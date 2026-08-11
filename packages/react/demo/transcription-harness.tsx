@@ -1,4 +1,4 @@
-import type { ClientVoiceInputConfig } from "@opengeni/sdk";
+import type { ClientVoiceInputConfig, EffectiveSessionControl } from "@opengeni/sdk";
 import { useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { ChatComposer, type ComposerState } from "@opengeni/react";
@@ -9,6 +9,7 @@ type FixtureMode = "normal" | "denied" | "hanging";
 const params = new URLSearchParams(window.location.search);
 const theme = params.get("theme") === "light" ? "light" : "dark";
 const requestedMode = params.get("mode");
+const crowdedChrome = params.get("chrome") === "crowded";
 const initialMode: FixtureMode =
   requestedMode === "denied" || requestedMode === "hanging" ? requestedMode : "normal";
 if (theme === "light") document.documentElement.dataset.ogTheme = "light";
@@ -19,6 +20,19 @@ const capability: ClientVoiceInputConfig = {
   maxDurationSeconds: 60,
   maxSizeBytes: 25 * 1024 * 1024,
   acceptedMimeTypes: ["audio/webm", "audio/webm;codecs=opus", "audio/mp4", "audio/ogg;codecs=opus"],
+};
+
+const activeControl: EffectiveSessionControl = {
+  state: "active",
+  controlVersion: 0,
+  controlEtag: "active",
+  directState: "active",
+  primaryBlocker: null,
+  additionalBlockerCount: 0,
+  blockers: [],
+  resumeOptions: [],
+  override: null,
+  settlement: null,
 };
 
 class FixtureMediaRecorder {
@@ -168,12 +182,46 @@ function App() {
       {sent ? <p>Sent: {sent}</p> : null}
       <ChatComposer
         composer={composer}
+        effectiveControl={crowdedChrome ? activeControl : undefined}
         transcription={{
           client: client as never,
           workspaceId: "11111111-1111-4111-8111-111111111111",
           capability,
           workspaceEnabled: true,
         }}
+        controlsLeading={
+          crowdedChrome ? (
+            <button
+              type="button"
+              aria-label="Open composer tools"
+              className="inline-flex size-8 shrink-0 items-center justify-center rounded-og-md border border-og-border pointer-coarse:size-11"
+            >
+              +
+            </button>
+          ) : undefined
+        }
+        controlsStart={
+          crowdedChrome ? (
+            <button
+              type="button"
+              aria-label="Model and effort"
+              className="inline-flex h-8 min-w-24 shrink-0 items-center justify-center rounded-og-md border border-og-border px-2 text-og-xs pointer-coarse:h-11"
+            >
+              Model
+            </button>
+          ) : undefined
+        }
+        actionsStart={
+          crowdedChrome ? (
+            <button
+              type="button"
+              aria-label="Start realtime voice"
+              className="inline-flex size-8 shrink-0 items-center justify-center rounded-og-md border border-og-border pointer-coarse:size-11"
+            >
+              R
+            </button>
+          ) : undefined
+        }
       />
     </main>
   );

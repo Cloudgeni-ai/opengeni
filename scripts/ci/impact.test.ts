@@ -84,6 +84,8 @@ describe("fail-closed change impact", () => {
       "test/e2e/editable-artifacts.browser.e2e.ts",
       "test/e2e/react-compiled-css.browser.e2e.ts",
       "test/e2e/source-packages-control-center.browser.e2e.ts",
+      "test/e2e/slack-access-link.browser.e2e.ts",
+      "test/e2e/slack-installation-binding.browser.e2e.ts",
     ]);
     expect(sdk.buildPackages).toEqual(expect.arrayContaining(["@opengeni/sdk", "@opengeni/react"]));
 
@@ -223,6 +225,8 @@ describe("fail-closed change impact", () => {
       "test/e2e/editable-artifacts.browser.e2e.ts",
       "test/e2e/react-compiled-css.browser.e2e.ts",
       "test/e2e/source-packages-control-center.browser.e2e.ts",
+      "test/e2e/slack-access-link.browser.e2e.ts",
+      "test/e2e/slack-installation-binding.browser.e2e.ts",
     ]);
     expect(tests.e2e).not.toContain("test/e2e/codex-overview.e2e.ts");
     expect(OPT_IN_TESTS["test/e2e/codex-overview.e2e.ts"]).toContain("browser-acceptance");

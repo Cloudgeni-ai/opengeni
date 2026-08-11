@@ -35,6 +35,7 @@ import {
   releaseLeaseHolder,
   touchLeaseHolder,
   updateRigChangeStatus,
+  SandboxCheckpointArtifactRegistrationConflictError,
   type Database,
 } from "@opengeni/db";
 import {
@@ -50,6 +51,7 @@ import {
   providerSupportsImmutableImageBuild,
   tagModalSandbox,
   terminateManagedSandboxSession,
+  verifySandboxExecReadiness,
   type EstablishedSandboxSession,
   type TurnSandboxCommandArgs,
   type TurnSandboxCommandSession,
@@ -598,6 +600,7 @@ export async function runWithOwnedRigVerificationSandbox<T>(
     void establishmentPromise.catch(() => undefined);
     const established = await waitForAbortable(establishmentPromise, signal);
     cleanupTarget = established;
+    await waitForAbortable(verifySandboxExecReadiness(established), signal);
     const resumeState =
       established.backendId === "modal" ? null : await dependencies.serialize(established);
     const committed = await dependencies.commitWarm(input.db, {
@@ -810,20 +813,104 @@ export function rigProviderImageContentMarkerCommand(
   contentHash: string,
   markerRoot = "/var/opengeni",
 ): string {
+  const { marker, normalizedRoot } = rigProviderImageContentMarker(contentHash, markerRoot);
+  return `mkdir -p '${normalizedRoot}' && touch '${marker}'`;
+}
+
+function rigProviderImageContentMarker(
+  contentHash: string,
+  markerRoot = "/var/opengeni",
+): { marker: string; normalizedRoot: string } {
   if (!/^sha256:[0-9a-f]{64}$/u.test(contentHash)) {
     throw new Error("Rig provider image content marker requires a canonical SHA-256 value");
   }
   if (!/^\/[A-Za-z0-9._/-]+$/u.test(markerRoot)) {
     throw new Error("Rig provider image marker root must be a safe absolute path");
   }
-  const normalizedRoot = markerRoot.replace(/\/+$/u, "");
-  const marker = `${normalizedRoot}/rig-setup-content-${contentHash.slice("sha256:".length)}.done`;
-  return `mkdir -p '${normalizedRoot}' && touch '${marker}'`;
+  const normalizedRoot = markerRoot.replace(/\/+$/u, "") || "/";
+  const marker = `${normalizedRoot === "/" ? "" : normalizedRoot}/rig-setup-content-${contentHash.slice("sha256:".length)}.done`;
+  return { marker, normalizedRoot };
+}
+
+export type RigProviderImageColdBootDependencies = {
+  runOwnedSandbox: typeof runWithOwnedRigVerificationSandbox;
+  now: () => Date;
+};
+
+const defaultRigProviderImageColdBootDependencies: RigProviderImageColdBootDependencies = {
+  runOwnedSandbox: runWithOwnedRigVerificationSandbox,
+  now: () => new Date(),
+};
+
+/** Prove a provider image from a second clean sandbox before runtime selection. */
+export async function verifyRigProviderImageColdBoot(
+  input: {
+    settings: ControlActivityServices["settings"];
+    db: Database;
+    observability: ControlActivityServices["observability"];
+    accountId: string;
+    workspaceId: string;
+    buildRequestId: string;
+    rigVersionId: string;
+    sessionIdPrefix: string;
+    imageId: string;
+    contentHash: string;
+    checks: RigProviderImageDefinition["checks"];
+    lifecycle: RigVerificationActivityLifecycle;
+  },
+  dependencies: RigProviderImageColdBootDependencies = defaultRigProviderImageColdBootDependencies,
+): Promise<string> {
+  const { marker } = rigProviderImageContentMarker(input.contentHash);
+  await dependencies.runOwnedSandbox(
+    {
+      settings: {
+        ...input.settings,
+        modalImageId: input.imageId,
+        // The full-machine provider image is the immutable rig base. Any future
+        // workspace recovery must layer /workspace onto it, never replace it.
+        modalWorkspacePersistence: "snapshot_directory",
+      },
+      db: input.db,
+      observability: input.observability,
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sandboxGroupId: input.buildRequestId,
+      rigVersionId: input.rigVersionId,
+      sessionIdPrefix: input.sessionIdPrefix,
+      lifecycle: input.lifecycle,
+    },
+    async (established, runContext) => {
+      const markerResult = await runCommand(
+        established.session as TurnSandboxCommandSession,
+        `test -f '${marker}'`,
+        input.settings.rigSetupTimeoutMs,
+        runContext.commandRunner,
+      );
+      if (markerResult.exitCode !== 0) {
+        throw new Error("built provider image is missing its exact rig-content marker");
+      }
+      for (const check of input.checks) {
+        const result = await runCommand(
+          established.session as TurnSandboxCommandSession,
+          check.command,
+          input.settings.rigSetupTimeoutMs,
+          runContext.commandRunner,
+        );
+        if (result.exitCode !== 0) {
+          throw new Error(
+            `built provider image failed check ${JSON.stringify(check.name)}: ${result.output.slice(-2000)}`,
+          );
+        }
+      }
+    },
+  );
+  return dependencies.now().toISOString();
 }
 
 export async function buildVerifiedRigProviderImage(input: {
   settings: ControlActivityServices["settings"];
   db: Database;
+  observability: ControlActivityServices["observability"];
   accountId: string;
   workspaceId: string;
   existingVersionId?: string;
@@ -831,6 +918,7 @@ export async function buildVerifiedRigProviderImage(input: {
   target: { kind: "change" | "version"; id: string };
   established: EstablishedSandboxSession;
   ownership: RigVerificationSandboxRunContext["ownership"];
+  lifecycle: RigVerificationActivityLifecycle;
   signal: AbortSignal;
 }): Promise<RigProviderImage> {
   const backend = input.settings.sandboxBackend as SandboxBackend;
@@ -953,6 +1041,7 @@ export async function buildVerifiedRigProviderImage(input: {
     providerBindingKey: string;
   } | null = null;
   let artifactId: string | null = null;
+  let coldBootValidatedAt: string | null = null;
   try {
     const built = await buildImmutableProviderImage({
       backend,
@@ -993,8 +1082,30 @@ export async function buildVerifiedRigProviderImage(input: {
         providerBinding: built.providerBinding,
         workspaceArchive: Buffer.from(archiveBytes).toString("base64"),
         workspaceArchiveMeta: descriptor,
+        registrationIdentity: "provider_object",
       });
       artifactId = artifact.id;
+
+      // A snapshot receipt is not proof that the artifact can cold-start. Boot
+      // a second, independently owned sandbox from the exact image before it
+      // can become runtime-selectable.
+      coldBootValidatedAt = await verifyRigProviderImageColdBoot({
+        settings: input.settings,
+        db: input.db,
+        observability: input.observability,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        buildRequestId: building.buildRequestId,
+        rigVersionId: input.target.id,
+        sessionIdPrefix: `rig-provider-image-${input.target.id}`,
+        imageId: built.imageId,
+        contentHash,
+        checks: input.definition.checks,
+        lifecycle: input.lifecycle,
+      });
+    }
+    if (!coldBootValidatedAt) {
+      throw new Error(`${backend} provider image build has no independent cold-boot validator`);
     }
     if (input.signal.aborted) {
       if (artifactId) {
@@ -1017,6 +1128,10 @@ export async function buildVerifiedRigProviderImage(input: {
       providerBindingKeyHash: built.providerBindingKey
         ? rigProviderImageProviderBindingKeyHash(built.providerBindingKey)
         : null,
+      coldBootValidation: {
+        version: 1,
+        checkedAt: coldBootValidatedAt,
+      },
       finishedAt: new Date().toISOString(),
       error: null,
     });
@@ -1029,7 +1144,11 @@ export async function buildVerifiedRigProviderImage(input: {
         artifactId,
         reason: "rig_provider_image_build_failed",
       }).catch(() => false);
-    } else if (backend === "modal" && builtIdentity) {
+    } else if (
+      backend === "modal" &&
+      builtIdentity &&
+      !(error instanceof SandboxCheckpointArtifactRegistrationConflictError)
+    ) {
       await deleteModalCheckpointSnapshot(
         input.settings,
         builtIdentity.providerBindingKey,
@@ -1222,17 +1341,17 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                   });
                   return updated;
                 }
-                const markerResult = await runCommand(
-                  established.session as TurnSandboxCommandSession,
-                  rigProviderImageContentMarkerCommand(providerImageContentHash),
-                  settings.rigSetupTimeoutMs,
-                  runContext.commandRunner,
+              }
+              const markerResult = await runCommand(
+                established.session as TurnSandboxCommandSession,
+                rigProviderImageContentMarkerCommand(providerImageContentHash),
+                settings.rigSetupTimeoutMs,
+                runContext.commandRunner,
+              );
+              if (markerResult.exitCode !== 0) {
+                throw new Error(
+                  `Failed to seal rig provider image content marker: ${markerResult.output.slice(-2000)}`,
                 );
-                if (markerResult.exitCode !== 0) {
-                  throw new Error(
-                    `Failed to seal rig provider image content marker: ${markerResult.output.slice(-2000)}`,
-                  );
-                }
               }
               const checkResults = [];
               for (const check of candidateVersion.checks) {
@@ -1254,12 +1373,14 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                 verification.providerImage = await buildVerifiedRigProviderImage({
                   settings: runSettings,
                   db,
+                  observability,
                   accountId: rig.accountId,
                   workspaceId: input.workspaceId,
                   definition: providerImageDefinition,
                   target: { kind: "change", id: change.id },
                   established,
                   ownership: runContext.ownership,
+                  lifecycle,
                   signal: runContext.signal,
                 });
               }
@@ -1383,6 +1504,17 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                   },
                 });
               }
+              const markerResult = await runCommand(
+                established.session as TurnSandboxCommandSession,
+                rigProviderImageContentMarkerCommand(providerImageContentHash),
+                settings.rigSetupTimeoutMs,
+                runContext.commandRunner,
+              );
+              if (markerResult.exitCode !== 0) {
+                throw new Error(
+                  `Failed to seal rig provider image content marker: ${markerResult.output.slice(-2000)}`,
+                );
+              }
               const checkResults = [];
               for (const check of version.checks) {
                 checkResults.push({
@@ -1401,6 +1533,7 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                 ? await buildVerifiedRigProviderImage({
                     settings: runSettings,
                     db,
+                    observability,
                     accountId: rig.accountId,
                     workspaceId: input.workspaceId,
                     existingVersionId: version.id,
@@ -1408,6 +1541,7 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                     target: { kind: "version", id: version.id },
                     established,
                     ownership: runContext.ownership,
+                    lifecycle,
                     signal: runContext.signal,
                   })
                 : null;

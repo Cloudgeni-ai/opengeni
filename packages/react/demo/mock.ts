@@ -11,16 +11,57 @@
 import type {
   AcknowledgeStreamResponse,
   AttachViewerResponse,
+  AttachedBrowserDevice,
+  AttachedBrowserDeviceListOptions,
+  AttachedBrowserDeviceListResponse,
   BillingUsageResponse,
+  BrowserActionReceipt,
+  BrowserActionRequest,
+  BrowserDiagnosticBatch,
+  BrowserDiagnosticsOptions,
+  BrowserIdentity,
+  BrowserIdentityListOptions,
+  BrowserIdentityListResponse,
+  BrowserIdentityMutationResponse,
+  BrowserObservation,
+  BrowserOpenTargetRequest,
+  BrowserSession,
+  BrowserSessionAttachment,
+  BrowserSessionAttachmentRequest,
+  BrowserSessionHeartbeatResponse,
+  BrowserSessionLifecycleRequest,
+  BrowserSessionListResponse,
+  BrowserSessionMutationResponse,
+  BrowserTarget,
+  BrowserTargetListResponse,
+  BrowserRevision,
+  BrowserRevisionListResponse,
   CapabilityPack,
   ClientConfig,
   ComposerDraft,
+  ComputerActionReceipt,
+  ComputerActionRequest,
+  ComputerObservation,
+  ComputerSession,
+  ComputerSessionAttachment,
+  ComputerSessionAttachmentRequest,
+  ComputerSessionHeartbeatResponse,
+  ComputerSessionLifecycleRequest,
+  ComputerSessionListResponse,
+  ComputerSessionMutationResponse,
+  ComputerTarget,
+  ComputerTargetListResponse,
+  CreateComputerSessionRequest,
   CreateSessionRequest,
+  CreateBrowserIdentityRequest,
+  CreateBrowserSessionRequest,
   CreateWorkspaceEnvironmentRequest,
   CreateVariableSetRequest,
   CreateRigRequest,
   UpdateRigRequest,
   ProposeRigChangeRequest,
+  PublishBrowserRevisionRequest,
+  PublishBrowserRevisionResponse,
   Rig,
   RigVersion,
   RigChange,
@@ -95,6 +136,12 @@ import type { MachinesResponse } from "@opengeni/react/machines";
 const WORKSPACE_ID = "11111111-2222-4333-8444-555555555555";
 export const MANAGER_SESSION_ID = "3f6e1a2b-4c5d-4e6f-8a9b-0c1d2e3f4a5b";
 const WORKER_SESSION_ID = "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d";
+export const DEMO_BROWSER_SESSION_ID = "81000000-0000-4000-8000-000000000001";
+export const DEMO_BROWSER_TARGET_ID = "82000000-0000-4000-8000-000000000001";
+export const DEMO_BROWSER_IDENTITY_ID = "83000000-0000-4000-8000-000000000001";
+export const DEMO_COMPUTER_SESSION_ID = "84000000-0000-4000-8000-000000000001";
+export const DEMO_COMPUTER_WINDOW_ID = "85000000-0000-4000-8000-000000000001";
+export const DEMO_COMPUTER_SCREEN_ID = "85000000-0000-4000-8000-000000000002";
 let nextDemoUuid = 0;
 
 /** Stable UUIDs keep screenshots deterministic and work in Vite's module
@@ -177,6 +224,41 @@ export class MockOpenGeniClient implements SessionClientLike {
   private scripted = false;
   private managerScript: Promise<void> | null = null;
   private responseQueues = new Map<string, Promise<void>>();
+  private browserRevision = 1;
+  private browserIdentities = new Map<string, BrowserIdentity>([
+    [DEMO_BROWSER_IDENTITY_ID, fabricateBrowserIdentity()],
+  ]);
+  private browserIdentityRevisions = new Map<string, BrowserRevision[]>([
+    [DEMO_BROWSER_IDENTITY_ID, []],
+  ]);
+  private browserSessions = new Map<string, BrowserSession>([
+    [DEMO_BROWSER_SESSION_ID, fabricateBrowserSession(MANAGER_SESSION_ID)],
+  ]);
+  private browserTargets = new Map<string, BrowserTarget[]>([
+    [DEMO_BROWSER_SESSION_ID, [fabricateBrowserTarget(DEMO_BROWSER_SESSION_ID)]],
+  ]);
+  private computerRevision = 1;
+  private computerSessions = new Map<string, ComputerSession>([
+    [DEMO_COMPUTER_SESSION_ID, fabricateComputerSession(MANAGER_SESSION_ID)],
+  ]);
+  private computerTargets = new Map<string, ComputerTarget[]>([
+    [
+      DEMO_COMPUTER_SESSION_ID,
+      [
+        fabricateComputerTarget(DEMO_COMPUTER_SESSION_ID),
+        fabricateComputerTarget(DEMO_COMPUTER_SESSION_ID, {
+          id: DEMO_COMPUTER_SCREEN_ID,
+          targetGeneration: "demo-screen-1",
+          kind: "screen",
+          applicationId: null,
+          processId: null,
+          title: "Agent desktop",
+          bounds: { x: 0, y: 0, width: 1_280, height: 720 },
+          focused: false,
+        }),
+      ],
+    ],
+  ]);
 
   bus(sessionId: string): SessionBus {
     let bus = this.buses.get(sessionId);
@@ -1450,6 +1532,557 @@ export class MockOpenGeniClient implements SessionClientLike {
     // no-op in the demo
   }
 
+  async listAttachedBrowsers(
+    _workspaceId: string,
+    _options: AttachedBrowserDeviceListOptions = {},
+  ): Promise<AttachedBrowserDeviceListResponse> {
+    return { revision: this.browserRevision, devices: [] };
+  }
+
+  async getAttachedBrowser(
+    _workspaceId: string,
+    _deviceId: string,
+  ): Promise<AttachedBrowserDevice> {
+    throw new Error("Attached browser not found");
+  }
+
+  async listBrowserIdentities(
+    _workspaceId: string,
+    options: BrowserIdentityListOptions = {},
+  ): Promise<BrowserIdentityListResponse> {
+    const identities = [...this.browserIdentities.values()].filter(
+      (identity) => options.includeArchived || identity.status === "active",
+    );
+    return { revision: this.browserRevision, identities };
+  }
+
+  async getBrowserIdentity(_workspaceId: string, identityId: string): Promise<BrowserIdentity> {
+    const identity = this.browserIdentities.get(identityId);
+    if (!identity) throw new Error("BrowserIdentity not found");
+    return identity;
+  }
+
+  async createBrowserIdentity(
+    _workspaceId: string,
+    request: CreateBrowserIdentityRequest,
+  ): Promise<BrowserIdentityMutationResponse> {
+    const identity = fabricateBrowserIdentity({ id: demoUuid(), name: request.name });
+    this.browserIdentities.set(identity.id, identity);
+    this.browserIdentityRevisions.set(identity.id, []);
+    this.browserRevision += 1;
+    return { identity, operationId: request.operationId, replayed: false };
+  }
+
+  async listBrowserRevisions(
+    _workspaceId: string,
+    identityId: string,
+  ): Promise<BrowserRevisionListResponse> {
+    return {
+      identity: await this.getBrowserIdentity(WORKSPACE_ID, identityId),
+      revisions: [...(this.browserIdentityRevisions.get(identityId) ?? [])],
+    };
+  }
+
+  async listBrowserSessions(): Promise<BrowserSessionListResponse> {
+    return { revision: this.browserRevision, sessions: [...this.browserSessions.values()] };
+  }
+
+  /** Frame metadata source for the deterministic demo transport. Not part of
+   *  SessionClientLike; production frames come from browserd. */
+  demoBrowserFrameTarget(browserSessionId: string, targetId: string): BrowserTarget | null {
+    const target = (this.browserTargets.get(browserSessionId) ?? []).find(
+      (candidate) => candidate.id === targetId,
+    );
+    return target ? { ...target } : null;
+  }
+
+  async getBrowserSession(_workspaceId: string, browserSessionId: string): Promise<BrowserSession> {
+    const session = this.browserSessions.get(browserSessionId);
+    if (!session) throw new Error("BrowserSession not found");
+    return session;
+  }
+
+  async createBrowserSession(
+    _workspaceId: string,
+    request: CreateBrowserSessionRequest,
+  ): Promise<BrowserSessionMutationResponse> {
+    const id = demoUuid();
+    const identity = request.identityId
+      ? await this.getBrowserIdentity(WORKSPACE_ID, request.identityId)
+      : null;
+    const session = fabricateBrowserSession(request.sessionId, {
+      id,
+      name: request.name ?? "New browser",
+      headless: request.headless ?? true,
+      identityId: identity?.id ?? null,
+      baseRevisionId: request.baseRevisionId ?? identity?.defaultRevisionId ?? null,
+      linkedComputerSessionId: request.linkedComputerSessionId ?? null,
+    });
+    const target = fabricateBrowserTarget(id, {
+      id: demoUuid(),
+      url: request.initialUrl ?? "about:blank",
+      title: request.initialUrl ? "New page" : "New tab",
+    });
+    this.browserSessions.set(id, session);
+    this.browserTargets.set(id, [target]);
+    this.browserRevision += 1;
+    return {
+      session,
+      operation: browserLifecycleReceipt(request.operationId, id, "create"),
+    };
+  }
+
+  async listBrowserTargets(
+    _workspaceId: string,
+    browserSessionId: string,
+  ): Promise<BrowserTargetListResponse> {
+    const session = await this.getBrowserSession(WORKSPACE_ID, browserSessionId);
+    return {
+      browserSessionId,
+      controllerGeneration: session.controller?.controllerGeneration ?? "demo-controller-1",
+      targets: [...(this.browserTargets.get(browserSessionId) ?? [])],
+    };
+  }
+
+  async openBrowserTarget(
+    _workspaceId: string,
+    browserSessionId: string,
+    request: BrowserOpenTargetRequest = {},
+  ): Promise<BrowserTarget> {
+    const targets = (this.browserTargets.get(browserSessionId) ?? []).map((target) => ({
+      ...target,
+      selected: false,
+    }));
+    const target = fabricateBrowserTarget(browserSessionId, {
+      id: demoUuid(),
+      url: request.url ?? "about:blank",
+      title: request.url ? "New page" : "New tab",
+    });
+    targets.push(target);
+    this.browserTargets.set(browserSessionId, targets);
+    return target;
+  }
+
+  async selectBrowserTarget(
+    _workspaceId: string,
+    browserSessionId: string,
+    targetId: string,
+  ): Promise<BrowserTarget> {
+    let selected: BrowserTarget | null = null;
+    const targets = (this.browserTargets.get(browserSessionId) ?? []).map((target) => {
+      const next = { ...target, selected: target.id === targetId };
+      if (next.selected) selected = next;
+      return next;
+    });
+    if (!selected) throw new Error("Browser target not found");
+    this.browserTargets.set(browserSessionId, targets);
+    return selected;
+  }
+
+  async closeBrowserTarget(
+    _workspaceId: string,
+    browserSessionId: string,
+    targetId: string,
+  ): Promise<BrowserTargetListResponse> {
+    const remaining = (this.browserTargets.get(browserSessionId) ?? []).filter(
+      (target) => target.id !== targetId,
+    );
+    if (remaining.length > 0 && !remaining.some((target) => target.selected)) {
+      remaining[0] = { ...remaining[0]!, selected: true };
+    }
+    this.browserTargets.set(browserSessionId, remaining);
+    return await this.listBrowserTargets(WORKSPACE_ID, browserSessionId);
+  }
+
+  async observeBrowserTarget(
+    _workspaceId: string,
+    browserSessionId: string,
+    targetId: string,
+  ): Promise<BrowserObservation> {
+    const target = (this.browserTargets.get(browserSessionId) ?? []).find(
+      (candidate) => candidate.id === targetId,
+    );
+    if (!target) throw new Error("Browser target not found");
+    return fabricateBrowserObservation(target);
+  }
+
+  async actInBrowser(
+    _workspaceId: string,
+    browserSessionId: string,
+    request: BrowserActionRequest,
+  ): Promise<BrowserActionReceipt> {
+    const targets = this.browserTargets.get(browserSessionId) ?? [];
+    const current = targets.find((target) => target.id === request.targetId);
+    if (!current) throw new Error("Browser target not found");
+    const actions = request.action.type === "batch" ? request.action.actions : [request.action];
+    let target = current;
+    for (const action of actions) {
+      if (action.type === "navigate") {
+        target = {
+          ...target,
+          title: new URL(action.url).hostname || "New page",
+          url: action.url,
+          documentGeneration: `demo-document-${this.browserRevision + 1}`,
+        };
+      }
+    }
+    this.browserTargets.set(
+      browserSessionId,
+      targets.map((candidate) => (candidate.id === target.id ? target : candidate)),
+    );
+    const now = new Date().toISOString();
+    return {
+      protocolVersion: 1,
+      operationId: request.operationId,
+      browserSessionId,
+      controllerGeneration: target.controllerGeneration,
+      targetId: target.id,
+      state: "completed",
+      dispatchedAt: now,
+      settledAt: now,
+      observation: fabricateBrowserObservation(target),
+      error: null,
+    };
+  }
+
+  async getBrowserActionReceipt(): Promise<BrowserActionReceipt> {
+    throw new Error("The scripted browser has no unsettled operations.");
+  }
+
+  async listBrowserDiagnostics(
+    _workspaceId: string,
+    browserSessionId: string,
+    targetId: string,
+    _options: BrowserDiagnosticsOptions = {},
+  ): Promise<BrowserDiagnosticBatch> {
+    const session = await this.getBrowserSession(WORKSPACE_ID, browserSessionId);
+    const controller = requireDemoBrowserController(session);
+    const target = (this.browserTargets.get(browserSessionId) ?? []).find(
+      (candidate) => candidate.id === targetId,
+    );
+    return {
+      browserSessionId,
+      controllerGeneration: controller.controllerGeneration,
+      targetId,
+      targetGeneration: target?.targetGeneration ?? "demo-target-1",
+      entries: [],
+      cursor: 0,
+      truncated: false,
+    };
+  }
+
+  async attachBrowserSession(
+    _workspaceId: string,
+    browserSessionId: string,
+    request: BrowserSessionAttachmentRequest,
+  ): Promise<BrowserSessionAttachment> {
+    const session = await this.getBrowserSession(WORKSPACE_ID, browserSessionId);
+    const controller = requireDemoBrowserController(session);
+    return {
+      browserSessionId,
+      controllerGeneration: controller.controllerGeneration,
+      targetId: request.targetId,
+      stream: {
+        kind: "direct_websocket",
+        url: `wss://browser.invalid/${browserSessionId}/${request.targetId}`,
+        protocols: ["opengeni.browser.v1", "opengeni.auth.demo-only"],
+      },
+      expiresAt: new Date(Date.now() + 120_000).toISOString(),
+    };
+  }
+
+  async heartbeatBrowserSession(
+    _workspaceId: string,
+    browserSessionId: string,
+  ): Promise<BrowserSessionHeartbeatResponse> {
+    const session = await this.getBrowserSession(WORKSPACE_ID, browserSessionId);
+    const controller = requireDemoBrowserController(session);
+    return {
+      browserSessionId,
+      controllerGeneration: controller.controllerGeneration,
+      alive: true,
+    };
+  }
+
+  async publishBrowserRevision(
+    _workspaceId: string,
+    browserSessionId: string,
+    request: PublishBrowserRevisionRequest,
+  ): Promise<PublishBrowserRevisionResponse> {
+    const session = await this.getBrowserSession(WORKSPACE_ID, browserSessionId);
+    const identity = await this.getBrowserIdentity(WORKSPACE_ID, request.identityId);
+    if (identity.headGeneration !== request.expectedHeadGeneration) {
+      throw new Error("BrowserIdentity head changed");
+    }
+    const prior = this.browserIdentityRevisions.get(identity.id) ?? [];
+    const revision = fabricateBrowserRevision(session, identity, prior.at(-1) ?? null);
+    const advanceDefault = request.advanceDefault ?? true;
+    const updated: BrowserIdentity = {
+      ...identity,
+      defaultRevisionId: advanceDefault ? revision.id : identity.defaultRevisionId,
+      headGeneration: identity.headGeneration + (advanceDefault ? 1 : 0),
+      revisionCount: identity.revisionCount + 1,
+      updatedAt: new Date().toISOString(),
+    };
+    this.browserIdentityRevisions.set(identity.id, [...prior, revision]);
+    this.browserIdentities.set(identity.id, updated);
+    this.browserSessions.set(browserSessionId, {
+      ...session,
+      identityId: identity.id,
+      baseRevisionId: revision.id,
+      lastUsedAt: new Date().toISOString(),
+    });
+    this.browserRevision += 1;
+    return {
+      identity: updated,
+      revision,
+      outcome: advanceDefault ? "saved_as_default" : "saved_not_default",
+      replayed: false,
+    };
+  }
+
+  async suspendBrowserSession(
+    _workspaceId: string,
+    browserSessionId: string,
+    request: BrowserSessionLifecycleRequest,
+  ): Promise<BrowserSessionMutationResponse> {
+    const current = await this.getBrowserSession(WORKSPACE_ID, browserSessionId);
+    const session: BrowserSession = {
+      ...current,
+      lifecycle: "suspended",
+      controller: null,
+      lastUsedAt: new Date().toISOString(),
+      failureCode: null,
+    };
+    this.browserSessions.set(browserSessionId, session);
+    this.browserRevision += 1;
+    return {
+      session,
+      operation: browserLifecycleReceipt(request.operationId, browserSessionId, "suspend"),
+    };
+  }
+
+  async resumeBrowserSession(
+    _workspaceId: string,
+    browserSessionId: string,
+    request: BrowserSessionLifecycleRequest,
+  ): Promise<BrowserSessionMutationResponse> {
+    const current = await this.getBrowserSession(WORKSPACE_ID, browserSessionId);
+    const controllerGeneration = `demo-controller-${demoUuid()}`;
+    const session: BrowserSession = {
+      ...current,
+      lifecycle: "active",
+      controller: {
+        controllerId: "opengeni-browserd",
+        controllerGeneration,
+        placementInstanceId: "demo-placement-1",
+      },
+      lastUsedAt: new Date().toISOString(),
+      failureCode: null,
+    };
+    this.browserSessions.set(browserSessionId, session);
+    this.browserTargets.set(
+      browserSessionId,
+      (this.browserTargets.get(browserSessionId) ?? []).map((target) => ({
+        ...target,
+        controllerGeneration,
+      })),
+    );
+    this.browserRevision += 1;
+    return {
+      session,
+      operation: browserLifecycleReceipt(request.operationId, browserSessionId, "resume"),
+    };
+  }
+
+  async endBrowserSession(
+    _workspaceId: string,
+    browserSessionId: string,
+    request: BrowserSessionLifecycleRequest,
+  ): Promise<BrowserSessionMutationResponse> {
+    const current = await this.getBrowserSession(WORKSPACE_ID, browserSessionId);
+    const session = {
+      ...current,
+      lifecycle: "ended" as const,
+      lastUsedAt: new Date().toISOString(),
+    };
+    this.browserSessions.set(browserSessionId, session);
+    this.browserRevision += 1;
+    return {
+      session,
+      operation: browserLifecycleReceipt(request.operationId, browserSessionId, "end"),
+    };
+  }
+
+  async listComputerSessions(): Promise<ComputerSessionListResponse> {
+    return { revision: this.computerRevision, sessions: [...this.computerSessions.values()] };
+  }
+
+  /** Frame metadata source for the deterministic Computer demo transport. */
+  demoComputerFrameTarget(computerSessionId: string, targetId: string): ComputerTarget | null {
+    const target = (this.computerTargets.get(computerSessionId) ?? []).find(
+      (candidate) => candidate.id === targetId,
+    );
+    return target ? { ...target } : null;
+  }
+
+  async getComputerSession(
+    _workspaceId: string,
+    computerSessionId: string,
+  ): Promise<ComputerSession> {
+    const session = this.computerSessions.get(computerSessionId);
+    if (!session) throw new Error("ComputerSession not found");
+    return session;
+  }
+
+  async createComputerSession(
+    _workspaceId: string,
+    request: CreateComputerSessionRequest,
+  ): Promise<ComputerSessionMutationResponse> {
+    const id = demoUuid();
+    const session = fabricateComputerSession(request.sessionId, {
+      id,
+      name: request.name ?? "Computer",
+      ...(request.placement ? { placement: request.placement } : {}),
+    });
+    const window = fabricateComputerTarget(id, { id: demoUuid() });
+    const screen = fabricateComputerTarget(id, {
+      id: demoUuid(),
+      targetGeneration: `demo-screen-${demoUuid()}`,
+      kind: "screen",
+      applicationId: null,
+      processId: null,
+      title: "Agent desktop",
+      bounds: { x: 0, y: 0, width: 1_280, height: 720 },
+      focused: false,
+    });
+    this.computerSessions.set(id, session);
+    this.computerTargets.set(id, [window, screen]);
+    this.computerRevision += 1;
+    return {
+      session,
+      operation: computerLifecycleReceipt(request.operationId, id, "create"),
+    };
+  }
+
+  async listComputerTargets(
+    _workspaceId: string,
+    computerSessionId: string,
+  ): Promise<ComputerTargetListResponse> {
+    const session = await this.getComputerSession(WORKSPACE_ID, computerSessionId);
+    const controller = requireDemoComputerController(session);
+    return {
+      computerSessionId,
+      controllerGeneration: controller.controllerGeneration,
+      targets: [...(this.computerTargets.get(computerSessionId) ?? [])],
+    };
+  }
+
+  async observeComputerTarget(
+    _workspaceId: string,
+    computerSessionId: string,
+    targetId: string,
+  ): Promise<ComputerObservation> {
+    const target = (this.computerTargets.get(computerSessionId) ?? []).find(
+      (candidate) => candidate.id === targetId,
+    );
+    if (!target) throw new Error("Computer target not found");
+    return fabricateComputerObservation(target);
+  }
+
+  async actInComputer(
+    _workspaceId: string,
+    computerSessionId: string,
+    request: ComputerActionRequest,
+  ): Promise<ComputerActionReceipt> {
+    let targets = this.computerTargets.get(computerSessionId) ?? [];
+    let target = targets.find((candidate) => candidate.id === request.targetId) ?? null;
+    if (!target) throw new Error("Computer target not found");
+    if (request.action.type === "focus") {
+      const focusId = request.action.targetId;
+      targets = targets.map((candidate) => ({ ...candidate, focused: candidate.id === focusId }));
+      target = targets.find((candidate) => candidate.id === focusId) ?? target;
+    } else if (request.action.type === "launch") {
+      target = fabricateComputerTarget(computerSessionId, {
+        id: demoUuid(),
+        targetGeneration: `demo-window-${demoUuid()}`,
+        applicationId: request.action.applicationId,
+        title: request.action.applicationId,
+      });
+      targets = [...targets.map((candidate) => ({ ...candidate, focused: false })), target];
+    }
+    this.computerTargets.set(computerSessionId, targets);
+    const now = new Date().toISOString();
+    return {
+      protocolVersion: 1,
+      operationId: request.operationId,
+      computerSessionId,
+      controllerGeneration: target.controllerGeneration,
+      targetId: target.id,
+      state: "completed",
+      dispatchedAt: now,
+      settledAt: now,
+      observation: fabricateComputerObservation(target),
+      error: null,
+    };
+  }
+
+  async getComputerActionReceipt(): Promise<ComputerActionReceipt> {
+    throw new Error("The scripted computer has no unsettled operations.");
+  }
+
+  async attachComputerSession(
+    _workspaceId: string,
+    computerSessionId: string,
+    request: ComputerSessionAttachmentRequest,
+  ): Promise<ComputerSessionAttachment> {
+    const session = await this.getComputerSession(WORKSPACE_ID, computerSessionId);
+    const controller = requireDemoComputerController(session);
+    return {
+      computerSessionId,
+      controllerGeneration: controller.controllerGeneration,
+      targetId: request.targetId,
+      stream: {
+        kind: "direct_websocket",
+        url: `wss://computer.invalid/${computerSessionId}/${request.targetId}`,
+        protocols: ["opengeni.computer.v1", "opengeni.auth.demo-only"],
+      },
+      expiresAt: new Date(Date.now() + 120_000).toISOString(),
+    };
+  }
+
+  async heartbeatComputerSession(
+    _workspaceId: string,
+    computerSessionId: string,
+  ): Promise<ComputerSessionHeartbeatResponse> {
+    const session = await this.getComputerSession(WORKSPACE_ID, computerSessionId);
+    const controller = requireDemoComputerController(session);
+    return {
+      computerSessionId,
+      controllerGeneration: controller.controllerGeneration,
+      alive: true,
+    };
+  }
+
+  async endComputerSession(
+    _workspaceId: string,
+    computerSessionId: string,
+    request: ComputerSessionLifecycleRequest,
+  ): Promise<ComputerSessionMutationResponse> {
+    const current = await this.getComputerSession(WORKSPACE_ID, computerSessionId);
+    const session: ComputerSession = {
+      ...current,
+      lifecycle: "ended",
+      lastUsedAt: new Date().toISOString(),
+    };
+    this.computerSessions.set(computerSessionId, session);
+    this.computerRevision += 1;
+    return {
+      session,
+      operation: computerLifecycleReceipt(request.operationId, computerSessionId, "end"),
+    };
+  }
+
   async fsList(
     _workspaceId: string,
     _sessionId: string,
@@ -1911,6 +2544,371 @@ export class MockOpenGeniClient implements SessionClientLike {
       updatedAt,
     };
   }
+}
+
+function fabricateBrowserSession(
+  associationSessionId: string,
+  overrides: Partial<BrowserSession> = {},
+): BrowserSession {
+  const now = new Date().toISOString();
+  const base: BrowserSession = {
+    id: DEMO_BROWSER_SESSION_ID,
+    accountId: ACCOUNT_ID,
+    workspaceId: WORKSPACE_ID,
+    name: "Agent browser",
+    lifecycle: "active",
+    placement: { kind: "sandbox_group", sandboxGroupId: MANAGER_SESSION_ID },
+    controller: {
+      controllerId: "opengeni-browserd",
+      controllerGeneration: "demo-controller-1",
+      placementInstanceId: "demo-placement-1",
+    },
+    driverId: "opengeni.cdp.v1",
+    engine: "chromium",
+    engineVersion: "151",
+    headless: false,
+    identityId: null,
+    baseRevisionId: null,
+    networkRouteId: null,
+    linkedComputerSessionId: DEMO_COMPUTER_SESSION_ID,
+    capabilities: {
+      semanticObservation: true,
+      screenshots: true,
+      liveFrames: true,
+      humanInput: true,
+      tabs: true,
+      downloads: true,
+      uploads: true,
+      clipboard: false,
+      diagnostics: true,
+      rawCdp: false,
+      linkedComputer: true,
+      privateCheckpoint: true,
+      identityPublication: true,
+      parallelTargets: true,
+    },
+    associations: [
+      {
+        sessionId: associationSessionId,
+        turnId: null,
+        attemptId: null,
+        relationship: "created",
+        actorSubjectId: "agent:demo",
+        lastUsedAt: now,
+      },
+    ],
+    createdBySubjectId: "agent:demo",
+    createdAt: now,
+    lastUsedAt: now,
+    failureCode: null,
+  };
+  const session = { ...base, ...overrides };
+  return {
+    ...session,
+    capabilities: {
+      ...base.capabilities,
+      ...(overrides.capabilities ?? {}),
+      linkedComputer: session.linkedComputerSessionId !== null,
+    },
+  };
+}
+
+function requireDemoBrowserController(
+  session: BrowserSession,
+): NonNullable<BrowserSession["controller"]> {
+  if (session.lifecycle !== "active" || !session.controller) {
+    throw new Error("The scripted browser controller is not active.");
+  }
+  return session.controller;
+}
+
+function fabricateComputerSession(
+  associationSessionId: string,
+  overrides: Partial<ComputerSession> = {},
+): ComputerSession {
+  const now = new Date().toISOString();
+  return {
+    id: DEMO_COMPUTER_SESSION_ID,
+    accountId: ACCOUNT_ID,
+    workspaceId: WORKSPACE_ID,
+    name: "Agent computer",
+    lifecycle: "active",
+    placement: { kind: "sandbox_group", sandboxGroupId: MANAGER_SESSION_ID },
+    controller: {
+      controllerId: "opengeni-interaction-controller",
+      controllerGeneration: "demo-computer-controller-1",
+      placementInstanceId: "demo-placement-1",
+    },
+    platform: "linux",
+    adapter: "opengeni.linux.atspi-x11.v1",
+    seatId: "demo-seat-1",
+    displayId: ":99",
+    capabilities: {
+      semanticObservation: true,
+      appDiscovery: true,
+      appLaunch: true,
+      windowCapture: true,
+      screenCapture: true,
+      semanticActions: true,
+      pointerInput: true,
+      keyboardInput: true,
+      backgroundActions: true,
+      parallelApps: true,
+    },
+    associations: [
+      {
+        sessionId: associationSessionId,
+        turnId: null,
+        attemptId: null,
+        relationship: "created",
+        actorSubjectId: "agent:demo",
+        lastUsedAt: now,
+      },
+    ],
+    createdBySubjectId: "agent:demo",
+    createdAt: now,
+    lastUsedAt: now,
+    failureCode: null,
+    ...overrides,
+  };
+}
+
+function requireDemoComputerController(
+  session: ComputerSession,
+): NonNullable<ComputerSession["controller"]> {
+  if (session.lifecycle !== "active" || !session.controller) {
+    throw new Error("The scripted computer controller is not active.");
+  }
+  return session.controller;
+}
+
+function fabricateComputerTarget(
+  computerSessionId: string,
+  overrides: Partial<ComputerTarget> = {},
+): ComputerTarget {
+  return {
+    id: DEMO_COMPUTER_WINDOW_ID,
+    computerSessionId,
+    controllerGeneration: "demo-computer-controller-1",
+    targetGeneration: "demo-window-1",
+    kind: "window",
+    applicationId: "org.opengeni.demo",
+    processId: 4_201,
+    title: "OpenGeni workspace",
+    bounds: { x: 92, y: 68, width: 1_096, height: 612 },
+    focused: true,
+    ...overrides,
+  };
+}
+
+function fabricateComputerObservation(target: ComputerTarget): ComputerObservation {
+  const semantic =
+    target.kind === "screen"
+      ? null
+      : {
+          kind: "snapshot" as const,
+          roots: [
+            {
+              ref: "demo-window",
+              role: "window",
+              name: target.title,
+              states: target.focused ? ["focused"] : [],
+              actions: ["focus"],
+              children: [
+                {
+                  ref: "demo-run",
+                  role: "button",
+                  name: "Run checks",
+                  states: [],
+                  actions: ["invoke"],
+                },
+                {
+                  ref: "demo-status",
+                  role: "status",
+                  name: "Ready",
+                  value: "All systems operational",
+                  states: [],
+                  actions: [],
+                },
+              ],
+            },
+          ],
+          nodeCount: 3,
+        };
+  return {
+    protocolVersion: 1,
+    observationId: `demo-computer-observation-${Date.now()}`,
+    computerSessionId: target.computerSessionId,
+    target,
+    frameId: `demo-computer-frame-${target.targetGeneration}`,
+    semantic,
+    screenshot: null,
+    focusedRef: target.focused ? "demo-window" : null,
+    changedRegions: [],
+    observedAt: new Date().toISOString(),
+  };
+}
+
+function fabricateBrowserIdentity(overrides: Partial<BrowserIdentity> = {}): BrowserIdentity {
+  const now = new Date().toISOString();
+  return {
+    id: DEMO_BROWSER_IDENTITY_ID,
+    accountId: ACCOUNT_ID,
+    workspaceId: WORKSPACE_ID,
+    name: "Signed-in work",
+    status: "active",
+    defaultRevisionId: null,
+    headGeneration: 0,
+    revisionCount: 0,
+    createdBySubjectId: "user:demo",
+    createdAt: now,
+    updatedAt: now,
+    ...overrides,
+  };
+}
+
+function fabricateBrowserRevision(
+  session: BrowserSession,
+  identity: BrowserIdentity,
+  parent: BrowserRevision | null,
+): BrowserRevision {
+  return {
+    id: demoUuid(),
+    accountId: ACCOUNT_ID,
+    workspaceId: WORKSPACE_ID,
+    identityId: identity.id,
+    parentRevisionId: parent?.id ?? session.baseRevisionId,
+    ordinal: identity.revisionCount + 1,
+    sourceBrowserSessionId: session.id,
+    manifestDigest: "a".repeat(64),
+    components: [
+      {
+        id: demoUuid(),
+        kind: "chromium_profile",
+        format: "opengeni.chromium-profile.v1+gzip+aes-256-gcm",
+        artifactDigest: "b".repeat(64),
+        sizeBytes: 1_024,
+        materialization: {
+          portability: "portable",
+          reason: null,
+          platform: "linux",
+          architecture: "x64",
+          engine: "chromium",
+          engineVersion: session.engineVersion,
+          driverId: session.driverId,
+          driverSchemaVersion: 1,
+          profileCrypto: "chromium_basic",
+          providerId: null,
+          placement: null,
+        },
+      },
+    ],
+    createdBySubjectId: "user:demo",
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function fabricateBrowserTarget(
+  browserSessionId: string,
+  overrides: Partial<BrowserTarget> = {},
+): BrowserTarget {
+  return {
+    id: DEMO_BROWSER_TARGET_ID,
+    browserSessionId,
+    controllerGeneration: "demo-controller-1",
+    targetGeneration: "demo-target-1",
+    documentGeneration: "demo-document-1",
+    kind: "page",
+    title: "OpenGeni browser",
+    url: "https://opengeni.ai/",
+    selected: true,
+    attached: true,
+    createdAt: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
+function fabricateBrowserObservation(target: BrowserTarget): BrowserObservation {
+  return {
+    protocolVersion: 1,
+    observationId: `demo-observation-${Date.now()}`,
+    browserSessionId: target.browserSessionId,
+    target,
+    frameId: `demo-frame-${target.documentGeneration ?? "blank"}`,
+    semantic: {
+      kind: "snapshot",
+      roots: [
+        {
+          ref: "demo-document",
+          role: "document",
+          name: target.title,
+          states: [],
+          actions: [],
+          children: [
+            {
+              ref: "demo-link",
+              role: "link",
+              name: "Explore OpenGeni",
+              states: [],
+              actions: ["click"],
+            },
+          ],
+        },
+      ],
+      nodeCount: 2,
+    },
+    screenshot: null,
+    focusedRef: null,
+    changedRegions: [],
+    diagnostics: {
+      consoleErrorCount: 0,
+      failedRequestCount: 0,
+      downloadCount: 0,
+      pageErrorCount: 0,
+    },
+    dialog: null,
+    observedAt: new Date().toISOString(),
+  };
+}
+
+function browserLifecycleReceipt(
+  operationId: string,
+  browserSessionId: string,
+  kind: "create" | "resume" | "suspend" | "end",
+): BrowserSessionMutationResponse["operation"] {
+  const now = new Date().toISOString();
+  return {
+    operationId,
+    resourceKind: "browser_session",
+    resourceId: browserSessionId,
+    kind,
+    state: "completed",
+    replayed: false,
+    error: null,
+    createdAt: now,
+    dispatchedAt: now,
+    settledAt: now,
+  };
+}
+
+function computerLifecycleReceipt(
+  operationId: string,
+  computerSessionId: string,
+  kind: "create" | "end",
+): ComputerSessionMutationResponse["operation"] {
+  const now = new Date().toISOString();
+  return {
+    operationId,
+    resourceKind: "computer_session",
+    resourceId: computerSessionId,
+    kind,
+    state: "completed",
+    replayed: false,
+    error: null,
+    createdAt: now,
+    dispatchedAt: now,
+    settledAt: now,
+  };
 }
 
 async function streamText(
@@ -2425,6 +3423,7 @@ function scheduledTask(
     temporalScheduleId: `sched-${name.toLowerCase().replace(/[^a-z]+/g, "-")}`,
     runMode: "new_session_per_run",
     overlapPolicy: "skip",
+    action: { kind: "agent_turn" },
     agentConfig: { prompt, resources: [], tools: [], metadata: {} },
     targetSessionId: null,
     reusableSessionId: null,

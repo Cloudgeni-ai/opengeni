@@ -16,17 +16,11 @@ import {
 } from "@opengeni/sdk";
 import { Link } from "@tanstack/react-router";
 import {
-  BookOpenIcon,
+  ArrowLeftIcon,
   BrainCircuitIcon,
   ChevronDownIcon,
   CircleAlertIcon,
   Clock3Icon,
-  FileSearchIcon,
-  NetworkIcon,
-  PlugIcon,
-  ServerCogIcon,
-  SettingsIcon,
-  UsersIcon,
 } from "lucide-react";
 import { type FormEvent, type ReactNode, useEffect, useState } from "react";
 
@@ -37,6 +31,7 @@ import { useAppContext } from "@/context";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 
 import { BrainOverview } from "./agent-brain-overview";
+import { AgentBrainPrompt } from "./agent-brain-prompt";
 import {
   useCompanyProfileInventory,
   useWorkspaceInstructionPolicyOnboardingProposals,
@@ -1184,59 +1179,160 @@ function KnowledgeInventory({
   );
 }
 
-function ExistingSources({ workspaceId }: { workspaceId: string }) {
-  const links = [
-    { to: "/workspaces/$workspaceId/documents" as const, label: "Documents", icon: FileSearchIcon },
-    { to: "/workspaces/$workspaceId/memory" as const, label: "Memory", icon: BrainCircuitIcon },
-    {
-      to: "/workspaces/$workspaceId/capabilities" as const,
-      label: "Skills & capabilities",
-      icon: PlugIcon,
-    },
-    {
-      to: "/workspaces/$workspaceId/sessions" as const,
-      label: "Sessions & agents",
-      icon: UsersIcon,
-    },
-    { to: "/workspaces/$workspaceId/rigs" as const, label: "Rigs", icon: ServerCogIcon },
-    {
-      to: "/workspaces/$workspaceId/variable-sets" as const,
-      label: "Variable sets",
-      icon: BookOpenIcon,
-    },
-    {
-      to: "/workspaces/$workspaceId/settings" as const,
-      label: "Workspace",
-      icon: SettingsIcon,
-    },
-  ];
+function FocusedInstructions({
+  state,
+  workspaceId,
+  onWorkspaceStateReload,
+}: {
+  state: WorkspaceStateResponse;
+  workspaceId: string;
+  onWorkspaceStateReload: () => Promise<void>;
+}) {
+  const context = useAppContext();
+  const { client } = context;
+  const canEdit = hasWorkspacePermission(context.accessContext, workspaceId, "workspace:admin");
+  const activeHead = state.policy.activeHeads.find(
+    (head) => head.kind === "policy" && head.scope === "global" && head.roleKey === null,
+  );
+  const activeRevisionId = activeHead?.revisionId ?? null;
+  const [content, setContent] = useState("");
+  const [loadingContent, setLoadingContent] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [editorError, setEditorError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoadingContent(true);
+    setEditorError(null);
+    void (async () => {
+      try {
+        const nextContent = activeRevisionId
+          ? (await client.getWorkspaceInstructionPolicyRevision(workspaceId, activeRevisionId))
+              .content
+          : state.policy.legacyRuntime.workspaceOverrideConfigured
+            ? ((await client.getWorkspace(workspaceId)).agentInstructions ?? "")
+            : "";
+        if (!cancelled) setContent(nextContent);
+      } catch (error) {
+        if (!cancelled) {
+          setEditorError(error instanceof Error ? error.message : String(error));
+        }
+      } finally {
+        if (!cancelled) setLoadingContent(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeRevisionId,
+    client,
+    state.policy.legacyRuntime.workspaceOverrideConfigured,
+    workspaceId,
+  ]);
+
+  const save = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    if (!canEdit || saving || !content.trim()) return;
+    setSaving(true);
+    setMessage(null);
+    setEditorError(null);
+    try {
+      const draft = await client.createWorkspaceInstructionPolicyDraft(workspaceId, {
+        operationId: crypto.randomUUID(),
+        kind: "policy",
+        scope: "global",
+        roleKey: null,
+        content,
+        provenanceSource: "human",
+        provenanceSourceId: null,
+        supersedesRevisionId: activeHead?.revisionId ?? null,
+      });
+      await client.activateWorkspaceInstructionPolicyRevision(workspaceId, draft.id, {
+        operationId: crypto.randomUUID(),
+        expectedCurrentRevisionId: activeHead?.revisionId ?? null,
+        expectedActivationVersion: activeHead?.activationVersion ?? 0,
+        reason: "Updated by a workspace admin from Agent Brain",
+      });
+      await onWorkspaceStateReload();
+      setMessage("Saved. New agent turns will use these workspace instructions.");
+    } catch (error) {
+      setEditorError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
-    <StateCard
-      title="Authoritative source surfaces"
-      description="Agent Brain is an overview, not a duplicate editor. Use each authority's existing surface or canonical lifecycle panel for detail and permitted changes."
-    >
-      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-        {links.map((item) => (
-          <Link
-            key={item.to}
-            to={item.to}
-            params={{ workspaceId }}
-            className="flex items-center gap-2 rounded-md border border-border p-3 text-sm font-medium text-fg transition-colors hover:bg-surface-2"
-          >
-            <item.icon className="size-4 text-brand" />
-            {item.label}
-          </Link>
-        ))}
-      </div>
-    </StateCard>
+    <div className="grid gap-4">
+      <AgentBrainPrompt kind="workspace_instructions" workspaceId={workspaceId} />
+      <details className="group rounded-lg border border-border bg-surface">
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 text-sm font-medium text-fg [&::-webkit-details-marker]:hidden">
+          Write manually
+          <ChevronDownIcon className="size-4 text-fg-muted transition-transform group-open:rotate-180" />
+        </summary>
+        <form
+          className="grid gap-3 border-t border-border p-4"
+          onSubmit={(event) => void save(event)}
+        >
+          <label className="grid gap-1 text-xs font-medium text-fg-muted">
+            Instructions for this workspace
+            <textarea
+              className="min-h-48 rounded-md border border-border bg-surface px-3 py-2 text-sm leading-6 text-fg outline-none focus:border-brand disabled:cursor-not-allowed disabled:opacity-60"
+              value={content}
+              maxLength={WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS}
+              disabled={!canEdit || loadingContent || saving}
+              placeholder="For example: Keep updates concise, explain important decisions, and surface blockers early."
+              onChange={(event) => setContent(event.target.value)}
+            />
+          </label>
+          <p className="text-xs leading-5 text-fg-subtle">
+            These instructions are included automatically for agents working in this workspace.
+            Changes are versioned and can be audited or rolled back.
+          </p>
+          {!canEdit ? (
+            <p className="text-xs text-status-waiting">
+              Workspace admin access is required to edit.
+            </p>
+          ) : null}
+          {editorError ? (
+            <p role="alert" className="text-xs text-status-error">
+              {editorError}
+            </p>
+          ) : null}
+          {message ? (
+            <p role="status" className="text-xs text-status-success">
+              {message}
+            </p>
+          ) : null}
+          <div>
+            <button
+              type="submit"
+              className="rounded-md bg-brand px-3 py-2 text-sm font-medium text-white hover:bg-brand/90 disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={!canEdit || loadingContent || saving || !content.trim()}
+            >
+              {saving ? "Saving…" : "Save instructions"}
+            </button>
+          </div>
+        </form>
+      </details>
+    </div>
   );
 }
 
-export function WorkspaceStateRoute({ workspaceId }: { workspaceId: string }) {
+export function WorkspaceStateRoute({
+  workspaceId,
+  view,
+}: {
+  workspaceId: string;
+  view?: "company" | "instructions" | "preferences";
+}) {
   const { client } = useAppContext();
   const [attemptInput, setAttemptInput] = useState("");
   const [attemptId, setAttemptId] = useState<string | undefined>();
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  const companyProfile = useCompanyProfileInventory(client, workspaceId);
   const { state, error, loading, reload } = useWorkspaceStateInventory(
     client,
     workspaceId,
@@ -1250,84 +1346,142 @@ export function WorkspaceStateRoute({ workspaceId }: { workspaceId: string }) {
     setAttemptInput("");
     setAttemptId(undefined);
   };
+  const companyProfileStatus = companyProfile.loading
+    ? { label: "Loading…" }
+    : companyProfile.error
+      ? { label: "Unavailable", tone: "warning" as const }
+      : companyProfile.response?.current
+        ? { label: "Configured" }
+        : { label: "Not configured" };
 
   return (
     <ContentPage width="standard">
       <PageHeader
         icon={<BrainCircuitIcon className="size-4" />}
-        title="Agent Brain"
-        description="Understand what agents always know, what they retrieve when relevant, and which authority owns every change."
+        title={
+          view === "company"
+            ? "Company profile & goals"
+            : view === "instructions"
+              ? "Workspace instructions"
+              : view === "preferences"
+                ? "Preferences"
+                : "Agent Brain"
+        }
+        description={
+          view === "company"
+            ? "Set the essential organization context every agent should know."
+            : view === "instructions"
+              ? "Set how agents should work in this workspace."
+              : view === "preferences"
+                ? "Save reusable instructions agents can apply when relevant."
+                : "What every agent starts with, and what it can find when needed."
+        }
       />
-      {loading && !state ? <WorkspaceStateLoading /> : null}
-      {error && !state ? (
-        <LoadErrorState
-          title="Couldn't load Agent Brain"
-          error={error}
-          onRetry={() => void reload()}
-        />
-      ) : null}
-      {state ? (
-        <div className="grid gap-4">
-          {error ? (
-            <LoadErrorState
-              title="Couldn't refresh Agent Brain"
-              error={error}
-              onRetry={() => void reload()}
-            />
-          ) : null}
-          <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-surface-2/30 px-3 py-2 text-xs text-fg-muted">
-            <NetworkIcon className="size-3.5 text-brand" />
-            Generated {formatDate(state.generatedAt)} from a read-time projection. Registry and
-            onboarding mutations use explicit canonical lifecycle APIs; imported evidence never
-            activates prompt authority directly.
-          </div>
-          <BrainOverview
-            state={state}
-            workspaceId={workspaceId}
-            onOpenDiagnostics={() => setDiagnosticsOpen(true)}
-          />
-          <CompanyProfileInventory workspaceId={workspaceId} />
-          <details
-            id="brain-diagnostics"
-            className="group scroll-mt-4 rounded-lg border border-border bg-surface"
-            open={diagnosticsOpen}
-            onToggle={(event) => setDiagnosticsOpen(event.currentTarget.open)}
+      <div className="mt-6">
+        {view ? (
+          <Link
+            to="/workspaces/$workspaceId/state"
+            params={{ workspaceId }}
+            search={{}}
+            className="mb-4 inline-flex items-center gap-1 text-xs font-medium text-brand hover:underline"
           >
-            <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 text-left transition-colors hover:bg-surface-2/50 [&::-webkit-details-marker]:hidden">
-              <div>
-                <h2 className="text-sm font-semibold text-fg">Advanced & diagnostics</h2>
-                <p className="mt-1 text-xs leading-5 text-fg-muted">
-                  Authority inventories, structured preference lifecycle controls, immutable hashes,
-                  accepted-attempt drift, inactive policy drafts, and bounded structural gaps.
-                </p>
+            <ArrowLeftIcon className="size-3" />
+            Back to Agent Brain
+          </Link>
+        ) : null}
+        {loading && !state ? <WorkspaceStateLoading /> : null}
+        {error && !state ? (
+          <LoadErrorState
+            title="Couldn't load Agent Brain"
+            error={error}
+            onRetry={() => void reload()}
+          />
+        ) : null}
+        {state ? (
+          <div className="grid gap-4">
+            {error ? (
+              <LoadErrorState
+                title="Couldn't refresh Agent Brain"
+                error={error}
+                onRetry={() => void reload()}
+              />
+            ) : null}
+            {view === "company" ? (
+              <div className="grid gap-4">
+                <AgentBrainPrompt kind="company_profile" workspaceId={workspaceId} />
+                <details className="rounded-lg border border-border bg-surface">
+                  <summary className="cursor-pointer list-none px-4 py-3 text-sm font-medium text-fg [&::-webkit-details-marker]:hidden">
+                    Edit manually and view history
+                  </summary>
+                  <div className="border-t border-border p-4">
+                    <CompanyProfileInventory workspaceId={workspaceId} />
+                  </div>
+                </details>
               </div>
-              <ChevronDownIcon className="size-4 shrink-0 text-fg-muted transition-transform group-open:rotate-180" />
-            </summary>
-            <div className="grid gap-4 border-t border-border p-4">
-              <PolicyInventory state={state} />
-              <PreferenceInventory state={state} />
+            ) : null}
+            {view === "instructions" ? (
+              <FocusedInstructions
+                state={state}
+                workspaceId={workspaceId}
+                onWorkspaceStateReload={reload}
+              />
+            ) : null}
+            {view === "preferences" ? (
               <PreferenceRegistryAdministration
                 workspaceId={workspaceId}
                 onWorkspaceStateReload={reload}
+                compact
               />
-              <OnboardingProposalInventory
-                state={state}
-                workspaceId={workspaceId}
-                onWorkspaceStateReload={reload}
-              />
-              <AttemptGovernanceInventory
-                state={state}
-                attemptInput={attemptInput}
-                onAttemptInput={setAttemptInput}
-                onInspect={inspectAttempt}
-                onClear={clearAttempt}
-              />
-              <KnowledgeInventory state={state} workspaceId={workspaceId} />
-              <ExistingSources workspaceId={workspaceId} />
-            </div>
-          </details>
-        </div>
-      ) : null}
+            ) : null}
+            {!view ? (
+              <>
+                <BrainOverview
+                  state={state}
+                  workspaceId={workspaceId}
+                  companyProfileStatus={companyProfileStatus}
+                />
+                <details
+                  id="brain-diagnostics"
+                  className="group scroll-mt-4 rounded-lg border border-border bg-surface"
+                  open={diagnosticsOpen}
+                  onToggle={(event) => setDiagnosticsOpen(event.currentTarget.open)}
+                >
+                  <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 text-left transition-colors hover:bg-surface-2/50 [&::-webkit-details-marker]:hidden">
+                    <div>
+                      <h2 className="text-sm font-semibold text-fg">Advanced & diagnostics</h2>
+                      <p className="mt-1 text-xs leading-5 text-fg-muted">
+                        Technical details, audit history and administration.
+                      </p>
+                    </div>
+                    <ChevronDownIcon className="size-4 shrink-0 text-fg-muted transition-transform group-open:rotate-180" />
+                  </summary>
+                  <div className="grid gap-4 border-t border-border p-4">
+                    <PolicyInventory state={state} />
+                    <PreferenceInventory state={state} />
+                    <PreferenceRegistryAdministration
+                      workspaceId={workspaceId}
+                      onWorkspaceStateReload={reload}
+                    />
+                    <OnboardingProposalInventory
+                      state={state}
+                      workspaceId={workspaceId}
+                      onWorkspaceStateReload={reload}
+                    />
+                    <AttemptGovernanceInventory
+                      state={state}
+                      attemptInput={attemptInput}
+                      onAttemptInput={setAttemptInput}
+                      onInspect={inspectAttempt}
+                      onClear={clearAttempt}
+                    />
+                    <KnowledgeInventory state={state} workspaceId={workspaceId} />
+                  </div>
+                </details>
+              </>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
     </ContentPage>
   );
 }

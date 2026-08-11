@@ -5,10 +5,7 @@ import { capabilityAuthHint, capabilityItemKindLabel } from "@/lib/capabilities"
 import { cn } from "@/lib/utils";
 import type { CapabilityCatalogItem } from "@/types";
 
-/**
- * One catalog tile in the Browse grid. The whole tile is the click target
- * (opens the detail sheet) — no per-tile enable button crowding the grid.
- */
+/** One compact catalog row. The whole row opens the same detail/settings sheet. */
 export const CapabilityTile = memo(function CapabilityTile({
   item,
   logoSrc,
@@ -25,31 +22,27 @@ export const CapabilityTile = memo(function CapabilityTile({
       onClick={onOpen}
       data-capability-catalog-tile={item.id}
       className={cn(
-        "group flex h-full flex-col gap-3 rounded-xl border border-border bg-surface/50 p-4 text-left",
-        "transition-all hover:-translate-y-px hover:border-border-strong hover:bg-surface hover:shadow-md",
+        "group flex min-w-0 items-center gap-3 rounded-xl border border-border bg-surface/50 p-3 text-left",
+        "transition-colors hover:border-border-strong hover:bg-surface",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg",
       )}
     >
-      <div className="flex items-start justify-between gap-2">
-        <CapabilityLogo src={logoSrc} name={item.name} />
-        <div className="flex items-center gap-1.5">
+      <CapabilityLogo src={logoSrc} name={item.name} size="sm" />
+      <div className="min-w-0 flex-1">
+        <div className="flex min-w-0 items-center gap-2">
+          <h3 className="truncate text-sm font-medium text-fg">{item.name}</h3>
           {item.enabled ? (
-            <span className="inline-flex items-center gap-1 text-2xs font-medium text-status-idle">
+            <span className="inline-flex shrink-0 items-center gap-1 text-2xs font-medium text-status-idle">
               <span className="size-1.5 rounded-full bg-status-idle" />
               Enabled
             </span>
           ) : null}
         </div>
-      </div>
-
-      <div className="min-w-0 flex-1">
-        <h3 className="truncate text-sm font-medium text-fg">{item.name}</h3>
-        <p className="mt-1 line-clamp-2 text-xs leading-5 text-fg-muted">
+        <p className="mt-0.5 truncate text-xs text-fg-muted">
           {item.description ?? "No description provided."}
         </p>
       </div>
-
-      <div className="flex items-center gap-2 text-2xs text-fg-subtle">
+      <div className="hidden shrink-0 items-center gap-2 text-2xs text-fg-subtle sm:flex">
         <span className="truncate">{capabilityItemKindLabel(item)}</span>
         {authHint ? (
           <>

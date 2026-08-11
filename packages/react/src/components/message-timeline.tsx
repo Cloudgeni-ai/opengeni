@@ -1,4 +1,9 @@
-import type { DraftTimelineAnnotation, SessionEvent, SessionStatus } from "@opengeni/sdk";
+import type {
+  DraftTimelineAnnotation,
+  MediaGenerationResult,
+  SessionEvent,
+  SessionStatus,
+} from "@opengeni/sdk";
 import {
   ArrowDownIcon,
   ArrowRightIcon,
@@ -73,6 +78,7 @@ import {
   type TimelineAnnotationSourceDescriptor,
   type RetainedArtifactLoader,
   type RetainedScreenshotLoader,
+  type VideoArtifactPlaybackLoader,
   type ToolRegistry,
   type TurnSummaryOptions,
   type UserMessageItem,
@@ -85,6 +91,7 @@ import {
   useTurnSettleOpen,
 } from "../timeline";
 import { CopyHoverFrame } from "./copy-button";
+import { GeneratedVideoPlayer } from "./generated-video-player";
 import {
   MACHINE_INPUT_META,
   cleanMachineInputSummary,
@@ -155,6 +162,8 @@ export type MessageTimelineProps = {
   loadRetainedScreenshot?: RetainedScreenshotLoader | undefined;
   /** Resolve permanent generated-image receipts through the authenticated host SDK. */
   loadRetainedArtifact?: RetainedArtifactLoader | undefined;
+  /** Mint short-lived native playback sources for retained generated videos. */
+  loadVideoArtifactPlayback?: VideoArtifactPlaybackLoader | undefined;
   /**
    * Display name of the session's active compute target (Connected Machine or
    * cloud sandbox). When set, exec_command collapsed previews prefix `on {label}`.
@@ -304,6 +313,7 @@ export function MessageTimeline({
   toolRegistry = defaultToolRegistry,
   loadRetainedScreenshot,
   loadRetainedArtifact,
+  loadVideoArtifactPlayback,
   computeLabel = null,
   turnSummary,
   autoFollow = true,
@@ -1383,6 +1393,7 @@ export function MessageTimeline({
                                 toolRegistry,
                                 loadRetainedScreenshot,
                                 loadRetainedArtifact,
+                                loadVideoArtifactPlayback,
                                 turnSummary,
                               ]}
                             >
@@ -1397,6 +1408,7 @@ export function MessageTimeline({
                                   toolRegistry={toolRegistry}
                                   loadRetainedScreenshot={loadRetainedScreenshot}
                                   loadRetainedArtifact={loadRetainedArtifact}
+                                  loadVideoArtifactPlayback={loadVideoArtifactPlayback}
                                   turnSummary={turnSummary}
                                   foldLiveCluster={isAgentProgress(next)}
                                   trailingAgentText={trailingAgentTextAfterTurn(group, next)}
@@ -1742,6 +1754,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
   toolRegistry,
   loadRetainedScreenshot,
   loadRetainedArtifact,
+  loadVideoArtifactPlayback,
   turnSummary,
   insideTurn = false,
   nestClusterChips = false,
@@ -1760,6 +1773,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
   toolRegistry: ToolRegistry;
   loadRetainedScreenshot?: RetainedScreenshotLoader | undefined;
   loadRetainedArtifact?: RetainedArtifactLoader | undefined;
+  loadVideoArtifactPlayback?: VideoArtifactPlaybackLoader | undefined;
   turnSummary?: TurnSummaryOptions | undefined;
   /** A completed cluster of a still-RUNNING turn (not the live tail) folds
       behind a neutral chip — the one place activity without an outcome still
@@ -1916,6 +1930,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
               toolRegistry,
               loadRetainedScreenshot,
               loadRetainedArtifact,
+              loadVideoArtifactPlayback,
               turnSummary,
             ]}
           >
@@ -1929,6 +1944,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
               toolRegistry={toolRegistry}
               loadRetainedScreenshot={loadRetainedScreenshot}
               loadRetainedArtifact={loadRetainedArtifact}
+              loadVideoArtifactPlayback={loadVideoArtifactPlayback}
               turnSummary={turnSummary}
               insideTurn
               nestClusterChips={nestClusters}
@@ -1970,6 +1986,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
           onReconnect={onReconnect}
           resolveProviderLogo={resolveProviderLogo}
           onOpenSession={onOpenSession}
+          loadVideoArtifactPlayback={loadVideoArtifactPlayback}
         />
       );
   }
@@ -2218,6 +2235,7 @@ export function TimelineRow({
   onReconnect,
   resolveProviderLogo,
   onOpenSession,
+  loadVideoArtifactPlayback,
 }: {
   item: TimelineItem;
   renderMessageText?:
@@ -2226,6 +2244,7 @@ export function TimelineRow({
   onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
   resolveProviderLogo?: ((providerDomain: string) => string | null | undefined) | undefined;
   onOpenSession?: ((sessionId: string) => void) | undefined;
+  loadVideoArtifactPlayback?: VideoArtifactPlaybackLoader | undefined;
 }) {
   switch (item.kind) {
     case "user-message":
@@ -2239,7 +2258,9 @@ export function TimelineRow({
     case "goal":
       return <GoalRow item={item} />;
     case "machine-input-batch":
-      return <MachineInputBatchRow item={item} />;
+      return (
+        <MachineInputBatchRow item={item} loadVideoArtifactPlayback={loadVideoArtifactPlayback} />
+      );
     case "notice":
       return <NoticeRow item={item} />;
     case "context-compaction":
@@ -2359,6 +2380,14 @@ function UserMessageRow({
     | undefined;
 }) {
   const enter = useEntranceAnimation();
+  const deliveryLabel =
+    item.delivery?.state === "sending"
+      ? "Sending…"
+      : item.delivery?.state === "queued"
+        ? "Queued"
+        : item.delivery?.state === "failed"
+          ? "Not sent"
+          : null;
   return (
     <div className={cn(enter && "animate-og-enter", "flex justify-end")}>
       <div className="flex max-w-[85%] min-w-0 flex-col items-end gap-1">
@@ -2393,6 +2422,29 @@ function UserMessageRow({
             ) : null}
           </div>
         </CopyHoverFrame>
+        {deliveryLabel ? (
+          <div className="flex max-w-full items-center gap-2 px-1 text-og-xs text-og-fg-subtle">
+            <span title={item.delivery?.error}>{deliveryLabel}</span>
+            {item.delivery?.state === "failed" && item.delivery.onRetry ? (
+              <button
+                type="button"
+                className="font-medium text-og-fg underline decoration-og-border underline-offset-2 hover:text-og-fg-strong"
+                onClick={item.delivery.onRetry}
+              >
+                Retry
+              </button>
+            ) : null}
+            {item.delivery?.state === "failed" && item.delivery.onRemove ? (
+              <button
+                type="button"
+                className="font-medium text-og-fg-subtle underline decoration-og-border underline-offset-2 hover:text-og-fg"
+                onClick={item.delivery.onRemove}
+              >
+                Remove
+              </button>
+            ) : null}
+          </div>
+        ) : null}
       </div>
     </div>
   );
@@ -2678,10 +2730,24 @@ function GoalRow({ item }: { item: GoalItem }) {
   );
 }
 
-function MachineInputBatchRow({ item }: { item: MachineInputBatchItem }) {
+function MachineInputBatchRow({
+  item,
+  loadVideoArtifactPlayback,
+}: {
+  item: MachineInputBatchItem;
+  loadVideoArtifactPlayback?: VideoArtifactPlaybackLoader | undefined;
+}) {
   const enter = useEntranceAnimation();
   const label = machineInputBatchLabel(item.members);
   const single = item.members.length === 1 ? item.members[0]! : null;
+  if (single?.kind === "media_generation_result" && single.result) {
+    return (
+      <VideoGenerationResultRow
+        result={single.result}
+        loadVideoArtifactPlayback={loadVideoArtifactPlayback}
+      />
+    );
+  }
   const singleSummary = single ? cleanMachineInputSummary(single.summary) : "";
   const showCollapsedSummary =
     single != null && machineInputSummaryIsUseful(single.kind, singleSummary);
@@ -2705,7 +2771,11 @@ function MachineInputBatchRow({ item }: { item: MachineInputBatchItem }) {
         </summary>
         <div className="mx-auto mt-2 w-full max-w-lg space-y-2 border-t border-og-border/50 pt-2">
           {item.members.map((member) => (
-            <MachineInputRow key={member.id} member={member} />
+            <MachineInputRow
+              key={member.id}
+              member={member}
+              loadVideoArtifactPlayback={loadVideoArtifactPlayback}
+            />
           ))}
         </div>
       </details>
@@ -2718,7 +2788,22 @@ function MachineInputBatchRow({ item }: { item: MachineInputBatchItem }) {
   );
 }
 
-function MachineInputRow({ member }: { member: MachineInputBatchItem["members"][number] }) {
+function MachineInputRow({
+  member,
+  loadVideoArtifactPlayback,
+}: {
+  member: MachineInputBatchItem["members"][number];
+  loadVideoArtifactPlayback?: VideoArtifactPlaybackLoader | undefined;
+}) {
+  if (member.kind === "media_generation_result" && member.result) {
+    return (
+      <VideoGenerationResultRow
+        result={member.result}
+        loadVideoArtifactPlayback={loadVideoArtifactPlayback}
+        compact
+      />
+    );
+  }
   const source = readableMachineInputSource(member.sourceId);
   const summary = cleanMachineInputSummary(member.summary);
   return (
@@ -2737,6 +2822,72 @@ function MachineInputRow({ member }: { member: MachineInputBatchItem["members"][
       </div>
     </div>
   );
+}
+
+function VideoGenerationResultRow({
+  result,
+  loadVideoArtifactPlayback,
+  compact = false,
+}: {
+  result: MediaGenerationResult;
+  loadVideoArtifactPlayback?: VideoArtifactPlaybackLoader | undefined;
+  compact?: boolean | undefined;
+}) {
+  const enter = useEntranceAnimation();
+  if (result.status !== "ready") {
+    return (
+      <div
+        className={cn(
+          enter && "animate-og-enter",
+          "mx-auto w-full max-w-lg rounded-og-md border border-og-status-failed/30 bg-og-status-failed/5 px-3.5 py-3",
+        )}
+      >
+        <div className="flex items-center gap-2 text-og-sm font-medium text-og-status-failed">
+          <XCircleIcon aria-hidden className="size-4" />
+          Video generation failed
+        </div>
+        <p className="mt-1 text-og-sm leading-5 text-og-fg-muted">{result.boundedPublicReason}</p>
+      </div>
+    );
+  }
+  const { receipt } = result;
+  const facts = receipt.video;
+  return (
+    <section
+      aria-label="Generated video"
+      className={cn(
+        enter && "animate-og-enter",
+        "mx-auto w-full max-w-2xl overflow-hidden rounded-og-lg border border-og-border bg-og-surface-1 shadow-sm",
+        compact && "max-w-lg",
+      )}
+    >
+      {loadVideoArtifactPlayback ? (
+        <GeneratedVideoPlayer
+          receipt={receipt}
+          loadPlaybackSource={loadVideoArtifactPlayback}
+          className="rounded-none border-0 shadow-none"
+        />
+      ) : (
+        <div className="flex aspect-video items-center justify-center bg-og-surface-2 text-og-fg-subtle">
+          <PlayIcon aria-hidden className="size-6" />
+        </div>
+      )}
+      <div className="flex items-center justify-between gap-4 px-3.5 py-2.5">
+        <div className="min-w-0">
+          <p className="text-og-sm font-medium text-og-fg">Generated video</p>
+          <p className="truncate text-og-xs text-og-fg-subtle">
+            {facts.width}×{facts.height} · {formatVideoDuration(facts.durationSeconds)}
+            {facts.hasAudio ? " · Audio" : ""}
+          </p>
+        </div>
+        <CheckCircle2Icon aria-label="Ready" className="size-4 shrink-0 text-og-status-success" />
+      </div>
+    </section>
+  );
+}
+
+function formatVideoDuration(seconds: number): string {
+  return `${Math.round(seconds * 10) / 10}s`;
 }
 
 function NoticeRow({ item }: { item: NoticeItem }) {

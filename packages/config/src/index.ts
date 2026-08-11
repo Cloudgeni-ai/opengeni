@@ -9,12 +9,14 @@ import {
   ReasoningEffort,
   SandboxBackend,
   SessionMcpApprovalPolicy,
+  SEEDANCE_2_5_MODEL_ID,
   StaticUsageLimits,
   TurnExecutionPolicyV1,
   UsageLimitsMode,
   type TurnExecutionLatencyModeSourceV1,
   type TurnExecutionModelSourceV1,
   type TurnExecutionReasoningSourceV1,
+  type VideoGenerationResolution,
 } from "@opengeni/contracts";
 import { CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS } from "@opengeni/codex";
 import {
@@ -297,8 +299,7 @@ const SettingsSchema = z.object({
   // holder of stream:control gets 403 until this flips. Keeps stream:control a
   // declared-but-inert permission so later hardening is a flag flip.
   streamControlEnabled: EnvBoolean.default(false),
-  toolspaceEnabled: EnvBoolean.default(false),
-  toolspaceMaxCallsPerTurn: z.coerce.number().int().positive().default(200),
+  codemodeMaxCallsPerTurn: z.coerce.number().int().positive().default(200),
   // Optional release-coherent bootstrap hint for custom rigs/connected machines
   // that do not carry the stock-image ogtool binary. Exact stable versions only:
   // the agent must never guess a tag or silently install `latest`.
@@ -311,11 +312,15 @@ const SettingsSchema = z.object({
   integrationsStateSecret: z.string().optional(),
   integrationsAllowPrivateNetworkTargets: EnvBoolean.default(false),
   integrationsOauthClientsJson: z.string().default("{}"),
+  gmailRestAdapterEnabled: EnvBoolean.default(false),
   slackClientId: z.string().optional(),
   slackClientSecret: z.string().optional(),
   slackSigningSecret: z.string().optional(),
   googleDriveClientId: z.string().optional(),
   googleDriveClientSecret: z.string().optional(),
+  googleDriveWorkspaceEventsEnabled: EnvBoolean.optional(),
+  atlassianClientId: z.string().optional(),
+  atlassianClientSecret: z.string().optional(),
   // Undefined is meaningful: the migration boundary persists the product
   // default of 3 when no deployment override is supplied.
   maxNestedAgentDepth: z.coerce.number().int().nonnegative().max(MAX_NESTED_AGENT_DEPTH).optional(),
@@ -391,6 +396,43 @@ const SettingsSchema = z.object({
   vercelAiGatewayApiKey: z.string().optional(),
   /** Image adapter route; native hosted providers ignore this model. */
   imageGenerationModel: z.string().trim().min(1).max(256).default("openai/gpt-image-2"),
+  /** Durable video generation uses the workspace-owned Gateway credential. */
+  videoGenerationPollIntervalMs: z.coerce.number().int().min(1_000).max(60_000).default(5_000),
+  videoGenerationRecoveryDeadlineMs: z.coerce
+    .number()
+    .int()
+    .min(60_000)
+    .max(24 * 60 * 60_000)
+    .default(2 * 60 * 60_000),
+  videoGenerationReferenceUrlTtlSeconds: z.coerce
+    .number()
+    .int()
+    .min(300)
+    .max(6 * 60 * 60)
+    .default(60 * 60),
+  videoGenerationMaxConcurrentPerWorkspace: z.coerce.number().int().min(1).max(16).default(2),
+  videoGenerationWorkspaceQuotaBytes: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(Number.MAX_SAFE_INTEGER)
+    .default(20 * 1024 * 1024 * 1024),
+  videoGenerationTempDirectory: z.string().trim().min(1).max(1_024).default("/tmp/opengeni-video"),
+  videoGenerationFfprobePath: z.string().trim().min(1).max(1_024).default("ffprobe"),
+  // OpenGeni's customer price, not a claim about the provider's delayed cost report.
+  // The durable operation freezes the exact resulting price before provider submit.
+  videoGenerationCredit480pMicrosPerSecond: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(10_000_000)
+    .default(155_000),
+  videoGenerationCredit720pMicrosPerSecond: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(10_000_000)
+    .default(350_000),
   // Native composer voice input (browser MediaRecorder → API transcription).
   // Provider credentials stay server-side; ClientConfig only projects availability
   // and hard ceilings. Selection happens once before audio is sent — never retry
@@ -609,17 +651,16 @@ const SettingsSchema = z.object({
   // SOONER than the hard lifetime; the boot invariant forbids a value that would
   // reap before reaperPeriod + idleGrace elapses.
   modalIdleTimeoutSeconds: z.coerce.number().int().positive().optional(),
-  // /workspace FILE PERSISTENCE across warm/cold cycles. Defaults to
-  // `snapshot_filesystem` so EVERY box is created persistence-capable: the reaper
-  // snapshots the live box before it terminates a drained group, and a later
-  // cold-restore hydrates a fresh box from that snapshot (sandbox-file-persistence).
-  // `snapshot_filesystem` requires the manifest declare NO ephemeralPersistencePaths
-  // (buildManifest never sets entry.ephemeral, so it never downgrades to tar). Set
-  // OPENGENI_MODAL_WORKSPACE_PERSISTENCE=tar to opt back out (no native snapshot;
-  // the reaper persists a tar archive — same store+hydrate plumbing, slower).
+  // /workspace FILE PERSISTENCE across warm/cold cycles. Directory snapshots
+  // preserve only the durable user workspace, so provider recovery does not
+  // restore an entire machine image or replace the selected rig/base image.
+  // Existing serialized sessions retain their original persistence mode and
+  // remain recoverable; this default governs newly created Modal sandboxes.
+  // `snapshot_filesystem` remains available for explicit compatibility and
+  // immutable rig-image materialization. `tar` is the portable fallback.
   modalWorkspacePersistence: z
     .enum(["tar", "snapshot_filesystem", "snapshot_directory"])
-    .default("snapshot_filesystem"),
+    .default("snapshot_directory"),
   // Shared desktop toggle: this module reads it for the 6080 port-merge; the
   // owner module (P4.x) acts on it to launch the display stack.
   sandboxDesktopEnabled: EnvBoolean.default(false),
@@ -827,6 +868,10 @@ const SettingsSchema = z.object({
   // snapshotted before the box dies (sandbox-file-persistence).
   sandboxLeaseReaperPeriodMs: z.coerce.number().int().positive().default(30_000),
   sandboxViewerHolderTtlMs: z.coerce.number().int().positive().default(90_000),
+  // A BrowserSession controller refreshes its durable resource and exact
+  // interaction lease holder together. This longer crash horizon tolerates API
+  // replacement while still releasing a placement whose controller died.
+  sandboxInteractionHolderTtlMs: z.coerce.number().int().positive().default(180_000),
   // The DRAIN grace: how long a refcount-0 (draining) lease stays WARM before the
   // reaper resume-by-ids the box and terminates it. This is the cost-vs-snappiness
   // dial — when the user navigates away the box keeps refcount 0, but it survives
@@ -1824,8 +1869,7 @@ export function getSettings(): Settings {
     delegationSecret: optional("OPENGENI_DELEGATION_SECRET"),
     streamTokenSecret: optional("OPENGENI_STREAM_TOKEN_SECRET"),
     streamControlEnabled: optional("OPENGENI_STREAM_CONTROL_ENABLED"),
-    toolspaceEnabled: optional("OPENGENI_TOOLSPACE_ENABLED"),
-    toolspaceMaxCallsPerTurn: optional("OPENGENI_TOOLSPACE_MAX_CALLS_PER_TURN"),
+    codemodeMaxCallsPerTurn: optional("OPENGENI_CODEMODE_MAX_CALLS_PER_TURN"),
     ogtoolPackageSpec: optional("OPENGENI_OGTOOL_PACKAGE_SPEC"),
     environmentsEncryptionKey: optional("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY"),
     integrationsEnabled: optional("OPENGENI_INTEGRATIONS_ENABLED"),
@@ -1834,11 +1878,15 @@ export function getSettings(): Settings {
       "OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS",
     ),
     integrationsOauthClientsJson: optional("OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON"),
+    gmailRestAdapterEnabled: optional("OPENGENI_GMAIL_REST_ADAPTER_ENABLED"),
     slackClientId: optional("OPENGENI_SLACK_CLIENT_ID"),
     slackClientSecret: optional("OPENGENI_SLACK_CLIENT_SECRET"),
     slackSigningSecret: optional("OPENGENI_SLACK_SIGNING_SECRET"),
     googleDriveClientId: optional("OPENGENI_GOOGLE_DRIVE_CLIENT_ID"),
     googleDriveClientSecret: optional("OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET"),
+    googleDriveWorkspaceEventsEnabled: optional("OPENGENI_GOOGLE_DRIVE_WORKSPACE_EVENTS_ENABLED"),
+    atlassianClientId: optional("OPENGENI_ATLASSIAN_CLIENT_ID"),
+    atlassianClientSecret: optional("OPENGENI_ATLASSIAN_CLIENT_SECRET"),
     maxNestedAgentDepth: optional("OPENGENI_MAX_NESTED_AGENT_DEPTH"),
     socialOauthClientsJson: optional("OPENGENI_SOCIAL_OAUTH_CLIENTS_JSON"),
     goalMaxAutoContinuations: optional("OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS"),
@@ -1866,6 +1914,23 @@ export function getSettings(): Settings {
     openaiAllowedModels: optional("OPENGENI_OPENAI_ALLOWED_MODELS"),
     vercelAiGatewayApiKey: optional("OPENGENI_VERCEL_AI_GATEWAY_API_KEY"),
     imageGenerationModel: optional("OPENGENI_IMAGE_GENERATION_MODEL"),
+    videoGenerationPollIntervalMs: optional("OPENGENI_VIDEO_GENERATION_POLL_INTERVAL_MS"),
+    videoGenerationRecoveryDeadlineMs: optional("OPENGENI_VIDEO_GENERATION_RECOVERY_DEADLINE_MS"),
+    videoGenerationReferenceUrlTtlSeconds: optional(
+      "OPENGENI_VIDEO_GENERATION_REFERENCE_URL_TTL_SECONDS",
+    ),
+    videoGenerationMaxConcurrentPerWorkspace: optional(
+      "OPENGENI_VIDEO_GENERATION_MAX_CONCURRENT_PER_WORKSPACE",
+    ),
+    videoGenerationWorkspaceQuotaBytes: optional("OPENGENI_VIDEO_GENERATION_WORKSPACE_QUOTA_BYTES"),
+    videoGenerationTempDirectory: optional("OPENGENI_VIDEO_GENERATION_TEMP_DIRECTORY"),
+    videoGenerationFfprobePath: optional("OPENGENI_VIDEO_GENERATION_FFPROBE_PATH"),
+    videoGenerationCredit480pMicrosPerSecond: optional(
+      "OPENGENI_VIDEO_GENERATION_CREDIT_480P_MICROS_PER_SECOND",
+    ),
+    videoGenerationCredit720pMicrosPerSecond: optional(
+      "OPENGENI_VIDEO_GENERATION_CREDIT_720P_MICROS_PER_SECOND",
+    ),
     voiceInputMaxDurationSeconds: optional("OPENGENI_VOICE_INPUT_MAX_DURATION_SECONDS"),
     voiceInputMaxSizeBytes: optional("OPENGENI_VOICE_INPUT_MAX_SIZE_BYTES"),
     voiceInputResumableEnabled: optional("OPENGENI_VOICE_INPUT_RESUMABLE_ENABLED"),
@@ -2001,6 +2066,7 @@ export function getSettings(): Settings {
     sandboxSelfhostedControlTimeoutMs: optional("OPENGENI_SANDBOX_SELFHOSTED_CONTROL_TIMEOUT_MS"),
     sandboxLeaseReaperPeriodMs: optional("OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS"),
     sandboxViewerHolderTtlMs: optional("OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS"),
+    sandboxInteractionHolderTtlMs: optional("OPENGENI_SANDBOX_INTERACTION_HOLDER_TTL_MS"),
     sandboxIdleGraceMs: optional("OPENGENI_SANDBOX_IDLE_GRACE_MS"),
     sandboxSnapshotIntervalMs: optional("OPENGENI_SANDBOX_SNAPSHOT_INTERVAL_MS"),
     sandboxSnapshotTimeoutMs: optional("OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS"),
@@ -3635,6 +3701,36 @@ export function calculateGatewayReportedCostBreakdown(
   };
 }
 
+/**
+ * Exact OpenGeni product price frozen before a managed video request starts.
+ * Gateway reporting is delayed for asynchronous video, so this deliberately
+ * does not masquerade as provider-reported cost.
+ */
+export function calculateVideoGenerationCreditCostMicros(
+  settings: Settings,
+  input: {
+    modelId: string;
+    resolution: VideoGenerationResolution;
+    durationSeconds: number;
+  },
+): number {
+  if (input.modelId !== SEEDANCE_2_5_MODEL_ID) {
+    throw new Error(`Missing video generation credit pricing for ${input.modelId}`);
+  }
+  if (!Number.isSafeInteger(input.durationSeconds) || input.durationSeconds < 1) {
+    throw new Error("Video generation duration is invalid for credit pricing");
+  }
+  const rate =
+    input.resolution === "480p"
+      ? settings.videoGenerationCredit480pMicrosPerSecond
+      : settings.videoGenerationCredit720pMicrosPerSecond;
+  const cost = rate * input.durationSeconds;
+  if (!Number.isSafeInteger(cost) || cost <= 0 || cost > 1_000_000_000) {
+    throw new Error("Video generation credit price exceeds the supported range");
+  }
+  return cost;
+}
+
 export function configuredAllowedReasoningEfforts(
   settings: Settings,
 ): Array<z.infer<typeof ReasoningEffort>> {
@@ -3846,16 +3942,13 @@ export function stableSandboxEnvironmentForRun(
     environment.OPENGENI_GIT_CLI_WRAPPER_DIR ??= `${home}/.opengeni/bin`;
     environment.PATH = prependPathEntry(environment.PATH, environment.OPENGENI_GIT_CLI_WRAPPER_DIR);
   }
-  if (settings.toolspaceEnabled && settings.sandboxBackend !== "selfhosted") {
-    environment.OPENGENI_TOOLSPACE_TOKEN_FILE ??= `${environment.HOME ?? descriptor.workspaceRoot}/.opengeni/toolspace-token`;
+  if (settings.sandboxBackend !== "selfhosted" && resolveFirstPartyDelegationSecret(settings)) {
+    environment.OPENGENI_CODEMODE_TOKEN_FILE ??= `${environment.HOME ?? descriptor.workspaceRoot}/.opengeni/codemode-token`;
     if (settings.ogtoolPackageSpec) {
       environment.OPENGENI_OGTOOL_PACKAGE_SPEC ??= settings.ogtoolPackageSpec;
     }
     if (options.workspaceId) {
-      environment.OPENGENI_TOOLSPACE_URL ??= firstPartyMcpWorkspaceUrl(
-        settings,
-        options.workspaceId,
-      );
+      environment.OPENGENI_CODEMODE_URL ??= codemodeWorkspaceUrl(settings, options.workspaceId);
     }
   }
   return environment;
@@ -4360,6 +4453,7 @@ function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
               "search_documents",
               "fetch_document_chunk",
               "list_document_bases",
+              "list_indexed_documents",
               "knowledge_search",
               "knowledge_fetch",
               "memory_search",
@@ -4412,6 +4506,15 @@ export function firstPartyMcpWorkspaceUrl(settings: Settings, workspaceId: strin
   return url.toString();
 }
 
+export function codemodeWorkspaceUrl(settings: Settings, workspaceId: string): string {
+  const url = new URL(firstPartyMcpWorkspaceUrl(settings, workspaceId));
+  if (!url.pathname.endsWith("/mcp")) {
+    throw new Error("First-party MCP URL cannot be projected to the Codemode endpoint");
+  }
+  url.pathname = `${url.pathname.slice(0, -4)}/codemode`;
+  return url.toString();
+}
+
 function firstPartyMcpServerUrl(settings: Settings): string {
   return firstPartyMcpBaseUrl(settings);
 }
@@ -4426,9 +4529,6 @@ function firstPartyFilesMcpServerUrl(mcpUrl: string): string {
 
 function validateSettings(settings: Settings): void {
   temporalConnectionOptions(settings);
-  if (settings.toolspaceEnabled && !settings.delegationSecret) {
-    throw new Error("OPENGENI_DELEGATION_SECRET is required when OPENGENI_TOOLSPACE_ENABLED=true");
-  }
   if (settings.productAccessMode === "managed") {
     if (!settings.publicBaseUrl) {
       throw new Error(
@@ -4523,6 +4623,31 @@ function validateSettings(settings: Settings): void {
     if (!settings.integrationsStateSecret) {
       throw new Error(
         "OPENGENI_INTEGRATIONS_STATE_SECRET is required when the Google Drive integration is configured",
+      );
+    }
+  }
+  if (Boolean(settings.atlassianClientId) !== Boolean(settings.atlassianClientSecret)) {
+    throw new Error(
+      "OPENGENI_ATLASSIAN_CLIENT_ID and OPENGENI_ATLASSIAN_CLIENT_SECRET must be configured together",
+    );
+  }
+  if (settings.atlassianClientId) {
+    if (!settings.publicBaseUrl) {
+      throw new Error(
+        "OPENGENI_PUBLIC_BASE_URL is required when the Atlassian integration is configured",
+      );
+    }
+    if (
+      !settings.publicBaseUrl.startsWith("https://") &&
+      !["local", "test"].includes(settings.environment)
+    ) {
+      throw new Error(
+        "OPENGENI_PUBLIC_BASE_URL must use https when the Atlassian integration is configured outside local/test",
+      );
+    }
+    if (!settings.integrationsStateSecret) {
+      throw new Error(
+        "OPENGENI_INTEGRATIONS_STATE_SECRET is required when the Atlassian integration is configured",
       );
     }
   }
@@ -4749,6 +4874,7 @@ function validateSettings(settings: Settings): void {
   {
     const reaperPeriod = settings.sandboxLeaseReaperPeriodMs;
     const viewerTtl = settings.sandboxViewerHolderTtlMs;
+    const interactionTtl = settings.sandboxInteractionHolderTtlMs;
     const idleGraceMs = settings.sandboxIdleGraceMs;
     const providerLifetimeMs = settings.modalTimeoutSeconds * 1000;
     const rotationLeadMs = settings.sandboxRotationLeadMs;
@@ -4765,6 +4891,13 @@ function validateSettings(settings: Settings): void {
         `OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS (${reaperPeriod}) must be strictly less than ` +
           `OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS (${viewerTtl}): the reaper must run more often ` +
           `than the TTL it polices, or stale viewer holders outlive a full reaper period.`,
+      );
+    }
+    if (!(reaperPeriod < interactionTtl)) {
+      throw new Error(
+        `OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS (${reaperPeriod}) must be strictly less than ` +
+          `OPENGENI_SANDBOX_INTERACTION_HOLDER_TTL_MS (${interactionTtl}): the reaper must run ` +
+          `more often than the controller-heartbeat horizon.`,
       );
     }
     if (!(idleTimeoutMs <= providerLifetimeMs)) {
@@ -4796,6 +4929,13 @@ function validateSettings(settings: Settings): void {
         `OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS (${viewerTtl}) must be strictly less than the effective box ` +
           `idle timeout (${idleTimeoutMs}): a viewer holder must be reapable before the box idles out from ` +
           `under it (the provider idle-timeout is the backstop).`,
+      );
+    }
+    if (!(interactionTtl < idleTimeoutMs)) {
+      throw new Error(
+        `OPENGENI_SANDBOX_INTERACTION_HOLDER_TTL_MS (${interactionTtl}) must be strictly less than ` +
+          `the effective box idle timeout (${idleTimeoutMs}): a dead browser controller must be ` +
+          `reapable before the provider reclaims its placement.`,
       );
     }
     if (!(reaperPeriod + idleGraceMs < idleTimeoutMs)) {

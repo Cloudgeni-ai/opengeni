@@ -488,7 +488,7 @@ function SessionsIndexRouteContent({
   return (
     // The canvas parent is overflow-hidden, so this route owns its scrolling —
     // without it the page clips (recent sessions were unreachable below the fold).
-    <div className="min-h-0 flex-1 overflow-y-auto">
+    <div data-workspace-scroll-owner="self-managed" className="min-h-0 flex-1 overflow-y-auto">
       <div className="mx-auto flex w-full max-w-3xl flex-col px-4 pt-10 pb-16 sm:px-6 sm:pt-16">
         <section className="flex flex-col items-center gap-2 text-center">
           <h1 className="text-balance text-2xl font-semibold tracking-tight sm:text-3xl">

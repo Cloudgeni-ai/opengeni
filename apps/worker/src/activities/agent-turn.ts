@@ -18,6 +18,7 @@ import {
   getHumanInputResumeForEvent,
   getSessionHumanInputRequest,
   installOrReadTurnExecutionPolicyForAttempt,
+  persistAttemptToolCatalog,
   workspaceCodexSubscriptionActive,
   acquireCodexCredentialLease,
   armCodexCapacityWait,
@@ -32,13 +33,13 @@ import {
   fetchCodexUsageForAccount,
   getSessionCodexState,
   recordSessionActiveCodexCredential,
-  setSessionCodexPin,
+  setSessionCodexPinInTransaction,
   recordCodexAccountUsageWithWakeTargets,
   quarantineCodexCredentialForLease,
   setActiveCodexCredential,
   resolveWorkspaceMemoryBlock,
   setCodexCredentialExhaustedWithWakeTargets,
-  withCodexCapacityMutation,
+  withSessionCodexCapacityMutation,
   countConsecutiveReactiveRotations,
   requireSession,
   recordUsageEvent,
@@ -61,6 +62,10 @@ import {
   accrueWarmSeconds,
   getMaterializedSandboxFileResources,
   markSandboxFileResourcesMaterialized,
+  getGeneratedVideoArtifact,
+  listSessionSystemUpdatesForTurn,
+  getWorkspaceVideoGenerationPolicy,
+  loadWorkspaceVercelAiGatewayCredentialLease,
   areGitHubRepositoriesAllowedForWorkspace,
   SandboxLeaseRecoveryBlockedError,
   SandboxLeaseSupersededError,
@@ -125,8 +130,8 @@ import {
   clearRunCredentialsForAttempt,
   withRunCredentialsSession,
   refreshGitCredentialBindingTokenFiles,
-  refreshToolspaceTokenFile,
-  toolspaceTokenFileFromEnvironment,
+  refreshCodemodeTokenFile,
+  codemodeTokenFileFromEnvironment,
   sandboxFileDownloadFailureNote,
   SUMMARY_BUFFER_TOKENS,
   isMcpRequestTimeoutError,
@@ -140,6 +145,7 @@ import {
   type SandboxFileDownloadFailure,
   type OpenGeniRuntime,
   type ComputerToolMode,
+  type RetainableSessionImageOutputHook,
   type ModelResponseUsage,
   type ModelCallUsageInput,
   type ModelCallUsageNormalization,
@@ -152,7 +158,8 @@ import {
   type LazyToolTransport,
   type NormalizedRunCredentialMaterial,
   type RunCredentialCommandSession,
-  type ToolspaceTokenWriterSession,
+  type CodemodeTokenWriterSession,
+  createFirstPartyInteractionAttemptToolDefinitions,
   deleteRecordingArtifacts,
   stopRecording as stopRecordingOnBox,
 } from "@opengeni/runtime";
@@ -179,7 +186,6 @@ import {
   type ModelProviderApi,
   type RegistryProviderKind,
   type Settings,
-  resolveFirstPartyDelegationSecret,
 } from "@opengeni/config";
 import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
 import {
@@ -208,6 +214,7 @@ import {
   publishCodexFleetShadowDecisionV1,
 } from "./codex-fleet-shadow";
 import type { CodexAccountStatus } from "@opengeni/db";
+import { CodemodeAttemptDispatcher } from "./codemode-dispatcher";
 import { buildCodexTokenResolver } from "./codex-auth";
 import {
   refreshCodexUsageAndRepairCapacityWaiters,
@@ -240,15 +247,21 @@ import {
   resolveCodexAppsCredentialIdForRun,
   withFrozenPersonalConnectionDelegations,
   resolveSessionToolPolicy,
+  videoGenerationCapabilitiesForPolicy,
 } from "@opengeni/core";
 import { maybeCompactContext, settleFailedContextCompactionLandmark } from "./context-compaction";
 import { TurnAttemptFencedError } from "./turn-attempt-fenced";
+import {
+  admitVideoGenerationRequest,
+  managedVideoGenerationCredentialLease,
+  type VideoGenerationCredentialLease,
+} from "./video-generation-admission";
 import {
   assertGitCredentialRenewalTransportUnchanged,
   gitCredentialAuthorityForTurn,
   gitHubTokenMintSelections,
   loadWorkspaceEnvironmentForRunWithCredentials,
-  mintSandboxToolspaceToken,
+  mintSandboxCodemodeToken,
   mintRunGitCredentials,
   mintRunGitCredentialBinding,
   sandboxEnvironmentForRun,
@@ -265,10 +278,10 @@ import {
   type RunCredentialRenewalController,
 } from "./run-credential-renewal";
 import {
-  TOOLSPACE_TOKEN_EXPIRY_LEAD_MS,
-  startToolspaceTokenRenewalLoop,
-  type ToolspaceTokenRenewalController,
-} from "./toolspace-token-renewal";
+  CODEMODE_TOKEN_EXPIRY_LEAD_MS,
+  startCodemodeTokenRenewalLoop,
+  type CodemodeTokenRenewalController,
+} from "./codemode-token-renewal";
 import {
   bindRunCredentialResolver,
   runCredentialAuthNeededPayloads,
@@ -354,7 +367,9 @@ import {
   materializeRetainedScreenshotRunState,
   sdkEventContainsInlineImage,
   retainComputerScreenshot,
+  toolOutputContainsInlineImage,
   typedScreenshotFromSdkEvent,
+  typedScreenshotFromToolOutput,
   unavailableRetainedSessionImage,
 } from "./retained-screenshots";
 import {
@@ -377,9 +392,9 @@ import {
 import { executeGatewayImageGeneration } from "./gateway-image-generation";
 import { executeCodexImageGeneration } from "./codex-image-generation";
 import { imageProviderBindingHash } from "./image-generation-operation";
-import { executeEditableArtifactPublication } from "./editable-artifact-publication";
+import { resolveImageGenerationReferences } from "./image-generation-references";
 import { captureWorkspaceRevision, openFreshWorkspaceCaptureSession } from "./workspace-capture";
-import type { ChannelASession } from "@opengeni/runtime/sandbox";
+import { SandboxChannelAService, type ChannelASession } from "@opengeni/runtime/sandbox";
 import { createObjectStorage, type ObjectStorage } from "@opengeni/storage";
 import {
   desktopCapableBackend,
@@ -396,6 +411,7 @@ import {
   type LatencyMode,
   type ResourceRef,
   type RetainedArtifactMetadata,
+  type MediaGenerationResult,
   type SessionEvent,
   type SessionEventType,
   type SessionStatus,
@@ -844,7 +860,7 @@ export async function drainAttemptOwnedSandboxWriters(input: {
   toolCancellationFence: Pick<TurnToolCancellationFence, "cancel" | "waitForQuiescence"> | null;
   cancellationReason?: unknown;
   gitCredentialRenewals: readonly Pick<GitCredentialRenewalController, "stop">[];
-  toolspaceTokenRenewal: Pick<ToolspaceTokenRenewalController, "stop"> | null;
+  codemodeTokenRenewal: Pick<CodemodeTokenRenewalController, "stop"> | null;
   runCredentialRenewal: Pick<RunCredentialRenewalController, "stop"> | null;
 }): Promise<void> {
   if (input.toolCancellationFence) {
@@ -854,7 +870,7 @@ export async function drainAttemptOwnedSandboxWriters(input: {
     await input.toolCancellationFence.waitForQuiescence();
   }
   await Promise.all(input.gitCredentialRenewals.map(async (renewal) => await renewal.stop()));
-  await input.toolspaceTokenRenewal?.stop();
+  await input.codemodeTokenRenewal?.stop();
   await input.runCredentialRenewal?.stop();
 }
 
@@ -2034,9 +2050,11 @@ export type SandboxArtifactRuntimeAdmission = Readonly<{
 }>;
 
 /**
- * Admit native artifact skills only for the deployment's exact base sandbox
- * image contract. A pack/rig image override is an independent filesystem and
- * therefore fails closed even when the deployment base image is capable.
+ * Admit the optional native standalone-file runtime only for the deployment's
+ * exact base sandbox image contract. A pack/rig image override is an
+ * independent filesystem and therefore fails closed even when the deployment
+ * base image is capable. Collaborative artifact skills are admitted separately
+ * from the frozen canonical tool catalog.
  *
  * This keeps lazy provisioning intact: CI/release proves the image closure,
  * while a before-agent-start doctor verifies the actual box before any model
@@ -2415,15 +2433,17 @@ export function isLazySandboxProvisionRetryable(error: unknown): boolean {
   }
   if (
     error instanceof SandboxLeaseSupersededError ||
-    error instanceof SandboxLeaseTransitionError ||
-    error instanceof SandboxWarmingTimeoutError
+    error instanceof SandboxLeaseTransitionError
   ) {
     return true;
   }
-  const message = error instanceof Error ? error.message : String(error);
-  return /(?:capacity|create|creation|provider|sandbox).*(?:timeout|timed out)|(?:timeout|timed out).*(?:capacity|create|creation|provider|sandbox)|ECONNRESET|ETIMEDOUT|EAI_AGAIN|temporar/i.test(
-    message,
-  );
+  if (error instanceof SandboxWarmingTimeoutError) {
+    return false;
+  }
+  // Provider/transport text is not durable evidence that creation never
+  // happened. Retrying an ambiguous unknown here can create a second box; only
+  // typed, ownership-fenced lifecycle outcomes above are safe to replay.
+  return false;
 }
 
 /** Short workflow-visible anti-churn pacing after a lifecycle transition. The
@@ -2670,6 +2690,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       signalCodexCapacityWorkflow,
       entitlements,
       connectionCredentials,
+      startVideoGenerationWorkflow,
     } = await services();
     const activityContext = currentActivityContext();
     const cancellationSignal = activityContext?.cancellationSignal;
@@ -3040,11 +3061,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     let runCredentialRenewal: RunCredentialRenewalController | null = null;
     let runCredentialRenewalClosed = false;
     let runCredentialSession: RunCredentialCommandSession | null = null;
-    // The delegated Toolspace bearer has a one-hour TTL. Renewal is attempt-
+    // The delegated Codemode bearer has a one-hour TTL. Renewal is attempt-
     // owned and attaches only after the initial token file reached a real
     // sandbox session; finalization drains an in-flight replacement.
-    let toolspaceTokenRenewal: ToolspaceTokenRenewalController | null = null;
-    let toolspaceTokenRenewalClosed = false;
+    let codemodeTokenRenewal: CodemodeTokenRenewalController | null = null;
+    let codemodeTokenRenewalClosed = false;
     // MID-SESSION snapshot single-flight guard: the heartbeat tick fires every
     // 10s but a Modal filesystem snapshot can take longer — never overlap two
     // captures on one box. The in-flight capture's promise is held so the
@@ -3098,6 +3119,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       await current?.flush().catch(() => undefined);
     };
     let preparedTools: Awaited<ReturnType<OpenGeniRuntime["prepareTools"]>> | null = null;
+    let codemodeDispatcher: CodemodeAttemptDispatcher | null = null;
     const toolCancellationFenceRef: {
       current: TurnToolCancellationFence | null;
     } = {
@@ -3430,6 +3452,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     let modelCanReceiveRetainedSessionImages = true;
     const generatedImageReceiptsByProviderItemId = new Map<string, GeneratedImageReceipt>();
     const generatedImageReceiptsByArtifactId = new Map<string, GeneratedImageReceipt>();
+    const videoGenerationAcceptancesByCallId = new Map<
+      string,
+      { operationId: string; requestDigest: string }
+    >();
+    const requiredGeneratedVideoFiles: Array<{
+      operationId: string;
+      artifactId: string;
+      fileId: string;
+      objectKey: string;
+      sizeBytes: number;
+      sha256: string;
+      filename: string;
+    }> = [];
     let generatedImageMaterializationCache: {
       instanceId: string;
       fileIds: Set<string>;
@@ -3437,7 +3472,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // Legacy ownership mode lets the Agents SDK create the sandbox inside
     // run(). Keep that exact session once the runtime exposes it so an image
     // generated later in the same model/tool loop can be copied immediately.
-    let sdkOwnedSandboxSession: ToolspaceTokenWriterSession | null = null;
+    let sdkOwnedSandboxSession: CodemodeTokenWriterSession | null = null;
     const prepareGeneratedImageDownload = async (receipt: GeneratedImageReceipt) => {
       if (!objectStorage) {
         throw new Error("Generated image sandbox materialization requires object storage");
@@ -3461,7 +3496,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       };
     };
     const writeGeneratedImageDownload = async (
-      sessionForDownload: ToolspaceTokenWriterSession,
+      sessionForDownload: CodemodeTokenWriterSession,
       download: SandboxFileDownload,
     ): Promise<void> => {
       const runAs = sandboxRunAs(modelRunSettings);
@@ -3522,7 +3557,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           "generatedImageMaterialization",
           async () =>
             await writeGeneratedImageDownload(
-              sessionForDownload as ToolspaceTokenWriterSession,
+              sessionForDownload as CodemodeTokenWriterSession,
               download,
             ),
         );
@@ -3550,7 +3585,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       try {
         const { download } = await prepareGeneratedImageDownload(receipt);
         await writeGeneratedImageDownload(
-          sessionForDownload as ToolspaceTokenWriterSession,
+          sessionForDownload as CodemodeTokenWriterSession,
           download,
         );
         return true;
@@ -3640,6 +3675,57 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // intentional computer_screenshot or view_image result must never be lost
     // when the event/history sanitizer removes its inline bytes.
     const retainedSessionImageCallIds = new Set<string>();
+    const retainSessionImageAtToolBoundary: RetainableSessionImageOutputHook = async ({
+      toolCallId,
+      output,
+    }) => {
+      const activeTurnId = turnId;
+      if (!activeTurnId) {
+        throw new Error("Session image tool completed before turn initialization");
+      }
+      const typedScreenshot = typedScreenshotFromToolOutput({ callId: toolCallId, output });
+      retainedSessionImageCallIds.add(toolCallId);
+      if (!typedScreenshot) {
+        if (toolOutputContainsInlineImage(output)) {
+          retainedScreenshotReceiptsByCallId.set(
+            toolCallId,
+            unavailableRetainedSessionImage({
+              sessionId: input.sessionId,
+              turnId: activeTurnId,
+              attemptId: input.attemptId,
+              toolCallId,
+              toolOutputId: toolCallId,
+              reason: "unsupported",
+            }),
+          );
+        }
+        return;
+      }
+      retainedScreenshotReceiptsByCallId.set(
+        toolCallId,
+        unavailableRetainedSessionImage({
+          sessionId: input.sessionId,
+          turnId: activeTurnId,
+          attemptId: input.attemptId,
+          toolCallId,
+          toolOutputId: toolCallId,
+          reason: "pending",
+        }),
+      );
+      retainedScreenshotReceiptsByCallId.set(
+        toolCallId,
+        await retainComputerScreenshot({
+          db,
+          objectStorage,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: activeTurnId,
+          attemptId: input.attemptId,
+          output: typedScreenshot,
+        }),
+      );
+    };
     const materializeScreenshotHistory = async (history: Array<Record<string, unknown>>) => {
       collectRetainedScreenshotReceipts(history, retainedScreenshotReceiptsByCallId);
       if (!modelCanReceiveRetainedSessionImages) return history;
@@ -4257,14 +4343,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           leased.credentialId !== null &&
           (sessionPinSource !== "policy" || sessionPin !== leased.credentialId)
         ) {
-          const pinMutation = await withCodexCapacityMutation(
+          const pinMutation = await withSessionCodexCapacityMutation(
             db,
             {
               workspaceId: input.workspaceId,
               reason: "codex_policy_pin_changed",
             },
             async (tx) => {
-              const changed = await setSessionCodexPin(
+              const changed = await setSessionCodexPinInTransaction(
                 tx,
                 input.workspaceId,
                 input.sessionId,
@@ -4285,14 +4371,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             pinMutation.wakeTargets,
           );
         } else if (selectedPinDisposition === "clearStale") {
-          const pinMutation = await withCodexCapacityMutation(
+          const pinMutation = await withSessionCodexCapacityMutation(
             db,
             {
               workspaceId: input.workspaceId,
               reason: "codex_stale_policy_pin_cleared",
             },
             async (tx) => {
-              const changed = await setSessionCodexPin(
+              const changed = await setSessionCodexPinInTransaction(
                 tx,
                 input.workspaceId,
                 input.sessionId,
@@ -4892,6 +4978,44 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           }
         }
       }
+      // A recovered asynchronous video completion is model-visible only after
+      // its durable File is present at the exact sandbox path carried by the
+      // receipt. Resolve and verify the claimed update before sandbox policy is
+      // chosen so this turn cannot remain lazy and expose an absent path.
+      for (const update of await listSessionSystemUpdatesForTurn(
+        db,
+        input.workspaceId,
+        input.sessionId,
+        turn.id,
+      )) {
+        const payload = update.payload as MediaGenerationResult;
+        if (payload.type !== "media_generation_result" || payload.status !== "ready") continue;
+        const retained = await getGeneratedVideoArtifact(
+          db,
+          input.workspaceId,
+          payload.receipt.artifact.artifactId,
+        );
+        if (
+          !retained ||
+          retained.artifact.deletedAt ||
+          retained.file.status !== "ready" ||
+          retained.file.contentType !== "video/mp4" ||
+          retained.file.sizeBytes !== payload.receipt.artifact.originalBytes ||
+          retained.file.sha256 !== payload.receipt.artifact.sha256 ||
+          retained.artifact.sandboxFilename !== `generated-video-${retained.artifact.id}.mp4`
+        ) {
+          throw new Error("Generated video completion does not match its retained File");
+        }
+        requiredGeneratedVideoFiles.push({
+          operationId: payload.operationId,
+          artifactId: retained.artifact.id,
+          fileId: retained.file.id,
+          objectKey: retained.file.objectKey,
+          sizeBytes: retained.file.sizeBytes,
+          sha256: retained.file.sha256,
+          filename: retained.artifact.sandboxFilename,
+        });
+      }
       // A codex-subscription turn resolves the bearer for THIS turn's effective
       // codex account (effectiveCodexCredentialId; pin > workspace-active) at
       // model-call time — multi-account P1 means a workspace can hold N accounts,
@@ -5460,7 +5584,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // Resolved run credentials must be written to one exact leased sandbox
         // before agent execution. A warm active pointer can bypass the lazy
         // provisioner entirely, which previously skipped materialization.
-        !initialRunCredentialMaterial
+        !initialRunCredentialMaterial &&
+        requiredGeneratedVideoFiles.length === 0
           ? "on-demand"
           : "eager";
       // Computed exactly ONCE per turn and reused for BOTH the box manifest
@@ -5514,8 +5639,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               turn,
             })
           : undefined;
-      const toolspaceAuthority = {
+      const codemodeAuthority = {
         sessionId: input.sessionId,
+        turnId: turn.id,
+        attemptId: input.attemptId,
+        executionGeneration: turn.executionGeneration,
       };
       const sandboxArtifactRuntime = sandboxArtifactRuntimeAdmission(
         settings,
@@ -5528,8 +5656,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         gitTokens: sandboxGitTokens,
         gitTokenExpiresAt: sandboxGitTokenExpiresAt,
         gitCredentialBindings: sandboxGitCredentialBindings,
-        toolspaceToken: sandboxToolspaceToken,
-        toolspaceTokenExpiresAt: sandboxToolspaceTokenExpiresAt,
+        codemodeToken: sandboxCodemodeToken,
+        codemodeTokenExpiresAt: sandboxCodemodeTokenExpiresAt,
       } = await waitForTurnOperation(
         sandboxEnvironmentForRun(
           runSettings,
@@ -5539,14 +5667,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           sandboxWorkspaceEnvironmentValues,
           {
             skipGitHubToken: activeSandboxBackend === "selfhosted",
-            skipToolspace: activeSandboxBackend === "selfhosted",
+            skipCodemode: activeSandboxBackend === "selfhosted",
             deferGitHubToken:
               activeSandboxBackend !== "selfhosted" && establishPolicy === "on-demand",
             scope: connectionScope,
             ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
             gitCredentials: connectionCredentials?.gitCredentials,
             authorizeGitHubTokenMint,
-            toolspaceAuthority,
+            codemodeAuthority,
           },
         ),
         cancellationSignal,
@@ -5559,8 +5687,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         ? { ...baseSandboxEnvironment, ...sandboxArtifactRuntime.environment }
         : baseSandboxEnvironment;
 
-      const sandboxToolspaceTokenFile = sandboxToolspaceToken
-        ? toolspaceTokenFileFromEnvironment(sandboxEnvironment, input.sessionId)
+      const sandboxCodemodeTokenFile = sandboxCodemodeToken
+        ? codemodeTokenFileFromEnvironment(sandboxEnvironment, input.sessionId)
         : undefined;
 
       const initialGitCredentials: MintedRunGitCredentials | undefined =
@@ -5673,22 +5801,22 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         gitCredentialRenewals = controllers;
       };
 
-      const attachToolspaceTokenRenewal = async (
-        tokenSession: ToolspaceTokenWriterSession,
-        initialExpiresAt = sandboxToolspaceTokenExpiresAt,
+      const attachCodemodeTokenRenewal = async (
+        tokenSession: CodemodeTokenWriterSession,
+        initialExpiresAt = sandboxCodemodeTokenExpiresAt,
         initialSandbox?: ResumedTurnSandbox,
       ): Promise<void> => {
-        if (!sandboxToolspaceToken || !initialExpiresAt) return;
-        const previous = toolspaceTokenRenewal;
-        toolspaceTokenRenewal = null;
+        if (!sandboxCodemodeToken || !initialExpiresAt) return;
+        const previous = codemodeTokenRenewal;
+        codemodeTokenRenewal = null;
         await previous?.stop();
-        if (toolspaceTokenRenewalClosed) return;
+        if (codemodeTokenRenewalClosed) return;
 
         const mint = async () => {
-          const material = await mintSandboxToolspaceToken(
+          const material = await mintSandboxCodemodeToken(
             runSettings,
             connectionScope,
-            toolspaceAuthority,
+            codemodeAuthority,
           );
           if (material) {
           }
@@ -5698,18 +5826,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const runAs = sandboxRunAs(runSettings);
           const targetSandbox = resolvedSandbox ?? initialSandbox;
           if (!targetSandbox) {
-            throw new Error("Toolspace token renewal has no exact sandbox lease target");
+            throw new Error("Codemode token renewal has no exact sandbox lease target");
           }
           await runWorkspaceMutationForSandbox(
             targetSandbox,
-            "toolspaceTokenRenewal",
+            "codemodeTokenRenewal",
             async () =>
-              await refreshToolspaceTokenFile(tokenSession, material.token, {
+              await refreshCodemodeTokenFile(tokenSession, material.token, {
                 ...(runAs ? { runAs } : {}),
-                ...(sandboxToolspaceTokenFile
+                ...(sandboxCodemodeTokenFile
                   ? {
-                      tokenFile: sandboxToolspaceTokenFile,
-                      legacyTokenFile: sandboxEnvironment.OPENGENI_TOOLSPACE_TOKEN_FILE!,
+                      tokenFile: sandboxCodemodeTokenFile,
+                      legacyTokenFile: sandboxEnvironment.OPENGENI_CODEMODE_TOKEN_FILE!,
                     }
                   : {}),
                 ...(toolCancellationFenceRef.current
@@ -5723,32 +5851,32 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           );
         };
         let renewalExpiresAt = initialExpiresAt;
-        if (renewalExpiresAt.getTime() <= Date.now() + TOOLSPACE_TOKEN_EXPIRY_LEAD_MS) {
+        if (renewalExpiresAt.getTime() <= Date.now() + CODEMODE_TOKEN_EXPIRY_LEAD_MS) {
           const fresh = await mint();
           if (!fresh) {
-            throw new Error("Toolspace token mint became unavailable during sandbox setup");
+            throw new Error("Codemode token mint became unavailable during sandbox setup");
           }
           await write(fresh);
           renewalExpiresAt = fresh.expiresAt;
         }
-        const controller = startToolspaceTokenRenewalLoop({
+        const controller = startCodemodeTokenRenewalLoop({
           initialExpiresAt: renewalExpiresAt,
           mint,
           write,
           onSuccess: () => {
             observability.incrementCounter({
-              name: "opengeni_toolspace_token_renewals_total",
-              help: "Sandbox Toolspace token renewal attempts by outcome.",
+              name: "opengeni_codemode_token_renewals_total",
+              help: "Sandbox Codemode token renewal attempts by outcome.",
               labels: { outcome: "completed" },
             });
           },
           onFailure: ({ retryDelayMs, errorClass }) => {
             observability.incrementCounter({
-              name: "opengeni_toolspace_token_renewals_total",
-              help: "Sandbox Toolspace token renewal attempts by outcome.",
+              name: "opengeni_codemode_token_renewals_total",
+              help: "Sandbox Codemode token renewal attempts by outcome.",
               labels: { outcome: "error" },
             });
-            observability.warn("Sandbox Toolspace token renewal failed; retry scheduled", {
+            observability.warn("Sandbox Codemode token renewal failed; retry scheduled", {
               sessionId: input.sessionId,
               turnId,
               errorClass,
@@ -5756,11 +5884,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             });
           },
         });
-        if (toolspaceTokenRenewalClosed) {
+        if (codemodeTokenRenewalClosed) {
           await controller.stop();
           return;
         }
-        toolspaceTokenRenewal = controller;
+        codemodeTokenRenewal = controller;
       };
 
       const attachRunCredentialRenewal = async (
@@ -6124,7 +6252,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         }
       }
 
-      const fileResourceDownloads = await waitForTurnOperation(
+      const ordinaryFileResourceDownloads = await waitForTurnOperation(
         sandboxFileDownloadsForRun(
           runSettings,
           db,
@@ -6136,6 +6264,33 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         cancellationSignal,
         undefined,
       );
+      if (requiredGeneratedVideoFiles.length > 0 && !objectStorage) {
+        throw new Error("Generated video materialization requires object storage");
+      }
+      const generatedVideoDownloads: SandboxFileDownload[] = [];
+      if (objectStorage && requiredGeneratedVideoFiles.length > 0) {
+        const downloadStorage = objectStorageForSandboxDownloads(modelRunSettings, objectStorage);
+        for (const file of requiredGeneratedVideoFiles) {
+          const signed = await downloadStorage.createGetUrl({ key: file.objectKey });
+          generatedVideoDownloads.push({
+            fileId: file.fileId,
+            mountPath: "generated-videos",
+            filename: file.filename,
+            url: signed.url,
+            expiresAt: signed.expiresAt,
+            sizeBytes: file.sizeBytes,
+            sha256: file.sha256,
+          });
+        }
+      }
+      const fileResourceDownloads = [
+        ...new Map(
+          [...ordinaryFileResourceDownloads, ...generatedVideoDownloads].map((download) => [
+            download.fileId,
+            download,
+          ]),
+        ).values(),
+      ];
       throwIfWorkerShuttingDown();
       throwIfTurnCancelled();
       const mcpCredentialRootSessionId =
@@ -6249,16 +6404,53 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           resolveCredential,
           onAuthNeeded: publishToolAuthNeeded,
           localMcpServers,
+          onAttemptToolCatalog: async (catalog) => {
+            await persistAttemptToolCatalog(db, catalog);
+          },
           // Manager-style sessions carry a creation-validated permission set
           // for their first-party MCP token; null keeps the fixed default.
           ...(session.firstPartyMcpPermissions?.length
             ? { firstPartyPermissions: session.firstPartyMcpPermissions }
             : {}),
           firstPartyTools: session.firstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+          attemptToolDefinitions: createFirstPartyInteractionAttemptToolDefinitions({
+            settings: runSettings,
+            scope: {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: turn.id,
+              attemptId: input.attemptId,
+              executionGeneration,
+            },
+            ...(session.firstPartyMcpPermissions?.length
+              ? { permissions: session.firstPartyMcpPermissions }
+              : {}),
+            selectedTools: session.firstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+            subjectId: "worker:first-party-mcp",
+            subjectLabel: "OpenGeni worker",
+          }),
         }),
         cancellationSignal,
         async (latePreparedTools) => await latePreparedTools.close().catch(() => undefined),
       );
+      if (turnId && preparedTools.attemptToolEnvironment) {
+        codemodeDispatcher = new CodemodeAttemptDispatcher(
+          db,
+          bus,
+          preparedTools.attemptToolEnvironment,
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId,
+            attemptId: input.attemptId,
+            executionGeneration,
+          },
+          cancellationSignal,
+        );
+        codemodeDispatcher.start();
+      }
       // Genesis turn = the first user turn (no assistant history reconciled
       // yet). Durable Postgres state (countSessionHistoryItems includes
       // superseded rows after compaction), NOT a workflow counter (turnsThisRun
@@ -6297,6 +6489,37 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             }
           : {};
       const hostedWebSearch = hostedWebSearchForTurn(resolvedModel, runSettings.webSearchEnabled);
+      const resolveImageReferences = async (
+        references: Parameters<typeof resolveImageGenerationReferences>[0]["references"],
+      ) =>
+        await resolveImageGenerationReferences({
+          db,
+          objectStorage: objectStorage!,
+          workspaceId: input.workspaceId,
+          references,
+          readSandboxFile: async (path, maxBytes) => {
+            const imageReferenceSession = (setupBoxSession ??
+              sdkOwnedSandboxSession) as ChannelASession | null;
+            if (!imageReferenceSession) {
+              throw new Error("Sandbox image reference is unavailable");
+            }
+            const relativePath = path.slice("/workspace/".length);
+            const referenceRunAs = sandboxRunAs(modelRunSettings);
+            const channel = new SandboxChannelAService({
+              session: imageReferenceSession,
+              workspaceRoot: "/workspace",
+              leaseEpoch: resolvedSandbox?.leaseEpoch ?? 0,
+              ...(referenceRunAs ? { runAs: referenceRunAs } : {}),
+            });
+            const read = await channel.fsRead({
+              path: relativePath,
+              encoding: "base64",
+              maxBytes,
+            });
+            if (read.truncated) throw new Error("Sandbox image reference exceeds the byte limit");
+            return Uint8Array.from(Buffer.from(read.content, "base64"));
+          },
+        });
       const imageGenerationOption: Pick<BuildAgentOptions, "imageGeneration"> = (() => {
         // Never expose a paid image operation unless its permanent artifact can
         // be committed. Failing after provider execution would leave an
@@ -6323,7 +6546,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           return {
             imageGeneration: {
               kind: "provider_adapter",
-              execute: async ({ prompt }, { toolCallId }) => {
+              execute: async ({ prompt, references }, { toolCallId }) => {
+                const resolvedReferences = await resolveImageReferences(references);
                 const receipt = await executeCodexImageGeneration({
                   db,
                   objectStorage,
@@ -6334,6 +6558,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   attemptId: input.attemptId,
                   toolCallId,
                   prompt,
+                  references: resolvedReferences,
                   credentialId: codexImageCredentialId,
                   codexContext: codexImageContext,
                   ...(runtimeCancellationSignal ? { abortSignal: runtimeCancellationSignal } : {}),
@@ -6356,7 +6581,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         return {
           imageGeneration: {
             kind: "provider_adapter",
-            execute: async ({ prompt }, { toolCallId }) => {
+            execute: async ({ prompt, references }, { toolCallId }) => {
+              const resolvedReferences = await resolveImageReferences(references);
               const receipt = await executeGatewayImageGeneration({
                 db,
                 objectStorage,
@@ -6368,6 +6594,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 apiKey: gatewayApiKey,
                 modelId: capabilitySettings.imageGenerationModel,
                 prompt,
+                references: resolvedReferences,
                 toolCallId,
                 ...(runtimeCancellationSignal ? { abortSignal: runtimeCancellationSignal } : {}),
               });
@@ -6378,62 +6605,84 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           },
         };
       })();
-      const editableArtifactPublicationOption: Pick<
-        BuildAgentOptions,
-        "editableArtifactPublication"
-      > = (() => {
+      const videoGenerationPolicy = await getWorkspaceVideoGenerationPolicy(db, input.workspaceId);
+      const videoGenerationEnabled =
+        videoGenerationPolicy.defaultModelId !== null &&
+        videoGenerationPolicy.enabledModelIds.length > 0;
+      let videoGenerationCredential: VideoGenerationCredentialLease | null = null;
+      if (objectStorage && videoGenerationEnabled) {
+        if (videoGenerationPolicy.fundingSource === "opengeni_credits") {
+          videoGenerationCredential = managedVideoGenerationCredentialLease(modelRunSettings);
+        } else {
+          const workspaceCredential = await loadWorkspaceVercelAiGatewayCredentialLease(
+            db,
+            modelRunSettings,
+            input.workspaceId,
+          );
+          if (workspaceCredential) {
+            videoGenerationCredential = {
+              fundingSource: "workspace_gateway",
+              ...workspaceCredential,
+            };
+          }
+        }
+      }
+      const videoGenerationOption: Pick<BuildAgentOptions, "videoGeneration"> = (() => {
         if (
           !objectStorage ||
-          !sandboxArtifactRuntime.available ||
-          !resolveFirstPartyDelegationSecret(modelRunSettings) ||
-          (session.firstPartyMcpPermissions !== null &&
-            !session.firstPartyMcpPermissions.includes("artifacts:publish") &&
-            !session.firstPartyMcpPermissions.includes("workspace:admin"))
+          modelRunSettings.sandboxBackend === "none" ||
+          !videoGenerationCredential ||
+          !videoGenerationEnabled
         ) {
           return {};
         }
-        const runtimeEntrypoint = sandboxEnvironment.OPENGENI_ARTIFACT_TOOL_ENTRY;
-        if (!runtimeEntrypoint) return {};
-        const sandboxObjectStorage =
-          activeSandboxBackend === "selfhosted"
-            ? objectStorage
-            : objectStorageForSandboxDownloads(modelRunSettings, objectStorage);
+        // Parse the frozen capability snapshot before advertising either tool.
+        // Invalid or unsupported workspace policy therefore fails closed before
+        // it can perturb the model's tool list.
+        const capabilities = videoGenerationCapabilitiesForPolicy({
+          policy: videoGenerationPolicy,
+          credentialVersion: videoGenerationCredential.version,
+        });
         return {
-          editableArtifactPublication: {
-            execute: async (request, { toolCallId }) => {
-              const sessionForPublication =
+          videoGeneration: {
+            capabilities: async () => capabilities,
+            execute: async (toolInput, { toolCallId }) => {
+              const sessionForReference =
                 resolvedSandbox?.established.session ?? sdkOwnedSandboxSession;
               const fence = toolCancellationFenceRef.current;
-              if (!sessionForPublication || !fence) {
-                throw new Error(
-                  "Editable artifact publication requires the active sandbox session",
-                );
-              }
               const runAs = sandboxRunAs(modelRunSettings);
-              return await executeEditableArtifactPublication({
+              const accepted = await admitVideoGenerationRequest({
                 db,
-                objectStorage,
-                sandboxObjectStorage,
+                storage: objectStorage,
                 settings: modelRunSettings,
                 accountId: input.accountId,
                 workspaceId: input.workspaceId,
                 sessionId: input.sessionId,
                 turnId: turn.id,
                 attemptId: input.attemptId,
-                executionGeneration,
                 toolCallId,
-                request,
-                runtimeEntrypoint,
-                runCommand: async (command) =>
-                  await fence.runSandboxCommandStructured(
-                    sessionForPublication as import("@opengeni/runtime").TurnSandboxCommandSession,
-                    {
-                      ...command,
-                      ...(runAs ? { runAs } : {}),
-                    },
-                  ),
+                toolInput,
+                policy: videoGenerationPolicy,
+                credential: videoGenerationCredential,
+                ...(sessionForReference && fence
+                  ? {
+                      runCommand: async (command) =>
+                        await fence.runSandboxCommandStructured(
+                          sessionForReference as import("@opengeni/runtime").TurnSandboxCommandSession,
+                          {
+                            ...command,
+                            ...(runAs ? { runAs } : {}),
+                          },
+                        ),
+                    }
+                  : {}),
                 ...(runtimeCancellationSignal ? { signal: runtimeCancellationSignal } : {}),
               });
+              videoGenerationAcceptancesByCallId.set(toolCallId, {
+                operationId: accepted.operationId,
+                requestDigest: accepted.requestDigest,
+              });
+              return accepted.receipt;
             },
           },
         };
@@ -6479,6 +6728,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           titleIsSet: Boolean(session.title?.trim()),
         },
         sandboxEnvironment,
+        ...(preparedTools.attemptToolCatalog
+          ? { attemptToolCatalog: preparedTools.attemptToolCatalog }
+          : {}),
         ...(sandboxArtifactRuntime.available ? { artifactRuntimeAvailable: true } : {}),
         ...(cancellationSignal ? { turnCancellationSignal: cancellationSignal } : {}),
         onToolCancellationFence: (fence) => {
@@ -6499,13 +6751,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         ...(activeSandboxBackend !== "selfhosted" && !sandboxGitTokens && sandboxGitToken
           ? { gitTokenSeed: sandboxGitToken }
           : {}),
-        // Toolspace delivery is managed-sandbox-only. Connected Machines own any
+        // Codemode delivery is managed-sandbox-only. Connected Machines own any
         // manually configured API credentials and must never be contacted during
         // turn admission merely to seed OpenGeni tooling.
-        ...(sandboxToolspaceToken
+        ...(sandboxCodemodeToken
           ? {
-              toolspaceTokenSeed: sandboxToolspaceToken,
-              toolspaceTokenSessionId: input.sessionId,
+              codemodeTokenSeed: sandboxCodemodeToken,
+              codemodeTokenSessionId: input.sessionId,
             }
           : {}),
         ...(activeSandboxBackend ? { activeSandboxBackend } : {}),
@@ -6533,7 +6785,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // compaction threshold.
         hostedWebSearch,
         ...imageGenerationOption,
-        ...editableArtifactPublicationOption,
+        ...videoGenerationOption,
         lazyToolTransport,
         supportsImageInput,
         inputFileMediaTypes: modelInputPolicy.inputFileMediaTypes,
@@ -6579,6 +6831,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           didComputerUse = true;
           await maybeStartOnTurnRecording(resolvedSandbox, activeSandboxBackend);
         },
+        onRetainableSessionImageOutput: retainSessionImageAtToolBoundary,
         ...(packRuntime.skills.length > 0 ? { packSkills: packRuntime.skills } : {}),
         ...(session.skills.length > 0 ? { sessionSkills: session.skills } : {}),
         ...(skillLibraryRuntime.skillLibrarySkills.length > 0
@@ -6666,8 +6919,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     authorizeGitHubTokenMint,
                   });
             const lazyGitTokens = lazyGitCredentials?.gitTokens;
-            const lazyToolspaceToken = sandboxToolspaceToken
-              ? await mintSandboxToolspaceToken(runSettings, connectionScope, toolspaceAuthority)
+            const lazyCodemodeToken = sandboxCodemodeToken
+              ? await mintSandboxCodemodeToken(runSettings, connectionScope, codemodeAuthority)
               : undefined;
             const provisioned = await resumeBoxForTurn(
               {
@@ -6726,9 +6979,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                           gitCredentialBindingsOverride: lazyGitCredentials.bindings,
                         }
                       : {}),
-                    ...(lazyToolspaceToken
+                    ...(lazyCodemodeToken
                       ? {
-                          toolspaceTokenSeedOverride: lazyToolspaceToken.token,
+                          codemodeTokenSeedOverride: lazyCodemodeToken.token,
                         }
                       : {}),
                     ...(toolCancellationFenceRef.current
@@ -6741,9 +6994,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   },
                 ),
             );
-            await attachToolspaceTokenRenewal(
-              provisioned.established.session as ToolspaceTokenWriterSession,
-              lazyToolspaceToken?.expiresAt,
+            await attachCodemodeTokenRenewal(
+              provisioned.established.session as CodemodeTokenWriterSession,
+              lazyCodemodeToken?.expiresAt,
               provisioned,
             );
             await attachGitCredentialRenewal(
@@ -7137,7 +7390,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             "fileMaterialization",
             async () =>
               await materializeSandboxFileDownloads(
-                setupBoxSession as ToolspaceTokenWriterSession,
+                setupBoxSession as CodemodeTokenWriterSession,
                 downloadsToMaterialize,
                 {
                   onRuntimeEvent: async (event) => {
@@ -7171,6 +7424,37 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           }
         }
         fileDownloadsMaterializedForRun = true;
+      }
+      const requiredVideoFileIds = new Set(requiredGeneratedVideoFiles.map((file) => file.fileId));
+      const failedRequiredVideo = fileMaterializationFailures.find((failure) =>
+        requiredVideoFileIds.has(failure.fileId),
+      );
+      if (failedRequiredVideo) {
+        const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+          sessionId: input.sessionId,
+          turnId: turn.id,
+          triggerEventId: triggerEventId!,
+          attemptId: input.attemptId,
+          reason: "generated_video_materialization_failed",
+          detail: {
+            retryable: true,
+            operationIds: requiredGeneratedVideoFiles.map((file) => file.operationId),
+          },
+        });
+        if (recovery.action === "stale") {
+          acknowledgeLostAttemptOwnership();
+          activityStatus = "cancelled";
+          turnMetricOutcome = "cancelled";
+          return claimedResult({ status: "cancelled" });
+        }
+        if (recovery.action !== "recovering") {
+          throw new Error("Generated video materialization could not enter recovery");
+        }
+        acknowledgeRecoveryQuiescence();
+        await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
+        activityStatus = "recovering";
+        turnMetricOutcome = "recovering";
+        return claimedResult({ status: "recovering", continueDelayMs: 1_000 });
       }
       const unavailableSandboxFilesNote = sandboxFileDownloadFailureNote(
         fileMaterializationFailures,
@@ -7393,14 +7677,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   },
                 }
               : {}),
-            ...(sandboxToolspaceToken && sandboxToolspaceTokenExpiresAt && !lazyOwnedSandbox
+            ...(sandboxCodemodeToken && sandboxCodemodeTokenExpiresAt && !lazyOwnedSandbox
               ? {
-                  onToolspaceTokenSessionReady: async (
-                    tokenSession: ToolspaceTokenWriterSession,
-                  ) => {
+                  onCodemodeTokenSessionReady: async (tokenSession: CodemodeTokenWriterSession) => {
                     const renewalSession =
-                      (setupBoxSession as ToolspaceTokenWriterSession | null) ?? tokenSession;
-                    await attachToolspaceTokenRenewal(renewalSession);
+                      (setupBoxSession as CodemodeTokenWriterSession | null) ?? tokenSession;
+                    await attachCodemodeTokenRenewal(renewalSession);
                   },
                 }
               : {}),
@@ -7423,7 +7705,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               : {}),
             ...(modelRunSettings.sandboxBackend !== "none"
               ? {
-                  onSandboxSessionReady: async (sandboxSession: ToolspaceTokenWriterSession) => {
+                  onSandboxSessionReady: async (sandboxSession: CodemodeTokenWriterSession) => {
                     sdkOwnedSandboxSession = sandboxSession;
                     for (const receipt of generatedImageReceiptsByArtifactId.values()) {
                       await materializeGeneratedImageInOwnedSdkSession(receipt, sandboxSession);
@@ -7584,8 +7866,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             }
             const completedToolCall = completedToolCallFromSdkEvent(durableSdkEvent);
             if (completedToolCall) {
-              const typedScreenshot = typedScreenshotFromSdkEvent(durableSdkEvent);
+              retainedScreenshotMetadata =
+                retainedScreenshotReceiptsByCallId.get(completedToolCall.callId) ?? null;
+              const typedScreenshot = retainedScreenshotMetadata
+                ? null
+                : typedScreenshotFromSdkEvent(durableSdkEvent);
               if (
+                !retainedScreenshotMetadata &&
                 retainedSessionImageCallIds.has(completedToolCall.callId) &&
                 sdkEventContainsInlineImage(durableSdkEvent) &&
                 !typedScreenshot
@@ -7604,6 +7891,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 );
               }
               if (
+                !retainedScreenshotMetadata &&
                 typedScreenshot &&
                 typedScreenshot.callId === completedToolCall.callId &&
                 retainedSessionImageCallIds.has(completedToolCall.callId)
@@ -7659,11 +7947,37 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 callId: completedToolCall.callId,
                 modelToolOutputTruncationTokens: modelRunSettings.modelToolOutputTruncationTokens,
                 resultItem: durableResultItem as Record<string, unknown>,
+                ...(videoGenerationAcceptancesByCallId.has(completedToolCall.callId)
+                  ? {
+                      videoGenerationAcceptance: videoGenerationAcceptancesByCallId.get(
+                        completedToolCall.callId,
+                      )!,
+                    }
+                  : {}),
               });
               if (!recorded.accepted) {
                 throw new TurnAttemptFencedError(
                   "turn attempt ended while recording a tool-call result",
                 );
+              }
+              const videoAcceptance = videoGenerationAcceptancesByCallId.get(
+                completedToolCall.callId,
+              );
+              if (videoAcceptance && startVideoGenerationWorkflow) {
+                try {
+                  await startVideoGenerationWorkflow({
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    operationId: videoAcceptance.operationId,
+                  });
+                } catch (error) {
+                  // The accepted operation is durable. The recovery sweep starts
+                  // the same deterministic workflow ID if this nudge fails.
+                  observability.warn("Video generation workflow start deferred", {
+                    operationId: videoAcceptance.operationId,
+                    errorClass: error instanceof Error ? error.name : "UnknownError",
+                  });
+                }
               }
               const belongsToCurrentBatch = currentToolBatchCallIds.has(completedToolCall.callId);
               if (belongsToCurrentBatch) {
@@ -8749,14 +9063,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               });
               if (newHome) {
                 rotated = true;
-                const pinMutation = await withCodexCapacityMutation(
+                const pinMutation = await withSessionCodexCapacityMutation(
                   db,
                   {
                     workspaceId: input.workspaceId,
                     reason: "codex_policy_pin_resharded",
                   },
                   async (tx) => {
-                    const changed = await setSessionCodexPin(
+                    const changed = await setSessionCodexPinInTransaction(
                       tx,
                       input.workspaceId,
                       input.sessionId,
@@ -9237,10 +9551,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         gitCredentialRenewalClosed = true;
         const gitRenewalsToStop = gitCredentialRenewals;
         gitCredentialRenewals = [];
-        toolspaceTokenRenewalClosed = true;
-        const toolspaceRenewalToStop =
-          toolspaceTokenRenewal as ToolspaceTokenRenewalController | null;
-        toolspaceTokenRenewal = null;
+        codemodeTokenRenewalClosed = true;
+        const codemodeRenewalToStop = codemodeTokenRenewal as CodemodeTokenRenewalController | null;
+        codemodeTokenRenewal = null;
         runCredentialRenewalClosed = true;
         const runRenewalToStop = runCredentialRenewal as RunCredentialRenewalController | null;
         runCredentialRenewal = null;
@@ -9292,7 +9605,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           toolCancellationFence,
           cancellationReason: cancellationSignal?.reason ?? new Error("TURN_ATTEMPT_FINALIZED"),
           gitCredentialRenewals: gitRenewalsToStop,
-          toolspaceTokenRenewal: toolspaceRenewalToStop,
+          codemodeTokenRenewal: codemodeRenewalToStop,
           runCredentialRenewal: runRenewalToStop,
         });
         attemptWritersDrained = true;
@@ -9537,6 +9850,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             observability,
             ...(finalizerSignal ? { signal: finalizerSignal } : {}),
           });
+        }
+        if (codemodeDispatcher) {
+          await waitForTurnFinalizerStep(
+            codemodeDispatcher.close().catch(() => undefined),
+            finalizerSignal,
+          );
+          codemodeDispatcher = null;
         }
         if (preparedTools) {
           await waitForTurnFinalizerStep(

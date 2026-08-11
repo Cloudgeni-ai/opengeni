@@ -79,6 +79,70 @@ async function renderCard(accountState: PersonalSlackAccountState) {
 }
 
 describe("PersonalSlackAccountCard", () => {
+  test("keeps the embedded control free of repeated status and explanation copy", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      const state: PersonalSlackAccountState = { state: "not_connected" };
+      await act(async () => {
+        root.render(
+          <PersonalSlackAccountCard
+            available
+            canManage
+            busy={false}
+            accountState={state}
+            embedded
+            onConnect={() => {}}
+            onReconnect={() => {}}
+            onDisconnect={() => {}}
+          />,
+        );
+      });
+
+      expect(container.textContent).toContain("Connect");
+      expect(container.textContent).not.toContain("Not connected");
+      expect(container.textContent).not.toContain("Connect only when");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("keeps a connected embedded control to the single disconnect action", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        root.render(
+          <PersonalSlackAccountCard
+            available
+            canManage
+            busy={false}
+            accountState={{
+              state: "connected",
+              connection: connection(),
+              accessTokenRefreshDue: false,
+            }}
+            embedded
+            onConnect={() => {}}
+            onReconnect={() => {}}
+            onDisconnect={() => {}}
+          />,
+        );
+      });
+
+      const buttons = [...container.querySelectorAll<HTMLButtonElement>("button")];
+      expect(buttons.map((button) => button.textContent?.trim())).toEqual(["Disconnect"]);
+      expect(container.querySelector("details")).toBeNull();
+      expect(container.textContent).not.toContain("Connection details");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("renders a subject-owned status without exposing its private row id", async () => {
     const rendered = await renderCard({
       state: "connected",
@@ -86,20 +150,21 @@ describe("PersonalSlackAccountCard", () => {
       accessTokenRefreshDue: false,
     });
     try {
-      expect(rendered.container.textContent).toContain("Personal · only you");
+      expect(rendered.container.textContent).toContain("Personal Slack access");
+      expect(rendered.container.textContent).toContain(
+        "This connection belongs only to your account",
+      );
       expect(rendered.container.textContent).toContain("Connected");
       expect(rendered.container.textContent).toContain("search:read.public, chat:write");
       expect(rendered.container.textContent).not.toContain("11111111-1111-4111-8111-111111111111");
       expect(rendered.container.textContent).not.toContain("Required bot scopes");
 
       const buttons = [...rendered.container.querySelectorAll<HTMLButtonElement>("button")];
-      await act(async () =>
-        buttons.find((button) => button.textContent?.includes("Reconnect"))!.click(),
-      );
+      expect(buttons.some((button) => button.textContent?.includes("Reconnect"))).toBe(false);
       await act(async () =>
         buttons.find((button) => button.textContent?.includes("Disconnect"))!.click(),
       );
-      expect(rendered.onReconnect).toHaveBeenCalledTimes(1);
+      expect(rendered.onReconnect).not.toHaveBeenCalled();
       expect(rendered.onDisconnect).toHaveBeenCalledTimes(1);
       expect(rendered.onConnect).not.toHaveBeenCalled();
     } finally {
@@ -115,7 +180,9 @@ describe("PersonalSlackAccountCard", () => {
     });
     try {
       expect(refreshPending.container.textContent).toContain("Connected · refresh pending");
-      expect(refreshPending.container.textContent).toContain("refresh it automatically on use");
+      expect(refreshPending.container.textContent).toContain(
+        "refresh this connection automatically",
+      );
     } finally {
       await refreshPending.unmount();
     }
@@ -127,7 +194,7 @@ describe("PersonalSlackAccountCard", () => {
     });
     try {
       expect(reconnect.container.textContent).toContain("Reconnect required");
-      expect(reconnect.container.textContent).toContain("expired and could not be refreshed");
+      expect(reconnect.container.textContent).toContain("connection expired");
     } finally {
       await reconnect.unmount();
     }
@@ -138,7 +205,7 @@ describe("PersonalSlackAccountCard", () => {
     });
     try {
       expect(disconnected.container.textContent).toContain("Disconnected");
-      expect(disconnected.container.textContent).toContain("Reconnect my Slack account");
+      expect(disconnected.container.textContent).toContain("Reconnect");
       expect(disconnected.container.textContent).not.toContain("DisconnectDisconnect");
     } finally {
       await disconnected.unmount();

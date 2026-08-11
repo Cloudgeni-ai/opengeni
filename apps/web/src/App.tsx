@@ -5,6 +5,7 @@
 //   /workspaces/:id/agent                    → sessions redirect (legacy URL)
 //   /workspaces/:id/sessions                 → sessions index + create
 //   /workspaces/:id/sessions/:sessionId      → session view (queue/goal rail)
+//   /workspaces/:id/agents                   → workspace agent topology
 //   /sessions/:sessionId                     → authorized compatibility redirect
 //   /workspaces/:id/variable-sets            → variable sets + variables
 //   /workspaces/:id/rigs                     → rigs list + create
@@ -21,6 +22,7 @@
 //   /billing?checkout=success|cancelled      → Stripe return → default organization
 //   /device?user_code=…                      → self-hosted enrollment approve page
 //   /dev/composer-chrome                     → DEV-only SessionChrome harness (mocked)
+//   /dev/agent-topology                      → DEV-only agent tree preview (mocked)
 import {
   Navigate,
   RouterProvider,
@@ -39,6 +41,11 @@ export { workspaceAgentPath, workspaceSessionPath, workspaceSessionsPath } from 
 const LazyCapabilitiesRoute = lazyRouteComponent(
   () => import("@/routes/capabilities"),
   "CapabilitiesRoute",
+);
+const LazyAgentsRoute = lazyRouteComponent(() => import("@/routes/agents"), "AgentsRoute");
+const LazyAgentTopologyPreviewRoute = lazyRouteComponent(
+  () => import("@/routes/agents"),
+  "AgentTopologyPreviewRoute",
 );
 const LazyDeviceRoute = lazyRouteComponent(() => import("@/routes/device"), "DeviceRoute");
 const LazyDocumentsRoute = lazyRouteComponent(() => import("@/routes/documents"), "DocumentsRoute");
@@ -151,6 +158,11 @@ const composerChromeGalleryRoute = createRoute({
   path: "dev/composer-chrome",
   component: ComposerChromeGallery,
 });
+const agentTopologyPreviewRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "dev/agent-topology",
+  component: AgentTopologyPreview,
+});
 const workspaceRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "workspaces/$workspaceId",
@@ -180,6 +192,11 @@ const workspaceSessionRoute = createRoute({
   validateSearch: (search: Record<string, unknown>): ComposerLaunchSearch =>
     parseComposerLaunchSearch(search),
   component: SessionView,
+});
+const workspaceAgentsRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "agents",
+  component: Agents,
 });
 const workspaceVariableSetsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
@@ -224,13 +241,8 @@ const workspaceCapabilitiesRoute = createRoute({
   path: "capabilities",
   // `?section=packs` focuses the Packs subsection (used by the legacy
   // /packs redirect and the nav). Unknown values fall back to the catalog.
-  validateSearch: (
-    search: Record<string, unknown>,
-  ): { section?: "packs"; slack_link?: string } => ({
+  validateSearch: (search: Record<string, unknown>): { section?: "packs" } => ({
     ...(search.section === "packs" ? { section: "packs" as const } : {}),
-    ...(typeof search.slack_link === "string" && search.slack_link
-      ? { slack_link: search.slack_link }
-      : {}),
   }),
   component: Capabilities,
 });
@@ -245,8 +257,10 @@ const workspaceDocumentsRoute = createRoute({
   // Memory used to live inside Documents, so existing timeline links and
   // bookmarks can still carry `?memory=<id>`. Preserve that public URL as a
   // compatibility redirect to the first-class Memory surface.
-  validateSearch: (search: Record<string, unknown>): { memory?: string } =>
-    typeof search.memory === "string" ? { memory: search.memory } : {},
+  validateSearch: (search: Record<string, unknown>): { memory?: string; from?: "brain" } => ({
+    ...(typeof search.memory === "string" ? { memory: search.memory } : {}),
+    ...(search.from === "brain" ? { from: "brain" as const } : {}),
+  }),
   component: Documents,
 });
 const workspaceMemoryRoute = createRoute({
@@ -255,8 +269,10 @@ const workspaceMemoryRoute = createRoute({
   // `?memory=<id>` deep-links a memory record (from a timeline memory step): the
   // Memory page reveals + highlights that record even when the filters would
   // otherwise hide it. Unknown values are ignored.
-  validateSearch: (search: Record<string, unknown>): { memory?: string } =>
-    typeof search.memory === "string" ? { memory: search.memory } : {},
+  validateSearch: (search: Record<string, unknown>): { memory?: string; from?: "brain" } => ({
+    ...(typeof search.memory === "string" ? { memory: search.memory } : {}),
+    ...(search.from === "brain" ? { from: "brain" as const } : {}),
+  }),
   component: Memory,
 });
 const workspaceSettingsRoute = createRoute({
@@ -267,6 +283,12 @@ const workspaceSettingsRoute = createRoute({
 const workspaceStateRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "state",
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { view?: "company" | "instructions" | "preferences" } =>
+    search.view === "company" || search.view === "instructions" || search.view === "preferences"
+      ? { view: search.view }
+      : {},
   component: WorkspaceState,
 });
 const workspaceArtifactsRoute = createRoute({
@@ -312,12 +334,13 @@ const routeTree = rootRoute.addChildren([
   billingReturnRoute,
   deviceRoute,
   resetPasswordRoute,
-  ...(import.meta.env.DEV ? [composerChromeGalleryRoute] : []),
+  ...(import.meta.env.DEV ? [composerChromeGalleryRoute, agentTopologyPreviewRoute] : []),
   workspaceRoute.addChildren([
     workspaceIndexRoute,
     workspaceAgentRoute,
     workspaceSessionsRoute,
     workspaceSessionRoute,
+    workspaceAgentsRoute,
     workspaceVariableSetsRoute,
     workspaceEnvironmentsRoute,
     workspaceRigsRoute,
@@ -396,6 +419,11 @@ function SessionView() {
   );
 }
 
+function Agents() {
+  const { workspaceId } = workspaceAgentsRoute.useParams();
+  return <LazyAgentsRoute workspaceId={workspaceId} />;
+}
+
 function SessionDeepLink() {
   const { sessionId } = sessionDeepLinkRoute.useParams();
   return <LazySessionDeepLinkRoute sessionId={sessionId} />;
@@ -445,14 +473,8 @@ function PacksRedirect() {
 
 function Capabilities() {
   const { workspaceId } = workspaceCapabilitiesRoute.useParams();
-  const { section, slack_link: slackLinkToken } = workspaceCapabilitiesRoute.useSearch();
-  return (
-    <LazyCapabilitiesRoute
-      workspaceId={workspaceId}
-      initialSection={section}
-      slackLinkToken={slackLinkToken}
-    />
-  );
+  const { section } = workspaceCapabilitiesRoute.useSearch();
+  return <LazyCapabilitiesRoute workspaceId={workspaceId} initialSection={section} />;
 }
 
 function Schedules() {
@@ -462,24 +484,30 @@ function Schedules() {
 
 function Documents() {
   const { workspaceId } = workspaceDocumentsRoute.useParams();
-  const { memory } = workspaceDocumentsRoute.useSearch();
+  const { memory, from } = workspaceDocumentsRoute.useSearch();
   if (memory) {
     return (
       <Navigate
         to="/workspaces/$workspaceId/memory"
         params={{ workspaceId }}
-        search={{ memory }}
+        search={{ memory, ...(from ? { from } : {}) }}
         replace
       />
     );
   }
-  return <LazyDocumentsRoute workspaceId={workspaceId} />;
+  return <LazyDocumentsRoute workspaceId={workspaceId} returnToBrain={from === "brain"} />;
 }
 
 function Memory() {
   const { workspaceId } = workspaceMemoryRoute.useParams();
-  const { memory } = workspaceMemoryRoute.useSearch();
-  return <LazyMemoryRoute workspaceId={workspaceId} focusMemoryId={memory} />;
+  const { memory, from } = workspaceMemoryRoute.useSearch();
+  return (
+    <LazyMemoryRoute
+      workspaceId={workspaceId}
+      focusMemoryId={memory}
+      returnToBrain={from === "brain"}
+    />
+  );
 }
 
 function WorkspaceSettings() {
@@ -489,7 +517,8 @@ function WorkspaceSettings() {
 
 function WorkspaceState() {
   const { workspaceId } = workspaceStateRoute.useParams();
-  return <LazyWorkspaceStateRoute workspaceId={workspaceId} />;
+  const { view } = workspaceStateRoute.useSearch();
+  return <LazyWorkspaceStateRoute workspaceId={workspaceId} view={view} />;
 }
 
 function Artifacts() {
@@ -535,6 +564,10 @@ function ResetPassword() {
 
 function ComposerChromeGallery() {
   return <LazyComposerChromeGalleryRoute />;
+}
+
+function AgentTopologyPreview() {
+  return <LazyAgentTopologyPreviewRoute />;
 }
 
 function BillingReturnRoute() {

@@ -92,11 +92,7 @@ type ProjectedWorkbook = Readonly<{
   semanticHash: string;
 }>;
 
-type NativeSourceDiagnosticSubcode =
-  | "input_framing"
-  | "snapshot_open"
-  | "state_mismatch"
-  | "revision_mismatch";
+type NativeSourceDiagnosticSubcode = "input_framing" | "snapshot_open" | "state_mismatch";
 
 export async function runArtifactMaterializerCli(
   args: readonly string[],
@@ -255,9 +251,6 @@ function projectSpreadsheet(
   }
   try {
     if (session.stateHash() !== manifest.stateHash) throw invalidSource("state_mismatch");
-    if (session.revision() !== BigInt(manifest.targetHeadSequence)) {
-      throw invalidSource("revision_mismatch");
-    }
     const metadataLimit = Math.min(
       session.capabilities.maxQueryResponseBytes,
       SPREADSHEET_ARTIFACT_PROJECTION_MAX_BYTES,

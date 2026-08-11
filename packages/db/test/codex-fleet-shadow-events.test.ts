@@ -16,8 +16,8 @@ import {
   listSessionEvents,
   requestSessionTurnRecovery,
   submitHumanPromptInTransaction,
-  withWorkspaceRls,
-  withWorkspaceSubjectRls,
+  withWorkspaceSessionActivityRls as withWorkspaceRls,
+  withWorkspaceSubjectSessionActivityRls as withWorkspaceSubjectRls,
   type Database,
   type DbClient,
 } from "../src/index";
@@ -171,7 +171,7 @@ async function createRunningTurn(db: Database, grant: WorkspaceGrant) {
   });
   await withWorkspaceSubjectRls(db, grant.workspaceId, grant.subjectId, (scoped) =>
     scoped.transaction((tx) =>
-      submitHumanPromptInTransaction(tx as typeof scoped, {
+      submitHumanPromptInTransaction(tx as unknown as typeof scoped, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         sessionId: session.id,

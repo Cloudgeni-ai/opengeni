@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import { sql } from "drizzle-orm";
 import postgres from "postgres";
 
 import {
@@ -9,6 +10,8 @@ import {
   evaluateSessionControl,
   evaluateSessionControls,
   mutateSessionControlInTransaction,
+  withSessionActivitySavepoint,
+  withWorkspaceSessionActivityRls,
 } from "@opengeni/db";
 import { startTestServices } from "@opengeni/testing";
 
@@ -46,21 +49,22 @@ try {
   const subjectId = grant.subjectId;
   const rootId = crypto.randomUUID();
 
-  await raw`
-    insert into sessions (
-      id, account_id, workspace_id, status, initial_message, title,
-      resources, tools, metadata, model, sandbox_backend, sandbox_group_id,
-      temporal_workflow_id, tool_policy
-    ) values (
-      ${rootId}::uuid, ${accountId}::uuid, ${workspaceId}::uuid, 'idle',
-      'benchmark root', 'Benchmark root', '[]'::jsonb, '[]'::jsonb,
-      jsonb_build_object('bench_index', 0), 'benchmark-model', 'none',
-      ${rootId}::uuid, ${`session-${rootId}`},
-      jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
-    )
-  `;
-  if (sessionCount > 1) {
-    await raw`
+  await withWorkspaceSessionActivityRls(client.db, workspaceId, async (scopedDb) => {
+    await scopedDb.execute(sql`
+      insert into sessions (
+        id, account_id, workspace_id, status, initial_message, title,
+        resources, tools, metadata, model, sandbox_backend, sandbox_group_id,
+        temporal_workflow_id, tool_policy
+      ) values (
+        ${rootId}::uuid, ${accountId}::uuid, ${workspaceId}::uuid, 'idle',
+        'benchmark root', 'Benchmark root', '[]'::jsonb, '[]'::jsonb,
+        jsonb_build_object('bench_index', 0), 'benchmark-model', 'none',
+        ${rootId}::uuid, ${`session-${rootId}`},
+        jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
+      )
+    `);
+    if (sessionCount <= 1) return;
+    await scopedDb.execute(sql`
       insert into sessions (
         id, account_id, workspace_id, status, initial_message, title,
         resources, tools, metadata, model, sandbox_backend, sandbox_group_id,
@@ -97,8 +101,8 @@ try {
           end
         )
       from generate_series(1, ${sessionCount - 1}) as generated(i)
-    `;
-  }
+    `);
+  });
 
   const sessionRows = await raw<{ id: string; benchIndex: number }[]>`
     select id, (metadata ->> 'bench_index')::integer as "benchIndex"
@@ -134,16 +138,18 @@ try {
   const parallelReadsMs = performance.now() - parallelStarted;
 
   const pauseStarted = performance.now();
-  await client.db.transaction((tx) =>
-    mutateSessionControlInTransaction(tx as ReturnType<typeof createDb>["db"], {
-      accountId,
-      workspaceId,
-      sessionId: rootId,
-      actor: { type: "human", subjectId },
-      operationKey: crypto.randomUUID(),
-      action: "pause",
-      reason: "benchmark recursive barrier",
-    }),
+  await withWorkspaceSessionActivityRls(client.db, workspaceId, (scopedDb) =>
+    withSessionActivitySavepoint(scopedDb, (tx) =>
+      mutateSessionControlInTransaction(tx, {
+        accountId,
+        workspaceId,
+        sessionId: rootId,
+        actor: { type: "human", subjectId },
+        operationKey: crypto.randomUUID(),
+        action: "pause",
+        reason: "benchmark recursive barrier",
+      }),
+    ),
   );
   const rootPauseMs = performance.now() - pauseStarted;
   const singlePausedMs = await samples(50, async () => {

@@ -1,25 +1,25 @@
-import type {
-  ConfiguredModel,
-  ModelProviderApi,
-  ResolvedModelProvider,
-  Settings,
-} from "@opengeni/config";
+import type { ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
 import {
   AGENT_INSTRUCTIONS_CORE_PLACEHOLDER,
-  OPENGENI_GATEWAY_MODELS,
   collectSandboxEnvironment,
   configuredProviders,
   firstPartyMcpBaseUrl,
-  gatewayRequestPolicyForUpstreamModel,
   resolveFirstPartyDelegationSecret,
-  resolveModelProvider,
   sandboxLifecycleHookIds,
 } from "@opengeni/config";
+import {
+  AttemptToolEnvironment,
+  createAttemptToolEnvironment,
+  parseVerifiedAttemptToolCatalog,
+  type AttemptToolDefinition,
+  type AttemptToolScope,
+} from "@opengeni/codemode";
 import {
   approvalIdentifier,
   CAPABILITY_DESCRIPTORS,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS,
   assertUniqueResourceMountPaths,
   gitCredentialBindingIdForRepository,
   gitCredentialProviderForRepository,
@@ -33,7 +33,12 @@ import {
   resourceMountPath,
   signDelegatedAccessToken,
   GenerateImageToolInput,
+  GenerateVideoToolInput,
+  GetVideoGenerationCapabilitiesToolInput,
   RequestHumanInputToolInput,
+  AttemptToolResult,
+  type AttemptToolCatalog,
+  type AttemptToolResult as AttemptToolResultValue,
   type GitCredentialProvider,
   type GitCredentialTransport,
   type HumanInputResponse,
@@ -45,11 +50,9 @@ import {
   type ResourceRef,
   type ToolAuthNeededPayload,
   type ToolRef,
+  type VideoGenerationAcceptedReceipt,
+  type VideoGenerationCapabilities,
 } from "@opengeni/contracts";
-import {
-  PublishEditableArtifactToolInput,
-  type PublishEditableArtifactReceipt,
-} from "@opengeni/contracts/editable-artifact-publication";
 import {
   MCP_MAX_CONCURRENT_SERVER_OPERATIONS,
   MCP_MAX_TOOL_RESULT_BYTES,
@@ -66,38 +69,32 @@ import {
   undiciFetch,
   type McpRequestReplayInfo,
 } from "./mcp-network";
-import { AppendOnlyOpenAIResponsesModel } from "./append-only-responses-model";
 import {
   LazyToolModelProvider,
   installLazyToolRuntime,
   lazyToolRuntimeForAgent,
   type LazyToolTransport,
 } from "./lazy-tool-transport";
+import { GmailRestMcpServer, isOfficialGmailMcpConfig } from "./gmail-rest-mcp";
+export {
+  GMAIL_REST_API_BASE,
+  GMAIL_REST_MCP_TOOLS,
+  GmailRestMcpServer,
+  OFFICIAL_GMAIL_MCP_URL,
+  gmailRestToolIsMutation,
+  isOfficialGmailMcpConfig,
+  type GmailRestMcpServerOptions,
+} from "./gmail-rest-mcp";
 import {
   Agent,
   AgentsError,
   connectMcpServers,
-  setDefaultModelProvider,
   MaxTurnsExceededError,
   MCPServerStreamableHttp,
-  // Provider-bound Model instances. Both are re-exported from
-  // @openai/agents-openai via `export * from '@openai/agents-openai'` in
-  // @openai/agents' index, so the multi-provider routing imports them
-  // from the same entrypoint as the rest of the SDK rather than reaching into
-  // the openai subpackage. OpenAIChatCompletionsModel speaks /v1/chat/completions
-  // (the registry "chat" wire API, e.g. Fireworks); OpenAIResponsesModel speaks
-  // /v1/responses (the built-in OpenAI/Azure "responses" wire API). Both bind a
-  // model id to a specific OpenAI client, which is what routes a turn to its
-  // provider without touching the global default client.
-  OpenAIChatCompletionsModel,
   RunState,
   run,
   Runner,
   Usage,
-  setDefaultOpenAIClient,
-  setDefaultOpenAIKey,
-  setOpenAIResponsesTransport,
-  setTracingDisabled,
   tool as agentTool,
   // Hosted web_search tool factory. Re-exported from @openai/agents-openai via
   // `export * from '@openai/agents-openai'` in @openai/agents' index;
@@ -113,15 +110,14 @@ import {
   // apply file edits over its NATS fs ops using the SDK's exact diff semantics.
   applyDiff,
   RunContext,
+  ToolGuardrailFunctionOutputFactory,
   type AgentInputItem,
   type CallModelInputFilter,
-  type MCPCallToolOptions,
   type MCPServer,
   type MCPToolErrorFunction,
   type Model,
   type ModelRequest,
   type ModelResponse,
-  type ModelProvider,
   type SerializedTool,
   type Tool,
 } from "@openai/agents";
@@ -154,29 +150,15 @@ import OpenAI from "openai";
 import {
   CODEX_APPS_MCP_SERVER_ID,
   CODEX_APPS_MCP_URL,
-  CODEX_MODEL_ID_PREFIX,
   CODEX_ORIGINATOR,
-  CODEX_REQUEST_BODY_NORMALIZED_HEADER,
-  CODEX_REQUEST_CALLER_STREAM_HEADER,
-  CODEX_REQUEST_ID_HEADER,
-  CODEX_REQUEST_MODEL_HEADER,
-  CODEX_RESPONSE_SDK_OUTER_TIMEOUT_MS,
-  codexRequestStorage,
   codexAppsSanitizingFetch,
-  codexSubscriptionFetch,
-  normalizedCodexRequestBody,
-  opaqueProviderArtifactFingerprints,
 } from "@opengeni/codex";
 import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join, posix as posixPath, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import {
-  rewriteComputerCallsToActionsOnly,
-  rewriteEmptyComputerCallOutputImageUrls,
-  sanitizeHistoryItemsForModel,
-} from "./history-sanitizer";
+import { sanitizeHistoryItemsForModel } from "./history-sanitizer";
 import { installCodexToolSearch } from "./codex-tool-search";
 import {
   CompactionProviderResponseError,
@@ -194,9 +176,9 @@ import {
   repairSerializedRunStateExposedPorts,
   restoredSandboxSessionStateFromEntry,
   setSelfhostedApplyDiff,
-  toolspaceTokenFileFromEnvironment,
-  withToolspaceTokenClient,
-  withToolspaceTokenSession,
+  codemodeTokenFileFromEnvironment,
+  withCodemodeTokenClient,
+  withCodemodeTokenSession,
   withRunCredentialsClient,
   withRunCredentialsSession,
   type RunCredentialSessionReady,
@@ -208,7 +190,7 @@ import {
   sandboxCommandStillRunning,
   sandboxCommandStdout,
 } from "./sandbox/command-result";
-import { shellToolspacePath } from "./sandbox/toolspace-token";
+import { shellCodemodePath } from "./sandbox/codemode-token";
 import {
   createTurnToolCancellationController,
   TurnSandboxCommandCancelledError,
@@ -217,11 +199,23 @@ import {
   type TurnSandboxCommandSession,
   type TurnToolCancellationFence,
 } from "./sandbox/turn-tool-cancellation";
-import { computerUse, type ComputerToolMode } from "./sandbox-computer";
+import {
+  computerUse,
+  withRetainableSessionImageOutputHook,
+  type ComputerToolMode,
+  type RetainableSessionImageOutputHook,
+} from "./sandbox-computer";
 import type { RuntimeMetricsHooks } from "./metrics";
+import {
+  MultiProviderModelProvider,
+  OpenGeniResponsesModel,
+  buildOpenAIClientFromSettings,
+  configureOpenAI,
+  configureRuntimeMetricsHooks,
+  resolveTurnModel,
+} from "./model-provider";
 import { workspaceSkills, type WorkspaceSkillSearchPath } from "./workspace-skills";
 import { appendWorkspaceGovernance } from "./workspace-governance";
-import { ReplayableJsonOpenAI, type ModelJsonRequestPolicy } from "./replayable-json-body";
 import {
   baseModelInputFilterForSettings,
   boundModelToolOutputsFilterForSettings,
@@ -266,6 +260,23 @@ export {
 
 export type { RuntimeMetricsHooks } from "./metrics";
 export {
+  CodexSubscriptionUnavailableError,
+  MultiProviderModelProvider,
+  OpenGeniResponsesModel,
+  WorkspaceGatewayUnavailableError,
+  WorkspaceModelPolicyBlockedError,
+  azureOpenAIDefaultQuery,
+  buildModelInstance,
+  buildOpenAIClientFromSettings,
+  buildProviderClient,
+  configureOpenAI,
+  configureRuntimeMetricsHooks,
+  modelRequestPolicyForProvider,
+  normalizeVercelGatewayRequestBody,
+  resolveTurnModel,
+  vercelGatewayRoutingFetch,
+} from "./model-provider";
+export {
   appendWorkspaceGovernance,
   CompanyProfilePromptLimitError,
   hasActiveWorkspaceInstructionPolicy,
@@ -305,6 +316,8 @@ export {
   type SandboxComputerOptions,
   type ComputerUseArgs,
   type ComputerToolMode,
+  type RetainableSessionImageOutputHook,
+  type RetainableSessionImageToolName,
   type ScreenshotReadErrorCode,
 } from "./sandbox-computer";
 
@@ -313,6 +326,7 @@ export {
 // barrel surface is unchanged for apps/worker while @opengeni/runtime/sandbox
 // stays importable by the API without the agent loop.
 export * from "./sandbox";
+export * from "./interaction-tools";
 export {
   boundModelToolOutputsFilterForSettings,
   callModelInputFilterForSettings,
@@ -453,7 +467,15 @@ ensureReadableStreamFrom();
 
 const SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS = 120_000;
 
-type RuntimeMcpTool = Awaited<ReturnType<MCPServer["listTools"]>>[number];
+/**
+ * The Agents SDK intentionally types only the fields it needs to project a
+ * model function. Its MCP transport still returns the complete MCP Tool value.
+ * Keep that complete descriptor here because the attempt catalog is also the
+ * authoritative Codemode descriptor and must not discard output contracts or
+ * presentation/effect metadata.
+ */
+type RuntimeMcpTool = Awaited<ReturnType<MCPServer["listTools"]>>[number] &
+  Pick<AttemptToolDefinition, "title" | "outputSchema" | "annotations" | "icons">;
 
 type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
@@ -580,12 +602,6 @@ export type SandboxFileDownloadMaterializationResult = {
   failures: SandboxFileDownloadFailure[];
 };
 
-let runtimeMetricsHooks: RuntimeMetricsHooks | null = null;
-
-export function configureRuntimeMetricsHooks(hooks: RuntimeMetricsHooks | null | undefined): void {
-  runtimeMetricsHooks = hooks ?? null;
-}
-
 export type OpenGeniRuntime = {
   configure: (settings: Settings) => void;
   // Multi-provider per-turn model routing. Returns the resolved provider, its
@@ -653,646 +669,6 @@ export function createProductionAgentRuntime(
     serializeApprovals,
     serializeHumanInputRequests,
   };
-}
-
-/**
- * Build an OpenAI client from settings for the configured provider. Mirrors the
- * client construction in configureOpenAI so a direct API call (the compaction
- * summarizer) uses the same Azure/OpenAI auth and base URL. Returns null when
- * the OpenAI-platform path has only a key (the SDK default client is used via
- * setDefaultOpenAIKey there); the caller then constructs a key-only client.
- */
-export function buildOpenAIClientFromSettings(
-  settings: Settings,
-  providerId: string = settings.openaiProvider,
-): OpenAI {
-  if (settings.openaiProvider === "azure") {
-    const baseURL = settings.azureOpenaiBaseUrl ?? azureDeploymentBaseUrl(settings);
-    const apiKey = settings.azureOpenaiApiKey ?? settings.azureOpenaiAdToken ?? "azure-ad-token";
-    return new ReplayableJsonOpenAI(
-      {
-        apiKey,
-        baseURL,
-        maxRetries: settings.openaiMaxRetries,
-        defaultQuery: azureOpenAIDefaultQuery(settings, baseURL),
-        defaultHeaders:
-          settings.azureOpenaiAdToken && !settings.azureOpenaiApiKey
-            ? { Authorization: `Bearer ${settings.azureOpenaiAdToken}` }
-            : undefined,
-        fetch: instrumentedModelFetch(providerId, globalThis.fetch),
-      },
-      { modelRequestPolicy: azureModelRequestPolicy },
-    );
-  }
-  return new ReplayableJsonOpenAI({
-    apiKey: settings.openaiApiKey ?? process.env.OPENAI_API_KEY,
-    ...(settings.openaiBaseUrl ? { baseURL: settings.openaiBaseUrl } : {}),
-    maxRetries: settings.openaiMaxRetries,
-    fetch: instrumentedModelFetch(providerId, globalThis.fetch),
-  });
-}
-
-/**
- * One OpenAI client per resolved provider id, built lazily and cached for the
- * process. The built-in openai/azure provider reuses
- * buildOpenAIClientFromSettings verbatim (so its Azure AD/api-version/base-URL
- * construction stays byte-for-byte identical to configureOpenAI); a registry
- * provider gets a plain client pointed at its base URL with its resolved key,
- * the shared maxRetries budget, and its declared defaultQuery/defaultHeaders.
- * Caching by provider.id keeps concurrent multi-provider turns sharing one
- * connection pool per provider rather than reconstructing a client per turn.
- */
-const providerClientCache = new Map<string, OpenAI>();
-
-export function buildProviderClient(provider: ResolvedModelProvider, settings: Settings): OpenAI {
-  const workspaceGateway = provider.kind === "vercel-gateway-workspace";
-  const gatewayProvider = workspaceGateway || provider.kind === "vercel-gateway-managed";
-  const cached = workspaceGateway ? undefined : providerClientCache.get(provider.id);
-  if (cached) {
-    return cached;
-  }
-  if (workspaceGateway && !provider.apiKey) {
-    throw new WorkspaceGatewayUnavailableError();
-  }
-  const client = provider.builtin
-    ? buildOpenAIClientFromSettings(settings, provider.id)
-    : provider.kind === "codex-subscription"
-      ? // Codex subscription: the static apiKey is a placeholder — the real per-request
-        // bearer + ChatGPT-Account-ID, the /responses->/codex/responses rewrite, and the
-        // body normalization are all injected by codexSubscriptionFetch, which reads the
-        // per-workspace token from the Codex request context at call time.
-        // The provider id is constant ("codex-subscription"), so one cached client serves
-        // every workspace without baking a token into it.
-        new ReplayableJsonOpenAI(
-          {
-            apiKey: provider.apiKey ?? "codex-subscription",
-            ...(provider.baseUrl ? { baseURL: provider.baseUrl } : {}),
-            // Codex transport owns exactly one explicit 401 refresh/retry. Blind
-            // SDK retries on network/5xx/partial streams can replay provider work
-            // or external tool side effects without a durable checkpoint.
-            maxRetries: 0,
-            // Codex transport owns finer headers/idle/whole deadlines and emits
-            // typed durable evidence. Keep the SDK envelope beyond that budget.
-            timeout: CODEX_RESPONSE_SDK_OUTER_TIMEOUT_MS,
-            fetch: codexSubscriptionFetch(instrumentedModelFetch(provider.id, globalThis.fetch)),
-          },
-          { modelRequestPolicy: modelRequestPolicyForProvider(provider) },
-        )
-      : // ResolvedModelProvider.apiKey is already the resolved key (configuredProviders
-        // ran resolveProviderApiKey at config time, collapsing apiKey/apiKeyEnv), so it
-        // is passed straight through here rather than re-resolved.
-        new ReplayableJsonOpenAI(
-          {
-            ...(provider.apiKey ? { apiKey: provider.apiKey } : {}),
-            ...(provider.baseUrl ? { baseURL: provider.baseUrl } : {}),
-            // Gateway routing is deliberately fail-closed. Avoid SDK replay after
-            // a request may have reached the one pinned endpoint.
-            maxRetries: gatewayProvider ? 0 : settings.openaiMaxRetries,
-            ...(provider.defaultQuery ? { defaultQuery: provider.defaultQuery } : {}),
-            ...(provider.defaultHeaders ? { defaultHeaders: provider.defaultHeaders } : {}),
-            fetch: gatewayProvider
-              ? vercelGatewayRoutingFetch(
-                  provider.kind as "vercel-gateway-managed" | "vercel-gateway-workspace",
-                  instrumentedModelFetch(provider.id, globalThis.fetch),
-                )
-              : instrumentedModelFetch(provider.id, globalThis.fetch),
-          },
-          { modelRequestPolicy: modelRequestPolicyForProvider(provider) },
-        );
-  if (!workspaceGateway) {
-    providerClientCache.set(provider.id, client);
-  }
-  return client;
-}
-
-export class WorkspaceGatewayUnavailableError extends Error {
-  constructor() {
-    super(
-      "Your Gateway model is unavailable: connect or reconnect the workspace AI Gateway key in Settings, then retry.",
-    );
-    this.name = "WorkspaceGatewayUnavailableError";
-  }
-}
-
-/**
- * Gateway's Kimi Responses adapter rejects the standard grouped parallel-tool
- * continuation (`call A, call B, result A, result B`) even though it accepts
- * the exact same complete items when each result follows its call. Pair only
- * complete contiguous batches by `call_id`; preserve every item and field,
- * parallel execution, model, and provider route. Partial or ambiguous batches
- * stay untouched and fail closed upstream.
- */
-const GATEWAY_REQUEST_BODY_NORMALIZED_HEADER = "x-opengeni-gateway-request-body-normalized";
-
-function pairKimiParallelFunctionCallResults(body: Record<string, unknown>): void {
-  const input = body.input;
-  if (!Array.isArray(input)) return;
-  let index = 0;
-  while (index < input.length) {
-    const item = input[index];
-    if (
-      !item ||
-      typeof item !== "object" ||
-      (item as Record<string, unknown>).type !== "function_call"
-    ) {
-      index += 1;
-      continue;
-    }
-    let callEnd = index;
-    while (
-      callEnd < input.length &&
-      input[callEnd] &&
-      typeof input[callEnd] === "object" &&
-      (input[callEnd] as Record<string, unknown>).type === "function_call"
-    ) {
-      callEnd += 1;
-    }
-    const calls = input.slice(index, callEnd) as Array<Record<string, unknown>>;
-    if (calls.length < 2) {
-      index = callEnd;
-      continue;
-    }
-    let resultEnd = callEnd;
-    while (
-      resultEnd < input.length &&
-      input[resultEnd] &&
-      typeof input[resultEnd] === "object" &&
-      (input[resultEnd] as Record<string, unknown>).type === "function_call_output"
-    ) {
-      resultEnd += 1;
-    }
-    const results = input.slice(callEnd, resultEnd) as Array<Record<string, unknown>>;
-    if (results.length !== calls.length) {
-      index = resultEnd;
-      continue;
-    }
-    const resultsByCallId = new Map<string, Record<string, unknown>>();
-    for (const result of results) {
-      const callId = result.call_id;
-      if (typeof callId !== "string" || resultsByCallId.has(callId)) {
-        resultsByCallId.clear();
-        break;
-      }
-      resultsByCallId.set(callId, result);
-    }
-    const paired: Array<Record<string, unknown>> = [];
-    for (const call of calls) {
-      const callId = call.call_id;
-      const result = typeof callId === "string" ? resultsByCallId.get(callId) : undefined;
-      if (!result) {
-        paired.length = 0;
-        break;
-      }
-      paired.push(call, result);
-    }
-    if (paired.length === calls.length * 2) {
-      input.splice(index, paired.length, ...paired);
-      index += paired.length;
-    } else {
-      index = resultEnd;
-    }
-  }
-}
-
-/** Apply the complete reviewed Gateway request policy to an SDK-owned object. */
-export function normalizeVercelGatewayRequestBody(body: Record<string, unknown>): void {
-  const model = typeof body.model === "string" ? body.model : "";
-  const policy = gatewayRequestPolicyForUpstreamModel(model);
-  if (!policy) {
-    throw new Error("Model request is not in the approved catalogue");
-  }
-  const providerOptions =
-    body.providerOptions &&
-    typeof body.providerOptions === "object" &&
-    !Array.isArray(body.providerOptions)
-      ? { ...(body.providerOptions as Record<string, unknown>) }
-      : {};
-  providerOptions.gateway = {
-    only: [...policy.gateway.only],
-    order: [...policy.gateway.only],
-    ...(policy.gateway.caching === "auto" ? { caching: "auto" } : {}),
-  };
-  body.providerOptions = providerOptions;
-  if (model === OPENGENI_GATEWAY_MODELS.kimi.upstreamModelId) {
-    pairKimiParallelFunctionCallResults(body);
-  }
-}
-
-/**
- * Compatibility fallback for callers that did not apply the object-stage
- * request policy. Inject the reviewed route from the serialized body and
- * replace any caller gateway options. Only the ordered, reviewed endpoint
- * providers are allowed; no model fallback list is sent. Unknown models/body
- * shapes fail before I/O.
- */
-export function vercelGatewayRoutingFetch(
-  kind: Extract<
-    ResolvedModelProvider["kind"],
-    "vercel-gateway-managed" | "vercel-gateway-workspace"
-  >,
-  inner: typeof fetch,
-): typeof fetch {
-  return (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
-    if (!isModelCallFetch(input)) {
-      return await inner(input, init);
-    }
-    const headers = new Headers(init?.headers);
-    const bodyAlreadyNormalized = headers.get(GATEWAY_REQUEST_BODY_NORMALIZED_HEADER) === "1";
-    headers.delete(GATEWAY_REQUEST_BODY_NORMALIZED_HEADER);
-    let nextInit: RequestInit = { ...init, headers };
-    if (!bodyAlreadyNormalized) {
-      if (typeof init?.body !== "string") {
-        throw new Error("Model request could not be prepared");
-      }
-      try {
-        const parsed = JSON.parse(init.body) as unknown;
-        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-          throw new Error("invalid body");
-        }
-        const body = parsed as Record<string, unknown>;
-        normalizeVercelGatewayRequestBody(body);
-        nextInit = { ...nextInit, body: JSON.stringify(body) };
-      } catch (error) {
-        if (error instanceof Error && error.message.includes("approved catalogue")) throw error;
-        throw new Error("Model request could not be prepared", { cause: error });
-      }
-    }
-    const response = await inner(input, nextInit);
-    if (response.ok) {
-      return response;
-    }
-    // The public error below replaces the upstream response. Cancel its unread
-    // body now so buffered bytes and the connection are not retained until GC.
-    await response.body?.cancel().catch(() => undefined);
-    const message =
-      kind === "vercel-gateway-workspace" && (response.status === 401 || response.status === 403)
-        ? "Your Gateway connection needs attention. Reconnect it in workspace Settings."
-        : "The selected model is temporarily unavailable.";
-    return new Response(JSON.stringify({ error: { type: "model_unavailable", message } }), {
-      status: response.status,
-      statusText: response.statusText,
-      headers: { "content-type": "application/json" },
-    });
-  }) as typeof fetch;
-}
-
-function azureModelRequestPolicy({
-  body,
-}: {
-  body: Readonly<Record<string, unknown>>;
-}): ReturnType<ModelJsonRequestPolicy> {
-  const input = body.input;
-  if (!Array.isArray(input)) return undefined;
-  const containsComputerProtocol = input.some(
-    (item) =>
-      item &&
-      typeof item === "object" &&
-      ((item as Record<string, unknown>).type === "computer_call" ||
-        (item as Record<string, unknown>).type === "computer_call_output"),
-  );
-  if (!containsComputerProtocol) return undefined;
-  const projectedInput = input.map((item) => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) return item;
-    const record = item as Record<string, unknown>;
-    if (record.type === "computer_call") return { ...record };
-    if (
-      record.type === "computer_call_output" &&
-      record.output &&
-      typeof record.output === "object" &&
-      !Array.isArray(record.output)
-    ) {
-      return { ...record, output: { ...(record.output as Record<string, unknown>) } };
-    }
-    return item;
-  });
-  const projectedBody: Record<string, unknown> = { ...body, input: projectedInput };
-  const changedComputerCalls = rewriteComputerCallsToActionsOnly(projectedBody);
-  const changedScreenshots = rewriteEmptyComputerCallOutputImageUrls(projectedBody);
-  return changedComputerCalls || changedScreenshots ? { body: projectedBody } : undefined;
-}
-
-/**
- * One object-stage request policy for both Responses and Chat Completions.
- * Transport wrappers only authenticate, route, observe, and translate errors;
- * they never need to parse and re-stringify an owned model request.
- */
-export function modelRequestPolicyForProvider(
-  provider: ResolvedModelProvider,
-): ModelJsonRequestPolicy {
-  return ({ path, body }) => {
-    if (provider.id === "azure") {
-      return azureModelRequestPolicy({ body });
-    }
-    if (provider.kind === "codex-subscription") {
-      if (!(path.split("?", 1)[0] ?? path).endsWith("/responses")) {
-        throw new Error("Subscription models require the Responses API");
-      }
-      const fallbackModel = typeof body.model === "string" ? body.model : provider.id;
-      const callerWantsStream = body.stream === true;
-      const context = codexRequestStorage.getStore();
-      if (!context) throw new CodexSubscriptionUnavailableError(fallbackModel);
-
-      const normalizedBody = normalizedCodexRequestBody(body, context.resolveModel);
-      const requestId = context.nextRequestId?.() ?? randomUUID();
-      context.onRequestOpaqueArtifacts?.({
-        requestId,
-        fingerprints: opaqueProviderArtifactFingerprints(normalizedBody.input),
-      });
-      return {
-        body: normalizedBody,
-        headers: {
-          [CODEX_REQUEST_BODY_NORMALIZED_HEADER]: "1",
-          [CODEX_REQUEST_CALLER_STREAM_HEADER]: callerWantsStream ? "1" : "0",
-          [CODEX_REQUEST_MODEL_HEADER]:
-            typeof normalizedBody.model === "string" ? normalizedBody.model : fallbackModel,
-          [CODEX_REQUEST_ID_HEADER]: requestId,
-        },
-      };
-    }
-    if (
-      provider.kind === "vercel-gateway-managed" ||
-      provider.kind === "vercel-gateway-workspace"
-    ) {
-      const projectedBody: Record<string, unknown> = {
-        ...body,
-        ...(body.model === OPENGENI_GATEWAY_MODELS.kimi.upstreamModelId && Array.isArray(body.input)
-          ? { input: [...body.input] }
-          : {}),
-      };
-      normalizeVercelGatewayRequestBody(projectedBody);
-      return {
-        body: projectedBody,
-        headers: { [GATEWAY_REQUEST_BODY_NORMALIZED_HEADER]: "1" },
-      };
-    }
-    return undefined;
-  };
-}
-
-export class OpenGeniResponsesModel extends AppendOnlyOpenAIResponsesModel {
-  constructor(
-    client: OpenAI,
-    model: string,
-    protected readonly provider: ResolvedModelProvider,
-  ) {
-    super(client, model);
-  }
-}
-
-/** Bind a model id to the provider's declared wire API and owned client. */
-export function buildModelInstance(
-  provider: ResolvedModelProvider,
-  client: OpenAI,
-  modelId: string,
-): Model {
-  return provider.api === "chat"
-    ? new OpenAIChatCompletionsModel(client, modelId)
-    : new OpenGeniResponsesModel(client, modelId, provider);
-}
-
-/**
- * Resolved per-turn model routing: the provider that serves `modelId`, its
- * (cached) OpenAI client, the provider-bound `Model` instance, and the
- * configured-model shape (label/api/contextWindow/reasoningEffort/hostedWebSearch).
- * Returns null when the model is not in the registry — the caller then falls
- * back to the legacy global-client path (settings.openaiModel + the default
- * client configured by configureOpenAI), preserved byte-for-byte.
- */
-export function resolveTurnModel(
-  settings: Settings,
-  modelId: string,
-): {
-  provider: ResolvedModelProvider;
-  client: OpenAI;
-  model: Model;
-  configured: ConfiguredModel;
-} | null {
-  const resolved = resolveModelProvider(settings, modelId);
-  if (!resolved) {
-    return null;
-  }
-  const client = buildProviderClient(resolved.provider, settings);
-  return {
-    provider: resolved.provider,
-    client,
-    model: buildModelInstance(resolved.provider, client, resolved.model.upstreamModelId),
-    configured: resolved.model,
-  };
-}
-
-/**
- * Routes a model *name* to its provider-bound Model (Fireworks chat model for a
- * registry model id, the built-in OpenAI/Azure responses model otherwise) via
- * `resolveTurnModel`. This is the load-bearing piece for the sandbox path:
- * passing a Model *instance* as `agent.model` only survives the in-process
- * (`sandboxBackend: "none"`) run — on the SandboxAgent/Modal path the instance
- * is dropped and the model *name* is re-resolved through the run's
- * `modelProvider` (or the global default). Without this router that re-resolution
- * hits the default client (e.g. Azure) and a registry model 404s
- * ("deployment does not exist"); with it the name resolves back to the right
- * provider. Installed both as the run-scoped `Runner.config.modelProvider` (every
- * run in runAgentStream goes through `runScopedRunner(settings, agent)`, built from the
- * per-turn settings) and as the process default (see configureOpenAI). The
- * run-scoped instance is the load-bearing one: a `Runner` resolves string model
- * names against ITS OWN modelProvider, not the lazy global default, so each
- * concurrent turn routes codex/registry names against its own settings and a
- * foreign turn's setDefaultModelProvider can never clobber this turn's routing.
- * The process default remains only as a boot-time fallback. Falls back to the
- * SDK default provider for a model that is in no provider's allow-list.
- */
-export class MultiProviderModelProvider implements ModelProvider {
-  constructor(private readonly settings: Settings) {}
-
-  async getModel(modelName?: string): Promise<Model> {
-    if (modelName) {
-      const resolved = resolveTurnModel(
-        settingsForRunScopedModelResolution(this.settings, modelName),
-        modelName,
-      );
-      if (resolved) {
-        // Fail-loud floor (defense in depth): a `codex/<slug>` id must only ever
-        // resolve through the synthetic codex-subscription provider (which installs
-        // fetch: codexSubscriptionFetch + the per-workspace bearer). If a future
-        // settings path re-introduces a built-in/registry shadow that binds a
-        // `codex/` id to any other provider kind, that would silently ship the id
-        // to Azure/OpenAI as a deployment name (DeploymentNotFound 404). Refuse it
-        // here so codex can never reach a non-codex client on ANY backend; the
-        // primary fix (config configuredModels) keeps this a no-op in practice.
-        if (
-          modelName.startsWith(CODEX_MODEL_ID_PREFIX) &&
-          resolved.provider.kind !== "codex-subscription"
-        ) {
-          throw new CodexSubscriptionUnavailableError(modelName);
-        }
-        return resolved.model;
-      }
-      // A `codex/<slug>` id only resolves when the per-workspace worker overlay
-      // (settingsWithCodexCredential) has injected the synthetic codex-subscription
-      // provider — which it does ONLY for a workspace with an *active* connected
-      // Codex subscription. If it did not resolve, the subscription is not
-      // connected for this workspace, so the codex provider is absent. Falling
-      // through to the built-in Responses fallback below would ship `codex/<slug>` to
-      // the global default (Azure) client as a deployment name and surface a
-      // misleading "DeploymentNotFound" 404. Throw a clear, user-actionable error
-      // instead; it propagates through the worker's agentRunFailurePayload as the
-      // turn.failed message the session UI shows. Mirrors the codex-prefix
-      // awareness of assertConfiguredModel at apps/api/src/domain/sessions.ts.
-      if (modelName.startsWith(CODEX_MODEL_ID_PREFIX)) {
-        throw new CodexSubscriptionUnavailableError(modelName);
-      }
-    }
-    // Preserve the legacy unlisted-model fallback, but bind it through the same
-    // typed request-policy model as every configured Responses call. This keeps
-    // Azure wire normalization at the object stage instead of reintroducing a
-    // JSON parse/stringify transport wrapper on the fallback path.
-    const builtin = configuredProviders(this.settings)[0];
-    if (!builtin) throw new Error("Built-in model provider is unavailable");
-    return new OpenGeniResponsesModel(
-      buildProviderClient(builtin, this.settings),
-      modelName ?? this.settings.openaiModel,
-      builtin,
-    );
-  }
-}
-
-function settingsForRunScopedModelResolution(settings: Settings, modelName: string): Settings {
-  if (modelName !== settings.openaiModel) {
-    return settings;
-  }
-  const builtinAllowed = splitOpenaiAllowedModels(settings.openaiAllowedModels);
-  const fallbackBuiltin = builtinAllowed.find((id) => id !== modelName);
-  if (!fallbackBuiltin) {
-    return settings;
-  }
-  // The worker sets runSettings.openaiModel to the turn's model. For namespaced
-  // registry ids configuredModels filters the built-in entry out, but a unique
-  // bare registry id would otherwise be claimed by the built-in only because of
-  // that per-turn override. Resolve the run-scoped router against the deployment
-  // allow-list head instead; real built-in models stay in the allow-list.
-  return builtinAllowed.includes(modelName)
-    ? settings
-    : { ...settings, openaiModel: fallbackBuiltin };
-}
-
-function splitOpenaiAllowedModels(value: string): string[] {
-  return value
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
-
-/**
- * A `codex/<slug>` turn reached the model router but the workspace has no active
- * Codex subscription connected (the worker overlay never injected the synthetic
- * provider, so resolveTurnModel returned nothing). Thrown instead of silently
- * routing the id to the built-in Azure/OpenAI client — that produced an opaque
- * "DeploymentNotFound" 404. The message is user-actionable (connect/reconnect)
- * and carries no status/code, so agentRunFailurePayload surfaces it verbatim as
- * a non-retryable turn.failed the session UI shows.
- */
-export class CodexSubscriptionUnavailableError extends Error {
-  constructor(modelName: string) {
-    super(
-      `Codex subscription model "${modelName}" is unavailable: no active Codex subscription is connected for this workspace. ` +
-        `Connect (or reconnect) your ChatGPT/Codex subscription in Settings, then retry.`,
-    );
-    this.name = "CodexSubscriptionUnavailableError";
-  }
-}
-
-/**
- * The workspace's model policy blocks the provider/model this turn resolved
- * to. Thrown at the worker's post-resolution gate INSTEAD of running the turn
- * on the blocked provider — a policy-restricted workspace (e.g. fail-closed to
- * the Codex subscription) must never silently remap to, or fall through to,
- * the paid built-in client. Like CodexSubscriptionUnavailableError the message
- * is user-actionable and surfaces verbatim as a non-retryable turn.failed.
- */
-export class WorkspaceModelPolicyBlockedError extends Error {
-  constructor(modelName: string, providerId: string, reason: "provider" | "model") {
-    super(
-      reason === "provider"
-        ? `Model "${modelName}" is not available in this workspace: its provider ("${providerId}") is not in the workspace's allowed providers. ` +
-            `Pick an allowed model, or ask a workspace admin to change the workspace model policy.`
-        : `Model "${modelName}" is not in this workspace's allowed models. ` +
-            `Pick an allowed model, or ask a workspace admin to change the workspace model policy.`,
-    );
-    this.name = "WorkspaceModelPolicyBlockedError";
-  }
-}
-
-export function configureOpenAI(settings: Settings): void {
-  setOpenAIResponsesTransport(settings.openaiResponsesTransport);
-  setTracingDisabled(settings.disableOpenaiTracing || !settings.observabilityOtlpEndpoint);
-  // Install the registry-aware router as the process default model provider so a
-  // model name re-resolved on the SandboxAgent/Modal path (where a Model instance
-  // does not survive) routes to its provider instead of the built-in client.
-  // Built before the default-client calls below so it captures the same settings.
-  const router = new MultiProviderModelProvider(settings);
-  if (settings.openaiProvider === "azure") {
-    setDefaultOpenAIClient(buildOpenAIClientFromSettings(settings));
-    setDefaultModelProvider(router);
-    return;
-  }
-  if (settings.openaiApiKey) {
-    setDefaultOpenAIKey(settings.openaiApiKey);
-  }
-  if (settings.openaiBaseUrl) {
-    setDefaultOpenAIClient(buildOpenAIClientFromSettings(settings));
-  }
-  setDefaultModelProvider(router);
-}
-
-function instrumentedModelFetch(provider: string, inner: typeof fetch): typeof fetch {
-  return (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
-    if (!isModelCallFetch(input)) {
-      return await inner(input, init);
-    }
-    const started = performance.now();
-    try {
-      const response = await inner(input, init);
-      recordModelCallMetric(provider, response.ok ? "completed" : "failed", started);
-      return response;
-    } catch (error) {
-      recordModelCallMetric(provider, "failed", started);
-      throw error;
-    }
-  }) as typeof fetch;
-}
-
-function isModelCallFetch(input: Parameters<typeof fetch>[0]): boolean {
-  const rawUrl =
-    typeof input === "string"
-      ? input
-      : input instanceof URL
-        ? input.toString()
-        : (input as { url?: unknown }).url;
-  if (typeof rawUrl !== "string" || rawUrl.length === 0) {
-    return false;
-  }
-  try {
-    const pathname = new URL(rawUrl, "http://opengeni.local").pathname;
-    return (
-      pathname.endsWith("/responses") ||
-      pathname.endsWith("/chat/completions") ||
-      pathname.endsWith("/codex/responses")
-    );
-  } catch {
-    return /\/(?:codex\/)?responses(?:\?|$)|\/chat\/completions(?:\?|$)/.test(rawUrl);
-  }
-}
-
-function recordModelCallMetric(
-  provider: string,
-  outcome: "completed" | "failed",
-  started: number,
-): void {
-  const durationSeconds = Math.max(0, (performance.now() - started) / 1000);
-  try {
-    runtimeMetricsHooks?.onModelCall?.({ provider, outcome, durationSeconds });
-  } catch {
-    // Metrics emission must never affect a model call.
-  }
 }
 
 /**
@@ -1891,7 +1267,7 @@ export type GitCredentialBindingSeed = {
   providerBindingCount?: number;
 };
 export type GitCredentialTokenWriterSession = SandboxSessionLike;
-export type ToolspaceTokenWriterSession = SandboxSessionLike;
+export type CodemodeTokenWriterSession = SandboxSessionLike;
 
 export type EffectiveSkillSelection = Readonly<{
   id: string;
@@ -1992,14 +1368,18 @@ export type BuildAgentOptions = {
     | { kind: "native_hosted" }
     | {
         kind: "provider_adapter";
-        execute: (input: { prompt: string }, context: { toolCallId: string }) => Promise<unknown>;
+        execute: (
+          input: GenerateImageToolInput,
+          context: { toolCallId: string },
+        ) => Promise<unknown>;
       };
-  /** Host-owned durable promotion of one final, verified Office artifact. */
-  editableArtifactPublication?: {
+  /** Host-owned durable asynchronous video-generation boundary for this turn. */
+  videoGeneration?: {
+    capabilities: () => Promise<VideoGenerationCapabilities>;
     execute: (
-      input: PublishEditableArtifactToolInput,
+      input: import("@opengeni/contracts").GenerateVideoToolInput,
       context: { toolCallId: string },
-    ) => Promise<PublishEditableArtifactReceipt>;
+    ) => Promise<VideoGenerationAcceptedReceipt>;
   };
   encryptedReasoning?: boolean;
   structuredToolTransport?: boolean;
@@ -2025,6 +1405,8 @@ export type BuildAgentOptions = {
    * shell/filesystem turns never pay that cost.
    */
   onComputerUseReady?: (session: SandboxSessionLike) => Promise<void>;
+  /** Persist intentional image outputs before the SDK can add them to history. */
+  onRetainableSessionImageOutput?: RetainableSessionImageOutputHook;
   // The LIVE, by-reference connector-namespace Set from prepareAgentTools
   // (codexConnectorNamespaces): fills during each turn's codex_apps tools/list,
   // read per model call by the codex tool_search description so the model sees
@@ -2039,9 +1421,9 @@ export type BuildAgentOptions = {
   sandboxEnvironment?: Record<string, string>;
   /**
    * Host assertion that the selected sandbox/machine passed the exact artifact
-   * runtime manifest, integrity, target, and capability preflight. The runtime
-   * also requires absolute manifest/facade paths in `sandboxEnvironment` before
-   * advertising artifact skills. Omitted/false keeps those skills absent.
+   * runtime manifest, integrity, target, and capability preflight. This enables
+   * the optional standalone-file runtime and its startup doctor; collaborative
+   * artifact skills are admitted independently from the frozen attempt catalog.
    */
   artifactRuntimeAvailable?: boolean;
   // The EFFECTIVE/active compute backend for this turn. `settings.sandboxBackend`
@@ -2059,12 +1441,14 @@ export type BuildAgentOptions = {
   activeSandboxBackend?: Settings["sandboxBackend"];
   fileResourceDownloads?: SandboxFileDownload[];
   mcpServers?: MCPServer[];
+  /** Exact prepared tool authority used to admit tool-dependent bundled skills. */
+  attemptToolCatalog?: AttemptToolCatalog;
   /** Exact broker-resolved connection identity frozen during MCP preparation. */
   resolvedMcpConnectionIds?: ReadonlyMap<string, string>;
   /** Attempt-bound connector Allow/Ask/Block enforcement and safe audit hooks. */
   connectorActionPolicy?: ConnectorActionPolicyHooks;
   // Workspace Memory V1 working-set block, resolved by the worker per turn.
-  // Composed after the workspace persona/CORE/toolspace substrate and before
+  // Composed after the workspace persona/CORE/codemode substrate and before
   // per-session instructions. Omitted/blank ⇒ byte-identical instructions.
   workspaceMemory?: string;
   // Exact-attempt active policy and preference descriptor block. When present,
@@ -2097,15 +1481,15 @@ export type BuildAgentOptions = {
   // Provider-neutral, independently mintable credentials. Binding ids remain
   // off-manifest and are hashed before they influence sandbox paths.
   gitCredentialBindings?: GitCredentialBindingSeed[];
-  // TOOLSPACE: the run-scoped delegated token to seed into
-  // $OPENGENI_TOOLSPACE_TOKEN_FILE. Like gitTokenSeed, this stays off the
+  // CODEMODE: the run-scoped delegated token to seed into
+  // $OPENGENI_CODEMODE_TOKEN_FILE. Like gitTokenSeed, this stays off the
   // manifest/env delta and is written into the sandbox filesystem by a lifecycle
   // hook before the agent starts.
-  toolspaceTokenSeed?: string;
+  codemodeTokenSeed?: string;
   // Durable OpenGeni session identity used only to derive the off-manifest,
-  // per-session token file. Required together with toolspaceTokenSeed so two
+  // per-session token file. Required together with codemodeTokenSeed so two
   // sessions sharing one box never overwrite the same pointer.
-  toolspaceTokenSessionId?: string;
+  codemodeTokenSessionId?: string;
   // Genesis turn only: inject a one-shot instruction into the FIRST model
   // call telling it to title the session via opengeni__set_session_title.
   // Keeping this out of the persistent Agent.instructions prevents every
@@ -2341,11 +1725,9 @@ function composedPersistentAgentInstructions(
         appendSessionInstructions(
           appendWorkspaceMemory(
             appendGitCredentialBindingInstructions(
-              appendToolspaceInstructions(
+              appendCodemodeInstructions(
                 personaAndCore,
-                settings.toolspaceEnabled &&
-                  options.activeSandboxBackend !== "selfhosted" &&
-                  Boolean(options.toolspaceTokenSeed),
+                options.activeSandboxBackend !== "selfhosted" && Boolean(options.codemodeTokenSeed),
               ),
               options.gitCredentialBindings,
               options.activeSandboxBackend,
@@ -2365,7 +1747,7 @@ function composedPersistentAgentInstructions(
   // session/task state, then tool/repository substrate, then bounded memory.
   return appendWorkspaceMemory(
     appendGitCredentialBindingInstructions(
-      appendToolspaceInstructions(
+      appendCodemodeInstructions(
         appendPersistentSessionSettings(
           appendTurnInstructions(
             appendSessionInstructions(
@@ -2376,9 +1758,7 @@ function composedPersistentAgentInstructions(
           ),
           options.persistentSessionSettings,
         ),
-        settings.toolspaceEnabled &&
-          options.activeSandboxBackend !== "selfhosted" &&
-          Boolean(options.toolspaceTokenSeed),
+        options.activeSandboxBackend !== "selfhosted" && Boolean(options.codemodeTokenSeed),
       ),
       options.gitCredentialBindings,
       options.activeSandboxBackend,
@@ -2388,19 +1768,19 @@ function composedPersistentAgentInstructions(
 }
 
 /**
- * Appends the generic programmatic-tool-calling (toolspace) directive to the
+ * Appends the generic programmatic-tool-calling (codemode) directive to the
  * composed workspace + CORE instructions, joined by " ". This is GENERIC
  * substrate prompting — the same text for every host, never per-host copy.
  *
- * Included ONLY when `toolspaceAvailable` is true, which the caller sets from the
- * exact condition that gates the managed-sandbox token mint: the feature is
- * enabled, the effective backend is not selfhosted, and a token was minted for
- * this turn. A turn with no minted token has no Toolspace URL/token and must not
+ * Included ONLY when `codemodeAvailable` is true, which the caller sets from the
+ * exact condition that gates the managed-sandbox token mint: the effective
+ * backend is not selfhosted and a token was minted for this turn. A turn with
+ * no minted token has no Codemode URL/token and must not
  * advertise a capability that is not there. Placed before the per-session
  * instructions so host/session specificity still wins over this substrate note.
  */
-export function appendToolspaceInstructions(composed: string, toolspaceAvailable: boolean): string {
-  return toolspaceAvailable ? `${composed} ${TOOLSPACE_PROGRAMMATIC_DIRECTIVE}` : composed;
+export function appendCodemodeInstructions(composed: string, codemodeAvailable: boolean): string {
+  return codemodeAvailable ? `${composed} ${CODEMODE_PROGRAMMATIC_DIRECTIVE}` : composed;
 }
 
 const GIT_BINDING_DISCOVERY_DIRECTIVE =
@@ -2454,8 +1834,8 @@ const agentArtifactRuntimeHooks = new WeakMap<object, SandboxLifecycleHook[]>();
 // Absent when no brokered repo is attached / on the selfhosted path.
 const agentGitTokenSeeds = new WeakMap<object, GitTokenSeeds>();
 const agentGitCredentialBindings = new WeakMap<object, GitCredentialBindingSeed[]>();
-const agentToolspaceTokenSeed = new WeakMap<object, string>();
-const agentToolspaceTokenSessionId = new WeakMap<object, string>();
+const agentCodemodeTokenSeed = new WeakMap<object, string>();
+const agentCodemodeTokenSessionId = new WeakMap<object, string>();
 // A genesis directive is consumed by runAgentStream exactly once for the
 // freshly-built agent. It must not remain in Agent.instructions: those
 // instructions are presented again on every internal model/tool loop.
@@ -2526,7 +1906,7 @@ const mcpToolErrorFunction: MCPToolErrorFunction = ({ error }) =>
 const ARTIFACT_RUNTIME_MANIFEST_ENV = "OPENGENI_ARTIFACT_RUNTIME_MANIFEST";
 const ARTIFACT_TOOL_ENTRY_ENV = "OPENGENI_ARTIFACT_TOOL_ENTRY";
 
-function artifactRuntimeSkillsAvailable(options: BuildAgentOptions): boolean {
+function artifactRuntimeIsAvailable(options: BuildAgentOptions): boolean {
   if (options.artifactRuntimeAvailable !== true) return false;
   const environment = options.sandboxEnvironment;
   const manifest = environment?.[ARTIFACT_RUNTIME_MANIFEST_ENV];
@@ -2539,18 +1919,48 @@ function artifactRuntimeSkillsAvailable(options: BuildAgentOptions): boolean {
   return true;
 }
 
+/**
+ * True only when one frozen attempt catalog contains the complete canonical
+ * editable-artifact tool family under its authored model and CodeMode names.
+ * The catalog is the execution authority; sandbox runtime presence is unrelated.
+ */
+export function hasCanonicalEditableArtifactToolSurface(
+  catalog: AttemptToolCatalog | null | undefined,
+): boolean {
+  if (!catalog) return false;
+  let verified: AttemptToolCatalog;
+  try {
+    verified = parseVerifiedAttemptToolCatalog(catalog);
+  } catch {
+    return false;
+  }
+  return Object.entries(EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS).every(([toolName, path]) => {
+    const matches = verified.entries.filter(
+      (entry) => entry.identity.serverId === "opengeni" && entry.identity.toolName === toolName,
+    );
+    if (matches.length !== 1) return false;
+    const entry = matches[0]!;
+    return (
+      entry.source === "opengeni" &&
+      entry.modelName === sharedPrefixedMcpToolName("opengeni", toolName) &&
+      entry.codemodePath.length === path.length &&
+      entry.codemodePath.every((segment, index) => segment === path[index])
+    );
+  });
+}
+
 export function buildOpenGeniAgent(
   settings: Settings,
   resources: ResourceRef[],
   options: BuildAgentOptions = {},
 ): Agent<any, any> {
-  if (Boolean(options.toolspaceTokenSeed) !== Boolean(options.toolspaceTokenSessionId)) {
-    throw new Error("toolspaceTokenSeed and toolspaceTokenSessionId must be supplied together");
+  if (Boolean(options.codemodeTokenSeed) !== Boolean(options.codemodeTokenSessionId)) {
+    throw new Error("codemodeTokenSeed and codemodeTokenSessionId must be supplied together");
   }
-  const artifactRuntimeAvailable = artifactRuntimeSkillsAvailable(options);
-  if (options.editableArtifactPublication && !artifactRuntimeAvailable) {
-    throw new Error("editableArtifactPublication requires a verified artifact runtime");
-  }
+  const artifactRuntimeAvailable = artifactRuntimeIsAvailable(options);
+  const editableArtifactToolsAvailable = hasCanonicalEditableArtifactToolSurface(
+    options.attemptToolCatalog,
+  );
   // Resolved per-turn gating. Each override defaults to today's settings-derived
   // behaviour, so the legacy global-client callers (no resolved model) build the
   // exact same agent as before; the multi-provider worker path passes the
@@ -2585,7 +1995,7 @@ export function buildOpenGeniAgent(
       ? agentTool({
           name: "generate_image",
           description:
-            "Generate exactly one image from the requested visual description. Use this when the user asks to create an image. The result is a permanent image artifact and its exact sandbox path. Do not call it repeatedly unless the user requested multiple distinct images.",
+            "Generate or edit exactly one image. Optionally provide up to four ordered references using exact /workspace paths, workspace File IDs, or generated-image artifact IDs; describe each reference's role by position in the prompt. The result is a permanent image artifact and its exact sandbox path. Do not call repeatedly unless the user requested multiple distinct images.",
           parameters: GenerateImageToolInput,
           errorFunction: null,
           execute: async (input, _context, details) => {
@@ -2598,22 +2008,32 @@ export function buildOpenGeniAgent(
           },
         })
       : null;
-  const editableArtifactPublicationTool = options.editableArtifactPublication
+  const videoGenerationCapabilityTool = options.videoGeneration
     ? agentTool({
-        name: "publish_editable_artifact",
+        name: "get_video_generation_capabilities",
         description:
-          "Promote one final, validated Office file into the durable collaborative editor. Call exactly once only after exporting, re-importing, and visually verifying the final .docx, .xlsx, or .pptx. Do not call for scratch files, previews, read-only work, or before validation. A successful receipt is authoritative; never repeat it.",
-        parameters: PublishEditableArtifactToolInput,
+          "Return the video-generation models and exact source, duration, resolution, aspect-ratio, and audio capabilities currently enabled for this workspace. Call when choosing a model or reference mode; availability is runtime state and is never encoded in the generate_video schema.",
+        parameters: GetVideoGenerationCapabilitiesToolInput,
+        errorFunction: null,
+        execute: async () => {
+          const adapter = options.videoGeneration;
+          if (!adapter) throw new Error("Video-generation capability changed during execution");
+          return await adapter.capabilities();
+        },
+      })
+    : null;
+  const videoGenerationTool = options.videoGeneration
+    ? agentTool({
+        name: "generate_video",
+        description:
+          "Start one durable asynchronous video generation. Use exact /workspace paths for any references and call once per intentionally distinct result. The accepted receipt means work continues independently; a later platform update provides the terminal result. Never retry automatically after failure or uncertainty.",
+        parameters: GenerateVideoToolInput,
         errorFunction: null,
         execute: async (input, _context, details) => {
           const toolCallId = details?.toolCall?.callId;
-          if (!toolCallId) {
-            throw new Error("Editable-artifact publication tool call has no durable identity");
-          }
-          const adapter = options.editableArtifactPublication;
-          if (!adapter) {
-            throw new Error("Editable-artifact publication adapter changed during execution");
-          }
+          if (!toolCallId) throw new Error("Video-generation tool call has no durable identity");
+          const adapter = options.videoGeneration;
+          if (!adapter) throw new Error("Video-generation adapter changed during execution");
           return await adapter.execute(input, { toolCallId });
         },
       })
@@ -2627,6 +2047,27 @@ export function buildOpenGeniAgent(
             "Pause this turn and request structured human input. Use for decisions or missing information that only a person can provide. Supports free text, single-select, multi-select, an optional Other value, multiple questions, explicit skip policy, and an optional expiry.",
           parameters: RequestHumanInputToolInput,
           needsApproval: true,
+          inputGuardrails: [
+            {
+              name: "validate_human_input_request",
+              run: async ({ toolCall }) => {
+                let input: unknown;
+                try {
+                  input = JSON.parse(toolCall.arguments);
+                } catch {
+                  return ToolGuardrailFunctionOutputFactory.rejectContent(
+                    "Invalid request_human_input arguments. Call the tool again with valid JSON matching its schema.",
+                  );
+                }
+                if (!RequestHumanInputToolInput.safeParse(input).success) {
+                  return ToolGuardrailFunctionOutputFactory.rejectContent(
+                    "Invalid request_human_input arguments. Call the tool again with an object matching its schema; questions must be an array, not JSON text.",
+                  );
+                }
+                return ToolGuardrailFunctionOutputFactory.allow();
+              },
+            },
+          ],
           // A missing/mismatched durable response is a protocol integrity failure,
           // not model-visible tool output the agent may reason past.
           errorFunction: null,
@@ -2648,7 +2089,8 @@ export function buildOpenGeniAgent(
   const agentTools = [
     ...hostedTools,
     ...(providerImageGenerationTool ? [providerImageGenerationTool] : []),
-    ...(editableArtifactPublicationTool ? [editableArtifactPublicationTool] : []),
+    ...(videoGenerationCapabilityTool ? [videoGenerationCapabilityTool] : []),
+    ...(videoGenerationTool ? [videoGenerationTool] : []),
     ...(humanInputTool ? [humanInputTool] : []),
   ];
   const baseConfig = {
@@ -2665,8 +2107,8 @@ export function buildOpenGeniAgent(
     // Persona composition order (all one system-level instructions string):
     //   1. workspace instructionsTemplate (or deployment default) with the
     //      non-bypassable CORE substituted at {{core}} — composeAgentInstructions,
-    //   2. + the generic programmatic-tool-calling (toolspace) directive, ONLY
-    //      when a toolspace token was minted for this managed-sandbox turn,
+    //   2. + the generic programmatic-tool-calling (codemode) directive, ONLY
+    //      when a codemode token was minted for this managed-sandbox turn,
     //   3. + managed-sandbox Git binding discovery, ONLY when one provider has
     //      multiple credential bindings,
     //   4. + workspace memory working set, ONLY when the workspace setting is on
@@ -2743,7 +2185,8 @@ export function buildOpenGeniAgent(
         ? { skillLibrarySkills: options.skillLibrarySkills }
         : {}),
       ...(options.sessionSkills?.length ? { sessionSkills: options.sessionSkills } : {}),
-      ...(artifactRuntimeAvailable ? { artifactRuntimeAvailable: true } : {}),
+      ...(editableArtifactToolsAvailable ? { editableArtifactToolsAvailable: true } : {}),
+      ...(options.videoGeneration ? { videoGenerationAvailable: true } : {}),
       ...repositoryWorkspaceSkillPathsOption(resources),
       ...(options.structuredToolTransport !== undefined
         ? { structuredToolTransport: options.structuredToolTransport }
@@ -2755,6 +2198,9 @@ export function buildOpenGeniAgent(
         ? { computerToolMode: options.computerToolMode }
         : {}),
       ...(options.onComputerUseReady ? { onComputerUseReady: options.onComputerUseReady } : {}),
+      ...(options.onRetainableSessionImageOutput
+        ? { onRetainableSessionImageOutput: options.onRetainableSessionImageOutput }
+        : {}),
       ...(options.turnCancellationSignal
         ? { turnCancellationSignal: options.turnCancellationSignal }
         : {}),
@@ -2771,7 +2217,8 @@ export function buildOpenGeniAgent(
         options.skillLibrarySkills ?? [],
         options.packSkills ?? [],
         options.sessionSkills ?? [],
-        artifactRuntimeAvailable,
+        editableArtifactToolsAvailable,
+        Boolean(options.videoGeneration),
       ).map((selection) => Object.freeze(selection)),
     ),
   );
@@ -2819,9 +2266,9 @@ export function buildOpenGeniAgent(
   if (options.gitCredentialBindings && options.gitCredentialBindings.length > 0) {
     agentGitCredentialBindings.set(agent, options.gitCredentialBindings);
   }
-  if (options.toolspaceTokenSeed && options.activeSandboxBackend !== "selfhosted") {
-    agentToolspaceTokenSeed.set(agent, options.toolspaceTokenSeed);
-    agentToolspaceTokenSessionId.set(agent, options.toolspaceTokenSessionId!);
+  if (options.codemodeTokenSeed && options.activeSandboxBackend !== "selfhosted") {
+    agentCodemodeTokenSeed.set(agent, options.codemodeTokenSeed);
+    agentCodemodeTokenSessionId.set(agent, options.codemodeTokenSessionId!);
   }
   // M3: stash the rig setup descriptor + RESOLVE the rig credential hooks now.
   // sandboxLifecycleHooksForIds throws on an unknown hook name, so a typo'd rig
@@ -3253,7 +2700,8 @@ export function buildAgentCapabilities(
   options: {
     skillLibrarySkills?: PackSkill[];
     sessionSkills?: PackSkill[];
-    artifactRuntimeAvailable?: boolean;
+    editableArtifactToolsAvailable?: boolean;
+    videoGenerationAvailable?: boolean;
     workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];
     structuredToolTransport?: boolean;
     supportsImageInput?: boolean;
@@ -3261,6 +2709,7 @@ export function buildAgentCapabilities(
     // Omitted/unproven transport fails closed with no computer tools.
     computerToolMode?: ComputerToolMode;
     onComputerUseReady?: (session: SandboxSessionLike) => Promise<void>;
+    onRetainableSessionImageOutput?: RetainableSessionImageOutputHook;
     turnCancellationSignal?: AbortSignal;
     onToolCancellationFence?: (fence: TurnToolCancellationFence) => void;
   } = {},
@@ -3282,12 +2731,19 @@ export function buildAgentCapabilities(
       options.structuredToolTransport === false
         ? withStructuredViewImageFunctionResults(tools)
         : tools;
-    return options.supportsImageInput === false
-      ? withoutImageInputTools(transportTools)
-      : transportTools;
+    const imageCapableTools =
+      options.supportsImageInput === false
+        ? withoutImageInputTools(transportTools)
+        : transportTools;
+    return withRetainableSessionImageOutputHook(
+      imageCapableTools,
+      options.onRetainableSessionImageOutput,
+    );
   };
   const filesystemCapability = filesystem({
-    ...(options.structuredToolTransport === false || options.supportsImageInput === false
+    ...(options.structuredToolTransport === false ||
+    options.supportsImageInput === false ||
+    options.onRetainableSessionImageOutput
       ? { configureTools: configureFilesystemTools }
       : {}),
   });
@@ -3304,23 +2760,27 @@ export function buildAgentCapabilities(
     packSkills,
     options.skillLibrarySkills ?? [],
     options.sessionSkills ?? [],
-    options.artifactRuntimeAvailable === true,
+    options.editableArtifactToolsAvailable === true,
+    options.videoGenerationAvailable === true,
   );
   caps.push(
     skills({
       lazyFrom: lazySkillSourceWithPackSkills(
         [...packSkills, ...sessionSkills],
         options.skillLibrarySkills ?? [],
-        options.artifactRuntimeAvailable === true,
+        options.editableArtifactToolsAvailable === true,
+        options.videoGenerationAvailable === true,
       ),
     }),
   );
   if (options.workspaceSkillPaths?.length) {
     caps.push(
       workspaceSkills(options.workspaceSkillPaths, [
-        ...(options.artifactRuntimeAvailable
+        ...bundledSkillDirNames(bundledSkillsDir()),
+        ...(options.editableArtifactToolsAvailable
           ? bundledSkillDirNames(bundledArtifactSkillsDir())
           : []),
+        ...(options.videoGenerationAvailable ? bundledSkillDirNames(bundledVideoSkillsDir()) : []),
         ...(options.skillLibrarySkills ?? []).map((skill) => skill.name),
         ...packSkills.map((skill) => skill.name),
         ...sessionSkills.map((skill) => skill.name),
@@ -3353,6 +2813,9 @@ export function buildAgentCapabilities(
       readOnly: settings.computerUseReadOnly,
       ...(options.turnCancellationSignal ? { abortSignal: options.turnCancellationSignal } : {}),
       ...(options.onComputerUseReady ? { onReady: options.onComputerUseReady } : {}),
+      ...(options.onRetainableSessionImageOutput
+        ? { onRetainableSessionImageOutput: options.onRetainableSessionImageOutput }
+        : {}),
       toolMode: options.computerToolMode ?? "disabled",
     });
     caps.push(computerCapability as unknown as ReturnType<typeof Capabilities.default>[number]);
@@ -3374,6 +2837,10 @@ export function sandboxRunAs(_settings: Settings): string | undefined {
 
 export type PreparedAgentTools = {
   mcpServers: MCPServer[];
+  /** One exact executable catalog shared by model MCP and Codemode projections. */
+  attemptToolCatalog: AttemptToolCatalog | null;
+  /** In-process authority behind the model MCP projection of the same catalog. */
+  attemptToolEnvironment: AttemptToolEnvironment | null;
   /** Attempt-frozen successful broker identity for each prepared MCP server. */
   resolvedMcpConnectionIds: ReadonlyMap<string, string>;
   close: () => Promise<void>;
@@ -3437,6 +2904,16 @@ export type PrepareToolsOptions = {
   mcpFetchImpl?: FetchLike;
   /** In-process protocol adapters keyed by their ordinary runtime registry id. */
   localMcpServers?: readonly LocalMcpServerRegistration[];
+  /** Monotonic catalog generation for this execution attempt. */
+  attemptToolCatalogGeneration?: number;
+  /** Durable host seam; completion is required before the model can run. */
+  onAttemptToolCatalog?: (catalog: AttemptToolCatalog) => Promise<void> | void;
+  /**
+   * Already-authorized in-process tools (for example Browser/Computer
+   * interaction operations). They are projected into the same model MCP list
+   * and exact attempt catalog; this is not a second tool registry.
+   */
+  attemptToolDefinitions?: readonly AttemptToolDefinition[];
 };
 
 type ConnectedMcpServerBatch = Awaited<ReturnType<typeof connectMcpServers>>;
@@ -3549,13 +3026,8 @@ export async function prepareAgentTools(
   const codexConnectorNamespaces = new Set<string>();
   const resolvedMcpConnectionIds = new Map<string, string>();
   assertMcpServerSelectionWithinBounds(tools);
-  if (tools.length === 0) {
-    return {
-      mcpServers: [],
-      resolvedMcpConnectionIds,
-      close: async () => {},
-      codexConnectorNamespaces,
-    };
+  if (options.attemptToolDefinitions?.length && !attemptToolScope(options)) {
+    throw new Error("in-process attempt tools require exact attempt scope");
   }
   const registry = new Map(settings.mcpServers.map((server) => [server.id, server]));
   const localRegistry = localMcpServerRegistry(options.localMcpServers ?? [], registry);
@@ -3644,34 +3116,58 @@ export async function prepareAgentTools(
       // auth misses are still published as actionable state because the
       // workspace catalog explicitly told the user that the surface existed.
       const bestEffort = isCodexAppsMcpServer(config) || optional || !!config.connectionRef;
+      const useGmailRestAdapter =
+        settings.gmailRestAdapterEnabled &&
+        isOfficialGmailMcpConfig(config.url, config.connectionRef);
+      const innerServer = useGmailRestAdapter
+        ? new GmailRestMcpServer({
+            workspaceId: options.workspaceId ?? "",
+            ...(options.credentialSubjectId ? { subjectId: options.credentialSubjectId } : {}),
+            serverId: config.id,
+            connectionRef: config.connectionRef!,
+            resolveCredential: async (request) =>
+              await resolveConnectionForRequest(
+                options,
+                request.serverId,
+                request.connectionRef,
+                request.destinationUrl,
+                request.toolName,
+                request.forceRefresh === true,
+              ),
+            onAuthNeeded: async (payload) => await publishAuthNeeded(options, payload),
+            onResolvedConnectionId: (connectionId) =>
+              recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, connectionId),
+            fetchImpl: mcpFetchImpl,
+          })
+        : new MCPServerStreamableHttp({
+            url,
+            name: config.name ?? config.id,
+            cacheToolsList: config.cacheToolsList,
+            // The upstream transport logger receives raw thrown errors, whose
+            // messages may contain response bodies, URLs, headers, or echoed
+            // credentials. Keep its diagnostic surface structural only.
+            logger: mcpTransportLogger(config.id, {
+              // Codex Apps setup is a read-only initialize/tools-list handshake.
+              // A statusless transport failure is safe to retry, while auth
+              // responses remain non-retryable and publish their specific
+              // reconnect reason through codexAppsAuthFetch.
+              recoverySafeSetup: isCodexAppsMcpServer(config),
+            }),
+            // codex_apps returns connector tools with empty `outputSchema: {}` that the
+            // MCP SDK's strict Tool schema rejects (fails the turn during tools/list);
+            // sanitize the response on the wire before validation. The namespace Set
+            // also captures each tool's original connector namespace (P4 Part B.1).
+            fetch: fetchImpl,
+            ...(await mcpServerRequestInit(settings, config)),
+            ...(config.timeoutMs
+              ? {
+                  timeout: config.timeoutMs,
+                  clientSessionTimeoutSeconds: Math.ceil(config.timeoutMs / 1000),
+                }
+              : {}),
+          });
       const server = new PrefixedMcpServer(
-        new MCPServerStreamableHttp({
-          url,
-          name: config.name ?? config.id,
-          cacheToolsList: config.cacheToolsList,
-          // The upstream transport logger receives raw thrown errors, whose
-          // messages may contain response bodies, URLs, headers, or echoed
-          // credentials. Keep its diagnostic surface structural only.
-          logger: mcpTransportLogger(config.id, {
-            // Codex Apps setup is a read-only initialize/tools-list handshake.
-            // A statusless transport failure is safe to retry, while auth
-            // responses remain non-retryable and publish their specific
-            // reconnect reason through codexAppsAuthFetch.
-            recoverySafeSetup: isCodexAppsMcpServer(config),
-          }),
-          // codex_apps returns connector tools with empty `outputSchema: {}` that the
-          // MCP SDK's strict Tool schema rejects (fails the turn during tools/list);
-          // sanitize the response on the wire before validation. The namespace Set
-          // also captures each tool's original connector namespace (P4 Part B.1).
-          fetch: fetchImpl,
-          ...(await mcpServerRequestInit(settings, config)),
-          ...(config.timeoutMs
-            ? {
-                timeout: config.timeoutMs,
-                clientSessionTimeoutSeconds: Math.ceil(config.timeoutMs / 1000),
-              }
-            : {}),
-        }),
+        innerServer,
         config.id,
         config.allowedTools,
         bestEffort,
@@ -3741,11 +3237,48 @@ export async function prepareAgentTools(
       );
     }
   }
+  const activeMcpServers = [...connectedRequired.active, ...(connectedBestEffort?.active ?? [])];
+  let localToolServer: AttemptDefinitionMcpServer | null = null;
+  let attemptToolEnvironment: AttemptToolEnvironment | null = null;
+  try {
+    localToolServer = options.attemptToolDefinitions?.length
+      ? new AttemptDefinitionMcpServer(
+          options.attemptToolDefinitions,
+          aggregateToolBudget,
+          options.subjectId ?? "worker:mcp-model",
+        )
+      : null;
+    attemptToolEnvironment = await prepareAttemptToolEnvironment(
+      activeMcpServers,
+      registry,
+      options,
+    );
+    if (attemptToolEnvironment && localToolServer) {
+      localToolServer.bindAttemptToolEnvironment(attemptToolEnvironment);
+    }
+    if (attemptToolEnvironment) {
+      await options.onAttemptToolCatalog?.(attemptToolEnvironment.catalog);
+    }
+  } catch (error) {
+    await localToolServer?.close().catch(() => undefined);
+    await connectedBestEffort?.close().catch(() => undefined);
+    await connectedRequired.close().catch(() => undefined);
+    throw error;
+  }
   return {
-    mcpServers: [...connectedRequired.active, ...(connectedBestEffort?.active ?? [])],
+    mcpServers: localToolServer ? [...activeMcpServers, localToolServer] : activeMcpServers,
+    attemptToolCatalog: attemptToolEnvironment?.catalog ?? null,
+    attemptToolEnvironment,
     resolvedMcpConnectionIds: new Map(resolvedMcpConnectionIds),
     close: async () => {
       let firstError: unknown;
+      if (localToolServer) {
+        try {
+          await localToolServer.close();
+        } catch (error) {
+          firstError ??= error;
+        }
+      }
       if (connectedBestEffort) {
         try {
           await connectedBestEffort.close();
@@ -3786,6 +3319,122 @@ function localMcpServerRegistry(
     registry.set(registration.id, registration);
   }
   return registry;
+}
+function attemptToolScope(options: PrepareToolsOptions): AttemptToolScope | null {
+  if (
+    !options.accountId ||
+    !options.workspaceId ||
+    !options.sessionId ||
+    !options.turnId ||
+    !options.attemptId ||
+    options.executionGeneration === undefined
+  ) {
+    return null;
+  }
+  return {
+    accountId: options.accountId,
+    workspaceId: options.workspaceId,
+    sessionId: options.sessionId,
+    turnId: options.turnId,
+    attemptId: options.attemptId,
+    executionGeneration: options.executionGeneration,
+  };
+}
+
+async function prepareAttemptToolEnvironment(
+  servers: MCPServer[],
+  registry: ReadonlyMap<string, Settings["mcpServers"][number]>,
+  options: PrepareToolsOptions,
+): Promise<AttemptToolEnvironment | null> {
+  const scope = attemptToolScope(options);
+  if (!scope) return null;
+  const preparedServers = servers.map((server) => {
+    if (!(server instanceof PrefixedMcpServer)) {
+      throw new Error("attempt tool catalog received an unknown MCP server implementation");
+    }
+    const config = registry.get(server.registryId);
+    if (!config) {
+      throw new Error(`attempt tool catalog lost MCP registry entry: ${server.registryId}`);
+    }
+    return { server, config };
+  });
+  const perServerDefinitions = await boundedParallelMap(
+    preparedServers,
+    MCP_MAX_CONCURRENT_SERVER_OPERATIONS,
+    async ({ server, config }): Promise<AttemptToolDefinition[]> => {
+      const listed = await server.freezeTools();
+      return listed.map((tool) => {
+        const toolName = server.unprefixedToolName(tool.name);
+        return {
+          identity: { serverId: server.registryId, toolName },
+          modelName: tool.name,
+          codemodePath: attemptToolCodemodePath(server.registryId, toolName),
+          ...(tool.title ? { title: tool.title } : {}),
+          ...(tool.description ? { description: tool.description } : {}),
+          inputSchema: tool.inputSchema,
+          ...(tool.outputSchema ? { outputSchema: tool.outputSchema } : {}),
+          ...(tool.annotations ? { annotations: tool.annotations } : {}),
+          ...(tool.icons ? { icons: tool.icons } : {}),
+          source: attemptToolSource(server.registryId),
+          approval: attemptToolApproval(config, toolName),
+          execute: async (args, context) =>
+            await server.executeCatalogTool(
+              toolName,
+              args,
+              {
+                ...(context.transportMeta ?? {}),
+                opengeniOperationId: context.operationId,
+              },
+              {
+                ...(context.signal ? { signal: context.signal } : {}),
+              },
+            ),
+        };
+      });
+    },
+  );
+  const environment = createAttemptToolEnvironment({
+    scope,
+    generation: options.attemptToolCatalogGeneration ?? 1,
+    definitions: [...perServerDefinitions.flat(), ...(options.attemptToolDefinitions ?? [])],
+  });
+  const subjectId = options.subjectId ?? "worker:mcp-model";
+  for (const { server } of preparedServers) {
+    server.bindAttemptToolEnvironment(environment, subjectId);
+  }
+  return environment;
+}
+
+function attemptToolCodemodePath(serverId: string, toolName: string): readonly string[] {
+  if (serverId === "opengeni") {
+    const path =
+      EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS[
+        toolName as keyof typeof EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS
+      ];
+    if (path) return path;
+  }
+  return [serverId, toolName];
+}
+
+function attemptToolSource(serverId: string): AttemptToolDefinition["source"] {
+  if (serverId === "opengeni" || serverId === "files" || serverId === "docs") {
+    return serverId;
+  }
+  if (serverId === CODEX_APPS_MCP_SERVER_ID) return "codex_apps";
+  return "mcp";
+}
+
+function attemptToolApproval(
+  config: Settings["mcpServers"][number],
+  toolName: string,
+): AttemptToolDefinition["approval"] {
+  if (
+    config.requireApproval === true ||
+    (Array.isArray(config.requireApproval) && config.requireApproval.includes(toolName))
+  ) {
+    return "human";
+  }
+  return config.connectionRef ? "policy" : "none";
 }
 
 function connectionBrokerFetch(
@@ -4261,6 +3910,25 @@ function mcpToolUnavailableContent(error: unknown): Array<{ type: "text"; text: 
       text: "This tool is unavailable for the rest of this turn. Do not retry it — continue without it or use another approach.",
     },
   ];
+}
+
+function mcpContentAsResult(content: unknown): Record<string, unknown> {
+  if (!Array.isArray(content)) {
+    throw new Error("MCP tool returned non-array content");
+  }
+  const metadata = content as unknown as {
+    _meta?: unknown;
+    structuredContent?: unknown;
+    isError?: unknown;
+  };
+  return {
+    content: [...content],
+    ...(metadata._meta === undefined ? {} : { _meta: metadata._meta }),
+    ...(metadata.structuredContent === undefined
+      ? {}
+      : { structuredContent: metadata.structuredContent }),
+    ...(metadata.isError === undefined ? {} : { isError: metadata.isError }),
+  };
 }
 
 function exactErrorMessage(error: unknown): string {
@@ -4951,6 +4619,96 @@ function logPublicMcpLifecycleFailure(error: Error): void {
   });
 }
 
+/**
+ * Model-facing MCP projection for canonical in-process definitions. The
+ * definitions themselves are compiled into AttemptToolEnvironment; this class
+ * owns no authority and cannot execute until bound to that exact environment.
+ */
+class AttemptDefinitionMcpServer implements MCPServer {
+  readonly cacheToolsList = true;
+  readonly name = "opengeni-attempt-local-tools";
+  private readonly tools: RuntimeMcpTool[];
+  private environment: AttemptToolEnvironment | null = null;
+  private closed = false;
+
+  constructor(
+    definitions: readonly AttemptToolDefinition[],
+    private readonly aggregateToolBudget: McpAggregateToolListBudget,
+    private readonly subjectId: string,
+  ) {
+    const descriptors = definitions.map(
+      (definition) =>
+        ({
+          name: definition.modelName,
+          ...(definition.title ? { title: definition.title } : {}),
+          ...(definition.description ? { description: definition.description } : {}),
+          inputSchema: definition.inputSchema,
+          ...(definition.outputSchema ? { outputSchema: definition.outputSchema } : {}),
+          ...(definition.annotations ? { annotations: definition.annotations } : {}),
+          ...(definition.icons ? { icons: definition.icons } : {}),
+        }) as RuntimeMcpTool,
+    );
+    this.tools = [
+      ...(this.aggregateToolBudget.replace(this.name, descriptors) as RuntimeMcpTool[]),
+    ];
+  }
+
+  bindAttemptToolEnvironment(environment: AttemptToolEnvironment): void {
+    if (this.environment && this.environment !== environment) {
+      throw new Error("local model tool server is already bound to another attempt catalog");
+    }
+    this.environment = environment;
+  }
+
+  async connect(): Promise<void> {
+    if (this.closed) throw new Error("local model tool server is closed");
+  }
+
+  async close(): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
+    this.environment = null;
+    this.aggregateToolBudget.remove(this.name);
+  }
+
+  async listTools(): Promise<RuntimeMcpTool[]> {
+    if (this.closed) throw new Error("local model tool server is closed");
+    return this.tools;
+  }
+
+  async callTool(
+    toolName: string,
+    args: Record<string, unknown> | null,
+    meta?: Record<string, unknown> | null,
+    options?: { signal?: AbortSignal },
+  ): Promise<any> {
+    return (await this.callToolResult(toolName, args, meta, options)).content;
+  }
+
+  async callToolResult(
+    toolName: string,
+    args: Record<string, unknown> | null,
+    meta?: Record<string, unknown> | null,
+    options?: { signal?: AbortSignal },
+  ): Promise<any> {
+    if (this.closed) throw new Error("local model tool server is closed");
+    if (!this.environment) {
+      throw new Error("local model tool server has no exact attempt authority");
+    }
+    return await this.environment.callModel({
+      modelName: toolName,
+      arguments: args ?? {},
+      subjectId: this.subjectId,
+      ...(meta === undefined ? {} : { transportMeta: meta }),
+      ...(options?.signal ? { signal: options.signal } : {}),
+    });
+  }
+
+  async invalidateToolsCache(): Promise<void> {
+    // Attempt catalogs are immutable. A successor attempt gets a new server.
+  }
+}
+
 /** @internal Exported for exact SDK-boundary conformance tests. */
 export class PrefixedMcpServer implements MCPServer {
   readonly cacheToolsList: boolean;
@@ -4966,6 +4724,9 @@ export class PrefixedMcpServer implements MCPServer {
   private loggedListToolsFailure = false;
   private listedToolSchemaTokens = 0;
   private modelToolSchemaAccountingDeferred = false;
+  private frozenTools: Promise<RuntimeMcpTool[]> | null = null;
+  private attemptToolEnvironment: AttemptToolEnvironment | null = null;
+  private attemptToolSubjectId = "worker:mcp-model";
   private readonly lifecycleFailures: Partial<Record<McpLifecyclePhase, McpLifecycleFailure>> = {};
 
   constructor(
@@ -5030,7 +4791,28 @@ export class PrefixedMcpServer implements MCPServer {
     this.aggregateToolBudget?.remove(this.aggregateSourceId);
   }
 
-  async listTools(): Promise<RuntimeMcpTool[]> {
+  listTools(): Promise<RuntimeMcpTool[]> {
+    this.frozenTools ??= this.loadAndFreezeTools();
+    return this.frozenTools;
+  }
+
+  freezeTools(): Promise<RuntimeMcpTool[]> {
+    return this.listTools();
+  }
+
+  bindAttemptToolEnvironment(environment: AttemptToolEnvironment, subjectId: string): void {
+    if (this.attemptToolEnvironment && this.attemptToolEnvironment !== environment) {
+      throw new Error(`MCP server ${this.registryId} is already bound to another attempt catalog`);
+    }
+    this.attemptToolEnvironment = environment;
+    this.attemptToolSubjectId = subjectId;
+  }
+
+  unprefixedToolName(toolName: string): string {
+    return this.unprefixToolName(toolName);
+  }
+
+  private async loadAndFreezeTools(): Promise<RuntimeMcpTool[]> {
     try {
       const tools = assertMcpToolListWithinBounds(await this.inner.listTools()) as RuntimeMcpTool[];
       const exposed = tools
@@ -5093,16 +4875,60 @@ export class PrefixedMcpServer implements MCPServer {
     toolName: string,
     args: Record<string, unknown> | null,
     meta?: Record<string, unknown> | null,
-    callOptions?: MCPCallToolOptions,
+    options?: { signal?: AbortSignal },
   ): Promise<any> {
     const unprefixed = this.unprefixToolName(toolName);
     if (!this.isAllowed(unprefixed)) {
       throw new Error(`MCP tool ${unprefixed} is not allowed for server ${this.registryId}`);
     }
+    const result = this.attemptToolEnvironment
+      ? await this.attemptToolEnvironment.callModel({
+          modelName: toolName,
+          arguments: args ?? {},
+          subjectId: this.attemptToolSubjectId,
+          ...(meta === undefined ? {} : { transportMeta: meta }),
+          ...(options?.signal ? { signal: options.signal } : {}),
+        })
+      : await this.executeCatalogTool(unprefixed, args ?? {}, meta, options);
+    return result;
+  }
+
+  async callToolResult(
+    toolName: string,
+    args: Record<string, unknown> | null,
+    meta?: Record<string, unknown> | null,
+    options?: { signal?: AbortSignal },
+  ): Promise<any> {
+    const unprefixed = this.unprefixToolName(toolName);
+    if (!this.isAllowed(unprefixed)) {
+      throw new Error(`MCP tool ${unprefixed} is not allowed for server ${this.registryId}`);
+    }
+    return this.attemptToolEnvironment
+      ? await this.attemptToolEnvironment.callModel({
+          modelName: toolName,
+          arguments: args ?? {},
+          subjectId: this.attemptToolSubjectId,
+          ...(meta === undefined ? {} : { transportMeta: meta }),
+          ...(options?.signal ? { signal: options.signal } : {}),
+        })
+      : await this.executeCatalogTool(unprefixed, args ?? {}, meta, options);
+  }
+
+  async executeCatalogTool(
+    unprefixed: string,
+    args: Record<string, unknown>,
+    meta?: Record<string, unknown> | null,
+    options?: { signal?: AbortSignal },
+  ): Promise<AttemptToolResultValue> {
+    if (!this.isAllowed(unprefixed)) {
+      throw new Error(`MCP tool ${unprefixed} is not allowed for server ${this.registryId}`);
+    }
     try {
-      const output = await this.inner.callTool(unprefixed, args, meta, callOptions);
+      const output = this.inner.callToolResult
+        ? await this.inner.callToolResult(unprefixed, args, meta, options)
+        : mcpContentAsResult(await this.inner.callTool(unprefixed, args, meta, options));
       assertMcpPayloadWithinBytes(output, MCP_MAX_TOOL_RESULT_BYTES, "MCP tool result");
-      return output;
+      return AttemptToolResult.parse(output);
     } catch (error) {
       // A brokered tools/call that receives 401 may already have changed provider
       // state. The broker refreshed credentials for future requests but did not
@@ -5153,6 +4979,7 @@ export class PrefixedMcpServer implements MCPServer {
   }
 
   invalidateToolsCache(): Promise<void> {
+    if (this.frozenTools) return Promise.resolve();
     return this.inner.invalidateToolsCache();
   }
 
@@ -5333,9 +5160,9 @@ export type RunAgentStreamOptions = {
   // owns the multi-day timer and uses this pinned, un-proxied session to
   // atomically replace token files; runtime never mints credentials itself.
   onGitCredentialSessionReady?: (session: GitCredentialTokenWriterSession) => Promise<void> | void;
-  // OpenGeni-minted Toolspace token renewal registration. Called only after the
+  // OpenGeni-minted Codemode token renewal registration. Called only after the
   // initial token file reached the real sandbox session.
-  onToolspaceTokenSessionReady?: (session: ToolspaceTokenWriterSession) => Promise<void> | void;
+  onCodemodeTokenSessionReady?: (session: CodemodeTokenWriterSession) => Promise<void> | void;
   // Host-owned run material is seeded off-manifest before setup and every
   // agent-created process sources the active immutable generation. The worker
   // owns resolution/renewal/fencing; runtime owns sandbox transport.
@@ -5424,13 +5251,13 @@ function takeGenesisTitleInputFilter(agent: Agent<any, any>): CallModelInputFilt
   return oneShotGenesisTitleInputFilter();
 }
 
-// Generic substrate prompting for programmatic tool calling (toolspace). Same
-// text for every host; gated per-turn by appendToolspaceInstructions on the
-// presence of a minted toolspace token, so it only appears when the sandbox
-// exposes $OPENGENI_TOOLSPACE_URL/_TOKEN_FILE. Stock images carry ogtool;
-// custom environments get only an exact deployment-pinned bootstrap hint.
-export const TOOLSPACE_PROGRAMMATIC_DIRECTIVE =
-  "Every tool on your MCP surface is also callable programmatically from the sandbox shell, so scripts can invoke tools without a model round trip per call. If `ogtool` is installed, run `ogtool list` to see the available tools and their input schemas (from tools/list), then `ogtool call <tool-name> '<json-args>'`. If it is absent and both npm and $OPENGENI_OGTOOL_PACKAGE_SPEC are available, run the exact deployment-pinned package with `npm exec --yes --package=\"$OPENGENI_OGTOOL_PACKAGE_SPEC\" -- ogtool ...`; never guess a version or install `latest`. Otherwise POST MCP JSON-RPC directly to $OPENGENI_TOOLSPACE_URL with the bearer token read from $OPENGENI_TOOLSPACE_TOKEN_FILE. Prefer programmatic calls for loops, polling, and bulk filtering: their results stay in the sandbox and do not consume your context window. Tools that require human approval must still be invoked normally — called programmatically they return a typed error.";
+// Generic substrate prompting for programmatic tool calling (codemode). Same
+// text for every host; gated per-turn by appendCodemodeInstructions on the
+// presence of a minted codemode token, so it only appears when the sandbox
+// exposes $OPENGENI_CODEMODE_URL/_TOKEN_FILE. Stock images carry the importable
+// package and ogtool; custom environments get an exact pinned CLI hint.
+export const CODEMODE_PROGRAMMATIC_DIRECTIVE =
+  'Every tool available to you is also callable programmatically from the sandbox through the same frozen catalog, authority, credentials, policy, and execution path. In stock sandboxes, write persistent Bun code with `import { tools, openGeni } from "@opengeni/codemode"`; run `ogtool declarations <file.d.ts>` when project-local catalog types are useful. For shell calls, run `ogtool list`, then `ogtool call <tool-path> \'<json-args>\'`. If `ogtool` is absent and Bun plus $OPENGENI_OGTOOL_PACKAGE_SPEC are available, run the exact deployment-pinned package with `bun x -p "$OPENGENI_OGTOOL_PACKAGE_SPEC" ogtool ...`; never guess a version or install `latest`. Prefer Codemode for loops, polling, bulk filtering, and intermediate data that should remain in the sandbox instead of consuming your context window. Tools requiring human approval return a typed error in Codemode and must be invoked normally.';
 
 function modelModalityProjectionFilterForAgent(
   agent: object,
@@ -5460,7 +5287,7 @@ export async function runAgentStream(
         ? { input, persistedHistoryCount: input.history.length }
         : input;
   const environment = overrides.sandboxEnvironment ?? collectSandboxEnvironment(settings);
-  const toolspaceTokenFile = toolspaceTokenFileForAgent(agent, environment);
+  const codemodeTokenFile = codemodeTokenFileForAgent(agent, environment);
   const genesisTitleInputFilter = takeGenesisTitleInputFilter(agent);
   if (overrides.onRunCredentialSessionReady && !overrides.runCredentialSessionId) {
     throw new Error("runCredentialSessionId is required when run credential setup is enabled");
@@ -5486,14 +5313,14 @@ export async function runAgentStream(
     const credentialAgentSession = overrides.runCredentialSessionId
       ? withRunCredentialsSession(session as SandboxSessionLike, overrides.runCredentialSessionId)
       : (session as SandboxSessionLike);
-    const agentSession = toolspaceTokenFile
-      ? withToolspaceTokenSession(credentialAgentSession, toolspaceTokenFile)
+    const agentSession = codemodeTokenFile
+      ? withCodemodeTokenSession(credentialAgentSession, codemodeTokenFile)
       : credentialAgentSession;
     const credentialSetupSession = overrides.runCredentialSessionId
       ? withRunCredentialsSession(setupSession, overrides.runCredentialSessionId)
       : setupSession;
-    const decoratedSetupSession = toolspaceTokenFile
-      ? withToolspaceTokenSession(credentialSetupSession, toolspaceTokenFile)
+    const decoratedSetupSession = codemodeTokenFile
+      ? withCodemodeTokenSession(credentialSetupSession, codemodeTokenFile)
       : credentialSetupSession;
     // Platform setup (manifest-env pin + beforeAgentStart hooks + file downloads)
     // against the UN-proxied established box — the ONE-TRUTH helper shared with the
@@ -5516,8 +5343,8 @@ export async function runAgentStream(
             }
           : {}),
       });
-      if (toolspaceTokenSeedForAgent(agent)) {
-        await overrides.onToolspaceTokenSessionReady?.(agentSession);
+      if (codemodeTokenSeedForAgent(agent)) {
+        await overrides.onCodemodeTokenSessionReady?.(agentSession);
       }
       await overrides.onGitCredentialSessionReady?.(setupSession);
     }
@@ -5541,7 +5368,7 @@ export async function runAgentStream(
     // repository-clone hook seeds it to the box's token file before the clone.
     const ownedGitTokenSeeds = gitTokenSeedsForAgent(agent);
     const ownedGitCredentialBindings = gitCredentialBindingsForAgent(agent);
-    const ownedToolspaceTokenSeed = toolspaceTokenSeedForAgent(agent);
+    const ownedCodemodeTokenSeed = codemodeTokenSeedForAgent(agent);
     const ownedRigSetup = rigSetupDescriptorForAgent(agent);
     const ownedHooks = [
       // M3: rig setup runs FIRST so any tooling it installs is present for the
@@ -5553,9 +5380,9 @@ export async function runAgentStream(
         sandboxLifecycleHooksForIds(sandboxLifecycleHookIds(settings)),
         rigCredentialHooksForAgent(agent),
       ),
-      ...sandboxToolspaceTokenHooksForAgent(agent),
-      ...toolspaceTokenSessionRegistrationHooks(
-        ownedToolspaceTokenSeed ? overrides.onToolspaceTokenSessionReady : undefined,
+      ...sandboxCodemodeTokenHooksForAgent(agent),
+      ...codemodeTokenSessionRegistrationHooks(
+        ownedCodemodeTokenSeed ? overrides.onCodemodeTokenSessionReady : undefined,
       ),
       ...sandboxRepositoryCloneHooksForAgent(agent),
       ...gitCredentialSessionRegistrationHooks(overrides.onGitCredentialSessionReady),
@@ -5566,8 +5393,8 @@ export async function runAgentStream(
       ...(runAs ? { runAs } : {}),
       ...(ownedGitTokenSeeds ? { gitTokenSeeds: ownedGitTokenSeeds } : {}),
       ...(ownedGitCredentialBindings ? { gitCredentialBindings: ownedGitCredentialBindings } : {}),
-      ...(ownedToolspaceTokenSeed ? { toolspaceTokenSeed: ownedToolspaceTokenSeed } : {}),
-      ...(toolspaceTokenFile ? { toolspaceTokenFile } : {}),
+      ...(ownedCodemodeTokenSeed ? { codemodeTokenSeed: ownedCodemodeTokenSeed } : {}),
+      ...(codemodeTokenFile ? { codemodeTokenFile } : {}),
       ...(ownedRigSetup ? { rigSetup: ownedRigSetup } : {}),
     };
     // Keep both credential seeding and lifecycle decoration as a safety net for
@@ -5580,11 +5407,11 @@ export async function runAgentStream(
           overrides.onRunCredentialSessionReady,
         )
       : resourceClient;
-    const toolspaceResourceClient = toolspaceTokenFile
-      ? withToolspaceTokenClient(credentialResourceClient, toolspaceTokenFile)
+    const codemodeResourceClient = codemodeTokenFile
+      ? withCodemodeTokenClient(credentialResourceClient, codemodeTokenFile)
       : credentialResourceClient;
     const decoratedClient = withSandboxLifecycleHooks(
-      toolspaceResourceClient,
+      codemodeResourceClient,
       ownedHooks,
       ownedHookContext,
     );
@@ -5618,6 +5445,7 @@ export async function runAgentStream(
       maxTurns: settings.agentMaxModelCallsPerTurn,
       historyOwnership: "external",
       modelResponseRetention: "last",
+      toolExecution: { preApprovalInputGuardrails: true },
       callModelInputFilter: ownedFilter,
       ...(overrides.signal ? { signal: overrides.signal } : {}),
     };
@@ -5656,19 +5484,19 @@ export async function runAgentStream(
           overrides.onRunCredentialSessionReady,
         )
       : resourceClient;
-  const toolspaceClient =
-    credentialClient && toolspaceTokenFile
-      ? withToolspaceTokenClient(credentialClient, toolspaceTokenFile)
+  const codemodeClient =
+    credentialClient && codemodeTokenFile
+      ? withCodemodeTokenClient(credentialClient, codemodeTokenFile)
       : credentialClient;
   // TOKEN-BROKER (B1): the per-turn git token seed, forwarded OFF-MANIFEST so the
   // repository-clone hook seeds it to the box's token file before the clone.
   const gitTokenSeeds = gitTokenSeedsForAgent(agent);
   const gitCredentialBindings = gitCredentialBindingsForAgent(agent);
-  const toolspaceTokenSeed = toolspaceTokenSeedForAgent(agent);
+  const codemodeTokenSeed = codemodeTokenSeedForAgent(agent);
   const legacyRigSetup = rigSetupDescriptorForAgent(agent);
-  const lifecycleClient = toolspaceClient
+  const lifecycleClient = codemodeClient
     ? withSandboxLifecycleHooks(
-        toolspaceClient,
+        codemodeClient,
         [
           // M3: same rig-setup-first ordering + credential-hook union as the owned
           // path (this legacy create/resume decoration path is byte-for-byte today
@@ -5679,9 +5507,9 @@ export async function runAgentStream(
             sandboxLifecycleHooksForIds(sandboxLifecycleHookIds(settings)),
             rigCredentialHooksForAgent(agent),
           ),
-          ...sandboxToolspaceTokenHooksForAgent(agent),
-          ...toolspaceTokenSessionRegistrationHooks(
-            toolspaceTokenSeed ? overrides.onToolspaceTokenSessionReady : undefined,
+          ...sandboxCodemodeTokenHooksForAgent(agent),
+          ...codemodeTokenSessionRegistrationHooks(
+            codemodeTokenSeed ? overrides.onCodemodeTokenSessionReady : undefined,
           ),
           ...sandboxRepositoryCloneHooksForAgent(agent),
           ...gitCredentialSessionRegistrationHooks(overrides.onGitCredentialSessionReady),
@@ -5692,8 +5520,8 @@ export async function runAgentStream(
           ...(runAs ? { runAs } : {}),
           ...(gitTokenSeeds ? { gitTokenSeeds } : {}),
           ...(gitCredentialBindings ? { gitCredentialBindings } : {}),
-          ...(toolspaceTokenSeed ? { toolspaceTokenSeed } : {}),
-          ...(toolspaceTokenFile ? { toolspaceTokenFile } : {}),
+          ...(codemodeTokenSeed ? { codemodeTokenSeed } : {}),
+          ...(codemodeTokenFile ? { codemodeTokenFile } : {}),
           ...(legacyRigSetup ? { rigSetup: legacyRigSetup } : {}),
         },
       )
@@ -5734,6 +5562,7 @@ export async function runAgentStream(
     maxTurns: settings.agentMaxModelCallsPerTurn,
     historyOwnership: "external",
     modelResponseRetention: "last",
+    toolExecution: { preApprovalInputGuardrails: true },
     // Built-in per-call guard chain: normalize computer calls, optionally strip
     // provider ids, trim to the input budget on the client-compaction path, and
     // raise the proactive compaction signal. This runs for turn-start replay AND
@@ -6108,7 +5937,7 @@ export async function pinProvidedSessionManifestEnvironment(
 /**
  * The one-truth owned-path platform setup: the manifest-env pin (align the turn's
  * manifest to the live box's baked env + report drift, NEVER die on it) plus the
- * beforeAgentStart hooks (repository clone with B1 token/askpass seed, toolspace
+ * beforeAgentStart hooks (repository clone with B1 token/askpass seed, codemode
  * token seed, azure-cli-login) and signed-URL file materialization — all executed
  * DIRECTLY against the pinned, UN-proxied established box (the SDK never calls
  * client.create/resume for a provided session, so these decorations would never
@@ -6139,7 +5968,7 @@ export async function runOwnedSandboxSetup(
     gitTokenSeedsOverride?: GitTokenSeeds;
     gitTokenSeedOverride?: string;
     gitCredentialBindingsOverride?: GitCredentialBindingSeed[];
-    toolspaceTokenSeedOverride?: string;
+    codemodeTokenSeedOverride?: string;
     commandRunner?: SandboxLifecycleCommandRunner;
   },
 ): Promise<void> {
@@ -6164,9 +5993,8 @@ export async function runOwnedSandboxSetup(
   } satisfies GitTokenSeeds;
   const ownedGitCredentialBindings =
     opts.gitCredentialBindingsOverride ?? gitCredentialBindingsForAgent(agent);
-  const ownedToolspaceTokenSeed =
-    opts.toolspaceTokenSeedOverride ?? toolspaceTokenSeedForAgent(agent);
-  const ownedToolspaceTokenFile = toolspaceTokenFileForAgent(agent, environment);
+  const ownedCodemodeTokenSeed = opts.codemodeTokenSeedOverride ?? codemodeTokenSeedForAgent(agent);
+  const ownedCodemodeTokenFile = codemodeTokenFileForAgent(agent, environment);
   const ownedRigSetup = rigSetupDescriptorForAgent(agent);
   const ownedHooks = [
     // M3: rig setup runs FIRST so any tooling it installs is present for the
@@ -6181,7 +6009,7 @@ export async function runOwnedSandboxSetup(
       sandboxLifecycleHooksForIds(sandboxLifecycleHookIds(settings)),
       rigCredentialHooksForAgent(agent),
     ),
-    ...sandboxToolspaceTokenHooksForAgent(agent),
+    ...sandboxCodemodeTokenHooksForAgent(agent),
     ...sandboxRepositoryCloneHooksForAgent(agent),
   ];
   const ownedHookContext: SandboxLifecycleHookContext = {
@@ -6190,8 +6018,8 @@ export async function runOwnedSandboxSetup(
     ...(runAs ? { runAs } : {}),
     ...(Object.keys(ownedGitTokenSeeds).length > 0 ? { gitTokenSeeds: ownedGitTokenSeeds } : {}),
     ...(ownedGitCredentialBindings ? { gitCredentialBindings: ownedGitCredentialBindings } : {}),
-    ...(ownedToolspaceTokenSeed ? { toolspaceTokenSeed: ownedToolspaceTokenSeed } : {}),
-    ...(ownedToolspaceTokenFile ? { toolspaceTokenFile: ownedToolspaceTokenFile } : {}),
+    ...(ownedCodemodeTokenSeed ? { codemodeTokenSeed: ownedCodemodeTokenSeed } : {}),
+    ...(ownedCodemodeTokenFile ? { codemodeTokenFile: ownedCodemodeTokenFile } : {}),
     ...(ownedRigSetup ? { rigSetup: ownedRigSetup } : {}),
     ...(opts.commandRunner ? { commandRunner: opts.commandRunner } : {}),
   };
@@ -6850,8 +6678,8 @@ export type SandboxLifecycleHookContext = {
   // rotating values).
   gitTokenSeeds?: GitTokenSeeds;
   gitCredentialBindings?: GitCredentialBindingSeed[];
-  toolspaceTokenSeed?: string;
-  toolspaceTokenFile?: string;
+  codemodeTokenSeed?: string;
+  codemodeTokenFile?: string;
   // M3: the rig setup descriptor for the rig-setup hook (the script + marker
   // version id + the rig's own timeout). Present only on a rig-bound turn.
   rigSetup?: RigSetupDescriptor;
@@ -7059,33 +6887,33 @@ function gitCredentialBindingsForAgent(
   return agentGitCredentialBindings.get(agent);
 }
 
-function toolspaceTokenSeedForAgent(agent: Agent<any, any>): string | undefined {
-  return agentToolspaceTokenSeed.get(agent);
+function codemodeTokenSeedForAgent(agent: Agent<any, any>): string | undefined {
+  return agentCodemodeTokenSeed.get(agent);
 }
 
-function toolspaceTokenSessionIdForAgent(agent: Agent<any, any>): string | undefined {
-  return agentToolspaceTokenSessionId.get(agent);
+function codemodeTokenSessionIdForAgent(agent: Agent<any, any>): string | undefined {
+  return agentCodemodeTokenSessionId.get(agent);
 }
 
-function toolspaceTokenFileForAgent(
+function codemodeTokenFileForAgent(
   agent: Agent<any, any>,
   environment: Readonly<Record<string, string>>,
 ): string | undefined {
-  if (!toolspaceTokenSeedForAgent(agent)) return undefined;
-  const sessionId = toolspaceTokenSessionIdForAgent(agent);
+  if (!codemodeTokenSeedForAgent(agent)) return undefined;
+  const sessionId = codemodeTokenSessionIdForAgent(agent);
   if (!sessionId) {
-    throw new Error("Toolspace token seed is missing its session identity");
+    throw new Error("Codemode token seed is missing its session identity");
   }
-  return toolspaceTokenFileFromEnvironment(environment, sessionId);
+  return codemodeTokenFileFromEnvironment(environment, sessionId);
 }
 
-function sandboxToolspaceTokenHooksForAgent(agent: Agent<any, any>): SandboxLifecycleHook[] {
-  return toolspaceTokenSeedForAgent(agent)
+function sandboxCodemodeTokenHooksForAgent(agent: Agent<any, any>): SandboxLifecycleHook[] {
+  return codemodeTokenSeedForAgent(agent)
     ? [
         {
-          id: "toolspace-token",
+          id: "codemode-token",
           phase: "beforeAgentStart",
-          run: runToolspaceTokenSeedHook,
+          run: runCodemodeTokenSeedHook,
         },
       ]
     : [];
@@ -7148,13 +6976,13 @@ function gitCredentialSessionRegistrationHooks(
     : [];
 }
 
-function toolspaceTokenSessionRegistrationHooks(
-  callback: RunAgentStreamOptions["onToolspaceTokenSessionReady"],
+function codemodeTokenSessionRegistrationHooks(
+  callback: RunAgentStreamOptions["onCodemodeTokenSessionReady"],
 ): SandboxLifecycleHook[] {
   return callback
     ? [
         {
-          id: "toolspace-token-renewal-registration",
+          id: "codemode-token-renewal-registration",
           phase: "beforeAgentStart",
           run: async (session) => {
             await callback(session);
@@ -8130,24 +7958,24 @@ export function repositoryCloneCommand(
   return commands.join("\n");
 }
 
-export function toolspaceTokenSeedCommand(
+export function codemodeTokenSeedCommand(
   options: { tokenFile?: string; legacyTokenFile?: string } = {},
 ): string {
   return [
     "set +x",
     "set -eu",
     'export HOME="${HOME:-/workspace}"',
-    'if [ -n "${OPENGENI_TOOLSPACE_TOKEN_SEED:-}" ]; then',
+    'if [ -n "${OPENGENI_CODEMODE_TOKEN_SEED:-}" ]; then',
     '  seed_umask="$(umask)"',
     "  umask 077",
     options.tokenFile
-      ? `  token_file=${shellToolspacePath(options.tokenFile)}`
-      : '  token_file="${OPENGENI_TOOLSPACE_TOKEN_FILE:-$HOME/.opengeni/toolspace-token}"',
+      ? `  token_file=${shellCodemodePath(options.tokenFile)}`
+      : '  token_file="${OPENGENI_CODEMODE_TOKEN_FILE:-$HOME/.opengeni/codemode-token}"',
     options.legacyTokenFile
-      ? `  legacy_token_file=${shellToolspacePath(options.legacyTokenFile)}`
+      ? `  legacy_token_file=${shellCodemodePath(options.legacyTokenFile)}`
       : '  legacy_token_file=""',
     '  mkdir -p "$(dirname "$token_file")"',
-    '  printf \'%s\' "$OPENGENI_TOOLSPACE_TOKEN_SEED" > "$token_file.tmp.$$"',
+    '  printf \'%s\' "$OPENGENI_CODEMODE_TOKEN_SEED" > "$token_file.tmp.$$"',
     '  mv -f "$token_file.tmp.$$" "$token_file"',
     '  if [ -n "$legacy_token_file" ] && [ "$legacy_token_file" != "$token_file" ]; then',
     '    rm -f -- "$legacy_token_file"',
@@ -8157,18 +7985,18 @@ export function toolspaceTokenSeedCommand(
   ].join("\n");
 }
 
-export async function runToolspaceTokenSeedHook(
+export async function runCodemodeTokenSeedHook(
   session: SandboxSessionLike,
   context: SandboxLifecycleHookContext,
 ): Promise<void> {
-  if (!context.toolspaceTokenSeed) {
+  if (!context.codemodeTokenSeed) {
     return;
   }
-  const command = `set +x\nexport OPENGENI_TOOLSPACE_TOKEN_SEED=${shellQuote(context.toolspaceTokenSeed)}\n${toolspaceTokenSeedCommand(
+  const command = `set +x\nexport OPENGENI_CODEMODE_TOKEN_SEED=${shellQuote(context.codemodeTokenSeed)}\n${codemodeTokenSeedCommand(
     {
-      ...(context.toolspaceTokenFile ? { tokenFile: context.toolspaceTokenFile } : {}),
-      ...(context.toolspaceTokenFile && context.environment.OPENGENI_TOOLSPACE_TOKEN_FILE
-        ? { legacyTokenFile: context.environment.OPENGENI_TOOLSPACE_TOKEN_FILE }
+      ...(context.codemodeTokenFile ? { tokenFile: context.codemodeTokenFile } : {}),
+      ...(context.codemodeTokenFile && context.environment.OPENGENI_CODEMODE_TOKEN_FILE
+        ? { legacyTokenFile: context.environment.OPENGENI_CODEMODE_TOKEN_FILE }
         : {}),
     },
   )}`;
@@ -8183,11 +8011,11 @@ export async function runToolspaceTokenSeedHook(
     },
     context.commandRunner,
   );
-  assertSandboxCommandSucceeded(result, "Toolspace token seed hook");
+  assertSandboxCommandSucceeded(result, "Codemode token seed hook");
 }
 
-export async function refreshToolspaceTokenFile(
-  session: ToolspaceTokenWriterSession,
+export async function refreshCodemodeTokenFile(
+  session: CodemodeTokenWriterSession,
   token: string,
   options: {
     runAs?: string;
@@ -8196,7 +8024,7 @@ export async function refreshToolspaceTokenFile(
     legacyTokenFile?: string;
   } = {},
 ): Promise<void> {
-  const command = `set +x\nexport OPENGENI_TOOLSPACE_TOKEN_SEED=${shellQuote(token)}\n${toolspaceTokenSeedCommand(
+  const command = `set +x\nexport OPENGENI_CODEMODE_TOKEN_SEED=${shellQuote(token)}\n${codemodeTokenSeedCommand(
     {
       ...(options.tokenFile ? { tokenFile: options.tokenFile } : {}),
       ...(options.legacyTokenFile ? { legacyTokenFile: options.legacyTokenFile } : {}),
@@ -8213,7 +8041,7 @@ export async function refreshToolspaceTokenFile(
     },
     options.commandRunner,
   );
-  assertSandboxCommandSucceeded(result, "Toolspace token refresh");
+  assertSandboxCommandSucceeded(result, "Codemode token refresh");
 }
 
 // Bounds the setup output tail carried on a rig.setup failure event/error so a
@@ -8225,10 +8053,52 @@ const RIG_SETUP_OUTPUT_TAIL_LIMIT = 4_000;
 // exec round-trip.
 const RIG_SETUP_SKIPPED_SENTINEL = "__OPENGENI_RIG_SETUP_SKIPPED__";
 
+const RIG_SETUP_RUNTIME_MARKER_ROOT = "/tmp/opengeni/rig-setup";
+const RIG_SETUP_PROVIDER_IMAGE_MARKER_ROOT = "/var/opengeni";
+const RIG_SETUP_INLINE_COMMAND_MAX_BYTES = 32 * 1024;
+const RIG_SETUP_PAYLOAD_CHUNK_CHARS = 24 * 1024;
+const RIG_SETUP_PAYLOAD_ROOT = "/tmp/opengeni/rig-setup-payloads";
+
+export type RigSetupScriptCommandOptions = {
+  timeoutMs?: number;
+  /** Box-local writable state. Never place this under /workspace: workspace
+   * archives can outlive the machine packages that the marker attests to. */
+  markerRoot?: string;
+  contentHash?: string;
+  /** Optional immutable-image proof. Runtime reads it without writing into the
+   * provider image's root-owned marker directory. */
+  trustedContentMarkerRoot?: string;
+};
+
+function rigSetupHeredocDelimiter(script: string): string {
+  const occupied = new Set(script.split(/\r?\n/u));
+  const digest = createHash("sha256").update(script, "utf8").digest("hex").slice(0, 16);
+  let delimiter = `__OPENGENI_RIG_SETUP_${digest}__`;
+  while (occupied.has(delimiter)) delimiter += "_";
+  return delimiter;
+}
+
+function rigSetupExistingMarkerProbe(versionId: string, contentHash?: string): string {
+  if (contentHash !== undefined && !/^sha256:[0-9a-f]{64}$/u.test(contentHash)) {
+    throw new Error("Rig setup content hash must be a canonical SHA-256 value");
+  }
+  const markers = [`${RIG_SETUP_RUNTIME_MARKER_ROOT}/rig-setup-${versionId}.done`];
+  if (contentHash) {
+    const suffix = `rig-setup-content-${contentHash.slice("sha256:".length)}.done`;
+    markers.push(
+      `${RIG_SETUP_RUNTIME_MARKER_ROOT}/${suffix}`,
+      `${RIG_SETUP_PROVIDER_IMAGE_MARKER_ROOT}/${suffix}`,
+    );
+  }
+  const ready = markers.map((marker) => `[ -f ${shellQuote(marker)} ]`).join(" || ");
+  return `if ${ready}; then printf '%s\\n' ${shellQuote(RIG_SETUP_SKIPPED_SENTINEL)}; exit 0; fi\nexit 42`;
+}
+
 /**
  * The rig-setup command (M3). One idempotent bash program:
- *   1. `mkdir -p /var/opengeni` and, if the per-version or exact content marker
- *      already exists, print the SKIP sentinel and exit 0.
+ *   1. Create the writable box-local marker root and, if its per-version/exact
+ *      content marker or a trusted provider-image content marker already exists,
+ *      print the SKIP sentinel and exit 0.
  *   2. otherwise atomically claim the exact marker lock directory. A loser waits
  *      for the winner's marker, then skips; if the winner fails and releases the
  *      lock, the loser retries the claim.
@@ -8242,10 +8112,23 @@ const RIG_SETUP_SKIPPED_SENTINEL = "__OPENGENI_RIG_SETUP_SKIPPED__";
 export function rigSetupScriptCommand(
   script: string,
   versionId: string,
-  timeoutMs = 600_000,
-  markerRoot = "/var/opengeni",
-  contentHash?: string,
+  options: RigSetupScriptCommandOptions = {},
 ): string {
+  const timeoutMs = options.timeoutMs ?? 600_000;
+  const markerRoot = options.markerRoot ?? RIG_SETUP_PROVIDER_IMAGE_MARKER_ROOT;
+  const contentHash = options.contentHash;
+  const trustedContentMarkerRoot = options.trustedContentMarkerRoot ?? markerRoot;
+  for (const [label, root] of [
+    ["marker", markerRoot],
+    ["trusted content marker", trustedContentMarkerRoot],
+  ] as const) {
+    if (!isAbsolute(root) || root === "/") {
+      throw new Error(`Rig setup ${label} root must be a non-root absolute path`);
+    }
+  }
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new Error("Rig setup timeout must be a positive finite duration");
+  }
   if (contentHash !== undefined && !/^sha256:[0-9a-f]{64}$/u.test(contentHash)) {
     throw new Error("Rig setup content hash must be a canonical SHA-256 value");
   }
@@ -8256,14 +8139,20 @@ export function rigSetupScriptCommand(
   const contentMarker = contentHash
     ? `${normalizedMarkerRoot}/rig-setup-content-${contentHash.slice("sha256:".length)}.done`
     : null;
+  const normalizedTrustedContentMarkerRoot = trustedContentMarkerRoot.replace(/\/+$/, "");
+  const trustedContentMarker = contentHash
+    ? `${normalizedTrustedContentMarkerRoot}/rig-setup-content-${contentHash.slice("sha256:".length)}.done`
+    : null;
   const markerReady = contentMarker
-    ? '[ -f "$__OG_RIG_VERSION_MARKER" ] || [ -f "$__OG_RIG_CONTENT_MARKER" ]'
+    ? '[ -f "$__OG_RIG_VERSION_MARKER" ] || [ -f "$__OG_RIG_CONTENT_MARKER" ] || [ -f "$__OG_RIG_TRUSTED_CONTENT_MARKER" ]'
     : '[ -f "$__OG_RIG_VERSION_MARKER" ]';
+  const heredocDelimiter = rigSetupHeredocDelimiter(script);
   return [
     "set -u",
-    `mkdir -p ${shellQuote(markerRoot)}`,
+    `if ! mkdir -p ${shellQuote(markerRoot)}; then printf '%s\\n' 'unable to create rig setup marker root' >&2; exit 73; fi`,
     `__OG_RIG_VERSION_MARKER=${shellQuote(versionMarker)}`,
     `__OG_RIG_CONTENT_MARKER=${shellQuote(contentMarker ?? "")}`,
+    `__OG_RIG_TRUSTED_CONTENT_MARKER=${shellQuote(trustedContentMarker ?? "")}`,
     `__OG_RIG_MARKER=${shellQuote(contentMarker ?? versionMarker)}`,
     '__OG_RIG_LOCK="$__OG_RIG_MARKER.lock"',
     `__OG_RIG_TIMEOUT_SECS=${timeoutSecs}`,
@@ -8273,19 +8162,20 @@ export function rigSetupScriptCommand(
     '  if mkdir "$__OG_RIG_LOCK" 2>/dev/null; then',
     "    trap 'rm -rf \"$__OG_RIG_LOCK\"' EXIT",
     `    if ${markerReady}; then printf '%s\\n' ${shellQuote(RIG_SETUP_SKIPPED_SENTINEL)}; exit 0; fi`,
-    '__OG_RIG_SCRIPT="$(mktemp)"',
-    "cat > \"$__OG_RIG_SCRIPT\" <<'__OPENGENI_RIG_SETUP_SCRIPT_EOF__'",
+    "    if ! __OG_RIG_SCRIPT=\"$(mktemp)\"; then printf '%s\\n' 'unable to create rig setup script file' >&2; exit 73; fi",
+    `cat > "$__OG_RIG_SCRIPT" <<'${heredocDelimiter}'`,
     script,
-    "__OPENGENI_RIG_SETUP_SCRIPT_EOF__",
+    heredocDelimiter,
     '    timeout -k 5s "${__OG_RIG_TIMEOUT_SECS}s" bash "$__OG_RIG_SCRIPT"',
     "__OG_RIG_RC=$?",
     '    rm -f "$__OG_RIG_SCRIPT"',
     '    if [ "$__OG_RIG_RC" -eq 0 ]; then',
-    '      touch "$__OG_RIG_VERSION_MARKER"',
-    '      if [ -n "$__OG_RIG_CONTENT_MARKER" ]; then touch "$__OG_RIG_CONTENT_MARKER"; fi',
+    "      if ! touch \"$__OG_RIG_VERSION_MARKER\"; then printf '%s\\n' 'unable to write rig setup version marker' >&2; exit 73; fi",
+    "      if [ -n \"$__OG_RIG_CONTENT_MARKER\" ] && ! touch \"$__OG_RIG_CONTENT_MARKER\"; then printf '%s\\n' 'unable to write rig setup content marker' >&2; exit 73; fi",
     "    fi",
     '    exit "$__OG_RIG_RC"',
     "  fi",
+    "  if [ ! -d \"$__OG_RIG_LOCK\" ]; then printf '%s\\n' 'unable to create rig setup lock' >&2; exit 73; fi",
     "  __OG_RIG_WAITED=0",
     '  while [ "$__OG_RIG_WAITED" -lt "$__OG_RIG_LOCK_WAIT_SECS" ]; do',
     `    if ${markerReady}; then printf '%s\\n' ${shellQuote(RIG_SETUP_SKIPPED_SENTINEL)}; exit 0; fi`,
@@ -8295,9 +8185,60 @@ export function rigSetupScriptCommand(
     "  done",
     `  if ${markerReady}; then printf '%s\\n' ${shellQuote(RIG_SETUP_SKIPPED_SENTINEL)}; exit 0; fi`,
     '  if [ ! -d "$__OG_RIG_LOCK" ]; then continue; fi',
-    '  rmdir "$__OG_RIG_LOCK" 2>/dev/null || true',
+    "  if ! rmdir \"$__OG_RIG_LOCK\" 2>/dev/null && [ -d \"$__OG_RIG_LOCK\" ]; then printf '%s\\n' 'unable to reclaim stale rig setup lock' >&2; exit 73; fi",
     "done",
   ].join("\n");
+}
+
+async function stageRigSetupScript(
+  session: SandboxSessionLike,
+  script: string,
+  context: SandboxLifecycleHookContext,
+): Promise<string> {
+  const payloadPath = `${RIG_SETUP_PAYLOAD_ROOT}/${randomUUID()}.sh`;
+  const encodedPath = `${payloadPath}.b64`;
+  const encoded = Buffer.from(script, "utf8").toString("base64");
+  const commands = [
+    `set -eu\numask 077\nmkdir -p ${shellQuote(RIG_SETUP_PAYLOAD_ROOT)}\n: > ${shellQuote(encodedPath)}`,
+  ];
+  for (let offset = 0; offset < encoded.length; offset += RIG_SETUP_PAYLOAD_CHUNK_CHARS) {
+    commands.push(
+      `printf '%s' ${shellQuote(encoded.slice(offset, offset + RIG_SETUP_PAYLOAD_CHUNK_CHARS))} >> ${shellQuote(encodedPath)}`,
+    );
+  }
+  commands.push(
+    `set -eu\nbase64 -d ${shellQuote(encodedPath)} > ${shellQuote(payloadPath)}\nchmod 0700 ${shellQuote(payloadPath)}\nrm -f ${shellQuote(encodedPath)}`,
+  );
+  try {
+    for (const command of commands) {
+      const result = await runSandboxLifecycleCommand(
+        session,
+        {
+          cmd: command,
+          workdir: "/workspace",
+          ...(context.runAs ? { runAs: context.runAs } : {}),
+          yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+          maxOutputTokens: 4_000,
+        },
+        context.commandRunner,
+      );
+      assertSandboxCommandSucceeded(result, "Rig setup payload staging");
+    }
+    return payloadPath;
+  } catch (error) {
+    await runSandboxLifecycleCommand(
+      session,
+      {
+        cmd: `rm -f ${shellQuote(payloadPath)} ${shellQuote(encodedPath)}`,
+        workdir: "/workspace",
+        ...(context.runAs ? { runAs: context.runAs } : {}),
+        yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+        maxOutputTokens: 1_000,
+      },
+      context.commandRunner,
+    ).catch(() => undefined);
+    throw error;
+  }
 }
 
 /**
@@ -8325,15 +8266,20 @@ export async function runRigSetupHook(
     rigName: rigSetup.rigName,
   };
   await context.onRuntimeEvent?.({ type: "rig.setup.started", payload });
-  const command = rigSetupScriptCommand(
-    rigSetup.script,
-    rigSetup.versionId,
-    rigSetup.timeoutMs,
-    "/var/opengeni",
-    rigSetup.contentHash,
-  );
+  const commandOptions = {
+    timeoutMs: rigSetup.timeoutMs,
+    markerRoot: RIG_SETUP_RUNTIME_MARKER_ROOT,
+    ...(rigSetup.contentHash !== undefined ? { contentHash: rigSetup.contentHash } : {}),
+    trustedContentMarkerRoot: RIG_SETUP_PROVIDER_IMAGE_MARKER_ROOT,
+  };
+  const inlineCommand = rigSetupScriptCommand(rigSetup.script, rigSetup.versionId, commandOptions);
+  let stagedScriptPath: string | null = null;
+  let executableCommand =
+    Buffer.byteLength(inlineCommand, "utf8") <= RIG_SETUP_INLINE_COMMAND_MAX_BYTES
+      ? inlineCommand
+      : "";
   const execArgs = {
-    cmd: command,
+    cmd: executableCommand,
     workdir: "/workspace",
     ...(context.runAs ? { runAs: context.runAs } : {}),
     // The in-box coreutils timeout is the hard deadline; the SDK yield waits a
@@ -8344,7 +8290,41 @@ export async function runRigSetupHook(
   };
   let result: unknown;
   try {
-    result = await runSandboxLifecycleCommand(session, execArgs, context.commandRunner);
+    if (!executableCommand) {
+      const markerProbe = await runSandboxLifecycleCommand(
+        session,
+        {
+          cmd: rigSetupExistingMarkerProbe(rigSetup.versionId, rigSetup.contentHash),
+          workdir: "/workspace",
+          ...(context.runAs ? { runAs: context.runAs } : {}),
+          yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+          maxOutputTokens: 1_000,
+        },
+        context.commandRunner,
+      );
+      const markerProbeExitCode = sandboxCommandExitCode(markerProbe);
+      if (
+        markerProbeExitCode === 0 &&
+        sandboxCommandOutput(markerProbe).includes(RIG_SETUP_SKIPPED_SENTINEL)
+      ) {
+        result = markerProbe;
+      } else if (markerProbeExitCode !== 42) {
+        assertSandboxCommandSucceeded(markerProbe, "Rig setup marker probe");
+        throw new Error("Rig setup marker probe returned success without its sentinel");
+      }
+      if (result === undefined) {
+        stagedScriptPath = await stageRigSetupScript(session, rigSetup.script, context);
+        executableCommand = rigSetupScriptCommand(
+          `exec bash ${shellQuote(stagedScriptPath)}`,
+          rigSetup.versionId,
+          commandOptions,
+        );
+        execArgs.cmd = executableCommand;
+      }
+    }
+    if (result === undefined) {
+      result = await runSandboxLifecycleCommand(session, execArgs, context.commandRunner);
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await context.onRuntimeEvent?.({
@@ -8358,6 +8338,20 @@ export async function runRigSetupHook(
       `Rig setup failed for rig "${rigSetup.rigName}" (version ${rigSetup.versionId}): ${message}`,
       { cause: error },
     );
+  } finally {
+    if (stagedScriptPath) {
+      await runSandboxLifecycleCommand(
+        session,
+        {
+          cmd: `rm -f ${shellQuote(stagedScriptPath)} ${shellQuote(`${stagedScriptPath}.b64`)}`,
+          workdir: "/workspace",
+          ...(context.runAs ? { runAs: context.runAs } : {}),
+          yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+          maxOutputTokens: 1_000,
+        },
+        context.commandRunner,
+      ).catch(() => undefined);
+    }
   }
   const output = sandboxCommandOutput(result);
   // Marker present → the guard skipped the script. Distinct terminal signal.
@@ -8374,7 +8368,8 @@ export async function runRigSetupHook(
       output.length > RIG_SETUP_OUTPUT_TAIL_LIMIT
         ? output.slice(-RIG_SETUP_OUTPUT_TAIL_LIMIT)
         : output;
-    const reason = stillRunning
+    const timedOut = stillRunning || exitCode === 124 || exitCode === 137;
+    const reason = timedOut
       ? `did not finish within the rig setup timeout (${rigSetup.timeoutMs}ms)`
       : exitCode === null
         ? "did not report an exit code"
@@ -8547,26 +8542,6 @@ export async function runAzureCliLoginHook(
   }
 }
 
-function azureDeploymentBaseUrl(settings: Settings): string {
-  const endpoint = settings.azureOpenaiEndpoint?.replace(/\/+$/, "");
-  if (!endpoint || !settings.azureOpenaiDeployment) {
-    throw new Error("Azure OpenAI endpoint/deployment settings are incomplete");
-  }
-  return `${endpoint}/openai/deployments/${settings.azureOpenaiDeployment}`;
-}
-
-export function azureOpenAIDefaultQuery(
-  settings: Pick<Settings, "azureOpenaiApiVersion">,
-  baseURL: string,
-): Record<string, string> | undefined {
-  if (!settings.azureOpenaiApiVersion) return undefined;
-  const normalized = baseURL.replace(/\/+$/, "").toLowerCase();
-  if (normalized.endsWith("/openai/v1")) {
-    return undefined;
-  }
-  return { "api-version": settings.azureOpenaiApiVersion };
-}
-
 // Since @openai/agents 0.11.0 local sandbox sources (including the lazy
 // bundled-skills source) must stay within the SDK process working directory:
 // reads outside it require manifest.extraPathGrants, and remote sandbox
@@ -8574,7 +8549,28 @@ export function azureOpenAIDefaultQuery(
 // packaged skills live inside the runtime package — outside the worker's cwd
 // in production — so stage a copy under the working directory once per
 // process instead of granting the packaged path.
+let stagedBundledSkillsDir: string | null = null;
 let stagedBundledArtifactSkillsDir: string | null = null;
+let stagedBundledVideoSkillsDir: string | null = null;
+
+function bundledSkillsDir(): string {
+  const moduleDir = dirname(fileURLToPath(import.meta.url));
+  const packaged =
+    [
+      join(moduleDir, "assets", "runtime", "bundled_hashicorp_terraform_skills"),
+      join(moduleDir, "bundled_hashicorp_terraform_skills"),
+      join(moduleDir, "..", "src", "bundled_hashicorp_terraform_skills"),
+    ].find((candidate) => existsSync(candidate)) ??
+    join(moduleDir, "bundled_hashicorp_terraform_skills");
+  if (isPathWithin(process.cwd(), packaged)) return packaged;
+  if (!stagedBundledSkillsDir) {
+    stagedBundledSkillsDir = stageBundledSkills(
+      packaged,
+      join(process.cwd(), ".opengeni", "bundled_hashicorp_terraform_skills"),
+    );
+  }
+  return stagedBundledSkillsDir;
+}
 
 function bundledArtifactSkillsDir(): string {
   const moduleDir = dirname(fileURLToPath(import.meta.url));
@@ -8591,6 +8587,23 @@ function bundledArtifactSkillsDir(): string {
     );
   }
   return stagedBundledArtifactSkillsDir;
+}
+
+function bundledVideoSkillsDir(): string {
+  const moduleDir = dirname(fileURLToPath(import.meta.url));
+  const packaged =
+    [
+      join(moduleDir, "bundled_video_skills"),
+      join(moduleDir, "..", "src", "bundled_video_skills"),
+    ].find((candidate) => existsSync(candidate)) ?? join(moduleDir, "bundled_video_skills");
+  if (isPathWithin(process.cwd(), packaged)) return packaged;
+  if (!stagedBundledVideoSkillsDir) {
+    stagedBundledVideoSkillsDir = stageBundledSkills(
+      packaged,
+      join(process.cwd(), ".opengeni", "bundled_video_skills"),
+    );
+  }
+  return stagedBundledVideoSkillsDir;
 }
 
 function stageBundledSkills(packaged: string, target: string): string {
@@ -8625,15 +8638,34 @@ function isPathWithin(root: string, candidate: string): boolean {
 export function lazySkillSourceWithPackSkills(
   packSkills: PackSkill[],
   skillLibrarySkills: PackSkill[] = [],
-  artifactRuntimeAvailable = false,
+  editableArtifactToolsAvailable = false,
+  videoGenerationAvailable = false,
 ): LocalDirLazySkillSource {
+  const bundledDir = bundledSkillsDir();
+  const bundled = localDirLazySkillSource({ src: bundledDir });
+  if (
+    packSkills.length === 0 &&
+    skillLibrarySkills.length === 0 &&
+    !editableArtifactToolsAvailable &&
+    !videoGenerationAvailable
+  ) {
+    return bundled;
+  }
   const children: Record<string, Entry> = {};
   let artifactBundled: LocalDirLazySkillSource | null = null;
-  if (artifactRuntimeAvailable) {
+  if (editableArtifactToolsAvailable) {
     const artifactDir = bundledArtifactSkillsDir();
     artifactBundled = localDirLazySkillSource({ src: artifactDir });
     for (const name of bundledSkillDirNames(artifactDir)) {
       children[name] = localDir({ src: join(artifactDir, name) });
+    }
+  }
+  let videoBundled: LocalDirLazySkillSource | null = null;
+  if (videoGenerationAvailable) {
+    const videoDir = bundledVideoSkillsDir();
+    videoBundled = localDirLazySkillSource({ src: videoDir });
+    for (const name of bundledSkillDirNames(videoDir)) {
+      children[name] = localDir({ src: join(videoDir, name) });
     }
   }
   const libraryIndex: SkillIndexEntry[] = [];
@@ -8677,6 +8709,11 @@ export function lazySkillSourceWithPackSkills(
           !packNameKeys.has((entry.path ?? entry.name).toLowerCase()) &&
           !libraryNameKeys.has((entry.path ?? entry.name).toLowerCase()),
       ),
+      ...(videoBundled?.getIndex?.(manifest, skillsPath) ?? []).filter(
+        (entry) =>
+          !packNameKeys.has((entry.path ?? entry.name).toLowerCase()) &&
+          !libraryNameKeys.has((entry.path ?? entry.name).toLowerCase()),
+      ),
       ...libraryIndex.filter(
         (entry) => !packNameKeys.has((entry.path ?? entry.name).toLowerCase()),
       ),
@@ -8690,11 +8727,14 @@ function effectiveSkillSelections(
   librarySkills: readonly PackSkill[],
   packSkills: readonly PackSkill[],
   sessionSkills: readonly PackSkill[],
-  artifactRuntimeAvailable = false,
+  editableArtifactToolsAvailable = false,
+  videoGenerationAvailable = false,
 ): readonly EffectiveSkillSelection[] {
-  const defaultSkillNames = artifactRuntimeAvailable
-    ? bundledSkillDirNames(bundledArtifactSkillsDir())
-    : [];
+  const defaultSkillNames = [
+    ...bundledSkillDirNames(bundledSkillsDir()),
+    ...(editableArtifactToolsAvailable ? bundledSkillDirNames(bundledArtifactSkillsDir()) : []),
+    ...(videoGenerationAvailable ? bundledSkillDirNames(bundledVideoSkillsDir()) : []),
+  ];
   const defaultSelections = defaultSkillNames.map((name) => ({
     id: `bundled:${name}`,
     name,
@@ -8709,7 +8749,8 @@ function effectiveSkillSelections(
     packSkills,
     librarySkills,
     sessionSkills,
-    artifactRuntimeAvailable,
+    editableArtifactToolsAvailable,
+    videoGenerationAvailable,
   );
   const sessionNameKeys = new Set(effectiveSessionSkills.map((skill) => skill.name.toLowerCase()));
   const selected = librarySelections.filter((selection) =>
@@ -8750,16 +8791,19 @@ function sessionSkillsForMaterialization(
   packSkills: readonly PackSkill[],
   librarySkills: readonly PackSkill[],
   sessionSkills: readonly PackSkill[],
-  artifactRuntimeAvailable = false,
+  editableArtifactToolsAvailable = false,
+  videoGenerationAvailable = false,
 ): PackSkill[] {
   const configured = new Map<string, PackSkill>();
   for (const skill of [...librarySkills, ...packSkills]) {
     configured.set(skill.name.toLowerCase(), skill);
   }
   const bundledNames = new Set(
-    (artifactRuntimeAvailable ? bundledSkillDirNames(bundledArtifactSkillsDir()) : []).map((name) =>
-      name.toLowerCase(),
-    ),
+    [
+      ...bundledSkillDirNames(bundledSkillsDir()),
+      ...(editableArtifactToolsAvailable ? bundledSkillDirNames(bundledArtifactSkillsDir()) : []),
+      ...(videoGenerationAvailable ? bundledSkillDirNames(bundledVideoSkillsDir()) : []),
+    ].map((name) => name.toLowerCase()),
   );
   const selected = new Map<string, PackSkill>();
   for (const skill of sessionSkills) {

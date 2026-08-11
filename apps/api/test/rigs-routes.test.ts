@@ -2,12 +2,15 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 import type { Settings } from "@opengeni/config";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
+import { sql } from "drizzle-orm";
 import {
   createDb,
   createRigVersion,
+  createSession,
   getRigChange,
   listRigVersions,
   updateRigChangeStatus,
+  withWorkspaceSessionActivityRls,
   type DbClient,
 } from "@opengeni/db";
 import {
@@ -210,29 +213,32 @@ describe("rig route permission matrix", () => {
     });
     const rig = await created.json();
 
-    const [session] = await shared!.admin<{ id: string }[]>`
-      insert into sessions (
-        account_id, workspace_id, initial_message, model, sandbox_backend,
-        sandbox_group_id, rig_id, tool_policy
-      )
-      values (
-        ${ws.accountId}, ${ws.workspaceId}, 'hi', 'gpt-5.6-sol', 'none',
-        gen_random_uuid(), ${rig.id},
-        jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
-      )
-      returning id`;
+    const session = await createSession(client.db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      initialMessage: "hi",
+      resources: [],
+      metadata: {},
+      model: "gpt-5.6-sol",
+      sandboxBackend: "none",
+      rigId: rig.id,
+    });
 
     const blocked = await app().request(`${base}/${rig.id}`, { method: "DELETE", headers: manage });
     expect(blocked.status).toBe(409);
 
     // Drop the reference, then delete succeeds + audits.
-    await shared!.admin`update sessions set rig_id = null where id = ${session!.id}`;
+    await withWorkspaceSessionActivityRls(client.db, ws.workspaceId, async (tx) => {
+      await tx.execute(
+        sql`update sessions set rig_id = null where workspace_id = ${ws.workspaceId} and id = ${session.id}`,
+      );
+    });
     const ok = await app().request(`${base}/${rig.id}`, { method: "DELETE", headers: manage });
     expect(ok.status).toBe(200);
     expect(await auditActions(ws.workspaceId, rig.id)).toContain("rig.deleted");
   });
 
-  test("verify retries a failed change with a unique attempt workflow and rejects concurrent verifying", async () => {
+  test("verification starts are deterministic and retrying an in-flight attempt is idempotent", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
     const calls: unknown[] = [];
@@ -252,8 +258,11 @@ describe("rig route permission matrix", () => {
     });
     expect(proposed.status).toBe(201);
     const change = await proposed.json();
-    expect(calls).toHaveLength(1);
+    expect(calls).toHaveLength(2);
     expect((calls[0] as { workflowId: string }).workflowId).toBe(
+      `rig-verification-version-${rig.activeVersion.id}-initial`,
+    );
+    expect((calls[1] as { workflowId: string }).workflowId).toBe(
       `rig-verification-change-${change.id}-attempt-1`,
     );
 
@@ -268,8 +277,8 @@ describe("rig route permission matrix", () => {
     expect(retry.status).toBe(202);
     const retryBody = await retry.json();
     expect(retryBody.status).toBe("verifying");
-    expect(calls).toHaveLength(2);
-    expect((calls[1] as { workflowId: string }).workflowId).toBe(
+    expect(calls).toHaveLength(3);
+    expect((calls[2] as { workflowId: string }).workflowId).toBe(
       `rig-verification-change-${change.id}-attempt-2`,
     );
     expect((await getRigChange(client.db, ws.workspaceId, change.id))?.status).toBe("verifying");
@@ -278,8 +287,81 @@ describe("rig route permission matrix", () => {
       method: "POST",
       headers: use,
     });
-    expect(duplicate.status).toBe(409);
-    expect(calls).toHaveLength(2);
+    expect(duplicate.status).toBe(202);
+    expect(calls).toHaveLength(4);
+    expect((calls[3] as { workflowId: string }).workflowId).toBe(
+      `rig-verification-change-${change.id}-attempt-2`,
+    );
+  });
+
+  test("a committed rig create survives an unavailable initial verification dispatcher", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const http = createApp({
+      settings,
+      db: client.db,
+      bus: {} as never,
+      workflowClient: {
+        startRigVerification: async () => {
+          throw new Error("temporal unavailable");
+        },
+      } as never,
+      managedAuth: null,
+    } as never);
+    const manage = { authorization: await bearer(ws, "user:m", ["rigs:use", "rigs:manage"]) };
+    const base = `/v1/workspaces/${ws.workspaceId}/rigs`;
+    const created = await http.request(base, {
+      method: "POST",
+      headers: manage,
+      body: JSON.stringify({ name: "deferred-initial-verification" }),
+    });
+    expect(created.status).toBe(201);
+    expect(created.headers.get("OpenGeni-Rig-Verification")).toBe("deferred");
+    const rig = await created.json();
+    expect((await http.request(`${base}/${rig.id}`, { headers: manage })).status).toBe(200);
+  });
+
+  test("a committed proposal reports deferred dispatch and retries the same verification attempt", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const calls: Array<{ workflowId: string }> = [];
+    const http = createApp({
+      settings,
+      db: client.db,
+      bus: {} as never,
+      workflowClient: {
+        startRigVerification: async (input: { workflowId: string }) => {
+          calls.push(input);
+          if (calls.length === 2) throw new Error("temporal unavailable");
+        },
+      } as never,
+      managedAuth: null,
+    } as never);
+    const manage = { authorization: await bearer(ws, "user:m", ["rigs:use", "rigs:manage"]) };
+    const base = `/v1/workspaces/${ws.workspaceId}/rigs`;
+    const created = await http.request(base, {
+      method: "POST",
+      headers: manage,
+      body: JSON.stringify({ name: "deferred-change-verification" }),
+    });
+    const rig = await created.json();
+    const proposed = await http.request(`${base}/${rig.id}/changes`, {
+      method: "POST",
+      headers: manage,
+      body: JSON.stringify({ kind: "setup_append", payload: { command: "true" } }),
+    });
+    expect(proposed.status).toBe(201);
+    expect(proposed.headers.get("OpenGeni-Rig-Verification")).toBe("deferred");
+    const change = await proposed.json();
+    expect(change.status).toBe("verifying");
+
+    const retried = await http.request(`${base}/${rig.id}/changes/${change.id}/verify`, {
+      method: "POST",
+      headers: manage,
+    });
+    expect(retried.status).toBe(202);
+    expect(retried.headers.get("OpenGeni-Rig-Verification")).toBeNull();
+    expect(calls[1]?.workflowId).toBe(calls[2]?.workflowId);
   });
 
   test("definition_edit promote rejects a stale active base without minting", async () => {

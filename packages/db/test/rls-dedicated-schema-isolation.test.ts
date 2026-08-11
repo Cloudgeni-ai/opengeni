@@ -17,6 +17,11 @@ import {
   PROTECTED_NO_DIRECT_DML_TABLES,
   RUNTIME_FULL_DML_TABLES,
   rlsStrategyFor,
+  setSubjectRlsContext,
+  upsertKnowledgeProvider,
+  upsertKnowledgeSource,
+  upsertKnowledgeSourceObject,
+  withRlsContext,
   withWorkspaceRls,
   type Database,
   type DbClient,
@@ -106,6 +111,7 @@ async function waitForReady(): Promise<void> {
 
 let available = true;
 let dockerStarted = false;
+let appRoleExistedBeforeMigration = true;
 let admin: postgres.Sql;
 let client: DbClient;
 let db: Database;
@@ -209,6 +215,22 @@ beforeAll(async () => {
   }
   await waitForReady();
 
+  const bootstrap = postgres(ADMIN_URL, { max: 1 });
+  try {
+    const [role] = await bootstrap<Array<{ exists: boolean }>>`
+      SELECT exists(
+        SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app'
+      ) AS exists`;
+    appRoleExistedBeforeMigration = role?.exists ?? true;
+    if (appRoleExistedBeforeMigration) {
+      throw new Error(
+        "[rls-dedicated] clean-install proof requires opengeni_app to be absent before migration",
+      );
+    }
+  } finally {
+    await bootstrap.end();
+  }
+
   // (A) embedded migrate into the dedicated schema via the SDK entry point.
   await migrate(ADMIN_URL, SCHEMA);
   await migrate(ADMIN_URL, SCHEMA);
@@ -273,6 +295,15 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
     expect(posture.memberships).toEqual([]);
     expect(posture.ownedSchemas).toEqual([]);
     expect(posture.ownedRelations).toEqual([]);
+    expect(posture.targetRoutines).toEqual([
+      {
+        name: "knowledge_source_sync_lock_authority(uuid, uuid, uuid)",
+        owner: "postgres",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+      },
+    ]);
     expect(posture.tables.filter((table) => table.rlsEnabled)).toHaveLength(
       FORCE_RLS_TABLES.length,
     );
@@ -453,6 +484,90 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
       expect(routine.settings).toContain(`search_path=${SCHEMA}, pg_catalog`);
       expect(routine.app_execute).toBe(!routine.name.includes("_guard_"));
     }
+  });
+
+  test("migrate-then-provision grants the exact target-schema knowledge authority lock", async () => {
+    if (!available) return;
+    expect(appRoleExistedBeforeMigration).toBe(false);
+
+    const [routine] = await admin<
+      Array<{
+        arguments: string;
+        securityDefiner: boolean;
+        appExecute: boolean;
+        publicExecute: boolean;
+        settings: string[] | null;
+      }>
+    >`
+      SELECT
+        pg_catalog.oidvectortypes(procedure.proargtypes) AS arguments,
+        procedure.prosecdef AS "securityDefiner",
+        has_function_privilege('opengeni_app', procedure.oid, 'EXECUTE') AS "appExecute",
+        exists (
+          SELECT 1
+          FROM aclexplode(coalesce(procedure.proacl, acldefault('f', procedure.proowner))) acl
+          WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'
+        ) AS "publicExecute",
+        procedure.proconfig AS settings
+      FROM pg_proc procedure
+      JOIN pg_namespace namespace ON namespace.oid = procedure.pronamespace
+      WHERE namespace.nspname = ${SCHEMA}
+        AND procedure.proname = 'knowledge_source_sync_lock_authority'`;
+    expect(routine).toEqual({
+      arguments: "uuid, uuid, uuid",
+      securityDefiner: true,
+      appExecute: true,
+      publicExecute: false,
+      settings: [`search_path=${SCHEMA}, pg_catalog`],
+    });
+
+    const workspace = await freshWorkspace();
+    const subjectId = `knowledge-lock-${crypto.randomUUID()}`;
+    const actor = {
+      kind: "human" as const,
+      subjectId,
+      initiatingHumanSubjectId: subjectId,
+    };
+    const scope = {
+      kind: "workspace" as const,
+      workspaceId: workspace.workspaceId,
+      subjectId: null,
+    };
+    const provider = await upsertKnowledgeProvider(db, {
+      ...workspace,
+      scope,
+      operationId: `provider-${crypto.randomUUID()}`,
+      actor,
+      providerKey: "google-drive",
+      externalTenantId: `tenant-${crypto.randomUUID()}`,
+    });
+    const source = await upsertKnowledgeSource(db, {
+      ...workspace,
+      scope,
+      operationId: `source-${crypto.randomUUID()}`,
+      actor,
+      providerId: provider.id,
+      externalSourceId: `source-${crypto.randomUUID()}`,
+      sourceKind: "google-drive",
+    });
+    const object = await upsertKnowledgeSourceObject(db, {
+      ...workspace,
+      operationId: `object-${crypto.randomUUID()}`,
+      actor,
+      sourceId: source.id,
+      externalObjectId: `object-${crypto.randomUUID()}`,
+    });
+
+    await withRlsContext(db, workspace, async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, subjectId);
+      await scopedDb.execute(sql`
+        SELECT knowledge_source_sync_lock_authority(
+          ${workspace.accountId}::uuid,
+          ${source.id}::uuid,
+          ${object.id}::uuid
+        )
+      `);
+    });
   });
 
   test("the restricted runtime role can perform Better Auth table DML", async () => {

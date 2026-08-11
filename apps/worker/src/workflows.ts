@@ -14,12 +14,23 @@ export {
   type ScheduledTaskFireWorkflowInput,
 } from "./workflows/scheduled-tasks";
 export {
+  knowledgeSourceSyncWake,
+  knowledgeSourceSyncWorkflow,
+  knowledgeSourceSyncWorkflowId,
+  type KnowledgeSourceSyncWorkflowInput,
+} from "./workflows/knowledge-source-sync";
+export {
   sandboxDrainWorkflow,
   sandboxReaperMaintenanceWorkflow,
   sandboxReaperWorkflow,
   sandboxReaperWorkflowV2,
 } from "./workflows/sandbox-reaper";
 export { fileUploadReaperWorkflow } from "./workflows/file-upload-reaper";
+export {
+  videoGenerationWorkflow,
+  videoGenerationWorkflowId,
+  type VideoGenerationWorkflowInput,
+} from "./workflows/video-generation";
 export { sessionWorkflowWakeDispatcherWorkflow } from "./workflows/workflow-wake";
 export {
   rigVerificationWorkflow,

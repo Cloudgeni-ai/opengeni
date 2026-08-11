@@ -460,6 +460,12 @@ the enrollment methods (`mintEnrollToken`, `lookupDeviceEnrollment`,
 `approveDeviceEnrollment`, `denyDeviceEnrollment`) are covered in the
 [Connected Machines guide](../../docs/connected-machines.md).
 
+For large agent hierarchies, use `listAgentTopology` instead of collecting full
+session pages. It returns compact root, direct-child, or server-side search
+pages with opaque cursors and server-authored descendant counts. Load a child
+page only when its parent is expanded; `children.truncated` makes a lower-bound
+aggregate explicit.
+
 ## Full API coverage
 
 Every public endpoint group has typed methods:
@@ -467,7 +473,7 @@ Every public endpoint group has typed methods:
 | Group | Methods |
 | --- | --- |
 | Access + workspaces | `getAccessContext`, `listWorkspaces`, `createWorkspace`, `getWorkspace`, `updateWorkspace` |
-| Sessions + events | `createSession`, `listSessions`, `getSession`, `updateSession`, `listEvents`, `sendEvent`, `sendMessage`, `steerMessage`, `pauseSession`, `resumeSession`, `cancelSession`, `sendApprovalDecision`, `streamEvents`, `openEventStream` |
+| Sessions + events | `createSession`, `listSessions`, `listSessionPage`, `listAgentTopology`, `getSession`, `getSessionLineage`, `updateSession`, `listEvents`, `sendEvent`, `sendMessage`, `steerMessage`, `pauseSession`, `resumeSession`, `cancelSession`, `sendApprovalDecision`, `streamEvents`, `openEventStream` |
 | Machines (bring-your-own-compute) | `listMachines`, `machineMetricsSeries`, `swapActiveSandbox`, `mintEnrollToken`, `lookupDeviceEnrollment`, `approveDeviceEnrollment`, `denyDeviceEnrollment` |
 | Turn queue | `getQueue`, `moveQueueItem`, `editQueueItem`, `steerQueueItem`, `deleteQueueItem` |
 | Goal | `getGoal`, `updateGoal`, `pauseGoal`, `resumeGoal` |

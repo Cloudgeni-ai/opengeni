@@ -10,15 +10,23 @@ import {
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   completeFileUpload,
+  createConnection,
   createDb,
   createFileUpload,
   createSession,
   initializeSessionStartAtomically,
+  admitVideoGenerationOperation,
+  markVideoGenerationAccepted,
+  markVideoGenerationProviderStarted,
+  markVideoGenerationRetaining,
+  markVideoGenerationSubmissionIntent,
   markFileUploadFailed,
   prepareGeneratedImageArtifact,
   prepareRetainedScreenshotArtifact,
   settleGeneratedImageArtifactReady,
   settleRetainedScreenshotArtifactReady,
+  settleVideoGenerationReady,
+  updateWorkspaceVideoGenerationPolicy,
   type DbClient,
 } from "@opengeni/db";
 import type { ObjectStorage } from "@opengeni/storage";
@@ -65,6 +73,7 @@ function storageFixture() {
   const objects = new Map<string, Uint8Array>();
   const calls: StorageCall[] = [];
   const existenceCalls: string[] = [];
+  const signedGetCalls: string[] = [];
   const unavailable = async (): Promise<never> => {
     throw new Error("unexpected object-storage operation");
   };
@@ -73,7 +82,13 @@ function storageFixture() {
     backend: "s3-compatible",
     maxSinglePutSizeBytes: 5_000_000_000,
     createPutUrl: unavailable,
-    createGetUrl: unavailable,
+    async createGetUrl({ key }) {
+      signedGetCalls.push(key);
+      return {
+        url: `https://storage.example.test/${encodeURIComponent(key)}?signature=opaque`,
+        expiresAt: new Date("2026-08-10T12:05:00.000Z"),
+      };
+    },
     headFile: unavailable,
     async fileExists(file) {
       existenceCalls.push(file.id);
@@ -89,7 +104,7 @@ function storageFixture() {
     putObject: unavailable,
     deleteObject: unavailable,
   };
-  return { storage, objects, calls, existenceCalls };
+  return { storage, objects, calls, existenceCalls, signedGetCalls };
 }
 
 function routeApp(objectStorage: ObjectStorage | null, db = client.db): Hono {
@@ -318,6 +333,143 @@ async function createGeneratedImageArtifact(
   return { artifactId, objectKey };
 }
 
+async function createGeneratedVideoArtifact(
+  workspace: Awaited<ReturnType<typeof workspaceFixture>>,
+  input: { bytes: Uint8Array },
+) {
+  const session = await createSession(client.db, {
+    accountId: workspace.accountId,
+    workspaceId: workspace.workspaceId,
+    initialMessage: "generate a video",
+    resources: [],
+    metadata: {},
+    model: "scripted-model",
+    sandboxBackend: "none",
+  });
+  await initializeSessionStartAtomically(client.db, {
+    accountId: workspace.accountId,
+    workspaceId: workspace.workspaceId,
+    sessionId: session.id,
+    reasoningEffortFallback: "low",
+    createdEventPayload: {},
+  });
+  const attemptId = crypto.randomUUID();
+  const claim = await claimSessionWorkForAttempt(client.db, workspace.workspaceId, {
+    sessionId: session.id,
+    workflowId: `session-${session.id}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId,
+    dispatchId: `generated-video-api-${crypto.randomUUID()}`,
+    trigger: { kind: "next" },
+  });
+  if (claim.action !== "claimed") {
+    throw new Error(`Could not claim generated video API fixture: ${claim.reason}`);
+  }
+  const connection = await createConnection(client.db, {
+    accountId: workspace.accountId,
+    workspaceId: workspace.workspaceId,
+    subjectId: null,
+    providerDomain: "ai-gateway.vercel.sh",
+    kind: "api_key",
+    credentialEncrypted: "test-encrypted-credential",
+    metadata: { credentialRole: "vercel_ai_gateway" },
+    createdBySubjectId: workspace.subjectId,
+  });
+  const policy = await updateWorkspaceVideoGenerationPolicy(client.db, {
+    accountId: workspace.accountId,
+    workspaceId: workspace.workspaceId,
+    subjectId: workspace.subjectId,
+    expectedRevision: 0,
+    fundingSource: "workspace_gateway",
+    enabledModelIds: ["bytedance/seedance-2.5"],
+    defaultModelId: "bytedance/seedance-2.5",
+  });
+  const operationId = crypto.randomUUID();
+  const artifactId = crypto.randomUUID();
+  const fileId = crypto.randomUUID();
+  const requestDigest = "d".repeat(64);
+  await admitVideoGenerationOperation(client.db, {
+    id: operationId,
+    accountId: workspace.accountId,
+    workspaceId: workspace.workspaceId,
+    sessionId: session.id,
+    turnId: claim.turn.id,
+    attemptId,
+    toolCallId: `call-${operationId}`,
+    admissionKey: "e".repeat(64),
+    requestDigest,
+    promptDigest: "f".repeat(64),
+    requestEncrypted: "encrypted-request",
+    modelId: "bytedance/seedance-2.5",
+    sourceMode: "text",
+    capabilityRevision: "a".repeat(64),
+    policyRevision: policy.revision,
+    fundingSource: "workspace_gateway",
+    pricedCostMicros: 0,
+    connectionId: connection.id,
+    credentialVersion: connection.version,
+    credentialEncrypted: "encrypted-credential-lease",
+    providerIdempotencyKey: `video-api-${operationId}`,
+    expectedArtifactId: artifactId,
+    expectedFileId: fileId,
+    workspaceQuotaBytes: 1024 * 1024 * 1024,
+    maxConcurrentPerWorkspace: 2,
+    recoveryDeadlineAt: new Date(Date.now() + 60_000),
+    references: [],
+  });
+  await markVideoGenerationAccepted(client.db, {
+    accountId: workspace.accountId,
+    workspaceId: workspace.workspaceId,
+    operationId,
+    requestDigest,
+  });
+  await markVideoGenerationSubmissionIntent(client.db, {
+    accountId: workspace.accountId,
+    workspaceId: workspace.workspaceId,
+    operationId,
+    requestDigest,
+    encryptedProviderRequest: "encrypted-provider-request",
+    providerRequestExpiresAt: new Date(Date.now() + 60_000),
+    nextReconcileAt: new Date(),
+  });
+  await markVideoGenerationProviderStarted(client.db, {
+    accountId: workspace.accountId,
+    workspaceId: workspace.workspaceId,
+    operationId,
+    requestDigest,
+    providerJobId: "provider-job",
+    nextReconcileAt: new Date(),
+  });
+  await markVideoGenerationRetaining(client.db, {
+    accountId: workspace.accountId,
+    workspaceId: workspace.workspaceId,
+    operationId,
+    requestDigest,
+  });
+  const objectKey = `video-generation/objects/sha256/${"b".repeat(64)}.mp4`;
+  await settleVideoGenerationReady(client.db, {
+    accountId: workspace.accountId,
+    workspaceId: workspace.workspaceId,
+    operationId,
+    requestDigest,
+    fileId,
+    bucket: "retained-test-bucket",
+    objectKey,
+    sizeBytes: input.bytes.byteLength,
+    sha256: "b".repeat(64),
+    facts: {
+      durationSeconds: 5,
+      width: 1280,
+      height: 720,
+      fps: 24,
+      hasAudio: true,
+      videoCodec: "h264",
+      audioCodec: "aac",
+    },
+  });
+  return { artifactId, fileId, objectKey };
+}
+
 describe("retained artifact metadata and bounded content", () => {
   test("serves generated images as permanent provider-neutral workspace artifacts", async () => {
     if (!available) return;
@@ -358,6 +510,50 @@ describe("retained artifact metadata and bounded content", () => {
     );
     expect(content.status).toBe(206);
     expect(new Uint8Array(await content.arrayBuffer())).toEqual(bytes.slice(1, 3));
+  });
+
+  test("mints a short-lived Range playback source for a distinct generated-video artifact", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const fixture = storageFixture();
+    const bytes = new Uint8Array([0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70]);
+    const generated = await createGeneratedVideoArtifact(workspace, { bytes });
+    fixture.objects.set(generated.objectKey, bytes);
+    const app = routeApp(fixture.storage);
+
+    const metadataResponse = await app.request(
+      artifactUrl(workspace.workspaceId, generated.artifactId),
+      { headers: { authorization: workspace.authorization } },
+    );
+    expect(metadataResponse.status).toBe(200);
+    expect(await metadataResponse.json()).toMatchObject({
+      available: true,
+      artifactId: generated.artifactId,
+      kind: "generated_video",
+      contentType: "video/mp4",
+      originalBytes: bytes.byteLength,
+      dimensions: { width: 1280, height: 720 },
+    });
+
+    const playbackResponse = await app.request(
+      `${artifactUrl(workspace.workspaceId, generated.artifactId)}/playback-source`,
+      {
+        method: "POST",
+        headers: { authorization: workspace.authorization },
+      },
+    );
+    expect(playbackResponse.status).toBe(200);
+    expect(await playbackResponse.json()).toMatchObject({
+      schemaVersion: 1,
+      artifactId: generated.artifactId,
+      contentType: "video/mp4",
+      sizeBytes: bytes.byteLength,
+      sha256: "b".repeat(64),
+      acceptRanges: "bytes",
+    });
+    expect(fixture.existenceCalls).toEqual([generated.fileId]);
+    expect(fixture.signedGetCalls).toEqual([generated.objectKey]);
+    expect(fixture.calls).toHaveLength(0);
   });
 
   test("returns provider-neutral metadata and exact/default bounded ranges", async () => {

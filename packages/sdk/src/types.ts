@@ -645,6 +645,33 @@ export type OpenGeniSlackBotInstallStart = {
   expiresAt: string;
 };
 
+export type SlackInstallationBindingState = "active" | "quarantined";
+
+export type SlackInstallationBinding = {
+  id: string;
+  accountId: string;
+  accountName: string;
+  workspaceId: string;
+  workspaceName: string;
+  connectionId: string;
+  connectionStatus: ConnectionStatus;
+  connectionVersion: number;
+  slackTeamId: string;
+  slackTeamName: string;
+  botId: string;
+  botUserId: string;
+  botDisplayName: "OpenGeni";
+  state: SlackInstallationBindingState;
+  quarantineReason: string | null;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ListSlackInstallationBindingsResponse = {
+  bindings: SlackInstallationBinding[];
+};
+
 export type GoogleDriveTargetScope = "user" | "workspace" | "organization";
 export type ConnectorDocumentDestinationAuthority = "organization" | "workspace" | "personal";
 export type ConnectorDocumentDestinationSelection = {
@@ -684,13 +711,15 @@ export type GoogleDriveSelectedSource = {
   /** @deprecated Missing destinations resolve to the current workspace boundary. */
   targetScope?: GoogleDriveTargetScope | undefined;
   syncCadence: GoogleDriveSyncCadence;
+  syncEnabled: boolean;
+  configGeneration: number;
   readPolicy: GoogleDriveReadPolicy;
   selectedAt: string;
 };
 
 export type GoogleDriveConnectionMetadata = {
   credentialRole: "google_drive_metadata";
-  credentialLabel: "Google Drive metadata browser";
+  credentialLabel: "Google Drive read-only source sync" | "Google Drive metadata browser";
   googlePermissionId: string;
   googleEmail: string;
   googleDisplayName: string | null;
@@ -743,12 +772,86 @@ export type GoogleDriveBrowseResponse = {
   incompleteSearch: boolean;
 };
 
+export type AtlassianSourceKind = "jira_project" | "confluence_space";
+export type AtlassianSyncCadence = "manual" | "hourly" | "daily";
+export type AtlassianReadPolicy = "allow" | "ask" | "block";
+export type AtlassianConnectionLifecycle = {
+  state:
+    | "active"
+    | "paused"
+    | "token_revoked"
+    | "app_removed"
+    | "disconnected"
+    | "reconnect_required"
+    | "reconsent_required";
+  recoverable: boolean;
+  observedAt: string;
+};
+export type AtlassianSelectedSource = {
+  id: string;
+  cloudId: string;
+  siteName: string;
+  siteUrl: string;
+  resourceId: string;
+  key: string;
+  name: string;
+  kind: AtlassianSourceKind;
+  destination?: ConnectorDocumentDestination | undefined;
+  syncCadence: AtlassianSyncCadence;
+  syncEnabled: boolean;
+  configGeneration: number;
+  readPolicy: AtlassianReadPolicy;
+  selectedAt: string;
+};
+export type AtlassianConnectionMetadata = {
+  credentialRole: "atlassian_knowledge";
+  credentialLabel: "Atlassian read-only knowledge sync";
+  atlassianAccountId: string;
+  displayName: string;
+  email?: string | null | undefined;
+  sites: Array<{
+    cloudId: string;
+    name: string;
+    url: string;
+    products: Array<"jira" | "confluence">;
+  }>;
+  verifiedAt: string;
+  accessMode: "readonly";
+  lifecycle?: AtlassianConnectionLifecycle | undefined;
+  documentDestination?: ConnectorDocumentDestination | undefined;
+  selectedSources: AtlassianSelectedSource[];
+  [key: string]: unknown;
+};
+export type AtlassianOAuthStartResponse = { authorizationUrl: string; expiresAt: string };
+export type AtlassianLifecycleActionRequest = {
+  action: "pause" | "resume";
+  expectedVersion: number;
+};
+export type AtlassianDisconnectRequest = { expectedVersion: number; idempotencyKey: string };
+export type AtlassianBrowseItem = {
+  id: string;
+  cloudId: string;
+  siteName: string;
+  siteUrl: string;
+  resourceId: string;
+  key: string;
+  name: string;
+  kind: AtlassianSourceKind;
+  description: string | null;
+  webUrl: string;
+};
+export type AtlassianBrowseResponse = {
+  connection: ConnectionMetadata;
+  items: AtlassianBrowseItem[];
+};
+
 export type SaveGoogleDriveSourceRequest = {
   sources: Array<Pick<GoogleDriveBrowseItem, "id" | "name" | "mimeType" | "driveId">>;
   destination?: ConnectorDocumentDestinationSelection | undefined;
   /** @deprecated Legacy requests resolve to workspace authority. */
   targetScope?: GoogleDriveTargetScope | undefined;
   syncCadence: GoogleDriveSyncCadence;
+  syncEnabled: boolean;
   readPolicy: GoogleDriveReadPolicy;
 };
 
@@ -990,6 +1093,47 @@ export type SessionListResponse = {
   /** True when the server omitted older pins from its bounded pinned section. */
   pinnedTruncated?: boolean;
   sessions: Session[];
+  nextCursor: string | null;
+};
+
+/** Compact, bounded session projection for workspace agent-topology browsers. */
+export type AgentTopologySession = {
+  id: string;
+  title: string | null;
+  titleTruncated: boolean;
+  parentSessionId: string | null;
+  rootSessionId: string;
+  nestedAgentDepth: number;
+  ancestorPath: Array<{ id: string; title: string | null; titleTruncated: boolean }>;
+  status: SessionStatus;
+  pause: {
+    state: "active" | "paused";
+    additionalBlockerCount: number;
+    source: {
+      kind: "session" | "workspace";
+      sessionId?: string | undefined;
+      displayName: string;
+      displayNameTruncated: boolean;
+    } | null;
+  };
+  children: {
+    directChildren: number;
+    totalDescendants: number;
+    runningDescendants: number;
+    queuedDescendants: number;
+    attentionDescendants: number;
+    pausedDescendants: number;
+    failedDescendants: number;
+    truncated: boolean;
+  };
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AgentTopologyPageResponse = {
+  sessions: AgentTopologySession[];
+  total: number;
+  hasMore: boolean;
   nextCursor: string | null;
 };
 
@@ -1732,6 +1876,9 @@ export type GitStatusRequest = { path?: string };
 export type GitStatusResponse = {
   isRepo: boolean;
   head: string | null;
+  /** Exact commit object identity. null for unborn/non-repositories; absent on
+   *  legacy adapters. */
+  headOid?: string | null | undefined;
   detached: boolean;
   upstream: string | null;
   ahead: number;
@@ -1840,6 +1987,9 @@ export type WorkspaceCaptureFile = {
 export type WorkspaceCaptureRepo = {
   root: string;
   head: string | null;
+  /** Exact HEAD commit object identity. null for unborn repositories; absent
+   *  on legacy captures. */
+  headOid?: string | null | undefined;
   detached: boolean;
   upstream: string | null;
   ahead: number;
@@ -1983,6 +2133,7 @@ export type ScheduledTaskDayOfWeek =
   | "SATURDAY";
 
 export type ScheduledTaskScheduleSpec =
+  | { type: "manual" }
   | { type: "once"; runAt: string; timeZone: string }
   | {
       type: "interval";
@@ -2011,6 +2162,44 @@ export type ScheduledTaskAgentConfig = {
   maxNestedAgentDepth?: number | undefined;
 };
 
+export type ScopedKnowledgeScope =
+  | { kind: "organization"; workspaceId: null; subjectId: null }
+  | { kind: "workspace"; workspaceId: string; subjectId: null }
+  | { kind: "personal"; workspaceId: string | null; subjectId: string };
+
+export type KnowledgeSourceSyncLimits = {
+  maxItems: number;
+  maxBytes: number;
+  maxFileBytes: number;
+  maxProviderRequests: number;
+  maxElapsedSeconds: number;
+  maxConcurrency: number;
+  maxFailureDetails: number;
+};
+
+export type ScheduledTaskAction =
+  | { kind: "agent_turn" }
+  | {
+      kind: "knowledge_source_sync";
+      sourceId: string;
+      sourceGeneration: number;
+      sourceLifecycleGeneration: number;
+      sourceConfigGeneration: number;
+      controlWorkspaceId: string;
+      providerCoordinationKey: string;
+      connection: {
+        connectionId: string;
+        connectionVersion: number;
+        providerDomain: string;
+        kind: ConnectionKind;
+        ownerSubjectId: string;
+      };
+      destination: ScopedKnowledgeScope;
+      initiatingSubjectId: string;
+      allDescendants: boolean;
+      limits: KnowledgeSourceSyncLimits;
+    };
+
 export type ScheduledTask = {
   id: string;
   accountId: string;
@@ -2021,6 +2210,7 @@ export type ScheduledTask = {
   temporalScheduleId: string;
   runMode: ScheduledTaskRunMode;
   overlapPolicy: ScheduledTaskOverlapPolicy;
+  action: ScheduledTaskAction;
   agentConfig: ScheduledTaskAgentConfig;
   createdBy?: TurnInitiator | undefined;
   createdByContext?: TurnInitiatorContext | undefined;
@@ -2142,7 +2332,7 @@ export const KNOWN_PERMISSIONS = [
   "secrets:read",
   "secrets:write",
   "mcp_servers:attach",
-  "toolspace:call",
+  "codemode:call",
   "goals:manage",
   "enrollments:read",
   "enrollments:manage",
@@ -2177,7 +2367,6 @@ export type FirstPartyMcpToolName =
   | "run_on"
   | "sandbox_provision"
   | "connected_machine_remove"
-  | "connected_machine_remove"
   | "rig_list"
   | "rig_get"
   | "rig_propose_change"
@@ -2192,6 +2381,20 @@ export type FirstPartyMcpToolName =
   | "session_resume"
   | "session_steer"
   | "set_other_session_title"
+  | "interaction_discover"
+  | "browser_open"
+  | "browser_tabs"
+  | "browser_observe"
+  | "browser_act"
+  | "browser_debug"
+  | "browser_identity"
+  | "browser_publish"
+  | "browser_lifecycle"
+  | "computer_open"
+  | "computer_targets"
+  | "computer_observe"
+  | "computer_act"
+  | "computer_lifecycle"
   | "variable_set_list"
   | "environment_list"
   | "variable_set_get_variable"
@@ -2239,11 +2442,22 @@ export type FirstPartyMcpToolName =
   | "slack_bot_file_content"
   | "slack_bot_post_message"
   | "slack_bot_delete_message"
+  | "atlassian_sources_list"
+  | "atlassian_search"
+  | "atlassian_get"
   | "artifacts_list"
   | "artifacts_get_source"
   | "artifacts_create"
   | "artifacts_publish"
-  | "artifacts_rollback";
+  | "artifacts_rollback"
+  | "editable_artifact_list"
+  | "editable_artifact_create"
+  | "editable_artifact_import"
+  | "editable_artifact_get"
+  | "editable_artifact_inspect"
+  | "editable_artifact_apply"
+  | "editable_artifact_export"
+  | "editable_artifact_export_status";
 
 export type ProductAccessMode = "local" | "configured" | "managed";
 
@@ -2862,7 +3076,7 @@ export type WorkspaceSettings = {
 
 export type WorkspaceSlackReactionSummonSettings = {
   enabled: boolean;
-  emoji: string;
+  emoji: "genie";
   channelPolicy: { mode: "bot_member" } | { mode: "allowlist"; channelIds: string[] };
 };
 
@@ -2965,6 +3179,48 @@ export type AddWorkspaceMemberRequest = {
 export type UpdateWorkspaceMemberRequest = {
   role?: string | undefined;
   permissions: Permission[];
+};
+
+export type SlackUserLinkAccessRequestStatus =
+  | "prepared"
+  | "pending"
+  | "completed"
+  | "denied"
+  | "cancelled"
+  | "expired";
+
+/** Token-free durable projection of one signed Slack identity-link intent. */
+export type SlackUserLinkAccessRequest = {
+  id: string;
+  workspaceId: string;
+  workspaceDisplayName: string | null;
+  subjectLabel: string | null;
+  status: SlackUserLinkAccessRequestStatus;
+  version: number;
+  expiresAt: string;
+  requestedAt: string | null;
+  decidedAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type PrepareSlackUserLinkAccessRequest = {
+  linkToken: string;
+};
+
+export type SlackUserLinkAccessMutationRequest = {
+  expectedVersion: number;
+  idempotencyKey: string;
+};
+
+export type ApproveSlackUserLinkAccessRequest = SlackUserLinkAccessMutationRequest & {
+  role?: string | undefined;
+  permissions: Permission[];
+};
+
+export type ListSlackUserLinkAccessRequestsResponse = {
+  requests: SlackUserLinkAccessRequest[];
 };
 
 // --- Goals -------------------------------------------------------------------
@@ -3162,7 +3418,8 @@ export type SessionSystemUpdateKind =
   | "goal_continuation"
   | "agent_message"
   | "agent_steer_instruction"
-  | "child_terminal_result";
+  | "child_terminal_result"
+  | "media_generation_result";
 
 export type SessionSystemUpdateState =
   | "pending"
@@ -3297,9 +3554,10 @@ export type ScheduledTaskAgentConfigInput = {
   maxNestedAgentDepth?: number | undefined;
 };
 
-export type CreateScheduledTaskRequest = {
+export type CreateAgentScheduledTaskRequest = {
   name: string;
   schedule: ScheduledTaskScheduleSpec;
+  action?: { kind: "agent_turn" } | undefined;
   runMode?: ScheduledTaskRunMode | undefined;
   targetSessionId?: string | null | undefined;
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
@@ -3313,12 +3571,26 @@ export type CreateScheduledTaskRequest = {
   metadata?: Record<string, unknown> | undefined;
 };
 
+export type CreateKnowledgeSourceSyncScheduledTaskRequest = {
+  name: string;
+  schedule: ScheduledTaskScheduleSpec;
+  action: Extract<ScheduledTaskAction, { kind: "knowledge_source_sync" }>;
+  overlapPolicy?: "skip" | "buffer_one" | undefined;
+  status?: ScheduledTaskStatus | undefined;
+  metadata?: Record<string, unknown> | undefined;
+};
+
+export type CreateScheduledTaskRequest =
+  | CreateAgentScheduledTaskRequest
+  | CreateKnowledgeSourceSyncScheduledTaskRequest;
+
 export type UpdateScheduledTaskRequest = {
   name?: string | undefined;
   schedule?: ScheduledTaskScheduleSpec | undefined;
   runMode?: ScheduledTaskRunMode | undefined;
   targetSessionId?: string | null | undefined;
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
+  action?: ScheduledTaskAction | undefined;
   agentConfig?: ScheduledTaskAgentConfigInput | undefined;
   status?: ScheduledTaskStatus | undefined;
   variableSetId?: string | null | undefined;
@@ -3329,9 +3601,50 @@ export type UpdateScheduledTaskRequest = {
   metadata?: Record<string, unknown> | undefined;
 };
 
-export type ScheduledTaskRunStatus = "queued" | "dispatched" | "failed";
+export type ScheduledTaskRunStatus = "queued" | "dispatched" | "succeeded" | "skipped" | "failed";
 
-export type ScheduledTaskTriggerType = "scheduled" | "manual";
+export type KnowledgeSourceSyncRunSummary = {
+  phase: "queued" | "inventory" | "transfer" | "index" | "checkpoint" | "completed" | "failed";
+  scanned: number;
+  imported: number;
+  unchanged: number;
+  skipped: number;
+  failed: number;
+  bytes: number;
+  providerRequests: number;
+  elapsedMs: number;
+  indexed: number;
+  aclPending: number;
+  retryable: boolean;
+  limitReached: "items" | "bytes" | "file_bytes" | "provider_requests" | "elapsed_time" | null;
+  checkpointed: boolean;
+  reconnectRequired: boolean;
+  failures: Array<{
+    externalObjectId: string;
+    code:
+      | "authority_changed"
+      | "connection_reconnect_required"
+      | "provider_unavailable"
+      | "provider_rejected"
+      | "provider_payload_invalid"
+      | "content_unsupported"
+      | "content_too_large"
+      | "resource_limit"
+      | "item_processing_failed"
+      | "indexing_failed"
+      | "internal_failure";
+    retryable: boolean;
+    message: string;
+  }>;
+};
+
+export type ScheduledTaskTriggerType =
+  | "scheduled"
+  | "manual"
+  | "initial"
+  | "provider_event"
+  | "retry"
+  | "repair";
 
 export type ScheduledTaskRun = {
   id: string;
@@ -3344,6 +3657,10 @@ export type ScheduledTaskRun = {
   firedAt: string;
   sessionId: string | null;
   triggerEventId: string | null;
+  actionKind: "agent_turn" | "knowledge_source_sync";
+  knowledgeSyncRunId: string | null;
+  knowledgeSummary: KnowledgeSourceSyncRunSummary | null;
+  completedAt: string | null;
   error: string | null;
   createdAt: string;
   updatedAt: string;
@@ -3432,6 +3749,12 @@ export type RigProviderImage = {
   imageDigest: string | null;
   artifactId: string | null;
   providerBindingKeyHash: string | null;
+  coldBootValidation?:
+    | {
+        version: 1;
+        checkedAt: string;
+      }
+    | undefined;
   provenance: {
     kind: "rig_verification";
     targetKind: "change" | "version";
@@ -3571,6 +3894,7 @@ export const RETAINED_OUTPUT_DEFAULT_PAGE_BYTES = 256 * 1024;
 export const RETAINED_OUTPUT_MAX_PAGE_BYTES = 1024 * 1024;
 export const COMPUTER_SCREENSHOT_MAX_BYTES = 32 * 1024 * 1024;
 export const GENERATED_IMAGE_MAX_BYTES = 64 * 1024 * 1024;
+export const GENERATED_VIDEO_MAX_BYTES = 512 * 1024 * 1024;
 
 export type RetainedOutputKind =
   | "tool_result"
@@ -3579,6 +3903,7 @@ export type RetainedOutputKind =
   | "event_media"
   | "computer_screenshot"
   | "generated_image"
+  | "generated_video"
   | "file";
 
 export type RetainedOutputUnavailableReason =
@@ -3626,6 +3951,151 @@ export type GeneratedImageReceipt = {
   type: "generated_image";
   artifact: RetainedArtifactReference;
   sandboxPath: string;
+};
+
+export type VideoGenerationSourceMode =
+  | "text"
+  | "first_frame"
+  | "first_and_last_frames"
+  | "image_reference"
+  | "video_reference";
+
+export type VideoGenerationResolution = "480p" | "720p";
+
+export type VideoGenerationAspectRatio =
+  | "16:9"
+  | "4:3"
+  | "1:1"
+  | "3:4"
+  | "9:16"
+  | "21:9"
+  | "adaptive";
+
+export type VideoGenerationModelCapability = {
+  modelId: string;
+  label: string;
+  providerLabel: string;
+  sourceModes: VideoGenerationSourceMode[];
+  resolutions: VideoGenerationResolution[];
+  aspectRatios: VideoGenerationAspectRatio[];
+  duration: {
+    minSeconds: number;
+    maxSeconds: number;
+    stepSeconds: number;
+  };
+  supportsAudio: boolean;
+};
+
+export type VideoGenerationCapabilities = {
+  schemaVersion: 1;
+  capabilityRevision: string;
+  defaultModelId: string;
+  models: VideoGenerationModelCapability[];
+};
+
+export type VideoGenerationPolicy = {
+  schemaVersion: 1;
+  revision: number;
+  fundingSource: VideoGenerationFundingSource;
+  enabledModelIds: string[];
+  defaultModelId: string | null;
+};
+
+export type UpdateVideoGenerationPolicyRequest = {
+  expectedRevision: number;
+  fundingSource: VideoGenerationFundingSource;
+  enabledModelIds: string[];
+  defaultModelId: string | null;
+};
+
+export type VideoGenerationFundingSource = "opengeni_credits" | "workspace_gateway";
+
+export type VideoGenerationFundingOption = {
+  source: VideoGenerationFundingSource;
+  label: string;
+  description: string;
+  available: boolean;
+  unavailableReason: string | null;
+};
+
+export type WorkspaceVideoGenerationSettings = {
+  schemaVersion: 1;
+  policy: VideoGenerationPolicy;
+  fundingOptions: VideoGenerationFundingOption[];
+  availableModels: VideoGenerationModelCapability[];
+  capabilities: VideoGenerationCapabilities | null;
+};
+
+export type GeneratedVideoFacts = {
+  durationSeconds: number;
+  width: number;
+  height: number;
+  fps: number;
+  hasAudio: boolean;
+  videoCodec: "h264";
+  audioCodec: "aac" | null;
+};
+
+export type GeneratedVideoReceipt = {
+  type: "generated_video";
+  schemaVersion: 1;
+  operationId: string;
+  artifact: RetainedArtifactReference;
+  video: GeneratedVideoFacts;
+  sandboxPath: string;
+};
+
+export type VideoGenerationTerminalFailureStatus =
+  | "provider_failed"
+  | "retention_failed"
+  | "cancelled_before_submit"
+  | "outcome_unknown";
+
+export type MediaGenerationResult =
+  | {
+      type: "media_generation_result";
+      schemaVersion: 1;
+      status: "ready";
+      operationId: string;
+      receipt: GeneratedVideoReceipt;
+    }
+  | {
+      type: "media_generation_result";
+      schemaVersion: 1;
+      status: VideoGenerationTerminalFailureStatus;
+      operationId: string;
+      boundedPublicReason: string;
+    };
+
+export type VideoGenerationPublicStatus =
+  | "preparing"
+  | "prepared"
+  | "accepted"
+  | "provider_started"
+  | "retaining"
+  | "completed"
+  | VideoGenerationTerminalFailureStatus;
+
+export type VideoGenerationOperationSummary = {
+  schemaVersion: 1;
+  operationId: string;
+  modelId: string;
+  status: VideoGenerationPublicStatus;
+  createdAt: string;
+  updatedAt: string;
+  terminal: MediaGenerationResult | null;
+};
+
+/** Ephemeral source minted for native browser playback; never persist the URL. */
+export type VideoArtifactPlaybackSource = {
+  schemaVersion: 1;
+  artifactId: string;
+  url: string;
+  expiresAt: string;
+  contentType: "video/mp4";
+  sizeBytes: number;
+  sha256: string;
+  acceptRanges: "bytes";
 };
 
 export type RetainedArtifactContentOptions = {
@@ -5007,6 +5477,10 @@ export const KNOWN_USAGE_EVENT_TYPES = [
   "file.deleted",
   "document.indexed",
   "scheduled_task.fired",
+  "knowledge_source_sync.fired",
+  "knowledge_source_sync.completed",
+  "knowledge_source_sync.items",
+  "knowledge_source_sync.bytes",
   "api_key.request",
   // sandbox warm-time metering (P2.1) — mirrors contracts UsageEventType.
   "sandbox.warm_seconds",
@@ -5390,12 +5864,14 @@ export type RemoveEnrollmentResponse = {
   code:
     | "active_route"
     | "active_commands"
+    | "machine_home"
     | "active_lease"
     | "recovery_pending"
     | "not_selfhosted"
     | null;
   message: string;
   action: string;
+  dependentSessions: Array<{ id: string; title: string | null }>;
 };
 
 /** POST /v1/workspaces/:ws/sessions/:sessionId/active-sandbox — swap a session's

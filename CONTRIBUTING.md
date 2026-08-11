@@ -47,6 +47,13 @@ bun run test:e2e
 - Include tests for behavior changes.
 - Update README or docs when setup, public API, configuration, or user-facing behavior changes.
 - Do not commit secrets, local `.env` files, generated credentials, or private infrastructure details.
+- Keep a reviewable candidate head frozen while CI and review run. If `main`
+  advances, verify the frozen head's current-base mergeability and material
+  compatibility; do not merge or rebase unrelated `main` commits into the
+  branch solely to make it look current.
+- Treat candidate/version labels as substantive source revisions. Base-only
+  evidence refreshes stay on the same head. Change the head only for a source
+  defect, actual conflict, or material semantic incompatibility.
 
 ## Keeping Docs True
 

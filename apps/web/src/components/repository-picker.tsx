@@ -133,6 +133,12 @@ export type RepositoryContextPickerProps = {
   onOrgChange: (value: string) => void;
   onStartGitHubApp: () => void;
   onDisconnectInstallation: (installationId: number) => Promise<void>;
+  /** Repositories already mounted on an additive surface cannot be removed or retargeted. */
+  lockedRepoIds?: ReadonlySet<number>;
+  /** Manual rows already mounted on an additive surface are rendered read-only. */
+  lockedManualRepoIds?: ReadonlySet<number>;
+  /** Inline validation for pending manual repository additions. */
+  validationError?: string | null;
   /** Optional back control when embedded in the mobile “+” drill-in. */
   leading?: ReactNode;
   /** Extra classes on the bar trigger (e.g. `max-sm:hidden` when opened from +). */
@@ -403,6 +409,7 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
                       <div className="divide-y divide-border/70">
                         {group.repositories.map((repo) => {
                           const checked = props.selectedRepoIds.has(repo.id);
+                          const locked = props.lockedRepoIds?.has(repo.id) === true;
                           const blocked =
                             props.selectedInstallationId !== null &&
                             props.selectedInstallationId !== repo.installationId &&
@@ -418,9 +425,11 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
                               <button
                                 type="button"
                                 onClick={() => props.onToggleRepo(repo)}
-                                disabled={props.pending}
+                                disabled={props.pending || locked}
                                 aria-pressed={checked}
-                                aria-label={`Select ${repo.fullName}`}
+                                aria-label={
+                                  locked ? `${repo.fullName} mounted` : `Select ${repo.fullName}`
+                                }
                                 className="grid w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 rounded-md text-left outline-none"
                               >
                                 <span
@@ -446,7 +455,11 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
                                     default {repo.defaultBranch}
                                   </span>
                                 </span>
-                                {blocked ? (
+                                {locked ? (
+                                  <MetaChip dot="idle" rounded="full">
+                                    Mounted
+                                  </MetaChip>
+                                ) : blocked ? (
                                   <MetaChip dot="waiting" rounded="full">
                                     Other app
                                   </MetaChip>
@@ -465,7 +478,7 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
                                       props.onRefChange(repo.id, event.target.value)
                                     }
                                     onClick={(event) => event.stopPropagation()}
-                                    disabled={props.pending}
+                                    disabled={props.pending || locked}
                                     placeholder={repo.defaultBranch}
                                     aria-label={`${repo.fullName} ref`}
                                     className="h-7 text-xs"
@@ -523,78 +536,90 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
                       Add HTTPS Git repositories that don't use the GitHub app token.
                     </p>
                   ) : (
-                    props.manualRepos.map((repo) => (
-                      <div
-                        key={repo.id}
-                        className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_7rem_auto]"
-                      >
-                        <Input
-                          value={repo.url}
-                          onChange={(event) =>
-                            props.onManualUpdate(repo.id, { url: event.target.value })
-                          }
-                          disabled={props.pending}
-                          placeholder="https://github.com/org/repo"
-                          className="h-8 text-xs"
-                        />
-                        <div className="relative">
-                          <GitBranchIcon className="pointer-events-none absolute left-2.5 top-2 size-3.5 text-fg-subtle" />
+                    props.manualRepos.map((repo) => {
+                      const locked = props.lockedManualRepoIds?.has(repo.id) === true;
+                      return (
+                        <div
+                          key={repo.id}
+                          className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_7rem_auto]"
+                        >
                           <Input
-                            value={repo.ref}
+                            value={repo.url}
                             onChange={(event) =>
-                              props.onManualUpdate(repo.id, { ref: event.target.value })
+                              props.onManualUpdate(repo.id, { url: event.target.value })
                             }
-                            disabled={props.pending}
-                            placeholder="main"
-                            className="h-8 pl-7 text-xs"
+                            disabled={props.pending || locked}
+                            placeholder="https://github.com/org/repo"
+                            className="h-8 text-xs"
                           />
-                        </div>
-                        {confirmRemoveId === repo.id ? (
-                          <div className="flex items-center gap-1">
-                            <Button
-                              type="button"
-                              variant="destructive"
-                              size="icon-sm"
-                              onClick={() => {
-                                props.onManualRemove(repo.id);
-                                setConfirmRemoveId(null);
-                              }}
-                              disabled={props.pending}
-                              aria-label="Confirm remove repository"
-                              title="Remove"
-                              className="size-8"
-                            >
-                              <CheckIcon className="size-3.5" />
-                            </Button>
+                          <div className="relative">
+                            <GitBranchIcon className="pointer-events-none absolute left-2.5 top-2 size-3.5 text-fg-subtle" />
+                            <Input
+                              value={repo.ref}
+                              onChange={(event) =>
+                                props.onManualUpdate(repo.id, { ref: event.target.value })
+                              }
+                              disabled={props.pending || locked}
+                              placeholder="main"
+                              className="h-8 pl-7 text-xs"
+                            />
+                          </div>
+                          {locked ? (
+                            <MetaChip dot="idle" rounded="full" className="self-center">
+                              Mounted
+                            </MetaChip>
+                          ) : confirmRemoveId === repo.id ? (
+                            <div className="flex items-center gap-1">
+                              <Button
+                                type="button"
+                                variant="destructive"
+                                size="icon-sm"
+                                onClick={() => {
+                                  props.onManualRemove(repo.id);
+                                  setConfirmRemoveId(null);
+                                }}
+                                disabled={props.pending}
+                                aria-label="Confirm remove repository"
+                                title="Remove"
+                                className="size-8"
+                              >
+                                <CheckIcon className="size-3.5" />
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon-sm"
+                                onClick={() => setConfirmRemoveId(null)}
+                                aria-label="Keep repository"
+                                title="Cancel"
+                                className="size-8"
+                              >
+                                <XIcon className="size-3.5" />
+                              </Button>
+                            </div>
+                          ) : (
                             <Button
                               type="button"
                               variant="ghost"
                               size="icon-sm"
-                              onClick={() => setConfirmRemoveId(null)}
-                              aria-label="Keep repository"
-                              title="Cancel"
+                              onClick={() => setConfirmRemoveId(repo.id)}
+                              disabled={props.pending}
+                              aria-label="Remove repository"
+                              title="Remove"
                               className="size-8"
                             >
-                              <XIcon className="size-3.5" />
+                              <Trash2Icon className="size-3.5" />
                             </Button>
-                          </div>
-                        ) : (
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="icon-sm"
-                            onClick={() => setConfirmRemoveId(repo.id)}
-                            disabled={props.pending}
-                            aria-label="Remove repository"
-                            title="Remove"
-                            className="size-8"
-                          >
-                            <Trash2Icon className="size-3.5" />
-                          </Button>
-                        )}
-                      </div>
-                    ))
+                          )}
+                        </div>
+                      );
+                    })
                   )}
+                  {props.validationError ? (
+                    <p className="text-xs leading-5 text-status-failed" role="alert">
+                      {props.validationError}
+                    </p>
+                  ) : null}
                 </div>
               </CollapsibleContent>
             </div>

@@ -1,5 +1,38 @@
 # @opengeni/react
 
+## 0.52.0
+
+### Patch Changes
+
+- Updated dependencies [8b6803a]
+- Updated dependencies [aeb07f4]
+- Updated dependencies [ff7203c]
+  - @opengeni/sdk@0.52.0
+
+## 0.51.0
+
+### Minor Changes
+
+- dcfe6eb: Add canonical attempt-scoped CodeMode, browser and computer interaction, and durable collaborative editable artifacts. Agents and humans now share one artifact head through the same application authority; direct MCP and CodeMode support bounded inspection, fenced edits, trusted Office import, and asynchronous export to workspace files. The session UI gains a first-class Artifacts workspace, and React interaction viewers move to an explicit lazy-loadable subpath.
+
+### Patch Changes
+
+- 2f4ce5e: Add durable Seedance video generation with workspace model and funding policy,
+  secure media references, retained video artifacts, sandbox materialization,
+  OpenGeni-credit and workspace-gateway funding, and SDK/React playback surfaces.
+- 76e54a9: Keep mobile voice-input Cancel and Stop controls visible while recording in crowded composer footers.
+- bd5514e: Add explicitly enabled provider-neutral knowledge-source schedules with durable wake provenance, generation-fenced execution checkpoints and index obligations, fail-closed ACL activation seams, no-agent execution, layered pause state, shared schedule administration, and Google Drive source lifecycle integration.
+- 90eea29: Make connected-machine removal show every dependent session and support an explicit canonical move-to-default-sandbox confirmation before revocation. Default moves prove managed sandbox readiness through the existing fleet route, active turns remain fail-closed, and typed swap rejections surface as visible errors instead of false success.
+- Updated dependencies [b46f4de]
+- Updated dependencies [2f4ce5e]
+- Updated dependencies [d55a093]
+- Updated dependencies [dcfe6eb]
+- Updated dependencies [ad9123b]
+- Updated dependencies [bd5514e]
+- Updated dependencies [90eea29]
+- Updated dependencies [a858835]
+  - @opengeni/sdk@0.51.0
+
 ## 0.50.1
 
 ### Patch Changes

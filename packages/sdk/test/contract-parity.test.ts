@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   AcknowledgeStreamRequest as ContractAcknowledgeStreamRequest,
+  AgentTopologyPageResponse as ContractAgentTopologyPageResponse,
   ActivateCodexRealtimeConnectionRequest as ContractActivateCodexRealtimeConnectionRequest,
   AcknowledgeStreamResponse as ContractAcknowledgeStreamResponse,
   AddWorkspaceMemberRequest as ContractAddWorkspaceMemberRequest,
@@ -67,6 +68,11 @@ import {
   UninstallPluginRequest as ContractUninstallPluginRequest,
   UninstallPluginResult as ContractUninstallPluginResult,
   SaveNewSessionDraftRequest as ContractSaveNewSessionDraftRequest,
+  SlackUserLinkAccessRequest as ContractSlackUserLinkAccessRequest,
+  PrepareSlackUserLinkAccessRequest as ContractPrepareSlackUserLinkAccessRequest,
+  SlackUserLinkAccessMutationRequest as ContractSlackUserLinkAccessMutationRequest,
+  ApproveSlackUserLinkAccessRequest as ContractApproveSlackUserLinkAccessRequest,
+  ListSlackUserLinkAccessRequestsResponse as ContractListSlackUserLinkAccessRequestsResponse,
   OPENGENI_CORRELATION_HEADER as CONTRACT_CORRELATION_HEADER,
   SandboxBackend as ContractSandboxBackend,
   SandboxOs as ContractSandboxOs,
@@ -119,6 +125,7 @@ import {
 } from "../src/types";
 import type {
   AcknowledgeStreamRequest,
+  AgentTopologyPageResponse,
   ActivateCodexRealtimeConnectionRequest,
   AcknowledgeStreamResponse,
   AddWorkspaceMemberRequest,
@@ -179,6 +186,11 @@ import type {
   PreviewPluginRequest,
   ReasoningEffort,
   SaveNewSessionDraftRequest,
+  SlackUserLinkAccessRequest,
+  PrepareSlackUserLinkAccessRequest,
+  SlackUserLinkAccessMutationRequest,
+  ApproveSlackUserLinkAccessRequest,
+  ListSlackUserLinkAccessRequestsResponse,
   SandboxBackend,
   SandboxOs,
   ScheduledTask,
@@ -234,6 +246,29 @@ describe("SDK / contracts parity", () => {
   });
   test("pins the default uploaded-file mount root", () => {
     expect(DEFAULT_FILE_RESOURCE_MOUNT_ROOT).toBe(CONTRACT_DEFAULT_FILE_RESOURCE_MOUNT_ROOT);
+  });
+
+  test("Slack user-link access continuation shapes match the public contracts", () => {
+    const acceptRequest = (
+      value: z.infer<typeof ContractSlackUserLinkAccessRequest>,
+    ): SlackUserLinkAccessRequest => value;
+    const acceptPrepare = (
+      value: PrepareSlackUserLinkAccessRequest,
+    ): z.input<typeof ContractPrepareSlackUserLinkAccessRequest> => value;
+    const acceptMutation = (
+      value: SlackUserLinkAccessMutationRequest,
+    ): z.input<typeof ContractSlackUserLinkAccessMutationRequest> => value;
+    const acceptApproval = (
+      value: Omit<ApproveSlackUserLinkAccessRequest, "permissions">,
+    ): Omit<z.input<typeof ContractApproveSlackUserLinkAccessRequest>, "permissions"> => value;
+    const acceptList = (
+      value: z.infer<typeof ContractListSlackUserLinkAccessRequestsResponse>,
+    ): ListSlackUserLinkAccessRequestsResponse => value;
+    expect(
+      [acceptRequest, acceptPrepare, acceptMutation, acceptApproval, acceptList].every(
+        (fn) => typeof fn === "function",
+      ),
+    ).toBe(true);
   });
   test("known session event types match the contracts enum exactly", () => {
     expect([...SESSION_EVENT_TYPES].sort()).toEqual([...ContractSessionEventType.options].sort());
@@ -338,6 +373,9 @@ describe("SDK / contracts parity", () => {
   test("contract-parsed payloads are assignable to SDK types (compile-time)", () => {
     // Server -> client shapes: anything the contracts produce, the SDK accepts.
     const acceptSession = (value: z.infer<typeof ContractSessionSchema>): Session => value;
+    const acceptAgentTopologyPage = (
+      value: z.infer<typeof ContractAgentTopologyPageResponse>,
+    ): AgentTopologyPageResponse => value;
     const acceptCreateResponse = (
       value: z.infer<typeof ContractCreateSessionResponse>,
     ): CreateSessionResponse => value;
@@ -384,6 +422,7 @@ describe("SDK / contracts parity", () => {
     };
     const checks = [
       acceptSession,
+      acceptAgentTopologyPage,
       acceptCreateResponse,
       acceptEvent,
       acceptHumanInputRequest,

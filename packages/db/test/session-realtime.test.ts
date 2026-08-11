@@ -19,8 +19,9 @@ import {
   saveComposerDraftInTransaction,
   SessionRealtimeConflictError,
   submitHumanPromptInTransaction,
-  withWorkspaceRls,
-  withWorkspaceSubjectRls,
+  withWorkspaceSessionActivityRls as withWorkspaceRls,
+  withWorkspaceSubjectSessionActivityRls as withWorkspaceSubjectRls,
+  type SessionActivityDatabase,
   type Database,
 } from "../src/index";
 import * as schema from "../src/schema";
@@ -102,7 +103,7 @@ async function begin(
 ) {
   return await withWorkspaceRls(client.db, value.grant.workspaceId, (db) =>
     db.transaction((tx) =>
-      beginSessionRealtimeInTransaction(tx as unknown as Database, {
+      beginSessionRealtimeInTransaction(tx as unknown as SessionActivityDatabase, {
         ...input,
         ...options,
       }),
@@ -118,7 +119,7 @@ async function end(
 ) {
   return await withWorkspaceRls(client.db, value.grant.workspaceId, (db) =>
     db.transaction((tx) =>
-      endSessionRealtimeInTransaction(tx as unknown as Database, {
+      endSessionRealtimeInTransaction(tx as unknown as SessionActivityDatabase, {
         workspaceId: value.grant.workspaceId,
         sessionId: value.session.id,
         realtimeId,
@@ -255,7 +256,7 @@ describe("session realtime lifecycle (real PostgreSQL)", () => {
 
     const renewed = await withWorkspaceRls(client.db, value.grant.workspaceId, (db) =>
       db.transaction((tx) =>
-        renewSessionRealtimeInTransaction(tx as unknown as Database, {
+        renewSessionRealtimeInTransaction(tx as unknown as SessionActivityDatabase, {
           workspaceId: value.grant.workspaceId,
           sessionId: value.session.id,
           realtimeId: started.mode.id,
@@ -321,7 +322,7 @@ describe("session realtime lifecycle (real PostgreSQL)", () => {
     const queued = await fixture();
     await withWorkspaceRls(client.db, queued.grant.workspaceId, (db) =>
       db.transaction((tx) =>
-        submitHumanPromptInTransaction(tx as unknown as Database, {
+        submitHumanPromptInTransaction(tx as unknown as SessionActivityDatabase, {
           accountId: queued.grant.accountId,
           workspaceId: queued.grant.workspaceId,
           sessionId: queued.session.id,
@@ -343,7 +344,7 @@ describe("session realtime lifecycle (real PostgreSQL)", () => {
     const paused = await fixture();
     await withWorkspaceRls(client.db, paused.grant.workspaceId, (db) =>
       db.transaction((tx) =>
-        mutateSessionControlInTransaction(tx as unknown as Database, {
+        mutateSessionControlInTransaction(tx as unknown as SessionActivityDatabase, {
           accountId: paused.grant.accountId,
           workspaceId: paused.grant.workspaceId,
           sessionId: paused.session.id,
@@ -381,7 +382,7 @@ describe("session realtime lifecycle (real PostgreSQL)", () => {
 
     const submitted = await withWorkspaceRls(client.db, value.grant.workspaceId, (db) =>
       db.transaction((tx) =>
-        submitHumanPromptInTransaction(tx as unknown as Database, {
+        submitHumanPromptInTransaction(tx as unknown as SessionActivityDatabase, {
           accountId: value.grant.accountId,
           workspaceId: value.grant.workspaceId,
           sessionId: value.session.id,
@@ -422,7 +423,7 @@ describe("session realtime lifecycle (real PostgreSQL)", () => {
     await begin(value, proof);
     const first = await withWorkspaceRls(client.db, value.grant.workspaceId, (db) =>
       db.transaction((tx) =>
-        submitHumanPromptInTransaction(tx as unknown as Database, {
+        submitHumanPromptInTransaction(tx as unknown as SessionActivityDatabase, {
           accountId: value.grant.accountId,
           workspaceId: value.grant.workspaceId,
           sessionId: value.session.id,
@@ -439,7 +440,7 @@ describe("session realtime lifecycle (real PostgreSQL)", () => {
     );
     const replacement = await withWorkspaceRls(client.db, value.grant.workspaceId, (db) =>
       db.transaction((tx) =>
-        submitHumanPromptInTransaction(tx as unknown as Database, {
+        submitHumanPromptInTransaction(tx as unknown as SessionActivityDatabase, {
           accountId: value.grant.accountId,
           workspaceId: value.grant.workspaceId,
           sessionId: value.session.id,

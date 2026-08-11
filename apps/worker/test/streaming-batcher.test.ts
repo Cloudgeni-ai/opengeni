@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionEventType } from "@opengeni/contracts";
 import type { AppendEventInput } from "@opengeni/db";
-import { createRuntimeBatcher } from "../src/activities/streaming";
+import type { Context } from "@temporalio/activity";
+import { createRuntimeBatcher, nextStreamEvent } from "../src/activities/streaming";
 
 // Lever A: token deltas coalesce through the batcher (one appendSessionEvents
 // txn + one publish per flush) instead of one DB round-trip per token. These
@@ -237,5 +238,74 @@ describe("createRuntimeBatcher", () => {
     await expect(batcher.push(delta(5, TOOLCALL))).rejects.toThrow("append failed");
     expect(seen).toHaveLength(3);
     expect(seen[2]!.events).toBe(1); // the single structural delta(5) that failed to flush
+  });
+});
+
+describe("nextStreamEvent", () => {
+  test("does not subscribe every stream event to the activity's lifetime cancellation promise", async () => {
+    let cancellationSubscriptions = 0;
+    let activeAbortListeners = 0;
+    let addedAbortListeners = 0;
+    let removedAbortListeners = 0;
+    const cancelled = {
+      then() {
+        cancellationSubscriptions += 1;
+      },
+    } as unknown as Promise<never>;
+    const controller = new AbortController();
+    const signal = {
+      get aborted() {
+        return controller.signal.aborted;
+      },
+      get reason() {
+        return controller.signal.reason;
+      },
+      addEventListener(...args: Parameters<AbortSignal["addEventListener"]>) {
+        activeAbortListeners += 1;
+        addedAbortListeners += 1;
+        controller.signal.addEventListener(...args);
+      },
+      removeEventListener(...args: Parameters<AbortSignal["removeEventListener"]>) {
+        activeAbortListeners -= 1;
+        removedAbortListeners += 1;
+        controller.signal.removeEventListener(...args);
+      },
+    } as AbortSignal;
+    const context = {
+      cancelled,
+      cancellationSignal: signal,
+    } as Context;
+    let value = 0;
+    const iterator: AsyncIterator<number> = {
+      async next() {
+        return { done: false, value: value++ };
+      },
+    };
+
+    for (let index = 0; index < 256; index += 1) {
+      expect(await nextStreamEvent(iterator, context)).toEqual({ done: false, value: index });
+    }
+
+    expect(cancellationSubscriptions).toBe(0);
+    expect(activeAbortListeners).toBe(0);
+    expect(addedAbortListeners).toBe(256);
+    expect(removedAbortListeners).toBe(256);
+  });
+
+  test("rejects a pending iterator read with the exact activity cancellation reason", async () => {
+    const controller = new AbortController();
+    const context = {
+      cancelled: new Promise<never>(() => undefined),
+      cancellationSignal: controller.signal,
+    } as Context;
+    const iterator: AsyncIterator<number> = {
+      next: () => new Promise<IteratorResult<number>>(() => undefined),
+    };
+    const reason = new Error("activity cancelled");
+
+    const pending = nextStreamEvent(iterator, context);
+    controller.abort(reason);
+
+    await expect(pending).rejects.toBe(reason);
   });
 });

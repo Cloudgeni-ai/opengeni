@@ -103,6 +103,78 @@ import type {
 
 const PAGE_SIZE = 48;
 
+export function googleDriveStatusLabel(
+  state:
+    | "connected"
+    | "paused"
+    | "not_connected"
+    | "disconnected"
+    | "unverified"
+    | "reconsent_required"
+    | "error",
+): string {
+  if (state === "connected") return "Connected";
+  if (state === "paused") return "Paused";
+  if (state === "not_connected" || state === "disconnected") return "Not connected";
+  if (state === "unverified") return "Loading";
+  return "Needs attention";
+}
+
+export function localConnectedSlackPreview(
+  search: string,
+  workspaceId: string,
+  enabled = import.meta.env.DEV,
+) {
+  if (!enabled || new URLSearchParams(search).get("previewSlack") !== "connected") return null;
+  const now = new Date().toISOString();
+  const shared = {
+    accountId: "00000000-0000-4000-8000-000000000001",
+    workspaceId,
+    providerDomain: "slack.com",
+    status: "active" as const,
+    expiresAt: null,
+    lastRefreshAt: now,
+    lastUsedAt: now,
+    lastError: null,
+    version: 1,
+    createdBySubjectId: "preview-user",
+    updatedBySubjectId: "preview-user",
+    createdAt: now,
+    updatedAt: now,
+  };
+  const personal: ConnectionMetadata = {
+    ...shared,
+    id: "00000000-0000-4000-8000-000000000002",
+    subjectId: "preview-user",
+    kind: "oauth2",
+    grantedScopes: ["search:read.public", "channels:history", "chat:write"],
+    metadata: {},
+  };
+  return {
+    bot: {
+      ...shared,
+      id: "00000000-0000-4000-8000-000000000003",
+      subjectId: null,
+      kind: "app_install" as const,
+      grantedScopes: [...OPENGENI_SLACK_BOT_REQUESTED_SCOPES],
+      verifiedInstallAt: now,
+      verifiedInstallVersion: 1,
+      metadata: {
+        credentialRole: "opengeni_slack_bot",
+        credentialLabel: "OpenGeni Slack bot",
+        slackTeamId: "T_CLOUDGENI_PREVIEW",
+        slackTeamName: "CloudGeni",
+        botDisplayName: "OpenGeni",
+      },
+    } satisfies ConnectionMetadata,
+    personal: {
+      state: "connected" as const,
+      connection: personal,
+      accessTokenRefreshDue: false,
+    },
+  };
+}
+
 export function canWriteWorkspaceConnections(
   accessContext: AccessContext | null,
   workspaceId: string,
@@ -171,7 +243,7 @@ export function SlackBotInstallControls({
             onClick={() => onInstall(false)}
           >
             {busy ? <Loader2Icon className="animate-spin" /> : null}
-            Reinstall
+            Reconnect
           </Button>
           {canInstall ? (
             <Button type="button" variant="ghost" disabled={busy} onClick={() => onInstall(true)}>
@@ -1418,7 +1490,7 @@ export function CapabilitiesRoute({
                     connection={slackBotConnection}
                     canManage={canManageSlackReaction}
                     installBusy={slackBotBusy}
-                    onReinstall={() => void installSlackBot(false)}
+                    onUpdatePermissions={() => void installSlackBot(false)}
                   />
 
                   <details className="group mt-3 border-t border-border/70 pt-3">
@@ -1622,9 +1694,7 @@ export function slackBotDocumentDestinationAuthority(
     return "workspace";
   }
   const authorityKind = (destination as Record<string, unknown>).authorityKind;
-  return authorityKind === "organization" ||
-    authorityKind === "workspace" ||
-    authorityKind === "personal"
+  return authorityKind === "organization" || authorityKind === "workspace"
     ? authorityKind
     : "workspace";
 }

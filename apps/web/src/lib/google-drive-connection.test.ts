@@ -5,13 +5,14 @@ import {
   googleDriveAccountState,
   googleDriveConnections,
   googleDriveDisconnectAttempt,
+  localConnectedGoogleDrivePreview,
   preferredGoogleDriveConnection,
 } from "./google-drive-connection";
 
 function connection(overrides: Partial<ConnectionMetadata> = {}): ConnectionMetadata {
   const metadata: GoogleDriveConnectionMetadata = {
     credentialRole: "google_drive_metadata",
-    credentialLabel: "Google Drive metadata browser",
+    credentialLabel: "Google Drive read-only source sync",
     googlePermissionId: "permission-a",
     googleEmail: "drive@example.com",
     googleDisplayName: "Drive User",
@@ -59,6 +60,24 @@ function lifecycle(
 }
 
 describe("Google Drive connection lifecycle projection", () => {
+  test("offers a local-only connected preview with realistic folder configuration", () => {
+    expect(
+      localConnectedGoogleDrivePreview(
+        "?previewGoogleDrive=connected",
+        "33333333-3333-4333-8333-333333333333",
+        false,
+      ),
+    ).toBeNull();
+
+    const preview = localConnectedGoogleDrivePreview(
+      "?previewGoogleDrive=connected",
+      "33333333-3333-4333-8333-333333333333",
+      true,
+    );
+    expect(googleDriveAccountState(preview, true).state).toBe("connected");
+    expect((preview!.metadata as GoogleDriveConnectionMetadata).selectedSources).toHaveLength(2);
+  });
+
   test("reuses a disconnect operation key only for the same connection generation", () => {
     const first = googleDriveDisconnectAttempt(connection(), null, () => "disconnect-1");
     expect(first).toEqual({

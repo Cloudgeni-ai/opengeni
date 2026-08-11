@@ -56,6 +56,7 @@ import {
   captureVerifiedWorkspaceArchive,
   describeLegacyNativeSnapshotArchive,
   MODAL_EXEC_READINESS_TIMEOUT_MS,
+  SandboxExecReadinessError,
   WorkspaceArchiveIntegrityError,
   establishSandboxSessionFromEnvelope,
   isProviderSandboxNotFoundError,
@@ -188,17 +189,68 @@ export type ResumedTurnSandbox = {
   release: (options?: { workspaceWritersQuiesced?: boolean }) => Promise<void>;
 };
 
-export class SandboxWarmingTimeoutError extends Error {
-  readonly code = "sandbox_warming_timeout";
+export abstract class SandboxWarmingTimeoutError extends Error {
+  abstract readonly code: "sandbox_exec_readiness_timeout" | "sandbox_sibling_warming_timeout";
 
-  constructor(
+  protected constructor(
     public readonly backend: string,
     public readonly timeoutMs: number,
+    public readonly stage: "exec_readiness" | "sibling_warming",
+    public readonly sandboxGroupId: string | null,
+    public readonly instanceId: string | null,
   ) {
+    const timeoutSeconds = Math.ceil(timeoutMs / 1000);
+    const identity = [
+      sandboxGroupId ? `group ${sandboxGroupId}` : null,
+      instanceId ? `sandbox ${instanceId}` : null,
+    ]
+      .filter((part): part is string => part !== null)
+      .join(", ");
+    const target = identity ? ` (${identity})` : "";
     super(
-      `Sandbox backend "${backend}" capacity or creation timed out after ${Math.ceil(timeoutMs / 1000)}s while warming the sandbox lease. Please try again; if this persists, sandbox capacity may be exhausted.`,
+      stage === "exec_readiness"
+        ? `Sandbox backend "${backend}"${target} did not become command-ready within ${timeoutSeconds}s after creation or restore.`
+        : `Sandbox backend "${backend}"${target} did not finish warming within ${timeoutSeconds}s while waiting for the elected sandbox creator.`,
     );
     this.name = "SandboxWarmingTimeoutError";
+  }
+}
+
+export class SandboxExecReadinessTimeoutError extends SandboxWarmingTimeoutError {
+  readonly code = "sandbox_exec_readiness_timeout" as const;
+
+  constructor(
+    backend: string,
+    timeoutMs: number,
+    identity: { sandboxGroupId?: string | null; instanceId?: string | null } = {},
+  ) {
+    super(
+      backend,
+      timeoutMs,
+      "exec_readiness",
+      identity.sandboxGroupId ?? null,
+      identity.instanceId ?? null,
+    );
+    this.name = "SandboxExecReadinessTimeoutError";
+  }
+}
+
+export class SandboxSiblingWarmingTimeoutError extends SandboxWarmingTimeoutError {
+  readonly code = "sandbox_sibling_warming_timeout" as const;
+
+  constructor(
+    backend: string,
+    timeoutMs: number,
+    identity: { sandboxGroupId: string; instanceId?: string | null },
+  ) {
+    super(
+      backend,
+      timeoutMs,
+      "sibling_warming",
+      identity.sandboxGroupId,
+      identity.instanceId ?? null,
+    );
+    this.name = "SandboxSiblingWarmingTimeoutError";
   }
 }
 
@@ -233,12 +285,16 @@ async function sleep(ms: number): Promise<void> {
 export async function waitForSandboxExecReadiness(
   established: EstablishedSandboxSession,
   timeoutMs = MODAL_EXEC_READINESS_TIMEOUT_MS,
+  identity: { sandboxGroupId?: string | null } = {},
 ): Promise<void> {
   try {
     await verifySandboxExecReadiness(established, timeoutMs);
   } catch (error) {
-    if (/sandbox creation timed out/i.test(error instanceof Error ? error.message : "")) {
-      throw new SandboxWarmingTimeoutError(established.backendId, timeoutMs);
+    if (error instanceof SandboxExecReadinessError && error.code === "exec_probe_timeout") {
+      throw new SandboxExecReadinessTimeoutError(established.backendId, timeoutMs, {
+        sandboxGroupId: identity.sandboxGroupId ?? null,
+        instanceId: established.instanceId,
+      });
     }
     throw error;
   }
@@ -383,13 +439,6 @@ async function terminateEstablishedSandbox(
   }
 }
 
-function asSandboxWarmingError(error: unknown, backend: string, timeoutMs: number): unknown {
-  const message = error instanceof Error ? error.message : String(error);
-  return /sandbox creation timed out|warming timed out|capacity.*timed out/i.test(message)
-    ? new SandboxWarmingTimeoutError(backend, timeoutMs)
-    : error;
-}
-
 function recordSandboxWarmingTimeout(
   metrics: RuntimeMetricsHooks | undefined,
   error: unknown,
@@ -398,7 +447,7 @@ function recordSandboxWarmingTimeout(
     return;
   }
   try {
-    metrics?.onSandboxWarmingTimeout?.({ backend: error.backend });
+    metrics?.onSandboxWarmingTimeout?.({ backend: error.backend, stage: error.stage });
   } catch {
     // Metrics emission must never affect sandbox recovery or error propagation.
   }
@@ -516,6 +565,12 @@ export async function maybePersistWarmWorkspaceSnapshot(
       lease.liveness !== "warm" ||
       lease.instanceId === null
     ) {
+      return false;
+    }
+    // A checkpoint of this exact mutation generation already protects every
+    // settled operation admitted so far. Capturing it again cannot improve the
+    // recovery point, even when the wall-clock interval has elapsed.
+    if (lease.archiveComplete) {
       return false;
     }
     const instanceId = lease.instanceId;
@@ -1167,7 +1222,9 @@ export async function resumeBoxForTurn(
       // is live. Do not publish a warm lease until one bounded no-op exec works.
       // On timeout the catch below terminates the box and rolls warming -> cold,
       // so the next turn cold-creates instead of hanging forever on first use.
-      await waitForSandboxExecReadiness(established);
+      await waitForSandboxExecReadiness(established, MODAL_EXEC_READINESS_TIMEOUT_MS, {
+        sandboxGroupId: ids.sandboxGroupId,
+      });
       throwIfReleasedOrCancelled();
       // Fold the LIVE box into a re-resumable envelope and persist it as the
       // lease's resume_state — exactly like the API-direct paths (channel-a.ts /
@@ -1301,13 +1358,8 @@ export async function resumeBoxForTurn(
         }
       }
       await release();
-      const warmingError = asSandboxWarmingError(
-        error,
-        ids.backend,
-        settings.sandboxWarmingTimeoutMs,
-      );
-      recordSandboxWarmingTimeout(services.sandboxMetrics, warmingError);
-      throw warmingError;
+      recordSandboxWarmingTimeout(services.sandboxMetrics, error);
+      throw error;
     }
   }
 
@@ -1353,7 +1405,13 @@ export async function resumeBoxForTurn(
       // was idle. Prove the command router before handing the session to the
       // agent so terminal evidence enters the atomic warm->cold recovery path
       // below instead of surfacing inside a model-visible tool call.
-      await (services.verifyAttachedSandboxReadiness ?? waitForSandboxExecReadiness)(established);
+      if (services.verifyAttachedSandboxReadiness) {
+        await services.verifyAttachedSandboxReadiness(established);
+      } else {
+        await waitForSandboxExecReadiness(established, MODAL_EXEC_READINESS_TIMEOUT_MS, {
+          sandboxGroupId: ids.sandboxGroupId,
+        });
+      }
       throwIfReleasedOrCancelled();
     } catch (error) {
       if (!isProviderSandboxNotFoundError(ids.backend, error)) {
@@ -1387,13 +1445,8 @@ export async function resumeBoxForTurn(
     return { established, leaseEpoch, release };
   } catch (error) {
     await release();
-    const warmingError = asSandboxWarmingError(
-      error,
-      ids.backend,
-      settings.sandboxWarmingTimeoutMs,
-    );
-    recordSandboxWarmingTimeout(services.sandboxMetrics, warmingError);
-    throw warmingError;
+    recordSandboxWarmingTimeout(services.sandboxMetrics, error);
+    throw error;
   }
 }
 
@@ -1409,6 +1462,7 @@ async function waitForWarm(
 ): Promise<{ leaseEpoch: number }> {
   const { db, settings } = services;
   const deadline = Date.now() + settings.sandboxWarmingTimeoutMs;
+  let instanceId: string | null = null;
   while (Date.now() < deadline) {
     await sleep(WARMING_POLL_INTERVAL_MS);
     const lease = await readLease(db, ids.workspaceId, ids.sandboxGroupId);
@@ -1416,6 +1470,7 @@ async function waitForWarm(
       // Lease vanished (cold-reaped). Re-dispatch from scratch.
       throw new SandboxLeaseSupersededError(ids.sandboxGroupId, 0);
     }
+    instanceId = lease.instanceId;
     if (lease.liveness === "warm") {
       return { leaseEpoch: lease.leaseEpoch };
     }
@@ -1451,5 +1506,8 @@ async function waitForWarm(
     }
     // still warming — keep polling.
   }
-  throw new SandboxWarmingTimeoutError(ids.backend, settings.sandboxWarmingTimeoutMs);
+  throw new SandboxSiblingWarmingTimeoutError(ids.backend, settings.sandboxWarmingTimeoutMs, {
+    sandboxGroupId: ids.sandboxGroupId,
+    instanceId,
+  });
 }

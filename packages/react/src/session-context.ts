@@ -4,6 +4,9 @@ import type {
   EmbeddedFileAttachmentClientLike,
   EmbeddedGoalClientLike,
   EmbeddedHumanInputSessionClientLike,
+  EmbeddedBrowserInteractionClientLike,
+  EmbeddedComputerInteractionClientLike,
+  EmbeddedInteractionClientLike,
   EmbeddedRealtimeSessionClientLike,
   EmbeddedSessionClientLike,
   EmbeddedSessionLineageClientLike,
@@ -76,6 +79,21 @@ export type EmbeddedFileAttachmentClientOverride = {
   workspaceId?: string | undefined;
 };
 
+export type EmbeddedInteractionClientOverride = {
+  client?: EmbeddedInteractionClientLike | undefined;
+  workspaceId?: string | undefined;
+};
+
+export type EmbeddedBrowserInteractionClientOverride = {
+  client?: EmbeddedBrowserInteractionClientLike | undefined;
+  workspaceId?: string | undefined;
+};
+
+export type EmbeddedComputerInteractionClientOverride = {
+  client?: EmbeddedComputerInteractionClientLike | undefined;
+  workspaceId?: string | undefined;
+};
+
 export type EmbeddedSessionContextValue = Omit<OpenGeniContextValue, "client"> & {
   client: EmbeddedSessionClientLike;
 };
@@ -143,6 +161,78 @@ export function useOpenGeni(override: ClientOverride = {}): OpenGeniContextValue
     registerSessionReconciler: context?.registerSessionReconciler ?? NOOP_REGISTER_RECONCILER,
     reconcileSession: context?.reconcileSession ?? NOOP_RECONCILE_SESSION,
   };
+}
+
+const BROWSER_INTERACTION_METHODS = [
+  "listAttachedBrowsers",
+  "getAttachedBrowser",
+  "listBrowserIdentities",
+  "getBrowserIdentity",
+  "createBrowserIdentity",
+  "listBrowserRevisions",
+  "listBrowserSessions",
+  "getBrowserSession",
+  "createBrowserSession",
+  "listBrowserTargets",
+  "openBrowserTarget",
+  "selectBrowserTarget",
+  "closeBrowserTarget",
+  "observeBrowserTarget",
+  "actInBrowser",
+  "getBrowserActionReceipt",
+  "listBrowserDiagnostics",
+  "attachBrowserSession",
+  "heartbeatBrowserSession",
+  "publishBrowserRevision",
+  "suspendBrowserSession",
+  "resumeBrowserSession",
+  "endBrowserSession",
+] as const;
+
+const COMPUTER_INTERACTION_METHODS = [
+  "listComputerSessions",
+  "getComputerSession",
+  "createComputerSession",
+  "listComputerTargets",
+  "observeComputerTarget",
+  "actInComputer",
+  "getComputerActionReceipt",
+  "attachComputerSession",
+  "heartbeatComputerSession",
+  "endComputerSession",
+] as const;
+
+/** Resolve only BrowserSession methods for a standalone Browser embed. */
+export function useEmbeddedBrowserInteraction(
+  override: EmbeddedBrowserInteractionClientOverride = {},
+): EmbeddedClientContextValue<EmbeddedBrowserInteractionClientLike> {
+  return useEmbeddedClientRefinement(
+    override,
+    BROWSER_INTERACTION_METHODS,
+    "browser interaction hooks",
+  );
+}
+
+/** Resolve only ComputerSession methods for a standalone Computer embed. */
+export function useEmbeddedComputerInteraction(
+  override: EmbeddedComputerInteractionClientOverride = {},
+): EmbeddedClientContextValue<EmbeddedComputerInteractionClientLike> {
+  return useEmbeddedClientRefinement(
+    override,
+    COMPUTER_INTERACTION_METHODS,
+    "computer interaction hooks",
+  );
+}
+
+/** Resolve the complete Browser + Computer client surface. */
+export function useEmbeddedInteraction(
+  override: EmbeddedInteractionClientOverride = {},
+): EmbeddedClientContextValue<EmbeddedInteractionClientLike> {
+  return useEmbeddedClientRefinement(
+    override,
+    [...BROWSER_INTERACTION_METHODS, ...COMPUTER_INTERACTION_METHODS],
+    "interaction hooks",
+  );
 }
 
 /**

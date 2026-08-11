@@ -408,6 +408,7 @@ describe("M5 list + revoke + idempotent re-enroll", () => {
       outcome: "removed",
       enrollmentId: approve.enrollmentId,
       machineName: "node-a",
+      dependentSessions: [],
     });
     expect(revoke.message).toMatch(/history/i);
     expect(revoke.action).toMatch(/fresh human-approved/i);

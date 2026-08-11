@@ -36,6 +36,9 @@ const EXPLICIT_ONLY_CONNECTOR_TOOLS = [
   "slack_bot_file_content",
   "slack_bot_post_message",
   "slack_bot_delete_message",
+  "atlassian_sources_list",
+  "atlassian_search",
+  "atlassian_get",
 ] as const;
 
 describe("first-party MCP tool-name contract", () => {

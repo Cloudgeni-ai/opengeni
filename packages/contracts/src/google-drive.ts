@@ -13,8 +13,10 @@ export const GOOGLE_DRIVE_METADATA_READONLY_SCOPE =
   "https://www.googleapis.com/auth/drive.metadata.readonly" as const;
 export const GOOGLE_DRIVE_READONLY_SCOPE =
   "https://www.googleapis.com/auth/drive.readonly" as const;
+/** Stable serialized role retained for existing connection rows; not product-facing copy. */
 export const GOOGLE_DRIVE_CREDENTIAL_ROLE = "google_drive_metadata" as const;
-export const GOOGLE_DRIVE_CREDENTIAL_LABEL = "Google Drive metadata browser" as const;
+export const GOOGLE_DRIVE_CREDENTIAL_LABEL = "Google Drive read-only source sync" as const;
+export const GOOGLE_DRIVE_LEGACY_CREDENTIAL_LABEL = "Google Drive metadata browser" as const;
 
 export const GoogleDriveOAuthCapability = z.enum([
   "picker_file_read",
@@ -139,6 +141,8 @@ export const GoogleDriveSelectedSource = z.object({
   /** @deprecated Missing destinations resolve to the current workspace boundary. */
   targetScope: GoogleDriveTargetScope.optional(),
   syncCadence: GoogleDriveSyncCadence.default("hourly"),
+  syncEnabled: z.boolean().default(false),
+  configGeneration: z.number().int().positive().default(1),
   readPolicy: GoogleDriveReadPolicy.default("allow"),
   selectedAt: z.string().datetime({ offset: true }),
 });
@@ -147,7 +151,10 @@ export type GoogleDriveSelectedSource = z.infer<typeof GoogleDriveSelectedSource
 export const GoogleDriveConnectionMetadata = z
   .object({
     credentialRole: z.literal(GOOGLE_DRIVE_CREDENTIAL_ROLE),
-    credentialLabel: z.literal(GOOGLE_DRIVE_CREDENTIAL_LABEL),
+    credentialLabel: z.union([
+      z.literal(GOOGLE_DRIVE_CREDENTIAL_LABEL),
+      z.literal(GOOGLE_DRIVE_LEGACY_CREDENTIAL_LABEL),
+    ]),
     googlePermissionId: z.string().min(1).max(256),
     googleEmail: z.string().email().max(320),
     googleDisplayName: z.string().min(1).max(512).nullable(),
@@ -228,6 +235,7 @@ export const SaveGoogleDriveSourceRequest = z
     /** @deprecated Legacy requests are accepted but resolve to workspace authority. */
     targetScope: GoogleDriveTargetScope.optional(),
     syncCadence: GoogleDriveSyncCadence.default("hourly"),
+    syncEnabled: z.boolean().default(false),
     readPolicy: GoogleDriveReadPolicy.default("allow"),
   })
   .refine((request) => request.destination !== undefined || request.targetScope !== undefined, {

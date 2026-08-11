@@ -48,6 +48,7 @@ export type RigProviderImageSelectionReason =
   | "missing"
   | "provider_unsupported"
   | "not_ready"
+  | "not_cold_boot_validated"
   | "content_mismatch"
   | "provider_binding_unavailable"
   | "provider_binding_mismatch";
@@ -79,6 +80,14 @@ export function resolveRigProviderImageSelection(
       reason: "not_ready",
       contentHash: image.contentHash,
       imageId: image.imageId,
+    };
+  }
+  if (image.coldBootValidation?.version !== 1) {
+    return {
+      settings,
+      reason: "not_cold_boot_validated",
+      contentHash: image.contentHash,
+      imageId: null,
     };
   }
   const sourceImage = rigProviderImageSourceImage(settings, backend);

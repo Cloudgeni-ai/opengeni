@@ -142,6 +142,7 @@ export type HostMcpCredentialResolverContext = {
   initiator: TurnInitiator;
   initiatorContext: TurnInitiatorContext;
   surface: McpCredentialsRequest["surface"];
+  allowOfficialGmailRestDestination?: boolean;
 };
 
 export class HostMcpCredentialScopeError extends Error {
@@ -168,6 +169,35 @@ export class HostMcpCredentialBindingError extends Error {
   }
 }
 
+const OFFICIAL_GMAIL_MCP_RESOURCE = "https://gmailmcp.googleapis.com/mcp/v1";
+const OFFICIAL_GMAIL_REST_HOST = "gmail.googleapis.com";
+
+/**
+ * The opt-in Gmail REST adapter reuses the exact OAuth grant created for
+ * Google's hosted Gmail MCP while the preview endpoint is unavailable. Keep
+ * this exception narrower than ordinary provider-domain binding: HTTPS only,
+ * Google's canonical Gmail API host, and the authenticated `users/me` path.
+ */
+function isOfficialGmailRestDestination(
+  destinationUrl: string,
+  ref: McpServerConnectionRef,
+): boolean {
+  if (
+    ref.providerDomain.toLowerCase() !== "gmailmcp.googleapis.com" ||
+    ref.kind !== "oauth2" ||
+    ref.subjectScope !== "subject"
+  ) {
+    return false;
+  }
+  const destination = new URL(destinationUrl);
+  return (
+    destination.protocol === "https:" &&
+    destination.hostname.toLowerCase() === OFFICIAL_GMAIL_REST_HOST &&
+    (destination.pathname === "/gmail/v1/users/me" ||
+      destination.pathname.startsWith("/gmail/v1/users/me/"))
+  );
+}
+
 /**
  * Adapts the public embedding credential port to the runtime's connection
  * resolver contract. Scope echoes are checked before credential headers can
@@ -185,7 +215,11 @@ export function buildHostConnectionTokenResolver(
     const destinationUrl = canonicalHttpUrl(input.destinationUrl);
     if (
       !destinationUrl ||
-      !destinationHostMatchesProvider(destinationUrl, input.connectionRef.providerDomain)
+      (!destinationHostMatchesProvider(destinationUrl, input.connectionRef.providerDomain) &&
+        !(
+          context.allowOfficialGmailRestDestination === true &&
+          isOfficialGmailRestDestination(destinationUrl, input.connectionRef)
+        ))
     ) {
       throw new HostMcpCredentialBindingError("destinationUrl");
     }
@@ -621,7 +655,7 @@ export function buildConnectionTokenResolver(
     if (cred.status !== "active") {
       return authNeededForStatus(cred, ref);
     }
-    if (!connectionBindingMatches(cred, ref, destinationUrl)) {
+    if (!connectionBindingMatches(cred, ref, destinationUrl, settings.gmailRestAdapterEnabled)) {
       return authNeeded(ref, "missing_connection", cred.id);
     }
     const missingScopes = missingRequestedScopes(ref.scopes, cred.grantedScopes);
@@ -753,7 +787,9 @@ export function buildConnectionTokenResolver(
     // Reject an audience/destination mismatch before any provider-side refresh
     // or usage update. Refreshing first would still create an unauthorized
     // external side effect even though the token was never sent to the target.
-    if (!connectionBindingMatches(cred, ref, input.destinationUrl)) {
+    if (
+      !connectionBindingMatches(cred, ref, input.destinationUrl, settings.gmailRestAdapterEnabled)
+    ) {
       return authNeeded(ref, "missing_connection", cred.id);
     }
     if (shouldRefresh(cred, input.forceRefresh === true, deps.now())) {
@@ -800,6 +836,7 @@ function connectionBindingMatches(
   cred: ConnectionCredentialForBroker,
   ref: McpServerConnectionRef,
   destinationUrl: string,
+  gmailRestAdapterEnabled: boolean,
 ): boolean {
   if (cred.providerDomain.toLowerCase() !== ref.providerDomain.toLowerCase()) return false;
   if (ref.kind && cred.kind !== ref.kind) return false;
@@ -811,7 +848,17 @@ function connectionBindingMatches(
   if (!destination) return false;
   if (boundMcpUrl) {
     const binding = canonicalHttpUrl(boundMcpUrl);
-    if (!binding || destination !== binding) return false;
+    if (
+      !binding ||
+      (destination !== binding &&
+        !(
+          gmailRestAdapterEnabled &&
+          binding === canonicalHttpUrl(OFFICIAL_GMAIL_MCP_RESOURCE) &&
+          isOfficialGmailRestDestination(destination, ref)
+        ))
+    ) {
+      return false;
+    }
   } else if (!destinationHostMatchesProvider(destination, cred.providerDomain)) {
     // Legacy/manual API-key rows may predate mcpUrl metadata. They are still
     // host-bound to their canonical provider domain, never usable as an
@@ -1053,7 +1100,16 @@ export async function refreshOAuthConnectionCredential(
   if (clientId) {
     body.set("client_id", clientId);
   }
-  const headers: Record<string, string> = { "content-type": "application/x-www-form-urlencoded" };
+  const tokenRequestEncoding =
+    stringValue(
+      (cred.credential as { token_request_encoding?: unknown }).token_request_encoding,
+    ) === "json"
+      ? "json"
+      : "form";
+  const headers: Record<string, string> = {
+    "content-type":
+      tokenRequestEncoding === "json" ? "application/json" : "application/x-www-form-urlencoded",
+  };
   if (clientSecret && authMethod === "client_secret_post") {
     body.set("client_secret", clientSecret);
   } else if (clientId && clientSecret && authMethod === "client_secret_basic") {
@@ -1061,18 +1117,23 @@ export async function refreshOAuthConnectionCredential(
   }
   const resource =
     ref.resource ?? stringValue((cred.credential as { resource?: unknown }).resource);
-  if (resource) {
+  const resourceParameterSupported =
+    (cred.credential as { resource_parameter_supported?: unknown }).resource_parameter_supported !==
+    false;
+  if (resource && resourceParameterSupported) {
     body.set("resource", resource);
   }
   if (ref.scopes?.length) {
     body.set("scope", ref.scopes.join(" "));
   }
+  const requestBody: BodyInit =
+    tokenRequestEncoding === "json" ? JSON.stringify(Object.fromEntries(body.entries())) : body;
   const response = await pinnedFetch(
     validatedTokenEndpoint,
     {
       method: "POST",
       headers,
-      body,
+      body: requestBody,
       signal: AbortSignal.timeout(CONNECTION_REFRESH_TIMEOUT_MS),
     },
     settings,

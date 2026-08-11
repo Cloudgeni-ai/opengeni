@@ -10,6 +10,7 @@ import type {
 import {
   FIRST_PARTY_MCP_TOOL_NAMES,
   defaultRepositoryMountPath,
+  mergeResourceRefs,
   normalizeRepositoryTransportUri,
   resourceMountPathCollisionKey,
   type FirstPartyMcpToolName,
@@ -239,6 +240,29 @@ export function buildResources(
       ...(repo.private && repo.installationId ? { githubInstallationId: repo.installationId } : {}),
     };
   });
+}
+
+/**
+ * Build only the repository refs pending on an existing session and prove they
+ * can be additively merged with its already-mounted resources. Existing
+ * resources are immutable through follow-up messages, so ref/path conflicts
+ * fail in the composer before the turn is submitted.
+ */
+export function buildAdditionalRepositoryResources(input: {
+  mountedResources: ResourceRef[];
+  manualRepos: RepoDraft[];
+  repositories: GitHubRepository[];
+  selectedRepoIds: Set<number>;
+  selectedRepoRefs: Record<number, string>;
+}): ResourceRef[] {
+  const additions = buildResources(
+    input.manualRepos,
+    input.repositories,
+    input.selectedRepoIds,
+    input.selectedRepoRefs,
+  );
+  mergeResourceRefs(input.mountedResources, additions, { rejectConflicts: true });
+  return additions;
 }
 
 export function gitHubRepositoryResource(

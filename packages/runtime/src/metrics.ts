@@ -10,7 +10,10 @@ export type RuntimeMetricsHooks = {
     outcome: "completed" | "failed";
     durationSeconds: number;
   }) => void;
-  onSandboxWarmingTimeout?: (input: { backend: string }) => void;
+  onSandboxWarmingTimeout?: (input: {
+    backend: string;
+    stage: "exec_readiness" | "sibling_warming";
+  }) => void;
   /**
    * One completed Connected Machine (selfhosted) control op — the out-of-band
    * telemetry twin of the in-band fault rendering. `code` is the typed wire-code

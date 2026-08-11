@@ -5,6 +5,7 @@ import { defineConfig } from "tsup";
 export default defineConfig({
   entry: [
     "src/index.ts",
+    "src/atlassian.ts",
     "src/connector-destinations.ts",
     "src/google-drive.ts",
     "src/slack-bot-scopes.ts",
@@ -15,14 +16,13 @@ export default defineConfig({
     "src/editable-artifact-causal-frontier.ts",
     "src/editable-artifact-codec-registry.ts",
     "src/editable-artifact-versions.ts",
-    "src/editable-artifact-publication.ts",
-    "src/editable-artifact-publication-receipt.ts",
     "src/spreadsheet-artifact-commands.ts",
     "src/spreadsheet-artifact-query.ts",
     "src/document-artifact-commands.ts",
     "src/document-artifact-query.ts",
     "src/presentation-artifact-commands.ts",
     "src/presentation-artifact-query.ts",
+    "src/video-generation.ts",
   ],
   format: ["esm"],
   target: "es2022",

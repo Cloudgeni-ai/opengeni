@@ -97,6 +97,7 @@
 #![doc(html_root_url = "https://docs.rs/opengeni-agent-stream")]
 
 pub mod backoff;
+pub mod browser_pump;
 pub mod channel;
 pub mod codec;
 pub mod error;

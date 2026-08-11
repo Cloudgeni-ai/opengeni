@@ -58,10 +58,12 @@ spec:
             - name: http
               containerPort: {{ .Values.worker.containerPort }}
           envFrom:
-            - secretRef:
-                name: {{ include "opengeni.secretName" . }}
             - configMapRef:
                 name: {{ include "opengeni.fullname" . }}-config
+            # Later envFrom sources win duplicate keys. Keep the runtime Secret
+            # authoritative for protected provider/model overrides.
+            - secretRef:
+                name: {{ include "opengeni.secretName" . }}
           env:
             - name: OPENGENI_WORKER_HTTP_PORT
               value: {{ .Values.worker.containerPort | quote }}
