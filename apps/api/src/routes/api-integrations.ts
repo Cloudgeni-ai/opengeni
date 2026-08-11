@@ -1,6 +1,7 @@
 import {
   CORE_PROVIDER_PRESETS,
   createPinnedIntegrationTransport,
+  integrationFeaturesForPreset,
   providerDomainForPreset,
   type IntegrationCredentialResolver,
 } from "@opengeni/capabilities";
@@ -68,6 +69,12 @@ export function registerApiIntegrationRoutes(
           protocol: "openapi",
           providerDomain: providerDomainForPreset(preset),
           scopes: [...preset.oauth.scopes],
+          features: preset.features.map((feature) => ({
+            featureKey: feature.featureKey,
+            kind: feature.kind,
+            configSchema: { ...feature.configSchema },
+            capabilities: { ...feature.capabilities },
+          })),
         })),
       }),
     );
@@ -203,6 +210,7 @@ export function registerApiIntegrationRoutes(
             ownership:
               resolved.preview.connectionOwnership === "personal" ? "subject" : "workspace",
             ...(payload.allowedTools ? { allowedTools: payload.allowedTools } : {}),
+            featureDefinitions: integrationFeaturesForPreset(resolved.preview.presetId),
             revision: resolved.revision,
           }),
         ),

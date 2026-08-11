@@ -6,6 +6,7 @@ import {
   createConnection,
   createDb,
   deleteWorkspace,
+  installApiIntegration,
   type DbClient,
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
@@ -21,6 +22,7 @@ import {
   apiIntegrationRequiresConnection,
   registerApiIntegrationRoutes,
 } from "../src/routes/api-integrations";
+import { registerIntegrationFeatureRoutes } from "../src/routes/integration-features";
 
 const delegationSecret = "api-integration-route-secret";
 let sourceVersion = "1.0.0";
@@ -151,6 +153,13 @@ beforeAll(async () => {
       },
     },
   );
+  registerIntegrationFeatureRoutes(app, {
+    db: client.db,
+    settings: testSettings({
+      productAccessMode: "managed",
+      delegationSecret,
+    }),
+  } as ApiRouteDeps);
 }, 180_000);
 
 afterAll(async () => {
@@ -440,5 +449,181 @@ describe("API Integration routes", () => {
       },
     );
     expect(removed.status).toBe(200);
+  }, 60_000);
+
+  test("controls generic Integration features through the public lifecycle", async () => {
+    if (!available || !client) return;
+    const connection = await createConnection(client.db, {
+      accountId,
+      workspaceId,
+      providerDomain: "127.0.0.1",
+      kind: "api_key",
+      credentialEncrypted: "route-feature-encrypted-bundle",
+      createdBySubjectId: subjectId,
+    });
+    const installed = await installApiIntegration(client.db, {
+      accountId,
+      workspaceId,
+      subjectId,
+      capabilityId: "api:route-feature-control",
+      pluginKey: "integration/route-feature-control",
+      serverId: "route_feature_control",
+      name: "Route feature control",
+      description: "Exercises the generic feature HTTP lifecycle.",
+      providerDomain: "127.0.0.1",
+      protocol: "openapi",
+      baseUrl: "https://127.0.0.1/v1/",
+      sourceUrl: "https://127.0.0.1/openapi.json",
+      authScheme: { kind: "api_key", carrier: "header", name: "Authorization" },
+      connectionId: connection.id,
+      instanceKey: "finance",
+      featureDefinitions: [
+        {
+          featureKey: "inventory-source",
+          kind: "knowledge_source",
+          configSchema: {
+            type: "object",
+            required: ["collection"],
+            properties: {
+              collection: { type: "string", minLength: 1, maxLength: 128 },
+              includeArchived: { type: "boolean" },
+            },
+            additionalProperties: false,
+          },
+          capabilities: { connectionRequired: true, sync: "incremental" },
+        },
+      ],
+      revision: {
+        id: "openapi:333333333333333333333333",
+        protocol: "openapi",
+        integrationId: "route-feature-control",
+        contentSha256: "3".repeat(64),
+        source: { url: "https://127.0.0.1/openapi.json" },
+        title: "Route feature control",
+        tools: [
+          {
+            id: "list_items",
+            operationKey: "inventory.listItems",
+            name: "List items",
+            description: "List inventory items.",
+            inputSchema: { type: "object", properties: {} },
+            safety: "read",
+            approvalMode: "never",
+            deprecated: false,
+          },
+        ],
+        bindings: {
+          list_items: {
+            method: "get",
+            pathTemplate: "/items",
+            serverUrl: "https://127.0.0.1/v1/",
+            parameters: [],
+          },
+        },
+      },
+    });
+    const base = `/integrations/${encodeURIComponent(installed.capabilityId)}/instances/finance/features`;
+    const listed = await request(base);
+    expect(listed.status).toBe(200);
+    expect(await listed.json()).toMatchObject({
+      capabilityId: installed.capabilityId,
+      instanceKey: "finance",
+      connectionId: connection.id,
+      features: [
+        {
+          definition: {
+            featureKey: "inventory-source",
+            kind: "knowledge_source",
+          },
+          binding: null,
+        },
+      ],
+    });
+
+    const configureKey = crypto.randomUUID();
+    const configuredResponse = await request(`${base}/inventory-source`, {
+      method: "PUT",
+      body: JSON.stringify({
+        displayName: "Finance inventory",
+        config: { collection: "finance", includeArchived: false },
+        idempotencyKey: configureKey,
+      }),
+    });
+    expect(configuredResponse.status).toBe(201);
+    const configured = await configuredResponse.json();
+    expect(configured).toMatchObject({
+      status: "configured",
+      binding: { connectionId: connection.id, status: "active", version: 1 },
+    });
+    const replay = await request(`${base}/inventory-source`, {
+      method: "PUT",
+      body: JSON.stringify({
+        displayName: "Finance inventory",
+        config: { collection: "finance", includeArchived: false },
+        idempotencyKey: configureKey,
+      }),
+    });
+    expect(replay.status).toBe(201);
+    expect(await replay.json()).toEqual(configured);
+
+    const invalid = await request(`${base}/inventory-source`, {
+      method: "PUT",
+      body: JSON.stringify({
+        displayName: "Invalid inventory",
+        config: { collection: "finance", unsupported: true },
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+    expect(invalid.status).toBe(422);
+
+    const pausedResponse = await request(`${base}/inventory-source/pause`, {
+      method: "POST",
+      body: JSON.stringify({
+        expectedVersion: configured.binding.version,
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+    expect(pausedResponse.status).toBe(200);
+    const paused = await pausedResponse.json();
+    expect(paused).toMatchObject({
+      status: "paused",
+      binding: { status: "paused", version: 2 },
+    });
+
+    const staleResume = await request(`${base}/inventory-source/resume`, {
+      method: "POST",
+      body: JSON.stringify({
+        expectedVersion: configured.binding.version,
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+    expect(staleResume.status).toBe(409);
+    const resumedResponse = await request(`${base}/inventory-source/resume`, {
+      method: "POST",
+      body: JSON.stringify({
+        expectedVersion: paused.binding.version,
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+    expect(resumedResponse.status).toBe(200);
+    const resumed = await resumedResponse.json();
+    expect(resumed).toMatchObject({
+      status: "active",
+      binding: { status: "active", version: 3 },
+    });
+
+    const removed = await request(`${base}/inventory-source`, {
+      method: "DELETE",
+      body: JSON.stringify({
+        expectedVersion: resumed.binding.version,
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+    expect(removed.status).toBe(200);
+    expect(await removed.json()).toMatchObject({
+      status: "removed",
+      binding: { status: "disabled", version: 4 },
+      remainingOwners: [],
+    });
   }, 60_000);
 });

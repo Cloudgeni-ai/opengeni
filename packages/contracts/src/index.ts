@@ -7001,6 +7001,57 @@ export type UninstallSkillResult = z.infer<typeof UninstallSkillResult>;
 export const ApiIntegrationProtocol = z.enum(["openapi", "graphql"]);
 export type ApiIntegrationProtocol = z.infer<typeof ApiIntegrationProtocol>;
 
+export const IntegrationFeatureKey = z
+  .string()
+  .min(1)
+  .max(200)
+  .regex(/^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$/);
+export type IntegrationFeatureKey = z.infer<typeof IntegrationFeatureKey>;
+
+export const IntegrationFeatureKind = z.enum([
+  "tools",
+  "knowledge_source",
+  "inbound_trigger",
+  "delivery_destination",
+  "identity_link",
+]);
+export type IntegrationFeatureKind = z.infer<typeof IntegrationFeatureKind>;
+
+export const IntegrationFeatureStatus = z.enum([
+  "active",
+  "paused",
+  "needs_attention",
+  "disabled",
+]);
+export type IntegrationFeatureStatus = z.infer<typeof IntegrationFeatureStatus>;
+
+const IntegrationFeatureJsonObject = z
+  .record(z.string(), z.unknown())
+  .superRefine((value, ctx) => {
+    let serialized: string;
+    try {
+      serialized = JSON.stringify(value);
+    } catch {
+      ctx.addIssue({ code: "custom", message: "must be JSON serializable" });
+      return;
+    }
+    if (new TextEncoder().encode(serialized).byteLength > 131_072) {
+      ctx.addIssue({ code: "custom", message: "must not exceed 131072 UTF-8 bytes" });
+    }
+  });
+
+export const IntegrationFeatureDefinitionSummary = z
+  .object({
+    featureKey: IntegrationFeatureKey,
+    kind: IntegrationFeatureKind.exclude(["tools"]),
+    configSchema: IntegrationFeatureJsonObject,
+    capabilities: IntegrationFeatureJsonObject,
+  })
+  .strict();
+export type IntegrationFeatureDefinitionSummary = z.infer<
+  typeof IntegrationFeatureDefinitionSummary
+>;
+
 export const ApiIntegrationPresetSummary = z
   .object({
     id: z.string().min(1).max(128),
@@ -7010,6 +7061,7 @@ export const ApiIntegrationPresetSummary = z
     protocol: z.literal("openapi"),
     providerDomain: z.string().min(1).max(253),
     scopes: z.array(z.string().min(1).max(1024)).max(256),
+    features: z.array(IntegrationFeatureDefinitionSummary).max(128),
   })
   .strict();
 export type ApiIntegrationPresetSummary = z.infer<typeof ApiIntegrationPresetSummary>;
@@ -7025,6 +7077,93 @@ export const IntegrationInstanceKey = z
   .max(128)
   .regex(/^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$/);
 export type IntegrationInstanceKey = z.infer<typeof IntegrationInstanceKey>;
+
+export const IntegrationFeatureBindingSummary = z
+  .object({
+    id: z.string().uuid(),
+    featureKey: IntegrationFeatureKey,
+    kind: IntegrationFeatureKind.exclude(["tools"]),
+    bindingKey: IntegrationInstanceKey,
+    displayName: z.string().min(1).max(200),
+    connectionId: z.string().uuid().nullable(),
+    status: IntegrationFeatureStatus,
+    config: IntegrationFeatureJsonObject,
+    version: z.number().int().positive(),
+    hasCursor: z.boolean(),
+    lastSuccessAt: z.string().datetime({ offset: true }).nullable(),
+    lastErrorCode: z.string().min(1).max(120).nullable(),
+    createdAt: z.string().datetime({ offset: true }),
+    updatedAt: z.string().datetime({ offset: true }),
+  })
+  .strict();
+export type IntegrationFeatureBindingSummary = z.infer<
+  typeof IntegrationFeatureBindingSummary
+>;
+
+export const IntegrationInstanceFeaturesResponse = z
+  .object({
+    capabilityId: z.string().min(1).max(512),
+    instanceKey: IntegrationInstanceKey,
+    providerDomain: z.string().min(1).max(253),
+    connectionId: z.string().uuid().nullable(),
+    features: z
+      .array(
+        z
+          .object({
+            definition: IntegrationFeatureDefinitionSummary,
+            binding: IntegrationFeatureBindingSummary.nullable(),
+          })
+          .strict(),
+      )
+      .max(128),
+  })
+  .strict();
+export type IntegrationInstanceFeaturesResponse = z.infer<
+  typeof IntegrationInstanceFeaturesResponse
+>;
+
+export const UpsertIntegrationFeatureRequest = z
+  .object({
+    displayName: z.string().min(1).max(200),
+    config: IntegrationFeatureJsonObject.default({}),
+    expectedVersion: z.number().int().positive().optional(),
+    idempotencyKey: z.string().uuid(),
+  })
+  .strict();
+export type UpsertIntegrationFeatureRequest = z.infer<typeof UpsertIntegrationFeatureRequest>;
+
+export const MutateIntegrationFeatureRequest = z
+  .object({
+    expectedVersion: z.number().int().positive(),
+    idempotencyKey: z.string().uuid(),
+  })
+  .strict();
+export type MutateIntegrationFeatureRequest = z.infer<typeof MutateIntegrationFeatureRequest>;
+
+export const IntegrationFeatureMutationResult = z
+  .object({
+    capabilityId: z.string().min(1).max(512),
+    instanceKey: IntegrationInstanceKey,
+    featureKey: IntegrationFeatureKey,
+    status: z.enum(["configured", "paused", "active"]),
+    binding: IntegrationFeatureBindingSummary,
+  })
+  .strict();
+export type IntegrationFeatureMutationResult = z.infer<
+  typeof IntegrationFeatureMutationResult
+>;
+
+export const IntegrationFeatureRemovalResult = z
+  .object({
+    capabilityId: z.string().min(1).max(512),
+    instanceKey: IntegrationInstanceKey,
+    featureKey: IntegrationFeatureKey,
+    status: z.enum(["not_configured", "removed", "retained_by_other_owners"]),
+    binding: IntegrationFeatureBindingSummary.nullable(),
+    remainingOwners: z.array(CapabilityComponentOwner),
+  })
+  .strict();
+export type IntegrationFeatureRemovalResult = z.infer<typeof IntegrationFeatureRemovalResult>;
 
 export const ApiIntegrationSource = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("preset"), presetId: z.string().min(1).max(128) }).strict(),
@@ -11321,7 +11460,7 @@ export type WorkspaceModelCatalogResponse = z.infer<typeof WorkspaceModelCatalog
  * that rollout boundary. Mutating clients send this value in
  * `x-opengeni-api-contract`; the API rejects any other value before routing.
  */
-export const OPENGENI_API_CONTRACT_REVISION = "2026-07-workspace-artifacts-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-08-capability-facets-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;

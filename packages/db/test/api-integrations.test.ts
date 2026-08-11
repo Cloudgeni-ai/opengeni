@@ -5,13 +5,21 @@ import postgres from "postgres";
 import {
   ApiIntegrationInstallationVersionConflictError,
   bootstrapWorkspace,
+  configureIntegrationFeature,
   createConnection,
   createDb,
   deleteWorkspace,
   getApiIntegrationUninstallPreview,
   getConnectionMetadata,
   installApiIntegration,
+  IntegrationFeatureBindingVersionConflictError,
+  IntegrationFeatureConfigError,
+  IntegrationFeatureNotFoundError,
+  IntegrationFeatureOperationIdempotencyError,
+  listIntegrationInstanceFeatures,
   listInstalledApiIntegrations,
+  removeIntegrationFeature,
+  setIntegrationFeatureLifecycle,
   uninstallApiIntegration,
   type DbClient,
   type InstallApiIntegrationInput,
@@ -547,5 +555,342 @@ describe("API Integration persistence", () => {
       expect.objectContaining({ status: "active" }),
       expect.objectContaining({ status: "active" }),
     ]);
+  }, 60_000);
+
+  test("manages adapter-owned facets generically and preserves their state across definition upgrades", async () => {
+    if (!available || !client) return;
+    const googleConnection = await createConnection(client.db, {
+      accountId: first.accountId,
+      workspaceId: first.workspaceId,
+      providerDomain: "drive.example.test",
+      kind: "oauth2",
+      credentialEncrypted: "google-drive-feature-encrypted-bundle",
+      grantedScopes: ["files.read"],
+      createdBySubjectId: first.subjectId,
+    });
+    const baseInput = integrationInput(
+      googleConnection.id,
+      "generic-google-drive",
+    );
+    const googleInput: InstallApiIntegrationInput = {
+      ...baseInput,
+      name: "Generic Google Drive",
+      providerDomain: "drive.example.test",
+      baseUrl: "https://drive.example.test/v1/",
+      sourceUrl: "https://drive.example.test/openapi.json",
+      authScheme: { kind: "oauth2" },
+      requiredScopes: ["files.read"],
+      instanceKey: "finance",
+      featureDefinitions: [
+        {
+          featureKey: "drive-content",
+          kind: "knowledge_source",
+          configSchema: {
+            type: "object",
+            required: ["sourceId", "sourceKind"],
+            properties: {
+              sourceId: { type: "string", minLength: 1, maxLength: 512 },
+              sourceKind: { type: "string", enum: ["my_drive", "folder"] },
+              includeDescendants: { type: "boolean" },
+            },
+            additionalProperties: false,
+          },
+          capabilities: {
+            provider: "google-drive",
+            connectionRequired: true,
+            cursor: "page_token",
+          },
+        },
+        {
+          featureKey: "account-identity",
+          kind: "identity_link",
+          configSchema: {
+            type: "object",
+            properties: {},
+            additionalProperties: false,
+          },
+          capabilities: { provider: "google", connectionRequired: true },
+        },
+      ],
+      revision: {
+        ...baseInput.revision,
+        bindings: Object.fromEntries(
+          Object.entries(baseInput.revision.bindings).map(([key, binding]) => [
+            key,
+            { ...binding, serverUrl: "https://drive.example.test/v1/" },
+          ]),
+        ),
+      },
+    };
+    const installed = await installApiIntegration(client.db, googleInput);
+    expect(
+      await listIntegrationInstanceFeatures(
+        client.db,
+        first.workspaceId,
+        first.subjectId,
+        googleInput.capabilityId,
+        installed.instanceKey,
+      ),
+    ).toMatchObject({
+      capabilityId: googleInput.capabilityId,
+      instanceKey: "finance",
+      providerDomain: "drive.example.test",
+      connectionId: googleConnection.id,
+      features: [
+        {
+          definition: { featureKey: "account-identity", kind: "identity_link" },
+          binding: null,
+        },
+        {
+          definition: { featureKey: "drive-content", kind: "knowledge_source" },
+          binding: null,
+        },
+      ],
+    });
+
+    const configureKey = crypto.randomUUID();
+    const configured = await configureIntegrationFeature(client.db, {
+      accountId: first.accountId,
+      workspaceId: first.workspaceId,
+      subjectId: first.subjectId,
+      capabilityId: googleInput.capabilityId,
+      instanceKey: "finance",
+      featureKey: "drive-content",
+      displayName: "Finance source",
+      config: {
+        sourceId: "folder:finance",
+        sourceKind: "folder",
+        includeDescendants: true,
+      },
+      idempotencyKey: configureKey,
+    });
+    expect(configured).toMatchObject({
+      status: "configured",
+      binding: {
+        connectionId: googleConnection.id,
+        status: "active",
+        version: 1,
+        hasCursor: false,
+      },
+    });
+    expect(
+      await configureIntegrationFeature(client.db, {
+        accountId: first.accountId,
+        workspaceId: first.workspaceId,
+        subjectId: first.subjectId,
+        capabilityId: googleInput.capabilityId,
+        instanceKey: "finance",
+        featureKey: "drive-content",
+        displayName: "Finance source",
+        config: {
+          sourceId: "folder:finance",
+          sourceKind: "folder",
+          includeDescendants: true,
+        },
+        idempotencyKey: configureKey,
+      }),
+    ).toEqual(configured);
+    await expect(
+      configureIntegrationFeature(client.db, {
+        accountId: first.accountId,
+        workspaceId: first.workspaceId,
+        subjectId: first.subjectId,
+        capabilityId: googleInput.capabilityId,
+        instanceKey: "finance",
+        featureKey: "drive-content",
+        displayName: "Different source",
+        config: { sourceId: "folder:other", sourceKind: "folder" },
+        idempotencyKey: configureKey,
+      }),
+    ).rejects.toBeInstanceOf(IntegrationFeatureOperationIdempotencyError);
+    await expect(
+      configureIntegrationFeature(client.db, {
+        accountId: first.accountId,
+        workspaceId: first.workspaceId,
+        subjectId: first.subjectId,
+        capabilityId: googleInput.capabilityId,
+        instanceKey: "finance",
+        featureKey: "drive-content",
+        displayName: "Invalid source",
+        config: { sourceId: "folder:bad", sourceKind: "unsupported" },
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    ).rejects.toBeInstanceOf(IntegrationFeatureConfigError);
+
+    const upgraded = await installApiIntegration(client.db, {
+      ...googleInput,
+      expectedInstanceVersion: installed.instanceVersion,
+      revision: {
+        ...googleInput.revision,
+        id: "openapi:222222222222222222222222",
+        contentSha256: "2".repeat(64),
+      },
+    });
+    const afterUpgrade = await listIntegrationInstanceFeatures(
+      client.db,
+      first.workspaceId,
+      first.subjectId,
+      googleInput.capabilityId,
+      installed.instanceKey,
+    );
+    const upgradedSource = afterUpgrade.features.find(
+      (feature) => feature.definition.featureKey === "drive-content",
+    )!.binding!;
+    expect(upgradedSource).toMatchObject({
+      id: configured.binding.id,
+      version: configured.binding.version + 1,
+      status: "active",
+      config: {
+        sourceId: "folder:finance",
+        sourceKind: "folder",
+        includeDescendants: true,
+      },
+    });
+
+    const paused = await setIntegrationFeatureLifecycle(client.db, {
+      accountId: first.accountId,
+      workspaceId: first.workspaceId,
+      subjectId: first.subjectId,
+      capabilityId: googleInput.capabilityId,
+      instanceKey: "finance",
+      featureKey: "drive-content",
+      action: "pause",
+      expectedVersion: upgradedSource.version,
+      idempotencyKey: crypto.randomUUID(),
+    });
+    expect(paused).toMatchObject({
+      status: "paused",
+      binding: { status: "paused" },
+    });
+    await expect(
+      setIntegrationFeatureLifecycle(client.db, {
+        accountId: first.accountId,
+        workspaceId: first.workspaceId,
+        subjectId: first.subjectId,
+        capabilityId: googleInput.capabilityId,
+        instanceKey: "finance",
+        featureKey: "drive-content",
+        action: "resume",
+        expectedVersion: upgradedSource.version,
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    ).rejects.toBeInstanceOf(IntegrationFeatureBindingVersionConflictError);
+    const resumed = await setIntegrationFeatureLifecycle(client.db, {
+      accountId: first.accountId,
+      workspaceId: first.workspaceId,
+      subjectId: first.subjectId,
+      capabilityId: googleInput.capabilityId,
+      instanceKey: "finance",
+      featureKey: "drive-content",
+      action: "resume",
+      expectedVersion: paused.binding.version,
+      idempotencyKey: crypto.randomUUID(),
+    });
+    expect(resumed).toMatchObject({
+      status: "active",
+      binding: { status: "active" },
+    });
+    const removed = await removeIntegrationFeature(client.db, {
+      accountId: first.accountId,
+      workspaceId: first.workspaceId,
+      subjectId: first.subjectId,
+      capabilityId: googleInput.capabilityId,
+      instanceKey: "finance",
+      featureKey: "drive-content",
+      expectedVersion: resumed.binding.version,
+      idempotencyKey: crypto.randomUUID(),
+    });
+    expect(removed).toMatchObject({
+      status: "removed",
+      binding: { status: "disabled", version: resumed.binding.version + 1 },
+      remainingOwners: [],
+    });
+
+    const microsoftConnection = await createConnection(client.db, {
+      accountId: first.accountId,
+      workspaceId: first.workspaceId,
+      providerDomain: "onedrive.example.test",
+      kind: "oauth2",
+      credentialEncrypted: "onedrive-feature-encrypted-bundle",
+      grantedScopes: ["files.read"],
+      createdBySubjectId: first.subjectId,
+    });
+    const microsoftBase = integrationInput(
+      microsoftConnection.id,
+      "generic-onedrive",
+    );
+    const microsoftInput: InstallApiIntegrationInput = {
+      ...microsoftBase,
+      name: "Generic OneDrive",
+      providerDomain: "onedrive.example.test",
+      baseUrl: "https://onedrive.example.test/v1/",
+      sourceUrl: "https://onedrive.example.test/openapi.json",
+      authScheme: { kind: "oauth2" },
+      requiredScopes: ["files.read"],
+      instanceKey: "legal",
+      featureDefinitions: [
+        {
+          featureKey: "drive-content",
+          kind: "knowledge_source",
+          configSchema: {
+            type: "object",
+            required: ["sourceId", "sourceKind"],
+            properties: {
+              sourceId: { type: "string", minLength: 1, maxLength: 512 },
+              sourceKind: {
+                type: "string",
+                enum: ["my_drive", "shared_library", "folder"],
+              },
+            },
+            additionalProperties: false,
+          },
+          capabilities: {
+            provider: "microsoft-onedrive",
+            connectionRequired: true,
+            cursor: "delta_link",
+          },
+        },
+      ],
+      revision: {
+        ...microsoftBase.revision,
+        bindings: Object.fromEntries(
+          Object.entries(microsoftBase.revision.bindings).map(
+            ([key, binding]) => [
+              key,
+              { ...binding, serverUrl: "https://onedrive.example.test/v1/" },
+            ],
+          ),
+        ),
+      },
+    };
+    await installApiIntegration(client.db, microsoftInput);
+    const microsoftFeature = await configureIntegrationFeature(client.db, {
+      accountId: first.accountId,
+      workspaceId: first.workspaceId,
+      subjectId: first.subjectId,
+      capabilityId: microsoftInput.capabilityId,
+      instanceKey: "legal",
+      featureKey: "drive-content",
+      displayName: "Legal library",
+      config: { sourceId: "library:legal", sourceKind: "shared_library" },
+      idempotencyKey: crypto.randomUUID(),
+    });
+    expect(microsoftFeature.binding).toMatchObject({
+      kind: "knowledge_source",
+      connectionId: microsoftConnection.id,
+      config: { sourceId: "library:legal", sourceKind: "shared_library" },
+    });
+    await expect(
+      listIntegrationInstanceFeatures(
+        client.db,
+        second.workspaceId,
+        second.subjectId,
+        googleInput.capabilityId,
+        installed.instanceKey,
+      ),
+    ).rejects.toBeInstanceOf(IntegrationFeatureNotFoundError);
+    expect(upgraded.installationVersion).toBeGreaterThan(
+      installed.installationVersion,
+    );
   }, 60_000);
 });

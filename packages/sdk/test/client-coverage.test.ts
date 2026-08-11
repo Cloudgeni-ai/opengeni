@@ -335,7 +335,7 @@ describe("OpenGeniClient access + workspaces", () => {
   test("getClientConfig fetches the public bootstrap endpoint and returns the provider-grouped models", async () => {
     const config = {
       deploymentRevision: "rev-1",
-      apiContractRevision: "2026-07-workspace-artifacts-v1",
+      apiContractRevision: "2026-08-capability-facets-v1",
       defaultModel: "gpt-5.6-sol",
       allowedModels: ["gpt-5.6-sol", "accounts/fireworks/models/glm-5p2"],
       models: [
@@ -1243,6 +1243,48 @@ describe("OpenGeniClient capabilities", () => {
       expectedInstallationVersion: 4,
       expectedInstanceVersion: 2,
     });
+    await client.listIntegrationFeatures(WORKSPACE_ID, capabilityId, "finance");
+    await client.configureIntegrationFeature(
+      WORKSPACE_ID,
+      capabilityId,
+      "finance",
+      "mail-inbox",
+      {
+        displayName: "Finance inbox",
+        config: { unreadOnly: true },
+        idempotencyKey: "00000000-0000-4000-8000-000000000301",
+      },
+    );
+    await client.pauseIntegrationFeature(
+      WORKSPACE_ID,
+      capabilityId,
+      "finance",
+      "mail-inbox",
+      {
+        expectedVersion: 1,
+        idempotencyKey: "00000000-0000-4000-8000-000000000302",
+      },
+    );
+    await client.resumeIntegrationFeature(
+      WORKSPACE_ID,
+      capabilityId,
+      "finance",
+      "mail-inbox",
+      {
+        expectedVersion: 2,
+        idempotencyKey: "00000000-0000-4000-8000-000000000303",
+      },
+    );
+    await client.removeIntegrationFeature(
+      WORKSPACE_ID,
+      capabilityId,
+      "finance",
+      "mail-inbox",
+      {
+        expectedVersion: 3,
+        idempotencyKey: "00000000-0000-4000-8000-000000000304",
+      },
+    );
 
     expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
       [
@@ -1252,6 +1294,11 @@ describe("OpenGeniClient capabilities", () => {
         `GET /v1/workspaces/${WORKSPACE_ID}/integrations`,
         `GET /v1/workspaces/${WORKSPACE_ID}/integrations/api%3Aopenapi%3Aexample-deadbeef1234/instances/finance/uninstall-preview`,
         `DELETE /v1/workspaces/${WORKSPACE_ID}/integrations/api%3Aopenapi%3Aexample-deadbeef1234/instances/finance`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/integrations/api%3Aopenapi%3Aexample-deadbeef1234/instances/finance/features`,
+        `PUT /v1/workspaces/${WORKSPACE_ID}/integrations/api%3Aopenapi%3Aexample-deadbeef1234/instances/finance/features/mail-inbox`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/integrations/api%3Aopenapi%3Aexample-deadbeef1234/instances/finance/features/mail-inbox/pause`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/integrations/api%3Aopenapi%3Aexample-deadbeef1234/instances/finance/features/mail-inbox/resume`,
+        `DELETE /v1/workspaces/${WORKSPACE_ID}/integrations/api%3Aopenapi%3Aexample-deadbeef1234/instances/finance/features/mail-inbox`,
       ],
     );
     expect(JSON.parse(requests[1]!.body!)).toEqual({ source });
@@ -1264,6 +1311,15 @@ describe("OpenGeniClient capabilities", () => {
     expect(JSON.parse(requests[5]!.body!)).toEqual({
       expectedInstallationVersion: 4,
       expectedInstanceVersion: 2,
+    });
+    expect(JSON.parse(requests[7]!.body!)).toEqual({
+      displayName: "Finance inbox",
+      config: { unreadOnly: true },
+      idempotencyKey: "00000000-0000-4000-8000-000000000301",
+    });
+    expect(JSON.parse(requests[8]!.body!)).toEqual({
+      expectedVersion: 1,
+      idempotencyKey: "00000000-0000-4000-8000-000000000302",
     });
   });
 

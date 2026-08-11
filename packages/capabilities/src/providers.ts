@@ -23,7 +23,102 @@ export interface OpenApiProviderPreset {
   readonly pathPrefixes?: readonly string[];
   readonly healthOperation?: string;
   readonly healthArgs?: Readonly<Record<string, unknown>>;
+  readonly features: readonly IntegrationFeatureDefinition[];
 }
+
+export interface IntegrationFeatureDefinition {
+  readonly featureKey: string;
+  readonly kind:
+    | "knowledge_source"
+    | "inbound_trigger"
+    | "delivery_destination"
+    | "identity_link";
+  readonly configSchema: Readonly<Record<string, unknown>>;
+  readonly capabilities: Readonly<Record<string, unknown>>;
+}
+
+const accountIdentityFeature = (
+  provider: "google" | "microsoft",
+): IntegrationFeatureDefinition => ({
+  featureKey: "account-identity",
+  kind: "identity_link",
+  configSchema: { type: "object", properties: {}, additionalProperties: false },
+  capabilities: {
+    provider,
+    connectionRequired: true,
+    identity: "connected_account",
+  },
+});
+
+const driveKnowledgeFeature = (
+  provider: "google-drive" | "microsoft-onedrive",
+): IntegrationFeatureDefinition => ({
+  featureKey: "drive-content",
+  kind: "knowledge_source",
+  configSchema: {
+    type: "object",
+    required: ["sourceId", "sourceKind"],
+    properties: {
+      sourceId: { type: "string", minLength: 1, maxLength: 512 },
+      sourceKind: {
+        type: "string",
+        enum:
+          provider === "google-drive"
+            ? ["my_drive", "shared_drive", "folder"]
+            : ["my_drive", "shared_library", "folder"],
+      },
+      includeDescendants: { type: "boolean" },
+    },
+    additionalProperties: false,
+  },
+  capabilities: {
+    provider,
+    connectionRequired: true,
+    sync: "incremental",
+    cursor: provider === "google-drive" ? "page_token" : "delta_link",
+  },
+});
+
+const mailboxFeatures = (
+  provider: "google-gmail" | "microsoft-outlook-mail",
+): readonly IntegrationFeatureDefinition[] => [
+  {
+    featureKey: "mail-inbox",
+    kind: "inbound_trigger",
+    configSchema: {
+      type: "object",
+      properties: {
+        folder: { type: "string", minLength: 1, maxLength: 256 },
+        unreadOnly: { type: "boolean" },
+      },
+      additionalProperties: false,
+    },
+    capabilities: {
+      provider,
+      connectionRequired: true,
+      delivery: "poll",
+      cursor: provider === "google-gmail" ? "history_id" : "delta_link",
+    },
+  },
+  {
+    featureKey: "mail-delivery",
+    kind: "delivery_destination",
+    configSchema: {
+      type: "object",
+      properties: {
+        fromAlias: { type: "string", minLength: 1, maxLength: 512 },
+        saveToSent: { type: "boolean" },
+      },
+      additionalProperties: false,
+    },
+    capabilities: {
+      provider,
+      connectionRequired: true,
+      delivery: "email",
+    },
+  },
+  accountIdentityFeature(provider === "google-gmail" ? "google" : "microsoft"),
+];
 
 const googleDiscoveryUrl = (service: string, version: string): string =>
   `https://www.googleapis.com/discovery/v1/apis/${service}/${version}/rest`;
@@ -46,6 +141,7 @@ export const GOOGLE_DRIVE_PRESET: OpenApiProviderPreset = {
   oauth: googleOAuth(["https://www.googleapis.com/auth/drive"]),
   healthOperation: "drive.about.get",
   healthArgs: { query: { fields: "user" } },
+  features: [driveKnowledgeFeature("google-drive"), accountIdentityFeature("google")],
 };
 
 export const GOOGLE_GMAIL_PRESET: OpenApiProviderPreset = {
@@ -59,6 +155,7 @@ export const GOOGLE_GMAIL_PRESET: OpenApiProviderPreset = {
   oauth: googleOAuth(["https://mail.google.com/"]),
   healthOperation: "gmail.users.labels.list",
   healthArgs: { path: { userId: "me" } },
+  features: mailboxFeatures("google-gmail"),
 };
 
 export const MICROSOFT_GRAPH_OPENAPI_URL =
@@ -90,6 +187,7 @@ export const MICROSOFT_OUTLOOK_MAIL_PRESET: OpenApiProviderPreset = {
     "/me/mailboxSettings",
     "/me/outlook",
   ],
+  features: mailboxFeatures("microsoft-outlook-mail"),
 };
 
 export const MICROSOFT_OUTLOOK_CALENDAR_PRESET: OpenApiProviderPreset = {
@@ -110,6 +208,43 @@ export const MICROSOFT_OUTLOOK_CALENDAR_PRESET: OpenApiProviderPreset = {
     "/me/findMeetingTimes",
     "/me/reminderView",
   ],
+  features: [
+    {
+      featureKey: "calendar-events",
+      kind: "inbound_trigger",
+      configSchema: {
+        type: "object",
+        properties: {
+          calendarId: { type: "string", minLength: 1, maxLength: 512 },
+          lookaheadDays: { type: "integer", minimum: 1, maximum: 365 },
+        },
+        additionalProperties: false,
+      },
+      capabilities: {
+        provider: "microsoft-outlook-calendar",
+        connectionRequired: true,
+        delivery: "poll",
+        cursor: "delta_link",
+      },
+    },
+    {
+      featureKey: "calendar-delivery",
+      kind: "delivery_destination",
+      configSchema: {
+        type: "object",
+        properties: {
+          calendarId: { type: "string", minLength: 1, maxLength: 512 },
+        },
+        additionalProperties: false,
+      },
+      capabilities: {
+        provider: "microsoft-outlook-calendar",
+        connectionRequired: true,
+        delivery: "calendar_event",
+      },
+    },
+    accountIdentityFeature("microsoft"),
+  ],
 };
 
 export const MICROSOFT_OUTLOOK_CONTACTS_PRESET: OpenApiProviderPreset = {
@@ -122,6 +257,7 @@ export const MICROSOFT_OUTLOOK_CONTACTS_PRESET: OpenApiProviderPreset = {
   baseUrl: MICROSOFT_GRAPH_BASE_URL,
   oauth: microsoftOAuth(["Contacts.ReadWrite", "People.Read.All"]),
   pathPrefixes: ["/me/contacts", "/me/contactFolders", "/me/people"],
+  features: [accountIdentityFeature("microsoft")],
 };
 
 export const MICROSOFT_ONEDRIVE_PRESET: OpenApiProviderPreset = {
@@ -134,6 +270,7 @@ export const MICROSOFT_ONEDRIVE_PRESET: OpenApiProviderPreset = {
   baseUrl: MICROSOFT_GRAPH_BASE_URL,
   oauth: microsoftOAuth(["Files.ReadWrite.All", "Sites.ReadWrite.All"]),
   pathPrefixes: ["/me/drive", "/me/drives", "/me/followedSites", "/drives", "/shares"],
+  features: [driveKnowledgeFeature("microsoft-onedrive"), accountIdentityFeature("microsoft")],
 };
 
 export const CORE_PROVIDER_PRESETS: readonly OpenApiProviderPreset[] = [
@@ -151,6 +288,12 @@ export function providerPresetById(id: string): OpenApiProviderPreset | undefine
 
 export function providerDomainForPreset(preset: OpenApiProviderPreset): string {
   return new URL(preset.baseUrl).hostname.toLowerCase();
+}
+
+export function integrationFeaturesForPreset(
+  presetId: string | null | undefined,
+): readonly IntegrationFeatureDefinition[] {
+  return presetId ? (providerPresetById(presetId)?.features ?? []) : [];
 }
 
 export function filterOpenApiDocumentForPreset(

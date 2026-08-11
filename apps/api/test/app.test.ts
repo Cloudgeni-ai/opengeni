@@ -542,6 +542,20 @@ describe("API helpers", () => {
         `/v1/workspaces/${workspace}/integrations/api%3Aopenapi%3Agmail/instances/account-a`,
       ),
     ).toBe("/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey");
+    expect(
+      routeLabel(
+        `/v1/workspaces/${workspace}/integrations/api%3Aopenapi%3Agmail/instances/account-a/features/mail-inbox`,
+      ),
+    ).toBe(
+      "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey",
+    );
+    expect(
+      routeLabel(
+        `/v1/workspaces/${workspace}/integrations/api%3Aopenapi%3Agmail/instances/account-a/features/mail-inbox/pause`,
+      ),
+    ).toBe(
+      "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey/pause",
+    );
     expect(routeLabel("/v1/integrations/provider-oauth/callback")).toBe(
       "/v1/integrations/provider-oauth/callback",
     );

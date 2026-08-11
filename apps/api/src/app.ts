@@ -65,6 +65,7 @@ import { registerBillingRoutes } from "./routes/billing";
 import { registerGitHubRoutes } from "./routes/github";
 import { registerInstallRoutes } from "./routes/install";
 import { registerApiIntegrationRoutes } from "./routes/api-integrations";
+import { registerIntegrationFeatureRoutes } from "./routes/integration-features";
 import { registerPackRoutes } from "./routes/packs";
 import { registerPluginRoutes } from "./routes/plugins";
 import { registerSkillRoutes } from "./routes/skills";
@@ -585,6 +586,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerConnectionRoutes(app, routeDeps);
   registerCapabilityRoutes(app, routeDeps);
   registerApiIntegrationRoutes(app, routeDeps);
+  registerIntegrationFeatureRoutes(app, routeDeps);
   registerCatalogAssetRoutes(app, routeDeps);
   registerEnrollmentRoutes(app, routeDeps);
   registerMachineRoutes(app, routeDeps);
@@ -1190,6 +1192,26 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
     pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+\/uninstall-preview$/,
     label:
       "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/uninstall-preview",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+\/features\/[^/]+\/pause$/,
+    label:
+      "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey/pause",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+\/features\/[^/]+\/resume$/,
+    label:
+      "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey/resume",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+\/features\/[^/]+$/,
+    label:
+      "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+\/features$/,
+    label:
+      "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+$/,

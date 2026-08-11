@@ -2593,7 +2593,7 @@ export type ClientAuthConfig =
 
 // Kept value-identical to @opengeni/contracts and pinned by the SDK contract
 // parity suite. The SDK has no runtime dependency on the Zod contracts package.
-export const OPENGENI_API_CONTRACT_REVISION = "2026-07-workspace-artifacts-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-08-capability-facets-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
@@ -4337,6 +4337,83 @@ export type UninstallSkillResult = {
 
 export type ApiIntegrationProtocol = "openapi" | "graphql";
 
+export type IntegrationFeatureKind =
+  | "tools"
+  | "knowledge_source"
+  | "inbound_trigger"
+  | "delivery_destination"
+  | "identity_link";
+
+export type IntegrationFeatureStatus =
+  | "active"
+  | "paused"
+  | "needs_attention"
+  | "disabled";
+
+export type IntegrationFeatureDefinitionSummary = {
+  featureKey: string;
+  kind: Exclude<IntegrationFeatureKind, "tools">;
+  configSchema: Record<string, unknown>;
+  capabilities: Record<string, unknown>;
+};
+
+export type IntegrationFeatureBindingSummary = {
+  id: string;
+  featureKey: string;
+  kind: Exclude<IntegrationFeatureKind, "tools">;
+  bindingKey: string;
+  displayName: string;
+  connectionId: string | null;
+  status: IntegrationFeatureStatus;
+  config: Record<string, unknown>;
+  version: number;
+  hasCursor: boolean;
+  lastSuccessAt: string | null;
+  lastErrorCode: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type IntegrationInstanceFeaturesResponse = {
+  capabilityId: string;
+  instanceKey: string;
+  providerDomain: string;
+  connectionId: string | null;
+  features: {
+    definition: IntegrationFeatureDefinitionSummary;
+    binding: IntegrationFeatureBindingSummary | null;
+  }[];
+};
+
+export type UpsertIntegrationFeatureRequest = {
+  displayName: string;
+  config?: Record<string, unknown> | undefined;
+  expectedVersion?: number | undefined;
+  idempotencyKey: string;
+};
+
+export type MutateIntegrationFeatureRequest = {
+  expectedVersion: number;
+  idempotencyKey: string;
+};
+
+export type IntegrationFeatureMutationResult = {
+  capabilityId: string;
+  instanceKey: string;
+  featureKey: string;
+  status: "configured" | "paused" | "active";
+  binding: IntegrationFeatureBindingSummary;
+};
+
+export type IntegrationFeatureRemovalResult = {
+  capabilityId: string;
+  instanceKey: string;
+  featureKey: string;
+  status: "not_configured" | "removed" | "retained_by_other_owners";
+  binding: IntegrationFeatureBindingSummary | null;
+  remainingOwners: CapabilityComponentOwner[];
+};
+
 export type ApiIntegrationPresetSummary = {
   id: string;
   name: string;
@@ -4345,6 +4422,7 @@ export type ApiIntegrationPresetSummary = {
   protocol: "openapi";
   providerDomain: string;
   scopes: string[];
+  features: IntegrationFeatureDefinitionSummary[];
 };
 
 export type ListApiIntegrationPresetsResponse = {

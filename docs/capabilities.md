@@ -154,6 +154,11 @@ The owning endpoints are:
 - `POST /v1/workspaces/:workspaceId/integrations/install`
 - `GET /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/uninstall-preview`
 - `DELETE /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey`
+- `GET /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features`
+- `PUT /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey`
+- `POST /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey/pause`
+- `POST /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey/resume`
+- `DELETE /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey`
 
 One immutable Integration definition may have many active instances. Each
 instance has a stable `instanceKey`, human-editable display name, collision-free
@@ -163,9 +168,25 @@ resource-scoped configurations without copying the schema or overwriting a
 sibling. Reconnect and uninstall operate on the exact instance; the underlying
 Connection and shared definition survive unless separately removed.
 
+Provider adapters may also publish immutable generic feature definitions for
+Knowledge Sources, Inbound Triggers, Delivery Destinations, and Identity Links.
+Google Drive and OneDrive expose drive-content Knowledge Sources; Gmail and
+Outlook expose mail or calendar trigger/delivery facets and connected-account
+identity. These definitions are adapter-owned and cannot be invented or
+rewritten by a browser request. Operators configure only a definition's bounded
+schema on one exact Integration instance, inheriting that instance's exact
+Connection and Personal/workspace authority. Configure, pause, resume, and
+remove use caller UUID idempotency plus exact binding-version OCC. The public
+projection reports only whether a provider cursor exists; page tokens, delta
+links, and other cursor contents remain private durable state. Integration
+definition upgrades migrate same-key facets without losing configuration,
+cursor, lifecycle status, evidence timestamps, or owner edges, and reject an
+upgrade that would silently remove a configured facet.
+
 The preset inventory returns only safe public metadata (id, label, provider
-family/domain, protocol, summary, and requested scope names). Deployment OAuth
-client identifiers and secrets never cross this boundary. `/capabilities`
+family/domain, protocol, summary, requested scope names, and immutable feature
+schemas/capability facts). Deployment OAuth client identifiers, secrets, and
+provider cursors never cross this boundary. `/capabilities`
 renders that inventory as one service card per immutable definition and one
 independent row per named account instance; “Add another account” always creates
 a new Connection/binding instead of replacing a sibling.

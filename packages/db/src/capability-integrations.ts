@@ -30,6 +30,17 @@ export type ApiIntegrationProtocol = "openapi" | "graphql";
 export type ApiIntegrationToolSafety = "read" | "write" | "destructive";
 export type ApiIntegrationApprovalMode = "never" | "ask";
 
+export type ApiIntegrationFeatureDefinition = {
+  readonly featureKey: string;
+  readonly kind:
+    | "knowledge_source"
+    | "inbound_trigger"
+    | "delivery_destination"
+    | "identity_link";
+  readonly configSchema: Readonly<Record<string, unknown>>;
+  readonly capabilities: Readonly<Record<string, unknown>>;
+};
+
 export type ApiIntegrationToolDefinition = {
   readonly id: string;
   readonly operationKey: string;
@@ -122,6 +133,7 @@ export type InstallApiIntegrationInput = {
   requiredScopes?: string[];
   ownership?: "workspace" | "subject" | "either";
   allowedTools?: string[];
+  featureDefinitions?: readonly ApiIntegrationFeatureDefinition[];
   revision: StoredApiIntegrationRevision;
   owner?: ApiIntegrationOwner;
 };
@@ -406,6 +418,20 @@ export async function installApiIntegration(
           },
           capabilities: { protocol: input.protocol, runtime: "mcp" },
         });
+        const featureFacets = new Map<
+          string,
+          typeof schema.integrationFeatureFacets.$inferSelect
+        >([[toolsFeature.featureKey, toolsFeature]]);
+        for (const feature of input.featureDefinitions ?? []) {
+          const facet = await ensureIntegrationFeatureFacet(tx as unknown as Database, {
+            integrationFacetId: integrationFacet.id,
+            featureKey: feature.featureKey,
+            kind: feature.kind,
+            configSchema: { ...feature.configSchema },
+            capabilities: { ...feature.capabilities },
+          });
+          featureFacets.set(facet.featureKey, facet);
+        }
 
         let [pluginInstallation] = await tx
           .select()
@@ -499,7 +525,7 @@ export async function installApiIntegration(
             oldFacetInstallations,
             integrationFacetInstallationId: integrationFacetInstallation.id,
             apiFacetInstallationId: apiFacetInstallation.id,
-            featureFacetId: toolsFeature.id,
+            featureFacets,
             excludedRuntimeKey: runtimeServerId,
             revision: input.revision,
           });
@@ -1126,7 +1152,7 @@ async function migrateApiIntegrationFacetInstallations(
     oldFacetInstallations: InstalledFacetRow[];
     integrationFacetInstallationId: string;
     apiFacetInstallationId: string;
-    featureFacetId: string;
+    featureFacets: ReadonlyMap<string, typeof schema.integrationFeatureFacets.$inferSelect>;
     excludedRuntimeKey: string;
     revision: StoredApiIntegrationRevision;
   },
@@ -1167,31 +1193,55 @@ async function migrateApiIntegrationFacetInstallations(
   }
   if (!oldIntegration) return;
   const bindings = await db
-    .select()
+    .select({
+      binding: schema.integrationFeatureBindings,
+      featureKey: schema.integrationFeatureFacets.featureKey,
+      featureKind: schema.integrationFeatureFacets.kind,
+    })
     .from(schema.integrationFeatureBindings)
+    .innerJoin(
+      schema.integrationFeatureFacets,
+      eq(schema.integrationFeatureFacets.id, schema.integrationFeatureBindings.featureFacetId),
+    )
     .where(
       and(
         eq(schema.integrationFeatureBindings.workspaceId, input.workspaceId),
         eq(schema.integrationFeatureBindings.integrationFacetInstallationId, oldIntegration.id),
-        ne(schema.integrationFeatureBindings.runtimeKey, input.excludedRuntimeKey),
+        or(
+          sql`${schema.integrationFeatureBindings.runtimeKey} is null`,
+          ne(schema.integrationFeatureBindings.runtimeKey, input.excludedRuntimeKey),
+        ),
       ),
     )
     .for("update");
   const available = new Set(input.revision.tools.map((tool) => tool.id));
-  for (const binding of bindings) {
+  for (const row of bindings) {
+    const binding = row.binding;
+    const targetFeature = input.featureFacets.get(row.featureKey);
+    if (!targetFeature || targetFeature.kind !== row.featureKind) {
+      throw new Error(`API Integration update would remove configured feature ${row.featureKey}`);
+    }
     const config = objectValue(binding.config);
-    const selected = (stringArray(config.allowedTools) ?? []).filter((tool) => available.has(tool));
-    const requireApproval = input.revision.tools
-      .filter((tool) => selected.includes(tool.id) && tool.approvalMode === "ask")
-      .map((tool) => tool.id);
+    const toolsConfig = row.featureKind === "tools";
+    const selected = toolsConfig
+      ? (stringArray(config.allowedTools) ?? []).filter((tool) => available.has(tool))
+      : [];
+    const requireApproval = toolsConfig
+      ? input.revision.tools
+          .filter((tool) => selected.includes(tool.id) && tool.approvalMode === "ask")
+          .map((tool) => tool.id)
+      : [];
     await db
       .update(schema.integrationFeatureBindings)
       .set({
         integrationFacetInstallationId: input.integrationFacetInstallationId,
-        featureFacetId: input.featureFacetId,
-        config: { ...config, allowedTools: selected, requireApproval },
-        status: selected.length > 0 ? binding.status : "needs_attention",
-        lastErrorCode: selected.length > 0 ? null : "selected_tools_removed",
+        featureFacetId: targetFeature.id,
+        config: toolsConfig ? { ...config, allowedTools: selected, requireApproval } : config,
+        status: toolsConfig && selected.length === 0 ? "needs_attention" : binding.status,
+        lastErrorCode:
+          toolsConfig && selected.length === 0
+            ? "selected_tools_removed"
+            : binding.lastErrorCode,
         version: binding.version + 1,
         updatedAt: new Date(),
       })
@@ -1375,6 +1425,10 @@ async function integrationInstanceContext(
     })
     .from(schema.integrationFeatureBindings)
     .innerJoin(
+      schema.integrationFeatureFacets,
+      eq(schema.integrationFeatureFacets.id, schema.integrationFeatureBindings.featureFacetId),
+    )
+    .innerJoin(
       schema.capabilityFacetInstallations,
       eq(
         schema.capabilityFacetInstallations.id,
@@ -1396,6 +1450,7 @@ async function integrationInstanceContext(
       and(
         eq(schema.integrationFeatureBindings.workspaceId, workspaceId),
         eq(schema.integrationFeatureBindings.bindingKey, instanceKey),
+        eq(schema.integrationFeatureFacets.kind, "tools"),
         sql`${schema.capabilityPluginVersions.manifest} ->> 'capabilityId' = ${capabilityId}`,
       ),
     )
@@ -1518,6 +1573,13 @@ function assertInstallInput(input: InstallApiIntegrationInput): void {
   }
   if (new Set(input.revision.tools.map((tool) => tool.id)).size !== input.revision.tools.length) {
     throw new Error("API Integration revision has duplicate tool ids");
+  }
+  const featureDefinitions = input.featureDefinitions ?? [];
+  if (featureDefinitions.length > 128) {
+    throw new Error("API Integration exposes too many feature definitions");
+  }
+  if (new Set(featureDefinitions.map((feature) => feature.featureKey)).size !== featureDefinitions.length) {
+    throw new Error("API Integration has duplicate feature keys");
   }
   const base = new URL(input.baseUrl);
   if (base.protocol !== "https:" || base.username || base.password || base.hash) {
