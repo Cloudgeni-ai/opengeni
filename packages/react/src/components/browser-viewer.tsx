@@ -28,6 +28,7 @@ import {
   SaveIcon,
   UserRoundIcon,
   XIcon,
+  ZapIcon,
 } from "lucide-react";
 import {
   type FormEvent,
@@ -87,6 +88,7 @@ export type BrowserViewerProps = EmbeddedBrowserInteractionClientOverride & {
 type BrowserSelection = { sessionId: string; pinned: boolean } | null;
 type BrowserLaunchChoice =
   | { kind: "clean" }
+  | { kind: "fast" }
   | { kind: "profile"; identityId: string }
   | { kind: "attached"; device: AttachedBrowserDevice };
 type PointerStart = {
@@ -309,15 +311,24 @@ export function BrowserViewer({
     ...override,
     browserSessionId: selection?.sessionId ?? null,
     targetId: browser.selectedTarget?.id ?? null,
-    enabled: enabled && selection !== null && controllerReady && browser.selectedTarget !== null,
+    enabled:
+      enabled &&
+      selection !== null &&
+      controllerReady &&
+      browser.selectedTarget !== null &&
+      browser.session?.capabilities.liveFrames === true,
     stream: { format: "jpeg", quality: 76, maxWidth: 1_920, maxHeight: 1_200 },
     ...(webSocketFactory ? { webSocketFactory } : {}),
   });
   const displayedFrame = frameMatchesObservation(frames.frame, browser.observation)
     ? frames.frame
     : null;
-  const displayConnectionState =
-    frames.state === "live" && !displayedFrame ? "connecting" : frames.state;
+  const supportsLiveFrames = browser.session?.capabilities.liveFrames === true;
+  const displayConnectionState = supportsLiveFrames
+    ? frames.state === "live" && !displayedFrame
+      ? "connecting"
+      : frames.state
+    : "semantic";
   const selectedProfile = useMemo(
     () =>
       profiles.identities.find(
@@ -428,17 +439,21 @@ export function BrowserViewer({
           ? profiles.identities.find((candidate) => candidate.id === choice.identityId)
           : null;
       const device = choice.kind === "attached" ? choice.device : null;
+      const fast = choice.kind === "fast";
       const browserName =
-        device?.profileLabel ?? device?.name ?? (identity ? `${identity.name} browser` : "Browser");
+        device?.profileLabel ??
+        device?.name ??
+        (identity ? `${identity.name} browser` : fast ? "Fast browser" : "Browser");
       setCreating(true);
       void (async () => {
         const linkedComputer =
-          !device && createLinkedComputer
+          !device && !fast && createLinkedComputer
             ? await createLinkedComputer(`${browserName} computer`)
             : null;
         const response = await createRegistryBrowser({
           sessionId,
           name: browserName,
+          ...(fast ? { engine: "lightpanda" as const, headless: true } : {}),
           ...(device
             ? {
                 headless: false,
@@ -598,6 +613,7 @@ export function BrowserViewer({
             targets={browser.targets}
             selectedTargetId={browser.selectedTarget?.id ?? null}
             mutating={browser.mutating || savingProfile}
+            tabControl={browser.session?.capabilities.tabs === true}
             onSelect={(targetId) =>
               void browser
                 .selectTarget(targetId)
@@ -633,6 +649,7 @@ export function BrowserViewer({
           <BrowserViewport
             frame={displayedFrame}
             connectionState={displayConnectionState}
+            supportsLiveFrames={supportsLiveFrames}
             connectionError={frames.error}
             observation={browser.observation}
             mutating={browser.mutating || savingProfile}
@@ -972,6 +989,17 @@ function BrowserLaunchMenu(props: {
             <span className="block text-og-xs text-og-subtle">No saved profile</span>
           </span>
         </button>
+        <button
+          type="button"
+          onClick={() => choose({ kind: "fast" })}
+          className="flex w-full items-center gap-2 rounded-og-sm px-2 py-2 text-left transition hover:bg-og-surface-2"
+        >
+          <ZapIcon className="size-3.5 text-og-muted" />
+          <span>
+            <span className="block text-og-control text-og-fg">Fast semantic browser</span>
+            <span className="block text-og-xs text-og-subtle">Headless · optimized for agents</span>
+          </span>
+        </button>
         {props.identities.length > 0 ? (
           <div className="mt-1 border-t border-og-border pt-1">
             {props.identities.map((identity) => (
@@ -1152,6 +1180,7 @@ function BrowserTabs(props: {
   targets: BrowserTarget[];
   selectedTargetId: string | null;
   mutating: boolean;
+  tabControl: boolean;
   onSelect: (id: string) => void;
   onClose: (id: string) => void;
   onOpen: () => void;
@@ -1176,26 +1205,30 @@ function BrowserTabs(props: {
           >
             {target.title || shortUrl(target.url)}
           </button>
-          <button
-            type="button"
-            onClick={() => props.onClose(target.id)}
-            disabled={props.mutating}
-            className="ml-1 grid size-4 shrink-0 place-items-center rounded opacity-0 transition hover:bg-og-surface-3 group-hover:opacity-100 focus:opacity-100 disabled:opacity-30"
-            aria-label={`Close ${target.title || "tab"}`}
-          >
-            <XIcon className="size-3" />
-          </button>
+          {props.tabControl ? (
+            <button
+              type="button"
+              onClick={() => props.onClose(target.id)}
+              disabled={props.mutating}
+              className="ml-1 grid size-4 shrink-0 place-items-center rounded opacity-0 transition hover:bg-og-surface-3 group-hover:opacity-100 focus:opacity-100 disabled:opacity-30"
+              aria-label={`Close ${target.title || "tab"}`}
+            >
+              <XIcon className="size-3" />
+            </button>
+          ) : null}
         </div>
       ))}
-      <button
-        type="button"
-        onClick={props.onOpen}
-        disabled={props.mutating}
-        className="mb-1 grid size-6 shrink-0 place-items-center rounded-og-sm text-og-muted transition hover:bg-og-surface-2 hover:text-og-fg disabled:opacity-40"
-        aria-label="New tab"
-      >
-        <PlusIcon className="size-3.5" />
-      </button>
+      {props.tabControl ? (
+        <button
+          type="button"
+          onClick={props.onOpen}
+          disabled={props.mutating}
+          className="mb-1 grid size-6 shrink-0 place-items-center rounded-og-sm text-og-muted transition hover:bg-og-surface-2 hover:text-og-fg disabled:opacity-40"
+          aria-label="New tab"
+        >
+          <PlusIcon className="size-3.5" />
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -1255,6 +1288,7 @@ function BrowserAddressBar(props: {
 function BrowserViewport(props: {
   frame: BrowserFrame | null;
   connectionState: string;
+  supportsLiveFrames: boolean;
   connectionError: Error | null;
   observation: ReturnType<typeof useBrowserSession>["observation"];
   mutating: boolean;
@@ -1549,6 +1583,7 @@ function BrowserViewport(props: {
         <SemanticBrowserFallback
           observation={props.observation}
           connectionState={props.connectionState}
+          supportsLiveFrames={props.supportsLiveFrames}
           error={props.connectionError}
           onAction={(action) => enqueue(action, null)}
           onReconnect={props.onReconnect}
@@ -1566,6 +1601,7 @@ function BrowserViewport(props: {
 function SemanticBrowserFallback(props: {
   observation: ReturnType<typeof useBrowserSession>["observation"];
   connectionState: string;
+  supportsLiveFrames: boolean;
   error: Error | null;
   onAction: (action: BrowserAction) => void;
   onReconnect: () => void;
@@ -1580,16 +1616,26 @@ function SemanticBrowserFallback(props: {
         <div className="flex items-center gap-2">
           {props.error ? (
             <CircleAlertIcon className="size-4 text-og-status-error" />
+          ) : !props.supportsLiveFrames ? (
+            <ZapIcon className="size-4 text-og-muted" />
           ) : (
             <LoaderCircleIcon className="size-4 animate-spin text-og-muted" />
           )}
           <p className="text-og-menu font-medium text-og-fg">
-            {props.error ? "Live view disconnected" : browserConnectionLabel(props.connectionState)}
+            {props.error
+              ? "Live view disconnected"
+              : props.supportsLiveFrames
+                ? browserConnectionLabel(props.connectionState)
+                : "Semantic browser"}
           </p>
         </div>
         {interactive.length > 0 ? (
           <div className="mt-3 border-t border-og-border pt-3">
-            <p className="mb-2 text-og-xs text-og-subtle">Page controls remain available</p>
+            <p className="mb-2 text-og-xs text-og-subtle">
+              {props.supportsLiveFrames
+                ? "Page controls remain available"
+                : "Available page controls"}
+            </p>
             <div className="flex flex-wrap gap-1.5">
               {interactive.map((node) => (
                 <button
@@ -1609,7 +1655,7 @@ function SemanticBrowserFallback(props: {
             </div>
           </div>
         ) : null}
-        {props.error ? (
+        {props.error && props.supportsLiveFrames ? (
           <button
             type="button"
             onClick={props.onReconnect}
@@ -1643,11 +1689,17 @@ function BrowserStatusBar(props: {
       <span
         className={cn(
           "size-1.5 rounded-full",
-          props.connectionState === "live" ? "bg-og-status-running" : "bg-og-muted",
+          props.connectionState === "live" || props.connectionState === "semantic"
+            ? "bg-og-status-running"
+            : "bg-og-muted",
         )}
       />
       <span>
-        {props.connectionState === "live" ? "Live" : browserConnectionLabel(props.connectionState)}
+        {props.connectionState === "live"
+          ? "Live"
+          : props.connectionState === "semantic"
+            ? "Semantic"
+            : browserConnectionLabel(props.connectionState)}
       </span>
       <span>{props.profile?.name ?? "Temporary browser"}</span>
       <span className="min-w-0 flex-1 truncate">{props.target?.title}</span>
@@ -2317,6 +2369,8 @@ function browserConnectionLabel(state: string): string {
       return "Reconnecting…";
     case "error":
       return "Disconnected";
+    case "semantic":
+      return "Semantic";
     default:
       return "Waiting for browser…";
   }

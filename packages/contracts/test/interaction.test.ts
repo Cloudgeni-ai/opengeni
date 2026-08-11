@@ -86,8 +86,23 @@ describe("interaction contracts", () => {
       CreateBrowserSessionRequest.parse({
         operationId,
         sessionId: "33333333-3333-4333-8333-333333333333",
-      }).headless,
-    ).toBe(true);
+      }),
+    ).toMatchObject({ headless: true, engine: "chromium" });
+    expect(
+      CreateBrowserSessionRequest.parse({
+        operationId,
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        engine: "lightpanda",
+      }).engine,
+    ).toBe("lightpanda");
+    expect(
+      CreateBrowserSessionRequest.safeParse({
+        operationId,
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        engine: "lightpanda",
+        headless: false,
+      }).success,
+    ).toBe(false);
     expect(
       CreateBrowserSessionRequest.safeParse({
         operationId,

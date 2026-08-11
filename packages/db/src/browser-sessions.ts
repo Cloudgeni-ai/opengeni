@@ -82,6 +82,26 @@ export const ATTACHED_BROWSER_SESSION_CAPABILITIES = BrowserSessionCapabilities.
   parallelTargets: true,
 });
 
+/** Measured against Lightpanda 0.3.5. Unsupported Chromium-only affordances
+ * remain false instead of being emulated or silently routed elsewhere. */
+export const LIGHTPANDA_BROWSER_SESSION_CAPABILITIES = BrowserSessionCapabilities.parse({
+  semanticObservation: true,
+  screenshots: true,
+  liveFrames: false,
+  humanInput: false,
+  tabs: false,
+  downloads: false,
+  uploads: true,
+  clipboard: false,
+  permissions: false,
+  diagnostics: true,
+  rawCdp: false,
+  linkedComputer: false,
+  privateCheckpoint: false,
+  identityPublication: false,
+  parallelTargets: false,
+});
+
 export class BrowserSessionNotFoundError extends Error {
   readonly name = "BrowserSessionNotFoundError";
 }
@@ -348,7 +368,7 @@ export function browserSessionCreateRequestDigest(input: PrepareBrowserSessionCr
         : { kind: "blank_identity" as const }
     : { kind: "none" as const };
   return requestDigest({
-    version: 3,
+    version: 4,
     associatedSessionId: input.associatedSessionId,
     name: input.name,
     initialUrl: input.initialUrl,

@@ -14,6 +14,8 @@ export * from "./computer-supervisor";
 export * from "./downloads";
 export * from "./download-upload";
 export * from "./journal";
+export * from "./lightpanda-binary";
+export * from "./lightpanda-runner";
 export * from "./media";
 export * from "./protocol";
 export * from "./protected-auth-journal";

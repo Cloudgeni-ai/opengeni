@@ -845,6 +845,7 @@ export type CreateBrowserSessionRequest = {
   name?: string | undefined;
   initialUrl?: string | undefined;
   headless?: boolean | undefined;
+  engine?: "chromium" | "lightpanda" | undefined;
   placement?: InteractionPlacement | undefined;
   identityId?: string | undefined;
   baseRevisionId?: string | undefined;

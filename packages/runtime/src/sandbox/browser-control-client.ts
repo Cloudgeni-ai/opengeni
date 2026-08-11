@@ -181,7 +181,7 @@ export type PlacementBrowserNetworkRoute = {
 };
 
 export type PlacementBrowserTransport =
-  | { kind: "managed" }
+  | { kind: "managed"; engine?: "chromium" | "lightpanda" }
   | {
       kind: "attached_chrome";
       deviceId: string;
@@ -1351,7 +1351,16 @@ function parseComputerReference(value: unknown): PlacementComputerSessionReferen
 }
 
 function placementBrowserTransport(input: PlacementBrowserTransport): PlacementBrowserTransport {
-  if (input.kind === "managed") return { kind: "managed" };
+  if (input.kind === "managed") {
+    if (
+      input.engine !== undefined &&
+      input.engine !== "chromium" &&
+      input.engine !== "lightpanda"
+    ) {
+      throw new BrowserControlProtocolError("managed browser engine is invalid");
+    }
+    return { kind: "managed", engine: input.engine ?? "chromium" };
+  }
   return {
     kind: "attached_chrome",
     deviceId: requireUuid(input.deviceId, "attached browser id"),

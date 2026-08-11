@@ -1667,8 +1667,15 @@ function parseBrowserTransport(
     throw new ProtocolError("invalid_action", "browser transport is invalid", 400);
   }
   if (value.kind === "managed") {
-    assertOnlyKeys(value, ["kind"]);
-    return { kind: "managed" };
+    assertOnlyKeys(value, ["kind", "engine"]);
+    if (
+      value.engine !== undefined &&
+      value.engine !== "chromium" &&
+      value.engine !== "lightpanda"
+    ) {
+      throw new ProtocolError("invalid_action", "managed browser engine is unsupported", 400);
+    }
+    return { kind: "managed", engine: value.engine ?? "chromium" };
   }
   if (value.kind !== "attached_chrome") {
     throw new ProtocolError("invalid_action", "browser transport is unsupported", 400);

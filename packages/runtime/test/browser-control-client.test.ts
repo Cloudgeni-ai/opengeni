@@ -179,6 +179,7 @@ describe("BrowserControlClient", () => {
         controlToken,
         viewToken,
         headed: true,
+        transport: { kind: "managed", engine: "chromium" },
         linkedComputer: {
           computerSessionId: linkedComputerSessionId,
           controllerGeneration: "computer-controller-1",
@@ -235,6 +236,7 @@ describe("BrowserControlClient", () => {
         observation,
       });
       expect(createRequest).toMatchObject({
+        transport: { kind: "managed", engine: "chromium" },
         linkedComputer: {
           computerSessionId: linkedComputerSessionId,
           controllerGeneration: "computer-controller-1",

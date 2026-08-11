@@ -2087,6 +2087,9 @@ export const CreateBrowserSessionRequest = z
     name: z.string().trim().min(1).max(200).optional(),
     initialUrl: boundedUrl.optional(),
     headless: z.boolean().default(true),
+    /** Managed engine choice. Attached Chrome continues to derive its engine
+     * from the selected device rather than accepting an impersonated value. */
+    engine: z.enum(["chromium", "lightpanda"]).default("chromium"),
     placement: InteractionPlacement.optional(),
     identityId: z.string().uuid().optional(),
     baseRevisionId: z.string().uuid().optional(),
@@ -2109,7 +2112,44 @@ export const CreateBrowserSessionRequest = z
         message: "a linked computer requires a headed browser",
       });
     }
+    if (value.engine === "lightpanda") {
+      if (!value.headless) {
+        context.addIssue({
+          code: "custom",
+          path: ["headless"],
+          message: "Lightpanda is a headless semantic browser",
+        });
+      }
+      if (value.identityId || value.baseRevisionId) {
+        context.addIssue({
+          code: "custom",
+          path: ["identityId"],
+          message: "Lightpanda does not support Chromium browser identities",
+        });
+      }
+      if (value.networkRouteId) {
+        context.addIssue({
+          code: "custom",
+          path: ["networkRouteId"],
+          message: "Lightpanda network routes are not supported yet",
+        });
+      }
+      if (value.linkedComputerSessionId) {
+        context.addIssue({
+          code: "custom",
+          path: ["linkedComputerSessionId"],
+          message: "Lightpanda has no linked desktop window",
+        });
+      }
+    }
     if (value.placement?.kind === "attached_device") {
+      if (value.engine !== "chromium") {
+        context.addIssue({
+          code: "custom",
+          path: ["engine"],
+          message: "attached browser placement uses the selected Chrome engine",
+        });
+      }
       if (value.linkedComputerSessionId) {
         context.addIssue({
           code: "custom",

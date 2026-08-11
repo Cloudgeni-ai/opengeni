@@ -55,6 +55,7 @@ import {
   acquireLease,
   activateBrowserSession,
   ATTACHED_BROWSER_SESSION_CAPABILITIES,
+  LIGHTPANDA_BROWSER_SESSION_CAPABILITIES,
   bindBrowserSessionNetworkRouteAuthority,
   AttachedBrowserDeviceNotFoundError,
   BrowserIdentityConflictError,
@@ -182,6 +183,7 @@ import { withChannelA, type ChannelAOperation } from "../sandbox/channel-a";
 import { sanitizeFilename } from "./files";
 
 const BROWSER_DRIVER_ID = "opengeni.cdp.v1";
+const LIGHTPANDA_DRIVER_ID = "opengeni.lightpanda.cdp.v1";
 const BROWSER_WORKSPACE_FILE_AUTHORITY_TTL_SECONDS = 20 * 60;
 const BROWSER_STATE_UPLOAD_CLEANUP_GRACE_MS = 24 * 60 * 60 * 1_000;
 
@@ -399,7 +401,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
                 tokenGeneration: record.tokenGeneration,
                 ...tokens,
                 headed: !prepared.session.headless,
-                transport: placement.transport,
+                transport: browserRuntimeTransport(prepared.session, placement.transport),
                 ...(linkedComputer ? { linkedComputer } : {}),
                 ...(networkRoute ? { networkRoute } : {}),
                 ...(request.initialUrl ? { initialUrl: request.initialUrl } : {}),
@@ -2028,7 +2030,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
                 tokenGeneration: record.tokenGeneration,
                 ...tokens,
                 headed: !prepared.session.headless,
-                transport: placement.transport,
+                transport: browserRuntimeTransport(prepared.session, placement.transport),
                 ...(linkedComputer ? { linkedComputer } : {}),
                 ...(networkRoute ? { networkRoute } : {}),
                 restore: restore!,
@@ -2543,6 +2545,12 @@ function browserCreateInput(
   placement: InteractionPlacement,
 ) {
   const attached = placement.kind === "attached_device";
+  const engine = attached ? ("chrome" as const) : request.engine;
+  if (engine === "lightpanda" && placement.kind !== "sandbox_group") {
+    throw new BrowserControlUnsupportedError(
+      "Lightpanda is currently available only in managed agent sandboxes",
+    );
+  }
   return {
     accountId: grant.accountId,
     workspaceId,
@@ -2552,8 +2560,8 @@ function browserCreateInput(
     name: request.name ?? "Browser",
     initialUrl: request.initialUrl ?? null,
     placement,
-    driverId: BROWSER_DRIVER_ID,
-    engine: attached ? ("chrome" as const) : ("chromium" as const),
+    driverId: engine === "lightpanda" ? LIGHTPANDA_DRIVER_ID : BROWSER_DRIVER_ID,
+    engine,
     headless: attached ? false : request.headless,
     identityId: request.identityId ?? null,
     baseRevisionId: request.baseRevisionId ?? null,
@@ -2561,7 +2569,22 @@ function browserCreateInput(
     linkedComputerSessionId: request.linkedComputerSessionId ?? null,
     resolveDefaultRevision:
       !attached && request.identityId !== undefined && request.baseRevisionId === undefined,
-    ...(attached ? { capabilities: ATTACHED_BROWSER_SESSION_CAPABILITIES } : {}),
+    ...(attached
+      ? { capabilities: ATTACHED_BROWSER_SESSION_CAPABILITIES }
+      : engine === "lightpanda"
+        ? { capabilities: LIGHTPANDA_BROWSER_SESSION_CAPABILITIES }
+        : {}),
+  };
+}
+
+function browserRuntimeTransport(
+  session: BrowserSessionValue,
+  transport: PlacementBrowserTransport,
+): PlacementBrowserTransport {
+  if (transport.kind !== "managed") return transport;
+  return {
+    kind: "managed",
+    engine: session.engine === "lightpanda" ? "lightpanda" : "chromium",
   };
 }
 
@@ -2572,6 +2595,12 @@ function assertCreateReplay(
   if (request.placement && !sameInteractionPlacement(request.placement, session.placement)) {
     throw new BrowserSessionOperationConflictError(
       "BrowserSession create operation is bound to another placement",
+    );
+  }
+  const expectedEngine = session.placement.kind === "attached_device" ? "chrome" : request.engine;
+  if (session.engine !== expectedEngine) {
+    throw new BrowserSessionOperationConflictError(
+      "BrowserSession create operation is bound to another browser engine",
     );
   }
   if ((request.identityId ?? null) !== session.identityId) {

@@ -27,6 +27,7 @@ import {
   getBrowserSessionControlRecord,
   getBrowserPrivateCheckpointAuthority,
   listBrowserSessions,
+  LIGHTPANDA_BROWSER_SESSION_CAPABILITIES,
   MANAGED_BROWSER_SESSION_CAPABILITIES,
   prepareBrowserSessionCreate,
   prepareBrowserSessionEnd,
@@ -170,6 +171,14 @@ describe("durable BrowserSession lifecycle", () => {
     expect(ATTACHED_BROWSER_SESSION_CAPABILITIES).toMatchObject({
       downloads: false,
       uploads: false,
+    });
+    expect(LIGHTPANDA_BROWSER_SESSION_CAPABILITIES).toMatchObject({
+      semanticObservation: true,
+      screenshots: true,
+      liveFrames: false,
+      downloads: false,
+      privateCheckpoint: false,
+      identityPublication: false,
     });
   });
 

@@ -56,6 +56,28 @@ describe("BrowserControlServer", () => {
     );
   });
 
+  test("preserves the exact managed browser engine at the controller boundary", async () => {
+    let browserContext: BrowserSupervisorDriverContext | null = null;
+    await withServer(
+      async ({ server, reference }) => {
+        const created = await request(server, "/v1/browser-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference, {
+            transport: { kind: "managed", engine: "lightpanda" },
+          }),
+        });
+        expect(created.status).toBe(201);
+        expect(browserContext?.transport).toEqual({ kind: "managed", engine: "lightpanda" });
+      },
+      {
+        onBrowserContext: (context) => {
+          browserContext = context;
+        },
+      },
+    );
+  });
+
   test("resolves a linked ComputerSession into the browser launch environment", async () => {
     const computerSessionId = randomUUID();
     let browserContext: BrowserSupervisorDriverContext | null = null;
@@ -971,6 +993,7 @@ function createBody(
     headed: boolean;
     linkedComputer: { computerSessionId: string; controllerGeneration: string };
     networkRoute: ReturnType<typeof proxyRoute>;
+    transport: { kind: "managed"; engine: "chromium" | "lightpanda" };
   }> = {},
 ) {
   return {

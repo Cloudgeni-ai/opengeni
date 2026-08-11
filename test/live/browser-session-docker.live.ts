@@ -28,6 +28,10 @@ import type { ObjectStorage } from "@opengeni/storage";
 import { createApp } from "../../apps/api/src/app";
 
 const image = process.env.OPENGENI_BROWSER_CANARY_IMAGE?.trim() ?? "";
+const engine = process.env.OPENGENI_BROWSER_CANARY_ENGINE?.trim() || "chromium";
+if (engine !== "chromium" && engine !== "lightpanda") {
+  throw new Error(`unsupported BrowserSession canary engine: ${engine}`);
+}
 const delegationSecret = "browser-session-docker-live-secret";
 const origin = "http://localhost:3000";
 
@@ -49,7 +53,7 @@ afterAll(async () => {
 describe("BrowserSession API Docker canary", () => {
   const liveTest = image ? test : test.skip;
   liveTest(
-    "creates, observes, acts, grants frames, heartbeats, and ends through the public API",
+    "creates, observes, acts, exercises declared capabilities, heartbeats, and ends through the public API",
     async () => {
       const access = await bootstrapWorkspace(client.db, {
         accountExternalSource: "test",
@@ -129,6 +133,7 @@ describe("BrowserSession API Docker canary", () => {
               operationId: crypto.randomUUID(),
               sessionId: session.id,
               name: "Docker canary",
+              engine,
               initialUrl:
                 "data:text/html,%3Ctitle%3EBrowser%20Canary%3C%2Ftitle%3E%3Cbutton%3EReady%3C%2Fbutton%3E",
             }),
@@ -143,7 +148,14 @@ describe("BrowserSession API Docker canary", () => {
           );
         }
         const created = BrowserSessionMutationResponse.parse(createBody);
-        expect(created.session).toMatchObject({ lifecycle: "active", headless: true });
+        expect(created.session).toMatchObject({
+          lifecycle: "active",
+          headless: true,
+          capabilities:
+            engine === "lightpanda"
+              ? { semanticObservation: true, liveFrames: false, tabs: false, downloads: false }
+              : { semanticObservation: true, liveFrames: true, tabs: true, downloads: true },
+        });
         const browserSessionId = created.session.id;
 
         expect(containerId).toMatch(/^[a-f0-9]{64}$/u);
@@ -188,116 +200,118 @@ describe("BrowserSession API Docker canary", () => {
         });
         if (!navigated.observation) throw new Error("navigation returned no observation");
 
-        const downloadAction = await app.request(
-          `/v1/workspaces/${workspace.workspaceId}/browser-sessions/${browserSessionId}/actions`,
-          {
-            method: "POST",
-            headers,
-            body: JSON.stringify({
-              operationId: crypto.randomUUID(),
-              targetId: target.id,
-              expectedTargetGeneration: navigated.observation.target.targetGeneration,
-              expectedDocumentGeneration: navigated.observation.target.documentGeneration,
-              expectedFrameId: navigated.observation.frameId,
-              action: {
-                type: "click",
-                locator: { kind: "text", text: "Download fixture" },
-              },
-            }),
-          },
-        );
-        expect(BrowserActionReceipt.parse(await downloadAction.json())).toMatchObject({
-          state: "completed",
-        });
-        const download = await waitForCompletedDownload(
-          app,
-          workspace.workspaceId!,
-          browserSessionId,
-          headers,
-        );
-        expect(download).toMatchObject({
-          filename: "fixture-download.txt",
-          receivedBytes: storageFixture.downloadBytes.byteLength,
-          status: "completed",
-        });
-
-        const saveOperationId = crypto.randomUUID();
-        const savePath = `/v1/workspaces/${workspace.workspaceId}/browser-sessions/${browserSessionId}/downloads/${download.id}/save`;
-        const saveResponse = await app.request(savePath, {
-          method: "POST",
-          headers,
-          body: JSON.stringify({
-            operationId: saveOperationId,
-            destinationPath: "fixture-download.txt",
-            overwrite: false,
-          }),
-        });
-        const saveBody = await saveResponse.json();
-        if (saveResponse.status !== 201) {
-          throw new Error(
-            `BrowserDownload save returned ${saveResponse.status} after ${storageFixture.putCount()} object PUT and ${storageFixture.getCount()} object GET requests: ${JSON.stringify(saveBody)}`,
+        if (engine === "chromium") {
+          const downloadAction = await app.request(
+            `/v1/workspaces/${workspace.workspaceId}/browser-sessions/${browserSessionId}/actions`,
+            {
+              method: "POST",
+              headers,
+              body: JSON.stringify({
+                operationId: crypto.randomUUID(),
+                targetId: target.id,
+                expectedTargetGeneration: navigated.observation.target.targetGeneration,
+                expectedDocumentGeneration: navigated.observation.target.documentGeneration,
+                expectedFrameId: navigated.observation.frameId,
+                action: {
+                  type: "click",
+                  locator: { kind: "text", text: "Download fixture" },
+                },
+              }),
+            },
           );
-        }
-        const saved = BrowserDownloadSaveResponse.parse(saveBody);
-        expect(saved).toMatchObject({
-          download: { id: download.id },
-          destinationPath: "fixture-download.txt",
-          operationId: saveOperationId,
-          replayed: false,
-        });
-        expect(storageFixture.putCount()).toBe(1);
-        expect(storageFixture.getCount()).toBe(1);
+          expect(BrowserActionReceipt.parse(await downloadAction.json())).toMatchObject({
+            state: "completed",
+          });
+          const download = await waitForCompletedDownload(
+            app,
+            workspace.workspaceId!,
+            browserSessionId,
+            headers,
+          );
+          expect(download).toMatchObject({
+            filename: "fixture-download.txt",
+            receivedBytes: storageFixture.downloadBytes.byteLength,
+            status: "completed",
+          });
 
-        const readResponse = await app.request(
-          `/v1/workspaces/${workspace.workspaceId}/sessions/${session.id}/fs/read`,
-          {
+          const saveOperationId = crypto.randomUUID();
+          const savePath = `/v1/workspaces/${workspace.workspaceId}/browser-sessions/${browserSessionId}/downloads/${download.id}/save`;
+          const saveResponse = await app.request(savePath, {
             method: "POST",
             headers,
             body: JSON.stringify({
-              path: "fixture-download.txt",
-              encoding: "utf8",
-              maxBytes: 1_024,
+              operationId: saveOperationId,
+              destinationPath: "fixture-download.txt",
+              overwrite: false,
             }),
-          },
-        );
-        expect(readResponse.status).toBe(200);
-        expect(await readResponse.json()).toMatchObject({
-          content: storageFixture.downloadBytes.toString("utf8"),
-          truncated: false,
-        });
-
-        storageFixture.stop();
-        const replayResponse = await app.request(savePath, {
-          method: "POST",
-          headers,
-          body: JSON.stringify({
-            operationId: saveOperationId,
+          });
+          const saveBody = await saveResponse.json();
+          if (saveResponse.status !== 201) {
+            throw new Error(
+              `BrowserDownload save returned ${saveResponse.status} after ${storageFixture.putCount()} object PUT and ${storageFixture.getCount()} object GET requests: ${JSON.stringify(saveBody)}`,
+            );
+          }
+          const saved = BrowserDownloadSaveResponse.parse(saveBody);
+          expect(saved).toMatchObject({
+            download: { id: download.id },
             destinationPath: "fixture-download.txt",
-            overwrite: false,
-          }),
-        });
-        expect(replayResponse.status).toBe(200);
-        expect(BrowserDownloadSaveResponse.parse(await replayResponse.json())).toMatchObject({
-          operationId: saveOperationId,
-          replayed: true,
-        });
-        expect(storageFixture.putCount()).toBe(1);
-        expect(storageFixture.getCount()).toBe(1);
+            operationId: saveOperationId,
+            replayed: false,
+          });
+          expect(storageFixture.putCount()).toBe(1);
+          expect(storageFixture.getCount()).toBe(1);
 
-        const attachmentResponse = await app.request(
-          `/v1/workspaces/${workspace.workspaceId}/browser-sessions/${browserSessionId}/attachments`,
-          {
+          const readResponse = await app.request(
+            `/v1/workspaces/${workspace.workspaceId}/sessions/${session.id}/fs/read`,
+            {
+              method: "POST",
+              headers,
+              body: JSON.stringify({
+                path: "fixture-download.txt",
+                encoding: "utf8",
+                maxBytes: 1_024,
+              }),
+            },
+          );
+          expect(readResponse.status).toBe(200);
+          expect(await readResponse.json()).toMatchObject({
+            content: storageFixture.downloadBytes.toString("utf8"),
+            truncated: false,
+          });
+
+          storageFixture.stop();
+          const replayResponse = await app.request(savePath, {
             method: "POST",
             headers,
-            body: JSON.stringify({ targetId: target.id, expiresInSeconds: 30 }),
-          },
-        );
-        const attachment = BrowserSessionAttachment.parse(await attachmentResponse.json());
-        expect(attachment.stream.kind).toBe("direct_websocket");
-        if (attachment.stream.kind !== "direct_websocket")
-          throw new Error("expected direct stream");
-        expect(attachment.stream.url).toMatch(/^ws:\/\/127\.0\.0\.1:/u);
-        expect(attachment.stream.protocols).toHaveLength(2);
+            body: JSON.stringify({
+              operationId: saveOperationId,
+              destinationPath: "fixture-download.txt",
+              overwrite: false,
+            }),
+          });
+          expect(replayResponse.status).toBe(200);
+          expect(BrowserDownloadSaveResponse.parse(await replayResponse.json())).toMatchObject({
+            operationId: saveOperationId,
+            replayed: true,
+          });
+          expect(storageFixture.putCount()).toBe(1);
+          expect(storageFixture.getCount()).toBe(1);
+
+          const attachmentResponse = await app.request(
+            `/v1/workspaces/${workspace.workspaceId}/browser-sessions/${browserSessionId}/attachments`,
+            {
+              method: "POST",
+              headers,
+              body: JSON.stringify({ targetId: target.id, expiresInSeconds: 30 }),
+            },
+          );
+          const attachment = BrowserSessionAttachment.parse(await attachmentResponse.json());
+          expect(attachment.stream.kind).toBe("direct_websocket");
+          if (attachment.stream.kind !== "direct_websocket")
+            throw new Error("expected direct stream");
+          expect(attachment.stream.url).toMatch(/^ws:\/\/127\.0\.0\.1:/u);
+          expect(attachment.stream.protocols).toHaveLength(2);
+        }
 
         const heartbeatResponse = await app.request(
           `/v1/workspaces/${workspace.workspaceId}/browser-sessions/${browserSessionId}/heartbeat`,

@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { BROWSER_CONTROL_PORT } from "@opengeni/contracts";
 import { BROWSER_CONTROL_PROTOCOL_VERSION } from "./protocol";
 import { resolvePinnedAgentBrowserBinary } from "./binary";
+import { resolvePinnedLightpandaBinary } from "./lightpanda-binary";
 import {
   ExistingComputerEnvironmentAllocator,
   LinuxVirtualComputerEnvironmentAllocator,
@@ -17,6 +18,9 @@ export async function runBrowserd(environment: NodeJS.ProcessEnv = process.env):
   const agentBrowserBinary = config.agentBrowserBinaryPath
     ? await resolvePinnedAgentBrowserBinary({ binaryPath: config.agentBrowserBinaryPath })
     : undefined;
+  const lightpandaBinary = config.lightpandaBinaryPath
+    ? await resolvePinnedLightpandaBinary({ binaryPath: config.lightpandaBinaryPath })
+    : undefined;
   const computerNativeBinaryPath = config.computerNativeBinaryPath
     ? await resolveExecutable(config.computerNativeBinaryPath, "computer native helper")
     : undefined;
@@ -25,6 +29,7 @@ export async function runBrowserd(environment: NodeJS.ProcessEnv = process.env):
     ...(config.socketRootDirectory ? { socketRootDirectory: config.socketRootDirectory } : {}),
     maxSessions: config.maxSessions,
     ...(agentBrowserBinary ? { agentBrowserBinary } : {}),
+    ...(lightpandaBinary ? { lightpandaBinary } : {}),
   });
   let computerSupervisor: ComputerSupervisor | undefined;
   try {
@@ -116,6 +121,7 @@ type BrowserdConfig = {
   allowedOrigins: string[];
   browserExecutablePath?: string;
   agentBrowserBinaryPath?: string;
+  lightpandaBinaryPath?: string;
   computerNativeBinaryPath?: string;
   maxComputerSessions: number;
   computerEnvironmentMode: "existing" | "isolated_linux";
@@ -161,6 +167,9 @@ async function browserdConfig(environment: NodeJS.ProcessEnv): Promise<BrowserdC
       : {}),
     ...(environment.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
       ? { agentBrowserBinaryPath: resolve(environment.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY) }
+      : {}),
+    ...(environment.OPENGENI_BROWSERD_LIGHTPANDA_BINARY
+      ? { lightpandaBinaryPath: resolve(environment.OPENGENI_BROWSERD_LIGHTPANDA_BINARY) }
       : {}),
     ...(environment.OPENGENI_BROWSERD_COMPUTER_NATIVE_BINARY
       ? {

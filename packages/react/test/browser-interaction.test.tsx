@@ -1586,6 +1586,90 @@ describe("BrowserViewer", () => {
     await rendered.unmount();
   });
 
+  test("starts a fast semantic browser without inventing a desktop or frame stream", async () => {
+    const currentTarget = target();
+    const created: BrowserSession = {
+      ...browserSession(),
+      name: "Fast browser",
+      driverId: "opengeni.lightpanda.cdp.v1",
+      engine: "lightpanda",
+      engineVersion: "0.3.5",
+      headless: true,
+      capabilities: {
+        ...browserSession().capabilities,
+        liveFrames: false,
+        humanInput: false,
+        tabs: false,
+        downloads: false,
+        clipboard: false,
+        permissions: false,
+        privateCheckpoint: false,
+        identityPublication: false,
+        parallelTargets: false,
+      },
+    };
+    const createRequests: unknown[] = [];
+    let linkedComputerCreates = 0;
+    let frameAttachments = 0;
+    const client = fakeClient({
+      listBrowserSessions: async () => ({ revision: 1, sessions: [] }),
+      listBrowserIdentities: async () => ({ revision: 1, identities: [] }),
+      createBrowserSession: async (_workspaceId, request) => {
+        createRequests.push(request);
+        return mutation(created);
+      },
+      getBrowserSession: async () => created,
+      listBrowserTargets: async () => ({
+        browserSessionId: created.id,
+        controllerGeneration: "controller-1",
+        targets: [currentTarget],
+      }),
+      observeBrowserTarget: async () => observation(created.id, currentTarget),
+      attachBrowserSession: async () => {
+        frameAttachments += 1;
+        return attachment(currentTarget.id);
+      },
+    });
+    const rendered = await renderComponent(
+      <BrowserViewer
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        createLinkedComputer={async () => {
+          linkedComputerCreates += 1;
+          return { id: COMPUTER_SESSION_ID, placement: created.placement };
+        }}
+      />,
+    );
+    await flush(30);
+
+    const launchSummary = rendered.container.querySelector<HTMLElement>(
+      "summary[aria-label='New browser']",
+    );
+    expect(launchSummary).not.toBeNull();
+    await actRun(() => launchSummary!.click());
+    const fast = [...(launchSummary!.closest("details")?.querySelectorAll("button") ?? [])].find(
+      (button) => button.textContent?.includes("Fast semantic browser"),
+    );
+    expect(fast).toBeDefined();
+    await actRun(() => fast!.click());
+    await flush(40);
+
+    expect(createRequests).toHaveLength(1);
+    expect(createRequests[0]).toMatchObject({
+      sessionId: SESSION_ID,
+      name: "Fast browser",
+      engine: "lightpanda",
+      headless: true,
+    });
+    expect(linkedComputerCreates).toBe(0);
+    expect(frameAttachments).toBe(0);
+    expect(rendered.container.querySelector("button[aria-label='New tab']")).toBeNull();
+    expect(rendered.container.textContent).toContain("Semantic browser");
+    expect(rendered.container.textContent).toContain("Available page controls");
+    await rendered.unmount();
+  });
+
   test("starts the canonical BrowserSession against a connected Chrome profile", async () => {
     const device = attachedBrowserDevice();
     const created: BrowserSession = {

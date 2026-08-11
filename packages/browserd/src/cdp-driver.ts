@@ -215,7 +215,13 @@ export type AgentBrowserDriverOptions = {
     reject(guid: string, failureCode: string): Promise<void>;
   };
   connect?: (endpoint: string) => Promise<BrowserCdpConnection>;
-  engine?: "chromium" | "chrome";
+  engine?: "chromium" | "chrome" | "lightpanda";
+  /** Whether the lifecycle runner or this controller-owned CDP connection
+   * creates page targets. Remote and non-Chromium CDP engines commonly scope
+   * targets to the connection that created them, so they require `cdp`. */
+  targetLifecycle?: "runner" | "cdp";
+  tabControl?: boolean;
+  frameStreaming?: boolean;
   emulation?: BrowserSessionEmulation;
   permissionControl?: boolean;
 };
@@ -244,7 +250,7 @@ type BrowserUserAgentMetadata = {
 };
 
 export type BrowserRuntimeSnapshot = {
-  engine: "chromium" | "chrome";
+  engine: "chromium" | "chrome" | "lightpanda";
   engineVersion: string | null;
   tabs: Array<{ url: string; selected: boolean }>;
 };
@@ -268,7 +274,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private readonly runner: BrowserCommandRunner;
   private readonly now: () => Date;
   private readonly createId: () => string;
-  private readonly engine: "chromium" | "chrome";
+  /** Private physical-process fence. Provider target/loader ids are not
+   * required to be globally unique and may repeat after crash recovery. */
+  private readonly physicalGeneration: string;
+  private readonly engine: "chromium" | "chrome" | "lightpanda";
+  private readonly targetLifecycle: "runner" | "cdp";
+  private readonly tabControl: boolean;
+  private readonly frameStreaming: boolean;
   private readonly emulation: BrowserSessionEmulation | null;
   private readonly permissionControl: boolean;
   private userAgentMetadataPromise: Promise<BrowserUserAgentMetadata> | null = null;
@@ -300,7 +312,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     this.runner = options.runner;
     this.now = options.now ?? (() => new Date());
     this.createId = options.createId ?? randomUUID;
+    this.physicalGeneration = randomUUID();
     this.engine = options.engine ?? "chromium";
+    this.targetLifecycle = options.targetLifecycle ?? "runner";
+    this.tabControl = options.tabControl ?? true;
+    this.frameStreaming = options.frameStreaming ?? true;
     this.emulation = hasBrowserEmulation(options.emulation) ? options.emulation : null;
     this.permissionControl = options.permissionControl ?? true;
     this.resolveWorkspaceFiles = options.resolveWorkspaceFiles;
@@ -314,14 +330,26 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   async start(url?: string): Promise<BrowserObservationValue> {
     const deferNavigation = this.emulation !== null && url !== undefined && url !== "about:blank";
     const launchUrl = this.emulation !== null ? "about:blank" : url;
-    const launched = await this.runner.run<{
-      url?: unknown;
-      targetId?: unknown;
-    }>(launchUrl === undefined ? ["open"] : ["open", launchUrl], {
-      timeoutMs: BROWSER_START_TIMEOUT_MS,
-    });
     this.started = true;
-    const connection = await this.ensureConnection();
+    let connection: BrowserCdpConnection;
+    let launched: { url?: unknown; targetId?: unknown };
+    if (this.targetLifecycle === "cdp") {
+      connection = await this.ensureConnection();
+      const created = await connection.send<{ targetId?: unknown }>(
+        "Target.createTarget",
+        { url: launchUrl ?? "about:blank" },
+        { timeoutMs: BROWSER_START_TIMEOUT_MS },
+      );
+      launched = { targetId: created.targetId, url: launchUrl ?? "about:blank" };
+    } else {
+      launched = await this.runner.run<{
+        url?: unknown;
+        targetId?: unknown;
+      }>(launchUrl === undefined ? ["open"] : ["open", launchUrl], {
+        timeoutMs: BROWSER_START_TIMEOUT_MS,
+      });
+      connection = await this.ensureConnection();
+    }
     const targets = await this.targetInfos(connection);
     const launchedUrl = typeof launched.url === "string" ? launched.url : url;
     const launchedTargetId = typeof launched.targetId === "string" ? launched.targetId : undefined;
@@ -364,6 +392,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   async openTarget(url = "about:blank"): Promise<BrowserObservationValue> {
+    if (!this.tabControl) {
+      throw new InteractionDefiniteDriverError(
+        "unsupported",
+        "this browser engine does not support multiple tabs",
+      );
+    }
     const connection = await this.ensureConnection();
     const deferNavigation = this.emulation !== null && url !== "about:blank";
     const result = await connection.send<{ targetId?: unknown }>("Target.createTarget", {
@@ -390,6 +424,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   async closeTarget(targetId: string): Promise<BrowserTargetValue[]> {
+    if (!this.tabControl) {
+      throw new InteractionDefiniteDriverError(
+        "unsupported",
+        "this browser engine does not support closing individual tabs",
+      );
+    }
     const connection = await this.ensureConnection();
     await this.requireTargetInfo(connection, targetId);
     await connection.send("Target.closeTarget", { targetId });
@@ -407,7 +447,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     this.connectionPromise = null;
     let closeError: unknown = null;
     let terminationError: unknown = null;
-    if (this.started) {
+    if (this.started && this.targetLifecycle === "runner") {
       try {
         await this.runner.run(["close"], {
           timeoutMs: GRACEFUL_BROWSER_CLOSE_TIMEOUT_MS,
@@ -564,6 +604,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     targetId: string,
     options: BrowserFrameStreamOptions = {},
   ): Promise<BrowserFrameSubscription> {
+    if (!this.frameStreaming) {
+      throw new InteractionDefiniteDriverError(
+        "unsupported",
+        "this browser engine does not support live frame streaming",
+      );
+    }
     const normalized = normalizeFrameStreamOptions(options);
     return await this.withTarget(targetId, async (state) => {
       let screencast = state.screencast;
@@ -948,10 +994,16 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       frame,
       documentGeneration: documentGeneration(
         this.controllerGeneration,
+        this.physicalGeneration,
         info.targetId,
         frame.loaderId,
       ),
-      frameGeneration: frameGeneration(this.controllerGeneration, info.targetId, frame.id),
+      frameGeneration: frameGeneration(
+        this.controllerGeneration,
+        this.physicalGeneration,
+        info.targetId,
+        frame.id,
+      ),
       accessibility: null,
       dialog: null,
       diagnostics: {
@@ -1437,10 +1489,16 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       state.frame = frame;
       state.documentGeneration = documentGeneration(
         this.controllerGeneration,
+        this.physicalGeneration,
         state.targetId,
         frame.loaderId,
       );
-      state.frameGeneration = frameGeneration(this.controllerGeneration, state.targetId, frame.id);
+      state.frameGeneration = frameGeneration(
+        this.controllerGeneration,
+        this.physicalGeneration,
+        state.targetId,
+        frame.id,
+      );
       state.accessibility = null;
     } else {
       state.frame = frame;
@@ -2284,6 +2342,21 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     if (backendDOMNodeId === null) {
       throw new InteractionDefiniteDriverError("invalid_action", "browser node cannot be focused");
     }
+    if (this.engine === "lightpanda") {
+      const focused = await this.callOnNode(
+        state,
+        backendDOMNodeId,
+        "function () { this.focus(); return document.activeElement === this; }",
+        [],
+      );
+      if (focused !== true) {
+        throw new InteractionDefiniteDriverError(
+          "invalid_action",
+          "browser node cannot be focused",
+        );
+      }
+      return;
+    }
     await this.sendActionTarget(state, "DOM.focus", {
       backendNodeId: backendDOMNodeId,
     });
@@ -2753,7 +2826,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   private targetGeneration(targetId: string): string {
-    return generation("target", this.browserSessionId, this.controllerGeneration, targetId);
+    return generation(
+      "target",
+      this.browserSessionId,
+      this.controllerGeneration,
+      this.physicalGeneration,
+      targetId,
+    );
   }
 
   private async targetInfos(connection: BrowserCdpConnection): Promise<TargetInfo[]> {
@@ -2786,13 +2865,25 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     ) {
       return;
     }
+    // Some CDP-compatible engines omit `parentId` on child-frame navigation
+    // events. A page target has one established main-frame id, so never let a
+    // malformed child event invalidate the top-level document generation.
+    // `refreshFrame` still detects the exceptional case where the real main
+    // frame id itself changes.
+    if (frame.id !== state.frame.id) return;
     state.frame = { id: frame.id, loaderId: frame.loaderId, url: frame.url };
     state.documentGeneration = documentGeneration(
       this.controllerGeneration,
+      this.physicalGeneration,
       state.targetId,
       frame.loaderId,
     );
-    state.frameGeneration = frameGeneration(this.controllerGeneration, state.targetId, frame.id);
+    state.frameGeneration = frameGeneration(
+      this.controllerGeneration,
+      this.physicalGeneration,
+      state.targetId,
+      frame.id,
+    );
     state.accessibility = null;
   }
 
@@ -2901,14 +2992,20 @@ function targetKind(info: TargetInfo): BrowserTargetValue["kind"] {
 
 function documentGeneration(
   controllerGeneration: string,
+  physicalGeneration: string,
   targetId: string,
   loaderId: string,
 ): string {
-  return generation("document", controllerGeneration, targetId, loaderId);
+  return generation("document", controllerGeneration, physicalGeneration, targetId, loaderId);
 }
 
-function frameGeneration(controllerGeneration: string, targetId: string, frameId: string): string {
-  return generation("frame", controllerGeneration, targetId, frameId);
+function frameGeneration(
+  controllerGeneration: string,
+  physicalGeneration: string,
+  targetId: string,
+  frameId: string,
+): string {
+  return generation("frame", controllerGeneration, physicalGeneration, targetId, frameId);
 }
 
 function generation(prefix: string, ...parts: string[]): string {

@@ -39,6 +39,8 @@ import { AgentBrowserDriver, type BrowserRuntimeSnapshot } from "./cdp-driver";
 import { BrowserDownloadStore, type CompletedBrowserDownloadFile } from "./downloads";
 import { uploadBrowserDownload } from "./download-upload";
 import type { ResolvedAgentBrowserBinary } from "./binary";
+import type { ResolvedLightpandaBinary } from "./lightpanda-binary";
+import { LightpandaRunner } from "./lightpanda-runner";
 import {
   type BrowserFrameStreamOptions,
   type BrowserFrameSubscription,
@@ -117,7 +119,7 @@ export type BrowserSupervisorNetworkRoute = {
 };
 
 export type BrowserSupervisorTransport =
-  | { kind: "managed" }
+  | { kind: "managed"; engine?: "chromium" | "lightpanda" }
   | {
       kind: "attached_chrome";
       deviceId: string;
@@ -212,6 +214,7 @@ export type BrowserSupervisorOptions = {
   socketRootDirectory?: string;
   maxSessions?: number;
   agentBrowserBinary?: ResolvedAgentBrowserBinary;
+  lightpandaBinary?: ResolvedLightpandaBinary;
   createDriver?: (context: BrowserSupervisorDriverContext) => Promise<BrowserSupervisorDriver>;
   uploadArtifact?: (artifactPath: string, authority: BrowserStateUploadAuthority) => Promise<void>;
   uploadDownload?: typeof uploadBrowserDownload;
@@ -295,7 +298,8 @@ export class BrowserSupervisor {
     );
     this.createDriver =
       options.createDriver ??
-      (async (context) => await createBrowserDriver(context, options.agentBrowserBinary));
+      (async (context) =>
+        await createBrowserDriver(context, options.agentBrowserBinary, options.lightpandaBinary));
     this.uploadArtifact = options.uploadArtifact ?? uploadBrowserStateArtifact;
     this.uploadDownload = options.uploadDownload ?? uploadBrowserDownload;
   }
@@ -702,7 +706,7 @@ export class BrowserSupervisor {
       throw error;
     }
     let downloadStore: BrowserDownloadStore | null = null;
-    if (options.transport.kind === "managed") {
+    if (options.transport.kind === "managed" && options.transport.engine !== "lightpanda") {
       try {
         downloadStore = await BrowserDownloadStore.open({
           rootDirectory: downloadDirectory,
@@ -762,7 +766,10 @@ export class BrowserSupervisor {
         workspaceFileStager,
         downloadStore,
         lastSnapshot: {
-          engine: options.transport.kind === "attached_chrome" ? "chrome" : "chromium",
+          engine:
+            options.transport.kind === "attached_chrome"
+              ? "chrome"
+              : (options.transport.engine ?? "chromium"),
           engineVersion: null,
           tabs: [],
         },
@@ -836,10 +843,13 @@ export class BrowserSupervisor {
 
   private async performCapture(input: ValidatedBrowserStateCaptureInput) {
     const runtime = this.requireBound(input);
-    if (runtime.options.transport.kind === "attached_chrome") {
+    if (
+      runtime.options.transport.kind === "attached_chrome" ||
+      runtime.options.transport.engine === "lightpanda"
+    ) {
       throw new InteractionControllerError(
         "unsupported",
-        "attached Chrome does not support placement-managed profile capture",
+        "this browser engine does not support portable profile capture",
       );
     }
     const requestDigest = captureRequestDigest(input);
@@ -1316,6 +1326,7 @@ function browserActionUsesWorkspaceFiles(action: BrowserActionCommand["action"])
 async function createBrowserDriver(
   context: BrowserSupervisorDriverContext,
   binary?: ResolvedAgentBrowserBinary,
+  lightpandaBinary?: ResolvedLightpandaBinary,
 ): Promise<BrowserSupervisorDriver> {
   if (context.transport.kind === "attached_chrome") {
     const attached = await createAttachedChromeTransport({
@@ -1334,6 +1345,29 @@ async function createBrowserDriver(
       connect: async () => attached.connection,
       engine: "chrome",
       permissionControl: false,
+    });
+  }
+  if (context.transport.engine === "lightpanda") {
+    if (!lightpandaBinary) {
+      throw new InteractionControllerError(
+        "resource_unavailable",
+        "Lightpanda is not installed on this browser placement",
+      );
+    }
+    const runner = await LightpandaRunner.create({
+      binary: lightpandaBinary,
+      sessionDirectory: join(context.sessionDirectory, "lightpanda"),
+    });
+    return new AgentBrowserDriver({
+      browserSessionId: context.browserSessionId,
+      controllerGeneration: context.controllerGeneration,
+      runner,
+      engine: "lightpanda",
+      targetLifecycle: "cdp",
+      tabControl: false,
+      frameStreaming: false,
+      permissionControl: false,
+      resolveWorkspaceFiles: context.resolveWorkspaceFiles,
     });
   }
   const route = context.networkRoute;
@@ -1406,7 +1440,7 @@ function validateSessionOptions(
     ? validateBrowserNetworkRoute(options.networkRoute, transport)
     : undefined;
   if (options.linkedComputer) {
-    if (transport.kind !== "managed" || !options.headed) {
+    if (transport.kind !== "managed" || transport.engine === "lightpanda" || !options.headed) {
       throw new InteractionControllerError(
         "unsupported",
         "linked ComputerSessions require a managed headed browser",
@@ -1436,6 +1470,23 @@ function validateSessionOptions(
       throw new Error("attached Chrome cannot select another browser executable");
     }
   }
+  if (transport.kind === "managed" && transport.engine === "lightpanda") {
+    if (options.headed) {
+      throw new InteractionControllerError("unsupported", "Lightpanda is headless-only");
+    }
+    if (options.restore) {
+      throw new InteractionControllerError(
+        "unsupported",
+        "Lightpanda cannot restore a Chromium browser identity",
+      );
+    }
+    if (options.networkRoute) {
+      throw new InteractionControllerError(
+        "unsupported",
+        "Lightpanda network routes are not supported yet",
+      );
+    }
+  }
   const { restore, transport: _transport, networkRoute: _networkRoute, ...session } = options;
   return {
     ...session,
@@ -1446,7 +1497,16 @@ function validateSessionOptions(
 }
 
 function validateBrowserTransport(input: BrowserSupervisorTransport): BrowserSupervisorTransport {
-  if (input.kind === "managed") return { kind: "managed" };
+  if (input.kind === "managed") {
+    if (
+      input.engine !== undefined &&
+      input.engine !== "chromium" &&
+      input.engine !== "lightpanda"
+    ) {
+      throw new Error("managed browser engine is unsupported");
+    }
+    return { kind: "managed", engine: input.engine ?? "chromium" };
+  }
   if (input.kind !== "attached_chrome") throw new Error("browser transport is unsupported");
   if (!isUuid(input.deviceId)) throw new Error("attached browser id must be a UUID");
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,511}$/u.test(input.connectionGeneration)) {
@@ -1917,6 +1977,12 @@ function profileManifest(
   runtime: Runtime,
   snapshot: BrowserRuntimeSnapshot,
 ): BrowserProfileManifest {
+  if (snapshot.engine === "lightpanda") {
+    throw new InteractionControllerError(
+      "unsupported",
+      "Lightpanda sessions do not support portable browser profile capture",
+    );
+  }
   const platform =
     process.platform === "darwin"
       ? "macos"

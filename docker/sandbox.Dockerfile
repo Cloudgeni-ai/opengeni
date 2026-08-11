@@ -6,12 +6,20 @@ RUN set -eux; \
     python -m venv /opt/checkov; \
     /opt/checkov/bin/pip install --no-cache-dir "checkov==${CHECKOV_VERSION}"
 
+FROM scratch AS lightpanda-assets
+
+ADD --checksum=sha256:5713d49d06e8d4948d3358b6ce859ecca8e6f07dc312134d9f54999fb6e66c52 https://github.com/lightpanda-io/browser/releases/download/0.3.5/lightpanda-x86_64-linux /lightpanda-x86_64-linux
+ADD --checksum=sha256:8d7b3a1d7b9024beef94e7fc7ce854030ee4d6def5f802b8e0e8824731c3d93a https://github.com/lightpanda-io/browser/releases/download/0.3.5/lightpanda-aarch64-linux /lightpanda-aarch64-linux
+ADD --checksum=sha256:a5005b353a1738dd3d239234841cfcc808a7ec9faaebfcede3528f9fab3ae058 https://github.com/lightpanda-io/browser/archive/refs/tags/0.3.5.tar.gz /lightpanda-0.3.5-source.tar.gz
+ADD --checksum=sha256:8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef https://raw.githubusercontent.com/lightpanda-io/browser/0.3.5/LICENSE /lightpanda-LICENSE
+
 FROM oven/bun:1.3.14 AS bun-runtime
 
 FROM --platform=$BUILDPLATFORM oven/bun:1.3.14 AS browserd-build
 
 WORKDIR /src
 COPY . .
+COPY --from=lightpanda-assets / /lightpanda-assets/
 RUN bun install --frozen-lockfile
 
 # Install the exact lock-resolved Codemode package closure for ordinary Bun
@@ -42,8 +50,8 @@ COPY --from=bun-runtime /usr/local/bin/bun /tmp/opengeni-target-bun
 RUN set -eux; \
     arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
     case "$arch" in \
-      amd64) native=agent-browser-linux-x64; expected=b7bc3dfcf0a7326c1f5a60423163259ba2349eebfa5bd2e70e111af743da4a49 ;; \
-      arm64) native=agent-browser-linux-arm64; expected=6ccaba1eb26a0e6f5c23c59d2c63e6e0237fde82713cfdb543ba506490cac9c1 ;; \
+      amd64) native=agent-browser-linux-x64; expected=b7bc3dfcf0a7326c1f5a60423163259ba2349eebfa5bd2e70e111af743da4a49; lightpanda_native=lightpanda-x86_64-linux; lightpanda_expected=5713d49d06e8d4948d3358b6ce859ecca8e6f07dc312134d9f54999fb6e66c52 ;; \
+      arm64) native=agent-browser-linux-arm64; expected=6ccaba1eb26a0e6f5c23c59d2c63e6e0237fde82713cfdb543ba506490cac9c1; lightpanda_native=lightpanda-aarch64-linux; lightpanda_expected=8d7b3a1d7b9024beef94e7fc7ce854030ee4d6def5f802b8e0e8824731c3d93a ;; \
       *) echo "unsupported browser controller architecture=${arch}" >&2; exit 1 ;; \
     esac; \
     mkdir -p /out; \
@@ -53,9 +61,18 @@ RUN set -eux; \
     chmod 0755 /out/opengeni-browserd; \
     install -m 0755 "packages/browserd/node_modules/agent-browser/bin/${native}" /out/agent-browser; \
     test "$(sha256sum /out/agent-browser | awk '{print $1}')" = "$expected"; \
+    install -m 0755 "/lightpanda-assets/${lightpanda_native}" /out/lightpanda; \
+    test "$(sha256sum /out/lightpanda | awk '{print $1}')" = "$lightpanda_expected"; \
+    install -m 0644 /lightpanda-assets/lightpanda-0.3.5-source.tar.gz /out/lightpanda-0.3.5-source.tar.gz; \
+    test "$(sha256sum /out/lightpanda-0.3.5-source.tar.gz | awk '{print $1}')" = a5005b353a1738dd3d239234841cfcc808a7ec9faaebfcede3528f9fab3ae058; \
+    install -m 0644 /lightpanda-assets/lightpanda-LICENSE /out/lightpanda-LICENSE; \
+    test "$(sha256sum /out/lightpanda-LICENSE | awk '{print $1}')" = 8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef; \
     { \
       printf '%s  %s\n' "$(sha256sum /out/opengeni-browserd | awk '{print $1}')" /usr/local/bin/opengeni-browserd; \
       printf '%s  %s\n' "$expected" /usr/local/lib/opengeni/agent-browser; \
+      printf '%s  %s\n' "$lightpanda_expected" /usr/local/lib/opengeni/lightpanda; \
+      printf '%s  %s\n' a5005b353a1738dd3d239234841cfcc808a7ec9faaebfcede3528f9fab3ae058 /usr/local/share/source/lightpanda-0.3.5.tar.gz; \
+      printf '%s  %s\n' 8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef /usr/local/share/licenses/lightpanda/LICENSE; \
     } > /out/SHA256SUMS
 
 FROM node:22.22.0-bookworm-slim AS node-runtime
@@ -238,12 +255,17 @@ ENV OPENGENI_ARTIFACT_RASTER_FONT_FILES="[\"/usr/share/fonts/truetype/liberation
 ENV OPENGENI_ARTIFACT_RASTER_DEFAULT_FONT_FAMILY="Liberation Sans"
 ENV OPENGENI_BROWSERD_PORT=7682
 ENV OPENGENI_BROWSERD_AGENT_BROWSER_BINARY=/usr/local/lib/opengeni/agent-browser
+ENV OPENGENI_BROWSERD_LIGHTPANDA_BINARY=/usr/local/lib/opengeni/lightpanda
 ENV OPENGENI_BROWSERD_BROWSER_EXECUTABLE=/usr/lib/chromium/chromium
 ENV NODE_PATH=/opt/opengeni/codemode-runtime/node_modules
 
 COPY --from=browserd-build /out/opengeni-browserd /usr/local/bin/opengeni-browserd
 COPY --from=browserd-build /out/agent-browser /usr/local/lib/opengeni/agent-browser
+COPY --from=browserd-build /out/lightpanda /usr/local/lib/opengeni/lightpanda
+COPY --from=browserd-build /out/lightpanda-LICENSE /usr/local/share/licenses/lightpanda/LICENSE
+COPY --from=browserd-build /out/lightpanda-0.3.5-source.tar.gz /usr/local/share/source/lightpanda-0.3.5.tar.gz
 COPY --from=browserd-build /out/SHA256SUMS /usr/local/share/opengeni/browserd-SHA256SUMS
+COPY docker/browserd-THIRD-PARTY-NOTICES /usr/local/share/opengeni/browserd-THIRD-PARTY-NOTICES
 COPY --from=browserd-build /out/codemode-runtime /opt/opengeni/codemode-runtime
 COPY docker/opengeni-git-askpass /usr/local/bin/opengeni-git-askpass
 COPY packages/ogtool/package.json  /opt/opengeni/ogtool/package.json
@@ -256,7 +278,8 @@ RUN set -eux; \
     chmod 0755 /usr/local/bin/opengeni-git-askpass \
                /usr/local/bin/opengeni-terminal-up /usr/local/bin/opengeni-terminal-down \
                /usr/local/bin/opengeni-browserd-up /usr/local/bin/opengeni-browserd-down \
-               /usr/local/bin/opengeni-browserd /usr/local/lib/opengeni/agent-browser; \
+               /usr/local/bin/opengeni-browserd /usr/local/lib/opengeni/agent-browser \
+               /usr/local/lib/opengeni/lightpanda; \
     chmod 0755 /opt/opengeni/ogtool/bin/ogtool.cjs; \
     ln -s /opt/opengeni/ogtool/bin/ogtool.cjs /usr/local/bin/ogtool; \
     node --check /opt/opengeni/ogtool/bin/ogtool.cjs; \
