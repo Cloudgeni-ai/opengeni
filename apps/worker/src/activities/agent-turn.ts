@@ -1898,6 +1898,15 @@ export function managedSandboxOwnershipForTurn(
   };
 }
 
+/** A sandboxless home still establishes an explicitly attached Connected Machine. */
+export function shouldEstablishSandboxForTurn(
+  sandboxOwnershipEnabled: boolean,
+  homeBackend: Settings["sandboxBackend"],
+  machinePrimary: boolean,
+): boolean {
+  return sandboxOwnershipEnabled && (homeBackend !== "none" || machinePrimary);
+}
+
 /**
  * Classify a persisted active-sandbox pointer for TURN-START RECONCILE (issue #341
  * invariant B). Returns the typed reason to RESET the pointer to the session HOME,
@@ -5525,6 +5534,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         activeSandboxBackend === "selfhosted" &&
         Boolean(activeSandboxPointer?.activeSandboxId) &&
         Boolean(activeSandboxRecord?.enrollmentId);
+      // `none` describes the durable home, not an explicit per-turn route. Give
+      // the runtime the effective backend so it builds a SandboxAgent for the
+      // attached Connected Machine without mutating the session or turn record.
+      if (machinePrimary && modelRunSettings.sandboxBackend === "none") {
+        modelRunSettings = { ...modelRunSettings, sandboxBackend: "selfhosted" };
+      }
       // The backend that can actually create a sandbox for this turn. In the
       // common path this is runSettings.sandboxBackend. A selfhosted home turn
       // that is NOT machine-primary falls back to the deployment cloud backend
@@ -6045,7 +6060,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // applies the agent's manifest to this provided session and throws on ANY
       // variableSet delta (validateNoEnvironmentDelta). Passing sandboxEnvironment
       // here makes current==target so the delta is empty.
-      if (settings.sandboxOwnershipEnabled && turn.sandboxBackend !== "none") {
+      if (
+        shouldEstablishSandboxForTurn(
+          settings.sandboxOwnershipEnabled,
+          turn.sandboxBackend,
+          machinePrimary,
+        )
+      ) {
         const managedOwnership = managedSandboxOwnershipForTurn(
           machinePrimary,
           input.attemptId,
