@@ -2380,6 +2380,14 @@ function UserMessageRow({
     | undefined;
 }) {
   const enter = useEntranceAnimation();
+  const deliveryLabel =
+    item.delivery?.state === "sending"
+      ? "Sending…"
+      : item.delivery?.state === "queued"
+        ? "Queued"
+        : item.delivery?.state === "failed"
+          ? "Not sent"
+          : null;
   return (
     <div className={cn(enter && "animate-og-enter", "flex justify-end")}>
       <div className="flex max-w-[85%] min-w-0 flex-col items-end gap-1">
@@ -2414,6 +2422,29 @@ function UserMessageRow({
             ) : null}
           </div>
         </CopyHoverFrame>
+        {deliveryLabel ? (
+          <div className="flex max-w-full items-center gap-2 px-1 text-og-xs text-og-fg-subtle">
+            <span title={item.delivery?.error}>{deliveryLabel}</span>
+            {item.delivery?.state === "failed" && item.delivery.onRetry ? (
+              <button
+                type="button"
+                className="font-medium text-og-fg underline decoration-og-border underline-offset-2 hover:text-og-fg-strong"
+                onClick={item.delivery.onRetry}
+              >
+                Retry
+              </button>
+            ) : null}
+            {item.delivery?.state === "failed" && item.delivery.onRemove ? (
+              <button
+                type="button"
+                className="font-medium text-og-fg-subtle underline decoration-og-border underline-offset-2 hover:text-og-fg"
+                onClick={item.delivery.onRemove}
+              >
+                Remove
+              </button>
+            ) : null}
+          </div>
+        ) : null}
       </div>
     </div>
   );

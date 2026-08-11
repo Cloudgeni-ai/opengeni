@@ -40,6 +40,15 @@ export type UserMessageItem = {
   /** Tools requested for the turn this message starts. */
   tools: ToolRef[];
   occurredAt: string;
+  /** Local-only delivery projection; absent for authoritative durable events. */
+  delivery?:
+    | {
+        state: "sending" | "queued" | "failed";
+        error?: string | undefined;
+        onRetry?: (() => void) | undefined;
+        onRemove?: (() => void) | undefined;
+      }
+    | undefined;
 };
 
 export type AgentMessageItem = {

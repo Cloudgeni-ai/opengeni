@@ -108,6 +108,8 @@ export type AppDependencies = {
   editableArtifactOfficeImports?: EditableArtifactOfficeImportPort;
   bus: EventBus;
   workflowClient: SessionWorkflowClient;
+  /** Injectable structural seam for replayable prompt fanout and wake work. */
+  schedulePromptPostCommit?: (task: () => Promise<void>) => void;
   /** Optional provider override for deterministic API/object-storage tests. */
   objectStorage?: ObjectStorageDependency;
   documentIndexer?: DocumentIndexClient;
@@ -187,7 +189,7 @@ export type ApiRouteDeps = AppDependencies & {
  */
 export type AcceptSessionUserMessageDependencies = Pick<
   AppDependencies,
-  "settings" | "db" | "bus" | "sessionAuthorization"
+  "settings" | "db" | "bus" | "sessionAuthorization" | "schedulePromptPostCommit"
 > & {
   workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
   objectStorage: ObjectStorageDependency;

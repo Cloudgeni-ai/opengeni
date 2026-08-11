@@ -2368,6 +2368,82 @@ describe("API component integration", () => {
     expect(after).toBe(before + 1);
   });
 
+  test("returns a committed prompt before replayable fanout and wake work runs", async () => {
+    class FailingPromptBus extends MemoryEventBus {
+      fail = false;
+
+      override async publish(
+        workspaceId: string,
+        sessionId: string,
+        events: SessionEvent[],
+      ): Promise<void> {
+        if (this.fail) throw new Error("nats unavailable");
+        await super.publish(workspaceId, sessionId, events);
+      }
+    }
+    const bus = new FailingPromptBus();
+    const workflowClient = new FakeWorkflowClient();
+    const postCommitTasks: Array<() => Promise<void>> = [];
+    const app = createApp({
+      settings: testSettings({ databaseUrl: services.databaseUrl }),
+      db: dbClient.db,
+      bus,
+      workflowClient,
+      schedulePromptPostCommit: (task) => postCommitTasks.push(task),
+    });
+    const workspaceId = await defaultWorkspaceId(app);
+    const created = await app.request(workspacePath(workspaceId, "/sessions"), {
+      method: "POST",
+      body: JSON.stringify({ initialMessage: "hello" }),
+      headers: { "content-type": "application/json" },
+    });
+    const session = (await created.json()) as { id: string };
+    await setSessionStatus(dbClient.db, workspaceId, session.id, "idle", null);
+    const publishedBefore = bus.published.length;
+    const wakeupsBefore = workflowClient.wakeups.length;
+    const usageBefore = await sumUsageQuantity(dbClient.db, {
+      workspaceId,
+      eventType: "agent_run.created",
+      since: startOfUtcMonth(),
+    });
+
+    const response = await app.request(
+      workspacePath(workspaceId, `/sessions/${session.id}/events`),
+      {
+        method: "POST",
+        body: JSON.stringify({
+          type: "user.message",
+          clientEventId: "prompt-response-boundary",
+          payload: { text: "commit before fanout" },
+        }),
+        headers: { "content-type": "application/json" },
+      },
+    );
+
+    expect(response.status).toBe(202);
+    expect(postCommitTasks).toHaveLength(1);
+    expect(bus.published).toHaveLength(publishedBefore);
+    expect(workflowClient.wakeups).toHaveLength(wakeupsBefore);
+    const accepted = (await response.json()) as SessionEvent;
+    expect(accepted).toMatchObject({
+      type: "user.message",
+      clientEventId: "prompt-response-boundary",
+    });
+    const durableEvents = await listSessionEvents(dbClient.db, workspaceId, session.id);
+    expect(durableEvents.some((event) => event.id === accepted.id)).toBe(true);
+    expect(
+      await sumUsageQuantity(dbClient.db, {
+        workspaceId,
+        eventType: "agent_run.created",
+        since: startOfUtcMonth(),
+      }),
+    ).toBe(usageBefore + 1);
+
+    bus.fail = true;
+    workflowClient.wakeError = new Error("temporal unavailable");
+    await expect(postCommitTasks[0]!()).resolves.toBeUndefined();
+  });
+
   test("rejects concurrent removed one-turn tool overrides without partial mutation", async () => {
     const mcpServers = Array.from({ length: 12 }, (_, index) => ({
       id: `docs-${index}`,

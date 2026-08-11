@@ -1171,9 +1171,10 @@ function SessionChatPane(props: {
     sendBlocked: () => attachments.hasUnresolved || repositories.error !== null,
     effectiveControl: props.queue.effectiveControl ?? props.session.effectiveControl,
     onDraftApplied: applyComposerSettings,
-    // Clear only files included in the accepted wire input. A file added while
-    // sendMessage is in flight belongs to the next message and must survive.
-    onSent: (_text, input) => {
+    // Ordinary Send is acknowledged locally. Clear only resources captured in
+    // that immutable optimistic operation; later additions belong to the next
+    // draft, while retry keeps the original resource refs in the failed bubble.
+    onSubmitted: (_text, input) => {
       attachments.removeReadyFiles(
         (input.resources ?? []).flatMap((resource) =>
           resource.kind === "file" ? [resource.fileId] : [],
@@ -1182,6 +1183,38 @@ function SessionChatPane(props: {
       repositories.commitSent(input.resources ?? []);
     },
   });
+  const timelineWithOptimisticSends = useMemo<TimelineItem[]>(() => {
+    const acceptedClientEventIds = new Set(
+      props.events
+        .filter((event) => event.type === "user.message" && event.clientEventId)
+        .map((event) => event.clientEventId as string),
+    );
+    const optimisticItems: UserMessageItem[] = (composer.optimisticMessages ?? [])
+      .filter((message) => !acceptedClientEventIds.has(message.clientEventId))
+      .map((message) => ({
+        kind: "user-message",
+        id: `optimistic:${message.clientEventId}`,
+        text: message.text,
+        annotations: message.annotations.map((annotation, ordinal) => ({
+          ...annotation,
+          ordinal,
+        })),
+        resources: message.resources,
+        tools: [],
+        occurredAt: message.occurredAt,
+        delivery: {
+          state: message.state,
+          ...(message.error ? { error: message.error } : {}),
+          ...(message.state === "failed"
+            ? {
+                onRetry: () => composer.retryOptimisticMessage?.(message.clientEventId),
+                onRemove: () => composer.removeOptimisticMessage?.(message.clientEventId),
+              }
+            : {}),
+        },
+      }));
+    return [...props.timeline, ...optimisticItems];
+  }, [composer, props.events, props.timeline]);
   const repositoryPickerProps = repositories.pickerProps(terminal || composer.sending);
 
   // Slash-command palette context: the operator controls (/goal, /clear,
@@ -1254,7 +1287,7 @@ function SessionChatPane(props: {
           <div data-testid="session-timeline" className="min-h-0 min-w-0 flex-1">
             <MessageTimeline
               className="h-full"
-              items={props.timeline}
+              items={timelineWithOptimisticSends}
               status={props.session.status}
               computeLabel={computeLabel}
               renderMessageText={renderMessageText}
