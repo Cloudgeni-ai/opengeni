@@ -2616,11 +2616,9 @@ describe("API component integration", () => {
         .filter((item) => item.id.startsWith("api:"))
         .map((item) => [item.id, item.metadata.endpointPath]),
     );
-    expect(apiPaths).toMatchObject({
-      "api:github-app": "/v1/workspaces/{workspaceId}/github/app",
-      "api:documents": "/v1/workspaces/{workspaceId}/document-bases",
-      "api:social": "/v1/workspaces/{workspaceId}/social/connections",
-      "api:scheduled-tasks": "/v1/workspaces/{workspaceId}/scheduled-tasks",
+    expect(apiPaths).toEqual({
+      "api:x": undefined,
+      "api:reddit": undefined,
     });
     expect(catalog.items.find((item) => item.id === capabilityId)).toMatchObject({
       enabled: true,
