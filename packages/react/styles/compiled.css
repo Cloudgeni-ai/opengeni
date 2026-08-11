@@ -2737,6 +2737,9 @@
 :where(.og-root).underline,:where(.og-root) .underline {
     text-decoration-line: underline;
   }
+:where(.og-root).decoration-og-border,:where(.og-root) .decoration-og-border {
+    text-decoration-color: var(--og-color-border);
+  }
 :where(.og-root).decoration-og-border-strong,:where(.og-root) .decoration-og-border-strong {
     text-decoration-color: var(--og-color-border-strong);
   }
