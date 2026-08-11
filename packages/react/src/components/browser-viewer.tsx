@@ -2042,7 +2042,7 @@ function BrowserDownloadsPanel(props: {
                         }}
                         disabled={isSaving}
                         aria-label={`Workspace path for ${download.filename}`}
-                        className="h-7 min-w-0 flex-1 rounded-og-sm border border-og-border bg-og-surface-0 px-2 font-og-mono text-[10px] text-og-fg outline-none transition focus:border-og-accent disabled:opacity-50"
+                        className="h-7 min-w-0 flex-1 rounded-og-sm border border-og-border bg-og-surface-0 px-2 font-og-mono text-[10px] text-og-fg transition focus:border-og-accent focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent disabled:opacity-50"
                       />
                       <button
                         type="button"
