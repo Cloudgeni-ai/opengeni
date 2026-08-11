@@ -635,13 +635,14 @@ describe("Google Drive Changes cursor and reconciliation planner", () => {
       providerRequests: 1,
       cursorInvalidated: false,
       checkpoint: {
-        version: 2,
+        version: 3,
         kind: "google_drive_full_reconciliation",
         boundaryId: source.id,
         startPageToken: "start-2",
         budgetBeforeInventory: { examinedItems: 1, providerRequests: 1, elapsedMs: 0 },
         inventoryElapsedMs: 0,
         inventoryCheckpoint: null,
+        revisionFloors: [],
       },
     });
 
@@ -652,17 +653,144 @@ describe("Google Drive Changes cursor and reconciliation planner", () => {
       hardLimitReached: true,
       providerRequests: 2,
       checkpoint: {
-        version: 2,
+        version: 3,
         kind: "google_drive_full_reconciliation",
         budgetBeforeInventory: { examinedItems: 1, providerRequests: 1, elapsedMs: 0 },
         inventoryCheckpoint: {
           totals: { itemCount: 1, apiRequestCount: 1 },
         },
+        revisionFloors: [["full-item", "7"]],
       },
     });
     expect(full.entries.map((entry) => entry.externalObjectId)).toEqual(["full-item"]);
     expect(fullPageSizes).toEqual([1]);
     expect(full.providerCursor).toEqual(providerCursor);
+  });
+
+  test("preserves delta revision floors through full repair and checkpoint replay", async () => {
+    let fullCalls = 0;
+    const deltaFile = { ...file("doc-1", [source.id]), name: "delta-new.txt", version: "2" };
+    const staleFullFile = { ...file("doc-1", [source.id]), name: "full-stale.txt", version: "1" };
+    const provider: GoogleDriveSyncProviderPort = {
+      now: () => Date.parse("2026-08-10T12:00:00.000Z"),
+      getStartPageToken: async () => {
+        throw new Error("delta-to-full must use the terminal changes token");
+      },
+      listChanges: async () => ({
+        changes: [
+          { fileId: deltaFile.id, removed: false, file: deltaFile },
+          {
+            fileId: "changed-folder",
+            removed: false,
+            file: file("changed-folder", [source.id], GOOGLE_DRIVE_FOLDER_MIME_TYPE),
+          },
+        ],
+        nextPageToken: null,
+        newStartPageToken: "start-after-v2",
+      }),
+      getFile: async () => null,
+      listChildren: async () => {
+        fullCalls += 1;
+        return { items: [staleFullFile], nextPageToken: null, incompleteSearch: false };
+      },
+    };
+    const providerCursor = {
+      ...cursorFor(),
+      nextFullReconciliationAt: "2099-01-01T00:00:00.000Z",
+    };
+    const driver = driverFor(source, provider);
+
+    const handoff = await driver.inventory(null, providerCursor);
+    expect(handoff).toMatchObject({
+      status: "paused",
+      entries: [
+        {
+          externalObjectId: "doc-1",
+          externalVersionId: "2",
+          title: "delta-new.txt",
+        },
+      ],
+      checkpoint: {
+        version: 3,
+        kind: "google_drive_full_reconciliation",
+        startPageToken: "start-after-v2",
+        revisionFloors: [["doc-1", "2"]],
+      },
+      providerCursor,
+    });
+
+    const repaired = await driver.inventory(handoff.checkpoint, providerCursor);
+    expect(repaired).toMatchObject({
+      status: "complete",
+      entries: [],
+      authoritativeFullScan: true,
+      providerCursor: { pageToken: "start-after-v2", cursorGeneration: 2 },
+    });
+
+    const replayed = await driver.inventory(handoff.checkpoint, providerCursor);
+    expect(replayed).toMatchObject({
+      status: "complete",
+      entries: [],
+      authoritativeFullScan: true,
+      providerCursor: { pageToken: "start-after-v2", cursorGeneration: 2 },
+    });
+    expect(fullCalls).toBe(2);
+  });
+
+  test("fails closed when fallback revisions conflict during delta-to-full repair", async () => {
+    const deltaFile = {
+      ...file("fallback-doc", [source.id]),
+      version: null,
+      modifiedTime: "2026-08-10T00:00:00.000Z",
+    };
+    const fullFile = {
+      ...deltaFile,
+      name: "fallback-stale.txt",
+      modifiedTime: "2026-08-11T00:00:00.000Z",
+    };
+    const provider: GoogleDriveSyncProviderPort = {
+      now: () => Date.parse("2026-08-10T12:00:00.000Z"),
+      getStartPageToken: async () => {
+        throw new Error("delta-to-full must use the terminal changes token");
+      },
+      listChanges: async () => ({
+        changes: [
+          { fileId: deltaFile.id, removed: false, file: deltaFile },
+          {
+            fileId: "changed-folder",
+            removed: false,
+            file: file("changed-folder", [source.id], GOOGLE_DRIVE_FOLDER_MIME_TYPE),
+          },
+        ],
+        nextPageToken: null,
+        newStartPageToken: "must-not-adopt",
+      }),
+      getFile: async () => null,
+      listChildren: async () => ({
+        items: [fullFile],
+        nextPageToken: null,
+        incompleteSearch: false,
+      }),
+    };
+    const providerCursor = {
+      ...cursorFor(),
+      nextFullReconciliationAt: "2099-01-01T00:00:00.000Z",
+    };
+    const driver = driverFor(source, provider);
+    const handoff = await driver.inventory(null, providerCursor);
+    const repaired = await driver.inventory(handoff.checkpoint, providerCursor);
+
+    expect(repaired).toMatchObject({
+      status: "paused",
+      stopReason: "incomplete_search",
+      entries: [],
+      authoritativeFullScan: false,
+      providerCursor,
+      checkpoint: {
+        version: 3,
+        revisionFloors: [["fallback-doc", "2026-08-10T00:00:00.000Z"]],
+      },
+    });
   });
 
   test("does not resume a changes checkpoint bound to another connection", async () => {
@@ -707,6 +835,68 @@ describe("Google Drive Changes cursor and reconciliation planner", () => {
     expect(result).toMatchObject({
       status: "complete",
       providerCursor: { pageToken: "start-2", cursorGeneration: 2 },
+    });
+  });
+
+  test("replays unsettled Changes before replacing a legacy full checkpoint", async () => {
+    const requestedTokens: string[] = [];
+    const provider: GoogleDriveSyncProviderPort = {
+      now: () => Date.parse("2026-08-11T12:00:00.000Z"),
+      getStartPageToken: async () => {
+        throw new Error("the unsettled Changes window must replay first");
+      },
+      listChanges: async (pageToken) => {
+        requestedTokens.push(pageToken);
+        return {
+          changes: [
+            {
+              fileId: "legacy-delta",
+              removed: false,
+              file: { ...file("legacy-delta", [source.id]), version: "2" },
+            },
+          ],
+          nextPageToken: null,
+          newStartPageToken: "start-after-legacy",
+        };
+      },
+      getFile: async () => null,
+      listChildren: async () => {
+        throw new Error("the replacement full checkpoint must settle the delta first");
+      },
+    };
+    const providerCursor = {
+      ...cursorFor(),
+      nextFullReconciliationAt: "2026-08-11T00:00:00.000Z",
+    };
+    const result = await driverFor(source, provider).inventory(
+      {
+        version: 2,
+        kind: "google_drive_full_reconciliation",
+        connectionId: providerCursor.connectionId,
+        googlePermissionId: providerCursor.googlePermissionId,
+        sourceId: providerCursor.sourceId,
+        driveId: providerCursor.driveId,
+        boundaryId: providerCursor.boundaryId,
+        startPageToken: "legacy-terminal",
+        cursorInvalidated: false,
+        budgetBeforeInventory: { examinedItems: 1, providerRequests: 1, elapsedMs: 0 },
+        inventoryElapsedMs: 0,
+        inventoryCheckpoint: null,
+      },
+      providerCursor,
+    );
+
+    expect(requestedTokens).toEqual(["start-1"]);
+    expect(result).toMatchObject({
+      status: "paused",
+      entries: [{ externalObjectId: "legacy-delta", externalVersionId: "2" }],
+      checkpoint: {
+        version: 3,
+        kind: "google_drive_full_reconciliation",
+        startPageToken: "start-after-legacy",
+        revisionFloors: [["legacy-delta", "2"]],
+      },
+      providerCursor,
     });
   });
 

@@ -1832,6 +1832,26 @@ describe("knowledge-source schedule dispatch", () => {
         { externalObjectId: "protocol-b", providerRevision: "v1", metadataHash: "4".repeat(64) },
       ],
     });
+    await recordKnowledgeSourceSyncObjectObservations(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      sourceId: source.id,
+      scheduledTaskRunId: third.run.id,
+      scanGeneration: third.state.activeScanGeneration,
+      observations: [
+        { externalObjectId: "protocol-b", providerRevision: "v0", metadataHash: "5".repeat(64) },
+      ],
+    });
+    const [stableObservation] = await admin<
+      Array<{ providerRevision: string | null; metadataHash: string | null }>
+    >`
+      select provider_revision as "providerRevision", metadata_hash as "metadataHash"
+      from knowledge_source_sync_object_observations
+      where source_id = ${source.id} and external_object_id = 'protocol-b'`;
+    expect(stableObservation).toEqual({
+      providerRevision: "v1",
+      metadataHash: "4".repeat(64),
+    });
     await checkpointKnowledgeSourceSync(client.db, {
       accountId: account!.id,
       workspaceId: workspace!.id,

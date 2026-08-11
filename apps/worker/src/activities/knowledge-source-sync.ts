@@ -80,6 +80,7 @@ const DRIVE_API_BASE = "https://www.googleapis.com/drive/v3";
 const DRIVE_JSON_MAX_BYTES = 2 * 1024 * 1024;
 const GOOGLE_DRIVE_FULL_RECONCILIATION_INTERVAL_MS = 24 * 60 * 60 * 1_000;
 const GOOGLE_DRIVE_SYNC_INVOCATION_SLICE_MS = 30_000;
+const GOOGLE_DRIVE_EXECUTION_CHECKPOINT_MAX_BYTES = 2 * 1024 * 1024;
 
 export function createKnowledgeSourceSyncActivities(
   services: () => Promise<ControlActivityServices>,
@@ -1263,6 +1264,10 @@ export function googleDriveSyncDriver(input: {
         sourceId: input.selectedSource.id,
         driveId: input.selectedSource.driveId,
       };
+      const legacyFullCheckpoint = isLegacyGoogleDriveFullReconciliationCheckpoint(
+        executionCheckpoint,
+        expectedCursor,
+      );
       const cursor = parseGoogleDriveChangesCursor(providerCursor, expectedCursor);
       const checkpoint = parseGoogleDriveExecutionCheckpoint(
         executionCheckpoint,
@@ -1278,6 +1283,7 @@ export function googleDriveSyncDriver(input: {
         budgetBeforeInventory: GoogleDriveSyncBudget;
         inventoryElapsedMs: number;
         inventoryCheckpoint: GoogleDriveInventoryCheckpoint | null;
+        revisionFloors: GoogleDriveRevisionFloor[];
       }) => {
         const inventoryItems = full.inventoryCheckpoint?.totals.itemCount ?? 0;
         const inventoryProviderRequests = full.inventoryCheckpoint?.totals.apiRequestCount ?? 0;
@@ -1287,17 +1293,10 @@ export function googleDriveSyncDriver(input: {
           elapsedMs: full.budgetBeforeInventory.elapsedMs + full.inventoryElapsedMs,
         } satisfies GoogleDriveSyncBudget;
         const hardStopReason = googleDriveHardLimitReason(budgetBeforeInvocation, budgetLimits);
-        const fullCheckpoint = {
-          version: 2,
-          kind: "google_drive_full_reconciliation",
+        const fullCheckpoint = buildGoogleDriveFullReconciliationCheckpoint({
           ...expectedCursor,
-          boundaryId: full.boundaryId,
-          startPageToken: full.startPageToken,
-          cursorInvalidated: full.cursorInvalidated,
-          budgetBeforeInventory: full.budgetBeforeInventory,
-          inventoryElapsedMs: full.inventoryElapsedMs,
-          inventoryCheckpoint: full.inventoryCheckpoint,
-        } satisfies GoogleDriveExecutionCheckpoint;
+          ...full,
+        });
         if (hardStopReason) {
           return {
             status: "paused" as const,
@@ -1344,6 +1343,25 @@ export function googleDriveSyncDriver(input: {
             full.budgetBeforeInventory.providerRequests + inventory.totals.apiRequestCount,
           elapsedMs: full.budgetBeforeInventory.elapsedMs + inventoryElapsedMs,
         } satisfies GoogleDriveSyncBudget;
+        const reconciled = reconcileGoogleDriveRevisionFloors(
+          inventory.entries,
+          full.revisionFloors,
+          input.limits.maxItems,
+        );
+        if (reconciled.conflict) {
+          return {
+            status: "paused" as const,
+            stopReason: "incomplete_search" as const,
+            entries: [],
+            checkpoint: fullCheckpoint,
+            providerCursor,
+            authoritativeFullScan: false,
+            cursorInvalidated: full.cursorInvalidated,
+            providerRequests: budget.providerRequests,
+            elapsedMs: budget.elapsedMs,
+            hardLimitReached: false,
+          };
+        }
         const nextCursor =
           inventory.status === "complete"
             ? buildGoogleDriveChangesCursor({
@@ -1358,12 +1376,10 @@ export function googleDriveSyncDriver(input: {
         return {
           status: inventory.status,
           stopReason: inventory.stopReason,
-          entries: inventory.entries,
+          entries: reconciled.entries,
           checkpoint:
             inventory.status === "paused" && inventory.checkpoint
-              ? ({
-                  version: 2,
-                  kind: "google_drive_full_reconciliation",
+              ? buildGoogleDriveFullReconciliationCheckpoint({
                   ...expectedCursor,
                   boundaryId: full.boundaryId,
                   startPageToken: full.startPageToken,
@@ -1371,7 +1387,8 @@ export function googleDriveSyncDriver(input: {
                   budgetBeforeInventory: full.budgetBeforeInventory,
                   inventoryElapsedMs,
                   inventoryCheckpoint: inventory.checkpoint,
-                } satisfies GoogleDriveExecutionCheckpoint)
+                  revisionFloors: reconciled.revisionFloors,
+                })
               : null,
           providerCursor: nextCursor,
           authoritativeFullScan: inventory.status === "complete",
@@ -1435,6 +1452,7 @@ export function googleDriveSyncDriver(input: {
           budgetBeforeInventory: budget,
           inventoryElapsedMs: 0,
           inventoryCheckpoint: null,
+          revisionFloors: [],
         };
       };
 
@@ -1454,7 +1472,7 @@ export function googleDriveSyncDriver(input: {
           }),
         );
       }
-      if (!checkpoint && googleDriveFullReconciliationDue(cursor, now)) {
+      if (!checkpoint && !legacyFullCheckpoint && googleDriveFullReconciliationDue(cursor, now)) {
         return await runFullReconciliation(
           await acquireFullReconciliation({
             budget: emptyGoogleDriveSyncBudget(),
@@ -1465,13 +1483,15 @@ export function googleDriveSyncDriver(input: {
       }
 
       try {
+        const forceFullReconciliation =
+          legacyFullCheckpoint || googleDriveFullReconciliationDue(cursor, now);
         const changesCheckpoint =
           checkpoint?.kind === "google_drive_changes"
             ? {
                 ...checkpoint.changesCheckpoint,
                 requiresFullReconciliation:
                   checkpoint.changesCheckpoint.requiresFullReconciliation ||
-                  googleDriveFullReconciliationDue(cursor, now),
+                  forceFullReconciliation,
               }
             : null;
         const changes = await drainGoogleDriveChanges({
@@ -1498,7 +1518,11 @@ export function googleDriveSyncDriver(input: {
               version: 2,
               kind: "google_drive_changes",
               ...expectedCursor,
-              changesCheckpoint: changes.checkpoint,
+              changesCheckpoint: {
+                ...changes.checkpoint,
+                requiresFullReconciliation:
+                  changes.checkpoint.requiresFullReconciliation || forceFullReconciliation,
+              },
             } satisfies GoogleDriveExecutionCheckpoint,
             providerCursor,
             authoritativeFullScan: false,
@@ -1509,15 +1533,13 @@ export function googleDriveSyncDriver(input: {
           };
         }
         if (!changes.newStartPageToken) throw new Error("google_drive_changes_cursor_missing");
-        if (changes.requiresFullReconciliation) {
+        if (changes.requiresFullReconciliation || forceFullReconciliation) {
           const hardStopReason = googleDriveHardLimitReason(changes.budget, budgetLimits);
           return {
             status: "paused" as const,
             stopReason: hardStopReason ?? ("elapsed_time_limit" as const),
             entries: changes.entries,
-            checkpoint: {
-              version: 2,
-              kind: "google_drive_full_reconciliation",
+            checkpoint: buildGoogleDriveFullReconciliationCheckpoint({
               ...expectedCursor,
               boundaryId: cursor.boundaryId,
               startPageToken: changes.newStartPageToken,
@@ -1525,7 +1547,8 @@ export function googleDriveSyncDriver(input: {
               budgetBeforeInventory: changes.budget,
               inventoryElapsedMs: 0,
               inventoryCheckpoint: null,
-            } satisfies GoogleDriveExecutionCheckpoint,
+              revisionFloors: revisionFloorsForEntries(changes.entries, input.limits.maxItems),
+            }),
             providerCursor,
             authoritativeFullScan: false,
             cursorInvalidated: false,
@@ -1561,12 +1584,10 @@ export function googleDriveSyncDriver(input: {
           status: "paused" as const,
           stopReason: hardStopReason ?? ("elapsed_time_limit" as const),
           entries: [],
-          checkpoint: {
-            version: 2,
-            kind: "google_drive_full_reconciliation",
+          checkpoint: buildGoogleDriveFullReconciliationCheckpoint({
             ...expectedCursor,
             ...full,
-          } satisfies GoogleDriveExecutionCheckpoint,
+          }),
           providerCursor,
           authoritativeFullScan: false,
           cursorInvalidated: true,
@@ -1595,6 +1616,20 @@ type GoogleDriveCheckpointIdentity = {
   driveId: string | null;
 };
 
+type GoogleDriveRevisionFloor = [externalObjectId: string, providerRevision: string | null];
+
+type GoogleDriveFullReconciliationCheckpoint = GoogleDriveCheckpointIdentity & {
+  version: 3;
+  kind: "google_drive_full_reconciliation";
+  boundaryId: string;
+  startPageToken: string;
+  cursorInvalidated: boolean;
+  budgetBeforeInventory: GoogleDriveSyncBudget;
+  inventoryElapsedMs: number;
+  inventoryCheckpoint: GoogleDriveInventoryCheckpoint | null;
+  revisionFloors: GoogleDriveRevisionFloor[];
+};
+
 type GoogleDriveExecutionCheckpoint = GoogleDriveCheckpointIdentity &
   (
     | {
@@ -1602,17 +1637,23 @@ type GoogleDriveExecutionCheckpoint = GoogleDriveCheckpointIdentity &
         kind: "google_drive_changes";
         changesCheckpoint: GoogleDriveChangesCheckpoint;
       }
-    | {
-        version: 2;
-        kind: "google_drive_full_reconciliation";
-        boundaryId: string;
-        startPageToken: string;
-        cursorInvalidated: boolean;
-        budgetBeforeInventory: GoogleDriveSyncBudget;
-        inventoryElapsedMs: number;
-        inventoryCheckpoint: GoogleDriveInventoryCheckpoint | null;
-      }
+    | GoogleDriveFullReconciliationCheckpoint
   );
+
+function isLegacyGoogleDriveFullReconciliationCheckpoint(
+  value: Record<string, unknown> | null,
+  expected: GoogleDriveCheckpointIdentity,
+): boolean {
+  return (
+    value?.version === 2 &&
+    value.kind === "google_drive_full_reconciliation" &&
+    value.connectionId === expected.connectionId &&
+    value.googlePermissionId === expected.googlePermissionId &&
+    value.sourceId === expected.sourceId &&
+    value.driveId === expected.driveId &&
+    encodedJsonBytes(value) <= GOOGLE_DRIVE_EXECUTION_CHECKPOINT_MAX_BYTES
+  );
+}
 
 function parseGoogleDriveExecutionCheckpoint(
   value: Record<string, unknown> | null,
@@ -1621,22 +1662,23 @@ function parseGoogleDriveExecutionCheckpoint(
 ): GoogleDriveExecutionCheckpoint | null {
   if (
     !value ||
-    value.version !== 2 ||
     value.connectionId !== expected.connectionId ||
     value.googlePermissionId !== expected.googlePermissionId ||
     value.sourceId !== expected.sourceId ||
-    value.driveId !== expected.driveId
+    value.driveId !== expected.driveId ||
+    encodedJsonBytes(value) > GOOGLE_DRIVE_EXECUTION_CHECKPOINT_MAX_BYTES
   ) {
     return null;
   }
-  if (value.kind === "google_drive_changes") {
+  if (value.version === 2 && value.kind === "google_drive_changes") {
     const changesCheckpoint = parseGoogleDriveChangesCheckpoint(value.changesCheckpoint, limits);
     return changesCheckpoint
       ? ({ ...value, changesCheckpoint } as GoogleDriveExecutionCheckpoint)
       : null;
   }
-  if (value.kind === "google_drive_full_reconciliation") {
+  if (value.version === 3 && value.kind === "google_drive_full_reconciliation") {
     const budgetBeforeInventory = parseGoogleDriveSyncBudget(value.budgetBeforeInventory, limits);
+    const revisionFloors = parseGoogleDriveRevisionFloors(value.revisionFloors, limits.maxItems);
     if (
       typeof value.boundaryId !== "string" ||
       value.boundaryId.length < 1 ||
@@ -1646,6 +1688,7 @@ function parseGoogleDriveExecutionCheckpoint(
       value.startPageToken.length > 4096 ||
       typeof value.cursorInvalidated !== "boolean" ||
       !budgetBeforeInventory ||
+      !revisionFloors ||
       !Number.isSafeInteger(value.inventoryElapsedMs) ||
       Number(value.inventoryElapsedMs) < 0 ||
       Number(value.inventoryElapsedMs) > limits.maxElapsedMs ||
@@ -1661,9 +1704,121 @@ function parseGoogleDriveExecutionCheckpoint(
       ...value,
       budgetBeforeInventory,
       inventoryElapsedMs: Number(value.inventoryElapsedMs),
+      revisionFloors,
     } as GoogleDriveExecutionCheckpoint;
   }
   return null;
+}
+
+function buildGoogleDriveFullReconciliationCheckpoint(
+  input: Omit<GoogleDriveFullReconciliationCheckpoint, "version" | "kind">,
+): GoogleDriveFullReconciliationCheckpoint {
+  const checkpoint = {
+    version: 3,
+    kind: "google_drive_full_reconciliation",
+    ...input,
+    revisionFloors: input.revisionFloors.map((floor) => [...floor]),
+  } satisfies GoogleDriveFullReconciliationCheckpoint;
+  if (encodedJsonBytes(checkpoint) > GOOGLE_DRIVE_EXECUTION_CHECKPOINT_MAX_BYTES) {
+    throw new SyncFailure("resource_limit", false);
+  }
+  return checkpoint;
+}
+
+function parseGoogleDriveRevisionFloors(
+  value: unknown,
+  maxItems: number,
+): GoogleDriveRevisionFloor[] | null {
+  if (!Array.isArray(value) || value.length > maxItems) return null;
+  const floors: GoogleDriveRevisionFloor[] = [];
+  const seen = new Set<string>();
+  for (const floor of value) {
+    if (
+      !Array.isArray(floor) ||
+      floor.length !== 2 ||
+      typeof floor[0] !== "string" ||
+      floor[0].trim().length < 1 ||
+      floor[0].length > 1024 ||
+      (floor[1] !== null &&
+        (typeof floor[1] !== "string" || floor[1].length < 1 || floor[1].length > 256)) ||
+      seen.has(floor[0])
+    ) {
+      return null;
+    }
+    seen.add(floor[0]);
+    floors.push([floor[0], floor[1]]);
+  }
+  return floors;
+}
+
+function revisionFloorsForEntries(
+  entries: GoogleDriveInventoryEntry[],
+  maxItems: number,
+): GoogleDriveRevisionFloor[] {
+  const reconciled = reconcileGoogleDriveRevisionFloors(entries, [], maxItems);
+  if (reconciled.conflict) throw new SyncFailure("provider_payload_invalid", false);
+  return reconciled.revisionFloors;
+}
+
+function reconcileGoogleDriveRevisionFloors(
+  entries: GoogleDriveInventoryEntry[],
+  existingFloors: GoogleDriveRevisionFloor[],
+  maxItems: number,
+): {
+  entries: GoogleDriveInventoryEntry[];
+  revisionFloors: GoogleDriveRevisionFloor[];
+  conflict: boolean;
+} {
+  const floors = new Map<string, string | null>(existingFloors);
+  const accepted: GoogleDriveInventoryEntry[] = [];
+  for (const entry of entries) {
+    if (!floors.has(entry.externalObjectId)) {
+      floors.set(entry.externalObjectId, entry.externalVersionId);
+      accepted.push(entry);
+    } else {
+      const comparison = compareGoogleDriveProviderRevisions(
+        entry.externalVersionId,
+        floors.get(entry.externalObjectId) ?? null,
+      );
+      if (comparison === null) {
+        return {
+          entries: [],
+          revisionFloors: [...floors],
+          conflict: true,
+        };
+      }
+      if (comparison > 0) {
+        floors.set(entry.externalObjectId, entry.externalVersionId);
+        accepted.push(entry);
+      }
+    }
+    if (floors.size > maxItems) throw new SyncFailure("resource_limit", false);
+  }
+  return {
+    entries: accepted,
+    revisionFloors: [...floors],
+    conflict: false,
+  };
+}
+
+function compareGoogleDriveProviderRevisions(
+  candidate: string | null,
+  floor: string | null,
+): -1 | 0 | 1 | null {
+  if (candidate === floor) return 0;
+  if (candidate === null || floor === null) return null;
+  if (!/^(0|[1-9]\d*)$/u.test(candidate) || !/^(0|[1-9]\d*)$/u.test(floor)) return null;
+  const candidateNumber = BigInt(candidate);
+  const floorNumber = BigInt(floor);
+  return candidateNumber < floorNumber ? -1 : candidateNumber > floorNumber ? 1 : 0;
+}
+
+function encodedJsonBytes(value: unknown): number {
+  try {
+    return new TextEncoder().encode(JSON.stringify(value)).byteLength;
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
 }
 
 function parseGoogleDriveSyncBudget(

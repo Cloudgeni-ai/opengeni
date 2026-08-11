@@ -185,6 +185,20 @@ but retain their consumed totals. Repeated page tokens and oversized provider
 pages fail as invalid provider payloads. A delta that requires a full repair
 carries the same consumed budget into the full inventory checkpoint.
 
+That delta-to-full checkpoint also carries a bounded per-object provider
+revision floor for every accepted delta object and every accepted full-page
+object. Full inventory entries with an equal or older canonical decimal Drive
+revision are ignored, so they cannot replace the newer delta observation or
+current version before the terminal Changes token settles. Exact repeats of a
+fallback revision identity are likewise ignored; differing fallback identities,
+including a missing identity on only one side, are not ordered by guesswork and
+fail as invalid provider payloads without adopting the terminal token.
+Full-reconciliation checkpoints use version 3 for this contract. Older
+version-2 full checkpoints replay the still-unsettled Changes window before
+creating a replacement version-3 full checkpoint, while version-2 Changes
+checkpoints remain replay-compatible. The complete encoded execution checkpoint
+remains capped at the database's 2 MiB bound.
+
 Changes that cannot be represented safely as a bounded object update trigger a
 full repair instead of guessing. This includes known removals, trashing,
 reparenting or moves outside the configured boundary, unresolved ancestry, and
@@ -203,6 +217,10 @@ response that explicitly declares the scan complete may tombstone active
 objects absent from the complete generation. Partial, failed, paused, or
 reconnect-required scans never infer deletion, and a failed run clears its
 execution checkpoint before a later repair starts a new generation.
+The first accepted observation for one object within a scan generation is the
+durable floor: retries or later repair pages in that same generation cannot
+overwrite its provider revision or metadata hash. A newer scan generation may
+replace it normally.
 
 `manual`, `hourly`, and `daily` map to an on-demand Schedule, a one-hour
 interval, and a daily 00:00 UTC calendar respectively. The Schedules UI exposes

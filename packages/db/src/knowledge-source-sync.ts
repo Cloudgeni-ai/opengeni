@@ -734,7 +734,8 @@ export async function recordKnowledgeSourceSyncObjectObservations(
             provider_revision = EXCLUDED.provider_revision,
             metadata_hash = EXCLUDED.metadata_hash,
             observed_at = EXCLUDED.observed_at
-          WHERE knowledge_source_sync_object_observations.scan_generation <= EXCLUDED.scan_generation
+          -- The first accepted observation in one scan generation is its durable floor.
+          WHERE knowledge_source_sync_object_observations.scan_generation < EXCLUDED.scan_generation
         `);
       }
     },
