@@ -4,9 +4,9 @@ import { acquireBlankTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
 import { migrate } from "../src/migrate";
 
-const migrationUrl = new URL("../drizzle/0197_browser_download_saves.sql", import.meta.url);
+const migrationUrl = new URL("../drizzle/0214_browser_download_saves.sql", import.meta.url);
 
-describe("migration 0197 browser download saves", () => {
+describe("migration 0214 browser download saves", () => {
   test("extends the exact operation journal under maintenance governance", async () => {
     const source = await readFile(migrationUrl, "utf8");
     expect(source.split(/\r?\n/, 1)[0]).toBe("-- deployment-mode: maintenance");
@@ -15,7 +15,7 @@ describe("migration 0197 browser download saves", () => {
     expect(source).toContain("'browser_download'");
     expect(source).toContain("'save'");
 
-    const blank = await acquireBlankTestDatabase("migration-0197");
+    const blank = await acquireBlankTestDatabase("migration-0214");
     if (!blank) return;
     const sql = postgres(blank.databaseUrl, { max: 1, onnotice: () => undefined });
     try {

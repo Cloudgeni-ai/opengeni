@@ -134,53 +134,9 @@ CREATE INDEX "site_auth_connections_workspace_status_updated_idx"
   ON "site_auth_connections" ("workspace_id", "status", "updated_at", "id");
 
 ALTER TABLE "browser_sessions"
-  ADD COLUMN "network_route_version" bigint,
-  ADD COLUMN "network_route_configuration" jsonb,
-  ADD COLUMN "network_route_consistency" jsonb,
-  ADD COLUMN "network_route_credential_version" bigint,
-  ADD COLUMN "network_route_authority_digest" text;
-
-ALTER TABLE "browser_sessions"
-  DROP CONSTRAINT "browser_sessions_values_check",
-  ADD CONSTRAINT "browser_sessions_values_check" CHECK (
-    octet_length("name") BETWEEN 1 AND 200
-    AND octet_length("driver_id") BETWEEN 1 AND 512
-    AND octet_length("created_by_subject_id") BETWEEN 1 AND 1024
-    AND "token_generation" > 0
-    AND jsonb_typeof("capabilities") = 'object'
-    AND octet_length("capabilities"::text) BETWEEN 2 AND 65536
-    AND (
-      ("network_route_id" IS NULL
-        AND "network_route_version" IS NULL
-        AND "network_route_configuration" IS NULL
-        AND "network_route_consistency" IS NULL
-        AND "network_route_credential_version" IS NULL
-        AND "network_route_authority_digest" IS NULL)
-      OR
-      ("network_route_id" IS NOT NULL
-        AND "network_route_version" > 0
-        AND jsonb_typeof("network_route_configuration") = 'object'
-        AND octet_length("network_route_configuration"::text) BETWEEN 2 AND 65536
-        AND jsonb_typeof("network_route_consistency") = 'object'
-        AND octet_length("network_route_consistency"::text) BETWEEN 2 AND 65536
-        AND ("network_route_credential_version" IS NULL OR "network_route_credential_version" > 0)
-        AND ("network_route_authority_digest" IS NOT NULL OR "network_route_credential_version" IS NULL)
-        AND ("network_route_authority_digest" IS NULL OR (
-          octet_length("network_route_authority_digest") BETWEEN 16 AND 256
-          AND "network_route_authority_digest" ~ '^[A-Za-z0-9._~-]+$'
-        )))
-    )
-    AND ("engine_version" IS NULL OR octet_length("engine_version") BETWEEN 1 AND 256)
-    AND ("failure_code" IS NULL OR octet_length("failure_code") BETWEEN 1 AND 512)
-  );
-
-ALTER TABLE "browser_sessions"
   ADD CONSTRAINT "browser_sessions_network_route_fk"
   FOREIGN KEY ("workspace_id", "network_route_id")
   REFERENCES "network_routes"("workspace_id", "id") ON DELETE RESTRICT;
-
-CREATE INDEX "browser_sessions_workspace_network_route_idx"
-  ON "browser_sessions" ("workspace_id", "network_route_id", "lifecycle");
 
 CREATE TABLE "auth_runs" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -300,7 +256,6 @@ CREATE TABLE "interaction_interventions" (
   "originating_turn_id" uuid,
   "originating_attempt_id" uuid,
   "originating_tool_operation_id" uuid,
-  "originating_tool_call_id" text,
   "response_actor_subject_id" text,
   "version" bigint NOT NULL DEFAULT 1,
   "operation_id" uuid NOT NULL,
@@ -338,10 +293,6 @@ CREATE TABLE "interaction_interventions" (
     AND "reason" = btrim("reason")
     AND ("originating_attempt_id" IS NULL OR "originating_turn_id" IS NOT NULL)
     AND ("originating_tool_operation_id" IS NULL OR "originating_attempt_id" IS NOT NULL)
-    AND ("originating_tool_call_id" IS NULL OR (
-      "originating_attempt_id" IS NOT NULL
-      AND octet_length("originating_tool_call_id") BETWEEN 1 AND 1024
-    ))
     AND ("response_actor_subject_id" IS NULL OR octet_length("response_actor_subject_id") BETWEEN 1 AND 1024)
     AND "version" > 0
   ),
@@ -363,10 +314,6 @@ CREATE TABLE "interaction_interventions" (
 CREATE INDEX "interaction_interventions_open_resource_idx"
   ON "interaction_interventions"
   ("workspace_id", "resource_kind", "resource_id", "status", "created_at");
-CREATE UNIQUE INDEX "interaction_interventions_originating_tool_call_uq"
-  ON "interaction_interventions"
-  ("workspace_id", "originating_session_id", "originating_turn_id", "originating_tool_call_id")
-  WHERE "originating_tool_call_id" IS NOT NULL;
 CREATE UNIQUE INDEX "interaction_interventions_open_target_kind_uq"
   ON "interaction_interventions"
   ("workspace_id", "resource_kind", "resource_id", "target_id", "kind")
@@ -389,7 +336,6 @@ CREATE TABLE "interaction_resource_operations" (
   "resource_id" uuid NOT NULL,
   "kind" text NOT NULL,
   "request_digest" text NOT NULL,
-  "metadata" jsonb NOT NULL DEFAULT '{}'::jsonb,
   "state" text NOT NULL DEFAULT 'completed',
   "result_version" bigint,
   "result" jsonb,
@@ -408,8 +354,6 @@ CREATE TABLE "interaction_resource_operations" (
     CHECK ("state" IN ('prepared', 'dispatched', 'completed', 'failed', 'outcome_unknown')),
   CONSTRAINT "interaction_resource_operations_values_check" CHECK (
     "request_digest" ~ '^[0-9a-f]{64}$'
-    AND jsonb_typeof("metadata") = 'object'
-    AND octet_length("metadata"::text) BETWEEN 2 AND 65536
     AND ("result_version" IS NULL OR "result_version" > 0)
     AND ("result" IS NULL OR (
       jsonb_typeof("result") = 'object'
