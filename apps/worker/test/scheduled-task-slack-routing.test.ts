@@ -34,6 +34,23 @@ let shared: SharedTestDatabase | null = null;
 let admin: postgres.Sql;
 let client: DbClient;
 
+type SlackBotIdentity = {
+  slackTeamId: string;
+  slackTeamName: string;
+  botUserId: string;
+  botId: string;
+};
+
+function slackBotIdentity(slackTeamName = "Scheduled test workspace"): SlackBotIdentity {
+  const suffix = crypto.randomUUID().replaceAll("-", "");
+  return {
+    slackTeamId: `T${suffix}`,
+    slackTeamName,
+    botUserId: `U${suffix}`,
+    botId: `B${suffix}`,
+  };
+}
+
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("worker-scheduled-slack-routing");
   if (!shared) {
@@ -59,11 +76,18 @@ async function workspaceFixture() {
   await admin`
     insert into workspace_inference_controls (workspace_id, account_id)
     values (${workspace!.id}, ${account!.id})`;
-  return { accountId: account!.id, workspaceId: workspace!.id };
+  return {
+    accountId: account!.id,
+    workspaceId: workspace!.id,
+    slackBotIdentity: slackBotIdentity(),
+  };
 }
 
-async function botConnection(workspace: Awaited<ReturnType<typeof workspaceFixture>>) {
-  return await createConnection(client.db, {
+async function botConnection(
+  workspace: Awaited<ReturnType<typeof workspaceFixture>>,
+  identity = workspace.slackBotIdentity,
+) {
+  const connection = await createConnection(client.db, {
     ...workspace,
     subjectId: null,
     providerDomain: "slack.com",
@@ -75,15 +99,13 @@ async function botConnection(workspace: Awaited<ReturnType<typeof workspaceFixtu
     metadata: {
       credentialRole: OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
       credentialLabel: OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
-      slackTeamId: "T_SCHEDULED_TEST",
-      slackTeamName: "Scheduled test workspace",
-      botUserId: "U_SCHEDULED_TEST",
-      botId: "B_SCHEDULED_TEST",
+      ...identity,
       botDisplayName: "OpenGeni",
       verifiedAt: new Date(0).toISOString(),
     },
     createdBySubjectId: "subject-a",
   });
+  return { connection, identity };
 }
 
 async function personalSlackConnection(
@@ -144,7 +166,7 @@ describe("scheduled OpenGeni Slack bot routing", () => {
   test("binds the exact connection with safe creation evidence and revalidates revocation", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
-    const connection = await botConnection(workspace);
+    const { connection, identity } = await botConnection(workspace);
     const task = await taskFixture(workspace, connection.id, "new_session_per_run");
     const worker = activities();
 
@@ -171,7 +193,7 @@ describe("scheduled OpenGeni Slack bot routing", () => {
         credentialRole: OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
         credentialLabel: OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
         connectionId: connection.id,
-        slackTeamId: "T_SCHEDULED_TEST",
+        slackTeamId: identity.slackTeamId,
       },
     });
     expect(
@@ -206,7 +228,7 @@ describe("scheduled OpenGeni Slack bot routing", () => {
     ).rejects.toThrow("OpenGeni Slack bot connection");
 
     const otherWorkspace = await workspaceFixture();
-    const otherBot = await botConnection(otherWorkspace);
+    const { connection: otherBot } = await botConnection(otherWorkspace);
     const crossWorkspaceTask = await taskFixture(workspace, otherBot.id, "new_session_per_run");
     await expect(
       worker.dispatchScheduledTaskRun({
@@ -220,9 +242,12 @@ describe("scheduled OpenGeni Slack bot routing", () => {
   test("a new bot installation never silently rebinds an existing scheduled task", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
-    const original = await botConnection(workspace);
+    const { connection: original } = await botConnection(workspace);
     const task = await taskFixture(workspace, original.id, "new_session_per_run");
-    const separate = await botConnection(workspace);
+    const { connection: separate } = await botConnection(
+      workspace,
+      slackBotIdentity("Separate scheduled test workspace"),
+    );
     expect(separate.id).not.toBe(original.id);
 
     const dispatched = await activities().dispatchScheduledTaskRun({
@@ -239,7 +264,7 @@ describe("scheduled OpenGeni Slack bot routing", () => {
   test("fails a reusable run when the durable task and session bindings diverge", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
-    const connection = await botConnection(workspace);
+    const { connection } = await botConnection(workspace);
     const task = await taskFixture(workspace, connection.id, "reusable_session");
     const worker = activities();
 
@@ -270,7 +295,7 @@ describe("scheduled OpenGeni Slack bot routing", () => {
   test("completes an already-fired workflow after its task was deleted", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
-    const connection = await botConnection(workspace);
+    const { connection } = await botConnection(workspace);
     const task = await taskFixture(workspace, connection.id, "new_session_per_run");
     await deleteScheduledTask(client.db, workspace.workspaceId, task.id);
 
@@ -298,7 +323,7 @@ describe("scheduled OpenGeni Slack bot routing", () => {
   test("manual dispatch reuses the API charge identity without an idempotency conflict", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
-    const connection = await botConnection(workspace);
+    const { connection } = await botConnection(workspace);
     const task = await taskFixture(workspace, connection.id, "new_session_per_run");
     const idempotencyKey = `manual-trigger-${crypto.randomUUID()}`;
     const initiator = { kind: "subject" as const, subjectId: "subject-a" };
@@ -326,7 +351,7 @@ describe("scheduled OpenGeni Slack bot routing", () => {
   test("settles a permanently blocked schedule occurrence instead of retrying forever", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
-    const connection = await botConnection(workspace);
+    const { connection } = await botConnection(workspace);
     const task = await taskFixture(workspace, connection.id, "new_session_per_run");
 
     expect(
