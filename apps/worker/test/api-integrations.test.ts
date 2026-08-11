@@ -142,7 +142,7 @@ describe("installed API Integration worker adapters", () => {
       expect((await prepared.mcpServers[0]!.listTools()).map((tool) => tool.name)).toEqual([
         "inventory_api__list_items",
       ]);
-      const result = await prepared.mcpServers[0]!.callTool("inventory_api__list_items", {});
+      const result = await prepared.mcpServers[0]!.callToolResult!("inventory_api__list_items", {});
       expect(result).toMatchObject({ isError: false });
       expect(resolved).toEqual([
         {
@@ -203,7 +203,7 @@ describe("installed API Integration worker adapters", () => {
       { localMcpServers },
     );
     try {
-      const result = await prepared.mcpServers[0]!.callTool("inventory_api__list_items", {});
+      const result = await prepared.mcpServers[0]!.callToolResult!("inventory_api__list_items", {});
       expect(result).toMatchObject({ isError: true });
       expect(providerCalls).toBe(0);
       expect(authNeeded).toEqual([

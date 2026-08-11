@@ -77,6 +77,7 @@ import {
   type LazyToolTransport,
 } from "./lazy-tool-transport";
 import { GmailRestMcpServer, isOfficialGmailMcpConfig } from "./gmail-rest-mcp";
+import { createMcpResultCustomDataExtractor } from "./mcp-result-custom-data";
 export {
   GMAIL_REST_API_BASE,
   GMAIL_REST_MCP_TOOLS,
@@ -354,6 +355,11 @@ export {
   serializeHumanInputRequests,
   serializeInteractionInterventionRequests,
 } from "./run-events";
+export {
+  OPENGENI_INNER_MCP_CUSTOM_DATA_KEY,
+  OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY,
+  mcpResultFromCustomData,
+} from "./mcp-result-custom-data";
 export type {
   ModelResponseServiceTierEvent,
   ModelResponseUsage,
@@ -4681,6 +4687,7 @@ function logPublicMcpLifecycleFailure(error: Error): void {
  */
 class AttemptDefinitionMcpServer implements MCPServer {
   readonly cacheToolsList = true;
+  readonly customDataExtractor = createMcpResultCustomDataExtractor();
   readonly name = "opengeni-attempt-local-tools";
   private readonly tools: RuntimeMcpTool[];
   private environment: AttemptToolEnvironment | null = null;
@@ -4767,6 +4774,7 @@ class AttemptDefinitionMcpServer implements MCPServer {
 /** @internal Exported for exact SDK-boundary conformance tests. */
 export class PrefixedMcpServer implements MCPServer {
   readonly cacheToolsList: boolean;
+  readonly customDataExtractor: NonNullable<MCPServer["customDataExtractor"]>;
   readonly name: string;
   readonly prefix: string;
   readonly registryId: string;
@@ -4800,6 +4808,10 @@ export class PrefixedMcpServer implements MCPServer {
     this.name = `${MCP_SDK_LIFECYCLE_NAME}:${safeMcpServerIdentity(registryId)}`;
     this.prefix = prefixedMcpToolName(registryId, "");
     this.cacheToolsList = inner.cacheToolsList;
+    this.customDataExtractor = createMcpResultCustomDataExtractor({
+      innerServer: inner,
+      unprefixToolName: (toolName) => this.unprefixToolName(toolName),
+    });
     this.allowedTools = allowedTools ? new Set(allowedTools) : undefined;
     this.bestEffort = bestEffort;
   }
@@ -4945,7 +4957,7 @@ export class PrefixedMcpServer implements MCPServer {
           ...(options?.signal ? { signal: options.signal } : {}),
         })
       : await this.executeCatalogTool(unprefixed, args ?? {}, meta, options);
-    return result;
+    return result.content;
   }
 
   async callToolResult(
