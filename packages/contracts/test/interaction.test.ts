@@ -157,6 +157,18 @@ describe("interaction contracts", () => {
       }).placement,
     ).toEqual({ kind: "external_provider", providerId: "kernel", placementId: "default" });
     expect(
+      CreateBrowserSessionRequest.parse({
+        operationId,
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        placement: {
+          kind: "external_provider",
+          providerId: "kernel",
+          placementId: "default",
+        },
+        networkRouteId: "77777777-7777-4777-8777-777777777777",
+      }).networkRouteId,
+    ).toBe("77777777-7777-4777-8777-777777777777");
+    expect(
       CreateBrowserSessionRequest.safeParse({
         operationId,
         sessionId: "33333333-3333-4333-8333-333333333333",

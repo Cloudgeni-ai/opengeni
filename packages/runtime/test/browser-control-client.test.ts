@@ -64,6 +64,28 @@ describe("BrowserControlClient", () => {
           placementId: "default",
           authority: { apiKey: "browserbase-private-key" },
         },
+        networkRoute: {
+          routeId: "22222222-2222-4222-8222-222222222222",
+          routeVersion: 4,
+          authorityDigest: `ogr.${"m".repeat(43)}`,
+          kind: "managed",
+          consistency: {
+            dns: "provider",
+            expectedPublicIp: null,
+            expectedRegion: "NO",
+            locale: "nb-NO",
+            timezone: "Europe/Oslo",
+            geolocation: { latitude: 59.9139, longitude: 10.7522, accuracyMeters: 25 },
+            webRtc: "disable_non_proxied_udp",
+            stability: "session",
+          },
+          providerRoute: {
+            providerId: "browserbase",
+            routeId: "default",
+            egressClass: "residential",
+            region: "NO",
+          },
+        },
       });
       expect(wire).toMatchObject({
         transport: {
@@ -71,6 +93,17 @@ describe("BrowserControlClient", () => {
           providerId: "browserbase",
           placementId: "default",
           authority: { apiKey: "browserbase-private-key" },
+        },
+        networkRoute: {
+          routeVersion: 4,
+          kind: "managed",
+          consistency: { dns: "provider", expectedRegion: "NO" },
+          providerRoute: {
+            providerId: "browserbase",
+            routeId: "default",
+            egressClass: "residential",
+            region: "NO",
+          },
         },
       });
       expect(JSON.stringify(created)).not.toContain("browserbase-private-key");

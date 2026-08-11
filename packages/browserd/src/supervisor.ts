@@ -35,12 +35,14 @@ import {
   type BrowserInteractionDriver,
 } from "@opengeni/interaction";
 import { createAttachedChromeTransport } from "./attached-cdp";
+import { CdpConnection } from "./cdp";
 import { AgentBrowserDriver, type BrowserRuntimeSnapshot } from "./cdp-driver";
 import { BrowserDownloadStore, type CompletedBrowserDownloadFile } from "./downloads";
 import { uploadBrowserDownload } from "./download-upload";
 import type { ResolvedAgentBrowserBinary } from "./binary";
 import type { ResolvedLightpandaBinary } from "./lightpanda-binary";
 import { LightpandaRunner } from "./lightpanda-runner";
+import { ExternalProviderCdpRunner } from "./external-provider-runner";
 import {
   type BrowserFrameStreamOptions,
   type BrowserFrameSubscription,
@@ -113,9 +115,15 @@ export type BrowserSupervisorNetworkRoute = {
   routeId: string;
   routeVersion: number;
   authorityDigest: string;
-  kind: "direct" | "proxy" | "tunnel";
+  kind: "direct" | "proxy" | "managed" | "tunnel";
   consistency: NetworkRouteConsistencyValue;
   proxyUrl?: string;
+  providerRoute?: {
+    providerId: "browserbase" | "kernel";
+    routeId: string;
+    egressClass: "datacenter" | "residential" | "isp";
+    region: string | null;
+  };
 };
 
 export type BrowserSupervisorTransport =
@@ -1195,7 +1203,8 @@ export class BrowserSupervisor {
       runtime.options.restoreAuthorityDigest !== restoreAuthorityDigest(requested.restore) ||
       runtime.options.networkRouteAuthorityDigest !==
         (requested.networkRoute?.authorityDigest ?? null) ||
-      (requested.networkRoute?.proxyUrl !== undefined &&
+      ((requested.networkRoute?.proxyUrl !== undefined ||
+        requested.networkRoute?.providerRoute !== undefined) &&
         runtime.options.networkRouteMaterialDigest !==
           networkRouteMaterialDigest(requested.networkRoute))
     ) {
@@ -1383,31 +1392,52 @@ async function createBrowserDriver(
     });
   }
   if (context.transport.kind === "external_provider") {
-    const runner = await AgentBrowserJsonRunner.create({
-      namespace: "og",
-      sessionName: `b${randomUUID().replaceAll("-", "").slice(0, 16)}`,
-      socketDirectory: context.socketDirectory,
-      profileDirectory: context.profileDirectory,
-      downloadDirectory: context.downloadDirectory,
-      screenshotDirectory: context.screenshotDirectory,
-      headed: context.headed,
-      provider: {
-        id: context.transport.providerId,
-        apiKey: context.transport.authority.apiKey,
-        ...(context.transport.authority.endpoint
-          ? { endpoint: context.transport.authority.endpoint }
-          : {}),
-        ...(context.transport.timeoutSeconds
-          ? { timeoutSeconds: context.transport.timeoutSeconds }
-          : {}),
-        ...(context.transport.stealth === undefined ? {} : { stealth: context.transport.stealth }),
-      },
-      ...(binary ? { binary } : {}),
-    });
+    const managedRoute = context.networkRoute?.providerRoute;
+    const runner = managedRoute
+      ? new ExternalProviderCdpRunner({
+          providerId: context.transport.providerId,
+          apiKey: context.transport.authority.apiKey,
+          ...(context.transport.authority.endpoint
+            ? { endpoint: context.transport.authority.endpoint }
+            : {}),
+          headed: context.headed,
+          ...(context.transport.timeoutSeconds
+            ? { timeoutSeconds: context.transport.timeoutSeconds }
+            : {}),
+          ...(context.transport.stealth === undefined
+            ? {}
+            : { stealth: context.transport.stealth }),
+          route: managedRoute,
+        })
+      : await AgentBrowserJsonRunner.create({
+          namespace: "og",
+          sessionName: `b${randomUUID().replaceAll("-", "").slice(0, 16)}`,
+          socketDirectory: context.socketDirectory,
+          profileDirectory: context.profileDirectory,
+          downloadDirectory: context.downloadDirectory,
+          screenshotDirectory: context.screenshotDirectory,
+          headed: context.headed,
+          provider: {
+            id: context.transport.providerId,
+            apiKey: context.transport.authority.apiKey,
+            ...(context.transport.authority.endpoint
+              ? { endpoint: context.transport.authority.endpoint }
+              : {}),
+            ...(context.transport.timeoutSeconds
+              ? { timeoutSeconds: context.transport.timeoutSeconds }
+              : {}),
+            ...(context.transport.stealth === undefined
+              ? {}
+              : { stealth: context.transport.stealth }),
+          },
+          ...(binary ? { binary } : {}),
+        });
     return new AgentBrowserDriver({
       browserSessionId: context.browserSessionId,
       controllerGeneration: context.controllerGeneration,
       runner,
+      connect: async (endpoint) => await CdpConnection.connect(endpoint, { allowRemote: true }),
+      ...(managedRoute ? { targetLifecycle: "cdp" as const } : {}),
     });
   }
   const route = context.networkRoute;
@@ -1520,10 +1550,10 @@ function validateSessionOptions(
     if (options.browserExecutablePath) {
       throw new Error("external browser providers cannot select a local browser executable");
     }
-    if (options.networkRoute) {
+    if (options.networkRoute && options.networkRoute.kind !== "managed") {
       throw new InteractionControllerError(
         "unsupported",
-        "external browser provider network routes require a provider adapter",
+        "external browser providers require a provider-managed network route",
       );
     }
   }
@@ -1649,20 +1679,26 @@ function validateBrowserNetworkRoute(
   if (!/^[A-Za-z0-9._~-]{16,256}$/u.test(input.authorityDigest)) {
     throw new Error("network route authority digest is invalid");
   }
-  if (input.kind !== "direct" && input.kind !== "proxy" && input.kind !== "tunnel") {
+  if (
+    input.kind !== "direct" &&
+    input.kind !== "proxy" &&
+    input.kind !== "managed" &&
+    input.kind !== "tunnel"
+  ) {
     throw new Error("network route kind is unsupported");
   }
   const consistency = NetworkRouteConsistency.parse(input.consistency);
   if (consistency.locale) validateLocale(consistency.locale);
   if (consistency.timezone) validateTimezone(consistency.timezone);
-  const expectedDns = input.kind === "proxy" ? "proxy" : "placement";
+  const expectedDns =
+    input.kind === "proxy" ? "proxy" : input.kind === "managed" ? "provider" : "placement";
   if (consistency.dns !== expectedDns) {
     throw new InteractionControllerError(
       "unsupported",
       `network route ${input.kind} cannot provide ${consistency.dns} DNS`,
     );
   }
-  if (consistency.webRtc === "proxy_only" && input.kind !== "proxy") {
+  if (consistency.webRtc === "proxy_only" && input.kind !== "proxy" && input.kind !== "managed") {
     throw new InteractionControllerError(
       "unsupported",
       "WebRTC proxy-only routing requires a proxy network route",
@@ -1689,6 +1725,28 @@ function validateBrowserNetworkRoute(
   if (input.kind !== "proxy" && input.proxyUrl !== undefined) {
     throw new Error("non-proxy network route contains proxy authority");
   }
+  const providerRoute =
+    input.providerRoute === undefined ? undefined : validateProviderRoute(input.providerRoute);
+  if (input.kind !== "managed" && providerRoute !== undefined) {
+    throw new Error("non-managed network route contains provider material");
+  }
+  if (input.kind === "managed" && providerRoute === undefined) {
+    throw new Error("managed network route omits provider material");
+  }
+  if (input.kind === "managed") {
+    if (transport.kind !== "external_provider") {
+      throw new InteractionControllerError(
+        "unsupported",
+        "managed network routes require an external browser provider",
+      );
+    }
+    if (providerRoute?.providerId !== transport.providerId) {
+      throw new InteractionControllerError(
+        "unsupported",
+        "managed network route belongs to another browser provider",
+      );
+    }
+  }
   const proxyUrl = input.proxyUrl === undefined ? undefined : validateProxyUrl(input.proxyUrl);
   return {
     routeId: input.routeId,
@@ -1697,6 +1755,31 @@ function validateBrowserNetworkRoute(
     kind: input.kind,
     consistency,
     ...(proxyUrl === undefined ? {} : { proxyUrl }),
+    ...(providerRoute === undefined ? {} : { providerRoute }),
+  };
+}
+
+function validateProviderRoute(
+  input: NonNullable<BrowserSupervisorNetworkRoute["providerRoute"]>,
+): NonNullable<BrowserSupervisorNetworkRoute["providerRoute"]> {
+  if (input.providerId !== "browserbase" && input.providerId !== "kernel") {
+    throw new Error("managed network route provider is unsupported");
+  }
+  if (
+    input.egressClass !== "datacenter" &&
+    input.egressClass !== "residential" &&
+    input.egressClass !== "isp"
+  ) {
+    throw new Error("managed network route egress class is invalid");
+  }
+  return {
+    providerId: input.providerId,
+    routeId: boundedOpaqueText(input.routeId, 1, 512, "managed network route provider id"),
+    egressClass: input.egressClass,
+    region:
+      input.region === null
+        ? null
+        : boundedOpaqueText(input.region, 1, 128, "managed network route region"),
   };
 }
 
@@ -1821,6 +1904,7 @@ function networkRouteMaterialDigest(route: BrowserSupervisorNetworkRoute): strin
         kind: route.kind,
         consistency: route.consistency,
         proxyUrl: route.proxyUrl ?? null,
+        providerRoute: route.providerRoute ?? null,
       }),
       "utf8",
     )
@@ -2015,6 +2099,19 @@ function boundedText(value: unknown, minimum: number, maximum: number, label: st
     throw new Error(`${label} is invalid`);
   }
   return value;
+}
+
+function boundedOpaqueText(
+  value: unknown,
+  minimum: number,
+  maximum: number,
+  label: string,
+): string {
+  const text = boundedText(value, minimum, maximum, label);
+  if (text.trim() !== text || /[\u0000-\u001f\u007f]/u.test(text)) {
+    throw new Error(`${label} is invalid`);
+  }
+  return text;
 }
 
 type ValidatedBrowserStateCaptureInput = BrowserSessionReference & {

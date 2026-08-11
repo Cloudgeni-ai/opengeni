@@ -362,6 +362,36 @@ describe("BrowserSupervisor", () => {
     });
   });
 
+  test("binds managed egress to its exact external provider transport", async () => {
+    await withSupervisor(async ({ supervisor, contexts }) => {
+      const session = reference(1);
+      const route = managedRoute();
+      const transport = {
+        kind: "external_provider" as const,
+        providerId: "kernel" as const,
+        placementId: "default",
+        authority: { apiKey: "kernel-private-key" },
+      };
+      await supervisor.createSession({ ...session, headed: false, transport, networkRoute: route });
+      expect(contexts.get(session.browserSessionId)?.networkRoute).toEqual(route);
+      await expect(
+        supervisor.createSession({
+          ...reference(2),
+          headed: false,
+          transport: { ...transport, providerId: "browserbase" },
+          networkRoute: route,
+        }),
+      ).rejects.toMatchObject({ code: "unsupported" });
+      await expect(
+        supervisor.createSession({
+          ...reference(3),
+          headed: false,
+          networkRoute: route,
+        }),
+      ).rejects.toMatchObject({ code: "unsupported" });
+    });
+  });
+
   test("quiesces, captures, restarts, uploads, and replays one exact profile revision", async () => {
     const key = Buffer.alloc(32, 7);
     const aad = Buffer.from("workspace:identity:operation", "utf8");
@@ -858,6 +888,31 @@ function proxyRoute(proxyUrl = "http://user:password@proxy.test:8443/") {
       stability: "session" as const,
     },
     proxyUrl,
+  };
+}
+
+function managedRoute() {
+  return {
+    routeId: "33333333-3333-4333-8333-333333333333",
+    routeVersion: 2,
+    authorityDigest: `ogr.${"m".repeat(43)}`,
+    kind: "managed" as const,
+    consistency: {
+      dns: "provider" as const,
+      expectedPublicIp: null,
+      expectedRegion: "NO",
+      locale: "nb-NO",
+      timezone: "Europe/Oslo",
+      geolocation: { latitude: 59.9139, longitude: 10.7522, accuracyMeters: 25 },
+      webRtc: "disable_non_proxied_udp" as const,
+      stability: "session" as const,
+    },
+    providerRoute: {
+      providerId: "kernel" as const,
+      routeId: "kernel-proxy-7",
+      egressClass: "isp" as const,
+      region: "NO",
+    },
   };
 }
 

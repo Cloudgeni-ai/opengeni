@@ -1583,8 +1583,14 @@ function parseBrowserNetworkRoute(
     "kind",
     "consistency",
     "proxyUrl",
+    "providerRoute",
   ]);
-  if (value.kind !== "direct" && value.kind !== "proxy" && value.kind !== "tunnel") {
+  if (
+    value.kind !== "direct" &&
+    value.kind !== "proxy" &&
+    value.kind !== "managed" &&
+    value.kind !== "tunnel"
+  ) {
     throw new ProtocolError("invalid_action", "browser network route kind is unsupported", 400);
   }
   const consistency = NetworkRouteConsistency.safeParse(value.consistency);
@@ -1615,6 +1621,38 @@ function parseBrowserNetworkRoute(
       : {
           proxyUrl: requireString(value.proxyUrl, "browser proxy authority", 16_384),
         }),
+    ...(value.providerRoute === undefined
+      ? {}
+      : { providerRoute: parseManagedProviderRoute(value.providerRoute) }),
+  };
+}
+
+function parseManagedProviderRoute(
+  value: unknown,
+): NonNullable<NonNullable<BrowserSupervisorSessionOptions["networkRoute"]>["providerRoute"]> {
+  if (!isRecord(value)) {
+    throw new ProtocolError("invalid_action", "managed browser route is invalid", 400);
+  }
+  assertOnlyKeys(value, ["providerId", "routeId", "egressClass", "region"]);
+  if (value.providerId !== "browserbase" && value.providerId !== "kernel") {
+    throw new ProtocolError("invalid_action", "managed browser route provider is unsupported", 400);
+  }
+  if (
+    value.egressClass !== "datacenter" &&
+    value.egressClass !== "residential" &&
+    value.egressClass !== "isp"
+  ) {
+    throw new ProtocolError("invalid_action", "managed browser route egress is invalid", 400);
+  }
+  if (value.region !== null && typeof value.region !== "string") {
+    throw new ProtocolError("invalid_action", "managed browser route region is invalid", 400);
+  }
+  return {
+    providerId: value.providerId,
+    routeId: requireOpaqueId(value.routeId, "managed browser provider route id"),
+    egressClass: value.egressClass,
+    region:
+      value.region === null ? null : requireOpaqueId(value.region, "managed browser route region"),
   };
 }
 

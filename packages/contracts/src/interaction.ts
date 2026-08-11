@@ -2187,13 +2187,6 @@ export const CreateBrowserSessionRequest = z
           message: "external browser providers do not yet support portable BrowserIdentity state",
         });
       }
-      if (value.networkRouteId) {
-        context.addIssue({
-          code: "custom",
-          path: ["networkRouteId"],
-          message: "external browser provider network routes require a provider adapter",
-        });
-      }
       if (value.linkedComputerSessionId) {
         context.addIssue({
           code: "custom",

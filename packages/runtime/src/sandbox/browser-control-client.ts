@@ -172,12 +172,20 @@ export type PlacementBrowserNetworkRoute = {
   routeId: string;
   routeVersion: number;
   authorityDigest: string;
-  kind: "direct" | "proxy" | "tunnel";
+  kind: "direct" | "proxy" | "managed" | "tunnel";
   consistency: NetworkRouteConsistencyValue;
   /** Present for an initial authenticated-proxy launch; omitted only when
    * replaying an already-live controller after the referenced credential was
    * rotated. Never persisted or returned by the controller. */
   proxyUrl?: string;
+  /** Provider-native egress selector. Provider API authority remains on the
+   * external transport and is never duplicated into this route material. */
+  providerRoute?: {
+    providerId: "browserbase" | "kernel";
+    routeId: string;
+    egressClass: "datacenter" | "residential" | "isp";
+    region: string | null;
+  };
 };
 
 export type PlacementBrowserTransport =
@@ -1443,7 +1451,7 @@ function placementBrowserNetworkRoute(
   input: PlacementBrowserNetworkRoute,
 ): PlacementBrowserNetworkRoute {
   const kind = input.kind;
-  if (kind !== "direct" && kind !== "proxy" && kind !== "tunnel") {
+  if (kind !== "direct" && kind !== "proxy" && kind !== "managed" && kind !== "tunnel") {
     throw new BrowserControlProtocolError("browser network route kind is invalid");
   }
   if (!/^[A-Za-z0-9._~-]{16,256}$/u.test(input.authorityDigest)) {
@@ -1453,6 +1461,16 @@ function placementBrowserNetworkRoute(
   if (kind !== "proxy" && proxyUrl !== undefined) {
     throw new BrowserControlProtocolError("non-proxy browser route contains proxy authority");
   }
+  const providerRoute =
+    input.providerRoute === undefined ? undefined : placementProviderRoute(input.providerRoute);
+  if (kind !== "managed" && providerRoute !== undefined) {
+    throw new BrowserControlProtocolError(
+      "non-managed browser route contains provider route material",
+    );
+  }
+  if (kind === "managed" && providerRoute === undefined) {
+    throw new BrowserControlProtocolError("managed browser route omits provider route material");
+  }
   return {
     routeId: requireUuid(input.routeId, "network route id"),
     routeVersion: positiveSafeInteger(input.routeVersion, "network route version"),
@@ -1460,6 +1478,31 @@ function placementBrowserNetworkRoute(
     kind,
     consistency: NetworkRouteConsistency.parse(input.consistency),
     ...(proxyUrl === undefined ? {} : { proxyUrl }),
+    ...(providerRoute === undefined ? {} : { providerRoute }),
+  };
+}
+
+function placementProviderRoute(
+  input: NonNullable<PlacementBrowserNetworkRoute["providerRoute"]>,
+): NonNullable<PlacementBrowserNetworkRoute["providerRoute"]> {
+  if (input.providerId !== "browserbase" && input.providerId !== "kernel") {
+    throw new BrowserControlProtocolError("managed browser route provider is unsupported");
+  }
+  if (
+    input.egressClass !== "datacenter" &&
+    input.egressClass !== "residential" &&
+    input.egressClass !== "isp"
+  ) {
+    throw new BrowserControlProtocolError("managed browser route egress class is invalid");
+  }
+  return {
+    providerId: input.providerId,
+    routeId: requireOpaqueId(input.routeId, "managed browser provider route id"),
+    egressClass: input.egressClass,
+    region:
+      input.region === null
+        ? null
+        : requireBoundedText(input.region, 1, 128, "managed browser route region"),
   };
 }
 

@@ -173,6 +173,7 @@ import {
   BrowserAuthCredentialError,
   resolveProtectedAuthFieldValues,
 } from "../browser-auth-broker";
+import { managedNetworkRouteForPlacement } from "../browser-network-route";
 import { allowedCorsOrigin } from "../http/cors";
 import {
   observeAuthMutation,
@@ -351,6 +352,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
               browserSessionId: prepared.session.id,
               operationId: request.operationId,
               rootSecret: authority,
+              placement: placement.placement,
             });
             const interactionHeld = await ensureInteractionHolder(
               deps,
@@ -1985,6 +1987,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
               browserSessionId,
               operationId: request.operationId,
               rootSecret: authority,
+              placement: placement.placement,
             });
             const interactionHeld = await ensureInteractionHolder(
               deps,
@@ -3444,6 +3447,7 @@ async function resolveBrowserNetworkRouteLaunch(input: {
   browserSessionId: string;
   operationId: string;
   rootSecret: string;
+  placement: InteractionPlacement;
 }): Promise<PlacementBrowserNetworkRoute | null> {
   const record = await getBrowserSessionControlRecord(input.deps.db, {
     accountId: input.grant.accountId,
@@ -3453,12 +3457,16 @@ async function resolveBrowserNetworkRouteLaunch(input: {
   });
   const route = record.networkRouteAuthority;
   if (!route) return null;
-  if (route.configuration.kind === "managed") {
+  const kind = route.configuration.kind;
+  const providerRoute =
+    kind === "managed"
+      ? managedNetworkRouteForPlacement(route.configuration, route.consistency, input.placement)
+      : undefined;
+  if (kind !== "managed" && input.placement.kind === "external_provider") {
     throw new BrowserSessionStateError(
-      "Managed network routes require an external browser provider driver",
+      "External browser providers require a provider-managed NetworkRoute",
     );
   }
-  const kind = route.configuration.kind;
   let proxyCredential: { username: string; password: string } | null = null;
   let credentialVersion: number | null = null;
   let proxyUrl: string | undefined;
@@ -3477,12 +3485,12 @@ async function resolveBrowserNetworkRouteLaunch(input: {
         proxyCredential = proxyCredentialFromBundle(credential.credential);
       } catch (error) {
         if (route.authorityDigest && dispatched) {
-          return secretlessNetworkRouteReplay(route, kind);
+          return secretlessNetworkRouteReplay(route, kind, providerRoute);
         }
         throw error;
       }
       if (dispatched && route.credentialVersion !== credentialVersion) {
-        return secretlessNetworkRouteReplay(route, kind);
+        return secretlessNetworkRouteReplay(route, kind, providerRoute);
       }
     }
     proxyUrl = browserProxyUrl(route.configuration, proxyCredential);
@@ -3498,6 +3506,7 @@ async function resolveBrowserNetworkRouteLaunch(input: {
       kind,
       consistency: route.consistency,
       ...(proxyUrl === undefined ? {} : { proxyUrl }),
+      ...(providerRoute === undefined ? {} : { providerRoute }),
     };
   }
   const authorityDigest = deriveBrowserNetworkRouteAuthorityDigest({
@@ -3531,12 +3540,14 @@ async function resolveBrowserNetworkRouteLaunch(input: {
     kind,
     consistency: route.consistency,
     ...(proxyUrl === undefined ? {} : { proxyUrl }),
+    ...(providerRoute === undefined ? {} : { providerRoute }),
   };
 }
 
 function secretlessNetworkRouteReplay(
   route: NonNullable<BrowserSessionControlRecord["networkRouteAuthority"]>,
-  kind: "direct" | "proxy" | "tunnel",
+  kind: "direct" | "proxy" | "managed" | "tunnel",
+  providerRoute?: NonNullable<PlacementBrowserNetworkRoute["providerRoute"]>,
 ): PlacementBrowserNetworkRoute {
   if (!route.authorityDigest) {
     throw new BrowserSessionStateError("BrowserSession route authority is not bound");
@@ -3547,6 +3558,7 @@ function secretlessNetworkRouteReplay(
     authorityDigest: route.authorityDigest,
     kind,
     consistency: route.consistency,
+    ...(providerRoute === undefined ? {} : { providerRoute }),
   };
 }
 

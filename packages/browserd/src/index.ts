@@ -13,6 +13,7 @@ export * from "./computer-protocol";
 export * from "./computer-supervisor";
 export * from "./downloads";
 export * from "./download-upload";
+export * from "./external-provider-runner";
 export * from "./journal";
 export * from "./lightpanda-binary";
 export * from "./lightpanda-runner";

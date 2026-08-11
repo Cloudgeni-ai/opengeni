@@ -121,6 +121,36 @@ describe("BrowserControlServer", () => {
     );
   });
 
+  test("delivers one provider-managed route beside private provider authority", async () => {
+    let browserContext: BrowserSupervisorDriverContext | null = null;
+    await withServer(
+      async ({ server, reference }) => {
+        const route = managedRoute();
+        const created = await request(server, "/v1/browser-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference, {
+            transport: {
+              kind: "external_provider",
+              providerId: "kernel",
+              placementId: "default",
+              authority: { apiKey: "kernel-private-key" },
+            },
+            networkRoute: route,
+          }),
+        });
+        expect(created.status).toBe(201);
+        expect(browserContext?.networkRoute).toEqual(route);
+        expect(await created.text()).not.toContain("kernel-private-key");
+      },
+      {
+        onBrowserContext: (context) => {
+          browserContext = context;
+        },
+      },
+    );
+  });
+
   test("resolves a linked ComputerSession into the browser launch environment", async () => {
     const computerSessionId = randomUUID();
     let browserContext: BrowserSupervisorDriverContext | null = null;
@@ -1035,7 +1065,7 @@ function createBody(
     viewToken: string;
     headed: boolean;
     linkedComputer: { computerSessionId: string; controllerGeneration: string };
-    networkRoute: ReturnType<typeof proxyRoute>;
+    networkRoute: ReturnType<typeof proxyRoute> | ReturnType<typeof managedRoute>;
     transport:
       | { kind: "managed"; engine: "chromium" | "lightpanda" }
       | {
@@ -1075,6 +1105,31 @@ function proxyRoute() {
       stability: "session" as const,
     },
     proxyUrl: "http://proxy-user:proxy-password@proxy.test:8443/",
+  };
+}
+
+function managedRoute() {
+  return {
+    routeId: "33333333-3333-4333-8333-333333333333",
+    routeVersion: 2,
+    authorityDigest: `ogr.${"m".repeat(43)}`,
+    kind: "managed" as const,
+    consistency: {
+      dns: "provider" as const,
+      expectedPublicIp: null,
+      expectedRegion: "NO",
+      locale: "nb-NO",
+      timezone: "Europe/Oslo",
+      geolocation: { latitude: 59.9139, longitude: 10.7522, accuracyMeters: 25 },
+      webRtc: "disable_non_proxied_udp" as const,
+      stability: "session" as const,
+    },
+    providerRoute: {
+      providerId: "kernel" as const,
+      routeId: "kernel-proxy-7",
+      egressClass: "isp" as const,
+      region: "NO",
+    },
   };
 }
 
