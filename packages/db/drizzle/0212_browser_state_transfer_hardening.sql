@@ -558,4 +558,3 @@ BEGIN
   END IF;
 END
 $grants$;
-
