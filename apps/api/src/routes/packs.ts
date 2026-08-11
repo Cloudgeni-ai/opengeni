@@ -1,20 +1,50 @@
+import { createHash } from "node:crypto";
+
 import {
   EnablePackRequest,
+  InstallPackRequest,
   MarketingDailyAnalysisTaskRequest,
+  PackInstallation,
+  PackInstallationPreview,
+  PackUninstallPreview,
+  PreviewPackInstallationRequest,
   RegisterCapabilityPackRequest,
+  UninstallPackRequest,
+  UninstallPackResult,
+  stableJson,
   type SocialConnection,
 } from "@opengeni/contracts";
 import {
+  adoptPackComponentReferences,
+  CapabilityComponentVersionConflictError,
+  deferPackInstallationOperation,
   deleteWorkspacePack,
   disableCapabilityInstallation,
   enablePackInstallation,
+  finalizePackComponentOwnership,
+  finalizePackInstallationOperation,
+  finalizePackUninstallOperation,
   getCapabilityInstallation,
   getPackInstallation,
   getWorkspacePack,
   getSocialConnection,
+  installPortableSkill,
   listPackInstallations,
   listSocialConnections,
+  PackManifestChangedError,
+  PackComponentResolutionError,
+  PackInstallationVersionConflictError,
+  PackInstallationVersionRequiredError,
+  PackOperationClaimLostError,
+  PackOperationIdempotencyError,
+  PackOperationInProgressError,
+  preparePackInstallationOperation,
+  preparePackUninstallOperation,
+  previewPackComponentRelease,
+  recordPackInlineSkillComponent,
   registerWorkspacePack,
+  releasePackComponents,
+  touchPackInstallationOperation,
   updatePackInstallationStatus,
 } from "@opengeni/db";
 import { getDocumentBase } from "@opengeni/documents";
@@ -27,9 +57,12 @@ import { validateVariableSetAttachment } from "@opengeni/core";
 import {
   assertPackSandboxImageCompatible,
   buildMarketingDailyAnalysisAgentConfig,
+  capabilityPackRequiresInstallationPlan,
+  inlinePackSkillInstall,
   isBuiltInCapabilityPack,
   listWorkspaceCapabilityPacks,
   MARKETING_SOCIAL_PACK_ID,
+  previewCapabilityPackInstallation,
   resolveCapabilityPack,
 } from "@opengeni/core";
 import { createValidatedScheduledTask, syncCreatedScheduledTask } from "@opengeni/core";
@@ -70,16 +103,27 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
     await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
     const packId = c.req.param("packId");
     if (isBuiltInCapabilityPack(packId)) {
-      throw new HTTPException(409, { message: "built-in packs cannot be unregistered" });
+      throw new HTTPException(409, {
+        message: "built-in packs cannot be unregistered",
+      });
     }
     if (!(await getWorkspacePack(db, workspaceId, packId))) {
       throw new HTTPException(404, { message: "pack not found" });
     }
-    // Disable installations before deleting the registration so a crash in
-    // between can never orphan an active installation whose manifest is
-    // gone; the capability installation row for pack:{packId} would
-    // otherwise keep a future re-registration looking enabled.
+    // V2 Packs own explicit components. Unregistering before the ownership
+    // ledger is safely released would orphan those components, so require the
+    // dedicated uninstall flow first. Legacy installations retain the old
+    // disable-before-delete behavior for compatibility.
     const installation = await getPackInstallation(db, workspaceId, packId);
+    if (
+      installation &&
+      installation.status !== "disabled" &&
+      (installation.manifestDigest !== null || installation.manifestSnapshot !== null)
+    ) {
+      throw new HTTPException(409, {
+        message: "uninstall this Pack before unregistering it",
+      });
+    }
     if (installation && installation.status === "active") {
       await updatePackInstallationStatus(db, workspaceId, packId, "disabled");
     }
@@ -111,10 +155,342 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
     });
   });
 
+  app.post("/v1/workspaces/:workspaceId/packs/:packId/installation-preview", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const pack = await requirePack(db, workspaceId, c.req.param("packId"));
+    const payload = PreviewPackInstallationRequest.parse(await c.req.json());
+    return c.json(
+      PackInstallationPreview.parse(
+        await previewCapabilityPackInstallation(db, workspaceId, pack, {
+          ...(payload.rigId ? { rigId: payload.rigId } : {}),
+          ...(payload.variableSetId ? { variableSetId: payload.variableSetId } : {}),
+        }),
+      ),
+    );
+  });
+
+  app.post("/v1/workspaces/:workspaceId/packs/:packId/install", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const pack = await requirePack(db, workspaceId, c.req.param("packId"));
+    const payload = InstallPackRequest.parse(await c.req.json());
+    const preview = PackInstallationPreview.parse(
+      await previewCapabilityPackInstallation(db, workspaceId, pack, {
+        ...(payload.rigId ? { rigId: payload.rigId } : {}),
+        ...(payload.variableSetId ? { variableSetId: payload.variableSetId } : {}),
+      }),
+    );
+    if (preview.manifestDigest !== payload.expectedManifestDigest) {
+      throw new HTTPException(409, {
+        message: "The Pack manifest changed after preview. Review the updated installation plan.",
+      });
+    }
+    if (!preview.ready) {
+      throw new HTTPException(422, {
+        message: `The Pack is not ready to install: ${preview.blockers.join("; ")}`,
+      });
+    }
+    if (preview.variableSetId) {
+      await validateVariableSetAttachment(
+        { settings, db },
+        grant,
+        workspaceId,
+        preview.variableSetId,
+        { preauthorized: payload.variableSetId === undefined },
+      );
+    }
+    const metadata = {
+      ...payload.metadata,
+      platformVersion: 2,
+      packVersion: pack.version,
+      ...(preview.variableSetId ? { variableSetId: preview.variableSetId } : {}),
+    };
+    const requestDigest = sha256(
+      stableJson({
+        packId: pack.id,
+        manifestDigest: preview.manifestDigest,
+        expectedInstallationVersion: payload.expectedInstallationVersion ?? null,
+        selectedRigId: preview.rig.rigId,
+        variableSetId: preview.variableSetId,
+        metadata,
+      }),
+    );
+    let prepared: Awaited<ReturnType<typeof preparePackInstallationOperation>>;
+    try {
+      prepared = await preparePackInstallationOperation(db, {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+        pack,
+        manifestDigest: preview.manifestDigest,
+        selectedRigId: preview.rig.rigId,
+        metadata,
+        idempotencyKey: payload.idempotencyKey,
+        requestDigest,
+        ...(!isBuiltInCapabilityPack(pack.id)
+          ? { registeredManifestDigest: preview.manifestDigest }
+          : {}),
+        ...(payload.expectedInstallationVersion !== undefined
+          ? { expectedInstallationVersion: payload.expectedInstallationVersion }
+          : {}),
+      });
+    } catch (error) {
+      throw packMutationHttpError(error);
+    }
+    if (prepared.replayResult) {
+      const replayed = await getPackInstallation(db, workspaceId, pack.id);
+      if (!replayed) {
+        throw new HTTPException(500, {
+          message: "The completed Pack operation lost its installation record",
+        });
+      }
+      return c.json(PackInstallation.parse(replayed), 200);
+    }
+
+    const retainedComponentKeys: string[] = [];
+    const retainedFacetInstallationIds: string[] = [];
+    const retainedBindingIds: string[] = [];
+    let activeComponentKey = "manifest";
+    const heartbeat = async (): Promise<void> =>
+      await touchPackInstallationOperation(db, {
+        accountId: grant.accountId,
+        workspaceId,
+        operationId: prepared.operationId,
+        operationVersion: prepared.operationVersion,
+      });
+    try {
+      for (const skill of pack.skills) {
+        await heartbeat();
+        const inline = inlinePackSkillInstall(pack, skill);
+        activeComponentKey = inline.componentKey;
+        const installed = await installPortableSkill(db, {
+          accountId: grant.accountId,
+          workspaceId,
+          subjectId: grant.subjectId,
+          capabilityId: inline.capabilityId,
+          pluginKey: inline.pluginKey,
+          source: "pack",
+          sourceUrl: inline.sourceUrl,
+          repositoryUrl: inline.repositoryUrl,
+          sourceCommit: inline.sourceCommit,
+          sourcePath: inline.sourcePath,
+          name: inline.name,
+          description: inline.description,
+          contentSha256: inline.contentSha256,
+          totalBytes: inline.totalBytes,
+          files: inline.files,
+          owner: {
+            kind: "pack",
+            id: prepared.installation.id,
+            removable: true,
+          },
+        });
+        await heartbeat();
+        await recordPackInlineSkillComponent(db, {
+          accountId: grant.accountId,
+          workspaceId,
+          packInstallationId: prepared.installation.id,
+          componentKey: inline.componentKey,
+          capabilityId: inline.capabilityId,
+          facetInstallationId: installed.facetInstallationId,
+          contentSha256: inline.contentSha256,
+          name: inline.name,
+        });
+        retainedComponentKeys.push(inline.componentKey);
+        retainedFacetInstallationIds.push(installed.facetInstallationId);
+      }
+
+      activeComponentKey = "pinned-components";
+      await heartbeat();
+      const adopted = await adoptPackComponentReferences(db, {
+        accountId: grant.accountId,
+        workspaceId,
+        packInstallationId: prepared.installation.id,
+        references: pack.components,
+      });
+      retainedComponentKeys.push(...adopted.components.map((component) => component.key));
+      retainedFacetInstallationIds.push(...adopted.retainedFacetInstallationIds);
+      retainedBindingIds.push(...adopted.retainedBindingIds);
+
+      activeComponentKey = "ownership-finalize";
+      await heartbeat();
+      await finalizePackComponentOwnership(db, {
+        accountId: grant.accountId,
+        workspaceId,
+        packInstallationId: prepared.installation.id,
+        retainedComponentKeys,
+        retainedFacetInstallationIds,
+        retainedBindingIds,
+      });
+      await heartbeat();
+      const finalized = await finalizePackInstallationOperation(db, {
+        accountId: grant.accountId,
+        workspaceId,
+        operationId: prepared.operationId,
+        operationVersion: prepared.operationVersion,
+        packInstallationId: prepared.installation.id,
+        packId: pack.id,
+        result: {
+          status: "installed",
+          packId: pack.id,
+          manifestDigest: preview.manifestDigest,
+          componentCount: retainedComponentKeys.length,
+        },
+      });
+      return c.json(
+        PackInstallation.parse(finalized),
+        preview.installationVersion === null ? 201 : 200,
+      );
+    } catch (error) {
+      await deferPackInstallationOperation(db, {
+        accountId: grant.accountId,
+        workspaceId,
+        operationId: prepared.operationId,
+        operationVersion: prepared.operationVersion,
+        packInstallationId: prepared.installation.id,
+        phase: `component_failed:${activeComponentKey}`,
+        errorCode: packFailureCode(error),
+      }).catch(() => undefined);
+      if (error instanceof PackComponentResolutionError) {
+        throw new HTTPException(409, {
+          message: `Pack component ${error.componentKey} changed after preview. Review the installation plan and retry with the same idempotency key.`,
+        });
+      }
+      if (error instanceof CapabilityComponentVersionConflictError) {
+        throw new HTTPException(409, {
+          message: `Pack component ${activeComponentKey} is pinned by another installed owner. Resolve that version conflict and retry with the same idempotency key.`,
+        });
+      }
+      if (error instanceof PackOperationClaimLostError) {
+        throw packMutationHttpError(error);
+      }
+      if (error instanceof HTTPException) throw error;
+      throw new HTTPException(422, {
+        message: `Pack component ${activeComponentKey} could not be installed. No Pack-owned component is active until the operation completes; retry with the same idempotency key.`,
+      });
+    }
+  });
+
+  app.get("/v1/workspaces/:workspaceId/packs/:packId/uninstall-preview", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const pack = await requirePack(db, workspaceId, c.req.param("packId"));
+    const installation = await getPackInstallation(db, workspaceId, pack.id);
+    const installed = Boolean(installation && installation.status !== "disabled");
+    const components = installed
+      ? await previewPackComponentRelease(db, workspaceId, installation!.id)
+      : [];
+    return c.json(
+      PackUninstallPreview.parse({
+        packId: pack.id,
+        installed,
+        installationVersion: installation?.version ?? null,
+        components,
+      }),
+    );
+  });
+
+  app.delete("/v1/workspaces/:workspaceId/packs/:packId/installation", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const pack = await requirePack(db, workspaceId, c.req.param("packId"));
+    const payload = UninstallPackRequest.parse(await c.req.json());
+    const requestDigest = sha256(
+      stableJson({
+        packId: pack.id,
+        expectedInstallationVersion: payload.expectedInstallationVersion,
+      }),
+    );
+    let prepared: Awaited<ReturnType<typeof preparePackUninstallOperation>>;
+    try {
+      prepared = await preparePackUninstallOperation(db, {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+        packId: pack.id,
+        expectedInstallationVersion: payload.expectedInstallationVersion,
+        idempotencyKey: payload.idempotencyKey,
+        requestDigest,
+      });
+    } catch (error) {
+      throw packMutationHttpError(error);
+    }
+    if (!("installation" in prepared)) {
+      return c.json(
+        UninstallPackResult.parse({
+          packId: pack.id,
+          status:
+            prepared.replayResult.status === "not_installed" ? "not_installed" : "uninstalled",
+          retainedComponents: Array.isArray(prepared.replayResult.retainedComponents)
+            ? prepared.replayResult.retainedComponents
+            : [],
+        }),
+      );
+    }
+    try {
+      await touchPackInstallationOperation(db, {
+        accountId: grant.accountId,
+        workspaceId,
+        operationId: prepared.operationId,
+        operationVersion: prepared.operationVersion,
+      });
+      const released = await releasePackComponents(db, {
+        accountId: grant.accountId,
+        workspaceId,
+        packInstallationId: prepared.installation.id,
+      });
+      await touchPackInstallationOperation(db, {
+        accountId: grant.accountId,
+        workspaceId,
+        operationId: prepared.operationId,
+        operationVersion: prepared.operationVersion,
+      });
+      const result = UninstallPackResult.parse({
+        packId: pack.id,
+        status: "uninstalled",
+        retainedComponents: [...new Set(released.retainedComponents)],
+      });
+      await finalizePackUninstallOperation(db, {
+        accountId: grant.accountId,
+        workspaceId,
+        operationId: prepared.operationId,
+        operationVersion: prepared.operationVersion,
+        packInstallationId: prepared.installation.id,
+        packId: pack.id,
+        result,
+      });
+      return c.json(result);
+    } catch (error) {
+      await deferPackInstallationOperation(db, {
+        accountId: grant.accountId,
+        workspaceId,
+        operationId: prepared.operationId,
+        operationVersion: prepared.operationVersion,
+        packInstallationId: prepared.installation.id,
+        phase: "uninstall_failed",
+        errorCode: packFailureCode(error),
+      }).catch(() => undefined);
+      if (error instanceof PackOperationClaimLostError) {
+        throw packMutationHttpError(error);
+      }
+      if (error instanceof HTTPException) throw error;
+      throw new HTTPException(422, {
+        message: "The Pack could not be safely uninstalled. Retry with the same idempotency key.",
+      });
+    }
+  });
+
   app.post("/v1/workspaces/:workspaceId/packs/:packId/enable", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
     const pack = await requirePack(db, workspaceId, c.req.param("packId"));
+    if (capabilityPackRequiresInstallationPlan(pack)) {
+      throw new HTTPException(409, {
+        message:
+          "This Pack uses component or Rig requirements. Preview and install it through the Pack installation flow.",
+      });
+    }
     await assertPackSandboxImageCompatible(db, workspaceId, pack);
     const existing = await getPackInstallation(db, workspaceId, pack.id);
     const payload = EnablePackRequest.parse(await c.req.json());
@@ -232,6 +608,7 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
           overlapPolicy: payload.overlapPolicy,
           agentConfig,
           ...(installationVariableSetId ? { variableSetId: installationVariableSetId } : {}),
+          ...(installation.selectedRigId ? { rigId: installation.selectedRigId } : {}),
           metadata: {
             packId: pack.id,
             packVersion: pack.version,
@@ -245,6 +622,54 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
       return c.json(task, 201);
     },
   );
+}
+
+function packMutationHttpError(error: unknown): HTTPException {
+  if (error instanceof PackManifestChangedError) {
+    return new HTTPException(409, {
+      message: "The Pack manifest changed after preview. Review the updated installation plan.",
+    });
+  }
+  if (error instanceof PackOperationClaimLostError) {
+    return new HTTPException(409, {
+      message: "This Pack operation was recovered by another request; review the current state",
+    });
+  }
+  if (error instanceof PackOperationIdempotencyError) {
+    return new HTTPException(409, {
+      message: "Pack idempotency key was already used",
+    });
+  }
+  if (error instanceof PackOperationInProgressError) {
+    return new HTTPException(409, {
+      message: "Another Pack operation is still running; wait for it to finish, then review again",
+    });
+  }
+  if (error instanceof PackInstallationVersionConflictError) {
+    return new HTTPException(409, {
+      message: "Pack installation changed after preview",
+    });
+  }
+  if (error instanceof PackInstallationVersionRequiredError) {
+    return new HTTPException(400, {
+      message: "Updating or repairing a Pack requires the previewed installation version",
+    });
+  }
+  if (error instanceof HTTPException) return error;
+  return new HTTPException(422, {
+    message: error instanceof Error ? error.message : "Pack mutation failed",
+  });
+}
+
+function packFailureCode(error: unknown): string {
+  if (error instanceof HTTPException) return `http_${error.status}`;
+  if (error instanceof PackComponentResolutionError) return `component_${error.status}`;
+  if (error instanceof CapabilityComponentVersionConflictError) return "component_version_conflict";
+  return "component_install_failed";
+}
+
+function sha256(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
 }
 
 async function requirePack(db: ApiRouteDeps["db"], workspaceId: string, packId: string) {
@@ -268,7 +693,9 @@ async function resolveSocialConnections(
           ids.map(async (id) => {
             const connection = await getSocialConnection(db, workspaceId, id, subjectId);
             if (!connection) {
-              throw new HTTPException(422, { message: `unknown social connection: ${id}` });
+              throw new HTTPException(422, {
+                message: `unknown social connection: ${id}`,
+              });
             }
             return connection;
           }),
@@ -293,7 +720,9 @@ async function validateDocumentBaseIds(
   for (const baseId of [...new Set(documentBaseIds)]) {
     const base = await getDocumentBase(db, workspaceId, baseId);
     if (!base) {
-      throw new HTTPException(422, { message: `unknown document base: ${baseId}` });
+      throw new HTTPException(422, {
+        message: `unknown document base: ${baseId}`,
+      });
     }
   }
 }

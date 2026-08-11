@@ -335,7 +335,7 @@ describe("OpenGeniClient access + workspaces", () => {
   test("getClientConfig fetches the public bootstrap endpoint and returns the provider-grouped models", async () => {
     const config = {
       deploymentRevision: "rev-1",
-      apiContractRevision: "2026-08-drive-facet-v1",
+      apiContractRevision: "2026-08-pack-components-v1",
       defaultModel: "gpt-5.6-sol",
       allowedModels: ["gpt-5.6-sol", "accounts/fireworks/models/glm-5p2"],
       models: [
@@ -1121,9 +1121,9 @@ describe("OpenGeniClient documents", () => {
 });
 
 describe("OpenGeniClient packs", () => {
-  test("list, register, get, enable, installations, and delete (204)", async () => {
+  test("list, register, inspect, install, uninstall, and delete (204)", async () => {
     const { client, requests } = makeClient((request) => {
-      if (request.method === "DELETE") {
+      if (request.method === "DELETE" && request.url.endsWith("/packs/acme")) {
         return new Response(null, { status: 204 });
       }
       if (request.url.endsWith("/packs") && request.method === "GET") {
@@ -1144,6 +1144,18 @@ describe("OpenGeniClient packs", () => {
     await client.enablePack(WORKSPACE_ID, "acme", {
       environmentId: ENVIRONMENT_ID,
     });
+    await client.previewPackInstallation(WORKSPACE_ID, "acme", {
+      variableSetId: ENVIRONMENT_ID,
+    });
+    await client.installPack(WORKSPACE_ID, "acme", {
+      expectedManifestDigest: "a".repeat(64),
+      idempotencyKey: "44444444-4444-4444-8444-444444444444",
+    });
+    await client.previewPackUninstall(WORKSPACE_ID, "acme");
+    await client.uninstallPack(WORKSPACE_ID, "acme", {
+      expectedInstallationVersion: 1,
+      idempotencyKey: "55555555-5555-4555-8555-555555555555",
+    });
     await client.listPackInstallations(WORKSPACE_ID);
     await client.deletePack(WORKSPACE_ID, "acme");
     expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
@@ -1152,12 +1164,27 @@ describe("OpenGeniClient packs", () => {
         `POST /v1/workspaces/${WORKSPACE_ID}/packs`,
         `GET /v1/workspaces/${WORKSPACE_ID}/packs/acme`,
         `POST /v1/workspaces/${WORKSPACE_ID}/packs/acme/enable`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/packs/acme/installation-preview`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/packs/acme/install`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/packs/acme/uninstall-preview`,
+        `DELETE /v1/workspaces/${WORKSPACE_ID}/packs/acme/installation`,
         `GET /v1/workspaces/${WORKSPACE_ID}/packs/installations`,
         `DELETE /v1/workspaces/${WORKSPACE_ID}/packs/acme`,
       ],
     );
     expect(JSON.parse(requests[3]!.body!)).toEqual({
       environmentId: ENVIRONMENT_ID,
+    });
+    expect(JSON.parse(requests[4]!.body!)).toEqual({
+      variableSetId: ENVIRONMENT_ID,
+    });
+    expect(JSON.parse(requests[5]!.body!)).toEqual({
+      expectedManifestDigest: "a".repeat(64),
+      idempotencyKey: "44444444-4444-4444-8444-444444444444",
+    });
+    expect(JSON.parse(requests[7]!.body!)).toEqual({
+      expectedInstallationVersion: 1,
+      idempotencyKey: "55555555-5555-4555-8555-555555555555",
     });
   });
 });

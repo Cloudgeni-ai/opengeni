@@ -290,13 +290,13 @@ The resulting catalog row reports an installed/ready lifecycle (and retains `ena
 
 The runtime keeps these sources inspectable and separate:
 
-1. explicitly selected immutable curated-library skills;
-2. enabled capability-Pack skills;
-3. inline per-session skills;
+1. active immutable workspace Skill components, whether owned directly, by a Plugin, by a v2 Pack, or by a curated-library selection;
+2. legacy pre-v2 Pack inline Skills;
+3. inline per-session Skills;
 4. repository-local `.agents/skills` or `.claude/skills` discovered at their real mounted path; and
-5. native editable-artifact skills, only after the exact artifact runtime preflight succeeds.
+5. native editable-artifact Skills, only after the exact artifact runtime preflight succeeds.
 
-Pack skills retain explicit precedence when a Pack declares the same skill directory name as a curated entry. Duplicate or conflicting names fail instead of shadowing ambiguously. The effective runtime selection reports source, version, hash, and reason without exposing secrets.
+V2 Pack installation resolves names before mutation: identical case-insensitive name plus exact content is one shareable Skill component, while different content under an effective name is a blocking mismatch. It therefore never relies on runtime shadowing. Legacy Pack inline Skills retain their historical precedence only for installations with no frozen manifest snapshot/digest. The effective runtime selection reports source, version, hash, and reason without exposing secrets.
 
 Self-hosted/Connected Machine deployments may omit the curated artifact from their runtime image. Such a deployment omits the entry from discovery and cannot activate it; it does not download, substitute, or silently route the turn to Azure-hosted inference.
 
@@ -323,8 +323,8 @@ revision.
 The normalized v2 persistence model stores the immutable Plugin version, Skill
 facet, exact text files, workspace installation, and component owners under
 FORCE RLS. Runtime materialization revalidates the stored artifact and digest
-before adding it to the same lazy `.agents/` Skill index as curated, Pack,
-session, repository, and native artifact Skills. Uninstall is previewed and
+before adding it to the same lazy `.agents/` Skill index as other active
+workspace components, session, repository, and native artifact Skills. Uninstall is previewed and
 optimistic-concurrency fenced: removing the direct owner retains the Skill when
 a Plugin or Pack still owns it, and only the final owner removes it from later
 turns. The compatibility catalog/install rows are dual-written during the
@@ -384,7 +384,7 @@ If the MCP endpoint initializes successfully, the enabled MCP is returned by the
 Open the **Capabilities** view in the web app to:
 
 - filter and search the local catalog
-- install and configure role Packs
+- review, install/update/repair, and ownership-safely uninstall role Packs with explicit Rig/Variable Set selection
 - add and enable public MCP Registry results
 - add and connect manual MCP integrations through the MCP-only catalog form
 - detect, review, authenticate, and install custom OpenAPI or GraphQL APIs

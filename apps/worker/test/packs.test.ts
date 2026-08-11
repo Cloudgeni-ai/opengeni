@@ -3,6 +3,7 @@ import type { Settings } from "@opengeni/config";
 import { CapabilityPack } from "@opengeni/contracts";
 import {
   mergeRigDefaultVariableSetEnvironment,
+  packInstallationUsesLegacyRuntime,
   settingsWithPackSandboxImage,
   settingsWithRigImage,
   workspacePackRuntimeFromPacks,
@@ -33,6 +34,18 @@ const infraSkill = {
 };
 
 describe("workspace pack runtime resolution", () => {
+  test("loads inline runtime only for pre-V2 Pack installations", () => {
+    expect(
+      packInstallationUsesLegacyRuntime({ manifestSnapshot: null, manifestDigest: null }),
+    ).toBe(true);
+    expect(
+      packInstallationUsesLegacyRuntime({
+        manifestSnapshot: pack({ id: "v2-pack", skills: [infraSkill] }),
+        manifestDigest: "a".repeat(64),
+      }),
+    ).toBe(false);
+  });
+
   test("resolves to the global-image fallback when no pack declares a runtime", () => {
     expect(workspacePackRuntimeFromPacks([])).toEqual({
       sandboxImage: null,
@@ -69,7 +82,7 @@ describe("workspace pack runtime resolution", () => {
     ]);
   });
 
-  test("fails plainly when more than one enabled pack declares a sandbox image", () => {
+  test("fails plainly when more than one legacy Pack declares a sandbox image", () => {
     const packs = [
       pack({ id: "pack-b", sandboxImage: "example.com/b:1" }),
       pack({ id: "pack-a", sandboxImage: "example.com/a:1" }),
@@ -165,7 +178,7 @@ describe("pack sandbox image settings", () => {
   });
 });
 
-describe("rig sandbox image precedence (M3): rig > pack > deployment", () => {
+describe("rig image precedence over the pre-V2 Pack compatibility fallback", () => {
   const DEPLOYMENT = "opengeni-sandbox:local";
   const PACK = "ghcr.io/example/pack@sha256:pack";
   const RIG = "ghcr.io/example/rig@sha256:rig";

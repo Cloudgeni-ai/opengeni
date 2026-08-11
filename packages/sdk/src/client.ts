@@ -134,7 +134,10 @@ import type {
   SwapActiveSandboxRequest,
   SwapActiveSandboxResponse,
   ListWorkspaceMembersResponse,
+  InstallPackRequest,
+  PackInstallationPreview,
   PackInstallation,
+  PackUninstallPreview,
   LatencyMode,
   ReasoningEffort,
   RetainedScreenshotDownload,
@@ -147,12 +150,15 @@ import type {
   RetainedArtifactMetadata,
   RegisterCapabilityPackRequest,
   ResourceRef,
+  PreviewPackInstallationRequest,
   PreviewSkillImportRequest,
   ScheduledTask,
   ScheduledTaskRun,
   Session,
   SessionListResponse,
   UpdateSessionPinRequest,
+  UninstallPackRequest,
+  UninstallPackResult,
   SessionEvent,
   SessionEventCompactResult,
   SessionEventCompactResultOptions,
@@ -3561,6 +3567,53 @@ export class OpenGeniClient {
     return await this.requestJson<PackInstallation>(
       "POST",
       `/v1/workspaces/${workspaceId}/packs/${encodeURIComponent(packId)}/enable`,
+      request,
+    );
+  }
+
+  /** Resolve pinned components, Variable Set, and Rig requirements before installation. */
+  async previewPackInstallation(
+    workspaceId: string,
+    packId: string,
+    request: PreviewPackInstallationRequest = {},
+  ): Promise<PackInstallationPreview> {
+    return await this.requestJson<PackInstallationPreview>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/packs/${encodeURIComponent(packId)}/installation-preview`,
+      request,
+    );
+  }
+
+  /** Install, update, or repair a Pack from an exact previewed manifest. */
+  async installPack(
+    workspaceId: string,
+    packId: string,
+    request: InstallPackRequest,
+  ): Promise<PackInstallation> {
+    return await this.requestJson<PackInstallation>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/packs/${encodeURIComponent(packId)}/install`,
+      request,
+    );
+  }
+
+  /** Preview which Pack-owned components will be retained by other owners. */
+  async previewPackUninstall(workspaceId: string, packId: string): Promise<PackUninstallPreview> {
+    return await this.requestJson<PackUninstallPreview>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/packs/${encodeURIComponent(packId)}/uninstall-preview`,
+    );
+  }
+
+  /** Safely release Pack ownership and disable only now-ownerless components. */
+  async uninstallPack(
+    workspaceId: string,
+    packId: string,
+    request: UninstallPackRequest,
+  ): Promise<UninstallPackResult> {
+    return await this.requestJson<UninstallPackResult>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/packs/${encodeURIComponent(packId)}/installation`,
       request,
     );
   }

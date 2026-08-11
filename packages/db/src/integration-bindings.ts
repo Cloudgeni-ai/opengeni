@@ -4,6 +4,7 @@ import { stableJson } from "@opengeni/contracts";
 import { and, asc, eq, or, sql } from "drizzle-orm";
 
 import type { Database } from "./database";
+import { effectiveCapabilityOwnerSql } from "./capability-components";
 import * as schema from "./schema";
 
 export type IntegrationFeatureBindingOwner = {
@@ -247,6 +248,14 @@ export async function listIntegrationFeatureBindingOwners(
   db: Database,
   bindingId: string,
 ): Promise<IntegrationFeatureBindingOwner[]> {
+  return await loadIntegrationFeatureBindingOwners(db, bindingId, true);
+}
+
+async function loadIntegrationFeatureBindingOwners(
+  db: Database,
+  bindingId: string,
+  effectiveOnly: boolean,
+): Promise<IntegrationFeatureBindingOwner[]> {
   const rows = await db
     .select({
       kind: schema.integrationFeatureBindingOwners.ownerKind,
@@ -257,14 +266,12 @@ export async function listIntegrationFeatureBindingOwners(
     .where(
       and(
         eq(schema.integrationFeatureBindingOwners.bindingId, bindingId),
-        sql`(
-          ${schema.integrationFeatureBindingOwners.ownerKind} <> 'plugin'
-          or exists (
-            select 1 from ${schema.capabilityPluginInstallations} owning_plugin
-            where owning_plugin.id::text = ${schema.integrationFeatureBindingOwners.ownerId}
-              and owning_plugin.status = 'active'
-          )
-        )`,
+        effectiveOnly
+          ? effectiveCapabilityOwnerSql(
+              schema.integrationFeatureBindingOwners.ownerKind,
+              schema.integrationFeatureBindingOwners.ownerId,
+            )
+          : sql`true`,
       ),
     )
     .orderBy(
@@ -325,7 +332,9 @@ export async function removeIntegrationFeatureBindingOwner(
         eq(schema.integrationFeatureBindingOwners.ownerId, input.owner.id),
       ),
     );
-  const remainingOwners = await listIntegrationFeatureBindingOwners(db, binding.id);
+  // Pending or repairing owners are not runtime-effective yet, but they still
+  // preserve the shared binding so their operation can resume safely.
+  const remainingOwners = await loadIntegrationFeatureBindingOwners(db, binding.id, false);
   if (remainingOwners.length > 0) return { binding, remainingOwners };
   const [disabled] = await db
     .update(schema.integrationFeatureBindings)
@@ -355,7 +364,7 @@ export async function removeIntegrationFeatureBindingOwnersForOwner(
   const disabledBindingIds: string[] = [];
   const retainedBindingIds: string[] = [];
   for (const bindingId of [...new Set(deleted.map((row) => row.bindingId))]) {
-    const owners = await listIntegrationFeatureBindingOwners(db, bindingId);
+    const owners = await loadIntegrationFeatureBindingOwners(db, bindingId, false);
     if (owners.length > 0) {
       retainedBindingIds.push(bindingId);
       continue;
@@ -417,7 +426,7 @@ export async function integrationDefinitionHasBindingOwner(
   return Boolean(row);
 }
 
-async function addIntegrationFeatureBindingOwner(
+export async function addIntegrationFeatureBindingOwner(
   db: Database,
   bindingId: string,
   input: Pick<UpsertIntegrationFeatureBindingInput, "accountId" | "workspaceId" | "owner">,

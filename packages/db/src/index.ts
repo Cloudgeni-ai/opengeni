@@ -216,6 +216,7 @@ import { seedNewSessionDraftInTransaction } from "./new-session-drafts";
 import { runIdempotentPersistenceTransaction } from "./persistence-errors";
 import {
   assertCapabilityComponentVersionCanChange,
+  effectiveCapabilityOwnerSql,
   lockCapabilityComponentIdentity,
 } from "./capability-components";
 import {
@@ -1860,7 +1861,10 @@ export type TemporalScheduleCleanupClaim = {
 };
 
 export type DeleteWorkspaceIfQuiescentResult =
-  | { status: "deleted"; temporalScheduleCleanups: TemporalScheduleCleanupClaim[] }
+  | {
+      status: "deleted";
+      temporalScheduleCleanups: TemporalScheduleCleanupClaim[];
+    }
   | {
       status: "not_found" | "only_workspace" | "active_sessions" | "live_sandboxes";
     };
@@ -2023,7 +2027,9 @@ export async function deleteWorkspaceIfQuiescent(
           }
 
           const schedules = await tx
-            .select({ temporalScheduleId: schema.scheduledTasks.temporalScheduleId })
+            .select({
+              temporalScheduleId: schema.scheduledTasks.temporalScheduleId,
+            })
             .from(schema.scheduledTasks)
             .where(eq(schema.scheduledTasks.workspaceId, input.workspaceId))
             .for("update", { noWait: true });
@@ -3507,6 +3513,11 @@ export type CreatePackInstallationInput = {
   accountId: string;
   workspaceId: string;
   packId: string;
+  status?: PackInstallationStatus;
+  manifestSnapshot?: CapabilityPack | null;
+  manifestDigest?: string | null;
+  selectedRigId?: string | null;
+  installedBySubjectId?: string | null;
   metadata?: Record<string, unknown>;
 };
 
@@ -3904,7 +3915,7 @@ export type InstallPortableSkillInput = {
   subjectId: string;
   capabilityId: string;
   pluginKey: string;
-  source: "github" | "skills_sh";
+  source: "github" | "skills_sh" | "pack";
   sourceUrl: string;
   repositoryUrl: string;
   sourceCommit: string;
@@ -3932,7 +3943,7 @@ export type InstalledPortableSkill = {
   pluginInstallationId: string;
   facetInstallationId: string;
   installationVersion: number;
-  source: "github" | "skills_sh";
+  source: "github" | "skills_sh" | "pack";
   sourceUrl: string;
   sourceCommit: string;
   contentSha256: string;
@@ -4198,7 +4209,11 @@ export async function prepareEditableArtifactSourceFile(
           .limit(1);
         if (existing) {
           assertEditableArtifactSourceFileMatches(existing.file, existing.upload, input);
-          return { file: mapFile(existing.file), uploadId: existing.upload.id, created: false };
+          return {
+            file: mapFile(existing.file),
+            uploadId: existing.upload.id,
+            created: false,
+          };
         }
 
         const [file] = await tx
@@ -4323,7 +4338,9 @@ export function durableUserHistoryItem(
     content: renderTimelineAnnotationsForModel(prompt, annotations),
     ...(attachmentRefs.length > 0 ? { [MODEL_ATTACHMENT_REFS_FIELD]: attachmentRefs } : {}),
     ...(annotations.length > 0
-      ? { [MODEL_TIMELINE_ANNOTATIONS_FIELD]: TimelineAnnotations.parse(annotations) }
+      ? {
+          [MODEL_TIMELINE_ANNOTATIONS_FIELD]: TimelineAnnotations.parse(annotations),
+        }
       : {}),
   };
 }
@@ -4463,11 +4480,19 @@ export async function prepareRetainedScreenshotArtifact(
       await scopedDb.transaction(async (tx) => {
         await tx
           .insert(schema.workspaceScreenshotQuotas)
-          .values({ accountId: input.accountId, workspaceId: input.workspaceId })
-          .onConflictDoNothing({ target: schema.workspaceScreenshotQuotas.workspaceId });
+          .values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+          })
+          .onConflictDoNothing({
+            target: schema.workspaceScreenshotQuotas.workspaceId,
+          });
 
         const [existing] = await tx
-          .select({ artifact: schema.retainedScreenshotArtifacts, file: schema.files })
+          .select({
+            artifact: schema.retainedScreenshotArtifacts,
+            file: schema.files,
+          })
           .from(schema.retainedScreenshotArtifacts)
           .innerJoin(
             schema.files,
@@ -4713,7 +4738,10 @@ export async function getRetainedScreenshotArtifact(
 ): Promise<RetainedScreenshotArtifact | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
-      .select({ artifact: schema.retainedScreenshotArtifacts, file: schema.files })
+      .select({
+        artifact: schema.retainedScreenshotArtifacts,
+        file: schema.files,
+      })
       .from(schema.retainedScreenshotArtifacts)
       .innerJoin(
         schema.files,
@@ -4831,7 +4859,9 @@ export async function promoteRetainedScreenshotMaintenanceCleanup(
             eq(schema.retainedScreenshotArtifacts.maintenanceClaimId, input.claimId),
           ),
         )
-        .returning({ artifactId: schema.retainedScreenshotArtifacts.artifactId });
+        .returning({
+          artifactId: schema.retainedScreenshotArtifacts.artifactId,
+        });
       return updated !== undefined;
     },
   );
@@ -5042,7 +5072,10 @@ async function getRetainedScreenshotArtifactByWorkspace(
 ): Promise<RetainedScreenshotArtifact | null> {
   return await withRlsContext(db, { accountId, workspaceId }, async (scopedDb) => {
     const [row] = await scopedDb
-      .select({ artifact: schema.retainedScreenshotArtifacts, file: schema.files })
+      .select({
+        artifact: schema.retainedScreenshotArtifacts,
+        file: schema.files,
+      })
       .from(schema.retainedScreenshotArtifacts)
       .innerJoin(schema.files, eq(schema.files.id, schema.retainedScreenshotArtifacts.artifactId))
       .where(
@@ -5451,7 +5484,22 @@ export async function enablePackInstallation(
         const [row] = await scopedDb
           .update(schema.packInstallations)
           .set({
-            status: "active",
+            status: input.status ?? "active",
+            version: existing.version + 1,
+            manifestSnapshot:
+              input.manifestSnapshot === undefined
+                ? existing.manifestSnapshot
+                : input.manifestSnapshot === null
+                  ? null
+                  : (input.manifestSnapshot as unknown as Record<string, unknown>),
+            manifestDigest:
+              input.manifestDigest === undefined ? existing.manifestDigest : input.manifestDigest,
+            selectedRigId:
+              input.selectedRigId === undefined ? existing.selectedRigId : input.selectedRigId,
+            installedBySubjectId:
+              input.installedBySubjectId === undefined
+                ? existing.installedBySubjectId
+                : input.installedBySubjectId,
             metadata: input.metadata ?? existing.metadata,
             enabledAt: now,
             updatedAt: now,
@@ -5474,7 +5522,14 @@ export async function enablePackInstallation(
           accountId: input.accountId,
           workspaceId: input.workspaceId,
           packId: input.packId,
-          status: "active",
+          status: input.status ?? "active",
+          manifestSnapshot:
+            input.manifestSnapshot === undefined || input.manifestSnapshot === null
+              ? null
+              : (input.manifestSnapshot as unknown as Record<string, unknown>),
+          manifestDigest: input.manifestDigest ?? null,
+          selectedRigId: input.selectedRigId ?? null,
+          installedBySubjectId: input.installedBySubjectId ?? null,
           metadata: input.metadata ?? {},
         })
         .returning();
@@ -5531,6 +5586,7 @@ export async function updatePackInstallationStatus(
       .update(schema.packInstallations)
       .set({
         status,
+        version: sql`${schema.packInstallations.version} + 1`,
         updatedAt: new Date(),
       })
       .where(
@@ -6418,15 +6474,7 @@ export async function listInstalledPortableSkills(
             select 1
             from ${schema.capabilityComponentOwners} owner
             where owner.facet_installation_id = ${schema.capabilityFacetInstallations.id}
-              and (
-                owner.owner_kind <> 'plugin'
-                or exists (
-                  select 1 from ${schema.capabilityPluginInstallations} owning_plugin
-                  where owning_plugin.id::text = owner.owner_id
-                    and owning_plugin.workspace_id = ${workspaceId}
-                    and owning_plugin.status = 'active'
-                )
-              )
+              and ${effectiveCapabilityOwnerSql(sql`owner.owner_kind`, sql`owner.owner_id`)}
           )`,
         ),
       )
@@ -6655,14 +6703,10 @@ async function portableSkillOwners(
     .where(
       and(
         eq(schema.capabilityComponentOwners.facetInstallationId, facetInstallationId),
-        sql`(
-          ${schema.capabilityComponentOwners.ownerKind} <> 'plugin'
-          or exists (
-            select 1 from ${schema.capabilityPluginInstallations} owning_plugin
-            where owning_plugin.id::text = ${schema.capabilityComponentOwners.ownerId}
-              and owning_plugin.status = 'active'
-          )
-        )`,
+        effectiveCapabilityOwnerSql(
+          schema.capabilityComponentOwners.ownerKind,
+          schema.capabilityComponentOwners.ownerId,
+        ),
       ),
     )
     .orderBy(
@@ -6844,17 +6888,8 @@ export async function listEnabledMcpCapabilityServers(
               or exists (
                 select 1
                 from ${schema.capabilityComponentOwners} owner
-                left join ${schema.capabilityPluginInstallations} owning_plugin
-                  on owning_plugin.id::text = owner.owner_id
-                 and owner.owner_kind = 'plugin'
                 where owner.facet_installation_id::text = ${schema.capabilityInstallations.metadata} ->> 'facetInstallationId'
-                  and (
-                    owner.owner_kind <> 'plugin'
-                    or (
-                      owning_plugin.workspace_id = ${workspaceId}
-                      and owning_plugin.status = 'active'
-                    )
-                  )
+                  and ${effectiveCapabilityOwnerSql(sql`owner.owner_kind`, sql`owner.owner_id`)}
               )
             )`,
           ),
@@ -13426,7 +13461,10 @@ export async function getRigVersionById(
 
 export type RigProviderImageBuildClaim =
   | { status: "claimed"; image: RigProviderImage }
-  | { status: "ready" | "in_progress" | "unsupported" | "conflict"; image: RigProviderImage };
+  | {
+      status: "ready" | "in_progress" | "unsupported" | "conflict";
+      image: RigProviderImage;
+    };
 
 async function retainRigProviderImageArtifacts(
   db: Database,
@@ -34721,7 +34759,10 @@ export async function acquireSandboxLeaseReaperHold(
       await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
         const rows = await tx.execute<
-          LeaseRow & { reaper_hold_active: boolean; provider_hold_safe: boolean }
+          LeaseRow & {
+            reaper_hold_active: boolean;
+            provider_hold_safe: boolean;
+          }
         >(sql`
           select lease.*,
             (lease.reaper_hold_id is not null and lease.reaper_hold_until > now())
@@ -34757,16 +34798,28 @@ export async function acquireSandboxLeaseReaperHold(
           return { status: "held_by_other" as const, lease: mapLeaseRow(row) };
         }
         if (renewing && row.reaper_hold_reason !== reason) {
-          return { status: "reason_conflict" as const, lease: mapLeaseRow(row) };
+          return {
+            status: "reason_conflict" as const,
+            lease: mapLeaseRow(row),
+          };
         }
         if (row.archive_capture_id !== null || row.rotation_reason === "teardown_claim") {
-          return { status: "teardown_in_progress" as const, lease: mapLeaseRow(row) };
+          return {
+            status: "teardown_in_progress" as const,
+            lease: mapLeaseRow(row),
+          };
         }
         if (row.rotation_requested_at !== null) {
-          return { status: "rotation_in_progress" as const, lease: mapLeaseRow(row) };
+          return {
+            status: "rotation_in_progress" as const,
+            lease: mapLeaseRow(row),
+          };
         }
         if (!row.provider_hold_safe) {
-          return { status: "provider_deadline_conflict" as const, lease: mapLeaseRow(row) };
+          return {
+            status: "provider_deadline_conflict" as const,
+            lease: mapLeaseRow(row),
+          };
         }
         const held = await tx.execute<LeaseRow>(sql`
           update sandbox_leases set
@@ -34784,7 +34837,11 @@ export async function acquireSandboxLeaseReaperHold(
         if (!lease) {
           return { status: "lease_fenced" as const, lease: mapLeaseRow(row) };
         }
-        return { status: "held" as const, renewed: renewing, lease: mapLeaseRow(lease) };
+        return {
+          status: "held" as const,
+          renewed: renewing,
+          lease: mapLeaseRow(lease),
+        };
       }),
   );
 }
@@ -45175,7 +45232,10 @@ export async function settleSessionAttemptInterruptions(
                       turnGeneration: turn.executionGeneration,
                       turnAttemptId: attemptId,
                       turnAssociation: null,
-                      payload: { status: "idle", reason: "paused_recovery_settled" },
+                      payload: {
+                        status: "idle",
+                        reason: "paused_recovery_settled",
+                      },
                       clientEventId: `opengeni:paused-recovery-settled:${attemptId}`,
                       occurredAt: now,
                     },
@@ -50677,6 +50737,13 @@ function mapPackInstallation(row: typeof schema.packInstallations.$inferSelect):
     workspaceId: row.workspaceId,
     packId: row.packId,
     status: row.status as PackInstallationStatus,
+    version: row.version,
+    manifestSnapshot: row.manifestSnapshot
+      ? (row.manifestSnapshot as unknown as CapabilityPack)
+      : null,
+    manifestDigest: row.manifestDigest,
+    selectedRigId: row.selectedRigId,
+    installedBySubjectId: row.installedBySubjectId,
     metadata: row.metadata,
     enabledAt: row.enabledAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -51423,8 +51490,38 @@ export {
 } from "./connection-token-resolver";
 export {
   CapabilityComponentVersionConflictError,
+  cleanupOrphanedCapabilityComponents,
+  effectiveCapabilityOwnerSql,
   type CapabilityComponentOwnerIdentity,
 } from "./capability-components";
+export {
+  adoptPackComponentReferences,
+  finalizePackComponentOwnership,
+  listPackInstallationComponents,
+  PackComponentResolutionError,
+  previewPackComponentRelease,
+  recordPackInlineSkillComponent,
+  releasePackComponents,
+  resolvePackComponentReferences,
+  resolvePackInlineSkillReferences,
+  type PackInlineSkillRequirement,
+  type StoredPackInstallationComponent,
+} from "./pack-components";
+export {
+  deferPackInstallationOperation,
+  finalizePackInstallationOperation,
+  finalizePackUninstallOperation,
+  PackManifestChangedError,
+  PackOperationClaimLostError,
+  PackOperationInProgressError,
+  PackInstallationVersionConflictError,
+  PackInstallationVersionRequiredError,
+  PackOperationIdempotencyError,
+  preparePackInstallationOperation,
+  preparePackUninstallOperation,
+  touchPackInstallationOperation,
+  type PreparedPackInstallation,
+} from "./pack-installations";
 export {
   checkpointPluginPackageOperation,
   deferPluginPackageOperation,

@@ -1,8 +1,14 @@
 import type {
   CapabilityPack,
   EnablePackRequest,
+  InstallPackRequest,
+  PackInstallationPreview,
   PackInstallation,
+  PackUninstallPreview,
+  PreviewPackInstallationRequest,
   RegisterCapabilityPackRequest,
+  UninstallPackRequest,
+  UninstallPackResult,
   WorkspaceRegisteredPack,
 } from "@opengeni/sdk";
 import { useCallback } from "react";
@@ -28,7 +34,15 @@ export type UsePacksResult = {
   refresh: () => Promise<void>;
   /** Register (or replace) a workspace-scoped pack manifest. */
   register: (manifest: RegisterCapabilityPackRequest) => Promise<WorkspaceRegisteredPack | null>;
+  /** @deprecated Use previewInstallation + install for component/Rig-aware Packs. */
   enable: (packId: string, request?: EnablePackRequest) => Promise<PackInstallation | null>;
+  previewInstallation: (
+    packId: string,
+    request?: PreviewPackInstallationRequest,
+  ) => Promise<PackInstallationPreview | null>;
+  install: (packId: string, request: InstallPackRequest) => Promise<PackInstallation | null>;
+  previewUninstall: (packId: string) => Promise<PackUninstallPreview | null>;
+  uninstall: (packId: string, request: UninstallPackRequest) => Promise<UninstallPackResult | null>;
   /** Unregister a workspace-scoped pack (built-ins cannot be removed). */
   remove: (packId: string) => Promise<boolean>;
   mutating: boolean;
@@ -68,6 +82,39 @@ export function usePacks(options: UsePacksOptions = {}): UsePacksResult {
     [client, workspaceId, run, refresh],
   );
 
+  const previewInstallation = useCallback(
+    async (
+      packId: string,
+      request: PreviewPackInstallationRequest = {},
+    ): Promise<PackInstallationPreview | null> =>
+      await run(() => client.previewPackInstallation(workspaceId, packId, request)),
+    [client, workspaceId, run],
+  );
+
+  const install = useCallback(
+    async (packId: string, request: InstallPackRequest): Promise<PackInstallation | null> => {
+      const result = await run(() => client.installPack(workspaceId, packId, request));
+      if (result) await refresh();
+      return result;
+    },
+    [client, workspaceId, run, refresh],
+  );
+
+  const previewUninstall = useCallback(
+    async (packId: string): Promise<PackUninstallPreview | null> =>
+      await run(() => client.previewPackUninstall(workspaceId, packId)),
+    [client, workspaceId, run],
+  );
+
+  const uninstall = useCallback(
+    async (packId: string, request: UninstallPackRequest): Promise<UninstallPackResult | null> => {
+      const result = await run(() => client.uninstallPack(workspaceId, packId, request));
+      if (result) await refresh();
+      return result;
+    },
+    [client, workspaceId, run, refresh],
+  );
+
   const remove = useCallback(
     async (packId: string): Promise<boolean> => {
       const result = await run(async () => {
@@ -98,6 +145,10 @@ export function usePacks(options: UsePacksOptions = {}): UsePacksResult {
     refresh,
     register,
     enable,
+    previewInstallation,
+    install,
+    previewUninstall,
+    uninstall,
     remove,
     mutating,
     mutationError,

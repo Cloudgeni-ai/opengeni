@@ -59,6 +59,7 @@ import {
 import { validateVariableSetAttachment } from "./environments";
 import {
   assertPackSandboxImageCompatible,
+  capabilityPackRequiresInstallationPlan,
   listCapabilityPacks,
   listWorkspaceCapabilityPacks,
   resolveCapabilityPack,
@@ -335,6 +336,12 @@ export async function enableCapability(input: {
     const pack = await resolveCapabilityPack(input.db, input.workspaceId, packId);
     if (!pack) {
       throw new HTTPException(404, { message: "pack not found" });
+    }
+    if (capabilityPackRequiresInstallationPlan(pack)) {
+      throw new HTTPException(409, {
+        message:
+          "This Pack uses component or Rig requirements. Preview and install it through the Pack installation flow.",
+      });
     }
     await assertPackSandboxImageCompatible(input.db, input.workspaceId, pack);
     // The unified capability-enable path accepts an initial variableSet
@@ -764,6 +771,20 @@ export async function disableCapability(input: {
     });
   }
   if (item.kind === "pack") {
+    const packInstallation = await getPackInstallation(
+      input.db,
+      input.workspaceId,
+      packIdFromCapabilityId(item.id),
+    );
+    if (
+      packInstallation &&
+      (packInstallation.manifestDigest !== null || packInstallation.manifestSnapshot !== null)
+    ) {
+      throw new HTTPException(409, {
+        message:
+          "This Pack owns explicit components. Uninstall it through the Pack uninstall preview flow.",
+      });
+    }
     await updatePackInstallationStatus(
       input.db,
       input.workspaceId,

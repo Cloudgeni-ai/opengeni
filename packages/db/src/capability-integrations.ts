@@ -5,6 +5,7 @@ import { and, asc, eq, inArray, ne, or, sql } from "drizzle-orm";
 
 import {
   assertCapabilityComponentVersionCanChange,
+  effectiveCapabilityOwnerSql,
   lockCapabilityComponentIdentity,
 } from "./capability-components";
 import {
@@ -714,125 +715,128 @@ export async function listInstalledApiIntegrations(
   workspaceId: string,
   subjectId?: string,
 ): Promise<ApiIntegrationRuntime[]> {
-  const load = async (scopedDb: Database): Promise<ApiIntegrationRuntime[]> => {
-    const rows = await scopedDb
-      .select({
-        pluginKey: schema.capabilityPlugins.pluginKey,
-        pluginName: schema.capabilityPlugins.name,
-        pluginDescription: schema.capabilityPlugins.description,
-        manifest: schema.capabilityPluginVersions.manifest,
-        pluginInstallationId: schema.capabilityPluginInstallations.id,
-        installationVersion: schema.capabilityPluginInstallations.version,
-        apiFacetId: schema.capabilityApiFacets.facetId,
-        protocol: schema.capabilityApiFacets.protocol,
-        baseUrl: schema.capabilityApiFacets.baseUrl,
-        sourceUrl: schema.capabilityApiFacets.specSourceUrl,
-        authScheme: schema.capabilityApiFacets.authScheme,
-        providerDomain: schema.capabilityIntegrationFacets.providerDomain,
-        requiredScopes: schema.capabilityIntegrationFacets.requiredScopes,
-        instanceId: schema.integrationFeatureBindings.id,
-        instanceKey: schema.integrationFeatureBindings.bindingKey,
-        displayName: schema.integrationFeatureBindings.displayName,
-        instanceVersion: schema.integrationFeatureBindings.version,
-        runtimeKey: schema.integrationFeatureBindings.runtimeKey,
-        bindingConfig: schema.integrationFeatureBindings.config,
-        connectionId: schema.integrationFeatureBindings.connectionId,
-        revision: schema.integrationSpecRevisions.spec,
-      })
-      .from(schema.integrationFeatureBindings)
-      .innerJoin(
-        schema.integrationFeatureFacets,
-        eq(schema.integrationFeatureFacets.id, schema.integrationFeatureBindings.featureFacetId),
+  return subjectId
+    ? await withWorkspaceSubjectRls(
+        db,
+        workspaceId,
+        subjectId,
+        async (scopedDb) =>
+          await listInstalledApiIntegrationsInRlsContext(scopedDb, workspaceId, subjectId),
       )
-      .innerJoin(
-        schema.capabilityIntegrationFacets,
-        eq(
-          schema.capabilityIntegrationFacets.facetId,
-          schema.integrationFeatureFacets.integrationFacetId,
-        ),
-      )
-      .innerJoin(
-        schema.capabilityFacetInstallations,
-        eq(
-          schema.capabilityFacetInstallations.id,
-          schema.integrationFeatureBindings.integrationFacetInstallationId,
-        ),
-      )
-      .innerJoin(
-        schema.capabilityPluginInstallations,
-        eq(
-          schema.capabilityPluginInstallations.id,
-          schema.capabilityFacetInstallations.pluginInstallationId,
-        ),
-      )
-      .innerJoin(
-        schema.capabilityPlugins,
-        eq(schema.capabilityPlugins.id, schema.capabilityPluginInstallations.pluginId),
-      )
-      .innerJoin(
-        schema.capabilityPluginVersions,
-        eq(
-          schema.capabilityPluginVersions.id,
-          schema.capabilityPluginInstallations.pluginVersionId,
-        ),
-      )
-      .innerJoin(
-        schema.capabilityApiFacets,
-        eq(
-          schema.capabilityApiFacets.integrationFacetId,
-          schema.capabilityIntegrationFacets.facetId,
-        ),
-      )
-      .innerJoin(
-        schema.integrationSpecRevisions,
-        and(
-          eq(schema.integrationSpecRevisions.apiFacetId, schema.capabilityApiFacets.facetId),
-          eq(schema.integrationSpecRevisions.status, "active"),
-        ),
-      )
-      .where(
-        and(
-          eq(schema.capabilityPluginInstallations.workspaceId, workspaceId),
-          eq(schema.capabilityPluginInstallations.status, "active"),
-          eq(schema.capabilityFacetInstallations.status, "active"),
-          eq(schema.integrationFeatureFacets.kind, "tools"),
-          eq(schema.integrationFeatureBindings.status, "active"),
-          sql`${schema.integrationFeatureBindings.runtimeKey} is not null`,
-          sql`exists (
+    : await withWorkspaceRls(
+        db,
+        workspaceId,
+        async (scopedDb) => await listInstalledApiIntegrationsInRlsContext(scopedDb, workspaceId),
+      );
+}
+
+/**
+ * Read installed API Integrations from a transaction that already carries the
+ * workspace RLS context. This is intentionally separate from the public
+ * wrapper so compound Plugin/Pack lifecycle transactions never open a nested
+ * transaction or lose their advisory locks.
+ */
+export async function listInstalledApiIntegrationsInRlsContext(
+  scopedDb: Database,
+  workspaceId: string,
+  subjectId?: string,
+): Promise<ApiIntegrationRuntime[]> {
+  const rows = await scopedDb
+    .select({
+      pluginKey: schema.capabilityPlugins.pluginKey,
+      pluginName: schema.capabilityPlugins.name,
+      pluginDescription: schema.capabilityPlugins.description,
+      manifest: schema.capabilityPluginVersions.manifest,
+      pluginInstallationId: schema.capabilityPluginInstallations.id,
+      installationVersion: schema.capabilityPluginInstallations.version,
+      apiFacetId: schema.capabilityApiFacets.facetId,
+      protocol: schema.capabilityApiFacets.protocol,
+      baseUrl: schema.capabilityApiFacets.baseUrl,
+      sourceUrl: schema.capabilityApiFacets.specSourceUrl,
+      authScheme: schema.capabilityApiFacets.authScheme,
+      providerDomain: schema.capabilityIntegrationFacets.providerDomain,
+      requiredScopes: schema.capabilityIntegrationFacets.requiredScopes,
+      instanceId: schema.integrationFeatureBindings.id,
+      instanceKey: schema.integrationFeatureBindings.bindingKey,
+      displayName: schema.integrationFeatureBindings.displayName,
+      instanceVersion: schema.integrationFeatureBindings.version,
+      runtimeKey: schema.integrationFeatureBindings.runtimeKey,
+      bindingConfig: schema.integrationFeatureBindings.config,
+      connectionId: schema.integrationFeatureBindings.connectionId,
+      revision: schema.integrationSpecRevisions.spec,
+    })
+    .from(schema.integrationFeatureBindings)
+    .innerJoin(
+      schema.integrationFeatureFacets,
+      eq(schema.integrationFeatureFacets.id, schema.integrationFeatureBindings.featureFacetId),
+    )
+    .innerJoin(
+      schema.capabilityIntegrationFacets,
+      eq(
+        schema.capabilityIntegrationFacets.facetId,
+        schema.integrationFeatureFacets.integrationFacetId,
+      ),
+    )
+    .innerJoin(
+      schema.capabilityFacetInstallations,
+      eq(
+        schema.capabilityFacetInstallations.id,
+        schema.integrationFeatureBindings.integrationFacetInstallationId,
+      ),
+    )
+    .innerJoin(
+      schema.capabilityPluginInstallations,
+      eq(
+        schema.capabilityPluginInstallations.id,
+        schema.capabilityFacetInstallations.pluginInstallationId,
+      ),
+    )
+    .innerJoin(
+      schema.capabilityPlugins,
+      eq(schema.capabilityPlugins.id, schema.capabilityPluginInstallations.pluginId),
+    )
+    .innerJoin(
+      schema.capabilityPluginVersions,
+      eq(schema.capabilityPluginVersions.id, schema.capabilityPluginInstallations.pluginVersionId),
+    )
+    .innerJoin(
+      schema.capabilityApiFacets,
+      eq(schema.capabilityApiFacets.integrationFacetId, schema.capabilityIntegrationFacets.facetId),
+    )
+    .innerJoin(
+      schema.integrationSpecRevisions,
+      and(
+        eq(schema.integrationSpecRevisions.apiFacetId, schema.capabilityApiFacets.facetId),
+        eq(schema.integrationSpecRevisions.status, "active"),
+      ),
+    )
+    .where(
+      and(
+        eq(schema.capabilityPluginInstallations.workspaceId, workspaceId),
+        eq(schema.capabilityPluginInstallations.status, "active"),
+        eq(schema.capabilityFacetInstallations.status, "active"),
+        eq(schema.integrationFeatureFacets.kind, "tools"),
+        eq(schema.integrationFeatureBindings.status, "active"),
+        sql`${schema.integrationFeatureBindings.runtimeKey} is not null`,
+        sql`exists (
             select 1 from ${schema.capabilityComponentOwners} owner
             where owner.facet_installation_id = ${schema.capabilityFacetInstallations.id}
-              and (
-                owner.owner_kind <> 'plugin'
-                or exists (
-                  select 1 from ${schema.capabilityPluginInstallations} owning_plugin
-                  where owning_plugin.id::text = owner.owner_id
-                    and owning_plugin.workspace_id = ${workspaceId}
-                    and owning_plugin.status = 'active'
-                )
-              )
+              and ${effectiveCapabilityOwnerSql(sql`owner.owner_kind`, sql`owner.owner_id`)}
           )`,
-          sql`exists (
+        sql`exists (
             select 1 from ${schema.integrationFeatureBindingOwners} owner
             where owner.binding_id = ${schema.integrationFeatureBindings.id}
-              and (
-                owner.owner_kind <> 'plugin'
-                or exists (
-                  select 1 from ${schema.capabilityPluginInstallations} owning_plugin
-                  where owning_plugin.id::text = owner.owner_id
-                    and owning_plugin.workspace_id = ${workspaceId}
-                    and owning_plugin.status = 'active'
-                )
-              )
+              and ${effectiveCapabilityOwnerSql(sql`owner.owner_kind`, sql`owner.owner_id`)}
           )`,
-          sql`exists (
+        sql`exists (
             select 1 from ${schema.capabilityFacetInstallations} api_installation
             where api_installation.plugin_installation_id = ${schema.capabilityPluginInstallations.id}
               and api_installation.facet_id = ${schema.capabilityApiFacets.facetId}
               and api_installation.status = 'active'
           )`,
-          ...(subjectId
-            ? [
-                sql`(
+        ...(subjectId
+          ? [
+              sql`(
                   ${schema.integrationFeatureBindings.connectionId} is null
                   or exists (
                     select 1 from ${schema.connections} connection
@@ -840,82 +844,73 @@ export async function listInstalledApiIntegrations(
                       and (connection.subject_id is null or connection.subject_id = ${subjectId})
                   )
                 )`,
-              ]
-            : []),
-        ),
-      )
-      .orderBy(
-        asc(schema.capabilityPlugins.name),
-        asc(schema.integrationFeatureBindings.displayName),
-        asc(schema.integrationFeatureBindings.bindingKey),
-      );
+            ]
+          : []),
+      ),
+    )
+    .orderBy(
+      asc(schema.capabilityPlugins.name),
+      asc(schema.integrationFeatureBindings.displayName),
+      asc(schema.integrationFeatureBindings.bindingKey),
+    );
 
-    return rows.flatMap((row): ApiIntegrationRuntime[] => {
-      const revision = storedRevision(row.revision);
-      const config = objectValue(row.bindingConfig);
-      const manifest = objectValue(row.manifest);
-      const capabilityId = stringValue(manifest.capabilityId);
-      const presetId = stringValue(manifest.presetId) ?? null;
-      const serverId = row.runtimeKey;
-      if (!capabilityId || !serverId || row.protocol !== revision.protocol) {
-        throw new Error(
-          `Installed API Integration ${row.pluginKey} has invalid immutable metadata`,
-        );
-      }
-      const allowedTools =
-        stringArray(config.allowedTools) ?? revision.tools.map((tool) => tool.id);
-      const requireApproval =
-        stringArray(config.requireApproval) ??
-        revision.tools.filter((tool) => tool.approvalMode === "ask").map((tool) => tool.id);
-      const connectionKind = stringValue(config.connectionKind);
-      const subjectScope = stringValue(config.subjectScope);
-      const connectionRef: McpServerConnectionRef | null = row.connectionId
-        ? {
-            connectionId: row.connectionId,
-            providerDomain: row.providerDomain,
-            ...(stringValue(manifest.provider)
-              ? { provider: stringValue(manifest.provider)! }
-              : {}),
-            ...(connectionKind === "oauth2" ||
-            connectionKind === "api_key" ||
-            connectionKind === "app_install" ||
-            connectionKind === "delegated"
-              ? { kind: connectionKind }
-              : {}),
-            ...(row.requiredScopes.length > 0 ? { scopes: [...row.requiredScopes] } : {}),
-            subjectScope: subjectScope === "subject" ? "subject" : "workspace",
-          }
-        : null;
-      return [
-        {
-          capabilityId,
-          pluginKey: row.pluginKey,
-          pluginInstallationId: row.pluginInstallationId,
-          installationVersion: row.installationVersion,
-          instanceId: row.instanceId,
-          instanceKey: row.instanceKey,
-          displayName: row.displayName,
-          instanceVersion: row.instanceVersion,
-          serverId,
-          name: row.displayName,
-          description: row.pluginDescription,
-          protocol: revision.protocol,
-          presetId,
-          baseUrl: row.baseUrl,
-          sourceUrl: row.sourceUrl,
+  return rows.flatMap((row): ApiIntegrationRuntime[] => {
+    const revision = storedRevision(row.revision);
+    const config = objectValue(row.bindingConfig);
+    const manifest = objectValue(row.manifest);
+    const capabilityId = stringValue(manifest.capabilityId);
+    const presetId = stringValue(manifest.presetId) ?? null;
+    const serverId = row.runtimeKey;
+    if (!capabilityId || !serverId || row.protocol !== revision.protocol) {
+      throw new Error(`Installed API Integration ${row.pluginKey} has invalid immutable metadata`);
+    }
+    const allowedTools = stringArray(config.allowedTools) ?? revision.tools.map((tool) => tool.id);
+    const requireApproval =
+      stringArray(config.requireApproval) ??
+      revision.tools.filter((tool) => tool.approvalMode === "ask").map((tool) => tool.id);
+    const connectionKind = stringValue(config.connectionKind);
+    const subjectScope = stringValue(config.subjectScope);
+    const connectionRef: McpServerConnectionRef | null = row.connectionId
+      ? {
+          connectionId: row.connectionId,
           providerDomain: row.providerDomain,
-          authScheme: objectValue(row.authScheme),
-          connectionRef,
-          allowedTools,
-          requireApproval,
-          revision,
-        },
-      ];
-    });
-  };
-  return subjectId
-    ? await withWorkspaceSubjectRls(db, workspaceId, subjectId, load)
-    : await withWorkspaceRls(db, workspaceId, load);
+          ...(stringValue(manifest.provider) ? { provider: stringValue(manifest.provider)! } : {}),
+          ...(connectionKind === "oauth2" ||
+          connectionKind === "api_key" ||
+          connectionKind === "app_install" ||
+          connectionKind === "delegated"
+            ? { kind: connectionKind }
+            : {}),
+          ...(row.requiredScopes.length > 0 ? { scopes: [...row.requiredScopes] } : {}),
+          subjectScope: subjectScope === "subject" ? "subject" : "workspace",
+        }
+      : null;
+    return [
+      {
+        capabilityId,
+        pluginKey: row.pluginKey,
+        pluginInstallationId: row.pluginInstallationId,
+        installationVersion: row.installationVersion,
+        instanceId: row.instanceId,
+        instanceKey: row.instanceKey,
+        displayName: row.displayName,
+        instanceVersion: row.instanceVersion,
+        serverId,
+        name: row.displayName,
+        description: row.pluginDescription,
+        protocol: revision.protocol,
+        presetId,
+        baseUrl: row.baseUrl,
+        sourceUrl: row.sourceUrl,
+        providerDomain: row.providerDomain,
+        authScheme: objectValue(row.authScheme),
+        connectionRef,
+        allowedTools,
+        requireApproval,
+        revision,
+      },
+    ];
+  });
 }
 
 export async function getApiIntegrationUninstallPreview(
@@ -1517,14 +1512,10 @@ async function integrationOwners(
     .where(
       and(
         eq(schema.capabilityFacetInstallations.pluginInstallationId, pluginInstallationId),
-        sql`(
-          ${schema.capabilityComponentOwners.ownerKind} <> 'plugin'
-          or exists (
-            select 1 from ${schema.capabilityPluginInstallations} owning_plugin
-            where owning_plugin.id::text = ${schema.capabilityComponentOwners.ownerId}
-              and owning_plugin.status = 'active'
-          )
-        )`,
+        effectiveCapabilityOwnerSql(
+          schema.capabilityComponentOwners.ownerKind,
+          schema.capabilityComponentOwners.ownerId,
+        ),
       ),
     )
     .orderBy(

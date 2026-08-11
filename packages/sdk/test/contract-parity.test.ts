@@ -47,6 +47,16 @@ import {
   UninstallApiIntegrationRequest as ContractUninstallApiIntegrationRequest,
   UninstallApiIntegrationResult as ContractUninstallApiIntegrationResult,
   UpsertIntegrationFeatureRequest as ContractUpsertIntegrationFeatureRequest,
+  CapabilityPack as ContractCapabilityPack,
+  InstallPackRequest as ContractInstallPackRequest,
+  PackInstallation as ContractPackInstallation,
+  PackInstallationPreview as ContractPackInstallationPreview,
+  PackUninstallPreview as ContractPackUninstallPreview,
+  PreviewPackInstallationRequest as ContractPreviewPackInstallationRequest,
+  RegisterCapabilityPackRequest as ContractRegisterCapabilityPackRequest,
+  UninstallPackRequest as ContractUninstallPackRequest,
+  UninstallPackResult as ContractUninstallPackResult,
+  WorkspaceRegisteredPack as ContractWorkspaceRegisteredPack,
   InstallPluginRequest as ContractInstallPluginRequest,
   InstalledPlugin as ContractInstalledPlugin,
   ListInstalledPluginsResponse as ContractListInstalledPluginsResponse,
@@ -150,6 +160,16 @@ import type {
   UninstallApiIntegrationRequest,
   UninstallApiIntegrationResult,
   UpsertIntegrationFeatureRequest,
+  CapabilityPack,
+  InstallPackRequest,
+  PackInstallation,
+  PackInstallationPreview,
+  PackUninstallPreview,
+  PreviewPackInstallationRequest,
+  RegisterCapabilityPackRequest,
+  UninstallPackRequest,
+  UninstallPackResult,
+  WorkspaceRegisteredPack,
   InstallPluginRequest,
   InstalledPlugin,
   ListInstalledPluginsResponse,
@@ -773,6 +793,84 @@ describe("SDK / contracts parity", () => {
     expect(ContractPreviewPluginRequest.safeParse(previewRequest).success).toBe(true);
     expect(ContractInstallPluginRequest.safeParse(installRequest).success).toBe(true);
     expect(ContractUninstallPluginRequest.safeParse(uninstallRequest).success).toBe(true);
+  });
+
+  test("Pack composition request and response shapes match the contracts", () => {
+    const acceptManifest = (value: z.infer<typeof ContractCapabilityPack>): CapabilityPack => value;
+    const acceptRegistered = (
+      value: z.infer<typeof ContractWorkspaceRegisteredPack>,
+    ): WorkspaceRegisteredPack => value;
+    const acceptInstallation = (
+      value: z.infer<typeof ContractPackInstallation>,
+    ): PackInstallation => value;
+    const acceptPreview = (
+      value: z.infer<typeof ContractPackInstallationPreview>,
+    ): PackInstallationPreview => value;
+    const acceptUninstallPreview = (
+      value: z.infer<typeof ContractPackUninstallPreview>,
+    ): PackUninstallPreview => value;
+    const acceptUninstallResult = (
+      value: z.infer<typeof ContractUninstallPackResult>,
+    ): UninstallPackResult => value;
+    expect(
+      [
+        acceptManifest,
+        acceptRegistered,
+        acceptInstallation,
+        acceptPreview,
+        acceptUninstallPreview,
+        acceptUninstallResult,
+      ].every((fn) => typeof fn === "function"),
+    ).toBe(true);
+
+    const manifest: RegisterCapabilityPackRequest = {
+      id: "infrastructure/safe-operations",
+      name: "Safe infrastructure operations",
+      description: "Pinned infrastructure capabilities and runtime requirements.",
+      role: "infrastructure",
+      category: "operations",
+      version: "2.0.0",
+      components: [
+        {
+          key: "skill/safe-operations",
+          kind: "skill",
+          capabilityId: "skill:portable/safe-operations",
+          contentSha256: "a".repeat(64),
+        },
+        {
+          key: "integration/linear/main",
+          kind: "integration",
+          capabilityId: "integration:linear",
+          instanceKey: "main",
+          revisionId: "openapi:linear-v1",
+          contentSha256: "b".repeat(64),
+        },
+      ],
+      rig: {
+        required: true,
+        requireVerified: true,
+      },
+    };
+    const previewRequest: PreviewPackInstallationRequest = {
+      rigId: "00000000-0000-4000-8000-000000000300",
+      variableSetId: "00000000-0000-4000-8000-000000000301",
+    };
+    const installRequest: InstallPackRequest = {
+      expectedManifestDigest: "c".repeat(64),
+      expectedInstallationVersion: 3,
+      rigId: previewRequest.rigId,
+      variableSetId: previewRequest.variableSetId,
+      idempotencyKey: "00000000-0000-4000-8000-000000000302",
+      metadata: { source: "capabilities-ui" },
+    };
+    const uninstallRequest: UninstallPackRequest = {
+      expectedInstallationVersion: 4,
+      idempotencyKey: "00000000-0000-4000-8000-000000000303",
+    };
+    expect(ContractRegisterCapabilityPackRequest.safeParse(manifest).success).toBe(true);
+    expect(ContractPreviewPackInstallationRequest.safeParse(previewRequest).success).toBe(true);
+    expect(ContractInstallPackRequest.safeParse(installRequest).success).toBe(true);
+    expect(ContractUninstallPackRequest.safeParse(uninstallRequest).success).toBe(true);
   });
 
   test("multi-instance API Integration shapes match the contracts", () => {

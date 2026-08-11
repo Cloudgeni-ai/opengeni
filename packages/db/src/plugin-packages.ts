@@ -5,6 +5,8 @@ import { and, asc, eq, inArray, ne, or, sql } from "drizzle-orm";
 
 import {
   assertCapabilityComponentVersionCanChange,
+  cleanupOrphanedCapabilityComponents,
+  effectiveCapabilityOwnerSql,
   lockCapabilityComponentIdentity,
 } from "./capability-components";
 import { setSubjectRlsContext, withRlsContext, withWorkspaceRls, type Database } from "./database";
@@ -481,7 +483,7 @@ export async function finalizePluginPackageInstall(
               stale.map((row) => row.ownerId),
             ),
           );
-          await cleanupOrphanedComponents(
+          await cleanupOrphanedCapabilityComponents(
             tx,
             input.workspaceId,
             stale.map((row) => row.facetInstallationId),
@@ -936,7 +938,7 @@ export async function uninstallPluginPackage(
             ),
           )
           .returning({ facetInstallationId: schema.capabilityComponentOwners.facetInstallationId });
-        await cleanupOrphanedComponents(
+        await cleanupOrphanedCapabilityComponents(
           tx,
           input.workspaceId,
           owned.map((row) => row.facetInstallationId),
@@ -1081,6 +1083,10 @@ async function pluginOwnedComponents(
       .where(
         and(
           inArray(schema.capabilityComponentOwners.facetInstallationId, component.facetIds),
+          effectiveCapabilityOwnerSql(
+            schema.capabilityComponentOwners.ownerKind,
+            schema.capabilityComponentOwners.ownerId,
+          ),
           or(
             ne(schema.capabilityComponentOwners.ownerKind, "plugin"),
             ne(schema.capabilityComponentOwners.ownerId, ownerPluginInstallationId),
@@ -1094,63 +1100,6 @@ async function pluginOwnedComponents(
     });
   }
   return result;
-}
-
-async function cleanupOrphanedComponents(
-  db: Database,
-  workspaceId: string,
-  facetInstallationIds: string[],
-): Promise<void> {
-  const uniqueIds = [...new Set(facetInstallationIds)];
-  if (uniqueIds.length === 0) return;
-  const orphanRows = await db
-    .select({
-      facetInstallationId: schema.capabilityFacetInstallations.id,
-      pluginInstallationId: schema.capabilityFacetInstallations.pluginInstallationId,
-    })
-    .from(schema.capabilityFacetInstallations)
-    .where(
-      and(
-        inArray(schema.capabilityFacetInstallations.id, uniqueIds),
-        sql`not exists (
-          select 1 from ${schema.capabilityComponentOwners} owner
-          where owner.facet_installation_id = ${schema.capabilityFacetInstallations.id}
-        )`,
-      ),
-    );
-  if (orphanRows.length === 0) return;
-  await db.delete(schema.capabilityFacetInstallations).where(
-    inArray(
-      schema.capabilityFacetInstallations.id,
-      orphanRows.map((row) => row.facetInstallationId),
-    ),
-  );
-  const childInstallations = [...new Set(orphanRows.map((row) => row.pluginInstallationId))];
-  for (const childInstallationId of childInstallations) {
-    const [remaining] = await db
-      .select({ id: schema.capabilityFacetInstallations.id })
-      .from(schema.capabilityFacetInstallations)
-      .where(eq(schema.capabilityFacetInstallations.pluginInstallationId, childInstallationId))
-      .limit(1);
-    if (remaining) continue;
-    await db
-      .update(schema.capabilityPluginInstallations)
-      .set({
-        status: "disabled",
-        version: sql`${schema.capabilityPluginInstallations.version} + 1`,
-        updatedAt: new Date(),
-      })
-      .where(eq(schema.capabilityPluginInstallations.id, childInstallationId));
-    await db
-      .update(schema.capabilityInstallations)
-      .set({ status: "disabled", updatedAt: new Date() })
-      .where(
-        and(
-          eq(schema.capabilityInstallations.workspaceId, workspaceId),
-          sql`${schema.capabilityInstallations.metadata} ->> 'pluginInstallationId' = ${childInstallationId}`,
-        ),
-      );
-  }
 }
 
 async function completeInlineOperation(

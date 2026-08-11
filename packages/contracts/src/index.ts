@@ -6215,11 +6215,86 @@ function isSafePackSkillRelativePath(path: string): boolean {
     .every((segment) => segment.length > 0 && segment !== "." && segment !== "..");
 }
 
-const CapabilityPackVariableSet = z.object({
-  description: z.string().min(1),
-  requiredVariables: z.array(VariableSetVariableName).default([]),
-  required: z.boolean().default(false),
-});
+const CapabilityPackVariableSet = z
+  .object({
+    description: z.string().min(1).max(2048),
+    requiredVariables: z.array(VariableSetVariableName).max(256).default([]),
+    required: z.boolean().default(false),
+  })
+  .strict();
+
+const CapabilityPackComponentKey = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$/);
+
+const CapabilityPackInstanceKey = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$/);
+
+/**
+ * Immutable requirements adopted by a Pack installation. The manifest names
+ * portable identities; installation resolves them to exact workspace-local
+ * component rows and records Pack ownership in the shared component ledger.
+ */
+export const CapabilityPackComponentReference = z.discriminatedUnion("kind", [
+  z
+    .object({
+      key: CapabilityPackComponentKey,
+      kind: z.literal("plugin"),
+      pluginKey: z.string().min(1).max(200),
+      version: z.string().min(1).max(128),
+      manifestDigest: z.string().regex(/^[0-9a-f]{64}$/),
+      required: z.boolean().default(true),
+    })
+    .strict(),
+  z
+    .object({
+      key: CapabilityPackComponentKey,
+      kind: z.literal("skill"),
+      capabilityId: z.string().min(1).max(512),
+      contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
+      required: z.boolean().default(true),
+    })
+    .strict(),
+  z
+    .object({
+      key: CapabilityPackComponentKey,
+      kind: z.literal("integration"),
+      capabilityId: z.string().min(1).max(512),
+      instanceKey: CapabilityPackInstanceKey,
+      revisionId: z.string().min(1).max(512),
+      contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
+      required: z.boolean().default(true),
+    })
+    .strict(),
+  z
+    .object({
+      key: CapabilityPackComponentKey,
+      kind: z.literal("feature"),
+      capabilityId: z.string().min(1).max(512),
+      instanceKey: CapabilityPackInstanceKey,
+      featureKey: z.string().min(1).max(200),
+      bindingKey: CapabilityPackInstanceKey,
+      configDigest: z.string().regex(/^[0-9a-f]{64}$/),
+      required: z.boolean().default(true),
+    })
+    .strict(),
+]);
+export type CapabilityPackComponentReference = z.infer<typeof CapabilityPackComponentReference>;
+
+export const CapabilityPackRigRequirement = z
+  .object({
+    description: z.string().min(1).max(2048).optional(),
+    required: z.boolean().default(true),
+    rigId: z.string().uuid().optional(),
+    requireVerified: z.boolean().default(false),
+  })
+  .strict();
+export type CapabilityPackRigRequirement = z.infer<typeof CapabilityPackRigRequirement>;
 
 export const CapabilityPack = z.preprocess(
   (input) => {
@@ -6249,15 +6324,19 @@ export const CapabilityPack = z.preprocess(
   },
   z
     .object({
-      id: z.string().min(1),
-      name: z.string().min(1),
-      description: z.string().min(1),
-      role: z.string().min(1),
-      category: z.string().min(1),
-      version: z.string().min(1),
-      // Container image ref (digest-pinned recommended) the pack's sessions run
-      // in. At most one enabled pack per workspace may declare one; with none,
-      // sessions use the deployment-wide image settings.
+      id: z
+        .string()
+        .min(1)
+        .max(100)
+        .regex(/^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$/),
+      name: z.string().min(1).max(200),
+      description: z.string().min(1).max(4096),
+      role: z.string().min(1).max(128),
+      category: z.string().min(1).max(128),
+      version: z.string().min(1).max(128),
+      // Legacy manifest compatibility. V2 installation resolves this image to
+      // an explicit Rig requirement; the Pack no longer changes workspace
+      // runtime settings directly.
       sandboxImage: z.string().trim().min(1).max(512).optional(),
       // Optional provider-native immutable identities for the exact logical
       // sandboxImage above. These avoid re-importing a private registry image on
@@ -6277,7 +6356,8 @@ export const CapabilityPack = z.preprocess(
         })
         .strict()
         .optional(),
-      // Skills delivered into the sandbox skill index when the pack is enabled.
+      // Legacy inline Skills are migrated into immutable Skill components by
+      // the V2 Pack installer. They are not loaded directly by V2 runtime.
       skills: z
         .array(CapabilityPackSkill)
         .max(32)
@@ -6296,6 +6376,8 @@ export const CapabilityPack = z.preprocess(
           });
         })
         .default([]),
+      components: z.array(CapabilityPackComponentReference).max(128).default([]),
+      rig: CapabilityPackRigRequirement.optional(),
       tools: z.array(ToolRef).default([]),
       connectors: z.array(CapabilityPackConnector).default([]),
       knowledge: z.array(CapabilityPackKnowledge).default([]),
@@ -6304,6 +6386,28 @@ export const CapabilityPack = z.preprocess(
       metadata: z.record(z.string(), z.unknown()).default({}),
     })
     .superRefine((pack, ctx) => {
+      const componentKeys = new Set<string>();
+      pack.components.forEach((component, index) => {
+        if (componentKeys.has(component.key)) {
+          ctx.addIssue({
+            code: "custom",
+            message: `duplicate Pack component key: ${component.key}`,
+            path: ["components", index, "key"],
+          });
+        }
+        componentKeys.add(component.key);
+      });
+      pack.skills.forEach((skill, index) => {
+        const key = `inline-skill/${skill.name.toLowerCase()}`;
+        if (componentKeys.has(key)) {
+          ctx.addIssue({
+            code: "custom",
+            message: `Pack component key conflicts with inline Skill ${skill.name}: ${key}`,
+            path: ["skills", index, "name"],
+          });
+        }
+        componentKeys.add(key);
+      });
       if (!pack.sandboxProviderImages?.modal) {
         return;
       }
@@ -6341,7 +6445,12 @@ export const WorkspaceRegisteredPack = z.object({
 });
 export type WorkspaceRegisteredPack = z.infer<typeof WorkspaceRegisteredPack>;
 
-export const PackInstallationStatus = z.enum(["active", "disabled"]);
+export const PackInstallationStatus = z.enum([
+  "installing",
+  "active",
+  "needs_attention",
+  "disabled",
+]);
 export type PackInstallationStatus = z.infer<typeof PackInstallationStatus>;
 
 export const PackInstallation = z.object({
@@ -6350,6 +6459,14 @@ export const PackInstallation = z.object({
   workspaceId: z.string().uuid(),
   packId: z.string().min(1),
   status: PackInstallationStatus,
+  version: z.number().int().positive(),
+  manifestSnapshot: CapabilityPack.nullable(),
+  manifestDigest: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/)
+    .nullable(),
+  selectedRigId: z.string().uuid().nullable(),
+  installedBySubjectId: z.string().min(1).max(1024).nullable(),
   metadata: z.record(z.string(), z.unknown()),
   enabledAt: z.string(),
   updatedAt: z.string(),
@@ -6362,6 +6479,116 @@ export const EnablePackRequest = withVariableSetIdAlias({
   metadata: z.record(z.string(), z.unknown()).default({}),
 });
 export type EnablePackRequest = z.infer<typeof EnablePackRequest>;
+
+export const PackComponentResolutionStatus = z.enum(["ready", "missing", "mismatch"]);
+export type PackComponentResolutionStatus = z.infer<typeof PackComponentResolutionStatus>;
+
+export const PackComponentResolution = z
+  .object({
+    key: CapabilityPackComponentKey,
+    kind: z.enum(["plugin", "skill", "integration", "feature", "inline_skill"]),
+    capabilityId: z.string().min(1).max(512),
+    required: z.boolean(),
+    status: PackComponentResolutionStatus,
+    expectedDigest: z.string().regex(/^[0-9a-f]{64}$/),
+    actualDigest: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .nullable(),
+    resolvedId: z.string().min(1).max(512).nullable(),
+    label: z.string().min(1).max(200),
+  })
+  .strict();
+export type PackComponentResolution = z.infer<typeof PackComponentResolution>;
+
+export const PackRigResolution = z
+  .object({
+    required: z.boolean(),
+    status: z.enum(["not_required", "ready", "missing", "mismatch", "unverified"]),
+    requestedRigId: z.string().uuid().nullable(),
+    rigId: z.string().uuid().nullable(),
+    rigVersionId: z.string().uuid().nullable(),
+    name: z.string().min(1).max(200).nullable(),
+    image: z.string().min(1).max(512).nullable(),
+  })
+  .strict();
+export type PackRigResolution = z.infer<typeof PackRigResolution>;
+
+export const PreviewPackInstallationRequest = z
+  .object({
+    rigId: z.string().uuid().optional(),
+    variableSetId: z.string().uuid().optional(),
+  })
+  .strict();
+export type PreviewPackInstallationRequest = z.infer<typeof PreviewPackInstallationRequest>;
+
+export const PackInstallationPreview = z
+  .object({
+    packId: z.string().min(1),
+    packVersion: z.string().min(1),
+    manifestDigest: z.string().regex(/^[0-9a-f]{64}$/),
+    installationVersion: z.number().int().positive().nullable(),
+    action: z.enum(["install", "update", "repair"]),
+    ready: z.boolean(),
+    blockers: z.array(z.string().min(1).max(500)).max(256),
+    components: z.array(PackComponentResolution).max(160),
+    rig: PackRigResolution,
+    variableSetId: z.string().uuid().nullable(),
+    legacyInlineSkillCount: z.number().int().nonnegative().max(32),
+    legacySandboxImage: z.string().min(1).max(512).nullable(),
+  })
+  .strict();
+export type PackInstallationPreview = z.infer<typeof PackInstallationPreview>;
+
+export const InstallPackRequest = z
+  .object({
+    expectedManifestDigest: z.string().regex(/^[0-9a-f]{64}$/),
+    expectedInstallationVersion: z.number().int().positive().optional(),
+    rigId: z.string().uuid().optional(),
+    variableSetId: z.string().uuid().optional(),
+    idempotencyKey: z.string().uuid(),
+    metadata: z.record(z.string(), z.unknown()).default({}),
+  })
+  .strict();
+export type InstallPackRequest = z.infer<typeof InstallPackRequest>;
+
+export const PackUninstallPreview = z
+  .object({
+    packId: z.string().min(1),
+    installed: z.boolean(),
+    installationVersion: z.number().int().positive().nullable(),
+    components: z
+      .array(
+        z
+          .object({
+            key: CapabilityPackComponentKey,
+            kind: z.enum(["plugin", "skill", "integration", "feature", "inline_skill"]),
+            capabilityId: z.string().min(1).max(512),
+            retainedByOtherOwners: z.boolean(),
+          })
+          .strict(),
+      )
+      .max(160),
+  })
+  .strict();
+export type PackUninstallPreview = z.infer<typeof PackUninstallPreview>;
+
+export const UninstallPackRequest = z
+  .object({
+    expectedInstallationVersion: z.number().int().positive(),
+    idempotencyKey: z.string().uuid(),
+  })
+  .strict();
+export type UninstallPackRequest = z.infer<typeof UninstallPackRequest>;
+
+export const UninstallPackResult = z
+  .object({
+    packId: z.string().min(1),
+    status: z.enum(["not_installed", "uninstalled"]),
+    retainedComponents: z.array(z.string().min(1).max(512)).max(160),
+  })
+  .strict();
+export type UninstallPackResult = z.infer<typeof UninstallPackResult>;
 
 export const SocialProvider = z.enum([
   "x",
@@ -11449,7 +11676,7 @@ export type WorkspaceModelCatalogResponse = z.infer<typeof WorkspaceModelCatalog
  * that rollout boundary. Mutating clients send this value in
  * `x-opengeni-api-contract`; the API rejects any other value before routing.
  */
-export const OPENGENI_API_CONTRACT_REVISION = "2026-08-drive-facet-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-08-pack-components-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;

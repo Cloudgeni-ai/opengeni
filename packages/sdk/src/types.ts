@@ -2622,7 +2622,7 @@ export type ClientAuthConfig =
 
 // Kept value-identical to @opengeni/contracts and pinned by the SDK contract
 // parity suite. The SDK has no runtime dependency on the Zod contracts package.
-export const OPENGENI_API_CONTRACT_REVISION = "2026-08-drive-facet-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-08-pack-components-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
@@ -3993,6 +3993,49 @@ export type CapabilityPackVariableSetSpec = {
   required: boolean;
 };
 
+export type CapabilityPackComponentReference =
+  | {
+      key: string;
+      kind: "plugin";
+      pluginKey: string;
+      version: string;
+      manifestDigest: string;
+      required: boolean;
+    }
+  | {
+      key: string;
+      kind: "skill";
+      capabilityId: string;
+      contentSha256: string;
+      required: boolean;
+    }
+  | {
+      key: string;
+      kind: "integration";
+      capabilityId: string;
+      instanceKey: string;
+      revisionId: string;
+      contentSha256: string;
+      required: boolean;
+    }
+  | {
+      key: string;
+      kind: "feature";
+      capabilityId: string;
+      instanceKey: string;
+      featureKey: string;
+      bindingKey: string;
+      configDigest: string;
+      required: boolean;
+    };
+
+export type CapabilityPackRigRequirement = {
+  description?: string | undefined;
+  required: boolean;
+  rigId?: string | undefined;
+  requireVerified: boolean;
+};
+
 export type CapabilityPack = {
   id: string;
   name: string;
@@ -4007,6 +4050,8 @@ export type CapabilityPack = {
       }
     | undefined;
   skills: CapabilityPackSkill[];
+  components: CapabilityPackComponentReference[];
+  rig?: CapabilityPackRigRequirement | undefined;
   tools: ToolRef[];
   connectors: CapabilityPackConnector[];
   knowledge: CapabilityPackKnowledge[];
@@ -4035,6 +4080,52 @@ export type RegisterCapabilityPackRequest = {
         description?: string | undefined;
         files: CapabilityPackSkillFile[];
       }[]
+    | undefined;
+  components?:
+    | (
+        | {
+            key: string;
+            kind: "plugin";
+            pluginKey: string;
+            version: string;
+            manifestDigest: string;
+            required?: boolean | undefined;
+          }
+        | {
+            key: string;
+            kind: "skill";
+            capabilityId: string;
+            contentSha256: string;
+            required?: boolean | undefined;
+          }
+        | {
+            key: string;
+            kind: "integration";
+            capabilityId: string;
+            instanceKey: string;
+            revisionId: string;
+            contentSha256: string;
+            required?: boolean | undefined;
+          }
+        | {
+            key: string;
+            kind: "feature";
+            capabilityId: string;
+            instanceKey: string;
+            featureKey: string;
+            bindingKey: string;
+            configDigest: string;
+            required?: boolean | undefined;
+          }
+      )[]
+    | undefined;
+  rig?:
+    | {
+        description?: string | undefined;
+        required?: boolean | undefined;
+        rigId?: string | undefined;
+        requireVerified?: boolean | undefined;
+      }
     | undefined;
   tools?: ToolRef[] | undefined;
   connectors?:
@@ -4087,7 +4178,7 @@ export type WorkspaceRegisteredPack = {
   updatedAt: string;
 };
 
-export type PackInstallationStatus = "active" | "disabled";
+export type PackInstallationStatus = "installing" | "active" | "needs_attention" | "disabled";
 
 export type PackInstallation = {
   id: string;
@@ -4095,6 +4186,11 @@ export type PackInstallation = {
   workspaceId: string;
   packId: string;
   status: PackInstallationStatus;
+  version: number;
+  manifestSnapshot: CapabilityPack | null;
+  manifestDigest: string | null;
+  selectedRigId: string | null;
+  installedBySubjectId: string | null;
   metadata: Record<string, unknown>;
   enabledAt: string;
   updatedAt: string;
@@ -4105,6 +4201,82 @@ export type EnablePackRequest = {
   /** @deprecated use variableSetId */
   environmentId?: string | undefined;
   metadata?: Record<string, unknown> | undefined;
+};
+
+export type PackComponentResolutionStatus = "ready" | "missing" | "mismatch";
+
+export type PackComponentResolution = {
+  key: string;
+  kind: "plugin" | "skill" | "integration" | "feature" | "inline_skill";
+  capabilityId: string;
+  required: boolean;
+  status: PackComponentResolutionStatus;
+  expectedDigest: string;
+  actualDigest: string | null;
+  resolvedId: string | null;
+  label: string;
+};
+
+export type PackRigResolution = {
+  required: boolean;
+  status: "not_required" | "ready" | "missing" | "mismatch" | "unverified";
+  requestedRigId: string | null;
+  rigId: string | null;
+  rigVersionId: string | null;
+  name: string | null;
+  image: string | null;
+};
+
+export type PreviewPackInstallationRequest = {
+  rigId?: string | undefined;
+  variableSetId?: string | undefined;
+};
+
+export type PackInstallationPreview = {
+  packId: string;
+  packVersion: string;
+  manifestDigest: string;
+  installationVersion: number | null;
+  action: "install" | "update" | "repair";
+  ready: boolean;
+  blockers: string[];
+  components: PackComponentResolution[];
+  rig: PackRigResolution;
+  variableSetId: string | null;
+  legacyInlineSkillCount: number;
+  legacySandboxImage: string | null;
+};
+
+export type InstallPackRequest = {
+  expectedManifestDigest: string;
+  expectedInstallationVersion?: number | undefined;
+  rigId?: string | undefined;
+  variableSetId?: string | undefined;
+  idempotencyKey: string;
+  metadata?: Record<string, unknown> | undefined;
+};
+
+export type PackUninstallPreview = {
+  packId: string;
+  installed: boolean;
+  installationVersion: number | null;
+  components: Array<{
+    key: string;
+    kind: "plugin" | "skill" | "integration" | "feature" | "inline_skill";
+    capabilityId: string;
+    retainedByOtherOwners: boolean;
+  }>;
+};
+
+export type UninstallPackRequest = {
+  expectedInstallationVersion: number;
+  idempotencyKey: string;
+};
+
+export type UninstallPackResult = {
+  packId: string;
+  status: "not_installed" | "uninstalled";
+  retainedComponents: string[];
 };
 
 export type ListPacksResponse = {

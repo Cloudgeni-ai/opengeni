@@ -6213,6 +6213,13 @@ export const packInstallations = pgTable(
       .references(() => workspaces.id, { onDelete: "cascade" }),
     packId: text("pack_id").notNull(),
     status: text("status").notNull().default("active"),
+    version: integer("version").notNull().default(1),
+    manifestSnapshot: jsonb("manifest_snapshot").$type<Record<string, unknown>>(),
+    manifestDigest: text("manifest_digest"),
+    selectedRigId: uuid("selected_rig_id").references(() => rigs.id, {
+      onDelete: "set null",
+    }),
+    installedBySubjectId: text("installed_by_subject_id"),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
     enabledAt: timestamp("enabled_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -6223,6 +6230,44 @@ export const packInstallations = pgTable(
       table.packId,
     ),
     status: index("pack_installations_workspace_status_idx").on(table.workspaceId, table.status),
+    selectedRig: index("pack_installations_workspace_rig_idx")
+      .on(table.workspaceId, table.selectedRigId)
+      .where(sql`${table.selectedRigId} is not null`),
+  }),
+);
+
+export const packInstallationComponents = pgTable(
+  "pack_installation_components",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    packInstallationId: uuid("pack_installation_id")
+      .notNull()
+      .references(() => packInstallations.id, { onDelete: "cascade" }),
+    componentKey: text("component_key").notNull(),
+    kind: text("kind").notNull(),
+    capabilityId: text("capability_id").notNull(),
+    resolvedId: text("resolved_id").notNull(),
+    digest: text("digest").notNull(),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    installationKey: uniqueIndex("pack_installation_components_pack_key_uq").on(
+      table.packInstallationId,
+      table.componentKey,
+    ),
+    workspaceCapability: index("pack_installation_components_workspace_capability_idx").on(
+      table.workspaceId,
+      table.kind,
+      table.capabilityId,
+    ),
   }),
 );
 

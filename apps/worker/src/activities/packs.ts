@@ -1,4 +1,4 @@
-import { CapabilityPack } from "@opengeni/contracts";
+import { CapabilityPack, type PackInstallation } from "@opengeni/contracts";
 import {
   getWorkspace,
   getWorkspacePack,
@@ -23,9 +23,8 @@ export {
 } from "./sandbox-images";
 
 /**
- * The pack-scoped runtime for a workspace: the sandbox image its sessions run
- * in (when an enabled pack declares one) and the pack skills that join the
- * sandbox skill index.
+ * Legacy pack-scoped runtime compatibility. V2 Pack installations own ordinary
+ * Skill components and select an explicit Rig; they contribute nothing here.
  */
 export type WorkspacePackRuntime = {
   sandboxImage: string | null;
@@ -53,11 +52,11 @@ type SkillLibraryInstallationMetadata = {
 };
 
 /**
- * Resolves the pack-scoped runtime from the workspace's active pack
- * installations. Only registered (manifest-backed) packs can contribute a
- * sandbox image or skills; built-in packs never declare either (enforced by a
- * test on the built-in catalog), so their installations are skipped here
- * without consulting the API's built-in pack list.
+ * Resolves only pre-V2 active Pack installations. A frozen manifest/digest is
+ * the protocol marker for V2: inline Skills were migrated into the ordinary
+ * Skill ledger and sandboxImage was resolved to selectedRigId during install,
+ * so reading either field directly here would duplicate ownership and silently
+ * override session compute.
  */
 export async function resolveWorkspacePackRuntime(
   db: Database,
@@ -70,6 +69,9 @@ export async function resolveWorkspacePackRuntime(
   }
   const packs: CapabilityPack[] = [];
   for (const installation of active) {
+    if (!packInstallationUsesLegacyRuntime(installation)) {
+      continue;
+    }
     const registration = await getWorkspacePack(db, workspaceId, installation.packId);
     if (!registration) {
       continue;
@@ -80,6 +82,12 @@ export async function resolveWorkspacePackRuntime(
     }
   }
   return workspacePackRuntimeFromPacks(packs);
+}
+
+export function packInstallationUsesLegacyRuntime(
+  installation: Pick<PackInstallation, "manifestSnapshot" | "manifestDigest">,
+): boolean {
+  return installation.manifestSnapshot === null && installation.manifestDigest === null;
 }
 
 /**
@@ -198,10 +206,9 @@ function stringMetadata(value: unknown): string | null {
 }
 
 /**
- * Pure composition rule for enabled pack manifests. v1 keeps this small by
- * design: at most one enabled pack may declare a sandbox image (no image
- * layering or composition), and skill names must be unique across enabled
- * packs. Violations fail the turn with a plain error instead of guessing.
+ * Pure pre-V2 compatibility rule for enabled Pack manifests. At most one
+ * legacy Pack may declare a sandbox image, and legacy Skill names must be
+ * unique. V2 rows never reach this function through runtime resolution.
  */
 export function workspacePackRuntimeFromPacks(packs: CapabilityPack[]): WorkspacePackRuntime {
   const imagePacks = packs.filter(

@@ -9,7 +9,7 @@ import {
   OPENGENI_SLACK_BOT_REQUESTED_SCOPES,
   OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
 } from "@opengeni/contracts/slack-bot-scopes";
-import { usePacks, useVariableSets } from "@opengeni/react";
+import { usePacks, useRigs, useVariableSets } from "@opengeni/react";
 import {
   Building2Icon,
   CheckCircle2Icon,
@@ -99,6 +99,8 @@ import type {
   ConnectorDocumentDestinationAuthority,
   ConnectionMetadata,
   ConnectionOwnership,
+  PackInstallationPreview,
+  PackUninstallPreview,
   SocialConnection,
 } from "@/types";
 
@@ -283,6 +285,7 @@ export function CapabilitiesRoute({
   const [registrySearched, setRegistrySearched] = useState<string | null>(null);
 
   const packs = usePacks({ workspaceId });
+  const rigs = useRigs({ workspaceId });
   const variableSets = useVariableSets({ workspaceId });
 
   const counts = useMemo(() => capabilityCounts(items), [items]);
@@ -1125,35 +1128,90 @@ export function CapabilitiesRoute({
     }
   }
 
-  async function enablePack(pack: CapabilityPack, variableSetId: string | undefined) {
+  async function previewPackInstallation(
+    pack: CapabilityPack,
+    selection: { rigId?: string; variableSetId?: string },
+  ): Promise<PackInstallationPreview | null> {
     setBusyId(`pack:${pack.id}`);
     try {
-      await client.enableCapability(
-        workspaceId,
-        `pack:${pack.id}`,
-        variableSetId ? { variableSetId } : {},
-      );
-      await Promise.all([packs.refresh(), refresh()]);
-      onRuntimeChanged();
-      toast.success(`Enabled ${pack.name}`);
+      return await client.previewPackInstallation(workspaceId, pack.id, selection);
     } catch (error) {
-      const copy = capabilityErrorToast(error, "Failed to enable pack");
+      const copy = capabilityErrorToast(error, "Failed to review pack installation");
       toast.error(copy.title, { description: copy.description });
+      return null;
     } finally {
       setBusyId(null);
     }
   }
 
-  async function disablePack(pack: CapabilityPack) {
+  async function installPack(
+    pack: CapabilityPack,
+    preview: PackInstallationPreview,
+    selection: { rigId?: string; variableSetId?: string },
+    idempotencyKey: string,
+  ): Promise<boolean> {
     setBusyId(`pack:${pack.id}`);
     try {
-      await client.disableCapability(workspaceId, `pack:${pack.id}`);
+      await client.installPack(workspaceId, pack.id, {
+        expectedManifestDigest: preview.manifestDigest,
+        idempotencyKey,
+        ...selection,
+        ...(preview.installationVersion !== null
+          ? { expectedInstallationVersion: preview.installationVersion }
+          : {}),
+      });
       await Promise.all([packs.refresh(), refresh()]);
       onRuntimeChanged();
-      toast.success(`Disabled ${pack.name}`);
+      toast.success(
+        preview.action === "install"
+          ? `Installed ${pack.name}`
+          : preview.action === "update"
+            ? `Updated ${pack.name}`
+            : `Repaired ${pack.name}`,
+      );
+      return true;
     } catch (error) {
-      const copy = capabilityErrorToast(error, "Failed to disable pack");
+      const copy = capabilityErrorToast(error, "Failed to install pack");
       toast.error(copy.title, { description: copy.description });
+      return false;
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function previewPackUninstall(pack: CapabilityPack): Promise<PackUninstallPreview | null> {
+    setBusyId(`pack:${pack.id}`);
+    try {
+      return await client.previewPackUninstall(workspaceId, pack.id);
+    } catch (error) {
+      const copy = capabilityErrorToast(error, "Failed to review pack uninstall");
+      toast.error(copy.title, { description: copy.description });
+      return null;
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function uninstallPack(
+    pack: CapabilityPack,
+    preview: PackUninstallPreview,
+    idempotencyKey: string,
+  ): Promise<boolean> {
+    if (preview.installationVersion === null) return false;
+    setBusyId(`pack:${pack.id}`);
+    try {
+      await client.uninstallPack(workspaceId, pack.id, {
+        expectedInstallationVersion: preview.installationVersion,
+        idempotencyKey,
+      });
+      await Promise.all([packs.refresh(), refresh()]);
+      onRuntimeChanged();
+      toast.success(`Uninstalled ${pack.name}`);
+      return true;
+    } catch (error) {
+      const copy = capabilityErrorToast(error, "Failed to uninstall pack");
+      toast.error(copy.title, { description: copy.description });
+      return false;
     } finally {
       setBusyId(null);
     }
@@ -1523,10 +1581,19 @@ export function CapabilitiesRoute({
                 id: variableSet.id,
                 name: variableSet.name,
               }))}
+              rigs={rigs.rigs.map((rig) => ({
+                id: rig.id,
+                name: rig.name,
+                image: rig.activeVersion?.image ?? null,
+                available: rig.activeVersion !== null,
+                verified: rig.activeVersionHealth?.checkHealth === "passing",
+              }))}
               busyPackId={packBusyId}
               onRegister={registerPackManifest}
-              onEnable={(pack, variableSetId) => void enablePack(pack, variableSetId)}
-              onDisable={(pack) => void disablePack(pack)}
+              onPreviewInstall={previewPackInstallation}
+              onInstall={installPack}
+              onPreviewUninstall={previewPackUninstall}
+              onUninstall={uninstallPack}
               onUnregister={unregisterPack}
             />
           ) : null}
