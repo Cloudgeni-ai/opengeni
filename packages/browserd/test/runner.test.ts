@@ -1,12 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import {
-  chmod,
-  mkdtemp,
-  mkdir,
-  readFile,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   AgentBrowserJsonRunner,
@@ -34,13 +27,7 @@ describe("managed browser profile cryptography", () => {
     "preserves the managed browser executable startup handshake",
     async () => {
       const root = await mkdtemp("/tmp/og-runner-background-");
-      const browserPath = join(
-        root,
-        "Fixture Browser.app",
-        "Contents",
-        "MacOS",
-        "Fixture Browser",
-      );
+      const browserPath = join(root, "Fixture Browser.app", "Contents", "MacOS", "Fixture Browser");
       const binaryPath = join(root, "fixture-agent-browser");
       await mkdir(join(root, "Fixture Browser.app", "Contents", "MacOS"), {
         recursive: true,
@@ -68,10 +55,7 @@ describe("managed browser profile cryptography", () => {
         },
       });
       try {
-        const result = await runner.run<{ executable: string }>([
-          "open",
-          "about:blank",
-        ]);
+        const result = await runner.run<{ executable: string }>(["open", "about:blank"]);
         expect(result.executable).toBe(browserPath);
       } finally {
         await rm(root, { recursive: true, force: true });
@@ -97,14 +81,11 @@ describe("managed browser profile cryptography", () => {
         sha256: "fixture",
       },
     });
-    const daemon = Bun.spawn(
-      [process.execPath, "-e", "setInterval(() => {}, 60_000)"],
-      {
-        stdin: "ignore",
-        stdout: "ignore",
-        stderr: "ignore",
-      },
-    );
+    const daemon = Bun.spawn([process.execPath, "-e", "setInterval(() => {}, 60_000)"], {
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+    });
     const runDirectory = join(socketDirectory, "namespaces", "og", "run");
     await mkdir(runDirectory, { recursive: true });
     await writeFile(join(runDirectory, "cleanup.pid"), String(daemon.pid), {
@@ -263,9 +244,7 @@ console.log(JSON.stringify({ success: true, data: { argv: process.argv.slice(2),
       });
       const startedAt = Date.now();
       try {
-        await expect(
-          runner.run(["open"], { timeoutMs: 100 }),
-        ).rejects.toMatchObject({
+        await expect(runner.run(["open"], { timeoutMs: 100 })).rejects.toMatchObject({
           code: "timeout",
         });
         expect(Date.now() - startedAt).toBeLessThan(2_000);

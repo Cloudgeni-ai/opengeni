@@ -85,7 +85,7 @@ export type SandboxTerminalProps = {
    * attach), so a cold box upgrades from the read-only firehose to a live PTY ON
    * INTERACT — never on mere mount (which would force a box spin-up and regress
    * the firehose-only default).
-  */
+   */
   onActivate?: (() => void) | undefined;
   /** Re-negotiate the terminal capability after an unexpected socket failure. */
   onReconnectNeeded?: (() => void) | undefined;

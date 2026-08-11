@@ -118,11 +118,7 @@ export function useComputerFrameStream(
 
     const clearSocket = (terminateProducer = false) => {
       if (!socket) return;
-      if (
-        terminateProducer &&
-        activeStream?.kind === "relay" &&
-        socket.readyState === 1
-      ) {
+      if (terminateProducer && activeStream?.kind === "relay" && socket.readyState === 1) {
         try {
           socket.send(
             relayDatagram(
@@ -176,9 +172,7 @@ export function useComputerFrameStream(
           token: activeStream.token,
           role: STREAM_ROLE_CLIENT,
           resumeFromSeq:
-            lastRelaySequence === null
-              ? "0"
-              : (BigInt(lastRelaySequence) + 1n).toString(),
+            lastRelaySequence === null ? "0" : (BigInt(lastRelaySequence) + 1n).toString(),
         });
         try {
           socket?.send(relayDatagram(RELAY_TAG_OPEN, body));
@@ -276,8 +270,7 @@ export function useComputerFrameStream(
         error: null,
       }));
       const createSocket =
-        factoryRef.current ??
-        ((url: string, protocols: string[]) => new WebSocket(url, protocols));
+        factoryRef.current ?? ((url: string, protocols: string[]) => new WebSocket(url, protocols));
       socket = createSocket(
         activeStream.kind === "relay"
           ? activeStream.url

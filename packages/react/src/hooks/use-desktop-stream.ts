@@ -178,9 +178,7 @@ export function useDesktopStream(options: UseDesktopStreamOptions): UseDesktopSt
         setBoth(nextDesktopState(stateRef.current, { type: "negotiated" }));
         rfb = factory(container, socketUrl, {
           credentials: token ? { password: token } : undefined,
-          ...(webSocketProtocolsRef.current
-            ? { wsProtocols: webSocketProtocolsRef.current }
-            : {}),
+          ...(webSocketProtocolsRef.current ? { wsProtocols: webSocketProtocolsRef.current } : {}),
         });
         rfb.viewOnly = viewOnlyFor(modeRef.current, interactiveRef.current);
         // Fit-to-panel: SCALE the 1280x800 framebuffer down to the container

@@ -116,10 +116,7 @@ export interface ComputerNativeTransport {
   capabilities(): Promise<ComputerSessionCapabilities>;
   targets(): Promise<NativeComputerTarget[]>;
   observe(targetId: string): Promise<NativeComputerObservation>;
-  capture(
-    targetId: string,
-    options?: NativeComputerCaptureOptions,
-  ): Promise<NativeComputerFrame>;
+  capture(targetId: string, options?: NativeComputerCaptureOptions): Promise<NativeComputerFrame>;
   startCapture(targetId: string, options: NativeComputerCaptureOptions): Promise<void>;
   stopCapture(targetId: string): Promise<void>;
   clipboard(): Promise<NativeComputerClipboard>;
@@ -234,10 +231,7 @@ export class ComputerNativeClient implements ComputerNativeTransport {
     );
   }
 
-  async startCapture(
-    targetId: string,
-    options: NativeComputerCaptureOptions,
-  ): Promise<void> {
+  async startCapture(targetId: string, options: NativeComputerCaptureOptions): Promise<void> {
     await this.request(
       "start_capture",
       { targetId: boundedString(targetId, "targetId", 512), options },

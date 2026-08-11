@@ -863,13 +863,16 @@ export class BrowserControlClient {
     return await this.requestJson(input);
   }
 
-  private async requestJson(input: {
-    method: "GET" | "POST" | "PUT" | "DELETE";
-    path: string;
-    token: string;
-    body?: unknown;
-    timeoutMs?: number;
-  }, retryNativeEndpoint = true): Promise<unknown> {
+  private async requestJson(
+    input: {
+      method: "GET" | "POST" | "PUT" | "DELETE";
+      path: string;
+      token: string;
+      body?: unknown;
+      timeoutMs?: number;
+    },
+    retryNativeEndpoint = true,
+  ): Promise<unknown> {
     // Image-backed placements expose browserd through the provider tunnel. Use
     // that actual data plane for control too: one authenticated HTTP request,
     // instead of materializing files and starting curl through the sandbox exec
@@ -971,11 +974,7 @@ export class BrowserControlClient {
         throw error;
       }
       if (error instanceof BrowserControlTransportError) {
-        if (
-          retryNativeEndpoint &&
-          this.nativeAuthority &&
-          this.session.ensureBrowserControl
-        ) {
+        if (retryNativeEndpoint && this.nativeAuthority && this.session.ensureBrowserControl) {
           nativeControllerPorts.delete(nativeControllerKey(this.nativeAuthority));
           await this.controllerPort();
           return await this.requestJson(input, false);
@@ -1008,10 +1007,7 @@ export class BrowserControlClient {
   }
 }
 
-function nativeControllerKey(authority: {
-  scopeId: string;
-  scopeGeneration: string;
-}): string {
+function nativeControllerKey(authority: { scopeId: string; scopeGeneration: string }): string {
   return `${authority.scopeId}\u0000${authority.scopeGeneration}`;
 }
 

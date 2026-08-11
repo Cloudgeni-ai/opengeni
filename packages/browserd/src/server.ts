@@ -614,12 +614,7 @@ export class BrowserControlServer {
       if (request.method !== "GET") {
         throw new ProtocolError("invalid_action", "method not allowed", 405);
       }
-      return await this.upgradeComputerRfb(
-        request,
-        server,
-        computerSessionId,
-        segments[4]!,
-      );
+      return await this.upgradeComputerRfb(request, server, computerSessionId, segments[4]!);
     }
 
     const authority = this.requireComputerSession(
@@ -1544,7 +1539,10 @@ function frameStreamCloseReason(error: unknown): string {
   const detail = error instanceof Error ? error.message : "unknown failure";
   // WebSocket control frames allow at most 123 UTF-8 bytes. Keep diagnostics
   // useful and transport-safe without placing page/application text in logs.
-  const ascii = detail.replace(/[^\x20-\x7e]/g, "?").replace(/\s+/g, " ").trim();
+  const ascii = detail
+    .replace(/[^\x20-\x7e]/g, "?")
+    .replace(/\s+/g, " ")
+    .trim();
   return `frame stream unavailable: ${ascii || "unknown failure"}`.slice(0, 120);
 }
 

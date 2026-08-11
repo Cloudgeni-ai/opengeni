@@ -28,8 +28,12 @@ describe("ComputerSession route discipline", () => {
     expect(source).toContain("openRelayedComputerFrameStream");
     expect(source).toContain("COMPUTER_CONTROL_WEBSOCKET_PROTOCOL");
     const attachment = source.slice(
-      source.indexOf('"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/attachments"'),
-      source.indexOf('"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/heartbeat"'),
+      source.indexOf(
+        '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/attachments"',
+      ),
+      source.indexOf(
+        '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/heartbeat"',
+      ),
     );
     expect(attachment).toContain("requestOrigin(context, deps.settings.corsAllowOriginRegex)");
     expect(attachment).toContain("client.addAllowedOrigins([origin])");

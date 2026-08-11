@@ -496,36 +496,36 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
                 ],
               }
             : relayed
-            ? await (async () => {
-                const relayToken = await mintStreamToken(relaySecret!, {
-                  workspaceId,
-                  sessionId: record.sourceSessionId,
-                  viewerId: grantId,
-                  leaseEpoch: record.tokenGeneration,
-                  port: relayed.channel.port,
-                  ttlSeconds: request.expiresInSeconds,
-                });
-                return {
-                  kind: "relay" as const,
-                  url: buildStreamUrl(relayed.endpoint),
-                  token: relayToken,
-                  channel: {
-                    channelId: relayed.channel.channelId,
-                    workspaceId: relayed.channel.workspaceId,
-                    agentId: relayed.channel.agentId,
-                    kind: 4 as const,
+              ? await (async () => {
+                  const relayToken = await mintStreamToken(relaySecret!, {
+                    workspaceId,
+                    sessionId: record.sourceSessionId,
+                    viewerId: grantId,
+                    leaseEpoch: record.tokenGeneration,
                     port: relayed.channel.port,
-                  },
+                    ttlSeconds: request.expiresInSeconds,
+                  });
+                  return {
+                    kind: "relay" as const,
+                    url: buildStreamUrl(relayed.endpoint),
+                    token: relayToken,
+                    channel: {
+                      channelId: relayed.channel.channelId,
+                      workspaceId: relayed.channel.workspaceId,
+                      agentId: relayed.channel.agentId,
+                      kind: 4 as const,
+                      port: relayed.channel.port,
+                    },
+                  };
+                })()
+              : {
+                  kind: "direct_websocket" as const,
+                  url: await client.computerFrameStreamUrl(reference, request.targetId),
+                  protocols: [
+                    COMPUTER_CONTROL_WEBSOCKET_PROTOCOL,
+                    `${BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX}${token}`,
+                  ],
                 };
-              })()
-            : {
-                kind: "direct_websocket" as const,
-                url: await client.computerFrameStreamUrl(reference, request.targetId),
-                protocols: [
-                  COMPUTER_CONTROL_WEBSOCKET_PROTOCOL,
-                  `${BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX}${token}`,
-                ],
-              };
           return ComputerSessionAttachment.parse({
             computerSessionId,
             controllerGeneration: binding.controllerGeneration,
@@ -1161,9 +1161,9 @@ function nativeControllerAuthority(
       ? placement.placement.sandboxId
       : placement.placement.kind === "attached_device"
         ? placement.placement.deviceId
-      : placement.placement.kind === "sandbox_group"
-        ? placement.placement.sandboxGroupId
-        : null;
+        : placement.placement.kind === "sandbox_group"
+          ? placement.placement.sandboxGroupId
+          : null;
   if (!placementId) {
     throw new BrowserControlUnsupportedError("computer controller placement is unsupported");
   }

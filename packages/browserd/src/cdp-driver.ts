@@ -750,7 +750,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         }
       }
       if (command.observationMode === "none") return null;
-      const currentInfo = await this.requireTargetInfo(await this.ensureConnection(), info.targetId);
+      const currentInfo = await this.requireTargetInfo(
+        await this.ensureConnection(),
+        info.targetId,
+      );
       return await this.observeUnlocked(state, currentInfo);
     });
     this.refreshSubscribedFrame(command.targetId);
@@ -1745,10 +1748,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
   }
 
-  private async captureFallbackFrame(
-    targetId: string,
-    expected: TargetScreencast,
-  ): Promise<void> {
+  private async captureFallbackFrame(targetId: string, expected: TargetScreencast): Promise<void> {
     await this.withTarget(targetId, async (state) => {
       if (state.screencast !== expected || this.protectedAuthQuiet(state)) return;
       await this.refreshFrame(state);
@@ -1768,9 +1768,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           "Page.captureScreenshot",
           {
             format: expected.options.format,
-            ...(expected.options.format === "jpeg"
-              ? { quality: expected.options.quality }
-              : {}),
+            ...(expected.options.format === "jpeg" ? { quality: expected.options.quality } : {}),
             fromSurface: true,
             captureBeyondViewport: false,
             clip: {
@@ -1802,9 +1800,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         throw new Error("browser screenshot could not honor the frame dimension bound");
       }
       if (state.screencast !== expected || this.protectedAuthQuiet(state)) return;
-      expected.captureDeviceScaleFactor = finiteScale(
-        dimensions.width / (viewport.width * scale),
-      );
+      expected.captureDeviceScaleFactor = finiteScale(dimensions.width / (viewport.width * scale));
       const frame = this.imageFrame({
         state,
         sequence: ++expected.sequence,

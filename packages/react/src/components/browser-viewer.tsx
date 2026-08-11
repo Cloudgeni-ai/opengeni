@@ -1459,10 +1459,7 @@ function BrowserViewport(props: {
     if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
     clickTimerRef.current = null;
     lastClickRef.current = null;
-    enqueue(
-      { type: "pointer", action: "click", x: pending.x, y: pending.y },
-      pending.frame,
-    );
+    enqueue({ type: "pointer", action: "click", x: pending.x, y: pending.y }, pending.frame);
   }, [enqueue]);
 
   const pointerDown = (event: PointerEvent<HTMLCanvasElement>) => {
@@ -2425,10 +2422,7 @@ function sameFrameFence(left: BrowserFrame, right: BrowserFrame): boolean {
   );
 }
 
-function sameOptionalBrowserFrame(
-  left: BrowserFrame | null,
-  right: BrowserFrame | null,
-): boolean {
+function sameOptionalBrowserFrame(left: BrowserFrame | null, right: BrowserFrame | null): boolean {
   return left === null || right === null ? left === right : sameFrameFence(left, right);
 }
 

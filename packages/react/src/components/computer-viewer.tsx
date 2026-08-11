@@ -100,7 +100,8 @@ export function ComputerViewer({
     return recentRelevantFailure ? [...sessions, recentRelevantFailure] : sessions;
   }, [recentRelevantFailure, registry.sessions]);
   const relevant = useMemo(
-    () => liveRelevant.length > 0 ? liveRelevant : recentRelevantFailure ? [recentRelevantFailure] : [],
+    () =>
+      liveRelevant.length > 0 ? liveRelevant : recentRelevantFailure ? [recentRelevantFailure] : [],
     [liveRelevant, recentRelevantFailure],
   );
   const [selection, setSelection] = useState<ComputerSelection>(null);
@@ -735,9 +736,7 @@ function ComputerLifecyclePanel(props: {
         {failed ? (
           <button
             type="button"
-            onClick={() =>
-              retryCreatesSession ? props.onRetry() : void props.onRefresh()
-            }
+            onClick={() => (retryCreatesSession ? props.onRetry() : void props.onRefresh())}
             disabled={props.creating}
             className="mt-4 inline-flex h-8 items-center gap-1.5 rounded-og-sm border border-og-border bg-og-surface-1 px-3 text-og-control font-medium text-og-fg transition hover:bg-og-surface-2"
           >
@@ -844,13 +843,13 @@ function ComputerViewport(props: {
 
   const enqueue = useCallback(
     (action: ComputerAction, frame: ComputerFrame | null, after?: () => Promise<void>) => {
-    actionTailRef.current = actionTailRef.current
-      .catch(() => undefined)
-      .then(async () => {
-        await actionRef.current(action, frame);
-        await after?.();
-      })
-      .catch((cause) => errorRef.current(cause));
+      actionTailRef.current = actionTailRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          await actionRef.current(action, frame);
+          await after?.();
+        })
+        .catch((cause) => errorRef.current(cause));
     },
     [],
   );
@@ -1142,9 +1141,7 @@ function ComputerViewport(props: {
             <button
               type="button"
               disabled={props.mutating}
-              onClick={() =>
-                enqueue({ type: "focus", targetId: props.target!.id }, null)
-              }
+              onClick={() => enqueue({ type: "focus", targetId: props.target!.id }, null)}
               className="rounded-full bg-white/10 px-2 py-0.5 font-medium text-white transition hover:bg-white/20 disabled:opacity-50"
             >
               Control directly
@@ -1268,11 +1265,12 @@ function ComputerSemanticControl(props: {
   const { node } = props;
   const editable = node.actions.includes("set_value");
   const action = semanticAction(node);
-  const [value, setValue] = useState(() => semanticValue(node) ?? "");
+  const observedValue = semanticValue(node) ?? "";
+  const [value, setValue] = useState(() => observedValue);
 
   useEffect(() => {
-    setValue(semanticValue(node) ?? "");
-  }, [node.ref, node.value]);
+    setValue(observedValue);
+  }, [node.ref, observedValue]);
 
   if (editable) {
     return (

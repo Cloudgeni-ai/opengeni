@@ -2196,7 +2196,10 @@ export class BrowserTargetCollection {
     );
   }
 
-  async select(targetId: string, options: OpenGeniRequestOptions = {}): Promise<BrowserObservation> {
+  async select(
+    targetId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserObservation> {
     return await this.transport.selectBrowserTarget(
       this.workspaceId,
       this.browserSessionId,

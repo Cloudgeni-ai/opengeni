@@ -261,8 +261,7 @@ export function negotiateCapabilities(ctx: NegotiationContext): SessionCapabilit
     // (liveness "cold") yet mints a valid RELAY pty-ws cell — honour it.
     const ptyCapable = cap.pty;
     let transport: "pty-ws" | "relay-pty" | "sse-events" = ptyCapable
-      ? (ctx.terminalStream?.transport ??
-        (cap.transport === "relay-pty" ? "relay-pty" : "pty-ws"))
+      ? (ctx.terminalStream?.transport ?? (cap.transport === "relay-pty" ? "relay-pty" : "pty-ws"))
       : "sse-events";
     let reason: CapabilityUnavailableReason | null = null;
     if (ptyCapable && (ctx.terminalEnabled === false || ctx.streamTokenSecretAvailable === false)) {
@@ -275,9 +274,8 @@ export function negotiateCapabilities(ctx: NegotiationContext): SessionCapabilit
     // The minted pty-ws endpoint is folded in ONLY when the terminal is actually
     // serving pty-ws (the gates passed). When absent the cell advertises the
     // capability with a null live address — the caller mints it via POST /viewers.
-    const minted = transport === "pty-ws" || transport === "relay-pty"
-      ? ctx.terminalStream
-      : undefined;
+    const minted =
+      transport === "pty-ws" || transport === "relay-pty" ? ctx.terminalStream : undefined;
     return {
       transport,
       ptyCapable,

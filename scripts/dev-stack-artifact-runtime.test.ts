@@ -57,14 +57,18 @@ describe("local artifact runtime stack contract", () => {
     const source = await Bun.file(scriptPath).text();
     expect(source).toContain('if [ -z "${OPENGENI_APP_DATABASE_PASSWORD:-}" ]');
     expect(source).toContain('OPENGENI_LOCAL_DATABASE_URL="$OPENGENI_DATABASE_URL"');
-    expect(source).toContain("Automatic local app-role password derivation requires a loopback database URL");
+    expect(source).toContain(
+      "Automatic local app-role password derivation requires a loopback database URL",
+    );
     expect(source).toContain("export OPENGENI_APP_DATABASE_PASSWORD");
   });
 
   test("bridges standard local Modal credentials without persisting them", async () => {
     const source = await Bun.file(scriptPath).text();
     expect(source).toContain('[ "${OPENGENI_SANDBOX_BACKEND:-docker}" = "modal" ]');
-    expect(source).toContain('Bun.TOML.parse(await Bun.file(`${Bun.env.HOME}/.modal.toml`).text())');
+    expect(source).toContain(
+      "Bun.TOML.parse(await Bun.file(`${Bun.env.HOME}/.modal.toml`).text())",
+    );
     expect(source).toContain("Bun.env.MODAL_PROFILE?.trim()");
     expect(source).toContain("export OPENGENI_MODAL_TOKEN_ID OPENGENI_MODAL_TOKEN_SECRET");
     expect(source).not.toContain("printf 'OPENGENI_MODAL_TOKEN_ID=%s");

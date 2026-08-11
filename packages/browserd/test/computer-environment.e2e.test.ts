@@ -308,11 +308,7 @@ test.skipIf(!enabled)(
           name.includes("OpenGeni linked Chromium proof changed"),
         ),
       ).toBe(true);
-      const nativePage = await waitForNativeNode(
-        computer,
-        computerReference,
-        "Linked input",
-      );
+      const nativePage = await waitForNativeNode(computer, computerReference, "Linked input");
       expect(nativePage.node.role).toBe("entry");
       const nativeButton = findNode(nativePage.observation, "Native change");
       const nativeClicked = await computer.action(
@@ -320,12 +316,8 @@ test.skipIf(!enabled)(
       );
       expect(nativeClicked.state).toBe("completed");
       expect(
-        browserNames(
-          await browser.selectTarget(browserReference, created.observation.target.id),
-        ),
-      ).toContain(
-        "Changed through ComputerSession",
-      );
+        browserNames(await browser.selectTarget(browserReference, created.observation.target.id)),
+      ).toContain("Changed through ComputerSession");
 
       await browser.endSession(browserReference, { removeState: true });
       await computer.endSession(computerReference, { removeState: true });
@@ -486,7 +478,7 @@ async function waitForNativeNode(
       observed.push({
         title: target.title,
         kind: target.kind,
-        names: nodes.flatMap((candidate) => candidate.name ? [candidate.name] : []).slice(0, 24),
+        names: nodes.flatMap((candidate) => (candidate.name ? [candidate.name] : [])).slice(0, 24),
       });
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
