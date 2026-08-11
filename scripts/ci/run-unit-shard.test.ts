@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -100,9 +100,30 @@ describe("unit process planning", () => {
     ).toBe(true);
     expect(
       sourceMutatesSharedPostgresRole(
+        "await shared.admin.unsafe(`create role ${quotedRole} nologin`);",
+      ),
+    ).toBe(true);
+    expect(
+      sourceMutatesSharedPostgresRole(
+        "await sql.unsafe(`DROP ROLE IF EXISTS ${quoteIdentifier(migrationRole)}`);",
+      ),
+    ).toBe(true);
+    expect(
+      sourceMutatesSharedPostgresRole(
         "const shared = await acquireSharedTestDatabase('x'); if (externalUrl) await provisionRoles(externalUrl, {});",
       ),
     ).toBe(false);
+  });
+
+  test("classifies generated shared-cluster role DDL in the real test corpus", () => {
+    const root = join(import.meta.dir, "../..");
+    for (const path of [
+      "packages/db/test/session-activity-commit-gate.test.ts",
+      "packages/db/test/migration-0120-durable-goal-wake.test.ts",
+      "packages/db/test/migration-0138-sandbox-checkpoints.test.ts",
+    ]) {
+      expect(sourceMutatesSharedPostgresRole(readFileSync(join(root, path), "utf8"))).toBe(true);
+    }
   });
 
   test("keeps explicit concurrency, wall clocks, and cluster roles out of the parallel pool", () => {
@@ -117,7 +138,7 @@ describe("unit process planning", () => {
       );
       writeFileSync(
         join(root, "role.test.ts"),
-        "await sql.unsafe(`alter role opengeni_app with password 'test'`);\n",
+        "await sql.unsafe(`create role ${quoteIdentifier(generatedRole)} nologin`);\n",
       );
       mkdirSync(join(root, "nested"));
       writeFileSync(

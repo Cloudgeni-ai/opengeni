@@ -63,7 +63,7 @@ export function sourceUsesWallClockPerformanceAssertion(source: string): boolean
 
 export function sourceMutatesSharedPostgresRole(source: string): boolean {
   return (
-    /\b(?:create|alter|drop)\s+role\s+opengeni_app\b/i.test(source) ||
+    /\b(?:create|alter|drop)\s+role\b/i.test(source) ||
     (/\bacquireBlankTestDatabase\b/.test(source) && /\bprovisionRoles\s*\(/.test(source))
   );
 }
