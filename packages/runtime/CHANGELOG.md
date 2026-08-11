@@ -1,5 +1,19 @@
 # @opengeni/runtime
 
+## 0.19.1
+
+### Patch Changes
+
+- 8b6803a: Make Modal sandbox recovery command-ready and accurately diagnosed, use workspace-only snapshots for new sessions, enforce checkpoint cadence, and publish cached rig images only after an independent cold boot.
+- Updated dependencies [87e9ae6]
+- Updated dependencies [8b6803a]
+- Updated dependencies [aeb07f4]
+- Updated dependencies [ff7203c]
+  - @opengeni/config@0.13.1
+  - @opengeni/contracts@0.44.0
+  - @opengeni/sdk@0.52.0
+  - @opengeni/codemode@0.2.1
+
 ## 0.19.0
 
 ### Minor Changes
