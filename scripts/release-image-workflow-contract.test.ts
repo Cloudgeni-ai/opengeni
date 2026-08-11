@@ -248,7 +248,9 @@ describe("release image workflow contract", () => {
     expect(ci).toContain(
       "github.event_name == 'workflow_dispatch' && format('ci-automation-{0}', inputs.automation_pr_number)",
     );
-    expect(ci).toContain("cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}");
+    expect(ci).toContain(
+      "cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' }}",
+    );
     expect(ci).not.toContain(
       "format('ci-automation-{0}-{1}', inputs.automation_pr_number, inputs.automation_head_sha)",
     );

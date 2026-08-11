@@ -6,7 +6,9 @@ on:
       - main
   pull_request:
   schedule:
-    - cron: "0 3 * * *"
+    # Weekly full-mode drift coverage complements impact-selected pull-request
+    # CI without rebuilding an unchanged source/image matrix every day.
+    - cron: "0 3 * * 1"
   workflow_dispatch:
     inputs:
       automation_pr_number:
@@ -34,9 +36,11 @@ concurrency:
   # A Version PR has one authoritative latest head. When a newer main push
   # regenerates that head, continuing to build the superseded head can only
   # waste capacity and produce a predictably stale terminal-main failure.
-  # Ordinary push/PR CI remains independent and is never cancelled here.
-  group: ${{ github.event_name == 'workflow_dispatch' && format('ci-automation-{0}', inputs.automation_pr_number) || format('ci-{0}', github.run_id) }}
-  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
+  # Pull-request heads are mutable in the same way: only the newest head can be
+  # merged. Main pushes remain independent because an ancestor can still be an
+  # admitted release source after a newer merge lands.
+  group: ${{ github.event_name == 'workflow_dispatch' && format('ci-automation-{0}', inputs.automation_pr_number) || github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || format('ci-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -140,9 +144,13 @@ jobs:
       unit_count: ${{ steps.plan.outputs.unit_count }}
       integration_count: ${{ steps.plan.outputs.integration_count }}
       e2e_count: ${{ steps.plan.outputs.e2e_count }}
+      browser_lane_count: ${{ steps.plan.outputs.browser_lane_count }}
+      artifact_runtime_required: ${{ steps.plan.outputs.artifact_runtime_required }}
       build_count: ${{ steps.plan.outputs.build_count }}
       unit_matrix: ${{ steps.plan.outputs.unit_matrix }}
       integration_matrix: ${{ steps.plan.outputs.integration_matrix }}
+      e2e_matrix: ${{ steps.plan.outputs.e2e_matrix }}
+      browser_lane_matrix: ${{ steps.plan.outputs.browser_lane_matrix }}
     steps:
       - name: Check out exact candidate
         uses: actions/checkout@v6
@@ -183,11 +191,13 @@ jobs:
             # safety net and therefore never trust change selection.
             bun scripts/ci/impact.ts --full --output impact-plan.json
           fi
-          jq '{schemaVersion, mode, changedCount:(.changedFiles|length), affectedPackageCount:(.affectedPackages|length), typecheckProjectCount:(.typecheckProjects|length), unitCount:(.unitTests|length), integrationCount:(.integrationTests|length), e2eCount:(.e2eTests|length), buildCount:(.buildPackages|length), exampleBuildCount:(.exampleBuildProjects|length), guardCount:(.guards|length), reasonCount:(.reasons|length)}' impact-plan.json
+          jq '{schemaVersion, mode, changedCount:(.changedFiles|length), affectedPackageCount:(.affectedPackages|length), typecheckProjectCount:(.typecheckProjects|length), unitCount:(.unitTests|length), integrationCount:(.integrationTests|length), e2eCount:(.e2eTests|length), browserAcceptanceLanes, artifactRuntimeRequired, buildCount:(.buildPackages|length), exampleBuildCount:(.exampleBuildProjects|length), guardCount:(.guards|length), reasonCount:(.reasons|length)}' impact-plan.json
           echo "mode=$(jq -r .mode impact-plan.json)" >> "$GITHUB_OUTPUT"
           echo "unit_count=$(jq '.unitTests | length' impact-plan.json)" >> "$GITHUB_OUTPUT"
           echo "integration_count=$(jq '.integrationTests | length' impact-plan.json)" >> "$GITHUB_OUTPUT"
           echo "e2e_count=$(jq '.e2eTests | length' impact-plan.json)" >> "$GITHUB_OUTPUT"
+          echo "browser_lane_count=$(jq '.browserAcceptanceLanes | length' impact-plan.json)" >> "$GITHUB_OUTPUT"
+          echo "artifact_runtime_required=$(jq -r .artifactRuntimeRequired impact-plan.json)" >> "$GITHUB_OUTPUT"
           echo "build_count=$(jq '.buildPackages | length' impact-plan.json)" >> "$GITHUB_OUTPUT"
           matrix() {
             local selected="$1" maximum="$2" total
@@ -203,11 +213,13 @@ jobs:
           # smallest measured matrix that keeps source-byte skew off the critical path.
           echo "unit_matrix=$(matrix "$(jq '.unitTests | length' impact-plan.json)" 6)" >> "$GITHUB_OUTPUT"
           echo "integration_matrix=$(matrix "$(jq '.integrationTests | length' impact-plan.json)" 6)" >> "$GITHUB_OUTPUT"
+          echo "e2e_matrix=$(matrix "$(jq '.e2eTests | length' impact-plan.json)" 4)" >> "$GITHUB_OUTPUT"
+          echo "browser_lane_matrix=$(jq -c '.browserAcceptanceLanes | if length == 0 then [{lane:"none"}] else map({lane:.}) end' impact-plan.json)" >> "$GITHUB_OUTPUT"
           {
             echo '### Change-impact plan'
             echo
             echo '```json'
-            jq '{mode, changedFiles, affectedPackages, reasons, typecheckProjects, unitCount:(.unitTests|length), integrationTests, e2eTests, buildPackages, exampleBuildProjects}' impact-plan.json
+            jq '{mode, changedFiles, affectedPackages, reasons, typecheckProjects, unitCount:(.unitTests|length), integrationTests, e2eTests, browserAcceptanceLanes, artifactRuntimeRequired, buildPackages, exampleBuildProjects}' impact-plan.json
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -230,12 +242,12 @@ jobs:
           retention-days: 7
 
       - name: Upload dependency resource profile
-        if: ${{ always() }}
+        if: ${{ failure() }}
         uses: actions/upload-artifact@v7.0.1
         with:
           name: ci-profile-dependencies
           path: ci-profile/dependencies.json
-          if-no-files-found: error
+          if-no-files-found: ignore
           retention-days: 14
 
   source-contracts:
@@ -356,20 +368,20 @@ jobs:
           scripts/ci/summarize-profiles.test.ts
 
       - name: Upload source-contract resource profiles
-        if: ${{ always() }}
+        if: ${{ failure() }}
         uses: actions/upload-artifact@v7.0.1
         with:
           name: ci-profile-source-contracts
           path: |
             ci-profile/typecheck.json
             ci-profile/guards.json
-          if-no-files-found: error
+          if-no-files-found: ignore
           retention-days: 14
 
   unit-shards:
     name: Unit tests (shard ${{ matrix.number }}/${{ matrix.total }})
     needs: [automation-admission, plan]
-    if: ${{ always() && needs.plan.result == 'success' && github.event_name == 'pull_request' && needs.plan.outputs.unit_count != '0' }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.unit_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -418,68 +430,12 @@ jobs:
           --shard ${{ matrix.index }} --shards ${{ matrix.total }}
 
       - name: Upload unit resource profile
-        if: ${{ always() }}
+        if: ${{ failure() }}
         uses: actions/upload-artifact@v7.0.1
         with:
           name: ci-profile-unit-${{ matrix.number }}
           path: ci-profile/unit-${{ matrix.number }}.json
-          if-no-files-found: error
-          retention-days: 14
-
-  unit-safety:
-    name: Unit tests (monolithic safety)
-    needs: [automation-admission, plan]
-    if: ${{ always() && needs.plan.result == 'success' && github.event_name != 'pull_request' && needs.plan.outputs.unit_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 40
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version-file: .bun-version
-
-      - name: Cache Bun dependencies
-        uses: actions/cache@v6.1.0
-        with:
-          path: ~/.bun/install/cache
-          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
-          restore-keys: |
-            bun-${{ runner.os }}-
-
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Download exact impact plan
-        uses: actions/download-artifact@v4
-        with:
-          name: ci-impact-plan
-
-      - name: Test
-        env:
-          # Main pushes and trusted dispatches retain the complete monolithic safety net.
-          OPENGENI_REQUIRE_REAL_DB: "1"
-        run: >-
-          bun scripts/ci/profile-command.ts
-          --name unit-safety
-          --output ci-profile/unit-safety.json
-          --timeout-seconds 2100
-          -- bun scripts/ci/run-unit-shard.ts --plan impact-plan.json
-          --shard 0 --shards 1
-
-      - name: Upload unit-safety resource profile
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v7.0.1
-        with:
-          name: ci-profile-unit-safety
-          path: ci-profile/unit-safety.json
-          if-no-files-found: error
+          if-no-files-found: ignore
           retention-days: 14
 
   integration-shards:
@@ -523,14 +479,76 @@ jobs:
           --file-profile ci-profile/integration-${{ matrix.number }}-files.json
 
       - name: Upload integration resource profile
-        if: ${{ always() }}
+        if: ${{ failure() }}
         uses: actions/upload-artifact@v7.0.1
         with:
           name: ci-profile-integration-${{ matrix.number }}
           path: |
             ci-profile/integration-${{ matrix.number }}.json
             ci-profile/integration-${{ matrix.number }}-files.json
-          if-no-files-found: error
+          if-no-files-found: ignore
+          retention-days: 14
+
+  e2e-shards:
+    name: Impacted E2E shard ${{ matrix.number }}/${{ matrix.total }}
+    needs: [automation-admission, plan]
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.e2e_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: true
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.e2e_matrix) }}
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+
+      - name: Cache Bun dependencies
+        uses: actions/cache@v6.1.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            bun-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Download exact impact plan
+        uses: actions/download-artifact@v4
+        with:
+          name: ci-impact-plan
+
+      - name: Install pinned Chromium runtime
+        run: bun x playwright install --with-deps chromium
+
+      - name: Run exactly the impacted E2E tests
+        run: >-
+          bun scripts/ci/profile-command.ts
+          --name e2e-${{ matrix.number }}
+          --output ci-profile/e2e-${{ matrix.number }}.json
+          --timeout-seconds 1800
+          -- bun scripts/ci/run-test-shard.ts --plan impact-plan.json --tier e2e
+          --shard ${{ matrix.index }} --shards ${{ matrix.total }}
+          --file-profile ci-profile/e2e-${{ matrix.number }}-files.json
+
+      - name: Upload E2E resource profile on failure
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ci-profile-e2e-${{ matrix.number }}
+          path: |
+            ci-profile/e2e-${{ matrix.number }}.json
+            ci-profile/e2e-${{ matrix.number }}-files.json
+          if-no-files-found: ignore
           retention-days: 14
 
   test-suite:
@@ -590,12 +608,12 @@ jobs:
   browser-acceptance:
     name: Browser and visual acceptance (${{ matrix.lane }})
     needs: [automation-admission, plan]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'docs' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.browser_lane_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        lane: [interaction, knowledge, workbench]
+        include: ${{ fromJSON(needs.plan.outputs.browser_lane_matrix) }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -620,7 +638,12 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Install pinned Playwright browser runtimes
+      - name: Install pinned Chromium runtime
+        if: ${{ matrix.lane != 'workbench' }}
+        run: bun x playwright install --with-deps chromium
+
+      - name: Install pinned cross-browser runtimes
+        if: ${{ matrix.lane == 'workbench' }}
         run: bun x playwright install --with-deps chromium firefox webkit
 
       - name: Editable artifact browser acceptance
@@ -645,7 +668,7 @@ jobs:
           OPENGENI_EDITABLE_ARTIFACT_EVIDENCE_DIR: /tmp/opengeni-editable-artifact-evidence
         run: bun scripts/run-browser-e2e.ts ./test/e2e/editable-artifacts.browser.e2e.ts
 
-      - name: Codex quota Codex quota and entitlement browser acceptance
+      - name: Codex quota and entitlement browser acceptance
         if: ${{ matrix.lane == 'interaction' }}
         env:
           # Human-only redemption recovery and allocator independence require
@@ -653,6 +676,13 @@ jobs:
           OPENGENI_REQUIRE_REAL_DB: "1"
           OPENGENI_CODEX_QUOTA_EVIDENCE_DIR: /tmp/codex-quota-evidence
         run: bun scripts/run-browser-e2e.ts ./test/e2e/codex-overview.e2e.ts
+
+      - name: Capabilities control-center browser acceptance
+        if: ${{ matrix.lane == 'interaction' }}
+        run: |
+          bun scripts/run-browser-e2e.ts \
+            ./test/e2e/custom-api-control-center.browser.e2e.ts \
+            ./test/e2e/source-packages-control-center.browser.e2e.ts
 
       - name: Queue surface browser acceptance
         if: ${{ matrix.lane == 'interaction' }}
@@ -871,19 +901,19 @@ jobs:
         run: bun run --cwd apps/web build
 
       - name: Upload package-build resource profile
-        if: ${{ always() }}
+        if: ${{ failure() }}
         uses: actions/upload-artifact@v7.0.1
         with:
           name: ci-profile-packages
           path: |
             ci-profile/packages.json
             ci-profile/package-cache.json
-          if-no-files-found: error
+          if-no-files-found: ignore
           retention-days: 14
 
   test:
     name: Typecheck and unit tests
-    needs: [plan, source-contracts, unit-shards, unit-safety, integration-shards, test-suite, browser-acceptance, package-contracts, deployment, images]
+    needs: [plan, source-contracts, unit-shards, integration-shards, e2e-shards, test-suite, browser-acceptance, package-contracts, deployment, artifact-runtime, images]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
@@ -905,6 +935,9 @@ jobs:
           MODE: ${{ needs.plan.outputs.mode }}
           UNIT_COUNT: ${{ needs.plan.outputs.unit_count }}
           INTEGRATION_COUNT: ${{ needs.plan.outputs.integration_count }}
+          E2E_COUNT: ${{ needs.plan.outputs.e2e_count }}
+          BROWSER_LANE_COUNT: ${{ needs.plan.outputs.browser_lane_count }}
+          ARTIFACT_RUNTIME_REQUIRED: ${{ needs.plan.outputs.artifact_runtime_required }}
           BUILD_COUNT: ${{ needs.plan.outputs.build_count }}
         run: |
           set -euo pipefail
@@ -918,6 +951,9 @@ jobs:
             --arg mode "$MODE" \
             --argjson unit "$UNIT_COUNT" \
             --argjson integration "$INTEGRATION_COUNT" \
+            --argjson e2e "$E2E_COUNT" \
+            --argjson browser "$BROWSER_LANE_COUNT" \
+            --argjson artifactRuntime "$ARTIFACT_RUNTIME_REQUIRED" \
             --argjson build "$BUILD_COUNT" \
             -f scripts/ci/required-results.jq \
             <<<"$RESULTS"
@@ -1096,7 +1132,7 @@ jobs:
   artifact-runtime:
     name: Build exact artifact runtime inputs
     needs: [automation-admission, plan]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'docs' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.artifact_runtime_required == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     uses: ./.github/workflows/artifact-runtime.yml
     with:
       source_sha: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
@@ -1104,7 +1140,7 @@ jobs:
   api-image:
     name: Build API workload image
     needs: [automation-admission, plan, artifact-runtime]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'docs' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode == 'full' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1155,7 +1191,7 @@ jobs:
   worker-web-images:
     name: Build worker and web workload images
     needs: [automation-admission, plan]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'docs' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode == 'full' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1217,7 +1253,7 @@ jobs:
   artifact-materializer-image:
     name: Build artifact materializer workload image
     needs: [automation-admission, plan, artifact-runtime]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'docs' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode == 'full' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1268,7 +1304,7 @@ jobs:
   artifact-outbox-dispatcher-image:
     name: Build artifact outbox dispatcher workload image
     needs: [automation-admission, plan]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'docs' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode == 'full' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1313,7 +1349,7 @@ jobs:
   relay-image:
     name: Build relay workload image
     needs: [automation-admission, plan]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'docs' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode == 'full' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1354,7 +1390,7 @@ jobs:
   sandbox-image:
     name: Build headless sandbox workload image
     needs: [automation-admission, plan, artifact-runtime]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'docs' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode == 'full' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1409,7 +1445,7 @@ jobs:
       - artifact-outbox-dispatcher-image
       - relay-image
       - sandbox-image
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'docs' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode == 'full' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
