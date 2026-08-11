@@ -1,5 +1,14 @@
 # @opengeni/contracts
 
+## 0.44.1
+
+### Patch Changes
+
+- b57d61f: Keep Codex image-tool schemas within the provider-supported regex subset and
+  restore all bundled runtime skills to production API and worker process builds.
+- 5c5ea4a: Add the universal capabilities platform with named API integration instances,
+  provider-specific feature bindings, and local runtime adapters.
+
 ## 0.44.0
 
 ### Minor Changes

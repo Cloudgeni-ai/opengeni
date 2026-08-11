@@ -1,5 +1,27 @@
 # @opengeni/worker-bundle
 
+## 0.17.2
+
+### Patch Changes
+
+- 98e807e: Keep the normal remote context-compaction request unchanged, then recover once from an exact context-length rejection by temporarily reducing only tool-result bodies. Preserve the full durable history unless the retry returns a valid compaction checkpoint.
+- Updated dependencies [d73a2a9]
+- Updated dependencies [b57d61f]
+- Updated dependencies [5c5ea4a]
+- Updated dependencies [98e807e]
+  - @opengeni/capabilities@0.1.1
+  - @opengeni/contracts@0.44.1
+  - @opengeni/runtime@0.19.2
+  - @opengeni/core@0.24.1
+  - @opengeni/db@0.31.1
+  - @opengeni/codemode@0.2.2
+  - @opengeni/config@0.13.2
+  - @opengeni/documents@0.5.32
+  - @opengeni/events@0.3.103
+  - @opengeni/github@0.4.50
+  - @opengeni/observability@0.6.2
+  - @opengeni/storage@0.2.87
+
 ## 0.17.1
 
 ### Patch Changes
