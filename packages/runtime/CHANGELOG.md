@@ -1,5 +1,18 @@
 # @opengeni/runtime
 
+## 0.19.2
+
+### Patch Changes
+
+- 5c5ea4a: Add the universal capabilities platform with named API integration instances,
+  provider-specific feature bindings, and local runtime adapters.
+- 98e807e: Keep the normal remote context-compaction request unchanged, then recover once from an exact context-length rejection by temporarily reducing only tool-result bodies. Preserve the full durable history unless the retry returns a valid compaction checkpoint.
+- Updated dependencies [5c5ea4a]
+  - @opengeni/contracts@0.44.1
+  - @opengeni/sdk@0.52.1
+  - @opengeni/codemode@0.2.2
+  - @opengeni/config@0.13.2
+
 ## 0.19.1
 
 ### Patch Changes

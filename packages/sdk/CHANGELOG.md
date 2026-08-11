@@ -1,5 +1,14 @@
 # @opengeni/sdk
 
+## 0.52.1
+
+### Patch Changes
+
+- 5c5ea4a: Add the universal capabilities platform with named API integration instances,
+  provider-specific feature bindings, and local runtime adapters.
+- Updated dependencies [5c5ea4a]
+  - @opengeni/contracts@0.44.1
+
 ## 0.52.0
 
 ### Minor Changes
