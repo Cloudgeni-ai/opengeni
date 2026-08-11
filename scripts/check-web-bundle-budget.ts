@@ -15,11 +15,11 @@ const budgets = {
   // rail + settings against the session graph; a dedicated Radix vendor chunk
   // keeps Popper scopes intact (otherwise /settings crashes). The shared
   // composer also carries the tiny app-action slot used by realtime voice.
-  // Existing-session scheduling, authenticated retained screenshots, and the
-  // synchronous session projection grow the initial graph; keep modest
-  // headroom above the current 1299/362 KiB production build while the
-  // per-file and lazy-chunk budgets stay fixed.
-  initialRaw: 1308 * kib,
+  // Existing-session scheduling, authenticated retained screenshots, browser /
+  // computer control, and artifact collaboration grow the initial graph; keep
+  // modest headroom above the current 1328/365 KiB production build while the
+  // compressed, per-file, and lazy-chunk budgets stay fixed.
+  initialRaw: 1340 * kib,
   initialGzip: 366 * kib,
   initialFileGzip: 70 * kib,
   initialFiles: 16,
