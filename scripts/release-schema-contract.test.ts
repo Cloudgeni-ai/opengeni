@@ -115,12 +115,18 @@ describe("release schema contract", () => {
       sourceContract.migrations.map((migration) => [migration.path, migration]),
     );
     expect(sourceContract.sha256).toBe(
-      migrations.has("0218_site_auth_maintenance_sessions.sql")
+      migrations.has("0219_memory_slack_append_only_cascade.sql")
         ? migrations.has("0219_organization_tenancy_managed_human_provisioning.sql")
-          ? "aca629bb0e9b78656a5daaaa9d1720017b751b4f19c3e8b9e156d8e00c12d2d0"
+          ? "a75e838b475674d8fe34aaf0321f40ce03e81c0d1d5477e57f3e8bdb7c4ad2dd"
           : migrations.has("0218_organization_tenancy_foundation.sql")
-            ? "a002c6b3da822dfff2aca5fd88e76371ecadf87e1fc0c9f5a603b674f67676d1"
-            : "67238deb9f46f6459e46c882a4dd5231b0ba739f715dfc9e51d8539f54ff3039"
+            ? "724f96c2f545af3d3a5fc1ef05fbee6af332c68a917571230e21604f7e187337"
+            : "e1d34e33676401ce0335ba2ff6aef9d81226f144898284c0062533fc6d74313e"
+        : migrations.has("0218_site_auth_maintenance_sessions.sql")
+          ? migrations.has("0219_organization_tenancy_managed_human_provisioning.sql")
+            ? "aca629bb0e9b78656a5daaaa9d1720017b751b4f19c3e8b9e156d8e00c12d2d0"
+            : migrations.has("0218_organization_tenancy_foundation.sql")
+              ? "a002c6b3da822dfff2aca5fd88e76371ecadf87e1fc0c9f5a603b674f67676d1"
+              : "67238deb9f46f6459e46c882a4dd5231b0ba739f715dfc9e51d8539f54ff3039"
         : migrations.has("0218_organization_tenancy_foundation.sql")
           ? "eb6d0099f5362add0eb799641deace18326831ac61c8922c3f4f91c6a489f6a9"
           : migrations.has("0217_capability_definition_delete_authority.sql")
@@ -133,12 +139,18 @@ describe("release schema contract", () => {
     );
     const contract = {
       ...sourceContract,
-      sha256: migrations.has("0218_site_auth_maintenance_sessions.sql")
+      sha256: migrations.has("0219_memory_slack_append_only_cascade.sql")
         ? migrations.has("0219_organization_tenancy_managed_human_provisioning.sql")
-          ? "aca629bb0e9b78656a5daaaa9d1720017b751b4f19c3e8b9e156d8e00c12d2d0"
+          ? "a75e838b475674d8fe34aaf0321f40ce03e81c0d1d5477e57f3e8bdb7c4ad2dd"
           : migrations.has("0218_organization_tenancy_foundation.sql")
-            ? "a002c6b3da822dfff2aca5fd88e76371ecadf87e1fc0c9f5a603b674f67676d1"
-            : "67238deb9f46f6459e46c882a4dd5231b0ba739f715dfc9e51d8539f54ff3039"
+            ? "724f96c2f545af3d3a5fc1ef05fbee6af332c68a917571230e21604f7e187337"
+            : "e1d34e33676401ce0335ba2ff6aef9d81226f144898284c0062533fc6d74313e"
+        : migrations.has("0218_site_auth_maintenance_sessions.sql")
+          ? migrations.has("0219_organization_tenancy_managed_human_provisioning.sql")
+            ? "aca629bb0e9b78656a5daaaa9d1720017b751b4f19c3e8b9e156d8e00c12d2d0"
+            : migrations.has("0218_organization_tenancy_foundation.sql")
+              ? "a002c6b3da822dfff2aca5fd88e76371ecadf87e1fc0c9f5a603b674f67676d1"
+              : "67238deb9f46f6459e46c882a4dd5231b0ba739f715dfc9e51d8539f54ff3039"
         : migrations.has("0218_organization_tenancy_foundation.sql")
           ? "eb6d0099f5362add0eb799641deace18326831ac61c8922c3f4f91c6a489f6a9"
           : migrations.has("0217_capability_definition_delete_authority.sql")
@@ -317,15 +329,22 @@ describe("release schema contract", () => {
         (migrations.has("0217_capability_definition_delete_authority.sql") ? 1 : 0) +
         (migrations.has("0218_organization_tenancy_foundation.sql") ? 1 : 0) +
         (migrations.has("0218_site_auth_maintenance_sessions.sql") ? 1 : 0) +
+        (migrations.has("0219_memory_slack_append_only_cascade.sql") ? 1 : 0) +
         (migrations.has("0219_organization_tenancy_managed_human_provisioning.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      migrations.has("0218_site_auth_maintenance_sessions.sql")
+      migrations.has("0219_memory_slack_append_only_cascade.sql")
         ? migrations.has("0219_organization_tenancy_managed_human_provisioning.sql")
-          ? "aca629bb0e9b78656a5daaaa9d1720017b751b4f19c3e8b9e156d8e00c12d2d0"
+          ? "a75e838b475674d8fe34aaf0321f40ce03e81c0d1d5477e57f3e8bdb7c4ad2dd"
           : migrations.has("0218_organization_tenancy_foundation.sql")
-            ? "a002c6b3da822dfff2aca5fd88e76371ecadf87e1fc0c9f5a603b674f67676d1"
-            : "67238deb9f46f6459e46c882a4dd5231b0ba739f715dfc9e51d8539f54ff3039"
+            ? "724f96c2f545af3d3a5fc1ef05fbee6af332c68a917571230e21604f7e187337"
+            : "e1d34e33676401ce0335ba2ff6aef9d81226f144898284c0062533fc6d74313e"
+        : migrations.has("0218_site_auth_maintenance_sessions.sql")
+          ? migrations.has("0219_organization_tenancy_managed_human_provisioning.sql")
+            ? "aca629bb0e9b78656a5daaaa9d1720017b751b4f19c3e8b9e156d8e00c12d2d0"
+            : migrations.has("0218_organization_tenancy_foundation.sql")
+              ? "a002c6b3da822dfff2aca5fd88e76371ecadf87e1fc0c9f5a603b674f67676d1"
+              : "67238deb9f46f6459e46c882a4dd5231b0ba739f715dfc9e51d8539f54ff3039"
         : migrations.has("0218_organization_tenancy_foundation.sql")
           ? "eb6d0099f5362add0eb799641deace18326831ac61c8922c3f4f91c6a489f6a9"
           : "2d8e3211f1526419a8421c4388f7cf2297839318d7a7dbd194362d81c503c70a",
@@ -452,6 +471,10 @@ describe("release schema contract", () => {
     expect(migrations.get("0218_site_auth_maintenance_sessions.sql")).toMatchObject({
       sha256: "e8e786a510ae169013c5eebab17b3cbe6fc3fd239c88e544c081f4767a0e13bd",
       deploymentMode: "maintenance",
+    });
+    expect(migrations.get("0219_memory_slack_append_only_cascade.sql")).toMatchObject({
+      sha256: "17a34e7b943b1c4456bfb64cd8fe6fbb410b4ca7238b6ad02e24343483d54db1",
+      deploymentMode: "rolling",
     });
     expect(migrations.get("0183_model_call_provider_cost_estimates.sql")).toMatchObject({
       sha256: "2cb087b69996c62e8836f2d65c9e2af3fb580fe1822d327600bf40e3a6977d64",
