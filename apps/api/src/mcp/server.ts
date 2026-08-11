@@ -79,7 +79,6 @@ import {
   updateScheduledTask,
   updateSessionGoalWithEvent,
   upsertSessionGoalWithEvent,
-  RigChangeAlreadyVerifyingError,
   RigChangeTransitionError,
   createWorkspaceArtifact,
   getWorkspaceArtifact,
@@ -2631,12 +2630,10 @@ async function beginMcpRigVerificationAttempt(
   try {
     return await beginRigChangeVerificationAttempt(deps.db, workspaceId, changeId, {
       startedAt: new Date().toISOString(),
+      allowAlreadyVerifying: true,
     });
   } catch (error) {
-    if (
-      error instanceof RigChangeAlreadyVerifyingError ||
-      error instanceof RigChangeTransitionError
-    ) {
+    if (error instanceof RigChangeTransitionError) {
       throw new Error(error.message, { cause: error });
     }
     throw error;

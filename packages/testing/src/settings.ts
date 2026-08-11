@@ -181,7 +181,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     modalTokenSecret: undefined,
     modalEnvironment: undefined,
     modalIdleTimeoutSeconds: undefined,
-    modalWorkspacePersistence: "snapshot_filesystem",
+    modalWorkspacePersistence: "snapshot_directory",
     sandboxDesktopEnabled: false,
     sandboxDesktopInteractive: true,
     sandboxTerminalEnabled: true,

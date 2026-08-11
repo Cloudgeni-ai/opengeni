@@ -239,18 +239,25 @@ export async function createTemporalWorkflowClient(
       if (!targetId) {
         throw new Error("rig verification requires changeId or versionId");
       }
-      await temporal.workflow.start("rigVerificationWorkflow", {
-        taskQueue: settings.temporalTaskQueue,
-        workflowId: workflowId ?? `rig-verification-${targetId}-${crypto.randomUUID()}`,
-        workflowIdReusePolicy: "ALLOW_DUPLICATE",
-        args: [
-          {
-            workspaceId,
-            ...(changeId ? { changeId } : {}),
-            ...(versionId ? { versionId } : {}),
-          },
-        ],
-      });
+      try {
+        await temporal.workflow.start("rigVerificationWorkflow", {
+          taskQueue: settings.temporalTaskQueue,
+          workflowId: workflowId ?? `rig-verification-${targetId}-${crypto.randomUUID()}`,
+          workflowIdReusePolicy: "REJECT_DUPLICATE",
+          args: [
+            {
+              workspaceId,
+              ...(changeId ? { changeId } : {}),
+              ...(versionId ? { versionId } : {}),
+            },
+          ],
+        });
+      } catch (error) {
+        // A lost start acknowledgement is indistinguishable from a retry. The
+        // caller-owned workflow id makes both cases the same successful start.
+        if (isWorkflowAlreadyStarted(error)) return;
+        throw error;
+      }
     },
     check: async () => {
       await connection.workflowService.getSystemInfo({});

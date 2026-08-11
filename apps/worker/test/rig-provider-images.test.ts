@@ -21,6 +21,8 @@ import {
 import {
   rigProviderImageContentMarkerCommand,
   settingsForRigVerification,
+  verifyRigProviderImageColdBoot,
+  type RigProviderImageColdBootDependencies,
 } from "../src/activities/rig-verification";
 
 const VERSION_ID = "11111111-1111-4111-8111-111111111111";
@@ -73,6 +75,10 @@ function readyImage(settings: Settings, definition: RigVersion): RigProviderImag
     imageDigest: null,
     artifactId: "44444444-4444-4444-8444-444444444444",
     providerBindingKeyHash: rigProviderImageProviderBindingKeyHash(PROVIDER_BINDING_KEY),
+    coldBootValidation: {
+      version: 1,
+      checkedAt: "2026-08-10T00:00:00.500Z",
+    },
     provenance: {
       kind: "rig_verification",
       targetKind: "version",
@@ -95,6 +101,74 @@ async function execute(command: string): Promise<{ exitCode: number; output: str
 }
 
 describe("build-once rig provider image runtime", () => {
+  test("publishes cold-boot proof only after the exact image marker and checks pass", async () => {
+    const commands: string[] = [];
+    const runOwnedSandbox: RigProviderImageColdBootDependencies["runOwnedSandbox"] = async <T>(
+      input,
+      run,
+    ): Promise<T> => {
+      expect(input.settings.modalImageId).toBe("im-built-rig-image");
+      expect(input.settings.modalWorkspacePersistence).toBe("snapshot_directory");
+      expect(input.sandboxGroupId).toBe("33333333-3333-4333-8333-333333333333");
+      return await run(
+        {
+          backendId: "modal",
+          client: {},
+          instanceId: "sb-cold-boot",
+          session: {},
+          sessionState: {},
+        },
+        {
+          signal: new AbortController().signal,
+          commandRunner: async (_session, args) => {
+            commands.push(args.cmd);
+            return { exitCode: 0, output: "ok" };
+          },
+          ownership: {
+            leaseId: "lease-cold-boot",
+            leaseEpoch: 2,
+            workspaceGeneration: 0,
+            instanceId: "sb-cold-boot",
+          },
+        },
+      );
+    };
+    const checkedAt = await verifyRigProviderImageColdBoot(
+      {
+        settings: testSettings({ sandboxBackend: "modal" }),
+        db: {} as never,
+        observability: {} as never,
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        buildRequestId: "33333333-3333-4333-8333-333333333333",
+        rigVersionId: VERSION_ID,
+        sessionIdPrefix: "rig-provider-image-test",
+        imageId: "im-built-rig-image",
+        contentHash: `sha256:${"a".repeat(64)}`,
+        checks: [
+          { name: "bash", command: "bash --version" },
+          { name: "git", command: "git --version" },
+        ],
+        lifecycle: {
+          signal: new AbortController().signal,
+          cleanupDeadlineAtMs: null,
+          dispose: () => undefined,
+        },
+      },
+      {
+        runOwnedSandbox,
+        now: () => new Date("2026-08-10T00:00:00.500Z"),
+      },
+    );
+
+    expect(checkedAt).toBe("2026-08-10T00:00:00.500Z");
+    expect(commands).toEqual([
+      `test -f '/var/opengeni/rig-setup-content-${"a".repeat(64)}.done'`,
+      "bash --version",
+      "git --version",
+    ]);
+  });
+
   test("two fresh boxes select the same immutable image and skip setup from its content marker", async () => {
     const logicalSettings = settingsWithRigImage(
       testSettings({ sandboxBackend: "modal" }),
@@ -187,6 +261,25 @@ describe("build-once rig provider image runtime", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  test("a legacy ready image is not selected until an independent cold boot validates it", () => {
+    const settings = settingsWithRigImage(
+      testSettings({ sandboxBackend: "modal" }),
+      "ubuntu:24.04",
+    );
+    const base = version();
+    const { coldBootValidation: _legacyMissing, ...legacyImage } = readyImage(settings, base);
+    const selected = resolveRigProviderImageSelection(
+      settings,
+      { ...base, providerImages: { modal: legacyImage } },
+      "modal",
+      legacyImage.providerBindingKeyHash,
+    );
+
+    expect(selected.reason).toBe("not_cold_boot_validated");
+    expect(selected.settings.modalImageId).toBeUndefined();
+    expect(selected.imageId).toBeNull();
   });
 
   test("unsupported backends preserve runtime setup fallback without changing settings", () => {

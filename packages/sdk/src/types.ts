@@ -3702,6 +3702,12 @@ export type RigProviderImage = {
   imageDigest: string | null;
   artifactId: string | null;
   providerBindingKeyHash: string | null;
+  coldBootValidation?:
+    | {
+        version: 1;
+        checkedAt: string;
+      }
+    | undefined;
   provenance: {
     kind: "rig_verification";
     targetKind: "change" | "version";

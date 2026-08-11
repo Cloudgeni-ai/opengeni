@@ -1376,6 +1376,14 @@ describe("backend-gated sandbox required-credential validation", () => {
     ).toThrow();
   });
 
+  test("layers new Modal workspaces with directory snapshots by default", () => {
+    expect(withEnv({}, () => getSettings()).modalWorkspacePersistence).toBe("snapshot_directory");
+    expect(
+      withEnv({ OPENGENI_MODAL_WORKSPACE_PERSISTENCE: "snapshot_filesystem" }, () => getSettings())
+        .modalWorkspacePersistence,
+    ).toBe("snapshot_filesystem");
+  });
+
   test("keeps sandbox artifact-runtime admission explicit and disabled by default", () => {
     expect(withEnv({}, () => getSettings()).sandboxArtifactRuntimeEnabled).toBe(false);
     expect(

@@ -7,7 +7,6 @@ import {
 import {
   beginRigChangeVerificationAttempt,
   listRigs,
-  RigChangeAlreadyVerifyingError,
   RigChangeTransitionError,
 } from "@opengeni/db";
 import type { Hono } from "hono";
@@ -32,36 +31,85 @@ import { boundedLimit } from "../http/common";
 export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, workflowClient } = deps;
 
-  async function startChangeVerification(workspaceId: string, changeId: string): Promise<unknown> {
+  async function startChangeVerification(
+    workspaceId: string,
+    changeId: string,
+  ): Promise<{
+    change: Awaited<ReturnType<typeof beginRigChangeVerificationAttempt>>;
+    started: boolean;
+  }> {
     const startedAt = new Date().toISOString();
     let change;
     try {
-      change = await beginRigChangeVerificationAttempt(db, workspaceId, changeId, { startedAt });
+      change = await beginRigChangeVerificationAttempt(db, workspaceId, changeId, {
+        startedAt,
+        // Reuse the existing attempt after an ambiguous Temporal start. Its
+        // deterministic workflow id turns this into an idempotent recovery.
+        allowAlreadyVerifying: true,
+      });
     } catch (error) {
-      if (
-        error instanceof RigChangeAlreadyVerifyingError ||
-        error instanceof RigChangeTransitionError
-      ) {
+      if (error instanceof RigChangeTransitionError) {
         throw new HTTPException(409, { message: error.message });
       }
       throw error;
     }
     const attempt =
       typeof change.verification?.attempt === "number" ? change.verification.attempt : Date.now();
-    await workflowClient.startRigVerification({
-      workspaceId,
-      changeId,
-      workflowId: `rig-verification-change-${changeId}-attempt-${attempt}`,
-    });
-    return change;
+    try {
+      await workflowClient.startRigVerification({
+        workspaceId,
+        changeId,
+        workflowId: `rig-verification-change-${changeId}-attempt-${attempt}`,
+      });
+      return { change, started: true };
+    } catch (error) {
+      // The verifying transition already committed. Keep its deterministic
+      // attempt identity retryable instead of reporting an opaque 5xx after a
+      // durable mutation or inventing a second attempt after an ambiguous start.
+      deps.observability?.warn("rig change verification start failed", {
+        workspaceId,
+        changeId,
+        attempt,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return { change, started: false };
+    }
   }
 
-  async function startVersionVerification(workspaceId: string, versionId: string): Promise<void> {
+  async function startVersionVerification(
+    workspaceId: string,
+    versionId: string,
+    workflowId = `rig-verification-version-${versionId}-${crypto.randomUUID()}`,
+  ): Promise<void> {
     await workflowClient.startRigVerification({
       workspaceId,
       versionId,
-      workflowId: `rig-verification-version-${versionId}-${crypto.randomUUID()}`,
+      workflowId,
     });
+  }
+
+  async function tryStartInitialVersionVerification(
+    workspaceId: string,
+    versionId: string,
+  ): Promise<boolean> {
+    try {
+      await startVersionVerification(
+        workspaceId,
+        versionId,
+        `rig-verification-version-${versionId}-initial`,
+      );
+      return true;
+    } catch (error) {
+      // Creation already committed. The rig remains fully usable through its
+      // runtime setup fallback and can be re-verified explicitly; never turn a
+      // successful create into an unretryable 5xx because Temporal was down.
+      deps.observability?.warn("initial rig provider-image verification start failed", {
+        workspaceId,
+        versionId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return false;
+    }
   }
 
   app.get("/v1/workspaces/:workspaceId/rigs", async (c) => {
@@ -75,6 +123,10 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "rigs:manage");
     const payload = CreateRigRequest.parse(await c.req.json());
     const rig = await createRigForApi({ db }, grant, payload);
+    if (rig.activeVersion) {
+      const started = await tryStartInitialVersionVerification(workspaceId, rig.activeVersion.id);
+      if (!started) c.header("OpenGeni-Rig-Verification", "deferred");
+    }
     return c.json(rig, 201);
   });
 
@@ -112,7 +164,10 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "rigs:manage");
     const rig = await requireRigForApi(db, workspaceId, c.req.param("rigId"));
     const payload = RigDefinitionEditPayload.parse(await c.req.json());
-    return c.json(await createRigVersionForApi({ db }, grant, rig, payload), 201);
+    const version = await createRigVersionForApi({ db }, grant, rig, payload);
+    const started = await tryStartInitialVersionVerification(workspaceId, version.id);
+    if (!started) c.header("OpenGeni-Rig-Verification", "deferred");
+    return c.json(version, 201);
   });
 
   // Rollback / promote-activate: flips which existing version is active.
@@ -142,8 +197,9 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
     const rig = await requireRigForApi(db, workspaceId, c.req.param("rigId"));
     const request = ProposeRigChangeRequest.parse(await c.req.json());
     const change = await proposeRigChangeForApi({ db }, grant, rig, request);
-    const verifying = await startChangeVerification(workspaceId, change.id);
-    return c.json(verifying, 201);
+    const verification = await startChangeVerification(workspaceId, change.id);
+    if (!verification.started) c.header("OpenGeni-Rig-Verification", "deferred");
+    return c.json(verification.change, 201);
   });
 
   app.get("/v1/workspaces/:workspaceId/rigs/:rigId/changes/:changeId", async (c) => {
@@ -163,8 +219,9 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
       c.req.param("rigId"),
       c.req.param("changeId"),
     );
-    const verifying = await startChangeVerification(workspaceId, change.id);
-    return c.json(verifying, 202);
+    const verification = await startChangeVerification(workspaceId, change.id);
+    if (!verification.started) c.header("OpenGeni-Rig-Verification", "deferred");
+    return c.json(verification.change, 202);
   });
 
   app.post("/v1/workspaces/:workspaceId/rigs/:rigId/changes/:changeId/promote", async (c) => {
