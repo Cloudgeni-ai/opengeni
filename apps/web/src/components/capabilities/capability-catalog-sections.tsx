@@ -48,7 +48,7 @@ export function CapabilityDiscoveryControls({
           value={query}
           onChange={(event) => onQueryChange(event.target.value)}
           placeholder="Search integrations, tools, and skills"
-          className="h-12 rounded-xl pl-11 text-base"
+          className="h-12 rounded-xl pl-11 text-base transition-none placeholder:text-fg"
           aria-label="Search capabilities"
         />
       </div>
@@ -63,12 +63,12 @@ export function CapabilityDiscoveryControls({
             className={cn(
               "inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors pointer-coarse:min-h-11",
               filter === kind
-                ? "border-brand/40 bg-brand/10 text-brand"
+                ? "border-brand/40 bg-brand/10 text-fg"
                 : "border-border bg-surface/50 text-fg-muted hover:border-border-strong hover:text-fg",
             )}
           >
             {capabilityFilterLabel(kind)}
-            <span className={cn("text-2xs", filter === kind ? "text-brand/70" : "text-fg-subtle")}>
+            <span className={cn("text-2xs", filter === kind ? "text-fg" : "text-fg-muted")}>
               {counts[kind]}
             </span>
           </button>

@@ -49,7 +49,7 @@ export function CustomApiSection({
             <h3 id="custom-apis-heading" className="text-sm font-semibold text-fg">
               Custom APIs
             </h3>
-            <Badge variant="outline" className="bg-bg/50 text-2xs text-fg-muted">
+            <Badge variant="outline" className="bg-bg text-2xs text-fg transition-none">
               OpenAPI + GraphQL
             </Badge>
           </div>

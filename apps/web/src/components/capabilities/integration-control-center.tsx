@@ -117,11 +117,19 @@ export function IntegrationControlCenter({
   connections,
   canManage,
   onChanged,
+  presetIds,
+  excludedPresetIds,
+  showCustomApis = true,
+  embedded = false,
 }: {
   workspaceId: string;
   connections: ConnectionMetadata[] | null;
   canManage: boolean;
   onChanged: () => void | Promise<void>;
+  presetIds?: string[];
+  excludedPresetIds?: string[];
+  showCustomApis?: boolean;
+  embedded?: boolean;
 }) {
   const context = useAppContext();
   const client = context.client;
@@ -243,6 +251,13 @@ export function IntegrationControlCenter({
     () => instances.filter((instance) => instance.presetId === null),
     [instances],
   );
+  const visiblePresets = useMemo(() => {
+    const included = presetIds ? new Set(presetIds) : null;
+    const excluded = excludedPresetIds ? new Set(excludedPresetIds) : null;
+    return presets.filter(
+      (preset) => (!included || included.has(preset.id)) && !excluded?.has(preset.id),
+    );
+  }, [excludedPresetIds, presetIds, presets]);
 
   function openSetup(preset: ApiIntegrationPresetSummary) {
     const count = instancesByPreset.get(preset.id)?.length ?? 0;
@@ -522,9 +537,9 @@ export function IntegrationControlCenter({
       <IntegrationControlCenterView
         client={client}
         workspaceId={workspaceId}
-        presets={presets}
+        presets={visiblePresets}
         instancesByPreset={instancesByPreset}
-        customInstances={customInstances}
+        customInstances={showCustomApis ? customInstances : []}
         connections={connections}
         loading={loading}
         loadError={loadError}
@@ -539,6 +554,8 @@ export function IntegrationControlCenter({
         ownership={ownership}
         removeTarget={removeTarget}
         customApi={customApi}
+        embedded={embedded}
+        showCustomApis={showCustomApis}
         onRefresh={() => void load()}
         onOpenSetup={openSetup}
         onReconnect={(instance) => void reconnect(instance)}

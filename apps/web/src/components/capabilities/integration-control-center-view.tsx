@@ -83,6 +83,8 @@ export function IntegrationControlCenterView({
   ownership,
   removeTarget,
   customApi,
+  embedded,
+  showCustomApis,
   onRefresh,
   onOpenSetup,
   onReconnect,
@@ -125,6 +127,8 @@ export function IntegrationControlCenterView({
   ownership: ConnectionOwnership;
   removeTarget: IntegrationRemoveTarget | null;
   customApi: CustomApiFlowState;
+  embedded: boolean;
+  showCustomApis: boolean;
   onRefresh: () => void;
   onOpenSetup: (preset: ApiIntegrationPresetSummary) => void;
   onReconnect: (instance: ApiIntegrationInstallationSummary) => void;
@@ -157,38 +161,52 @@ export function IntegrationControlCenterView({
     <section
       ref={focusFallbackRef}
       tabIndex={-1}
-      className="relative mt-6 overflow-hidden rounded-xl border border-border bg-surface shadow-sm"
-      aria-labelledby="integration-control-center-heading"
+      className={cn(
+        "relative overflow-hidden",
+        embedded ? "bg-transparent" : "mt-6 rounded-xl border border-border bg-surface shadow-sm",
+      )}
+      {...(embedded
+        ? { "aria-label": "Connected service accounts" }
+        : { "aria-labelledby": "integration-control-center-heading" })}
       aria-busy={loading || callbackBusy}
     >
-      <div className="relative flex flex-col gap-4 border-b border-border/80 bg-brand/5 p-5 sm:flex-row sm:items-start sm:justify-between sm:p-6">
-        <div className="flex min-w-0 gap-3">
-          <span className="grid size-11 shrink-0 place-items-center rounded-xl border border-brand/20 bg-brand/10 text-brand shadow-sm">
-            <Layers3Icon className="size-5" />
-          </span>
-          <div>
-            <div className="flex flex-wrap items-center gap-2">
-              <h2
-                id="integration-control-center-heading"
-                className="text-base font-semibold text-fg"
-              >
-                Connected services
-              </h2>
-              <Badge variant="outline" className="bg-surface/50 text-2xs text-fg-muted">
-                Multi-account ready
-              </Badge>
+      {!embedded ? (
+        <div className="relative flex flex-col gap-4 border-b border-border/80 bg-brand/5 p-5 sm:flex-row sm:items-start sm:justify-between sm:p-6">
+          <div className="flex min-w-0 gap-3">
+            <span className="grid size-11 shrink-0 place-items-center rounded-xl border border-brand/20 bg-brand/10 text-brand shadow-sm">
+              <Layers3Icon className="size-5" />
+            </span>
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <h2
+                  id="integration-control-center-heading"
+                  className="text-base font-semibold text-fg"
+                >
+                  Connected services
+                </h2>
+                <Badge variant="outline" className="bg-surface text-2xs text-fg transition-none">
+                  Multi-account ready
+                </Badge>
+              </div>
+              <p className="mt-1 max-w-2xl text-sm leading-6 text-fg-muted">
+                Add Gmail, Outlook, or OneDrive in a few steps. Every account becomes a separate
+                named instance with its own tools, health, permissions, and lifecycle.
+              </p>
             </div>
-            <p className="mt-1 max-w-2xl text-sm leading-6 text-fg-muted">
-              Add Gmail, Drive, Outlook, or OneDrive in a few steps. Every account becomes a
-              separate named instance with its own tools, health, permissions, and lifecycle.
-            </p>
           </div>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="text-fg-muted transition-none disabled:opacity-100"
+            onClick={onRefresh}
+            disabled={loading}
+          >
+            <RefreshCwIcon className={cn("size-3.5", loading && "animate-spin")} />
+            Refresh services
+          </Button>
         </div>
-        <Button type="button" variant="ghost" size="sm" onClick={onRefresh} disabled={loading}>
-          <RefreshCwIcon className={cn("size-3.5", loading && "animate-spin")} />
-          Refresh services
-        </Button>
-      </div>
+      ) : null}
 
       {callbackBusy ? (
         <div
@@ -201,10 +219,10 @@ export function IntegrationControlCenterView({
         </div>
       ) : null}
 
-      <div className="relative p-4 sm:p-6">
+      <div className={cn("relative", embedded ? "py-3" : "p-4 sm:p-6")}>
         {loading && presets.length === 0 ? (
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-            {Array.from({ length: 6 }, (_, index) => (
+          <div className={cn("grid gap-3", !embedded && "md:grid-cols-2 xl:grid-cols-3")}>
+            {Array.from({ length: embedded ? 1 : 6 }, (_, index) => (
               <Skeleton key={index} className="h-40 rounded-xl" />
             ))}
           </div>
@@ -223,7 +241,7 @@ export function IntegrationControlCenterView({
             </Button>
           </div>
         ) : (
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+          <div className={cn("grid gap-3", !embedded && "md:grid-cols-2 xl:grid-cols-3")}>
             {presets.map((preset) => (
               <PresetCard
                 key={preset.id}
@@ -246,16 +264,18 @@ export function IntegrationControlCenterView({
         )}
       </div>
 
-      <CustomApiSection
-        instances={customInstances}
-        connections={connections}
-        canManage={canManage}
-        busyKey={busyKey}
-        onConnect={onOpenCustomApi}
-        onUpdate={onUpdateCustomApi}
-        onReconnect={onReconnectCustomApi}
-        onRemove={onPreviewRemove}
-      />
+      {showCustomApis ? (
+        <CustomApiSection
+          instances={customInstances}
+          connections={connections}
+          canManage={canManage}
+          busyKey={busyKey}
+          onConnect={onOpenCustomApi}
+          onUpdate={onUpdateCustomApi}
+          onReconnect={onReconnectCustomApi}
+          onRemove={onPreviewRemove}
+        />
+      ) : null}
 
       <Dialog open={setupPreset !== null} onOpenChange={(open) => !open && onSetupClose()}>
         <DialogContent className="sm:max-w-lg">
@@ -350,18 +370,20 @@ export function IntegrationControlCenterView({
         onConfirm={onRemoveInstance}
       />
 
-      <CustomApiSetupDialog
-        state={customApi}
-        connections={connections}
-        canManage={canManage}
-        onOpenChange={onCustomApiOpenChange}
-        onDraftChange={onCustomApiDraftChange}
-        onPreview={onCustomApiPreview}
-        onAuthenticate={onCustomApiAuthenticate}
-        onInstall={onCustomApiInstall}
-        onBack={onCustomApiBack}
-        onToggleTool={onCustomApiToggleTool}
-      />
+      {showCustomApis ? (
+        <CustomApiSetupDialog
+          state={customApi}
+          connections={connections}
+          canManage={canManage}
+          onOpenChange={onCustomApiOpenChange}
+          onDraftChange={onCustomApiDraftChange}
+          onPreview={onCustomApiPreview}
+          onAuthenticate={onCustomApiAuthenticate}
+          onInstall={onCustomApiInstall}
+          onBack={onCustomApiBack}
+          onToggleTool={onCustomApiToggleTool}
+        />
+      ) : null}
     </section>
   );
 }

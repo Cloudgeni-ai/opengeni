@@ -338,6 +338,18 @@ describe("capabilities browser e2e", () => {
         waitUntil: "networkidle",
       });
 
+      await page
+        .getByRole("button", {
+          name: "Google Drive Browse selected folders and Shared Drives for read-only knowledge sync. Not connected",
+          exact: true,
+        })
+        .click();
+      const advancedAccounts = page.getByText("Agent file access and additional accounts", {
+        exact: true,
+      });
+      await expectVisible(advancedAccounts);
+      await advancedAccounts.click();
+
       const instance = page.locator('[data-integration-instance="finance"]');
       await expectVisible(instance);
       await expectText(instance, "Google Drive — Finance");
@@ -348,11 +360,13 @@ describe("capabilities browser e2e", () => {
       await expectVisible(feature);
       await feature.getByRole("button", { name: "Configure" }).click();
 
-      const dialog = page.getByRole("dialog");
+      const dialog = page.locator('[data-slot="dialog-content"]').filter({
+        hasText: "Google Drive locations · Google Drive — Finance",
+      });
       await expectVisible(dialog);
       await expectText(dialog, "Google Drive locations · Google Drive — Finance");
       await dialog.getByRole("checkbox", { name: "Connect My Drive" }).check();
-      await assertAccessibleAndBounded(page, '[role="dialog"]');
+      await assertAccessibleAndBounded(page, '[data-slot="dialog-content"]');
       await dialog.getByRole("button", { name: "Save 1 location" }).click();
       await expectHidden(dialog);
 
@@ -555,6 +569,7 @@ async function setTheme(page: Page, theme: "light" | "dark"): Promise<void> {
     await new Promise<void>((resolve) => {
       requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
     });
+    await new Promise<void>((resolve) => setTimeout(resolve, 250));
   }, theme);
 }
 
