@@ -1452,6 +1452,95 @@ export async function ensureManagedAccessForUser(
         })
         .where(eq(schema.workspaceMemberships.id, membership.id));
     }
+
+    const personalWorkspaceExternalSource = "opengeni:organization-membership";
+    const personalWorkspaceExternalId = `${account.id}:${subjectId}`;
+    let [personalWorkspace] = await tx
+      .select()
+      .from(schema.workspaces)
+      .where(
+        and(
+          eq(schema.workspaces.externalSource, personalWorkspaceExternalSource),
+          eq(schema.workspaces.externalId, personalWorkspaceExternalId),
+        ),
+      )
+      .limit(1);
+    if (!personalWorkspace) {
+      [personalWorkspace] = await tx
+        .insert(schema.workspaces)
+        .values({
+          accountId: account.id,
+          name: "Personal workspace",
+          slug: null,
+          externalSource: personalWorkspaceExternalSource,
+          externalId: personalWorkspaceExternalId,
+        })
+        .onConflictDoUpdate({
+          target: [schema.workspaces.externalSource, schema.workspaces.externalId],
+          set: { updatedAt: new Date() },
+        })
+        .returning();
+    }
+    if (!personalWorkspace) {
+      throw new Error("Failed to ensure personal workspace");
+    }
+    if (
+      personalWorkspace.accountId !== account.id ||
+      personalWorkspace.externalSource !== personalWorkspaceExternalSource ||
+      personalWorkspace.externalId !== personalWorkspaceExternalId
+    ) {
+      throw new Error("Managed personal workspace identity conflict");
+    }
+
+    await setRlsContext(tx as unknown as Database, {
+      accountId: account.id,
+      workspaceId: personalWorkspace.id,
+    });
+    const [personalWorkspaceControl] = await tx
+      .select({ workspaceId: schema.workspaceInferenceControls.workspaceId })
+      .from(schema.workspaceInferenceControls)
+      .where(eq(schema.workspaceInferenceControls.workspaceId, personalWorkspace.id))
+      .limit(1);
+    if (!personalWorkspaceControl) {
+      await tx
+        .insert(schema.workspaceInferenceControls)
+        .values({
+          workspaceId: personalWorkspace.id,
+          accountId: account.id,
+        })
+        .onConflictDoNothing();
+    }
+    await setRlsContext(tx as unknown as Database, {
+      accountId: account.id,
+      workspaceId: null,
+    });
+
+    const [provisionedMembership] = await rawRows<{
+      organization_membership_id: string;
+      personal_workspace_id: string;
+    }>(
+      tx,
+      sql`
+        select * from ensure_managed_human_personal_workspace(
+          ${account.id},
+          ${subjectId},
+          ${personalWorkspace.id}
+        )
+      `,
+    );
+    if (
+      !provisionedMembership ||
+      provisionedMembership.personal_workspace_id !== personalWorkspace.id
+    ) {
+      throw new Error("Managed organization membership provisioning did not converge");
+    }
+
+    // The personal workspace is lifecycle metadata only in Slice B. Keep the
+    // existing default-workspace access projection and all legacy lists intact.
+    await setRlsContext(tx as unknown as Database, {
+      accountId: account.id,
+      workspaceId: null,
+    });
     const memberships = await tx
       .select({
         membership: schema.workspaceMemberships,

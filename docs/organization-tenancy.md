@@ -30,6 +30,37 @@ receives no direct table DML. Privileged migration/operator connections can
 inspect the scaffold. No API, SDK, worker, MCP, UI, or resource DAO uses it in
 Slice A.
 
+## Slice B: managed-human lifecycle provisioning
+
+Migration `0219_organization_tenancy_managed_human_provisioning.sql` adds the
+first narrow dual-write seam without activating personal-workspace runtime
+access. The existing Better Auth managed-human hook
+`ensureManagedAccessForUser` now converges, in one transaction, on:
+
+- exactly one `organization_memberships` row for the existing
+  `managed_accounts` organization and the derived `user:<id>` subject;
+- exactly one deterministic same-organization personal workspace with a normal
+  `workspace_inference_controls` row; and
+- an active membership pointer to that workspace.
+
+The personal workspace is lifecycle metadata only in this slice. It receives no
+`workspace_memberships` row, is absent from `AccessContext.workspaceGrants`,
+`defaultWorkspaceId`, subject workspace lists, and existing runtime resource
+paths, and does not create user-resource authority or grant rows. The legacy
+Better Auth default workspace remains the sole runtime-access workspace.
+
+Organization-table writes use one target-schema-local
+`ensure_managed_human_personal_workspace(uuid, text, uuid)` SECURITY DEFINER
+capability with a fixed schema-plus-`pg_catalog` search path, PUBLIC execution
+revoked, and explicit `opengeni_app` EXECUTE. Its transaction-local RLS marker,
+exact account/subject binding to the existing managed-human owner membership,
+deterministic workspace identity, control-row validation, and row lock make
+first, repeated, and concurrent provisioning converge. Suspended or revoked
+memberships, foreign accounts, wrong subjects/workspaces, existing runtime
+access on the personal workspace, and malformed subjects fail closed. The app
+role still has zero direct SELECT/INSERT/UPDATE/DELETE privileges on all four
+organization-tenancy tables.
+
 ## Legacy behavior
 
 Existing resources retain their current workspace foreign keys and RLS. Slice
@@ -74,13 +105,12 @@ the access path.
 
 ## Later migration phases
 
-### B. Dual-write
+### B. Dual-write (0219 current)
 
-Introduce lifecycle-only organization membership administration and exact
-server-derived user authority creation. New resource writes may record an
-authority id while continuing to write the existing workspace-owned row. New
-session writes may record owner/visibility, but old writers remain accepted.
-No read path changes yet.
+Managed-human membership and personal-workspace lifecycle metadata now use the
+narrow provisioning seam described above. Resource authority/grant dual-write,
+new-session owner/visibility writes, and all read-path changes remain future
+work; old writers remain accepted.
 
 ### C. Backfill
 
@@ -114,9 +144,11 @@ Only after all writers/readers are activated and audited may legacy
 workspace-owned assumptions be removed. Resource FKs are never destructively
 rewritten in the same release that first activates user authority.
 
-## Non-goals in Slice A
+## Non-goals in Slices A and B
 
 - organization/member API or UI;
+- personal-workspace runtime access or a personal `workspace_memberships` row;
+- user-resource authority/grant writes, discovery, or sharing;
 - resource CRUD or discovery changes;
 - session sharing/fork runtime;
 - turn/task cancellation or authority-epoch claim checks;

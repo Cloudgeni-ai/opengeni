@@ -79,14 +79,16 @@ MinIO is the local S3-compatible object storage default for Docker Compose and o
 For a map of every app, package, and how the parts fit together, start at [`docs/architecture.md`](docs/architecture.md) and follow its links to the focused topic docs.
 
 - Public clients talk only to the API.
-- Organization-tenancy Slice A names the future `Organization → Workspace → User`
-  authority hierarchy without activating it: `managed_accounts.id` remains the
-  physical organization id, organization membership is distinct from workspace
-  access, a personal workspace is lifecycle metadata rather than the ownership
-  anchor for user resources, and the new authority/grant tables are deny-all
-  FORCE-RLS scaffolding. Existing APIs, resources, sessions, and RLS behavior
-  remain workspace-owned/workspace-shared until later reviewed activation
-  slices. See `docs/organization-tenancy.md`.
+- Organization-tenancy Slices A+B stage the `Organization → Workspace → User`
+  authority hierarchy without activating personal runtime access:
+  `managed_accounts.id` remains the physical organization id, organization
+  membership is distinct from workspace access, managed-human provisioning
+  creates one same-org personal workspace pointer plus its normal control row,
+  and the personal workspace receives no `workspace_memberships` row. The four
+  authority/grant tables remain FORCE-RLS with zero direct app DML; only the
+  exact lifecycle SECURITY DEFINER seam may create the membership. Existing
+  APIs, resources, sessions, lists, and RLS behavior remain
+  workspace-owned/workspace-shared. See `docs/organization-tenancy.md`.
 - Domain/access/billing helpers now live in `@opengeni/core` under `packages/core/src`; `apps/api` routes are HTTP adapters over them.
 - Browser streaming uses `GET /v1/workspaces/:workspaceId/sessions/:id/events/stream` with SSE.
 - Session goals support `GET`, `PATCH(status paused|active)`, and idempotent `DELETE` clear on `/v1/workspaces/:workspaceId/sessions/:id/goal`; clearing removes the goal row and emits `goal.cleared`.

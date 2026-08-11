@@ -26,7 +26,13 @@ const tenancyTables = [
   "organization_user_resource_authorities",
   "organization_user_resource_grants",
 ] as const;
-const tenancySystemOnlyPolicy = "organization_tenancy_system_only";
+// Migration 0218's historical contract is intentionally deny-all. The shared
+// native fixture is cloned from the full current ledger, so its live catalog
+// reflects migration 0219's managed-human lifecycle activation instead.
+const historicalTenancySystemOnlyPolicy = "organization_tenancy_system_only";
+const currentLedgerTenancyLifecyclePolicy = "organization_tenancy_lifecycle";
+const currentLedgerTenancyLifecycleExpression =
+  "(current_setting('opengeni.organization_tenancy_lifecycle'::text, true) = 'managed_human_provisioning'::text)";
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
@@ -107,7 +113,7 @@ describe("migration 0218 organization tenancy foundation", () => {
       expect(migration).toContain(`CREATE TABLE "${table}"`);
       expect(migration).toContain(`ALTER TABLE "${table}" FORCE ROW LEVEL SECURITY`);
       expect(migration).toContain(
-        `CREATE POLICY ${tenancySystemOnlyPolicy} ON "${table}"\n  USING (false) WITH CHECK (false);`,
+        `CREATE POLICY ${historicalTenancySystemOnlyPolicy} ON "${table}"\n  USING (false) WITH CHECK (false);`,
       );
       expect(FORCE_RLS_TABLES).toContain(table);
       expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain(table);
@@ -119,9 +125,9 @@ describe("migration 0218 organization tenancy foundation", () => {
     expect(migration).toContain(
       `ADD COLUMN IF NOT EXISTS "authority_epoch" integer NOT NULL DEFAULT 1`,
     );
-    expect(migration.match(/CREATE POLICY organization_tenancy_system_only ON /gu)).toHaveLength(
-      tenancyTables.length,
-    );
+    expect(
+      migration.match(new RegExp(`CREATE POLICY ${historicalTenancySystemOnlyPolicy} ON `, "gu")),
+    ).toHaveLength(tenancyTables.length);
     expect(migration).toMatch(
       /"mode" = 'delete_after'\s+AND "retention_days" IS NOT NULL\s+AND "retention_days" BETWEEN 1 AND 3650/u,
     );
@@ -480,16 +486,20 @@ describe("migration 0218 organization tenancy foundation", () => {
       group by c.relname, c.relrowsecurity, c.relforcerowsecurity, c.oid
       order by c.relname
     `;
+    // This shared database contains the complete current migration ledger, not
+    // an isolated replay stopped at 0218. Therefore the live catalog must
+    // assert 0219's lifecycle policy while the static checks above preserve
+    // 0218's historical deny-all contract.
     expect([...policyRows]).toEqual(
       [...tenancyTables].sort().map((tableName) => ({
         tableName,
         rlsEnabled: true,
         rlsForced: true,
         policyCount: 1,
-        policyNames: [tenancySystemOnlyPolicy],
+        policyNames: [currentLedgerTenancyLifecyclePolicy],
         policyCommands: ["*"],
-        usingExpressions: ["false"],
-        checkExpressions: ["false"],
+        usingExpressions: [currentLedgerTenancyLifecycleExpression],
+        checkExpressions: [currentLedgerTenancyLifecycleExpression],
         appSelect: false,
         appInsert: false,
         appUpdate: false,

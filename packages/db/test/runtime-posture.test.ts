@@ -109,6 +109,13 @@ function safePosture(): RuntimeDatabasePosture {
         publicExecute: false,
         securityDefiner: true,
       },
+      {
+        name: "ensure_managed_human_personal_workspace(uuid, text, uuid)",
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+      },
     ],
     privateRoutines: [
       {

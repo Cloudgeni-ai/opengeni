@@ -211,18 +211,24 @@ Workspace State is an additive read-only projection over those existing authorit
 
 Effective retrieval has one composition boundary: `searchEffectiveDocuments`. The authenticated immutable initiating subject is bound outside request/tool input, then `/knowledge/search`, SDK `searchKnowledge`, and docs-MCP `knowledge_search` compose authorized organization + current-workspace + initiating-user personal Documents before vector/keyword ranking and limits. Typed results retain source metadata and immutable authority provenance. The single-record compatibility predicate applies the same exact authority tuple: legacy personal authority remains anchored to its originating workspace, workspace authority requires that workspace, and incomplete, non-canonical, overlong, or unknown tuples deny rather than becoming visible. Agent calls additionally require `agent_access=true`; Documents remain explicit RAG evidence and never enter prompts or memories automatically. Docs-MCP `list_indexed_documents` applies that same effective agent scope and returns source plus authority/ingestion provenance in database-assigned indexing-completion order. Its opaque checkpoint is bound to the account, requesting workspace, and immutable initiating subject; callers persist `nextCheckpoint` only after processing the page. Migration `0202_document_index_checkpoints.sql` stamps the sequence only on transitions to `ready`, so metadata refreshes and collection moves do not manufacture new review work while a successful reindex does. Canonical: `packages/documents/src/index.ts`, `apps/api/src/routes/documents.ts`, `apps/api/src/mcp/documents.ts`, `packages/contracts/src/index.ts`, `packages/db/src/schema.ts`, `packages/sdk/src/client.ts`.
 
-Migration 0218 adds the inert organization-tenancy Slice A foundation. The
-physical `managed_accounts.id` remains the organization identifier; new
-organization memberships carry one personal-workspace lifecycle pointer, while
-stable user-resource authority belongs to the organization membership rather
-than that workspace. Separate deny-all FORCE-RLS tables, each with one
-explicit `organization_tenancy_system_only` policy using
-`USING (false) WITH CHECK (false)`, name user-resource authority, owner-bound
-action grants, and configurable personal retention.
+Migrations 0218 and 0219 add the staged organization-tenancy foundation and
+managed-human lifecycle dual-write. The physical `managed_accounts.id` remains
+the organization identifier; each Better Auth managed human now converges on
+one same-organization `organization_memberships` row and one deterministic
+personal-workspace lifecycle pointer, while stable user-resource authority
+still belongs to the organization membership rather than that workspace.
+The four tenancy tables remain FORCE-RLS with no direct `opengeni_app` table
+DML; the only runtime write path is the target-schema-local,
+PUBLIC-revoked `ensure_managed_human_personal_workspace` SECURITY DEFINER
+capability, which validates the exact account, `user:<id>` subject, existing
+owner membership, workspace identity, and control row before the lifecycle
+write.
 Grant rows carry the owning membership and a canonical action; `once` and
 `session` are fenced to one exact session plus positive authority epoch, while
 `always` is a standing grant with null session and epoch. A later activation
-slice must consume `once` grants atomically before accepting use.
+slice must consume `once` grants atomically before accepting use. Slice B does
+not create any authority or grant rows, and the personal workspace remains
+absent from runtime workspace access.
 Sessions gain additive owner, `user_private|workspace_shared` visibility,
 authority-epoch, and independent-fork provenance columns; every existing row
 defaults to workspace-shared epoch 1 with no owner or fork authority. This slice

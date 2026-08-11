@@ -725,6 +725,22 @@ BEGIN
     END IF;
     IF to_regprocedure(
       format(
+        '%I.ensure_managed_human_personal_workspace(uuid,text,uuid)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.ensure_managed_human_personal_workspace(uuid, text, uuid) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.ensure_managed_human_personal_workspace(uuid, text, uuid) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
         '%I.scoped_knowledge_advance_source_acl(uuid,uuid,bigint,bigint,uuid,text,text,text,text,text,text)',
         ${literal(schema)}
       )
