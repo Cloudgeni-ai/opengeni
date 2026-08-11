@@ -1,4 +1,4 @@
-FROM oven/bun:1.3.14 AS base
+FROM oven/bun:1.3.14 AS source-base
 
 WORKDIR /app
 
@@ -42,11 +42,17 @@ RUN bun install --frozen-lockfile
 
 COPY --chown=bun:bun . .
 
+ENV NODE_ENV=production
+USER bun
+
+# Most workloads share the same network/source-control tools. Keep that stable
+# package layer reusable, while artifact-runtime workloads inherit source-base
+# directly and install their complete target-specific package union once.
+FROM source-base AS base
+USER root
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates git openssh-client \
   && rm -rf /var/lib/apt/lists/*
-
-ENV NODE_ENV=production
 USER bun
 
 FROM base AS northstar-demo-build
@@ -62,7 +68,7 @@ CMD ["bun", "run", "--cwd", "examples/northstar-support", "start"]
 # architecture at `.release/artifact-runtime/<amd64|arm64>/`. The bundle is
 # root-owned/read-only, and both API and materializer image builds fail before
 # publication if its complete release/install chain or facade probe is invalid.
-FROM base AS artifact-runtime-base
+FROM source-base AS artifact-runtime-base
 ARG TARGETARCH
 ARG OPENGENI_ARTIFACT_RUNTIME_BUNDLE=.release/artifact-runtime
 USER root
@@ -87,7 +93,7 @@ RUN bun packages/artifact-tool/src/runtime-cli-entry.ts doctor --json
 FROM artifact-runtime-base AS api
 USER root
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ffmpeg \
+  && apt-get install -y --no-install-recommends ca-certificates ffmpeg git openssh-client \
   && rm -rf /var/lib/apt/lists/*
 USER bun
 RUN bun scripts/build-runtime-processes.ts api
@@ -140,7 +146,7 @@ CMD ["bun", "apps/worker/dist/process/artifact-outbox/artifact-outbox-entry.js"]
 FROM artifact-runtime-base AS artifact-materializer
 USER root
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends bubblewrap util-linux \
+  && apt-get install -y --no-install-recommends bubblewrap ca-certificates git openssh-client util-linux \
   && rm -rf /var/lib/apt/lists/* \
   && install -d -o bun -g bun -m 0755 /opt/opengeni/bin
 USER bun
