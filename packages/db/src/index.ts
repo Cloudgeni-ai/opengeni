@@ -13788,7 +13788,9 @@ export async function setSessionChannel(
   db: Database,
   input: { workspaceId: string; sessionId: string; channelId: string | null },
 ): Promise<boolean> {
-  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+  // Session-row writers require the activity-gated handle (migration 0214's
+  // commit gate); filing is organizational but it is still a sessions UPDATE.
+  return await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scopedDb) => {
     if (input.channelId !== null) {
       const [channel] = await scopedDb
         .select({ id: schema.channels.id })
