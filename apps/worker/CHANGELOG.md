@@ -1,5 +1,50 @@
 # @opengeni/worker-bundle
 
+## 0.17.0
+
+### Minor Changes
+
+- dcfe6eb: Add canonical attempt-scoped CodeMode, browser and computer interaction, and durable collaborative editable artifacts. Agents and humans now share one artifact head through the same application authority; direct MCP and CodeMode support bounded inspection, fenced edits, trusted Office import, and asynchronous export to workspace files. The session UI gains a first-class Artifacts workspace, and React interaction viewers move to an explicit lazy-loadable subpath.
+
+### Patch Changes
+
+- 2f4ce5e: Add durable Seedance video generation with workspace model and funding policy,
+  secure media references, retained video artifacts, sandbox materialization,
+  OpenGeni-credit and workspace-gateway funding, and SDK/React playback surfaces.
+- 96965c2: Retain explicit image-tool outputs before they enter live agent history, preventing inline image bytes from reaching durable session history during SDK event/state ordering skew.
+- eade67f: Allow Modal cold filesystem-snapshot restores up to 60 seconds to become command-ready before failing lease warm-up.
+- bd5514e: Add explicitly enabled provider-neutral knowledge-source schedules with durable wake provenance, generation-fenced execution checkpoints and index obligations, fail-closed ACL activation seams, no-agent execution, layered pause state, shared schedule administration, and Google Drive source lifecycle integration.
+- Updated dependencies [b46f4de]
+- Updated dependencies [2f4ce5e]
+- Updated dependencies [d55a093]
+- Updated dependencies [7954468]
+- Updated dependencies [dcfe6eb]
+- Updated dependencies [cccc2b3]
+- Updated dependencies [d1db1d3]
+- Updated dependencies [96965c2]
+- Updated dependencies [a8e44ae]
+- Updated dependencies [ad9123b]
+- Updated dependencies [eade67f]
+- Updated dependencies [31666e2]
+- Updated dependencies [bd5514e]
+- Updated dependencies [90eea29]
+- Updated dependencies [a858835]
+- Updated dependencies [5fcad0a]
+  - @opengeni/contracts@0.43.0
+  - @opengeni/db@0.30.0
+  - @opengeni/config@0.13.0
+  - @opengeni/core@0.23.0
+  - @opengeni/network@0.2.2
+  - @opengeni/runtime@0.19.0
+  - @opengeni/agent-proto@0.4.0
+  - @opengeni/codemode@0.2.0
+  - @opengeni/observability@0.6.0
+  - @opengeni/documents@0.5.30
+  - @opengeni/events@0.3.101
+  - @opengeni/github@0.4.48
+  - @opengeni/storage@0.2.85
+  - @opengeni/codex@0.2.15
+
 ## 0.16.49
 
 ### Patch Changes
