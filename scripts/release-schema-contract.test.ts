@@ -117,10 +117,10 @@ describe("release schema contract", () => {
     expect(sourceContract.sha256).toBe(
       migrations.has("0219_memory_slack_append_only_cascade.sql")
         ? migrations.has("0219_organization_tenancy_managed_human_provisioning.sql")
-          ? "a75e838b475674d8fe34aaf0321f40ce03e81c0d1d5477e57f3e8bdb7c4ad2dd"
+          ? "c1bb8a035e8ab832968993cef2ff0a10965efaca1584320ac3969d267f2d9d8d"
           : migrations.has("0218_organization_tenancy_foundation.sql")
-            ? "724f96c2f545af3d3a5fc1ef05fbee6af332c68a917571230e21604f7e187337"
-            : "e1d34e33676401ce0335ba2ff6aef9d81226f144898284c0062533fc6d74313e"
+            ? "28f0960b59d4e978393f42f02c949e2f5d22947cd35f97288683494c05eea701"
+            : "85c02e09061ba359a0fa747b1ccffa87a5dd115cbfd8f36ad90c62292ef27bba"
         : migrations.has("0218_site_auth_maintenance_sessions.sql")
           ? migrations.has("0219_organization_tenancy_managed_human_provisioning.sql")
             ? "aca629bb0e9b78656a5daaaa9d1720017b751b4f19c3e8b9e156d8e00c12d2d0"
@@ -141,10 +141,10 @@ describe("release schema contract", () => {
       ...sourceContract,
       sha256: migrations.has("0219_memory_slack_append_only_cascade.sql")
         ? migrations.has("0219_organization_tenancy_managed_human_provisioning.sql")
-          ? "a75e838b475674d8fe34aaf0321f40ce03e81c0d1d5477e57f3e8bdb7c4ad2dd"
+          ? "c1bb8a035e8ab832968993cef2ff0a10965efaca1584320ac3969d267f2d9d8d"
           : migrations.has("0218_organization_tenancy_foundation.sql")
-            ? "724f96c2f545af3d3a5fc1ef05fbee6af332c68a917571230e21604f7e187337"
-            : "e1d34e33676401ce0335ba2ff6aef9d81226f144898284c0062533fc6d74313e"
+            ? "28f0960b59d4e978393f42f02c949e2f5d22947cd35f97288683494c05eea701"
+            : "85c02e09061ba359a0fa747b1ccffa87a5dd115cbfd8f36ad90c62292ef27bba"
         : migrations.has("0218_site_auth_maintenance_sessions.sql")
           ? migrations.has("0219_organization_tenancy_managed_human_provisioning.sql")
             ? "aca629bb0e9b78656a5daaaa9d1720017b751b4f19c3e8b9e156d8e00c12d2d0"
@@ -335,10 +335,10 @@ describe("release schema contract", () => {
     expect(contract.sha256).toBe(
       migrations.has("0219_memory_slack_append_only_cascade.sql")
         ? migrations.has("0219_organization_tenancy_managed_human_provisioning.sql")
-          ? "a75e838b475674d8fe34aaf0321f40ce03e81c0d1d5477e57f3e8bdb7c4ad2dd"
+          ? "c1bb8a035e8ab832968993cef2ff0a10965efaca1584320ac3969d267f2d9d8d"
           : migrations.has("0218_organization_tenancy_foundation.sql")
-            ? "724f96c2f545af3d3a5fc1ef05fbee6af332c68a917571230e21604f7e187337"
-            : "e1d34e33676401ce0335ba2ff6aef9d81226f144898284c0062533fc6d74313e"
+            ? "28f0960b59d4e978393f42f02c949e2f5d22947cd35f97288683494c05eea701"
+            : "85c02e09061ba359a0fa747b1ccffa87a5dd115cbfd8f36ad90c62292ef27bba"
         : migrations.has("0218_site_auth_maintenance_sessions.sql")
           ? migrations.has("0219_organization_tenancy_managed_human_provisioning.sql")
             ? "aca629bb0e9b78656a5daaaa9d1720017b751b4f19c3e8b9e156d8e00c12d2d0"
@@ -457,7 +457,7 @@ describe("release schema contract", () => {
       deploymentMode: "maintenance",
     });
     expect(migrations.get("0215_browser_controller_host.sql")).toMatchObject({
-      sha256: "9e40a7450b4d7c3fd73595e8ab3e844ee12765682e6fa67a479cf7f56728f328",
+      sha256: "048418cf8c8c6445d18977ba93c3ca87debde85fee038be6a90edfae6e4b93f6",
       deploymentMode: "maintenance",
     });
     expect(migrations.get("0216_browser_auth_health_evidence.sql")).toMatchObject({
