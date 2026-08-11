@@ -116,9 +116,13 @@ export function IntegrationFeaturesPanel({
   const [form, setForm] = useState<FeatureFormState>({});
   const [removeTarget, setRemoveTarget] = useState<FeatureEntry | null>(null);
   const loadSequence = useRef(0);
+  const loadPromise = useRef<Promise<void> | null>(null);
 
   useEffect(() => {
+    ++loadSequence.current;
+    loadPromise.current = null;
     setData(null);
+    setLoading(false);
     setError(null);
     setOpen(false);
     setEditor(null);
@@ -134,22 +138,31 @@ export function IntegrationFeaturesPanel({
   if (featureCount === 0) return null;
 
   async function load(): Promise<void> {
+    if (loadPromise.current) return await loadPromise.current;
     const sequence = ++loadSequence.current;
-    setLoading(true);
+    const pending = (async () => {
+      setLoading(true);
+      try {
+        const response = await client.listIntegrationFeatures(
+          workspaceId,
+          instance.capabilityId,
+          instance.instanceKey,
+        );
+        if (sequence !== loadSequence.current) return;
+        setData(response);
+        setError(null);
+      } catch (loadError) {
+        if (sequence !== loadSequence.current) return;
+        setError(loadError instanceof Error ? loadError.message : String(loadError));
+      } finally {
+        if (sequence === loadSequence.current) setLoading(false);
+      }
+    })();
+    loadPromise.current = pending;
     try {
-      const response = await client.listIntegrationFeatures(
-        workspaceId,
-        instance.capabilityId,
-        instance.instanceKey,
-      );
-      if (sequence !== loadSequence.current) return;
-      setData(response);
-      setError(null);
-    } catch (loadError) {
-      if (sequence !== loadSequence.current) return;
-      setError(loadError instanceof Error ? loadError.message : String(loadError));
+      await pending;
     } finally {
-      if (sequence === loadSequence.current) setLoading(false);
+      if (loadPromise.current === pending) loadPromise.current = null;
     }
   }
 
@@ -180,6 +193,7 @@ export function IntegrationFeaturesPanel({
         },
       );
       ++loadSequence.current;
+      loadPromise.current = null;
       setLoading(false);
       setData((current) =>
         current
