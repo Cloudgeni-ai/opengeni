@@ -46,8 +46,8 @@ ENV NODE_ENV=production
 USER bun
 
 # Most workloads share the same network/source-control tools. Keep that stable
-# package layer reusable, while artifact-runtime workloads inherit source-base
-# directly and install their complete target-specific package union once.
+# package layer reusable, while workloads with larger target-specific package
+# unions inherit source-base directly and install their complete union once.
 FROM source-base AS base
 USER root
 RUN apt-get update \
@@ -110,14 +110,14 @@ RUN bun scripts/build-runtime-processes.ts api
 EXPOSE 8000
 CMD ["bun", "apps/api/dist/process/index.js"]
 
-FROM base AS worker
+FROM source-base AS worker
 # The docker sandbox backend needs the Docker CLI to talk to the mounted host
 # daemon socket. Interactive/cancellable commands use the Agents SDK's
 # host-side Python PTY bridge, so Python must live in this worker image rather
 # than only inside the sandbox. The daemon remains outside this image.
 USER root
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg gnupg python3 \
+  && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg git gnupg openssh-client python3 \
   && install -m 0755 -d /etc/apt/keyrings \
   && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
   && chmod a+r /etc/apt/keyrings/docker.asc \

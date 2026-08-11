@@ -19,11 +19,12 @@ function aptTransactions(source: string): number {
   return source.match(/RUN apt-get update/gmu)?.length ?? 0;
 }
 
-function keepsArtifactWorkloadPackagesCoalesced(source: string): boolean {
+function keepsSpecializedWorkloadPackagesCoalesced(source: string): boolean {
   const sourceBase = stage(source, "source-base");
   const base = stage(source, "base");
   const artifactRuntimeBase = stage(source, "artifact-runtime-base");
   const api = stage(source, "api");
+  const worker = stage(source, "worker");
   const materializer = stage(source, "artifact-materializer");
 
   return (
@@ -44,6 +45,13 @@ function keepsArtifactWorkloadPackagesCoalesced(source: string): boolean {
     api.includes(
       "apt-get install -y --no-install-recommends ca-certificates ffmpeg git openssh-client",
     ) &&
+    worker.startsWith("FROM source-base AS worker") &&
+    aptTransactions(worker) === 1 &&
+    worker.includes(
+      "apt-get install -y --no-install-recommends ca-certificates curl ffmpeg git gnupg openssh-client python3",
+    ) &&
+    worker.includes("apt-get install -y --no-install-recommends docker-ce-cli") &&
+    worker.includes("/usr/bin/python3 -c 'import pty'") &&
     aptTransactions(materializer) === 1 &&
     materializer.includes(
       "apt-get install -y --no-install-recommends bubblewrap ca-certificates git openssh-client util-linux",
@@ -52,27 +60,45 @@ function keepsArtifactWorkloadPackagesCoalesced(source: string): boolean {
 }
 
 describe("workload image system package contract", () => {
-  test("coalesces artifact-runtime workload packages without weakening their runtime base", async () => {
+  test("coalesces specialized workload packages without weakening their runtime base", async () => {
     const dockerfile = await readFile(resolve(root, "docker/opengeni.Dockerfile"), "utf8");
 
-    expect(keepsArtifactWorkloadPackagesCoalesced(dockerfile)).toBe(true);
+    expect(keepsSpecializedWorkloadPackagesCoalesced(dockerfile)).toBe(true);
 
     const inheritedCommonInstall = dockerfile.replace(
       "FROM source-base AS artifact-runtime-base",
       "FROM base AS artifact-runtime-base",
     );
-    expect(keepsArtifactWorkloadPackagesCoalesced(inheritedCommonInstall)).toBe(false);
+    expect(keepsSpecializedWorkloadPackagesCoalesced(inheritedCommonInstall)).toBe(false);
 
     const missingApiRuntimeTools = dockerfile.replace(
       "ca-certificates ffmpeg git openssh-client",
       "ffmpeg",
     );
-    expect(keepsArtifactWorkloadPackagesCoalesced(missingApiRuntimeTools)).toBe(false);
+    expect(keepsSpecializedWorkloadPackagesCoalesced(missingApiRuntimeTools)).toBe(false);
 
     const duplicateApiTransaction = dockerfile.replace(
       "FROM artifact-runtime-base AS api\n",
       "FROM artifact-runtime-base AS api\nRUN apt-get update && rm -rf /var/lib/apt/lists/*\n",
     );
-    expect(keepsArtifactWorkloadPackagesCoalesced(duplicateApiTransaction)).toBe(false);
+    expect(keepsSpecializedWorkloadPackagesCoalesced(duplicateApiTransaction)).toBe(false);
+
+    const inheritedWorkerCommonInstall = dockerfile.replace(
+      "FROM source-base AS worker",
+      "FROM base AS worker",
+    );
+    expect(keepsSpecializedWorkloadPackagesCoalesced(inheritedWorkerCommonInstall)).toBe(false);
+
+    const missingWorkerSourceControlTools = dockerfile.replace(
+      "ca-certificates curl ffmpeg git gnupg openssh-client python3",
+      "ca-certificates curl ffmpeg gnupg python3",
+    );
+    expect(keepsSpecializedWorkloadPackagesCoalesced(missingWorkerSourceControlTools)).toBe(false);
+
+    const duplicateWorkerTransaction = dockerfile.replace(
+      "FROM source-base AS worker\n",
+      "FROM source-base AS worker\nRUN apt-get update && rm -rf /var/lib/apt/lists/*\n",
+    );
+    expect(keepsSpecializedWorkloadPackagesCoalesced(duplicateWorkerTransaction)).toBe(false);
   });
 });
