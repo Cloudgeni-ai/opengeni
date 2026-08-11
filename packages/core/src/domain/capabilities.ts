@@ -834,12 +834,13 @@ export async function settingsWithEnabledCapabilityMcpServers(
   workspaceId: string,
   settings: Settings,
   options?: {
+    subjectId?: string;
     onResolvedApiIntegrations?: (integrations: readonly ApiIntegrationRuntime[]) => void;
   },
 ): Promise<Settings> {
   const [enabled, apiIntegrations, codexAppsCredentialId] = await Promise.all([
     listEnabledMcpCapabilityServers(db, workspaceId),
-    listInstalledApiIntegrations(db, workspaceId),
+    listInstalledApiIntegrations(db, workspaceId, options?.subjectId),
     resolveCodexAppsCredentialIdForRun(db, workspaceId),
   ]);
   options?.onResolvedApiIntegrations?.(apiIntegrations);

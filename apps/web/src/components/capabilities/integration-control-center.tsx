@@ -152,6 +152,8 @@ export function IntegrationControlCenter({
     initialCustomApiFlowState,
   );
   const callbackHandled = useRef(false);
+  const removeTriggerRef = useRef<HTMLElement | null>(null);
+  const focusFallbackRef = useRef<HTMLElement | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -306,6 +308,8 @@ export function IntegrationControlCenter({
   }
 
   async function previewRemove(instance: ApiIntegrationInstallationSummary) {
+    const active = document.activeElement;
+    removeTriggerRef.current = active instanceof HTMLElement ? active : null;
     setBusyKey(instance.instanceKey);
     try {
       const preview = await client.previewApiIntegrationUninstall(
@@ -545,6 +549,8 @@ export function IntegrationControlCenter({
         onConnectSetup={connectSetup}
         onRemoveClose={() => setRemoveTarget(null)}
         onRemoveInstance={removeInstance}
+        removeTriggerRef={removeTriggerRef}
+        focusFallbackRef={focusFallbackRef}
         onOpenCustomApi={openCustomApi}
         onUpdateCustomApi={(instance) => editCustomApi(instance, "update")}
         onReconnectCustomApi={(instance) => editCustomApi(instance, "reconnect")}

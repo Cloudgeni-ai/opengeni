@@ -139,22 +139,22 @@ describe("runtime database posture evaluator", () => {
         ? ([
             [FORCE_RLS_TABLES, 210],
             [NON_RLS_RUNTIME_TABLES, 11],
-            [RUNTIME_FULL_DML_TABLES, 141],
+            [RUNTIME_FULL_DML_TABLES, 130],
             [RUNTIME_READ_ONLY_TABLES, 14],
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 41],
-            [RUNTIME_READ_INSERT_UPDATE_TABLES, 17],
+            [RUNTIME_READ_INSERT_UPDATE_TABLES, 28],
             [PROTECTED_NO_DIRECT_DML_TABLES, 7],
             [RUNTIME_DML_TABLES, 214],
           ] as const)
         : ([
             [FORCE_RLS_TABLES, 164],
             [NON_RLS_RUNTIME_TABLES, 11],
-            [RUNTIME_FULL_DML_TABLES, 117],
+            [RUNTIME_FULL_DML_TABLES, 106],
             [RUNTIME_READ_ONLY_TABLES, 13],
             [readUpdateTables, 0],
             [RUNTIME_READ_INSERT_TABLES, 37],
-            [RUNTIME_READ_INSERT_UPDATE_TABLES, 1],
+            [RUNTIME_READ_INSERT_UPDATE_TABLES, 12],
             [PROTECTED_NO_DIRECT_DML_TABLES, 7],
             [RUNTIME_DML_TABLES, 168],
           ] as const);

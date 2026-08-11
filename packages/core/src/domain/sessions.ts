@@ -1299,6 +1299,7 @@ export async function createSessionForRequestWithOutcome(
     db,
     workspaceId,
     settings,
+    { subjectId: grant.subjectId },
   );
   const sessionMcpServers = hasOwnProperty(rawPayload, "mcpServers")
     ? validateSessionMcpServersForCreate(capabilityRuntimeSettings, grant, payload.mcpServers)
@@ -2020,7 +2021,9 @@ export async function acceptSessionUserMessageWithOutcome(
     session: existingSession,
     updates: input.mcpCredentialUpdates ?? [],
   });
-  const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(db, workspaceId, settings);
+  const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(db, workspaceId, settings, {
+    subjectId: grant.subjectId,
+  });
   const personalConnectionDelegations = await freezePersonalConnectionDelegations({
     db,
     workspaceId,
@@ -2288,6 +2291,7 @@ export async function updateSessionToolPolicy(
     deps.db,
     grant.workspaceId,
     deps.settings,
+    { subjectId: grant.subjectId },
   );
   const runtimeSettings = settingsWithSessionMcpServerMetadata(
     capabilityRuntimeSettings,

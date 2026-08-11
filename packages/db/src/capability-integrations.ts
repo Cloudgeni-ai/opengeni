@@ -834,18 +834,23 @@ export async function listInstalledApiIntegrationsInRlsContext(
               and api_installation.facet_id = ${schema.capabilityApiFacets.facetId}
               and api_installation.status = 'active'
           )`,
-        ...(subjectId
-          ? [
-              sql`(
-                  ${schema.integrationFeatureBindings.connectionId} is null
-                  or exists (
-                    select 1 from ${schema.connections} connection
-                    where connection.id = ${schema.integrationFeatureBindings.connectionId}
-                      and (connection.subject_id is null or connection.subject_id = ${subjectId})
-                  )
-                )`,
-            ]
-          : []),
+        subjectId
+          ? sql`(
+              ${schema.integrationFeatureBindings.connectionId} is null
+              or exists (
+                select 1 from ${schema.connections} connection
+                where connection.id = ${schema.integrationFeatureBindings.connectionId}
+                  and (connection.subject_id is null or connection.subject_id = ${subjectId})
+              )
+            )`
+          : sql`(
+              ${schema.integrationFeatureBindings.connectionId} is null
+              or exists (
+                select 1 from ${schema.connections} connection
+                where connection.id = ${schema.integrationFeatureBindings.connectionId}
+                  and connection.subject_id is null
+              )
+            )`,
       ),
     )
     .orderBy(
@@ -916,13 +921,15 @@ export async function listInstalledApiIntegrationsInRlsContext(
 export async function getApiIntegrationUninstallPreview(
   db: Database,
   workspaceId: string,
+  subjectId: string,
   capabilityId: string,
   instanceKey: string,
 ): Promise<ApiIntegrationUninstallPreview> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+  return await withWorkspaceSubjectRls(db, workspaceId, subjectId, async (scopedDb) => {
     const context = await integrationInstanceContext(
       scopedDb,
       workspaceId,
+      subjectId,
       capabilityId,
       instanceKey,
     );
@@ -996,6 +1003,7 @@ export async function uninstallApiIntegration(
         const context = await integrationInstanceContext(
           tx as unknown as Database,
           input.workspaceId,
+          input.subjectId,
           input.capabilityId,
           input.instanceKey,
           true,
@@ -1399,6 +1407,7 @@ type IntegrationInstanceContext = {
 async function integrationInstanceContext(
   db: Database,
   workspaceId: string,
+  subjectId: string,
   capabilityId: string,
   instanceKey: string,
   lock = false,
@@ -1440,6 +1449,14 @@ async function integrationInstanceContext(
         eq(schema.integrationFeatureBindings.bindingKey, instanceKey),
         eq(schema.integrationFeatureFacets.kind, "tools"),
         sql`${schema.capabilityPluginVersions.manifest} ->> 'capabilityId' = ${capabilityId}`,
+        sql`(
+          ${schema.integrationFeatureBindings.connectionId} is null
+          or exists (
+            select 1 from ${schema.connections} connection
+            where connection.id = ${schema.integrationFeatureBindings.connectionId}
+              and (connection.subject_id is null or connection.subject_id = ${subjectId})
+          )
+        )`,
       ),
     )
     .limit(2);

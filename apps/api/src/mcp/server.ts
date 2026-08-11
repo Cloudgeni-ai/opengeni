@@ -3278,7 +3278,7 @@ function registerWorkspaceOrchestrationTools(
         );
         return json(
           boundSessionDetailMcp(
-            await withMcpEffectivePolicy(deps, grant.workspaceId, {
+            await withMcpEffectivePolicy(deps, grant.workspaceId, grant.subjectId, {
               ...projected,
               effectiveControl: queue?.effectiveControl ?? projected.effectiveControl,
             }),
@@ -4828,11 +4828,12 @@ function parseMcpDate(raw: string, label: string): Date {
 async function withMcpEffectivePolicy(
   deps: ApiRouteDeps,
   workspaceId: string,
+  subjectId: string,
   session: Session,
 ): Promise<Session> {
   const [workspaceServerIds, workspaceDefaultServerIds] = await Promise.all([
-    workspaceSessionToolPolicyServerIds(deps.db, workspaceId, deps.settings),
-    workspaceSessionToolPolicyDefaultServerIds(deps.db, workspaceId, deps.settings),
+    workspaceSessionToolPolicyServerIds(deps.db, workspaceId, deps.settings, subjectId),
+    workspaceSessionToolPolicyDefaultServerIds(deps.db, workspaceId, deps.settings, subjectId),
   ]);
   return sessionWithEffectiveToolPolicy(session, workspaceServerIds, workspaceDefaultServerIds);
 }

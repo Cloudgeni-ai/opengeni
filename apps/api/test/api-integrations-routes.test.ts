@@ -168,22 +168,26 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-async function auth(): Promise<string> {
+async function auth(asSubjectId = subjectId): Promise<string> {
   return `Bearer ${await signDelegatedAccessToken(delegationSecret, {
     accountId,
     workspaceId,
-    subjectId,
+    subjectId: asSubjectId,
     permissions: ["workspace:read", "workspace:admin"],
     principalKind: "human_session",
     exp: Math.floor(Date.now() / 1_000) + 3_600,
   })}`;
 }
 
-async function request(path: string, init: RequestInit = {}): Promise<Response> {
+async function request(
+  path: string,
+  init: RequestInit = {},
+  asSubjectId = subjectId,
+): Promise<Response> {
   return await app!.request(`http://x/v1/workspaces/${workspaceId}${path}`, {
     ...init,
     headers: {
-      authorization: await auth(),
+      authorization: await auth(asSubjectId),
       "content-type": "application/json",
       ...init.headers,
     },
@@ -438,8 +442,22 @@ describe("API Integration routes", () => {
       ],
     });
 
-    const removed = await request(
-      `/integrations/${encodeURIComponent(installed.capabilityId)}/instances/${encodeURIComponent(installed.instanceKey)}`,
+    const otherSubjectId = "user:api-integration-route-other";
+    const otherList = await request("/integrations", {}, otherSubjectId);
+    expect(otherList.status).toBe(200);
+    expect(await otherList.json()).toEqual({ integrations: [] });
+
+    const encodedInstancePath = `/integrations/${encodeURIComponent(installed.capabilityId)}/instances/${encodeURIComponent(installed.instanceKey)}`;
+    const otherPreview = await request(
+      `${encodedInstancePath}/uninstall-preview`,
+      {},
+      otherSubjectId,
+    );
+    expect(otherPreview.status).toBe(200);
+    expect(await otherPreview.json()).toMatchObject({ installed: false });
+
+    const otherRemoval = await request(
+      encodedInstancePath,
       {
         method: "DELETE",
         body: JSON.stringify({
@@ -447,7 +465,21 @@ describe("API Integration routes", () => {
           expectedInstanceVersion: installed.instanceVersion,
         }),
       },
+      otherSubjectId,
     );
+    expect(otherRemoval.status).toBe(200);
+    expect(await otherRemoval.json()).toMatchObject({ status: "not_installed" });
+
+    const ownerStillLists = await request("/integrations");
+    expect((await ownerStillLists.json()).integrations).toHaveLength(1);
+
+    const removed = await request(encodedInstancePath, {
+      method: "DELETE",
+      body: JSON.stringify({
+        expectedInstallationVersion: installed.installationVersion,
+        expectedInstanceVersion: installed.instanceVersion,
+      }),
+    });
     expect(removed.status).toBe(200);
   }, 60_000);
 

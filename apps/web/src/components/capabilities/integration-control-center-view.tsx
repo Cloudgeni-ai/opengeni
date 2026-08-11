@@ -16,7 +16,7 @@ import {
   UsersRoundIcon,
 } from "lucide-react";
 import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
-import type { ComponentType, FormEvent } from "react";
+import type { ComponentType, FormEvent, RefObject } from "react";
 
 import { CustomApiSection } from "@/components/capabilities/custom-api-section";
 import { CustomApiSetupDialog } from "@/components/capabilities/custom-api-setup-dialog";
@@ -93,6 +93,8 @@ export function IntegrationControlCenterView({
   onConnectSetup,
   onRemoveClose,
   onRemoveInstance,
+  removeTriggerRef,
+  focusFallbackRef,
   onOpenCustomApi,
   onUpdateCustomApi,
   onReconnectCustomApi,
@@ -133,6 +135,8 @@ export function IntegrationControlCenterView({
   onConnectSetup: () => void;
   onRemoveClose: () => void;
   onRemoveInstance: () => Promise<boolean>;
+  removeTriggerRef: RefObject<HTMLElement | null>;
+  focusFallbackRef: RefObject<HTMLElement | null>;
   onOpenCustomApi: () => void;
   onUpdateCustomApi: (instance: ApiIntegrationInstallationSummary) => void;
   onReconnectCustomApi: (instance: ApiIntegrationInstallationSummary) => void;
@@ -151,8 +155,11 @@ export function IntegrationControlCenterView({
 
   return (
     <section
+      ref={focusFallbackRef}
+      tabIndex={-1}
       className="relative mt-6 overflow-hidden rounded-xl border border-border bg-surface shadow-sm"
       aria-labelledby="integration-control-center-heading"
+      aria-busy={loading || callbackBusy}
     >
       <div className="relative flex flex-col gap-4 border-b border-border/80 bg-brand/5 p-5 sm:flex-row sm:items-start sm:justify-between sm:p-6">
         <div className="flex min-w-0 gap-3">
@@ -184,7 +191,11 @@ export function IntegrationControlCenterView({
       </div>
 
       {callbackBusy ? (
-        <div className="relative flex items-center gap-3 border-b border-brand/20 bg-brand/5 px-5 py-3 text-sm text-fg sm:px-6">
+        <div
+          className="relative flex items-center gap-3 border-b border-brand/20 bg-brand/5 px-5 py-3 text-sm text-fg sm:px-6"
+          role="status"
+          aria-live="polite"
+        >
           <Loader2Icon className="size-4 animate-spin text-brand" />
           <span>Verifying the provider schema and preparing this account's tool namespace…</span>
         </div>
@@ -198,7 +209,10 @@ export function IntegrationControlCenterView({
             ))}
           </div>
         ) : loadError ? (
-          <div className="flex flex-col items-start gap-3 rounded-xl border border-status-failed/40 bg-surface p-4">
+          <div
+            className="flex flex-col items-start gap-3 rounded-xl border border-status-failed/40 bg-surface p-4"
+            role="alert"
+          >
             <div className="flex items-center gap-2 text-sm font-medium text-fg">
               <AlertTriangleIcon className="size-4 text-danger" />
               Services couldn't be loaded
@@ -331,6 +345,8 @@ export function IntegrationControlCenterView({
         }
         confirmLabel="Remove instance"
         destructive
+        restoreFocusRef={removeTriggerRef}
+        restoreFocusFallbackRef={focusFallbackRef}
         onConfirm={onRemoveInstance}
       />
 
@@ -426,7 +442,12 @@ function PresetCard({
                     ) : (
                       <AlertTriangleIcon className="size-3.5 shrink-0 text-warning" />
                     )}
-                    <p className="truncate text-xs font-semibold text-fg">{instance.displayName}</p>
+                    <p
+                      className="truncate text-xs font-semibold text-fg"
+                      title={instance.displayName}
+                    >
+                      {instance.displayName}
+                    </p>
                   </div>
                   <p className="mt-1 text-2xs text-fg-subtle">
                     {instance.toolCount} tools ·{" "}
@@ -451,6 +472,7 @@ function PresetCard({
                     variant="ghost"
                     size="xs"
                     disabled={!canManage || busyKey !== null}
+                    aria-label={`Reconnect ${instance.displayName}`}
                     onClick={() => onReconnect(instance)}
                   >
                     <RefreshCwIcon />
@@ -462,6 +484,7 @@ function PresetCard({
                   variant="ghost"
                   size="xs"
                   disabled={!canManage || busyKey !== null}
+                  aria-label={`Remove ${instance.displayName}`}
                   onClick={() => onRemove(instance)}
                 >
                   <Trash2Icon />
@@ -482,6 +505,11 @@ function PresetCard({
             </div>
           );
         })}
+        {instances.length === 0 ? (
+          <p className="rounded-lg border border-dashed border-border px-3 py-4 text-center text-xs leading-5 text-fg-muted">
+            No account connected yet. Add one to give agents a dedicated, clearly named tool set.
+          </p>
+        ) : null}
       </div>
 
       <Button

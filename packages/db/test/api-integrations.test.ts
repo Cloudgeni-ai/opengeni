@@ -161,6 +161,69 @@ function integrationInput(connectionId?: string, suffix = "inventory"): InstallA
 }
 
 describe("API Integration persistence", () => {
+  test("keeps personal runtime projection and removal exact-subject", async () => {
+    if (!available || !client) return;
+    const ownerSubjectId = "user:api-integration-personal-owner";
+    const otherSubjectId = "user:api-integration-personal-other";
+    const connection = await createConnection(client.db, {
+      accountId: first.accountId,
+      workspaceId: first.workspaceId,
+      subjectId: ownerSubjectId,
+      providerDomain: "inventory.example.com",
+      kind: "api_key",
+      credentialEncrypted: "test-only-personal-encrypted-bundle",
+      grantedScopes: ["inventory.read", "inventory.write"],
+      createdBySubjectId: ownerSubjectId,
+    });
+    const input = {
+      ...integrationInput(connection.id, "inventory-personal-subject"),
+      subjectId: ownerSubjectId,
+      ownership: "subject" as const,
+    };
+    const installed = await installApiIntegration(client.db, input);
+
+    expect(
+      await listInstalledApiIntegrations(client.db, first.workspaceId, ownerSubjectId),
+    ).toEqual([expect.objectContaining({ instanceId: installed.instanceId })]);
+    expect(
+      await listInstalledApiIntegrations(client.db, first.workspaceId, otherSubjectId),
+    ).toEqual([]);
+    expect(await listInstalledApiIntegrations(client.db, first.workspaceId)).toEqual([]);
+    expect(
+      await getApiIntegrationUninstallPreview(
+        client.db,
+        first.workspaceId,
+        otherSubjectId,
+        input.capabilityId,
+        installed.instanceKey,
+      ),
+    ).toMatchObject({ installed: false, installationVersion: null, instanceVersion: null });
+    expect(
+      await uninstallApiIntegration(client.db, {
+        accountId: first.accountId,
+        workspaceId: first.workspaceId,
+        subjectId: otherSubjectId,
+        capabilityId: input.capabilityId,
+        instanceKey: installed.instanceKey,
+        expectedInstallationVersion: installed.installationVersion,
+        expectedInstanceVersion: installed.instanceVersion,
+      }),
+    ).toMatchObject({ status: "not_installed", definitionStatus: "retained" });
+    expect(
+      await listInstalledApiIntegrations(client.db, first.workspaceId, ownerSubjectId),
+    ).toHaveLength(1);
+
+    await uninstallApiIntegration(client.db, {
+      accountId: first.accountId,
+      workspaceId: first.workspaceId,
+      subjectId: ownerSubjectId,
+      capabilityId: input.capabilityId,
+      instanceKey: installed.instanceKey,
+      expectedInstallationVersion: installed.installationVersion,
+      expectedInstanceVersion: installed.instanceVersion,
+    });
+  }, 60_000);
+
   test("installs idempotently, projects runtime policy, isolates tenants, and OCC-uninstalls", async () => {
     if (!available || !client) return;
     const input = integrationInput();
@@ -186,6 +249,7 @@ describe("API Integration persistence", () => {
     const preview = await getApiIntegrationUninstallPreview(
       client.db,
       first.workspaceId,
+      first.subjectId,
       input.capabilityId,
       installed.instanceKey,
     );
@@ -311,6 +375,7 @@ describe("API Integration persistence", () => {
     const preview = await getApiIntegrationUninstallPreview(
       client.db,
       first.workspaceId,
+      first.subjectId,
       input.capabilityId,
       installed.instanceKey,
     );
@@ -492,6 +557,7 @@ describe("API Integration persistence", () => {
     const financePreview = await getApiIntegrationUninstallPreview(
       client.db,
       first.workspaceId,
+      first.subjectId,
       base.capabilityId,
       finance.instanceKey,
     );

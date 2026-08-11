@@ -115,19 +115,23 @@ describe("release schema contract", () => {
       sourceContract.migrations.map((migration) => [migration.path, migration]),
     );
     expect(sourceContract.sha256).toBe(
-      migrations.has("0216_pack_component_ownership.sql")
-        ? "85a5f5320fd7c673bfe16240d4615b93ce635e9724d8f1bc467ce336e5c93022"
-        : migrations.has("0214_session_activity_commit_gate.sql")
-          ? "00b9989ef287e75bceceabc94ddfa1c118a97553ccdbc523485300046058075f"
-          : "e3048091a81b7e122b3c6d17cf52e5ffccff4c082780f6d2d330031742aef792",
+      migrations.has("0217_capability_definition_delete_authority.sql")
+        ? "49fe063b91ded74174d945fdc2cb7713ba9b5604fee7610b495919179658fab3"
+        : migrations.has("0216_pack_component_ownership.sql")
+          ? "85a5f5320fd7c673bfe16240d4615b93ce635e9724d8f1bc467ce336e5c93022"
+          : migrations.has("0214_session_activity_commit_gate.sql")
+            ? "00b9989ef287e75bceceabc94ddfa1c118a97553ccdbc523485300046058075f"
+            : "e3048091a81b7e122b3c6d17cf52e5ffccff4c082780f6d2d330031742aef792",
     );
     const contract = {
       ...sourceContract,
-      sha256: migrations.has("0216_pack_component_ownership.sql")
-        ? "85a5f5320fd7c673bfe16240d4615b93ce635e9724d8f1bc467ce336e5c93022"
-        : migrations.has("0214_session_activity_commit_gate.sql")
-          ? "a00d56c13f4f03a3a48456860a7c63b82de5624970b3afae250e5aed0d6a2d89"
-          : "c9b19caabb946d91e6e2ec4b34bb48323a61efbfc76628fe338a277f5dcbe343",
+      sha256: migrations.has("0217_capability_definition_delete_authority.sql")
+        ? "49fe063b91ded74174d945fdc2cb7713ba9b5604fee7610b495919179658fab3"
+        : migrations.has("0216_pack_component_ownership.sql")
+          ? "85a5f5320fd7c673bfe16240d4615b93ce635e9724d8f1bc467ce336e5c93022"
+          : migrations.has("0214_session_activity_commit_gate.sql")
+            ? "a00d56c13f4f03a3a48456860a7c63b82de5624970b3afae250e5aed0d6a2d89"
+            : "c9b19caabb946d91e6e2ec4b34bb48323a61efbfc76628fe338a277f5dcbe343",
     };
     expect(migrations.get("0065_codex_subscription_overview.sql")).toMatchObject({
       deploymentMode: "maintenance",
@@ -287,12 +291,13 @@ describe("release schema contract", () => {
         (migrations.has("0213_slack_user_link_access_requests.sql") ? 1 : 0) +
         (migrations.has("0214_session_activity_commit_gate.sql") ? 1 : 0) +
         (migrations.has("0215_capabilities_platform.sql") ? 1 : 0) +
-        (migrations.has("0216_pack_component_ownership.sql") ? 1 : 0),
+        (migrations.has("0216_pack_component_ownership.sql") ? 1 : 0) +
+        (migrations.has("0217_capability_definition_delete_authority.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "85a5f5320fd7c673bfe16240d4615b93ce635e9724d8f1bc467ce336e5c93022",
+      "49fe063b91ded74174d945fdc2cb7713ba9b5604fee7610b495919179658fab3",
     );
-    expect(contract.latestMigration).toBe("0216_pack_component_ownership.sql");
+    expect(contract.latestMigration).toBe("0217_capability_definition_delete_authority.sql");
     expect(migrations.get("0214_session_activity_commit_gate.sql")).toMatchObject({
       sha256: "26c84bc34bc51d19f9532cf3f2c64a649f100a724cb73d968e17e7c4ecf8de36",
       deploymentMode: "maintenance",

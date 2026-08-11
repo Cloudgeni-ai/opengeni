@@ -3863,12 +3863,30 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // only exists in the RunState blob), never through a swapped trigger.
     let triggerType: string | null = null;
     try {
+      const session = await requireSession(db, input.workspaceId, input.sessionId);
+      const claim = await claimSessionWorkForAttempt(db, input.workspaceId, {
+        sessionId: input.sessionId,
+        workflowId: input.workflowId,
+        workflowRunId: input.workflowRunId,
+        attemptId: input.attemptId,
+        dispatchId,
+        trigger: input.trigger,
+      });
+      if (claim.action === "unclaimed") {
+        activityStatus = "unclaimed";
+        return { status: "unclaimed", reason: claim.reason };
+      }
+      const turn = claim.turn;
+      turnId = turn.id;
+      executionGeneration = turn.executionGeneration;
+      providerRecoveryCount = providerRecoveryCountFromMetadata(turn.metadata);
       let installedApiIntegrations: readonly ApiIntegrationRuntime[] = [];
       const mcpSettings = await settingsWithEnabledCapabilityMcpServers(
         db,
         input.workspaceId,
         settings,
         {
+          ...(turn.initiator.subjectId ? { subjectId: turn.initiator.subjectId } : {}),
           onResolvedApiIntegrations: (integrations) => {
             installedApiIntegrations = integrations;
           },
@@ -3897,23 +3915,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         ? await resolveCodexAppsCredentialIdForRun(db, input.workspaceId)
         : null;
       runtime.configure(capabilitySettings);
-      const session = await requireSession(db, input.workspaceId, input.sessionId);
-      const claim = await claimSessionWorkForAttempt(db, input.workspaceId, {
-        sessionId: input.sessionId,
-        workflowId: input.workflowId,
-        workflowRunId: input.workflowRunId,
-        attemptId: input.attemptId,
-        dispatchId,
-        trigger: input.trigger,
-      });
-      if (claim.action === "unclaimed") {
-        activityStatus = "unclaimed";
-        return { status: "unclaimed", reason: claim.reason };
-      }
-      const turn = claim.turn;
-      turnId = turn.id;
-      executionGeneration = turn.executionGeneration;
-      providerRecoveryCount = providerRecoveryCountFromMetadata(turn.metadata);
       const claimedPolicy = readTurnExecutionPolicyV1(turn.metadata);
       const policyForAbsent =
         claimedPolicy.kind === "valid"

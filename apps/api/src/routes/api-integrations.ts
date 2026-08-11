@@ -235,12 +235,13 @@ export function registerApiIntegrationRoutes(
     "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/uninstall-preview",
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
-      await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
       return c.json(
         ApiIntegrationUninstallPreview.parse(
           await getApiIntegrationUninstallPreview(
             deps.db,
             workspaceId,
+            grant.subjectId,
             decodeURIComponent(c.req.param("capabilityId")),
             decodeURIComponent(c.req.param("instanceKey")),
           ),
