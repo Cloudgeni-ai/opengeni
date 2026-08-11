@@ -13,6 +13,7 @@ const accountId = "00000000-0000-4000-8000-000000000618";
 const subjectId = "user:ope-16-browser";
 const financeConnectionId = "00000000-0000-4000-8000-000000000619";
 const salesConnectionId = "00000000-0000-4000-8000-000000000620";
+const gmailConnectionId = "00000000-0000-4000-8000-000000000621";
 const apiContractRevision = "2026-08-capability-facets-v1";
 let webBaseUrl = "";
 
@@ -21,6 +22,7 @@ type UiState = {
   connectionsUnavailable: boolean;
   dense: boolean;
   loading: boolean;
+  mailInboxBinding: ReturnType<typeof mailInboxBinding> | null;
 };
 
 describe("custom API control center browser acceptance", () => {
@@ -68,6 +70,7 @@ describe("custom API control center browser acceptance", () => {
   test("pass 1: desktop light shows two independently identified Linear instances", async () => {
     const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
     const page = await context.newPage();
+    const diagnostics = collectRuntimeDiagnostics(page);
     try {
       await installApi(page, readyState());
       await openCapabilities(page);
@@ -78,6 +81,12 @@ describe("custom API control center browser acceptance", () => {
       await expectText(page.locator('[data-custom-api-instance="sales"]'), "Sales credential");
       await assertAccessibleAndBounded(page, '[aria-labelledby="custom-apis-heading"]');
       await page.screenshot({ path: `${evidenceDir}pass-1-desktop-light.png`, fullPage: true });
+      expect(diagnostics).toEqual([]);
+    } catch (error) {
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)}\nRuntime diagnostics:\n${diagnostics.join("\n") || "(none)"}`,
+        { cause: error },
+      );
     } finally {
       await context.close();
     }
@@ -210,10 +219,71 @@ describe("custom API control center browser acceptance", () => {
       await context.close();
     }
   }, 90_000);
+
+  test("pass 6: Gmail facets configure and pause without exposing provider state", async () => {
+    const context = await browser.newContext({ viewport: { width: 1180, height: 960 } });
+    const page = await context.newPage();
+    try {
+      const state = readyState();
+      await installApi(page, state);
+      await openCapabilities(page);
+      const gmail = page.locator('[data-integration-instance="account-finance"]');
+      await expectText(gmail, "Gmail — Finance");
+      await gmail.getByRole("button", { name: "Manage features for Gmail — Finance" }).click();
+      await expectText(page.locator('[data-integration-features="account-finance"]'), "Mail inbox");
+      await expectText(
+        page.locator('[data-integration-features="account-finance"]'),
+        "Mail delivery",
+      );
+      await expectText(
+        page.locator('[data-integration-features="account-finance"]'),
+        "Account identity",
+      );
+
+      const inbox = page.locator('[data-integration-feature="mail-inbox"]');
+      await inbox.getByRole("button", { name: "Configure" }).click();
+      const dialog = page.getByRole("dialog");
+      await dialog.getByLabel("Folder").fill("INBOX");
+      await dialog.getByLabel("Unread Only").check();
+      await dialog.getByRole("button", { name: "Enable feature" }).click();
+      await expectText(inbox, "Active");
+      expect(JSON.stringify(state.mailInboxBinding)).not.toContain("history_id");
+
+      await inbox.getByRole("button", { name: "Pause" }).click();
+      await expectText(inbox, "Paused");
+      await assertAccessibleAndBounded(
+        page,
+        '[aria-labelledby="integration-control-center-heading"]',
+      );
+      await page.screenshot({ path: `${evidenceDir}pass-6-gmail-features.png`, fullPage: true });
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
 });
 
 function readyState(): UiState {
-  return { canManage: true, connectionsUnavailable: false, dense: false, loading: false };
+  return {
+    canManage: true,
+    connectionsUnavailable: false,
+    dense: false,
+    loading: false,
+    mailInboxBinding: null,
+  };
+}
+
+function collectRuntimeDiagnostics(page: Page): string[] {
+  const diagnostics: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") diagnostics.push(`console:${message.text()}`);
+  });
+  page.on("pageerror", (error) => diagnostics.push(`page:${error.message}`));
+  page.on("requestfailed", (request) => {
+    diagnostics.push(
+      `request:${request.method()} ${request.url()} ${request.failure()?.errorText ?? "failed"}`,
+    );
+  });
+  return diagnostics;
 }
 
 async function openCapabilities(page: Page): Promise<void> {
@@ -271,6 +341,7 @@ async function installApi(page: Page, state: UiState): Promise<void> {
     if (url.pathname === `/v1/workspaces/${workspaceId}/packs`) {
       return json({ packs: [], installations: [] });
     }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/plugins`) return json({ plugins: [] });
     if (url.pathname === `/v1/workspaces/${workspaceId}/variable-sets`) return json([]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/github/app`) {
       return json({ configured: false, missing: [], installUrl: null });
@@ -285,6 +356,77 @@ async function installApi(page: Page, state: UiState): Promise<void> {
     if (url.pathname === `/v1/workspaces/${workspaceId}/integrations`) {
       if (state.loading) await new Promise((resolve) => setTimeout(resolve, 8_000));
       return json({ integrations: instances(state.dense) });
+    }
+    if (
+      request.method() === "GET" &&
+      url.pathname.endsWith("/integrations/api%3Agoogle-gmail/instances/account-finance/features")
+    ) {
+      return json(gmailFeatures(state));
+    }
+    if (url.pathname.endsWith("/features/mail-inbox")) {
+      if (request.method() === "PUT") {
+        const body = request.postDataJSON() as {
+          displayName: string;
+          config: Record<string, unknown>;
+        };
+        state.mailInboxBinding = mailInboxBinding(
+          state.mailInboxBinding?.version ? state.mailInboxBinding.version + 1 : 1,
+          "active",
+          body.config,
+        );
+        return json({
+          capabilityId: "api:google-gmail",
+          instanceKey: "account-finance",
+          featureKey: "mail-inbox",
+          status: "configured",
+          binding: state.mailInboxBinding,
+        });
+      }
+      if (request.method() === "DELETE") {
+        state.mailInboxBinding = state.mailInboxBinding
+          ? {
+              ...state.mailInboxBinding,
+              status: "disabled",
+              version: state.mailInboxBinding.version + 1,
+            }
+          : null;
+        return json({
+          capabilityId: "api:google-gmail",
+          instanceKey: "account-finance",
+          featureKey: "mail-inbox",
+          status: "removed",
+          binding: state.mailInboxBinding,
+          remainingOwners: [],
+        });
+      }
+    }
+    if (request.method() === "POST" && url.pathname.endsWith("/features/mail-inbox/pause")) {
+      state.mailInboxBinding = {
+        ...state.mailInboxBinding!,
+        status: "paused",
+        version: state.mailInboxBinding!.version + 1,
+      };
+      return json({
+        capabilityId: "api:google-gmail",
+        instanceKey: "account-finance",
+        featureKey: "mail-inbox",
+        status: "paused",
+        binding: state.mailInboxBinding,
+      });
+    }
+    if (request.method() === "POST" && url.pathname.endsWith("/features/mail-inbox/resume")) {
+      state.mailInboxBinding = {
+        ...state.mailInboxBinding!,
+        status: "active",
+        version: state.mailInboxBinding!.version + 1,
+      };
+      return json({
+        capabilityId: "api:google-gmail",
+        instanceKey: "account-finance",
+        featureKey: "mail-inbox",
+        status: "active",
+        binding: state.mailInboxBinding,
+      });
     }
     if (
       request.method() === "POST" &&
@@ -367,6 +509,7 @@ function presets() {
     protocol: "openapi",
     providerDomain,
     scopes: ["read"],
+    features: id === "google-gmail" ? gmailFeatureDefinitions() : [],
   }));
 }
 
@@ -374,6 +517,11 @@ function connections(dense: boolean) {
   const values = [
     connection(financeConnectionId, "Finance credential", null),
     connection(salesConnectionId, "Sales credential", subjectId),
+    {
+      ...connection(gmailConnectionId, "Gmail Finance credential", subjectId),
+      providerDomain: "gmail.googleapis.com",
+      grantedScopes: ["mail.read", "mail.send"],
+    },
   ];
   if (dense) {
     for (let index = 3; index <= 8; index += 1) {
@@ -416,6 +564,22 @@ function instances(dense: boolean) {
   const values = [
     instance("finance", "Linear — Finance", financeConnectionId, "workspace"),
     instance("sales", "Linear — Sales", salesConnectionId, "personal"),
+    {
+      ...instance("account-finance", "Gmail — Finance", gmailConnectionId, "personal"),
+      capabilityId: "api:google-gmail",
+      pluginKey: "integration/google-gmail",
+      serverId: "api_google_gmail_account_finance",
+      name: "Gmail — Finance",
+      description: "Gmail messages, labels, drafts, and delivery.",
+      protocol: "openapi",
+      presetId: "google-gmail",
+      providerDomain: "gmail.googleapis.com",
+      baseUrl: "https://gmail.googleapis.com/",
+      sourceUrl: "https://www.googleapis.com/discovery/v1/apis/gmail/v1/rest",
+      allowedTools: ["gmail_users_messages_list", "gmail_users_messages_send"],
+      revisionId: "openapi:gmail-v1",
+      contentSha256: "c".repeat(64),
+    },
   ];
   if (dense) {
     for (let index = 3; index <= 8; index += 1) {
@@ -430,6 +594,76 @@ function instances(dense: boolean) {
     }
   }
   return values;
+}
+
+function gmailFeatureDefinitions() {
+  return [
+    {
+      featureKey: "mail-inbox",
+      kind: "inbound_trigger",
+      configSchema: {
+        type: "object",
+        properties: {
+          folder: { type: "string", minLength: 1, maxLength: 256 },
+          unreadOnly: { type: "boolean" },
+        },
+        additionalProperties: false,
+      },
+      capabilities: { provider: "google-gmail", connectionRequired: true, cursor: "history_id" },
+    },
+    {
+      featureKey: "mail-delivery",
+      kind: "delivery_destination",
+      configSchema: {
+        type: "object",
+        properties: { fromAlias: { type: "string", minLength: 1, maxLength: 512 } },
+        additionalProperties: false,
+      },
+      capabilities: { provider: "google-gmail", connectionRequired: true, delivery: "email" },
+    },
+    {
+      featureKey: "account-identity",
+      kind: "identity_link",
+      configSchema: { type: "object", properties: {}, additionalProperties: false },
+      capabilities: { provider: "google", connectionRequired: true },
+    },
+  ];
+}
+
+function gmailFeatures(state: UiState) {
+  return {
+    capabilityId: "api:google-gmail",
+    instanceKey: "account-finance",
+    providerDomain: "gmail.googleapis.com",
+    connectionId: gmailConnectionId,
+    features: gmailFeatureDefinitions().map((definition) => ({
+      definition,
+      binding: definition.featureKey === "mail-inbox" ? state.mailInboxBinding : null,
+    })),
+  };
+}
+
+function mailInboxBinding(
+  version: number,
+  status: "active" | "paused" | "disabled",
+  config: Record<string, unknown>,
+) {
+  return {
+    id: "00000000-0000-4000-8000-000000000622",
+    featureKey: "mail-inbox",
+    kind: "inbound_trigger" as const,
+    bindingKey: "account-finance",
+    displayName: "Gmail — Finance — Mail inbox",
+    connectionId: gmailConnectionId,
+    status,
+    config,
+    version,
+    hasCursor: false,
+    lastSuccessAt: null,
+    lastErrorCode: null,
+    createdAt: "2026-08-11T00:00:00.000Z",
+    updatedAt: "2026-08-11T00:00:00.000Z",
+  };
 }
 
 function instance(

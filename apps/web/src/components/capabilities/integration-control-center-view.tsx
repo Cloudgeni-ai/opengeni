@@ -15,11 +15,13 @@ import {
   UserRoundIcon,
   UsersRoundIcon,
 } from "lucide-react";
+import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
 import type { ComponentType, FormEvent } from "react";
 
 import { CustomApiSection } from "@/components/capabilities/custom-api-section";
 import { CustomApiSetupDialog } from "@/components/capabilities/custom-api-setup-dialog";
 import type { CustomApiFlowState } from "@/components/capabilities/custom-api-flow";
+import { IntegrationFeaturesPanel } from "@/components/capabilities/integration-features-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
@@ -61,6 +63,8 @@ const PRESET_VISUALS: Record<string, PresetVisual> = {
 };
 
 export function IntegrationControlCenterView({
+  client,
+  workspaceId,
   presets,
   instancesByPreset,
   customInstances,
@@ -96,6 +100,8 @@ export function IntegrationControlCenterView({
   onCustomApiBack,
   onCustomApiToggleTool,
 }: {
+  client: OpenGeniCoreClient;
+  workspaceId: string;
   presets: ApiIntegrationPresetSummary[];
   instancesByPreset: Map<string, ApiIntegrationInstallationSummary[]>;
   customInstances: ApiIntegrationInstallationSummary[];
@@ -200,6 +206,8 @@ export function IntegrationControlCenterView({
             {presets.map((preset) => (
               <PresetCard
                 key={preset.id}
+                client={client}
+                workspaceId={workspaceId}
                 preset={preset}
                 instances={instancesByPreset.get(preset.id) ?? []}
                 connections={connections}
@@ -333,6 +341,8 @@ export function IntegrationControlCenterView({
 }
 
 function PresetCard({
+  client,
+  workspaceId,
   preset,
   instances,
   connections,
@@ -342,6 +352,8 @@ function PresetCard({
   onReconnect,
   onRemove,
 }: {
+  client: OpenGeniCoreClient;
+  workspaceId: string;
   preset: ApiIntegrationPresetSummary;
   instances: ApiIntegrationInstallationSummary[];
   connections: ConnectionMetadata[] | null;
@@ -386,6 +398,7 @@ function PresetCard({
             <div
               key={instance.instanceId}
               className="rounded-lg border border-border bg-surface p-3 shadow-xs"
+              data-integration-instance={instance.instanceKey}
             >
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
@@ -439,6 +452,13 @@ function PresetCard({
                   Remove
                 </Button>
               </div>
+              <IntegrationFeaturesPanel
+                client={client}
+                workspaceId={workspaceId}
+                instance={instance}
+                featureCount={preset.features.length}
+                canManage={canManage}
+              />
             </div>
           );
         })}

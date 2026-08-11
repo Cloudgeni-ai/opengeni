@@ -503,6 +503,8 @@ export function IntegrationControlCenter({
       }
     >
       <IntegrationControlCenterView
+        client={client}
+        workspaceId={workspaceId}
         presets={presets}
         instancesByPreset={instancesByPreset}
         customInstances={customInstances}
