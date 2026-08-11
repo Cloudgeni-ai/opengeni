@@ -116,7 +116,7 @@ describe("release schema contract", () => {
     );
     expect(sourceContract.sha256).toBe(
       migrations.has("0218_organization_tenancy_foundation.sql")
-        ? "694a551e05e4ae603393524e21dcbf68862ddd443c5feec62e839be662d65a1e"
+        ? "7166f14d681b083e91b1d85608e70286400184887cdf84a4d6e6ae867fd8258b"
         : migrations.has("0217_capability_definition_delete_authority.sql")
           ? "49fe063b91ded74174d945fdc2cb7713ba9b5604fee7610b495919179658fab3"
           : migrations.has("0216_pack_component_ownership.sql")
@@ -311,7 +311,7 @@ describe("release schema contract", () => {
     });
     if (migrations.has("0218_organization_tenancy_foundation.sql")) {
       expect(migrations.get("0218_organization_tenancy_foundation.sql")).toMatchObject({
-        sha256: "8fa24ae2c05dd7eadd74efddc258d155c396275c73ea2e09cab6beb69afb1355",
+        sha256: "6377522b4a7295150828bee39fffc90643adc46fec1907f1acc9671909ad6e75",
         deploymentMode: "rolling",
       });
     }

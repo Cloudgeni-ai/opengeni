@@ -62,7 +62,11 @@ CREATE TABLE "organization_user_retention_policies" (
   ),
   CONSTRAINT "organization_user_retention_policies_duration_check" CHECK (
     ("mode" = 'retain' AND "retention_days" IS NULL)
-    OR ("mode" = 'delete_after' AND "retention_days" BETWEEN 1 AND 3650)
+    OR (
+      "mode" = 'delete_after'
+      AND "retention_days" IS NOT NULL
+      AND "retention_days" BETWEEN 1 AND 3650
+    )
   ),
   CONSTRAINT "organization_user_retention_policies_version_check" CHECK (
     "version" > 0
@@ -160,6 +164,7 @@ ALTER TABLE "sessions"
       AND "forked_by_organization_membership_id" IS NULL
     ) OR (
       "forked_from_session_id" IS NOT NULL
+      AND "forked_from_authority_epoch" IS NOT NULL
       AND "forked_from_authority_epoch" > 0
       AND "forked_from_visibility" IN ('user_private', 'workspace_shared')
       AND "forked_at" IS NOT NULL
@@ -231,6 +236,7 @@ CREATE TABLE "organization_user_resource_grants" (
       "mode" IN ('once', 'session')
       AND
       "session_id" IS NOT NULL
+      AND "authority_epoch" IS NOT NULL
       AND "authority_epoch" > 0
     )
   ),

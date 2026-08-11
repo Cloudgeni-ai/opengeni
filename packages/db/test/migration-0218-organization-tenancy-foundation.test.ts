@@ -98,7 +98,10 @@ describe("migration 0218 organization tenancy foundation", () => {
   });
 
   test("is rolling, additive, legacy-safe, and intentionally runtime-inert", async () => {
-    const migration = await readFile(migrationPath, "utf8");
+    const [migration, schema] = await Promise.all([
+      readFile(migrationPath, "utf8"),
+      readFile(schemaPath, "utf8"),
+    ]);
     expect(migration.split(/\r?\n/u, 1)[0]).toBe("-- deployment-mode: rolling");
     for (const table of tenancyTables) {
       expect(migration).toContain(`CREATE TABLE "${table}"`);
@@ -118,6 +121,24 @@ describe("migration 0218 organization tenancy foundation", () => {
     );
     expect(migration.match(/CREATE POLICY organization_tenancy_system_only ON /gu)).toHaveLength(
       tenancyTables.length,
+    );
+    expect(migration).toMatch(
+      /"mode" = 'delete_after'\s+AND "retention_days" IS NOT NULL\s+AND "retention_days" BETWEEN 1 AND 3650/u,
+    );
+    expect(migration).toContain(
+      `"forked_from_authority_epoch" IS NOT NULL\n      AND "forked_from_authority_epoch" > 0`,
+    );
+    expect(migration).toContain(
+      `"session_id" IS NOT NULL\n      AND "authority_epoch" IS NOT NULL\n      AND "authority_epoch" > 0`,
+    );
+    expect(schema).toMatch(
+      /organization_user_retention_policies_duration_check[\s\S]*?\$\{table\.mode\} = 'delete_after'\s+and \$\{table\.retentionDays\} is not null\s+and \$\{table\.retentionDays\} between 1 and 3650/u,
+    );
+    expect(schema).toMatch(
+      /sessions_fork_provenance_check[\s\S]*?\$\{table\.forkedFromSessionId\} is not null\s+and \$\{table\.forkedFromAuthorityEpoch\} is not null\s+and \$\{table\.forkedFromAuthorityEpoch\} > 0/u,
+    );
+    expect(schema).toMatch(
+      /organization_user_resource_grants_session_fence_check[\s\S]*?\$\{table\.sessionId\} is not null\s+and \$\{table\.authorityEpoch\} is not null\s+and \$\{table\.authorityEpoch\} > 0/u,
     );
     expect(migration).not.toMatch(
       /ALTER TABLE "(?:workspace_variable_sets|rigs|enrollments|codex_subscription_credentials)"/u,
@@ -269,6 +290,28 @@ describe("migration 0218 organization tenancy foundation", () => {
         `,
       "23514",
     );
+    await expectSqlState(
+      async () =>
+        await shared!.admin`
+          update sessions
+          set
+            forked_from_session_id = ${session.id},
+            forked_from_visibility = 'workspace_shared',
+            forked_at = now(),
+            forked_by_organization_membership_id = ${membership!.id}
+          where id = ${session.id}
+        `,
+      "23514",
+    );
+
+    await expectSqlState(
+      async () =>
+        await shared!.admin`
+          insert into organization_user_retention_policies (account_id, mode)
+          values (${personal.accountId}, 'delete_after')
+        `,
+      "23514",
+    );
 
     await shared.admin`
       insert into organization_user_resource_grants (
@@ -280,6 +323,34 @@ describe("migration 0218 organization tenancy foundation", () => {
         'workspace_shared', 1
       )
     `;
+    await expectSqlState(
+      async () =>
+        await shared!.admin`
+          insert into organization_user_resource_grants (
+            account_id, authority_id, owner_organization_membership_id,
+            workspace_id, session_id, action, mode, context
+          ) values (
+            ${personal.accountId}, ${authority!.id}, ${membership!.id},
+            ${personal.workspaceId}, ${session.id}, 'resource.use.once-null', 'once',
+            'workspace_shared'
+          )
+        `,
+      "23514",
+    );
+    await expectSqlState(
+      async () =>
+        await shared!.admin`
+          insert into organization_user_resource_grants (
+            account_id, authority_id, owner_organization_membership_id,
+            workspace_id, session_id, action, mode, context
+          ) values (
+            ${personal.accountId}, ${authority!.id}, ${membership!.id},
+            ${personal.workspaceId}, ${session.id}, 'resource.use.session-null', 'session',
+            'workspace_shared'
+          )
+        `,
+      "23514",
+    );
     await shared.admin`
       insert into organization_user_resource_grants (
         account_id, authority_id, owner_organization_membership_id,

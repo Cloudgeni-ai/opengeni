@@ -507,7 +507,11 @@ export const organizationUserRetentionPolicies = pgTable(
     durationValid: check(
       "organization_user_retention_policies_duration_check",
       sql`(${table.mode} = 'retain' and ${table.retentionDays} is null)
-        or (${table.mode} = 'delete_after' and ${table.retentionDays} between 1 and 3650)`,
+        or (
+          ${table.mode} = 'delete_after'
+          and ${table.retentionDays} is not null
+          and ${table.retentionDays} between 1 and 3650
+        )`,
     ),
     versionValid: check(
       "organization_user_retention_policies_version_check",
@@ -2326,6 +2330,7 @@ export const sessions = pgTable(
           and ${table.forkedByOrganizationMembershipId} is null
         ) or (
           ${table.forkedFromSessionId} is not null
+          and ${table.forkedFromAuthorityEpoch} is not null
           and ${table.forkedFromAuthorityEpoch} > 0
           and ${table.forkedFromVisibility} in ('user_private', 'workspace_shared')
           and ${table.forkedAt} is not null
@@ -2439,7 +2444,9 @@ export const organizationUserResourceGrants = pgTable(
         ) or (
           ${table.mode} in ('once', 'session')
           and
-          ${table.sessionId} is not null and ${table.authorityEpoch} > 0
+          ${table.sessionId} is not null
+          and ${table.authorityEpoch} is not null
+          and ${table.authorityEpoch} > 0
         )`,
     ),
     generationValid: check(
