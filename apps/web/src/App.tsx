@@ -5,6 +5,7 @@
 //   /workspaces/:id/agent                    → sessions redirect (legacy URL)
 //   /workspaces/:id/sessions                 → sessions index + create
 //   /workspaces/:id/sessions/:sessionId      → session view (queue/goal rail)
+//   /workspaces/:id/priority                 → "For you" priority feed (agent-time-lost ledger)
 //   /workspaces/:id/agents                   → workspace agent topology
 //   /sessions/:sessionId                     → authorized compatibility redirect
 //   /workspaces/:id/variable-sets            → variable sets + variables
@@ -56,6 +57,7 @@ const LazyVariableSetsRoute = lazyRouteComponent(
 );
 const LazyMachinesRoute = lazyRouteComponent(() => import("@/routes/machines"), "MachinesRoute");
 const LazyInsightsRoute = lazyRouteComponent(() => import("@/routes/insights"), "InsightsRoute");
+const LazyPriorityRoute = lazyRouteComponent(() => import("@/routes/priority"), "PriorityRoute");
 const LazyOrgSettingsRoute = lazyRouteComponent(
   () => import("@/routes/org-settings"),
   "OrgSettingsRoute",
@@ -228,6 +230,11 @@ const workspaceInsightsRoute = createRoute({
   path: "insights",
   component: Insights,
 });
+const workspacePriorityRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "priority",
+  component: Priority,
+});
 // Legacy standalone Packs route: packs are now a subsection of Capabilities,
 // so this redirects there (focusing the Packs subsection) instead of mounting
 // a separate page.
@@ -347,6 +354,7 @@ const routeTree = rootRoute.addChildren([
     workspaceRigDetailRoute,
     workspaceMachinesRoute,
     workspaceInsightsRoute,
+    workspacePriorityRoute,
     workspacePacksRoute,
     workspaceCapabilitiesRoute,
     workspaceSchedulesRoute,
@@ -457,6 +465,11 @@ function Machines() {
 function Insights() {
   const { workspaceId } = workspaceInsightsRoute.useParams();
   return <LazyInsightsRoute workspaceId={workspaceId} />;
+}
+
+function Priority() {
+  const { workspaceId } = workspacePriorityRoute.useParams();
+  return <LazyPriorityRoute workspaceId={workspaceId} />;
 }
 
 function PacksRedirect() {
