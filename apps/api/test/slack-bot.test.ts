@@ -87,6 +87,16 @@ afterAll(async () => {
 
 afterEach(async () => {
   if (!shared) return;
+  // These tables are immutable under ordinary DELETE, including cascades from
+  // their parent account. The database is disposable and private to this test
+  // file, so clear the complete ledger with one test-only TRUNCATE before the
+  // existing account cleanup.
+  await shared.admin`
+    truncate table
+      memory_slack_publication_receipts,
+      memory_slack_publications,
+      memory_slack_publication_configurations
+  `;
   await shared.admin`delete from managed_accounts where name = 'slack bot acct'`;
 });
 
