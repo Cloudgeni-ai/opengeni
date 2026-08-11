@@ -26,29 +26,13 @@ RUN set -eux; \
     mkdir -p /out; \
     install -m 0755 target/release/opengeni-computer-native /out/opengeni-computer-native
 
-FROM oven/bun:1.3.14 AS browserd-build
+FROM oven/bun:1.3.14 AS bun-runtime
 
-ARG TARGETARCH
+FROM --platform=$BUILDPLATFORM oven/bun:1.3.14 AS browserd-build
+
 WORKDIR /src
 COPY . .
 RUN bun install --frozen-lockfile
-RUN set -eux; \
-    cd packages/browserd; \
-    bun run build:binary; \
-    mkdir -p /out; \
-    install -m 0755 dist/opengeni-browserd /out/opengeni-browserd; \
-    arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
-    case "$arch" in \
-      amd64) native=agent-browser-linux-x64; expected=b7bc3dfcf0a7326c1f5a60423163259ba2349eebfa5bd2e70e111af743da4a49 ;; \
-      arm64) native=agent-browser-linux-arm64; expected=6ccaba1eb26a0e6f5c23c59d2c63e6e0237fde82713cfdb543ba506490cac9c1 ;; \
-      *) echo "unsupported browser controller architecture=${arch}" >&2; exit 1 ;; \
-    esac; \
-    install -m 0755 "node_modules/agent-browser/bin/${native}" /out/agent-browser; \
-    test "$(sha256sum /out/agent-browser | awk '{print $1}')" = "$expected"; \
-    { \
-      printf '%s  %s\n' "$(sha256sum /out/opengeni-browserd | awk '{print $1}')" /usr/local/bin/opengeni-browserd; \
-      printf '%s  %s\n' "$expected" /usr/local/lib/opengeni/agent-browser; \
-    } > /out/SHA256SUMS
 
 # Install the exact lock-resolved Codemode package closure for ordinary Bun
 # programs. The CLI and imported module therefore share source, catalog rules,
@@ -72,6 +56,27 @@ RUN set -eux; \
     test -f "$runtime/node_modules/@opengeni/codemode/src/index.ts"
 
 RUN cd packages/ogtool && bun run build
+
+ARG TARGETARCH
+COPY --from=bun-runtime /usr/local/bin/bun /tmp/opengeni-target-bun
+RUN set -eux; \
+    arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
+    case "$arch" in \
+      amd64) native=agent-browser-linux-x64; expected=b7bc3dfcf0a7326c1f5a60423163259ba2349eebfa5bd2e70e111af743da4a49 ;; \
+      arm64) native=agent-browser-linux-arm64; expected=6ccaba1eb26a0e6f5c23c59d2c63e6e0237fde82713cfdb543ba506490cac9c1 ;; \
+      *) echo "unsupported browser controller architecture=${arch}" >&2; exit 1 ;; \
+    esac; \
+    mkdir -p /out; \
+    bun build --compile --compile-executable-path=/tmp/opengeni-target-bun \
+      packages/browserd/src/main.ts \
+      --outfile /out/opengeni-browserd; \
+    chmod 0755 /out/opengeni-browserd; \
+    install -m 0755 "packages/browserd/node_modules/agent-browser/bin/${native}" /out/agent-browser; \
+    test "$(sha256sum /out/agent-browser | awk '{print $1}')" = "$expected"; \
+    { \
+      printf '%s  %s\n' "$(sha256sum /out/opengeni-browserd | awk '{print $1}')" /usr/local/bin/opengeni-browserd; \
+      printf '%s  %s\n' "$expected" /usr/local/lib/opengeni/agent-browser; \
+    } > /out/SHA256SUMS
 
 COPY --from=computer-native-build /out/opengeni-computer-native /out/opengeni-computer-native
 RUN printf '%s  %s\n' \
@@ -320,7 +325,7 @@ COPY docker/opengeni-git-askpass              /usr/local/bin/opengeni-git-askpas
 COPY packages/ogtool/package.json             /opt/opengeni/ogtool/package.json
 COPY --from=browserd-build /src/packages/ogtool/dist/bin/ogtool.cjs /opt/opengeni/ogtool/bin/ogtool.cjs
 COPY --from=browserd-build /out/opengeni-browserd /usr/local/bin/opengeni-browserd
-COPY --from=browserd-build /usr/local/bin/bun /usr/local/bin/bun
+COPY --from=bun-runtime /usr/local/bin/bun /usr/local/bin/bun
 COPY --from=browserd-build /out/agent-browser /usr/local/lib/opengeni/agent-browser
 COPY --from=browserd-build /out/opengeni-computer-native /usr/local/lib/opengeni/opengeni-computer-native
 COPY --from=browserd-build /out/SHA256SUMS /usr/local/share/opengeni/browserd-SHA256SUMS
