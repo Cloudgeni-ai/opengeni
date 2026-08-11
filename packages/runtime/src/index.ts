@@ -2777,17 +2777,23 @@ export function buildAgentCapabilities(
     }),
   );
   if (options.workspaceSkillPaths?.length) {
+    const bundledWorkspaceSkillNames = [
+      ...bundledSkillDirNames(bundledSkillsDir()),
+      ...(options.editableArtifactToolsAvailable
+        ? bundledSkillDirNames(bundledArtifactSkillsDir())
+        : []),
+      ...(options.videoGenerationAvailable ? bundledSkillDirNames(bundledVideoSkillsDir()) : []),
+    ];
     caps.push(
-      workspaceSkills(options.workspaceSkillPaths, [
-        ...bundledSkillDirNames(bundledSkillsDir()),
-        ...(options.editableArtifactToolsAvailable
-          ? bundledSkillDirNames(bundledArtifactSkillsDir())
-          : []),
-        ...(options.videoGenerationAvailable ? bundledSkillDirNames(bundledVideoSkillsDir()) : []),
-        ...(options.skillLibrarySkills ?? []).map((skill) => skill.name),
-        ...packSkills.map((skill) => skill.name),
-        ...sessionSkills.map((skill) => skill.name),
-      ]),
+      workspaceSkills(
+        options.workspaceSkillPaths,
+        [
+          ...(options.skillLibrarySkills ?? []).map((skill) => skill.name),
+          ...packSkills.map((skill) => skill.name),
+          ...sessionSkills.map((skill) => skill.name),
+        ],
+        bundledWorkspaceSkillNames,
+      ),
     );
   }
   // P4.3 computer-use: the agent drives the SAME :0 humans watch (xdotool/XTEST +
