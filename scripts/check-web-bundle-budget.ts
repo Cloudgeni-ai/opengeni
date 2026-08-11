@@ -16,11 +16,12 @@ const budgets = {
   // keeps Popper scopes intact (otherwise /settings crashes). The shared
   // composer also carries the tiny app-action slot used by realtime voice.
   // Existing-session scheduling, authenticated retained screenshots, and the
-  // synchronous session projection grow the initial graph; keep modest
-  // headroom above the current 1328/367 KiB Linux production build while the
-  // per-file and lazy-chunk budgets stay fixed.
-  initialRaw: 1336 * kib,
-  initialGzip: 370 * kib,
+  // synchronous session projection grow the initial graph. The managed-app
+  // catalog now includes governed Slack publication and read-only Atlassian;
+  // keep modest headroom above the current 1360/374 KiB production build while
+  // the per-file, graph-count, direct-session, and lazy-chunk budgets stay fixed.
+  initialRaw: 1380 * kib,
+  initialGzip: 382 * kib,
   initialFileGzip: 70 * kib,
   initialFiles: 16,
   directSessionRaw: 1900 * kib,
@@ -28,7 +29,7 @@ const budgets = {
   directSessionFiles: 18,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,
-  cssGzip: 30 * kib,
+  cssGzip: 31 * kib,
 } as const;
 
 const repoRoot = path.resolve(import.meta.dir, "..");

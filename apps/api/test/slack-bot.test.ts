@@ -87,9 +87,21 @@ afterAll(async () => {
 
 afterEach(async () => {
   if (!shared) return;
-  // This database belongs exclusively to this test file. TRUNCATE resets the
-  // whole account subtree without violating append-only DELETE triggers.
-  await shared.admin`truncate table managed_accounts cascade`;
+  // The publication configuration and receipt records are intentionally
+  // append-only in production. This test file owns a disposable database, so
+  // temporarily disable only those immutability triggers while removing its
+  // per-test tenant. Foreign-key triggers remain active and the DDL rolls back
+  // with the transaction if any cleanup step fails.
+  await shared.admin.begin(async (sql) => {
+    await sql`alter table memory_slack_publication_receipts disable trigger memory_slack_publication_receipts_immutable`;
+    await sql`alter table memory_slack_publication_configurations disable trigger memory_slack_publication_configurations_immutable`;
+    await sql`delete from memory_slack_publication_receipts where account_id in (select id from managed_accounts where name = 'slack bot acct')`;
+    await sql`delete from memory_slack_publications where account_id in (select id from managed_accounts where name = 'slack bot acct')`;
+    await sql`delete from memory_slack_publication_configurations where account_id in (select id from managed_accounts where name = 'slack bot acct')`;
+    await sql`delete from managed_accounts where name = 'slack bot acct'`;
+    await sql`alter table memory_slack_publication_configurations enable trigger memory_slack_publication_configurations_immutable`;
+    await sql`alter table memory_slack_publication_receipts enable trigger memory_slack_publication_receipts_immutable`;
+  });
 });
 
 async function freshWorkspace(): Promise<{

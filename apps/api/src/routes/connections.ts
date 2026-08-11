@@ -1,5 +1,13 @@
 import { createHash } from "node:crypto";
 import {
+  ATLASSIAN_PROVIDER_DOMAIN,
+  AtlassianConnectionMetadata,
+  AtlassianDisconnectRequest,
+  AtlassianLifecycleActionRequest,
+  AtlassianOAuthStartRequest,
+  AtlassianOAuthStartResponse,
+} from "@opengeni/contracts/atlassian";
+import {
   ConnectionResponse,
   CreateConnectionRequest,
   IntegrationClientMetadata,
@@ -62,6 +70,14 @@ import {
   startGoogleDriveOAuth,
   transitionGoogleDriveLifecycle,
 } from "../integrations/google-drive";
+import {
+  browseAtlassianSources,
+  completeAtlassianOAuthCallback,
+  disconnectAtlassian,
+  saveAtlassianSources,
+  startAtlassianOAuth,
+  transitionAtlassianLifecycle,
+} from "../integrations/atlassian";
 import {
   completeMcpOAuthCallback,
   integrationBaseUrl,
@@ -134,6 +150,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const providerDomain = canonicalProviderDomain(payload.providerDomain);
     assertNotDirectPersonalSlackOAuth(providerDomain, payload.kind);
     assertNotDirectGoogleDriveOAuth(providerDomain, payload.kind, payload.metadata);
+    assertNotDirectAtlassianOAuth(providerDomain, payload.kind, payload.metadata);
     const connection = await createConnection(db, {
       accountId: grant.accountId,
       workspaceId,
@@ -300,6 +317,100 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         }),
       ),
     );
+  });
+
+  app.post("/v1/workspaces/:workspaceId/connections/atlassian/install", async (c) => {
+    assertIntegrationsEnabled();
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
+    const parsed = AtlassianOAuthStartRequest.safeParse(await c.req.json());
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "invalid Atlassian install request" });
+    }
+    return c.json(
+      AtlassianOAuthStartResponse.parse(
+        await startAtlassianOAuth(deps, {
+          accountId: grant.accountId,
+          workspaceId,
+          subjectId: grant.subjectId,
+          requestUrl: c.req.url,
+          payload: parsed.data,
+        }),
+      ),
+    );
+  });
+
+  app.get("/v1/integrations/atlassian/callback", async (c) => {
+    assertIntegrationsEnabled();
+    const result = await completeAtlassianOAuthCallback(deps, {
+      ...(c.req.query("code") ? { code: c.req.query("code") } : {}),
+      ...(c.req.query("state") ? { state: c.req.query("state") } : {}),
+      ...(c.req.query("error") ? { error: c.req.query("error") } : {}),
+      requestUrl: c.req.url,
+    });
+    return c.redirect(result.redirectTo, 302);
+  });
+
+  app.patch(
+    "/v1/workspaces/:workspaceId/connections/atlassian/:connectionId/lifecycle",
+    async (c) => {
+      assertIntegrationsEnabled();
+      const workspaceId = c.req.param("workspaceId");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
+      const parsed = AtlassianLifecycleActionRequest.safeParse(await c.req.json());
+      if (!parsed.success) {
+        throw new HTTPException(400, { message: "invalid Atlassian lifecycle request" });
+      }
+      return c.json(
+        ConnectionResponse.parse({
+          connection: await transitionAtlassianLifecycle(deps, {
+            workspaceId,
+            subjectId: grant.subjectId,
+            connectionId: c.req.param("connectionId"),
+            payload: parsed.data,
+          }),
+        }),
+      );
+    },
+  );
+
+  app.get("/v1/workspaces/:workspaceId/connections/atlassian/:connectionId/browse", async (c) => {
+    assertIntegrationsEnabled();
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:read");
+    return c.json(
+      await browseAtlassianSources(deps, {
+        workspaceId,
+        subjectId: grant.subjectId,
+        connectionId: c.req.param("connectionId"),
+      }),
+    );
+  });
+
+  app.post("/v1/workspaces/:workspaceId/connections/atlassian/:connectionId/source", async (c) => {
+    assertIntegrationsEnabled();
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "connections:write",
+    );
+    const { grant } = authorization;
+    const connection = await saveAtlassianSources(deps, {
+      accountId: grant.accountId,
+      workspaceId,
+      subjectId: grant.subjectId,
+      grant,
+      connectionId: c.req.param("connectionId"),
+      payload: await c.req.json(),
+      canManageOrganizationDestination:
+        authorization.accountGrant?.permissions.includes("account:admin") === true,
+      canManageWorkspaceDestination: hasPermission(grant.permissions, "workspace:admin"),
+      canManagePersonalDestination:
+        authorization.contextIntegrity && authorization.authenticatedSubjectId === grant.subjectId,
+    });
+    return c.json(ConnectionResponse.parse({ connection }));
   });
 
   app.get("/v1/integrations/google-drive/callback", async (c) => {
@@ -486,6 +597,11 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "use the dedicated Google Drive reconnect or source-selection flow",
       });
     }
+    if (existing && AtlassianConnectionMetadata.safeParse(existing.metadata).success) {
+      throw new HTTPException(422, {
+        message: "use the dedicated Atlassian reconnect or source-selection flow",
+      });
+    }
     if (existing) {
       const providerDomain = canonicalProviderDomain(
         payload.providerDomain ?? existing.providerDomain,
@@ -493,6 +609,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       const kind = payload.kind ?? existing.kind;
       assertNotDirectPersonalSlackOAuth(providerDomain, kind);
       assertNotDirectGoogleDriveOAuth(providerDomain, kind, payload.metadata ?? existing.metadata);
+      assertNotDirectAtlassianOAuth(providerDomain, kind, payload.metadata ?? existing.metadata);
     }
     // Status is not a free-form field: revocation goes through DELETE, and the
     // broker owns needs_reauth/error. Reactivating a connection is only
@@ -554,8 +671,14 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       existing.providerDomain === GOOGLE_DRIVE_PROVIDER_DOMAIN &&
       existing.kind === "oauth2" &&
       GoogleDriveConnectionMetadata.safeParse(existing.metadata).success;
+    const isAtlassian =
+      existing.subjectId === grant.subjectId &&
+      existing.providerDomain === ATLASSIAN_PROVIDER_DOMAIN &&
+      existing.kind === "oauth2" &&
+      AtlassianConnectionMetadata.safeParse(existing.metadata).success;
+    const disconnectPayload = await c.req.json().catch(() => null);
     const googleDriveDisconnect = isGoogleDrive
-      ? GoogleDriveDisconnectRequest.safeParse(await c.req.json().catch(() => null))
+      ? GoogleDriveDisconnectRequest.safeParse(disconnectPayload)
       : null;
     if (googleDriveDisconnect && !googleDriveDisconnect.success) {
       throw new HTTPException(400, {
@@ -564,7 +687,16 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           "invalid Google Drive disconnect request",
       });
     }
-    if (existing.status === "revoked" && !isGoogleDrive) {
+    const atlassianDisconnect = isAtlassian
+      ? AtlassianDisconnectRequest.safeParse(disconnectPayload)
+      : null;
+    if (atlassianDisconnect && !atlassianDisconnect.success) {
+      throw new HTTPException(400, {
+        message:
+          atlassianDisconnect.error.issues[0]?.message ?? "invalid Atlassian disconnect request",
+      });
+    }
+    if (existing.status === "revoked" && !isGoogleDrive && !isAtlassian) {
       return c.json(ConnectionResponse.parse({ connection: existing }));
     }
     const connection = isGoogleDrive
@@ -574,18 +706,31 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           connection: existing,
           payload: googleDriveDisconnect!.data,
         })
-      : isOpenGeniSlackBotConnection(existing)
-        ? await revokeConnectionWithSlackBotSuccessAudit(db, {
-            accountId: grant.accountId,
+      : isAtlassian
+        ? await disconnectAtlassian(deps, {
             workspaceId,
             subjectId: grant.subjectId,
-            connectionId,
-            expectedVersion: existing.version,
-            credentialRole: OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
-            credentialLabel: OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
-            slackTeamId: openGeniSlackBotMetadata(existing.metadata)!.slackTeamId,
+            connection: existing,
+            payload: atlassianDisconnect!.data,
           })
-        : await revokeConnection(db, workspaceId, connectionId, grant.subjectId, existing.version);
+        : isOpenGeniSlackBotConnection(existing)
+          ? await revokeConnectionWithSlackBotSuccessAudit(db, {
+              accountId: grant.accountId,
+              workspaceId,
+              subjectId: grant.subjectId,
+              connectionId,
+              expectedVersion: existing.version,
+              credentialRole: OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
+              credentialLabel: OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
+              slackTeamId: openGeniSlackBotMetadata(existing.metadata)!.slackTeamId,
+            })
+          : await revokeConnection(
+              db,
+              workspaceId,
+              connectionId,
+              grant.subjectId,
+              existing.version,
+            );
     if (!connection) {
       throw new HTTPException(409, { message: "connection changed during disconnect; try again" });
     }
@@ -912,6 +1057,21 @@ function assertNotDirectGoogleDriveOAuth(
   ) {
     throw new HTTPException(422, {
       message: "Google Drive credentials must use the dedicated OAuth connection flow",
+    });
+  }
+}
+
+function assertNotDirectAtlassianOAuth(
+  providerDomain: string,
+  kind: string,
+  metadata: Record<string, unknown> | undefined,
+): void {
+  if (
+    (providerDomain === ATLASSIAN_PROVIDER_DOMAIN && kind === "oauth2") ||
+    AtlassianConnectionMetadata.safeParse(metadata).success
+  ) {
+    throw new HTTPException(422, {
+      message: "Atlassian credentials must use the dedicated OAuth connection flow",
     });
   }
 }

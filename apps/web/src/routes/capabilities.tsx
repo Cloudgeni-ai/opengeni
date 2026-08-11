@@ -6,6 +6,12 @@
 // by hand-editing enable headers. Packs keep their first-class register/enable/
 // disable/unregister surface, restyled flat.
 import {
+  ATLASSIAN_APP_DESCRIPTION,
+  atlassianStatus,
+  localConnectedAtlassianPreview,
+  preferredAtlassianConnection,
+} from "@/lib/atlassian-connection";
+import {
   OPENGENI_SLACK_BOT_REQUESTED_SCOPES,
   OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
 } from "@opengeni/contracts/slack-bot-scopes";
@@ -35,6 +41,7 @@ import {
 import { toast } from "sonner";
 
 import { AddCustomDialog } from "@/components/capabilities/add-custom-dialog";
+import { AtlassianConnectorCard } from "@/components/capabilities/atlassian-connector-card";
 import {
   CapabilityDetailSheet,
   type ConnectAction,
@@ -342,7 +349,7 @@ export function CapabilitiesRoute({
   const capabilityFocusFallbackRef = useRef<HTMLDivElement | null>(null);
   const [sheetError, setSheetError] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
-  const [managedApp, setManagedApp] = useState<"google-drive" | "slack" | null>(null);
+  const [managedApp, setManagedApp] = useState<"google-drive" | "atlassian" | "slack" | null>(null);
 
   // Public MCP registry search (only offered when the catalog has no matches).
   const [registryBusy, setRegistryBusy] = useState(false);
@@ -411,6 +418,16 @@ export function CapabilitiesRoute({
   const googleDriveState = googleDriveAccountState(
     googleDriveConnection,
     googleDrivePreviewConnection !== null || connectionsLoaded,
+  );
+  const atlassianPreviewConnection = localConnectedAtlassianPreview(
+    window.location.search,
+    workspaceId,
+  );
+  const atlassianConnection =
+    atlassianPreviewConnection ?? preferredAtlassianConnection(connections ?? []);
+  const atlassianConnectionStatus = atlassianStatus(
+    atlassianConnection,
+    atlassianPreviewConnection !== null || connectionsLoaded,
   );
   const personalSlackItem = personalSlackCapability(items);
   const personalSlackConnection = preferredPersonalSlackConnection(connections ?? []);
@@ -1270,6 +1287,13 @@ export function CapabilitiesRoute({
               onOpen={() => setManagedApp("google-drive")}
             />
             <ManagedAppTile
+              icon={<AppLogo app="atlassian" />}
+              name="Jira & Confluence"
+              description={ATLASSIAN_APP_DESCRIPTION}
+              status={atlassianStatusLabel(atlassianConnectionStatus)}
+              onOpen={() => setManagedApp("atlassian")}
+            />
+            <ManagedAppTile
               icon={<AppLogo app="slack" />}
               name="Slack"
               description="Chat with OpenGeni and start work from Slack."
@@ -1290,6 +1314,21 @@ export function CapabilitiesRoute({
             </SheetHeader>
             <Suspense fallback={<Skeleton className="m-5 h-40 rounded-xl" />}>
               <GoogleDriveConnectorCard workspaceId={workspaceId} />
+            </Suspense>
+          </SheetContent>
+        </Sheet>
+
+        <Sheet
+          open={managedApp === "atlassian"}
+          onOpenChange={(open) => !open && setManagedApp(null)}
+        >
+          <SheetContent className="w-full overflow-y-auto sm:max-w-xl">
+            <SheetHeader className="sr-only">
+              <SheetTitle>Jira & Confluence</SheetTitle>
+              <SheetDescription>Atlassian connection settings.</SheetDescription>
+            </SheetHeader>
+            <Suspense fallback={<Skeleton className="m-5 h-40 rounded-xl" />}>
+              <AtlassianConnectorCard workspaceId={workspaceId} />
             </Suspense>
           </SheetContent>
         </Sheet>
@@ -1757,16 +1796,26 @@ export function googleDriveStatusLabel(
   return "Needs attention";
 }
 
+export function atlassianStatusLabel(status: ReturnType<typeof atlassianStatus>): string {
+  if (status === "connected") return "Connected";
+  if (status === "paused") return "Paused";
+  if (status === "loading") return "Loading";
+  if (status === "not_connected") return "Not connected";
+  return "Needs attention";
+}
+
 const APP_LOGO_URLS = {
   googleDrive:
     "https://www.gstatic.com/images/branding/productlogos/drive_2026/v2/web-64dp/logo_drive_2026_color_2x_web_64dp.png",
+  atlassian: "https://wac-cdn.atlassian.com/assets/img/favicons/atlassian/favicon.png",
   slack: "https://a.slack-edge.com/80588/marketing/img/meta/slack_hash_256.png",
 } as const;
 
 function AppLogo({ app, className }: { app: keyof typeof APP_LOGO_URLS; className?: string }) {
   const [failed, setFailed] = useState(false);
   if (failed) {
-    const FallbackIcon = app === "googleDrive" ? HardDriveIcon : MessagesSquareIcon;
+    const FallbackIcon =
+      app === "googleDrive" ? HardDriveIcon : app === "slack" ? MessagesSquareIcon : GlobeIcon;
     return <FallbackIcon className={cn("size-5 text-fg-muted", className)} aria-hidden="true" />;
   }
   return (

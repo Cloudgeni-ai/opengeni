@@ -772,6 +772,79 @@ export type GoogleDriveBrowseResponse = {
   incompleteSearch: boolean;
 };
 
+export type AtlassianSourceKind = "jira_project" | "confluence_space";
+export type AtlassianSyncCadence = "manual" | "hourly" | "daily";
+export type AtlassianReadPolicy = "allow" | "ask" | "block";
+export type AtlassianConnectionLifecycle = {
+  state:
+    | "active"
+    | "paused"
+    | "token_revoked"
+    | "app_removed"
+    | "disconnected"
+    | "reconnect_required"
+    | "reconsent_required";
+  recoverable: boolean;
+  observedAt: string;
+};
+export type AtlassianSelectedSource = {
+  id: string;
+  cloudId: string;
+  siteName: string;
+  siteUrl: string;
+  resourceId: string;
+  key: string;
+  name: string;
+  kind: AtlassianSourceKind;
+  destination?: ConnectorDocumentDestination | undefined;
+  syncCadence: AtlassianSyncCadence;
+  syncEnabled: boolean;
+  configGeneration: number;
+  readPolicy: AtlassianReadPolicy;
+  selectedAt: string;
+};
+export type AtlassianConnectionMetadata = {
+  credentialRole: "atlassian_knowledge";
+  credentialLabel: "Atlassian read-only knowledge sync";
+  atlassianAccountId: string;
+  displayName: string;
+  email?: string | null | undefined;
+  sites: Array<{
+    cloudId: string;
+    name: string;
+    url: string;
+    products: Array<"jira" | "confluence">;
+  }>;
+  verifiedAt: string;
+  accessMode: "readonly";
+  lifecycle?: AtlassianConnectionLifecycle | undefined;
+  documentDestination?: ConnectorDocumentDestination | undefined;
+  selectedSources: AtlassianSelectedSource[];
+  [key: string]: unknown;
+};
+export type AtlassianOAuthStartResponse = { authorizationUrl: string; expiresAt: string };
+export type AtlassianLifecycleActionRequest = {
+  action: "pause" | "resume";
+  expectedVersion: number;
+};
+export type AtlassianDisconnectRequest = { expectedVersion: number; idempotencyKey: string };
+export type AtlassianBrowseItem = {
+  id: string;
+  cloudId: string;
+  siteName: string;
+  siteUrl: string;
+  resourceId: string;
+  key: string;
+  name: string;
+  kind: AtlassianSourceKind;
+  description: string | null;
+  webUrl: string;
+};
+export type AtlassianBrowseResponse = {
+  connection: ConnectionMetadata;
+  items: AtlassianBrowseItem[];
+};
+
 export type SaveGoogleDriveSourceRequest = {
   sources: Array<Pick<GoogleDriveBrowseItem, "id" | "name" | "mimeType" | "driveId">>;
   destination?: ConnectorDocumentDestinationSelection | undefined;
@@ -2322,6 +2395,9 @@ export type FirstPartyMcpToolName =
   | "slack_bot_file_content"
   | "slack_bot_post_message"
   | "slack_bot_delete_message"
+  | "atlassian_sources_list"
+  | "atlassian_search"
+  | "atlassian_get"
   | "artifacts_list"
   | "artifacts_get_source"
   | "artifacts_create"
