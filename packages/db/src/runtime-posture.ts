@@ -180,6 +180,10 @@ export const FORCE_RLS_TABLES = [
   "model_call_facts",
   "network_routes",
   "new_session_drafts",
+  "organization_memberships",
+  "organization_user_resource_authorities",
+  "organization_user_resource_grants",
+  "organization_user_retention_policies",
   "pack_installation_components",
   "pack_installations",
   "preference_registry_events",
@@ -538,6 +542,10 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "host_export_cursor_state",
   "host_export_dead_letters",
   "host_export_outbox",
+  "organization_memberships",
+  "organization_user_resource_authorities",
+  "organization_user_resource_grants",
+  "organization_user_retention_policies",
 ] as const;
 
 export type RuntimeTableDmlPrivilege = "SELECT" | "INSERT" | "UPDATE" | "DELETE";

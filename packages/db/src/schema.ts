@@ -420,6 +420,163 @@ export const workspaceMemberships = pgTable(
   }),
 );
 
+// Organization membership is distinct from workspace access. `account_id` is
+// the physical organization identifier; `personal_workspace_id` is lifecycle
+// metadata only and never the ownership anchor for user resources.
+export const organizationMemberships = pgTable(
+  "organization_memberships",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    subjectId: text("subject_id").notNull(),
+    status: text("status").notNull().default("provisioning"),
+    personalWorkspaceId: uuid("personal_workspace_id"),
+    authorizationRevision: bigint("authorization_revision", { mode: "number" })
+      .notNull()
+      .default(1),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    personalRetentionUntil: timestamp("personal_retention_until", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    accountIdentity: uniqueIndex("organization_memberships_id_account_idx").on(
+      table.id,
+      table.accountId,
+    ),
+    accountSubject: uniqueIndex("organization_memberships_account_subject_idx").on(
+      table.accountId,
+      table.subjectId,
+    ),
+    personalWorkspace: uniqueIndex("organization_memberships_personal_workspace_idx")
+      .on(table.accountId, table.personalWorkspaceId)
+      .where(sql`${table.personalWorkspaceId} is not null`),
+    personalWorkspaceAccount: foreignKey({
+      name: "organization_memberships_personal_workspace_account_fk",
+      columns: [table.personalWorkspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("restrict"),
+    statusValid: check(
+      "organization_memberships_status_check",
+      sql`${table.status} in ('provisioning', 'active', 'suspended', 'revoked')`,
+    ),
+    activePersonalWorkspace: check(
+      "organization_memberships_active_personal_workspace_check",
+      sql`${table.status} <> 'active' or ${table.personalWorkspaceId} is not null`,
+    ),
+    subjectValid: check(
+      "organization_memberships_subject_check",
+      sql`length(btrim(${table.subjectId})) between 1 and 1024`,
+    ),
+    revisionValid: check(
+      "organization_memberships_revision_check",
+      sql`${table.authorizationRevision} > 0`,
+    ),
+    revocationValid: check(
+      "organization_memberships_revocation_check",
+      sql`(${table.status} = 'revoked' and ${table.revokedAt} is not null)
+        or (${table.status} <> 'revoked' and ${table.revokedAt} is null)`,
+    ),
+  }),
+);
+
+export const organizationUserRetentionPolicies = pgTable(
+  "organization_user_retention_policies",
+  {
+    accountId: uuid("account_id")
+      .primaryKey()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    mode: text("mode").notNull().default("retain"),
+    retentionDays: integer("retention_days"),
+    version: bigint("version", { mode: "number" }).notNull().default(1),
+    updatedByMembershipId: uuid("updated_by_membership_id"),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    updater: foreignKey({
+      name: "organization_user_retention_policies_updater_fk",
+      columns: [table.updatedByMembershipId, table.accountId],
+      foreignColumns: [organizationMemberships.id, organizationMemberships.accountId],
+    }).onDelete("restrict"),
+    modeValid: check(
+      "organization_user_retention_policies_mode_check",
+      sql`${table.mode} in ('retain', 'delete_after')`,
+    ),
+    durationValid: check(
+      "organization_user_retention_policies_duration_check",
+      sql`(${table.mode} = 'retain' and ${table.retentionDays} is null)
+        or (
+          ${table.mode} = 'delete_after'
+          and ${table.retentionDays} is not null
+          and ${table.retentionDays} between 1 and 3650
+        )`,
+    ),
+    versionValid: check(
+      "organization_user_retention_policies_version_check",
+      sql`${table.version} > 0`,
+    ),
+  }),
+);
+
+export const organizationUserResourceAuthorities = pgTable(
+  "organization_user_resource_authorities",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    organizationMembershipId: uuid("organization_membership_id").notNull(),
+    resourceKind: text("resource_kind").notNull(),
+    resourceId: uuid("resource_id").notNull(),
+    // Provenance only. The migration owns a composite same-organization FK
+    // whose delete action clears only this column, never account_id.
+    originWorkspaceId: uuid("origin_workspace_id"),
+    generation: bigint("generation", { mode: "number" }).notNull().default(1),
+    status: text("status").notNull().default("active"),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    accountIdentity: uniqueIndex("organization_user_resource_authorities_id_account_idx").on(
+      table.id,
+      table.accountId,
+    ),
+    accountMembershipIdentity: uniqueIndex(
+      "organization_user_resource_authorities_id_account_membership_idx",
+    ).on(table.id, table.accountId, table.organizationMembershipId),
+    resourceIdentity: uniqueIndex(
+      "organization_user_resource_authorities_resource_identity_idx",
+    ).on(table.accountId, table.organizationMembershipId, table.resourceKind, table.resourceId),
+    membership: foreignKey({
+      name: "organization_user_resource_authorities_membership_fk",
+      columns: [table.organizationMembershipId, table.accountId],
+      foreignColumns: [organizationMemberships.id, organizationMemberships.accountId],
+    }).onDelete("restrict"),
+    resourceKindValid: check(
+      "organization_user_resource_authorities_kind_check",
+      sql`${table.resourceKind} = lower(btrim(${table.resourceKind}))
+        and length(${table.resourceKind}) between 1 and 64
+        and ${table.resourceKind} ~ '^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$'`,
+    ),
+    generationValid: check(
+      "organization_user_resource_authorities_generation_check",
+      sql`${table.generation} > 0`,
+    ),
+    statusValid: check(
+      "organization_user_resource_authorities_status_check",
+      sql`${table.status} in ('active', 'retained', 'revoked')`,
+    ),
+    revocationValid: check(
+      "organization_user_resource_authorities_revocation_check",
+      sql`(${table.status} = 'revoked' and ${table.revokedAt} is not null)
+        or (${table.status} <> 'revoked' and ${table.revokedAt} is null)`,
+    ),
+  }),
+);
+
 export const apiKeys = pgTable(
   "api_keys",
   {
@@ -1944,6 +2101,20 @@ export const sessions = pgTable(
       .$type<Record<string, unknown>>()
       .notNull()
       .default({ backfill: true }),
+    // Generic tenancy metadata is additive foundation only. Existing rows are
+    // explicitly workspace-shared and have no owner membership, so absent
+    // fields can never manufacture user authority.
+    ownerOrganizationMembershipId: uuid("owner_organization_membership_id"),
+    visibility: text("visibility").notNull().default("workspace_shared"),
+    authorityEpoch: integer("authority_epoch").notNull().default(1),
+    // Independent-copy provenance. A destination may use either visibility and
+    // may live in another workspace in the same organization; no live process,
+    // credential, grant, or delegation is represented by these facts.
+    forkedFromSessionId: uuid("forked_from_session_id"),
+    forkedFromAuthorityEpoch: integer("forked_from_authority_epoch"),
+    forkedFromVisibility: text("forked_from_visibility"),
+    forkedAt: timestamp("forked_at", { withTimezone: true }),
+    forkedByOrganizationMembershipId: uuid("forked_by_organization_membership_id"),
     model: text("model").notNull(),
     sandboxBackend: text("sandbox_backend").notNull(),
     // The OS this session's box runs. Defaults to 'linux' (today's only OS, so
@@ -2097,6 +2268,7 @@ export const sessions = pgTable(
     activityRevisionPendingXid: bigint("activity_revision_pending_xid", { mode: "bigint" }),
   },
   (table) => ({
+    accountIdentity: uniqueIndex("sessions_id_account_idx").on(table.id, table.accountId),
     workspaceIdentity: uniqueIndex("sessions_workspace_id_idx").on(table.workspaceId, table.id),
     workspaceCreated: index("sessions_workspace_created_idx").on(
       table.workspaceId,
@@ -2124,6 +2296,47 @@ export const sessions = pgTable(
     workspaceActivityPending: index("sessions_workspace_activity_pending_idx")
       .on(table.workspaceId, table.activityRevisionPendingXid, table.id)
       .where(sql`${table.activityRevisionPendingXid} is not null`),
+    ownerOrganizationMembership: foreignKey({
+      name: "sessions_owner_organization_membership_fk",
+      columns: [table.ownerOrganizationMembershipId, table.accountId],
+      foreignColumns: [organizationMemberships.id, organizationMemberships.accountId],
+    }).onDelete("restrict"),
+    forkedFromSession: foreignKey({
+      name: "sessions_forked_from_session_account_fk",
+      columns: [table.forkedFromSessionId, table.accountId],
+      foreignColumns: [table.id, table.accountId],
+    }).onDelete("restrict"),
+    forkedByOrganizationMembership: foreignKey({
+      name: "sessions_forked_by_organization_membership_fk",
+      columns: [table.forkedByOrganizationMembershipId, table.accountId],
+      foreignColumns: [organizationMemberships.id, organizationMemberships.accountId],
+    }).onDelete("restrict"),
+    visibilityValid: check(
+      "sessions_visibility_check",
+      sql`${table.visibility} in ('user_private', 'workspace_shared')`,
+    ),
+    privateOwnerValid: check(
+      "sessions_private_owner_check",
+      sql`${table.visibility} <> 'user_private' or ${table.ownerOrganizationMembershipId} is not null`,
+    ),
+    authorityEpochValid: check("sessions_authority_epoch_check", sql`${table.authorityEpoch} > 0`),
+    forkProvenanceValid: check(
+      "sessions_fork_provenance_check",
+      sql`(
+          ${table.forkedFromSessionId} is null
+          and ${table.forkedFromAuthorityEpoch} is null
+          and ${table.forkedFromVisibility} is null
+          and ${table.forkedAt} is null
+          and ${table.forkedByOrganizationMembershipId} is null
+        ) or (
+          ${table.forkedFromSessionId} is not null
+          and ${table.forkedFromAuthorityEpoch} is not null
+          and ${table.forkedFromAuthorityEpoch} > 0
+          and ${table.forkedFromVisibility} in ('user_private', 'workspace_shared')
+          and ${table.forkedAt} is not null
+          and ${table.forkedByOrganizationMembershipId} is not null
+        )`,
+    ),
     variableSet: index("sessions_variable_set_idx").on(table.workspaceId, table.variableSetId),
     parent: index("sessions_parent_idx").on(table.workspaceId, table.parentSessionId),
     // Routing index: resolve session_id -> sandbox_group_id at every lease entry
@@ -2140,6 +2353,114 @@ export const sessions = pgTable(
       table.workspaceId,
       table.rootSessionId,
       table.nestedAgentDepth,
+    ),
+  }),
+);
+
+export const organizationUserResourceGrants = pgTable(
+  "organization_user_resource_grants",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    authorityId: uuid("authority_id").notNull(),
+    ownerOrganizationMembershipId: uuid("owner_organization_membership_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id"),
+    action: text("action").notNull(),
+    mode: text("mode").notNull(),
+    context: text("context").notNull(),
+    authorityEpoch: integer("authority_epoch"),
+    generation: bigint("generation", { mode: "number" }).notNull().default(1),
+    status: text("status").notNull().default("active"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    accountIdentity: uniqueIndex("organization_user_resource_grants_id_account_idx").on(
+      table.id,
+      table.accountId,
+    ),
+    authorityWorkspace: index("organization_user_resource_grants_authority_workspace_idx").on(
+      table.authorityId,
+      table.workspaceId,
+      table.status,
+    ),
+    authority: foreignKey({
+      name: "organization_user_resource_grants_authority_fk",
+      columns: [table.authorityId, table.accountId],
+      foreignColumns: [
+        organizationUserResourceAuthorities.id,
+        organizationUserResourceAuthorities.accountId,
+      ],
+    }).onDelete("restrict"),
+    ownerMembership: foreignKey({
+      name: "organization_user_resource_grants_owner_membership_fk",
+      columns: [table.ownerOrganizationMembershipId, table.accountId],
+      foreignColumns: [organizationMemberships.id, organizationMemberships.accountId],
+    }).onDelete("restrict"),
+    authorityOwner: foreignKey({
+      name: "organization_user_resource_grants_authority_owner_fk",
+      columns: [table.authorityId, table.accountId, table.ownerOrganizationMembershipId],
+      foreignColumns: [
+        organizationUserResourceAuthorities.id,
+        organizationUserResourceAuthorities.accountId,
+        organizationUserResourceAuthorities.organizationMembershipId,
+      ],
+    }).onDelete("restrict"),
+    workspaceAccount: foreignKey({
+      name: "organization_user_resource_grants_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    sessionWorkspace: foreignKey({
+      name: "organization_user_resource_grants_session_workspace_fk",
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("restrict"),
+    actionValid: check(
+      "organization_user_resource_grants_action_check",
+      sql`${table.action} = lower(btrim(${table.action}))
+        and length(${table.action}) between 1 and 64
+        and ${table.action} ~ '^[a-z0-9](?:[a-z0-9._:-]*[a-z0-9])?$'`,
+    ),
+    modeValid: check(
+      "organization_user_resource_grants_mode_check",
+      sql`${table.mode} in ('once', 'session', 'always')`,
+    ),
+    contextValid: check(
+      "organization_user_resource_grants_context_check",
+      sql`${table.context} in ('user_private', 'workspace_shared')`,
+    ),
+    sessionFenceValid: check(
+      "organization_user_resource_grants_session_fence_check",
+      sql`(
+          ${table.mode} = 'always'
+          and ${table.sessionId} is null
+          and ${table.authorityEpoch} is null
+        ) or (
+          ${table.mode} in ('once', 'session')
+          and
+          ${table.sessionId} is not null
+          and ${table.authorityEpoch} is not null
+          and ${table.authorityEpoch} > 0
+        )`,
+    ),
+    generationValid: check(
+      "organization_user_resource_grants_generation_check",
+      sql`${table.generation} > 0`,
+    ),
+    statusValid: check(
+      "organization_user_resource_grants_status_check",
+      sql`${table.status} in ('active', 'consumed', 'revoked', 'expired')`,
+    ),
+    revocationValid: check(
+      "organization_user_resource_grants_revocation_check",
+      sql`(${table.status} = 'revoked' and ${table.revokedAt} is not null)
+        or (${table.status} <> 'revoked' and ${table.revokedAt} is null)`,
     ),
   }),
 );

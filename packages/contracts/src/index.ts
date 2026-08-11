@@ -982,6 +982,206 @@ export type UsageLimitsMode = z.infer<typeof UsageLimitsMode>;
 export const AccountRole = z.enum(["owner", "admin", "member"]);
 export type AccountRole = z.infer<typeof AccountRole>;
 
+/**
+ * Settled tenancy vocabulary for resources that may outlive or be used from
+ * more than one workspace. This names authority only; parsing one of these
+ * contracts never authorizes access by itself.
+ */
+export const ResourceAuthorityScope = z.enum(["organization", "workspace", "user"]);
+export type ResourceAuthorityScope = z.infer<typeof ResourceAuthorityScope>;
+
+export const ResourceAuthorityListScope = z.enum([
+  "effective",
+  "organization",
+  "workspace",
+  "user",
+]);
+export type ResourceAuthorityListScope = z.infer<typeof ResourceAuthorityListScope>;
+
+export const OrganizationMembershipStatus = z.enum([
+  "provisioning",
+  "active",
+  "suspended",
+  "revoked",
+]);
+export type OrganizationMembershipStatus = z.infer<typeof OrganizationMembershipStatus>;
+
+export const PersonalResourceRetentionMode = z.enum(["retain", "delete_after"]);
+export type PersonalResourceRetentionMode = z.infer<typeof PersonalResourceRetentionMode>;
+
+export const SessionTenancyVisibility = z.enum(["user_private", "workspace_shared"]);
+export type SessionTenancyVisibility = z.infer<typeof SessionTenancyVisibility>;
+
+export const UserResourceGrantMode = z.enum(["once", "session", "always"]);
+export type UserResourceGrantMode = z.infer<typeof UserResourceGrantMode>;
+
+/** Canonical non-wildcard action named by a personal-resource grant. */
+export const UserResourceGrantAction = z
+  .string()
+  .min(1)
+  .max(64)
+  .regex(/^[a-z0-9](?:[a-z0-9._:-]*[a-z0-9])?$/u);
+export type UserResourceGrantAction = z.infer<typeof UserResourceGrantAction>;
+
+export const UserResourceGrantStatus = z.enum(["active", "consumed", "revoked", "expired"]);
+export type UserResourceGrantStatus = z.infer<typeof UserResourceGrantStatus>;
+
+function refineUserResourceGrantFence(
+  value: {
+    mode: UserResourceGrantMode;
+    sessionId: string | null;
+    authorityEpoch: number | null;
+  },
+  context: z.RefinementCtx,
+): void {
+  const sessionBoundMode = value.mode === "once" || value.mode === "session";
+  const hasSession = value.sessionId !== null;
+  const hasAuthorityEpoch = value.authorityEpoch !== null;
+
+  if (sessionBoundMode && !hasSession) {
+    context.addIssue({
+      code: "custom",
+      path: ["sessionId"],
+      message: "once and session grants require an exact sessionId",
+    });
+  }
+  if (sessionBoundMode && !hasAuthorityEpoch) {
+    context.addIssue({
+      code: "custom",
+      path: ["authorityEpoch"],
+      message: "once and session grants require an authorityEpoch fence",
+    });
+  }
+  if (!sessionBoundMode && (hasSession || hasAuthorityEpoch)) {
+    context.addIssue({
+      code: "custom",
+      path: ["mode"],
+      message: "always grants must not carry a session or authority-epoch fence",
+    });
+  }
+  if (hasSession !== hasAuthorityEpoch) {
+    context.addIssue({
+      code: "custom",
+      path: ["authorityEpoch"],
+      message: "sessionId and authorityEpoch must be present or absent together",
+    });
+  }
+}
+
+/** Self-only organization membership projection; no subject identifier leaks. */
+export const OrganizationMembershipProjection = z.object({
+  id: z.string().uuid(),
+  organizationId: z.string().uuid(),
+  status: OrganizationMembershipStatus,
+  personalWorkspaceId: z.string().uuid().nullable(),
+  personalRetentionUntil: z.string().datetime({ offset: true }).nullable(),
+});
+export type OrganizationMembershipProjection = z.infer<typeof OrganizationMembershipProjection>;
+
+/**
+ * Opaque user-resource authority projection. Ownership is represented by the
+ * server-issued authority id, never a raw subject or membership id.
+ */
+export const UserResourceAuthorityProjection = z.object({
+  id: z.string().uuid(),
+  organizationId: z.string().uuid(),
+  scope: z.literal("user"),
+  resourceKind: z.string().min(1).max(64),
+  originWorkspaceId: z.string().uuid().nullable(),
+  generation: z.number().int().positive(),
+  status: z.enum(["active", "retained", "revoked"]),
+});
+export type UserResourceAuthorityProjection = z.infer<typeof UserResourceAuthorityProjection>;
+
+/**
+ * Opaque grant projection. A grant is still inert until a server-side access
+ * boundary proves the organization, owner, workspace, session context, and
+ * current authority epoch.
+ */
+export const UserResourceGrantProjection = z
+  .object({
+    id: z.string().uuid(),
+    authorityId: z.string().uuid(),
+    organizationId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    sessionId: z.string().uuid().nullable(),
+    action: UserResourceGrantAction,
+    mode: UserResourceGrantMode,
+    context: SessionTenancyVisibility,
+    authorityEpoch: z.number().int().positive().nullable(),
+    generation: z.number().int().positive(),
+    status: UserResourceGrantStatus,
+    expiresAt: z.string().datetime({ offset: true }).nullable(),
+  })
+  .superRefine(refineUserResourceGrantFence);
+export type UserResourceGrantProjection = z.infer<typeof UserResourceGrantProjection>;
+
+/**
+ * Extensible immutable delegation payload for accepted work. It contains only
+ * opaque authority/grant identity and execution fences, never owner identity
+ * or credential material.
+ */
+export const UserResourceDelegation = z
+  .object({
+    authorityId: z.string().uuid(),
+    grantId: z.string().uuid(),
+    organizationId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    sessionId: z.string().uuid().nullable(),
+    action: UserResourceGrantAction,
+    mode: UserResourceGrantMode,
+    context: SessionTenancyVisibility,
+    authorityEpoch: z.number().int().positive().nullable(),
+    authorityGeneration: z.number().int().positive(),
+    grantGeneration: z.number().int().positive(),
+    resourceVersionId: z.string().uuid().nullable().optional(),
+  })
+  .superRefine(refineUserResourceGrantFence);
+export type UserResourceDelegation = z.infer<typeof UserResourceDelegation>;
+
+/**
+ * Compatibility envelope for future resource selectors. Omitted scope and
+ * authority parse to workspace-only behavior; user authority is impossible
+ * without one complete opaque delegation.
+ */
+export const ResourceAuthorityEnvelope = z
+  .object({
+    scope: ResourceAuthorityScope.default("workspace"),
+    userDelegation: UserResourceDelegation.optional(),
+  })
+  .superRefine((value, context) => {
+    if (value.scope === "user" && value.userDelegation === undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["userDelegation"],
+        message: "user scope requires an explicit immutable delegation",
+      });
+    }
+    if (value.scope !== "user" && value.userDelegation !== undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["userDelegation"],
+        message: "only user scope may carry a user delegation",
+      });
+    }
+  });
+export type ResourceAuthorityEnvelope = z.infer<typeof ResourceAuthorityEnvelope>;
+
+/** Secret-safe generic session tenancy metadata for an authorized viewer. */
+export const SessionTenancyProjection = z.object({
+  visibility: SessionTenancyVisibility,
+  authorityEpoch: z.number().int().positive(),
+  ownedByCurrentUser: z.boolean(),
+  fork: z
+    .object({
+      sourceVisibility: SessionTenancyVisibility,
+      sourceAuthorityEpoch: z.number().int().positive(),
+      forkedAt: z.string().datetime({ offset: true }),
+    })
+    .nullable(),
+});
+export type SessionTenancyProjection = z.infer<typeof SessionTenancyProjection>;
+
 export const ManagedAccount = z.object({
   id: z.string().uuid(),
   name: z.string(),

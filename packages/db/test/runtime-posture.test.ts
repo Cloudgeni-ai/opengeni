@@ -137,25 +137,25 @@ describe("runtime database posture evaluator", () => {
         .sort();
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 210],
+            [FORCE_RLS_TABLES, 214],
             [NON_RLS_RUNTIME_TABLES, 11],
             [RUNTIME_FULL_DML_TABLES, 130],
             [RUNTIME_READ_ONLY_TABLES, 14],
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 41],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 28],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 7],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 11],
             [RUNTIME_DML_TABLES, 214],
           ] as const)
         : ([
-            [FORCE_RLS_TABLES, 164],
+            [FORCE_RLS_TABLES, 168],
             [NON_RLS_RUNTIME_TABLES, 11],
             [RUNTIME_FULL_DML_TABLES, 106],
             [RUNTIME_READ_ONLY_TABLES, 13],
             [readUpdateTables, 0],
             [RUNTIME_READ_INSERT_TABLES, 37],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 12],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 7],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 11],
             [RUNTIME_DML_TABLES, 168],
           ] as const);
       for (const [tables, length] of contracts) {
@@ -165,7 +165,7 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = hasCurrentMainActivityLedger ? 221 : 175;
+      const tableCount = hasCurrentMainActivityLedger ? 225 : 179;
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount,
       );
@@ -219,14 +219,14 @@ describe("runtime database posture evaluator", () => {
     }
 
     const contracts = [
-      [FORCE_RLS_TABLES, 192],
+      [FORCE_RLS_TABLES, 196],
       [NON_RLS_RUNTIME_TABLES, 11],
       [RUNTIME_FULL_DML_TABLES, 128],
       [RUNTIME_READ_ONLY_TABLES, 14],
       [RUNTIME_READ_UPDATE_TABLES, 1],
       [RUNTIME_READ_INSERT_TABLES, 41],
       [RUNTIME_READ_INSERT_UPDATE_TABLES, 17],
-      [PROTECTED_NO_DIRECT_DML_TABLES, 7],
+      [PROTECTED_NO_DIRECT_DML_TABLES, 11],
       [RUNTIME_DML_TABLES, 201],
     ] as const;
     for (const [tables, length] of contracts) {
@@ -236,8 +236,8 @@ describe("runtime database posture evaluator", () => {
     }
 
     expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-    expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(208);
-    expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(203);
+    expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(212);
+    expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(207);
     expect(RUNTIME_TABLE_PRIVILEGES.editable_artifact_session_links).toEqual([
       "SELECT",
       "INSERT",
@@ -414,6 +414,35 @@ describe("runtime database posture evaluator", () => {
         "table configuration_rows grants excess runtime privileges: UPDATE",
         "table system_rows grants excess runtime privileges: SELECT",
       ]),
+    );
+  });
+
+  test("accepts one explicit deny-all policy for protected no-DML tables", () => {
+    const posture = safePosture();
+    posture.tables = [
+      {
+        ...posture.tables[0]!,
+        name: "organization_memberships",
+        policyCount: 1,
+        select: false,
+        insert: false,
+        update: false,
+        delete: false,
+      },
+      ...knowledgeAuthorityTables(),
+    ];
+    const inertOptions: RuntimeDatabasePostureOptions = {
+      ...options,
+      protectedTables: ["organization_memberships"],
+      tablePrivileges: {},
+      protectedNoDirectDmlTables: ["organization_memberships"],
+    };
+
+    expect(evaluateRuntimeDatabasePosture(posture, inertOptions)).toEqual([]);
+
+    posture.tables[0]!.policyCount = 0;
+    expect(evaluateRuntimeDatabasePosture(posture, inertOptions)).toContain(
+      "table organization_memberships has no RLS policy",
     );
   });
 
