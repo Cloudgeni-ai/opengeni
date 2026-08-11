@@ -1,7 +1,11 @@
 import { createHash } from "node:crypto";
 import { heartbeat } from "@temporalio/activity";
 import type { Settings } from "@opengeni/config";
-import { KnowledgeSourceSyncRunSummary, type ScheduledTask } from "@opengeni/contracts";
+import {
+  KnowledgeSourceSyncRunSummary,
+  type ScheduledTask,
+  type ScopedKnowledgeScope,
+} from "@opengeni/contracts";
 import {
   ATLASSIAN_PROVIDER_DOMAIN,
   AtlassianConnectionMetadata,
@@ -62,6 +66,7 @@ import {
   releaseKnowledgeSourceSyncLeaseForRetry,
   restoreKnowledgeSourceObject,
   retryKnowledgeSourceSyncIndexObligation,
+  scopedKnowledgeScopeKey,
   settleKnowledgeSourceSyncLease,
   settleKnowledgeSourceSyncIndexObligation,
   updateKnowledgeSourceDocumentObservationMetadata,
@@ -194,7 +199,10 @@ export function createKnowledgeSourceSyncActivities(
         if (!resolved || resolved.source.lifecycleState !== "active") {
           throw new SyncFailure("authority_changed", false);
         }
-        if (JSON.stringify(resolved.source.scope) !== JSON.stringify(action.destination)) {
+        if (
+          scopedKnowledgeScopeKey(resolved.source.scope) !==
+          scopedKnowledgeScopeKey(action.destination)
+        ) {
           throw new SyncFailure("authority_changed", false);
         }
         const liveState = await reconcileKnowledgeSourceSyncLiveGeneration(db, {
@@ -449,7 +457,7 @@ export function createKnowledgeSourceSyncActivities(
           if (details.indexRequired) {
             summary.phase = "index";
             try {
-              await documentActivities.indexDocument({
+              const indexedDocument = await documentActivities.indexDocument({
                 accountId: input.accountId,
                 workspaceId: input.workspaceId,
                 documentId: details.version.documentId,
@@ -457,6 +465,9 @@ export function createKnowledgeSourceSyncActivities(
                 authorityWorkspaceId: action.destination.workspaceId,
                 authoritySubjectId: action.destination.subjectId,
               });
+              if (indexedDocument.status !== "ready") {
+                throw new Error("document indexing did not complete");
+              }
             } catch {
               await settleKnowledgeSourceSyncIndexObligation(db, {
                 accountId: input.accountId,
@@ -1261,11 +1272,11 @@ async function resolveKnowledgeSyncProvider(input: {
     !initialSource.syncEnabled ||
     initialSource.configGeneration !== action.sourceConfigGeneration ||
     !initialSource.destination ||
-    JSON.stringify(
+    scopedKnowledgeScopeKey(
       googleInitial?.success
         ? googleDriveKnowledgeScope(initialSource.destination)
         : atlassianKnowledgeScope(initialSource.destination),
-    ) !== JSON.stringify(action.destination)
+    ) !== scopedKnowledgeScopeKey(action.destination)
   ) {
     throw new SyncFailure("authority_changed", false);
   }
@@ -1381,14 +1392,15 @@ async function resolveKnowledgeSyncProvider(input: {
 function validSelectedSource<Source extends GoogleDriveSelectedSource | AtlassianSelectedSource>(
   source: Source | null,
   action: Extract<ScheduledTask["action"], { kind: "knowledge_source_sync" }>,
-  scope: (destination: NonNullable<Source["destination"]>) => unknown,
+  scope: (destination: NonNullable<Source["destination"]>) => ScopedKnowledgeScope,
 ): source is Source & { destination: NonNullable<Source["destination"]> } {
   return Boolean(
     source &&
     source.syncEnabled &&
     source.configGeneration === action.sourceConfigGeneration &&
     source.destination &&
-    JSON.stringify(scope(source.destination)) === JSON.stringify(action.destination),
+    scopedKnowledgeScopeKey(scope(source.destination)) ===
+      scopedKnowledgeScopeKey(action.destination),
   );
 }
 

@@ -23,6 +23,7 @@ import {
   getScheduledTaskPersonalConnectionDelegations,
   getSession,
   requireWorkspace,
+  scopedKnowledgeScopeKey,
   updateScheduledTask,
   type Database,
   type UpdateScheduledTaskInput,
@@ -620,7 +621,8 @@ async function validateKnowledgeSourceSyncAction(input: {
   if (
     resolved.source.syncGeneration !== input.action.sourceGeneration ||
     resolved.source.lifecycleGeneration !== input.action.sourceLifecycleGeneration ||
-    JSON.stringify(resolved.source.scope) !== JSON.stringify(input.action.destination)
+    scopedKnowledgeScopeKey(resolved.source.scope) !==
+      scopedKnowledgeScopeKey(input.action.destination)
   ) {
     throw new HTTPException(409, {
       message: "knowledge source authority or generation changed",

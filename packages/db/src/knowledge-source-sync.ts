@@ -347,6 +347,7 @@ export async function claimKnowledgeSourceSyncLease(
             leaseId: input.scheduledTaskRunId,
             leaseUntil,
             bufferedWake: false,
+            bufferedScheduledTaskRunId: null,
             activeScanGeneration: sql`case
               when ${schema.knowledgeSourceSyncStates.leaseId} = ${input.scheduledTaskRunId}::uuid
                 then ${schema.knowledgeSourceSyncStates.activeScanGeneration}
