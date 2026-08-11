@@ -500,6 +500,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                   ],
                 };
               },
+              { activity: "semantic" },
             );
             await publishDurableSessionEvents(bus, task.workspaceId, session.id, goalEvents);
           }

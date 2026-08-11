@@ -31,6 +31,7 @@ import {
 } from "@opengeni/config";
 import {
   CLEARED_RUN_STATE_BLOB,
+  EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS,
   MODEL_ATTACHMENT_REFS_FIELD,
   sessionSystemUpdateBatchHistoryItem,
   type ToolAuthNeededPayload,
@@ -51,10 +52,11 @@ import {
   appendGitCredentialBindingInstructions,
   appendPersistentSessionSettings,
   appendTurnInstructions,
-  appendToolspaceInstructions,
+  appendCodemodeInstructions,
   appendWorkspaceMemory,
-  TOOLSPACE_PROGRAMMATIC_DIRECTIVE,
+  CODEMODE_PROGRAMMATIC_DIRECTIVE,
   GENESIS_TITLE_DIRECTIVE,
+  hasCanonicalEditableArtifactToolSurface,
   oneShotGenesisTitleInputFilter,
   lazySkillSourceWithPackSkills,
   effectiveSkillSelectionsForAgent,
@@ -90,17 +92,17 @@ import {
   runAzureCliLoginHook,
   runBeforeAgentStartHooks,
   runRepositoryCloneHook,
-  runToolspaceTokenSeedHook,
+  runCodemodeTokenSeedHook,
   mcpTransportErrorWithRetryMetadata,
   serializeApprovals,
   serializeHumanInputRequests,
-  refreshToolspaceTokenFile,
+  refreshCodemodeTokenFile,
   withStructuredViewImageFunctionResults,
   sandboxCommandExitCode,
   sandboxArtifactRuntimeDoctorHooks,
   sandboxFileDownloadsForAgent,
   sandboxRunAs,
-  toolspaceTokenSeedCommand,
+  codemodeTokenSeedCommand,
   withSandboxFileDownloads,
   withSandboxSessionReady,
   withSandboxLifecycleHooks,
@@ -110,11 +112,17 @@ import {
 } from "../src/index";
 
 import { Manifest } from "@openai/agents/sandbox";
+import { createAttemptToolEnvironment } from "@opengeni/codemode";
 import { TurnSandboxCommandCancelledError } from "../src/sandbox/turn-tool-cancellation";
 import { CompactionNeededError } from "../src/context-compaction";
 import { readSkillLibraryArtifact, verifySkillLibraryArtifact } from "../src/skill-library";
 import { MCP_MAX_CONCURRENT_SERVER_OPERATIONS } from "../src/mcp-network";
-import { ScriptedModel, startTestMcpServer, testSettings } from "@opengeni/testing";
+import {
+  ScriptedModel,
+  functionCall as scriptedFunctionCall,
+  startTestMcpServer,
+  testSettings,
+} from "@opengeni/testing";
 import type { MCPServer } from "@openai/agents";
 import {
   boundModelToolOutputItem,
@@ -464,6 +472,68 @@ describe("structured human-input runtime boundary", () => {
       outcome: "answered",
       answers: [{ questionId: "q", values: ["Because"] }],
     });
+  });
+
+  test("returns malformed human-input arguments to the model instead of interrupting the turn", async () => {
+    const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false });
+    const validQuestions = [
+      {
+        id: "choice",
+        kind: "single_select",
+        prompt: "Choose one",
+        options: [{ id: "a", label: "A" }],
+      },
+    ];
+    const model = new ScriptedModel([
+      {
+        output: [
+          scriptedFunctionCall(
+            HUMAN_INPUT_TOOL_NAME,
+            { questions: JSON.stringify(validQuestions), allowSkip: false },
+            "human-call-invalid",
+          ),
+        ],
+      },
+      {
+        output: [
+          scriptedFunctionCall(
+            HUMAN_INPUT_TOOL_NAME,
+            { questions: validQuestions, allowSkip: false },
+            "human-call-valid",
+          ),
+        ],
+      },
+    ]);
+    const agent = buildOpenGeniAgent(settings, [], { model, hostedWebSearch: false });
+
+    const result = await runAgentStream(agent, "Ask me to choose", settings);
+    for await (const event of result.toStream()) void event;
+    await result.completed;
+
+    expect(model.calls).toBe(2);
+    expect(result.interruptions).toHaveLength(1);
+    expect(result.interruptions[0]?.rawItem).toMatchObject({
+      callId: "human-call-valid",
+      name: HUMAN_INPUT_TOOL_NAME,
+    });
+    expect(serializeHumanInputRequests(result.interruptions)).toEqual([
+      {
+        toolCallId: "human-call-valid",
+        input: {
+          questions: [
+            {
+              ...validQuestions[0],
+              required: true,
+              allowOther: false,
+            },
+          ],
+          allowSkip: false,
+        },
+      },
+    ]);
+    const retryInput = JSON.stringify(model.requests[1]?.input);
+    expect(retryInput).toContain("Tool execution failed. Error details are redacted.");
+    expect(retryInput).toContain("human-call-invalid");
   });
 
   test("rejects malformed interruption arguments instead of exposing an unvalidated form", () => {
@@ -2776,93 +2846,73 @@ describe("runtime event normalization", () => {
     expect(agent.instructions).not.toContain(GENESIS_TITLE_DIRECTIVE);
   });
 
-  // ── generic programmatic-tool-calling (toolspace) substrate directive ──────
+  // ── generic programmatic-tool-calling (codemode) substrate directive ──────
   // The block is GENERIC substrate prompting, gated by the SAME condition that
-  // gates the sandbox token mint: toolspaceEnabled AND a toolspace token minted
-  // for this turn (surfaced to the runtime as options.toolspaceTokenSeed, which
-  // the worker passes only for a non-selfhosted, non-skipped turn).
-  const toolspaceOn = {
+  // gates the sandbox authority: a Codemode token minted for this exact attempt
+  // (surfaced as options.codemodeTokenSeed for a non-selfhosted turn).
+  const codemodeOn = {
     sandboxBackend: "none",
-    toolspaceEnabled: true,
   } as const;
 
-  test("the toolspace directive is present exactly when the feature is on AND a token was minted", () => {
-    const agent = buildOpenGeniAgent(testSettings(toolspaceOn), [], {
-      toolspaceTokenSeed: "ogd_seed",
-      toolspaceTokenSessionId: "session-instructions",
+  test("the codemode directive is present exactly when an attempt token was minted", () => {
+    const agent = buildOpenGeniAgent(testSettings(codemodeOn), [], {
+      codemodeTokenSeed: "ogd_seed",
+      codemodeTokenSessionId: "session-instructions",
     });
-    expect(agent.instructions).toContain(TOOLSPACE_PROGRAMMATIC_DIRECTIVE);
-    // Default (feature off, no seed) never carries it — the historical preamble.
+    expect(agent.instructions).toContain(CODEMODE_PROGRAMMATIC_DIRECTIVE);
+    // No exact-attempt authority means no advertised programmatic surface.
     const off = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
     expect(off.instructions).toBe(HISTORICAL_DEFAULT_INSTRUCTIONS);
-    expect(off.instructions).not.toContain(TOOLSPACE_PROGRAMMATIC_DIRECTIVE);
+    expect(off.instructions).not.toContain(CODEMODE_PROGRAMMATIC_DIRECTIVE);
   });
 
-  test("NEGATIVE: feature flag off (even with a token seed) omits the directive", () => {
-    const agent = buildOpenGeniAgent(
-      testSettings({ sandboxBackend: "none", toolspaceEnabled: false }),
-      [],
-      {
-        toolspaceTokenSeed: "ogd_seed",
-        toolspaceTokenSessionId: "session-instructions",
-      },
-    );
-    expect(agent.instructions).not.toContain(TOOLSPACE_PROGRAMMATIC_DIRECTIVE);
+  test("no token minted for the turn omits the directive", () => {
+    const agent = buildOpenGeniAgent(testSettings(codemodeOn), []);
+    expect(agent.instructions).not.toContain(CODEMODE_PROGRAMMATIC_DIRECTIVE);
     expect(agent.instructions).toBe(HISTORICAL_DEFAULT_INSTRUCTIONS);
   });
 
-  test("NEGATIVE: feature on but no token minted for the turn omits the directive", () => {
-    // The block gates on the per-turn seed, not the flag alone: a turn with no
-    // minted toolspace token (the worker passed no seed) has no ogtool/URL in its
-    // sandbox, so the block must not advertise it. The mint now happens on every
-    // backend including selfhosted, so this is the genuine no-token case, not a
-    // backend distinction.
-    const agent = buildOpenGeniAgent(testSettings(toolspaceOn), []);
-    expect(agent.instructions).not.toContain(TOOLSPACE_PROGRAMMATIC_DIRECTIVE);
-    expect(agent.instructions).toBe(HISTORICAL_DEFAULT_INSTRUCTIONS);
-  });
-
-  test("a Toolspace bearer cannot be built without its durable session identity", () => {
+  test("a Codemode bearer cannot be built without its durable session identity", () => {
     expect(() =>
-      buildOpenGeniAgent(testSettings(toolspaceOn), [], {
-        toolspaceTokenSeed: "ogd_unscoped",
+      buildOpenGeniAgent(testSettings(codemodeOn), [], {
+        codemodeTokenSeed: "ogd_unscoped",
       }),
-    ).toThrow("toolspaceTokenSeed and toolspaceTokenSessionId must be supplied together");
+    ).toThrow("codemodeTokenSeed and codemodeTokenSessionId must be supplied together");
   });
 
-  test("the toolspace directive composes AFTER the workspace persona + CORE but BEFORE the per-session slice", () => {
+  test("the codemode directive composes AFTER the workspace persona + CORE but BEFORE the per-session slice", () => {
     const template = `WORKSPACE PERSONA ${AGENT_INSTRUCTIONS_CORE_PLACEHOLDER}`;
-    const agent = buildOpenGeniAgent(testSettings(toolspaceOn), [], {
+    const agent = buildOpenGeniAgent(testSettings(codemodeOn), [], {
       instructionsTemplate: template,
       sessionInstructions: "SESSION RULE: always answer in French.",
-      toolspaceTokenSeed: "ogd_seed",
-      toolspaceTokenSessionId: "session-instructions",
+      codemodeTokenSeed: "ogd_seed",
+      codemodeTokenSessionId: "session-instructions",
     });
-    // Exact ordering: workspace persona + CORE, then the toolspace directive,
+    // Exact ordering: workspace persona + CORE, then the codemode directive,
     // then the session slice last (host/session specificity wins).
     expect(agent.instructions).toBe(
-      `WORKSPACE PERSONA ${coreInstructions().join(" ")} ${TOOLSPACE_PROGRAMMATIC_DIRECTIVE} SESSION RULE: always answer in French.`,
+      `WORKSPACE PERSONA ${coreInstructions().join(" ")} ${CODEMODE_PROGRAMMATIC_DIRECTIVE} SESSION RULE: always answer in French.`,
     );
-    expect(agent.instructions.indexOf(TOOLSPACE_PROGRAMMATIC_DIRECTIVE)).toBeLessThan(
+    expect(agent.instructions.indexOf(CODEMODE_PROGRAMMATIC_DIRECTIVE)).toBeLessThan(
       agent.instructions.indexOf("SESSION RULE"),
     );
   });
 
-  test("workspace memory composes after the toolspace directive and before the per-session slice", () => {
+  test("workspace memory composes after the codemode directive and before the per-session slice", () => {
     const template = `WORKSPACE PERSONA ${AGENT_INSTRUCTIONS_CORE_PLACEHOLDER}`;
     const workspaceMemory = "## Workspace memory\n- [abcd1234] Prefer Terraform over Pulumi.";
-    const agent = buildOpenGeniAgent(testSettings(toolspaceOn), [], {
+    const agent = buildOpenGeniAgent(testSettings(codemodeOn), [], {
       instructionsTemplate: template,
       workspaceMemory,
       sessionInstructions: "SESSION RULE: always answer in French.",
-      toolspaceTokenSeed: "ogd_seed",
-      toolspaceTokenSessionId: "session-instructions",
+      codemodeTokenSeed: "ogd_seed",
+      codemodeTokenSessionId: "session-instructions",
     });
 
     expect(agent.instructions).toBe(
-      `WORKSPACE PERSONA ${coreInstructions().join(" ")} ${TOOLSPACE_PROGRAMMATIC_DIRECTIVE} ${workspaceMemory} SESSION RULE: always answer in French.`,
+      `WORKSPACE PERSONA ${coreInstructions().join(" ")} ${CODEMODE_PROGRAMMATIC_DIRECTIVE} ${workspaceMemory} SESSION RULE: always answer in French.`,
     );
-    expect(agent.instructions.indexOf(TOOLSPACE_PROGRAMMATIC_DIRECTIVE)).toBeLessThan(
+    expect(agent.instructions.indexOf(CODEMODE_PROGRAMMATIC_DIRECTIVE)).toBeLessThan(
       agent.instructions.indexOf(workspaceMemory),
     );
     expect(agent.instructions.indexOf(workspaceMemory)).toBeLessThan(
@@ -2870,25 +2920,25 @@ describe("runtime event normalization", () => {
     );
   });
 
-  test("the toolspace directive and session slice stay persistent while genesis stays one-shot", () => {
-    const agent = buildOpenGeniAgent(testSettings(toolspaceOn), [], {
+  test("the codemode directive and session slice stay persistent while genesis stays one-shot", () => {
+    const agent = buildOpenGeniAgent(testSettings(codemodeOn), [], {
       sessionInstructions: "Session-scoped rule.",
       genesisTitleHint: true,
-      toolspaceTokenSeed: "ogd_seed",
-      toolspaceTokenSessionId: "session-instructions",
+      codemodeTokenSeed: "ogd_seed",
+      codemodeTokenSessionId: "session-instructions",
     });
-    expect(agent.instructions).toContain(TOOLSPACE_PROGRAMMATIC_DIRECTIVE);
+    expect(agent.instructions).toContain(CODEMODE_PROGRAMMATIC_DIRECTIVE);
     expect(agent.instructions).not.toContain(GENESIS_TITLE_DIRECTIVE);
-    expect(agent.instructions.indexOf(TOOLSPACE_PROGRAMMATIC_DIRECTIVE)).toBeLessThan(
+    expect(agent.instructions.indexOf(CODEMODE_PROGRAMMATIC_DIRECTIVE)).toBeLessThan(
       agent.instructions.indexOf("Session-scoped rule."),
     );
   });
 
-  test("appendToolspaceInstructions joins by space and no-ops when unavailable", () => {
-    expect(appendToolspaceInstructions("BASE", true)).toBe(
-      `BASE ${TOOLSPACE_PROGRAMMATIC_DIRECTIVE}`,
+  test("appendCodemodeInstructions joins by space and no-ops when unavailable", () => {
+    expect(appendCodemodeInstructions("BASE", true)).toBe(
+      `BASE ${CODEMODE_PROGRAMMATIC_DIRECTIVE}`,
     );
-    expect(appendToolspaceInstructions("BASE", false)).toBe("BASE");
+    expect(appendCodemodeInstructions("BASE", false)).toBe("BASE");
   });
 
   test("multi-account Git binding discovery is model-visible only for managed sandboxes", () => {
@@ -2912,12 +2962,12 @@ describe("runtime event normalization", () => {
     expect(appendGitCredentialBindingInstructions("BASE", [bindings[0]], "modal")).toBe("BASE");
   });
 
-  test("the toolspace directive text is a stable, generic, host-agnostic snapshot", () => {
+  test("the codemode directive text is a stable, generic, host-agnostic snapshot", () => {
     // Pinned verbatim so an unintended edit to the substrate prompt fails here.
-    // It must name only generic substrate handles (ogtool, $OPENGENI_TOOLSPACE_*),
+    // It must name only generic substrate handles (ogtool, $OPENGENI_CODEMODE_*),
     // never a host/product name.
-    expect(TOOLSPACE_PROGRAMMATIC_DIRECTIVE).toBe(
-      "Every tool on your MCP surface is also callable programmatically from the sandbox shell, so scripts can invoke tools without a model round trip per call. If `ogtool` is installed, run `ogtool list` to see the available tools and their input schemas (from tools/list), then `ogtool call <tool-name> '<json-args>'`. If it is absent and both npm and $OPENGENI_OGTOOL_PACKAGE_SPEC are available, run the exact deployment-pinned package with `npm exec --yes --package=\"$OPENGENI_OGTOOL_PACKAGE_SPEC\" -- ogtool ...`; never guess a version or install `latest`. Otherwise POST MCP JSON-RPC directly to $OPENGENI_TOOLSPACE_URL with the bearer token read from $OPENGENI_TOOLSPACE_TOKEN_FILE. Prefer programmatic calls for loops, polling, and bulk filtering: their results stay in the sandbox and do not consume your context window. Tools that require human approval must still be invoked normally — called programmatically they return a typed error.",
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toBe(
+      'Every tool available to you is also callable programmatically from the sandbox through the same frozen catalog, authority, credentials, policy, and execution path. In stock sandboxes, write persistent Bun code with `import { tools, openGeni } from "@opengeni/codemode"`; run `ogtool declarations <file.d.ts>` when project-local catalog types are useful. For shell calls, run `ogtool list`, then `ogtool call <tool-path> \'<json-args>\'`. If `ogtool` is absent and Bun plus $OPENGENI_OGTOOL_PACKAGE_SPEC are available, run the exact deployment-pinned package with `bun x -p "$OPENGENI_OGTOOL_PACKAGE_SPEC" ogtool ...`; never guess a version or install `latest`. Prefer Codemode for loops, polling, bulk filtering, and intermediate data that should remain in the sandbox instead of consuming your context window. Tools requiring human approval return a typed error in Codemode and must be invoked normally.',
     );
   });
 
@@ -3843,20 +3893,20 @@ describe("runtime event normalization", () => {
     expect(String(calls[0]?.cmd).startsWith("set +x\nset -eu")).toBe(true);
   });
 
-  test("TOOLSPACE-BROKER: seed hook writes the delegated token file from a per-exec prefix only", async () => {
-    const command = toolspaceTokenSeedCommand();
-    expect(command).toContain('if [ -n "${OPENGENI_TOOLSPACE_TOKEN_SEED:-}" ]; then');
+  test("CODEMODE-BROKER: seed hook writes the delegated token file from a per-exec prefix only", async () => {
+    const command = codemodeTokenSeedCommand();
+    expect(command).toContain('if [ -n "${OPENGENI_CODEMODE_TOKEN_SEED:-}" ]; then');
     expect(command).toContain("umask 077");
     expect(command).toContain(
-      'token_file="${OPENGENI_TOOLSPACE_TOKEN_FILE:-$HOME/.opengeni/toolspace-token}"',
+      'token_file="${OPENGENI_CODEMODE_TOKEN_FILE:-$HOME/.opengeni/codemode-token}"',
     );
     expect(command).toContain(
-      'printf \'%s\' "$OPENGENI_TOOLSPACE_TOKEN_SEED" > "$token_file.tmp.$$"',
+      'printf \'%s\' "$OPENGENI_CODEMODE_TOKEN_SEED" > "$token_file.tmp.$$"',
     );
     expect(command).toContain('mv -f "$token_file.tmp.$$" "$token_file"');
 
     const calls: Array<Record<string, unknown>> = [];
-    await runToolspaceTokenSeedHook(
+    await runCodemodeTokenSeedHook(
       {
         exec: async (args: Record<string, unknown>) => {
           calls.push(args);
@@ -3872,12 +3922,12 @@ describe("runtime event normalization", () => {
       {
         environment: {
           HOME: "/workspace",
-          OPENGENI_TOOLSPACE_TOKEN_FILE: "/workspace/.opengeni/toolspace-token",
+          OPENGENI_CODEMODE_TOKEN_FILE: "/workspace/.opengeni/codemode-token",
         },
         runAs: "sandbox",
-        toolspaceTokenSeed: "ogd_toolspace_live",
-        toolspaceTokenFile:
-          "/workspace/.opengeni/toolspace-tokens/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        codemodeTokenSeed: "ogd_codemode_live",
+        codemodeTokenFile:
+          "/workspace/.opengeni/codemode-tokens/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       } as any,
     );
 
@@ -3885,17 +3935,15 @@ describe("runtime event normalization", () => {
     expect(calls[0]?.environment).toBeUndefined();
     const cmd = String(calls[0]?.cmd);
     expect(cmd.startsWith("set +x\n")).toBe(true);
-    expect(cmd).toContain("export OPENGENI_TOOLSPACE_TOKEN_SEED='ogd_toolspace_live'");
-    expect(cmd.indexOf("set +x")).toBeLessThan(
-      cmd.indexOf("export OPENGENI_TOOLSPACE_TOKEN_SEED="),
-    );
-    expect(cmd.indexOf("export OPENGENI_TOOLSPACE_TOKEN_SEED=")).toBeLessThan(
-      cmd.indexOf("printf '%s' \"$OPENGENI_TOOLSPACE_TOKEN_SEED\""),
+    expect(cmd).toContain("export OPENGENI_CODEMODE_TOKEN_SEED='ogd_codemode_live'");
+    expect(cmd.indexOf("set +x")).toBeLessThan(cmd.indexOf("export OPENGENI_CODEMODE_TOKEN_SEED="));
+    expect(cmd.indexOf("export OPENGENI_CODEMODE_TOKEN_SEED=")).toBeLessThan(
+      cmd.indexOf("printf '%s' \"$OPENGENI_CODEMODE_TOKEN_SEED\""),
     );
   });
 
-  test("TOOLSPACE-BROKER: refresh atomically replaces the stable 0600 token file", async () => {
-    const home = mkdtempSync(join(tmpdir(), "opengeni-toolspace-refresh-"));
+  test("CODEMODE-BROKER: refresh atomically replaces the stable 0600 token file", async () => {
+    const home = mkdtempSync(join(tmpdir(), "opengeni-codemode-refresh-"));
     try {
       const session = {
         exec: async (args: { cmd: string }) => {
@@ -3914,12 +3962,12 @@ describe("runtime event normalization", () => {
         },
       };
 
-      await refreshToolspaceTokenFile(session as never, "ogd_renewed");
+      await refreshCodemodeTokenFile(session as never, "ogd_renewed");
       const tokenDir = join(home, ".opengeni");
-      const tokenFile = join(tokenDir, "toolspace-token");
+      const tokenFile = join(tokenDir, "codemode-token");
       expect(readFileSync(tokenFile, "utf8")).toBe("ogd_renewed");
       expect(statSync(tokenFile).mode & 0o777).toBe(0o600);
-      expect(readdirSync(tokenDir)).toEqual(["toolspace-token"]);
+      expect(readdirSync(tokenDir)).toEqual(["codemode-token"]);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
@@ -4302,6 +4350,239 @@ describe("runtime event normalization", () => {
     }
   });
 
+  test("freezes one exact catalog and routes model MCP and Codemode through one executor", async () => {
+    const mcp = startTestMcpServer();
+    let persistedDigest: string | null = null;
+    const prepared = await prepareAgentTools(
+      testSettings({
+        mcpServers: [
+          {
+            id: "docs",
+            name: "Document Search",
+            url: mcp.url,
+            cacheToolsList: false,
+            requireApproval: ["fetch_document"],
+          },
+        ],
+      }),
+      [{ kind: "mcp", id: "docs" }],
+      {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        turnId: "44444444-4444-4444-8444-444444444444",
+        attemptId: "55555555-5555-4555-8555-555555555555",
+        executionGeneration: 1,
+        onAttemptToolCatalog: (catalog) => {
+          persistedDigest = catalog.digest;
+        },
+      },
+    );
+    try {
+      expect(prepared.attemptToolCatalog?.entries).toEqual([
+        expect.objectContaining({
+          identity: { serverId: "docs", toolName: "search_documents" },
+          modelName: "docs__search_documents",
+          codemodePath: ["docs", "search_documents"],
+          source: "docs",
+          approval: "none",
+        }),
+        expect.objectContaining({
+          identity: { serverId: "docs", toolName: "fetch_document" },
+          approval: "human",
+        }),
+      ]);
+      expect(persistedDigest).toBe(prepared.attemptToolCatalog?.digest ?? null);
+
+      const modelResult = await prepared.mcpServers[0]!.callTool("docs__search_documents", {
+        query: "model",
+      });
+      expect(JSON.stringify(modelResult)).toContain("found document for model");
+      const environment = prepared.attemptToolEnvironment!;
+      const codemodeResult = await environment.call({
+        operationId: "66666666-6666-4666-8666-666666666666",
+        catalogDigest: environment.catalog.digest,
+        identity: { serverId: "docs", toolName: "search_documents" },
+        arguments: { query: "codemode" },
+        caller: { kind: "codemode", subjectId: "agent:test" },
+      });
+      expect(JSON.stringify(codemodeResult)).toContain("found document for codemode");
+      await expect(
+        environment.call({
+          operationId: "77777777-7777-4777-8777-777777777777",
+          catalogDigest: environment.catalog.digest,
+          identity: { serverId: "docs", toolName: "fetch_document" },
+          arguments: { id: "doc-1" },
+          caller: { kind: "codemode", subjectId: "agent:test" },
+        }),
+      ).rejects.toMatchObject({ code: "approval_required" });
+      expect(mcp.calls).toEqual([
+        { tool: "search_documents", args: { query: "model" } },
+        { tool: "search_documents", args: { query: "codemode" } },
+      ]);
+    } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
+  test("retains full MCP output and effect metadata in the frozen catalog", async () => {
+    const mcp = startTestMcpServer({ richToolMetadata: true });
+    const prepared = await prepareAgentTools(
+      testSettings({
+        mcpServers: [
+          {
+            id: "docs",
+            name: "Document Search",
+            url: mcp.url,
+            cacheToolsList: false,
+          },
+        ],
+      }),
+      [{ kind: "mcp", id: "docs" }],
+      {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        turnId: "44444444-4444-4444-8444-444444444444",
+        attemptId: "55555555-5555-4555-8555-555555555555",
+        executionGeneration: 1,
+      },
+    );
+    try {
+      const entry = prepared.attemptToolCatalog?.entries.find(
+        ({ identity }) => identity.toolName === "summarize_document",
+      );
+      expect(entry).toMatchObject({
+        title: "Summarize document",
+        outputSchema: {
+          type: "object",
+          properties: {
+            summary: { type: "string" },
+            sourceId: { type: "string" },
+          },
+          required: ["summary", "sourceId"],
+        },
+        annotations: {
+          title: "Document summary",
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false,
+        },
+      });
+      const result = await prepared.attemptToolEnvironment!.call({
+        operationId: "88888888-8888-4888-8888-888888888888",
+        catalogDigest: prepared.attemptToolCatalog!.digest,
+        identity: { serverId: "docs", toolName: "summarize_document" },
+        arguments: { id: "doc-1" },
+        caller: { kind: "codemode", subjectId: "agent:test" },
+      });
+      expect(result.structuredContent).toEqual({
+        summary: "summary for doc-1",
+        sourceId: "doc-1",
+      });
+    } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
+  test("projects in-process definitions through the same model and Codemode authority", async () => {
+    const executions: string[] = [];
+    const prepared = await prepareAgentTools(testSettings(), [], {
+      accountId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      sessionId: "33333333-3333-4333-8333-333333333333",
+      turnId: "44444444-4444-4444-8444-444444444444",
+      attemptId: "55555555-5555-4555-8555-555555555555",
+      executionGeneration: 1,
+      attemptToolDefinitions: [
+        {
+          identity: { serverId: "interaction", toolName: "browser_observe" },
+          modelName: "interaction__browser_observe",
+          codemodePath: ["interaction", "browser", "observe"],
+          title: "Observe browser",
+          description: "Observe one exact browser target.",
+          inputSchema: {
+            type: "object",
+            properties: { targetId: { type: "string" } },
+            required: ["targetId"],
+            additionalProperties: false,
+          },
+          outputSchema: {
+            type: "object",
+            properties: { observationId: { type: "string" } },
+            required: ["observationId"],
+            additionalProperties: false,
+          },
+          annotations: { readOnlyHint: true, idempotentHint: true },
+          source: "interaction",
+          approval: "none",
+          execute: async (args, context) => {
+            executions.push(`${context.caller.kind}:${String(args.targetId)}`);
+            return {
+              content: [{ type: "text", text: "observation-1" }],
+              structuredContent: { observationId: "observation-1" },
+            };
+          },
+        },
+      ],
+    });
+    try {
+      expect(prepared.mcpServers).toHaveLength(1);
+      expect(await prepared.mcpServers[0]!.listTools()).toEqual([
+        expect.objectContaining({
+          name: "interaction__browser_observe",
+          title: "Observe browser",
+          outputSchema: expect.any(Object),
+          annotations: { readOnlyHint: true, idempotentHint: true },
+        }),
+      ]);
+      expect(prepared.attemptToolCatalog?.entries).toEqual([
+        expect.objectContaining({
+          identity: { serverId: "interaction", toolName: "browser_observe" },
+          codemodePath: ["interaction", "browser", "observe"],
+          source: "interaction",
+        }),
+      ]);
+      expect(
+        await prepared.mcpServers[0]!.callToolResult?.("interaction__browser_observe", {
+          targetId: "tab-1",
+        }),
+      ).toMatchObject({ structuredContent: { observationId: "observation-1" } });
+      expect(
+        await prepared.attemptToolEnvironment!.call({
+          operationId: "99999999-9999-4999-8999-999999999999",
+          catalogDigest: prepared.attemptToolCatalog!.digest,
+          identity: { serverId: "interaction", toolName: "browser_observe" },
+          arguments: { targetId: "tab-2" },
+          caller: { kind: "codemode", subjectId: "agent:test" },
+        }),
+      ).toMatchObject({ structuredContent: { observationId: "observation-1" } });
+      expect(executions).toEqual(["model:tab-1", "codemode:tab-2"]);
+    } finally {
+      await prepared.close();
+    }
+  });
+
+  test("rejects in-process definitions without exact attempt scope", async () => {
+    await expect(
+      prepareAgentTools(testSettings(), [], {
+        attemptToolDefinitions: [
+          {
+            identity: { serverId: "interaction", toolName: "discover" },
+            modelName: "interaction__discover",
+            inputSchema: { type: "object", additionalProperties: false },
+            source: "interaction",
+            approval: "none",
+            execute: async () => ({ content: [] }),
+          },
+        ],
+      }),
+    ).rejects.toThrow("exact attempt scope");
+  });
+
   test("sends the shared access key to first-party MCP servers", async () => {
     const accessKey = "local-mcp-access-key";
     const mcp = startTestMcpServer({
@@ -4400,11 +4681,14 @@ describe("runtime event normalization", () => {
         const expsAfterFirst = seenExps.length;
         // Fast-forward 2h — any bearer minted at connect is now expired.
         nowMs += 2 * 60 * 60 * 1000;
-        // Re-list (the SDK's per-step re-fetch). Pre-fix this 401s on the stale
-        // baked bearer and throws (required → turn dies); post-fix the wrapper
-        // re-signs a fresh bearer and it succeeds.
+        // The attempt catalog is frozen, so re-list is deliberately local. A
+        // real tool request still re-signs at the transport boundary.
         const second = await prepared.mcpServers[0]!.listTools();
         expect(second.map((t) => t.name)).toContain("opengeni__search_documents");
+        const toolResult = await prepared.mcpServers[0]!.callTool("opengeni__search_documents", {
+          query: "fresh bearer",
+        });
+        expect(JSON.stringify(toolResult)).toContain("found document for fresh bearer");
         // Proof of per-request re-signing: the later bearer's exp advanced with
         // the clock (a static baked bearer would have a constant exp).
         expect(seenExps.length).toBeGreaterThan(expsAfterFirst);
@@ -6665,6 +6949,34 @@ function fakeMcpServer(name: string): MCPServer {
   };
 }
 
+function editableArtifactAttemptToolCatalog() {
+  return createAttemptToolEnvironment({
+    scope: {
+      accountId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      sessionId: "33333333-3333-4333-8333-333333333333",
+      turnId: "44444444-4444-4444-8444-444444444444",
+      attemptId: "55555555-5555-4555-8555-555555555555",
+      executionGeneration: 1,
+    },
+    generation: 1,
+    definitions: Object.entries(EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS).map(
+      ([toolName, codemodePath]) => ({
+        identity: { serverId: "opengeni", toolName },
+        modelName: `opengeni__${toolName}`,
+        codemodePath,
+        inputSchema: { type: "object", additionalProperties: false },
+        source: "opengeni" as const,
+        approval: "none" as const,
+        execute: async () => ({
+          content: [{ type: "text" as const, text: "ok" }],
+          structuredContent: { ok: true },
+        }),
+      }),
+    ),
+  }).catalog;
+}
+
 describe("pack skills in the sandbox skill index", () => {
   const infraSkill = {
     name: "infra-ops",
@@ -6693,7 +7005,7 @@ describe("pack skills in the sandbox skill index", () => {
     expect(index.map((entry) => entry.name)).not.toContain("opengeni-spreadsheets");
   });
 
-  test("artifact skills are indexed only after an exact host runtime preflight", () => {
+  test("artifact skills join the index when their canonical tool surface is available", () => {
     const source = lazySkillSourceWithPackSkills([], [], true);
     const index = source.getIndex?.(emptyManifest, ".agents") ?? [];
     expect(index.map((entry) => entry.name)).toEqual(
@@ -6707,7 +7019,7 @@ describe("pack skills in the sandbox skill index", () => {
     expect(sourceDir.children["opengeni-spreadsheets"].type).toBe("local_dir");
   });
 
-  test("buildOpenGeniAgent refuses to advertise artifact skills without absolute host paths", () => {
+  test("artifact skills follow the exact tool catalog, independently of local runtime support", () => {
     const settings = testSettings({ sandboxBackend: "docker" });
     expect(() =>
       buildOpenGeniAgent(settings, [], {
@@ -6716,13 +7028,28 @@ describe("pack skills in the sandbox skill index", () => {
       }),
     ).toThrow("artifactRuntimeAvailable requires absolute");
 
-    const agent = buildOpenGeniAgent(settings, [], {
+    const runtimeOnlyAgent = buildOpenGeniAgent(settings, [], {
       artifactRuntimeAvailable: true,
       sandboxEnvironment: {
         OPENGENI_ARTIFACT_RUNTIME_MANIFEST: "/opt/opengeni/artifacts/installation.json",
         OPENGENI_ARTIFACT_TOOL_ENTRY: "/opt/opengeni/artifacts/skill-facade-entry.mjs",
       },
     });
+    expect(indexedSkillNames(runtimeOnlyAgent, emptyManifest)).not.toContain("opengeni-documents");
+
+    const catalog = editableArtifactAttemptToolCatalog();
+    expect(hasCanonicalEditableArtifactToolSurface(catalog)).toBe(true);
+    const agent = buildOpenGeniAgent(settings, [], { attemptToolCatalog: catalog });
+    expect(indexedSkillNames(agent, emptyManifest)).toContain("opengeni-documents");
+
+    const incompleteCatalog = {
+      ...catalog,
+      entries: catalog.entries.slice(1),
+    };
+    expect(hasCanonicalEditableArtifactToolSurface(incompleteCatalog)).toBe(false);
+  });
+
+  function indexedSkillNames(agent: unknown, manifest: Manifest): string[] {
     const skillsCapability = (
       (agent as any).capabilities as Array<{
         type: string;
@@ -6731,11 +7058,10 @@ describe("pack skills in the sandbox skill index", () => {
         };
       }>
     ).find((capability) => capability.type === "skills");
-    const names =
-      skillsCapability?.lazyFrom?.getIndex?.(emptyManifest, ".agents").map((entry) => entry.name) ??
-      [];
-    expect(names).toContain("opengeni-documents");
-  });
+    return (
+      skillsCapability?.lazyFrom?.getIndex?.(manifest, ".agents").map((entry) => entry.name) ?? []
+    );
+  }
 
   test("artifact runtime doctor blocks the agent before an unavailable image can be used", async () => {
     const hooks = sandboxArtifactRuntimeDoctorHooks({

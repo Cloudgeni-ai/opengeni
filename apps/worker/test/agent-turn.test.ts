@@ -2822,7 +2822,7 @@ describe("worker shutdown preemption", () => {
     const steps: string[] = [];
     let releaseTools!: () => void;
     let releaseGitWrite!: () => void;
-    let releaseToolspaceWrite!: () => void;
+    let releaseCodemodeWrite!: () => void;
     let releaseRunCredentialWrite!: () => void;
     const toolsDrained = new Promise<void>((resolve) => {
       releaseTools = resolve;
@@ -2830,8 +2830,8 @@ describe("worker shutdown preemption", () => {
     const gitWriteDrained = new Promise<void>((resolve) => {
       releaseGitWrite = resolve;
     });
-    const toolspaceWriteDrained = new Promise<void>((resolve) => {
-      releaseToolspaceWrite = resolve;
+    const codemodeWriteDrained = new Promise<void>((resolve) => {
+      releaseCodemodeWrite = resolve;
     });
     const runCredentialWriteDrained = new Promise<void>((resolve) => {
       releaseRunCredentialWrite = resolve;
@@ -2863,11 +2863,11 @@ describe("worker shutdown preemption", () => {
       },
       cancellationReason: new Error("STEER"),
       gitCredentialRenewals: [gitRenewal],
-      toolspaceTokenRenewal: {
+      codemodeTokenRenewal: {
         stop: async () => {
-          steps.push("toolspace-draining");
-          await toolspaceWriteDrained;
-          steps.push("toolspace-drained");
+          steps.push("codemode-draining");
+          await codemodeWriteDrained;
+          steps.push("codemode-drained");
         },
       },
       runCredentialRenewal: {
@@ -2898,10 +2898,10 @@ describe("worker shutdown preemption", () => {
 
     releaseGitWrite();
     await Bun.sleep(0);
-    expect(steps.at(-1)).toBe("toolspace-draining");
+    expect(steps.at(-1)).toBe("codemode-draining");
     expect(receipts).toBe(0);
 
-    releaseToolspaceWrite();
+    releaseCodemodeWrite();
     await Bun.sleep(0);
     expect(steps.at(-1)).toBe("run-credentials-draining");
     expect(receipts).toBe(0);
@@ -3701,7 +3701,7 @@ describe("transient provider error classifier", () => {
     expect(agentRunFailurePayload(mandatory).retryable).toBeUndefined();
   });
 
-  test("preserves an exact non-SQLSTATE persistence failure in the session payload", async () => {
+  test("retains an exact database cause internally but sanitizes the session payload", async () => {
     const syntheticValue = ["synthetic", "worker", "db", "123456"].join("-");
     const source = Object.assign(new Error(`Failed query containing ${syntheticValue}`), {
       query: "insert into session_events values ($1)",
@@ -3726,7 +3726,7 @@ describe("transient provider error classifier", () => {
     expect((error as SessionEventPersistenceError).cause).toBe(source);
     const payload = agentRunFailurePayload(error);
     expect(payload).toEqual({
-      error: `Database failure while persisting agent.model.usage: Failed query containing ${syntheticValue}`,
+      error: "Database failure while persisting agent.model.usage",
       code: "db_failure",
       detail: "The database rejected the idempotent persistence transaction.",
       correlationId: "corr-unknown-exact",
@@ -3736,7 +3736,9 @@ describe("transient provider error classifier", () => {
       retryOutcome: "not_retryable",
       database: { table: "session_events" },
     });
-    expect(JSON.stringify(payload)).toContain(syntheticValue);
+    expect(JSON.stringify(payload)).not.toContain(syntheticValue);
+    expect(JSON.stringify(payload)).not.toContain(source.query);
+    expect((error as SessionEventPersistenceError).cause).toBe(source);
   });
 
   test("classifies 5xx status codes as transient (status is authoritative)", () => {

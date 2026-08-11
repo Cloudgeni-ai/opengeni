@@ -2,10 +2,12 @@ import { OpenGeniClient as OpenGeniCoreClient } from "./client";
 import type {
   CreateEditableArtifactMaterializationRequest,
   CreateEditableArtifactResourceRequest,
+  EditableArtifactListResource,
   EditableArtifactMaterializationJobResource,
   EditableArtifactPinnedVersionResource,
   EditableArtifactResource,
   ImportEditableArtifactResourceRequest,
+  ListSessionEditableArtifactResourcesOptions,
   PinEditableArtifactVersionRequest,
   ReadEditableArtifactMaterializationOptions,
   ReadEditableArtifactResourceOptions,
@@ -61,6 +63,20 @@ export class OpenGeniClient extends OpenGeniCoreClient {
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/editable-artifacts/${encodeURIComponent(artifactId)}`,
       undefined,
       { replicaId: options.replicaId },
+      options,
+    );
+  }
+
+  async listSessionEditableArtifacts(
+    workspaceId: string,
+    sourceSessionId: string,
+    options: ListSessionEditableArtifactResourcesOptions,
+  ): Promise<EditableArtifactListResource> {
+    return await this.requestJson<EditableArtifactListResource>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/editable-artifacts`,
+      undefined,
+      { sourceSessionId, replicaId: options.replicaId },
       options,
     );
   }

@@ -81,6 +81,7 @@ import type {
   LatencyMode,
   ResourceRef,
   Session,
+  SlackUserLinkAccessRequest,
   ToolRef,
   TurnSubmission,
   UpdateWorkspaceSettingsRequest,
@@ -108,6 +109,11 @@ export type AppContextValue = {
   authSession: AuthSession | null;
   accessContext: AccessContext;
   workspaces: Workspace[];
+  /** Token-free continuation identity retained across Root/provider remounts. */
+  slackLinkContinuationWorkspaceId: string | null;
+  /** Creates or joins the one server-side prepare request for the bootstrapped bearer. */
+  preparePendingSlackLink: (workspaceId: string) => Promise<SlackUserLinkAccessRequest | null>;
+  clearSlackLinkContinuation: () => void;
   accessKeyVersion: number;
   keyAuthRequired: boolean;
   model: string;
@@ -228,6 +234,95 @@ export type AppContextValue = {
   resetWorkspaceIntegrations: () => void;
 };
 
+export type PendingSlackLink = {
+  workspaceId: string;
+  token: string;
+};
+
+export type SlackLinkPreparePhase = "none" | "raw" | "in_flight" | "prepared" | "failed";
+
+export function createSlackLinkPrepareController<Request>(value: PendingSlackLink | null) {
+  let workspaceId = value?.workspaceId ?? null;
+  let bearer = value?.token ?? null;
+  let inFlight: Promise<Request> | null = null;
+  let prepared: Request | null = null;
+  let failure: unknown;
+  let hasFailure = false;
+  let generation = 0;
+
+  return {
+    workspaceId: () => workspaceId,
+    phase: (): SlackLinkPreparePhase => {
+      if (!workspaceId) return "none";
+      if (bearer !== null) return "raw";
+      if (inFlight) return "in_flight";
+      if (prepared !== null) return "prepared";
+      return hasFailure ? "failed" : "none";
+    },
+    prepare: (
+      requestedWorkspaceId: string,
+      exchange: (token: string) => Promise<Request>,
+    ): Promise<Request | null> => {
+      if (!workspaceId || requestedWorkspaceId !== workspaceId) return Promise.resolve(null);
+      if (prepared !== null) return Promise.resolve(prepared);
+      if (hasFailure) return Promise.reject(failure);
+      if (inFlight) return inFlight;
+      if (bearer === null) return Promise.resolve(null);
+
+      const token = bearer;
+      const claimedGeneration = generation;
+      let exchangePromise: Promise<Request>;
+      try {
+        exchangePromise = exchange(token);
+      } catch (error) {
+        exchangePromise = Promise.reject(error);
+      }
+      // The exchange request now owns the only live bearer reference. Module,
+      // React, URL, history, and storage state retain only token-free facts.
+      bearer = null;
+      let flight: Promise<Request>;
+      flight = exchangePromise
+        .then(
+          (request) => {
+            if (generation === claimedGeneration) prepared = request;
+            return request;
+          },
+          (error: unknown) => {
+            if (generation === claimedGeneration) {
+              failure = error;
+              hasFailure = true;
+            }
+            throw error;
+          },
+        )
+        .finally(() => {
+          if (generation === claimedGeneration && inFlight === flight) inFlight = null;
+        });
+      inFlight = flight;
+      return flight;
+    },
+    clear: () => {
+      generation += 1;
+      workspaceId = null;
+      bearer = null;
+      inFlight = null;
+      prepared = null;
+      failure = undefined;
+      hasFailure = false;
+    },
+  };
+}
+
+// Capture and scrub the signed fragment while this module is loading, before
+// TanStack Router canonicalizes the initial location. The module-scoped
+// controller survives Root/provider remounts, but releases the raw bearer as
+// soon as exactly one prepare request has been created.
+const bootstrappedPendingSlackLink = pendingSlackLinkFromBrowserLocation();
+stripSlackLinkFromBrowserLocation();
+const slackLinkPrepareController = createSlackLinkPrepareController<SlackUserLinkAccessRequest>(
+  bootstrappedPendingSlackLink,
+);
+
 type SessionEventFeed = { sessionId: string; events: SessionEvent[] } | null;
 
 type SessionEventFeedStore = {
@@ -291,6 +386,9 @@ export function RootRouteComponent() {
   const [authSession, setAuthSession] = useState<AuthSession | null | undefined>(undefined);
   const [accessContext, setAccessContext] = useState<AccessContext | null>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [slackLinkContinuationWorkspaceId, setSlackLinkContinuationWorkspaceId] = useState<
+    string | null
+  >(slackLinkPrepareController.workspaceId);
   const [accessLoading, setAccessLoading] = useState(false);
   const [accessError, setAccessError] = useState<string | null>(null);
   const [model, setModel] = useState("gpt-5.6-sol");
@@ -357,6 +455,7 @@ export function RootRouteComponent() {
     accessContext?.workspaceGrants[0]?.workspaceId ??
     null;
   const navigate = useNavigate();
+
   // Public routes render ahead of every auth/config gate: a user completing a
   // password reset is signed out by definition, so `/reset-password` must never
   // be intercepted by the sign-in panel or workspace-access loading.
@@ -1119,6 +1218,18 @@ export function RootRouteComponent() {
   const contextDisconnectGitHubInstallation = useLatestCallback(disconnectGitHubInstallation);
   const contextToggleGitHubRepository = useLatestCallback(toggleGitHubRepository);
   const contextStartSession = useLatestCallback(startSession);
+  const preparePendingSlackLink = useCallback(
+    async (workspaceId: string) =>
+      await slackLinkPrepareController.prepare(
+        workspaceId,
+        async (token) => await client.prepareSlackUserLinkAccess(workspaceId, { linkToken: token }),
+      ),
+    [client],
+  );
+  const clearSlackLinkContinuation = useCallback(() => {
+    slackLinkPrepareController.clear();
+    setSlackLinkContinuationWorkspaceId(null);
+  }, []);
 
   const appContext = useMemo<AppContextValue | null>(() => {
     return clientConfig && accessContext
@@ -1128,6 +1239,9 @@ export function RootRouteComponent() {
           authSession: authSession ?? null,
           accessContext,
           workspaces,
+          slackLinkContinuationWorkspaceId,
+          preparePendingSlackLink,
+          clearSlackLinkContinuation,
           accessKeyVersion,
           keyAuthRequired: keyAuthRequired === true,
           model,
@@ -1203,6 +1317,7 @@ export function RootRouteComponent() {
     accessKeyVersion,
     authSession,
     busy,
+    clearSlackLinkContinuation,
     client,
     clientConfig,
     connectionState,
@@ -1233,6 +1348,8 @@ export function RootRouteComponent() {
     manualRepos,
     manualReposOpen,
     model,
+    preparePendingSlackLink,
+    slackLinkContinuationWorkspaceId,
     modelForSession,
     ensureModelForSession,
     latencyMode,
@@ -1315,7 +1432,7 @@ export function RootRouteComponent() {
         />
       ) : accessLoading || !appContext ? (
         <LoadingPanel label="Loading workspace access" />
-      ) : !defaultWorkspaceId ? (
+      ) : !defaultWorkspaceId && !slackLinkContinuationWorkspaceId ? (
         <ProblemPanel
           title="No workspace access"
           description="You don't have access to any workspace yet."
@@ -1345,6 +1462,37 @@ function submitGitHubManifest(actionUrl: string, manifest: Record<string, unknow
   form.append(input);
   document.body.append(form);
   form.submit();
+}
+
+export function pendingSlackLinkFromUrl(value: string): PendingSlackLink | null {
+  const url = new URL(value, "https://opengeni.invalid");
+  const match = /^\/workspaces\/([^/]+)\/capabilities\/?$/.exec(url.pathname);
+  if (!match?.[1]) return null;
+  const fragment = new URLSearchParams(url.hash.startsWith("#") ? url.hash.slice(1) : url.hash);
+  const token = fragment.get("slack_link");
+  if (!token || token.length > 2_048) return null;
+  return { workspaceId: decodeURIComponent(match[1]), token };
+}
+
+function pendingSlackLinkFromBrowserLocation(): PendingSlackLink | null {
+  return typeof window === "undefined" ? null : pendingSlackLinkFromUrl(window.location.href);
+}
+
+function stripSlackLinkFromBrowserLocation(): void {
+  if (typeof window === "undefined") return;
+  const url = new URL(window.location.href);
+  const queryHasSlackLink = url.searchParams.has("slack_link");
+  const rawFragment = url.hash.startsWith("#") ? url.hash.slice(1) : url.hash;
+  const fragment = new URLSearchParams(rawFragment);
+  const fragmentHasSlackLink = fragment.has("slack_link");
+  if (!queryHasSlackLink && !fragmentHasSlackLink) return;
+  url.searchParams.delete("slack_link");
+  if (fragmentHasSlackLink) {
+    fragment.delete("slack_link");
+    const nextFragment = fragment.toString();
+    url.hash = nextFragment ? `#${nextFragment}` : "";
+  }
+  window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
 }
 
 function AccessKeyPanel(props: {

@@ -33,7 +33,7 @@ mode and requires a direct Better Auth cookie session, the same `user:<id>` that
 most recently connected the credential, workspace admin, exact same-origin
 `Origin`/Fetch Metadata, and a session-bound HMAC confirmation. It rejects every
 `Authorization` header even when a valid cookie is also present. There is no SDK,
-MCP, Toolspace, worker, scheduled, background, allocator, or rotation consume
+MCP, Codemode, worker, scheduled, background, allocator, or rotation consume
 path; provider bearer values remain server-only.
 
 ## Connected Machines

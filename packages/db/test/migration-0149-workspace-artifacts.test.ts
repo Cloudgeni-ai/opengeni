@@ -1,8 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import {
-  DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
-  FIRST_PARTY_MCP_TOOL_NAMES,
-} from "@opengeni/contracts";
+import { FIRST_PARTY_MCP_TOOL_NAMES } from "@opengeni/contracts";
 import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing";
 import { readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -88,9 +85,25 @@ describe("workspace artifacts migration", () => {
       const historicalTools = FIRST_PARTY_MCP_TOOL_NAMES.filter(
         (name) => !name.startsWith("artifacts_"),
       );
-      const historicalPermissions = DEFAULT_FIRST_PARTY_MCP_PERMISSIONS.filter(
-        (permission) => permission !== "connections:read" && !permission.startsWith("artifacts:"),
-      );
+      // Migration 0149 freezes the default that existed at its own cutover.
+      // Keep this historical contract explicit: deriving it from today's
+      // defaults silently widens the expected result whenever a new capability
+      // is introduced.
+      const historicalPermissions = [
+        "workspace:read",
+        "files:read",
+        "documents:search",
+        "scheduled_tasks:manage",
+        "scheduled_tasks:run",
+        "goals:manage",
+        "sessions:read",
+        "sessions:create",
+        "sessions:control",
+        "variable-sets:use",
+        "variable-sets:manage",
+        "rigs:use",
+        "github:use",
+      ];
       const create = async (suffix: string, permissions?: string[], tools = historicalTools) => {
         const id = crypto.randomUUID();
         await admin`

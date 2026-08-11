@@ -16,7 +16,7 @@ import {
   markSessionWorkflowWakeDelivered,
   steerAgentSessionInTransaction,
   withWorkspaceRls,
-  type Database,
+  withWorkspaceSessionActivityRls,
   type SessionCommandActor,
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
@@ -259,17 +259,15 @@ describe("cancellation-settlement lane Agent Steer cancellation deadlock product
           expect(update.reason).toBe("added");
         }
 
-        const steered = await withWorkspaceRls(dbClient.db, workspaceId, (scoped) =>
-          scoped.transaction((tx) =>
-            steerAgentSessionInTransaction(tx as unknown as Database, {
-              accountId: grant.accountId,
-              workspaceId,
-              targetSessionId: target.id,
-              actor,
-              operationKey: `cancellation-settlement-steer-${suffix}`,
-              instruction: "replace the superseded direction exactly once",
-            }),
-          ),
+        const steered = await withWorkspaceSessionActivityRls(dbClient.db, workspaceId, (scoped) =>
+          steerAgentSessionInTransaction(scoped, {
+            accountId: grant.accountId,
+            workspaceId,
+            targetSessionId: target.id,
+            actor,
+            operationKey: `cancellation-settlement-steer-${suffix}`,
+            instruction: "replace the superseded direction exactly once",
+          }),
         );
         expect(steered.interruptionCount).toBe(1);
         expect(steered.wakeRevision).toBeGreaterThan(0);
@@ -570,17 +568,15 @@ describe("cancellation-settlement lane Agent Steer cancellation deadlock product
       try {
         await waitFor(() => targetClaim !== undefined && heartbeats >= 3);
 
-        const steered = await withWorkspaceRls(dbClient.db, workspaceId, (scoped) =>
-          scoped.transaction((tx) =>
-            steerAgentSessionInTransaction(tx as unknown as Database, {
-              accountId: grant.accountId,
-              workspaceId,
-              targetSessionId: target.id,
-              actor,
-              operationKey: `cancellation-settlement-failed-steer-${suffix}`,
-              instruction: "deliver this existing direction exactly once after typed recovery",
-            }),
-          ),
+        const steered = await withWorkspaceSessionActivityRls(dbClient.db, workspaceId, (scoped) =>
+          steerAgentSessionInTransaction(scoped, {
+            accountId: grant.accountId,
+            workspaceId,
+            targetSessionId: target.id,
+            actor,
+            operationKey: `cancellation-settlement-failed-steer-${suffix}`,
+            instruction: "deliver this existing direction exactly once after typed recovery",
+          }),
         );
         expect(steered.interruptionCount).toBe(1);
         expect(steered.wakeRevision).toBeGreaterThan(0);

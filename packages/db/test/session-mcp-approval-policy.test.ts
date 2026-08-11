@@ -71,6 +71,7 @@ async function updatePolicy(
           : [],
       };
     },
+    { activity: "semantic" },
   );
 }
 

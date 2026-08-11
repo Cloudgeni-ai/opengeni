@@ -1,0 +1,788 @@
+import { describe, expect, test } from "bun:test";
+import { randomUUID } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { join } from "node:path";
+import type { BrowserActionCommand, BrowserObservation, BrowserTarget } from "@opengeni/contracts";
+import {
+  BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX,
+  BROWSER_CONTROL_WEBSOCKET_PROTOCOL,
+  BROWSER_STATE_ARTIFACT_CONTENT_TYPE,
+  BrowserControlServer,
+  BrowserSupervisor,
+  ComputerSupervisor,
+  LatestBrowserFrameSubscription,
+  decodeBrowserFrameMessage,
+  decodeBrowserFrameMetadataHeader,
+  type BrowserImageFrame,
+  type BrowserStateUploadAuthority,
+  type BrowserSupervisorDriver,
+  type BrowserSupervisorDriverContext,
+} from "../src";
+
+const adminToken = `admin.${"a".repeat(48)}`;
+const controlToken = `control.${"c".repeat(48)}`;
+const viewToken = `view.${"v".repeat(48)}`;
+const rotatedControlToken = `control.${"d".repeat(48)}`;
+const rotatedViewToken = `view.${"w".repeat(48)}`;
+const grantedViewToken = `grant.${"g".repeat(48)}`;
+const allowedOrigin = "https://app.opengeni.test";
+
+describe("BrowserControlServer", () => {
+  test("resolves a linked ComputerSession into the browser launch environment", async () => {
+    const computerSessionId = randomUUID();
+    let browserContext: BrowserSupervisorDriverContext | null = null;
+    await withServer(
+      async ({ server, reference }) => {
+        const created = await request(server, "/v1/browser-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference, {
+            headed: true,
+            linkedComputer: {
+              computerSessionId,
+              controllerGeneration: "computer-controller-1",
+            },
+          }),
+        });
+        expect(created.status).toBe(201);
+        expect(browserContext?.launchEnvironment).toMatchObject({
+          DISPLAY: ":101",
+          DBUS_SESSION_BUS_ADDRESS: "unix:path=/tmp/computer-bus",
+        });
+      },
+      {
+        linkedComputer: {
+          computerSessionId,
+          controllerGeneration: "computer-controller-1",
+          environment: {
+            DISPLAY: ":101",
+            DBUS_SESSION_BUS_ADDRESS: "unix:path=/tmp/computer-bus",
+          },
+        },
+        onBrowserContext: (context) => {
+          browserContext = context;
+        },
+      },
+    );
+  });
+
+  test("enforces admin/control/view authority, origin policy, and monotonic rotation", async () => {
+    await withServer(async ({ server, reference }) => {
+      expect(
+        (
+          await request(server, "/v1/browser-sessions", {
+            method: "POST",
+            body: createBody(reference),
+          })
+        ).status,
+      ).toBe(401);
+      expect(
+        (
+          await request(server, "/v1/browser-sessions", {
+            method: "POST",
+            token: adminToken,
+            body: createBody(reference),
+            origin: "https://evil.test",
+          })
+        ).status,
+      ).toBe(403);
+      const preflight = await fetch(`${server.url}/v1/browser-sessions`, {
+        method: "OPTIONS",
+        headers: {
+          origin: allowedOrigin,
+          "access-control-request-method": "POST",
+        },
+      });
+      expect(preflight.status).toBe(204);
+      expect(preflight.headers.get("access-control-allow-origin")).toBe(allowedOrigin);
+
+      const created = await request(server, "/v1/browser-sessions", {
+        method: "POST",
+        token: adminToken,
+        origin: allowedOrigin,
+        body: createBody(reference),
+      });
+      expect(created.status).toBe(201);
+      expect(created.headers.get("access-control-allow-origin")).toBe(allowedOrigin);
+      const createdBody = await json(created);
+      const observation = createdBody.data.observation as BrowserObservation;
+
+      expect(
+        (
+          await request(server, `/v1/browser-sessions/${reference.browserSessionId}/targets`, {
+            token: viewToken,
+          })
+        ).status,
+      ).toBe(200);
+      expect(
+        (
+          await request(server, `/v1/browser-sessions/${reference.browserSessionId}/actions`, {
+            method: "POST",
+            token: viewToken,
+            body: command(observation),
+          })
+        ).status,
+      ).toBe(401);
+      const acted = await request(
+        server,
+        `/v1/browser-sessions/${reference.browserSessionId}/actions`,
+        { method: "POST", token: controlToken, body: command(observation) },
+      );
+      expect(acted.status).toBe(200);
+      expect((await json(acted)).data.state).toBe("completed");
+
+      const screenshot = await request(
+        server,
+        `/v1/browser-sessions/${reference.browserSessionId}/targets/${encodeURIComponent(observation.target.id)}/screenshot`,
+        { token: viewToken },
+      );
+      expect(screenshot.status).toBe(200);
+      expect(screenshot.headers.get("content-type")).toBe("image/png");
+      expect(
+        decodeBrowserFrameMetadataHeader(screenshot.headers.get("x-opengeni-browser-frame")!),
+      ).toMatchObject({
+        browserSessionId: reference.browserSessionId,
+        targetId: observation.target.id,
+      });
+      expect([...new Uint8Array(await screenshot.arrayBuffer())]).toEqual([...png()]);
+
+      const conflicting = await request(server, "/v1/browser-sessions", {
+        method: "POST",
+        token: adminToken,
+        body: createBody(reference, {
+          controlToken: rotatedControlToken,
+          viewToken: rotatedViewToken,
+        }),
+      });
+      expect(conflicting.status).toBe(409);
+      const rotated = await request(server, "/v1/browser-sessions", {
+        method: "POST",
+        token: adminToken,
+        body: createBody(reference, {
+          tokenGeneration: 2,
+          controlToken: rotatedControlToken,
+          viewToken: rotatedViewToken,
+        }),
+      });
+      expect(rotated.status).toBe(200);
+      expect(
+        (
+          await request(server, `/v1/browser-sessions/${reference.browserSessionId}/targets`, {
+            token: viewToken,
+          })
+        ).status,
+      ).toBe(401);
+      expect(
+        (
+          await request(server, `/v1/browser-sessions/${reference.browserSessionId}/targets`, {
+            token: rotatedViewToken,
+          })
+        ).status,
+      ).toBe(200);
+
+      const ended = await request(
+        server,
+        `/v1/browser-sessions/${reference.browserSessionId}/end`,
+        {
+          method: "POST",
+          token: adminToken,
+          body: {
+            controllerGeneration: reference.controllerGeneration,
+            removeState: true,
+          },
+        },
+      );
+      expect(ended.status).toBe(200);
+      expect(
+        (
+          await request(server, `/v1/browser-sessions/${reference.browserSessionId}/targets`, {
+            token: rotatedViewToken,
+          })
+        ).status,
+      ).toBe(401);
+    });
+  });
+
+  test("enrolls exact browser origins monotonically through admin authority", async () => {
+    await withServer(
+      async ({ server }) => {
+        expect((await request(server, "/healthz", { origin: allowedOrigin })).status).toBe(403);
+        const enrolled = await request(server, "/v1/origins", {
+          method: "PUT",
+          token: adminToken,
+          body: { origins: [allowedOrigin, `${allowedOrigin}/`] },
+        });
+        expect(enrolled.status).toBe(200);
+        expect((await json(enrolled)).data.origins).toEqual([allowedOrigin]);
+
+        const health = await request(server, "/healthz", {
+          origin: allowedOrigin,
+        });
+        expect(health.status).toBe(200);
+        expect(health.headers.get("access-control-allow-origin")).toBe(allowedOrigin);
+        expect(
+          (
+            await request(server, "/v1/origins", {
+              method: "PUT",
+              token: adminToken,
+              body: { origins: ["https://app.opengeni.test/path"] },
+            })
+          ).status,
+        ).toBe(400);
+
+        const capacity = await request(server, "/v1/origins", {
+          method: "PUT",
+          token: adminToken,
+          body: {
+            origins: Array.from({ length: 64 }, (_, index) => `https://origin-${index}.test`),
+          },
+        });
+        expect(capacity.status).toBe(503);
+        expect(
+          (await json(await request(server, "/v1/origins", { token: adminToken }))).data.origins,
+        ).toEqual([allowedOrigin]);
+      },
+      { allowedOrigins: [] },
+    );
+  });
+
+  test("uses bounded expiring grants for browser frame viewers", async () => {
+    await withServer(async ({ server, reference }) => {
+      const created = await request(server, "/v1/browser-sessions", {
+        method: "POST",
+        token: adminToken,
+        body: createBody(reference),
+      });
+      const observation = (await json(created)).data.observation as BrowserObservation;
+      const grantId = randomUUID();
+      const expiresAt = new Date(Date.now() + 1_000).toISOString();
+      const grantBody = {
+        grantId,
+        controllerGeneration: reference.controllerGeneration,
+        token: grantedViewToken,
+        expiresAt,
+      };
+      const granted = await request(
+        server,
+        `/v1/browser-sessions/${reference.browserSessionId}/view-grants`,
+        { method: "POST", token: adminToken, body: grantBody },
+      );
+      expect(granted.status).toBe(201);
+      expect((await json(granted)).data).toEqual({ grantId, expiresAt });
+      expect(
+        (
+          await request(server, `/v1/browser-sessions/${reference.browserSessionId}/targets`, {
+            token: grantedViewToken,
+          })
+        ).status,
+      ).toBe(401);
+      expect(
+        (
+          await request(server, `/v1/browser-sessions/${reference.browserSessionId}/actions`, {
+            method: "POST",
+            token: grantedViewToken,
+            body: command(observation),
+          })
+        ).status,
+      ).toBe(401);
+
+      const websocket = new WebSocket(
+        `${server.url.replace("http:", "ws:")}/v1/browser-sessions/${reference.browserSessionId}/targets/${encodeURIComponent(observation.target.id)}/frames`,
+        [
+          BROWSER_CONTROL_WEBSOCKET_PROTOCOL,
+          `${BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX}${grantedViewToken}`,
+        ],
+      );
+      websocket.binaryType = "arraybuffer";
+      await websocketMessage(websocket);
+      expect((await websocketClosed(websocket)).code).toBe(1008);
+      expect(
+        (
+          await request(server, `/v1/browser-sessions/${reference.browserSessionId}/targets`, {
+            token: grantedViewToken,
+          })
+        ).status,
+      ).toBe(401);
+
+      const tooLong = await request(
+        server,
+        `/v1/browser-sessions/${reference.browserSessionId}/view-grants`,
+        {
+          method: "POST",
+          token: adminToken,
+          body: {
+            ...grantBody,
+            grantId: randomUUID(),
+            expiresAt: new Date(Date.now() + 11 * 60_000).toISOString(),
+          },
+        },
+      );
+      expect(tooLong.status).toBe(400);
+    });
+  });
+
+  test("streams bounded binary frames and revokes an established viewer on rotation", async () => {
+    await withServer(async ({ server, reference }) => {
+      const created = await request(server, "/v1/browser-sessions", {
+        method: "POST",
+        token: adminToken,
+        body: createBody(reference),
+      });
+      const observation = (await json(created)).data.observation as BrowserObservation;
+      const websocket = new WebSocket(
+        `${server.url.replace("http:", "ws:")}/v1/browser-sessions/${reference.browserSessionId}/targets/${encodeURIComponent(observation.target.id)}/frames`,
+        [
+          BROWSER_CONTROL_WEBSOCKET_PROTOCOL,
+          `${BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX}${viewToken}`,
+        ],
+      );
+      websocket.binaryType = "arraybuffer";
+      const message = await websocketMessage(websocket);
+      expect(websocket.protocol).toBe(BROWSER_CONTROL_WEBSOCKET_PROTOCOL);
+      expect(decodeBrowserFrameMessage(new Uint8Array(message))).toMatchObject({
+        browserSessionId: reference.browserSessionId,
+        targetId: observation.target.id,
+        sequence: 1,
+      });
+      const closed = websocketClosed(websocket);
+      expect(
+        (
+          await request(server, "/v1/browser-sessions", {
+            method: "POST",
+            token: adminToken,
+            body: createBody(reference, {
+              tokenGeneration: 2,
+              controlToken: rotatedControlToken,
+              viewToken: rotatedViewToken,
+            }),
+          })
+        ).status,
+      ).toBe(200);
+      expect((await closed).code).toBe(1008);
+      await server.stop();
+      await expect(fetch(`${server.url}/healthz`)).rejects.toThrow();
+    });
+  });
+
+  test("a stale lifecycle request cannot disrupt the active session or its viewers", async () => {
+    await withServer(async ({ server, reference }) => {
+      const created = await request(server, "/v1/browser-sessions", {
+        method: "POST",
+        token: adminToken,
+        body: createBody(reference),
+      });
+      const observation = (await json(created)).data.observation as BrowserObservation;
+      const websocket = new WebSocket(
+        `${server.url.replace("http:", "ws:")}/v1/browser-sessions/${reference.browserSessionId}/targets/${encodeURIComponent(observation.target.id)}/frames`,
+        [
+          BROWSER_CONTROL_WEBSOCKET_PROTOCOL,
+          `${BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX}${viewToken}`,
+        ],
+      );
+      websocket.binaryType = "arraybuffer";
+      await websocketMessage(websocket);
+
+      const stale = await request(
+        server,
+        `/v1/browser-sessions/${reference.browserSessionId}/end`,
+        {
+          method: "POST",
+          token: adminToken,
+          body: { controllerGeneration: "controller-stale", removeState: true },
+        },
+      );
+      expect(stale.status).toBe(409);
+      expect(websocket.readyState).toBe(WebSocket.OPEN);
+      expect(
+        (
+          await request(server, `/v1/browser-sessions/${reference.browserSessionId}/targets`, {
+            token: viewToken,
+          })
+        ).status,
+      ).toBe(200);
+      websocket.close(1000, "done");
+      await websocketClosed(websocket);
+    });
+  });
+
+  test("keeps encrypted state capture behind exact admin authority and replays its receipt", async () => {
+    let uploads = 0;
+    await withServer(
+      async ({ server, reference }) => {
+        expect(
+          (
+            await request(server, "/v1/browser-sessions", {
+              method: "POST",
+              token: adminToken,
+              body: createBody(reference),
+            })
+          ).status,
+        ).toBe(201);
+        const path = `/v1/browser-sessions/${reference.browserSessionId}/state-captures`;
+        const body = stateCaptureBody(reference);
+        expect((await request(server, path, { method: "POST", body })).status).toBe(401);
+        expect(
+          (
+            await request(server, path, {
+              method: "POST",
+              token: adminToken,
+              body: { ...body, dataKeyBase64: "not-base64" },
+            })
+          ).status,
+        ).toBe(400);
+
+        const captured = await request(server, path, {
+          method: "POST",
+          token: adminToken,
+          body,
+        });
+        expect(captured.status).toBe(200);
+        const first = await json(captured);
+        expect(first.data).toMatchObject({
+          operationId: body.operationId,
+          browserSessionId: reference.browserSessionId,
+          controllerGeneration: reference.controllerGeneration,
+          objectKey: body.objectKey,
+        });
+        const serialized = JSON.stringify(first);
+        expect(serialized).not.toContain(body.dataKeyBase64);
+        expect(serialized).not.toContain(body.upload.url);
+        expect(uploads).toBe(1);
+
+        const replayed = await request(server, path, {
+          method: "POST",
+          token: adminToken,
+          body,
+        });
+        expect(replayed.status).toBe(200);
+        expect(await json(replayed)).toEqual(first);
+        expect(uploads).toBe(1);
+      },
+      {
+        uploadArtifact: async () => {
+          uploads += 1;
+        },
+      },
+    );
+  });
+
+  test("rejects malformed bodies without reflecting private driver failures", async () => {
+    await withServer(
+      async ({ server, reference }) => {
+        const invalidUtf8 = await fetch(`${server.url}/v1/browser-sessions`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${adminToken}`,
+            "content-type": "application/json",
+          },
+          body: Uint8Array.of(0xff).slice().buffer,
+        });
+        expect(invalidUtf8.status).toBe(400);
+        const failed = await request(server, "/v1/browser-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference),
+        });
+        expect(failed.status).toBe(500);
+        expect(JSON.stringify(await json(failed))).not.toContain("private-driver-detail");
+      },
+      { failStart: true },
+    );
+  });
+});
+
+async function withServer(
+  callback: (fixture: {
+    server: BrowserControlServer;
+    reference: { browserSessionId: string; controllerGeneration: string };
+  }) => Promise<void>,
+  options: {
+    failStart?: boolean;
+    allowedOrigins?: readonly string[];
+    uploadArtifact?: (path: string, authority: BrowserStateUploadAuthority) => Promise<void>;
+    linkedComputer?: {
+      computerSessionId: string;
+      controllerGeneration: string;
+      environment: NodeJS.ProcessEnv;
+    };
+    onBrowserContext?: (context: BrowserSupervisorDriverContext) => void;
+  } = {},
+): Promise<void> {
+  const directory = await mkdtemp("/tmp/ogb-server-");
+  const supervisor = await BrowserSupervisor.open({
+    rootDirectory: join(directory, "state"),
+    socketRootDirectory: join(directory, "sockets"),
+    createDriver: async (context) => {
+      options.onBrowserContext?.(context);
+      return fakeDriver(context, options);
+    },
+    ...(options.uploadArtifact ? { uploadArtifact: options.uploadArtifact } : {}),
+  });
+  const computerSupervisor = options.linkedComputer
+    ? ({
+        launchEnvironment(reference: { computerSessionId: string; controllerGeneration: string }) {
+          if (
+            reference.computerSessionId !== options.linkedComputer!.computerSessionId ||
+            reference.controllerGeneration !== options.linkedComputer!.controllerGeneration
+          ) {
+            throw new Error("stale ComputerSession fixture reference");
+          }
+          return { ...options.linkedComputer!.environment };
+        },
+        async close() {},
+      } as unknown as ComputerSupervisor)
+    : undefined;
+  const server = BrowserControlServer.start({
+    supervisor,
+    ...(computerSupervisor ? { computerSupervisor } : {}),
+    adminToken,
+    port: 0,
+    allowedOrigins: options.allowedOrigins ?? [allowedOrigin],
+  });
+  try {
+    await callback({
+      server,
+      reference: {
+        browserSessionId: randomUUID(),
+        controllerGeneration: "controller-1",
+      },
+    });
+  } finally {
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+function fakeDriver(
+  context: BrowserSupervisorDriverContext,
+  options: { failStart?: boolean },
+): BrowserSupervisorDriver {
+  const target: BrowserTarget = {
+    id: `target-${context.browserSessionId}`,
+    browserSessionId: context.browserSessionId,
+    controllerGeneration: context.controllerGeneration,
+    targetGeneration: "target-1",
+    documentGeneration: "document-1",
+    kind: "page",
+    title: "Fixture",
+    url: "about:blank",
+    selected: true,
+    attached: true,
+    createdAt: "2026-08-09T12:00:00.000Z",
+  };
+  const observation = (): BrowserObservation => ({
+    protocolVersion: 1,
+    observationId: randomUUID(),
+    browserSessionId: context.browserSessionId,
+    target: { ...target },
+    frameId: "frame-1",
+    semantic: { kind: "snapshot", roots: [], nodeCount: 0 },
+    screenshot: null,
+    focusedRef: null,
+    changedRegions: [],
+    diagnostics: {
+      consoleErrorCount: 0,
+      failedRequestCount: 0,
+      downloadCount: 0,
+      pageErrorCount: 0,
+    },
+    dialog: null,
+    observedAt: "2026-08-09T12:00:00.000Z",
+  });
+  return {
+    async start(url) {
+      if (options.failStart) throw new Error("private-driver-detail");
+      target.url = url ?? "about:blank";
+      return observation();
+    },
+    async target(targetId) {
+      return targetId === target.id ? { ...target } : null;
+    },
+    async listTargets() {
+      return [{ ...target }];
+    },
+    async openTarget(url) {
+      target.url = url ?? "about:blank";
+      return observation();
+    },
+    async selectTarget() {
+      return observation();
+    },
+    async closeTarget() {
+      return [];
+    },
+    async observe() {
+      return observation();
+    },
+    async dispatch() {
+      return observation();
+    },
+    async captureScreenshot() {
+      return frame(context, target);
+    },
+    async subscribeFrames() {
+      const subscription = new LatestBrowserFrameSubscription(async () => undefined);
+      queueMicrotask(() => subscription.push(frame(context, target)));
+      return subscription;
+    },
+    async debug() {
+      return {
+        browserSessionId: context.browserSessionId,
+        controllerGeneration: context.controllerGeneration,
+        targetId: target.id,
+        targetGeneration: target.targetGeneration,
+        entries: [],
+        cursor: 0,
+        truncated: false,
+      };
+    },
+    async runtimeSnapshot() {
+      return {
+        engine: "chromium" as const,
+        engineVersion: "140.0.0.0",
+        tabs: [{ url: target.url, selected: target.selected }],
+      };
+    },
+    async close() {},
+  };
+}
+
+function frame(context: BrowserSupervisorDriverContext, target: BrowserTarget): BrowserImageFrame {
+  return {
+    frameId: "image-1",
+    browserSessionId: context.browserSessionId,
+    controllerGeneration: context.controllerGeneration,
+    targetId: target.id,
+    targetGeneration: target.targetGeneration,
+    documentGeneration: target.documentGeneration!,
+    sequence: 1,
+    mediaType: "image/png",
+    width: 3,
+    height: 2,
+    deviceScaleFactor: 1,
+    scrollX: 0,
+    scrollY: 0,
+    data: png(),
+    capturedAt: "2026-08-09T12:00:00.000Z",
+  };
+}
+
+function png(): Uint8Array {
+  return Uint8Array.from([
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 3, 0, 0, 0, 2,
+  ]);
+}
+
+function createBody(
+  reference: { browserSessionId: string; controllerGeneration: string },
+  overrides: Partial<{
+    tokenGeneration: number;
+    controlToken: string;
+    viewToken: string;
+    headed: boolean;
+    linkedComputer: { computerSessionId: string; controllerGeneration: string };
+  }> = {},
+) {
+  return {
+    ...reference,
+    tokenGeneration: 1,
+    controlToken,
+    viewToken,
+    headed: false,
+    ...overrides,
+  };
+}
+
+function stateCaptureBody(reference: { browserSessionId: string; controllerGeneration: string }) {
+  const operationId = "22222222-2222-4222-8222-222222222222";
+  return {
+    operationId,
+    controllerGeneration: reference.controllerGeneration,
+    objectKey: `workspaces/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/browser-state/publications/${operationId}/chromium-profile.ogbs`,
+    afterCapture: "restart",
+    dataKeyBase64: Buffer.alloc(32, 9).toString("base64"),
+    aadBase64: Buffer.from("workspace:object", "utf8").toString("base64"),
+    upload: {
+      url: "https://storage.test/upload?signature=fixture",
+      requiredHeaders: { "content-type": BROWSER_STATE_ARTIFACT_CONTENT_TYPE },
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    },
+  };
+}
+
+function command(observation: BrowserObservation): BrowserActionCommand {
+  return {
+    protocolVersion: 1,
+    operationId: randomUUID(),
+    browserSessionId: observation.browserSessionId,
+    controllerGeneration: observation.target.controllerGeneration,
+    targetId: observation.target.id,
+    expectedTargetGeneration: observation.target.targetGeneration,
+    expectedDocumentGeneration: observation.target.documentGeneration,
+    expectedFrameId: observation.frameId,
+    actor: { kind: "system", subjectId: "server-test" },
+    action: { type: "click", locator: { kind: "ref", ref: "e1" } },
+  };
+}
+
+async function request(
+  server: BrowserControlServer,
+  path: string,
+  options: {
+    method?: string;
+    token?: string;
+    origin?: string;
+    body?: unknown;
+  } = {},
+): Promise<Response> {
+  const headers: Record<string, string> = {};
+  if (options.token) headers.authorization = `Bearer ${options.token}`;
+  if (options.origin) headers.origin = options.origin;
+  if (options.body !== undefined) headers["content-type"] = "application/json";
+  return await fetch(`${server.url}${path}`, {
+    method: options.method ?? "GET",
+    headers,
+    ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
+  });
+}
+
+async function json(response: Response): Promise<{ data: Record<string, unknown> }> {
+  return (await response.json()) as { data: Record<string, unknown> };
+}
+
+async function websocketMessage(websocket: WebSocket): Promise<ArrayBuffer> {
+  return await new Promise<ArrayBuffer>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("websocket message timeout")), 2_000);
+    websocket.addEventListener(
+      "message",
+      (event) => {
+        clearTimeout(timer);
+        if (event.data instanceof ArrayBuffer) resolve(event.data);
+        else reject(new Error("expected binary websocket frame"));
+      },
+      { once: true },
+    );
+    websocket.addEventListener(
+      "error",
+      () => {
+        clearTimeout(timer);
+        reject(new Error("websocket failed"));
+      },
+      { once: true },
+    );
+  });
+}
+
+async function websocketClosed(websocket: WebSocket): Promise<CloseEvent> {
+  return await new Promise<CloseEvent>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("websocket close timeout")), 2_000);
+    websocket.addEventListener(
+      "close",
+      (event) => {
+        clearTimeout(timer);
+        resolve(event);
+      },
+      { once: true },
+    );
+  });
+}

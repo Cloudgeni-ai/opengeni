@@ -98,8 +98,8 @@ import {
   projectSessionForRelatedAccess,
   recordStreamAcknowledgment,
   requestSessionCompaction,
-  setSessionCodexPin,
-  withCodexCapacityMutation,
+  setSessionCodexPinInTransaction,
+  withSessionCodexCapacityMutation,
   setSessionPin,
   SessionPinVersionConflictError,
   SessionPinAccessError,
@@ -129,6 +129,7 @@ import {
   sessionLatestWorkspaceCapture,
   renewSessionRealtimeInTransaction,
   syncSessionRealtimeLedgerInTransaction,
+  withWorkspaceSessionActivityRls,
   withWorkspaceRls,
   workspaceCaptureAtRevision,
   type AppendEventInput,
@@ -694,16 +695,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       throw new HTTPException(400, { message: "invalid session realtime request" });
     }
     try {
-      const result = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
-        scopedDb.transaction(async (tx) =>
-          beginSessionRealtimeInTransaction(tx as unknown as Database, {
-            accountId: grant.accountId,
-            workspaceId,
-            sessionId,
-            ownerSubjectId: grant.subjectId,
-            ...parsed.data,
-          }),
-        ),
+      const result = await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) =>
+        beginSessionRealtimeInTransaction(scopedDb, {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          ownerSubjectId: grant.subjectId,
+          ...parsed.data,
+        }),
       );
       await publishRealtimeMutation(grant.accountId, workspaceId, sessionId, result);
       c.header("cache-control", "private, no-store");
@@ -731,16 +730,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         throw new HTTPException(400, { message: "invalid realtime heartbeat request" });
       }
       try {
-        const result = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
-          scopedDb.transaction(async (tx) =>
-            renewSessionRealtimeInTransaction(tx as unknown as Database, {
-              workspaceId,
-              sessionId,
-              realtimeId,
-              ownerSubjectId: grant.subjectId,
-              ...parsed.data,
-            }),
-          ),
+        const result = await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) =>
+          renewSessionRealtimeInTransaction(scopedDb, {
+            workspaceId,
+            sessionId,
+            realtimeId,
+            ownerSubjectId: grant.subjectId,
+            ...parsed.data,
+          }),
         );
         await publishRealtimeMutation(grant.accountId, workspaceId, sessionId, result);
         c.header("cache-control", "private, no-store");
@@ -767,16 +764,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       throw new HTTPException(400, { message: "invalid realtime end request" });
     }
     try {
-      const result = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
-        scopedDb.transaction(async (tx) =>
-          endSessionRealtimeInTransaction(tx as unknown as Database, {
-            workspaceId,
-            sessionId,
-            realtimeId,
-            ownerSubjectId: grant.subjectId,
-            ...parsed.data,
-          }),
-        ),
+      const result = await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) =>
+        endSessionRealtimeInTransaction(scopedDb, {
+          workspaceId,
+          sessionId,
+          realtimeId,
+          ownerSubjectId: grant.subjectId,
+          ...parsed.data,
+        }),
       );
       await publishRealtimeMutation(grant.accountId, workspaceId, sessionId, result);
       c.header("cache-control", "private, no-store");
@@ -1139,16 +1134,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         throw new HTTPException(422, { message: "invalid realtime ledger sync request" });
       }
       try {
-        const result = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
-          scopedDb.transaction(async (tx) =>
-            syncSessionRealtimeLedgerInTransaction(tx as unknown as Database, {
-              workspaceId,
-              sessionId,
-              realtimeId,
-              ownerSubjectId: grant.subjectId,
-              ...parsed.data,
-            }),
-          ),
+        const result = await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) =>
+          syncSessionRealtimeLedgerInTransaction(scopedDb, {
+            workspaceId,
+            sessionId,
+            realtimeId,
+            ownerSubjectId: grant.subjectId,
+            ...parsed.data,
+          }),
         );
         await publishRealtimeMutation(grant.accountId, workspaceId, sessionId, result);
         c.header("cache-control", "private, no-store");
@@ -1253,11 +1246,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       }
     }
     const pinned = target === "auto" ? null : target;
-    const mutation = await withCodexCapacityMutation(
+    const mutation = await withSessionCodexCapacityMutation(
       db,
       { workspaceId, reason: "codex_manual_session_pin_changed" },
       async (tx) => {
-        const changed = await setSessionCodexPin(tx, workspaceId, sessionId, pinned);
+        const changed = await setSessionCodexPinInTransaction(tx, workspaceId, sessionId, pinned);
         return { result: changed, changed };
       },
     );

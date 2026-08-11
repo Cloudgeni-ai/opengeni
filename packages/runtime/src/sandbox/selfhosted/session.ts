@@ -22,6 +22,10 @@ import {
   FsEntryKind,
   StreamKind,
   type DesktopInputRequest,
+  type BrowserControlEnsureRequest,
+  type BrowserControlEnsureResponse,
+  type BrowserFramesOpenRequest,
+  type ComputerFramesOpenRequest,
   type ExecRequest,
   type ExecResponse,
   type StreamChannel,
@@ -1008,6 +1012,54 @@ export class SelfhostedSession {
     };
   }
 
+  /** Ensure the loopback browser controller sidecar owned by this connected
+   * machine. The authority scope is supplied by the caller and remains local. */
+  async ensureBrowserControl(
+    request: BrowserControlEnsureRequest,
+  ): Promise<BrowserControlEnsureResponse> {
+    const result = await this.call({
+      $case: "browserControlEnsure",
+      browserControlEnsure: request,
+    });
+    if (result.$case !== "browserControlEnsure") {
+      throw new Error(`selfhosted ensureBrowserControl: unexpected result ${result.$case}`);
+    }
+    return result.browserControlEnsure;
+  }
+
+  /** Open one browser-native frame producer and return its canonical relay
+   * endpoint. This does not route through `resolveExposedPort`: that legacy
+   * method allocates PTY/desktop resources based on fixed ports, while this op
+   * returns the exact fresh browser StreamChannel allocated by the agent. */
+  async openBrowserFrames(
+    request: BrowserFramesOpenRequest,
+  ): Promise<{ channel: StreamChannel; endpoint: ExposedPortEndpoint }> {
+    const result = await this.call({
+      $case: "browserFramesOpen",
+      browserFramesOpen: request,
+    });
+    if (result.$case !== "browserFramesOpen" || !result.browserFramesOpen.channel) {
+      throw new Error(`selfhosted openBrowserFrames: unexpected result ${result.$case}`);
+    }
+    const channel = result.browserFramesOpen.channel;
+    return { channel, endpoint: this.relayEndpoint(channel) };
+  }
+
+  /** Open one ComputerSession frame producer through the same relay fabric. */
+  async openComputerFrames(
+    request: ComputerFramesOpenRequest,
+  ): Promise<{ channel: StreamChannel; endpoint: ExposedPortEndpoint }> {
+    const result = await this.call({
+      $case: "computerFramesOpen",
+      computerFramesOpen: request,
+    });
+    if (result.$case !== "computerFramesOpen" || !result.computerFramesOpen.channel) {
+      throw new Error(`selfhosted openComputerFrames: unexpected result ${result.$case}`);
+    }
+    const channel = result.computerFramesOpen.channel;
+    return { channel, endpoint: this.relayEndpoint(channel) };
+  }
+
   /** A cheap liveness probe — request a Ping on the subject; returns true iff a
    *  responder answered (no AgentError). Used by `negotiateSelfhostedCapabilities`.
    *  The wire `nonce` is a uint64 (a numeric string), so the default is a random
@@ -1084,7 +1136,8 @@ export class SelfhostedSession {
       }
       channel = result.ptyOpen.channel;
     }
-    const channelId = channel?.channelId ?? channelKey(this.workspaceId, this.agentId, port);
+    if (channel) return this.relayEndpoint(channel);
+    const channelId = channelKey(this.workspaceId, this.agentId, port);
     const tls = this.relay.tls ?? true;
     // The routing key the relay pairs producer↔consumer by — IDENTICAL to the
     // agent's `ChannelKey::query` — plus the channel-id correlation hint.
@@ -1100,7 +1153,23 @@ export class SelfhostedSession {
       // The relay's wss route (`/stream`); buildStreamUrl honors `path`.
       path: this.relay.path ?? SELFHOSTED_RELAY_STREAM_PATH,
       query: routingQuery,
-      protocol: kindToProtocol(channel?.kind),
+    };
+  }
+
+  private relayEndpoint(channel: StreamChannel): ExposedPortEndpoint {
+    const tls = this.relay.tls ?? true;
+    const routingQuery =
+      `ws=${encodeURIComponent(channel.workspaceId)}` +
+      `&agent=${encodeURIComponent(channel.agentId)}` +
+      `&port=${channel.port}` +
+      `&channel=${encodeURIComponent(channel.channelId)}`;
+    return {
+      host: this.relay.host,
+      port: this.relay.port ?? (tls ? 443 : 80),
+      tls,
+      path: this.relay.path ?? SELFHOSTED_RELAY_STREAM_PATH,
+      query: routingQuery,
+      protocol: kindToProtocol(channel.kind),
     };
   }
 

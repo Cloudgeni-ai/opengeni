@@ -1002,8 +1002,10 @@ Production Docker/Modal references must be digest-pinned; pack, rig, mutable,
 self-hosted, and mismatched images fail closed. The worker runs the absolute
 runtime doctor inside the actual box before the model starts. `bun run dev`
 automatically caches an exact clean-HEAD CI runtime when available, source-tags
-the local image, and otherwise leaves native agent artifact skills disabled
-unless `OPENGENI_REQUIRE_SANDBOX_ARTIFACT_RUNTIME=1` requests a hard failure.
+the local image, and otherwise leaves only standalone sandbox-local Office file
+operations disabled unless `OPENGENI_REQUIRE_SANDBOX_ARTIFACT_RUNTIME=1`
+requests a hard failure. Collaborative artifact skills are independent: the
+worker admits them from the exact frozen first-party tool catalog.
 
 The Connected Machine stream relay is a separate deployed component built from
 the `agent/` Cargo workspace. It is only needed when Connected Machines are

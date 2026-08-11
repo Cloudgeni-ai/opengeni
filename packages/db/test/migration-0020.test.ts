@@ -4,6 +4,7 @@ import { readdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
+import { createDb, createSession } from "../src/index";
 import { migrate } from "../src/migrate";
 
 // Migration 0020 (session_recordings) applied against a THROWAWAY, PRISTINE
@@ -112,20 +113,23 @@ describe("migration 0020 (session_recordings)", () => {
       await sql`
         INSERT INTO "workspace_inference_controls" ("workspace_id", "account_id")
         VALUES (${workspaceId}, ${accountId})`;
-      // sandbox_group_id is app-generated (== id for a singleton group), NOT NULL
-      // since 0018 — supply both from one uuid.
-      const sessionId = (
-        await sql<{ id: string }[]>`
-        INSERT INTO "sessions" (
-          "id", "account_id", "workspace_id", "status", "sandbox_backend",
-          "initial_message", "model", "sandbox_group_id", "tool_policy"
-        )
-        VALUES (
-          gen_random_uuid(), ${accountId}, ${workspaceId}, 'idle', 'modal',
-          'hi', 'gpt-5', gen_random_uuid(),
-          jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
-        ) RETURNING "id"`
-      )[0]!.id;
+      const sessionClient = createDb(DB_URL, { max: 1 });
+      let sessionId: string;
+      try {
+        sessionId = (
+          await createSession(sessionClient.db, {
+            accountId,
+            workspaceId,
+            initialMessage: "hi",
+            resources: [],
+            metadata: {},
+            model: "gpt-5",
+            sandboxBackend: "modal",
+          })
+        ).id;
+      } finally {
+        await sessionClient.close();
+      }
 
       // --- The CHECK constraints reject a bad state/mode/codec. Each negative
       // insert runs on its OWN short-lived connection so a failed statement can't

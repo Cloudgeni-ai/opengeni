@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { ReasoningEffort } from "@opengeni/contracts";
 import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 
-import type { Database } from "./database";
+import type { Database, SessionActivityDatabase } from "./database";
 import { fromPostgresLosslessJson, fromPostgresLosslessText } from "./lossless-json";
 import * as schema from "./schema";
 import { submitHumanPromptInTransaction } from "./session-queue-commands";
@@ -178,7 +178,7 @@ function mapProjection(
  * delegation into the same canonical Steer-or-start path used by a human.
  */
 export async function flushSessionRealtimeTranscriptTailInTransaction(
-  db: Database,
+  db: SessionActivityDatabase,
   input: {
     accountId: string;
     workspaceId: string;

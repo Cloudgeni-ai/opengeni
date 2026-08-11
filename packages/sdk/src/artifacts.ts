@@ -3,11 +3,13 @@ export { OpenGeniClient } from "./artifact-client";
 export type {
   CreateEditableArtifactMaterializationRequest,
   CreateEditableArtifactResourceRequest,
+  EditableArtifactListResource,
   EditableArtifactMaterializationFormat,
   EditableArtifactMaterializationJobResource,
   EditableArtifactMaterializationResultResource,
   EditableArtifactPinnedVersionResource,
   EditableArtifactResource,
+  ListSessionEditableArtifactResourcesOptions,
   PinEditableArtifactVersionRequest,
   ReadEditableArtifactMaterializationOptions,
   ReadEditableArtifactResourceOptions,

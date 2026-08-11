@@ -1,6 +1,13 @@
 import { createHash } from "node:crypto";
 import { heartbeat } from "@temporalio/activity";
-import { KnowledgeSourceSyncRunSummary } from "@opengeni/contracts";
+import type { Settings } from "@opengeni/config";
+import { KnowledgeSourceSyncRunSummary, type ScheduledTask } from "@opengeni/contracts";
+import {
+  ATLASSIAN_PROVIDER_DOMAIN,
+  AtlassianConnectionMetadata,
+  atlassianScopesAllowRead,
+  type AtlassianSelectedSource,
+} from "@opengeni/contracts/atlassian";
 import {
   GoogleDriveConnectionMetadata,
   GOOGLE_DRIVE_PROVIDER_DOMAIN,
@@ -16,6 +23,13 @@ import {
   type GoogleDriveInventoryProviderItem,
   type GoogleDriveInventoryStopReason,
 } from "@opengeni/documents/google-drive";
+import {
+  atlassianKnowledgeScope,
+  inventoryAtlassianSource,
+  type AtlassianInventoryEntry,
+  type AtlassianInventoryPage,
+  type AtlassianInventoryStopReason,
+} from "@opengeni/documents/atlassian";
 import { addDocumentToBase, ensureDefaultBase, getDocumentBase } from "@opengeni/documents";
 import {
   appendKnowledgeDocumentVersion,
@@ -85,6 +99,17 @@ const DRIVE_JSON_MAX_BYTES = 2 * 1024 * 1024;
 const GOOGLE_DRIVE_FULL_RECONCILIATION_INTERVAL_MS = 24 * 60 * 60 * 1_000;
 const GOOGLE_DRIVE_SYNC_INVOCATION_SLICE_MS = 30_000;
 const GOOGLE_DRIVE_EXECUTION_CHECKPOINT_MAX_BYTES = 2 * 1024 * 1024;
+const ATLASSIAN_API_BASE = "https://api.atlassian.com";
+const ATLASSIAN_JSON_MAX_BYTES = 4 * 1024 * 1024;
+
+type KnowledgeSyncEntry = GoogleDriveInventoryEntry | AtlassianInventoryEntry;
+type KnowledgeSyncStopReason = GoogleDriveInventoryStopReason | AtlassianInventoryStopReason;
+
+export function knowledgeSyncObservationPolicy(kind: "google_drive" | "atlassian") {
+  return kind === "google_drive"
+    ? { revisionOrdering: "canonical_decimal" as const, filterWithDriveDurability: true }
+    : { revisionOrdering: "first_observation" as const, filterWithDriveDurability: false };
+}
 
 export function createKnowledgeSourceSyncActivities(
   services: () => Promise<ControlActivityServices>,
@@ -108,6 +133,10 @@ export function createKnowledgeSourceSyncActivities(
         return await failWithoutProvider("schedule_inactive_or_changed");
       }
       const action = task.action;
+      const providerLabel =
+        action.connection.providerDomain === ATLASSIAN_PROVIDER_DOMAIN
+          ? "atlassian"
+          : "google_drive";
       if (
         action.controlWorkspaceId !== input.workspaceId ||
         action.sourceConfigGeneration <= 0 ||
@@ -122,7 +151,7 @@ export function createKnowledgeSourceSyncActivities(
       if (lease.action !== "claimed") {
         observability.incrementCounter({
           name: "opengeni_knowledge_source_sync_runs_total",
-          labels: { provider: "google_drive", outcome: lease.action },
+          labels: { provider: providerLabel, outcome: lease.action },
         });
         return { action: lease.action };
       }
@@ -239,112 +268,17 @@ export function createKnowledgeSourceSyncActivities(
             bufferedScheduledTaskRunId: settled.bufferedScheduledTaskRunId,
           };
         }
-        const connection = await getConnectionMetadata(
-          db,
-          input.workspaceId,
-          action.connection.connectionId,
-          action.initiatingSubjectId,
-        );
-        if (
-          !connection ||
-          connection.accountId !== input.accountId ||
-          connection.subjectId !== action.connection.ownerSubjectId ||
-          connection.providerDomain.toLowerCase() !==
-            action.connection.providerDomain.toLowerCase() ||
-          connection.kind !== action.connection.kind ||
-          connection.version < action.connection.connectionVersion ||
-          connection.status !== "active" ||
-          !googleDriveScopesAllowCapability(connection.grantedScopes, "recursive_source_sync")
-        ) {
-          throw new SyncFailure("connection_reconnect_required", true, true);
-        }
-        if (connection.providerDomain !== GOOGLE_DRIVE_PROVIDER_DOMAIN) {
-          throw new SyncFailure("provider_rejected", false);
-        }
-        const initialMetadata = GoogleDriveConnectionMetadata.parse(connection.metadata);
-        if (initialMetadata.lifecycle?.state && initialMetadata.lifecycle.state !== "active") {
-          throw new SyncFailure("connection_reconnect_required", true, true);
-        }
-        const initialSelectedSource = selectedDriveSource(
-          initialMetadata,
-          resolved.source.externalSourceId,
-        );
-        if (!initialSelectedSource || !initialSelectedSource.syncEnabled) {
-          throw new SyncFailure("authority_changed", false);
-        }
-        if (initialSelectedSource.configGeneration !== action.sourceConfigGeneration) {
-          throw new SyncFailure("authority_changed", false);
-        }
-        if (
-          !initialSelectedSource.destination ||
-          JSON.stringify(googleDriveKnowledgeScope(initialSelectedSource.destination)) !==
-            JSON.stringify(action.destination)
-        ) {
-          throw new SyncFailure("authority_changed", false);
-        }
-
-        const token = await buildConnectionTokenResolver(
+        const provider = await resolveKnowledgeSyncProvider({
           db,
           settings,
-        )({
+          accountId: input.accountId,
           workspaceId: input.workspaceId,
-          subjectId: action.initiatingSubjectId,
-          serverId: "knowledge-source-sync",
-          connectionRef: {
-            connectionId: connection.id,
-            providerDomain: connection.providerDomain,
-            kind: connection.kind,
-            subjectScope: "subject",
-          },
-          destinationUrl: "https://www.googleapis.com",
+          action,
+          sourceId: input.sourceId,
+          externalSourceId: resolved.source.externalSourceId,
         });
-        if (token.status !== "ok") {
-          throw new SyncFailure("connection_reconnect_required", true, true);
-        }
-        const resolvedConnection = await getConnectionMetadata(
-          db,
-          input.workspaceId,
-          action.connection.connectionId,
-          action.initiatingSubjectId,
-        );
-        const resolvedMetadata = resolvedConnection
-          ? GoogleDriveConnectionMetadata.parse(resolvedConnection.metadata)
-          : null;
-        if (
-          !resolvedConnection ||
-          resolvedConnection.accountId !== input.accountId ||
-          resolvedConnection.subjectId !== action.connection.ownerSubjectId ||
-          resolvedConnection.providerDomain.toLowerCase() !==
-            action.connection.providerDomain.toLowerCase() ||
-          resolvedConnection.kind !== action.connection.kind ||
-          !resolvedMetadata ||
-          !googleDriveSyncProviderAccessAllowed({
-            connectionVersion: resolvedConnection.version,
-            resolvedConnectionVersion: token.connectionVersion,
-            connectionStatus: resolvedConnection.status,
-            lifecycleState: resolvedMetadata.lifecycle?.state,
-            grantedScopes: resolvedConnection.grantedScopes,
-          })
-        ) {
-          throw new SyncFailure("connection_reconnect_required", true, true);
-        }
-        const resolvedSelectedSource = selectedDriveSource(
-          resolvedMetadata,
-          resolved.source.externalSourceId,
-        );
-        const selectedDestination = resolvedSelectedSource?.destination;
-        if (
-          !resolvedSelectedSource ||
-          !resolvedSelectedSource.syncEnabled ||
-          resolvedSelectedSource.configGeneration !== action.sourceConfigGeneration ||
-          !selectedDestination ||
-          JSON.stringify(googleDriveKnowledgeScope(selectedDestination)) !==
-            JSON.stringify(action.destination)
-        ) {
-          throw new SyncFailure("authority_changed", false);
-        }
-        const metadata = resolvedMetadata;
-        const selectedSource = resolvedSelectedSource;
+        const selectedDestination = provider.selectedDestination;
+        const observationPolicy = knowledgeSyncObservationPolicy(provider.kind);
 
         let aclGeneration = resolved.source.currentAclGeneration;
         let acl = aclGeneration
@@ -392,25 +326,7 @@ export function createKnowledgeSourceSyncActivities(
           }));
         knowledgeRunId = knowledgeRun.id;
 
-        const driver = googleDriveSyncDriver({
-          actionProviderCoordinationKey: action.providerCoordinationKey,
-          metadata,
-          selectedSource,
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          initiatingSubjectId: action.initiatingSubjectId,
-          authorization: token.headers.Authorization ?? token.headers.authorization,
-          limits: action.limits,
-          connectionId: connection.id,
-          fullReconciliationIntervalMs: GOOGLE_DRIVE_FULL_RECONCILIATION_INTERVAL_MS,
-          observedExternalObjectIds: async (externalObjectIds) =>
-            await listObservedKnowledgeSourceSyncExternalObjectIds(db, {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sourceId: input.sourceId,
-              externalObjectIds,
-            }),
-        });
+        const driver = provider.driver;
         const inventory = await driver.inventory(
           lease.state.executionCheckpoint,
           lease.state.providerCursor,
@@ -434,21 +350,23 @@ export function createKnowledgeSourceSyncActivities(
           initiatingSubjectId: action.initiatingSubjectId,
           scanGeneration: liveState.activeScanGeneration,
           executionCheckpointGeneration: lease.state.executionCheckpointGeneration,
-          revisionOrdering: "canonical_decimal",
+          revisionOrdering: observationPolicy.revisionOrdering,
           observations: inventory.entries.map((entry) => ({
             externalObjectId: entry.externalObjectId,
             providerRevision: entry.externalVersionId,
             metadataHash: entryMetadataHash(entry),
           })),
         });
-        const entriesToProcess = inventory.entries.filter((entry, index) =>
-          shouldProcessGoogleDriveDurableObservation({
-            entry,
-            observation: durableObservations[index]!,
-            sourceLifecycleGeneration: resolved.source.lifecycleGeneration,
-            aclGeneration: aclGeneration!,
-          }),
-        );
+        const entriesToProcess = observationPolicy.filterWithDriveDurability
+          ? inventory.entries.filter((entry, index) =>
+              shouldProcessGoogleDriveDurableObservation({
+                entry,
+                observation: durableObservations[index]!,
+                sourceLifecycleGeneration: resolved.source.lifecycleGeneration,
+                aclGeneration: aclGeneration!,
+              }),
+            )
+          : inventory.entries;
         const observationFloorsById = new Map<string, KnowledgeSourceSyncObservationFloor>();
         for (const observation of durableObservations) {
           observationFloorsById.set(observation.externalObjectId, {
@@ -465,7 +383,7 @@ export function createKnowledgeSourceSyncActivities(
         );
 
         const ensureVersionIndexed = async (details: {
-          entry: GoogleDriveInventoryEntry;
+          entry: KnowledgeSyncEntry;
           object: {
             id: string;
             lifecycleGeneration: number;
@@ -1042,23 +960,23 @@ export function createKnowledgeSourceSyncActivities(
         await recordConnectorUsage("bytes", summary.bytes, "byte");
         observability.incrementCounter({
           name: "opengeni_knowledge_source_sync_runs_total",
-          labels: { provider: "google_drive", outcome: "succeeded" },
+          labels: { provider: providerLabel, outcome: "succeeded" },
         });
         observability.incrementCounter({
           name: "opengeni_knowledge_source_sync_items_total",
-          labels: { provider: "google_drive", outcome: "imported" },
+          labels: { provider: providerLabel, outcome: "imported" },
           amount: summary.imported,
         });
         for (const outcome of ["unchanged", "skipped", "failed"] as const) {
           observability.incrementCounter({
             name: "opengeni_knowledge_source_sync_items_total",
-            labels: { provider: "google_drive", outcome },
+            labels: { provider: providerLabel, outcome },
             amount: summary[outcome],
           });
         }
         observability.incrementCounter({
           name: "opengeni_knowledge_source_sync_bytes_total",
-          labels: { provider: "google_drive" },
+          labels: { provider: providerLabel },
           amount: summary.bytes,
         });
         return {
@@ -1134,18 +1052,18 @@ export function createKnowledgeSourceSyncActivities(
         await recordConnectorUsage("bytes", summary.bytes, "byte");
         observability.incrementCounter({
           name: "opengeni_knowledge_source_sync_runs_total",
-          labels: { provider: "google_drive", outcome: "failed" },
+          labels: { provider: providerLabel, outcome: "failed" },
         });
         for (const outcome of ["imported", "unchanged", "skipped", "failed"] as const) {
           observability.incrementCounter({
             name: "opengeni_knowledge_source_sync_items_total",
-            labels: { provider: "google_drive", outcome },
+            labels: { provider: providerLabel, outcome },
             amount: summary[outcome],
           });
         }
         observability.incrementCounter({
           name: "opengeni_knowledge_source_sync_bytes_total",
-          labels: { provider: "google_drive" },
+          labels: { provider: providerLabel },
           amount: summary.bytes,
         });
         return {
@@ -1273,6 +1191,269 @@ export type GoogleDriveSyncProviderPort = {
     pageSize: number;
   }) => Promise<GoogleDriveInventoryPage>;
 };
+
+async function resolveKnowledgeSyncProvider(input: {
+  db: Database;
+  settings: Settings;
+  accountId: string;
+  workspaceId: string;
+  action: Extract<ScheduledTask["action"], { kind: "knowledge_source_sync" }>;
+  sourceId: string;
+  externalSourceId: string;
+}): Promise<{
+  kind: "google_drive" | "atlassian";
+  selectedDestination: NonNullable<
+    GoogleDriveSelectedSource["destination"] | AtlassianSelectedSource["destination"]
+  >;
+  driver: KnowledgeSourceSyncDriver<KnowledgeSyncEntry, KnowledgeSyncStopReason>;
+}> {
+  const { action } = input;
+  const connection = await getConnectionMetadata(
+    input.db,
+    input.workspaceId,
+    action.connection.connectionId,
+    action.initiatingSubjectId,
+  );
+  if (
+    !connection ||
+    connection.accountId !== input.accountId ||
+    connection.subjectId !== action.connection.ownerSubjectId ||
+    connection.providerDomain.toLowerCase() !== action.connection.providerDomain.toLowerCase() ||
+    connection.kind !== action.connection.kind ||
+    connection.version < action.connection.connectionVersion ||
+    connection.status !== "active"
+  ) {
+    throw new SyncFailure("connection_reconnect_required", true, true);
+  }
+
+  const googleInitial =
+    connection.providerDomain === GOOGLE_DRIVE_PROVIDER_DOMAIN
+      ? GoogleDriveConnectionMetadata.safeParse(connection.metadata)
+      : null;
+  const atlassianInitial =
+    connection.providerDomain === ATLASSIAN_PROVIDER_DOMAIN
+      ? AtlassianConnectionMetadata.safeParse(connection.metadata)
+      : null;
+  const initialAtlassianMetadata = atlassianInitial?.success ? atlassianInitial.data : null;
+  if (!googleInitial?.success && !initialAtlassianMetadata) {
+    throw new SyncFailure("provider_rejected", false);
+  }
+  if (
+    googleInitial?.success &&
+    !googleDriveScopesAllowCapability(connection.grantedScopes, "recursive_source_sync")
+  ) {
+    throw new SyncFailure("connection_reconnect_required", true, true);
+  }
+  if (atlassianInitial?.success && !atlassianScopesAllowRead(connection.grantedScopes)) {
+    throw new SyncFailure("connection_reconnect_required", true, true);
+  }
+  const initialLifecycle = googleInitial?.success
+    ? googleInitial.data.lifecycle
+    : initialAtlassianMetadata!.lifecycle;
+  if (initialLifecycle?.state && initialLifecycle.state !== "active") {
+    throw new SyncFailure("connection_reconnect_required", true, true);
+  }
+  const initialSource = googleInitial?.success
+    ? selectedDriveSource(googleInitial.data, input.externalSourceId)
+    : selectedAtlassianSource(initialAtlassianMetadata!, input.externalSourceId);
+  if (
+    !initialSource ||
+    !initialSource.syncEnabled ||
+    initialSource.configGeneration !== action.sourceConfigGeneration ||
+    !initialSource.destination ||
+    JSON.stringify(
+      googleInitial?.success
+        ? googleDriveKnowledgeScope(initialSource.destination)
+        : atlassianKnowledgeScope(initialSource.destination),
+    ) !== JSON.stringify(action.destination)
+  ) {
+    throw new SyncFailure("authority_changed", false);
+  }
+
+  const token = await buildConnectionTokenResolver(
+    input.db,
+    input.settings,
+  )({
+    workspaceId: input.workspaceId,
+    subjectId: action.initiatingSubjectId,
+    serverId: "knowledge-source-sync",
+    connectionRef: {
+      connectionId: connection.id,
+      providerDomain: connection.providerDomain,
+      kind: connection.kind,
+      subjectScope: "subject",
+    },
+    destinationUrl:
+      connection.providerDomain === ATLASSIAN_PROVIDER_DOMAIN
+        ? ATLASSIAN_API_BASE
+        : "https://www.googleapis.com",
+  });
+  if (token.status !== "ok") {
+    throw new SyncFailure("connection_reconnect_required", true, true);
+  }
+  const resolvedConnection = await getConnectionMetadata(
+    input.db,
+    input.workspaceId,
+    action.connection.connectionId,
+    action.initiatingSubjectId,
+  );
+  if (
+    !resolvedConnection ||
+    resolvedConnection.accountId !== input.accountId ||
+    resolvedConnection.subjectId !== action.connection.ownerSubjectId ||
+    resolvedConnection.providerDomain.toLowerCase() !==
+      action.connection.providerDomain.toLowerCase() ||
+    resolvedConnection.kind !== action.connection.kind ||
+    resolvedConnection.version !== token.connectionVersion ||
+    resolvedConnection.status !== "active"
+  ) {
+    throw new SyncFailure("connection_reconnect_required", true, true);
+  }
+  const authorization = token.headers.Authorization ?? token.headers.authorization;
+  if (resolvedConnection.providerDomain === GOOGLE_DRIVE_PROVIDER_DOMAIN) {
+    const metadata = GoogleDriveConnectionMetadata.parse(resolvedConnection.metadata);
+    if (
+      !googleDriveSyncProviderAccessAllowed({
+        connectionVersion: resolvedConnection.version,
+        resolvedConnectionVersion: token.connectionVersion,
+        connectionStatus: resolvedConnection.status,
+        lifecycleState: metadata.lifecycle?.state,
+        grantedScopes: resolvedConnection.grantedScopes,
+      })
+    ) {
+      throw new SyncFailure("connection_reconnect_required", true, true);
+    }
+    const source = selectedDriveSource(metadata, input.externalSourceId);
+    if (!validSelectedSource(source, action, googleDriveKnowledgeScope)) {
+      throw new SyncFailure("authority_changed", false);
+    }
+    return {
+      kind: "google_drive",
+      selectedDestination: source.destination!,
+      driver: googleDriveSyncDriver({
+        actionProviderCoordinationKey: action.providerCoordinationKey,
+        metadata,
+        selectedSource: source,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        initiatingSubjectId: action.initiatingSubjectId,
+        authorization,
+        limits: action.limits,
+        connectionId: resolvedConnection.id,
+        fullReconciliationIntervalMs: GOOGLE_DRIVE_FULL_RECONCILIATION_INTERVAL_MS,
+        observedExternalObjectIds: async (externalObjectIds) =>
+          await listObservedKnowledgeSourceSyncExternalObjectIds(input.db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sourceId: input.sourceId,
+            externalObjectIds,
+          }),
+      }) as unknown as KnowledgeSourceSyncDriver<KnowledgeSyncEntry, KnowledgeSyncStopReason>,
+    };
+  }
+  if (resolvedConnection.providerDomain === ATLASSIAN_PROVIDER_DOMAIN) {
+    const metadata = AtlassianConnectionMetadata.parse(resolvedConnection.metadata);
+    if (
+      metadata.lifecycle?.state !== "active" ||
+      !atlassianScopesAllowRead(resolvedConnection.grantedScopes)
+    ) {
+      throw new SyncFailure("connection_reconnect_required", true, true);
+    }
+    const source = selectedAtlassianSource(metadata, input.externalSourceId);
+    if (!validSelectedSource(source, action, atlassianKnowledgeScope)) {
+      throw new SyncFailure("authority_changed", false);
+    }
+    return {
+      kind: "atlassian",
+      selectedDestination: source.destination!,
+      driver: atlassianSyncDriver({
+        actionProviderCoordinationKey: action.providerCoordinationKey,
+        metadata,
+        selectedSource: source,
+        authorization,
+        limits: action.limits,
+      }) as unknown as KnowledgeSourceSyncDriver<KnowledgeSyncEntry, KnowledgeSyncStopReason>,
+    };
+  }
+  throw new SyncFailure("provider_rejected", false);
+}
+
+function validSelectedSource<Source extends GoogleDriveSelectedSource | AtlassianSelectedSource>(
+  source: Source | null,
+  action: Extract<ScheduledTask["action"], { kind: "knowledge_source_sync" }>,
+  scope: (destination: NonNullable<Source["destination"]>) => unknown,
+): source is Source & { destination: NonNullable<Source["destination"]> } {
+  return Boolean(
+    source &&
+    source.syncEnabled &&
+    source.configGeneration === action.sourceConfigGeneration &&
+    source.destination &&
+    JSON.stringify(scope(source.destination)) === JSON.stringify(action.destination),
+  );
+}
+
+function selectedAtlassianSource(
+  metadata: ReturnType<typeof AtlassianConnectionMetadata.parse>,
+  externalSourceId: string,
+): AtlassianSelectedSource | null {
+  return metadata.selectedSources.find((source) => source.id === externalSourceId) ?? null;
+}
+
+function atlassianSyncDriver(input: {
+  actionProviderCoordinationKey: string;
+  metadata: ReturnType<typeof AtlassianConnectionMetadata.parse>;
+  selectedSource: AtlassianSelectedSource;
+  authorization: string | undefined;
+  limits: {
+    maxItems: number;
+    maxBytes: number;
+    maxFileBytes: number;
+    maxProviderRequests: number;
+    maxElapsedSeconds: number;
+  };
+}): KnowledgeSourceSyncDriver<AtlassianInventoryEntry, AtlassianInventoryStopReason> {
+  return {
+    providerKey: "atlassian",
+    providerDomain: ATLASSIAN_PROVIDER_DOMAIN,
+    providerCoordinationKey: input.actionProviderCoordinationKey,
+    inventory: async (checkpoint) => {
+      const inventory = await inventoryAtlassianSource({
+        cloudId: input.selectedSource.cloudId,
+        source: input.selectedSource,
+        limits: {
+          maxItems: input.limits.maxItems,
+          maxApiRequests: input.limits.maxProviderRequests,
+          maxElapsedMs: input.limits.maxElapsedSeconds * 1_000,
+          pageSize: Math.min(input.limits.maxItems, 100),
+        },
+        checkpoint,
+        listPage: async (cursor, pageSize) =>
+          await listAtlassianItems(input.selectedSource, cursor, pageSize, input.authorization),
+      });
+      return {
+        ...inventory,
+        providerCursor: null,
+        authoritativeFullScan: inventory.status === "complete",
+        cursorInvalidated: false,
+        hardLimitReached:
+          inventory.status === "paused" &&
+          inventory.stopReason !== "elapsed_time_limit" &&
+          inventory.stopReason !== "provider_error",
+      };
+    },
+    fetchContent: async (entry, maxBytes) =>
+      await fetchAtlassianContent(input.selectedSource, entry, input.authorization, maxBytes),
+    citationLocator: (entry) => ({
+      version: 1,
+      providerKey: "atlassian",
+      providerCoordinationKey: input.actionProviderCoordinationKey,
+      cloudId: input.selectedSource.cloudId,
+      sourceKind: input.selectedSource.kind,
+      externalObjectId: entry.externalObjectId,
+      sourceUri: entry.sourceUri,
+    }),
+  };
+}
 
 export function googleDriveSyncDriver(input: {
   actionProviderCoordinationKey: string;
@@ -2242,6 +2423,337 @@ async function fetchDriveBytes(
   return bytes;
 }
 
+async function listAtlassianItems(
+  source: AtlassianSelectedSource,
+  cursor: string | null,
+  pageSize: number,
+  authorization: string | undefined,
+): Promise<AtlassianInventoryPage> {
+  if (!authorization) throw new SyncFailure("connection_reconnect_required", true, true);
+  if (source.kind === "jira_project") {
+    const url = new URL(
+      `${ATLASSIAN_API_BASE}/ex/jira/${encodeURIComponent(source.cloudId)}/rest/api/3/search/jql`,
+    );
+    url.searchParams.set(
+      "jql",
+      `project = "${source.key.replaceAll('"', '\\"')}" ORDER BY key ASC`,
+    );
+    url.searchParams.set("maxResults", String(pageSize));
+    url.searchParams.set("fields", "summary,created,updated");
+    if (cursor) url.searchParams.set("nextPageToken", cursor);
+    const payload = objectRecord(await atlassianJsonRequest(url, authorization, "Jira issue list"));
+    const issues = Array.isArray(payload.issues) ? payload.issues : [];
+    return {
+      items: issues.map((raw) => {
+        const row = objectRecord(raw);
+        const fields = objectRecord(row.fields);
+        const id = requiredAtlassianString(row.id, "issue.id");
+        const key = requiredAtlassianString(row.key, "issue.key");
+        const updatedAt = optionalString(fields.updated);
+        return {
+          id,
+          key,
+          title: requiredAtlassianString(fields.summary, "issue.summary"),
+          version: updatedAt,
+          createdAt: optionalString(fields.created),
+          updatedAt,
+          webUrl: new URL(`/browse/${encodeURIComponent(key)}`, source.siteUrl).toString(),
+        };
+      }),
+      nextCursor: optionalString(payload.nextPageToken),
+    };
+  }
+
+  const url = new URL(
+    `${ATLASSIAN_API_BASE}/ex/confluence/${encodeURIComponent(source.cloudId)}/wiki/api/v2/spaces/${encodeURIComponent(source.resourceId)}/pages`,
+  );
+  url.searchParams.set("limit", String(pageSize));
+  url.searchParams.set("sort", "id");
+  if (cursor) url.searchParams.set("cursor", cursor);
+  const payload = objectRecord(
+    await atlassianJsonRequest(url, authorization, "Confluence page list"),
+  );
+  const pages = Array.isArray(payload.results) ? payload.results : [];
+  return {
+    items: pages.map((raw) => {
+      const row = objectRecord(raw);
+      const version = objectRecord(row.version);
+      const id = requiredAtlassianString(row.id, "page.id");
+      const webUi = optionalString(objectRecord(row._links).webui);
+      const versionNumber = numberValue(version.number);
+      return {
+        id,
+        key: id,
+        title: requiredAtlassianString(row.title, "page.title"),
+        version: versionNumber === undefined ? null : String(versionNumber),
+        createdAt: optionalString(row.createdAt),
+        updatedAt: optionalString(version.createdAt),
+        webUrl: webUi
+          ? new URL(webUi.startsWith("/wiki/") ? webUi : `/wiki${webUi}`, source.siteUrl).toString()
+          : new URL(
+              `/wiki/spaces/${encodeURIComponent(source.key)}/pages/${encodeURIComponent(id)}`,
+              source.siteUrl,
+            ).toString(),
+      };
+    }),
+    nextCursor: confluenceCursor(objectRecord(payload._links).next),
+  };
+}
+
+async function fetchAtlassianContent(
+  source: AtlassianSelectedSource,
+  entry: AtlassianInventoryEntry,
+  authorization: string | undefined,
+  maxBytes: number,
+): Promise<Uint8Array> {
+  if (!authorization) throw new SyncFailure("connection_reconnect_required", true, true);
+  const objectId = entry.externalObjectId.slice(entry.externalObjectId.indexOf(":") + 1);
+  const markdown =
+    source.kind === "jira_project"
+      ? await jiraIssueMarkdown(source, objectId, entry, authorization)
+      : await confluencePageMarkdown(source, objectId, entry, authorization);
+  const bytes = new TextEncoder().encode(markdown);
+  if (bytes.byteLength > maxBytes) throw new SyncFailure("content_too_large", false);
+  return bytes;
+}
+
+async function jiraIssueMarkdown(
+  source: AtlassianSelectedSource,
+  issueId: string,
+  entry: AtlassianInventoryEntry,
+  authorization: string,
+): Promise<string> {
+  const issueUrl = new URL(
+    `${ATLASSIAN_API_BASE}/ex/jira/${encodeURIComponent(source.cloudId)}/rest/api/3/issue/${encodeURIComponent(issueId)}`,
+  );
+  issueUrl.searchParams.set(
+    "fields",
+    "summary,description,status,issuetype,priority,assignee,reporter,labels,created,updated",
+  );
+  const issue = objectRecord(await atlassianJsonRequest(issueUrl, authorization, "Jira issue"));
+  const fields = objectRecord(issue.fields);
+  const lines = [
+    `# ${entry.title}`,
+    "",
+    `- Key: ${optionalString(issue.key) ?? entry.title}`,
+    `- Type: ${optionalString(objectRecord(fields.issuetype).name) ?? "Unknown"}`,
+    `- Status: ${optionalString(objectRecord(fields.status).name) ?? "Unknown"}`,
+    `- Priority: ${optionalString(objectRecord(fields.priority).name) ?? "None"}`,
+    `- Assignee: ${optionalString(objectRecord(fields.assignee).displayName) ?? "Unassigned"}`,
+    `- Reporter: ${optionalString(objectRecord(fields.reporter).displayName) ?? "Unknown"}`,
+    `- Updated: ${optionalString(fields.updated) ?? "Unknown"}`,
+    `- Source: ${entry.sourceUri}`,
+    "",
+    "## Description",
+    "",
+    adfToMarkdown(fields.description) || "No description.",
+  ];
+  const labels = Array.isArray(fields.labels)
+    ? fields.labels.filter((value): value is string => typeof value === "string")
+    : [];
+  if (labels.length > 0) lines.splice(9, 0, `- Labels: ${labels.join(", ")}`);
+  const comments = await jiraComments(source, issueId, authorization);
+  if (comments.length > 0) {
+    lines.push("", "## Comments", "");
+    for (const comment of comments) {
+      const row = objectRecord(comment);
+      const author = optionalString(objectRecord(row.author).displayName) ?? "Unknown author";
+      const created = optionalString(row.created) ?? "Unknown date";
+      lines.push(`### ${author} · ${created}`, "", adfToMarkdown(row.body), "");
+    }
+  }
+  return lines.join("\n");
+}
+
+async function jiraComments(
+  source: AtlassianSelectedSource,
+  issueId: string,
+  authorization: string,
+): Promise<unknown[]> {
+  const comments: unknown[] = [];
+  let startAt = 0;
+  for (let page = 0; page < 20; page += 1) {
+    const url = new URL(
+      `${ATLASSIAN_API_BASE}/ex/jira/${encodeURIComponent(source.cloudId)}/rest/api/3/issue/${encodeURIComponent(issueId)}/comment`,
+    );
+    url.searchParams.set("startAt", String(startAt));
+    url.searchParams.set("maxResults", "100");
+    url.searchParams.set("orderBy", "created");
+    const payload = objectRecord(await atlassianJsonRequest(url, authorization, "Jira comments"));
+    const pageComments = Array.isArray(payload.comments) ? payload.comments : [];
+    comments.push(...pageComments);
+    const total = numberValue(payload.total) ?? comments.length;
+    if (comments.length >= total || pageComments.length === 0) break;
+    startAt += pageComments.length;
+  }
+  return comments;
+}
+
+async function confluencePageMarkdown(
+  source: AtlassianSelectedSource,
+  pageId: string,
+  entry: AtlassianInventoryEntry,
+  authorization: string,
+): Promise<string> {
+  const pageUrl = new URL(
+    `${ATLASSIAN_API_BASE}/ex/confluence/${encodeURIComponent(source.cloudId)}/wiki/api/v2/pages/${encodeURIComponent(pageId)}`,
+  );
+  pageUrl.searchParams.set("body-format", "storage");
+  const page = objectRecord(await atlassianJsonRequest(pageUrl, authorization, "Confluence page"));
+  const storage = objectRecord(objectRecord(page.body).storage);
+  const lines = [
+    `# ${entry.title}`,
+    "",
+    `- Space: ${source.name} (${source.key})`,
+    `- Updated: ${entry.modifiedTime ?? "Unknown"}`,
+    `- Source: ${entry.sourceUri}`,
+    "",
+    "## Content",
+    "",
+    optionalString(storage.value) ?? "No content.",
+  ];
+  const comments = await confluenceFooterComments(source, pageId, authorization);
+  if (comments.length > 0) {
+    lines.push("", "## Comments", "");
+    for (const comment of comments) {
+      const row = objectRecord(comment);
+      const body = objectRecord(objectRecord(row.body).storage);
+      const version = objectRecord(row.version);
+      lines.push(
+        `### Comment · ${optionalString(version.createdAt) ?? "Unknown date"}`,
+        "",
+        optionalString(body.value) ?? "",
+        "",
+      );
+    }
+  }
+  return lines.join("\n");
+}
+
+async function confluenceFooterComments(
+  source: AtlassianSelectedSource,
+  pageId: string,
+  authorization: string,
+): Promise<unknown[]> {
+  const comments: unknown[] = [];
+  let cursor: string | null = null;
+  for (let page = 0; page < 20; page += 1) {
+    const url = new URL(
+      `${ATLASSIAN_API_BASE}/ex/confluence/${encodeURIComponent(source.cloudId)}/wiki/api/v2/pages/${encodeURIComponent(pageId)}/footer-comments`,
+    );
+    url.searchParams.set("body-format", "storage");
+    url.searchParams.set("limit", "100");
+    if (cursor) url.searchParams.set("cursor", cursor);
+    const payload = objectRecord(
+      await atlassianJsonRequest(url, authorization, "Confluence page comments"),
+    );
+    const results = Array.isArray(payload.results) ? payload.results : [];
+    comments.push(...results);
+    cursor = confluenceCursor(objectRecord(payload._links).next);
+    if (!cursor) break;
+  }
+  return comments;
+}
+
+async function atlassianJsonRequest(
+  url: URL,
+  authorization: string,
+  label: string,
+): Promise<unknown> {
+  const response = await fetch(url, {
+    headers: { authorization, accept: "application/json" },
+    redirect: "error",
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => undefined);
+    if (response.status === 401 || response.status === 403) {
+      throw new SyncFailure("connection_reconnect_required", true, true);
+    }
+    throw new SyncFailure(
+      "provider_unavailable",
+      response.status >= 500 || response.status === 429,
+    );
+  }
+  return await readResponseJsonBounded(response, ATLASSIAN_JSON_MAX_BYTES, label);
+}
+
+export function confluenceCursor(value: unknown): string | null {
+  const next = optionalString(value);
+  if (!next) return null;
+  const url = new URL(next, ATLASSIAN_API_BASE);
+  const cursor = url.searchParams.get("cursor");
+  if (!cursor || cursor.length > 4_096 || /[\u0000-\u001f]/.test(cursor)) {
+    throw new Error("invalid Confluence cursor");
+  }
+  return cursor;
+}
+
+export function adfToMarkdown(value: unknown): string {
+  const node = objectRecord(value);
+  const type = optionalString(node.type);
+  const children = Array.isArray(node.content) ? node.content.map(adfToMarkdown).join("") : "";
+  if (type === "text") {
+    let text = typeof node.text === "string" ? node.text : "";
+    const marks = Array.isArray(node.marks) ? node.marks : [];
+    for (const rawMark of marks) {
+      const mark = objectRecord(rawMark);
+      const markType = optionalString(mark.type);
+      if (markType === "code") text = `\`${text}\``;
+      if (markType === "strong") text = `**${text}**`;
+      if (markType === "em") text = `*${text}*`;
+      if (markType === "strike") text = `~~${text}~~`;
+      if (markType === "link") {
+        const href = optionalString(objectRecord(mark.attrs).href);
+        if (href) text = `[${text}](${href})`;
+      }
+    }
+    return text;
+  }
+  if (type === "paragraph") return `${children}\n\n`;
+  if (type === "heading") {
+    const level = Math.min(Math.max(numberValue(objectRecord(node.attrs).level) ?? 2, 1), 6);
+    return `${"#".repeat(level)} ${children.trim()}\n\n`;
+  }
+  if (type === "hardBreak") return "  \n";
+  if (type === "rule") return "---\n\n";
+  if (type === "blockquote") {
+    return `${children
+      .trim()
+      .split("\n")
+      .map((line) => `> ${line}`)
+      .join("\n")}\n\n`;
+  }
+  if (type === "bulletList") {
+    return `${children.trimEnd()}\n`;
+  }
+  if (type === "orderedList") {
+    return `${children.trimEnd()}\n`;
+  }
+  if (type === "listItem") {
+    return `- ${children.trim().replaceAll("\n", "\n  ")}\n`;
+  }
+  if (type === "codeBlock") return `\`\`\`\n${children.trimEnd()}\n\`\`\`\n\n`;
+  if (type === "mention") return `@${optionalString(objectRecord(node.attrs).text) ?? "user"}`;
+  if (type === "emoji") return optionalString(objectRecord(node.attrs).text) ?? "";
+  if (type === "inlineCard") {
+    const url = optionalString(objectRecord(node.attrs).url);
+    return url ? `[${url}](${url})` : "";
+  }
+  return children;
+}
+
+function objectRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function requiredAtlassianString(value: unknown, label: string): string {
+  if (typeof value !== "string" || !value.trim()) throw new Error(`invalid_atlassian_${label}`);
+  return value;
+}
+
 function deterministicUuid(value: string): string {
   const bytes = createHash("sha256").update(value).digest().subarray(0, 16);
   bytes[6] = (bytes[6]! & 0x0f) | 0x50;
@@ -2267,11 +2779,15 @@ function optionalString(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
+function numberValue(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
 function boundedError(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).slice(0, 1000);
 }
 
-function entryMetadataHash(entry: GoogleDriveInventoryEntry): string {
+function entryMetadataHash(entry: KnowledgeSyncEntry): string {
   return createHash("sha256")
     .update(
       JSON.stringify({

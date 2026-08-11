@@ -39,6 +39,7 @@ import type {
   SignalCodexCapacityWorkflow,
   SignalSessionAttemptQuiesced,
   StartSandboxReaperWorkflow,
+  StartVideoGenerationWorkflow,
   WakeSessionWorkflowSignal,
 } from "./activities/types";
 import { turnTaskQueue } from "./workflows/activities";
@@ -343,6 +344,7 @@ export async function createWorkerWorkflowSignaler(
   signalCodexCapacityWorkflow: SignalCodexCapacityWorkflow;
   getTurnTaskQueueStats: () => Promise<TurnTaskQueueStats>;
   startSandboxReaperWorkflow: StartSandboxReaperWorkflow;
+  startVideoGenerationWorkflow: StartVideoGenerationWorkflow;
   check: () => Promise<void>;
   close: () => Promise<void>;
 }> {
@@ -456,6 +458,33 @@ export async function createWorkerWorkflowSignaler(
           workflowId: SANDBOX_REAPER_V2_WORKFLOW_ID,
           workflowIdReusePolicy: "ALLOW_DUPLICATE",
           args: [],
+        });
+        return "started";
+      } catch (error) {
+        if (error instanceof WorkflowExecutionAlreadyStartedError) {
+          return "already_running";
+        }
+        throw error;
+      }
+    },
+    startVideoGenerationWorkflow: async ({ accountId, workspaceId, operationId }) => {
+      try {
+        await temporal.workflow.start("videoGenerationWorkflow", {
+          taskQueue: settings.temporalTaskQueue,
+          workflowId: `video-generation:${operationId}`,
+          // Reject a concurrent or already-completed run, but allow the repair
+          // sweep to restart this exact operation if the workflow itself failed.
+          // Every provider/storage transition remains CAS/idempotency fenced in
+          // Postgres, so recovery never creates a second logical operation.
+          workflowIdReusePolicy: "ALLOW_DUPLICATE_FAILED_ONLY",
+          args: [
+            {
+              accountId,
+              workspaceId,
+              operationId,
+              baseTaskQueue: settings.temporalTaskQueue,
+            },
+          ],
         });
         return "started";
       } catch (error) {
@@ -721,7 +750,8 @@ export async function createOpenGeniWorkerService(
       !options.activityDependencies.signalSessionAttemptQuiesced ||
       !options.activityDependencies.inspectSessionAttemptActivity ||
       !options.activityDependencies.signalCodexCapacityWorkflow ||
-      !options.activityDependencies.startSandboxReaperWorkflow;
+      !options.activityDependencies.startSandboxReaperWorkflow ||
+      !options.activityDependencies.startVideoGenerationWorkflow;
     if (needsSignaler) {
       signaler = await retryStartupDependency(
         "Temporal client",
@@ -743,12 +773,16 @@ export async function createOpenGeniWorkerService(
     const startSandboxReaperWorkflow =
       options.activityDependencies.startSandboxReaperWorkflow ??
       signaler?.startSandboxReaperWorkflow;
+    const startVideoGenerationWorkflow =
+      options.activityDependencies.startVideoGenerationWorkflow ??
+      signaler?.startVideoGenerationWorkflow;
     if (
       !wakeSessionWorkflow ||
       !signalSessionAttemptQuiesced ||
       !inspectSessionAttemptActivity ||
       !signalCodexCapacityWorkflow ||
-      !startSandboxReaperWorkflow
+      !startSandboxReaperWorkflow ||
+      !startVideoGenerationWorkflow
     ) {
       throw new Error("OpenGeni worker lifecycle could not resolve its workflow signalers");
     }
@@ -766,6 +800,7 @@ export async function createOpenGeniWorkerService(
         inspectSessionAttemptActivity,
         signalCodexCapacityWorkflow,
         startSandboxReaperWorkflow,
+        startVideoGenerationWorkflow,
       },
     });
 

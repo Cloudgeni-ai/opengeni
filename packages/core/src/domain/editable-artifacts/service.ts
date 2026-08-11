@@ -81,6 +81,7 @@ import {
   type EditableArtifact,
   type EditableArtifactActor,
   type EditableArtifactCausalFrontier,
+  type EditableArtifactClientTransactionId,
   type EditableArtifactKernelOperation,
   type EditableArtifactLiveOutboxRecord,
   type EditableArtifactMutationIntent,
@@ -484,6 +485,62 @@ export class EditableArtifactService {
     throw new EditableArtifactRetryableConflictError();
   }
 
+  /**
+   * Resolve one actor-scoped durable mutation identity after an idempotency
+   * collision. Normal edits do not pay this read; agent transports use it to
+   * recover a committed receipt after a lost response without process state.
+   */
+  async findTransactionReceipt(input: {
+    scope: EditableArtifactScope;
+    artifactId: EditableArtifact["id"];
+    actor: EditableArtifactActor;
+    clientTransactionId: EditableArtifactClientTransactionId;
+  }): Promise<EditableArtifactReceipt | null> {
+    const context = normalizeBoundaryContext(input);
+    await this.requirePermission({ ...context, permission: "edit" });
+    const result = await this.dependencies.store.readTransactionBasis(
+      context.scope,
+      context.artifactId,
+      {
+        actorKey: editableArtifactActorKey(context.actor),
+        clientTransactionId: editableArtifactClientTransactionId(input.clientTransactionId),
+        previousLocalTransactionId: null,
+        selectiveUndoOperationIds: Object.freeze([]),
+      },
+    );
+    return result.kind === "existing" ? copyReceipt(result.receipt) : null;
+  }
+
+  /**
+   * Returns one detached, internally consistent reconstruction basis for an
+   * authorized current-head read. Inspection and compaction deliberately share
+   * this store primitive so neither can observe a metadata/snapshot/tail mix.
+   */
+  async readCurrentKernelState(input: {
+    scope: EditableArtifactScope;
+    artifactId: EditableArtifact["id"];
+    actor: EditableArtifactActor;
+  }): Promise<EditableArtifactKernelState> {
+    const context = normalizeBoundaryContext(input);
+    let authorizationRevision = await this.requirePermission({
+      ...context,
+      permission: "read",
+    });
+    for (let attempt = 1; attempt <= EDITABLE_ARTIFACT_MAX_COMMIT_ATTEMPTS; attempt += 1) {
+      const outcome = await this.dependencies.store.readCurrentKernelState(
+        context.scope,
+        context.artifactId,
+        authorizationRevision,
+      );
+      if (outcome.kind === "basis") return outcome.state;
+      authorizationRevision = await this.requirePermission({
+        ...context,
+        permission: "read",
+      });
+    }
+    throw new EditableArtifactRetryableConflictError();
+  }
+
   async applyTransaction(input: {
     scope: EditableArtifactScope;
     artifactId: EditableArtifact["id"];
@@ -605,6 +662,13 @@ export class EditableArtifactService {
           permission: "edit",
         });
         continue;
+      }
+      if (
+        request.expectedHead &&
+        (artifact.headSequence !== request.expectedHead.sequence ||
+          artifact.stateHash !== request.expectedHead.stateHash)
+      ) {
+        throw new EditableArtifactStaleBaseError();
       }
       if (artifact.lifecycle !== "active") {
         throw new EditableArtifactNotEditableError(artifact.lifecycle);
@@ -1079,7 +1143,7 @@ export class EditableArtifactService {
       if (input.signal?.aborted) {
         throw new EditableArtifactSnapshotVerificationError("cancelled");
       }
-      const basis = await this.dependencies.store.readSnapshotCompactionBasis(
+      const basis = await this.dependencies.store.readCurrentKernelState(
         input.scope,
         input.artifactId,
         authorizationRevision,
@@ -1556,9 +1620,10 @@ function normalizeTransactionEnvelope(
   request: ApplyEditableArtifactTransactionRequest,
 ): ApplyEditableArtifactTransactionRequest {
   const record = plainDataRecord(request, "mutation envelope");
-  rejectUnknownKeys(record, ["intentBytes", "requestHash"], "mutation envelope");
+  rejectUnknownKeys(record, ["intentBytes", "requestHash", "expectedHead"], "mutation envelope");
   const rawIntentBytes = dataProperty(record, "intentBytes", true);
   const rawRequestHash = dataProperty(record, "requestHash", true);
+  const rawExpectedHead = dataProperty(record, "expectedHead", false);
   if (!(rawIntentBytes instanceof Uint8Array)) {
     throw new TypeError("Mutation intent bytes must be a Uint8Array");
   }
@@ -1571,9 +1636,25 @@ function normalizeTransactionEnvelope(
   if (typeof rawRequestHash !== "string") {
     throw new TypeError("Mutation request hash must be a string");
   }
+  let expectedHead: ApplyEditableArtifactTransactionRequest["expectedHead"];
+  if (rawExpectedHead !== undefined) {
+    const expected = plainDataRecord(rawExpectedHead, "mutation expected head");
+    rejectUnknownKeys(expected, ["sequence", "stateHash"], "mutation expected head");
+    const sequence = dataProperty(expected, "sequence", true);
+    const stateHash = dataProperty(expected, "stateHash", true);
+    if (typeof sequence !== "number" || typeof stateHash !== "string") {
+      throw new TypeError("Mutation expected head fields are malformed");
+    }
+    assertNonnegativeSafeInteger(sequence, "mutation expected head sequence");
+    expectedHead = Object.freeze({
+      sequence,
+      stateHash: editableArtifactStateHash(stateHash),
+    });
+  }
   return Object.freeze({
     intentBytes: rawIntentBytes.slice(),
     requestHash: editableArtifactRequestHash(rawRequestHash),
+    ...(expectedHead ? { expectedHead } : {}),
   });
 }
 

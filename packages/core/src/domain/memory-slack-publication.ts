@@ -4,6 +4,7 @@ import {
   type KnowledgeMemoryKind,
   type KnowledgeMemoryStatus,
 } from "@opengeni/contracts";
+import { sanitizeSlackPublicationText } from "./slack-publication-secret-safety";
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SELECTOR_SEGMENT_PATTERN = /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/;
@@ -197,7 +198,9 @@ export function evaluateMemorySlackPublication(
   const deliveryMode = effectiveDeliveryMode(policy, input.distribution);
   if (!deliveryMode) return denied("below_noise_policy");
 
-  const collapsedSummary = collapseText(input.distribution.shareSummary);
+  const collapsedSummary = sanitizeSlackPublicationText(
+    collapseText(input.distribution.shareSummary),
+  );
   if (!collapsedSummary) return denied("missing_summary");
   const summary = truncateUtf8(collapsedSummary, MEMORY_SLACK_SUMMARY_MAX_UTF8_BYTES);
 
@@ -397,7 +400,7 @@ function boundedOptionalText(
   value: string | null | undefined,
   maxBytes: number,
 ): { value: string | null; truncated: boolean } {
-  const collapsed = collapseText(value ?? "");
+  const collapsed = sanitizeSlackPublicationText(collapseText(value ?? ""));
   if (!collapsed) return { value: null, truncated: false };
   const bounded = truncateUtf8(collapsed, maxBytes);
   return {

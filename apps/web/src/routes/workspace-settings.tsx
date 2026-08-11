@@ -24,6 +24,7 @@ import { toast } from "sonner";
 
 import { CodexSubscriptionsCard } from "@/components/codex-connection";
 import { AiGatewayConnectionCard } from "@/components/ai-gateway-connection";
+import { VideoGenerationPreferenceRow } from "@/components/video-generation-settings";
 import { LoadErrorState } from "@/components/common";
 import { WorkspaceConfigLink } from "@/components/rail/workspace-config-link";
 import {
@@ -59,7 +60,7 @@ import {
   hasWorkspacePermission,
   workspaceMemberPermissionGroups,
 } from "@/lib/permissions";
-import type { ApiKey, WorkspaceMember } from "@/types";
+import type { ApiKey, SlackUserLinkAccessRequest, WorkspaceMember } from "@/types";
 
 function BrowseWorkspaceStrip(props: { workspaceId: string; canReadInsights: boolean }) {
   const items = WORKSPACE_BROWSE_ITEMS.filter(
@@ -126,6 +127,7 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
   const [busy, setBusy] = useState(false);
   const [editingName, setEditingName] = useState(false);
   const [apiKeysOpen, setApiKeysOpen] = useState(false);
+  const [gatewayRevision, setGatewayRevision] = useState(0);
   const canManageApiKeys = hasWorkspacePermission(
     context.accessContext,
     workspaceId,
@@ -366,6 +368,11 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
           <div className="divide-y divide-border/70 rounded-lg border border-border px-3">
             <MemoryPreferenceRow workspaceId={workspaceId} canManage={canRename} />
             <VoiceInputPreferenceRow workspaceId={workspaceId} canManage={canRename} />
+            <VideoGenerationPreferenceRow
+              workspaceId={workspaceId}
+              canManage={canDeleteWorkspace}
+              refreshKey={gatewayRevision}
+            />
             <CodexCompactionPreferenceRow workspaceId={workspaceId} canManage={canRename} />
           </div>
         </section>
@@ -377,7 +384,11 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
           canManage={canDeleteWorkspace}
         />
 
-        <AiGatewayConnectionCard workspaceId={workspaceId} canManage={canDeleteWorkspace} />
+        <AiGatewayConnectionCard
+          workspaceId={workspaceId}
+          canManage={canDeleteWorkspace}
+          onConnectionChange={() => setGatewayRevision((revision) => revision + 1)}
+        />
 
         <details
           className="rounded-lg border border-border"
@@ -559,6 +570,7 @@ function MembersSection({ workspaceId, canManage }: { workspaceId: string; canMa
   const context = useAppContext();
   const client = context.client;
   const [members, setMembers] = useState<WorkspaceMember[]>([]);
+  const [slackAccessRequests, setSlackAccessRequests] = useState<SlackUserLinkAccessRequest[]>([]);
   const [error, setError] = useState<Error | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [email, setEmail] = useState("");
@@ -574,15 +586,21 @@ function MembersSection({ workspaceId, canManage }: { workspaceId: string; canMa
 
   const refresh = useCallback(async () => {
     try {
-      setMembers(await client.listWorkspaceMembers(workspaceId));
+      const [nextMembers, nextSlackAccessRequests] = await Promise.all([
+        client.listWorkspaceMembers(workspaceId),
+        canManage ? client.listSlackUserLinkAccessRequests(workspaceId) : Promise.resolve([]),
+      ]);
+      setMembers(nextMembers);
+      setSlackAccessRequests(nextSlackAccessRequests);
       setError(null);
     } catch (caught) {
       setMembers([]);
+      setSlackAccessRequests([]);
       setError(caught instanceof Error ? caught : new Error(String(caught)));
     } finally {
       setLoaded(true);
     }
-  }, [client, workspaceId]);
+  }, [canManage, client, workspaceId]);
 
   useEffect(() => {
     void refresh();
@@ -678,6 +696,44 @@ function MembersSection({ workspaceId, canManage }: { workspaceId: string; canMa
     }
   }
 
+  async function approveSlackAccess(request: SlackUserLinkAccessRequest) {
+    setBusy(true);
+    try {
+      await client.approveSlackUserLinkAccessRequest(workspaceId, request.id, {
+        expectedVersion: request.version,
+        idempotencyKey: crypto.randomUUID(),
+        role: "member",
+        permissions: [...defaultWorkspaceMemberPermissions],
+      });
+      await refresh();
+      toast.success("Access approved and Slack identity linked");
+    } catch (caught) {
+      toast.error("Failed to approve access", {
+        description: caught instanceof Error ? caught.message : String(caught),
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function denySlackAccess(request: SlackUserLinkAccessRequest) {
+    setBusy(true);
+    try {
+      await client.denySlackUserLinkAccessRequest(workspaceId, request.id, {
+        expectedVersion: request.version,
+        idempotencyKey: crypto.randomUUID(),
+      });
+      setSlackAccessRequests((current) => current.filter((entry) => entry.id !== request.id));
+      toast.success("Access request denied");
+    } catch (caught) {
+      toast.error("Failed to deny access", {
+        description: caught instanceof Error ? caught.message : String(caught),
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <section className="grid gap-2">
       <div className="flex items-baseline justify-between gap-3">
@@ -719,6 +775,51 @@ function MembersSection({ workspaceId, canManage }: { workspaceId: string; canMa
             Add
           </Button>
         </form>
+      ) : null}
+
+      {canManage && slackAccessRequests.length > 0 ? (
+        <div className="grid gap-2 rounded-lg border border-border bg-surface-2/35 p-3">
+          <div>
+            <p className="text-xs font-medium text-fg">Pending Slack access requests</p>
+            <p className="mt-0.5 text-2xs text-fg-subtle">
+              Approval grants the standard collaborator role and completes Slack identity linking.
+            </p>
+          </div>
+          {slackAccessRequests.map((request) => (
+            <div
+              key={request.id}
+              className="flex flex-col gap-2 rounded-md border border-border/70 bg-surface px-3 py-2 sm:flex-row sm:items-center sm:justify-between"
+            >
+              <div className="min-w-0">
+                <p className="truncate text-xs font-medium text-fg">
+                  {request.subjectLabel ?? "Signed-in OpenGeni user"}
+                </p>
+                <p className="text-2xs text-fg-subtle">
+                  Expires {new Date(request.expiresAt).toLocaleString()}
+                </p>
+              </div>
+              <div className="flex shrink-0 gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={busy}
+                  onClick={() => void approveSlackAccess(request)}
+                >
+                  Approve
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  disabled={busy}
+                  onClick={() => void denySlackAccess(request)}
+                >
+                  Deny
+                </Button>
+              </div>
+            </div>
+          ))}
+        </div>
       ) : null}
 
       {error ? (

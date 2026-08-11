@@ -1,4 +1,9 @@
-import type { SessionEvent, SessionStatus, TimelineAnnotation } from "@opengeni/sdk";
+import {
+  parseMediaGenerationResult,
+  type SessionEvent,
+  type SessionStatus,
+  type TimelineAnnotation,
+} from "@opengeni/sdk";
 import fleetDecisionItem from "./fleet-decision-projection";
 import {
   CREDIT_EXHAUSTION_MESSAGE,
@@ -1423,6 +1428,7 @@ function machineInputMembers(value: unknown): MachineInputBatchItem["members"] {
     "agent_message",
     "agent_steer_instruction",
     "child_terminal_result",
+    "media_generation_result",
   ]);
   const classifications = new Set<MachineInputBatchItem["members"][number]["classification"]>([
     "success",
@@ -1441,16 +1447,24 @@ function machineInputMembers(value: unknown): MachineInputBatchItem["members"] {
             member.classification as MachineInputBatchItem["members"][number]["classification"],
           ) &&
           typeof member.sourceId === "string"
-          ? [
-              {
-                id: member.id,
-                kind: member.kind as MachineInputBatchItem["members"][number]["kind"],
-                classification:
-                  member.classification as MachineInputBatchItem["members"][number]["classification"],
-                sourceId: member.sourceId,
-                summary: stringValue(member.summary),
-              },
-            ]
+          ? (() => {
+              const kind = member.kind as MachineInputBatchItem["members"][number]["kind"];
+              const result =
+                kind === "media_generation_result"
+                  ? parseMediaGenerationResult(member.result)
+                  : null;
+              return [
+                {
+                  id: member.id,
+                  kind,
+                  classification:
+                    member.classification as MachineInputBatchItem["members"][number]["classification"],
+                  sourceId: member.sourceId,
+                  summary: stringValue(member.summary),
+                  ...(result ? { result } : {}),
+                },
+              ];
+            })()
           : [];
       })
     : [];

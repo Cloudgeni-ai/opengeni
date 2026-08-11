@@ -22,8 +22,8 @@ import {
   settleSessionAttemptInterruptions,
   setSessionGoalStatus,
   submitHumanPromptInTransaction,
-  withWorkspaceRls,
-  withWorkspaceSubjectRls,
+  withWorkspaceSessionActivityRls as withWorkspaceRls,
+  withWorkspaceSubjectSessionActivityRls as withWorkspaceSubjectRls,
 } from "../src/index";
 import * as schema from "../src/schema";
 
@@ -80,7 +80,7 @@ async function send(
     wakeFixture.grant.subjectId,
     (db) =>
       db.transaction((tx) =>
-        submitHumanPromptInTransaction(tx as typeof db, {
+        submitHumanPromptInTransaction(tx as unknown as typeof db, {
           accountId: wakeFixture.grant.accountId,
           workspaceId: wakeFixture.grant.workspaceId!,
           sessionId: wakeFixture.session.id,
@@ -100,7 +100,7 @@ async function send(
 async function pauseWorkspace(ctx: WakeFixture) {
   return await withWorkspaceRls(client.db, ctx.grant.workspaceId!, (db) =>
     db.transaction((tx) =>
-      mutateWorkspaceControlInTransaction(tx as typeof db, {
+      mutateWorkspaceControlInTransaction(tx as unknown as typeof db, {
         accountId: ctx.grant.accountId,
         workspaceId: ctx.grant.workspaceId!,
         actor: { type: "human", subjectId: ctx.grant.subjectId },
@@ -212,7 +212,7 @@ describe("transactional session workflow wake outbox", () => {
     const grant = access.workspaceGrants[0]!;
     await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
       db.transaction((tx) =>
-        mutateWorkspaceControlInTransaction(tx as typeof db, {
+        mutateWorkspaceControlInTransaction(tx as unknown as typeof db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId!,
           actor: { type: "human", subjectId: grant.subjectId },
@@ -495,7 +495,7 @@ describe("transactional session workflow wake outbox", () => {
     });
     const paused = await withWorkspaceRls(client.db, ctx.grant.workspaceId!, (db) =>
       db.transaction((tx) =>
-        mutateSessionControlInTransaction(tx as typeof db, {
+        mutateSessionControlInTransaction(tx as unknown as typeof db, {
           accountId: ctx.grant.accountId,
           workspaceId: ctx.grant.workspaceId!,
           sessionId: ctx.session.id,
@@ -537,7 +537,7 @@ describe("transactional session workflow wake outbox", () => {
     });
     const paused = await withWorkspaceRls(client.db, ctx.grant.workspaceId!, (db) =>
       db.transaction((tx) =>
-        mutateSessionControlInTransaction(tx as typeof db, {
+        mutateSessionControlInTransaction(tx as unknown as typeof db, {
           accountId: ctx.grant.accountId,
           workspaceId: ctx.grant.workspaceId!,
           sessionId: ctx.session.id,
@@ -589,7 +589,7 @@ describe("transactional session workflow wake outbox", () => {
     ]);
     await withWorkspaceRls(client.db, ctx.grant.workspaceId!, (db) =>
       db.transaction((tx) =>
-        mutateSessionControlInTransaction(tx as typeof db, {
+        mutateSessionControlInTransaction(tx as unknown as typeof db, {
           accountId: ctx.grant.accountId,
           workspaceId: ctx.grant.workspaceId!,
           sessionId: ctx.session.id,

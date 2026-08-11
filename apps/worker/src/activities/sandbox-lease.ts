@@ -485,6 +485,7 @@ export function createSandboxLeaseActivities(
         // removed immediately by the DB function; no path-duration guess belongs
         // in this lifecycle contract.
         turnHolderTtlMs: settings.sandboxLeaseTtlMs,
+        interactionHolderTtlMs: settings.sandboxInteractionHolderTtlMs,
         idleGraceMs: settings.sandboxIdleGraceMs,
       });
       const drainable = drainableInventory.slice(0, SANDBOX_REAPER_CHILD_DISPATCH_LIMIT);

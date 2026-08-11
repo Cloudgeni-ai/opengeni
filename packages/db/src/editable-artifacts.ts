@@ -585,6 +585,60 @@ export class EditableArtifactPersistenceError extends Error {
   }
 }
 
+/** Record that one session used an artifact; repeated calls only advance recency. */
+export async function touchEditableArtifactSessionLink(
+  db: Database,
+  scopeInput: PersistedEditableArtifactScope,
+  sessionIdInput: string,
+  artifactIdInput: string,
+): Promise<void> {
+  const scope = validateScope(scopeInput);
+  const sessionId = validateUuid(sessionIdInput, "session id");
+  const artifactId = validateStableId(artifactIdInput, "artifact id");
+  await withRlsContext(db, scope, async (tx) => {
+    await tx.execute(sql`insert into editable_artifact_session_links (
+        account_id, workspace_id, session_id, artifact_id
+      ) values (
+        ${scope.accountId}::uuid, ${scope.workspaceId}::uuid, ${sessionId}::uuid, ${artifactId}
+      )
+      on conflict (account_id, workspace_id, session_id, artifact_id)
+      do update set last_used_at = greatest(
+        editable_artifact_session_links.last_used_at,
+        now()
+      )`);
+  });
+}
+
+/** List the exact artifacts most recently used by one session. */
+export async function listEditableArtifactIdsForSession(
+  db: Database,
+  scopeInput: PersistedEditableArtifactScope,
+  sessionIdInput: string,
+  limitInput = 64,
+): Promise<readonly string[]> {
+  const scope = validateScope(scopeInput);
+  const sessionId = validateUuid(sessionIdInput, "session id");
+  const limit = validateInteger(limitInput, "editable artifact list limit", 1, 64);
+  return await withRlsContext(
+    db,
+    scope,
+    async (tx) => {
+      const rows = await rawRows<{ artifact_id: string }>(
+        tx,
+        sql`select artifact_id
+          from editable_artifact_session_links
+          where account_id = ${scope.accountId}::uuid
+            and workspace_id = ${scope.workspaceId}::uuid
+            and session_id = ${sessionId}::uuid
+          order by last_used_at desc, artifact_id
+          limit ${limit}`,
+      );
+      return Object.freeze(rows.map((row) => validateStableId(row.artifact_id, "artifact id")));
+    },
+    { isolationLevel: "repeatable read", accessMode: "read only" },
+  );
+}
+
 export const EDITABLE_ARTIFACT_INTENT_MAX_BYTES = 5 * 1024 * 1024;
 export const EDITABLE_ARTIFACT_KERNEL_TAIL_MAX_TRANSACTIONS = 100_000;
 export const EDITABLE_ARTIFACT_KERNEL_TAIL_MAX_BYTES = 64 * 1024 * 1024;
@@ -1392,7 +1446,7 @@ export class PostgresEditableArtifactStore {
     );
   }
 
-  async readSnapshotCompactionBasis(
+  async readCurrentKernelState(
     scopeInput: PersistedEditableArtifactScope,
     artifactIdInput: string,
     expectedAuthorizationRevisionInput: number,
@@ -4822,6 +4876,16 @@ function liveTicketFromRow(row: LiveTicketRow): PersistedEditableArtifactLiveTic
 function validateStableId(value: unknown, label: string): string {
   if (typeof value !== "string" || !/^[0-9a-f]{32}$/.test(value) || /^0+$/.test(value)) {
     throw new TypeError(`${label} must be fixed-width lowercase nonzero hexadecimal text`);
+  }
+  return value;
+}
+
+function validateUuid(value: unknown, label: string): string {
+  if (
+    typeof value !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(value)
+  ) {
+    throw new TypeError(`${label} must be a canonical UUID`);
   }
   return value;
 }

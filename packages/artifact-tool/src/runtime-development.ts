@@ -24,7 +24,6 @@ import {
   probeVerifiedArtifactSkillFacade,
   resolveCurrentArtifactRuntimeTarget,
   runArtifactRuntimeCli,
-  runVerifiedArtifactPublicationCli,
   type VerifiedArtifactRuntimeLocation,
 } from "./runtime-cli";
 
@@ -431,15 +430,9 @@ export async function runConfiguredArtifactRuntimeCli(
   environment: RuntimeEnvironment = process.env,
 ): Promise<string> {
   if (!usesDevelopmentRuntime(environment)) return await runArtifactRuntimeCli(args, environment);
-  if (args[0] === "prepare-publication") {
-    const location = await doctorVerifiedDevelopmentArtifactRuntime({ environment });
-    return await runVerifiedArtifactPublicationCli(args, location);
-  }
   const [command, format, ...rest] = args;
   if ((command !== "locate" && command !== "doctor") || format !== "--json" || rest.length > 0) {
-    invalid(
-      "Usage: opengeni-artifact-runtime <locate|doctor> --json | opengeni-artifact-runtime prepare-publication --json --modality <spreadsheet|document|presentation> --input <absolute-office-file> --snapshot-output <absolute-new-file>",
-    );
+    invalid("Usage: opengeni-artifact-runtime <locate|doctor> --json");
   }
   const location =
     command === "doctor"

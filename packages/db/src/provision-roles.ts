@@ -5,6 +5,7 @@ import {
   RUNTIME_READ_INSERT_TABLES,
   RUNTIME_READ_INSERT_UPDATE_TABLES,
   RUNTIME_READ_ONLY_TABLES,
+  RUNTIME_READ_UPDATE_TABLES,
 } from "./runtime-posture";
 import {
   classifyRoleRelationships,
@@ -478,6 +479,7 @@ async function grantAppRoleIfSchemaExists(
 ): Promise<void> {
   const runtimeFullDmlTables = `ARRAY[${RUNTIME_FULL_DML_TABLES.map(literal).join(", ")}]`;
   const runtimeReadOnlyTables = `ARRAY[${RUNTIME_READ_ONLY_TABLES.map(literal).join(", ")}]`;
+  const runtimeReadUpdateTables = `ARRAY[${RUNTIME_READ_UPDATE_TABLES.map(literal).join(", ")}]`;
   const runtimeReadInsertTables = `ARRAY[${RUNTIME_READ_INSERT_TABLES.map(literal).join(", ")}]`;
   const runtimeReadInsertUpdateTables = `ARRAY[${RUNTIME_READ_INSERT_UPDATE_TABLES.map(literal).join(", ")}]`;
   await sql.unsafe(`
@@ -505,6 +507,16 @@ BEGIN
       IF to_regclass(format('%I.%I', ${literal(schema)}, runtime_table)) IS NOT NULL THEN
         EXECUTE format(
           'GRANT SELECT ON TABLE %I.%I TO %I',
+          ${literal(schema)},
+          runtime_table,
+          ${literal(role)}
+        );
+      END IF;
+    END LOOP;
+    FOREACH runtime_table IN ARRAY ${runtimeReadUpdateTables} LOOP
+      IF to_regclass(format('%I.%I', ${literal(schema)}, runtime_table)) IS NOT NULL THEN
+        EXECUTE format(
+          'GRANT SELECT, UPDATE ON TABLE %I.%I TO %I',
           ${literal(schema)},
           runtime_table,
           ${literal(role)}

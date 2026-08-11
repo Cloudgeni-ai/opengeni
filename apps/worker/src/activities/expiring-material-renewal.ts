@@ -14,7 +14,7 @@ export type ExpiringMaterialRenewalController = {
 
 export type ExpiringMaterialRenewalPublicErrorClass =
   | "RunCredentialRenewalOperationError"
-  | "ToolspaceTokenRenewalOperationError";
+  | "CodemodeTokenRenewalOperationError";
 
 export type ExpiringMaterialRenewalOptions<
   T,

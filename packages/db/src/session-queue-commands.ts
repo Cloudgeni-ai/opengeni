@@ -17,7 +17,7 @@ import {
   type TimelineAnnotation,
 } from "@opengeni/contracts";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
-import type { Database } from "./database";
+import type { Database, SessionActivityDatabase } from "./database";
 import { withLosslessContentWriteVersion } from "./lossless-json";
 import { closePendingSessionToolCallsInTransaction } from "./session-tool-call-settlement";
 import {
@@ -419,7 +419,7 @@ async function loadQueuedTurns(
 }
 
 async function normalizeQueuePositions(
-  db: Database,
+  db: SessionActivityDatabase,
   workspaceId: string,
   sessionId: string,
   orderedIds: string[],
@@ -578,7 +578,7 @@ export async function saveComposerDraftInTransaction(
 }
 
 export async function moveQueuedTurnInTransaction(
-  db: Database,
+  db: SessionActivityDatabase,
   input: {
     accountId: string;
     workspaceId: string;
@@ -714,7 +714,7 @@ export async function moveQueuedTurnInTransaction(
 }
 
 export async function deleteSessionQueueItemInTransaction(
-  db: Database,
+  db: SessionActivityDatabase,
   input: {
     accountId: string;
     workspaceId: string;
@@ -845,7 +845,7 @@ export async function deleteSessionQueueItemInTransaction(
 }
 
 export async function editQueuedTurnInTransaction(
-  db: Database,
+  db: SessionActivityDatabase,
   input: {
     accountId: string;
     workspaceId: string;
@@ -1027,7 +1027,7 @@ export async function editQueuedTurnInTransaction(
 }
 
 export async function steerQueuedTurnInTransaction(
-  db: Database,
+  db: SessionActivityDatabase,
   input: {
     accountId: string;
     workspaceId: string;
@@ -1260,7 +1260,7 @@ export async function steerQueuedTurnInTransaction(
 }
 
 export async function submitHumanPromptInTransaction(
-  db: Database,
+  db: SessionActivityDatabase,
   input: {
     accountId: string;
     workspaceId: string;
@@ -1873,7 +1873,7 @@ export async function submitHumanPromptInTransaction(
 }
 
 export async function sendAgentMessageInTransaction(
-  db: Database,
+  db: SessionActivityDatabase,
   input: {
     accountId: string;
     workspaceId: string;
@@ -2077,7 +2077,7 @@ export async function sendAgentMessageInTransaction(
 }
 
 export async function steerAgentSessionInTransaction(
-  db: Database,
+  db: SessionActivityDatabase,
   input: {
     accountId: string;
     workspaceId: string;

@@ -20,7 +20,7 @@ import {
   createSession,
   submitHumanPromptInTransaction,
   updateSessionTitle,
-  withWorkspaceSubjectRls,
+  withWorkspaceSubjectSessionActivityRls,
   type Database,
 } from "@opengeni/db";
 import type { HumanInputQuestion } from "@opengeni/contracts";
@@ -439,9 +439,12 @@ async function sendAndClaim(
 ): Promise<{ turnId: string; attemptId: string; triggerEventId: string }> {
   // createSession(scripted-model) can leave a queued shell with no turn; the
   // unit-test fixture path is send → claim before the live worker wins.
-  await withWorkspaceSubjectRls(db, identity.workspaceId, identity.subjectId, (scoped) =>
-    scoped.transaction((tx) =>
-      submitHumanPromptInTransaction(tx as typeof scoped, {
+  await withWorkspaceSubjectSessionActivityRls(
+    db,
+    identity.workspaceId,
+    identity.subjectId,
+    (scoped) =>
+      submitHumanPromptInTransaction(scoped, {
         accountId: identity.accountId,
         workspaceId: identity.workspaceId,
         sessionId,
@@ -454,7 +457,6 @@ async function sendAndClaim(
         reasoningEffortFallback: "low",
         source: "user",
       }),
-    ),
   );
 
   for (let i = 0; i < 40; i += 1) {

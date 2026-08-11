@@ -22,7 +22,7 @@ everything else is machinery you receive from OpenGeni rather than choose.
 | Codex subscription tokens | ChatGPT access/refresh/id tokens, encrypted | Device-code login flow | OpenAI; OpenGeni stores encrypted, never returns them | Provider-defined, auto-refreshed | Workspaces using a ChatGPT/Codex subscription as a model provider |
 | Git credential-binding secret | Contained GitHub/GitLab/Azure DevOps provider token, or host smart-Git broker bearer | OpenGeni or embedding host per repository binding | Git provider or host HTTPS smart-Git broker | Provider/host-defined, independently renewed during active managed-sandbox turns | Sandbox git operations; direct provider tokens may also reach the matching provider CLI, while broker bearers are Git-only (delivered via hashed binding files, never baked into manifests/config/remote URIs) |
 | Host run credentials | Provider-neutral environment values and credential files | Embedding host through `ConnectionCredentialsPort.runCredentials` | Upstream cloud/service CLIs and SDKs | Host-defined, proactively renewed during the active attempt | Agent commands and session-scoped Channel-A terminal processes; never the box-global shared `ttyd` process |
-| Sandbox Toolspace bearer | `ogd_…` in a hashed per-session file selected through `OPENGENI_TOOLSPACE_TOKEN_FILE` | OpenGeni worker from the deployment delegation secret | Toolspace MCP endpoint | One hour per bearer, proactively renewed during the active attempt | Packaged `ogtool` and direct MCP JSON-RPC from the session sandbox or Channel-A terminal; a custom environment may receive an exact `OPENGENI_OGTOOL_PACKAGE_SPEC`, while group-global ttyd receives no bearer pointer |
+| Sandbox Codemode bearer | `ogd_…` in an attempt-scoped file selected through `OPENGENI_CODEMODE_TOKEN_FILE` | OpenGeni worker from first-party signing authority | Exact-attempt Codemode API | One hour per bearer, proactively renewed during the active attempt | Packaged `ogtool` or `@opengeni/codemode` from the session sandbox or Channel-A terminal; a custom environment may receive an exact `OPENGENI_OGTOOL_PACKAGE_SPEC`, while group-global ttyd receives no bearer pointer |
 | Signed storage URLs | Time-limited URL | API via object storage | Storage provider | Minutes | File upload/download without exposing storage credentials |
 
 Rules that hold across the table:
@@ -44,7 +44,7 @@ Rules that hold across the table:
   generations and renewed throughout the exact active attempt. The active and
   immediately previous host generation are retained for one-rotation process
   overlap; new processes always source the active pointer. Session MCP bearers
-  are resolved at request time. Sandbox Toolspace bearers are re-signed with the
+  are resolved at request time. Sandbox Codemode bearers are re-signed with the
   same frozen session/run authority and atomically replace the stable token file.
 - **Sandbox git auth is pointer-based and binding-scoped.** The manifest carries stable paths such
   as `OPENGENI_GIT_CREDENTIALS_DIR` and `OPENGENI_GIT_TOKEN_FILE`, while the

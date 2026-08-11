@@ -1,5 +1,12 @@
 # @opengeni/codex
 
+## 0.2.15
+
+### Patch Changes
+
+- Updated dependencies [2f4ce5e]
+  - @opengeni/network@0.2.2
+
 ## 0.2.14
 
 ### Patch Changes

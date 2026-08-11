@@ -15,7 +15,9 @@ import type {
   CodexUsageWindow,
 } from "@opengeni/sdk";
 import {
+  CheckIcon,
   ChevronDownIcon,
+  CopyIcon,
   ExternalLinkIcon,
   Loader2Icon,
   PencilIcon,
@@ -624,6 +626,109 @@ function resetBadgeTone(remainingMs: number | null): "urgent" | "soon" | "ok" {
   return "ok";
 }
 
+const CODE_COPIED_FEEDBACK_MS = 1600;
+
+type ClipboardModule = {
+  copyTextToClipboard: (text: string) => Promise<boolean>;
+};
+
+const loadSharedClipboard = (): Promise<ClipboardModule> => import("@opengeni/react/clipboard");
+
+export function CodexDeviceCodePanel({
+  userCode,
+  verificationUri,
+  loadClipboard = loadSharedClipboard,
+}: {
+  userCode: string;
+  verificationUri: string;
+  loadClipboard?: () => Promise<ClipboardModule>;
+}) {
+  const [copied, setCopied] = useState(false);
+  const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const copyAttemptRef = useRef(0);
+
+  useEffect(() => {
+    copyAttemptRef.current += 1;
+    setCopied(false);
+    return () => {
+      copyAttemptRef.current += 1;
+      if (copiedTimerRef.current !== null) {
+        clearTimeout(copiedTimerRef.current);
+        copiedTimerRef.current = null;
+      }
+    };
+  }, [userCode]);
+
+  const copyCode = useCallback(async () => {
+    const attempt = ++copyAttemptRef.current;
+    if (copiedTimerRef.current !== null) {
+      clearTimeout(copiedTimerRef.current);
+      copiedTimerRef.current = null;
+    }
+    setCopied(false);
+
+    const { copyTextToClipboard } = await loadClipboard();
+    if (attempt !== copyAttemptRef.current) return;
+    const ok = await copyTextToClipboard(userCode);
+    if (attempt !== copyAttemptRef.current) return;
+    if (!ok) {
+      toast.error("Couldn't copy the code", {
+        description: "Copy it manually instead.",
+      });
+      return;
+    }
+    setCopied(true);
+    toast.success("Code copied");
+    if (copiedTimerRef.current !== null) {
+      clearTimeout(copiedTimerRef.current);
+    }
+    copiedTimerRef.current = setTimeout(() => {
+      if (attempt !== copyAttemptRef.current) return;
+      copiedTimerRef.current = null;
+      setCopied(false);
+    }, CODE_COPIED_FEEDBACK_MS);
+  }, [loadClipboard, userCode]);
+
+  return (
+    <div className="grid gap-2 rounded-md border border-border bg-bg p-3">
+      <div className="text-xs text-fg-muted">
+        Enter this code at the OpenAI page (opened in a new tab). Authorization continues if you
+        navigate away.
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <code
+          data-codex-device-code=""
+          className="rounded bg-surface-2 px-3 py-1.5 text-lg font-semibold tracking-widest"
+        >
+          {userCode}
+        </code>
+        <Button
+          type="button"
+          variant="secondary"
+          size="sm"
+          aria-label={copied ? "Code copied" : "Copy code"}
+          onClick={() => void copyCode()}
+        >
+          {copied ? (
+            <CheckIcon className="size-3.5" aria-hidden="true" />
+          ) : (
+            <CopyIcon className="size-3.5" aria-hidden="true" />
+          )}
+          {copied ? "Copied" : "Copy code"}
+        </Button>
+        <Button asChild type="button" variant="secondary" size="sm">
+          <a href={verificationUri} target="_blank" rel="noopener noreferrer">
+            Open auth page <ExternalLinkIcon className="size-3.5" />
+          </a>
+        </Button>
+      </div>
+      <div className="flex items-center gap-2 text-xs text-fg-subtle">
+        <Loader2Icon className="size-3.5 animate-spin" /> Waiting for authorization…
+      </div>
+    </div>
+  );
+}
+
 export function CodexSubscriptionsCard({
   workspaceId,
   canManage,
@@ -1112,25 +1217,10 @@ export function CodexSubscriptionsCard({
           <Loader2Icon className="size-3.5 animate-spin" /> Loading subscriptions…
         </div>
       ) : pending ? (
-        <div className="grid gap-2 rounded-md border border-border bg-bg p-3">
-          <div className="text-xs text-fg-muted">
-            Enter this code at the OpenAI page (opened in a new tab). Authorization continues if you
-            navigate away.
-          </div>
-          <div className="flex items-center gap-2">
-            <code className="rounded bg-surface-2 px-3 py-1.5 text-lg font-semibold tracking-widest">
-              {pending.userCode}
-            </code>
-            <Button asChild type="button" variant="secondary" size="sm">
-              <a href={pending.verificationUri} target="_blank" rel="noopener noreferrer">
-                Open auth page <ExternalLinkIcon className="size-3.5" />
-              </a>
-            </Button>
-          </div>
-          <div className="flex items-center gap-2 text-xs text-fg-subtle">
-            <Loader2Icon className="size-3.5 animate-spin" /> Waiting for authorization…
-          </div>
-        </div>
+        <CodexDeviceCodePanel
+          userCode={pending.userCode}
+          verificationUri={pending.verificationUri}
+        />
       ) : accounts.length === 0 ? (
         <div className="flex flex-wrap items-center justify-between gap-2">
           <p className="text-xs text-fg-subtle">

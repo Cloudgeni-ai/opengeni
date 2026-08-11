@@ -17,7 +17,74 @@
 # blocks the builder forever otherwise.
 #
 # The CI push of this image to GHCR is P-Deploy, NOT this PR.
-FROM ubuntu:22.04
+FROM rust:1.82-bookworm AS computer-native-build
+
+WORKDIR /src/agent
+COPY agent .
+RUN set -eux; \
+    cargo build --locked --release -p opengeni-computer-native; \
+    mkdir -p /out; \
+    install -m 0755 target/release/opengeni-computer-native /out/opengeni-computer-native
+
+FROM oven/bun:1.3.14 AS bun-runtime
+
+FROM --platform=$BUILDPLATFORM oven/bun:1.3.14 AS browserd-build
+
+WORKDIR /src
+COPY . .
+RUN bun install --frozen-lockfile
+
+# Install the exact lock-resolved Codemode package closure for ordinary Bun
+# programs. The CLI and imported module therefore share source, catalog rules,
+# and transport behavior without resolving mutable registry versions at runtime.
+RUN set -eux; \
+    runtime=/out/codemode-runtime; \
+    install -d -m 0755 "$runtime/node_modules/@opengeni/codemode" \
+                        "$runtime/node_modules/@opengeni/contracts" \
+                        "$runtime/node_modules/@noble"; \
+    install -m 0644 packages/codemode/package.json "$runtime/node_modules/@opengeni/codemode/package.json"; \
+    cp -a packages/codemode/src "$runtime/node_modules/@opengeni/codemode/src"; \
+    install -m 0644 packages/contracts/package.json "$runtime/node_modules/@opengeni/contracts/package.json"; \
+    cp -a packages/contracts/src "$runtime/node_modules/@opengeni/contracts/src"; \
+    cp -aL packages/codemode/node_modules/ajv "$runtime/node_modules/ajv"; \
+    ajv_modules="$(dirname "$(readlink -f packages/codemode/node_modules/ajv)")"; \
+    for dependency in fast-deep-equal fast-uri json-schema-traverse require-from-string; do \
+      cp -aL "$ajv_modules/$dependency" "$runtime/node_modules/$dependency"; \
+    done; \
+    cp -aL packages/contracts/node_modules/zod "$runtime/node_modules/zod"; \
+    cp -aL packages/contracts/node_modules/@noble/hashes "$runtime/node_modules/@noble/hashes"; \
+    test -f "$runtime/node_modules/@opengeni/codemode/src/index.ts"
+
+RUN cd packages/ogtool && bun run build
+
+ARG TARGETARCH
+COPY --from=bun-runtime /usr/local/bin/bun /tmp/opengeni-target-bun
+RUN set -eux; \
+    arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
+    case "$arch" in \
+      amd64) native=agent-browser-linux-x64; expected=b7bc3dfcf0a7326c1f5a60423163259ba2349eebfa5bd2e70e111af743da4a49 ;; \
+      arm64) native=agent-browser-linux-arm64; expected=6ccaba1eb26a0e6f5c23c59d2c63e6e0237fde82713cfdb543ba506490cac9c1 ;; \
+      *) echo "unsupported browser controller architecture=${arch}" >&2; exit 1 ;; \
+    esac; \
+    mkdir -p /out; \
+    bun build --compile --compile-executable-path=/tmp/opengeni-target-bun \
+      packages/browserd/src/main.ts \
+      --outfile /out/opengeni-browserd; \
+    chmod 0755 /out/opengeni-browserd; \
+    install -m 0755 "packages/browserd/node_modules/agent-browser/bin/${native}" /out/agent-browser; \
+    test "$(sha256sum /out/agent-browser | awk '{print $1}')" = "$expected"; \
+    { \
+      printf '%s  %s\n' "$(sha256sum /out/opengeni-browserd | awk '{print $1}')" /usr/local/bin/opengeni-browserd; \
+      printf '%s  %s\n' "$expected" /usr/local/lib/opengeni/agent-browser; \
+    } > /out/SHA256SUMS
+
+COPY --from=computer-native-build /out/opengeni-computer-native /out/opengeni-computer-native
+RUN printf '%s  %s\n' \
+      "$(sha256sum /out/opengeni-computer-native | awk '{print $1}')" \
+      /usr/local/lib/opengeni/opengeni-computer-native \
+      >> /out/SHA256SUMS
+
+FROM debian:13-slim
 
 ARG TERRAFORM_VERSION=1.13.3
 ARG CHECKOV_VERSION=3.2.526
@@ -26,6 +93,8 @@ ARG WEBSOCKIFY_REF=v0.12.0
 ARG TTYD_VERSION=1.7.7
 ARG NODE_MAJOR=20
 ARG TARGETARCH
+ARG OPENGENI_GOOGLE_CHROME_VERSION=151.0.7922.108-1
+ARG OPENGENI_CHROMIUM_VERSION=151.0.7922.108-1~deb13u1
 
 # noninteractive + a fixed TZ on EVERY apt layer (mandatory — see header).
 ENV DEBIAN_FRONTEND=noninteractive
@@ -38,7 +107,7 @@ RUN set -eux; \
     export DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC; \
     base_packages=" \
         bash ca-certificates coreutils curl gpg git jq openssh-client \
-        fuse3 procps rclone ripgrep unzip wget python3 python3-pip software-properties-common \
+        fuse3 procps rclone ripgrep unzip wget python3 python3-pip python3-venv \
         apt-transport-https net-tools netcat-openbsd sudo util-linux xxd file \
     "; \
     for attempt in 1 2 3; do \
@@ -48,9 +117,8 @@ RUN set -eux; \
     done; \
     rm -rf /var/lib/apt/lists/*
 
-# Node.js LTS from NodeSource. Ubuntu 22.04's apt `nodejs` is Node 12 — too old
-# to run ogtool; pin the 20.x LTS line via the NodeSource apt repo, mirroring the
-# gh keyring+repo layer.
+# Node.js LTS from NodeSource. Pin the 20.x LTS line instead of inheriting the
+# distribution's moving Node release, mirroring the gh keyring+repo layer.
 RUN set -eux; \
     export DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC; \
     mkdir -p -m 755 /etc/apt/keyrings; \
@@ -78,6 +146,7 @@ RUN set -eux; \
         xkb-data x11-xkb-utils \
         xfce4 xfce4-terminal dbus-x11 \
         at-spi2-core \
+        tini \
         x11vnc \
         xdotool scrot ffmpeg \
         libgl1-mesa-dri \
@@ -102,10 +171,9 @@ RUN set -eux; dbus-uuidgen --ensure=/var/lib/dbus/machine-id; \
     ln -sf /var/lib/dbus/machine-id /etc/machine-id
 
 # ---- Layer 5: a REAL in-box browser (google-chrome-stable) + container-safe wiring ----
-# The spike PROVED `chromium-browser` on Jammy is a SNAP-TRANSITION STUB (a shell
-# script that demands the chromium snap; with no snapd in the container it does NOT
-# install a runnable browser). The canonical image ships the real Google Chrome deb
-# (the "apt-key dance" is unavoidable and correct).
+# The canonical image ships Google Chrome on amd64 and Debian Chromium on arm64.
+# Both are real CDP-capable engines; there is no Ubuntu chromium snap-transition
+# stub and no Firefox-only architecture that silently breaks browser automation.
 #
 # CONTAINER-SAFE LAUNCH (the bug this layer fixes): the box runs as ROOT, and Chrome
 # refuses to start as root without --no-sandbox — so the stock XFCE/exo "Web Browser"
@@ -119,10 +187,10 @@ RUN set -eux; dbus-uuidgen --ensure=/var/lib/dbus/machine-id; \
 # (google-chrome, google-chrome-stable, chromium, chromium-browser) to the wrapper
 # itself. Pointing OPENGENI_BROWSER_BIN at /usr/bin/google-chrome-stable would make the
 # wrapper exec a symlink that resolves straight back to the wrapper => infinite loop.
-# /opt/google/chrome/google-chrome (chrome deb) and /usr/lib/firefox-esr/firefox-esr
-# (firefox-esr deb) are the real launcher binaries and are NOT aliased.
+# /opt/google/chrome/google-chrome (Chrome deb) and /usr/lib/chromium/chromium
+# (Debian Chromium) are real engine binaries and are NOT aliased.
 ARG OPENGENI_BROWSER_BIN_AMD64=/opt/google/chrome/google-chrome
-ARG OPENGENI_BROWSER_BIN_ARM64=/usr/lib/firefox-esr/firefox-esr
+ARG OPENGENI_BROWSER_BIN_ARM64=/usr/lib/chromium/chromium
 
 # (i) the wrapper + the default-browser config files (one COPY, used right below).
 COPY docker/desktop/opengeni-browser.sh            /usr/local/bin/opengeni-browser
@@ -141,22 +209,26 @@ RUN set -eux; \
             > /etc/apt/sources.list.d/google-chrome.list; \
         for attempt in 1 2 3; do \
             rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/partial/*; \
-            apt-get update && apt-get install -y --no-install-recommends google-chrome-stable && break; \
+            apt-get update && apt-get install -y --no-install-recommends \
+                "google-chrome-stable=${OPENGENI_GOOGLE_CHROME_VERSION}" && break; \
             if [ "$attempt" = "3" ]; then exit 1; fi; sleep $((attempt * 5)); \
         done; \
         BROWSER_BIN="${OPENGENI_BROWSER_BIN_AMD64}"; \
     else \
         for attempt in 1 2 3; do \
             rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/partial/*; \
-            apt-get update && apt-get install -y --no-install-recommends firefox-esr && break; \
+            apt-get update && apt-get install -y --no-install-recommends \
+                "chromium=${OPENGENI_CHROMIUM_VERSION}" && break; \
             if [ "$attempt" = "3" ]; then exit 1; fi; sleep $((attempt * 5)); \
         done; \
         BROWSER_BIN="${OPENGENI_BROWSER_BIN_ARM64}"; \
     fi; \
     rm -rf /var/lib/apt/lists/*; \
-    # the wrapper reads OPENGENI_BROWSER_BIN; bake the per-arch real binary into the
-    # process env (ENV below) AND record it so the wrapper resolves it deterministically.
-    echo "OPENGENI_BROWSER_BIN baked as ${BROWSER_BIN}"; \
+    # Persist the resolved per-architecture engine. Docker ENV cannot retain a shell
+    # variable chosen inside this RUN layer, so both launchers read this immutable file.
+    install -d -m 0755 /etc/opengeni; \
+    printf '%s\n' "${BROWSER_BIN}" > /etc/opengeni/browser-engine; \
+    chmod 0644 /etc/opengeni/browser-engine; \
     chmod 0755 /usr/local/bin/opengeni-browser; \
     bash -n /usr/local/bin/opengeni-browser; \
     # (ii) make the wrapper the XFCE default WebBrowser so exo-open --launch WebBrowser
@@ -193,23 +265,15 @@ RUN set -eux; \
         ln -sf /usr/local/bin/opengeni-browser "/usr/local/bin/${alias_name}"; \
     done; \
     # x-www-browser stays owned by update-alternatives (set in step iii above); leave it.
-    # (vi) prove the wrapper actually launches the real engine (--version, NO_AT_BRIDGE
-    #     keeps it quiet). Uses the baked env via the ENV directive below at runtime;
-    #     here we pass it inline so the build-time check exercises the same path.
-    OPENGENI_BROWSER_BIN="${BROWSER_BIN}" /usr/local/bin/opengeni-browser --version; \
+    # (vi) prove the wrapper reads the persisted path and launches the real engine.
+    /usr/local/bin/opengeni-browser --version; \
     # (vii) prove the NAME aliases resolve to the wrapper AND launch (loop-free): invoke
     #     via the alias names (PATH resolution) with the real engine baked in. If any name
     #     had recursed into the wrapper the process would spin/EMFILE instead of printing
     #     a version; a clean --version here is the no-loop proof.
     for alias_name in google-chrome google-chrome-stable chromium chromium-browser; do \
-        OPENGENI_BROWSER_BIN="${BROWSER_BIN}" "${alias_name}" --version; \
+        "${alias_name}" --version; \
     done
-
-# the per-arch real engine the wrapper execs (amd64 chrome by default; the ARM build
-# arg path overrides at build time). Lives in process env so the wrapper picks it up
-# from BOTH the human exo launch and the agent computer-use launch. ABSOLUTE real-binary
-# path — NOT /usr/bin/google-chrome-stable, which is now a wrapper alias (loop guard).
-ENV OPENGENI_BROWSER_BIN=/opt/google/chrome/google-chrome
 
 # ---- Layer 6: terraform / checkov / az / gh (parity with docker/sandbox.Dockerfile) ----
 RUN set -eux; \
@@ -217,7 +281,11 @@ RUN set -eux; \
     case "${arch}" in amd64) tfa="amd64" ;; arm64|aarch64) tfa="arm64" ;; *) echo "unsupported architecture=${arch}" >&2; exit 1 ;; esac; \
     curl -fsSLo /tmp/terraform.zip "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_${tfa}.zip"; \
     unzip /tmp/terraform.zip -d /usr/local/bin; rm /tmp/terraform.zip; terraform version
-RUN set -eux; pip3 install --no-cache-dir "checkov==${CHECKOV_VERSION}"; checkov --version
+RUN set -eux; \
+    python3 -m venv /opt/checkov; \
+    /opt/checkov/bin/pip install --no-cache-dir "checkov==${CHECKOV_VERSION}"; \
+    ln -s /opt/checkov/bin/checkov /usr/local/bin/checkov; \
+    checkov --version
 RUN set -eux; curl -fsSL https://aka.ms/InstallAzureCLIDeb | bash; az version
 RUN set -eux; \
     export DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC; \
@@ -236,7 +304,7 @@ RUN set -eux; \
     gh --version
 
 # ---- Layer 6b: ttyd static binary (REAL PTY-over-websocket; Channel-B terminal) ----
-# Pinned static build from the upstream release (no apt package on Jammy). The PTY
+# Pinned static build from the upstream release. The PTY
 # port (7681) is exposed over the SAME Modal raw-TLS tunnel as the desktop noVNC.
 RUN set -eux; \
     arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
@@ -250,33 +318,54 @@ COPY docker/desktop/opengeni-desktop-up.sh    /usr/local/bin/opengeni-desktop-up
 COPY docker/desktop/opengeni-desktop-down.sh  /usr/local/bin/opengeni-desktop-down
 COPY docker/desktop/opengeni-terminal-up.sh   /usr/local/bin/opengeni-terminal-up
 COPY docker/desktop/opengeni-terminal-down.sh /usr/local/bin/opengeni-terminal-down
+COPY docker/desktop/opengeni-browserd-up.sh    /usr/local/bin/opengeni-browserd-up
+COPY docker/desktop/opengeni-browserd-down.sh  /usr/local/bin/opengeni-browserd-down
 COPY docker/desktop/opengeni-record.sh        /usr/local/bin/opengeni-record
 COPY docker/opengeni-git-askpass              /usr/local/bin/opengeni-git-askpass
 COPY packages/ogtool/package.json             /opt/opengeni/ogtool/package.json
-COPY packages/ogtool/bin/ogtool.cjs           /opt/opengeni/ogtool/bin/ogtool.cjs
+COPY --from=browserd-build /src/packages/ogtool/dist/bin/ogtool.cjs /opt/opengeni/ogtool/bin/ogtool.cjs
+COPY --from=browserd-build /out/opengeni-browserd /usr/local/bin/opengeni-browserd
+COPY --from=bun-runtime /usr/local/bin/bun /usr/local/bin/bun
+COPY --from=browserd-build /out/agent-browser /usr/local/lib/opengeni/agent-browser
+COPY --from=browserd-build /out/opengeni-computer-native /usr/local/lib/opengeni/opengeni-computer-native
+COPY --from=browserd-build /out/SHA256SUMS /usr/local/share/opengeni/browserd-SHA256SUMS
+COPY --from=browserd-build /out/codemode-runtime /opt/opengeni/codemode-runtime
 RUN set -eux; \
     chmod 0755 /usr/local/bin/opengeni-desktop-up /usr/local/bin/opengeni-desktop-down \
                /usr/local/bin/opengeni-terminal-up /usr/local/bin/opengeni-terminal-down \
-               /usr/local/bin/opengeni-record /usr/local/bin/opengeni-git-askpass; \
+               /usr/local/bin/opengeni-browserd-up /usr/local/bin/opengeni-browserd-down \
+               /usr/local/bin/opengeni-record /usr/local/bin/opengeni-git-askpass \
+               /usr/local/bin/opengeni-browserd /usr/local/lib/opengeni/agent-browser \
+               /usr/local/lib/opengeni/opengeni-computer-native; \
     chmod 0755 /opt/opengeni/ogtool/bin/ogtool.cjs; \
     ln -s /opt/opengeni/ogtool/bin/ogtool.cjs /usr/local/bin/ogtool; \
     node --check /opt/opengeni/ogtool/bin/ogtool.cjs; \
     test -n "$(ogtool --version)"; \
+    NODE_PATH=/opt/opengeni/codemode-runtime/node_modules bun -e 'const module = await import("@opengeni/codemode"); if (typeof module.CodemodeClient !== "function" || typeof module.openGeni !== "object") process.exit(1)'; \
     bash -n /usr/local/bin/opengeni-desktop-up; \
     bash -n /usr/local/bin/opengeni-desktop-down; \
     bash -n /usr/local/bin/opengeni-terminal-up; \
     bash -n /usr/local/bin/opengeni-terminal-down; \
+    bash -n /usr/local/bin/opengeni-browserd-up; \
+    bash -n /usr/local/bin/opengeni-browserd-down; \
+    sha256sum -c /usr/local/share/opengeni/browserd-SHA256SUMS; \
     bash -n /usr/local/bin/opengeni-record
 
 ENV HOME=/workspace
 ENV DISPLAY=:0
 ENV OPENGENI_DESKTOP_STREAM_PORT=6080
 ENV OPENGENI_TERMINAL_STREAM_PORT=7681
+ENV OPENGENI_BROWSERD_PORT=7682
+ENV OPENGENI_BROWSERD_AGENT_BROWSER_BINARY=/usr/local/lib/opengeni/agent-browser
+ENV OPENGENI_BROWSERD_COMPUTER_NATIVE_BINARY=/usr/local/lib/opengeni/opengeni-computer-native
+ENV OPENGENI_BROWSERD_COMPUTER_ENVIRONMENT_MODE=isolated_linux
+ENV NODE_PATH=/opt/opengeni/codemode-runtime/node_modules
 EXPOSE 6080
 EXPOSE 7681
+EXPOSE 7682
 WORKDIR /workspace
 
-# No CMD/ENTRYPOINT override of substance: the provider runs its own keep-alive
-# root (Modal pins this to `sleep infinity`); the desktop stack is launched via
-# exec by ensureDisplayStack, NOT as the container CMD.
+# The managed box hosts many independently ending GUI process trees. PID 1 must
+# reap their D-Bus/AT-SPI descendants after exact controller teardown.
+ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["sleep", "infinity"]

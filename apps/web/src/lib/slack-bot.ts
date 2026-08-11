@@ -10,6 +10,8 @@ export type OpenGeniSlackBotUiMetadata = {
   credentialLabel: typeof OPENGENI_SLACK_BOT_CREDENTIAL_LABEL;
   slackTeamId: string;
   slackTeamName: string;
+  botId: string;
+  botUserId: string;
   botDisplayName: "OpenGeni";
 };
 
@@ -28,6 +30,8 @@ export function openGeniSlackBotUiMetadata(
     metadata.credentialLabel !== OPENGENI_SLACK_BOT_CREDENTIAL_LABEL ||
     typeof metadata.slackTeamId !== "string" ||
     typeof metadata.slackTeamName !== "string" ||
+    typeof metadata.botId !== "string" ||
+    typeof metadata.botUserId !== "string" ||
     metadata.botDisplayName !== "OpenGeni"
   ) {
     return null;

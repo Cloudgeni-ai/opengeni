@@ -520,6 +520,15 @@ export type ApplyEditableArtifactTransactionRequest = Readonly<{
   /** Exact owned canonical OGATX001 bytes. */
   intentBytes: Uint8Array;
   requestHash: EditableArtifactRequestHash;
+  /**
+   * Optional exact-head fence for clients that author from a bounded read.
+   * Browser replicas deliberately omit it so spreadsheet CRDT operations can
+   * merge. Agent edits always provide it and must re-inspect after a conflict.
+   */
+  expectedHead?: Readonly<{
+    sequence: number;
+    stateHash: EditableArtifactStateHash;
+  }>;
 }>;
 
 /** Metadata indexed for authorship/selective undo; command data stays in OGACO. */

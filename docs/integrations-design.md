@@ -197,7 +197,7 @@ New permissions `connections:read` (metadata/status only — never secrets) and 
 
 Subject-ownership is enforced in helper predicates + domain logic (DB RLS is account/workspace-scoped and cannot see the caller subject): readers see shared rows plus their own subject rows; admins may revoke subject-owned rows but not use them or read beyond provider + status; the broker re-checks at resolve time.
 
-**Resolved embedding boundary:** the worker still calls `prepareTools` with the synthetic technical subject `worker:first-party-mcp`, so OpenGeni's standalone connection-table resolver intentionally accepts **workspace-shared connections only**. The host MCP credential port separately receives the durable turn's immutable initiator and must use that field—not the technical caller—for subject authorization. Toolspace follows the same rule.
+**Resolved embedding boundary:** the worker still calls `prepareTools` with the synthetic technical subject `worker:first-party-mcp`, so OpenGeni's standalone connection-table resolver intentionally accepts **workspace-shared connections only**. The host MCP credential port separately receives the durable turn's immutable initiator and must use that field—not the technical caller—for subject authorization. Codemode follows the same rule.
 
 `subjectScope: "subject"` remains representable for forward compatibility, but
 the standalone table resolver currently fails it closed because it does not load

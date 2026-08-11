@@ -7,6 +7,7 @@ import {
 } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { createHash, randomUUID } from "node:crypto";
+import { sql } from "drizzle-orm";
 import {
   activateRigVersion,
   claimRigVersionProviderImageBuild,
@@ -18,6 +19,7 @@ import {
   createRigChange,
   createRigVersion,
   createRigVersionForChangePromotion,
+  createSession,
   deleteRig,
   deleteRigIfNoActiveSessions,
   finalizeRigVersionProviderImageBuild,
@@ -35,6 +37,7 @@ import {
   RigChangeTransitionError,
   updateRig,
   updateRigChangeStatus,
+  withWorkspaceSessionActivityRls,
   type Database,
   type DbClient,
 } from "../src/index";
@@ -79,18 +82,17 @@ async function insertSessionForRig(
   ws: { accountId: string; workspaceId: string },
   rigId: string,
 ): Promise<string> {
-  const [row] = await shared!.admin<{ id: string }[]>`
-    insert into sessions (
-      account_id, workspace_id, initial_message, model, sandbox_backend,
-      sandbox_group_id, rig_id, tool_policy
-    )
-    values (
-      ${ws.accountId}, ${ws.workspaceId}, 'hello', 'gpt-5.6-sol', 'none',
-      gen_random_uuid(), ${rigId},
-      jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
-    )
-    returning id`;
-  return row!.id;
+  const session = await createSession(db, {
+    accountId: ws.accountId,
+    workspaceId: ws.workspaceId,
+    initialMessage: "hello",
+    resources: [],
+    metadata: {},
+    model: "gpt-5.6-sol",
+    sandboxBackend: "none",
+    rigId,
+  });
+  return session.id;
 }
 
 function rigProviderImage(overrides: Partial<RigProviderImage> = {}): RigProviderImage {
@@ -816,7 +818,11 @@ describe("rig delete guard", () => {
     });
     expect(await getRig(db, ws.workspaceId, rig.id)).not.toBeNull();
 
-    await shared!.admin`update sessions set status = 'cancelled' where id = ${sessionId}`;
+    await withWorkspaceSessionActivityRls(db, ws.workspaceId, async (tx) => {
+      await tx.execute(
+        sql`update sessions set status = 'cancelled', updated_at = now() where workspace_id = ${ws.workspaceId} and id = ${sessionId}`,
+      );
+    });
     expect(await deleteRigIfNoActiveSessions(db, ws.workspaceId, rig.id)).toEqual({
       deleted: true,
       activeSessionCount: 0,

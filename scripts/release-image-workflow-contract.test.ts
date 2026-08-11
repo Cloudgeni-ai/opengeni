@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 const root = resolve(import.meta.dir, "..");
@@ -14,6 +14,21 @@ async function workflow(name: string): Promise<string> {
 
 async function action(name: string): Promise<string> {
   return readFile(resolve(root, ".github/actions", name, "action.yml"), "utf8");
+}
+
+async function workspaceManifestPaths(): Promise<Map<string, string>> {
+  const manifests = new Map<string, string>();
+  for (const scope of ["apps", "examples", "packages"] as const) {
+    for (const entry of await readdir(resolve(root, scope), { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const manifestPath = `${scope}/${entry.name}/package.json`;
+      const manifest = JSON.parse(await readFile(resolve(root, manifestPath), "utf8")) as {
+        name?: string;
+      };
+      if (manifest.name) manifests.set(manifest.name, manifestPath);
+    }
+  }
+  return manifests;
 }
 
 const sandboxArtifactRuntimeCopy =
@@ -99,6 +114,48 @@ describe("release image workflow contract", () => {
 
     expect(patchCopy).toBeGreaterThan(-1);
     expect(frozenInstall).toBeGreaterThan(patchCopy);
+  });
+
+  test("stages every workspace manifest and its dependency closure before frozen install", async () => {
+    const dockerfile = await readFile(resolve(root, "docker/opengeni.Dockerfile"), "utf8");
+    const installPrefix = dockerfile.slice(
+      0,
+      dockerfile.indexOf("RUN bun install --frozen-lockfile"),
+    );
+    const stagedPaths = new Set([
+      "package.json",
+      ...Array.from(
+        installPrefix.matchAll(/^COPY (\S+\/package\.json) \S+\/package\.json$/gmu),
+        (match) => match[1]!,
+      ),
+    ]);
+    const workspaces = await workspaceManifestPaths();
+
+    expect([...stagedPaths].sort()).toEqual(["package.json", ...workspaces.values()].sort());
+
+    for (const manifestPath of stagedPaths) {
+      const manifest = JSON.parse(await readFile(resolve(root, manifestPath), "utf8")) as {
+        dependencies?: Record<string, string>;
+        devDependencies?: Record<string, string>;
+        optionalDependencies?: Record<string, string>;
+      };
+      const dependencies = {
+        ...manifest.dependencies,
+        ...manifest.devDependencies,
+        ...manifest.optionalDependencies,
+      };
+      for (const [name, range] of Object.entries(dependencies)) {
+        if (!range.startsWith("workspace:")) continue;
+        const dependencyManifest = workspaces.get(name);
+        expect(
+          dependencyManifest,
+          `${manifestPath} references unknown workspace ${name}`,
+        ).toBeDefined();
+        expect(stagedPaths, `${manifestPath} requires unstaged ${dependencyManifest}`).toContain(
+          dependencyManifest!,
+        );
+      }
+    }
   });
 
   test("keeps stable sandbox tools cacheable across exact runtime revisions", async () => {

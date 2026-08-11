@@ -39,6 +39,8 @@ function connection(overrides: Partial<ConnectionMetadata> = {}): ConnectionMeta
       credentialLabel: OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
       slackTeamId: "T_TEST",
       slackTeamName: "Test workspace",
+      botId: "B_TEST",
+      botUserId: "U_TEST",
       botDisplayName: "OpenGeni",
     },
     createdBySubjectId: "subject-a",

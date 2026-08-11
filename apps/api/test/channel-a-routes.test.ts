@@ -516,10 +516,10 @@ describe("P4.4 Channel-A route discipline", () => {
     expect(channelASeam).toContain("@opengeni/runtime/sandbox");
   });
 
-  test("Channel-A commands select the session-specific Toolspace token pointer", () => {
+  test("Channel-A commands select the session-specific Codemode token pointer", () => {
     const credentialAt = channelASeam.indexOf("withRunCredentialsSession(");
-    const deriveAt = channelASeam.indexOf("toolspaceTokenFileFromEnvironment(");
-    const decorateAt = channelASeam.indexOf("withToolspaceTokenSession(");
+    const deriveAt = channelASeam.indexOf("codemodeTokenFileFromEnvironment(");
+    const decorateAt = channelASeam.indexOf("withCodemodeTokenSession(");
     const serviceAt = channelASeam.indexOf("new SandboxChannelAService(");
 
     expect(credentialAt).toBeGreaterThanOrEqual(0);

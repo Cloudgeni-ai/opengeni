@@ -72,11 +72,12 @@ import {
   submitHumanPromptInTransaction,
   upsertConnectorActionPolicy,
   deleteSessionQueueItemInTransaction,
+  withWorkspaceSessionActivityRls,
   withWorkspaceRls,
-  withWorkspaceSubjectRls,
+  withWorkspaceSubjectSessionActivityRls,
 } from "../src/index";
 import * as schema from "../src/schema";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { boundModelToolOutputItem } from "@opengeni/codex";
 import postgres from "postgres";
@@ -126,19 +127,31 @@ async function fixture() {
   return { grant, session };
 }
 
+async function readSessionActivityRevision(
+  workspaceId: string,
+  sessionId: string,
+): Promise<string> {
+  const [row] = await shared.admin<Array<{ revision: string }>>`
+    select activity_revision::text as revision
+    from sessions
+    where workspace_id = ${workspaceId} and id = ${sessionId}`;
+  if (!row) throw new Error(`Session activity revision missing: ${sessionId}`);
+  return row.revision;
+}
+
 async function send(
   grant: { accountId: string; workspaceId: string; subjectId: string },
   sessionId: string,
   text: string,
   delivery: "send" | "steer" = "send",
 ) {
-  const accepted = await withWorkspaceSubjectRls(
+  const accepted = await withWorkspaceSubjectSessionActivityRls(
     client.db,
     grant.workspaceId,
     grant.subjectId,
     (db) =>
       db.transaction((tx) =>
-        submitHumanPromptInTransaction(tx as typeof db, {
+        submitHumanPromptInTransaction(tx as unknown as typeof db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId,
           sessionId,
@@ -163,9 +176,9 @@ async function controlSession(
   sessionId: string,
   action: "pause" | "resume" | "cancel",
 ) {
-  return await withWorkspaceRls(client.db, grant.workspaceId, (db) =>
+  return await withWorkspaceSessionActivityRls(client.db, grant.workspaceId, (db) =>
     db.transaction((tx) =>
-      mutateSessionControlInTransaction(tx as typeof db, {
+      mutateSessionControlInTransaction(tx as unknown as typeof db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         sessionId,
@@ -182,9 +195,9 @@ async function controlWorkspace(
   action: "pause" | "resume",
   reason = "test",
 ) {
-  return await withWorkspaceRls(client.db, grant.workspaceId, (db) =>
+  return await withWorkspaceSessionActivityRls(client.db, grant.workspaceId, (db) =>
     db.transaction((tx) =>
-      mutateWorkspaceControlInTransaction(tx as typeof db, {
+      mutateWorkspaceControlInTransaction(tx as unknown as typeof db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         actor: { type: "human", subjectId: grant.subjectId },
@@ -792,23 +805,17 @@ describe("clean session control plane", () => {
       );
     }
     const exactEqualTimestamp = "2020-01-02T03:04:05.123456Z";
-    // Preserve a representative legacy revision-zero bucket so the timestamp/id
-    // suffix remains fully covered after the rolling migration.
-    await shared.admin.unsafe(
-      "alter table sessions disable trigger sessions_assign_activity_revision",
-    );
-    try {
-      await shared.admin`
+    // One semantic transaction deliberately gives every row the same timestamp
+    // and activity revision. The id suffix must still make the keyset exact.
+    await withWorkspaceSessionActivityRls(client.db, grant.workspaceId!, (db) =>
+      db.execute(sql`
         update sessions
         set created_at = ${exactEqualTimestamp}::text::timestamptz,
-            updated_at = ${exactEqualTimestamp}::text::timestamptz,
-            activity_revision = 0
-        where workspace_id = ${grant.workspaceId!}`;
-    } finally {
-      await shared.admin.unsafe(
-        "alter table sessions enable trigger sessions_assign_activity_revision",
-      );
-    }
+            updated_at = ${exactEqualTimestamp}::text::timestamptz
+        where workspace_id = ${grant.workspaceId!}
+      `),
+    );
+    const equalRevision = await readSessionActivityRevision(grant.workspaceId!, first.id);
 
     const expectedEqualOrder = sessions
       .map((session) => session.id)
@@ -848,7 +855,7 @@ describe("clean session control plane", () => {
       expectedEqualOrder.slice(0, 2),
     );
     expect(firstUpdatedPage.nextCursor?.sortAt).toBe(exactEqualTimestamp);
-    expect(firstUpdatedPage.nextCursor?.sortRevision).toBe("0");
+    expect(firstUpdatedPage.nextCursor?.sortRevision).toBe(equalRevision);
     const movedId = expectedEqualOrder.at(-1)!;
     const newcomer = await createSession(client.db, {
       accountId: grant.accountId,
@@ -859,14 +866,22 @@ describe("clean session control plane", () => {
       model: "scripted-model",
       sandboxBackend: "none",
     });
-    await shared.admin`
-      update sessions
-      set updated_at = ${firstUpdatedPage.snapshotAt}::text::timestamptz + interval '1 microsecond'
-      where workspace_id = ${grant.workspaceId!} and id = ${movedId}`;
-    await shared.admin`
-      update sessions
-      set updated_at = ${firstUpdatedPage.snapshotAt}::text::timestamptz + interval '2 microseconds'
-      where workspace_id = ${grant.workspaceId!} and id = ${newcomer.id}`;
+    await withWorkspaceSessionActivityRls(client.db, grant.workspaceId!, (db) =>
+      db.execute(sql`
+        update sessions
+        set updated_at = ${firstUpdatedPage.snapshotAt}::text::timestamptz
+          + interval '1 microsecond'
+        where workspace_id = ${grant.workspaceId!} and id = ${movedId}
+      `),
+    );
+    await withWorkspaceSessionActivityRls(client.db, grant.workspaceId!, (db) =>
+      db.execute(sql`
+        update sessions
+        set updated_at = ${firstUpdatedPage.snapshotAt}::text::timestamptz
+          + interval '2 microseconds'
+        where workspace_id = ${grant.workspaceId!} and id = ${newcomer.id}
+      `),
+    );
 
     const oldTraversalIds = firstUpdatedPage.sessions.map((session) => session.id);
     let oldCursor = firstUpdatedPage.nextCursor ?? undefined;
@@ -948,58 +963,18 @@ describe("clean session control plane", () => {
       sandboxBackend: "none",
     });
 
-    // A revision-aware schema installs this trigger. Disable it only while
-    // constructing the reviewer's historical 10/9/8/5 ordering; the actual
-    // concurrent writes below run through the production trigger.
-    const [activityTrigger] = await shared.admin<Array<{ present: boolean }>>`
-      select exists (
-        select 1 from pg_trigger
-        where tgrelid = 'sessions'::regclass
-          and tgname = 'sessions_assign_activity_revision'
-          and not tgisinternal
-      ) as present`;
-    if (activityTrigger?.present) {
-      await shared.admin.unsafe(
-        "alter table sessions disable trigger sessions_assign_activity_revision",
-      );
-    }
-    try {
-      const [activityColumn] = await shared.admin<Array<{ present: boolean }>>`
-        select exists (
-          select 1 from information_schema.columns
-          where table_schema = current_schema()
-            and table_name = 'sessions'
-            and column_name = 'activity_revision'
-        ) as present`;
-      if (activityColumn?.present) {
-        await shared.admin`
-          update sessions
-          set updated_at = case id
-                when ${newest.id} then '2020-01-01T00:00:10Z'::timestamptz
-                when ${second.id} then '2020-01-01T00:00:09Z'::timestamptz
-                when ${third.id} then '2020-01-01T00:00:08Z'::timestamptz
-                when ${moved.id} then '2020-01-01T00:00:05Z'::timestamptz
-              end,
-              activity_revision = 0
-          where workspace_id = ${grant.workspaceId!}`;
-      } else {
-        await shared.admin`
-          update sessions
-          set updated_at = case id
-                when ${newest.id} then '2020-01-01T00:00:10Z'::timestamptz
-                when ${second.id} then '2020-01-01T00:00:09Z'::timestamptz
-                when ${third.id} then '2020-01-01T00:00:08Z'::timestamptz
-                when ${moved.id} then '2020-01-01T00:00:05Z'::timestamptz
-              end
-          where workspace_id = ${grant.workspaceId!}`;
-      }
-    } finally {
-      if (activityTrigger?.present) {
-        await shared.admin.unsafe(
-          "alter table sessions enable trigger sessions_assign_activity_revision",
-        );
-      }
-    }
+    await withWorkspaceSessionActivityRls(client.db, grant.workspaceId!, (db) =>
+      db.execute(sql`
+        update sessions
+        set updated_at = case id
+              when ${newest.id} then '2020-01-01T00:00:10Z'::timestamptz
+              when ${second.id} then '2020-01-01T00:00:09Z'::timestamptz
+              when ${third.id} then '2020-01-01T00:00:08Z'::timestamptz
+              when ${moved.id} then '2020-01-01T00:00:05Z'::timestamptz
+            end
+        where workspace_id = ${grant.workspaceId!}
+      `),
+    );
 
     const firstPage = await listSessionDiscoverySummaries(client.db, grant.workspaceId!, {
       limit: 2,
@@ -1011,20 +986,27 @@ describe("clean session control plane", () => {
     // unvisited 5 moves above the 9 cursor but remains far below the old
     // timestamp watermark. Repeat the same timestamp to prove equal clocks do
     // not collapse two semantic updates into one ordering fact.
-    const [firstMove] = await shared.admin<Array<{ activityRevision: string }>>`
-      update sessions set updated_at = '2020-01-01T00:00:09.5Z'::timestamptz
-      where workspace_id = ${grant.workspaceId!} and id = ${moved.id}
-      returning activity_revision::text as "activityRevision"`;
-    const [repeatedMove] = await shared.admin<Array<{ activityRevision: string }>>`
-      update sessions set updated_at = '2020-01-01T00:00:09.5Z'::timestamptz
-      where workspace_id = ${grant.workspaceId!} and id = ${moved.id}
-      returning activity_revision::text as "activityRevision"`;
-    expect(BigInt(repeatedMove!.activityRevision)).toBeGreaterThan(
-      BigInt(firstMove!.activityRevision),
+    await withWorkspaceSessionActivityRls(client.db, grant.workspaceId!, (db) =>
+      db.execute(sql`
+        update sessions set updated_at = '2020-01-01T00:00:09.5Z'::timestamptz
+        where workspace_id = ${grant.workspaceId!} and id = ${moved.id}
+      `),
     );
-    await shared.admin`
-      update sessions set updated_at = '2020-01-01T00:00:09.5Z'::timestamptz
-      where workspace_id = ${grant.workspaceId!} and id = ${third.id}`;
+    const firstMoveRevision = await readSessionActivityRevision(grant.workspaceId!, moved.id);
+    await withWorkspaceSessionActivityRls(client.db, grant.workspaceId!, (db) =>
+      db.execute(sql`
+        update sessions set updated_at = '2020-01-01T00:00:09.5Z'::timestamptz
+        where workspace_id = ${grant.workspaceId!} and id = ${moved.id}
+      `),
+    );
+    const repeatedMoveRevision = await readSessionActivityRevision(grant.workspaceId!, moved.id);
+    expect(BigInt(repeatedMoveRevision)).toBeGreaterThan(BigInt(firstMoveRevision));
+    await withWorkspaceSessionActivityRls(client.db, grant.workspaceId!, (db) =>
+      db.execute(sql`
+        update sessions set updated_at = '2020-01-01T00:00:09.5Z'::timestamptz
+        where workspace_id = ${grant.workspaceId!} and id = ${third.id}
+      `),
+    );
     const inserted = await createSession(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId!,
@@ -1034,9 +1016,12 @@ describe("clean session control plane", () => {
       model: "scripted-model",
       sandboxBackend: "none",
     });
-    await shared.admin`
-      update sessions set updated_at = '2020-01-01T00:00:09.5Z'::timestamptz
-      where workspace_id = ${grant.workspaceId!} and id = ${inserted.id}`;
+    await withWorkspaceSessionActivityRls(client.db, grant.workspaceId!, (db) =>
+      db.execute(sql`
+        update sessions set updated_at = '2020-01-01T00:00:09.5Z'::timestamptz
+        where workspace_id = ${grant.workspaceId!} and id = ${inserted.id}
+      `),
+    );
 
     const oldTraversalIds = firstPage.sessions.map((session) => session.id);
     let oldCursor = firstPage.nextCursor ?? undefined;
@@ -1071,69 +1056,40 @@ describe("clean session control plane", () => {
     expect(new Set(changedIds)).toEqual(new Set([third.id, moved.id, inserted.id]));
   });
 
-  test("the first-page revision fence blocks semantic activity without blocking raw deltas", async () => {
+  test("the first-page revision fence is a nonblocking MVCC snapshot", async () => {
     const { grant, session } = await fixture();
     const reader = postgres(shared.adminUrl, { max: 1 });
-    const writer = postgres(shared.adminUrl, { max: 1 });
     let readerTransactionOpen = true;
     await reader.unsafe("begin");
     try {
-      // This is the exact lock prefix used by an updated-order first page.
-      await reader`
-        select workspace_id
-        from workspace_inference_controls
-        where workspace_id = ${grant.workspaceId!}
-        for share`;
-      await reader`
-        insert into workspace_session_activity_revisions (
-          workspace_id, account_id, revision
-        ) values (${grant.workspaceId!}, ${grant.accountId}, 0)
-        on conflict (workspace_id) do nothing`;
       const [fence] = await reader<Array<{ revision: string }>>`
         select revision::text as revision
         from workspace_session_activity_revisions
-        where workspace_id = ${grant.workspaceId!}
-        for share`;
+        where workspace_id = ${grant.workspaceId!}`;
       expect(fence).toBeDefined();
 
-      // Raw stream volume omits updated_at/activity_revision, so it never
-      // contends on the activity counter even while the snapshot fence is held.
-      const [rawDelta] = await writer<Array<{ lastSequence: number }>>`
-        update sessions
-        set last_sequence = last_sequence + 1
-        where workspace_id = ${grant.workspaceId!} and id = ${session.id}
-        returning last_sequence as "lastSequence"`;
-      expect(rawDelta?.lastSequence).toBe(1);
+      // Keeping the reader transaction open must not delay either raw progress
+      // or a semantic transaction that advances the workspace activity clock.
+      await appendSessionEvents(client.db, grant.workspaceId!, session.id, [
+        { type: SESSION_EVENT_RAW_DELTA_TYPES[0], payload: { text: "fragment" } },
+      ]);
+      await appendSessionEvents(client.db, grant.workspaceId!, session.id, [
+        { type: "agent.message.completed", payload: { text: "semantic" } },
+      ]);
 
-      // A semantic/direct writer mentions updated_at, reaches the trigger after
-      // locking the session, and must wait rather than committing at or below
-      // the already returned fence.
-      await writer.unsafe("set lock_timeout = '100ms'");
-      let lockError: unknown;
-      try {
-        await writer`
-          update sessions
-          set updated_at = clock_timestamp()
-          where workspace_id = ${grant.workspaceId!} and id = ${session.id}`;
-      } catch (error) {
-        lockError = error;
-      }
-      expect((lockError as { code?: string } | undefined)?.code).toBe("55P03");
+      const [advanced] = await reader<Array<{ revision: string }>>`
+        select revision::text as revision
+        from workspace_session_activity_revisions
+        where workspace_id = ${grant.workspaceId!}`;
+      expect(BigInt(advanced!.revision)).toBeGreaterThan(BigInt(fence!.revision));
 
       await reader.unsafe("commit");
       readerTransactionOpen = false;
-      await writer.unsafe("set lock_timeout = '0'");
-      const [semantic] = await writer<Array<{ activityRevision: string }>>`
-        update sessions
-        set updated_at = clock_timestamp()
-        where workspace_id = ${grant.workspaceId!} and id = ${session.id}
-        returning activity_revision::text as "activityRevision"`;
-      expect(BigInt(semantic!.activityRevision)).toBeGreaterThan(BigInt(fence!.revision));
     } finally {
       if (readerTransactionOpen) {
         await reader.unsafe("rollback").catch(() => undefined);
       }
-      await Promise.all([reader.end().catch(() => undefined), writer.end().catch(() => undefined)]);
+      await reader.end().catch(() => undefined);
     }
   });
 
@@ -1159,17 +1115,20 @@ describe("clean session control plane", () => {
 
   test("session monitoring traversal uses both composite keyset indexes", async () => {
     const { grant } = await fixture();
-    await shared.admin`
-      insert into sessions (
-        account_id, workspace_id, initial_message, resources, tools, metadata,
-        model, sandbox_backend, sandbox_group_id, tool_policy, created_at, updated_at
-      )
-      select ${grant.accountId}, ${grant.workspaceId!}, 'plan-' || n::text,
-        '[]'::jsonb, '[]'::jsonb, '{}'::jsonb, 'scripted-model', 'none',
-        gen_random_uuid(), jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null),
-        statement_timestamp() - make_interval(secs => n),
-        statement_timestamp() - make_interval(secs => 5001 - n)
-      from generate_series(1, 5000) as generated(n)`;
+    await withWorkspaceSessionActivityRls(client.db, grant.workspaceId!, (db) =>
+      db.execute(sql`
+        insert into sessions (
+          account_id, workspace_id, initial_message, resources, tools, metadata,
+          model, sandbox_backend, sandbox_group_id, tool_policy, created_at, updated_at
+        )
+        select ${grant.accountId}, ${grant.workspaceId!}, 'plan-' || n::text,
+          '[]'::jsonb, '[]'::jsonb, '{}'::jsonb, 'scripted-model', 'none',
+          gen_random_uuid(), jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null),
+          statement_timestamp() - make_interval(secs => n),
+          statement_timestamp() - make_interval(secs => 5001 - n)
+        from generate_series(1, 5000) as generated(n)
+      `),
+    );
     await shared.admin`analyze sessions`;
     const [cursor] = await shared.admin<
       Array<{ id: string; createdAt: Date; updatedAt: Date; activityRevision: string }>
@@ -1223,9 +1182,14 @@ describe("clean session control plane", () => {
         payload: { text: `fragment-${index}` },
       }));
     const setBaseline = async (workspaceId: string, sessionId: string) => {
-      await shared.admin`
-        update sessions set updated_at = ${baseline}::timestamptz
-        where workspace_id = ${workspaceId} and id = ${sessionId}`;
+      await withWorkspaceSessionActivityRls(client.db, workspaceId, (db) =>
+        db
+          .update(schema.sessions)
+          .set({ updatedAt: new Date(baseline) })
+          .where(
+            and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
+          ),
+      );
     };
     const activity = async (workspaceId: string, sessionId: string) => {
       const [row] = await shared.admin<
@@ -1358,6 +1322,7 @@ describe("clean session control plane", () => {
       locked.grant.workspaceId!,
       locked.session.id,
       () => ({ events: [rawDeltas()[0]!] }),
+      { activity: "raw-only" },
     );
     expect(await activity(locked.grant.workspaceId!, locked.session.id)).toEqual({
       lastSequence: lockedBefore.lastSequence + 1,
@@ -1372,11 +1337,46 @@ describe("clean session control plane", () => {
         events: [rawDeltas()[0]!],
         update: { metadata: { activity: "explicit locked mutation" } },
       }),
+      { activity: "semantic" },
     );
     const lockedSemantic = await activity(locked.grant.workspaceId!, locked.session.id);
     expect(lockedSemantic.updatedAt).not.toBe(baseline);
     expect(BigInt(lockedSemantic.activityRevision)).toBeGreaterThan(
       BigInt(lockedBefore.activityRevision),
+    );
+
+    const rejected = await fixture();
+    await setBaseline(rejected.grant.workspaceId!, rejected.session.id);
+    const rejectedBefore = await activity(rejected.grant.workspaceId!, rejected.session.id);
+    await expect(
+      appendSessionEventsWithLockedSessionUpdate(
+        client.db,
+        rejected.grant.workspaceId!,
+        rejected.session.id,
+        () => ({
+          events: [{ type: "session.title_set", payload: { title: "semantic" } }],
+        }),
+        { activity: "raw-only" },
+      ),
+    ).rejects.toThrow(
+      "Raw-only locked session event append cannot contain semantic events or session updates",
+    );
+    await expect(
+      appendSessionEventsWithLockedSessionUpdate(
+        client.db,
+        rejected.grant.workspaceId!,
+        rejected.session.id,
+        () => ({
+          events: [rawDeltas()[0]!],
+          update: { metadata: { activity: "undeclared" } },
+        }),
+        { activity: "raw-only" },
+      ),
+    ).rejects.toThrow(
+      "Raw-only locked session event append cannot contain semantic events or session updates",
+    );
+    expect(await activity(rejected.grant.workspaceId!, rejected.session.id)).toEqual(
+      rejectedBefore,
     );
   });
 
@@ -2853,9 +2853,9 @@ describe("clean session control plane", () => {
   test("a waiting prompt can only be deleted with exact queue and row versions", async () => {
     const { grant, session } = await fixture();
     const queued = await send(grant, session.id, "delete me");
-    const result = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+    const result = await withWorkspaceSessionActivityRls(client.db, grant.workspaceId!, (db) =>
       db.transaction((tx) =>
-        deleteSessionQueueItemInTransaction(tx as typeof db, {
+        deleteSessionQueueItemInTransaction(tx as unknown as typeof db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId!,
           sessionId: session.id,
@@ -5908,9 +5908,9 @@ describe("clean session control plane", () => {
     );
     const operationKey = crypto.randomUUID();
     const mutate = async () =>
-      await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      await withWorkspaceSessionActivityRls(client.db, grant.workspaceId!, (db) =>
         db.transaction((tx) =>
-          mutateSessionControlInTransaction(tx as typeof db, {
+          mutateSessionControlInTransaction(tx as unknown as typeof db, {
             accountId: grant.accountId,
             workspaceId: grant.workspaceId!,
             sessionId: session.id,
@@ -6060,9 +6060,9 @@ describe("clean session control plane", () => {
     const release = new Promise<void>((resolve) => {
       releaseCancellation = resolve;
     });
-    const cancelling = withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+    const cancelling = withWorkspaceSessionActivityRls(client.db, grant.workspaceId!, (db) =>
       db.transaction(async (tx) => {
-        const result = await mutateSessionControlInTransaction(tx as typeof db, {
+        const result = await mutateSessionControlInTransaction(tx as unknown as typeof db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId!,
           sessionId: session.id,
@@ -6107,9 +6107,9 @@ describe("clean session control plane", () => {
     const release = new Promise<void>((resolve) => {
       releaseCancellation = resolve;
     });
-    const cancelling = withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+    const cancelling = withWorkspaceSessionActivityRls(client.db, grant.workspaceId!, (db) =>
       db.transaction(async (tx) => {
-        const result = await mutateSessionControlInTransaction(tx as typeof db, {
+        const result = await mutateSessionControlInTransaction(tx as unknown as typeof db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId!,
           sessionId: session.id,
@@ -6156,9 +6156,9 @@ describe("clean session control plane", () => {
     const { grant } = await fixture();
     const operationKey = crypto.randomUUID();
     const mutate = async () =>
-      await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      await withWorkspaceSessionActivityRls(client.db, grant.workspaceId!, (db) =>
         db.transaction((tx) =>
-          mutateWorkspaceControlInTransaction(tx as typeof db, {
+          mutateWorkspaceControlInTransaction(tx as unknown as typeof db, {
             accountId: grant.accountId,
             workspaceId: grant.workspaceId!,
             actor: { type: "human", subjectId: grant.subjectId },
@@ -6209,7 +6209,7 @@ describe("clean session control plane", () => {
     const { grant, session } = await fixture();
     await send(grant, session.id, "run only this session");
     const pauseWorkspace = async (reason: string) =>
-      await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      await withWorkspaceSessionActivityRls(client.db, grant.workspaceId!, (db) =>
         mutateWorkspaceControlInTransaction(db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId!,
@@ -6230,7 +6230,7 @@ describe("clean session control plane", () => {
       ),
     ).toBeNull();
 
-    const resumed = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+    const resumed = await withWorkspaceSessionActivityRls(client.db, grant.workspaceId!, (db) =>
       mutateSessionControlInTransaction(db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId!,

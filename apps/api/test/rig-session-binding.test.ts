@@ -10,6 +10,7 @@ import {
   createDb,
   createRig,
   createRigVersion,
+  createSession,
   getSession,
   type Database,
   type DbClient,
@@ -355,19 +356,21 @@ describe("M3 rig binding: rig-aware shared-sandbox gate", () => {
       rigId: rigA.rigId,
       sandboxBackend: "modal",
     });
-    // Simulate a legacy/corrupt rig-blind share: force a B-rig member row into
-    // A's group directly. Today the create gate must compare the joiner against
+    // Simulate a legacy/corrupt rig-blind share through the low-level
+    // persistence API. The request-layer gate must compare a joiner against
     // ALL members, not just parent A.
-    await admin`
-      insert into sessions (
-        account_id, workspace_id, initial_message, rig_id, rig_version_id,
-        sandbox_group_id, model, sandbox_backend, tool_policy
-      )
-      values (
-        ${accountId}, ${workspaceId}, 'legacy mixed-rig member', ${rigB.rigId},
-        ${rigB.activeVersionId}, ${a.sandboxGroupId}, 'gpt-test', 'modal',
-        jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
-      )`;
+    await createSession(db, {
+      accountId,
+      workspaceId,
+      initialMessage: "legacy mixed-rig member",
+      resources: [],
+      metadata: {},
+      model: "gpt-test",
+      sandboxBackend: "modal",
+      rigId: rigB.rigId,
+      rigVersionId: rigB.activeVersionId,
+      sandboxGroupId: a.sandboxGroupId,
+    });
     await expect(
       createSessionForRequest(deps(bus), grant(accountId, workspaceId, a.id), workspaceId, {
         initialMessage: "joiner matching parent only",
