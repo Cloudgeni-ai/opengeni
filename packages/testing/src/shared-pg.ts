@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -31,8 +31,9 @@ const execFileAsync = promisify(execFile);
 // filesystem lock, and each test FILE gets its own freshly-created DATABASE
 // inside that container. Per-database isolation preserves the previous
 // per-container data isolation (separate schema + rows) while collapsing the
-// concurrent-container count from ~15 to 1. A lock-guarded refcount file tracks
-// how many files are using the container; the last one out removes it.
+// concurrent-container count from ~15 to 1. A lock-guarded holder set tracks
+// exact acquisitions against the current container id; the last holder removes
+// only that exact generation.
 //
 // Tests connect as the NON-superuser `opengeni_app` login role (so FORCE RLS is
 // genuinely enforced, exactly as before), with a separate superuser `admin`
@@ -108,7 +109,23 @@ async function templateDbName(): Promise<string> {
 
 const STATE_DIR = join(tmpdir(), `opengeni-shared-pg-${PORT}`);
 const LOCK_DIR = join(STATE_DIR, "lock");
-const REFCOUNT_FILE = join(STATE_DIR, "refcount");
+const LOCK_OWNER_FILE = join(LOCK_DIR, "owner.json");
+const CONTAINER_STATE_FILE = join(STATE_DIR, "container.json");
+
+type LockOwner = {
+  pid: number;
+  token: string;
+};
+
+type ContainerHandle = {
+  generation: string;
+  token: string;
+};
+
+type ContainerState = {
+  generation: string;
+  holders: Record<string, { pid: number }>;
+};
 
 export type SharedTestDatabase = {
   /** Superuser connection scoped to this file's own database (bypasses RLS). */
@@ -117,7 +134,7 @@ export type SharedTestDatabase = {
   adminUrl: string;
   /** opengeni_app (non-superuser) URL for createDb() — FORCE RLS applies. */
   appUrl: string;
-  /** Release this file's handle: closes admin + decrements the shared refcount. */
+  /** Release this file's exact holder and close its admin pool. */
   release: () => Promise<void>;
 };
 
@@ -141,62 +158,166 @@ async function dockerOk(args: string[]): Promise<boolean> {
   }
 }
 
-/** A cooperative cross-process lock via atomic mkdir, with stale-lock breaking. */
+async function readLockOwner(): Promise<LockOwner | null> {
+  try {
+    const parsed = JSON.parse(await readFile(LOCK_OWNER_FILE, "utf8")) as Partial<LockOwner>;
+    return typeof parsed.pid === "number" &&
+      Number.isSafeInteger(parsed.pid) &&
+      parsed.pid > 0 &&
+      typeof parsed.token === "string"
+      ? { pid: parsed.pid, token: parsed.token }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+/**
+ * Cooperative cross-process lock via atomic mkdir.
+ *
+ * A migration-template build can legitimately take minutes on a loaded CI host.
+ * Lock age therefore cannot prove abandonment: only a missing/dead owner may be
+ * reclaimed. The token also prevents an old holder from deleting a successor's
+ * lock during cleanup.
+ */
 async function withLock<T>(fn: () => Promise<T>): Promise<T> {
   await mkdir(STATE_DIR, { recursive: true });
-  const deadline = Date.now() + 120_000;
+  const deadline = Date.now() + 600_000;
+  const token = crypto.randomUUID();
   for (;;) {
+    let acquired = false;
     try {
       await mkdir(LOCK_DIR); // atomic: fails if another holder exists
-      break;
+      acquired = true;
     } catch {
-      // Break a stale lock left by a crashed process (older than 60s).
+      // Reclaim only a lock whose owner is provably gone. A holder can remain
+      // healthy past any wall-clock threshold while it builds the template.
       try {
         const stat = await import("node:fs/promises").then((m) => m.stat(LOCK_DIR));
-        if (Date.now() - stat.mtimeMs > 60_000) {
+        const owner = await readLockOwner();
+        const ownerGone = owner ? !processIsAlive(owner.pid) : Date.now() - stat.mtimeMs > 30_000;
+        if (ownerGone) {
           await rm(LOCK_DIR, { recursive: true, force: true });
           continue;
         }
       } catch {
         // lock vanished between checks — retry the mkdir
       }
-      if (Date.now() > deadline) {
-        throw new Error("shared-pg: timed out acquiring the container lock");
-      }
-      await Bun.sleep(50 + Math.random() * 100);
     }
+    if (acquired) {
+      try {
+        await writeFile(LOCK_OWNER_FILE, JSON.stringify({ pid: process.pid, token }), "utf8");
+      } catch (error) {
+        await rm(LOCK_DIR, { recursive: true, force: true }).catch(() => undefined);
+        throw error;
+      }
+      break;
+    }
+    if (Date.now() > deadline) {
+      throw new Error("shared-pg: timed out acquiring the container lock");
+    }
+    await Bun.sleep(50 + Math.random() * 100);
   }
   try {
     return await fn();
   } finally {
-    await rm(LOCK_DIR, { recursive: true, force: true }).catch(() => undefined);
+    const owner = await readLockOwner();
+    if (owner?.token === token) {
+      await rm(LOCK_DIR, { recursive: true, force: true }).catch(() => undefined);
+    }
   }
 }
 
-async function readRefcount(): Promise<number> {
+async function readContainerState(): Promise<ContainerState | null> {
+  let source: string;
   try {
-    return Number.parseInt(await readFile(REFCOUNT_FILE, "utf8"), 10) || 0;
-  } catch {
-    return 0;
+    source = await readFile(CONTAINER_STATE_FILE, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+  let parsed: Partial<ContainerState>;
+  try {
+    parsed = JSON.parse(source) as Partial<ContainerState>;
+  } catch (error) {
+    throw new Error("shared-pg: container holder state is malformed", { cause: error });
+  }
+  if (
+    typeof parsed.generation !== "string" ||
+    !/^[a-f0-9]{64}$/u.test(parsed.generation) ||
+    !parsed.holders ||
+    typeof parsed.holders !== "object" ||
+    Array.isArray(parsed.holders)
+  ) {
+    throw new Error("shared-pg: container holder state has an invalid shape");
+  }
+  const holders: ContainerState["holders"] = {};
+  for (const [token, holder] of Object.entries(parsed.holders)) {
+    if (
+      !/^[0-9a-f-]{36}$/iu.test(token) ||
+      !holder ||
+      typeof holder !== "object" ||
+      typeof (holder as { pid?: unknown }).pid !== "number" ||
+      !Number.isSafeInteger((holder as { pid: number }).pid) ||
+      (holder as { pid: number }).pid <= 0
+    ) {
+      throw new Error("shared-pg: container holder state has an invalid holder");
+    }
+    holders[token] = { pid: (holder as { pid: number }).pid };
+  }
+  return { generation: parsed.generation, holders };
+}
+
+async function writeContainerState(state: ContainerState): Promise<void> {
+  const temporaryPath = join(STATE_DIR, `.container-${process.pid}-${crypto.randomUUID()}.tmp`);
+  try {
+    await writeFile(temporaryPath, `${JSON.stringify(state)}\n`, "utf8");
+    await rename(temporaryPath, CONTAINER_STATE_FILE);
+  } finally {
+    await rm(temporaryPath, { force: true }).catch(() => undefined);
   }
 }
 
-async function writeRefcount(n: number): Promise<void> {
-  await writeFile(REFCOUNT_FILE, String(n), "utf8");
-}
+type ContainerProbe = { available: true; id: string | null } | { available: false };
 
-async function containerRunning(): Promise<boolean> {
-  const { stdout } = await docker([
-    "ps",
-    "--filter",
-    `name=^${CONTAINER}$`,
-    "--format",
-    "{{.Names}}",
-  ]).catch(() => ({ stdout: "" }));
-  return stdout
+async function probeContainer(): Promise<ContainerProbe> {
+  let result: Awaited<ReturnType<typeof docker>> | null = null;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    result = await docker([
+      "ps",
+      "--no-trunc",
+      "--filter",
+      `name=^${CONTAINER}$`,
+      "--format",
+      "{{.ID}}",
+    ]).catch(() => null);
+    if (result) {
+      break;
+    }
+    await Bun.sleep(100 * (attempt + 1));
+  }
+  if (!result) {
+    return { available: false };
+  }
+  const ids = result.stdout
     .split("\n")
     .map((l) => l.trim())
-    .includes(CONTAINER);
+    .filter(Boolean);
+  if (ids.length > 1 || ids.some((id) => !/^[a-f0-9]{64}$/u.test(id))) {
+    throw new Error("shared-pg: Docker returned an ambiguous container generation");
+  }
+  return { available: true, id: ids[0] ?? null };
 }
 
 async function waitForReady(url: string): Promise<void> {
@@ -287,20 +408,23 @@ async function ensureTemplateBuilt(): Promise<void> {
 
 /**
  * Ensure the single shared container is up and the cluster-global opengeni_app
- * role exists, then bump the refcount. Lock-guarded so exactly one parallel
- * worker starts it. Returns false (and does NOT bump the refcount) if docker is
+ * role exists, then register one exact holder. Lock-guarded so exactly one
+ * parallel worker starts it. Returns null (and registers no holder) if Docker is
  * unavailable, so callers can skip gracefully — mirroring the old per-file
  * `available = false` behaviour.
  */
-async function ensureContainerAndAcquire(): Promise<boolean> {
+async function ensureContainerAndAcquire(): Promise<ContainerHandle | null> {
   return withLock(async () => {
-    const startedContainer = !(await containerRunning());
+    const probe = await probeContainer();
+    if (!probe.available) {
+      return null;
+    }
+    const startedContainer = probe.id === null;
+    let generation = probe.id;
     if (startedContainer) {
-      // Clear any stale refcount left over from a previous crashed run.
-      await writeRefcount(0);
       // Remove a stopped leftover of the same name, then start fresh. NOT --rm:
       // the container must survive across the many test-file processes that
-      // share it; the last file out removes it explicitly.
+      // share it; the last exact holder removes it explicitly.
       // The postgres image declares an anonymous data volume. Remove it with
       // the container or every test-file lifecycle leaks a full migrated
       // cluster into the shared Docker filesystem.
@@ -314,7 +438,7 @@ async function ensureContainerAndAcquire(): Promise<boolean> {
       // visible) rather than a clean error. Give the throwaway test server a
       // generous ceiling so the whole suite fits. `MAX_CONNECTIONS` keeps the
       // per-file pools small as a second line of defence.
-      const started = await dockerOk([
+      const started = await docker([
         "run",
         "-d",
         "-e",
@@ -328,10 +452,14 @@ async function ensureContainerAndAcquire(): Promise<boolean> {
         "max_connections=1000",
         "-c",
         "shared_buffers=256MB",
-      ]);
-      if (!started) {
-        return false; // docker unavailable
+      ]).catch(() => null);
+      generation = started?.stdout.trim() ?? null;
+      if (!generation || !/^[a-f0-9]{64}$/u.test(generation)) {
+        return null; // Docker unavailable or unable to start the fixture.
       }
+    }
+    if (!generation) {
+      throw new Error("shared-pg: running container has no generation id");
     }
     try {
       await waitForReady(`${ADMIN_BASE_URL}/postgres`);
@@ -356,28 +484,55 @@ async function ensureContainerAndAcquire(): Promise<boolean> {
         await admin.end().catch(() => undefined);
       }
     } catch (err) {
-      if (startedContainer) await dockerOk(["rm", "-f", "-v", CONTAINER]);
+      if (startedContainer && generation) {
+        await dockerOk(["rm", "-f", "-v", generation]);
+      }
       throw err;
     }
     // Build the once-per-container migrated template (idempotent; self-heals a
     // crashed partial). Inside the lock so exactly one process pays the
     // migration; every acquire after that just clones from it.
     await ensureTemplateBuilt();
-    await writeRefcount((await readRefcount()) + 1);
-    return true;
+    const prior = await readContainerState();
+    const holders = prior?.generation === generation ? prior.holders : {};
+    for (const [token, holder] of Object.entries(holders)) {
+      if (!processIsAlive(holder.pid)) {
+        delete holders[token];
+      }
+    }
+    const token = crypto.randomUUID();
+    holders[token] = { pid: process.pid };
+    await writeContainerState({ generation, holders });
+    return { generation, token };
   });
 }
 
-async function releaseContainer(): Promise<void> {
+async function releaseContainer(handle: ContainerHandle): Promise<void> {
   await withLock(async () => {
-    const next = (await readRefcount()) - 1;
-    if (next <= 0) {
-      await writeRefcount(0);
-      await dockerOk(["rm", "-f", "-v", CONTAINER]);
-      await rm(STATE_DIR, { recursive: true, force: true }).catch(() => undefined);
-    } else {
-      await writeRefcount(next);
+    const state = await readContainerState();
+    if (state?.generation !== handle.generation || !state.holders[handle.token]) {
+      return;
     }
+    delete state.holders[handle.token];
+    if (Object.keys(state.holders).length > 0) {
+      await writeContainerState(state);
+      return;
+    }
+
+    const probe = await probeContainer();
+    if (!probe.available) {
+      await writeContainerState(state);
+      return;
+    }
+    if (probe.id !== handle.generation) {
+      await rm(CONTAINER_STATE_FILE, { force: true });
+      return;
+    }
+    if (!(await dockerOk(["rm", "-f", "-v", handle.generation]))) {
+      await writeContainerState(state);
+      return;
+    }
+    await rm(CONTAINER_STATE_FILE, { force: true });
   });
 }
 
@@ -424,12 +579,12 @@ async function cloneFromTemplate(dbName: string): Promise<void> {
   }
 }
 
-/** Best-effort DROP of this file's database, then decrement the shared refcount. */
-async function dropDatabaseAndRelease(dbName: string): Promise<void> {
+/** Best-effort DROP of this file's database, then release its exact holder. */
+async function dropDatabaseAndRelease(dbName: string, handle: ContainerHandle): Promise<void> {
   const dropper = postgres(`${ADMIN_BASE_URL}/postgres`, { max: 1 });
   await dropper.unsafe(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`).catch(() => undefined);
   await dropper.end().catch(() => undefined);
-  await releaseContainer();
+  await releaseContainer(handle);
 }
 
 function uniqueDbName(label: string): string {
@@ -479,11 +634,11 @@ export async function acquireSharedTestDatabase(
         }
         released = true;
         await admin.end().catch(() => undefined);
-        await dropDatabaseAndRelease(dbName);
+        await dropDatabaseAndRelease(dbName, acquired);
       },
     };
   } catch (err) {
-    await releaseContainer().catch(() => undefined);
+    await releaseContainer(acquired).catch(() => undefined);
     throw err;
   }
 }
@@ -514,11 +669,11 @@ export async function acquireBlankTestDatabase(label = "blank"): Promise<BlankTe
           return;
         }
         released = true;
-        await dropDatabaseAndRelease(dbName);
+        await dropDatabaseAndRelease(dbName, acquired);
       },
     };
   } catch (err) {
-    await releaseContainer().catch(() => undefined);
+    await releaseContainer(acquired).catch(() => undefined);
     throw err;
   }
 }
