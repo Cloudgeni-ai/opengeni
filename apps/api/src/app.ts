@@ -1436,6 +1436,10 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
     label: "/v1/integrations/provider-oauth/callback",
   },
   {
+    pattern: /^\/v1\/integrations\/google-drive\/callback$/,
+    label: "/v1/integrations/google-drive/callback",
+  },
+  {
     pattern: /^\/v1\/integrations\/oauth\/client-metadata\.json$/,
     label: "/v1/integrations/oauth/client-metadata.json",
   },

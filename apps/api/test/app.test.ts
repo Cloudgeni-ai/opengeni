@@ -559,6 +559,9 @@ describe("API helpers", () => {
     expect(routeLabel("/v1/integrations/provider-oauth/callback")).toBe(
       "/v1/integrations/provider-oauth/callback",
     );
+    expect(routeLabel("/v1/integrations/google-drive/callback")).toBe(
+      "/v1/integrations/google-drive/callback",
+    );
     expect(routeLabel(`/v1/workspaces/${workspace}/plugins/preview`)).toBe(
       "/v1/workspaces/:workspaceId/plugins/preview",
     );

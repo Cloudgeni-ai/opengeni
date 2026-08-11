@@ -74,6 +74,7 @@ import {
 } from "../integrations/google-drive";
 import {
   completeApiIntegrationProviderOAuth,
+  isApiIntegrationProviderOAuthState,
   startApiIntegrationProviderOAuth,
 } from "../integrations/provider-oauth";
 import {
@@ -422,12 +423,15 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get("/v1/integrations/google-drive/callback", async (c) => {
     assertIntegrationsEnabled();
-    const result = await completeGoogleDriveOAuthCallback(deps, {
+    const input = {
       ...(c.req.query("code") ? { code: c.req.query("code") } : {}),
       ...(c.req.query("state") ? { state: c.req.query("state") } : {}),
       ...(c.req.query("error") ? { error: c.req.query("error") } : {}),
       requestUrl: c.req.url,
-    });
+    };
+    const result = isApiIntegrationProviderOAuthState(input.state, deps.settings)
+      ? await completeApiIntegrationProviderOAuth(deps, input)
+      : await completeGoogleDriveOAuthCallback(deps, input);
     return c.redirect(result.redirectTo, 302);
   });
 

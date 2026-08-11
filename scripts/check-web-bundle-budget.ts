@@ -17,14 +17,15 @@ const budgets = {
   // composer also carries the tiny app-action slot used by realtime voice.
   // Existing-session scheduling, authenticated retained screenshots, and the
   // synchronous session projection grow the initial graph. The managed-app
-  // catalog now includes governed Slack publication and read-only Atlassian;
-  // keep modest headroom above the current 1360/374 KiB production build while
-  // the per-file, graph-count, direct-session, and lazy-chunk budgets stay fixed.
-  initialRaw: 1380 * kib,
-  initialGzip: 382 * kib,
-  initialFileGzip: 70 * kib,
+  // catalog now includes governed Slack publication, read-only Atlassian, and
+  // the typed capabilities client contracts. Keep bounded headroom above the
+  // current 1392/383 KiB production build while graph counts and lazy chunks
+  // stay fixed.
+  initialRaw: 1400 * kib,
+  initialGzip: 390 * kib,
+  initialFileGzip: 76 * kib,
   initialFiles: 16,
-  directSessionRaw: 1900 * kib,
+  directSessionRaw: 1930 * kib,
   directSessionGzip: 552 * kib,
   directSessionFiles: 18,
   lazyChunkRaw: 800 * kib,

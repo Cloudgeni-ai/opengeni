@@ -164,7 +164,7 @@ export async function startApiIntegrationProviderOAuth(
   const verifier = randomBytes(48).toString("base64url");
   const key = requireEnvironmentEncryption(deps.settings);
   const baseUrl = integrationBaseUrl(deps.settings.publicBaseUrl, input.requestUrl);
-  const redirectUri = `${baseUrl}${PROVIDER_OAUTH_CALLBACK_PATH}`;
+  const redirectUri = `${baseUrl}${providerOAuthCallbackPath(preset)}`;
   const returnPath = safeReturnPath(
     input.payload.returnPath ?? `/workspaces/${input.workspaceId}/capabilities`,
   );
@@ -258,7 +258,7 @@ export async function completeApiIntegrationProviderOAuth(
     }
     const key = requireEnvironmentEncryption(deps.settings);
     const verifier = decryptEnvironmentValue(key, state.encryptedPkceVerifier);
-    const redirectUri = `${apiBaseUrl}${PROVIDER_OAUTH_CALLBACK_PATH}`;
+    const redirectUri = `${apiBaseUrl}${providerOAuthCallbackPath(preset)}`;
     const token = await exchangeProviderAuthorizationCode(deps, preset, client, {
       code: input.code,
       verifier,
@@ -391,6 +391,27 @@ function requiredPreset(id: string): OpenApiProviderPreset {
   const preset = providerPresetById(id);
   if (!preset) throw new HTTPException(404, { message: "Unknown Integration preset" });
   return preset;
+}
+
+export function isApiIntegrationProviderOAuthState(
+  value: string | undefined,
+  settings: Settings,
+): boolean {
+  try {
+    readProviderOAuthState(value, settings);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function providerOAuthCallbackPath(preset: OpenApiProviderPreset): string {
+  // The existing Google OAuth client is already registered against this
+  // loopback callback. Keep that stable while the handler below distinguishes
+  // legacy Drive state from the protocol-neutral provider state.
+  return preset.family === "google"
+    ? "/v1/integrations/google-drive/callback"
+    : PROVIDER_OAUTH_CALLBACK_PATH;
 }
 
 function providerClientForPreset(

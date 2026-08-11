@@ -7,10 +7,11 @@ import { chromium, type Browser, type Page } from "playwright";
 import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
-const evidenceDir = new URL("../../.agent/evidence/ope-16-custom-api/", import.meta.url).pathname;
+const evidenceDir = new URL("../../.agent/evidence/capabilities-custom-api/", import.meta.url)
+  .pathname;
 const workspaceId = "00000000-0000-4000-8000-000000000617";
 const accountId = "00000000-0000-4000-8000-000000000618";
-const subjectId = "user:ope-16-browser";
+const subjectId = "user:capabilities-browser";
 const financeConnectionId = "00000000-0000-4000-8000-000000000619";
 const salesConnectionId = "00000000-0000-4000-8000-000000000620";
 const gmailConnectionId = "00000000-0000-4000-8000-000000000621";
@@ -314,7 +315,7 @@ async function installApi(page: Page, state: UiState): Promise<void> {
 
     if (url.pathname === "/v1/config/client") {
       return json({
-        deploymentRevision: "ope-16-browser",
+        deploymentRevision: "capabilities-browser",
         apiContractRevision,
         defaultModel: "gpt-5.6-sol",
         allowedModels: ["gpt-5.6-sol"],
@@ -456,7 +457,7 @@ function access(canManage: boolean) {
   return {
     mode: "configured",
     subjectId,
-    subjectLabel: "OPE-16 browser",
+    subjectLabel: "Capabilities browser",
     accountGrants: [
       {
         accountId,

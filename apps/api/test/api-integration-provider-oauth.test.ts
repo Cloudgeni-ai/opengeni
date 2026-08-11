@@ -254,9 +254,10 @@ async function callback(
   fixture: ReturnType<typeof providerFixture>,
   state: string,
   code = "fixture-code",
+  path = "/v1/integrations/provider-oauth/callback",
 ) {
   return await testApp(fixture).request(
-    `/v1/integrations/provider-oauth/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`,
+    `${path}?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`,
   );
 }
 
@@ -283,10 +284,15 @@ describe("API Integration provider OAuth", () => {
     expect(authorizationUrl.searchParams.get("prompt")).toBe("consent select_account");
     expect(authorizationUrl.searchParams.get("code_challenge_method")).toBe("S256");
     expect(authorizationUrl.searchParams.get("redirect_uri")).toBe(
-      "http://127.0.0.1:8000/v1/integrations/provider-oauth/callback",
+      "http://127.0.0.1:8000/v1/integrations/google-drive/callback",
     );
     const state = authorizationUrl.searchParams.get("state")!;
-    const connected = await callback(fixture, state);
+    const connected = await callback(
+      fixture,
+      state,
+      "fixture-code",
+      "/v1/integrations/google-drive/callback",
+    );
     expect(connected.status).toBe(302);
     const location = new URL(connected.headers.get("location")!);
     expect(location.origin).toBe("http://127.0.0.1:3000");
