@@ -480,6 +480,8 @@ export function CapabilitiesRoute({
         (binding) => binding.connectionId === visibleSlackBotConnection.id,
       ) ?? null)
     : null;
+  const hasActiveSlackInstallationBinding = visibleSlackInstallationBinding?.state === "active";
+  const canMutateInstalledSlackBot = canInstallSlackBot && hasActiveSlackInstallationBinding;
   const canManagePersonalSlack = canWriteWorkspaceConnections(context.accessContext, workspaceId);
   const canManageApiIntegrationInstances = canManageApiIntegrations(
     context.accessContext,
@@ -677,6 +679,12 @@ export function CapabilitiesRoute({
   }
 
   async function installSlackBot(createNewConnection = false) {
+    if (slackBotConnection && !hasActiveSlackInstallationBinding) {
+      toast.error("Slack installation repair is blocked", {
+        description: "A verified active installation binding is required before Slack can change.",
+      });
+      return;
+    }
     setSlackBotBusy(true);
     try {
       const installation = await client.startOpenGeniSlackBotInstall(
@@ -709,7 +717,7 @@ export function CapabilitiesRoute({
   }
 
   async function saveSlackBotDestination() {
-    if (!slackBotConnection) return;
+    if (!slackBotConnection || !hasActiveSlackInstallationBinding) return;
     setSlackDestinationBusy(true);
     try {
       await client.updateConnection(workspaceId, slackBotConnection.id, {
@@ -1641,7 +1649,7 @@ export function CapabilitiesRoute({
                               <Select
                                 aria-label="Slack knowledge destination"
                                 value={slackDestinationAuthority}
-                                disabled={!canInstallSlackBot || slackDestinationBusy}
+                                disabled={!canMutateInstalledSlackBot || slackDestinationBusy}
                                 onChange={(event) =>
                                   setSlackDestinationAuthority(
                                     event.target.value as ConnectorDocumentDestinationAuthority,
@@ -1667,7 +1675,7 @@ export function CapabilitiesRoute({
                               type="button"
                               size="sm"
                               disabled={
-                                !canInstallSlackBot ||
+                                !canMutateInstalledSlackBot ||
                                 slackDestinationBusy ||
                                 (slackDestinationAuthority === "workspace" &&
                                   !canManageSlackWorkspaceDestination) ||
@@ -1688,7 +1696,7 @@ export function CapabilitiesRoute({
                       <SlackReactionSummonCard
                         workspaceId={workspaceId}
                         connection={visibleSlackBotConnection}
-                        canManage={canManageSlackReaction}
+                        canManage={canManageSlackReaction && hasActiveSlackInstallationBinding}
                         installBusy={slackBotBusy}
                         onUpdatePermissions={() => void installSlackBot(false)}
                       />
@@ -1740,7 +1748,7 @@ export function CapabilitiesRoute({
                             className="mt-2"
                             disabled={
                               slackBotBusy ||
-                              !canInstallSlackBot ||
+                              !canMutateInstalledSlackBot ||
                               visibleSlackInstallationBinding?.state !== "active"
                             }
                             onClick={() => void installSlackBot(false)}
@@ -1777,10 +1785,7 @@ export function CapabilitiesRoute({
                               : ""}
                           </p>
                           <SlackBotInstallControls
-                            canInstall={
-                              canInstallSlackBot &&
-                              visibleSlackInstallationBinding?.state === "active"
-                            }
+                            canInstall={canMutateInstalledSlackBot}
                             hasConnection
                             busy={slackBotBusy}
                             onInstall={(createNewConnection) =>
@@ -2002,7 +2007,6 @@ function ManagedAppTile({
   return (
     <button
       type="button"
-      aria-label={`${name} ${description}`}
       onClick={onOpen}
       className="group flex min-w-0 items-center gap-3 rounded-xl border border-border bg-surface p-3 text-left hover:border-border-strong hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg"
     >
