@@ -335,7 +335,7 @@ describe("OpenGeniClient access + workspaces", () => {
   test("getClientConfig fetches the public bootstrap endpoint and returns the provider-grouped models", async () => {
     const config = {
       deploymentRevision: "rev-1",
-      apiContractRevision: "2026-07-workspace-artifacts-v1",
+      apiContractRevision: "2026-08-social-provider-tools-v1",
       defaultModel: "gpt-5.6-sol",
       allowedModels: ["gpt-5.6-sol", "accounts/fireworks/models/glm-5p2"],
       models: [
@@ -430,7 +430,9 @@ describe("OpenGeniClient access + workspaces", () => {
         : jsonResponse(accessRequest),
     );
 
-    await client.prepareSlackUserLinkAccess(WORKSPACE_ID, { linkToken: "signed-link" });
+    await client.prepareSlackUserLinkAccess(WORKSPACE_ID, {
+      linkToken: "signed-link",
+    });
     await client.getSlackUserLinkAccess(WORKSPACE_ID, requestId);
     await client.requestSlackUserLinkWorkspaceAccess(WORKSPACE_ID, requestId, {
       expectedVersion: 1,
@@ -462,7 +464,9 @@ describe("OpenGeniClient access + workspaces", () => {
         `POST /v1/workspaces/${WORKSPACE_ID}/members/access-requests/slack/${requestId}/deny`,
       ],
     );
-    expect(JSON.parse(requests[0]!.body!)).toEqual({ linkToken: "signed-link" });
+    expect(JSON.parse(requests[0]!.body!)).toEqual({
+      linkToken: "signed-link",
+    });
     expect(requests.slice(1).every((request) => !request.url.includes("signed-link"))).toBe(true);
   });
 });
@@ -1179,9 +1183,9 @@ describe("OpenGeniClient documents", () => {
 });
 
 describe("OpenGeniClient packs", () => {
-  test("list, register, get, enable, installations, and delete (204)", async () => {
+  test("list, register, inspect, install, uninstall, and delete (204)", async () => {
     const { client, requests } = makeClient((request) => {
-      if (request.method === "DELETE") {
+      if (request.method === "DELETE" && request.url.endsWith("/packs/acme")) {
         return new Response(null, { status: 204 });
       }
       if (request.url.endsWith("/packs") && request.method === "GET") {
@@ -1202,6 +1206,18 @@ describe("OpenGeniClient packs", () => {
     await client.enablePack(WORKSPACE_ID, "acme", {
       environmentId: ENVIRONMENT_ID,
     });
+    await client.previewPackInstallation(WORKSPACE_ID, "acme", {
+      variableSetId: ENVIRONMENT_ID,
+    });
+    await client.installPack(WORKSPACE_ID, "acme", {
+      expectedManifestDigest: "a".repeat(64),
+      idempotencyKey: "44444444-4444-4444-8444-444444444444",
+    });
+    await client.previewPackUninstall(WORKSPACE_ID, "acme");
+    await client.uninstallPack(WORKSPACE_ID, "acme", {
+      expectedInstallationVersion: 1,
+      idempotencyKey: "55555555-5555-4555-8555-555555555555",
+    });
     await client.listPackInstallations(WORKSPACE_ID);
     await client.deletePack(WORKSPACE_ID, "acme");
     expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
@@ -1210,12 +1226,27 @@ describe("OpenGeniClient packs", () => {
         `POST /v1/workspaces/${WORKSPACE_ID}/packs`,
         `GET /v1/workspaces/${WORKSPACE_ID}/packs/acme`,
         `POST /v1/workspaces/${WORKSPACE_ID}/packs/acme/enable`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/packs/acme/installation-preview`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/packs/acme/install`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/packs/acme/uninstall-preview`,
+        `DELETE /v1/workspaces/${WORKSPACE_ID}/packs/acme/installation`,
         `GET /v1/workspaces/${WORKSPACE_ID}/packs/installations`,
         `DELETE /v1/workspaces/${WORKSPACE_ID}/packs/acme`,
       ],
     );
     expect(JSON.parse(requests[3]!.body!)).toEqual({
       environmentId: ENVIRONMENT_ID,
+    });
+    expect(JSON.parse(requests[4]!.body!)).toEqual({
+      variableSetId: ENVIRONMENT_ID,
+    });
+    expect(JSON.parse(requests[5]!.body!)).toEqual({
+      expectedManifestDigest: "a".repeat(64),
+      idempotencyKey: "44444444-4444-4444-8444-444444444444",
+    });
+    expect(JSON.parse(requests[7]!.body!)).toEqual({
+      expectedInstallationVersion: 1,
+      idempotencyKey: "55555555-5555-4555-8555-555555555555",
     });
   });
 });
@@ -1249,6 +1280,208 @@ describe("OpenGeniClient capabilities", () => {
       `POST /v1/workspaces/${WORKSPACE_ID}/capabilities/mcp%3Aacme%2Ftools/disable`,
       `GET /v1/workspaces/${WORKSPACE_ID}/capabilities/discovery/mcp-registry?query=github&limit=10`,
     ]);
+  });
+
+  test("previews, installs, impact-checks, and uninstalls immutable Skills", async () => {
+    const { client, requests } = makeClient(() => jsonResponse({}));
+    const sourceUrl = "https://skills.sh/acme/skills/release-operator";
+    const capabilityId = "skill:release-operator-deadbeef1234";
+    await client.previewSkillImport(WORKSPACE_ID, { url: sourceUrl });
+    await client.installSkill(WORKSPACE_ID, {
+      url: sourceUrl,
+      expectedSourceCommit: "a".repeat(40),
+      expectedContentSha256: "b".repeat(64),
+    });
+    await client.previewSkillUninstall(WORKSPACE_ID, capabilityId);
+    await client.uninstallSkill(WORKSPACE_ID, capabilityId, {
+      expectedInstallationVersion: 3,
+    });
+
+    expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
+      [
+        `POST /v1/workspaces/${WORKSPACE_ID}/skills/preview`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/skills/install`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/skills/skill%3Arelease-operator-deadbeef1234/uninstall-preview`,
+        `DELETE /v1/workspaces/${WORKSPACE_ID}/skills/skill%3Arelease-operator-deadbeef1234`,
+      ],
+    );
+    expect(JSON.parse(requests[0]!.body!)).toEqual({ url: sourceUrl });
+    expect(JSON.parse(requests[1]!.body!)).toEqual({
+      url: sourceUrl,
+      expectedSourceCommit: "a".repeat(40),
+      expectedContentSha256: "b".repeat(64),
+    });
+    expect(JSON.parse(requests[3]!.body!)).toEqual({
+      expectedInstallationVersion: 3,
+    });
+  });
+
+  test("previews, installs, lists, impact-checks, and uninstalls API Integrations", async () => {
+    const { client, requests } = makeClient(() => jsonResponse({ integrations: [] }));
+    const source = {
+      kind: "openapi" as const,
+      url: "https://api.example.test/openapi.json",
+    };
+    const capabilityId = "api:openapi:example-deadbeef1234";
+    await client.listApiIntegrationPresets(WORKSPACE_ID);
+    await client.previewApiIntegration(WORKSPACE_ID, { source });
+    await client.installApiIntegration(WORKSPACE_ID, {
+      source,
+      expectedRevisionId: "openapi:aaaaaaaaaaaaaaaaaaaaaaaa",
+      expectedContentSha256: "b".repeat(64),
+      allowedTools: ["list_items"],
+    });
+    await client.listApiIntegrations(WORKSPACE_ID);
+    await client.previewApiIntegrationUninstall(WORKSPACE_ID, capabilityId, "finance");
+    await client.uninstallApiIntegration(WORKSPACE_ID, capabilityId, "finance", {
+      expectedInstallationVersion: 4,
+      expectedInstanceVersion: 2,
+    });
+    await client.listIntegrationFeatures(WORKSPACE_ID, capabilityId, "finance");
+    await client.configureIntegrationFeature(WORKSPACE_ID, capabilityId, "finance", "mail-inbox", {
+      displayName: "Finance inbox",
+      config: { unreadOnly: true },
+      idempotencyKey: "00000000-0000-4000-8000-000000000301",
+    });
+    await client.browseGoogleDriveIntegrationSource(
+      WORKSPACE_ID,
+      capabilityId,
+      "finance",
+      "drive-content",
+      {
+        parentId: "folder/a",
+        pageToken: "next page",
+      },
+    );
+    await client.saveGoogleDriveIntegrationSource(
+      WORKSPACE_ID,
+      capabilityId,
+      "finance",
+      "drive-content",
+      {
+        sources: [
+          {
+            id: "folder/a",
+            name: "Finance",
+            mimeType: "application/vnd.google-apps.folder",
+            driveId: null,
+          },
+        ],
+        destination: { authorityKind: "workspace", collectionId: null },
+        syncCadence: "hourly",
+        syncEnabled: true,
+        readPolicy: "allow",
+        expectedVersion: 4,
+        idempotencyKey: "00000000-0000-4000-8000-000000000305",
+      },
+    );
+    await client.pauseIntegrationFeature(WORKSPACE_ID, capabilityId, "finance", "mail-inbox", {
+      expectedVersion: 1,
+      idempotencyKey: "00000000-0000-4000-8000-000000000302",
+    });
+    await client.resumeIntegrationFeature(WORKSPACE_ID, capabilityId, "finance", "mail-inbox", {
+      expectedVersion: 2,
+      idempotencyKey: "00000000-0000-4000-8000-000000000303",
+    });
+    await client.removeIntegrationFeature(WORKSPACE_ID, capabilityId, "finance", "mail-inbox", {
+      expectedVersion: 3,
+      idempotencyKey: "00000000-0000-4000-8000-000000000304",
+    });
+
+    expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
+      [
+        `GET /v1/workspaces/${WORKSPACE_ID}/integrations/presets`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/integrations/preview`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/integrations/install`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/integrations`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/integrations/api%3Aopenapi%3Aexample-deadbeef1234/instances/finance/uninstall-preview`,
+        `DELETE /v1/workspaces/${WORKSPACE_ID}/integrations/api%3Aopenapi%3Aexample-deadbeef1234/instances/finance`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/integrations/api%3Aopenapi%3Aexample-deadbeef1234/instances/finance/features`,
+        `PUT /v1/workspaces/${WORKSPACE_ID}/integrations/api%3Aopenapi%3Aexample-deadbeef1234/instances/finance/features/mail-inbox`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/integrations/api%3Aopenapi%3Aexample-deadbeef1234/instances/finance/features/drive-content/browse`,
+        `PUT /v1/workspaces/${WORKSPACE_ID}/integrations/api%3Aopenapi%3Aexample-deadbeef1234/instances/finance/features/drive-content/source`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/integrations/api%3Aopenapi%3Aexample-deadbeef1234/instances/finance/features/mail-inbox/pause`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/integrations/api%3Aopenapi%3Aexample-deadbeef1234/instances/finance/features/mail-inbox/resume`,
+        `DELETE /v1/workspaces/${WORKSPACE_ID}/integrations/api%3Aopenapi%3Aexample-deadbeef1234/instances/finance/features/mail-inbox`,
+      ],
+    );
+    expect(JSON.parse(requests[1]!.body!)).toEqual({ source });
+    expect(JSON.parse(requests[2]!.body!)).toEqual({
+      source,
+      expectedRevisionId: "openapi:aaaaaaaaaaaaaaaaaaaaaaaa",
+      expectedContentSha256: "b".repeat(64),
+      allowedTools: ["list_items"],
+    });
+    expect(JSON.parse(requests[5]!.body!)).toEqual({
+      expectedInstallationVersion: 4,
+      expectedInstanceVersion: 2,
+    });
+    expect(JSON.parse(requests[7]!.body!)).toEqual({
+      displayName: "Finance inbox",
+      config: { unreadOnly: true },
+      idempotencyKey: "00000000-0000-4000-8000-000000000301",
+    });
+    expect(new URL(requests[8]!.url).searchParams).toEqual(
+      new URLSearchParams({ parentId: "folder/a", pageToken: "next page" }),
+    );
+    expect(JSON.parse(requests[9]!.body!)).toEqual({
+      sources: [
+        {
+          id: "folder/a",
+          name: "Finance",
+          mimeType: "application/vnd.google-apps.folder",
+          driveId: null,
+        },
+      ],
+      destination: { authorityKind: "workspace", collectionId: null },
+      syncCadence: "hourly",
+      syncEnabled: true,
+      readPolicy: "allow",
+      expectedVersion: 4,
+      idempotencyKey: "00000000-0000-4000-8000-000000000305",
+    });
+    expect(JSON.parse(requests[10]!.body!)).toEqual({
+      expectedVersion: 1,
+      idempotencyKey: "00000000-0000-4000-8000-000000000302",
+    });
+  });
+
+  test("previews, installs, impact-checks, and uninstalls Plugin packages", async () => {
+    const { client, requests } = makeClient(() => jsonResponse({}));
+    const sourceUrl = "https://plugins.example.test/research.json";
+    const pluginKey = "example/research-plugin";
+    await client.previewPlugin(WORKSPACE_ID, { url: sourceUrl });
+    await client.installPlugin(WORKSPACE_ID, {
+      url: sourceUrl,
+      expectedManifestDigest: "a".repeat(64),
+      expectedComponents: [{ key: "research", digest: "b".repeat(64) }],
+      idempotencyKey: "00000000-0000-4000-8000-000000000100",
+    });
+    await client.previewPluginUninstall(WORKSPACE_ID, pluginKey);
+    await client.uninstallPlugin(WORKSPACE_ID, pluginKey, {
+      expectedInstallationVersion: 5,
+      idempotencyKey: "00000000-0000-4000-8000-000000000101",
+    });
+
+    expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
+      [
+        `POST /v1/workspaces/${WORKSPACE_ID}/plugins/preview`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/plugins/install`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/plugins/example%2Fresearch-plugin/uninstall-preview`,
+        `DELETE /v1/workspaces/${WORKSPACE_ID}/plugins/example%2Fresearch-plugin`,
+      ],
+    );
+    expect(JSON.parse(requests[0]!.body!)).toEqual({ url: sourceUrl });
+    expect(JSON.parse(requests[1]!.body!)).toEqual({
+      url: sourceUrl,
+      expectedManifestDigest: "a".repeat(64),
+      expectedComponents: [{ key: "research", digest: "b".repeat(64) }],
+      idempotencyKey: "00000000-0000-4000-8000-000000000100",
+    });
+    expect(JSON.parse(requests[3]!.body!)).toEqual({
+      expectedInstallationVersion: 5,
+      idempotencyKey: "00000000-0000-4000-8000-000000000101",
+    });
   });
 });
 

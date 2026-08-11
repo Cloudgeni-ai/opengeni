@@ -104,4 +104,29 @@ describe("agent capability catalog search", () => {
     expect(first.map((result) => result.item.id)).toEqual(second.map((result) => result.item.id));
     expect(first).toHaveLength(3);
   });
+
+  test("keeps ranked discovery bounded across five thousand catalog entries", () => {
+    const candidates = Array.from({ length: 5_000 }, (_, index) =>
+      item({
+        id: `mcp:catalog-${index}`,
+        name: index === 4_876 ? "Needle Incident Response" : `Catalog Service ${index}`,
+        description:
+          index === 4_876
+            ? "Investigate production incidents and coordinate response."
+            : `General service catalog row ${index}.`,
+        tags: index === 4_876 ? ["needle", "incidents", "operations"] : ["catalog"],
+        providerDomain: index === 4_876 ? "needle.example" : `service-${index}.example`,
+        tier: "verified",
+        metadata: { mcpProbe: { status: "real" } },
+      }),
+    );
+
+    const startedAt = performance.now();
+    const results = searchCapabilityCatalogItems(candidates, "needle incident response", 20);
+    const durationMs = performance.now() - startedAt;
+
+    expect(results[0]?.item.id).toBe("mcp:catalog-4876");
+    expect(results).toHaveLength(1);
+    expect(durationMs).toBeLessThan(1_000);
+  });
 });

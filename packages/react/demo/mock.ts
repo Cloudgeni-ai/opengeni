@@ -67,6 +67,7 @@ import type {
   RigChange,
   CreateWorkspaceRequest,
   EnablePackRequest,
+  InstallPackRequest,
   FileAsset,
   FileDownloadUrlResponse,
   FsListResponse,
@@ -84,6 +85,9 @@ import type {
   GitStatusResponse,
   ListPacksResponse,
   PackInstallation,
+  PackInstallationPreview,
+  PackUninstallPreview,
+  PreviewPackInstallationRequest,
   PtyOpenResponse,
   RegisterCapabilityPackRequest,
   SessionCapabilities,
@@ -114,6 +118,8 @@ import type {
   UpdateWorkspaceEnvironmentRequest,
   UpdateVariableSetRequest,
   UpdateWorkspaceRequest,
+  UninstallPackRequest,
+  UninstallPackResult,
   Workspace,
   WorkspaceControlEvent,
   WorkspaceEnvironment,
@@ -1221,6 +1227,11 @@ export class MockOpenGeniClient implements SessionClientLike {
       workspaceId: WORKSPACE_ID,
       packId,
       status: "active",
+      version: 1,
+      manifestSnapshot: null,
+      manifestDigest: null,
+      selectedRigId: null,
+      installedBySubjectId: null,
       metadata: {
         ...request.metadata,
         ...(request.environmentId ? { environmentId: request.environmentId } : {}),
@@ -1233,6 +1244,101 @@ export class MockOpenGeniClient implements SessionClientLike {
       installation,
     ];
     return installation;
+  }
+
+  async previewPackInstallation(
+    _workspaceId: string,
+    packId: string,
+    request: PreviewPackInstallationRequest = {},
+  ): Promise<PackInstallationPreview> {
+    const pack = (await this.listPacks()).packs.find((candidate) => candidate.id === packId);
+    if (!pack) throw new Error("pack not found");
+    const installation = this.packInstallations.find((candidate) => candidate.packId === packId);
+    return {
+      packId,
+      packVersion: pack.version,
+      manifestDigest: "0".repeat(64),
+      installationVersion: installation?.version ?? null,
+      action: !installation || installation.status === "disabled" ? "install" : "update",
+      ready: true,
+      blockers: [],
+      components: [],
+      rig: {
+        required: false,
+        status: "not_required",
+        requestedRigId: request.rigId ?? null,
+        rigId: null,
+        rigVersionId: null,
+        name: null,
+        image: null,
+      },
+      variableSetId: request.variableSetId ?? null,
+      legacyInlineSkillCount: pack.skills.length,
+      legacySandboxImage: pack.sandboxImage ?? null,
+    };
+  }
+
+  async installPack(
+    _workspaceId: string,
+    packId: string,
+    request: InstallPackRequest,
+  ): Promise<PackInstallation> {
+    const pack = (await this.listPacks()).packs.find((candidate) => candidate.id === packId);
+    if (!pack) throw new Error("pack not found");
+    const existing = this.packInstallations.find((candidate) => candidate.packId === packId);
+    const now = new Date().toISOString();
+    const installation: PackInstallation = {
+      id: existing?.id ?? demoUuid(),
+      accountId: ACCOUNT_ID,
+      workspaceId: WORKSPACE_ID,
+      packId,
+      status: "active",
+      version: (existing?.version ?? 0) + 1,
+      manifestSnapshot: pack,
+      manifestDigest: request.expectedManifestDigest,
+      selectedRigId: request.rigId ?? null,
+      installedBySubjectId: "demo:user",
+      metadata: {
+        ...request.metadata,
+        ...(request.variableSetId ? { variableSetId: request.variableSetId } : {}),
+      },
+      enabledAt: now,
+      updatedAt: now,
+    };
+    this.packInstallations = [
+      ...this.packInstallations.filter((candidate) => candidate.packId !== packId),
+      installation,
+    ];
+    return installation;
+  }
+
+  async previewPackUninstall(_workspaceId: string, packId: string): Promise<PackUninstallPreview> {
+    const installation = this.packInstallations.find((candidate) => candidate.packId === packId);
+    return {
+      packId,
+      installed: Boolean(installation && installation.status !== "disabled"),
+      installationVersion: installation?.version ?? null,
+      components: [],
+    };
+  }
+
+  async uninstallPack(
+    _workspaceId: string,
+    packId: string,
+    _request: UninstallPackRequest,
+  ): Promise<UninstallPackResult> {
+    const installation = this.packInstallations.find((candidate) => candidate.packId === packId);
+    if (installation) {
+      this.packInstallations = [
+        ...this.packInstallations.filter((candidate) => candidate.packId !== packId),
+        { ...installation, status: "disabled", version: installation.version + 1 },
+      ];
+    }
+    return {
+      packId,
+      status: installation ? "uninstalled" : "not_installed",
+      retainedComponents: [],
+    };
   }
 
   async deletePack(_workspaceId: string, packId: string): Promise<void> {
@@ -3051,7 +3157,7 @@ const ACCOUNT_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
  */
 const CLIENT_CONFIG: ClientConfig = {
   deploymentRevision: "demo",
-  apiContractRevision: "2026-07-workspace-artifacts-v1",
+  apiContractRevision: "2026-08-social-provider-tools-v1",
   defaultModel: "gpt-5.6-sol",
   allowedModels: ["gpt-5.6-sol", "accounts/fireworks/models/glm-5p2"],
   models: [
@@ -3178,10 +3284,33 @@ function fabricatePack(manifest: RegisterCapabilityPackRequest): CapabilityPack 
     category: manifest.category,
     version: manifest.version,
     skills: (manifest.skills ?? []).map((skill) => ({ name: skill.name, files: skill.files })),
+    components: (manifest.components ?? []).map((component) => ({
+      ...component,
+      required: component.required ?? true,
+    })),
+    ...(manifest.rig
+      ? {
+          rig: {
+            ...manifest.rig,
+            required: manifest.rig.required ?? true,
+            requireVerified: manifest.rig.requireVerified ?? false,
+          },
+        }
+      : {}),
+    ...(manifest.sandboxImage ? { sandboxImage: manifest.sandboxImage } : {}),
     connectors: [],
     knowledge: [],
     scheduledTaskTemplates: [],
     tools: manifest.tools ?? [],
+    ...(manifest.variableSet
+      ? {
+          variableSet: {
+            ...manifest.variableSet,
+            requiredVariables: manifest.variableSet.requiredVariables ?? [],
+            required: manifest.variableSet.required ?? false,
+          },
+        }
+      : {}),
     metadata: manifest.metadata ?? {},
   };
 }

@@ -378,7 +378,12 @@ plus the checkpoint prompt. Aggregate tool outputs are replaced oldest-first in
 that copy; whole oldest user-delimited units are removed only if necessary. A
 provider overflow gets one smaller refit, so the path performs at most two
 provider calls rather than one failing request per history item. Other failures
-propagate without changing active history. A Codex terminal SSE failure carried
+propagate without changing active history. Remote v2 likewise keeps its first
+request unchanged and, only for the exact `context_length_exceeded` code, makes
+one same-endpoint retry with tool-result bodies temporarily reduced while every
+message, reasoning item, call/result identity, checkpoint, and item position is
+preserved. It never drops history units, folds chunks, or falls back to portable.
+A Codex terminal SSE failure carried
 on HTTP 200 is converted to one bounded, marked, non-retried provider error; it
 cannot masquerade as an empty successful summary. After a fenced durable
 replacement, the same activity, turn, attempt, and sandbox rebuild model input
@@ -662,15 +667,17 @@ receipt is already durable but whose session status still says `recovering`;
 that case skips Temporal liveness inspection and idempotently parks only the
 session projection.
 
-Sandbox lease warming is bounded for the same reason: it is a capacity/setup
-symptom, not legitimate agent work. A turn that attaches while another worker is
-creating the group sandbox waits at most
-`OPENGENI_SANDBOX_WARMING_TIMEOUT_MS` (default 600000). If the lease does not
-reach `warm` in that budget, the activity fails the turn with a clear
-backend/capacity timeout instead of heartbeating forever. When a provider create
-does return, the worker immediately records the provider instance id on the
-warming lease before readiness/display/setup work; any later setup failure
-terminates that just-created sandbox before the lease can be retried.
+Sandbox lease warming has two distinct bounded waits. A turn attached to a
+sibling creator waits at most `OPENGENI_SANDBOX_WARMING_TIMEOUT_MS` (default
+600000) for that durable warming lease to settle. The creator records the exact
+provider instance as soon as create/restore returns, then gives Modal's command
+router a separate 60-second readiness budget before publishing the lease warm.
+The two failures retain different typed stages, group and instance identities,
+and truthful durations; a command-readiness failure is never rewritten as a
+600-second provider-capacity failure. It terminates the unpublished instance,
+rolls only the exact warming epoch back to cold, and fails the turn rather than
+rapidly creating sibling boxes. Any later display/setup failure follows the same
+owned cleanup path.
 
 Lease liveness is not provider or workspace truth. The durable recovery
 projection independently records provider existence, archive availability,
@@ -694,6 +701,15 @@ and leaves typed degraded/unrecoverable state; it never publishes a clean
 replacement, a previous revision, or a mixed snapshot. A legacy per-session
 archive can participate only after its archive fields—never provider identity—
 are imported and selected under that same lock.
+
+New Modal sessions persist `/workspace` with `snapshot_directory`: the restored
+directory Image layers user files onto the currently selected rig/pack/base
+image instead of replacing the whole machine. Existing serialized sessions keep
+their recorded `snapshot_filesystem` or tar mode and remain recoverable. Warm
+checkpoint attempts use the configured interval as a hard minimum even after a
+new mutation generation; an already-complete generation never calls the
+provider again. The zero-holder drain/rotation capture bypasses that interval so
+the exact latest generation is durable before teardown.
 
 Concurrent routed calls may all discover the same missing provider. Exactly one
 observer wins the lease-loss transition; the others receive typed `superseded`

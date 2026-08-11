@@ -124,6 +124,7 @@
     "@opengeni/agent-proto": "workspace:*",
     "@opengeni/api-router": "workspace:*",
     "@opengeni/browserd": "workspace:*",
+    "@opengeni/capabilities": "workspace:*",
     "@opengeni/codemode": "workspace:*",
     "@opengeni/config": "workspace:*",
     "@opengeni/contracts": "workspace:*",

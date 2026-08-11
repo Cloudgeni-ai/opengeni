@@ -86,7 +86,11 @@ import { registerBrowserSessionRoutes } from "./routes/browser-sessions";
 import { registerComputerSessionRoutes } from "./routes/computer-sessions";
 import { registerGitHubRoutes } from "./routes/github";
 import { registerInstallRoutes } from "./routes/install";
+import { registerApiIntegrationRoutes } from "./routes/api-integrations";
+import { registerIntegrationFeatureRoutes } from "./routes/integration-features";
 import { registerPackRoutes } from "./routes/packs";
+import { registerPluginRoutes } from "./routes/plugins";
+import { registerSkillRoutes } from "./routes/skills";
 import { registerRigRoutes } from "./routes/rigs";
 import { registerScheduledTaskRoutes } from "./routes/scheduled-tasks";
 import { registerSessionRoutes } from "./routes/sessions";
@@ -638,12 +642,16 @@ export function createAppComposition(deps: AppDependencies): {
   registerSocialRoutes(app, routeDeps);
   registerConnectionRoutes(app, routeDeps);
   registerCapabilityRoutes(app, routeDeps);
+  registerApiIntegrationRoutes(app, routeDeps);
+  registerIntegrationFeatureRoutes(app, routeDeps);
   registerCatalogAssetRoutes(app, routeDeps);
   registerEnrollmentRoutes(app, routeDeps);
   registerMachineRoutes(app, routeDeps);
   registerEnvironmentRoutes(app, routeDeps);
   registerRigRoutes(app, routeDeps);
   registerPackRoutes(app, routeDeps);
+  registerPluginRoutes(app, routeDeps);
+  registerSkillRoutes(app, routeDeps);
   registerSessionRoutes(app, routeDeps);
   registerScheduledTaskRoutes(app, routeDeps);
   registerCodexRoutes(app, routeDeps);
@@ -1265,6 +1273,80 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
     label: "/v1/workspaces/:workspaceId/capabilities/:id/disable",
   },
   {
+    pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/preview$/,
+    label: "/v1/workspaces/:workspaceId/integrations/preview",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/install$/,
+    label: "/v1/workspaces/:workspaceId/integrations/install",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/presets$/,
+    label: "/v1/workspaces/:workspaceId/integrations/presets",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+\/uninstall-preview$/,
+    label:
+      "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/uninstall-preview",
+  },
+  {
+    pattern:
+      /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+\/features\/[^/]+\/browse$/,
+    label:
+      "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey/browse",
+  },
+  {
+    pattern:
+      /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+\/features\/[^/]+\/source$/,
+    label:
+      "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey/source",
+  },
+  {
+    pattern:
+      /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+\/features\/[^/]+\/pause$/,
+    label:
+      "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey/pause",
+  },
+  {
+    pattern:
+      /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+\/features\/[^/]+\/resume$/,
+    label:
+      "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey/resume",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+\/features\/[^/]+$/,
+    label:
+      "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+\/features$/,
+    label: "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/integrations$/,
+    label: "/v1/workspaces/:workspaceId/integrations",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/skills\/preview$/,
+    label: "/v1/workspaces/:workspaceId/skills/preview",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/skills\/install$/,
+    label: "/v1/workspaces/:workspaceId/skills/install",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/skills\/[^/]+\/uninstall-preview$/,
+    label: "/v1/workspaces/:workspaceId/skills/:id/uninstall-preview",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/skills\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId/skills/:id",
+  },
+  {
     pattern: /^\/v1\/workspaces\/[^/]+\/environments$/,
     label: "/v1/workspaces/:workspaceId/environments",
   },
@@ -1297,6 +1379,26 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
     label: "/v1/workspaces/:workspaceId/packs/:id",
   },
   {
+    pattern: /^\/v1\/workspaces\/[^/]+\/plugins\/preview$/,
+    label: "/v1/workspaces/:workspaceId/plugins/preview",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/plugins$/,
+    label: "/v1/workspaces/:workspaceId/plugins",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/plugins\/install$/,
+    label: "/v1/workspaces/:workspaceId/plugins/install",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/plugins\/[^/]+\/uninstall-preview$/,
+    label: "/v1/workspaces/:workspaceId/plugins/:pluginKey/uninstall-preview",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/plugins\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId/plugins/:pluginKey",
+  },
+  {
     pattern: /^\/v1\/workspaces\/[^/]+\/social\/connections$/,
     label: "/v1/workspaces/:workspaceId/social/connections",
   },
@@ -1311,6 +1413,10 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/connections\/oauth\/start$/,
     label: "/v1/workspaces/:workspaceId/connections/oauth/start",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/oauth\/start$/,
+    label: "/v1/workspaces/:workspaceId/integrations/oauth/start",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/connections\/slack-bot\/install$/,
@@ -1336,6 +1442,14 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
   {
     pattern: /^\/v1\/integrations\/oauth\/callback$/,
     label: "/v1/integrations/oauth/callback",
+  },
+  {
+    pattern: /^\/v1\/integrations\/provider-oauth\/callback$/,
+    label: "/v1/integrations/provider-oauth/callback",
+  },
+  {
+    pattern: /^\/v1\/integrations\/google-drive\/callback$/,
+    label: "/v1/integrations/google-drive/callback",
   },
   {
     pattern: /^\/v1\/integrations\/oauth\/client-metadata\.json$/,

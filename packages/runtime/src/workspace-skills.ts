@@ -36,6 +36,7 @@ export class WorkspaceSkillsCapability extends Capability {
   constructor(
     private readonly searchPaths: readonly WorkspaceSkillSearchPath[],
     private readonly reservedNames: ReadonlySet<string> = new Set(),
+    private readonly shadowedNames: ReadonlySet<string> = new Set(),
   ) {
     super();
   }
@@ -47,6 +48,7 @@ export class WorkspaceSkillsCapability extends Capability {
       this.searchPaths,
       this.reservedNames,
       this._runAs,
+      this.shadowedNames,
     );
     const skills = await this.discovery;
     if (skills.length === 0) return null;
@@ -72,10 +74,12 @@ ${available}
 export function workspaceSkills(
   searchPaths: readonly WorkspaceSkillSearchPath[],
   reservedNames: Iterable<string> = [],
+  shadowedNames: Iterable<string> = [],
 ): WorkspaceSkillsCapability {
   return new WorkspaceSkillsCapability(
     searchPaths,
     new Set([...reservedNames].map((name) => name.toLowerCase())),
+    new Set([...shadowedNames].map((name) => name.toLowerCase())),
   );
 }
 
@@ -84,6 +88,7 @@ export async function discoverWorkspaceSkills(
   searchPaths: readonly WorkspaceSkillSearchPath[],
   reservedNames: ReadonlySet<string> = new Set(),
   runAs?: string,
+  shadowedNames: ReadonlySet<string> = new Set(),
 ): Promise<readonly WorkspaceSkill[]> {
   if (!session.listDir || !session.readFile) {
     throw new Error("Workspace skill discovery requires sandbox listDir() and readFile() support");
@@ -119,11 +124,12 @@ export async function discoverWorkspaceSkills(
       if (name.length > 64 || !SAFE_SKILL_NAME.test(name)) {
         throw new Error(`Repository skill has an invalid name: ${name.slice(0, 64)}`);
       }
+      const key = name.toLowerCase();
+      if (shadowedNames.has(key)) continue;
       const description = frontmatter.description?.trim() || "No description provided.";
       if (description.length > 2_048 || /[\r\n]/.test(description)) {
         throw new Error(`Repository skill "${name}" has an invalid description`);
       }
-      const key = name.toLowerCase();
       if (reservedNames.has(key)) {
         throw new Error(`Workspace skill "${name}" conflicts with a configured OpenGeni skill`);
       }

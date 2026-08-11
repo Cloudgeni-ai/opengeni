@@ -819,24 +819,40 @@ Actions app identity (`github-actions`, app ID `15368`). This admission
 metadata does not alter the reproducible schema-v2 candidate receipt or any
 chart, manifest, SBOM, provenance, or workload digest.
 
-That workflow requires the exact current `main` SHA and no pending changesets.
+That workflow requires the exact current `main` source SHA, an immutable
+`opengeni-release-head-<sha>` controller equal to the Version PR's trusted base,
+and no pending changesets. Trusted Version CI retains that base before its
+candidate checks can succeed. Dispatch the
+workflow from that retained controller tag and pass the release source only as
+data. The complete job graph, reusable admission gate, and local publication
+actions therefore come from reviewed controller bytes. Every job that checks
+out or executes candidate source depends on the read-only gate, which
+reconstructs the provider-owned merge, exact-head review, retention, and
+required-check evidence. A merge composed against a different base fails before
+candidate source runs or candidate bytes exist. Acceptance, embedded
+distribution, and final publication all require that same controller SHA and
+revalidate its direct tag, immutable provider release, and successful admission
+job before trusting the candidate artifact.
 It derives every unpublished publishable workspace package directly from the
 exact checkout and npm registry, so a caller-maintained list cannot omit a
-package. It builds API, worker, web, relay, and stock headless-sandbox images under
-full-source-SHA candidate tags. Migrations explicitly reuse the API manifest.
+package. It builds API, worker, web, relay, and stock headless-sandbox images
+under fresh run-and-attempt-scoped candidate tags. Migrations explicitly reuse
+the API manifest.
 Protected main CI uses the separate `dogfood-sha-<source>` namespace for its
 SHA-configured images and records that tag in the dogfood receipt. The
 release-owned `sha-<source>` namespace therefore remains available for the
 accepted product-version manifests even when the two build configurations
 produce different digests from the same source tree.
-Each manifest is built at most once; retries reuse existing partial results.
+Each attempt refuses pre-existing run-scoped tags and builds the complete image
+set from scratch. A retry receives a different tag, so an interrupted attempt's
+partial registry state can never be mistaken for the next attempt's output.
 Before acceptance, the same workflow packages the Helm chart twice through the
 deterministic release packager, requires byte-for-byte equality, and freezes the
 resulting `.tgz` and SHA-256 in the candidate Actions artifact. It does **not**
 occupy the official OCI version yet. The immutable GitHub release tag
 `opengeni-candidate-<full-source-sha>` retains `release-candidate.json`, its
 SHA-256 sidecar, and the chart assets. Retries that fail before this immutable
-boundary reconcile existing image state and regenerate the same deterministic
+boundary rebuild under a fresh attempt tag and regenerate the same deterministic
 chart bytes; once the candidate release exists, the workflow refuses to rerun
 because its producer run-attempt binding is itself immutable. Release admission
 must use the original successful candidate run ID instead of trying to rewrite
@@ -876,7 +892,12 @@ embedded, and final anonymous-pull gates verify the resulting configuration.
 Self-hosted embedding consumers have a narrower distribution boundary:
 `.github/workflows/release-embedded.yml` publishes only an exact versioned
 source that already has an immutable candidate receipt from the canonical
-candidate workflow. Its dispatcher supplies the trusted candidate run ID, not a
+candidate workflow. It is dispatched from the same retained controller tag and
+executes registry authentication, receipt validation, package closure checks,
+manifest reconciliation, and BOM construction from that controller checkout;
+the versioned source remains data. Candidate provenance and receipt bytes are
+verified before installing that source's dependencies or allowing any source
+lifecycle script to run. Its dispatcher supplies the trusted candidate run ID, not a
 caller-selected receipt URL or digest. The workflow re-runs the public package
 gates, verifies npm `gitHead` and integrity, publishes or reconciles the exact
 candidate chart, promotes the receipt's unchanged manifests to version and
@@ -903,7 +924,10 @@ After staging, production, and the 72-hour canary have consumed those exact
 digests and chart bytes, the protected operator-controlled
 `.github/workflows/release-acceptance.yml` workflow produces the sanitized
 schema-v2 acceptance bundle. Its `production-acceptance` environment is the
-canonical acceptance boundary. That environment pins the operator repository
+canonical acceptance boundary. Dispatch it from the same retained controller
+tag as the candidate: the accepted source is checked out only as data, while
+the workflow graph, provenance verifiers, and bundle assembler are executed
+from the exact controller bytes. That environment pins the operator repository
 and canonical workflow path and holds a narrow artifact-read credential. A
 dispatcher supplies only the operator run ID: OpenGeni requires a successful
 `workflow_dispatch` run from the configured operator `main`, proves that run's
@@ -930,22 +954,27 @@ provider inventory details remain in operator-controlled evidence rather than
 the sanitized public bundle, but they are mandatory dependencies of acceptance.
 
 Public release is then an explicit dispatch of `.github/workflows/release.yml`
-from a ref pinned to the accepted source SHA. Evidence admission accepts the
+from the same retained controller tag. The accepted source SHA remains an
+explicit input and checkout, never workflow authority. Evidence admission accepts the
 candidate and acceptance **run IDs**, not caller-controlled URLs, hashes,
 workflow paths, or repository identities. The provenance verifier queries the
 GitHub API and requires the canonical repository/workflow, a completed
-successful `workflow_dispatch` run from `main`, exact source commit/tree SHA and
-run attempt, an exact retained controller branch/SHA whose SHA remains an
-ancestor of current `main`, one owned unexpired Actions artifact with its
-provider digest, and the expected artifact name. URLs and archive digests are
-derived only after those checks. The
+successful `workflow_dispatch` run from the exact retained controller tag,
+exact source commit/tree SHA and run attempt, the controller's direct immutable
+tag/release, the candidate run's one successful admission job, and one owned unexpired Actions
+artifact with its provider digest and expected artifact name. URLs and archive
+digests are derived only after those checks. This final read-only admission
+requires the accepted source to remain reachable from `main`, but deliberately
+does not require it to remain the newest `main` commit after a staging soak.
+The
 exact package set is carried from the immutable candidate receipt and
 re-derived from registry state immediately before publication; the dispatch
 caller cannot add or omit packages. An explicit zero-gap confirmation is still required. The product
 release identity comes from the exact SemVer `version`/`appVersion` pair
 committed in `deploy/helm/opengeni/Chart.yaml`; it is independent of whichever
-npm packages changed. The selected dispatch ref, `source_sha`, checked-out
-commit, and a commit reachable from `main` must identify the same revision.
+npm packages changed. The selected dispatch ref and workflow graph must identify
+the exact retained controller, while `source_sha`, the source checkout, and a
+commit reachable from `main` must identify the same release-data revision.
 Candidate admission rejects a product version already occupied by any official
 image or chart. A final-release retry permits only aliases that already resolve
 to the exact accepted digest.
@@ -1568,7 +1597,7 @@ Minimum production dashboards should cover:
 - API traffic: request rate, error rate, and p50/p95/p99 latency by `route`, `method`, `status`, `variable set`, and `component`.
 - Worker execution: activity run rate, failure rate, and p50/p95/p99 `runAgentTurn` duration by `activity`, `status`, `variable set`, and `component`.
 - Turn lifecycle: `opengeni_turns_total{outcome}`, `opengeni_turn_duration_seconds`, `opengeni_turns_inflight`, and `opengeni_turn_oldest_inflight_age_seconds`.
-- Model, Codex, and sandbox SLIs: `opengeni_model_calls_total{provider,outcome}`, `opengeni_model_call_duration_seconds{provider}`, `opengeni_codex_credential_selections_total{strategy,reason}`, `opengeni_codex_credential_failures_total{kind,outcome}`, `opengeni_codex_pool_observations_total{depth}`, `opengeni_codex_pool_low_total{depth}`, `opengeni_sandbox_creates_total{backend,image_source,outcome}`, `opengeni_sandbox_create_duration_seconds{backend,image_source}`, `opengeni_sandbox_operations_total{backend,op,outcome}` (`ok`, expected path `not_found`, or actual `failed`), `opengeni_sandbox_operation_duration_seconds{backend,op}`, `opengeni_sandbox_inventory_refresh_timestamp_seconds{domain}`, the chart's freshness-filtered `opengeni:*:fresh_max` inventory recording rules, `opengeni_sandbox_warming_timeouts_total`, and `opengeni_sandbox_orphans_terminated_total`.
+- Model, Codex, and sandbox SLIs: `opengeni_model_calls_total{provider,outcome}`, `opengeni_model_call_duration_seconds{provider}`, `opengeni_codex_credential_selections_total{strategy,reason}`, `opengeni_codex_credential_failures_total{kind,outcome}`, `opengeni_codex_pool_observations_total{depth}`, `opengeni_codex_pool_low_total{depth}`, `opengeni_sandbox_creates_total{backend,image_source,outcome}`, `opengeni_sandbox_create_duration_seconds{backend,image_source}`, `opengeni_sandbox_operations_total{backend,op,outcome}` (`ok`, expected path `not_found`, or actual `failed`), `opengeni_sandbox_operation_duration_seconds{backend,op}`, `opengeni_sandbox_inventory_refresh_timestamp_seconds{domain}`, the chart's freshness-filtered `opengeni:*:fresh_max` inventory recording rules, `opengeni_sandbox_warming_timeouts_total{backend,stage}`, and `opengeni_sandbox_orphans_terminated_total`.
 - Queue, admission, and billing: `opengeni_turns_queued`, `opengeni_turn_eligible_backlog`, `opengeni_turn_eligible_backlog_oldest_age_seconds`, `opengeni_turn_slot_saturation_ratio`, `opengeni_credit_balance_micros{account_id}`, `opengeni_credit_micros_total{kind}`, and `opengeni_build_info{version,revision}`.
 - Dependency health: Postgres connection health, Temporal worker poll health, NATS connectivity, object-storage write/read conformance, and sandbox backend readiness.
 - Runtime health: API/worker restarts, continuous turn-worker host/cgroup utilization and RSS reserve consumption, node memory/I/O PSI, swap-out activity, kubelet runtime errors, node readiness, pod pending time, collector scrape/export errors, and OTLP export failures.

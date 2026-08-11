@@ -26,8 +26,16 @@ materializes a scoped knowledge source and a shared Schedule action:
   Background sync is authorized solely by **Enable synchronization** and does
   not pause for per-run approval.
 - Deleting a sync Schedule first disables that exact source selection and
-  tombstones its scoped source. Later saves keep it disabled until the same
-  initiating subject explicitly enables synchronization again.
+tombstones its scoped source. Later saves keep it disabled until the same
+initiating subject explicitly enables synchronization again.
+
+The Capabilities platform can install multiple named Drive instances (for
+example, Finance and Sales). Each instance is bound to one exact Personal or
+workspace Connection and its own feature configuration; provider-domain
+fallback and singleton credential reuse are not authority. The newer provider
+preset may expose separately reviewed Drive read/write tools, while scheduled
+knowledge ingestion remains an explicit source feature with its own destination
+and enablement fences.
 
 Google currently classifies `drive.readonly` as a restricted scope.
 Keep the OAuth app in Testing with explicit test users for local development.

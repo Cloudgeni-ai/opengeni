@@ -80,6 +80,10 @@ export type SessionClientLike = Pick<
   | "listPacks"
   | "registerPack"
   | "enablePack"
+  | "previewPackInstallation"
+  | "installPack"
+  | "previewPackUninstall"
+  | "uninstallPack"
   | "deletePack"
   // Workspaces + billing
   | "listWorkspaces"

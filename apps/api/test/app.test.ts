@@ -524,6 +524,56 @@ describe("API helpers", () => {
     expect(routeLabel(`/v1/workspaces/${workspace}/capabilities/mcp%3Aexample/disable`)).toBe(
       "/v1/workspaces/:workspaceId/capabilities/:id/disable",
     );
+    expect(routeLabel(`/v1/workspaces/${workspace}/integrations/oauth/start`)).toBe(
+      "/v1/workspaces/:workspaceId/integrations/oauth/start",
+    );
+    expect(routeLabel(`/v1/workspaces/${workspace}/integrations/presets`)).toBe(
+      "/v1/workspaces/:workspaceId/integrations/presets",
+    );
+    expect(
+      routeLabel(
+        `/v1/workspaces/${workspace}/integrations/api%3Aopenapi%3Agmail/instances/account-a/uninstall-preview`,
+      ),
+    ).toBe(
+      "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/uninstall-preview",
+    );
+    expect(
+      routeLabel(
+        `/v1/workspaces/${workspace}/integrations/api%3Aopenapi%3Agmail/instances/account-a`,
+      ),
+    ).toBe("/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey");
+    expect(
+      routeLabel(
+        `/v1/workspaces/${workspace}/integrations/api%3Aopenapi%3Agmail/instances/account-a/features/mail-inbox`,
+      ),
+    ).toBe(
+      "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey",
+    );
+    expect(
+      routeLabel(
+        `/v1/workspaces/${workspace}/integrations/api%3Aopenapi%3Agmail/instances/account-a/features/mail-inbox/pause`,
+      ),
+    ).toBe(
+      "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey/pause",
+    );
+    expect(routeLabel("/v1/integrations/provider-oauth/callback")).toBe(
+      "/v1/integrations/provider-oauth/callback",
+    );
+    expect(routeLabel("/v1/integrations/google-drive/callback")).toBe(
+      "/v1/integrations/google-drive/callback",
+    );
+    expect(routeLabel(`/v1/workspaces/${workspace}/plugins/preview`)).toBe(
+      "/v1/workspaces/:workspaceId/plugins/preview",
+    );
+    expect(routeLabel(`/v1/workspaces/${workspace}/plugins/install`)).toBe(
+      "/v1/workspaces/:workspaceId/plugins/install",
+    );
+    expect(
+      routeLabel(`/v1/workspaces/${workspace}/plugins/example%2Fplugin/uninstall-preview`),
+    ).toBe("/v1/workspaces/:workspaceId/plugins/:pluginKey/uninstall-preview");
+    expect(routeLabel(`/v1/workspaces/${workspace}/plugins/example%2Fplugin`)).toBe(
+      "/v1/workspaces/:workspaceId/plugins/:pluginKey",
+    );
     expect(
       routeLabel(`/v1/workspaces/${workspace}/packs/marketing-social-daily-analysis/enable`),
     ).toBe("/v1/workspaces/:workspaceId/packs/:id/enable");

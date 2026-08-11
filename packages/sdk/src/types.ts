@@ -872,6 +872,35 @@ export type SaveGoogleDriveSourceRequest = {
   readPolicy: GoogleDriveReadPolicy;
 };
 
+export type GoogleDriveKnowledgeSourceItem = {
+  id: string;
+  name: string;
+  mimeType: string;
+  driveId?: string | undefined;
+  sourceKind: "my_drive" | "shared_drive" | "folder";
+  includeDescendants: boolean;
+};
+
+export type GoogleDriveKnowledgeSourceDestination = {
+  authorityKind: ConnectorDocumentDestinationAuthority;
+  authorityAccountId: string;
+  authorityWorkspaceId?: string | undefined;
+  authoritySubjectId?: string | undefined;
+  collectionId?: string | undefined;
+};
+
+export type GoogleDriveKnowledgeSourceConfig = {
+  sources: GoogleDriveKnowledgeSourceItem[];
+  destination: GoogleDriveKnowledgeSourceDestination;
+  syncCadence: GoogleDriveSyncCadence;
+  readPolicy: GoogleDriveReadPolicy;
+};
+
+export type SaveGoogleDriveIntegrationSourceRequest = SaveGoogleDriveSourceRequest & {
+  expectedVersion?: number | undefined;
+  idempotencyKey: string;
+};
+
 export type UpdateConnectionRequest = {
   providerDomain?: string | undefined;
   subjectId?: string | null | undefined;
@@ -2400,6 +2429,18 @@ export type FirstPartyMcpToolName =
   | "social_thread_fetch"
   | "social_posts_sync"
   | "social_post_reply"
+  | "x_accounts_list"
+  | "x_search_live"
+  | "x_mentions_live"
+  | "x_thread_fetch"
+  | "x_posts_sync"
+  | "x_post_reply"
+  | "reddit_accounts_list"
+  | "reddit_search_live"
+  | "reddit_mentions_live"
+  | "reddit_thread_fetch"
+  | "reddit_posts_sync"
+  | "reddit_post_reply"
   | "scheduled_tasks_list"
   | "scheduled_tasks_get"
   | "scheduled_tasks_create"
@@ -2834,7 +2875,7 @@ export type ClientAuthConfig =
 
 // Kept value-identical to @opengeni/contracts and pinned by the SDK contract
 // parity suite. The SDK has no runtime dependency on the Zod contracts package.
-export const OPENGENI_API_CONTRACT_REVISION = "2026-07-workspace-artifacts-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-08-social-provider-tools-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
@@ -3735,6 +3776,12 @@ export type RigProviderImage = {
   imageDigest: string | null;
   artifactId: string | null;
   providerBindingKeyHash: string | null;
+  coldBootValidation?:
+    | {
+        version: 1;
+        checkedAt: string;
+      }
+    | undefined;
   provenance: {
     kind: "rig_verification";
     targetKind: "change" | "version";
@@ -4455,6 +4502,49 @@ export type CapabilityPackVariableSetSpec = {
   required: boolean;
 };
 
+export type CapabilityPackComponentReference =
+  | {
+      key: string;
+      kind: "plugin";
+      pluginKey: string;
+      version: string;
+      manifestDigest: string;
+      required: boolean;
+    }
+  | {
+      key: string;
+      kind: "skill";
+      capabilityId: string;
+      contentSha256: string;
+      required: boolean;
+    }
+  | {
+      key: string;
+      kind: "integration";
+      capabilityId: string;
+      instanceKey: string;
+      revisionId: string;
+      contentSha256: string;
+      required: boolean;
+    }
+  | {
+      key: string;
+      kind: "feature";
+      capabilityId: string;
+      instanceKey: string;
+      featureKey: string;
+      bindingKey: string;
+      configDigest: string;
+      required: boolean;
+    };
+
+export type CapabilityPackRigRequirement = {
+  description?: string | undefined;
+  required: boolean;
+  rigId?: string | undefined;
+  requireVerified: boolean;
+};
+
 export type CapabilityPack = {
   id: string;
   name: string;
@@ -4469,6 +4559,8 @@ export type CapabilityPack = {
       }
     | undefined;
   skills: CapabilityPackSkill[];
+  components: CapabilityPackComponentReference[];
+  rig?: CapabilityPackRigRequirement | undefined;
   tools: ToolRef[];
   connectors: CapabilityPackConnector[];
   knowledge: CapabilityPackKnowledge[];
@@ -4497,6 +4589,52 @@ export type RegisterCapabilityPackRequest = {
         description?: string | undefined;
         files: CapabilityPackSkillFile[];
       }[]
+    | undefined;
+  components?:
+    | (
+        | {
+            key: string;
+            kind: "plugin";
+            pluginKey: string;
+            version: string;
+            manifestDigest: string;
+            required?: boolean | undefined;
+          }
+        | {
+            key: string;
+            kind: "skill";
+            capabilityId: string;
+            contentSha256: string;
+            required?: boolean | undefined;
+          }
+        | {
+            key: string;
+            kind: "integration";
+            capabilityId: string;
+            instanceKey: string;
+            revisionId: string;
+            contentSha256: string;
+            required?: boolean | undefined;
+          }
+        | {
+            key: string;
+            kind: "feature";
+            capabilityId: string;
+            instanceKey: string;
+            featureKey: string;
+            bindingKey: string;
+            configDigest: string;
+            required?: boolean | undefined;
+          }
+      )[]
+    | undefined;
+  rig?:
+    | {
+        description?: string | undefined;
+        required?: boolean | undefined;
+        rigId?: string | undefined;
+        requireVerified?: boolean | undefined;
+      }
     | undefined;
   tools?: ToolRef[] | undefined;
   connectors?:
@@ -4549,7 +4687,7 @@ export type WorkspaceRegisteredPack = {
   updatedAt: string;
 };
 
-export type PackInstallationStatus = "active" | "disabled";
+export type PackInstallationStatus = "installing" | "active" | "needs_attention" | "disabled";
 
 export type PackInstallation = {
   id: string;
@@ -4557,6 +4695,11 @@ export type PackInstallation = {
   workspaceId: string;
   packId: string;
   status: PackInstallationStatus;
+  version: number;
+  manifestSnapshot: CapabilityPack | null;
+  manifestDigest: string | null;
+  selectedRigId: string | null;
+  installedBySubjectId: string | null;
   metadata: Record<string, unknown>;
   enabledAt: string;
   updatedAt: string;
@@ -4567,6 +4710,82 @@ export type EnablePackRequest = {
   /** @deprecated use variableSetId */
   environmentId?: string | undefined;
   metadata?: Record<string, unknown> | undefined;
+};
+
+export type PackComponentResolutionStatus = "ready" | "missing" | "mismatch";
+
+export type PackComponentResolution = {
+  key: string;
+  kind: "plugin" | "skill" | "integration" | "feature" | "inline_skill";
+  capabilityId: string;
+  required: boolean;
+  status: PackComponentResolutionStatus;
+  expectedDigest: string;
+  actualDigest: string | null;
+  resolvedId: string | null;
+  label: string;
+};
+
+export type PackRigResolution = {
+  required: boolean;
+  status: "not_required" | "ready" | "missing" | "mismatch" | "unverified";
+  requestedRigId: string | null;
+  rigId: string | null;
+  rigVersionId: string | null;
+  name: string | null;
+  image: string | null;
+};
+
+export type PreviewPackInstallationRequest = {
+  rigId?: string | undefined;
+  variableSetId?: string | undefined;
+};
+
+export type PackInstallationPreview = {
+  packId: string;
+  packVersion: string;
+  manifestDigest: string;
+  installationVersion: number | null;
+  action: "install" | "update" | "repair";
+  ready: boolean;
+  blockers: string[];
+  components: PackComponentResolution[];
+  rig: PackRigResolution;
+  variableSetId: string | null;
+  legacyInlineSkillCount: number;
+  legacySandboxImage: string | null;
+};
+
+export type InstallPackRequest = {
+  expectedManifestDigest: string;
+  expectedInstallationVersion?: number | undefined;
+  rigId?: string | undefined;
+  variableSetId?: string | undefined;
+  idempotencyKey: string;
+  metadata?: Record<string, unknown> | undefined;
+};
+
+export type PackUninstallPreview = {
+  packId: string;
+  installed: boolean;
+  installationVersion: number | null;
+  components: Array<{
+    key: string;
+    kind: "plugin" | "skill" | "integration" | "feature" | "inline_skill";
+    capabilityId: string;
+    retainedByOtherOwners: boolean;
+  }>;
+};
+
+export type UninstallPackRequest = {
+  expectedInstallationVersion: number;
+  idempotencyKey: string;
+};
+
+export type UninstallPackResult = {
+  packId: string;
+  status: "not_installed" | "uninstalled";
+  retainedComponents: string[];
 };
 
 export type ListPacksResponse = {
@@ -4596,6 +4815,34 @@ export type CapabilityInstallationStatus = "active" | "disabled";
 export type CapabilityCatalogAuthKind = "oauth2" | "api_key" | "none" | "unknown";
 
 export type CapabilityCatalogTier = "verified" | "community";
+
+export type CapabilityLifecycleStatus =
+  | "available"
+  | "installed"
+  | "connected"
+  | "ready"
+  | "needs_attention"
+  | "unavailable"
+  | "managed";
+
+export type CapabilityReadiness = "ready" | "setup_required" | "attention" | "unavailable";
+
+export type CapabilityAction =
+  | "install"
+  | "connect"
+  | "configure"
+  | "update"
+  | "repair"
+  | "disconnect"
+  | "uninstall"
+  | "inspect";
+
+export type CapabilityLifecycle = {
+  status: CapabilityLifecycleStatus;
+  readiness: CapabilityReadiness;
+  detail: string | null;
+  managedBy: "deployment" | "platform" | "workspace" | null;
+};
 
 export type CapabilityRuntime = {
   available: boolean;
@@ -4643,7 +4890,11 @@ export type CapabilityCatalogItem = {
   staleAt: string | null;
   tools: ToolRef[];
   runtime: CapabilityRuntime;
+  lifecycle: CapabilityLifecycle;
+  actions: CapabilityAction[];
+  /** @deprecated Use lifecycle and actions. */
   enabled: boolean;
+  /** @deprecated Use lifecycle.detail. */
   enabledReason: string | null;
   /** The connection backing this enabled installation, or null when none is involved. */
   connectionRef: {
@@ -4714,6 +4965,447 @@ export type DiscoverMcpCapabilitiesResponse = {
   items: CapabilityCatalogItem[];
   source: "official_mcp_registry";
   sourceUrl: string;
+};
+
+export type SkillImportSource = "github" | "skills_sh";
+
+export type PreviewSkillImportRequest = {
+  url: string;
+};
+
+export type SkillImportFileSummary = {
+  path: string;
+  byteSize: number;
+  contentSha256: string;
+};
+
+export type SkillImportPreview = {
+  source: SkillImportSource;
+  sourceUrl: string;
+  repositoryUrl: string;
+  owner: string;
+  repository: string;
+  sourcePath: string;
+  sourceCommit: string;
+  name: string;
+  description: string;
+  contentSha256: string;
+  totalBytes: number;
+  files: SkillImportFileSummary[];
+  warnings: string[];
+  installed: boolean;
+  installationVersion: number | null;
+};
+
+export type InstallSkillRequest = {
+  url: string;
+  expectedSourceCommit: string;
+  expectedContentSha256: string;
+  expectedInstallationVersion?: number | undefined;
+};
+
+export type InstalledSkill = {
+  capabilityId: string;
+  pluginId: string;
+  pluginVersionId: string;
+  facetId: string;
+  pluginInstallationId: string;
+  facetInstallationId: string;
+  installationVersion: number;
+  source: SkillImportSource;
+  sourceUrl: string;
+  sourceCommit: string;
+  contentSha256: string;
+  name: string;
+  status: "installed";
+};
+
+export type CapabilityComponentOwner = {
+  kind: "direct" | "plugin" | "pack" | "migration";
+  id: string;
+  removable: boolean;
+};
+
+export type SkillUninstallPreview = {
+  capabilityId: string;
+  installed: boolean;
+  installationVersion: number | null;
+  directOwner: CapabilityComponentOwner | null;
+  remainingOwners: CapabilityComponentOwner[];
+  removesRuntimeSkill: boolean;
+};
+
+export type UninstallSkillRequest = {
+  expectedInstallationVersion: number;
+};
+
+export type UninstallSkillResult = {
+  capabilityId: string;
+  status: "not_installed" | "uninstalled" | "retained_by_other_owners";
+  remainingOwners: CapabilityComponentOwner[];
+};
+
+export type ApiIntegrationProtocol = "openapi" | "graphql";
+
+export type IntegrationFeatureKind =
+  | "tools"
+  | "knowledge_source"
+  | "inbound_trigger"
+  | "delivery_destination"
+  | "identity_link";
+
+export type IntegrationFeatureStatus = "active" | "paused" | "needs_attention" | "disabled";
+
+export type IntegrationFeatureDefinitionSummary = {
+  featureKey: string;
+  kind: Exclude<IntegrationFeatureKind, "tools">;
+  configSchema: Record<string, unknown>;
+  capabilities: Record<string, unknown>;
+};
+
+export type IntegrationFeatureBindingSummary = {
+  id: string;
+  featureKey: string;
+  kind: Exclude<IntegrationFeatureKind, "tools">;
+  bindingKey: string;
+  displayName: string;
+  connectionId: string | null;
+  status: IntegrationFeatureStatus;
+  config: Record<string, unknown>;
+  version: number;
+  hasCursor: boolean;
+  lastSuccessAt: string | null;
+  lastErrorCode: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type IntegrationInstanceFeaturesResponse = {
+  capabilityId: string;
+  instanceKey: string;
+  providerDomain: string;
+  connectionId: string | null;
+  features: {
+    definition: IntegrationFeatureDefinitionSummary;
+    binding: IntegrationFeatureBindingSummary | null;
+  }[];
+};
+
+export type UpsertIntegrationFeatureRequest = {
+  displayName: string;
+  config?: Record<string, unknown> | undefined;
+  expectedVersion?: number | undefined;
+  idempotencyKey: string;
+};
+
+export type MutateIntegrationFeatureRequest = {
+  expectedVersion: number;
+  idempotencyKey: string;
+};
+
+export type IntegrationFeatureMutationResult = {
+  capabilityId: string;
+  instanceKey: string;
+  featureKey: string;
+  status: "configured" | "paused" | "active";
+  binding: IntegrationFeatureBindingSummary;
+};
+
+export type IntegrationFeatureRemovalResult = {
+  capabilityId: string;
+  instanceKey: string;
+  featureKey: string;
+  status: "not_configured" | "removed" | "retained_by_other_owners";
+  binding: IntegrationFeatureBindingSummary | null;
+  remainingOwners: CapabilityComponentOwner[];
+};
+
+export type ApiIntegrationPresetSummary = {
+  id: string;
+  name: string;
+  summary: string;
+  family: "google" | "microsoft";
+  protocol: "openapi";
+  providerDomain: string;
+  scopes: string[];
+  features: IntegrationFeatureDefinitionSummary[];
+};
+
+export type ListApiIntegrationPresetsResponse = {
+  presets: ApiIntegrationPresetSummary[];
+};
+
+export type ApiIntegrationSource =
+  | { kind: "preset"; presetId: string }
+  | { kind: "openapi"; url: string; baseUrl?: string | undefined }
+  | { kind: "graphql"; endpoint: string; name?: string | undefined }
+  | { kind: "auto"; url: string; baseUrl?: string | undefined };
+
+export type PreviewApiIntegrationRequest = {
+  source: ApiIntegrationSource;
+  connectionId?: string | undefined;
+  ownership?: ConnectionOwnership | undefined;
+};
+
+export type ApiIntegrationOAuthStartRequest = {
+  presetId: string;
+  ownership?: ConnectionOwnership | undefined;
+  connectionId?: string | undefined;
+  returnPath?: string | undefined;
+};
+
+export type ApiIntegrationAuthPreview =
+  | { kind: "none" }
+  | { kind: "oauth2"; providerDomain: string; scopes: string[] }
+  | {
+      kind: "api_key";
+      providerDomain: string;
+      carrier: "header" | "query" | "cookie";
+      name: string;
+    }
+  | { kind: "http"; providerDomain: string; scheme: string };
+
+export type ApiIntegrationToolPreview = {
+  id: string;
+  operationKey: string;
+  name: string;
+  description: string;
+  safety: "read" | "write" | "destructive";
+  approvalMode: "never" | "ask";
+  deprecated: boolean;
+};
+
+export type ApiIntegrationPreview = {
+  source: ApiIntegrationSource;
+  presetId: string | null;
+  protocol: ApiIntegrationProtocol;
+  integrationId: string;
+  capabilityId: string;
+  pluginKey: string;
+  serverId: string;
+  name: string;
+  description: string | null;
+  provider: string | null;
+  providerDomain: string;
+  baseUrl: string;
+  sourceUrl: string | null;
+  revisionId: string;
+  contentSha256: string;
+  auth: ApiIntegrationAuthPreview;
+  connectionId: string | null;
+  connectionOwnership: ConnectionOwnership | null;
+  tools: ApiIntegrationToolPreview[];
+  warnings: string[];
+};
+
+export type InstallApiIntegrationRequest = {
+  source: ApiIntegrationSource;
+  expectedRevisionId: string;
+  expectedContentSha256: string;
+  connectionId?: string | undefined;
+  ownership?: ConnectionOwnership | undefined;
+  instanceKey?: string | undefined;
+  displayName?: string | undefined;
+  expectedInstanceVersion?: number | undefined;
+  allowedTools?: string[] | undefined;
+};
+
+export type InstalledApiIntegration = {
+  capabilityId: string;
+  pluginId: string;
+  pluginVersionId: string;
+  integrationFacetId: string;
+  apiFacetId: string;
+  pluginInstallationId: string;
+  integrationFacetInstallationId: string;
+  apiFacetInstallationId: string;
+  installationVersion: number;
+  instanceId: string;
+  instanceKey: string;
+  displayName: string;
+  instanceVersion: number;
+  revisionId: string;
+  serverId: string;
+  status: "installed";
+};
+
+export type ApiIntegrationInstallationSummary = {
+  capabilityId: string;
+  pluginKey: string;
+  installationVersion: number;
+  instanceId: string;
+  instanceKey: string;
+  displayName: string;
+  instanceVersion: number;
+  serverId: string;
+  name: string;
+  description: string | null;
+  protocol: ApiIntegrationProtocol;
+  presetId: string | null;
+  providerDomain: string;
+  baseUrl: string;
+  sourceUrl: string | null;
+  connected: boolean;
+  requiresConnection: boolean;
+  connectionId: string | null;
+  ownership: "workspace" | "personal" | "none";
+  allowedTools: string[];
+  toolCount: number;
+  approvalRequiredToolCount: number;
+  revisionId: string;
+  contentSha256: string;
+};
+
+export type ListApiIntegrationsResponse = {
+  integrations: ApiIntegrationInstallationSummary[];
+};
+
+export type ApiIntegrationUninstallPreview = {
+  capabilityId: string;
+  instanceKey: string;
+  displayName: string | null;
+  installed: boolean;
+  installationVersion: number | null;
+  instanceVersion: number | null;
+  directOwner: CapabilityComponentOwner | null;
+  remainingOwners: CapabilityComponentOwner[];
+  removesRuntimeIntegration: boolean;
+  removesDefinition: boolean;
+};
+
+export type UninstallApiIntegrationRequest = {
+  expectedInstallationVersion: number;
+  expectedInstanceVersion: number;
+};
+
+export type UninstallApiIntegrationResult = {
+  capabilityId: string;
+  instanceKey: string;
+  status: "not_installed" | "uninstalled" | "retained_by_other_owners";
+  remainingOwners: CapabilityComponentOwner[];
+  definitionStatus: "retained" | "disabled";
+};
+
+export type PluginManifestComponent =
+  | { key: string; kind: "skill"; url: string }
+  | { key: string; kind: "integration"; source: ApiIntegrationSource }
+  | { key: string; kind: "mcp"; serverId: string };
+
+export type PluginManifest = {
+  schemaVersion: 1;
+  pluginKey: string;
+  version: string;
+  name: string;
+  description: string;
+  category: string;
+  tags: string[];
+  components: PluginManifestComponent[];
+};
+
+export type PluginComponentBinding = {
+  connectionId?: string | undefined;
+  instanceKey?: string | undefined;
+  displayName?: string | undefined;
+};
+
+export type PreviewPluginRequest = {
+  url: string;
+  bindings?: Record<string, PluginComponentBinding> | undefined;
+};
+
+export type PluginComponentPreview = {
+  key: string;
+  kind: "skill" | "integration" | "mcp";
+  name: string;
+  capabilityId: string;
+  digest: string;
+  connectionRequired: boolean;
+  connectionId: string | null;
+  instanceKey: string | null;
+  displayName: string | null;
+  facts: Record<string, unknown>;
+};
+
+export type PluginUpdateDiff = {
+  fromVersion: string | null;
+  toVersion: string;
+  added: string[];
+  removed: string[];
+  changed: string[];
+  unchanged: string[];
+};
+
+export type PluginPreview = {
+  sourceUrl: string;
+  manifest: PluginManifest;
+  manifestDigest: string;
+  installed: boolean;
+  installationVersion: number | null;
+  components: PluginComponentPreview[];
+  diff: PluginUpdateDiff;
+};
+
+export type InstallPluginRequest = {
+  url: string;
+  expectedManifestDigest: string;
+  expectedComponents: Array<{ key: string; digest: string }>;
+  bindings?: Record<string, PluginComponentBinding> | undefined;
+  idempotencyKey: string;
+  expectedInstallationVersion?: number | undefined;
+};
+
+export type InstalledPlugin = {
+  pluginKey: string;
+  version: string;
+  pluginId: string;
+  pluginVersionId: string;
+  pluginInstallationId: string;
+  installationVersion: number;
+  componentCount: number;
+  status: "installed";
+};
+
+export type PluginInstallationSummary = {
+  pluginKey: string;
+  version: string;
+  name: string;
+  description: string;
+  category: string;
+  tags: string[];
+  sourceUrl: string | null;
+  manifestDigest: string;
+  installationVersion: number;
+  componentCount: number;
+  status: "active" | "needs_attention";
+  installedAt: string;
+  updatedAt: string;
+};
+
+export type ListInstalledPluginsResponse = {
+  plugins: PluginInstallationSummary[];
+};
+
+export type PluginUninstallPreview = {
+  pluginKey: string;
+  installed: boolean;
+  version: string | null;
+  installationVersion: number | null;
+  components: Array<{
+    capabilityId: string;
+    kind: "skill" | "integration" | "mcp";
+    retainedByOtherOwners: boolean;
+  }>;
+};
+
+export type UninstallPluginRequest = {
+  expectedInstallationVersion: number;
+  idempotencyKey: string;
+};
+
+export type UninstallPluginResult = {
+  pluginKey: string;
+  status: "not_installed" | "uninstalled";
+  retainedComponents: string[];
 };
 
 // --- GitHub ---------------------------------------------------------------------

@@ -91,6 +91,7 @@ import {
   type CodexCredentialLeaseResult,
   type CodexCredentialLeaseSelectionContext,
   type ApplySessionTurnSettlementInput,
+  type ApiIntegrationRuntime,
   type SessionAttemptQuiescenceCommit,
   type SessionTurnRecordingSettlement,
 } from "@opengeni/db";
@@ -163,6 +164,7 @@ import {
   stopRecording as stopRecordingOnBox,
 } from "@opengeni/runtime";
 import { connectionTokenResolverForTurn } from "./mcp-credentials";
+import { buildApiIntegrationServersForTurn } from "./api-integrations";
 import {
   assertTurnExecutionPolicyMatchesConfigV1,
   calculateGatewayReportedCostBreakdown,
@@ -2431,15 +2433,17 @@ export function isLazySandboxProvisionRetryable(error: unknown): boolean {
   }
   if (
     error instanceof SandboxLeaseSupersededError ||
-    error instanceof SandboxLeaseTransitionError ||
-    error instanceof SandboxWarmingTimeoutError
+    error instanceof SandboxLeaseTransitionError
   ) {
     return true;
   }
-  const message = error instanceof Error ? error.message : String(error);
-  return /(?:capacity|create|creation|provider|sandbox).*(?:timeout|timed out)|(?:timeout|timed out).*(?:capacity|create|creation|provider|sandbox)|ECONNRESET|ETIMEDOUT|EAI_AGAIN|temporar/i.test(
-    message,
-  );
+  if (error instanceof SandboxWarmingTimeoutError) {
+    return false;
+  }
+  // Provider/transport text is not durable evidence that creation never
+  // happened. Retrying an ambiguous unknown here can create a second box; only
+  // typed, ownership-fenced lifecycle outcomes above are safe to replay.
+  return false;
 }
 
 /** Short workflow-visible anti-churn pacing after a lifecycle transition. The
@@ -3679,7 +3683,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (!activeTurnId) {
         throw new Error("Session image tool completed before turn initialization");
       }
-      const typedScreenshot = typedScreenshotFromToolOutput({ callId: toolCallId, output });
+      const typedScreenshot = typedScreenshotFromToolOutput({
+        callId: toolCallId,
+        output,
+      });
       retainedSessionImageCallIds.add(toolCallId);
       if (!typedScreenshot) {
         if (toolOutputContainsInlineImage(output)) {
@@ -3859,10 +3866,39 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // only exists in the RunState blob), never through a swapped trigger.
     let triggerType: string | null = null;
     try {
+      const session = await requireSession(db, input.workspaceId, input.sessionId);
+      const claim = await claimSessionWorkForAttempt(db, input.workspaceId, {
+        sessionId: input.sessionId,
+        workflowId: input.workflowId,
+        workflowRunId: input.workflowRunId,
+        attemptId: input.attemptId,
+        dispatchId,
+        trigger: input.trigger,
+      });
+      if (claim.action === "unclaimed") {
+        activityStatus = "unclaimed";
+        return { status: "unclaimed", reason: claim.reason };
+      }
+      const turn = claim.turn;
+      turnId = turn.id;
+      executionGeneration = turn.executionGeneration;
+      providerRecoveryCount = providerRecoveryCountFromMetadata(turn.metadata);
+      let installedApiIntegrations: readonly ApiIntegrationRuntime[] = [];
+      const credentialSubjectId = credentialSubjectIdForTurnInitiator(turn);
       const mcpSettings = await settingsWithEnabledCapabilityMcpServers(
         db,
         input.workspaceId,
         settings,
+        {
+          ...(credentialSubjectId
+            ? { subjectId: credentialSubjectId }
+            : {
+                personalConnectionDelegations: turn.personalConnectionDelegations,
+              }),
+          onResolvedApiIntegrations: (integrations) => {
+            installedApiIntegrations = integrations;
+          },
+        },
       );
       // Read the active-credential flag once for the runtime capability overlay.
       // Accepted billing/provider identity comes from the turn policy below,
@@ -3887,23 +3923,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         ? await resolveCodexAppsCredentialIdForRun(db, input.workspaceId)
         : null;
       runtime.configure(capabilitySettings);
-      const session = await requireSession(db, input.workspaceId, input.sessionId);
-      const claim = await claimSessionWorkForAttempt(db, input.workspaceId, {
-        sessionId: input.sessionId,
-        workflowId: input.workflowId,
-        workflowRunId: input.workflowRunId,
-        attemptId: input.attemptId,
-        dispatchId,
-        trigger: input.trigger,
-      });
-      if (claim.action === "unclaimed") {
-        activityStatus = "unclaimed";
-        return { status: "unclaimed", reason: claim.reason };
-      }
-      const turn = claim.turn;
-      turnId = turn.id;
-      executionGeneration = turn.executionGeneration;
-      providerRecoveryCount = providerRecoveryCountFromMetadata(turn.metadata);
       const claimedPolicy = readTurnExecutionPolicyV1(turn.metadata);
       const policyForAbsent =
         claimedPolicy.kind === "valid"
@@ -4864,11 +4883,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         turn.sandboxBackend,
       );
       const baseRunSettings = {
-        // IMAGE PRECEDENCE (M3): rig > pack > deployment. settingsWithRigImage runs
-        // OUTERMOST so a rig-pinned image overrides both the pack image and the
-        // deployment default; a rig with no image (or a rig-less turn) is a
-        // pass-through. A matching verified provider-native ID is then applied
-        // only to fresh creation without changing the logical lease image.
+        // IMAGE PRECEDENCE: rig > pre-V2 Pack compatibility > deployment.
+        // resolveWorkspacePackRuntime returns no image for V2 Pack rows, so
+        // settingsWithRigImage runs outermost over only the intentionally
+        // retained legacy fallback. A matching verified provider-native ID is
+        // then applied only to fresh creation without changing the logical
+        // lease image.
         ...providerImageSettings,
         openaiModel: turn.model,
         openaiReasoningEffort: turn.reasoningEffort,
@@ -6260,7 +6280,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (objectStorage && requiredGeneratedVideoFiles.length > 0) {
         const downloadStorage = objectStorageForSandboxDownloads(modelRunSettings, objectStorage);
         for (const file of requiredGeneratedVideoFiles) {
-          const signed = await downloadStorage.createGetUrl({ key: file.objectKey });
+          const signed = await downloadStorage.createGetUrl({
+            key: file.objectKey,
+          });
           generatedVideoDownloads.push({
             fileId: file.fileId,
             mountPath: "generated-videos",
@@ -6320,7 +6342,30 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         }
         return result;
       };
-      const credentialSubjectId = credentialSubjectIdForTurnInitiator(turn);
+      const publishToolAuthNeeded = async (payload: ToolAuthNeededPayload): Promise<void> => {
+        if (!shouldPublishToolAuthNeededForTurn(payload, trigger, turn)) {
+          return;
+        }
+        await publish!([{ type: "tool.auth_needed", payload }], true);
+      };
+      const selectedApiIntegrationIds = new Set(turnTools.map((tool) => tool.id));
+      const localMcpServers = buildApiIntegrationServersForTurn({
+        settings: runSettings,
+        integrations: installedApiIntegrations.filter((integration) =>
+          selectedApiIntegrationIds.has(integration.serverId),
+        ),
+        authority: {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          rootSessionId: session.rootSessionId,
+          turnId: turn.id,
+          attemptId: input.attemptId,
+          ...(credentialSubjectId ? { initiatingSubjectId: credentialSubjectId } : {}),
+        },
+        resolveCredential,
+        onAuthNeeded: publishToolAuthNeeded,
+      });
       const codexAppsAuth = codexAppsCredentialId
         ? (() => {
             const resolver = buildCodexTokenResolver(
@@ -6367,14 +6412,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           ...(credentialSubjectId ? { credentialSubjectId } : {}),
           ...(codexAppsAuth ? { codexAppsAuth } : {}),
           resolveCredential,
+          onAuthNeeded: publishToolAuthNeeded,
+          localMcpServers,
           onAttemptToolCatalog: async (catalog) => {
             await persistAttemptToolCatalog(db, catalog);
-          },
-          onAuthNeeded: async (payload) => {
-            if (!shouldPublishToolAuthNeededForTurn(payload, trigger, turn)) {
-              return;
-            }
-            await publish!([{ type: "tool.auth_needed", payload }], true);
           },
           // Manager-style sessions carry a creation-validated permission set
           // for their first-party MCP token; null keeps the fixed default.

@@ -67,6 +67,17 @@ export default defineConfig({
               entriesAwareMergeThreshold: 128 * 1024,
               priority: 3,
             },
+            {
+              // Keep the capabilities service-card presentation behind its
+              // local React.lazy boundary. Rolldown otherwise coalesces this
+              // view-only module back into the route chunk, making every
+              // startup pay for account cards and setup dialogs before the
+              // preset inventory is visible.
+              name: "capabilities-services",
+              test: /src[\\/]components[\\/]capabilities[\\/]integration-control-center-view\.tsx$/,
+              includeDependenciesRecursively: false,
+              priority: 4,
+            },
           ],
         },
       },

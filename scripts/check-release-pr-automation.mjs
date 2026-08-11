@@ -129,6 +129,8 @@ function githubClient(fetchImpl, token) {
     },
     patch: async (path, body) => (await request("PATCH", path, body)).value,
     post: async (path, body) => (await request("POST", path, body)).value,
+    postAllowing: async (path, body, allowedStatuses) =>
+      request("POST", path, body, allowedStatuses),
   };
 }
 
@@ -197,10 +199,14 @@ async function ensureReleaseHeadRef(api, headSha) {
 async function createReleaseHeadRef(api, headSha) {
   const tag = releaseHeadTagName(headSha);
   const path = repositoryPath(`/git/ref/tags/${tag}`);
-  await api.post(repositoryPath("/git/refs"), {
-    ref: `refs/tags/${tag}`,
-    sha: headSha,
-  });
+  await api.postAllowing(
+    repositoryPath("/git/refs"),
+    {
+      ref: `refs/tags/${tag}`,
+      sha: headSha,
+    },
+    [409, 422],
+  );
   const terminal = await api.get(path);
   assertReleaseHeadRef(terminal, headSha);
   return { name: tag, ref: `refs/tags/${tag}`, sha: headSha };
@@ -268,16 +274,20 @@ async function ensureReleaseHeadRelease(api, headSha) {
 async function createReleaseHeadRelease(api, headSha) {
   const tagName = releaseHeadTagName(headSha);
   const path = repositoryPath(`/releases/tags/${tagName}`);
-  await api.post(repositoryPath("/releases"), {
-    tag_name: tagName,
-    name: releaseHeadReleaseName(headSha),
-    body:
-      `Provider-retained exact release-source head ${headSha}. ` +
-      "This prerelease exists only as immutable source-retention evidence.",
-    draft: false,
-    prerelease: true,
-    make_latest: "false",
-  });
+  await api.postAllowing(
+    repositoryPath("/releases"),
+    {
+      tag_name: tagName,
+      name: releaseHeadReleaseName(headSha),
+      body:
+        `Provider-retained exact release-source head ${headSha}. ` +
+        "This prerelease exists only as immutable source-retention evidence.",
+      draft: false,
+      prerelease: true,
+      make_latest: "false",
+    },
+    [409, 422],
+  );
   return assertReleaseHeadRelease(await api.get(path), headSha);
 }
 
@@ -1326,8 +1336,15 @@ export async function beginVersionPrChecks(options = {}) {
   const context = automationCiContext(env, options.inputs);
   const api = githubClient(options.fetchImpl ?? globalThis.fetch, context.token);
   await terminalVersionIdentity(api, context);
-  const releaseHead = await ensureReleaseHeadRef(api, context.headSha);
-  const releaseHeadRelease = await ensureReleaseHeadRelease(api, context.headSha);
+  const retain = async (sha) => {
+    const ref = await ensureReleaseHeadRef(api, sha);
+    const release = await ensureReleaseHeadRelease(api, sha);
+    return { ref, release };
+  };
+  const retainedHead = await retain(context.headSha);
+  const retainedController = await retain(context.baseSha);
+  const releaseHead = retainedHead.ref;
+  const releaseHeadRelease = retainedHead.release;
   await terminalVersionIdentity(api, context);
   const now = options.now ?? (() => new Date());
   await upsertCheckRun(
@@ -1366,7 +1383,13 @@ export async function beginVersionPrChecks(options = {}) {
     },
     now,
   );
-  return { ...context, releaseHead, releaseHeadRelease };
+  return {
+    ...context,
+    releaseHead,
+    releaseHeadRelease,
+    releaseController: retainedController.ref,
+    releaseControllerRelease: retainedController.release,
+  };
 }
 
 export async function completeVersionPrChecks(options = {}) {
@@ -1759,10 +1782,13 @@ function releaseApprovalContext(env, suppliedSourceSha) {
   requiredEnvironment(env, [
     "GITHUB_API_URL",
     "GITHUB_EVENT_NAME",
+    "GITHUB_REF",
     "GITHUB_REPOSITORY",
     "GITHUB_SERVER_URL",
     "GITHUB_SHA",
     "GITHUB_TOKEN",
+    "GITHUB_WORKFLOW_SHA",
+    "RELEASE_CONTROLLER_SHA",
   ]);
   invariant(
     env.GITHUB_API_URL === RELEASE_AUTOMATION_CONTRACT.apiUrl,
@@ -1778,11 +1804,21 @@ function releaseApprovalContext(env, suppliedSourceSha) {
   );
   invariant(env.GITHUB_EVENT_NAME === "workflow_dispatch", "unexpected workflow event");
   const sourceSha = assertSha(suppliedSourceSha ?? env.SOURCE_SHA, "release source SHA");
+  const controllerSha = assertSha(env.RELEASE_CONTROLLER_SHA, "release controller SHA");
   invariant(
-    assertSha(env.GITHUB_SHA, "GITHUB_SHA") === sourceSha,
-    "dispatch ref differs from source SHA",
+    assertSha(env.GITHUB_SHA, "GITHUB_SHA") === controllerSha,
+    "dispatch ref differs from release controller SHA",
   );
-  return { sourceSha, token: env.GITHUB_TOKEN };
+  invariant(
+    assertSha(env.GITHUB_WORKFLOW_SHA, "GITHUB_WORKFLOW_SHA") === controllerSha,
+    "workflow definition differs from release controller SHA",
+  );
+  invariant(
+    env.GITHUB_REF === `refs/tags/${releaseHeadTagName(controllerSha)}`,
+    "release workflow is not running from the retained controller ref",
+  );
+  invariant(controllerSha !== sourceSha, "release controller must differ from release source");
+  return { controllerSha, sourceSha, token: env.GITHUB_TOKEN };
 }
 
 export async function verifyApprovedMerge(options = {}) {
@@ -1790,8 +1826,21 @@ export async function verifyApprovedMerge(options = {}) {
   const logger = options.logger ?? console;
   const context = releaseApprovalContext(env, options.sourceSha);
   const api = githubClient(options.fetchImpl ?? globalThis.fetch, context.token);
-  const initialMain = await api.get(repositoryPath("/git/ref/heads/main"));
+  const controllerTag = releaseHeadTagName(context.controllerSha);
+  const [initialMain, controllerValue, controllerRef, controllerReleaseValue] = await Promise.all([
+    api.get(repositoryPath("/git/ref/heads/main")),
+    api.get(repositoryPath(`/git/commits/${context.controllerSha}`)),
+    api.get(repositoryPath(`/git/ref/tags/${controllerTag}`)),
+    api.get(repositoryPath(`/releases/tags/${controllerTag}`)),
+  ]);
   assertMainRef(initialMain, context.sourceSha, "initial release main");
+  const controller = assertCommit(
+    controllerValue,
+    context.controllerSha,
+    "release controller commit",
+  );
+  assertReleaseHeadRef(controllerRef, context.controllerSha);
+  const controllerRelease = assertReleaseHeadRelease(controllerReleaseValue, context.controllerSha);
   const source = assertCommit(
     await api.get(repositoryPath(`/git/commits/${context.sourceSha}`)),
     context.sourceSha,
@@ -1826,6 +1875,10 @@ export async function verifyApprovedMerge(options = {}) {
     "pull-request timeline",
   );
   assertProviderMergeEvent(timeline, context.sourceSha, pullIdentity);
+  invariant(
+    context.controllerSha === pullIdentity.baseSha,
+    "release controller SHA differs from the exact reviewed base SHA",
+  );
   const [base, head] = await Promise.all([
     api
       .get(repositoryPath(`/git/commits/${pullIdentity.baseSha}`))
@@ -1834,6 +1887,10 @@ export async function verifyApprovedMerge(options = {}) {
       .get(repositoryPath(`/git/commits/${pullIdentity.headSha}`))
       .then((value) => assertCommit(value, pullIdentity.headSha, "reviewed head commit")),
   ]);
+  invariant(
+    controller.treeSha === base.treeSha,
+    "release controller tree differs from the exact reviewed base tree",
+  );
   invariant(
     source.treeSha === head.treeSha,
     "release source tree differs from the exact reviewed head",
@@ -1957,6 +2014,11 @@ export async function verifyApprovedMerge(options = {}) {
     sourceSha: context.sourceSha,
     sourceTreeSha: source.treeSha,
     sourceParents: source.parents,
+    controller: {
+      sha: context.controllerSha,
+      treeSha: controller.treeSha,
+      release: controllerRelease,
+    },
     pullRequestNumber: pullNumber,
     mergeMethod,
     providerPullCommitCount: pullIdentity.commitCount,

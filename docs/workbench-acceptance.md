@@ -92,15 +92,18 @@ plan from the exact checkout and npm registry state (which is empty for an
 application-only release), takes the product release version from the
 source-controlled Helm chart rather than inferring it from an unrelated npm
 package version, requires the current versioned `main` SHA with no pending changesets,
-builds each physical image at most once under a full-SHA candidate tag, and
-publishes an immutable `opengeni-candidate-<sourceSha>` receipt. A retry reuses
-an already-present manifest instead of rebuilding it. Image and chart
+builds every physical image under a fresh run-and-attempt-scoped candidate tag,
+and publishes an immutable `opengeni-candidate-<sourceSha>` receipt. An
+interrupted attempt is never reused: a new attempt gets a new tag and rebuilds
+all candidate images before it can freeze a receipt. Image and chart
 repositories derive from the validated `OPENGENI_RELEASE_OCI_PREFIX`; the
 portable login boundary supports built-in GitHub auth or short-lived Azure
 OIDC and always drops registry credentials before the anonymous-pull proof.
 
 The protected `release-acceptance.yml` workflow is the canonical acceptance
-producer. Its protected environment pins the trusted operator repository and
+producer. It is dispatched from the candidate's exact retained controller tag,
+checks out the accepted source only as data, and runs its provenance verifiers
+and bundle assembler from the controller checkout. Its protected environment pins the trusted operator repository and
 workflow path and supplies the narrow credential required to read that private
 run's artifact. The workflow takes an operator run ID—not an evidence URL or
 hash—then verifies the successful main-branch workflow identity, current-main
@@ -369,10 +372,18 @@ replacement for review or acceptance.
 1. Merge reviewed source to `main`.
 2. Merge the generated Version PR so the release source has exact package
    versions and no pending changesets.
-3. Dispatch `release-candidate.yml` from that exact current `main` SHA and
-   package plan. Build the seven physical images once, record their digests, and
-   record `migration → api`. The selected public OCI prefix must remain
-   identical through candidate, embedded/final promotion, and BOM publication.
+3. Dispatch `release-candidate.yml` from the immutable retained tag for the
+   Version PR's trusted base. Supply that exact base SHA as `controller_sha` and
+   the exact current `main` SHA as `source_sha`. Build
+   the seven physical images once, record their digests, and record `migration
+   → api`. The selected public OCI prefix must remain identical through
+   candidate, embedded/final promotion, and BOM publication. Dispatch final
+   acceptance, embedded distribution, and final publication from the same
+   controller tag and identities. Trust-bearing release scripts and local
+   actions execute from that controller checkout; source files are explicit data.
+   Final publication re-proves the accepted candidate and acceptance runs and
+   source ancestry without requiring the soaked source to remain the newest
+   `main` commit.
 4. Deploy those exact receipt digests to staging.
 5. Pass the complete authenticated live matrix on staging.
 6. Run a failure-free staging soak long enough to cover sandbox expiry,

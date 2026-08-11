@@ -16,6 +16,7 @@ import {
   DEFAULT_COMPACTION_THRESHOLD_RATIO,
   MAX_COMPACTION_THRESHOLD_RATIO,
   MIN_COMPACTION_THRESHOLD_RATIO,
+  REMOTE_COMPACTION_TOOL_RESULT_OMISSION,
   SUMMARY_PREFIX,
   USER_MESSAGE_TRUNCATION_MARKER,
   buildCompactionPromptInput,
@@ -36,6 +37,7 @@ import {
   estimateNativeImageTokens,
   estimateSerializedValueTokens,
   estimateTextTokens,
+  estimateTokens,
   opaqueEncryptedContentLength,
   findCompactionNeededError,
   compactionReplacementFingerprint,
@@ -45,6 +47,7 @@ import {
   jsonSerializedLength,
   jsonSerializedUtf8ByteLength,
   prepareCompactionPromptInput,
+  projectRemoteCompactionOverflowRetryInput,
   renderCompactionPromptInputForChat,
   type CompactionItem,
   utf8ByteLength,
@@ -798,6 +801,151 @@ describe("codex-parity rebuild", () => {
 });
 
 describe("bounded checkpoint input", () => {
+  test("projects only tool-result bodies for one remote overflow retry", () => {
+    const preserved = [
+      user("keep the user's request exactly"),
+      {
+        type: "reasoning",
+        id: "reasoning-1",
+        content: [{ type: "input_text", text: "keep reasoning" }],
+      },
+      { type: "function_call", callId: "function-1", name: "exec", arguments: "{}" },
+    ];
+    const functionResult = {
+      type: "function_call_result",
+      id: "result-1",
+      callId: "function-1",
+      name: "exec",
+      status: "completed",
+      providerData: { receipt: "keep" },
+      output: "function output ".repeat(4_000),
+    };
+    const shellCall = {
+      type: "shell_call",
+      callId: "shell-1",
+      status: "completed",
+      action: { commands: ["test"] },
+    };
+    const shellResult = {
+      type: "shell_call_output",
+      callId: "shell-1",
+      status: "completed",
+      output: [
+        {
+          stdout: "stdout ".repeat(4_000),
+          stderr: "stderr ".repeat(4_000),
+          outcome: { type: "exit", exitCode: 0 },
+        },
+      ],
+    };
+    const computerCall = {
+      type: "computer_call",
+      callId: "computer-1",
+      status: "completed",
+      action: { type: "screenshot" },
+    };
+    const computerResult = {
+      type: "computer_call_result",
+      callId: "computer-1",
+      output: {
+        type: "computer_screenshot",
+        data: `data:image/png;base64,${"a".repeat(300_000)}`,
+      },
+    };
+    const patchCall = {
+      type: "apply_patch_call",
+      callId: "patch-1",
+      status: "completed",
+      operation: { type: "create_file", path: "a", diff: "+a" },
+    };
+    const patchResult = {
+      type: "apply_patch_call_output",
+      callId: "patch-1",
+      status: "completed",
+      output: "patch output ".repeat(4_000),
+    };
+    const searchCall = {
+      type: "tool_search_call",
+      callId: "search-1",
+      arguments: { query: "tools" },
+    };
+    const searchResult = {
+      type: "tool_search_output",
+      callId: "search-1",
+      status: "completed",
+      tools: [{ name: "huge", description: "schema ".repeat(4_000) }],
+    };
+    const checkpoint = { type: "compaction", encrypted_content: "keep-checkpoint" };
+    const items: CompactionItem[] = [
+      ...preserved,
+      functionResult,
+      shellCall,
+      shellResult,
+      computerCall,
+      computerResult,
+      patchCall,
+      patchResult,
+      searchCall,
+      searchResult,
+      checkpoint,
+    ];
+    const original = JSON.stringify(items);
+    const projected = projectRemoteCompactionOverflowRetryInput(items);
+    const repeated = projectRemoteCompactionOverflowRetryInput(projected.input);
+
+    expect(projected.rewrittenToolOutputs).toBe(5);
+    expect(projected.input).toHaveLength(items.length);
+    expect(estimateTokens(projected.input)).toBeLessThan(estimateTokens(items));
+    expect(JSON.stringify(items)).toBe(original);
+    for (const index of [0, 1, 2, 4, 6, 8, 10, 12]) {
+      expect(projected.input[index]).toBe(items[index]);
+    }
+    expect(projected.input[3]).toMatchObject({
+      id: "result-1",
+      callId: "function-1",
+      name: "exec",
+      status: "completed",
+      providerData: { receipt: "keep" },
+      output: REMOTE_COMPACTION_TOOL_RESULT_OMISSION,
+    });
+    expect(projected.input[5]).toMatchObject({
+      callId: "shell-1",
+      status: "completed",
+      output: [
+        {
+          stdout: "",
+          stderr: REMOTE_COMPACTION_TOOL_RESULT_OMISSION,
+          outcome: { type: "exit", exitCode: null },
+        },
+      ],
+    });
+    expect(projected.input[7]).toMatchObject({
+      type: "computer_call_result",
+      callId: "computer-1",
+      output: { type: "computer_screenshot", data: expect.stringMatching(/^data:image\/png/) },
+    });
+    expect(projected.input[9]).toMatchObject({
+      callId: "patch-1",
+      status: "completed",
+      output: REMOTE_COMPACTION_TOOL_RESULT_OMISSION,
+    });
+    expect(projected.input[11]).toMatchObject({
+      callId: "search-1",
+      status: "completed",
+      tools: [],
+    });
+
+    expect(repeated.rewrittenToolOutputs).toBe(0);
+    expect(repeated.input).toBe(projected.input);
+  });
+
+  test("does not allocate a retry copy when no result body can shrink", () => {
+    const items = [user("message-only history")];
+    const projected = projectRemoteCompactionOverflowRetryInput(items);
+    expect(projected).toEqual({ input: items, rewrittenToolOutputs: 0 });
+    expect(projected.input).toBe(items);
+  });
+
   test("rewrites oldest aggregate tool output while preserving recent detail", () => {
     const oldOutput = "x".repeat(80_000);
     const recentOutput = "recent result";

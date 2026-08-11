@@ -1,7 +1,7 @@
 import { memo } from "react";
 
 import { CapabilityLogo } from "@/components/capabilities/capability-logo";
-import { capabilityAuthHint, capabilityKindLabel } from "@/lib/capabilities";
+import { capabilityAuthHint, capabilityItemKindLabel } from "@/lib/capabilities";
 import { cn } from "@/lib/utils";
 import type { CapabilityCatalogItem } from "@/types";
 
@@ -20,6 +20,7 @@ export const CapabilityTile = memo(function CapabilityTile({
     <button
       type="button"
       onClick={onOpen}
+      data-capability-catalog-tile={item.id}
       className={cn(
         "group flex min-w-0 items-center gap-3 rounded-xl border border-border bg-surface/50 p-3 text-left",
         "transition-colors hover:border-border-strong hover:bg-surface",
@@ -42,7 +43,7 @@ export const CapabilityTile = memo(function CapabilityTile({
         </p>
       </div>
       <div className="hidden shrink-0 items-center gap-2 text-2xs text-fg-subtle sm:flex">
-        <span className="truncate">{capabilityKindLabel(item.kind)}</span>
+        <span className="truncate">{capabilityItemKindLabel(item)}</span>
         {authHint ? (
           <>
             <span aria-hidden className="text-fg-subtle/50">

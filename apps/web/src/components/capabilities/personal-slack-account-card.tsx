@@ -51,9 +51,14 @@ export function PersonalSlackAccountCard({
       {!embedded ? (
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
-            <h3 id="personal-slack-heading" className="text-sm font-semibold text-fg">
-              Personal Slack access
-            </h3>
+            <div className="flex flex-wrap items-center gap-2">
+              <h3 id="personal-slack-heading" className="text-sm font-semibold text-fg">
+                Your Slack account
+              </h3>
+              <span className="rounded-full border border-brand/20 bg-brand/10 px-2 py-0.5 text-2xs font-medium text-fg">
+                Personal · only you
+              </span>
+            </div>
             <p className="mt-1 max-w-xl text-xs leading-5 text-fg-muted">
               Let agents use Slack as you. This connection belongs only to your account.
             </p>

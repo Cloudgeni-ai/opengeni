@@ -108,10 +108,11 @@ export function runtimeMetricsHooksForObservability(
         value: durationSeconds,
       });
     },
-    onSandboxWarmingTimeout: () => {
+    onSandboxWarmingTimeout: ({ backend, stage }) => {
       observability.incrementCounter({
         name: "opengeni_sandbox_warming_timeouts_total",
         help: "Total sandbox warming timeouts.",
+        labels: { backend, stage },
       });
     },
     onSandboxOp: ({ backend, op, outcome, code, healed, durationSeconds, replyBytes }) => {

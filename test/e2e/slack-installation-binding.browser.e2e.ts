@@ -15,7 +15,7 @@ const workspaceId = "00000000-0000-4000-8000-000000000231";
 const accountId = "00000000-0000-4000-8000-000000000232";
 const connectionId = "00000000-0000-4000-8000-000000000233";
 const bindingId = "00000000-0000-4000-8000-000000000234";
-const apiContractRevision = "2026-07-workspace-artifacts-v1";
+const apiContractRevision = "2026-08-social-provider-tools-v1";
 
 type FixtureState = {
   bindingState: "active" | "quarantined" | null;
@@ -71,7 +71,9 @@ describe("Slack installation binding browser acceptance", () => {
       connectionStatus: "active",
       installRequests: 0,
     };
-    const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+    const context = await browser.newContext({
+      viewport: { width: 1440, height: 1000 },
+    });
     const page = await context.newPage();
     try {
       await installApiFixture(page, state);
@@ -149,7 +151,11 @@ async function installApiFixture(page: Page, state: FixtureState): Promise<void>
         fileUploads: { enabled: false, maxSizeBytes: 1_048_576 },
         productAccessMode: "configured",
         auth: { mode: "none" },
-        structuredServices: { fileSystem: false, git: false, terminalEvents: false },
+        structuredServices: {
+          fileSystem: false,
+          git: false,
+          terminalEvents: false,
+        },
       });
     }
     if (url.pathname === "/v1/access/me") {
@@ -184,14 +190,33 @@ async function installApiFixture(page: Page, state: FixtureState): Promise<void>
       });
     }
     if (url.pathname === "/v1/workspaces") return json([workspace()]);
+    if (url.pathname === `/v1/workspaces/${workspaceId}`) return json(workspace());
     if (url.pathname === `/v1/workspaces/${workspaceId}/capabilities`) {
       return json({ items: [], installations: [] });
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/plugins`) return json({ plugins: [] });
+    if (url.pathname === `/v1/workspaces/${workspaceId}/integrations/presets`) {
+      return json({ presets: [] });
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/integrations`) {
+      return json({ integrations: [] });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/connections`) {
       return json({ connections: [slackConnection(state.connectionStatus)] });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/connections/slack-bot/bindings`) {
-      return json({ bindings: state.bindingState ? [slackBinding(state.bindingState)] : [] });
+      return json({
+        bindings: state.bindingState ? [slackBinding(state.bindingState)] : [],
+      });
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/memory-slack-publications/configuration`) {
+      return json({ current: null, history: [] });
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/memory-slack-publications/channels`) {
+      return json({ channels: [], nextCursor: null });
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/memory-slack-publications`) {
+      return json({ publications: [], nextCursor: null });
     }
     if (
       request.method() === "POST" &&
@@ -205,11 +230,17 @@ async function installApiFixture(page: Page, state: FixtureState): Promise<void>
       return json({ packs: [], installations: [] });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/variable-sets`) return json([]);
+    if (url.pathname === `/v1/workspaces/${workspaceId}/rigs`) return json([]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/github/app`) {
       return json({ configured: false, missing: [], installUrl: null });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/sessions`) {
-      return json({ sessions: [], pinned: [], pinnedTruncated: false, nextCursor: null });
+      return json({
+        sessions: [],
+        pinned: [],
+        pinnedTruncated: false,
+        nextCursor: null,
+      });
     }
     return json({});
   });

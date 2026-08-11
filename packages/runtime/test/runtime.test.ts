@@ -115,7 +115,12 @@ import { Manifest } from "@openai/agents/sandbox";
 import { createAttemptToolEnvironment } from "@opengeni/codemode";
 import { TurnSandboxCommandCancelledError } from "../src/sandbox/turn-tool-cancellation";
 import { CompactionNeededError } from "../src/context-compaction";
-import { readSkillLibraryArtifact, verifySkillLibraryArtifact } from "../src/skill-library";
+import {
+  buildPortableSkillArtifact,
+  PORTABLE_SKILL_MAX_FILE_BYTES,
+  readSkillLibraryArtifact,
+  verifySkillLibraryArtifact,
+} from "../src/skill-library";
 import { MCP_MAX_CONCURRENT_SERVER_OPERATIONS } from "../src/mcp-network";
 import {
   ScriptedModel,
@@ -7011,6 +7016,121 @@ describe("runtime event normalization", () => {
     }
   });
 
+  test("routes selected local MCP adapters through prefixing, bounds, connection identity, and cancellation", async () => {
+    const connectionId = "11111111-2222-4333-8444-555555555555";
+    let connected = 0;
+    let closed = 0;
+    let observedSignal: AbortSignal | undefined;
+    const local: MCPServer = {
+      name: "local-openapi",
+      cacheToolsList: true,
+      async connect() {
+        connected += 1;
+      },
+      async close() {
+        closed += 1;
+      },
+      async listTools() {
+        return [
+          {
+            name: "list_items",
+            description: "List items.",
+            inputSchema: { type: "object", properties: {}, required: [] },
+          },
+        ];
+      },
+      async callTool(_name, _args, _meta, options) {
+        observedSignal = options?.signal;
+        return { content: [{ type: "text", text: "ok" }] };
+      },
+      async invalidateToolsCache() {},
+    };
+    let remoteFetchCalled = false;
+    const prepared = await prepareAgentTools(
+      testSettings({
+        mcpServers: [
+          {
+            id: "inventory_api",
+            name: "Inventory API",
+            url: "https://inventory.example.test/",
+            cacheToolsList: true,
+            connectionRef: {
+              connectionId,
+              providerDomain: "inventory.example.test",
+              kind: "oauth2",
+              subjectScope: "workspace",
+            },
+          },
+        ],
+      }),
+      [{ kind: "mcp", id: "inventory_api" }],
+      {
+        localMcpServers: [
+          { id: "inventory_api", server: local, resolvedConnectionId: connectionId },
+        ],
+        mcpFetchImpl: async () => {
+          remoteFetchCalled = true;
+          throw new Error("local adapters must not use the remote MCP transport");
+        },
+      },
+    );
+    try {
+      expect(connected).toBe(1);
+      expect(remoteFetchCalled).toBe(false);
+      expect(prepared.resolvedMcpConnectionIds.get("inventory_api")).toBe(connectionId);
+      const tools = await prepared.mcpServers[0]!.listTools();
+      expect(tools.map((tool) => tool.name)).toEqual(["inventory_api__list_items"]);
+      const controller = new AbortController();
+      await prepared.mcpServers[0]!.callTool("inventory_api__list_items", {}, null, {
+        signal: controller.signal,
+      });
+      expect(observedSignal).toBe(controller.signal);
+    } finally {
+      await prepared.close();
+    }
+    expect(closed).toBe(1);
+  });
+
+  test("rejects duplicate, unregistered, and connection-mismatched local MCP adapters", async () => {
+    const settings = testSettings({
+      mcpServers: [
+        {
+          id: "local_api",
+          url: "https://local.example.test/",
+          connectionRef: {
+            connectionId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            providerDomain: "local.example.test",
+          },
+        },
+      ],
+    });
+    const local = fakeMcpServer("local");
+    await expect(
+      prepareAgentTools(settings, [{ kind: "mcp", id: "local_api" }], {
+        localMcpServers: [
+          { id: "local_api", server: local },
+          { id: "local_api", server: local },
+        ],
+      }),
+    ).rejects.toThrow("Duplicate local MCP server id");
+    await expect(
+      prepareAgentTools(settings, [{ kind: "mcp", id: "local_api" }], {
+        localMcpServers: [{ id: "missing", server: local }],
+      }),
+    ).rejects.toThrow("not registered in settings");
+    await expect(
+      prepareAgentTools(settings, [{ kind: "mcp", id: "local_api" }], {
+        localMcpServers: [
+          {
+            id: "local_api",
+            server: local,
+            resolvedConnectionId: "ffffffff-1111-4222-8333-444444444444",
+          },
+        ],
+      }),
+    ).rejects.toThrow("connection identity changed");
+  });
+
   test("rejects unknown MCP tool ids during runtime preparation", async () => {
     await expect(
       prepareAgentTools(testSettings(), [{ kind: "mcp", id: "missing" }]),
@@ -7080,7 +7200,7 @@ describe("pack skills in the sandbox skill index", () => {
     environment: {},
   });
 
-  test("without pack skills the source is the unchanged bundled local-dir source", () => {
+  test("without explicit selections the skill index retains bundled guidance", () => {
     const source = lazySkillSourceWithPackSkills([]);
     expect((source.source as { type: string }).type).toBe("local_dir");
     const index = source.getIndex?.(emptyManifest, ".agents") ?? [];
@@ -7203,15 +7323,13 @@ describe("pack skills in the sandbox skill index", () => {
     );
   });
 
-  test("pack skills join the bundled skills in one lazy skill index", () => {
+  test("pack skills join the explicit skill index", () => {
     const source = lazySkillSourceWithPackSkills([infraSkill]);
     const sourceDir = source.source as {
       type: string;
       children: Record<string, any>;
     };
     expect(sourceDir.type).toBe("dir");
-    // Bundled skills stay lazily materializable from their local directories.
-    expect(sourceDir.children.checkov.type).toBe("local_dir");
     // Pack skill content is carried in-memory from the manifest.
     expect(sourceDir.children["infra-ops"].type).toBe("dir");
     expect(sourceDir.children["infra-ops"].children["SKILL.md"].content).toContain("# Infra ops");
@@ -7220,7 +7338,7 @@ describe("pack skills in the sandbox skill index", () => {
     );
     const index = source.getIndex?.(emptyManifest, ".agents") ?? [];
     const names = index.map((entry) => entry.name);
-    expect(names).toContain("checkov");
+    expect(names).not.toContain("checkov");
     expect(names).toContain("infra-ops");
     const infra = index.find((entry) => entry.name === "infra-ops");
     expect(infra?.description).toBe("Operate workspace infrastructure.");
@@ -7237,7 +7355,7 @@ describe("pack skills in the sandbox skill index", () => {
     );
   });
 
-  test("a pack skill shadows a bundled skill with the same name", () => {
+  test("a Pack may explicitly contribute a former deployment-default skill", () => {
     const source = lazySkillSourceWithPackSkills([
       {
         name: "checkov",
@@ -7336,8 +7454,8 @@ describe("pack skills in the sandbox skill index", () => {
     expect(skillsCapability?.lazyFrom?.source.type).toBe("dir");
     const index = skillsCapability?.lazyFrom?.getIndex?.(emptyManifest, ".agents") ?? [];
     expect(index.map((entry) => entry.name)).toContain("infra-ops");
-    // Backward compatibility: without pack skills the capability keeps the
-    // plain bundled local-dir source.
+    // Without explicit skills, the capability retains an empty in-memory
+    // source so repository and later session skills can still compose.
     const plainAgent = buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), []);
     const plainCapability = (
       (plainAgent as any).capabilities as Array<{
@@ -7442,6 +7560,51 @@ describe("curated skill-library artifact integrity", () => {
       symlinkSync("SKILL.md", join(root, "linked.md"));
       expect(() => readSkillLibraryArtifact(root)).toThrow(/symbolic link/);
     });
+  });
+});
+
+describe("portable skill artifact validation", () => {
+  test("normalizes, sorts, and fingerprints the complete artifact", () => {
+    const artifact = buildPortableSkillArtifact([
+      { path: "references/runbook.md", content: "Runbook.\n" },
+      {
+        path: "SKILL.md",
+        content:
+          "---\nname: incident-response\ndescription: >-\n  Triage incidents and\n  preserve evidence.\n---\n# Incident response\n",
+      },
+    ]);
+    expect(artifact).toMatchObject({
+      name: "incident-response",
+      description: "Triage incidents and preserve evidence.",
+      totalBytes: expect.any(Number),
+      contentSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+    });
+    expect(artifact.files.map((file) => file.path)).toEqual(["SKILL.md", "references/runbook.md"]);
+  });
+
+  test("rejects path traversal, duplicate files, missing metadata, and size overflow", () => {
+    const validMarkdown = "---\nname: safe\ndescription: Safe guidance.\n---\n";
+    expect(() =>
+      buildPortableSkillArtifact([
+        { path: "SKILL.md", content: validMarkdown },
+        { path: "../escape.md", content: "x" },
+      ]),
+    ).toThrow("unsafe path");
+    expect(() =>
+      buildPortableSkillArtifact([
+        { path: "SKILL.md", content: validMarkdown },
+        { path: "SKILL.md", content: validMarkdown },
+      ]),
+    ).toThrow("duplicate file path");
+    expect(() =>
+      buildPortableSkillArtifact([{ path: "SKILL.md", content: "# Missing\n" }]),
+    ).toThrow("must declare a safe name");
+    expect(() =>
+      buildPortableSkillArtifact([
+        { path: "SKILL.md", content: validMarkdown },
+        { path: "large.txt", content: "x".repeat(PORTABLE_SKILL_MAX_FILE_BYTES + 1) },
+      ]),
+    ).toThrow("file exceeds");
   });
 });
 

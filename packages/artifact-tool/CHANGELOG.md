@@ -1,5 +1,22 @@
 # @opengeni/artifact-tool
 
+## 0.2.2
+
+### Patch Changes
+
+- Updated dependencies [b57d61f]
+- Updated dependencies [5c5ea4a]
+  - @opengeni/contracts@0.44.1
+
+## 0.2.1
+
+### Patch Changes
+
+- Updated dependencies [8b6803a]
+- Updated dependencies [aeb07f4]
+- Updated dependencies [ff7203c]
+  - @opengeni/contracts@0.44.0
+
 ## 0.2.0
 
 ### Minor Changes

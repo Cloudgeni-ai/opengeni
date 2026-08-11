@@ -354,8 +354,7 @@ async function writeReceiptFromEnvironment(): Promise<void> {
     ociPrefix: releaseOciPrefixFromEnvironment(),
   });
   const outputPath = resolve(
-    import.meta.dir,
-    "..",
+    process.env.OPENGENI_RELEASE_SOURCE_ROOT ?? process.cwd(),
     process.env.OPENGENI_RELEASE_CANDIDATE_PATH ?? "evidence/release-candidate.json",
   );
   const serialized = `${JSON.stringify(receipt, null, 2)}\n`;

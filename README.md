@@ -225,9 +225,10 @@ AWS S3 uses `OPENGENI_OBJECT_STORAGE_BACKEND=aws-s3` plus `OPENGENI_OBJECT_STORA
 
 For Modal runs, configure the Modal sandbox variables in `.env.example`. Private
 registry images use `OPENGENI_MODAL_IMAGE_REGISTRY_SECRET`; the global
-`OPENGENI_MODAL_IMAGE_REF` is warmed at worker boot, and pack-scoped
-`sandboxImage` refs are warmed at turn time after pack settings resolve. The
-registry Secret lookup uses the configured `OPENGENI_MODAL_TOKEN_ID` /
+`OPENGENI_MODAL_IMAGE_REF` is warmed at worker boot, while v2 capability Packs
+select an explicit Rig whose active version owns its logical/provider image
+truth. Pre-v2 Pack rows retain their historical turn-time image warmup only for
+rollback compatibility. The registry Secret lookup uses the configured `OPENGENI_MODAL_TOKEN_ID` /
 `OPENGENI_MODAL_TOKEN_SECRET` client, so embedded hosts do not need to also set
 standard `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` env vars or provide a
 `~/.modal.toml` profile.
@@ -460,7 +461,7 @@ Before publishing:
 - Run a secret scan against the export, for example `gitleaks detect --no-git --source <export-dir>` and optionally `trufflehog filesystem <export-dir>`.
 - Rotate any credential that ever appeared in the old private history, even if the new public export is clean.
 
-The project license is Apache-2.0. Bundled HashiCorp Terraform-oriented agent skills include their own license at `packages/runtime/src/bundled_hashicorp_terraform_skills/LICENSE`.
+The project license is Apache-2.0. Optional curated skills under `packages/runtime/src/bundled_skill_library` retain per-entry provenance and license metadata; HashiCorp-derived Terraform guidance is MPL-2.0 and is never mounted by default.
 
 ## Roadmap
 

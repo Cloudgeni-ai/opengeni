@@ -6,6 +6,8 @@ import {
   CapabilityCatalogResponse,
   evaluateWorkspaceModelPolicy,
   CapabilityPack,
+  InstallPackRequest,
+  PreviewPackInstallationRequest,
   ClientConfig,
   ClientModel,
   WorkspaceModelCatalogResponse,
@@ -52,6 +54,7 @@ import {
   SteerSessionMessageRequest,
   SubmitHumanInputResponseRequest,
   TerminalPtyExitedPayload,
+  UninstallPackRequest,
   DraftTimelineAnnotations,
   SubmittedTimelineAnnotations,
   renderTimelineAnnotationsForModel,
@@ -1916,6 +1919,95 @@ describe("capability pack runtime manifest fields", () => {
         ],
       }),
     ).toThrow();
+  });
+
+  test("pins component references and explicit Rig requirements", () => {
+    const pack = CapabilityPack.parse({
+      ...baseManifest,
+      components: [
+        {
+          key: "skills/terraform",
+          kind: "skill",
+          capabilityId: "skill:terraform",
+          contentSha256: "a".repeat(64),
+        },
+        {
+          key: "integrations/github",
+          kind: "integration",
+          capabilityId: "integration:github",
+          instanceKey: "primary",
+          revisionId: "revision-1",
+          contentSha256: "b".repeat(64),
+          required: false,
+        },
+      ],
+      rig: { rigId: "11111111-1111-4111-8111-111111111111", requireVerified: true },
+    });
+    expect(pack.components.map((component) => component.required)).toEqual([true, false]);
+    expect(pack.rig).toEqual({
+      rigId: "11111111-1111-4111-8111-111111111111",
+      required: true,
+      requireVerified: true,
+    });
+  });
+
+  test("rejects duplicate and inline-generated component keys", () => {
+    expect(() =>
+      CapabilityPack.parse({
+        ...baseManifest,
+        components: [
+          {
+            key: "skills/terraform",
+            kind: "skill",
+            capabilityId: "skill:a",
+            contentSha256: "a".repeat(64),
+          },
+          {
+            key: "skills/terraform",
+            kind: "skill",
+            capabilityId: "skill:b",
+            contentSha256: "b".repeat(64),
+          },
+        ],
+      }),
+    ).toThrow();
+    expect(() =>
+      CapabilityPack.parse({
+        ...baseManifest,
+        components: [
+          {
+            key: "inline-skill/infra-ops",
+            kind: "skill",
+            capabilityId: "skill:external",
+            contentSha256: "c".repeat(64),
+          },
+        ],
+        skills: [skill],
+      }),
+    ).toThrow();
+  });
+
+  test("bounds Pack identities and validates lifecycle request fences", () => {
+    expect(() => CapabilityPack.parse({ ...baseManifest, id: "Uppercase" })).toThrow();
+    expect(() => CapabilityPack.parse({ ...baseManifest, id: "x".repeat(101) })).toThrow();
+    expect(
+      PreviewPackInstallationRequest.parse({
+        rigId: "11111111-1111-4111-8111-111111111111",
+      }),
+    ).toEqual({ rigId: "11111111-1111-4111-8111-111111111111" });
+    expect(
+      InstallPackRequest.parse({
+        expectedManifestDigest: "d".repeat(64),
+        expectedInstallationVersion: 3,
+        idempotencyKey: "22222222-2222-4222-8222-222222222222",
+      }),
+    ).toMatchObject({ expectedInstallationVersion: 3 });
+    expect(
+      UninstallPackRequest.parse({
+        expectedInstallationVersion: 4,
+        idempotencyKey: "33333333-3333-4333-8333-333333333333",
+      }),
+    ).toMatchObject({ expectedInstallationVersion: 4 });
   });
 });
 

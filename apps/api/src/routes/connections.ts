@@ -8,6 +8,8 @@ import {
   AtlassianOAuthStartResponse,
 } from "@opengeni/contracts/atlassian";
 import {
+  API_INTEGRATION_OAUTH_CREDENTIAL_ROLE,
+  ApiIntegrationOAuthStartRequest,
   ConnectionResponse,
   CreateConnectionRequest,
   FIKEN_CREDENTIAL_LABEL,
@@ -80,6 +82,11 @@ import {
   startGoogleDriveOAuth,
   transitionGoogleDriveLifecycle,
 } from "../integrations/google-drive";
+import {
+  completeApiIntegrationProviderOAuth,
+  isApiIntegrationProviderOAuthState,
+  startApiIntegrationProviderOAuth,
+} from "../integrations/provider-oauth";
 import {
   browseAtlassianSources,
   completeAtlassianOAuthCallback,
@@ -162,6 +169,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const payload = CreateConnectionRequest.parse(await c.req.json());
     assertNotReservedSlackBotMetadata(payload.metadata);
     assertNotReservedFikenMetadata(payload.metadata);
+    assertNotReservedApiIntegrationOAuthMetadata(payload.metadata);
     const key = requireEnvironmentEncryption(settings);
     const subjectId = createConnectionSubjectId(payload, grant.subjectId);
     const providerDomain = canonicalProviderDomain(payload.providerDomain);
@@ -546,12 +554,15 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get("/v1/integrations/google-drive/callback", async (c) => {
     assertIntegrationsEnabled();
-    const result = await completeGoogleDriveOAuthCallback(deps, {
+    const input = {
       ...(c.req.query("code") ? { code: c.req.query("code") } : {}),
       ...(c.req.query("state") ? { state: c.req.query("state") } : {}),
       ...(c.req.query("error") ? { error: c.req.query("error") } : {}),
       requestUrl: c.req.url,
-    });
+    };
+    const result = isApiIntegrationProviderOAuthState(input.state, deps.settings)
+      ? await completeApiIntegrationProviderOAuth(deps, input)
+      : await completeGoogleDriveOAuthCallback(deps, input);
     return c.redirect(result.redirectTo, 302);
   });
 
@@ -653,6 +664,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const payload = UpdateConnectionRequest.parse(await c.req.json());
     assertNotReservedSlackBotMetadata(payload.metadata);
     assertNotReservedFikenMetadata(payload.metadata);
+    assertNotReservedApiIntegrationOAuthMetadata(payload.metadata);
     const existing = await getConnectionMetadata(
       db,
       workspaceId,
@@ -727,6 +739,11 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (existing && GoogleDriveConnectionMetadata.safeParse(existing.metadata).success) {
       throw new HTTPException(422, {
         message: "use the dedicated Google Drive reconnect or source-selection flow",
+      });
+    }
+    if (existing?.metadata.credentialRole === API_INTEGRATION_OAUTH_CREDENTIAL_ROLE) {
+      throw new HTTPException(422, {
+        message: "use the dedicated Integration provider OAuth flow to update this connection",
       });
     }
     if (existing && AtlassianConnectionMetadata.safeParse(existing.metadata).success) {
@@ -893,6 +910,29 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(OAuthStartResponse.parse(result));
   });
 
+  app.post("/v1/workspaces/:workspaceId/integrations/oauth/start", async (c) => {
+    assertIntegrationsEnabled();
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
+    const parsed = ApiIntegrationOAuthStartRequest.safeParse(await c.req.json());
+    if (!parsed.success) {
+      throw new HTTPException(400, {
+        message: parsed.error.issues[0]?.message ?? "invalid Integration OAuth start request",
+      });
+    }
+    return c.json(
+      OAuthStartResponse.parse(
+        await startApiIntegrationProviderOAuth(deps, {
+          accountId: grant.accountId,
+          workspaceId,
+          subjectId: grant.subjectId,
+          requestUrl: c.req.url,
+          payload: parsed.data,
+        }),
+      ),
+    );
+  });
+
   app.get("/v1/integrations/oauth/callback", async (c) => {
     assertIntegrationsEnabled();
     const result = await completeMcpOAuthCallback(
@@ -903,6 +943,17 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         requestUrl: c.req.url,
       },
     );
+    return c.redirect(result.redirectTo, 302);
+  });
+
+  app.get("/v1/integrations/provider-oauth/callback", async (c) => {
+    assertIntegrationsEnabled();
+    const result = await completeApiIntegrationProviderOAuth(deps, {
+      ...(c.req.query("code") ? { code: c.req.query("code") } : {}),
+      ...(c.req.query("state") ? { state: c.req.query("state") } : {}),
+      ...(c.req.query("error") ? { error: c.req.query("error") } : {}),
+      requestUrl: c.req.url,
+    });
     return c.redirect(result.redirectTo, 302);
   });
 
@@ -1220,6 +1271,16 @@ function assertNotReservedFikenMetadata(metadata: Record<string, unknown> | unde
   if (hasReservedFikenMetadata(metadata)) {
     throw new HTTPException(422, {
       message: "Fiken connection metadata is reserved for the verified Fiken connect flows",
+    });
+  }
+}
+
+function assertNotReservedApiIntegrationOAuthMetadata(
+  metadata: Record<string, unknown> | undefined,
+): void {
+  if (metadata?.credentialRole === API_INTEGRATION_OAUTH_CREDENTIAL_ROLE) {
+    throw new HTTPException(422, {
+      message: "API Integration OAuth metadata is reserved for the dedicated provider flow",
     });
   }
 }

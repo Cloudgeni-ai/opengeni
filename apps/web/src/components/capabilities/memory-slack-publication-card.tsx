@@ -5,6 +5,7 @@ import type {
   MemorySlackPublicationState,
   SlackPublicationChannel,
 } from "@opengeni/sdk";
+import { OpenGeniMemorySlackClient } from "@opengeni/sdk/memory-slack";
 import {
   AlertTriangleIcon,
   CheckCircle2Icon,
@@ -34,7 +35,8 @@ export function MemorySlackPublicationCard({
   connections: ConnectionMetadata[];
   canManage: boolean;
 }) {
-  const { client } = useAppContext();
+  const { client: coreClient } = useAppContext();
+  const client = useMemo(() => new OpenGeniMemorySlackClient(coreClient), [coreClient]);
   const activeConnections = useMemo(
     () => connections.filter((connection) => connection.status === "active"),
     [connections],

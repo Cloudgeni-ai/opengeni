@@ -214,21 +214,23 @@ export const GoogleDriveBrowseResponse = z.object({
 });
 export type GoogleDriveBrowseResponse = z.infer<typeof GoogleDriveBrowseResponse>;
 
+const GoogleDriveSourceSelection = z
+  .array(
+    GoogleDriveBrowseItem.pick({
+      id: true,
+      name: true,
+      mimeType: true,
+      driveId: true,
+    }),
+  )
+  .max(100)
+  .refine((sources) => new Set(sources.map((source) => source.id)).size === sources.length, {
+    message: "Google Drive sources must be unique",
+  });
+
 export const SaveGoogleDriveSourceRequest = z
   .object({
-    sources: z
-      .array(
-        GoogleDriveBrowseItem.pick({
-          id: true,
-          name: true,
-          mimeType: true,
-          driveId: true,
-        }),
-      )
-      .max(100)
-      .refine((sources) => new Set(sources.map((source) => source.id)).size === sources.length, {
-        message: "Google Drive sources must be unique",
-      }),
+    sources: GoogleDriveSourceSelection,
     destination: ConnectorDocumentDestinationSelection.optional(),
     /** @deprecated Legacy requests are accepted but resolve to workspace authority. */
     targetScope: GoogleDriveTargetScope.optional(),
@@ -240,3 +242,46 @@ export const SaveGoogleDriveSourceRequest = z
     message: "Google Drive document destination is required",
   });
 export type SaveGoogleDriveSourceRequest = z.infer<typeof SaveGoogleDriveSourceRequest>;
+
+export const GoogleDriveKnowledgeSourceItem = z.object({
+  id: z.string().min(1).max(512),
+  name: z.string().min(1).max(1024),
+  mimeType: z.string().min(1).max(256),
+  driveId: z.string().min(1).max(512).optional(),
+  sourceKind: z.enum(["my_drive", "shared_drive", "folder"]),
+  includeDescendants: z.boolean(),
+});
+export type GoogleDriveKnowledgeSourceItem = z.infer<typeof GoogleDriveKnowledgeSourceItem>;
+
+export const GoogleDriveKnowledgeSourceDestination = z.object({
+  authorityKind: z.enum(["organization", "workspace", "personal"]),
+  authorityAccountId: z.string().min(1).max(128),
+  authorityWorkspaceId: z.string().min(1).max(128).optional(),
+  authoritySubjectId: z.string().min(1).max(512).optional(),
+  collectionId: z.string().min(1).max(512).optional(),
+});
+export type GoogleDriveKnowledgeSourceDestination = z.infer<
+  typeof GoogleDriveKnowledgeSourceDestination
+>;
+
+export const GoogleDriveKnowledgeSourceConfig = z.object({
+  sources: z.array(GoogleDriveKnowledgeSourceItem).min(1).max(100),
+  destination: GoogleDriveKnowledgeSourceDestination,
+  syncCadence: GoogleDriveSyncCadence,
+  readPolicy: GoogleDriveReadPolicy,
+});
+export type GoogleDriveKnowledgeSourceConfig = z.infer<typeof GoogleDriveKnowledgeSourceConfig>;
+
+export const SaveGoogleDriveIntegrationSourceRequest = z.intersection(
+  SaveGoogleDriveSourceRequest,
+  z.object({
+    sources: GoogleDriveSourceSelection.refine((sources) => sources.length > 0, {
+      message: "At least one Google Drive source is required",
+    }),
+    expectedVersion: z.number().int().positive().optional(),
+    idempotencyKey: z.string().uuid(),
+  }),
+);
+export type SaveGoogleDriveIntegrationSourceRequest = z.infer<
+  typeof SaveGoogleDriveIntegrationSourceRequest
+>;

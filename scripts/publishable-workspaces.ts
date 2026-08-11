@@ -1,8 +1,10 @@
 import { readdirSync, readFileSync } from "node:fs";
-import { dirname, join, relative } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+export const repoRoot = process.env.OPENGENI_RELEASE_SOURCE_ROOT
+  ? resolve(process.env.OPENGENI_RELEASE_SOURCE_ROOT)
+  : join(dirname(fileURLToPath(import.meta.url)), "..");
 
 export const PUBLISHED_DEP_FIELDS = [
   "dependencies",

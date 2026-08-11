@@ -11,6 +11,8 @@ import {
   GoogleDriveConnectionLifecycle,
   GoogleDriveDisconnectRequest,
   GoogleDriveLifecycleActionRequest,
+  SaveGoogleDriveIntegrationSourceRequest,
+  SaveGoogleDriveSourceRequest,
   googleDriveOAuthScopeDecision,
   googleDriveScopesAllowCapability,
 } from "../src/google-drive";
@@ -149,5 +151,49 @@ describe("Google Drive OAuth scope capabilities", () => {
         observedAt: "2026-08-03T10:00:00.000Z",
       }),
     ).toMatchObject({ state: "disconnected", recoverable: true });
+  });
+});
+
+describe("Google Drive source selection contracts", () => {
+  const source = {
+    id: "folder-1",
+    name: "Product",
+    mimeType: "application/vnd.google-apps.folder",
+    driveId: null,
+  };
+  const request = {
+    sources: [source],
+    destination: { authorityKind: "workspace" as const, collectionId: null },
+    syncCadence: "hourly" as const,
+    readPolicy: "allow" as const,
+    idempotencyKey: "00000000-0000-4000-8000-000000000000",
+  };
+
+  test("requires one to 100 unique sources before provider verification", () => {
+    expect(SaveGoogleDriveIntegrationSourceRequest.safeParse(request).success).toBeTrue();
+    expect(
+      SaveGoogleDriveIntegrationSourceRequest.safeParse({ ...request, sources: [] }).success,
+    ).toBeFalse();
+    expect(
+      SaveGoogleDriveIntegrationSourceRequest.safeParse({
+        ...request,
+        sources: Array.from({ length: 101 }, (_, index) => ({
+          ...source,
+          id: `folder-${index}`,
+        })),
+      }).success,
+    ).toBeFalse();
+    expect(
+      SaveGoogleDriveIntegrationSourceRequest.safeParse({
+        ...request,
+        sources: [source, source],
+      }).success,
+    ).toBeFalse();
+    expect(
+      SaveGoogleDriveSourceRequest.safeParse({
+        sources: [],
+        targetScope: "workspace",
+      }).success,
+    ).toBeTrue();
   });
 });

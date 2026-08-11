@@ -144,6 +144,8 @@ export type AppDependencies = {
   googleDriveFetch?: typeof fetch;
   /** Injectable Fiken API transport for deterministic connector tests. */
   fikenFetch?: typeof fetch;
+  /** Injectable provider-preset OAuth/API transport for deterministic integration tests. */
+  apiIntegrationOAuthFetch?: typeof fetch;
   atlassianFetch?: typeof fetch;
   /** Injectable MCP OAuth setup deadline for deterministic stalled-provider tests. */
   oauthStartDeadlineMs?: number;
