@@ -30,8 +30,8 @@ import {
   settleSessionAttemptInterruptions,
   submitHumanPromptInTransaction,
   syncSessionRealtimeLedgerInTransaction,
-  withWorkspaceRls,
-  type Database,
+  withWorkspaceSessionActivityRls as withWorkspaceRls,
+  type SessionActivityDatabase,
 } from "../src/index";
 import * as schema from "../src/schema";
 
@@ -91,9 +91,12 @@ async function fixture() {
 
 type Fixture = Awaited<ReturnType<typeof fixture>>;
 
-async function transaction<T>(workspaceId: string, fn: (db: Database) => Promise<T>): Promise<T> {
+async function transaction<T>(
+  workspaceId: string,
+  fn: (db: SessionActivityDatabase) => Promise<T>,
+): Promise<T> {
   return await withWorkspaceRls(client.db, workspaceId, (db) =>
-    db.transaction((tx) => fn(tx as unknown as Database)),
+    db.transaction((tx) => fn(tx as unknown as SessionActivityDatabase)),
   );
 }
 

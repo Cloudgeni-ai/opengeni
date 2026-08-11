@@ -54,6 +54,7 @@ import {
   updateScheduledTask,
   updateWorkspaceSettings,
   upsertCapabilityCatalogItem,
+  withWorkspaceSessionActivityRls,
   withWorkspaceRls,
   type Database,
 } from "@opengeni/db";
@@ -102,7 +103,7 @@ async function setSessionStatus(
   status: SessionStatus,
   activeTurnId: string | null = null,
 ): Promise<void> {
-  await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+  await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) => {
     await scopedDb.execute(dbSql`
       update sessions
       set status = ${status}, active_turn_id = ${activeTurnId}, updated_at = now()

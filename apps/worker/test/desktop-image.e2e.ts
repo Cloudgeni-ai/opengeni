@@ -189,7 +189,11 @@ describe("P4.1 desktop image — LOCAL build + stack-up assertions", () => {
       expect(defaults.out).toContain("/usr/local/bin/opengeni-browser");
 
       // and the wrapper actually LAUNCHES enough to report a version (the snap-stub cannot).
-      const ver = await sh("/usr/local/bin/opengeni-browser --version 2>&1 | head -1", 30_000);
+      // Keep the browser process as the command whose exit code we assert. Firefox
+      // may print a harmless namespace diagnostic before its version in restricted
+      // containers; piping through `head` both hid the version and replaced the
+      // browser's exit status with the pipe consumer's.
+      const ver = await sh("/usr/local/bin/opengeni-browser --version 2>&1", 30_000);
       expect(ver.code).toBe(0);
       expect(ver.out.toLowerCase()).toMatch(/chrome|chromium/);
 

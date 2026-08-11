@@ -379,7 +379,6 @@ export const RUNTIME_FULL_DML_TABLES = [
   "workspace_model_policies",
   "workspace_packs",
   "workspace_screenshot_quotas",
-  "workspace_session_activity_revisions",
   "workspace_variable_set_variables",
   "workspace_variable_sets",
   "workspace_video_generation_policies",
@@ -404,6 +403,9 @@ export const RUNTIME_READ_ONLY_TABLES = [
   "workspace_learning_policy_heads",
   "workspace_learning_policy_snapshots",
 ] as const;
+
+/** Existing runtime authorities that may be observed and advanced, never created or deleted. */
+export const RUNTIME_READ_UPDATE_TABLES = ["workspace_session_activity_revisions"] as const;
 
 /** Append-only evidence/revision tables are insertable and queryable, never mutable. */
 export const RUNTIME_READ_INSERT_TABLES = [
@@ -496,6 +498,9 @@ const FULL_DML_PRIVILEGES = ["SELECT", "INSERT", "UPDATE", "DELETE"] as const;
 export const RUNTIME_TABLE_PRIVILEGES: RuntimeTablePrivilegeContract = Object.freeze({
   ...Object.fromEntries(RUNTIME_FULL_DML_TABLES.map((table) => [table, FULL_DML_PRIVILEGES])),
   ...Object.fromEntries(RUNTIME_READ_ONLY_TABLES.map((table) => [table, ["SELECT"] as const])),
+  ...Object.fromEntries(
+    RUNTIME_READ_UPDATE_TABLES.map((table) => [table, ["SELECT", "UPDATE"] as const]),
+  ),
   ...Object.fromEntries(
     RUNTIME_READ_INSERT_TABLES.map((table) => [table, ["SELECT", "INSERT"] as const]),
   ),

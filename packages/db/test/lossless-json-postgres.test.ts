@@ -21,7 +21,6 @@ import {
   createSession,
   deadLetterHostExportHead,
   getActiveSessionHistoryItemsPaged,
-  getSession,
   getSessionHistoryItems,
   initializeSessionStartAtomically,
   listSessionEventPage,
@@ -57,6 +56,24 @@ const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle"
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let shared: SharedTestDatabase | null = null;
 let app: ReturnType<typeof createDb> | null = null;
+
+async function readHistoricalSessionInitialMessage(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<string | null> {
+  const [row] = await withWorkspaceRls(db, workspaceId, (scopedDb) =>
+    scopedDb
+      .select({
+        initialMessage: schema.sessions.initialMessage,
+        initialMessageCodecVersion: schema.sessions.initialMessageCodecVersion,
+      })
+      .from(schema.sessions)
+      .where(eq(schema.sessions.id, sessionId))
+      .limit(1),
+  );
+  return row ? fromPostgresLosslessText(row.initialMessage, row.initialMessageCodecVersion) : null;
+}
 
 setDefaultTimeout(60_000);
 
@@ -233,6 +250,19 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
         payloadVersion: null,
       });
 
+      // The assertions above deliberately exercise the exact historical
+      // migration boundary. Advance the populated database to the current
+      // schema before opening current application connections so unrelated
+      // future session columns cannot invalidate this compatibility test.
+      for (const file of files.filter((entry) => entry.localeCompare(migrationFile) > 0)) {
+        await admin.unsafe(await readFile(join(migrationsDir, file), "utf8"));
+        await admin`
+          insert into schema_migrations (name)
+          values (${file})
+          on conflict do nothing
+        `;
+      }
+
       const testValue = String.fromCharCode(97, 112, 112, 112, 119);
       const firstKey = String.fromCharCode(97, 112, 112, 80, 97, 115, 115, 119, 111, 114, 100);
       await provisionRoles(blank.databaseUrl, {
@@ -289,8 +319,9 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
           .set({ title: "unrelated new-app update" })
           .where(eq(schema.sessions.id, sessionId)),
       );
-      const legacySession = await getSession(rollingApp.db, workspace!.id, sessionId);
-      expect(legacySession?.initialMessage).toBe(legacyTextMarker);
+      expect(
+        await readHistoricalSessionInitialMessage(rollingApp.db, workspace!.id, sessionId),
+      ).toBe(legacyTextMarker);
       const [afterUnrelatedUpdate] = await admin<
         Array<{ initialMessage: string; initialVersion: number | null }>
       >`
@@ -364,9 +395,9 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
         initialMessage: legacyTextMarker,
         initialVersion: null,
       });
-      expect((await getSession(rollingApp.db, workspace!.id, sessionId))?.initialMessage).toBe(
-        legacyTextMarker,
-      );
+      expect(
+        await readHistoricalSessionInitialMessage(rollingApp.db, workspace!.id, sessionId),
+      ).toBe(legacyTextMarker);
 
       const embeddedExact = `embedded${nul}${loneHigh}${loneLow}${LOSSLESS_TEXT_PREFIX}`;
       await withWorkspaceRls(injectedDb, workspace!.id, (db) =>

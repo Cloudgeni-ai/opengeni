@@ -33,13 +33,13 @@ import {
   fetchCodexUsageForAccount,
   getSessionCodexState,
   recordSessionActiveCodexCredential,
-  setSessionCodexPin,
+  setSessionCodexPinInTransaction,
   recordCodexAccountUsageWithWakeTargets,
   quarantineCodexCredentialForLease,
   setActiveCodexCredential,
   resolveWorkspaceMemoryBlock,
   setCodexCredentialExhaustedWithWakeTargets,
-  withCodexCapacityMutation,
+  withSessionCodexCapacityMutation,
   countConsecutiveReactiveRotations,
   requireSession,
   recordUsageEvent,
@@ -4333,14 +4333,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           leased.credentialId !== null &&
           (sessionPinSource !== "policy" || sessionPin !== leased.credentialId)
         ) {
-          const pinMutation = await withCodexCapacityMutation(
+          const pinMutation = await withSessionCodexCapacityMutation(
             db,
             {
               workspaceId: input.workspaceId,
               reason: "codex_policy_pin_changed",
             },
             async (tx) => {
-              const changed = await setSessionCodexPin(
+              const changed = await setSessionCodexPinInTransaction(
                 tx,
                 input.workspaceId,
                 input.sessionId,
@@ -4361,14 +4361,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             pinMutation.wakeTargets,
           );
         } else if (selectedPinDisposition === "clearStale") {
-          const pinMutation = await withCodexCapacityMutation(
+          const pinMutation = await withSessionCodexCapacityMutation(
             db,
             {
               workspaceId: input.workspaceId,
               reason: "codex_stale_policy_pin_cleared",
             },
             async (tx) => {
-              const changed = await setSessionCodexPin(
+              const changed = await setSessionCodexPinInTransaction(
                 tx,
                 input.workspaceId,
                 input.sessionId,
@@ -9032,14 +9032,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               });
               if (newHome) {
                 rotated = true;
-                const pinMutation = await withCodexCapacityMutation(
+                const pinMutation = await withSessionCodexCapacityMutation(
                   db,
                   {
                     workspaceId: input.workspaceId,
                     reason: "codex_policy_pin_resharded",
                   },
                   async (tx) => {
-                    const changed = await setSessionCodexPin(
+                    const changed = await setSessionCodexPinInTransaction(
                       tx,
                       input.workspaceId,
                       input.sessionId,

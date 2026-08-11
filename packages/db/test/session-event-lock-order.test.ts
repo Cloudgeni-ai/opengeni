@@ -6,6 +6,7 @@ import {
   MemoryEventBus,
   type SharedTestDatabase,
 } from "@opengeni/testing";
+import { sql } from "drizzle-orm";
 import postgres from "postgres";
 import {
   addSessionSystemUpdate,
@@ -33,7 +34,8 @@ import {
   settleSessionIdleWithParentOutbox,
   updateSessionGoal,
   updateSessionTitle,
-  withWorkspaceRls,
+  withWorkspaceSessionActivityRls as withWorkspaceRls,
+  type SessionActivityDatabase,
   type Database,
   type DbClient,
 } from "../src/index";
@@ -105,23 +107,23 @@ async function seedRunningSession(
       triggerEventId,
     },
   };
-  await admin`
-    insert into sessions (
-      id, account_id, workspace_id, initial_message, model,
-      sandbox_backend, sandbox_group_id, status, temporal_workflow_id,
-      parent_session_id, tool_policy
-    ) values (
-      ${sessionId}, ${owner.accountId}, ${owner.workspaceId}, 'event-ordering invariant race',
-      'codex/gpt-5.6-sol', 'modal', ${sandboxGroupId}, 'running', ${workflowId},
-      ${options.parentSessionId ?? null},
-      jsonb_build_object(
-        'mode', 'explicit',
-        'inheritedFromSessionId', ${options.parentSessionId ?? null}::uuid
+  await withWorkspaceRls(db, owner.workspaceId, async (tx) => {
+    await tx.execute(sql`
+      insert into sessions (
+        id, account_id, workspace_id, initial_message, model,
+        sandbox_backend, sandbox_group_id, status, temporal_workflow_id,
+        parent_session_id, tool_policy
+      ) values (
+        ${sessionId}, ${owner.accountId}, ${owner.workspaceId}, 'event-ordering invariant race',
+        'codex/gpt-5.6-sol', 'modal', ${sandboxGroupId}, 'running', ${workflowId},
+        ${options.parentSessionId ?? null},
+        jsonb_build_object(
+          'mode', 'explicit',
+          'inheritedFromSessionId', ${options.parentSessionId ?? null}::uuid
+        )
       )
-    )
-  `;
-  await admin.begin(async (tx) => {
-    await tx`
+    `);
+    await tx.execute(sql`
       insert into session_turns (
         id, account_id, workspace_id, session_id, trigger_event_id,
         temporal_workflow_id, status, position, prompt, model,
@@ -133,8 +135,8 @@ async function seedRunningSession(
         'xhigh', 'modal', '[]'::jsonb, '[]'::jsonb, ${JSON.stringify(metadata)}::jsonb,
         1, ${attemptId}
       )
-    `;
-    await tx`
+    `);
+    await tx.execute(sql`
       insert into session_turn_attempts (
         id, account_id, workspace_id, session_id, turn_id,
         execution_generation, state, temporal_workflow_id,
@@ -145,8 +147,8 @@ async function seedRunningSession(
         1, 'running', ${workflowId}, ${`run-${attemptId}`}, ${`activity-${attemptId}`}, 0,
         '{}'::jsonb
       )
-    `;
-    await tx`update sessions set active_turn_id = ${turnId} where id = ${sessionId}`;
+    `);
+    await tx.execute(sql`update sessions set active_turn_id = ${turnId} where id = ${sessionId}`);
   });
   return {
     ...owner,
@@ -163,21 +165,23 @@ async function seedIdleChild(
   sessionId: string,
   parentSessionId: string,
 ): Promise<Pick<RunningFixture, "accountId" | "workspaceId" | "sessionId">> {
-  await admin`
-    insert into sessions (
-      id, account_id, workspace_id, initial_message, model,
-      sandbox_backend, sandbox_group_id, status, temporal_workflow_id,
-      parent_session_id, tool_policy
-    ) values (
-      ${sessionId}, ${workspace.accountId}, ${workspace.workspaceId}, 'event-ordering invariant idle child',
-      'codex/gpt-5.6-sol', 'modal', ${sessionId}, 'running', ${`session-${sessionId}`},
-      ${parentSessionId},
-      jsonb_build_object(
-        'mode', 'explicit',
-        'inheritedFromSessionId', ${parentSessionId}::uuid
+  await withWorkspaceRls(db, workspace.workspaceId, async (tx) => {
+    await tx.execute(sql`
+      insert into sessions (
+        id, account_id, workspace_id, initial_message, model,
+        sandbox_backend, sandbox_group_id, status, temporal_workflow_id,
+        parent_session_id, tool_policy
+      ) values (
+        ${sessionId}, ${workspace.accountId}, ${workspace.workspaceId}, 'event-ordering invariant idle child',
+        'codex/gpt-5.6-sol', 'modal', ${sessionId}, 'running', ${`session-${sessionId}`},
+        ${parentSessionId},
+        jsonb_build_object(
+          'mode', 'explicit',
+          'inheritedFromSessionId', ${parentSessionId}::uuid
+        )
       )
-    )
-  `;
+    `);
+  });
   return { ...workspace, sessionId };
 }
 
@@ -197,17 +201,19 @@ async function seedSandboxGroupMember(
   fixture: Pick<RunningFixture, "accountId" | "workspaceId" | "sandboxGroupId">,
 ): Promise<string> {
   const sessionId = crypto.randomUUID();
-  await admin`
-    insert into sessions (
-      id, account_id, workspace_id, initial_message, model,
-      sandbox_backend, sandbox_group_id, status, temporal_workflow_id, tool_policy
-    ) values (
-      ${sessionId}, ${fixture.accountId}, ${fixture.workspaceId}, 'event-ordering invariant group join',
-      'codex/gpt-5.6-sol', 'modal', ${fixture.sandboxGroupId}, 'idle',
-      ${`session-${sessionId}`},
-      jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
-    )
-  `;
+  await withWorkspaceRls(db, fixture.workspaceId, async (tx) => {
+    await tx.execute(sql`
+      insert into sessions (
+        id, account_id, workspace_id, initial_message, model,
+        sandbox_backend, sandbox_group_id, status, temporal_workflow_id, tool_policy
+      ) values (
+        ${sessionId}, ${fixture.accountId}, ${fixture.workspaceId}, 'event-ordering invariant group join',
+        'codex/gpt-5.6-sol', 'modal', ${fixture.sandboxGroupId}, 'idle',
+        ${`session-${sessionId}`},
+        jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
+      )
+    `);
+  });
   return sessionId;
 }
 
@@ -298,7 +304,7 @@ async function pauseSession(fixture: RunningFixture): Promise<unknown> {
     async (scopedDb) =>
       await scopedDb.transaction(
         async (tx) =>
-          await mutateSessionControlInTransaction(tx as unknown as Database, {
+          await mutateSessionControlInTransaction(tx as unknown as SessionActivityDatabase, {
             accountId: fixture.accountId,
             workspaceId: fixture.workspaceId,
             sessionId: fixture.sessionId,
@@ -318,7 +324,7 @@ async function resumeSession(fixture: RunningFixture): Promise<unknown> {
     async (scopedDb) =>
       await scopedDb.transaction(
         async (tx) =>
-          await mutateSessionControlInTransaction(tx as unknown as Database, {
+          await mutateSessionControlInTransaction(tx as unknown as SessionActivityDatabase, {
             accountId: fixture.accountId,
             workspaceId: fixture.workspaceId,
             sessionId: fixture.sessionId,
@@ -379,7 +385,7 @@ async function sendAgentMessage(
     async (scopedDb) =>
       await scopedDb.transaction(
         async (tx) =>
-          await sendAgentMessageInTransaction(tx as unknown as Database, {
+          await sendAgentMessageInTransaction(tx as unknown as SessionActivityDatabase, {
             accountId: actor.accountId,
             workspaceId: actor.workspaceId,
             targetSessionId: target.sessionId,
@@ -741,6 +747,7 @@ const genericWriters: GenericWriter[] = [
           ],
           update: { metadata: { race: "locked-update" } },
         }),
+        { activity: "semantic" },
       ),
   },
   {
@@ -1629,7 +1636,7 @@ describe("event-ordering invariant canonical session-event lock order", () => {
         async (scopedDb) =>
           await scopedDb.transaction(
             async (tx) =>
-              await mutateSessionControlInTransaction(tx as unknown as Database, {
+              await mutateSessionControlInTransaction(tx as unknown as SessionActivityDatabase, {
                 accountId: workspace.accountId,
                 workspaceId: workspace.workspaceId,
                 sessionId: actor.sessionId,
@@ -1723,12 +1730,14 @@ describe("event-ordering invariant canonical session-event lock order", () => {
       const workspace = await freshWorkspace();
       const actor = await seedRunningSession(workspace);
       const target = await seedIdleChild(workspace, crypto.randomUUID(), actor.sessionId);
-      await admin`
-        update sessions
-        set status = 'cancelled'
-        where workspace_id = ${workspace.workspaceId}
-          and id = ${target.sessionId}
-      `;
+      await withWorkspaceRls(db, workspace.workspaceId, async (tx) => {
+        await tx.execute(sql`
+          update sessions
+          set status = 'cancelled'
+          where workspace_id = ${workspace.workspaceId}
+            and id = ${target.sessionId}
+        `);
+      });
       const bus = new MemoryEventBus();
       let wakes = 0;
       const error = await rejectAgentCommandWithoutEffects({

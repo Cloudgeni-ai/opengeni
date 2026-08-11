@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
+import { createDb, createSession } from "../src/index";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 
@@ -82,7 +83,10 @@ describe("0117 durable sandbox recovery generations (real PostgreSQL)", () => {
             where table_schema = current_schema()
               and table_name = 'sandbox_leases'
               and column_name = 'workspace_generation'`;
-        expect(rolledBack).toEqual({ admissions: null, workspaceGeneration: 0 });
+        expect(rolledBack).toEqual({
+          admissions: null,
+          workspaceGeneration: 0,
+        });
       } finally {
         await app.end();
       }
@@ -228,7 +232,10 @@ describe("0117 durable sandbox recovery generations (real PostgreSQL)", () => {
         "open PTY does not match its exact retained process identity",
       );
 
-      const reaperApp = postgres(appUrl(databaseUrl), { max: 1, prepare: false });
+      const reaperApp = postgres(appUrl(databaseUrl), {
+        max: 1,
+        prepare: false,
+      });
       try {
         await reaperApp`select * from opengeni_private.reap_sandbox_leases(1, 0, 1000)`;
         await reaperApp`select * from opengeni_private.reap_sandbox_leases(1, 0, 1000)`;
@@ -334,14 +341,22 @@ describe("0117 durable sandbox recovery generations (real PostgreSQL)", () => {
             (${staleArchiveLease}, ${scope.accountId}, ${scope.workspaceId},
               ${crypto.randomUUID()}, 'warming', 'modal', 15, 3, 2,
               'modal', ${admin.json(archiveState)}, now() - interval '1 hour')`;
-      const warmingApp = postgres(appUrl(databaseUrl), { max: 1, prepare: false });
+      const warmingApp = postgres(appUrl(databaseUrl), {
+        max: 1,
+        prepare: false,
+      });
       try {
         await warmingApp`select * from opengeni_private.reap_sandbox_leases(1, 0, 1000)`;
       } finally {
         await warmingApp.end();
       }
       const warming = await admin<
-        Array<{ id: string; liveness: string; leaseEpoch: number; resumeState: RecoveryState }>
+        Array<{
+          id: string;
+          liveness: string;
+          leaseEpoch: number;
+          resumeState: RecoveryState;
+        }>
       >`
           select id, liveness, lease_epoch as "leaseEpoch", resume_state as "resumeState"
           from sandbox_leases where id in (${exactArchiveLease}, ${staleArchiveLease})
@@ -350,7 +365,9 @@ describe("0117 durable sandbox recovery generations (real PostgreSQL)", () => {
       const stale = warming.find((row) => row.id === staleArchiveLease)!;
       expect(exact).toMatchObject({ liveness: "cold", leaseEpoch: 12 });
       expect(exact.resumeState.sessionState?.workspaceArchive).toBe("archive-current");
-      expect(exact.resumeState.opengeniRecovery?.restore).toMatchObject({ status: "pending" });
+      expect(exact.resumeState.opengeniRecovery?.restore).toMatchObject({
+        status: "pending",
+      });
       expect(stale).toMatchObject({ liveness: "cold", leaseEpoch: 16 });
       expect(stale.resumeState.opengeniRecovery?.restore).toMatchObject({
         status: "degraded",
@@ -388,7 +405,7 @@ describe("0117 durable sandbox recovery generations (real PostgreSQL)", () => {
         publicAdmissions: null,
       });
 
-      const scope = await seedScope(admin, "dedicated", schema);
+      const scope = await seedScope(admin, "dedicated", schema, databaseUrl);
       const leaseId = crypto.randomUUID();
       await admin.unsafe(`set search_path = ${quoteIdentifier(schema)}, opengeni_private, public`);
       await admin`
@@ -442,7 +459,10 @@ async function acquireMigration0117TestDatabase(label: string): Promise<BlankTes
   const databaseName = `opengeni_0117_${label.replaceAll(/[^a-zA-Z0-9]/g, "_")}_${crypto
     .randomUUID()
     .replaceAll("-", "")}`.slice(0, 63);
-  const control = postgres(explicitAdminDatabaseUrl, { max: 1, prepare: false });
+  const control = postgres(explicitAdminDatabaseUrl, {
+    max: 1,
+    prepare: false,
+  });
   try {
     await control.unsafe(`create database ${quoteIdentifier(databaseName)}`);
   } catch (error) {
@@ -504,7 +524,12 @@ async function applyFile(admin: postgres.Sql, file: string): Promise<void> {
   await admin.unsafe(await readFile(join(migrationsDir, file), "utf8"));
 }
 
-async function seedScope(admin: postgres.Sql, label: string, schema?: string): Promise<Scope> {
+async function seedScope(
+  admin: postgres.Sql,
+  label: string,
+  schema?: string,
+  databaseUrl?: string,
+): Promise<Scope> {
   if (schema) {
     await admin.unsafe(`set search_path = ${quoteIdentifier(schema)}, opengeni_private, public`);
   }
@@ -518,6 +543,28 @@ async function seedScope(admin: postgres.Sql, label: string, schema?: string): P
     insert into workspace_inference_controls (workspace_id, account_id)
     values (${workspace!.id}, ${account!.id})`;
   const sessionId = crypto.randomUUID();
+  if (schema) {
+    if (!databaseUrl) throw new Error("Dedicated-schema session seed requires a database URL");
+    const sessionClient = createDb(databaseUrl, {
+      max: 1,
+      searchPath: `${schema},opengeni_private,public`,
+    });
+    try {
+      await createSession(sessionClient.db, {
+        accountId: account!.id,
+        workspaceId: workspace!.id,
+        requestedSessionId: sessionId,
+        initialMessage: "migration test",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        sandboxBackend: "modal",
+      });
+    } finally {
+      await sessionClient.close();
+    }
+    return { accountId: account!.id, workspaceId: workspace!.id, sessionId };
+  }
   await admin`
     insert into sessions (
       id, account_id, workspace_id, initial_message, model,

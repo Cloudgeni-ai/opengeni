@@ -23,8 +23,8 @@ import {
   updateCodexRotationSettings,
   updateSessionGoalWithEvent,
   upsertSessionGoalWithEvent,
-  withWorkspaceRls,
-  withWorkspaceSubjectRls,
+  withWorkspaceSessionActivityRls as withWorkspaceRls,
+  withWorkspaceSubjectSessionActivityRls as withWorkspaceSubjectRls,
 } from "../src/index";
 
 let shared: SharedTestDatabase;
@@ -244,7 +244,7 @@ describe("durable active-goal wake", () => {
     ];
     await withWorkspaceSubjectRls(client.db, ctx.grant.workspaceId!, ctx.grant.subjectId, (db) =>
       db.transaction((tx) =>
-        submitHumanPromptInTransaction(tx as typeof db, {
+        submitHumanPromptInTransaction(tx as unknown as typeof db, {
           accountId: ctx.grant.accountId,
           workspaceId: ctx.grant.workspaceId!,
           sessionId: ctx.session.id,
@@ -708,7 +708,7 @@ describe("durable active-goal wake", () => {
 
     await withWorkspaceSubjectRls(client.db, goal.grant.workspaceId!, goal.grant.subjectId, (db) =>
       db.transaction((tx) =>
-        submitHumanPromptInTransaction(tx as typeof db, {
+        submitHumanPromptInTransaction(tx as unknown as typeof db, {
           accountId: goal.grant.accountId,
           workspaceId: goal.grant.workspaceId!,
           sessionId: goal.session.id,
@@ -750,7 +750,7 @@ describe("durable active-goal wake", () => {
     const control = async (sessionId: string, action: "pause" | "resume") =>
       await withWorkspaceRls(client.db, ctx.grant.workspaceId!, (db) =>
         db.transaction((tx) =>
-          mutateSessionControlInTransaction(tx as typeof db, {
+          mutateSessionControlInTransaction(tx as unknown as typeof db, {
             accountId: ctx.grant.accountId,
             workspaceId: ctx.grant.workspaceId!,
             sessionId,
@@ -992,7 +992,7 @@ describe("durable active-goal wake", () => {
       ctx.grant.subjectId,
       (db) =>
         db.transaction((tx) =>
-          submitHumanPromptInTransaction(tx as typeof db, {
+          submitHumanPromptInTransaction(tx as unknown as typeof db, {
             accountId: ctx.grant.accountId,
             workspaceId: ctx.grant.workspaceId!,
             sessionId: ctx.session.id,

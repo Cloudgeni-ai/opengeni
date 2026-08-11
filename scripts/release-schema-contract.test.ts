@@ -11,6 +11,44 @@ afterEach(async () => {
 });
 
 describe("release schema contract", () => {
+  test("installs the workspace activity initializer before its conflict-safe backfill", async () => {
+    const migration = await readFile(
+      join(import.meta.dir, "../packages/db/drizzle/0214_session_activity_commit_gate.sql"),
+      "utf8",
+    );
+    const scopedInitializer = migration.indexOf(
+      "CREATE OR REPLACE FUNCTION opengeni_private.ensure_workspace_session_activity_revision(",
+    );
+    const initializer = migration.indexOf(
+      "CREATE OR REPLACE FUNCTION opengeni_private.initialize_workspace_session_activity_revision()",
+    );
+    const trigger = migration.indexOf(
+      "CREATE TRIGGER workspaces_initialize_session_activity_revision",
+    );
+    const backfill = migration.indexOf(
+      "SELECT opengeni_private.ensure_workspace_session_activity_revision(",
+      trigger,
+    );
+
+    expect(scopedInitializer).toBeGreaterThanOrEqual(0);
+    expect(initializer).toBeGreaterThan(scopedInitializer);
+    expect(trigger).toBeGreaterThan(initializer);
+    expect(backfill).toBeGreaterThan(trigger);
+    expect(migration.slice(scopedInitializer, initializer)).toContain(
+      "set_config('opengeni.account_id', target_account_id::text, true)",
+    );
+    expect(migration.slice(scopedInitializer, initializer)).toContain(
+      "set_config('opengeni.workspace_id', target_workspace_id::text, true)",
+    );
+    expect(migration.slice(scopedInitializer, initializer)).toContain(
+      "ON CONFLICT (workspace_id) DO NOTHING",
+    );
+    expect(migration.slice(initializer, trigger)).toContain(
+      "opengeni_private.ensure_workspace_session_activity_revision(",
+    );
+    expect(migration.slice(backfill)).toContain('FROM "workspaces"');
+  });
+
   test("classifies the Codex quota owning-human cutover as maintenance-only", async () => {
     const contract = await buildSchemaContract();
     expect(
@@ -228,12 +266,17 @@ describe("release schema contract", () => {
         (migrations.has("0210_browser_auth_network_interventions.sql") ? 1 : 0) +
         (migrations.has("0211_editable_artifact_session_links.sql") ? 1 : 0) +
         (migrations.has("0212_slack_installation_bindings.sql") ? 1 : 0) +
-        (migrations.has("0213_slack_user_link_access_requests.sql") ? 1 : 0),
+        (migrations.has("0213_slack_user_link_access_requests.sql") ? 1 : 0) +
+        (migrations.has("0214_session_activity_commit_gate.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "b30c0e31ed555539b59f776aa8ef136883e0e1152cff06037911feea67fe1141",
+      "a00d56c13f4f03a3a48456860a7c63b82de5624970b3afae250e5aed0d6a2d89",
     );
-    expect(contract.latestMigration).toBe("0213_slack_user_link_access_requests.sql");
+    expect(contract.latestMigration).toBe("0214_session_activity_commit_gate.sql");
+    expect(migrations.get("0214_session_activity_commit_gate.sql")).toMatchObject({
+      sha256: "26c84bc34bc51d19f9532cf3f2c64a649f100a724cb73d968e17e7c4ecf8de36",
+      deploymentMode: "maintenance",
+    });
     expect(migrations.get("0197_knowledge_source_sync_schedules.sql")).toMatchObject({
       sha256: "edd425be4e4db07f4fcab1e520ece71dc1a692072ce28256ec2b86248442f3c8",
       deploymentMode: "maintenance",

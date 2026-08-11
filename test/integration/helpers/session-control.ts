@@ -3,7 +3,7 @@ import {
   getSessionEvent,
   getSessionTurn,
   submitHumanPromptInTransaction,
-  withWorkspaceSubjectRls,
+  withWorkspaceSubjectSessionActivityRls,
   type Database,
 } from "@opengeni/db";
 
@@ -32,9 +32,12 @@ export async function submitTestHumanPrompt(
     controlEtag?: string | null;
   },
 ) {
-  const command = await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, (scoped) =>
-    scoped.transaction((tx) =>
-      submitHumanPromptInTransaction(tx as unknown as Database, {
+  const command = await withWorkspaceSubjectSessionActivityRls(
+    db,
+    input.workspaceId,
+    input.subjectId,
+    (scoped) =>
+      submitHumanPromptInTransaction(scoped, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
@@ -51,7 +54,6 @@ export async function submitTestHumanPrompt(
         reasoningEffortFallback: input.reasoningEffortFallback,
         source: input.source ?? "user",
       }),
-    ),
   );
   const [accepted, turn] = await Promise.all([
     getSessionEvent(db, input.workspaceId, command.acceptedEventId),

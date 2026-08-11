@@ -369,10 +369,10 @@ export const workspaceInferenceControls = pgTable(
   }),
 );
 
-// One transactionally allocated activity clock per workspace. An updated-order
-// first page takes a SHARE lock on this row after the workspace-control lock;
-// semantic writers allocate after UUID-ordered session locks. Plain MVCC page
-// reads never lock session rows, so that ordering cannot form a cycle.
+// One transactionally allocated activity clock per workspace. Updated-order
+// discovery reads the committed value through plain MVCC. Semantic writers
+// advance it once at their explicit commit gate, after every other deferred
+// constraint and row lock has settled.
 export const workspaceSessionActivityRevisions = pgTable(
   "workspace_session_activity_revisions",
   {
@@ -1791,10 +1791,13 @@ export const sessions = pgTable(
     codexCompactionMode: text("codex_compaction_mode").notNull().default("portable"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-    // Assigned by the database trigger whenever canonical updated_at activity
-    // advances. Legacy rows remain zero until touched; raw delta-only writers
-    // intentionally omit updated_at and therefore do not allocate revisions.
+    // Assigned once by the explicit transaction commit gate whenever canonical
+    // updated_at activity advances. Raw delta-only writers intentionally omit
+    // updated_at and therefore do not allocate revisions.
     activityRevision: bigint("activity_revision", { mode: "number" }).notNull().default(0),
+    // Transaction ownership marker between the cheap row trigger and the
+    // once-per-transaction commit gate. Committed rows must always be null.
+    activityRevisionPendingXid: bigint("activity_revision_pending_xid", { mode: "bigint" }),
   },
   (table) => ({
     workspaceIdentity: uniqueIndex("sessions_workspace_id_idx").on(table.workspaceId, table.id),
@@ -1821,6 +1824,9 @@ export const sessions = pgTable(
       table.updatedAt.desc(),
       table.id.desc(),
     ),
+    workspaceActivityPending: index("sessions_workspace_activity_pending_idx")
+      .on(table.workspaceId, table.activityRevisionPendingXid, table.id)
+      .where(sql`${table.activityRevisionPendingXid} is not null`),
     variableSet: index("sessions_variable_set_idx").on(table.workspaceId, table.variableSetId),
     parent: index("sessions_parent_idx").on(table.workspaceId, table.parentSessionId),
     // Routing index: resolve session_id -> sandbox_group_id at every lease entry

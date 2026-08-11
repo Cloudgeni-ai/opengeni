@@ -156,12 +156,12 @@ export function safeDatabaseErrorFacts(error: unknown): SafeDatabaseErrorFacts {
 
 /**
  * Typed persistence classification that retains the exact original failure as
- * `cause`. Classification metadata supplements the cause; it never replaces or
- * rewrites source error content.
+ * `cause` for internal diagnostics. The ordinary Error message is deliberately
+ * stable and source-free so a generic presentation path can never disclose SQL,
+ * parameters, or driver detail by rendering `.message`.
  */
 export class SessionEventPersistenceError extends Error {
   readonly name = "SessionEventPersistenceError";
-  readonly cause: unknown;
 
   constructor(
     readonly details: PersistenceFailureDetails,
@@ -174,10 +174,7 @@ export class SessionEventPersistenceError extends Error {
           ? "Database serialization failure"
           : "Database failure";
     const operation = `${label} while persisting ${details.eventTypes.join(", ") || "session events"}`;
-    const sourceMessage =
-      cause === undefined ? null : cause instanceof Error ? cause.message : String(cause);
-    super(sourceMessage ? `${operation}: ${sourceMessage}` : operation);
-    this.cause = cause;
+    super(operation, cause === undefined ? undefined : { cause });
   }
 
   get code(): DatabaseFailureCode {

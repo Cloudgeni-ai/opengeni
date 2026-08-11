@@ -849,18 +849,26 @@ The current map:
   `(activity_revision, updated_at, id)` keysets through matching
   workspace-prefixed indexes. Revision zero is the rolling-upgrade legacy
   bucket and retains exact `(updated_at, id)` suffix order. For updated order,
-  a first page takes the workspace inference-control lock before a shared lock
-  on the workspace activity counter, then reads session rows through ordinary
-  MVCC. Control-aware semantic writers take workspace control, UUID-sorted
-  session rows, then the counter; inserts/direct writers never invert that
-  order. The counter lock makes the returned `updatedThrough` decimal revision
-  an exact snapshot fence: later activity receives a greater revision and a
-  subsequent scan passes the token as `updatedAfter`. Opaque cursors bind that
-  fence, revision keyset, exact PostgreSQL-microsecond timestamp suffix, order,
-  and incremental scope. Contention is bounded to one short counter allocation
-  per semantic activity in that workspace. Raw message/reasoning/command/PTY
-  deltas advance `last_sequence` without moving `updated_at` or allocating a
-  revision. Known targets should still use direct exact-ID `session_get`.
+  the workspace activity counter is precreated with the workspace and read in
+  one short read-only repeatable-read MVCC snapshot; discovery never locks it,
+  lazily inserts it, or joins the writer lock graph. The returned
+  `updatedThrough` decimal revision
+  is therefore a nonblocking snapshot fence. A semantic session transaction
+  runs inside one explicit activity gate: row triggers mark changed sessions
+  with the current full transaction id, then the outermost wrapper first
+  settles deferred constraints and only afterward increments the workspace
+  counter once and stamps exactly that transaction's pending sessions with one
+  shared revision. The counter itself rejects any update except that exact
+  finalizing `+1` transition. Low-level session writers require the branded gate
+  handle at compile time; the database trigger remains the runtime authority. A
+  transaction with no semantic change does not increment the counter. Direct or
+  forgotten semantic writers fail closed at the database boundary, and a gate
+  that is opened but not finalized cannot commit. Opaque cursors bind the fence,
+  revision keyset, exact
+  PostgreSQL-microsecond timestamp suffix, order, and incremental scope. Raw
+  message/reasoning/command/PTY deltas advance `last_sequence` without moving
+  `updated_at`, marking activity pending, or allocating a revision. Known
+  targets should still use direct exact-ID `session_get`.
 - **Model-facing entity details are independently bounded.** `session_get`
   uses an exact-ID, field/count/byte-aware projection, and `rig_get` selects
   summary-only historical versions/changes while retaining one bounded active

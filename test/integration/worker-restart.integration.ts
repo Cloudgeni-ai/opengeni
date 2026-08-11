@@ -12,7 +12,7 @@ import {
   listSessionEvents,
   listSessionTurns,
   mutateSessionControlInTransaction,
-  withWorkspaceRls,
+  withWorkspaceSessionActivityRls,
 } from "@opengeni/db";
 import { createNatsEventBus, type EventBus } from "@opengeni/events";
 import { createProductionAgentRuntime } from "@opengeni/runtime";
@@ -489,18 +489,16 @@ describe("worker restart resilience", () => {
           turn.activeAttemptId === dispatchedAttemptId
         );
       });
-      const pause = await withWorkspaceRls(dbClient.db, grant.workspaceId, (db) =>
-        db.transaction((tx) =>
-          mutateSessionControlInTransaction(tx as typeof db, {
-            accountId: grant.accountId,
-            workspaceId: grant.workspaceId,
-            sessionId: session.id,
-            actor: { type: "human", subjectId: grant.subjectId },
-            action: "pause",
-            reason: "operator pause",
-            operationKey: `pause-zombie-${crypto.randomUUID()}`,
-          }),
-        ),
+      const pause = await withWorkspaceSessionActivityRls(dbClient.db, grant.workspaceId, (db) =>
+        mutateSessionControlInTransaction(db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: session.id,
+          actor: { type: "human", subjectId: grant.subjectId },
+          action: "pause",
+          reason: "operator pause",
+          operationKey: `pause-zombie-${crypto.randomUUID()}`,
+        }),
       );
       expect(pause.interruptionCount).toBe(1);
       await handle.signal("sessionControl");

@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { sql } from "drizzle-orm";
 import postgres from "postgres";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
@@ -8,6 +9,7 @@ import {
   createSessionWithIdempotencyKeyResult,
   getSessionSpawnDenialByIdempotencyKey,
   initializeSessionStartAtomically,
+  withWorkspaceSessionActivityRls,
   type DbClient,
   type Database,
   type SessionCreateResult,
@@ -208,19 +210,19 @@ describe("nested-agent depth database admission", () => {
     );
   }, 60_000);
 
-  test("serializes an old source writer with current admission and replays the success winner", async () => {
+  test("serializes a direct source writer with current admission and replays the success winner", async () => {
     if (!available) return;
     const workspace = await freshWorkspace("db depth success race");
     const key = `success-race-${crypto.randomUUID()}`;
     const lockKey = `session-create:${workspace.workspaceId}:${key}`;
 
-    // This direct transaction represents a pre-boundary writer. It takes the
-    // same advisory lock as the boundary trigger, reserves the source row, and
-    // holds the transaction open while the current application writer waits.
-    const oldWriter = admin.begin(async (sql) => {
-      await sql`select pg_advisory_xact_lock(hashtext(${lockKey}))`;
-      await sql`select pg_sleep(0.1)`;
-      const rows = await sql<{ id: string }[]>`
+    // This direct transaction takes the same advisory lock as the boundary
+    // trigger, reserves the source row, and holds the transaction open while
+    // the normal application writer waits. It still uses the commit gate.
+    const directWriter = withWorkspaceSessionActivityRls(db, workspace.workspaceId, async (tx) => {
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${lockKey}))`);
+      await tx.execute(sql`select pg_sleep(0.1)`);
+      const rows = await tx.execute(sql<{ id: string }>`
         insert into sessions (
           account_id, workspace_id, initial_message, model, sandbox_backend,
           sandbox_group_id, create_idempotency_key, tool_policy
@@ -229,8 +231,8 @@ describe("nested-agent depth database admission", () => {
           'depth-policy-test', 'none', gen_random_uuid(), ${key},
           jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
         )
-        returning id`;
-      await sql`select pg_sleep(0.1)`;
+        returning id`);
+      await tx.execute(sql`select pg_sleep(0.1)`);
       return rows[0]?.id ?? null;
     });
     await delay(25);
@@ -239,7 +241,7 @@ describe("nested-agent depth database admission", () => {
       ...sessionInput(workspace, "current writer"),
       createIdempotencyKey: key,
     });
-    const [oldSessionId, replay] = await Promise.all([oldWriter, currentWriter]);
+    const [oldSessionId, replay] = await Promise.all([directWriter, currentWriter]);
 
     expect(oldSessionId).not.toBeNull();
     if (oldSessionId === null) throw new Error("old writer did not create a session");
@@ -270,10 +272,10 @@ describe("nested-agent depth database admission", () => {
     const key = `denial-race-${crypto.randomUUID()}`;
     const lockKey = `session-create:${workspace.workspaceId}:${key}`;
 
-    const oldWriter = admin.begin(async (sql) => {
-      await sql`select pg_advisory_xact_lock(hashtext(${lockKey}))`;
-      await sql`select pg_sleep(0.1)`;
-      const rows = await sql<{ id: string }[]>`
+    const oldWriter = admin.begin(async (tx) => {
+      await tx`select pg_advisory_xact_lock(hashtext(${lockKey}))`;
+      await tx`select pg_sleep(0.1)`;
+      const rows = await tx<{ id: string }[]>`
         insert into session_spawn_denials (
           account_id, workspace_id, current_depth, attempted_depth,
           effective_max_nested_agent_depth, policy_source, code, idempotency_key
@@ -282,7 +284,7 @@ describe("nested-agent depth database admission", () => {
           'default', 'nested_agent_depth_exceeded', ${key}
         )
         returning id`;
-      await sql`select pg_sleep(0.1)`;
+      await tx`select pg_sleep(0.1)`;
       return rows[0]?.id ?? null;
     });
     await delay(25);

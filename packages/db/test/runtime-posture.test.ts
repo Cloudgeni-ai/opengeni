@@ -9,6 +9,7 @@ import {
   RUNTIME_READ_INSERT_TABLES,
   RUNTIME_READ_INSERT_UPDATE_TABLES,
   RUNTIME_READ_ONLY_TABLES,
+  RUNTIME_READ_UPDATE_TABLES,
   RUNTIME_TABLE_PRIVILEGES,
   type RuntimeDatabasePosture,
   type RuntimeDatabasePostureOptions,
@@ -94,8 +95,9 @@ describe("runtime database posture evaluator", () => {
     const contracts = [
       [FORCE_RLS_TABLES, 189],
       [NON_RLS_RUNTIME_TABLES, 11],
-      [RUNTIME_FULL_DML_TABLES, 121],
+      [RUNTIME_FULL_DML_TABLES, 120],
       [RUNTIME_READ_ONLY_TABLES, 14],
+      [RUNTIME_READ_UPDATE_TABLES, 1],
       [RUNTIME_READ_INSERT_TABLES, 41],
       [RUNTIME_READ_INSERT_UPDATE_TABLES, 17],
       [PROTECTED_NO_DIRECT_DML_TABLES, 7],
@@ -113,6 +115,10 @@ describe("runtime database posture evaluator", () => {
     expect(RUNTIME_TABLE_PRIVILEGES.editable_artifact_session_links).toEqual([
       "SELECT",
       "INSERT",
+      "UPDATE",
+    ]);
+    expect(RUNTIME_TABLE_PRIVILEGES.workspace_session_activity_revisions).toEqual([
+      "SELECT",
       "UPDATE",
     ]);
     expect(RUNTIME_TABLE_PRIVILEGES.slack_user_link_access_requests).toEqual([

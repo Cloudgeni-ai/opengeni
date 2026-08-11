@@ -20,8 +20,8 @@ import {
   saveComposerDraftInTransaction,
   SessionIdConflictError,
   submitHumanPromptInTransaction,
-  withWorkspaceRls,
-  withWorkspaceSubjectRls,
+  withWorkspaceSessionActivityRls as withWorkspaceRls,
+  withWorkspaceSubjectSessionActivityRls as withWorkspaceSubjectRls,
 } from "../src/index";
 import * as schema from "../src/schema";
 
@@ -256,7 +256,7 @@ describe("immutable session turn initiators", () => {
     ];
     const sent = await withWorkspaceSubjectRls(client.db, grant.workspaceId!, sender, (db) =>
       db.transaction((tx) =>
-        submitHumanPromptInTransaction(tx as typeof db, {
+        submitHumanPromptInTransaction(tx as unknown as typeof db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId!,
           sessionId: session.id,
@@ -282,7 +282,7 @@ describe("immutable session turn initiators", () => {
 
     const edited = await withWorkspaceSubjectRls(client.db, grant.workspaceId!, editor, (db) =>
       db.transaction((tx) =>
-        editQueuedTurnInTransaction(tx as typeof db, {
+        editQueuedTurnInTransaction(tx as unknown as typeof db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId!,
           sessionId: session.id,
@@ -298,7 +298,7 @@ describe("immutable session turn initiators", () => {
     );
     const savedEdit = await withWorkspaceSubjectRls(client.db, grant.workspaceId!, editor, (db) =>
       db.transaction((tx) =>
-        saveComposerDraftInTransaction(tx as typeof db, {
+        saveComposerDraftInTransaction(tx as unknown as typeof db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId!,
           sessionId: session.id,
@@ -313,7 +313,7 @@ describe("immutable session turn initiators", () => {
     );
     const resubmitted = await withWorkspaceSubjectRls(client.db, grant.workspaceId!, editor, (db) =>
       db.transaction((tx) =>
-        submitHumanPromptInTransaction(tx as typeof db, {
+        submitHumanPromptInTransaction(tx as unknown as typeof db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId!,
           sessionId: session.id,
@@ -349,7 +349,7 @@ describe("immutable session turn initiators", () => {
 
     const steerSource = await withWorkspaceSubjectRls(client.db, grant.workspaceId!, sender, (db) =>
       db.transaction((tx) =>
-        submitHumanPromptInTransaction(tx as typeof db, {
+        submitHumanPromptInTransaction(tx as unknown as typeof db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId!,
           sessionId: session.id,
@@ -367,7 +367,7 @@ describe("immutable session turn initiators", () => {
     );
     const steerDraft = await withWorkspaceSubjectRls(client.db, grant.workspaceId!, editor, (db) =>
       db.transaction((tx) =>
-        editQueuedTurnInTransaction(tx as typeof db, {
+        editQueuedTurnInTransaction(tx as unknown as typeof db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId!,
           sessionId: session.id,
@@ -383,7 +383,7 @@ describe("immutable session turn initiators", () => {
     );
     const steered = await withWorkspaceSubjectRls(client.db, grant.workspaceId!, editor, (db) =>
       db.transaction((tx) =>
-        submitHumanPromptInTransaction(tx as typeof db, {
+        submitHumanPromptInTransaction(tx as unknown as typeof db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId!,
           sessionId: session.id,
@@ -416,7 +416,7 @@ describe("immutable session turn initiators", () => {
       authorizationSubject,
       (db) =>
         db.transaction((tx) =>
-          submitHumanPromptInTransaction(tx as typeof db, {
+          submitHumanPromptInTransaction(tx as unknown as typeof db, {
             accountId: grant.accountId,
             workspaceId: grant.workspaceId!,
             sessionId: session.id,
