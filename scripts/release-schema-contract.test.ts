@@ -117,10 +117,10 @@ describe("release schema contract", () => {
     expect(sourceContract.sha256).toBe(
       migrations.has("0218_site_auth_maintenance_sessions.sql")
         ? migrations.has("0219_organization_tenancy_managed_human_provisioning.sql")
-          ? "d4d392fe9e90dbfe3186bc558e454bd8c528ac31f952a1960d9b9370c6109638"
+          ? "aca629bb0e9b78656a5daaaa9d1720017b751b4f19c3e8b9e156d8e00c12d2d0"
           : migrations.has("0218_organization_tenancy_foundation.sql")
-            ? "0dfe8714db5f1a0ef2cb8aafe54d2fc10f70652b3168bd703b90ec6f2e66a3dd"
-            : "075fc99d80e7921df6c24811641db8571adc6047d689024d5f884cd658858410"
+            ? "a002c6b3da822dfff2aca5fd88e76371ecadf87e1fc0c9f5a603b674f67676d1"
+            : "67238deb9f46f6459e46c882a4dd5231b0ba739f715dfc9e51d8539f54ff3039"
         : migrations.has("0218_organization_tenancy_foundation.sql")
           ? "eb6d0099f5362add0eb799641deace18326831ac61c8922c3f4f91c6a489f6a9"
           : migrations.has("0217_capability_definition_delete_authority.sql")
@@ -135,10 +135,10 @@ describe("release schema contract", () => {
       ...sourceContract,
       sha256: migrations.has("0218_site_auth_maintenance_sessions.sql")
         ? migrations.has("0219_organization_tenancy_managed_human_provisioning.sql")
-          ? "d4d392fe9e90dbfe3186bc558e454bd8c528ac31f952a1960d9b9370c6109638"
+          ? "aca629bb0e9b78656a5daaaa9d1720017b751b4f19c3e8b9e156d8e00c12d2d0"
           : migrations.has("0218_organization_tenancy_foundation.sql")
-            ? "0dfe8714db5f1a0ef2cb8aafe54d2fc10f70652b3168bd703b90ec6f2e66a3dd"
-            : "075fc99d80e7921df6c24811641db8571adc6047d689024d5f884cd658858410"
+            ? "a002c6b3da822dfff2aca5fd88e76371ecadf87e1fc0c9f5a603b674f67676d1"
+            : "67238deb9f46f6459e46c882a4dd5231b0ba739f715dfc9e51d8539f54ff3039"
         : migrations.has("0218_organization_tenancy_foundation.sql")
           ? "eb6d0099f5362add0eb799641deace18326831ac61c8922c3f4f91c6a489f6a9"
           : migrations.has("0217_capability_definition_delete_authority.sql")
@@ -322,10 +322,10 @@ describe("release schema contract", () => {
     expect(contract.sha256).toBe(
       migrations.has("0218_site_auth_maintenance_sessions.sql")
         ? migrations.has("0219_organization_tenancy_managed_human_provisioning.sql")
-          ? "d4d392fe9e90dbfe3186bc558e454bd8c528ac31f952a1960d9b9370c6109638"
+          ? "aca629bb0e9b78656a5daaaa9d1720017b751b4f19c3e8b9e156d8e00c12d2d0"
           : migrations.has("0218_organization_tenancy_foundation.sql")
-            ? "0dfe8714db5f1a0ef2cb8aafe54d2fc10f70652b3168bd703b90ec6f2e66a3dd"
-            : "075fc99d80e7921df6c24811641db8571adc6047d689024d5f884cd658858410"
+            ? "a002c6b3da822dfff2aca5fd88e76371ecadf87e1fc0c9f5a603b674f67676d1"
+            : "67238deb9f46f6459e46c882a4dd5231b0ba739f715dfc9e51d8539f54ff3039"
         : migrations.has("0218_organization_tenancy_foundation.sql")
           ? "eb6d0099f5362add0eb799641deace18326831ac61c8922c3f4f91c6a489f6a9"
           : "2d8e3211f1526419a8421c4388f7cf2297839318d7a7dbd194362d81c503c70a",
@@ -426,7 +426,7 @@ describe("release schema contract", () => {
       deploymentMode: "rolling",
     });
     expect(migrations.get("0212_browser_state_transfer_hardening.sql")).toMatchObject({
-      sha256: "6b0f17d44159dace9546184fda9cbf3169c1ef491bb64ace74d81654717c7145",
+      sha256: "28aa25ba8262d54343dd092d21ec8853e8d050c91768a6350054724dae141f76",
       deploymentMode: "maintenance",
     });
     expect(migrations.get("0213_browser_interaction_authority.sql")).toMatchObject({
@@ -438,7 +438,7 @@ describe("release schema contract", () => {
       deploymentMode: "maintenance",
     });
     expect(migrations.get("0215_browser_controller_host.sql")).toMatchObject({
-      sha256: "7baf107069b77443941c609316b7b3e949c8d9b095f04c998d06eefaf8f3087e",
+      sha256: "9e40a7450b4d7c3fd73595e8ab3e844ee12765682e6fa67a479cf7f56728f328",
       deploymentMode: "maintenance",
     });
     expect(migrations.get("0216_browser_auth_health_evidence.sql")).toMatchObject({
