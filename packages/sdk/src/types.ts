@@ -4458,8 +4458,10 @@ export type ApiIntegrationInstallationSummary = {
   baseUrl: string;
   sourceUrl: string | null;
   connected: boolean;
+  requiresConnection: boolean;
   connectionId: string | null;
   ownership: "workspace" | "personal" | "none";
+  allowedTools: string[];
   toolCount: number;
   approvalRequiredToolCount: number;
   revisionId: string;

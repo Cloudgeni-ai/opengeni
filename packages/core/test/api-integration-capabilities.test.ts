@@ -48,6 +48,7 @@ function runtime(overrides: Partial<ApiIntegrationRuntime> = {}): ApiIntegration
     baseUrl: "https://inventory.example.com/v1/",
     sourceUrl: "https://inventory.example.com/openapi.json",
     providerDomain: "inventory.example.com",
+    authScheme: { kind: "api_key" },
     connectionRef: {
       connectionId: "22222222-2222-4222-8222-222222222222",
       providerDomain: "inventory.example.com",

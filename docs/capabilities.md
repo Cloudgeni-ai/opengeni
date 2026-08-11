@@ -88,6 +88,27 @@ share the normalized component ledger, so uninstall preview identifies whether
 the runtime adapter will actually disappear. Mutation uses the Plugin
 installation version as an optimistic-concurrency fence.
 
+The Capabilities page exposes this lifecycle as **Connect custom API**. The
+default path accepts one URL or domain and detects OpenAPI or GraphQL; advanced
+controls allow an explicit OpenAPI document/base URL or GraphQL endpoint/name.
+Detection is non-mutating. If discovery reports authentication, the dialog
+defaults to creating a new Personal or workspace Connection and also offers
+only compatible active existing Connections for the exact domain and
+ownership. An authenticated GraphQL preview is then retried through that exact
+Connection. The final review shows the immutable digest, tools, safety and
+approval policy, warnings, ownership, and account label before install.
+
+Installed custom APIs appear in a dedicated section rather than the legacy
+generic “Add custom” catalog dialog. Multiple named instances of one definition
+remain independent (for example, `Linear — Finance` and `Linear — Sales`), with
+their own Connection, stable runtime identity, selected tools, status, update
+review, reconnect action, and instance-scoped removal. Updating preserves only
+previously allowed tools that still exist; newly discovered tools are opt-in,
+and an explicit empty selection is never interpreted as all tools. Readiness is
+derived from the persisted authentication scheme: a no-auth API can remain
+ready even when an optional Connection is attached, while authenticated APIs
+never claim readiness when Connection data is unavailable.
+
 API-key Connections may store bounded, validated header, query, and cookie
 placements. The broker resolves those placements only for the exact provider
 destination and local HTTP API adapter; query/cookie material fails closed for
@@ -317,6 +338,8 @@ Open the **Capabilities** view in the web app to:
 - install and configure role Packs
 - add and enable public MCP Registry results
 - add and connect manual MCP integrations
+- detect, review, authenticate, and install custom OpenAPI or GraphQL APIs
+- manage multiple named custom API instances, updates, reconnects, and removals
 - install immutable Skills and inspect their provenance
 - select enabled custom MCPs in the agent composer
 

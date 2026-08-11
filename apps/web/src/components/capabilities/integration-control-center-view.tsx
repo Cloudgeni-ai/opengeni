@@ -17,6 +17,9 @@ import {
 } from "lucide-react";
 import type { ComponentType, FormEvent } from "react";
 
+import { CustomApiSection } from "@/components/capabilities/custom-api-section";
+import { CustomApiSetupDialog } from "@/components/capabilities/custom-api-setup-dialog";
+import type { CustomApiFlowState } from "@/components/capabilities/custom-api-flow";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
@@ -58,6 +61,7 @@ const PRESET_VISUALS: Record<string, PresetVisual> = {
 export function IntegrationControlCenterView({
   presets,
   instancesByPreset,
+  customInstances,
   connections,
   loading,
   loadError,
@@ -68,6 +72,7 @@ export function IntegrationControlCenterView({
   displayName,
   ownership,
   removeTarget,
+  customApi,
   onRefresh,
   onOpenSetup,
   onReconnect,
@@ -78,9 +83,20 @@ export function IntegrationControlCenterView({
   onConnectSetup,
   onRemoveClose,
   onRemoveInstance,
+  onOpenCustomApi,
+  onUpdateCustomApi,
+  onReconnectCustomApi,
+  onCustomApiOpenChange,
+  onCustomApiDraftChange,
+  onCustomApiPreview,
+  onCustomApiAuthenticate,
+  onCustomApiInstall,
+  onCustomApiBack,
+  onCustomApiToggleTool,
 }: {
   presets: ApiIntegrationPresetSummary[];
   instancesByPreset: Map<string, ApiIntegrationInstallationSummary[]>;
+  customInstances: ApiIntegrationInstallationSummary[];
   connections: ConnectionMetadata[] | null;
   loading: boolean;
   loadError: string | null;
@@ -91,6 +107,7 @@ export function IntegrationControlCenterView({
   displayName: string;
   ownership: ConnectionOwnership;
   removeTarget: IntegrationRemoveTarget | null;
+  customApi: CustomApiFlowState;
   onRefresh: () => void;
   onOpenSetup: (preset: ApiIntegrationPresetSummary) => void;
   onReconnect: (instance: ApiIntegrationInstallationSummary) => void;
@@ -101,6 +118,16 @@ export function IntegrationControlCenterView({
   onConnectSetup: () => void;
   onRemoveClose: () => void;
   onRemoveInstance: () => Promise<boolean>;
+  onOpenCustomApi: () => void;
+  onUpdateCustomApi: (instance: ApiIntegrationInstallationSummary) => void;
+  onReconnectCustomApi: (instance: ApiIntegrationInstallationSummary) => void;
+  onCustomApiOpenChange: (open: boolean) => void;
+  onCustomApiDraftChange: (patch: Partial<CustomApiFlowState["draft"]>) => void;
+  onCustomApiPreview: () => void;
+  onCustomApiAuthenticate: () => void;
+  onCustomApiInstall: () => void;
+  onCustomApiBack: () => void;
+  onCustomApiToggleTool: (toolId: string, selected: boolean) => void;
 }) {
   function submitSetup(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -184,6 +211,17 @@ export function IntegrationControlCenterView({
           </div>
         )}
       </div>
+
+      <CustomApiSection
+        instances={customInstances}
+        connections={connections}
+        canManage={canManage}
+        busyKey={busyKey}
+        onConnect={onOpenCustomApi}
+        onUpdate={onUpdateCustomApi}
+        onReconnect={onReconnectCustomApi}
+        onRemove={onPreviewRemove}
+      />
 
       <Dialog open={setupPreset !== null} onOpenChange={(open) => !open && onSetupClose()}>
         <DialogContent className="sm:max-w-lg">
@@ -274,6 +312,19 @@ export function IntegrationControlCenterView({
         confirmLabel="Remove instance"
         destructive
         onConfirm={onRemoveInstance}
+      />
+
+      <CustomApiSetupDialog
+        state={customApi}
+        connections={connections}
+        canManage={canManage}
+        onOpenChange={onCustomApiOpenChange}
+        onDraftChange={onCustomApiDraftChange}
+        onPreview={onCustomApiPreview}
+        onAuthenticate={onCustomApiAuthenticate}
+        onInstall={onCustomApiInstall}
+        onBack={onCustomApiBack}
+        onToggleTool={onCustomApiToggleTool}
       />
     </section>
   );

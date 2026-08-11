@@ -1,6 +1,24 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
 
+import {
+  customApiAuthenticationMayBeRequired,
+  customApiConnectionRequest,
+  customApiFlowReducer,
+  customApiInstallValidationError,
+  customApiProviderDomain,
+  customApiSourceFromDraft,
+  initialCustomApiFlowState,
+} from "@/components/capabilities/custom-api-flow";
 import type { IntegrationRemoveTarget } from "@/components/capabilities/integration-control-center-view";
 import { useAppContext } from "@/context";
 import type {
@@ -115,6 +133,11 @@ export function IntegrationControlCenter({
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [callbackBusy, setCallbackBusy] = useState(false);
   const [removeTarget, setRemoveTarget] = useState<IntegrationRemoveTarget | null>(null);
+  const [customApi, dispatchCustomApi] = useReducer(
+    customApiFlowReducer,
+    undefined,
+    initialCustomApiFlowState,
+  );
   const callbackHandled = useRef(false);
 
   const load = useCallback(async () => {
@@ -200,6 +223,11 @@ export function IntegrationControlCenter({
     }
     return grouped;
   }, [instances]);
+
+  const customInstances = useMemo(
+    () => instances.filter((instance) => instance.presetId === null),
+    [instances],
+  );
 
   function openSetup(preset: ApiIntegrationPresetSummary) {
     const count = instancesByPreset.get(preset.id)?.length ?? 0;
@@ -312,6 +340,147 @@ export function IntegrationControlCenter({
     }
   }
 
+  function openCustomApi() {
+    if (
+      customApi.draft.url.trim() ||
+      customApi.preview ||
+      customApi.error ||
+      customApi.editingInstance
+    ) {
+      dispatchCustomApi({ type: "open" });
+      return;
+    }
+    dispatchCustomApi({ type: "new" });
+  }
+
+  function editCustomApi(
+    instance: ApiIntegrationInstallationSummary,
+    intent: "update" | "reconnect",
+  ) {
+    const connection = instance.connectionId
+      ? ((connections ?? []).find((candidate) => candidate.id === instance.connectionId) ?? null)
+      : null;
+    dispatchCustomApi({ type: "edit", intent, instance, connection });
+  }
+
+  async function previewCustomApi(connection = customApi.connection) {
+    let source;
+    try {
+      source = customApiSourceFromDraft(customApi.draft);
+    } catch (error) {
+      dispatchCustomApi({
+        type: "preview_error",
+        message: error instanceof Error ? error.message : String(error),
+        authenticationMayBeRequired: false,
+      });
+      return;
+    }
+    dispatchCustomApi({ type: "phase", phase: "previewing", error: null });
+    try {
+      const preview = await client.previewApiIntegration(workspaceId, {
+        source,
+        ...(connection
+          ? { connectionId: connection.id, ownership: customApi.draft.ownership }
+          : {}),
+      });
+      dispatchCustomApi({ type: "preview", preview, connection });
+    } catch (error) {
+      dispatchCustomApi({
+        type: "preview_error",
+        message: error instanceof Error ? error.message : String(error),
+        authenticationMayBeRequired: customApiAuthenticationMayBeRequired(source, error),
+      });
+    }
+  }
+
+  async function authenticateCustomApi() {
+    let connection: ConnectionMetadata;
+    dispatchCustomApi({ type: "phase", phase: "creating_connection", error: null });
+    try {
+      if (customApi.draft.connectionMode === "existing") {
+        const selected = (connections ?? []).find(
+          (candidate) => candidate.id === customApi.draft.existingConnectionId,
+        );
+        if (!selected) throw new Error("Choose a compatible existing Connection.");
+        connection = selected;
+      } else {
+        const providerDomain =
+          customApi.preview?.providerDomain ?? customApiProviderDomain(customApi.draft);
+        connection = await client.createConnection(
+          workspaceId,
+          customApiConnectionRequest({
+            preview: customApi.preview,
+            draft: customApi.draft,
+            providerDomain,
+          }),
+        );
+        await onChanged();
+      }
+      dispatchCustomApi({ type: "connection", connection });
+      await previewCustomApi(connection);
+    } catch (error) {
+      dispatchCustomApi({
+        type: "phase",
+        phase: "auth",
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  async function installCustomApi() {
+    const validationError = customApiInstallValidationError(customApi);
+    if (validationError) {
+      dispatchCustomApi({ type: "phase", phase: "review", error: validationError });
+      return;
+    }
+    const preview = customApi.preview!;
+    dispatchCustomApi({ type: "phase", phase: "installing", error: null });
+    const editing = customApi.editingInstance;
+    try {
+      await client.installApiIntegration(workspaceId, {
+        source: preview.source,
+        expectedRevisionId: preview.revisionId,
+        expectedContentSha256: preview.contentSha256,
+        ...(customApi.connection && preview.auth.kind !== "none"
+          ? {
+              connectionId: customApi.connection.id,
+              ownership: customApi.draft.ownership,
+            }
+          : {}),
+        instanceKey: editing?.instanceKey ?? `custom-${crypto.randomUUID()}`,
+        displayName: customApi.draft.displayName.trim(),
+        ...(editing ? { expectedInstanceVersion: editing.instanceVersion } : {}),
+        allowedTools: customApi.selectedTools,
+      });
+      await Promise.all([load(), onChanged()]);
+      toast.success(`${customApi.draft.displayName.trim()} ${editing ? "updated" : "installed"}`, {
+        description: `${customApi.selectedTools.length} tools are available through this exact instance.`,
+      });
+      dispatchCustomApi({ type: "reset" });
+    } catch (error) {
+      dispatchCustomApi({
+        type: "phase",
+        phase: "review",
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  function customApiBack() {
+    if (customApi.phase === "review" && customApi.preview?.auth.kind !== "none") {
+      dispatchCustomApi({ type: "phase", phase: "auth", error: null });
+      return;
+    }
+    dispatchCustomApi({ type: "phase", phase: "source", error: null });
+  }
+
+  function toggleCustomApiTool(toolId: string, selected: boolean) {
+    const next = selected
+      ? [...new Set([...customApi.selectedTools, toolId])]
+      : customApi.selectedTools.filter((candidate) => candidate !== toolId);
+    dispatchCustomApi({ type: "tools", selectedTools: next });
+  }
+
   function connectSetup() {
     if (!setupPreset || !displayName.trim() || !canManage) return;
     const preset = setupPreset;
@@ -336,6 +505,7 @@ export function IntegrationControlCenter({
       <IntegrationControlCenterView
         presets={presets}
         instancesByPreset={instancesByPreset}
+        customInstances={customInstances}
         connections={connections}
         loading={loading}
         loadError={loadError}
@@ -346,6 +516,7 @@ export function IntegrationControlCenter({
         displayName={displayName}
         ownership={ownership}
         removeTarget={removeTarget}
+        customApi={customApi}
         onRefresh={() => void load()}
         onOpenSetup={openSetup}
         onReconnect={(instance) => void reconnect(instance)}
@@ -356,6 +527,16 @@ export function IntegrationControlCenter({
         onConnectSetup={connectSetup}
         onRemoveClose={() => setRemoveTarget(null)}
         onRemoveInstance={removeInstance}
+        onOpenCustomApi={openCustomApi}
+        onUpdateCustomApi={(instance) => editCustomApi(instance, "update")}
+        onReconnectCustomApi={(instance) => editCustomApi(instance, "reconnect")}
+        onCustomApiOpenChange={(open) => dispatchCustomApi({ type: open ? "open" : "close" })}
+        onCustomApiDraftChange={(patch) => dispatchCustomApi({ type: "draft", patch })}
+        onCustomApiPreview={() => void previewCustomApi()}
+        onCustomApiAuthenticate={() => void authenticateCustomApi()}
+        onCustomApiInstall={() => void installCustomApi()}
+        onCustomApiBack={customApiBack}
+        onCustomApiToggleTool={toggleCustomApiTool}
       />
     </Suspense>
   );

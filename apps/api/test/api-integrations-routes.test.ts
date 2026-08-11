@@ -17,7 +17,10 @@ import {
 import { Hono } from "hono";
 import postgres from "postgres";
 
-import { registerApiIntegrationRoutes } from "../src/routes/api-integrations";
+import {
+  apiIntegrationRequiresConnection,
+  registerApiIntegrationRoutes,
+} from "../src/routes/api-integrations";
 
 const delegationSecret = "api-integration-route-secret";
 let sourceVersion = "1.0.0";
@@ -179,6 +182,12 @@ async function request(path: string, init: RequestInit = {}): Promise<Response> 
 }
 
 describe("API Integration routes", () => {
+  test("projects missing legacy auth metadata as not requiring a Connection", () => {
+    expect(apiIntegrationRequiresConnection({})).toBe(false);
+    expect(apiIntegrationRequiresConnection({ kind: "none" })).toBe(false);
+    expect(apiIntegrationRequiresConnection({ kind: "oauth2" })).toBe(true);
+  });
+
   test("lists curated provider presets without deployment OAuth credentials", async () => {
     if (!available) return;
     const response = await request("/integrations/presets");
@@ -229,21 +238,31 @@ describe("API Integration routes", () => {
     expect(drifted.status).toBe(409);
 
     sourceVersion = "1.0.0";
+    const optionalConnection = await createConnection(client!.db, {
+      accountId,
+      workspaceId,
+      providerDomain: "127.0.0.1",
+      kind: "api_key",
+      credentialEncrypted: "test-only-optional-connection",
+      createdBySubjectId: subjectId,
+    });
     const installedResponse = await request("/integrations/install", {
       method: "POST",
       body: JSON.stringify({
         source,
         expectedRevisionId: preview.revisionId,
         expectedContentSha256: preview.contentSha256,
+        connectionId: optionalConnection.id,
+        ownership: "workspace",
       }),
     });
     expect(installedResponse.status).toBe(201);
     const installed = await installedResponse.json();
+    expect(installed.instanceKey).toMatch(/^account-/);
     expect(installed).toMatchObject({
       capabilityId: preview.capabilityId,
       revisionId: preview.revisionId,
-      instanceKey: "default",
-      displayName: "Inventory API",
+      displayName: "Inventory API — connected account",
       status: "installed",
       installationVersion: 1,
       instanceVersion: 1,
@@ -261,9 +280,11 @@ describe("API Integration routes", () => {
           instanceKey: installed.instanceKey,
           instanceVersion: installed.instanceVersion,
           presetId: null,
-          connected: false,
-          connectionId: null,
-          ownership: "none",
+          connected: true,
+          requiresConnection: false,
+          connectionId: optionalConnection.id,
+          ownership: "workspace",
+          allowedTools: ["inventory_createitem", "inventory_listitems"],
           toolCount: 2,
           approvalRequiredToolCount: 1,
         }),
@@ -349,6 +370,27 @@ describe("API Integration routes", () => {
       connectionOwnership: "personal",
     });
 
+    const wrongKindConnection = await createConnection(client.db, {
+      accountId,
+      workspaceId,
+      subjectId,
+      providerDomain: "127.0.0.1",
+      kind: "oauth2",
+      credentialEncrypted: "test-only-wrong-kind-encrypted-bundle",
+      createdBySubjectId: subjectId,
+    });
+    const wrongKind = await request("/integrations/install", {
+      method: "POST",
+      body: JSON.stringify({
+        source,
+        expectedRevisionId: preview.revisionId,
+        expectedContentSha256: preview.contentSha256,
+        connectionId: wrongKindConnection.id,
+        ownership: "personal",
+      }),
+    });
+    expect(wrongKind.status).toBe(422);
+
     const mismatched = await request("/integrations/install", {
       method: "POST",
       body: JSON.stringify({
@@ -378,7 +420,12 @@ describe("API Integration routes", () => {
     expect(listedResponse.status).toBe(200);
     expect(await listedResponse.json()).toEqual({
       integrations: [
-        expect.objectContaining({ capabilityId: installed.capabilityId, ownership: "personal" }),
+        expect.objectContaining({
+          capabilityId: installed.capabilityId,
+          ownership: "personal",
+          requiresConnection: true,
+          allowedTools: ["querykey_listitems"],
+        }),
       ],
     });
 

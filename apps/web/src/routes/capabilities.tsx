@@ -1171,7 +1171,7 @@ export function CapabilitiesRoute({
               </Button>
               <Button type="button" onClick={() => setAddOpen(true)}>
                 <PlusIcon />
-                Add custom
+                Add MCP, Skill, or Plugin
               </Button>
             </>
           }
@@ -1700,7 +1700,7 @@ function RegistryFallback({
         title={emptyDefault ? "Nothing here yet" : "No matches for this filter"}
         description={
           emptyDefault
-            ? "Search the catalog above, or add a custom MCP server, API, skill, or plugin."
+            ? "Search the catalog above, connect a custom API, or add an MCP server, Skill, or Plugin."
             : "Try a different filter or search term."
         }
       />

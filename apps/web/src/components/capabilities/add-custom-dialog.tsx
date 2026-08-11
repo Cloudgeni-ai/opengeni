@@ -22,13 +22,12 @@ import { cn } from "@/lib/utils";
 import type { CapabilityKind } from "@/types";
 
 type AddableKind = Exclude<CapabilityKind, "pack">;
-const KINDS: AddableKind[] = ["mcp", "api", "skill", "plugin"];
+export const ADD_CUSTOM_CATALOG_KINDS: AddableKind[] = ["mcp", "skill", "plugin"];
 
 /**
- * "Add custom" — kind-aware so only MCP servers ask for an endpoint URL. APIs,
- * skills, and plugins are enabled by name (the user's complaint was being asked
- * for an endpoint when adding a skill). Packs keep their manifest flow in the
- * Packs section, so they are not offered here.
+ * "Add custom" owns legacy catalog-backed MCP, Skill, and Plugin rows. Custom
+ * APIs deliberately do not appear here: the Integration Control Center routes
+ * every OpenAPI/GraphQL source through immutable preview-before-install.
  */
 export function AddCustomDialog({
   open,
@@ -58,7 +57,8 @@ export function AddCustomDialog({
         <DialogHeader>
           <DialogTitle>Add a custom capability</DialogTitle>
           <DialogDescription>
-            Connect a remote MCP server, or enable an API, skill, or plugin your team uses.
+            Add a remote MCP server, Skill, or Plugin. Use Connect custom API for OpenAPI and
+            GraphQL.
           </DialogDescription>
         </DialogHeader>
 
@@ -72,8 +72,8 @@ export function AddCustomDialog({
           {/* Kind picker */}
           <div className="grid gap-1.5">
             <Label className="text-xs text-fg-muted">Type</Label>
-            <div className="grid grid-cols-4 gap-1.5 rounded-lg border border-border bg-surface/50 p-1">
-              {KINDS.map((kind) => (
+            <div className="grid gap-1.5 rounded-lg border border-border bg-surface/50 p-1 sm:grid-cols-3">
+              {ADD_CUSTOM_CATALOG_KINDS.map((kind) => (
                 <button
                   key={kind}
                   type="button"

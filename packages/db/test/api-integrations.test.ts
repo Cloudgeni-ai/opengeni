@@ -99,7 +99,9 @@ function integrationInput(connectionId?: string, suffix = "inventory"): InstallA
     protocol: "openapi",
     baseUrl: "https://inventory.example.com/v1/",
     sourceUrl: "https://inventory.example.com/openapi.json",
-    authScheme: connectionId ? { kind: "connection" } : { kind: "none" },
+    authScheme: connectionId
+      ? { kind: "api_key", carrier: "header", name: "Authorization" }
+      : { kind: "none" },
     ...(connectionId ? { connectionId } : {}),
     requiredScopes: connectionId ? ["inventory.read", "inventory.write"] : [],
     ownership: "workspace",
@@ -164,6 +166,7 @@ describe("API Integration persistence", () => {
         instanceKey: "default",
         displayName: input.name,
         instanceVersion: 1,
+        authScheme: { kind: "none" },
         connectionRef: null,
         allowedTools: ["list_items", "update_item"],
         requireApproval: ["update_item"],
@@ -216,15 +219,53 @@ describe("API Integration persistence", () => {
       definitionStatus: "disabled",
     });
     expect(await listInstalledApiIntegrations(client.db, first.workspaceId)).toEqual([]);
+
+    const emptySelectionInput = {
+      ...integrationInput(undefined, "inventory-empty-selection"),
+      allowedTools: [],
+    } satisfies InstallApiIntegrationInput;
+    const emptySelection = await installApiIntegration(client.db, emptySelectionInput);
+    expect(await listInstalledApiIntegrations(client.db, first.workspaceId)).toEqual([
+      expect.objectContaining({
+        capabilityId: emptySelectionInput.capabilityId,
+        authScheme: { kind: "none" },
+        allowedTools: [],
+      }),
+    ]);
+    await uninstallApiIntegration(client.db, {
+      accountId: first.accountId,
+      workspaceId: first.workspaceId,
+      subjectId: first.subjectId,
+      capabilityId: emptySelectionInput.capabilityId,
+      instanceKey: emptySelection.instanceKey,
+      expectedInstallationVersion: emptySelection.installationVersion,
+      expectedInstanceVersion: emptySelection.instanceVersion,
+    });
   }, 60_000);
 
   test("binds an exact workspace Connection and preserves Pack-owned runtime components", async () => {
     if (!available || !client || !shared) return;
-    const connection = await createConnection(client.db, {
+    const wrongKindConnection = await createConnection(client.db, {
       accountId: first.accountId,
       workspaceId: first.workspaceId,
       providerDomain: "inventory.example.com",
       kind: "oauth2",
+      credentialEncrypted: "test-only-wrong-kind-encrypted-bundle",
+      grantedScopes: ["inventory.read", "inventory.write"],
+      createdBySubjectId: first.subjectId,
+    });
+    await expect(
+      installApiIntegration(
+        client.db,
+        integrationInput(wrongKindConnection.id, "inventory-wrong-kind"),
+      ),
+    ).rejects.toThrow("credential Connection");
+
+    const connection = await createConnection(client.db, {
+      accountId: first.accountId,
+      workspaceId: first.workspaceId,
+      providerDomain: "inventory.example.com",
+      kind: "api_key",
       credentialEncrypted: "test-only-encrypted-bundle",
       grantedScopes: ["inventory.read", "inventory.write"],
       createdBySubjectId: first.subjectId,
@@ -233,10 +274,11 @@ describe("API Integration persistence", () => {
     const installed = await installApiIntegration(client.db, input);
     expect(await listInstalledApiIntegrations(client.db, first.workspaceId)).toEqual([
       expect.objectContaining({
+        authScheme: { kind: "api_key", carrier: "header", name: "Authorization" },
         connectionRef: {
           connectionId: connection.id,
           providerDomain: "inventory.example.com",
-          kind: "oauth2",
+          kind: "api_key",
           scopes: ["inventory.read", "inventory.write"],
           subjectScope: "workspace",
         },
@@ -289,37 +331,77 @@ describe("API Integration persistence", () => {
     expect(await listInstalledApiIntegrations(client.db, first.workspaceId)).toHaveLength(1);
   }, 60_000);
 
-  test("keeps two Connections for one Integration definition independently callable and removable", async () => {
+  test("keeps two Linear-like GraphQL Connections and named instances independently updateable and removable", async () => {
     if (!available || !client) return;
     const financeConnection = await createConnection(client.db, {
       accountId: first.accountId,
       workspaceId: first.workspaceId,
-      providerDomain: "inventory.example.com",
+      providerDomain: "linear.example.test",
       kind: "oauth2",
       credentialEncrypted: "finance-encrypted-bundle",
-      grantedScopes: ["inventory.read", "inventory.write"],
+      grantedScopes: ["issues:read", "issues:write"],
       createdBySubjectId: first.subjectId,
     });
     const salesConnection = await createConnection(client.db, {
       accountId: first.accountId,
       workspaceId: first.workspaceId,
-      providerDomain: "inventory.example.com",
+      providerDomain: "linear.example.test",
       kind: "oauth2",
       credentialEncrypted: "sales-encrypted-bundle",
-      grantedScopes: ["inventory.read", "inventory.write"],
+      grantedScopes: ["issues:read", "issues:write"],
       createdBySubjectId: first.subjectId,
     });
-    const base = integrationInput(financeConnection.id, "inventory-multi");
+    const inventoryBase = integrationInput(financeConnection.id, "linear-like-graphql");
+    const base: InstallApiIntegrationInput = {
+      ...inventoryBase,
+      name: "Linear-like GraphQL",
+      description: "Deterministic issue-tracker GraphQL emulator.",
+      providerDomain: "linear.example.test",
+      protocol: "graphql",
+      baseUrl: "https://linear.example.test/graphql",
+      sourceUrl: "https://linear.example.test/graphql",
+      authScheme: { kind: "oauth2" },
+      requiredScopes: ["issues:read", "issues:write"],
+      revision: {
+        id: "graphql:111111111111111111111111",
+        protocol: "graphql",
+        integrationId: "linear-like-graphql",
+        contentSha256: "1".repeat(64),
+        source: { url: "https://linear.example.test/graphql" },
+        title: "Linear-like GraphQL",
+        tools: inventoryBase.revision.tools,
+        bindings: {
+          list_items: {
+            kind: "query",
+            fieldName: "issues",
+            operationName: "ListIssues",
+            variableDefinitions: [],
+            variableNames: [],
+            defaultSelection: "nodes { id title }",
+            selectionAllowed: true,
+          },
+          update_item: {
+            kind: "mutation",
+            fieldName: "issueUpdate",
+            operationName: "UpdateIssue",
+            variableDefinitions: ["$id: ID!"],
+            variableNames: ["id"],
+            defaultSelection: "id",
+            selectionAllowed: true,
+          },
+        },
+      },
+    };
     const finance = await installApiIntegration(client.db, {
       ...base,
       instanceKey: "finance",
-      displayName: "Inventory — Finance",
+      displayName: "Linear — Finance",
     });
     const sales = await installApiIntegration(client.db, {
       ...base,
       connectionId: salesConnection.id,
       instanceKey: "sales",
-      displayName: "Inventory — Sales",
+      displayName: "Linear — Sales",
     });
     expect(finance.instanceId).not.toBe(sales.instanceId);
     expect(finance.serverId).not.toBe(sales.serverId);
@@ -352,11 +434,11 @@ describe("API Integration persistence", () => {
       ...base,
       connectionId: salesConnection.id,
       instanceKey: "sales",
-      displayName: "Inventory — Sales",
+      displayName: "Linear — Sales",
       expectedInstanceVersion: sales.instanceVersion,
       revision: {
         ...base.revision,
-        id: "openapi:222222222222222222222222",
+        id: "graphql:222222222222222222222222",
         contentSha256: "2".repeat(64),
       },
     });
@@ -365,7 +447,7 @@ describe("API Integration persistence", () => {
       serverId: sales.serverId,
       instanceVersion: sales.instanceVersion + 1,
       installationVersion: sales.installationVersion + 1,
-      revisionId: "openapi:222222222222222222222222",
+      revisionId: "graphql:222222222222222222222222",
     });
     const afterUpgrade = (await listInstalledApiIntegrations(client.db, first.workspaceId)).filter(
       (integration) => integration.capabilityId === base.capabilityId,
@@ -441,7 +523,7 @@ describe("API Integration persistence", () => {
       ...base,
       connectionId: salesConnection.id,
       instanceKey: "sales",
-      displayName: "Inventory — Sales primary",
+      displayName: "Linear — Sales primary",
       expectedInstanceVersion: upgradedSales.instanceVersion,
       revision: {
         ...base.revision,
@@ -452,7 +534,7 @@ describe("API Integration persistence", () => {
     expect(renamed).toMatchObject({
       instanceId: sales.instanceId,
       instanceKey: "sales",
-      displayName: "Inventory — Sales primary",
+      displayName: "Linear — Sales primary",
       instanceVersion: upgradedSales.instanceVersion + 1,
       serverId: sales.serverId,
     });

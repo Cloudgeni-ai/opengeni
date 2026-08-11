@@ -162,6 +162,7 @@ export type ApiIntegrationRuntime = {
   baseUrl: string;
   sourceUrl: string | null;
   providerDomain: string;
+  authScheme: Record<string, unknown>;
   connectionRef: McpServerConnectionRef | null;
   allowedTools: string[];
   requireApproval: true | string[];
@@ -705,6 +706,7 @@ export async function listInstalledApiIntegrations(
         protocol: schema.capabilityApiFacets.protocol,
         baseUrl: schema.capabilityApiFacets.baseUrl,
         sourceUrl: schema.capabilityApiFacets.specSourceUrl,
+        authScheme: schema.capabilityApiFacets.authScheme,
         providerDomain: schema.capabilityIntegrationFacets.providerDomain,
         requiredScopes: schema.capabilityIntegrationFacets.requiredScopes,
         instanceId: schema.integrationFeatureBindings.id,
@@ -881,6 +883,7 @@ export async function listInstalledApiIntegrations(
           baseUrl: row.baseUrl,
           sourceUrl: row.sourceUrl,
           providerDomain: row.providerDomain,
+          authScheme: objectValue(row.authScheme),
           connectionRef,
           allowedTools,
           requireApproval,
@@ -1222,6 +1225,7 @@ async function loadInstallConnection(
   if (connection.providerDomain.toLowerCase() !== input.providerDomain.toLowerCase()) {
     throw new Error("API Integration connection provider does not match the destination");
   }
+  assertConnectionKindMatchesAuth(input.authScheme, connection.kind);
   const missing = normalizedStrings(input.requiredScopes ?? [], 256).filter(
     (scope) => !connection.grantedScopes.includes(scope),
   );
@@ -1229,6 +1233,28 @@ async function loadInstallConnection(
     throw new Error("API Integration connection is missing required scopes");
   }
   return connection;
+}
+
+function assertConnectionKindMatchesAuth(
+  authScheme: Record<string, unknown> | undefined,
+  connectionKind: string,
+): void {
+  const auth = objectValue(authScheme);
+  const authKind = stringValue(auth.kind);
+  if (authKind === undefined || authKind === "none") return;
+  if (authKind === "oauth2") {
+    if (connectionKind !== "oauth2") {
+      throw new Error("API Integration requires an OAuth Connection");
+    }
+    return;
+  }
+  if (authKind === "api_key" || authKind === "http") {
+    if (connectionKind !== "api_key") {
+      throw new Error("API Integration requires a credential Connection, not OAuth");
+    }
+    return;
+  }
+  throw new Error("API Integration auth scheme is unsupported");
 }
 
 async function ensureFacet(
@@ -1511,9 +1537,10 @@ function assertInstallInput(input: InstallApiIntegrationInput): void {
 
 function selectedToolIds(input: InstallApiIntegrationInput): string[] {
   const available = new Set(input.revision.tools.map((tool) => tool.id));
-  const selected = input.allowedTools?.length
-    ? normalizedStrings(input.allowedTools, 2_000)
-    : [...available];
+  const selected =
+    input.allowedTools === undefined
+      ? [...available]
+      : normalizedStrings(input.allowedTools, 2_000);
   if (selected.some((tool) => !available.has(tool))) {
     throw new Error("API Integration selected an unknown tool");
   }

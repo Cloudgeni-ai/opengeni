@@ -23,6 +23,7 @@ function integration(): ApiIntegrationRuntime {
     baseUrl: "https://127.0.0.1/v1/",
     sourceUrl: "https://127.0.0.1/openapi.json",
     providerDomain: "127.0.0.1",
+    authScheme: { kind: "oauth2" },
     connectionRef: {
       connectionId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
       providerDomain: "127.0.0.1",

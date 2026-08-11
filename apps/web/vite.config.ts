@@ -62,6 +62,7 @@ export default defineConfig({
               // preset inventory is visible.
               name: "capabilities-services",
               test: /src[\\/]components[\\/]capabilities[\\/]integration-control-center-view\.tsx$/,
+              includeDependenciesRecursively: false,
               priority: 4,
             },
           ],

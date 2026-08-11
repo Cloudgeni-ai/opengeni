@@ -8,6 +8,8 @@ export type {
   AddWorkspaceMemberRequest,
   ApiIntegrationInstallationSummary,
   ApiIntegrationPresetSummary,
+  ApiIntegrationPreview,
+  ApiIntegrationSource,
   ApiKey,
   BillingBalance,
   BillingEntitlementsResponse,

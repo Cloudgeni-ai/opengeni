@@ -40,6 +40,11 @@ import {
 
 export type ApiIntegrationRouteOverrides = Readonly<{ fetchImpl?: FetchLike }>;
 
+export function apiIntegrationRequiresConnection(authScheme: Record<string, unknown>): boolean {
+  const authKind = authScheme.kind;
+  return typeof authKind === "string" && authKind !== "none";
+}
+
 export function registerApiIntegrationRoutes(
   app: Hono,
   deps: ApiRouteDeps,
@@ -74,38 +79,42 @@ export function registerApiIntegrationRoutes(
     const integrations = await listInstalledApiIntegrations(deps.db, workspaceId, grant.subjectId);
     return c.json(
       ListApiIntegrationsResponse.parse({
-        integrations: integrations.map((integration) => ({
-          capabilityId: integration.capabilityId,
-          pluginKey: integration.pluginKey,
-          installationVersion: integration.installationVersion,
-          instanceId: integration.instanceId,
-          instanceKey: integration.instanceKey,
-          displayName: integration.displayName,
-          instanceVersion: integration.instanceVersion,
-          serverId: integration.serverId,
-          name: integration.name,
-          description: integration.description,
-          protocol: integration.protocol,
-          presetId: integration.presetId,
-          providerDomain: integration.providerDomain,
-          baseUrl: integration.baseUrl,
-          sourceUrl: integration.sourceUrl,
-          connected: integration.connectionRef !== null,
-          connectionId: integration.connectionRef?.connectionId ?? null,
-          ownership:
-            integration.connectionRef?.subjectScope === "subject"
-              ? "personal"
-              : integration.connectionRef
-                ? "workspace"
-                : "none",
-          toolCount: integration.allowedTools.length,
-          approvalRequiredToolCount:
-            integration.requireApproval === true
-              ? integration.allowedTools.length
-              : integration.requireApproval.length,
-          revisionId: integration.revision.id,
-          contentSha256: integration.revision.contentSha256,
-        })),
+        integrations: integrations.map((integration) => {
+          return {
+            capabilityId: integration.capabilityId,
+            pluginKey: integration.pluginKey,
+            installationVersion: integration.installationVersion,
+            instanceId: integration.instanceId,
+            instanceKey: integration.instanceKey,
+            displayName: integration.displayName,
+            instanceVersion: integration.instanceVersion,
+            serverId: integration.serverId,
+            name: integration.name,
+            description: integration.description,
+            protocol: integration.protocol,
+            presetId: integration.presetId,
+            providerDomain: integration.providerDomain,
+            baseUrl: integration.baseUrl,
+            sourceUrl: integration.sourceUrl,
+            connected: integration.connectionRef !== null,
+            requiresConnection: apiIntegrationRequiresConnection(integration.authScheme),
+            connectionId: integration.connectionRef?.connectionId ?? null,
+            ownership:
+              integration.connectionRef?.subjectScope === "subject"
+                ? "personal"
+                : integration.connectionRef
+                  ? "workspace"
+                  : "none",
+            allowedTools: integration.allowedTools,
+            toolCount: integration.allowedTools.length,
+            approvalRequiredToolCount:
+              integration.requireApproval === true
+                ? integration.allowedTools.length
+                : integration.requireApproval.length,
+            revisionId: integration.revision.id,
+            contentSha256: integration.revision.contentSha256,
+          };
+        }),
       }),
     );
   });
