@@ -14,7 +14,6 @@ import type {
   CodexUsageMap,
   CodexUsageWindow,
 } from "@opengeni/sdk";
-import { copyTextToClipboard } from "@opengeni/react";
 import {
   CheckIcon,
   ChevronDownIcon,
@@ -660,6 +659,7 @@ export function CodexDeviceCodePanel({
     }
     setCopied(false);
 
+    const { copyTextToClipboard } = await import("@opengeni/react/clipboard");
     const ok = await copyTextToClipboard(userCode);
     if (attempt !== copyAttemptRef.current) return;
     if (!ok) {

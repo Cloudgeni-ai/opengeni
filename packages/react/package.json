@@ -70,6 +70,10 @@
       "types": "./src/interaction.ts",
       "default": "./src/interaction.ts"
     },
+    "./clipboard": {
+      "types": "./src/clipboard.ts",
+      "default": "./src/clipboard.ts"
+    },
     "./styles.css": {
       "types": "./styles/index.d.ts",
       "style": "./styles/index.css",
