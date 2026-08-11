@@ -119,12 +119,17 @@ the request URL or headers are mutated.
 Google and Microsoft presets use a dedicated signed PKCE flow:
 
 - `POST /v1/workspaces/:workspaceId/integrations/oauth/start`
-- `GET /v1/integrations/provider-oauth/callback`
+- Google: `GET /v1/integrations/google-drive/callback`
+- Microsoft: `GET /v1/integrations/provider-oauth/callback`
 
 The start request names the preset and ownership and may name an existing
 Connection for reconnect/incremental consent. Google can reuse the deployment's
 Google Drive OAuth app; Microsoft and alternate Google clients are selected
 from `OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON` by authorization-server URL.
+The Google callback keeps the existing registered URI and verifies the signed
+state before dispatching either the legacy read-only Drive connector or a named
+provider instance. A Google Web application client must include its client
+secret; a public client may explicitly use `tokenEndpointAuthMethod: "none"`.
 Callbacks consume single-use state, recheck `connections:write`, verify the
 provider principal, require every preset scope, preserve an existing refresh
 token when the provider omits a replacement, and CAS-update or duplicate-safe
