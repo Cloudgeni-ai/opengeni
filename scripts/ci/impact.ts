@@ -15,6 +15,7 @@ import {
 import { changesetIgnoreSet } from "../publishable-workspaces";
 
 export type ImpactReason = { path: string; reason: string };
+export type BrowserAcceptanceLane = "interaction" | "knowledge" | "workbench";
 export type ImpactPlan = {
   schemaVersion: 1;
   mode: "focused" | "full" | "docs";
@@ -26,6 +27,8 @@ export type ImpactPlan = {
   unitTests: string[];
   integrationTests: string[];
   e2eTests: string[];
+  browserAcceptanceLanes: BrowserAcceptanceLane[];
+  artifactRuntimeRequired: boolean;
   buildPackages: string[];
   exampleBuildProjects: string[];
   guards: string[];
@@ -41,6 +44,8 @@ export function impactPlanConsoleSummary(plan: ImpactPlan, outputPath: string): 
     `unit=${plan.unitTests.length}`,
     `integration=${plan.integrationTests.length}`,
     `e2e=${plan.e2eTests.length}`,
+    `browser=${plan.browserAcceptanceLanes.length}`,
+    `artifactRuntime=${plan.artifactRuntimeRequired}`,
     `build=${plan.buildPackages.length}`,
     `examples=${plan.exampleBuildProjects.length}`,
     `guards=${plan.guards.length}`,
@@ -167,6 +172,17 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/react",
     "@opengeni/testing",
   ],
+  "test/e2e/code-editor.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
+  "test/e2e/composer-responsive.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
+  "test/e2e/connected-machine-removal.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/api-router",
+    "@opengeni/contracts",
+    "@opengeni/db",
+    "@opengeni/react",
+    "@opengeni/sdk",
+    "@opengeni/testing",
+  ],
   "test/e2e/editable-artifacts.browser.e2e.ts": [
     "@opengeni/api-router",
     "@opengeni/artifact-kernel-wasm-document",
@@ -179,6 +195,24 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/testing",
     "@opengeni/worker-bundle",
   ],
+  "test/e2e/artifact-static-renderer.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
+  "test/e2e/codex-overview.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/api-router",
+    "@opengeni/contracts",
+    "@opengeni/db",
+    "@opengeni/react",
+    "@opengeni/sdk",
+    "@opengeni/testing",
+  ],
+  "test/e2e/queue-surface.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
+  "test/e2e/user-message-disclosure.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
+  "test/e2e/realtime-demo.browser.e2e.ts": [
+    "@opengeni/react",
+    "@opengeni/sdk",
+    "@opengeni/testing",
+  ],
+  "test/e2e/react-compiled-css.browser.e2e.ts": ["@opengeni/react"],
   "test/e2e/session-pins.browser.e2e.ts": [
     "opengeni-web",
     "@opengeni/react",
@@ -186,6 +220,21 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/api-router",
     "@opengeni/contracts",
     "@opengeni/db",
+    "@opengeni/testing",
+  ],
+  "test/e2e/slack-access-link.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
+  "test/e2e/slack-installation-binding.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/contracts",
+    "@opengeni/testing",
+  ],
+  "test/e2e/knowledge-surfaces.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/api-router",
+    "@opengeni/contracts",
+    "@opengeni/db",
+    "@opengeni/react",
+    "@opengeni/sdk",
     "@opengeni/testing",
   ],
   "test/e2e/workbench.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
@@ -197,6 +246,23 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/runtime",
     "@opengeni/worker-bundle",
     "@opengeni/api-router",
+  ],
+};
+
+const BROWSER_ACCEPTANCE_TESTS: Readonly<Record<BrowserAcceptanceLane, readonly string[]>> = {
+  interaction: [
+    "test/e2e/codex-overview.e2e.ts",
+    "test/e2e/queue-surface.browser.e2e.ts",
+    "test/e2e/user-message-disclosure.browser.e2e.ts",
+    "test/e2e/realtime-demo.browser.e2e.ts",
+  ],
+  knowledge: ["test/e2e/session-pins.browser.e2e.ts", "test/e2e/knowledge-surfaces.browser.e2e.ts"],
+  workbench: [
+    "test/e2e/artifact-spreadsheet-canvas.browser.e2e.ts",
+    "test/e2e/artifact-spreadsheet-scroll.browser.e2e.ts",
+    "test/e2e/artifact-static-renderer.browser.e2e.ts",
+    "test/e2e/editable-artifacts.browser.e2e.ts",
+    "test/e2e/workbench.browser.e2e.ts",
   ],
 };
 
@@ -217,6 +283,12 @@ const ARTIFACT_RUNTIME_WORKSPACES = [
   "@opengeni/sdk",
   "@opengeni/worker-bundle",
 ] as const;
+const ARTIFACT_RUNTIME_SOURCE_WORKSPACES = new Set([
+  "@opengeni/artifact-kernel-wasm-document",
+  "@opengeni/artifact-kernel-wasm-presentation",
+  "@opengeni/artifact-kernel-wasm-spreadsheet",
+  "@opengeni/artifact-tool",
+]);
 const ARTIFACT_RUNTIME_SCRIPT_PATTERN = /^scripts\/[^/]*artifact[^/]*\.ts$/;
 const ARTIFACT_RUNTIME_SCRIPT_TEST_PATTERN = /^scripts\/[^/]*artifact[^/]*\.test\.ts$/;
 const ARTIFACT_SKILL_PATTERN =
@@ -246,6 +318,17 @@ function rootPathImpact(path: string, unitTests: readonly string[]): RootPathImp
     };
   }
   return null;
+}
+
+function focusedArtifactRuntimeRequired(
+  graph: WorkspaceGraph,
+  changedFiles: readonly string[],
+): boolean {
+  return changedFiles.some((path) => {
+    if (ARTIFACT_RUNTIME_SCRIPT_PATTERN.test(path)) return true;
+    const pkg = workspaceForPath(graph, path);
+    return pkg ? ARTIFACT_RUNTIME_SOURCE_WORKSPACES.has(pkg.name) : false;
+  });
 }
 
 function importedWorkspaceDependencies(graph: WorkspaceGraph, path: string): Set<string> {
@@ -278,6 +361,25 @@ function rootTestDependencies(graph: WorkspaceGraph, path: string): string[] | n
   const declared = ROOT_TEST_DEPENDENCIES[path];
   if (!declared) return null;
   return [...new Set([...declared, ...importedWorkspaceDependencies(graph, path)])].sort();
+}
+
+function selectedBrowserAcceptanceLanes(
+  graph: WorkspaceGraph,
+  affected: ReadonlySet<string>,
+  changedTests: ReadonlySet<string>,
+): BrowserAcceptanceLane[] {
+  return (Object.entries(BROWSER_ACCEPTANCE_TESTS) as [BrowserAcceptanceLane, readonly string[]][])
+    .filter(([, paths]) =>
+      paths.some((path) => {
+        if (changedTests.has(path)) return true;
+        const dependencies = rootTestDependencies(graph, path);
+        if (!dependencies) {
+          throw new Error(`browser acceptance test is missing a dependency mapping: ${path}`);
+        }
+        return dependencies.some((name) => affected.has(name));
+      }),
+    )
+    .map(([lane]) => lane);
 }
 
 function normalizeRepositoryPath(path: string): string {
@@ -328,6 +430,8 @@ function fullPlan(
     unitTests: tests.unit,
     integrationTests: tests.integration,
     e2eTests: tests.e2e,
+    browserAcceptanceLanes: ["interaction", "knowledge", "workbench"],
+    artifactRuntimeRequired: true,
     buildPackages: graph.packages
       .filter((pkg) => pkg.name.startsWith("@opengeni/") && pkg.packageJson.private !== true)
       .filter((pkg) => !ignoredBuildPackages.has(pkg.name))
@@ -399,6 +503,8 @@ export function createImpactPlan(
       unitTests: [],
       integrationTests: [],
       e2eTests: [],
+      browserAcceptanceLanes: [],
+      artifactRuntimeRequired: false,
       buildPackages: [],
       exampleBuildProjects: [],
       guards: ["format", "docs-refs", "generated-fonts", "public-hygiene"],
@@ -533,6 +639,8 @@ export function createImpactPlan(
     unitTests: [...unit].filter((path) => existsSync(join(process.cwd(), path))).sort(),
     integrationTests: rootTests(tests.integration),
     e2eTests: rootTests(tests.e2e),
+    browserAcceptanceLanes: selectedBrowserAcceptanceLanes(graph, affected, changedTests),
+    artifactRuntimeRequired: focusedArtifactRuntimeRequired(graph, changedFiles),
     buildPackages,
     exampleBuildProjects: examples,
     guards,
