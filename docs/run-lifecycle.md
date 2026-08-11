@@ -22,6 +22,25 @@ one non-retryable Temporal `runAgentTurn` activity. Inside the activity the
 OpenAI Agents SDK loop makes as many model calls and tool calls as the work
 needs.
 
+Ordinary Send acknowledges locally before transport completion. The composer
+freezes the exact text, annotations, resources, settings, and one
+`clientEventId`, clears the visible draft immediately, and renders that snapshot
+as `Sending`, `Queued`, or `Not sent`. Rapid distinct sends keep distinct keys
+and preserve order. An outcome-unknown retry first reconciles and reuses the
+same key; a definite rejection retry receives a fresh key. Newer edits are a
+separate draft shadow and survive the in-flight operation and remount. The
+optimistic row disappears when the authoritative `user.message` arrives, so
+HTTP-first, SSE-first, reconnect, and remount paths cannot create duplicate
+visible messages.
+
+On the server, prompt acceptance remains one canonical Postgres transaction:
+the user event, queued turn, session/queue state, optional realtime mirror,
+audit receipt, `agent_run.created` usage fact, and workflow-wake outbox revision
+commit together. The response is built from those returned committed rows.
+NATS and workspace-control fanout plus the immediate Temporal wake attempt are
+scheduled only after commit and are not response-holding; durable event replay
+and the wake outbox recover their failures.
+
 The same ordinary session can add and remove a realtime voice
 conversational transport without creating a second session, queue, or workflow.
 Only the authenticated browser owner/connection is exclusive. Human

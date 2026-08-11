@@ -61,6 +61,15 @@ These are the load-bearing, cross-cutting rules. Breaking one tends to be a subt
   authoritative session event without a prior durable append; never reverse the
   order. A fanout failure must not kill an in-flight turn because consumers
   reconcile missed events from the durable log.
+- **Prompt admission acknowledges the durable commit, not transport follow-up.**
+  Send/Steer authorization, policy and limit checks precede one transaction that
+  commits the `user.message`, queued turn, session/queue mutation, audit record,
+  run-usage fact, and workflow-wake outbox revision. The API response is projected
+  from those committed rows without a post-commit reload. NATS/workspace-control
+  fanout and the immediate Temporal wake attempt are replayable post-commit work;
+  they cannot delay or reverse the accepted response. The browser ordinary-Send
+  path likewise acknowledges locally with one `clientEventId`, renders a bounded
+  optimistic message, and reconciles it against the authoritative event stream.
 - **Connected-machine commands also use NATS.** Agent request/reply, streamed
   operation frames, heartbeats, and enrollment auth callout all cross the same
   broker. They are live transport, not durable broker state. A broker restart
