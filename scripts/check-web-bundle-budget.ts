@@ -18,9 +18,9 @@ const budgets = {
   // Existing-session scheduling, authenticated retained screenshots, and the
   // synchronous session projection grow the initial graph. The managed-app
   // catalog now includes governed Slack publication, read-only Atlassian, and
-  // the typed capabilities client contracts. Keep bounded headroom above the
-  // current 1392/383 KiB production build while graph counts and lazy chunks
-  // stay fixed.
+  // typed capabilities plus Browser/Computer resource contracts. Keep bounded
+  // headroom above the current production build while graph counts and lazy
+  // chunks stay fixed.
   initialRaw: 1400 * kib,
   initialGzip: 390 * kib,
   initialFileGzip: 76 * kib,
