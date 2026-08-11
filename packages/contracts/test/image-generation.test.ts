@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { z } from "zod";
 import {
   GenerateImageToolInput,
   GeneratedImageReceiptSchema,
@@ -34,6 +35,18 @@ describe("GenerateImageToolInput", () => {
     ).toBe(false);
     expect(
       GenerateImageToolInput.safeParse({
+        prompt: "unsafe nested path",
+        references: [{ kind: "sandbox_path", path: "/workspace/assets/../secret.png" }],
+      }).success,
+    ).toBe(false);
+    expect(
+      GenerateImageToolInput.safeParse({
+        prompt: "unsafe current directory",
+        references: [{ kind: "sandbox_path", path: "/workspace/./image.png" }],
+      }).success,
+    ).toBe(false);
+    expect(
+      GenerateImageToolInput.safeParse({
         prompt: "too many",
         references: Array.from({ length: IMAGE_GENERATION_MAX_REFERENCES + 1 }, (_, index) => ({
           kind: "sandbox_path",
@@ -41,6 +54,16 @@ describe("GenerateImageToolInput", () => {
         })),
       }).success,
     ).toBe(false);
+  });
+
+  test("emits a provider-portable path pattern without regex lookaround", () => {
+    const schema = z.toJSONSchema(GenerateImageToolInput, { target: "draft-2020-12" });
+    const serialized = JSON.stringify(schema);
+    expect(serialized).not.toContain("(?!");
+    expect(serialized).not.toContain("(?=");
+    expect(serialized).not.toContain("(?<=");
+    expect(serialized).not.toContain("(?<!");
+    expect(serialized).toContain(String.raw`^\\/workspace\\/.+$`);
   });
 });
 

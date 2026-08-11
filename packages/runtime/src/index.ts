@@ -8556,15 +8556,19 @@ let stagedBundledSkillsDir: string | null = null;
 let stagedBundledArtifactSkillsDir: string | null = null;
 let stagedBundledVideoSkillsDir: string | null = null;
 
-function bundledSkillsDir(): string {
+function packagedBundledSkillsDir(directoryName: string): string {
   const moduleDir = dirname(fileURLToPath(import.meta.url));
-  const packaged =
+  return (
     [
-      join(moduleDir, "assets", "runtime", "bundled_hashicorp_terraform_skills"),
-      join(moduleDir, "bundled_hashicorp_terraform_skills"),
-      join(moduleDir, "..", "src", "bundled_hashicorp_terraform_skills"),
-    ].find((candidate) => existsSync(candidate)) ??
-    join(moduleDir, "bundled_hashicorp_terraform_skills");
+      join(moduleDir, "assets", "runtime", directoryName),
+      join(moduleDir, directoryName),
+      join(moduleDir, "..", "src", directoryName),
+    ].find((candidate) => existsSync(candidate)) ?? join(moduleDir, directoryName)
+  );
+}
+
+function bundledSkillsDir(): string {
+  const packaged = packagedBundledSkillsDir("bundled_hashicorp_terraform_skills");
   if (isPathWithin(process.cwd(), packaged)) return packaged;
   if (!stagedBundledSkillsDir) {
     stagedBundledSkillsDir = stageBundledSkills(
@@ -8576,12 +8580,7 @@ function bundledSkillsDir(): string {
 }
 
 function bundledArtifactSkillsDir(): string {
-  const moduleDir = dirname(fileURLToPath(import.meta.url));
-  const packaged =
-    [
-      join(moduleDir, "bundled_artifact_skills"),
-      join(moduleDir, "..", "src", "bundled_artifact_skills"),
-    ].find((candidate) => existsSync(candidate)) ?? join(moduleDir, "bundled_artifact_skills");
+  const packaged = packagedBundledSkillsDir("bundled_artifact_skills");
   if (isPathWithin(process.cwd(), packaged)) return packaged;
   if (!stagedBundledArtifactSkillsDir) {
     stagedBundledArtifactSkillsDir = stageBundledSkills(
@@ -8593,12 +8592,7 @@ function bundledArtifactSkillsDir(): string {
 }
 
 function bundledVideoSkillsDir(): string {
-  const moduleDir = dirname(fileURLToPath(import.meta.url));
-  const packaged =
-    [
-      join(moduleDir, "bundled_video_skills"),
-      join(moduleDir, "..", "src", "bundled_video_skills"),
-    ].find((candidate) => existsSync(candidate)) ?? join(moduleDir, "bundled_video_skills");
+  const packaged = packagedBundledSkillsDir("bundled_video_skills");
   if (isPathWithin(process.cwd(), packaged)) return packaged;
   if (!stagedBundledVideoSkillsDir) {
     stagedBundledVideoSkillsDir = stageBundledSkills(
