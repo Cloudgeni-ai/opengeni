@@ -1246,6 +1246,7 @@ export class SandboxChannelAService {
       return {
         isRepo: false,
         head: null,
+        headOid: null,
         detached: false,
         upstream: null,
         ahead: 0,
@@ -2265,6 +2266,7 @@ function isImagePath(p: string): boolean {
 export function parsePorcelainV2(z: string): Omit<GitStatusResponse, "revision"> {
   const records = z.split(NUL);
   let head: string | null = null;
+  let headOid: string | null = null;
   let upstream: string | null = null;
   let detached = false;
   let ahead = 0;
@@ -2273,7 +2275,10 @@ export function parsePorcelainV2(z: string): Omit<GitStatusResponse, "revision">
   for (let i = 0; i < records.length; i++) {
     const rec = records[i]!;
     if (rec === "") continue;
-    if (rec.startsWith("# branch.head ")) {
+    if (rec.startsWith("# branch.oid ")) {
+      const v = rec.slice("# branch.oid ".length);
+      headOid = v === "(initial)" ? null : v;
+    } else if (rec.startsWith("# branch.head ")) {
       const v = rec.slice("# branch.head ".length);
       if (v === "(detached)") {
         detached = true;
@@ -2329,7 +2334,7 @@ export function parsePorcelainV2(z: string): Omit<GitStatusResponse, "revision">
       });
     }
   }
-  return { isRepo: true, head, detached, upstream, ahead, behind, files };
+  return { isRepo: true, head, headOid, detached, upstream, ahead, behind, files };
 }
 
 function xyCode(c: string): GitFileStatusCode | null {
