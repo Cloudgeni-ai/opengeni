@@ -126,6 +126,7 @@ import {
   InteractionResourceStateError,
   persistAttemptInteractionInterventionInTransaction,
   resolveInteractionInterventionInTransaction,
+  settleSessionMaintenanceInTransaction,
 } from "./browser-auth";
 import {
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
@@ -20752,6 +20753,10 @@ export type SessionCreateInput = {
   maxNestedAgentDepthOverride?: number | null;
   allowNestedAgentDepthIncrease?: boolean;
   subjectId?: string | null;
+  /** Trusted, transaction-local linkage run after the exact session row and
+   * MCP metadata exist but before either can commit. It must perform database
+   * work only; throwing rolls the complete create/replay transaction back. */
+  beforeCreateCommit?: (tx: Database, sessionId: string) => Promise<void>;
 };
 
 type SessionDepthDecision =
@@ -21105,6 +21110,7 @@ async function createSessionInTransaction(
       const grouped = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
         existing.id,
       ]);
+      await input.beforeCreateCommit?.(tx, existing.id);
       return {
         session: await mapSessionWithControl(tx, existing, grouped.get(existing.id) ?? []),
         created: false,
@@ -21210,6 +21216,7 @@ async function createSessionInTransaction(
         const grouped = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
           existing.id,
         ]);
+        await input.beforeCreateCommit?.(tx, existing.id);
         return {
           session: await mapSessionWithControl(tx, existing, grouped.get(existing.id) ?? []),
           created: false,
@@ -21242,6 +21249,7 @@ async function createSessionInTransaction(
     sessionId: inserted.id,
     servers: input.mcpServers ?? [],
   });
+  await input.beforeCreateCommit?.(tx, inserted.id);
   return {
     session: await mapSessionWithControl(tx, inserted, mcpServers),
     created: true,
@@ -47656,6 +47664,13 @@ export async function applySessionTurnSettlement(
           sessionId: input.sessionId,
           turnId: input.turnId,
         });
+        if (["idle", "failed", "cancelled"].includes(effectiveSessionStatus)) {
+          await settleSessionMaintenanceInTransaction(tx as unknown as Database, {
+            accountId: session.accountId,
+            workspaceId,
+            sessionId: input.sessionId,
+          });
+        }
       }
       let sequence = session.lastSequence;
       const closesAttempt = ["failed", "cancelled", "superseded"].includes(input.turnStatus);

@@ -855,6 +855,17 @@ describe("interaction contracts", () => {
         origins: ["https://example.com"],
       }).success,
     ).toBe(false);
+    expect(
+      CreateSiteAuthConnectionRequest.safeParse({
+        ...auth,
+        preferredIdentityId: "88888888-8888-4888-8888-888888888888",
+        preferredPlacement: {
+          kind: "external_provider",
+          providerId: "kernel",
+          placementId: "eu-west",
+        },
+      }).success,
+    ).toBe(false);
 
     const baseRun = {
       id: "44444444-4444-4444-8444-444444444444",

@@ -1691,6 +1691,7 @@ export class MockOpenGeniClient implements SessionClientLike {
       lastVerifiedUrl: null,
       lastCheckedAt: null,
       nextCheckAt: configuration.healthPolicy.mode === "maintained" ? now : null,
+      maintenance: null,
       repairCode: null,
       version: 1,
       createdBySubjectId: "user:demo",
@@ -1727,6 +1728,7 @@ export class MockOpenGeniClient implements SessionClientLike {
       ...current,
       ...changes,
       nextCheckAt,
+      maintenance: null,
       version: current.version + 1,
       updatedAt: new Date().toISOString(),
     };

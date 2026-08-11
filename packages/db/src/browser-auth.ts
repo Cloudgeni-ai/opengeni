@@ -18,10 +18,14 @@ import {
   NetworkRouteConsistency,
   NetworkRouteListResponse,
   NetworkRouteMutationResponse,
+  interactionPlacementsEqual,
+  networkRoutePlacementCompatibilityIssue,
   ProtectedAuthFillRequest,
   ProtectedAuthFillResponse,
   ReportAuthRunRequest,
   RequestHumanInteractionToolInput,
+  SITE_AUTH_MAINTENANCE_CONNECTION_CONTEXT_KEY,
+  SITE_AUTH_MAINTENANCE_OPERATION_CONTEXT_KEY,
   SiteAuthAuthority,
   ResolveInteractionInterventionRequest,
   SiteAuthConnection,
@@ -65,7 +69,7 @@ import {
   type VerifyAuthRunRequest as VerifyAuthRunRequestValue,
 } from "@opengeni/contracts";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
-import { type Database, setSubjectRlsContext, withRlsContext } from "./database";
+import { type Database, rawRows, setSubjectRlsContext, withRlsContext } from "./database";
 import {
   advanceWorkspaceInteractionRevision,
   readWorkspaceInteractionRevision,
@@ -92,6 +96,7 @@ const CONSISTENT_READ = {
   isolationLevel: "repeatable read",
   accessMode: "read only",
 } as const;
+const MAX_SITE_AUTH_MAINTENANCE_RETRY_MS = 15 * 60 * 1_000;
 
 export class InteractionResourceNotFoundError extends Error {
   readonly name = "InteractionResourceNotFoundError";
@@ -168,6 +173,14 @@ function siteAuthConnectionFromRow(row: SiteAuthConnectionRow): SiteAuthConnecti
     lastVerifiedUrl: row.lastVerifiedUrl,
     lastCheckedAt: row.lastCheckedAt ? iso(row.lastCheckedAt) : null,
     nextCheckAt: row.nextCheckAt ? iso(row.nextCheckAt) : null,
+    maintenance: row.maintenanceOperationId
+      ? {
+          action: row.maintenanceAction,
+          sessionId: row.maintenanceStartedAt ? row.maintenanceSessionId : null,
+          dueAt: iso(row.maintenanceDueAt!),
+          startedAt: row.maintenanceStartedAt ? iso(row.maintenanceStartedAt) : null,
+        }
+      : null,
     repairCode: row.repairCode,
     version: row.version,
     createdBySubjectId: row.createdBySubjectId,
@@ -187,6 +200,224 @@ function nextMaintainedAuthCheck(
   return lastCheckedAt
     ? new Date(lastCheckedAt.getTime() + policy.intervalSeconds * 1_000)
     : new Date();
+}
+
+export type SiteAuthMaintenanceClaim = {
+  operationId: string;
+  sessionId: string;
+  accountId: string;
+  workspaceId: string;
+  siteAuthConnectionId: string;
+  connectionVersion: number;
+  action: "health_check" | "repair";
+  dueAt: Date;
+  claimedAt: Date;
+  name: string;
+  accountLabel: string;
+  loginUrl: string | null;
+  verificationUrlPrefixes: string[];
+  preferredIdentityId: string | null;
+  preferredPlacement: SiteAuthConnectionValue["preferredPlacement"];
+  preferredNetworkRouteId: string | null;
+  healthPolicy: SiteAuthConnectionValue["healthPolicy"];
+  verificationState: SiteAuthConnectionValue["verificationState"];
+};
+
+/** Claim a bounded cross-workspace batch. Stale pre-start claims keep the same
+ * operation/session ids, so worker loss repairs one durable dispatch. */
+export async function claimSiteAuthMaintenance(
+  db: Database,
+  input: { claimTimeoutMs: number; limit: number },
+): Promise<SiteAuthMaintenanceClaim[]> {
+  if (!Number.isSafeInteger(input.claimTimeoutMs) || input.claimTimeoutMs < 0) {
+    throw new Error("site auth maintenance claim timeout must be a non-negative safe integer");
+  }
+  if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 1_000) {
+    throw new Error("site auth maintenance claim limit must be between 1 and 1000");
+  }
+  const rows = await rawRows<{
+    operation_id: string;
+    session_id: string;
+    account_id: string;
+    workspace_id: string;
+    site_auth_connection_id: string;
+    connection_version: number;
+    action: "health_check" | "repair";
+    due_at: Date;
+    claimed_at: Date;
+    name: string;
+    account_label: string;
+    login_url: string | null;
+    verification_url_prefixes: string[];
+    preferred_identity_id: string | null;
+    preferred_placement: SiteAuthConnectionValue["preferredPlacement"];
+    preferred_network_route_id: string | null;
+    health_policy: SiteAuthConnectionValue["healthPolicy"];
+    verification_state: SiteAuthConnectionValue["verificationState"];
+  }>(
+    db,
+    sql`
+      select *
+      from opengeni_private.claim_site_auth_maintenance(
+        ${input.claimTimeoutMs},
+        ${input.limit}
+      )
+    `,
+  );
+  return rows.map((row) => ({
+    operationId: row.operation_id,
+    sessionId: row.session_id,
+    accountId: row.account_id,
+    workspaceId: row.workspace_id,
+    siteAuthConnectionId: row.site_auth_connection_id,
+    connectionVersion: Number(row.connection_version),
+    action: row.action,
+    dueAt: new Date(row.due_at),
+    claimedAt: new Date(row.claimed_at),
+    name: row.name,
+    accountLabel: row.account_label,
+    loginUrl: row.login_url,
+    verificationUrlPrefixes: row.verification_url_prefixes,
+    preferredIdentityId: row.preferred_identity_id,
+    preferredPlacement: row.preferred_placement,
+    preferredNetworkRouteId: row.preferred_network_route_id,
+    healthPolicy: row.health_policy,
+    verificationState: row.verification_state,
+  }));
+}
+
+/** Link the exact hidden maintenance claim to its service-created session in
+ * the caller's create transaction. A false result must abort that transaction. */
+export async function confirmSiteAuthMaintenanceSessionInTransaction(
+  tx: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    siteAuthConnectionId: string;
+    operationId: string;
+    sessionId: string;
+  },
+): Promise<boolean> {
+  const [session] = await tx
+    .select({
+      createdByKind: schema.sessions.createdByKind,
+      createdBySubjectId: schema.sessions.createdBySubjectId,
+      createdByContext: schema.sessions.createdByContext,
+    })
+    .from(schema.sessions)
+    .where(
+      and(
+        eq(schema.sessions.workspaceId, input.workspaceId),
+        eq(schema.sessions.id, input.sessionId),
+      ),
+    )
+    .limit(1);
+  if (
+    !session ||
+    session.createdByKind !== "service" ||
+    session.createdBySubjectId !== "site-auth-maintenance" ||
+    session.createdByContext[SITE_AUTH_MAINTENANCE_OPERATION_CONTEXT_KEY] !== input.operationId ||
+    session.createdByContext[SITE_AUTH_MAINTENANCE_CONNECTION_CONTEXT_KEY] !==
+      input.siteAuthConnectionId
+  ) {
+    return false;
+  }
+  const startedAt = new Date();
+  const [confirmed] = await tx
+    .update(schema.siteAuthConnections)
+    .set({
+      maintenanceStartedAt: startedAt,
+      version: sql`${schema.siteAuthConnections.version} + 1`,
+      updatedBySubjectId: "site-auth-maintenance",
+      updatedAt: startedAt,
+    })
+    .where(
+      and(
+        eq(schema.siteAuthConnections.workspaceId, input.workspaceId),
+        eq(schema.siteAuthConnections.id, input.siteAuthConnectionId),
+        eq(schema.siteAuthConnections.maintenanceOperationId, input.operationId),
+        eq(schema.siteAuthConnections.maintenanceSessionId, input.sessionId),
+        sql`${schema.siteAuthConnections.maintenanceStartedAt} is null`,
+      ),
+    )
+    .returning({ id: schema.siteAuthConnections.id });
+  if (!confirmed) {
+    const [existing] = await tx
+      .select({ startedAt: schema.siteAuthConnections.maintenanceStartedAt })
+      .from(schema.siteAuthConnections)
+      .where(
+        and(
+          eq(schema.siteAuthConnections.workspaceId, input.workspaceId),
+          eq(schema.siteAuthConnections.id, input.siteAuthConnectionId),
+          eq(schema.siteAuthConnections.maintenanceOperationId, input.operationId),
+          eq(schema.siteAuthConnections.maintenanceSessionId, input.sessionId),
+        ),
+      )
+      .limit(1);
+    return existing?.startedAt !== null && existing?.startedAt !== undefined;
+  }
+  await advanceWorkspaceInteractionRevision(tx, input.accountId, input.workspaceId);
+  return true;
+}
+
+/** Standalone wrapper retained for exact DB callers and tests. Session creation
+ * uses the in-transaction form so a changed claim cannot leave an empty shell. */
+export async function confirmSiteAuthMaintenanceSession(
+  db: Database,
+  input: Parameters<typeof confirmSiteAuthMaintenanceSessionInTransaction>[1],
+): Promise<boolean> {
+  return await withRlsContext(db, input, async (scopedDb) =>
+    confirmSiteAuthMaintenanceSessionInTransaction(scopedDb, input),
+  );
+}
+
+/** Release an exact claim that failed before a maintenance session started. */
+export async function deferSiteAuthMaintenance(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    siteAuthConnectionId: string;
+    operationId: string;
+    sessionId: string;
+    retryAt: Date;
+  },
+): Promise<boolean> {
+  return await withRlsContext(db, input, async (scopedDb) =>
+    scopedDb.transaction(async (tx) => {
+      const [deferred] = await tx
+        .update(schema.siteAuthConnections)
+        .set({
+          maintenanceOperationId: null,
+          maintenanceAction: null,
+          maintenanceDueAt: null,
+          maintenanceClaimedAt: null,
+          maintenanceSessionId: null,
+          maintenanceStartedAt: null,
+          nextCheckAt: input.retryAt,
+          version: sql`${schema.siteAuthConnections.version} + 1`,
+          updatedBySubjectId: "site-auth-maintenance",
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(schema.siteAuthConnections.workspaceId, input.workspaceId),
+            eq(schema.siteAuthConnections.id, input.siteAuthConnectionId),
+            eq(schema.siteAuthConnections.maintenanceOperationId, input.operationId),
+            eq(schema.siteAuthConnections.maintenanceSessionId, input.sessionId),
+            sql`${schema.siteAuthConnections.maintenanceStartedAt} is null`,
+          ),
+        )
+        .returning({ id: schema.siteAuthConnections.id });
+      if (!deferred) return false;
+      await advanceWorkspaceInteractionRevision(
+        tx as unknown as Database,
+        input.accountId,
+        input.workspaceId,
+      );
+      return true;
+    }),
+  );
 }
 
 async function lockOperation(db: Database, operationId: string): Promise<void> {
@@ -375,19 +606,74 @@ async function assertActiveNetworkRoute(
   db: Database,
   workspaceId: string,
   routeId: string | null,
-): Promise<void> {
-  if (!routeId) return;
+): Promise<NetworkRouteValue | null> {
+  if (!routeId) return null;
   const [route] = await db
-    .select({ status: schema.networkRoutes.status })
+    .select()
     .from(schema.networkRoutes)
     .where(
       and(eq(schema.networkRoutes.workspaceId, workspaceId), eq(schema.networkRoutes.id, routeId)),
     )
+    .for("share")
     .limit(1);
   if (!route) throw new InteractionResourceNotFoundError("Preferred network route not found");
   if (route.status !== "active") {
     throw new InteractionResourceStateError("Preferred network route is archived");
   }
+  return routeFromRow(route);
+}
+
+async function assertNetworkRouteUpdateCompatibleWithSiteAuthConnections(
+  db: Database,
+  input: {
+    workspaceId: string;
+    routeId: string;
+    status: NetworkRouteValue["status"];
+    configuration: NetworkRouteValue["configuration"];
+    consistency: NetworkRouteValue["consistency"];
+  },
+): Promise<void> {
+  const references = await db
+    .select({ preferredPlacement: schema.siteAuthConnections.preferredPlacement })
+    .from(schema.siteAuthConnections)
+    .where(
+      and(
+        eq(schema.siteAuthConnections.workspaceId, input.workspaceId),
+        eq(schema.siteAuthConnections.preferredNetworkRouteId, input.routeId),
+        eq(schema.siteAuthConnections.status, "active"),
+      ),
+    );
+  if (references.length === 0) return;
+  if (input.status !== "active") {
+    throw new InteractionResourceStateError(
+      "Network route is selected by an active site auth connection",
+    );
+  }
+  for (const reference of references) {
+    const issue = networkRoutePlacementCompatibilityIssue(
+      input.configuration,
+      input.consistency,
+      reference.preferredPlacement,
+    );
+    if (issue) {
+      throw new InteractionResourceStateError(
+        `Network route update is incompatible with an active site auth connection: ${issue}`,
+      );
+    }
+  }
+}
+
+function assertSiteAuthRouteCompatibility(
+  route: NetworkRouteValue | null,
+  placement: SiteAuthConnectionValue["preferredPlacement"],
+): void {
+  if (!route) return;
+  const issue = networkRoutePlacementCompatibilityIssue(
+    route.configuration,
+    route.consistency,
+    placement,
+  );
+  if (issue) throw new InteractionResourceStateError(`Preferred network route: ${issue}`);
 }
 
 export async function listNetworkRoutes(
@@ -590,6 +876,19 @@ export async function updateNetworkRoute(
           credentialRefsFromRoute(configuration),
         ),
       );
+      if (
+        request.configuration !== undefined ||
+        request.consistency !== undefined ||
+        (request.status !== undefined && request.status !== current.status)
+      ) {
+        await assertNetworkRouteUpdateCompatibleWithSiteAuthConnections(scopedDb, {
+          workspaceId: input.workspaceId,
+          routeId: input.routeId,
+          status: request.status ?? current.status,
+          configuration,
+          consistency,
+        });
+      }
       const [row] = await scopedDb
         .update(schema.networkRoutes)
         .set({
@@ -700,7 +999,7 @@ async function validateSiteAuthReferences(
   workspaceId: string,
   connection: Pick<
     SiteAuthConnectionValue,
-    "authorities" | "preferredIdentityId" | "preferredNetworkRouteId"
+    "authorities" | "preferredIdentityId" | "preferredNetworkRouteId" | "preferredPlacement"
   >,
 ): Promise<void> {
   await assertCredentialAuthorities(
@@ -709,7 +1008,8 @@ async function validateSiteAuthReferences(
     credentialRefsFromAuthorities(connection.authorities),
   );
   await assertActiveBrowserIdentity(db, workspaceId, connection.preferredIdentityId);
-  await assertActiveNetworkRoute(db, workspaceId, connection.preferredNetworkRouteId);
+  const route = await assertActiveNetworkRoute(db, workspaceId, connection.preferredNetworkRouteId);
+  assertSiteAuthRouteCompatibility(route, connection.preferredPlacement);
 }
 
 async function validateSiteAuthUpdateReferences(
@@ -729,8 +1029,21 @@ async function validateSiteAuthUpdateReferences(
   if (candidate.preferredIdentityId !== current.preferredIdentityId) {
     await assertActiveBrowserIdentity(db, workspaceId, candidate.preferredIdentityId);
   }
-  if (candidate.preferredNetworkRouteId !== current.preferredNetworkRouteId) {
-    await assertActiveNetworkRoute(db, workspaceId, candidate.preferredNetworkRouteId);
+  if (
+    candidate.status === "active" &&
+    (current.status !== "active" ||
+      candidate.preferredNetworkRouteId !== current.preferredNetworkRouteId ||
+      (candidate.preferredPlacement === null) !== (current.preferredPlacement === null) ||
+      (candidate.preferredPlacement !== null &&
+        current.preferredPlacement !== null &&
+        !interactionPlacementsEqual(candidate.preferredPlacement, current.preferredPlacement)))
+  ) {
+    const route = await assertActiveNetworkRoute(
+      db,
+      workspaceId,
+      candidate.preferredNetworkRouteId,
+    );
+    assertSiteAuthRouteCompatibility(route, candidate.preferredPlacement);
   }
 }
 
@@ -777,6 +1090,7 @@ export async function createSiteAuthConnection(
       await validateSiteAuthReferences(scopedDb, input.workspaceId, {
         authorities: request.authorities,
         preferredIdentityId: request.preferredIdentityId,
+        preferredPlacement: request.preferredPlacement,
         preferredNetworkRouteId: request.preferredNetworkRouteId,
       });
       const id = randomUUID();
@@ -913,6 +1227,10 @@ export async function updateSiteAuthConnection(
       const candidate = SiteAuthConnection.parse({
         ...currentValue,
         ...candidatePatch,
+        // Any configuration change invalidates the scheduler's frozen prompt.
+        // The already-created session remains auditable but can no longer bind
+        // a maintenance AuthRun to this connection.
+        maintenance: null,
         id: current.id,
         accountId: current.accountId,
         workspaceId: current.workspaceId,
@@ -942,6 +1260,12 @@ export async function updateSiteAuthConnection(
             candidate.healthPolicy,
             current.lastCheckedAt,
           ),
+          maintenanceOperationId: null,
+          maintenanceAction: null,
+          maintenanceDueAt: null,
+          maintenanceClaimedAt: null,
+          maintenanceSessionId: null,
+          maintenanceStartedAt: null,
           version: candidate.version,
           updatedBySubjectId: input.actorSubjectId,
           updatedAt: sql`now()`,
@@ -1027,7 +1351,11 @@ async function projectSettledAuthRunHealth(
   input: { run: AuthRunRow; actorSubjectId: string },
 ): Promise<boolean> {
   const { run } = input;
-  if ((run.state !== "verified" && run.state !== "failed") || !run.settledAt) return false;
+  if (!run.settledAt) return false;
+  const carriesEvidence = run.state === "verified" || run.state === "failed";
+  if (!carriesEvidence && (run.state !== "cancelled" || !run.maintenanceOperationId)) {
+    return false;
+  }
   const [connection] = await db
     .select()
     .from(schema.siteAuthConnections)
@@ -1041,8 +1369,16 @@ async function projectSettledAuthRunHealth(
     .limit(1);
   if (!connection) throw new InteractionResourceNotFoundError("Site auth connection not found");
   const checkedAt = run.settledAt;
+  const maintenanceMatches =
+    run.maintenanceOperationId !== null &&
+    connection.maintenanceOperationId === run.maintenanceOperationId;
+  const evidenceAdvances =
+    carriesEvidence &&
+    connection.healthSequence < run.healthSequence &&
+    (run.maintenanceOperationId === null || maintenanceMatches);
+  if (!maintenanceMatches && !evidenceAdvances) return false;
   const intervalSeconds = connection.healthPolicy.intervalSeconds;
-  const nextCheckAt =
+  const nextEvidenceCheckAt =
     connection.status === "active" &&
     connection.healthPolicy.mode === "maintained" &&
     intervalSeconds !== null
@@ -1053,20 +1389,45 @@ async function projectSettledAuthRunHealth(
         : new Date(checkedAt.getTime() + intervalSeconds * 1_000)
       : null;
   const failureState = run.purpose === "repair" ? "failed" : "needs_repair";
+  const cancelledMaintenanceCheckAt =
+    connection.status === "active" &&
+    connection.healthPolicy.mode === "maintained" &&
+    intervalSeconds !== null
+      ? new Date(
+          checkedAt.getTime() +
+            Math.min(intervalSeconds * 1_000, MAX_SITE_AUTH_MAINTENANCE_RETRY_MS),
+        )
+      : null;
   const [projected] = await db
     .update(schema.siteAuthConnections)
     .set({
-      verificationState: run.state === "verified" ? "verified" : failureState,
-      ...(run.state === "verified"
+      ...(evidenceAdvances
         ? {
-            lastVerifiedAt: checkedAt,
-            lastVerifiedUrl: run.verifiedUrl,
-            repairCode: null,
+            verificationState: run.state === "verified" ? "verified" : failureState,
+            ...(run.state === "verified"
+              ? {
+                  lastVerifiedAt: checkedAt,
+                  lastVerifiedUrl: run.verifiedUrl,
+                  repairCode: null,
+                }
+              : { repairCode: run.failureCode }),
+            lastCheckedAt: checkedAt,
+            nextCheckAt: nextEvidenceCheckAt,
+            healthSequence: run.healthSequence,
           }
-        : { repairCode: run.failureCode }),
-      lastCheckedAt: checkedAt,
-      nextCheckAt,
-      healthSequence: run.healthSequence,
+        : maintenanceMatches && run.state === "cancelled"
+          ? { nextCheckAt: cancelledMaintenanceCheckAt }
+          : {}),
+      ...(maintenanceMatches
+        ? {
+            maintenanceOperationId: null,
+            maintenanceAction: null,
+            maintenanceDueAt: null,
+            maintenanceClaimedAt: null,
+            maintenanceSessionId: null,
+            maintenanceStartedAt: null,
+          }
+        : {}),
       version: sql`${schema.siteAuthConnections.version} + 1`,
       updatedBySubjectId: input.actorSubjectId,
       updatedAt: checkedAt,
@@ -1075,7 +1436,10 @@ async function projectSettledAuthRunHealth(
       and(
         eq(schema.siteAuthConnections.workspaceId, run.workspaceId),
         eq(schema.siteAuthConnections.id, run.siteAuthConnectionId),
-        sql`${schema.siteAuthConnections.healthSequence} < ${run.healthSequence}`,
+        sql`(
+          ${schema.siteAuthConnections.healthSequence} < ${run.healthSequence}
+          or ${schema.siteAuthConnections.maintenanceOperationId} = ${run.maintenanceOperationId}
+        )`,
       ),
     )
     .returning({ id: schema.siteAuthConnections.id });
@@ -1560,6 +1924,8 @@ export async function startAuthRun(
   input: InteractionMutationScope & {
     browserSessionId: string;
     controllerGeneration: string;
+    /** Trusted attempt provenance supplied by the API grant. */
+    originatingSessionId?: string | null;
   } & StartAuthRunRequestValue,
 ): Promise<AuthRunMutationResponseValue> {
   const request = StartAuthRunRequest.parse({
@@ -1627,6 +1993,55 @@ export async function startAuthRun(
         methodId: request.methodId ?? null,
         authorityId: request.authorityId ?? null,
       });
+      let originatingMaintenanceOperationId: string | null = null;
+      if (input.originatingSessionId) {
+        const [originatingSession] = await scopedDb
+          .select({
+            createdByKind: schema.sessions.createdByKind,
+            createdBySubjectId: schema.sessions.createdBySubjectId,
+            createdByContext: schema.sessions.createdByContext,
+          })
+          .from(schema.sessions)
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.originatingSessionId),
+            ),
+          )
+          .limit(1);
+        const contextOperationId =
+          originatingSession?.createdByContext[SITE_AUTH_MAINTENANCE_OPERATION_CONTEXT_KEY];
+        const contextConnectionId =
+          originatingSession?.createdByContext[SITE_AUTH_MAINTENANCE_CONNECTION_CONTEXT_KEY];
+        if (
+          originatingSession?.createdByKind === "service" &&
+          originatingSession.createdBySubjectId === "site-auth-maintenance" &&
+          typeof contextOperationId === "string"
+        ) {
+          if (contextConnectionId !== request.siteAuthConnectionId) {
+            throw new InteractionResourceStateError(
+              "Site auth maintenance session belongs to another connection",
+            );
+          }
+          originatingMaintenanceOperationId = contextOperationId;
+        }
+      }
+      if (
+        originatingMaintenanceOperationId &&
+        (input.originatingSessionId !== authConnection.maintenanceSessionId ||
+          originatingMaintenanceOperationId !== authConnection.maintenanceOperationId)
+      ) {
+        throw new InteractionResourceStateError("Site auth maintenance claim is no longer active");
+      }
+      const maintenanceOperationId = originatingMaintenanceOperationId;
+      if (
+        maintenanceOperationId &&
+        (request.purpose ?? "authenticate") !== authConnection.maintenanceAction
+      ) {
+        throw new InteractionResourceStateError(
+          "Maintenance auth run purpose does not match its durable claim",
+        );
+      }
       const id = randomUUID();
       const [row] = await scopedDb
         .insert(schema.authRuns)
@@ -1641,6 +2056,7 @@ export async function startAuthRun(
           targetGeneration: request.expectedTargetGeneration,
           documentGeneration: request.expectedDocumentGeneration,
           purpose: request.purpose ?? "authenticate",
+          maintenanceOperationId,
           methodId: request.methodId ?? null,
           authorityId: request.authorityId ?? null,
           operationId: request.operationId,
@@ -1669,6 +2085,11 @@ export async function startAuthRun(
       return response;
     });
   } catch (error) {
+    if (postgresConstraint(error) === "auth_runs_workspace_maintenance_operation_uq") {
+      throw new InteractionResourceConflictError(
+        "This maintenance session already has an auth run",
+      );
+    }
     if (postgresConstraint(error) === "auth_runs_active_browser_target_uq") {
       throw new InteractionResourceConflictError(
         "This browser target already has an active auth run",
@@ -1676,6 +2097,131 @@ export async function startAuthRun(
     }
     throw error;
   }
+}
+
+export type SettleSessionMaintenanceResult = {
+  cancelledAuthRuns: number;
+  releasedClaim: boolean;
+};
+
+/** A terminal-for-now maintenance session cannot leave an AuthRun or its claim
+ * pinned. Interventions settle linked runs first; this covers every other path. */
+export async function settleSessionMaintenanceInTransaction(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+  },
+): Promise<SettleSessionMaintenanceResult> {
+  const [session] = await db
+    .select({
+      createdByKind: schema.sessions.createdByKind,
+      createdBySubjectId: schema.sessions.createdBySubjectId,
+      createdByContext: schema.sessions.createdByContext,
+    })
+    .from(schema.sessions)
+    .where(
+      and(
+        eq(schema.sessions.workspaceId, input.workspaceId),
+        eq(schema.sessions.id, input.sessionId),
+      ),
+    )
+    .limit(1);
+  const maintenanceOperationId =
+    session?.createdByContext[SITE_AUTH_MAINTENANCE_OPERATION_CONTEXT_KEY];
+  const siteAuthConnectionId =
+    session?.createdByContext[SITE_AUTH_MAINTENANCE_CONNECTION_CONTEXT_KEY];
+  if (
+    session?.createdByKind !== "service" ||
+    session.createdBySubjectId !== "site-auth-maintenance" ||
+    typeof maintenanceOperationId !== "string" ||
+    typeof siteAuthConnectionId !== "string"
+  ) {
+    return { cancelledAuthRuns: 0, releasedClaim: false };
+  }
+  const settledAt = new Date();
+  const cancelled = await db
+    .update(schema.authRuns)
+    .set({
+      state: "cancelled",
+      choices: [],
+      pendingFields: [],
+      externalAction: null,
+      verifiedUrl: null,
+      failureCode: null,
+      version: sql`${schema.authRuns.version} + 1`,
+      updatedAt: settledAt,
+      settledAt,
+    })
+    .where(
+      and(
+        eq(schema.authRuns.workspaceId, input.workspaceId),
+        eq(schema.authRuns.siteAuthConnectionId, siteAuthConnectionId),
+        eq(schema.authRuns.maintenanceOperationId, maintenanceOperationId),
+        sql`${schema.authRuns.settledAt} is null`,
+      ),
+    )
+    .returning();
+  for (const run of cancelled) {
+    await projectSettledAuthRunHealth(db, {
+      run,
+      actorSubjectId: "site-auth-maintenance",
+    });
+  }
+  const [orphanedClaim] = await db
+    .select()
+    .from(schema.siteAuthConnections)
+    .where(
+      and(
+        eq(schema.siteAuthConnections.workspaceId, input.workspaceId),
+        eq(schema.siteAuthConnections.id, siteAuthConnectionId),
+        eq(schema.siteAuthConnections.maintenanceOperationId, maintenanceOperationId),
+        eq(schema.siteAuthConnections.maintenanceSessionId, input.sessionId),
+      ),
+    )
+    .for("update")
+    .limit(1);
+  let releasedClaim = false;
+  if (orphanedClaim) {
+    const intervalSeconds = orphanedClaim.healthPolicy.intervalSeconds;
+    const retryAt =
+      orphanedClaim.status === "active" &&
+      orphanedClaim.healthPolicy.mode === "maintained" &&
+      intervalSeconds !== null
+        ? new Date(
+            settledAt.getTime() +
+              Math.min(intervalSeconds * 1_000, MAX_SITE_AUTH_MAINTENANCE_RETRY_MS),
+          )
+        : null;
+    const [released] = await db
+      .update(schema.siteAuthConnections)
+      .set({
+        maintenanceOperationId: null,
+        maintenanceAction: null,
+        maintenanceDueAt: null,
+        maintenanceClaimedAt: null,
+        maintenanceSessionId: null,
+        maintenanceStartedAt: null,
+        nextCheckAt: retryAt,
+        version: sql`${schema.siteAuthConnections.version} + 1`,
+        updatedBySubjectId: "site-auth-maintenance",
+        updatedAt: settledAt,
+      })
+      .where(
+        and(
+          eq(schema.siteAuthConnections.workspaceId, input.workspaceId),
+          eq(schema.siteAuthConnections.id, orphanedClaim.id),
+          eq(schema.siteAuthConnections.maintenanceOperationId, maintenanceOperationId),
+        ),
+      )
+      .returning({ id: schema.siteAuthConnections.id });
+    releasedClaim = released !== undefined;
+  }
+  if (cancelled.length > 0 || releasedClaim) {
+    await advanceWorkspaceInteractionRevision(db, input.accountId, input.workspaceId);
+  }
+  return { cancelledAuthRuns: cancelled.length, releasedClaim };
 }
 
 export async function reportAuthRun(

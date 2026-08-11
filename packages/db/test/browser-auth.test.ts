@@ -7,6 +7,8 @@ import {
   bindBrowserSessionNetworkRouteAuthority,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
+  claimSiteAuthMaintenance,
+  confirmSiteAuthMaintenanceSessionInTransaction,
   createDb,
   createInteractionIntervention,
   createNetworkRoute,
@@ -24,7 +26,9 @@ import {
   getInteractionIntervention,
   getInteractionInterventionResumeForEvent,
   getProtectedAuthFillPreparation,
+  getSession,
   getExternalAuthPreparation,
+  initializeSessionStartAtomically,
   InteractionResourceConflictError,
   InteractionResourceNotFoundError,
   InteractionResourceStateError,
@@ -354,6 +358,92 @@ describe("browser auth and network resources", () => {
       routeVersion: 2,
       authorityDigest: `route.${"a".repeat(43)}`,
     });
+
+    const managed = await createNetworkRoute(client.db, {
+      ...scope,
+      actorSubjectId: scope.actorSubjectId,
+      operationId: crypto.randomUUID(),
+      name: `Kernel route ${crypto.randomUUID()}`,
+      configuration: {
+        kind: "managed",
+        providerId: "kernel",
+        routeId: "kernel-proxy-4",
+        egressClass: "isp",
+        region: "NO",
+        credential: null,
+      },
+      consistency: {
+        dns: "provider",
+        expectedPublicIp: null,
+        expectedRegion: "NO",
+        locale: "nb-NO",
+        timezone: "Europe/Oslo",
+        geolocation: null,
+        webRtc: "disable_non_proxied_udp",
+        stability: "sticky",
+      },
+    });
+    const externalOperationId = crypto.randomUUID();
+    const external = await prepareBrowserSessionCreate(client.db, {
+      ...scope,
+      operationId: externalOperationId,
+      associatedSessionId: scope.sessionId,
+      name: "Kernel browser",
+      initialUrl: "https://example.com",
+      placement: { kind: "external_provider", providerId: "kernel", placementId: "default" },
+      driverId: "opengeni.external.cdp.v1",
+      engine: "external",
+      headless: true,
+      identityId: null,
+      baseRevisionId: null,
+      networkRouteId: managed.route.id,
+    });
+    expect(
+      (
+        await findBrowserSessionControlRecordByOperation(client.db, {
+          accountId: scope.accountId,
+          workspaceId: scope.workspaceId,
+          operationId: externalOperationId,
+        })
+      )?.networkRouteAuthority,
+    ).toMatchObject({
+      routeId: managed.route.id,
+      configuration: { kind: "managed", providerId: "kernel" },
+      consistency: { dns: "provider", stability: "sticky" },
+    });
+    expect(external.session.placement).toEqual({
+      kind: "external_provider",
+      providerId: "kernel",
+      placementId: "default",
+    });
+    const mismatchedOperationId = crypto.randomUUID();
+    await expect(
+      prepareBrowserSessionCreate(client.db, {
+        ...scope,
+        operationId: mismatchedOperationId,
+        associatedSessionId: scope.sessionId,
+        name: "Wrong provider browser",
+        initialUrl: null,
+        placement: {
+          kind: "external_provider",
+          providerId: "browserbase",
+          placementId: "default",
+        },
+        driverId: "opengeni.external.cdp.v1",
+        engine: "external",
+        headless: true,
+        identityId: null,
+        baseRevisionId: null,
+        networkRouteId: managed.route.id,
+      }),
+    ).rejects.toThrow("another external browser provider");
+    expect(
+      await findBrowserSessionControlRecordByOperation(client.db, {
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        operationId: mismatchedOperationId,
+      }),
+    ).toBeNull();
   });
 
   test("freezes visible connection authority without persisting credential values", async () => {
@@ -428,6 +518,111 @@ describe("browser auth and network resources", () => {
         methods: [{ ...base.methods[0]!, authorityIds: ["connection"] }],
       }),
     ).rejects.toBeInstanceOf(InteractionResourceNotFoundError);
+  });
+
+  test("rejects a preferred auth route that its browser placement cannot realize", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const route = await createNetworkRoute(client.db, {
+      ...scope,
+      actorSubjectId: scope.actorSubjectId,
+      operationId: crypto.randomUUID(),
+      name: `Kernel auth route ${crypto.randomUUID()}`,
+      configuration: {
+        kind: "managed",
+        providerId: "kernel",
+        routeId: "kernel-proxy-4",
+        egressClass: "isp",
+        region: "NO",
+        credential: null,
+      },
+      consistency: {
+        dns: "provider",
+        expectedPublicIp: null,
+        expectedRegion: "NO",
+        locale: null,
+        timezone: null,
+        geolocation: null,
+        webRtc: "default",
+        stability: "sticky",
+      },
+    });
+    await expect(
+      createSiteAuthConnection(client.db, {
+        ...scope,
+        ...humanSiteAuth(),
+        preferredNetworkRouteId: route.route.id,
+      }),
+    ).rejects.toThrow("external browser provider placement");
+    const configured = await createSiteAuthConnection(client.db, {
+      ...scope,
+      ...humanSiteAuth(),
+      preferredPlacement: {
+        kind: "external_provider",
+        providerId: "kernel",
+        placementId: "default",
+      },
+      preferredNetworkRouteId: route.route.id,
+    });
+    expect(configured.connection).toMatchObject({
+      preferredPlacement: {
+        kind: "external_provider",
+        providerId: "kernel",
+        placementId: "default",
+      },
+      preferredNetworkRouteId: route.route.id,
+    });
+
+    await expect(
+      updateNetworkRoute(client.db, {
+        ...scope,
+        routeId: route.route.id,
+        operationId: crypto.randomUUID(),
+        expectedVersion: route.route.version,
+        status: "archived",
+      }),
+    ).rejects.toThrow("selected by an active site auth connection");
+    await expect(
+      updateNetworkRoute(client.db, {
+        ...scope,
+        routeId: route.route.id,
+        operationId: crypto.randomUUID(),
+        expectedVersion: route.route.version,
+        configuration: {
+          kind: "managed",
+          providerId: "browserbase",
+          routeId: "default",
+          egressClass: "residential",
+          region: "NO",
+          credential: null,
+        },
+      }),
+    ).rejects.toThrow("belongs to another external browser provider");
+
+    const archivedConnection = await updateSiteAuthConnection(client.db, {
+      ...scope,
+      siteAuthConnectionId: configured.connection.id,
+      operationId: crypto.randomUUID(),
+      expectedVersion: configured.connection.version,
+      status: "archived",
+    });
+    const archivedRoute = await updateNetworkRoute(client.db, {
+      ...scope,
+      routeId: route.route.id,
+      operationId: crypto.randomUUID(),
+      expectedVersion: route.route.version,
+      status: "archived",
+    });
+    await expect(
+      updateSiteAuthConnection(client.db, {
+        ...scope,
+        siteAuthConnectionId: archivedConnection.connection.id,
+        operationId: crypto.randomUUID(),
+        expectedVersion: archivedConnection.connection.version,
+        status: "active",
+      }),
+    ).rejects.toThrow("Preferred network route is archived");
+    expect(archivedRoute.route.status).toBe("archived");
   });
 
   test("runs exact-target auth and resumes it through one durable intervention", async () => {
@@ -1341,5 +1536,500 @@ describe("browser auth and network resources", () => {
       healthPolicy: { mode: "on_use", intervalSeconds: null, automaticRepair: true },
     });
     expect(updated.connection.nextCheckAt).toBeNull();
+  });
+
+  test("claims one hidden maintenance session and settles its exact health run", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const auth = await createSiteAuthConnection(client.db, {
+      ...scope,
+      ...humanSiteAuth(),
+      healthPolicy: {
+        mode: "maintained",
+        intervalSeconds: 120,
+        automaticRepair: true,
+      },
+    });
+    const [claimed] = await claimSiteAuthMaintenance(client.db, {
+      claimTimeoutMs: 0,
+      limit: 1,
+    });
+    expect(claimed).toMatchObject({
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      siteAuthConnectionId: auth.connection.id,
+      action: "health_check",
+    });
+    const beforeStart = (await listSiteAuthConnections(client.db, scope)).connections[0]!;
+    expect(beforeStart.maintenance).toMatchObject({
+      action: "health_check",
+      sessionId: null,
+      startedAt: null,
+    });
+
+    const [reclaimed] = await claimSiteAuthMaintenance(client.db, {
+      claimTimeoutMs: 0,
+      limit: 1,
+    });
+    expect(reclaimed).toMatchObject({
+      operationId: claimed!.operationId,
+      sessionId: claimed!.sessionId,
+    });
+    const maintenanceCreateInput = {
+      requestedSessionId: reclaimed!.sessionId,
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      initialMessage: "Maintain auth",
+      resources: [],
+      metadata: {},
+      createdBy: {
+        kind: "service",
+        subjectId: "site-auth-maintenance",
+        label: "OpenGeni authentication maintenance",
+      },
+      createdByContext: {
+        opengeniSiteAuthConnectionId: auth.connection.id,
+        opengeniSiteAuthMaintenanceOperationId: reclaimed!.operationId,
+      },
+      model: "scripted-model",
+      sandboxBackend: "none",
+      subjectId: "site-auth-maintenance",
+      createIdempotencyKey: `site-auth-maintenance:${reclaimed!.operationId}`,
+      beforeCreateCommit: async (tx, sessionId) => {
+        const confirmed = await confirmSiteAuthMaintenanceSessionInTransaction(tx, {
+          accountId: scope.accountId,
+          workspaceId: scope.workspaceId,
+          siteAuthConnectionId: auth.connection.id,
+          operationId: reclaimed!.operationId,
+          sessionId,
+        });
+        if (!confirmed) throw new Error("maintenance claim changed");
+      },
+    } satisfies Parameters<typeof createSession>[1];
+    const maintenanceSession = await createSession(client.db, maintenanceCreateInput);
+    const replayedMaintenanceSession = await createSession(client.db, maintenanceCreateInput);
+    expect(replayedMaintenanceSession.id).toBe(maintenanceSession.id);
+    const activeMaintenance = (await listSiteAuthConnections(client.db, scope)).connections[0]!;
+    expect(activeMaintenance.maintenance).toMatchObject({
+      action: "health_check",
+      sessionId: reclaimed!.sessionId,
+      startedAt: expect.any(String),
+    });
+
+    const browser = await activeBrowser(scope);
+    await expect(
+      startAuthRun(client.db, {
+        ...scope,
+        ...browser,
+        originatingSessionId: reclaimed!.sessionId,
+        operationId: crypto.randomUUID(),
+        siteAuthConnectionId: auth.connection.id,
+        targetId: "maintenance-wrong-purpose",
+        expectedTargetGeneration: "maintenance-target-generation",
+        expectedDocumentGeneration: "maintenance-document-generation",
+        purpose: "repair",
+      }),
+    ).rejects.toBeInstanceOf(InteractionResourceStateError);
+    const started = await startAuthRun(client.db, {
+      ...scope,
+      ...browser,
+      originatingSessionId: reclaimed!.sessionId,
+      operationId: crypto.randomUUID(),
+      siteAuthConnectionId: auth.connection.id,
+      targetId: "maintenance-health",
+      expectedTargetGeneration: "maintenance-target-generation",
+      expectedDocumentGeneration: "maintenance-document-generation",
+      purpose: "health_check",
+    });
+    await expect(
+      startAuthRun(client.db, {
+        ...scope,
+        ...browser,
+        originatingSessionId: reclaimed!.sessionId,
+        operationId: crypto.randomUUID(),
+        siteAuthConnectionId: auth.connection.id,
+        targetId: "maintenance-duplicate",
+        expectedTargetGeneration: "maintenance-target-generation-2",
+        expectedDocumentGeneration: "maintenance-document-generation-2",
+        purpose: "health_check",
+      }),
+    ).rejects.toThrow("already has an auth run");
+    const settled = await reportAuthRun(client.db, {
+      ...scope,
+      authRunId: started.run.id,
+      controllerGeneration: browser.controllerGeneration,
+      operationId: crypto.randomUUID(),
+      expectedVersion: started.run.version,
+      state: "failed",
+      failureCode: "session_expired",
+    });
+    const needsRepair = (await listSiteAuthConnections(client.db, scope)).connections[0]!;
+    expect(needsRepair).toMatchObject({
+      maintenance: null,
+      verificationState: "needs_repair",
+      repairCode: "session_expired",
+    });
+    expect(Date.parse(needsRepair.nextCheckAt!)).toBe(Date.parse(settled.run.settledAt!));
+
+    const [repair] = await claimSiteAuthMaintenance(client.db, {
+      claimTimeoutMs: 0,
+      limit: 1,
+    });
+    expect(repair).toMatchObject({
+      siteAuthConnectionId: auth.connection.id,
+      action: "repair",
+    });
+    expect(repair!.operationId).not.toBe(reclaimed!.operationId);
+    expect(repair!.sessionId).not.toBe(reclaimed!.sessionId);
+
+    await createSession(client.db, {
+      requestedSessionId: repair!.sessionId,
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      initialMessage: "Repair auth",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "service", subjectId: "site-auth-maintenance" },
+      createdByContext: {
+        opengeniSiteAuthConnectionId: auth.connection.id,
+        opengeniSiteAuthMaintenanceOperationId: repair!.operationId,
+      },
+      model: "scripted-model",
+      sandboxBackend: "none",
+      subjectId: "site-auth-maintenance",
+      beforeCreateCommit: async (tx, sessionId) => {
+        const confirmed = await confirmSiteAuthMaintenanceSessionInTransaction(tx, {
+          accountId: scope.accountId,
+          workspaceId: scope.workspaceId,
+          siteAuthConnectionId: auth.connection.id,
+          operationId: repair!.operationId,
+          sessionId,
+        });
+        if (!confirmed) throw new Error("maintenance claim changed");
+      },
+    });
+    const staleRepair = await startAuthRun(client.db, {
+      ...scope,
+      ...browser,
+      originatingSessionId: repair!.sessionId,
+      operationId: crypto.randomUUID(),
+      siteAuthConnectionId: auth.connection.id,
+      targetId: "maintenance-before-edit",
+      expectedTargetGeneration: "maintenance-before-edit-target-generation",
+      expectedDocumentGeneration: "maintenance-before-edit-document-generation",
+      purpose: "repair",
+    });
+    const beforeEdit = (await listSiteAuthConnections(client.db, scope)).connections[0]!;
+    const edited = await updateSiteAuthConnection(client.db, {
+      ...scope,
+      siteAuthConnectionId: auth.connection.id,
+      operationId: crypto.randomUUID(),
+      expectedVersion: beforeEdit.version,
+      accountLabel: "Edited while maintenance was starting",
+    });
+    expect(edited.connection.maintenance).toBeNull();
+    await reportAuthRun(client.db, {
+      ...scope,
+      authRunId: staleRepair.run.id,
+      controllerGeneration: browser.controllerGeneration,
+      operationId: crypto.randomUUID(),
+      expectedVersion: staleRepair.run.version,
+      state: "failed",
+      failureCode: "stale_repair_failed",
+    });
+    expect((await listSiteAuthConnections(client.db, scope)).connections[0]).toMatchObject({
+      maintenance: null,
+      verificationState: "needs_repair",
+      repairCode: "session_expired",
+    });
+    await expect(
+      startAuthRun(client.db, {
+        ...scope,
+        ...browser,
+        originatingSessionId: repair!.sessionId,
+        operationId: crypto.randomUUID(),
+        siteAuthConnectionId: auth.connection.id,
+        targetId: "stale-maintenance",
+        expectedTargetGeneration: "stale-target-generation",
+        expectedDocumentGeneration: "stale-document-generation",
+        purpose: "repair",
+      }),
+    ).rejects.toBeInstanceOf(InteractionResourceStateError);
+  });
+
+  test("rolls back the maintenance session shell when its claim changes", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const auth = await createSiteAuthConnection(client.db, {
+      ...scope,
+      ...humanSiteAuth(),
+      healthPolicy: { mode: "maintained", intervalSeconds: 120, automaticRepair: true },
+    });
+    const [claim] = await claimSiteAuthMaintenance(client.db, {
+      claimTimeoutMs: 0,
+      limit: 1,
+    });
+    const claimedConnection = (await listSiteAuthConnections(client.db, scope)).connections[0]!;
+    await updateSiteAuthConnection(client.db, {
+      ...scope,
+      siteAuthConnectionId: auth.connection.id,
+      operationId: crypto.randomUUID(),
+      expectedVersion: claimedConnection.version,
+      accountLabel: "Changed before dispatch",
+    });
+
+    await expect(
+      createSession(client.db, {
+        requestedSessionId: claim!.sessionId,
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        initialMessage: "Stale maintenance",
+        resources: [],
+        metadata: {},
+        createdBy: { kind: "service", subjectId: "site-auth-maintenance" },
+        createdByContext: {
+          opengeniSiteAuthConnectionId: auth.connection.id,
+          opengeniSiteAuthMaintenanceOperationId: claim!.operationId,
+        },
+        model: "scripted-model",
+        sandboxBackend: "none",
+        subjectId: "site-auth-maintenance",
+        beforeCreateCommit: async (tx, sessionId) => {
+          const confirmed = await confirmSiteAuthMaintenanceSessionInTransaction(tx, {
+            accountId: scope.accountId,
+            workspaceId: scope.workspaceId,
+            siteAuthConnectionId: auth.connection.id,
+            operationId: claim!.operationId,
+            sessionId,
+          });
+          if (!confirmed) throw new Error("maintenance claim changed");
+        },
+      }),
+    ).rejects.toThrow("maintenance claim changed");
+    expect(await getSession(client.db, scope.workspaceId, claim!.sessionId)).toBeNull();
+    expect(
+      (await listSiteAuthConnections(client.db, scope)).connections[0]!.maintenance,
+    ).toBeNull();
+  });
+
+  test("cancels an orphaned maintenance auth run when its agent turn settles", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const auth = await createSiteAuthConnection(client.db, {
+      ...scope,
+      ...humanSiteAuth(),
+      healthPolicy: { mode: "maintained", intervalSeconds: 3_600, automaticRepair: true },
+    });
+    const claims = await claimSiteAuthMaintenance(client.db, {
+      claimTimeoutMs: 600_000,
+      limit: 1_000,
+    });
+    const claim = claims.find((candidate) => candidate.siteAuthConnectionId === auth.connection.id);
+    expect(claim).toBeDefined();
+    await createSession(client.db, {
+      requestedSessionId: claim!.sessionId,
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      initialMessage: "Maintain auth",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "service", subjectId: "site-auth-maintenance" },
+      createdByContext: {
+        opengeniSiteAuthConnectionId: auth.connection.id,
+        opengeniSiteAuthMaintenanceOperationId: claim!.operationId,
+      },
+      model: "scripted-model",
+      sandboxBackend: "none",
+      subjectId: "site-auth-maintenance",
+      beforeCreateCommit: async (tx, sessionId) => {
+        const confirmed = await confirmSiteAuthMaintenanceSessionInTransaction(tx, {
+          accountId: scope.accountId,
+          workspaceId: scope.workspaceId,
+          siteAuthConnectionId: auth.connection.id,
+          operationId: claim!.operationId,
+          sessionId,
+        });
+        if (!confirmed) throw new Error("maintenance claim changed");
+      },
+    });
+    const initialized = await initializeSessionStartAtomically(client.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      sessionId: claim!.sessionId,
+      reasoningEffortFallback: "low",
+      createdEventPayload: { role: "site_auth_maintenance" },
+    });
+    expect(initialized.turn).not.toBeNull();
+    const attemptId = crypto.randomUUID();
+    const claimedTurn = await claimSessionWorkForAttempt(client.db, scope.workspaceId, {
+      sessionId: claim!.sessionId,
+      workflowId: `session-${claim!.sessionId}`,
+      workflowRunId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      attemptId,
+      trigger: { kind: "next" },
+    });
+    if (claimedTurn.action !== "claimed") {
+      throw new Error(`Could not claim maintenance turn: ${claimedTurn.reason}`);
+    }
+    const browser = await activeBrowser(scope);
+    const run = await startAuthRun(client.db, {
+      ...scope,
+      ...browser,
+      originatingSessionId: claim!.sessionId,
+      operationId: crypto.randomUUID(),
+      siteAuthConnectionId: auth.connection.id,
+      targetId: "orphaned-maintenance",
+      expectedTargetGeneration: "orphaned-target-generation",
+      expectedDocumentGeneration: "orphaned-document-generation",
+      purpose: "health_check",
+    });
+    const settled = await applySessionTurnSettlement(client.db, scope.workspaceId, {
+      sessionId: claim!.sessionId,
+      turnId: claimedTurn.turn.id,
+      triggerEventId: claimedTurn.turn.triggerEventId,
+      attemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [
+        { type: "turn.completed", payload: {} },
+        { type: "session.status.changed", payload: { status: "idle" } },
+      ],
+    });
+    expect(settled.action).toBe("settled");
+    expect((await getAuthRun(client.db, { ...scope, authRunId: run.run.id })).state).toBe(
+      "cancelled",
+    );
+    const connection = (await listSiteAuthConnections(client.db, scope)).connections[0]!;
+    expect(connection.maintenance).toBeNull();
+    expect(Date.parse(connection.nextCheckAt!) - Date.now()).toBeLessThanOrEqual(15 * 60 * 1_000);
+    expect(Date.parse(connection.nextCheckAt!)).toBeGreaterThan(Date.now());
+  });
+
+  test("keeps maintenance live while the session has a queued continuation", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const auth = await createSiteAuthConnection(client.db, {
+      ...scope,
+      ...humanSiteAuth(),
+      healthPolicy: { mode: "maintained", intervalSeconds: 3_600, automaticRepair: true },
+    });
+    const claim = (
+      await claimSiteAuthMaintenance(client.db, {
+        claimTimeoutMs: 600_000,
+        limit: 1_000,
+      })
+    ).find((candidate) => candidate.siteAuthConnectionId === auth.connection.id);
+    expect(claim).toBeDefined();
+    await createSession(client.db, {
+      requestedSessionId: claim!.sessionId,
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      initialMessage: "Maintain auth",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "service", subjectId: "site-auth-maintenance" },
+      createdByContext: {
+        opengeniSiteAuthConnectionId: auth.connection.id,
+        opengeniSiteAuthMaintenanceOperationId: claim!.operationId,
+      },
+      model: "scripted-model",
+      sandboxBackend: "none",
+      subjectId: "site-auth-maintenance",
+      beforeCreateCommit: async (tx, sessionId) => {
+        const confirmed = await confirmSiteAuthMaintenanceSessionInTransaction(tx, {
+          accountId: scope.accountId,
+          workspaceId: scope.workspaceId,
+          siteAuthConnectionId: auth.connection.id,
+          operationId: claim!.operationId,
+          sessionId,
+        });
+        if (!confirmed) throw new Error("maintenance claim changed");
+      },
+    });
+    await initializeSessionStartAtomically(client.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      sessionId: claim!.sessionId,
+      reasoningEffortFallback: "low",
+      createdEventPayload: { role: "site_auth_maintenance" },
+    });
+    const attemptId = crypto.randomUUID();
+    const claimedTurn = await claimSessionWorkForAttempt(client.db, scope.workspaceId, {
+      sessionId: claim!.sessionId,
+      workflowId: `session-${claim!.sessionId}`,
+      workflowRunId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      attemptId,
+      trigger: { kind: "next" },
+    });
+    if (claimedTurn.action !== "claimed") {
+      throw new Error(`Could not claim maintenance turn: ${claimedTurn.reason}`);
+    }
+    const browser = await activeBrowser(scope);
+    const run = await startAuthRun(client.db, {
+      ...scope,
+      ...browser,
+      originatingSessionId: claim!.sessionId,
+      operationId: crypto.randomUUID(),
+      siteAuthConnectionId: auth.connection.id,
+      targetId: "continued-maintenance",
+      expectedTargetGeneration: "continued-target-generation",
+      expectedDocumentGeneration: "continued-document-generation",
+      purpose: "health_check",
+    });
+    await withWorkspaceSubjectRls(client.db, scope.workspaceId, scope.actorSubjectId, (db) =>
+      db.transaction((tx) =>
+        submitHumanPromptInTransaction(tx as typeof db, {
+          accountId: scope.accountId,
+          workspaceId: scope.workspaceId,
+          sessionId: claim!.sessionId,
+          subjectId: scope.actorSubjectId,
+          actor: { type: "human", subjectId: scope.actorSubjectId },
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          text: "Continue the same maintenance check",
+          resources: [],
+          reasoningEffortFallback: "low",
+          source: "user",
+        }),
+      ),
+    );
+    expect(
+      (
+        await applySessionTurnSettlement(client.db, scope.workspaceId, {
+          sessionId: claim!.sessionId,
+          turnId: claimedTurn.turn.id,
+          triggerEventId: claimedTurn.turn.triggerEventId,
+          attemptId,
+          turnStatus: "completed",
+          sessionStatus: "idle",
+          activeTurnId: null,
+          events: [
+            { type: "turn.completed", payload: {} },
+            { type: "session.status.changed", payload: { status: "idle" } },
+          ],
+        })
+      ).action,
+    ).toBe("settled");
+    expect((await getAuthRun(client.db, { ...scope, authRunId: run.run.id })).state).toBe(
+      "discovering",
+    );
+    expect(
+      (await listSiteAuthConnections(client.db, scope)).connections[0]!.maintenance,
+    ).toMatchObject({ action: "health_check", sessionId: claim!.sessionId });
+
+    await reportAuthRun(client.db, {
+      ...scope,
+      authRunId: run.run.id,
+      controllerGeneration: browser.controllerGeneration,
+      operationId: crypto.randomUUID(),
+      expectedVersion: run.run.version,
+      state: "cancelled",
+    });
+    expect(
+      (await listSiteAuthConnections(client.db, scope)).connections[0]!.maintenance,
+    ).toBeNull();
   });
 });

@@ -298,6 +298,12 @@ export type SiteAuthConnection = SiteAuthConnectionConfiguration & {
   lastVerifiedUrl: string | null;
   lastCheckedAt: string | null;
   nextCheckAt: string | null;
+  maintenance: {
+    action: "health_check" | "repair";
+    sessionId: string | null;
+    dueAt: string;
+    startedAt: string | null;
+  } | null;
   repairCode: string | null;
   version: number;
   createdBySubjectId: string;

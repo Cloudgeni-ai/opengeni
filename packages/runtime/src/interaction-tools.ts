@@ -122,6 +122,7 @@ const BrowserOpenInput = z
     placement: InteractionPlacement.optional(),
     identityId: z.string().uuid().optional(),
     baseRevisionId: z.string().uuid().optional(),
+    networkRouteId: z.string().uuid().optional(),
     linkedComputerSessionId: z.string().uuid().optional(),
   })
   .strict()
@@ -133,7 +134,10 @@ const BrowserOpenInput = z
         message: "mode=new cannot target an existing BrowserSession",
       });
     }
-    if (value.browserSessionId && (value.identityId || value.baseRevisionId || value.placement)) {
+    if (
+      value.browserSessionId &&
+      (value.identityId || value.baseRevisionId || value.networkRouteId || value.placement)
+    ) {
       context.addIssue({
         code: "custom",
         path: ["browserSessionId"],
@@ -1046,10 +1050,15 @@ async function openBrowser(
           sessionId: sourceSessionId,
           ...(value.name ? { name: value.name } : {}),
           ...(value.initialUrl ? { initialUrl: value.initialUrl } : {}),
-          ...(value.headless !== undefined ? { headless: value.headless } : {}),
+          ...(value.headless !== undefined
+            ? { headless: value.headless }
+            : value.placement?.kind === "attached_device"
+              ? { headless: false }
+              : {}),
           ...(value.placement ? { placement: value.placement } : {}),
           ...(value.identityId ? { identityId: value.identityId } : {}),
           ...(value.baseRevisionId ? { baseRevisionId: value.baseRevisionId } : {}),
+          ...(value.networkRouteId ? { networkRouteId: value.networkRouteId } : {}),
           ...(value.linkedComputerSessionId
             ? { linkedComputerSessionId: value.linkedComputerSessionId }
             : {}),

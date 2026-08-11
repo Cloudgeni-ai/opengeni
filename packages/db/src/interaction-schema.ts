@@ -1066,6 +1066,12 @@ export const siteAuthConnections = pgTable(
     lastVerifiedUrl: text("last_verified_url"),
     lastCheckedAt: timestamp("last_checked_at", { withTimezone: true }),
     nextCheckAt: timestamp("next_check_at", { withTimezone: true }),
+    maintenanceOperationId: uuid("maintenance_operation_id"),
+    maintenanceAction: text("maintenance_action", { enum: ["health_check", "repair"] }),
+    maintenanceDueAt: timestamp("maintenance_due_at", { withTimezone: true }),
+    maintenanceClaimedAt: timestamp("maintenance_claimed_at", { withTimezone: true }),
+    maintenanceSessionId: uuid("maintenance_session_id"),
+    maintenanceStartedAt: timestamp("maintenance_started_at", { withTimezone: true }),
     healthSequence: bigint("health_sequence", { mode: "number" }).notNull().default(0),
     repairCode: text("repair_code"),
     version: bigint("version", { mode: "number" }).notNull().default(1),
@@ -1094,8 +1100,8 @@ export const siteAuthConnections = pgTable(
       table.id,
     ),
     maintenance: index("site_auth_connections_health_maintenance_idx").on(
-      table.workspaceId,
       table.nextCheckAt,
+      table.maintenanceClaimedAt,
       table.id,
     ),
     valuesValid: check(
@@ -1163,6 +1169,29 @@ export const siteAuthConnections = pgTable(
           )
         )`,
     ),
+    maintenanceValid: check(
+      "site_auth_connections_maintenance_check",
+      sql`(
+          ${table.maintenanceOperationId} is null
+          and ${table.maintenanceAction} is null
+          and ${table.maintenanceDueAt} is null
+          and ${table.maintenanceClaimedAt} is null
+          and ${table.maintenanceSessionId} is null
+          and ${table.maintenanceStartedAt} is null
+        ) or (
+          ${table.status} = 'active'
+          and ${table.healthPolicy}->>'mode' = 'maintained'
+          and ${table.maintenanceOperationId} is not null
+          and ${table.maintenanceAction} in ('health_check', 'repair')
+          and ${table.maintenanceDueAt} is not null
+          and ${table.maintenanceClaimedAt} is not null
+          and ${table.maintenanceSessionId} is not null
+          and (
+            ${table.maintenanceStartedAt} is null
+            or ${table.maintenanceStartedAt} >= ${table.maintenanceDueAt}
+          )
+        )`,
+    ),
   }),
 );
 
@@ -1184,6 +1213,7 @@ export const authRuns = pgTable(
     healthSequence: bigint("health_sequence", { mode: "number" })
       .notNull()
       .default(sql`nextval('auth_runs_health_sequence_seq'::regclass)`),
+    maintenanceOperationId: uuid("maintenance_operation_id"),
     methodId: text("method_id"),
     authorityId: text("authority_id"),
     state: text("state", {
@@ -1232,6 +1262,9 @@ export const authRuns = pgTable(
       table.siteAuthConnectionId,
       table.createdAt,
     ),
+    maintenanceOperation: uniqueIndex("auth_runs_workspace_maintenance_operation_uq")
+      .on(table.workspaceId, table.maintenanceOperationId)
+      .where(sql`${table.maintenanceOperationId} is not null`),
     valuesValid: check(
       "auth_runs_values_check",
       sql`octet_length(${table.targetId}) between 1 and 512
@@ -1257,6 +1290,11 @@ export const authRuns = pgTable(
       "auth_runs_health_evidence_check",
       sql`${table.purpose} in ('authenticate', 'health_check', 'repair')
         and ${table.healthSequence} > 0`,
+    ),
+    maintenanceValid: check(
+      "auth_runs_maintenance_check",
+      sql`${table.maintenanceOperationId} is null
+        or ${table.purpose} in ('health_check', 'repair')`,
     ),
     lifecycleValid: check(
       "auth_runs_lifecycle_check",

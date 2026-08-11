@@ -108,6 +108,8 @@ export {
 const SANDBOX_REAPER_SCHEDULE_ID = "opengeni-sandbox-lease-reaper";
 export const FILE_UPLOAD_REAPER_SCHEDULE_ID = "opengeni-file-upload-reaper";
 export const FILE_UPLOAD_REAPER_PERIOD_MS = 15 * 60 * 1_000;
+export const SITE_AUTH_MAINTENANCE_SCHEDULE_ID = "opengeni-site-auth-maintenance";
+export const SITE_AUTH_MAINTENANCE_PERIOD_MS = 60 * 1_000;
 export type OpenGeniWorkerRole = "control" | "turn";
 
 export type WorkerOptions = {
@@ -640,6 +642,48 @@ export async function registerFileUploadReaperSchedule(
   }
 }
 
+/** Register the deployment-wide maintained-auth dispatcher. Its one-minute
+ * cadence matches the minimum public policy interval; DB claims own overlap,
+ * crash recovery, and exact session idempotency. */
+export async function registerSiteAuthMaintenanceSchedule(
+  settings: Settings,
+  observability: Observability,
+): Promise<{ registered: boolean; close: () => Promise<void> }> {
+  const connection = await Connection.connect(temporalConnectionOptions(settings));
+  const temporal = new TemporalClient({ connection, namespace: settings.temporalNamespace });
+  try {
+    await temporal.schedule.create({
+      scheduleId: SITE_AUTH_MAINTENANCE_SCHEDULE_ID,
+      spec: { intervals: [{ every: SITE_AUTH_MAINTENANCE_PERIOD_MS }] },
+      action: {
+        type: "startWorkflow",
+        workflowType: "siteAuthMaintenanceWorkflow",
+        taskQueue: settings.temporalTaskQueue,
+        args: [],
+      },
+      policies: {
+        overlap: ScheduleOverlapPolicy.SKIP,
+        catchupWindow: "1m",
+        pauseOnFailure: false,
+      },
+    });
+    observability.info("Registered the global site-auth maintenance Schedule", {
+      scheduleId: SITE_AUTH_MAINTENANCE_SCHEDULE_ID,
+      maintenancePeriodMs: SITE_AUTH_MAINTENANCE_PERIOD_MS,
+    });
+    return { registered: true, close: async () => connection.close() };
+  } catch (error) {
+    if (error instanceof ScheduleAlreadyRunning) {
+      observability.info("Global site-auth maintenance Schedule already registered", {
+        scheduleId: SITE_AUTH_MAINTENANCE_SCHEDULE_ID,
+      });
+      return { registered: false, close: async () => connection.close() };
+    }
+    await connection.close().catch(() => undefined);
+    throw error;
+  }
+}
+
 /**
  * Register the one repair cadence for committed workflow-wake revisions. The
  * activity only reads the transactional outbox and sends revision-scoped
@@ -826,6 +870,13 @@ export async function createOpenGeniWorkerService(
         await retryStartupDependency(
           "Temporal schedule (file upload reaper)",
           () => registerFileUploadReaperSchedule(settings, observability),
+          { ...retryOptions, onRetry },
+        ),
+      );
+      schedules.push(
+        await retryStartupDependency(
+          "Temporal schedule (site auth maintenance)",
+          () => registerSiteAuthMaintenanceSchedule(settings, observability),
           { ...retryOptions, onRetry },
         ),
       );

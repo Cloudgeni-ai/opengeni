@@ -540,7 +540,10 @@ export async function createAndStartSessionWithOutcome(input: {
   requestedSessionId?: string;
   db: Database;
   bus: EventBus;
-  workflowClient: SessionWorkflowClient;
+  workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
+  /** Internal database-only composition seam. The exact session shell and this
+   * linkage commit together before its first event/turn can be initialized. */
+  beforeCreateCommit?: (tx: Database, sessionId: string) => Promise<void>;
   accountId: string;
   workspaceId: string;
   initialMessage: string;
@@ -678,6 +681,7 @@ export async function createAndStartSessionWithOutcome(input: {
       maxNestedAgentDepthOverride: input.maxNestedAgentDepthOverride ?? null,
       allowNestedAgentDepthIncrease: input.allowNestedAgentDepthIncrease ?? false,
       subjectId: input.subjectId ?? null,
+      ...(input.beforeCreateCommit ? { beforeCreateCommit: input.beforeCreateCommit } : {}),
     });
     if (keyedResult.denied) {
       throw new SessionSpawnDeniedError(SessionSpawnDenial.parse(keyedResult.denial));
@@ -736,6 +740,7 @@ export async function createAndStartSessionWithOutcome(input: {
       maxNestedAgentDepthOverride: input.maxNestedAgentDepthOverride ?? null,
       allowNestedAgentDepthIncrease: input.allowNestedAgentDepthIncrease ?? false,
       subjectId: input.subjectId ?? null,
+      ...(input.beforeCreateCommit ? { beforeCreateCommit: input.beforeCreateCommit } : {}),
     });
   } catch (error) {
     if (error instanceof SessionSpawnDeniedDbError) {
@@ -769,7 +774,7 @@ async function finishStartSession(
   input: {
     db: Database;
     bus: EventBus;
-    workflowClient: SessionWorkflowClient;
+    workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
     initialMessage: string;
     deferInitialTurn?: boolean;
     turnInstructions?: string | null;

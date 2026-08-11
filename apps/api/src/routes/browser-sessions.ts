@@ -1003,6 +1003,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         "sessions:control",
       );
       const request = await parseJsonBody(context, StartAuthRunRequest);
+      const actor = interactionActorForGrant(grant);
       const startedAtMs = performance.now();
       const result = await withActiveBrowserController(
         context,
@@ -1027,6 +1028,8 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
             actorSubjectId: grant.subjectId,
             browserSessionId,
             controllerGeneration: binding.controllerGeneration,
+            originatingSessionId:
+              actor.kind === "agent" && actor.sessionId ? actor.sessionId : null,
             ...request,
           });
         },

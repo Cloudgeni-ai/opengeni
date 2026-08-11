@@ -18,6 +18,7 @@ import {
   type InteractionPlacement,
   NetworkRouteConfiguration,
   NetworkRouteConsistency,
+  networkRoutePlacementCompatibilityIssue,
   type NetworkRouteConfiguration as NetworkRouteConfigurationValue,
   type NetworkRouteConsistency as NetworkRouteConsistencyValue,
 } from "@opengeni/contracts";
@@ -948,68 +949,19 @@ async function assertNetworkRouteAvailable(
   if (route.status !== "active") {
     throw new BrowserSessionStateError("Network route is archived");
   }
-  if (
-    route.configuration.kind === "tunnel" &&
-    !placementsEqual(route.configuration.placement, input.placement)
-  ) {
-    throw new BrowserSessionStateError("Tunnel route is bound to another placement");
-  }
   const configuration = NetworkRouteConfiguration.parse(route.configuration);
   const consistency = NetworkRouteConsistency.parse(route.consistency);
-  if (configuration.kind === "managed") {
-    throw new BrowserSessionStateError(
-      "Managed provider routes require an external browser provider driver",
-    );
-  }
-  const expectedDns = configuration.kind === "proxy" ? "proxy" : "placement";
-  if (consistency.dns !== expectedDns) {
-    throw new BrowserSessionStateError(
-      `Network route ${configuration.kind} cannot provide ${consistency.dns} DNS`,
-    );
-  }
-  if (consistency.webRtc === "proxy_only" && configuration.kind !== "proxy") {
-    throw new BrowserSessionStateError("WebRTC proxy-only routing requires a proxy network route");
-  }
-  if (input.placement.kind === "attached_device") {
-    if (configuration.kind === "proxy") {
-      throw new BrowserSessionStateError(
-        "Attached Chrome cannot change its process-scoped proxy configuration",
-      );
-    }
-    if (
-      consistency.locale !== null ||
-      consistency.timezone !== null ||
-      consistency.geolocation !== null ||
-      consistency.webRtc !== "default"
-    ) {
-      throw new BrowserSessionStateError(
-        "Attached Chrome cannot change process-scoped route emulation",
-      );
-    }
-  }
+  const compatibilityIssue = networkRoutePlacementCompatibilityIssue(
+    configuration,
+    consistency,
+    input.placement,
+  );
+  if (compatibilityIssue) throw new BrowserSessionStateError(compatibilityIssue);
   return {
     version: safeInteger(route.version, "network route version"),
     configuration,
     consistency,
   };
-}
-
-function placementsEqual(left: InteractionPlacement, right: InteractionPlacement): boolean {
-  if (left.kind !== right.kind) return false;
-  switch (left.kind) {
-    case "sandbox_group":
-      return right.kind === "sandbox_group" && left.sandboxGroupId === right.sandboxGroupId;
-    case "connected_machine":
-      return right.kind === "connected_machine" && left.sandboxId === right.sandboxId;
-    case "attached_device":
-      return right.kind === "attached_device" && left.deviceId === right.deviceId;
-    case "external_provider":
-      return (
-        right.kind === "external_provider" &&
-        left.providerId === right.providerId &&
-        left.placementId === right.placementId
-      );
-  }
 }
 
 async function assertLinkedComputerAvailable(

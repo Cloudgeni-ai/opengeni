@@ -1802,6 +1802,8 @@ const reservedServiceTurnInitiatorContextKeys = new Set([
   "backfill",
   "label",
   "provenanceError",
+  "opengeniSiteAuthConnectionId",
+  "opengeniSiteAuthMaintenanceOperationId",
   "via",
   "viaTruncated",
 ]);

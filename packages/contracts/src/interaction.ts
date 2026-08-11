@@ -586,6 +586,93 @@ export const NetworkRouteConsistency = z
   .strict();
 export type NetworkRouteConsistency = z.infer<typeof NetworkRouteConsistency>;
 
+export function interactionPlacementsEqual(
+  left: InteractionPlacement,
+  right: InteractionPlacement,
+): boolean {
+  if (left.kind !== right.kind) return false;
+  switch (left.kind) {
+    case "sandbox_group":
+      return right.kind === "sandbox_group" && left.sandboxGroupId === right.sandboxGroupId;
+    case "connected_machine":
+      return right.kind === "connected_machine" && left.sandboxId === right.sandboxId;
+    case "attached_device":
+      return right.kind === "attached_device" && left.deviceId === right.deviceId;
+    case "external_provider":
+      return (
+        right.kind === "external_provider" &&
+        left.providerId === right.providerId &&
+        left.placementId === right.placementId
+      );
+  }
+}
+
+/** One secret-free compatibility rule shared by configuration, persistence,
+ * and launch. `null` placement means the ordinary managed sandbox default. */
+export function networkRoutePlacementCompatibilityIssue(
+  configuration: NetworkRouteConfiguration,
+  consistency: NetworkRouteConsistency,
+  placement: InteractionPlacement | null,
+): string | null {
+  if (configuration.kind === "tunnel") {
+    if (!placement || !interactionPlacementsEqual(configuration.placement, placement)) {
+      return "Tunnel route is bound to another placement";
+    }
+  }
+  if (configuration.kind === "managed") {
+    if (placement?.kind !== "external_provider") {
+      return "Managed NetworkRoutes require an external browser provider placement";
+    }
+    if (configuration.providerId !== placement.providerId) {
+      return "Managed NetworkRoute belongs to another external browser provider";
+    }
+    if (configuration.credential !== null) {
+      return "Managed provider routes cannot use a separate proxy credential";
+    }
+    if (consistency.dns !== "provider") {
+      return "Managed provider routes require provider DNS";
+    }
+    if (configuration.providerId === "browserbase") {
+      if (configuration.routeId !== "default" || configuration.egressClass !== "residential") {
+        return "Browserbase supports only its default managed residential route";
+      }
+      if (configuration.region !== null && !/^[A-Za-z]{2}$/u.test(configuration.region)) {
+        return "Browserbase managed route region must be a two-letter country code";
+      }
+      if (consistency.stability !== "session") {
+        return "Browserbase managed routing cannot promise a stable IP across sessions";
+      }
+    } else if (configuration.providerId !== "kernel") {
+      return `Managed NetworkRoute provider ${configuration.providerId} is unsupported`;
+    }
+    return null;
+  }
+  if (placement?.kind === "external_provider") {
+    return "External browser providers require a provider-managed NetworkRoute";
+  }
+  const expectedDns = configuration.kind === "proxy" ? "proxy" : "placement";
+  if (consistency.dns !== expectedDns) {
+    return `Network route ${configuration.kind} cannot provide ${consistency.dns} DNS`;
+  }
+  if (consistency.webRtc === "proxy_only" && configuration.kind !== "proxy") {
+    return "WebRTC proxy-only routing requires a proxy network route";
+  }
+  if (placement?.kind === "attached_device") {
+    if (configuration.kind === "proxy") {
+      return "Attached Chrome cannot change its process-scoped proxy configuration";
+    }
+    if (
+      consistency.locale !== null ||
+      consistency.timezone !== null ||
+      consistency.geolocation !== null ||
+      consistency.webRtc !== "default"
+    ) {
+      return "Attached Chrome cannot change process-scoped route emulation";
+    }
+  }
+  return null;
+}
+
 export const NetworkRoute = z
   .object({
     id: z.string().uuid(),
@@ -741,6 +828,22 @@ export type SiteAuthHealthPolicy = z.infer<typeof SiteAuthHealthPolicy>;
 export const SiteAuthVerificationState = z.enum(["unknown", "verified", "needs_repair", "failed"]);
 export type SiteAuthVerificationState = z.infer<typeof SiteAuthVerificationState>;
 
+export const SiteAuthMaintenance = z
+  .object({
+    action: z.enum(["health_check", "repair"]),
+    /** Hidden until the durable session start has been confirmed. */
+    sessionId: z.string().uuid().nullable(),
+    dueAt: z.string().datetime({ offset: true }),
+    startedAt: z.string().datetime({ offset: true }).nullable(),
+  })
+  .strict();
+export type SiteAuthMaintenance = z.infer<typeof SiteAuthMaintenance>;
+
+/** Trusted service provenance for scheduler-authored maintenance sessions. */
+export const SITE_AUTH_MAINTENANCE_OPERATION_CONTEXT_KEY =
+  "opengeniSiteAuthMaintenanceOperationId" as const;
+export const SITE_AUTH_MAINTENANCE_CONNECTION_CONTEXT_KEY = "opengeniSiteAuthConnectionId" as const;
+
 const SiteAuthConnectionConfiguration = z
   .object({
     name: z.string().trim().min(1).max(200),
@@ -761,6 +864,17 @@ function validateSiteAuthConfiguration(
   connection: z.infer<typeof SiteAuthConnectionConfiguration>,
   context: z.RefinementCtx,
 ): void {
+  if (
+    connection.preferredIdentityId &&
+    (connection.preferredPlacement?.kind === "attached_device" ||
+      connection.preferredPlacement?.kind === "external_provider")
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["preferredIdentityId"],
+      message: "the preferred placement owns its live profile identity",
+    });
+  }
   if (new Set(connection.origins).size !== connection.origins.length) {
     context.addIssue({ code: "custom", path: ["origins"], message: "origins repeat" });
   }
@@ -837,6 +951,7 @@ export const SiteAuthConnection = SiteAuthConnectionConfiguration.extend({
   lastVerifiedUrl: boundedUrl.nullable(),
   lastCheckedAt: z.string().datetime({ offset: true }).nullable(),
   nextCheckAt: z.string().datetime({ offset: true }).nullable(),
+  maintenance: SiteAuthMaintenance.nullable(),
   repairCode: boundedOpaqueId.nullable(),
   version: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   createdBySubjectId: z.string().min(1).max(1_024),

@@ -29,6 +29,39 @@ const computerSessionId = randomUUID();
 const now = "2026-08-10T12:00:00.000Z";
 
 describe("interaction attempt tools", () => {
+  test("opens attached browsers headed and forwards the selected network route", async () => {
+    let createRequest: Record<string, unknown> | null = null;
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        listBrowserSessions: async () => ({ revision: 0, sessions: [] }),
+        createBrowserSession: async (_workspaceId, request) => {
+          createRequest = request as unknown as Record<string, unknown>;
+          return { session: { lifecycle: "starting" } } as never;
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_open"],
+      permissions: ["sessions:control"],
+    });
+    const deviceId = randomUUID();
+    const networkRouteId = randomUUID();
+    await definitions[0]!.execute(
+      {
+        mode: "new",
+        placement: { kind: "attached_device", deviceId },
+        networkRouteId,
+      },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+    expect(createRequest).toMatchObject({
+      sessionId,
+      headless: false,
+      placement: { kind: "attached_device", deviceId },
+      networkRouteId,
+    });
+  });
+
   test("projects one permission-filtered definition set into the exact attempt catalog", () => {
     const definitions = createInteractionAttemptToolDefinitions({
       transport: unusedTransport(),
