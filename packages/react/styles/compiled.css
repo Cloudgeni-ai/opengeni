@@ -646,6 +646,9 @@
 :where(.og-root).z-\[2147483647\],:where(.og-root) .z-\[2147483647\] {
     z-index: 2147483647;
   }
+:where(.og-root).col-span-2,:where(.og-root) .col-span-2 {
+    grid-column: span 2 / span 2;
+  }
 :where(.og-root).col-span-full,:where(.og-root) .col-span-full {
     grid-column: 1 / -1;
   }
@@ -1511,6 +1514,9 @@
 :where(.og-root).gap-y-0\.5,:where(.og-root) .gap-y-0\.5 {
     row-gap: calc(var(--spacing) * 0.5);
   }
+:where(.og-root).gap-y-1,:where(.og-root) .gap-y-1 {
+    row-gap: calc(var(--spacing) * 1);
+  }
 :where(.og-root).gap-y-1\.5,:where(.og-root) .gap-y-1\.5 {
     row-gap: calc(var(--spacing) * 1.5);
   }
@@ -1545,6 +1551,9 @@
   }
 :where(.og-root).justify-self-end,:where(.og-root) .justify-self-end {
     justify-self: flex-end;
+  }
+:where(.og-root).justify-self-start,:where(.og-root) .justify-self-start {
+    justify-self: flex-start;
   }
 :where(.og-root).truncate,:where(.og-root) .truncate {
     overflow: hidden;
