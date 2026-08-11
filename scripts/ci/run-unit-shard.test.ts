@@ -8,6 +8,7 @@ import {
   planUnitTestProcesses,
   runBoundedTestProcesses,
   sourceUsesExplicitTestConcurrency,
+  sourceUsesWallClockPerformanceAssertion,
 } from "./run-unit-shard";
 
 describe("bounded unit process execution", () => {
@@ -70,12 +71,31 @@ describe("unit process planning", () => {
     expect(sourceUsesExplicitTestConcurrency("test('concurrent sessions', () => {})")).toBe(false);
   });
 
-  test("keeps explicit concurrency serial while every other file retains a fresh process", () => {
+  test("recognizes real wall-clock upper bounds without matching unrelated clocks", () => {
+    expect(
+      sourceUsesWallClockPerformanceAssertion(
+        "const started = Bun.nanoseconds(); expect(elapsed).toBeLessThan(1500);",
+      ),
+    ).toBe(true);
+    expect(
+      sourceUsesWallClockPerformanceAssertion(
+        "const started = performance.now(); expect(elapsed).toBeLessThanOrEqual(100);",
+      ),
+    ).toBe(true);
+    expect(sourceUsesWallClockPerformanceAssertion("const now = Date.now();")).toBe(false);
+    expect(sourceUsesWallClockPerformanceAssertion("expect(rows).toBeLessThan(100);")).toBe(false);
+  });
+
+  test("keeps explicit concurrency and wall-clock assertions out of the parallel pool", () => {
     const root = mkdtempSync(join(tmpdir(), "opengeni-unit-process-plan-"));
     try {
-      for (const path of ["batch-a.test.ts", "batch-b.test.ts", "isolated-a.test.ts"]) {
+      for (const path of ["batch-a.test.ts", "isolated-a.test.ts"]) {
         writeFileSync(join(root, path), "test('ordinary', () => {});\n");
       }
+      writeFileSync(
+        join(root, "timed.test.ts"),
+        "const started = performance.now(); expect(performance.now() - started).toBeLessThan(100);\n",
+      );
       mkdirSync(join(root, "nested"));
       writeFileSync(
         join(root, "nested/concurrent.test.ts"),
@@ -83,7 +103,7 @@ describe("unit process planning", () => {
       );
       const plan = planUnitTestProcesses(
         root,
-        ["batch-a.test.ts", "nested/concurrent.test.ts", "batch-b.test.ts"],
+        ["batch-a.test.ts", "nested/concurrent.test.ts", "timed.test.ts"],
         ["isolated-a.test.ts"],
         1,
       );
@@ -91,10 +111,10 @@ describe("unit process planning", () => {
       expect(plan).toEqual({
         parallel: [
           { files: ["batch-a.test.ts"], isolated: false },
-          { files: ["batch-b.test.ts"], isolated: false },
           { files: ["isolated-a.test.ts"], isolated: true },
         ],
         explicitConcurrency: [{ files: ["nested/concurrent.test.ts"], isolated: false }],
+        wallClockSensitive: [{ files: ["timed.test.ts"], isolated: false }],
       });
     } finally {
       rmSync(root, { recursive: true, force: true });

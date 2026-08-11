@@ -22,6 +22,7 @@ export type UnitTestProcess = {
 export type UnitTestProcessPlan = {
   parallel: UnitTestProcess[];
   explicitConcurrency: UnitTestProcess[];
+  wallClockSensitive: UnitTestProcess[];
 };
 
 export function sanitizedTestEnvironment(
@@ -52,22 +53,47 @@ export function sourceUsesExplicitTestConcurrency(source: string): boolean {
   );
 }
 
+export function sourceUsesWallClockPerformanceAssertion(source: string): boolean {
+  return (
+    /\b(?:Bun\.nanoseconds|performance\.now|Date\.now)\s*\(/.test(source) &&
+    /\.toBeLessThan(?:OrEqual)?\s*\(/.test(source)
+  );
+}
+
 export function planUnitTestProcesses(
   root: string,
   batch: readonly string[],
   isolated: readonly string[],
   batchSize: number,
 ): UnitTestProcessPlan {
+  const sources = new Map(
+    [...batch, ...isolated].map((path) => [path, readFileSync(join(root, path), "utf8")] as const),
+  );
   const explicitConcurrency = new Set(
-    [...batch, ...isolated].filter((path) =>
-      sourceUsesExplicitTestConcurrency(readFileSync(join(root, path), "utf8")),
-    ),
+    [...sources]
+      .filter(([, source]) => sourceUsesExplicitTestConcurrency(source))
+      .map(([path]) => path),
+  );
+  const wallClockSensitive = new Set(
+    [...sources]
+      .filter(
+        ([path, source]) =>
+          !explicitConcurrency.has(path) && sourceUsesWallClockPerformanceAssertion(source),
+      )
+      .map(([path]) => path),
   );
   const usesExplicitConcurrency = (path: string): boolean => explicitConcurrency.has(path);
-  const parallelBatch = batch.filter((path) => !usesExplicitConcurrency(path));
+  const usesWallClock = (path: string): boolean => wallClockSensitive.has(path);
+  const parallelBatch = batch.filter(
+    (path) => !usesExplicitConcurrency(path) && !usesWallClock(path),
+  );
   const concurrentBatch = batch.filter(usesExplicitConcurrency);
-  const parallelIsolated = isolated.filter((path) => !usesExplicitConcurrency(path));
+  const wallClockBatch = batch.filter(usesWallClock);
+  const parallelIsolated = isolated.filter(
+    (path) => !usesExplicitConcurrency(path) && !usesWallClock(path),
+  );
   const concurrentIsolated = isolated.filter(usesExplicitConcurrency);
+  const wallClockIsolated = isolated.filter(usesWallClock);
   return {
     parallel: [
       ...deterministicFileBatches(parallelBatch, batchSize).map((files) => ({
@@ -83,6 +109,13 @@ export function planUnitTestProcesses(
     explicitConcurrency: [
       ...concurrentBatch.map((path) => ({ files: [path], isolated: false })),
       ...concurrentIsolated.map((path) => ({ files: [path], isolated: true })),
+    ],
+    // Wall-clock assertions measure the tested operation, not unrelated CPU
+    // contention from sibling files. Keep their existing limits unchanged and
+    // run those files alone with ordinary serial Bun semantics.
+    wallClockSensitive: [
+      ...wallClockBatch.map((path) => ({ files: [path], isolated: false })),
+      ...wallClockIsolated.map((path) => ({ files: [path], isolated: true })),
     ],
   };
 }
@@ -177,7 +210,7 @@ async function main(): Promise<void> {
   const budget = testConcurrencyBudget();
   const processes = planUnitTestProcesses(process.cwd(), batch, isolated, configuredBatchSize);
   process.stdout.write(
-    `[unit-shard] process plan: ${describeTestConcurrencyBudget(budget)} parallel=${processes.parallel.length} explicitConcurrency=${processes.explicitConcurrency.length}\n`,
+    `[unit-shard] process plan: ${describeTestConcurrencyBudget(budget)} parallel=${processes.parallel.length} explicitConcurrency=${processes.explicitConcurrency.length} wallClockSensitive=${processes.wallClockSensitive.length}\n`,
   );
   const parallelStatus = await runBoundedTestProcesses(
     processes.parallel,
@@ -189,6 +222,10 @@ async function main(): Promise<void> {
     run(task, budget, 1, budget.concurrency),
   );
   if (explicitStatus !== 0) process.exit(explicitStatus);
+  const wallClockStatus = await runBoundedTestProcesses(processes.wallClockSensitive, 1, (task) =>
+    run(task, budget, 1, 1),
+  );
+  if (wallClockStatus !== 0) process.exit(wallClockStatus);
   process.stdout.write(
     `[unit-shard] shard ${index + 1}/${count} passed (${selected.length} files)\n`,
   );
