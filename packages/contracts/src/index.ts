@@ -829,6 +829,18 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "social_thread_fetch",
   "social_posts_sync",
   "social_post_reply",
+  "x_accounts_list",
+  "x_search_live",
+  "x_mentions_live",
+  "x_thread_fetch",
+  "x_posts_sync",
+  "x_post_reply",
+  "reddit_accounts_list",
+  "reddit_search_live",
+  "reddit_mentions_live",
+  "reddit_thread_fetch",
+  "reddit_posts_sync",
+  "reddit_post_reply",
   "scheduled_tasks_list",
   "scheduled_tasks_get",
   "scheduled_tasks_create",
@@ -862,7 +874,11 @@ export type FirstPartyMcpToolName = z.infer<typeof FirstPartyMcpToolName>;
  * any catalogued connector tool and remains independently permission-gated.
  */
 export const DEFAULT_FIRST_PARTY_MCP_TOOLS = FIRST_PARTY_MCP_TOOL_NAMES.filter(
-  (name) => !name.startsWith("social_") && !name.startsWith("slack_bot_"),
+  (name) =>
+    !name.startsWith("social_") &&
+    !name.startsWith("x_") &&
+    !name.startsWith("reddit_") &&
+    !name.startsWith("slack_bot_"),
 ) satisfies readonly FirstPartyMcpToolName[];
 
 export function prefixedMcpToolName(registryId: string, toolName: string): string {
@@ -11676,7 +11692,7 @@ export type WorkspaceModelCatalogResponse = z.infer<typeof WorkspaceModelCatalog
  * that rollout boundary. Mutating clients send this value in
  * `x-opengeni-api-contract`; the API rejects any other value before routing.
  */
-export const OPENGENI_API_CONTRACT_REVISION = "2026-08-pack-components-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-08-social-provider-tools-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;

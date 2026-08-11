@@ -9,12 +9,14 @@ import {
   loadSocialConnectionCredential,
   type DbClient,
 } from "@opengeni/db";
+import { migrate } from "@opengeni/db/migrate";
 import { environmentsEncryptionKeyBytes } from "@opengeni/config";
 import {
   acquireSharedTestDatabase,
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
+import postgres from "postgres";
 import {
   completeSocialOAuthCallback,
   freshSocialAccessToken,
@@ -44,8 +46,29 @@ let settings: Settings;
 const rawKey = randomBytes(32);
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("api_social_flow");
+  const adminUrl = process.env.OPENGENI_API_SOCIAL_FLOW_TEST_POSTGRES_ADMIN_URL;
+  const appUrl = process.env.OPENGENI_API_SOCIAL_FLOW_TEST_POSTGRES_APP_URL;
+  if ((adminUrl && !appUrl) || (!adminUrl && appUrl)) {
+    throw new Error(
+      "OPENGENI_API_SOCIAL_FLOW_TEST_POSTGRES_ADMIN_URL and OPENGENI_API_SOCIAL_FLOW_TEST_POSTGRES_APP_URL must be set together",
+    );
+  }
+  if (adminUrl && appUrl) {
+    await migrate(adminUrl);
+    const admin = postgres(adminUrl, { max: 4 });
+    shared = {
+      admin,
+      adminUrl,
+      appUrl,
+      release: async () => await admin.end().catch(() => undefined),
+    };
+  } else {
+    shared = await acquireSharedTestDatabase("api_social_flow");
+  }
   if (!shared) {
+    if (process.env.OPENGENI_REQUIRE_REAL_DB === "1") {
+      throw new Error("PostgreSQL test database unavailable while OPENGENI_REQUIRE_REAL_DB=1");
+    }
     available = false;
     // eslint-disable-next-line no-console
     console.warn("[social-connector-flow] docker unavailable, skipping");
@@ -236,8 +259,9 @@ async function connect(
   return { start, result };
 }
 
-describe.skipIf(!available)("social connector end-to-end flow", () => {
+describe("social connector end-to-end flow", () => {
   test("x: connect stores an encrypted bundle and a usable connection", async () => {
+    if (!available) return;
     const workspace = await freshWorkspace();
     const provider = fakeProvider();
     const { result } = await connect(workspace, "x", provider.fetchImpl);
@@ -272,6 +296,7 @@ describe.skipIf(!available)("social connector end-to-end flow", () => {
   });
 
   test("x: a near-expiry token refreshes and the rotated refresh token is persisted", async () => {
+    if (!available) return;
     const workspace = await freshWorkspace();
     // expires_in=1 on the initial grant forces a refresh on first use.
     const provider = fakeProvider({ xAccessTokenSeq: ["x-access-1", "x-access-2"] });
@@ -302,6 +327,7 @@ describe.skipIf(!available)("social connector end-to-end flow", () => {
   });
 
   test("x: search, mentions, and reply run the full loop", async () => {
+    if (!available) return;
     const workspace = await freshWorkspace();
     const provider = fakeProvider({ xAccessTokenSeq: ["x-access-1", "x-access-2"] });
     await connect(workspace, "x", provider.fetchImpl);
@@ -339,6 +365,7 @@ describe.skipIf(!available)("social connector end-to-end flow", () => {
   });
 
   test("x: own-post sync is idempotent across repeated runs", async () => {
+    if (!available) return;
     const workspace = await freshWorkspace();
     const provider = fakeProvider({ xAccessTokenSeq: ["x-access-1", "x-access-2"] });
     await connect(workspace, "x", provider.fetchImpl);
@@ -379,6 +406,7 @@ describe.skipIf(!available)("social connector end-to-end flow", () => {
   });
 
   test("reddit: connect, search a subreddit, and publish a comment reply", async () => {
+    if (!available) return;
     const workspace = await freshWorkspace();
     const provider = fakeProvider();
     const { result } = await connect(workspace, "reddit", provider.fetchImpl);
@@ -414,6 +442,7 @@ describe.skipIf(!available)("social connector end-to-end flow", () => {
   });
 
   test("reconnecting the same account replaces the credential instead of duplicating", async () => {
+    if (!available) return;
     const workspace = await freshWorkspace();
     await connect(workspace, "x", fakeProvider().fetchImpl);
     await connect(workspace, "x", fakeProvider({ xAccessTokenSeq: ["x-access-9"] }).fetchImpl);
@@ -435,6 +464,7 @@ describe.skipIf(!available)("social connector end-to-end flow", () => {
   });
 
   test("a revoked grant surfaces as needs_reauth instead of an opaque failure", async () => {
+    if (!available) return;
     const workspace = await freshWorkspace();
     const provider = fakeProvider();
     await connect(workspace, "x", provider.fetchImpl);

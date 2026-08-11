@@ -127,6 +127,7 @@ import {
 } from "../github-access";
 import { githubBrowserBaseUrl, githubBrowserGrantClaims } from "../github-browser-flow";
 import {
+  assertSocialConnectionProvider,
   socialMentionsLive,
   socialOwnPostsLive,
   socialPostReply,
@@ -286,6 +287,18 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   // Publishes under the user's identity: connections:write keeps it out of the
   // default agent permission set, unlike the read-only social tools above.
   social_post_reply: { allOf: ["connections:write"] },
+  x_accounts_list: { allOf: ["connections:read"] },
+  x_search_live: { allOf: ["connections:read"] },
+  x_mentions_live: { allOf: ["connections:read"] },
+  x_thread_fetch: { allOf: ["connections:read"] },
+  x_posts_sync: { allOf: ["connections:write"] },
+  x_post_reply: { allOf: ["connections:write"] },
+  reddit_accounts_list: { allOf: ["connections:read"] },
+  reddit_search_live: { allOf: ["connections:read"] },
+  reddit_mentions_live: { allOf: ["connections:read"] },
+  reddit_thread_fetch: { allOf: ["connections:read"] },
+  reddit_posts_sync: { allOf: ["connections:write"] },
+  reddit_post_reply: { allOf: ["connections:write"] },
   scheduled_tasks_list: {
     anyOf: ["scheduled_tasks:manage", "scheduled_tasks:run"],
   },
@@ -417,6 +430,14 @@ export function buildOpenGeniMcpServer(
       ({ connection }) => connection.id === connectionId,
     );
     if (!authority) throw new Error(`Unknown or unavailable social connection: ${connectionId}`);
+    return authority;
+  };
+  const requireAuthorizedSocialConnectionForProvider = async (
+    provider: "x" | "reddit",
+    connectionId: string,
+  ) => {
+    const authority = await requireAuthorizedSocialConnection(connectionId);
+    assertSocialConnectionProvider(authority.connection, provider);
     return authority;
   };
 
@@ -745,6 +766,116 @@ export function buildOpenGeniMcpServer(
         });
       },
     );
+
+    // Provider-scoped aliases are the canonical tools advertised by the X and
+    // Reddit Integration cards. The legacy social_* names remain available to
+    // existing Packs/sessions, but these names bind the provider in the tool
+    // identity and reject a near-identical Connection from the other adapter.
+    for (const provider of ["x", "reddit"] as const) {
+      const providerName = provider === "x" ? "X" : "Reddit";
+      server.registerTool(
+        `${provider}_accounts_list`,
+        {
+          description: `List the exact visible ${providerName} accounts available to this work.`,
+          inputSchema: { limit: z4.number().int().positive().optional() },
+        },
+        async ({ limit }) =>
+          json({
+            connections: (await authorizedSocialConnections())
+              .filter(
+                ({ connection }) =>
+                  connection.provider === provider && connection.status !== "disabled",
+              )
+              .slice(0, boundedMcpLimit(limit))
+              .map(({ connection }) => connection),
+          }),
+      );
+      server.registerTool(
+        `${provider}_search_live`,
+        {
+          description:
+            provider === "x"
+              ? "Search recent X conversations through one exact connected X account."
+              : "Search Reddit through one exact connected Reddit account; optionally scope to a subreddit.",
+          inputSchema: {
+            connectionId: z4.string().uuid(),
+            query: z4.string().min(1).max(512),
+            subreddit: z4.string().min(1).max(100).optional(),
+            limit: z4.number().int().positive().optional(),
+          },
+        },
+        async ({ connectionId, query, subreddit, limit }) => {
+          const authority = await requireAuthorizedSocialConnectionForProvider(
+            provider,
+            connectionId,
+          );
+          const result = await socialSearchLive(
+            deps,
+            {
+              workspaceId: grant.workspaceId,
+              connectionId,
+              subjectId: authority.subjectId,
+            },
+            { query, subreddit, limit },
+          );
+          return json({ provider: result.connection.provider, posts: result.posts });
+        },
+      );
+      server.registerTool(
+        `${provider}_mentions_live`,
+        {
+          description: `Fetch live ${providerName} mentions and replies through one exact connected account.`,
+          inputSchema: {
+            connectionId: z4.string().uuid(),
+            sinceId: z4.string().optional(),
+            limit: z4.number().int().positive().optional(),
+          },
+        },
+        async ({ connectionId, sinceId, limit }) => {
+          const authority = await requireAuthorizedSocialConnectionForProvider(
+            provider,
+            connectionId,
+          );
+          const result = await socialMentionsLive(
+            deps,
+            {
+              workspaceId: grant.workspaceId,
+              connectionId,
+              subjectId: authority.subjectId,
+            },
+            { sinceId, limit },
+          );
+          return json({ provider: result.connection.provider, posts: result.posts });
+        },
+      );
+      server.registerTool(
+        `${provider}_thread_fetch`,
+        {
+          description: `Fetch one live ${providerName} conversation thread through an exact connected account.`,
+          inputSchema: {
+            connectionId: z4.string().uuid(),
+            id: z4.string().min(1).max(100),
+            limit: z4.number().int().positive().optional(),
+          },
+        },
+        async ({ connectionId, id, limit }) => {
+          const authority = await requireAuthorizedSocialConnectionForProvider(
+            provider,
+            connectionId,
+          );
+          const result = await socialThreadLive(
+            deps,
+            {
+              workspaceId: grant.workspaceId,
+              connectionId,
+              subjectId: authority.subjectId,
+            },
+            { id, limit },
+          );
+          return json({ provider: result.connection.provider, posts: result.posts });
+        },
+      );
+    }
   }
 
   // Writes are gated on connections:write (never in the default first-party
@@ -846,6 +977,103 @@ export function buildOpenGeniMcpServer(
         });
       },
     );
+
+    for (const provider of ["x", "reddit"] as const) {
+      const providerName = provider === "x" ? "X" : "Reddit";
+      server.registerTool(
+        `${provider}_posts_sync`,
+        {
+          description: `Sync one exact connected ${providerName} account's recent posts into OpenGeni (idempotent).`,
+          inputSchema: {
+            connectionId: z4.string().uuid(),
+            limit: z4.number().int().positive().optional(),
+          },
+        },
+        async ({ connectionId, limit }) => {
+          const authority = await requireAuthorizedSocialConnectionForProvider(
+            provider,
+            connectionId,
+          );
+          const result = await socialOwnPostsLive(
+            deps,
+            {
+              workspaceId: grant.workspaceId,
+              connectionId,
+              subjectId: authority.subjectId,
+            },
+            { limit },
+          );
+          const datedPosts = result.posts.filter((post) => post.createdAt !== null);
+          const synced = await recordSyncedSocialPosts(deps.db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            connectionId,
+            subjectId: authority.subjectId,
+            posts: datedPosts.map((post) => ({
+              externalPostId: post.id,
+              url: post.url,
+              authorHandle: post.author,
+              text: post.text,
+              publishedAt: new Date(post.createdAt!),
+              metrics: post.metrics,
+            })),
+          });
+          return json({
+            provider: result.connection.provider,
+            fetched: result.posts.length,
+            inserted: synced.inserted,
+            skipped: synced.skipped,
+            skippedMissingDate: result.posts.length - datedPosts.length,
+          });
+        },
+      );
+      server.registerTool(
+        `${provider}_post_reply`,
+        {
+          description: `Publish a reply from one exact connected ${providerName} account. This is a public write and should require approval.`,
+          inputSchema: {
+            connectionId: z4.string().uuid(),
+            inReplyToId: z4.string().min(1).max(100),
+            text: z4.string().min(1).max(10000),
+          },
+        },
+        async ({ connectionId, inReplyToId, text }) => {
+          const authority = await requireAuthorizedSocialConnectionForProvider(
+            provider,
+            connectionId,
+          );
+          const result = await socialPostReply(
+            deps,
+            {
+              workspaceId: grant.workspaceId,
+              connectionId,
+              subjectId: authority.subjectId,
+            },
+            { inReplyToId, text },
+          );
+          await recordAuditEvent(deps.db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            subjectId: grant.subjectId,
+            action: "social.post_reply",
+            targetType: "social_connection",
+            targetId: connectionId,
+            metadata: {
+              provider: result.connection.provider,
+              adapterTool: `${provider}_post_reply`,
+              inReplyToId,
+              postedId: result.postedId,
+              url: result.url,
+            },
+          });
+          return json({
+            provider: result.connection.provider,
+            postedId: result.postedId,
+            url: result.url,
+          });
+        },
+      );
+    }
   }
 
   if (!toolspaceMode || can("scheduled_tasks:manage") || can("scheduled_tasks:run")) {

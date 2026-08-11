@@ -208,6 +208,26 @@ renders that inventory as one service card per immutable definition and one
 independent row per named account instance; “Add another account” always creates
 a new Connection/binding instead of replacing a sibling.
 
+X and Reddit use the same multi-account control-center model through a
+first-party social provider adapter. Their catalog cards are
+`provider_integration` projections derived from every visible Personal or
+workspace `social_connections` row, not from one preferred singleton. The safe
+summary publishes provider-specific connected, needs-reauth, disabled, and
+total counts without Connection UUIDs. The detail view then lists exact visible
+accounts for the selected ownership, with independent status, disconnect, and
+add/reconnect actions. Mixed healthy and repair-needed accounts keep the card in
+`needs_attention` without hiding the healthy rows.
+
+New X and Reddit policies use provider-scoped first-party tool identities
+(`x_*` and `reddit_*`). Each tool binds the provider namespace and requires an
+exact matching connection before provider I/O; aggregate
+`social_connections_list`, `social_posts_recent`, and
+`social_daily_analysis_context` remain available for cross-provider Pack flows.
+Legacy generic live/write `social_*` aliases remain compatibility-only during
+rolling migration. The public capability kind remains the compatible `api`
+contract value while item metadata and the web label identify the surface as an
+Integration.
+
 ### Plugin packages
 
 A Plugin is a bounded JSON manifest that groups existing safe component

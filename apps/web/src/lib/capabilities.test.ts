@@ -6,6 +6,7 @@ import {
   capabilityConnectPlan,
   capabilityFilterLabel,
   capabilityFormError,
+  capabilityItemKindLabel,
   capabilityKindLabel,
   capabilityMonogram,
   capabilityReconnectPlan,
@@ -24,6 +25,7 @@ import {
   preferredSocialConnection,
   registryResultsForQuery,
   resolveSheetItem,
+  socialConnectionsForOwnership,
   subjectOAuthConnectionRef,
   workspaceConnectionForDomain,
 } from "./capabilities";
@@ -158,6 +160,9 @@ describe("human labels", () => {
     expect(capabilityKindLabel("mcp")).toBe("MCP server");
     expect(capabilityKindLabel("api")).toBe("API");
     expect(capabilityKindLabel("pack")).toBe("Pack");
+    expect(
+      capabilityItemKindLabel(item({ kind: "api", surfaceType: "provider_integration" })),
+    ).toBe("Integration");
   });
 
   test("source labels are human", () => {
@@ -216,12 +221,12 @@ describe("curated skill provenance", () => {
 });
 
 describe("capabilityConnectPlan", () => {
-  test("first-party social APIs use their dedicated OAuth connector", () => {
+  test("social provider integrations use their dedicated OAuth connector", () => {
     const x = item({
       id: "api:x",
       kind: "api",
-      surfaceType: "first_party_social",
-      metadata: { provider: "x" },
+      surfaceType: "provider_integration",
+      metadata: { providerAdapter: "social", provider: "x" },
     });
     expect(capabilityConnectPlan(x)).toEqual({ mode: "social_oauth", provider: "x" });
     expect(capabilityAuthHint(x)).toBe("OAuth");
@@ -332,6 +337,30 @@ describe("first-party social capability state", () => {
     });
     const connected = socialConnection({ updatedAt: "2026-08-02T00:00:00.000Z" });
     expect(preferredSocialConnection([disabled, connected], "x")?.status).toBe("connected");
+  });
+
+  test("keeps every exact account and filters ownership without singleton collapse", () => {
+    const personal = socialConnection({
+      id: "11111111-1111-4111-8111-111111111113",
+      ownership: "personal",
+      accountHandle: "personal",
+      updatedAt: "2026-08-04T00:00:00.000Z",
+    });
+    const needsReauth = socialConnection({
+      id: "11111111-1111-4111-8111-111111111114",
+      status: "needs_reauth",
+      accountHandle: "support",
+      updatedAt: "2026-08-05T00:00:00.000Z",
+    });
+    const connected = socialConnection({
+      id: "11111111-1111-4111-8111-111111111115",
+      accountHandle: "main",
+      updatedAt: "2026-08-03T00:00:00.000Z",
+    });
+    expect(socialConnectionsForOwnership([personal, needsReauth, connected], "workspace")).toEqual([
+      connected,
+      needsReauth,
+    ]);
   });
 });
 

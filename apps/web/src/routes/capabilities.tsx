@@ -51,7 +51,7 @@ import {
   capabilityErrorToast,
   capabilityFilterLabel,
   capabilityInputFromForm,
-  capabilityKindLabel,
+  capabilityItemKindLabel,
   connectionHealth,
   connectionToReuseForApiKey,
   createInputFromCatalogItem,
@@ -1758,7 +1758,7 @@ function EnabledCard({
             <span aria-hidden className="text-fg-subtle/50">
               ·
             </span>
-            <span className="truncate">{capabilityKindLabel(item.kind)}</span>
+            <span className="truncate">{capabilityItemKindLabel(item)}</span>
           </div>
         </div>
       </button>

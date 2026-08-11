@@ -124,7 +124,9 @@ still permission-, deployment-, session-, and Toolspace-mode-dependent.
 | Docs: `memory_propose` | Mutation | v1 receipt |
 | First-party: `files_get_download_url` | Read | Bounded access URL/result required to perform the read; not a redundant entity echo |
 | First-party: `github_repositories_list` | List | Existing bounded list/read result |
-| First-party: `social_connections_list`, `social_posts_recent` | List | Existing bounded list result |
+| First-party: `x_accounts_list`, `reddit_accounts_list`, `social_connections_list`, `social_posts_recent` | List | Existing bounded provider/account or aggregate list result |
+| First-party: `x_search_live`, `x_mentions_live`, `x_thread_fetch`, `reddit_search_live`, `reddit_mentions_live`, `reddit_thread_fetch` | Read/list | Existing bounded provider result; the exact connection must match the tool namespace |
+| First-party: `x_posts_sync`, `reddit_posts_sync` | Mutation | Existing bounded sync result; writes the durable social-post store and requires an exact provider-matching connection |
 | First-party: `social_daily_analysis_context` | Read | Existing bounded analysis input projection |
 | First-party: `scheduled_tasks_list` | List | Compact, offset-paginated list result; scheduled-task entity bodies are not returned |
 | First-party: `scheduled_task_runs_list` | List | Existing caller-limited run list; not a redundant mutation echo |

@@ -24,11 +24,11 @@ import {
 } from "@/components/ui/sheet";
 import {
   capabilityConnectPlan,
-  capabilityKindLabel,
+  capabilityItemKindLabel,
   capabilityReconnectPlan,
   capabilitySourceLabel,
   curatedSkillProvenance,
-  preferredSocialConnection,
+  socialConnectionsForOwnership,
   GENERIC_API_KEY_FIELD,
   type ConnectionHealth,
 } from "@/lib/capabilities";
@@ -218,7 +218,7 @@ function DetailBody({
           <div className="min-w-0 flex-1">
             <SheetTitle className="truncate text-base">{item.name}</SheetTitle>
             <SheetDescription className="mt-0.5 text-xs text-fg-subtle">
-              {capabilityKindLabel(item.kind)}
+              {capabilityItemKindLabel(item)}
               {item.category && item.category !== "custom" ? ` · ${item.category}` : ""}
             </SheetDescription>
           </div>
@@ -449,24 +449,65 @@ export function SocialConnectorControls({
   canManage: boolean;
   onAction: (action: ConnectAction) => void;
 }) {
-  const connection = preferredSocialConnection(
-    connections.filter((candidate) => candidate.ownership === ownership),
-    provider,
+  const visibleConnections = socialConnectionsForOwnership(
+    connections.filter((candidate) => candidate.provider === provider),
+    ownership,
   );
+  const connected = visibleConnections.filter((connection) => connection.status === "connected");
+  const needsReauth = visibleConnections.filter(
+    (connection) => connection.status === "needs_reauth",
+  );
+  const hasUsableAccount = connected.length + needsReauth.length > 0;
   const canConnect = ownership === "personal" || canManage;
   return (
     <div className="space-y-3">
       <OwnershipSelector value={ownership} onChange={onOwnershipChange} />
-      {connection ? (
-        <Notice tone={connection.status === "connected" ? "success" : "waiting"}>
-          <span className="font-medium">
-            {connection.status === "connected"
-              ? `Connected as @${connection.accountHandle}`
-              : connection.status === "needs_reauth"
-                ? `@${connection.accountHandle} needs to reconnect`
-                : `@${connection.accountHandle} is disconnected`}
-          </span>
-        </Notice>
+      {visibleConnections.length > 0 ? (
+        <div className="divide-y divide-border rounded-lg border border-border" role="list">
+          {visibleConnections.map((connection) => (
+            <div
+              key={connection.id}
+              className="flex min-h-14 items-center gap-3 px-3 py-2.5"
+              role="listitem"
+            >
+              <span
+                className={cn(
+                  "size-2 shrink-0 rounded-full",
+                  connection.status === "connected"
+                    ? "bg-status-idle"
+                    : connection.status === "needs_reauth"
+                      ? "bg-status-waiting"
+                      : "bg-fg-subtle/40",
+                )}
+                aria-hidden
+              />
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-xs font-medium text-fg">
+                  {connection.accountName || `@${connection.accountHandle}`}
+                </p>
+                <p className="truncate text-2xs text-fg-subtle">
+                  @{connection.accountHandle} · {socialConnectionStatusLabel(connection.status)}
+                </p>
+              </div>
+              {connection.status !== "disabled" ? (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="shrink-0 text-status-failed hover:bg-status-failed/10 hover:text-status-failed pointer-coarse:min-h-11"
+                  disabled={busy || !canConnect}
+                  aria-label={`Disconnect @${connection.accountHandle}`}
+                  onClick={() =>
+                    onAction({ type: "disconnect_social", item, connectionId: connection.id })
+                  }
+                >
+                  <TrashIcon />
+                  Disconnect
+                </Button>
+              ) : null}
+            </div>
+          ))}
+        </div>
       ) : null}
       <Button
         type="button"
@@ -475,29 +516,19 @@ export function SocialConnectorControls({
         onClick={() => onAction({ type: "social_oauth", item, provider, ownership })}
       >
         {busy ? <Loader2Icon className="animate-spin" /> : <PlugIcon />}
-        {connection && connection.status !== "disabled"
-          ? `Reconnect ${item.name}`
-          : ownership === "workspace"
-            ? `Connect ${item.name} for workspace`
-            : `Connect ${item.name} only for me`}
+        {needsReauth.length > 0
+          ? `Reconnect or add ${item.name} account`
+          : hasUsableAccount
+            ? `Add another ${item.name} account`
+            : ownership === "workspace"
+              ? `Connect ${item.name} for workspace`
+              : `Connect ${item.name} only for me`}
       </Button>
       <p className="text-center text-xs text-fg-subtle">
         {ownership === "workspace"
           ? "Workspace shared. Agents and scheduled automations can use the connected account; connect a brand account rather than a personal one."
           : "Personal. Used only by work carrying your explicit connection authority, including tasks you create from that authority."}
       </p>
-      {connection?.status === "connected" ? (
-        <Button
-          type="button"
-          variant="outline"
-          className="w-full"
-          disabled={busy || !canConnect}
-          onClick={() => onAction({ type: "disconnect_social", item, connectionId: connection.id })}
-        >
-          <TrashIcon />
-          Disconnect
-        </Button>
-      ) : null}
       {ownership === "workspace" && !canManage ? (
         <p className="text-center text-xs text-fg-subtle">
           Workspace admin permission is required to manage this connection.
@@ -505,6 +536,12 @@ export function SocialConnectorControls({
       ) : null}
     </div>
   );
+}
+
+function socialConnectionStatusLabel(status: SocialConnection["status"]): string {
+  if (status === "connected") return "Connected";
+  if (status === "needs_reauth") return "Needs reconnection";
+  return "Disconnected";
 }
 
 export function OwnershipSelector({

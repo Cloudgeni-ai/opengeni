@@ -13,11 +13,13 @@ import {
   type Database,
   type DbClient,
 } from "@opengeni/db";
+import { migrate } from "@opengeni/db/migrate";
 import {
   acquireSharedTestDatabase,
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
+import postgres from "postgres";
 import {
   applyCapabilityEnablement,
   buildCapabilityCatalog,
@@ -33,9 +35,30 @@ let settings: Settings;
 let encryptionKey: Uint8Array;
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("core-capability-subject-connections");
+  const adminUrl = process.env.OPENGENI_CORE_CAPABILITIES_TEST_POSTGRES_ADMIN_URL;
+  const appUrl = process.env.OPENGENI_CORE_CAPABILITIES_TEST_POSTGRES_APP_URL;
+  if ((adminUrl && !appUrl) || (!adminUrl && appUrl)) {
+    throw new Error(
+      "OPENGENI_CORE_CAPABILITIES_TEST_POSTGRES_ADMIN_URL and OPENGENI_CORE_CAPABILITIES_TEST_POSTGRES_APP_URL must be set together",
+    );
+  }
+  if (adminUrl && appUrl) {
+    await migrate(adminUrl);
+    const admin = postgres(adminUrl, { max: 4 });
+    shared = {
+      admin,
+      adminUrl,
+      appUrl,
+      release: async () => await admin.end().catch(() => undefined),
+    };
+  } else {
+    shared = await acquireSharedTestDatabase("core-capability-subject-connections");
+  }
   if (!shared) {
     available = false;
+    if (process.env.OPENGENI_REQUIRE_REAL_DB === "1") {
+      throw new Error("[capability-subject-connections] PostgreSQL is required but unavailable");
+    }
     console.warn("[capability-subject-connections] docker unavailable, skipping");
     return;
   }
@@ -131,17 +154,21 @@ describe("subject-owned capability connection references", () => {
     expect(source).not.toContain("personalSlackMcpCatalogItem");
   });
 
-  test("does not mistake a browseable first-party social connector for a connection", () => {
+  test("does not mistake a browseable social provider integration for a connection", () => {
     const item = CapabilityCatalogItem.parse({
       id: "api:x",
       kind: "api",
       source: "built_in",
       name: "X",
       category: "social-media",
-      surfaceType: "first_party_social",
+      surfaceType: "provider_integration",
       enabled: false,
       enabledReason: null,
-      metadata: { provider: "x", ownership: "workspace" },
+      metadata: {
+        providerAdapter: "social",
+        provider: "x",
+        connectionCounts: { connected: 0, needsReauth: 0, disabled: 0, total: 0 },
+      },
     });
     expect(applyCapabilityEnablement(item, undefined, new Set())).toMatchObject({
       enabled: false,
@@ -224,7 +251,7 @@ describe("subject-owned capability connection references", () => {
     });
   });
 
-  test("publishes X as a workspace-shared first-party connector with truthful state", async () => {
+  test("publishes X and Reddit as multi-account provider integrations with truthful state", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const disconnectedCatalog = await buildCapabilityCatalog({
@@ -234,17 +261,44 @@ describe("subject-owned capability connection references", () => {
     });
     expect(disconnectedCatalog.items.find((item) => item.id === "api:x")).toMatchObject({
       kind: "api",
-      surfaceType: "first_party_social",
+      surfaceType: "provider_integration",
       enabled: false,
-      metadata: { provider: "x", ownership: "workspace" },
+      lifecycle: { status: "available", readiness: "setup_required", managedBy: null },
+      metadata: {
+        providerAdapter: "social",
+        provider: "x",
+        connectionCounts: { connected: 0, needsReauth: 0, disabled: 0, total: 0 },
+      },
       tools: [{ kind: "mcp", id: "opengeni" }],
     });
+    expect(disconnectedCatalog.items.find((item) => item.id === "api:reddit")).toMatchObject({
+      surfaceType: "provider_integration",
+      enabled: false,
+      metadata: { providerAdapter: "social", provider: "reddit" },
+    });
 
-    await createSocialConnection(db, {
+    const connected = await createSocialConnection(db, {
       ...workspace,
       provider: "x",
       accountHandle: "opengeni",
+      externalAccountId: "x-opengeni",
       status: "connected",
+      scopes: ["tweet.read", "users.read"],
+    });
+    const needsReauth = await createSocialConnection(db, {
+      ...workspace,
+      provider: "x",
+      accountHandle: "opengeni_support",
+      externalAccountId: "x-opengeni-support",
+      status: "needs_reauth",
+      scopes: ["tweet.read", "users.read"],
+    });
+    const disabled = await createSocialConnection(db, {
+      ...workspace,
+      provider: "x",
+      accountHandle: "opengeni_archive",
+      externalAccountId: "x-opengeni-archive",
+      status: "disabled",
       scopes: ["tweet.read", "users.read"],
     });
     const connectedCatalog = await buildCapabilityCatalog({
@@ -254,8 +308,17 @@ describe("subject-owned capability connection references", () => {
     });
     expect(connectedCatalog.items.find((item) => item.id === "api:x")).toMatchObject({
       enabled: true,
-      enabledReason: "workspace social account connected",
+      enabledReason: "1 connected account; 1 account needs reconnection; 1 disconnected account",
+      lifecycle: { status: "needs_attention", readiness: "attention", managedBy: null },
+      actions: ["repair", "connect", "disconnect", "inspect"],
+      metadata: {
+        connectionCounts: { connected: 1, needsReauth: 1, disabled: 1, total: 3 },
+      },
     });
+    const projected = JSON.stringify(connectedCatalog);
+    expect(projected).not.toContain(connected.id);
+    expect(projected).not.toContain(needsReauth.id);
+    expect(projected).not.toContain(disabled.id);
   });
 
   test("resolves Alice's generic ref and never persists or projects a personal UUID", async () => {

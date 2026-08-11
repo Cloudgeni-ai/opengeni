@@ -1,7 +1,7 @@
 import { memo } from "react";
 
 import { CapabilityLogo } from "@/components/capabilities/capability-logo";
-import { capabilityAuthHint, capabilityKindLabel } from "@/lib/capabilities";
+import { capabilityAuthHint, capabilityItemKindLabel } from "@/lib/capabilities";
 import { cn } from "@/lib/utils";
 import type { CapabilityCatalogItem } from "@/types";
 
@@ -49,7 +49,7 @@ export const CapabilityTile = memo(function CapabilityTile({
       </div>
 
       <div className="flex items-center gap-2 text-2xs text-fg-subtle">
-        <span className="truncate">{capabilityKindLabel(item.kind)}</span>
+        <span className="truncate">{capabilityItemKindLabel(item)}</span>
         {authHint ? (
           <>
             <span aria-hidden className="text-fg-subtle/50">

@@ -32,6 +32,12 @@ export function capabilityKindLabel(kind: CapabilityKind): string {
   }
 }
 
+export function capabilityItemKindLabel(item: CapabilityCatalogItem): string {
+  return item.surfaceType === "provider_integration"
+    ? "Integration"
+    : capabilityKindLabel(item.kind);
+}
+
 /** Human label for where a catalog item came from. */
 export function capabilitySourceLabel(source: CapabilitySource | string): string {
   switch (source) {
@@ -205,7 +211,10 @@ export type CapabilityConnectPlan =
   | { mode: "api_key"; providerDomain: string; fields: RequiredHeaderField[] };
 
 export function capabilityConnectPlan(item: CapabilityCatalogItem): CapabilityConnectPlan {
-  if (item.surfaceType === "first_party_social") {
+  if (
+    item.surfaceType === "first_party_social" ||
+    (item.surfaceType === "provider_integration" && item.metadata.providerAdapter === "social")
+  ) {
     const provider = stringValue(item.metadata.provider);
     if (provider === "x" || provider === "reddit") {
       return { mode: "social_oauth", provider };
@@ -247,18 +256,27 @@ export function preferredSocialConnection(
   connections: SocialConnection[],
   provider: "x" | "reddit",
 ): SocialConnection | null {
+  return (
+    socialConnectionsForOwnership(
+      connections.filter((connection) => connection.provider === provider),
+    )[0] ?? null
+  );
+}
+
+export function socialConnectionsForOwnership(
+  connections: SocialConnection[],
+  ownership?: ConnectionOwnership,
+): SocialConnection[] {
   const statusRank = (status: SocialConnection["status"]): number =>
     status === "connected" ? 0 : status === "needs_reauth" ? 1 : 2;
-  return (
-    connections
-      .filter((connection) => connection.provider === provider)
-      .sort(
-        (left, right) =>
-          statusRank(left.status) - statusRank(right.status) ||
-          right.updatedAt.localeCompare(left.updatedAt) ||
-          left.id.localeCompare(right.id),
-      )[0] ?? null
-  );
+  return connections
+    .filter((connection) => ownership === undefined || connection.ownership === ownership)
+    .sort(
+      (left, right) =>
+        statusRank(left.status) - statusRank(right.status) ||
+        right.updatedAt.localeCompare(left.updatedAt) ||
+        right.id.localeCompare(left.id),
+    );
 }
 
 function headerField(name: string): RequiredHeaderField {

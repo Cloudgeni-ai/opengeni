@@ -196,7 +196,7 @@ The built-in Pack exposes:
 
 - Pack catalog and installation records under `/v1/workspaces/:workspaceId/packs`;
 - social connector routes under `/v1/workspaces/:workspaceId/social`;
-- OpenGeni MCP tools such as `social_connections_list`, `social_posts_recent`, and `social_daily_analysis_context`;
+- provider-scoped X/Reddit live tools (`x_*` and `reddit_*`) bound to exact accounts, plus aggregate Pack tools such as `social_connections_list`, `social_posts_recent`, and `social_daily_analysis_context`;
 - optional document knowledge through the docs MCP server;
 - a daily analysis scheduled-task template.
 

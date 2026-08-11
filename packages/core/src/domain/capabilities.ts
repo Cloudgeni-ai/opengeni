@@ -114,7 +114,7 @@ export async function buildCapabilityCatalog(input: {
       packCatalogItem(pack, builtInPackIds.has(pack.id) ? "built_in" : "manual"),
     ),
     ...configuredMcpCatalogItems(input.settings),
-    ...platformApiCatalogItems(socialConnections),
+    ...providerIntegrationCatalogItems(socialConnections),
     ...curatedLibrarySkills,
   ];
   const codexApps = input.settings.codexConnectedAppsEnabled
@@ -1194,52 +1194,93 @@ export function codexAppsCatalogItem(available: boolean): CapabilityCatalogItem 
   });
 }
 
-function platformApiCatalogItems(socialConnections: SocialConnection[]): CapabilityCatalogItem[] {
-  const xConnection = preferredSocialConnection(socialConnections, "x");
-  const xEnabled = xConnection?.status === "connected" || xConnection?.status === "needs_reauth";
-  const x = CapabilityCatalogItem.parse({
-    id: "api:x",
-    kind: "api",
-    source: "built_in",
+type SocialProviderIntegrationDefinition = {
+  provider: "x" | "reddit";
+  name: string;
+  description: string;
+  providerDomain: string;
+  homepageUrl: string;
+  tags: string[];
+};
+
+const SOCIAL_PROVIDER_INTEGRATIONS: readonly SocialProviderIntegrationDefinition[] = [
+  {
+    provider: "x",
     name: "X",
     description:
-      "Connect an X account for live search, mentions, thread context, post sync, and permission-controlled replies.",
-    category: "social-media",
-    tags: ["api", "x", "twitter", "social", "marketing"],
-    homepageUrl: "https://x.com",
-    authModel: "oauth2_authorization_code_pkce",
+      "Connect one or more X accounts for live search, mentions, thread context, post sync, and permission-controlled replies.",
     providerDomain: "x.com",
-    surfaceType: "first_party_social",
-    authKind: "oauth2",
-    tools: [{ kind: "mcp", id: "opengeni" }],
-    runtime: {
-      available: true,
-      mcpServerId: "opengeni",
-      notes: "Account access is provided through OpenGeni's first-party social tools.",
-    },
-    enabled: xEnabled,
-    enabledReason: xEnabled
-      ? xConnection.status === "connected"
-        ? `${xConnection.ownership} social account connected`
-        : `${xConnection.ownership} social account needs reconnection`
-      : null,
-    metadata: {
-      connectorMode: "first_party_social",
-      provider: "x",
-      ownership: xConnection?.ownership ?? "workspace",
-      firstPartyMcpTools: [
-        "social_connections_list",
-        "social_posts_recent",
-        "social_daily_analysis_context",
-        "social_search_live",
-        "social_mentions_live",
-        "social_thread_fetch",
-        "social_posts_sync",
-        "social_post_reply",
-      ],
-    },
+    homepageUrl: "https://x.com",
+    tags: ["api", "x", "twitter", "social", "marketing"],
+  },
+  {
+    provider: "reddit",
+    name: "Reddit",
+    description:
+      "Connect one or more Reddit accounts for search, mentions, thread context, account sync, and permission-controlled replies.",
+    providerDomain: "reddit.com",
+    homepageUrl: "https://www.reddit.com",
+    tags: ["api", "reddit", "social", "community", "marketing"],
+  },
+];
+
+const SOCIAL_PROVIDER_TOOL_NAMES = {
+  x: [
+    "x_accounts_list",
+    "x_search_live",
+    "x_mentions_live",
+    "x_thread_fetch",
+    "x_posts_sync",
+    "x_post_reply",
+  ],
+  reddit: [
+    "reddit_accounts_list",
+    "reddit_search_live",
+    "reddit_mentions_live",
+    "reddit_thread_fetch",
+    "reddit_posts_sync",
+    "reddit_post_reply",
+  ],
+} as const;
+
+function providerIntegrationCatalogItems(
+  socialConnections: SocialConnection[],
+): CapabilityCatalogItem[] {
+  return SOCIAL_PROVIDER_INTEGRATIONS.map((definition) => {
+    const counts = socialConnectionCounts(socialConnections, definition.provider);
+    const enabled = counts.connected + counts.needsReauth > 0;
+    return CapabilityCatalogItem.parse({
+      id: `api:${definition.provider}`,
+      kind: "api",
+      source: "built_in",
+      name: definition.name,
+      description: definition.description,
+      category: "social-media",
+      tags: definition.tags,
+      homepageUrl: definition.homepageUrl,
+      authModel: "oauth2_authorization_code_pkce",
+      providerDomain: definition.providerDomain,
+      surfaceType: "provider_integration",
+      authKind: "oauth2",
+      tools: [{ kind: "mcp", id: "opengeni" }],
+      runtime: {
+        available: true,
+        mcpServerId: "opengeni",
+        notes:
+          "OpenGeni's social provider adapter routes every call through an exact visible account Connection.",
+      },
+      enabled,
+      enabledReason: socialConnectionSummary(counts),
+      provenance: "OpenGeni provider adapter",
+      metadata: {
+        providerAdapter: "social",
+        provider: definition.provider,
+        connectionCounts: counts,
+        runtimeNamespace: "social",
+        firstPartyMcpTools: SOCIAL_PROVIDER_TOOL_NAMES[definition.provider],
+      },
+    });
   });
-  return [x];
 }
 
 /**
@@ -1285,22 +1326,35 @@ export function nativeConnectionCapabilityRecommendations(): CapabilityCatalogIt
   ];
 }
 
-function preferredSocialConnection(
+function socialConnectionCounts(
   connections: SocialConnection[],
   provider: "x" | "reddit",
-): SocialConnection | null {
-  const statusRank = (status: SocialConnection["status"]): number =>
-    status === "connected" ? 0 : status === "needs_reauth" ? 1 : 2;
-  return (
-    connections
-      .filter((connection) => connection.provider === provider)
-      .sort(
-        (left, right) =>
-          statusRank(left.status) - statusRank(right.status) ||
-          right.updatedAt.localeCompare(left.updatedAt) ||
-          left.id.localeCompare(right.id),
-      )[0] ?? null
-  );
+): { connected: number; needsReauth: number; disabled: number; total: number } {
+  const matching = connections.filter((connection) => connection.provider === provider);
+  return {
+    connected: matching.filter((connection) => connection.status === "connected").length,
+    needsReauth: matching.filter((connection) => connection.status === "needs_reauth").length,
+    disabled: matching.filter((connection) => connection.status === "disabled").length,
+    total: matching.length,
+  };
+}
+
+function socialConnectionSummary(counts: ReturnType<typeof socialConnectionCounts>): string | null {
+  const parts: string[] = [];
+  if (counts.connected > 0) {
+    parts.push(`${counts.connected} connected account${counts.connected === 1 ? "" : "s"}`);
+  }
+  if (counts.needsReauth > 0) {
+    parts.push(
+      `${counts.needsReauth} account${counts.needsReauth === 1 ? "" : "s"} need${
+        counts.needsReauth === 1 ? "s" : ""
+      } reconnection`,
+    );
+  }
+  if (counts.disabled > 0) {
+    parts.push(`${counts.disabled} disconnected account${counts.disabled === 1 ? "" : "s"}`);
+  }
+  return parts.length > 0 ? parts.join("; ") : null;
 }
 
 /**
@@ -1349,6 +1403,37 @@ function stringMetadata(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
 
+function isSocialProviderIntegration(item: CapabilityCatalogItem): boolean {
+  return (
+    item.surfaceType === "first_party_social" ||
+    (item.surfaceType === "provider_integration" && item.metadata.providerAdapter === "social")
+  );
+}
+
+function socialProviderConnectionCounts(item: CapabilityCatalogItem): {
+  connected: number;
+  needsReauth: number;
+} {
+  const value = item.metadata.connectionCounts;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {
+      connected: item.enabled && !item.enabledReason?.includes("reconnection") ? 1 : 0,
+      needsReauth: item.enabledReason?.includes("reconnection") ? 1 : 0,
+    };
+  }
+  const record = value as Record<string, unknown>;
+  return {
+    connected:
+      typeof record.connected === "number" && Number.isInteger(record.connected)
+        ? Math.max(0, record.connected)
+        : 0,
+    needsReauth:
+      typeof record.needsReauth === "number" && Number.isInteger(record.needsReauth)
+        ? Math.max(0, record.needsReauth)
+        : 0,
+  };
+}
+
 export function applyCapabilityEnablement(
   item: CapabilityCatalogItem,
   installation: CapabilityInstallation | undefined,
@@ -1365,10 +1450,10 @@ export function applyCapabilityEnablement(
       enabledReason: enabled ? "enabled" : null,
     };
   }
-  if (item.surfaceType === "first_party_social") {
-    // Social connector state is derived from the authoritative workspace
-    // connection row while the catalog is built. Being built in means the
-    // connector is browseable, not that an account is already connected.
+  if (isSocialProviderIntegration(item)) {
+    // Provider-integration state is derived from every authoritative visible
+    // social Connection while the catalog is built. The catalog summary never
+    // publishes a personal connection UUID or collapses many accounts to one.
     return { ...item, connectionRef: null };
   }
   if (item.surfaceType === "codex_apps") {
@@ -1457,20 +1542,22 @@ function applyCapabilityLifecycle(item: CapabilityCatalogItem): CapabilityCatalo
     };
   }
 
-  if (item.surfaceType === "first_party_social") {
-    const needsAttention = item.enabledReason?.includes("needs reconnection") ?? false;
+  if (isSocialProviderIntegration(item)) {
+    const counts = socialProviderConnectionCounts(item);
+    const needsAttention = counts.needsReauth > 0;
+    const connected = counts.connected > 0;
     return {
       ...item,
       lifecycle: {
-        status: needsAttention ? "needs_attention" : item.enabled ? "connected" : "available",
-        readiness: needsAttention ? "attention" : item.enabled ? "ready" : "setup_required",
+        status: needsAttention ? "needs_attention" : connected ? "connected" : "available",
+        readiness: needsAttention ? "attention" : connected ? "ready" : "setup_required",
         detail: item.enabledReason,
-        managedBy: "platform",
+        managedBy: null,
       },
       actions: needsAttention
-        ? ["repair", "disconnect", "inspect"]
-        : item.enabled
-          ? ["configure", "disconnect", "inspect"]
+        ? ["repair", "connect", "disconnect", "inspect"]
+        : connected
+          ? ["connect", "configure", "disconnect", "inspect"]
           : ["connect", "inspect"],
     };
   }
