@@ -15,7 +15,7 @@ import {
   initializeSessionStartAtomically,
   listSessionEvents,
   mutateSessionControlInTransaction,
-  withWorkspaceRls,
+  withWorkspaceSessionActivityRls,
   type DbClient,
 } from "@opengeni/db";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
@@ -582,18 +582,16 @@ describe("embedding host session authorization routes", () => {
     expect(lineage.status).toBe(200);
     expect(await lineage.json()).toEqual({ ancestors: [], children: [], truncated: false });
 
-    await withWorkspaceRls(client.db, value.grant.workspaceId, (scoped) =>
-      scoped.transaction((tx) =>
-        mutateSessionControlInTransaction(tx as typeof client.db, {
-          accountId: value.grant.accountId,
-          workspaceId: value.grant.workspaceId,
-          sessionId: value.root.id,
-          actor: { type: "human", subjectId: value.grant.subjectId },
-          operationKey: crypto.randomUUID(),
-          action: "pause",
-          reason: "private parent reason",
-        }),
-      ),
+    await withWorkspaceSessionActivityRls(client.db, value.grant.workspaceId, (scoped) =>
+      mutateSessionControlInTransaction(scoped, {
+        accountId: value.grant.accountId,
+        workspaceId: value.grant.workspaceId,
+        sessionId: value.root.id,
+        actor: { type: "human", subjectId: value.grant.subjectId },
+        operationKey: crypto.randomUUID(),
+        action: "pause",
+        reason: "private parent reason",
+      }),
     );
     const queue = await app.request(`${base}/queue`, { headers });
     expect(queue.status).toBe(200);
@@ -988,6 +986,7 @@ describe("embedding host session authorization routes", () => {
         label: "Test owner",
       },
       initiatorContext: { label: "Test owner" },
+      initiatingHumanSubjectId: value.grant.subjectId,
     });
 
     const admin = postgres(shared.adminUrl, { max: 1 });

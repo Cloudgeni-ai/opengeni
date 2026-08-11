@@ -18,6 +18,9 @@ import { Notice, type NoticeTone } from "@/components/ui/notice";
 import { Select } from "@/components/ui/select";
 import { useAppContext } from "@/context";
 import {
+  GOOGLE_DRIVE_ACCESS_DISCLOSURE,
+  GOOGLE_DRIVE_APP_DESCRIPTION,
+  GOOGLE_DRIVE_SYNC_BEHAVIOR,
   googleDriveAccountState,
   googleDriveConnectionMetadata,
   googleDriveDisconnectAttempt,
@@ -399,7 +402,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
             <div className="min-w-0">
               <div className="text-sm font-medium">Google Drive</div>
               <p className="mt-0.5 text-xs leading-5 text-fg-muted">
-                Connect folders and Shared Drives for recurring knowledge import.
+                {GOOGLE_DRIVE_APP_DESCRIPTION}
               </p>
             </div>
           </div>
@@ -436,6 +439,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
                   <Button
                     type="button"
                     size="sm"
+                    aria-describedby="google-drive-access-disclosure"
                     disabled={busy || !canWrite || readOnly}
                     onClick={() => void connect(true)}
                   >
@@ -460,6 +464,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
               <Button
                 type="button"
                 size="sm"
+                aria-describedby="google-drive-access-disclosure"
                 disabled={busy || !canWrite || readOnly}
                 onClick={() => void connect()}
               >
@@ -469,6 +474,13 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
             )}
           </div>
         </div>
+
+        <p
+          id="google-drive-access-disclosure"
+          className="mt-3 border-t border-border/70 pt-3 text-xs leading-5 text-fg-muted"
+        >
+          {GOOGLE_DRIVE_ACCESS_DISCLOSURE}
+        </p>
 
         {connection && metadata ? (
           <div className="mt-3 grid gap-2 border-t border-border/70 pt-3 text-xs sm:grid-cols-3">
@@ -703,9 +715,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
               </Button>
             </div>
 
-            <div className="text-2xs text-fg-subtle">
-              First import: existing files. Later imports: changes only.
-            </div>
+            <div className="text-2xs text-fg-subtle">{GOOGLE_DRIVE_SYNC_BEHAVIOR}</div>
           </div>
 
           <div className="grid gap-2 sm:grid-cols-3">

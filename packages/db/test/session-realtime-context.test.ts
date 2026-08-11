@@ -17,8 +17,8 @@ import {
   SESSION_REALTIME_TAIL_INSTRUCTION,
   SESSION_REALTIME_TAIL_SOURCE,
   syncSessionRealtimeLedgerInTransaction,
-  withWorkspaceRls,
-  type Database,
+  withWorkspaceSessionActivityRls as withWorkspaceRls,
+  type SessionActivityDatabase,
   type SessionRealtimeContextSourceEntry,
   type SessionRealtimeInboundEntryInput,
 } from "../src/index";
@@ -41,9 +41,12 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-async function transaction<T>(workspaceId: string, fn: (db: Database) => Promise<T>): Promise<T> {
+async function transaction<T>(
+  workspaceId: string,
+  fn: (db: SessionActivityDatabase) => Promise<T>,
+): Promise<T> {
   return await withWorkspaceRls(client.db, workspaceId, (db) =>
-    db.transaction((tx) => fn(tx as unknown as Database)),
+    db.transaction((tx) => fn(tx as unknown as SessionActivityDatabase)),
   );
 }
 

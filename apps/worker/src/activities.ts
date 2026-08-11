@@ -41,6 +41,8 @@ export type {
   RunKnowledgeSourceSyncBatchResult,
   RunAgentTurnInput,
   RunAgentTurnResult,
+  VideoGenerationReconcileResult,
+  VideoGenerationTerminalStatus,
   SessionAttemptQuiescenceProof,
   SharedActivityServices,
   TurnActivityDependencies,
@@ -82,6 +84,8 @@ const defaultControlActivities = createControlActivities();
 const defaultTurnActivities = createTurnActivities();
 
 export const runAgentTurn = defaultTurnActivities.runAgentTurn;
+export const reconcileVideoGenerationOperation =
+  defaultTurnActivities.reconcileVideoGenerationOperation;
 export const indexDocument = defaultControlActivities.indexDocument;
 export const failSessionAttempt = defaultControlActivities.failSessionAttempt;
 export const settleSessionInterruptions = defaultControlActivities.settleSessionInterruptions;
@@ -105,6 +109,8 @@ export const drainSandboxLease = defaultControlActivities.drainSandboxLease;
 export const maintainSandboxLeaseSweep = defaultControlActivities.maintainSandboxLeaseSweep;
 export const reapSandboxLeases = defaultControlActivities.reapSandboxLeases;
 export const reapExpiredFileUploads = defaultControlActivities.reapExpiredFileUploads;
+export const recoverVideoGenerationWorkflows =
+  defaultControlActivities.recoverVideoGenerationWorkflows;
 export const maintainRetainedScreenshots = defaultControlActivities.maintainRetainedScreenshots;
 export const dispatchSessionWorkflowWakes = defaultControlActivities.dispatchSessionWorkflowWakes;
 export const verifyRigChange = defaultControlActivities.verifyRigChange;

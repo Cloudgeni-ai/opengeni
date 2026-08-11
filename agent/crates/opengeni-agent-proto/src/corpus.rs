@@ -104,6 +104,7 @@ pub fn canonical_hello() -> v1::Hello {
             // Left at the proto3 default (false), so the canonical Hello's encoded
             // bytes are unchanged and the existing cross-stack fixtures stay valid.
             op_stream: false,
+            browser_bridge: false,
         }),
         update_channel: "stable".to_string(),
         resume_token: "resume-token-1".to_string(),

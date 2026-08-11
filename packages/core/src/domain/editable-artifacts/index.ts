@@ -1,5 +1,6 @@
 export * from "./errors";
 export * from "./durable-export";
+export * from "./agent-application";
 export * from "./durable-export-postgres";
 export * from "./hash";
 export * from "./in-memory";

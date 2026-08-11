@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { LatencyMode, ReasoningEffort, type SessionRealtimeMode } from "@opengeni/contracts";
 import { and, asc, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 
-import type { Database } from "./database";
+import type { Database, SessionActivityDatabase } from "./database";
 import {
   fromPostgresLosslessJson,
   fromPostgresLosslessText,
@@ -1075,7 +1075,7 @@ async function appendInvalidDelegationFailure(
 }
 
 async function admitRealtimeDelegationInTransaction(
-  db: Database,
+  db: SessionActivityDatabase,
   input: Pick<
     SyncSessionRealtimeLedgerInput,
     "workspaceId" | "sessionId" | "realtimeId" | "connectionEpoch" | "ownerSubjectId"
@@ -1268,7 +1268,7 @@ function assertProviderAckSequences(values: number[] | undefined, maximum: numbe
 }
 
 export async function syncSessionRealtimeLedgerInTransaction(
-  db: Database,
+  db: SessionActivityDatabase,
   input: SyncSessionRealtimeLedgerInput,
   hooks: SyncSessionRealtimeLedgerHooks = {},
 ): Promise<SyncSessionRealtimeLedgerResult> {

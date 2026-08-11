@@ -14,7 +14,7 @@ import {
   getSessionHumanInputRequest,
   peekSessionWork,
   submitHumanPromptInTransaction,
-  withWorkspaceSubjectRls,
+  withWorkspaceSubjectSessionActivityRls as withWorkspaceSubjectRls,
 } from "../src/index";
 
 let shared: SharedTestDatabase;
@@ -66,7 +66,7 @@ async function send(
 ) {
   return await withWorkspaceSubjectRls(client.db, grant.workspaceId, grant.subjectId, (db) =>
     db.transaction((tx) =>
-      submitHumanPromptInTransaction(tx as typeof db, {
+      submitHumanPromptInTransaction(tx as unknown as typeof db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         sessionId,

@@ -106,6 +106,19 @@ async function botConnection(
   });
 }
 
+async function expectSlackBindingConflict(operation: Promise<unknown>) {
+  let failure: unknown;
+  try {
+    await operation;
+  } catch (error) {
+    failure = error;
+  }
+  expect(failure).toBeInstanceOf(Error);
+  expect((failure as Error & { cause?: { message?: string } }).cause?.message).toContain(
+    "OPENGENI_SLACK_BINDING_CONFLICT",
+  );
+}
+
 function inboxInput(input: {
   accountId: string;
   workspaceId: string;
@@ -204,28 +217,31 @@ describe("Slack interaction migration and durable database boundary", () => {
     }
   });
 
-  test("collapses one Slack principal deterministically and fails closed on tenant ambiguity", async () => {
+  test("routes one Slack team and rejects duplicate or cross-tenant installations", async () => {
     if (!available) return;
     const first = await workspace("resolver-a");
     const original = await botConnection(first, "T_RESOLVER", {
       botId: "B_RESOLVER",
       botUserId: "U_RESOLVER_BOT",
     });
-    const duplicate = await botConnection(first, "T_RESOLVER", {
-      botId: "B_RESOLVER",
-      botUserId: "U_RESOLVER_BOT",
-    });
-    expect((await resolveSlackInstallationRoute(db, "T_RESOLVER"))?.connectionId).toBe(
-      duplicate.id,
+    await expectSlackBindingConflict(
+      botConnection(first, "T_RESOLVER", {
+        botId: "B_RESOLVER",
+        botUserId: "U_RESOLVER_BOT",
+      }),
     );
-    expect(duplicate.id).not.toBe(original.id);
+    expect((await resolveSlackInstallationRoute(db, "T_RESOLVER"))?.connectionId).toBe(original.id);
 
     const second = await workspace("resolver-b");
-    await botConnection(second, "T_RESOLVER", {
-      botId: "B_OTHER",
-      botUserId: "U_OTHER_BOT",
-    });
-    expect(await resolveSlackInstallationRoute(db, "T_RESOLVER")).toBeNull();
+    await expectSlackBindingConflict(
+      botConnection(second, "T_RESOLVER", {
+        botId: "B_OTHER",
+        botUserId: "U_OTHER_BOT",
+      }),
+    );
+    expect((await resolveSlackInstallationRoute(db, "T_RESOLVER"))?.workspaceId).toBe(
+      first.workspaceId,
+    );
   });
 
   test("deduplicates reaction event and remove-readd identities, reclaims expired leases, and scopes settlement", async () => {

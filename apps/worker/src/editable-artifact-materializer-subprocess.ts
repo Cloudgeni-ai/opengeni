@@ -350,12 +350,7 @@ function nativeFailureDiagnostic(
   subcode: unknown,
 ): EditableArtifactMaterializerFailureDiagnostic | undefined {
   if (code !== "source_identity_mismatch") return undefined;
-  if (
-    subcode === "input_framing" ||
-    subcode === "snapshot_open" ||
-    subcode === "state_mismatch" ||
-    subcode === "revision_mismatch"
-  ) {
+  if (subcode === "input_framing" || subcode === "snapshot_open" || subcode === "state_mismatch") {
     return { stage: "native", subcode };
   }
   return undefined;

@@ -32,6 +32,7 @@ import {
   type UseSandboxWorkspaceTabsOptions,
   type UseSandboxWorkspaceTabsResult,
   SandboxWorkspace,
+  WORKBENCH_TAB_BROWSER,
   WORKBENCH_TAB_CHANGES,
   WORKBENCH_TAB_DESKTOP,
   WORKBENCH_TAB_FILES,
@@ -207,6 +208,35 @@ function coldClient(
 // ── Embedder surface policy ─────────────────────────────────────────────────
 
 describe("workbench surface allowlist", () => {
+  test("Browser is independent from sandbox capability and machine polling", async () => {
+    const calls = { capabilities: 0, capture: 0, machines: 0 };
+    const client = fakeClient({
+      getStreamCapabilities: async () => {
+        calls.capabilities += 1;
+        return fakeColdCapabilities();
+      },
+      getWorkspaceCapture: async () => {
+        calls.capture += 1;
+        return captureAvailable(fakeManifest(1));
+      },
+      listMachines: async () => {
+        calls.machines += 1;
+        return EMPTY_MACHINES;
+      },
+    } as Partial<SessionClientLike>);
+    const hook = await renderTabsHook(client, {
+      sessionId: SESSION_ID,
+      events: [],
+      surfaces: [WORKBENCH_TAB_BROWSER],
+    });
+    await flush(30);
+
+    expect(hook.result.current.tabs.map((tab) => tab.id)).toEqual([WORKBENCH_TAB_BROWSER]);
+    expect(hook.result.current.machine.enabled).toBe(false);
+    expect(calls).toEqual({ capabilities: 0, capture: 0, machines: 0 });
+    await hook.unmount();
+  });
+
   test("omitting Desktop excludes the tab while retaining the requested surfaces", async () => {
     const { client, spy } = coldClient();
     const hook = await renderTabsHook(client, {

@@ -250,28 +250,6 @@ describe("compiled native artifact materializer", () => {
       },
     });
 
-    const revisionMismatch = parseFrame(
-      (
-        await invoke(
-          fixture,
-          MATERIALIZE,
-          framed(
-            INPUT_MAGIC,
-            manifest({ targetHeadSequence: fixture.headSequence + 1 }),
-            fixture.snapshot,
-          ),
-        )
-      ).stdout,
-    );
-    expect(revisionMismatch).toMatchObject({
-      magic: ERROR_MAGIC,
-      metadata: {
-        code: "source_identity_mismatch",
-        protocol: "OGAMERR1",
-        subcode: "revision_mismatch",
-      },
-    });
-
     const valid = parseFrame(
       (await invoke(fixture, MATERIALIZE, framed(INPUT_MAGIC, manifest(), fixture.snapshot)))
         .stdout,
@@ -364,7 +342,10 @@ async function createFixture(): Promise<Fixture> {
     });
     const snapshot = source.snapshot();
     const stateHash = source.stateHash();
-    const headSequence = Number(source.revision());
+    // One native transaction contains two durable operations. Native revision
+    // and durable operation sequence are intentionally different counters.
+    if (source.revision() !== 1n) throw new Error("materializer fixture revision is invalid");
+    const headSequence = 2;
     const environment = await installRuntime(root, runtime.target, runtime.buildIdentity);
     const identity = await invoke({ root, executable, environment } as Fixture, IDENTITY);
     if (identity.exitCode !== 0 || identity.stderr !== "") {

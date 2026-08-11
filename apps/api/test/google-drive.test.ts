@@ -109,6 +109,7 @@ function googleFixture(
     permissionId?: string;
     omitRefreshToken?: boolean;
     scopes?: string[];
+    refreshScopes?: string[];
     refreshError?: { status: number; error: string; description: string };
     fileListError?: { status: number; reason: string; message: string };
   } = {},
@@ -124,7 +125,8 @@ function googleFixture(
           ? init.body
           : new URLSearchParams(typeof init?.body === "string" ? init.body : "");
       tokenRequests.push(body);
-      if (body.get("grant_type") === "refresh_token" && options.refreshError) {
+      const isRefresh = body.get("grant_type") === "refresh_token";
+      if (isRefresh && options.refreshError) {
         return Response.json(
           {
             error: options.refreshError.error,
@@ -138,7 +140,10 @@ function googleFixture(
         ...(options.omitRefreshToken ? {} : { refresh_token: "google-refresh-token" }),
         token_type: "Bearer",
         expires_in: 3600,
-        scope: (options.scopes ?? [GOOGLE_DRIVE_READONLY_SCOPE]).join(" "),
+        scope: (isRefresh
+          ? (options.refreshScopes ?? options.scopes ?? [GOOGLE_DRIVE_READONLY_SCOPE])
+          : (options.scopes ?? [GOOGLE_DRIVE_READONLY_SCOPE])
+        ).join(" "),
       });
     }
     apiAuthorizationHeaders.push(new Headers(init?.headers).get("authorization") ?? "");
@@ -871,6 +876,90 @@ describe("Google Drive local source preview", () => {
         accessMode: "readonly",
         lifecycle: { state: "active", recoverable: true },
       },
+    });
+  });
+
+  test("revalidates refreshed Drive scopes before provider access", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const google = googleFixture({ refreshScopes: [GOOGLE_DRIVE_METADATA_READONLY_SCOPE] });
+    const connected = await connect(workspace, google);
+    await shared!.admin`
+      update connections
+      set expires_at = now() - interval '1 minute'
+      where id = ${connected.connection.id}
+    `;
+    google.apiAuthorizationHeaders.length = 0;
+
+    const browse = await app(google.fetch).request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/${connected.connection.id}/browse?parentId=root`,
+      {
+        headers: {
+          authorization: await bearer(workspace, "subject-a", ["connections:read"]),
+          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+        },
+      },
+    );
+
+    expect(browse.status).toBe(401);
+    expect(await browse.json()).toMatchObject({
+      error: {
+        message: "Google Drive needs permission re-consent for selected-source read access",
+      },
+    });
+    expect(google.tokenRequests).toHaveLength(2);
+    expect(google.apiAuthorizationHeaders).toEqual([]);
+    expect(
+      await getConnectionMetadata(
+        client.db,
+        workspace.workspaceId,
+        connected.connection.id,
+        "subject-a",
+      ),
+    ).toMatchObject({
+      status: "needs_reauth",
+      grantedScopes: [GOOGLE_DRIVE_METADATA_READONLY_SCOPE],
+      lastError: "google_drive_reconsent_required",
+      metadata: { lifecycle: { state: "reconsent_required", recoverable: true } },
+    });
+  });
+
+  test("continues after refresh when the refreshed scope preserves recursive access", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const google = googleFixture({ refreshScopes: ["openid", GOOGLE_DRIVE_FULL_SCOPE] });
+    const connected = await connect(workspace, google);
+    await shared!.admin`
+      update connections
+      set expires_at = now() - interval '1 minute'
+      where id = ${connected.connection.id}
+    `;
+    google.apiAuthorizationHeaders.length = 0;
+
+    const browse = await app(google.fetch).request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/${connected.connection.id}/browse?parentId=root`,
+      {
+        headers: {
+          authorization: await bearer(workspace, "subject-a", ["connections:read"]),
+          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+        },
+      },
+    );
+
+    expect(browse.status).toBe(200);
+    expect(google.tokenRequests).toHaveLength(2);
+    expect(google.apiAuthorizationHeaders).toEqual(["Bearer google-access-token"]);
+    expect(
+      await getConnectionMetadata(
+        client.db,
+        workspace.workspaceId,
+        connected.connection.id,
+        "subject-a",
+      ),
+    ).toMatchObject({
+      status: "active",
+      grantedScopes: ["openid", GOOGLE_DRIVE_FULL_SCOPE],
+      metadata: { lifecycle: { state: "active", recoverable: true } },
     });
   });
 

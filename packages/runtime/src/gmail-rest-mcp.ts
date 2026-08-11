@@ -288,6 +288,10 @@ export class GmailRestMcpServer implements MCPServer {
   }
 
   async callTool(toolName: string, args: Record<string, unknown> | null): Promise<any> {
+    return (await this.callToolResult(toolName, args)).content;
+  }
+
+  async callToolResult(toolName: string, args: Record<string, unknown> | null): Promise<any> {
     try {
       const input = args ?? {};
       const output = await this.execute(toolName, input);

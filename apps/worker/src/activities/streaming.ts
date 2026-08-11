@@ -198,5 +198,42 @@ export async function nextStreamEvent<T>(
   if (!context) {
     return await iterator.next();
   }
-  return await Promise.race([iterator.next(), context.cancelled]);
+  const signal = context.cancellationSignal;
+  if (signal.aborted) {
+    throw signal.reason;
+  }
+
+  // Context.cancelled never settles for a normally completed activity. Racing
+  // every token/event read against that lifetime promise leaves one losing
+  // Promise reaction attached for every event until the Context itself dies.
+  // Use the equivalent Temporal AbortSignal and remove each listener as soon as
+  // the iterator wins, so a long stream retains at most its one pending read.
+  return await new Promise<IteratorResult<T>>((resolve, reject) => {
+    let settled = false;
+    const settle = (complete: () => void) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      complete();
+    };
+    const onAbort = () => settle(() => reject(signal.reason));
+
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+
+    let next: PromiseLike<IteratorResult<T>>;
+    try {
+      next = iterator.next();
+    } catch (error) {
+      settle(() => reject(error));
+      return;
+    }
+    void Promise.resolve(next).then(
+      (result) => settle(() => resolve(result)),
+      (error) => settle(() => reject(error)),
+    );
+  });
 }

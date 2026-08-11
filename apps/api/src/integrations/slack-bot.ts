@@ -659,6 +659,7 @@ export class OpenGeniSlackBotClient {
     userId?: string;
     threadTimestamp?: string;
     text: string;
+    requireActiveNonSharedChannel?: boolean;
   }) {
     const operation = "message.post" as const;
     const claimHolderId = crypto.randomUUID();
@@ -672,7 +673,7 @@ export class OpenGeniSlackBotClient {
           users: input.userId,
         });
         channelId = requiredSlackString(slackRecord(opened.channel)?.id, "channel.id");
-      } else if (channelId) {
+      } else if (channelId && !input.requireActiveNonSharedChannel) {
         await this.requireMemberChannel(headers, channelId);
       }
       if (!channelId) {
@@ -711,6 +712,12 @@ export class OpenGeniSlackBotClient {
         return this.completedPostResult(claim.operation, input.operationId, input.threadTimestamp);
       }
       claimAcquired = true;
+      if (input.requireActiveNonSharedChannel) {
+        if (input.userId || !input.channelId) {
+          throw new Error("active non-shared channel validation requires channelId");
+        }
+        await this.requireActiveNonSharedMemberChannel(headers, channelId);
+      }
       providerCallStarted = true;
       const posted = await this.call(headers, "chat.postMessage", {
         channel: channelId,
@@ -913,6 +920,20 @@ export class OpenGeniSlackBotClient {
     // that this installation can address that direct conversation.
     if (!projected || (projected.isMember !== true && projected.isDirectMessage !== true)) {
       throw new SlackBotProviderError("not_in_channel");
+    }
+    return projected;
+  }
+
+  private async requireActiveNonSharedMemberChannel(
+    headers: Record<string, string>,
+    channelId: string,
+  ) {
+    const projected = await this.requireMemberChannel(headers, channelId);
+    if (projected.isArchived) {
+      throw new SlackBotProviderError("is_archived");
+    }
+    if (projected.isShared || projected.isExternallyShared || projected.isOrgShared) {
+      throw new SlackBotProviderError("slack_connect_unsupported");
     }
     return projected;
   }

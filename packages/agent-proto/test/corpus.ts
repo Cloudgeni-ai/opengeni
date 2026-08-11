@@ -103,6 +103,7 @@ export function canonicalHello(): Hello {
       // Left at the proto3 default (false) so the encoded bytes are unchanged and
       // the existing cross-stack fixtures stay valid (mirrors the Rust corpus).
       opStream: false,
+      browserBridge: false,
     },
     updateChannel: "stable",
     resumeToken: "resume-token-1",

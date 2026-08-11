@@ -229,7 +229,8 @@ and label lists do not.
 While hosted MCP enrollment is pending, a deployment can set
 `OPENGENI_GMAIL_REST_ADAPTER_ENABLED=true`. This opt-in substitutes a bounded
 Gmail REST implementation for that exact official MCP endpoint in agent turns
-and Toolspace; it does not create a second capability or connection. The
+and the attempt-frozen Codemode projection; it does not create a second
+capability or connection. The
 adapter preserves the reviewed ten-tool allowlist, tool names, output field
 shape, subject-owned delegation, and approval policy. Its credential broker
 binding permits only `https://gmail.googleapis.com/gmail/v1/users/me/...`: it

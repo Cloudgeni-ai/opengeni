@@ -2,12 +2,15 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 import type { Settings } from "@opengeni/config";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
+import { sql } from "drizzle-orm";
 import {
   createDb,
   createRigVersion,
+  createSession,
   getRigChange,
   listRigVersions,
   updateRigChangeStatus,
+  withWorkspaceSessionActivityRls,
   type DbClient,
 } from "@opengeni/db";
 import {
@@ -210,23 +213,26 @@ describe("rig route permission matrix", () => {
     });
     const rig = await created.json();
 
-    const [session] = await shared!.admin<{ id: string }[]>`
-      insert into sessions (
-        account_id, workspace_id, initial_message, model, sandbox_backend,
-        sandbox_group_id, rig_id, tool_policy
-      )
-      values (
-        ${ws.accountId}, ${ws.workspaceId}, 'hi', 'gpt-5.6-sol', 'none',
-        gen_random_uuid(), ${rig.id},
-        jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
-      )
-      returning id`;
+    const session = await createSession(client.db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      initialMessage: "hi",
+      resources: [],
+      metadata: {},
+      model: "gpt-5.6-sol",
+      sandboxBackend: "none",
+      rigId: rig.id,
+    });
 
     const blocked = await app().request(`${base}/${rig.id}`, { method: "DELETE", headers: manage });
     expect(blocked.status).toBe(409);
 
     // Drop the reference, then delete succeeds + audits.
-    await shared!.admin`update sessions set rig_id = null where id = ${session!.id}`;
+    await withWorkspaceSessionActivityRls(client.db, ws.workspaceId, async (tx) => {
+      await tx.execute(
+        sql`update sessions set rig_id = null where workspace_id = ${ws.workspaceId} and id = ${session.id}`,
+      );
+    });
     const ok = await app().request(`${base}/${rig.id}`, { method: "DELETE", headers: manage });
     expect(ok.status).toBe(200);
     expect(await auditActions(ws.workspaceId, rig.id)).toContain("rig.deleted");

@@ -58,12 +58,14 @@ pub use cgroup::{establish_oom_isolation, OpCgroupConfig, OpCgroups};
 pub use desktop::{
     fit_frame_to_budget, resolve_desktop, CapturedFrame, DesktopBackend, FittedFrame, NoDesktop,
 };
+#[cfg(target_os = "linux")]
+pub use desktop::{LinuxDesktop, LinuxWindow, LinuxWindowRect};
 pub use error::{PlatformError, PlatformResult};
 pub use native::{assemble_git_response, spawn_contained, ContainedExec, NativePlatform};
 pub use pty::{spawn_pty, PtyProcess};
 
 /// macOS TCC-grant helpers (feature `macos-desktop`, macOS-only): read the Screen
-/// Recording + Accessibility grant state without prompting ([`desktop_grants`])
+/// Recording + Accessibility + Input Monitoring state without prompting ([`desktop_grants`])
 /// and fire the OS consent prompts once ([`request_desktop_grants`]). The agent's
 /// startup/enroll seam uses these to request display capability on a real Mac; a
 /// denied grant degrades cleanly to `display_unavailable`.
@@ -78,6 +80,41 @@ pub struct HostIdentity {
     pub os: v1::Os,
     /// The CPU architecture.
     pub arch: v1::Arch,
+}
+
+/// Loopback endpoint of one agent-supervised browser controller sidecar.
+///
+/// This is deliberately process-local: the control plane never receives the
+/// browserd authority or connects to this port directly. Browser control RPCs
+/// reach it through the connected-machine execution adapter, while frame bytes
+/// are copied into an authenticated relay channel by [`StreamRegistry`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserControlEndpoint {
+    /// Loopback TCP port selected by browserd.
+    pub port: u16,
+    /// Changes whenever the supervised sidecar process is replaced.
+    pub sidecar_generation: String,
+}
+
+/// Host-owned lifecycle seam for browserd.
+///
+/// The agent binary implements this because it owns installation paths,
+/// configuration storage, and child-process shutdown. The platform and relay
+/// crates depend only on this narrow capability, never on Bun/browserd details.
+#[async_trait]
+pub trait BrowserControlBackend: Send + Sync {
+    /// Ensures the exact authority scope and attached-browser generation is live.
+    async fn ensure(
+        &self,
+        req: &v1::BrowserControlEnsureRequest,
+    ) -> PlatformResult<BrowserControlEndpoint>;
+
+    /// Resolves an already-ensured endpoint, fenced by the exact scope generation.
+    async fn resolve(
+        &self,
+        scope_id: &str,
+        scope_generation: &str,
+    ) -> PlatformResult<BrowserControlEndpoint>;
 }
 
 /// The host-facing capability surface of a connected agent.
@@ -200,6 +237,74 @@ pub trait Platform: Send + Sync {
     /// rather than panicking.
     fn stream_registry(&self) -> Option<Arc<dyn StreamRegistry>>;
 
+    /// Agent-owned browser controller lifecycle, when browserd is installed.
+    fn browser_control_backend(&self) -> Option<Arc<dyn BrowserControlBackend>> {
+        None
+    }
+
+    /// Ensures one placement-scoped browser controller sidecar.
+    async fn browser_control_ensure(
+        &self,
+        req: &v1::BrowserControlEnsureRequest,
+    ) -> PlatformResult<v1::BrowserControlEnsureResponse> {
+        let backend = self.browser_control_backend().ok_or_else(|| {
+            PlatformError::Unsupported(
+                "browser_control_ensure: browser controller sidecar is unavailable".to_string(),
+            )
+        })?;
+        let endpoint = backend.ensure(req).await?;
+        Ok(v1::BrowserControlEnsureResponse {
+            port: u32::from(endpoint.port),
+            sidecar_generation: endpoint.sidecar_generation,
+        })
+    }
+
+    /// Opens a browser-native frame subscription over the existing relay plane.
+    async fn browser_frames_open(
+        &self,
+        req: &v1::BrowserFramesOpenRequest,
+    ) -> PlatformResult<v1::BrowserFramesOpenResponse> {
+        let backend = self.browser_control_backend().ok_or_else(|| {
+            PlatformError::Unsupported(
+                "browser_frames_open: browser controller sidecar is unavailable".to_string(),
+            )
+        })?;
+        let endpoint = backend
+            .resolve(&req.scope_id, &req.scope_generation)
+            .await?;
+        let registry = self
+            .stream_registry()
+            .ok_or_else(|| no_relay("browser_frames_open"))?;
+        let channel = registry.register_browser_frames(endpoint.port, req).await?;
+        Ok(v1::BrowserFramesOpenResponse {
+            channel: Some(channel),
+        })
+    }
+
+    /// Opens a ComputerSession frame subscription over the same relay plane.
+    async fn computer_frames_open(
+        &self,
+        req: &v1::ComputerFramesOpenRequest,
+    ) -> PlatformResult<v1::ComputerFramesOpenResponse> {
+        let backend = self.browser_control_backend().ok_or_else(|| {
+            PlatformError::Unsupported(
+                "computer_frames_open: interaction controller sidecar is unavailable".to_string(),
+            )
+        })?;
+        let endpoint = backend
+            .resolve(&req.scope_id, &req.scope_generation)
+            .await?;
+        let registry = self
+            .stream_registry()
+            .ok_or_else(|| no_relay("computer_frames_open"))?;
+        let channel = registry
+            .register_computer_frames(endpoint.port, req)
+            .await?;
+        Ok(v1::ComputerFramesOpenResponse {
+            channel: Some(channel),
+        })
+    }
+
     /// Opens a pseudo-terminal and registers a relay PTY stream channel. Spawns the
     /// shell/command in a real PTY, hands it to the registrar to pump both
     /// directions over a [`StreamKind::Pty`](v1::StreamKind) channel, and returns
@@ -306,6 +411,29 @@ pub trait StreamRegistry: Send + Sync {
         display: &v1::Display,
         req: &v1::DesktopEnsureRequest,
     ) -> PlatformResult<v1::StreamChannel>;
+
+    /// Copies one browserd WebSocket subscription into a fresh browser relay
+    /// channel. The returned descriptor is what the control plane mints a viewer
+    /// grant against; browserd itself remains loopback-only.
+    async fn register_browser_frames(
+        &self,
+        browserd_port: u16,
+        req: &v1::BrowserFramesOpenRequest,
+    ) -> PlatformResult<v1::StreamChannel>;
+
+    /// Copies one ComputerSession WebSocket subscription into a fresh relay
+    /// channel. It intentionally shares browserd and the interaction stream
+    /// transport while retaining distinct resource authority.
+    async fn register_computer_frames(
+        &self,
+        browserd_port: u16,
+        req: &v1::ComputerFramesOpenRequest,
+    ) -> PlatformResult<v1::StreamChannel> {
+        let _ = (browserd_port, req);
+        Err(PlatformError::Unsupported(
+            "computer frame relay is unavailable".to_string(),
+        ))
+    }
 
     /// Writes input bytes to an open PTY by id.
     ///

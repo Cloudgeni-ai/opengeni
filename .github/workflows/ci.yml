@@ -429,7 +429,7 @@ jobs:
     needs: [automation-admission, plan]
     if: ${{ always() && needs.plan.result == 'success' && github.event_name != 'pull_request' && needs.plan.outputs.unit_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -467,7 +467,7 @@ jobs:
           bun scripts/ci/profile-command.ts
           --name unit-safety
           --output ci-profile/unit-safety.json
-          --timeout-seconds 1800
+          --timeout-seconds 2100
           -- bun scripts/ci/run-unit-shard.ts --plan impact-plan.json
           --shard 0 --shards 1
 

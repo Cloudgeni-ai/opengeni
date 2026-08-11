@@ -4,6 +4,7 @@ import { KnowledgeSourceSyncRunSummary } from "@opengeni/contracts";
 import {
   GoogleDriveConnectionMetadata,
   GOOGLE_DRIVE_PROVIDER_DOMAIN,
+  googleDriveScopesAllowCapability,
   type GoogleDriveSelectedSource,
 } from "@opengeni/contracts/google-drive";
 import {
@@ -222,27 +223,31 @@ export function createKnowledgeSourceSyncActivities(
             action.connection.providerDomain.toLowerCase() ||
           connection.kind !== action.connection.kind ||
           connection.version < action.connection.connectionVersion ||
-          connection.status !== "active"
+          connection.status !== "active" ||
+          !googleDriveScopesAllowCapability(connection.grantedScopes, "recursive_source_sync")
         ) {
           throw new SyncFailure("connection_reconnect_required", true, true);
         }
         if (connection.providerDomain !== GOOGLE_DRIVE_PROVIDER_DOMAIN) {
           throw new SyncFailure("provider_rejected", false);
         }
-        const metadata = GoogleDriveConnectionMetadata.parse(connection.metadata);
-        if (metadata.lifecycle?.state && metadata.lifecycle.state !== "active") {
+        const initialMetadata = GoogleDriveConnectionMetadata.parse(connection.metadata);
+        if (initialMetadata.lifecycle?.state && initialMetadata.lifecycle.state !== "active") {
           throw new SyncFailure("connection_reconnect_required", true, true);
         }
-        const selectedSource = selectedDriveSource(metadata, resolved.source.externalSourceId);
-        if (!selectedSource || !selectedSource.syncEnabled) {
+        const initialSelectedSource = selectedDriveSource(
+          initialMetadata,
+          resolved.source.externalSourceId,
+        );
+        if (!initialSelectedSource || !initialSelectedSource.syncEnabled) {
           throw new SyncFailure("authority_changed", false);
         }
-        if (selectedSource.configGeneration !== action.sourceConfigGeneration) {
+        if (initialSelectedSource.configGeneration !== action.sourceConfigGeneration) {
           throw new SyncFailure("authority_changed", false);
         }
         if (
-          !selectedSource.destination ||
-          JSON.stringify(googleDriveKnowledgeScope(selectedSource.destination)) !==
+          !initialSelectedSource.destination ||
+          JSON.stringify(googleDriveKnowledgeScope(initialSelectedSource.destination)) !==
             JSON.stringify(action.destination)
         ) {
           throw new SyncFailure("authority_changed", false);
@@ -266,6 +271,50 @@ export function createKnowledgeSourceSyncActivities(
         if (token.status !== "ok") {
           throw new SyncFailure("connection_reconnect_required", true, true);
         }
+        const resolvedConnection = await getConnectionMetadata(
+          db,
+          input.workspaceId,
+          action.connection.connectionId,
+          action.initiatingSubjectId,
+        );
+        const resolvedMetadata = resolvedConnection
+          ? GoogleDriveConnectionMetadata.parse(resolvedConnection.metadata)
+          : null;
+        if (
+          !resolvedConnection ||
+          resolvedConnection.accountId !== input.accountId ||
+          resolvedConnection.subjectId !== action.connection.ownerSubjectId ||
+          resolvedConnection.providerDomain.toLowerCase() !==
+            action.connection.providerDomain.toLowerCase() ||
+          resolvedConnection.kind !== action.connection.kind ||
+          !resolvedMetadata ||
+          !googleDriveSyncProviderAccessAllowed({
+            connectionVersion: resolvedConnection.version,
+            resolvedConnectionVersion: token.connectionVersion,
+            connectionStatus: resolvedConnection.status,
+            lifecycleState: resolvedMetadata.lifecycle?.state,
+            grantedScopes: resolvedConnection.grantedScopes,
+          })
+        ) {
+          throw new SyncFailure("connection_reconnect_required", true, true);
+        }
+        const resolvedSelectedSource = selectedDriveSource(
+          resolvedMetadata,
+          resolved.source.externalSourceId,
+        );
+        const selectedDestination = resolvedSelectedSource?.destination;
+        if (
+          !resolvedSelectedSource ||
+          !resolvedSelectedSource.syncEnabled ||
+          resolvedSelectedSource.configGeneration !== action.sourceConfigGeneration ||
+          !selectedDestination ||
+          JSON.stringify(googleDriveKnowledgeScope(selectedDestination)) !==
+            JSON.stringify(action.destination)
+        ) {
+          throw new SyncFailure("authority_changed", false);
+        }
+        const metadata = resolvedMetadata;
+        const selectedSource = resolvedSelectedSource;
 
         let aclGeneration = resolved.source.currentAclGeneration;
         let acl = aclGeneration
@@ -327,8 +376,8 @@ export function createKnowledgeSourceSyncActivities(
         summary.providerRequests = inventory.providerRequests;
         summary.elapsedMs = inventory.elapsedMs;
 
-        const base = selectedSource.destination.collectionId
-          ? await getDocumentBase(db, input.workspaceId, selectedSource.destination.collectionId)
+        const base = selectedDestination.collectionId
+          ? await getDocumentBase(db, input.workspaceId, selectedDestination.collectionId)
           : await ensureDefaultBase(db, {
               accountId: input.accountId,
               workspaceId: input.workspaceId,
@@ -1175,6 +1224,22 @@ function selectedDriveSource(
   const sources =
     metadata.selectedSources ?? (metadata.selectedSource ? [metadata.selectedSource] : []);
   return sources.find((source) => source.id === externalSourceId) ?? null;
+}
+
+export function googleDriveSyncProviderAccessAllowed(input: {
+  connectionVersion: number;
+  resolvedConnectionVersion: number | undefined;
+  connectionStatus: string;
+  lifecycleState: string | undefined;
+  grantedScopes: string[];
+}): boolean {
+  return (
+    input.resolvedConnectionVersion !== undefined &&
+    input.connectionVersion === input.resolvedConnectionVersion &&
+    input.connectionStatus === "active" &&
+    (input.lifecycleState === undefined || input.lifecycleState === "active") &&
+    googleDriveScopesAllowCapability(input.grantedScopes, "recursive_source_sync")
+  );
 }
 
 async function listDriveChildren(

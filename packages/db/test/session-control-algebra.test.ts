@@ -14,7 +14,7 @@ import {
   SessionCommandIdempotencyError,
   SessionControlInvariantError,
   settleSessionAttemptInterruptions,
-  withWorkspaceRls,
+  withWorkspaceSessionActivityRls as withWorkspaceRls,
 } from "../src/index";
 import * as schema from "../src/schema";
 

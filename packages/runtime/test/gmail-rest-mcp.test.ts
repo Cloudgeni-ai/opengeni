@@ -65,7 +65,7 @@ describe("Gmail REST MCP adapter", () => {
         });
       },
     });
-    const first = (await gmail.callTool("list_labels", { pageSize: 1 })) as {
+    const first = (await gmail.callToolResult("list_labels", { pageSize: 1 })) as {
       content: Array<{ text: string }>;
     };
     expect(request!.url).toBe("https://gmail.googleapis.com/gmail/v1/users/me/labels");
@@ -74,7 +74,7 @@ describe("Gmail REST MCP adapter", () => {
       labels: [{ labelId: "Label_1", name: "Projects", threadsTotal: 7 }],
       nextPageToken: "opengeni-rest:1",
     });
-    const second = (await gmail.callTool("list_labels", {
+    const second = (await gmail.callToolResult("list_labels", {
       pageSize: 1,
       pageToken: "opengeni-rest:1",
     })) as { content: Array<{ text: string }> };
@@ -104,7 +104,7 @@ describe("Gmail REST MCP adapter", () => {
           : Response.json({ labels: [] });
       },
     });
-    const result = (await gmail.callTool("list_labels", {})) as { isError?: boolean };
+    const result = (await gmail.callToolResult("list_labels", {})) as { isError?: boolean };
     expect(result.isError).not.toBe(true);
     expect(resolves).toBe(2);
     expect(requests).toBe(2);
@@ -140,7 +140,7 @@ describe("Gmail REST MCP adapter", () => {
       },
     });
 
-    const drafts = (await gmail.callTool("list_drafts", {})) as {
+    const drafts = (await gmail.callToolResult("list_drafts", {})) as {
       structuredContent: Record<string, unknown>;
     };
     expect(drafts.structuredContent).toMatchObject({ nextPageToken: "draft-next" });
@@ -151,7 +151,7 @@ describe("Gmail REST MCP adapter", () => {
     });
     expect(JSON.stringify(drafts.structuredContent)).not.toContain('"message"');
 
-    const threads = (await gmail.callTool("search_threads", {})) as {
+    const threads = (await gmail.callToolResult("search_threads", {})) as {
       structuredContent: Record<string, unknown>;
     };
     expect(threads.structuredContent).toEqual({
@@ -178,7 +178,7 @@ describe("Gmail REST MCP adapter", () => {
         return Response.json({ error: { status: "UNAUTHENTICATED" } }, { status: 401 });
       },
     });
-    const result = (await gmail.callTool("label_message", {
+    const result = (await gmail.callToolResult("label_message", {
       messageId: "m1",
       labelIds: ["STARRED"],
     })) as { isError?: boolean; content: Array<{ text: string }> };
@@ -196,7 +196,7 @@ describe("Gmail REST MCP adapter", () => {
         return Response.json({});
       },
     });
-    const result = (await gmail.callTool("label_thread", {
+    const result = (await gmail.callToolResult("label_thread", {
       threadId: "t1",
       labelIds: ["TRASH"],
     })) as { isError?: boolean; content: Array<{ text: string }> };
@@ -213,7 +213,7 @@ describe("Gmail REST MCP adapter", () => {
         return Response.json({ id: "draft-1", message: { id: "message-1" } });
       },
     });
-    const result = (await gmail.callTool("create_draft", {
+    const result = (await gmail.callToolResult("create_draft", {
       to: ["user@example.com"],
       subject: "Local REST test",
       body: "Draft only",
@@ -233,7 +233,7 @@ describe("Gmail REST MCP adapter", () => {
         return Response.json({ id: "draft-1" });
       },
     });
-    const result = (await gmail.callTool("create_draft", {
+    const result = (await gmail.callToolResult("create_draft", {
       to: ["user@example.com"],
       attachments: [
         {
@@ -256,7 +256,7 @@ describe("Gmail REST MCP adapter", () => {
         return Response.json({ id: "draft-1" });
       },
     });
-    const result = (await gmail.callTool("create_draft", {
+    const result = (await gmail.callToolResult("create_draft", {
       attachments: [{ content: "not base64!", filename: "bad.txt" }],
     })) as { isError?: boolean; content: Array<{ text: string }> };
     expect(result.isError).toBe(true);
@@ -272,7 +272,7 @@ describe("Gmail REST MCP adapter", () => {
         throw new TypeError("fixture transport failure");
       },
     });
-    const result = (await gmail.callTool("create_draft", {
+    const result = (await gmail.callToolResult("create_draft", {
       to: ["user@example.com"],
       body: "Draft only",
     })) as { isError?: boolean; content: Array<{ text: string }> };

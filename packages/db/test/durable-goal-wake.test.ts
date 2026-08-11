@@ -23,8 +23,8 @@ import {
   updateCodexRotationSettings,
   updateSessionGoalWithEvent,
   upsertSessionGoalWithEvent,
-  withWorkspaceRls,
-  withWorkspaceSubjectRls,
+  withWorkspaceSessionActivityRls as withWorkspaceRls,
+  withWorkspaceSubjectSessionActivityRls as withWorkspaceSubjectRls,
 } from "../src/index";
 
 let shared: SharedTestDatabase;
@@ -85,6 +85,7 @@ async function runningGoalFixture(
     resources: [],
     tools: [],
     metadata: {},
+    createdBy: { kind: "subject", subjectId: grant.subjectId },
     model: "scripted-model",
     sandboxBackend: "none",
     personalConnectionDelegations,
@@ -244,7 +245,7 @@ describe("durable active-goal wake", () => {
     ];
     await withWorkspaceSubjectRls(client.db, ctx.grant.workspaceId!, ctx.grant.subjectId, (db) =>
       db.transaction((tx) =>
-        submitHumanPromptInTransaction(tx as typeof db, {
+        submitHumanPromptInTransaction(tx as unknown as typeof db, {
           accountId: ctx.grant.accountId,
           workspaceId: ctx.grant.workspaceId!,
           sessionId: ctx.session.id,
@@ -653,6 +654,11 @@ describe("durable active-goal wake", () => {
     expect(claimed.action).toBe("claimed");
     if (claimed.action !== "claimed") throw new Error("goal continuation was not claimed");
     expect(claimed.turn.source).toBe("goal");
+    expect(claimed.turn.initiator).toMatchObject({
+      kind: "service",
+      subjectId: "goal-continuation",
+    });
+    expect(claimed.turn.initiatingHumanSubjectId).toBe(ctx.grant.subjectId);
     expect(
       (await getSessionGoalWithContinuation(client.db, ctx.grant.workspaceId!, ctx.session.id))
         ?.continuation,
@@ -708,7 +714,7 @@ describe("durable active-goal wake", () => {
 
     await withWorkspaceSubjectRls(client.db, goal.grant.workspaceId!, goal.grant.subjectId, (db) =>
       db.transaction((tx) =>
-        submitHumanPromptInTransaction(tx as typeof db, {
+        submitHumanPromptInTransaction(tx as unknown as typeof db, {
           accountId: goal.grant.accountId,
           workspaceId: goal.grant.workspaceId!,
           sessionId: goal.session.id,
@@ -750,7 +756,7 @@ describe("durable active-goal wake", () => {
     const control = async (sessionId: string, action: "pause" | "resume") =>
       await withWorkspaceRls(client.db, ctx.grant.workspaceId!, (db) =>
         db.transaction((tx) =>
-          mutateSessionControlInTransaction(tx as typeof db, {
+          mutateSessionControlInTransaction(tx as unknown as typeof db, {
             accountId: ctx.grant.accountId,
             workspaceId: ctx.grant.workspaceId!,
             sessionId,
@@ -992,7 +998,7 @@ describe("durable active-goal wake", () => {
       ctx.grant.subjectId,
       (db) =>
         db.transaction((tx) =>
-          submitHumanPromptInTransaction(tx as typeof db, {
+          submitHumanPromptInTransaction(tx as unknown as typeof db, {
             accountId: ctx.grant.accountId,
             workspaceId: ctx.grant.workspaceId!,
             sessionId: ctx.session.id,

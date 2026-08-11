@@ -73,12 +73,13 @@ import {
   submitHumanPromptInTransaction,
   appendSessionEventsWithLockedSessionUpdate,
   updateSessionTitle as updateSessionTitleRow,
-  withWorkspaceSubjectRls,
+  withWorkspaceSubjectSessionActivityRls,
   type CreateSessionMcpServerInput,
   type Database,
   type UpdateSessionMcpServerCredentialsInput,
   QueueCommandConflictError,
   AgentCommandAuthorityError,
+  runIdempotentPersistenceTransaction,
   SessionSpawnDeniedDbError,
   SessionControlConflictError,
   SessionToolPolicyVersionConflictError,
@@ -244,7 +245,9 @@ export function creationInitiatorForGrant(grant: AccessGrant): FrozenCreationIni
       !Number.isSafeInteger(callerExecutionGeneration) ||
       callerExecutionGeneration < 1
     ) {
-      throw new HTTPException(403, { message: "caller attempt claims are incomplete" });
+      throw new HTTPException(403, {
+        message: "caller attempt claims are incomplete",
+      });
     }
     const actor = {
       type: "agent_attempt",
@@ -287,11 +290,15 @@ function normalizedSessionMcpCredentialHeaders(
   const seen = new Set<string>();
   for (const [name, value] of entries) {
     if (!sessionMcpCredentialHeaderName.test(name)) {
-      throw new HTTPException(422, { message: `invalid credential header name: ${name}` });
+      throw new HTTPException(422, {
+        message: `invalid credential header name: ${name}`,
+      });
     }
     const lower = name.toLowerCase();
     if (seen.has(lower)) {
-      throw new HTTPException(422, { message: `duplicate credential header name: ${name}` });
+      throw new HTTPException(422, {
+        message: `duplicate credential header name: ${name}`,
+      });
     }
     seen.add(lower);
     if (value.length === 0 || value.length > maxSessionMcpCredentialHeaderValueLength) {
@@ -391,11 +398,15 @@ function validateSessionMcpServersForCreate(
   const metadata: SessionMcpServerMetadata[] = [];
   for (const server of servers) {
     if (seenIds.has(server.id)) {
-      throw new HTTPException(422, { message: `duplicate session MCP server id: ${server.id}` });
+      throw new HTTPException(422, {
+        message: `duplicate session MCP server id: ${server.id}`,
+      });
     }
     seenIds.add(server.id);
     if (reservedSessionMcpServerIds.has(server.id) || existingIds.has(server.id)) {
-      throw new HTTPException(422, { message: `MCP server id already exists: ${server.id}` });
+      throw new HTTPException(422, {
+        message: `MCP server id already exists: ${server.id}`,
+      });
     }
     const headers = normalizedSessionMcpCredentialHeaders(server.headers);
     const headersEncrypted = Object.fromEntries(
@@ -493,7 +504,9 @@ function validateSessionMcpCredentialUpdates(input: {
     }
     seenIds.add(update.id);
     if (!knownIds.has(update.id)) {
-      throw new HTTPException(422, { message: `unknown session MCP server id: ${update.id}` });
+      throw new HTTPException(422, {
+        message: `unknown session MCP server id: ${update.id}`,
+      });
     }
     const headers = normalizedSessionMcpCredentialHeaders(update.headers);
     return {
@@ -605,10 +618,17 @@ export async function createAndStartSessionWithOutcome(input: {
   // target fails the create (422) — never a silent fall-back to the default box.
   // `workingDir` (optional) is the path/cwd base the chosen machine runs under,
   // seeded alongside the pointer through the epoch-fenced CAS.
-  seedTargetSandbox?: { sandboxId: string; settings: Settings; workingDir?: string | null } | null;
+  seedTargetSandbox?: {
+    sandboxId: string;
+    settings: Settings;
+    workingDir?: string | null;
+  } | null;
   // Exact actor-private pre-session draft represented by this create. The
   // initializer consumes it only after the first durable runnable unit commits.
-  consumeNewSessionDraft?: { subjectId: string; expectedRevision: number } | null;
+  consumeNewSessionDraft?: {
+    subjectId: string;
+    expectedRevision: number;
+  } | null;
   // A child may lower its inherited nested-agent depth limit freely; increases
   // are authorized by the caller's workspace:admin grant and checked again by
   // the database admission transaction.
@@ -770,7 +790,10 @@ async function finishStartSession(
       settings: Settings;
       workingDir?: string | null;
     } | null;
-    consumeNewSessionDraft?: { subjectId: string; expectedRevision: number } | null;
+    consumeNewSessionDraft?: {
+      subjectId: string;
+      expectedRevision: number;
+    } | null;
   },
   session: Session,
 ): Promise<{ session: CreateSessionResponse; changed: boolean }> {
@@ -793,7 +816,11 @@ async function finishStartSession(
       sessionGroupId: session.sandboxGroupId,
     };
     const seeded = await swapActiveSandbox(
-      { db: input.db, settings: input.seedTargetSandbox.settings, bus: input.bus },
+      {
+        db: input.db,
+        settings: input.seedTargetSandbox.settings,
+        bus: input.bus,
+      },
       ctx,
       input.seedTargetSandbox.sandboxId,
       // The working dir is committed in the SAME epoch-fenced CAS that seeds the
@@ -816,7 +843,10 @@ async function finishStartSession(
     createdEventPayload: {
       toolPolicy: input.toolPolicy,
       ...(input.variableSet
-        ? { variableSetId: input.variableSet.id, variableSetName: input.variableSet.name }
+        ? {
+            variableSetId: input.variableSet.id,
+            variableSetName: input.variableSet.name,
+          }
         : {}),
       ...(input.sessionMcpServers?.length ? { mcpServers: input.sessionMcpServers } : {}),
     },
@@ -1070,36 +1100,47 @@ export async function postUserMessageTurn(input: {
   const operationKey = input.clientEventId ?? crypto.randomUUID();
   let result;
   try {
-    result = await withWorkspaceSubjectRls(db, workspaceId, input.actor ?? accountId, (scoped) =>
-      scoped.transaction((tx) =>
-        submitHumanPromptInTransaction(tx as unknown as Database, {
-          accountId,
+    result = await runIdempotentPersistenceTransaction(
+      {
+        stage: "session.prompt.submit",
+        eventTypes: ["user.message", "turn.queued", "session.status.changed"],
+        maxAttempts: 3,
+      },
+      async () =>
+        await withWorkspaceSubjectSessionActivityRls(
+          db,
           workspaceId,
-          sessionId,
-          subjectId: input.actor ?? accountId,
-          ...(input.actorLabel ? { subjectLabel: input.actorLabel } : {}),
-          actor: input.commandActor ?? {
-            type: "human",
-            subjectId: input.actor ?? accountId,
-          },
-          operationKey,
-          delivery: input.delivery ?? "send",
-          controlEtag: input.controlEtag ?? null,
-          expectedDraftRevision: input.expectedDraftRevision ?? null,
-          text: input.text,
-          annotations: input.annotations ?? [],
-          turnInstructions: input.turnInstructions ?? null,
-          resources: input.resources,
-          model: requestedModel,
-          reasoningEffort: requestedReasoningEffort,
-          latencyMode: input.latencyMode ?? null,
-          reasoningEffortFallback: input.reasoningEffortFallback ?? settings.openaiReasoningEffort,
-          turnExecutionPolicy: input.turnExecutionPolicy,
-          source: input.origin === "operator" ? "api" : "user",
-          personalConnectionDelegations: input.personalConnectionDelegations ?? [],
-          mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
-        }),
-      ),
+          input.actor ?? accountId,
+          (scoped) =>
+            submitHumanPromptInTransaction(scoped, {
+              accountId,
+              workspaceId,
+              sessionId,
+              subjectId: input.actor ?? accountId,
+              ...(input.actorLabel ? { subjectLabel: input.actorLabel } : {}),
+              actor: input.commandActor ?? {
+                type: "human",
+                subjectId: input.actor ?? accountId,
+              },
+              operationKey,
+              delivery: input.delivery ?? "send",
+              controlEtag: input.controlEtag ?? null,
+              expectedDraftRevision: input.expectedDraftRevision ?? null,
+              text: input.text,
+              annotations: input.annotations ?? [],
+              turnInstructions: input.turnInstructions ?? null,
+              resources: input.resources,
+              model: requestedModel,
+              reasoningEffort: requestedReasoningEffort,
+              latencyMode: input.latencyMode ?? null,
+              reasoningEffortFallback:
+                input.reasoningEffortFallback ?? settings.openaiReasoningEffort,
+              turnExecutionPolicy: input.turnExecutionPolicy,
+              source: input.origin === "operator" ? "api" : "user",
+              personalConnectionDelegations: input.personalConnectionDelegations ?? [],
+              mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
+            }),
+        ),
     );
   } catch (error) {
     if (
@@ -1291,7 +1332,10 @@ export async function createSessionForRequestWithOutcome(
         "child tools may only narrow the parent session tool policy",
       );
       selectedTools = requestedTools;
-      toolPolicy = { mode: "explicit", inheritedFromSessionId: parentSession.id };
+      toolPolicy = {
+        mode: "explicit",
+        inheritedFromSessionId: parentSession.id,
+      };
     } else {
       selectedTools = parentEffective;
       toolPolicy = {
@@ -1324,7 +1368,9 @@ export async function createSessionForRequestWithOutcome(
   });
   await validateGitHubRepositorySelection(db, workspaceId, resources);
   if (resources.some((resource) => resource.kind === "file") && !objectStorage) {
-    throw new HTTPException(503, { message: "object storage is not configured" });
+    throw new HTTPException(503, {
+      message: "object storage is not configured",
+    });
   }
   await validateFileResources(db, workspaceId, resources);
   // VariableSet attachment requires variable-sets:use on the calling grant
@@ -1785,7 +1831,11 @@ export async function createSessionForRequestWithOutcome(
       // (after the row exists, before the first turn dispatches). Validation
       // (ownership/liveness) lives in swapActiveSandbox; an invalid target 422s.
       seedTargetSandbox: payload.targetSandboxId
-        ? { sandboxId: payload.targetSandboxId, settings, workingDir: payload.workingDir ?? null }
+        ? {
+            sandboxId: payload.targetSandboxId,
+            settings,
+            workingDir: payload.workingDir ?? null,
+          }
         : null,
       consumeNewSessionDraft:
         payload.expectedNewSessionDraftRevision !== undefined
@@ -1942,7 +1992,9 @@ export async function acceptSessionUserMessageWithOutcome(
     model: effectiveModel,
   });
   if (requestedResources.some((resource) => resource.kind === "file") && !objectStorage) {
-    throw new HTTPException(503, { message: "object storage is not configured" });
+    throw new HTTPException(503, {
+      message: "object storage is not configured",
+    });
   }
   await validateFileResources(db, workspaceId, requestedResources);
   await validateGitHubRepositorySelection(db, workspaceId, [
@@ -2078,7 +2130,12 @@ export async function updateSessionTitle(
     surface: "core",
   });
   const workspaceId = grant.workspaceId;
-  const result = await updateSessionTitleRow(db, { workspaceId, sessionId, title, source });
+  const result = await updateSessionTitleRow(db, {
+    workspaceId,
+    sessionId,
+    title,
+    source,
+  });
   if (result.updated) {
     await appendAndPublishEvents(db, bus, workspaceId, sessionId, [
       {
@@ -2129,7 +2186,9 @@ export async function updateSessionMcpApprovalPolicy(
     async (_session, context) => {
       const result = await context.updateSessionMcpApprovalPolicy(serverId, normalizedPolicy);
       if (!result.server) {
-        throw new HTTPException(404, { message: "session MCP server not found" });
+        throw new HTTPException(404, {
+          message: "session MCP server not found",
+        });
       }
       outcome.server = result.server;
       return {
@@ -2146,6 +2205,7 @@ export async function updateSessionMcpApprovalPolicy(
           : [],
       };
     },
+    { activity: "semantic" },
   );
   const updatedServer = outcome.server;
   if (!updatedServer) {
@@ -2244,7 +2304,9 @@ export async function updateSessionToolPolicy(
           (tool) => !validatedIds.has(`${tool.kind}:${tool.id}`),
         );
         if (unknown) {
-          throw new HTTPException(422, { message: `unknown MCP server id: ${unknown.id}` });
+          throw new HTTPException(422, {
+            message: `unknown MCP server id: ${unknown.id}`,
+          });
         }
         return withFirstPartyTools(validatedTools, runtimeSettings);
       })()
@@ -2273,7 +2335,9 @@ export async function updateSessionToolPolicy(
       if (session.parentSessionId) {
         const parent = await context.getLockedSession(session.parentSessionId);
         if (!parent) {
-          throw new HTTPException(409, { message: "parent session is no longer available" });
+          throw new HTTPException(409, {
+            message: "parent session is no longer available",
+          });
         }
         const parentTracksWorkspaceDefaults = parent.toolPolicy?.mode === "workspace_default";
         const parentEffective = withFirstPartyTools(
@@ -2386,7 +2450,7 @@ export async function updateSessionToolPolicy(
         },
       };
     },
-    { lockParentSession: true },
+    { activity: "semantic", lockParentSession: true },
   );
   if (events.length > 0) {
     await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, events);

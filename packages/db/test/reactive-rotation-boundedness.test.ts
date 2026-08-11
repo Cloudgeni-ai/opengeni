@@ -5,6 +5,7 @@ import {
   clearSessionGoal,
   countConsecutiveReactiveRotations,
   createDb,
+  createSession,
   evaluateGoalContinuation,
   getSessionGoal,
   listSessionEvents,
@@ -45,15 +46,16 @@ async function freshWorkspace(): Promise<{ accountId: string; workspaceId: strin
 
 async function seedSession(ws: { accountId: string; workspaceId: string }): Promise<string> {
   const id = crypto.randomUUID();
-  await admin`
-    insert into sessions (
-      id, account_id, workspace_id, initial_message, model,
-      sandbox_backend, sandbox_group_id, tool_policy
-    )
-    values (
-      ${id}, ${ws.accountId}, ${ws.workspaceId}, 'go', 'gpt', 'modal', ${id},
-      jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
-    )`;
+  await createSession(db, {
+    requestedSessionId: id,
+    accountId: ws.accountId,
+    workspaceId: ws.workspaceId,
+    initialMessage: "go",
+    resources: [],
+    metadata: {},
+    model: "gpt",
+    sandboxBackend: "modal",
+  });
   return id;
 }
 
