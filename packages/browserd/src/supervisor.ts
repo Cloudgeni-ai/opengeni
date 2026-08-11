@@ -1296,14 +1296,6 @@ export class BrowserSupervisor {
   }
 }
 
-function aggregateFailure(
-  errors: readonly unknown[],
-  message: string,
-  cause: unknown,
-): AggregateError {
-  return new AggregateError(errors, message, { cause });
-}
-
 function snapshotWithTargets(
   snapshot: BrowserRuntimeSnapshot,
   targets: readonly BrowserTarget[],

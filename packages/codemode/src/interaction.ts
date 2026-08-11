@@ -3,7 +3,6 @@ import type {
   AuthRun,
   AuthRunListResponse,
   AuthRunMutationResponse,
-  AttemptToolResult,
   BrowserAction,
   BrowserActionReceipt,
   BrowserClipboard,
