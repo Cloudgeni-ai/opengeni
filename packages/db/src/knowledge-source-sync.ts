@@ -870,111 +870,22 @@ export async function recordKnowledgeSourceSyncObjectObservations(
           providerRevision: observation.providerRevision ?? null,
           metadataHash: observation.metadataHash ?? null,
         };
-        const [inserted] = await scopedDb
-          .insert(schema.knowledgeSourceSyncObjectObservations)
-          .values({
-            sourceId: input.sourceId,
-            externalObjectId: observation.externalObjectId,
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            scheduledTaskRunId: input.scheduledTaskRunId,
-            scanGeneration: input.scanGeneration,
-            providerRevision: candidate.providerRevision,
-            metadataHash: candidate.metadataHash,
-            observedAt: new Date(),
-          })
-          .onConflictDoNothing()
-          .returning();
-
-        let durable = inserted;
-        let disposition: KnowledgeSourceSyncObjectObservationResult["disposition"] = "accepted";
-        if (!durable) {
-          const [existing] = await scopedDb
-            .select()
-            .from(schema.knowledgeSourceSyncObjectObservations)
-            .where(
-              and(
-                eq(schema.knowledgeSourceSyncObjectObservations.sourceId, input.sourceId),
-                eq(
-                  schema.knowledgeSourceSyncObjectObservations.externalObjectId,
-                  observation.externalObjectId,
-                ),
+        const [existing] = await scopedDb
+          .select()
+          .from(schema.knowledgeSourceSyncObjectObservations)
+          .where(
+            and(
+              eq(schema.knowledgeSourceSyncObjectObservations.sourceId, input.sourceId),
+              eq(
+                schema.knowledgeSourceSyncObjectObservations.externalObjectId,
+                observation.externalObjectId,
               ),
-            )
-            .for("update")
-            .limit(1);
-          if (!existing) throw new Error("Knowledge source observation disappeared");
-          durable = existing;
-
-          if (existing.scanGeneration < input.scanGeneration) {
-            [durable] = await scopedDb
-              .update(schema.knowledgeSourceSyncObjectObservations)
-              .set({
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                scheduledTaskRunId: input.scheduledTaskRunId,
-                scanGeneration: input.scanGeneration,
-                providerRevision: candidate.providerRevision,
-                metadataHash: candidate.metadataHash,
-                observedAt: new Date(),
-              })
-              .where(
-                and(
-                  eq(schema.knowledgeSourceSyncObjectObservations.sourceId, input.sourceId),
-                  eq(
-                    schema.knowledgeSourceSyncObjectObservations.externalObjectId,
-                    observation.externalObjectId,
-                  ),
-                ),
-              )
-              .returning();
-            if (!durable) throw new Error("Knowledge source observation generation changed");
-          } else if (existing.scanGeneration > input.scanGeneration) {
-            throw new Error("Knowledge source observation scan generation advanced");
-          } else if (input.revisionOrdering === "canonical_decimal") {
-            const comparison = compareCanonicalDecimalProviderRevisions(
-              candidate.providerRevision,
-              existing.providerRevision,
-            );
-            if (comparison === null) {
-              disposition = "conflict";
-            } else if (comparison < 0) {
-              disposition = "stale";
-            } else if (comparison === 0) {
-              disposition =
-                candidate.metadataHash === existing.metadataHash ? "replayed" : "conflict";
-            } else {
-              [durable] = await scopedDb
-                .update(schema.knowledgeSourceSyncObjectObservations)
-                .set({
-                  scheduledTaskRunId: input.scheduledTaskRunId,
-                  providerRevision: candidate.providerRevision,
-                  metadataHash: candidate.metadataHash,
-                  observedAt: new Date(),
-                })
-                .where(
-                  and(
-                    eq(schema.knowledgeSourceSyncObjectObservations.sourceId, input.sourceId),
-                    eq(
-                      schema.knowledgeSourceSyncObjectObservations.externalObjectId,
-                      observation.externalObjectId,
-                    ),
-                    eq(
-                      schema.knowledgeSourceSyncObjectObservations.scanGeneration,
-                      input.scanGeneration,
-                    ),
-                  ),
-                )
-                .returning();
-              if (!durable) throw new Error("Knowledge source observation floor changed");
-            }
-          } else {
-            disposition =
-              candidate.providerRevision === existing.providerRevision &&
-              candidate.metadataHash === existing.metadataHash
-                ? "replayed"
-                : "stale";
-          }
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (existing && existing.scanGeneration > input.scanGeneration) {
+          throw new Error("Knowledge source observation scan generation advanced");
         }
 
         const [currentObject] = await scopedDb
@@ -990,6 +901,7 @@ export async function recordKnowledgeSourceSyncObjectObservations(
               eq(schema.knowledgeSourceObjects.externalObjectId, observation.externalObjectId),
             ),
           )
+          .for("share")
           .limit(1);
         let currentVersion: KnowledgeSourceSyncObjectObservationResult["currentVersion"] = null;
         if (currentObject?.currentVersionId) {
@@ -1029,51 +941,125 @@ export async function recordKnowledgeSourceSyncObjectObservations(
             };
           }
         }
+
+        const sameGenerationObservation =
+          existing?.scanGeneration === input.scanGeneration ? existing : null;
+        let authoritativeFloor: {
+          providerRevision: string | null;
+          metadataHash: string | null;
+        } | null = sameGenerationObservation
+          ? {
+              providerRevision: sameGenerationObservation.providerRevision,
+              metadataHash: sameGenerationObservation.metadataHash,
+            }
+          : null;
         if (input.revisionOrdering === "canonical_decimal" && currentVersion) {
-          const currentComparison = compareCanonicalDecimalProviderRevisions(
-            currentVersion.providerRevision,
-            durable.providerRevision,
-          );
-          if (currentComparison !== null && currentComparison > 0) {
-            [durable] = await scopedDb
-              .update(schema.knowledgeSourceSyncObjectObservations)
-              .set({
-                scheduledTaskRunId: input.scheduledTaskRunId,
+          if (!authoritativeFloor) {
+            authoritativeFloor = {
+              providerRevision: currentVersion.providerRevision,
+              metadataHash: currentVersion.metadataHash,
+            };
+          } else {
+            const currentComparison = compareCanonicalDecimalProviderRevisions(
+              currentVersion.providerRevision,
+              authoritativeFloor.providerRevision,
+            );
+            if (
+              currentComparison !== null &&
+              (currentComparison > 0 ||
+                (currentComparison === 0 &&
+                  currentVersion.metadataHash !== authoritativeFloor.metadataHash))
+            ) {
+              authoritativeFloor = {
                 providerRevision: currentVersion.providerRevision,
                 metadataHash: currentVersion.metadataHash,
-                observedAt: new Date(),
-              })
-              .where(
-                and(
-                  eq(schema.knowledgeSourceSyncObjectObservations.sourceId, input.sourceId),
-                  eq(
-                    schema.knowledgeSourceSyncObjectObservations.externalObjectId,
-                    observation.externalObjectId,
-                  ),
-                  eq(
-                    schema.knowledgeSourceSyncObjectObservations.scanGeneration,
-                    input.scanGeneration,
-                  ),
-                ),
-              )
-              .returning();
-            if (!durable) throw new Error("Knowledge source observation floor changed");
-            const candidateComparison = compareCanonicalDecimalProviderRevisions(
-              candidate.providerRevision,
-              durable.providerRevision,
-            );
-            if (candidateComparison === null) {
-              disposition = "conflict";
-            } else if (candidateComparison < 0) {
-              disposition = "stale";
-            } else if (candidateComparison === 0) {
-              disposition =
-                candidate.metadataHash === durable.metadataHash ? "replayed" : "conflict";
-            } else {
-              throw new Error("Knowledge source current version exceeded an accepted observation");
+              };
             }
           }
         }
+
+        let disposition: KnowledgeSourceSyncObjectObservationResult["disposition"] = "accepted";
+        let desiredFloor = candidate;
+        if (input.revisionOrdering === "canonical_decimal" && authoritativeFloor) {
+          const comparison = compareCanonicalDecimalProviderRevisions(
+            candidate.providerRevision,
+            authoritativeFloor.providerRevision,
+          );
+          if (comparison === null) {
+            disposition = "conflict";
+            desiredFloor = authoritativeFloor;
+          } else if (comparison < 0) {
+            disposition = "stale";
+            desiredFloor = authoritativeFloor;
+          } else if (comparison === 0) {
+            disposition =
+              candidate.metadataHash === authoritativeFloor.metadataHash ? "replayed" : "conflict";
+            desiredFloor = authoritativeFloor;
+          }
+        } else if (sameGenerationObservation) {
+          disposition =
+            candidate.providerRevision === sameGenerationObservation.providerRevision &&
+            candidate.metadataHash === sameGenerationObservation.metadataHash
+              ? "replayed"
+              : "stale";
+          desiredFloor = {
+            providerRevision: sameGenerationObservation.providerRevision,
+            metadataHash: sameGenerationObservation.metadataHash,
+          };
+        }
+
+        let durable = existing;
+        if (!existing) {
+          [durable] = await scopedDb
+            .insert(schema.knowledgeSourceSyncObjectObservations)
+            .values({
+              sourceId: input.sourceId,
+              externalObjectId: observation.externalObjectId,
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              scheduledTaskRunId: input.scheduledTaskRunId,
+              scanGeneration: input.scanGeneration,
+              providerRevision: desiredFloor.providerRevision,
+              metadataHash: desiredFloor.metadataHash,
+              observedAt: new Date(),
+            })
+            .onConflictDoNothing()
+            .returning();
+          if (!durable) throw new Error("Knowledge source observation changed before insert");
+        } else if (
+          existing.scanGeneration !== input.scanGeneration ||
+          existing.scheduledTaskRunId !== input.scheduledTaskRunId ||
+          existing.providerRevision !== desiredFloor.providerRevision ||
+          existing.metadataHash !== desiredFloor.metadataHash
+        ) {
+          [durable] = await scopedDb
+            .update(schema.knowledgeSourceSyncObjectObservations)
+            .set({
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              scheduledTaskRunId: input.scheduledTaskRunId,
+              scanGeneration: input.scanGeneration,
+              providerRevision: desiredFloor.providerRevision,
+              metadataHash: desiredFloor.metadataHash,
+              observedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(schema.knowledgeSourceSyncObjectObservations.sourceId, input.sourceId),
+                eq(
+                  schema.knowledgeSourceSyncObjectObservations.externalObjectId,
+                  observation.externalObjectId,
+                ),
+                eq(
+                  schema.knowledgeSourceSyncObjectObservations.scanGeneration,
+                  existing.scanGeneration,
+                ),
+              ),
+            )
+            .returning();
+          if (!durable) throw new Error("Knowledge source observation floor changed");
+        }
+        if (!durable) throw new Error("Knowledge source observation disappeared");
         results.push({
           externalObjectId: observation.externalObjectId,
           providerRevision: durable.providerRevision,

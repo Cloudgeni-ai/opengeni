@@ -2048,6 +2048,24 @@ describe("knowledge-source schedule dispatch", () => {
 
   test("advances the Drive provider cursor only with successful generation-fenced settlement", async () => {
     if (!available) return;
+    const appProbe = postgres(shared!.appUrl, { max: 1 });
+    try {
+      const [posture] = await appProbe<
+        Array<{ currentUser: string; rlsEnabled: boolean; forceRls: boolean }>
+      >`
+        select current_user as "currentUser",
+          cls.relrowsecurity as "rlsEnabled",
+          cls.relforcerowsecurity as "forceRls"
+        from pg_class cls
+        where cls.oid = 'knowledge_source_sync_object_observations'::regclass`;
+      expect(posture).toEqual({
+        currentUser: "opengeni_app",
+        rlsEnabled: true,
+        forceRls: true,
+      });
+    } finally {
+      await appProbe.end();
+    }
     const [account] = await admin<{ id: string }[]>`
       insert into managed_accounts (name) values ('drive cursor settlement') returning id`;
     const [workspace] = await admin<{ id: string }[]>`
@@ -2395,6 +2413,212 @@ describe("knowledge-source schedule dispatch", () => {
       metadataHash: metadataHash8,
       currentVersion: { providerRevision: "8", metadataHash: metadataHash8 },
     });
+
+    // Reproduce the exact V4 defect: a regressed observation v7/hash B,
+    // authoritative current v8/hash A, and candidate v8/hash C. Admission must
+    // repair the observation from current truth before classifying the
+    // candidate, then fail closed before metadata/checkpoint/cursor settlement.
+    await admin`
+      update knowledge_source_sync_object_observations
+      set provider_revision = '7', metadata_hash = ${metadataHash7}
+      where source_id = ${source.id} and external_object_id = 'full-only-doc'`;
+    const metadataHashConflict8 = "c".repeat(64);
+    const [conflictingReplay8] = await recordKnowledgeSourceSyncObjectObservations(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      sourceId: source.id,
+      scheduledTaskRunId: run.id,
+      initiatingSubjectId: actor.subjectId,
+      scanGeneration: liveState.activeScanGeneration,
+      executionCheckpointGeneration: liveState.executionCheckpointGeneration,
+      revisionOrdering: "canonical_decimal",
+      observations: [
+        {
+          externalObjectId: "full-only-doc",
+          providerRevision: "8",
+          metadataHash: metadataHashConflict8,
+        },
+      ],
+    });
+    expect(conflictingReplay8).toMatchObject({
+      disposition: "conflict",
+      providerRevision: "8",
+      metadataHash: metadataHash8,
+      currentVersion: { providerRevision: "8", metadataHash: metadataHash8 },
+    });
+    expect(() =>
+      shouldProcessGoogleDriveDurableObservation({
+        entry: { externalObjectId: "full-only-doc" },
+        observation: conflictingReplay8!,
+        sourceLifecycleGeneration: source.lifecycleGeneration,
+        aclGeneration: acl.generation,
+      }),
+    ).toThrow("provider_payload_invalid");
+    const conflictingProviderCursor = {
+      version: 1,
+      kind: "google_drive_changes",
+      pageToken: "must-not-commit-conflicting-metadata",
+    };
+    const conflictSummary = {
+      phase: "completed" as const,
+      scanned: 1,
+      imported: 1,
+      unchanged: 0,
+      skipped: 0,
+      failed: 0,
+      bytes: 8,
+      providerRequests: 1,
+      elapsedMs: 1,
+      indexed: 1,
+      aclPending: 0,
+      retryable: false,
+      limitReached: null,
+      checkpointed: false,
+      reconnectRequired: false,
+      failures: [],
+    };
+    const conflictingObservationFence = {
+      initiatingSubjectId: actor.subjectId,
+      scanGeneration: liveState.activeScanGeneration,
+      executionCheckpointGeneration: liveState.executionCheckpointGeneration,
+      observations: [
+        {
+          externalObjectId: "full-only-doc",
+          providerRevision: "8",
+          metadataHash: metadataHashConflict8,
+        },
+      ],
+    };
+    await expect(
+      updateKnowledgeSourceDocumentObservationMetadata(client.db, {
+        accountId: account!.id,
+        workspaceId: workspace!.id,
+        initiatingSubjectId: actor.subjectId,
+        sourceId: source.id,
+        expectedSourceLifecycleGeneration: source.lifecycleGeneration,
+        objectId: object.id,
+        expectedObjectLifecycleGeneration: object.lifecycleGeneration,
+        versionId: version8.id,
+        documentId: document.id,
+        title: "must-not-replace-authoritative-title.txt",
+        sourceUri: "https://drive.google.com/open?id=full-only-doc",
+        sourceVersion: "8",
+        sourceUpdatedAt: "2026-08-11T00:00:09.000Z",
+        syncObservation: {
+          scheduledTaskRunId: run.id,
+          scanGeneration: liveState.activeScanGeneration,
+          providerRevision: "8",
+          metadataHash: metadataHashConflict8,
+        },
+      }),
+    ).rejects.toThrow("observation floor changed");
+    await expect(
+      checkpointKnowledgeSourceSync(client.db, {
+        accountId: account!.id,
+        workspaceId: workspace!.id,
+        sourceId: source.id,
+        scheduledTaskRunId: run.id,
+        sourceConfigGeneration: 1,
+        sourceLifecycleGeneration: source.lifecycleGeneration,
+        executionCheckpoint: {
+          version: 3,
+          kind: "google_drive_full_reconciliation",
+          revisionFloors: [["full-only-doc", "8"]],
+        },
+        observationFence: conflictingObservationFence,
+      }),
+    ).rejects.toThrow("observation floor changed");
+    await expect(
+      settleKnowledgeSourceSyncLease(client.db, {
+        accountId: account!.id,
+        workspaceId: workspace!.id,
+        sourceId: source.id,
+        scheduledTaskRunId: run.id,
+        knowledgeSyncRunId: knowledgeRun.id,
+        status: "succeeded",
+        summary: conflictSummary,
+        sourceConfigGeneration: 1,
+        sourceLifecycleGeneration: source.lifecycleGeneration,
+        sourceSyncGeneration: 0,
+        completedSourceSyncGeneration: 1,
+        providerCursor: conflictingProviderCursor,
+        observationFence: conflictingObservationFence,
+      }),
+    ).rejects.toThrow("observation floor changed");
+    const [conflictFacts] = await admin<
+      Array<{
+        providerRevision: string | null;
+        metadataHash: string | null;
+        currentVersionMetadataHash: string | null;
+        documentTitle: string;
+        documentSourceVersion: string | null;
+        executionCheckpoint: Record<string, unknown> | null;
+        providerCursor: Record<string, unknown> | null;
+        leaseId: string | null;
+        runStatus: string;
+      }>
+    >`
+      select observation.provider_revision as "providerRevision",
+        observation.metadata_hash as "metadataHash",
+        version.source_metadata ->> 'metadataHash' as "currentVersionMetadataHash",
+        document.title as "documentTitle",
+        document.source_version as "documentSourceVersion",
+        state.execution_checkpoint as "executionCheckpoint",
+        state.provider_cursor as "providerCursor",
+        state.lease_id as "leaseId",
+        run.status as "runStatus"
+      from knowledge_source_sync_object_observations observation
+      join knowledge_source_sync_states state on state.source_id = observation.source_id
+      join scheduled_task_runs run on run.id = ${run.id}
+      join knowledge_source_objects object
+        on object.source_id = observation.source_id
+        and object.external_object_id = observation.external_object_id
+      join knowledge_document_versions version on version.id = object.current_version_id
+      join documents document on document.id = version.document_id
+      where observation.source_id = ${source.id}
+        and observation.external_object_id = 'full-only-doc'`;
+    expect(conflictFacts).toEqual({
+      providerRevision: "8",
+      metadataHash: metadataHash8,
+      currentVersionMetadataHash: metadataHash8,
+      documentTitle: "version-8.txt",
+      documentSourceVersion: "8",
+      executionCheckpoint: null,
+      providerCursor: null,
+      leaseId: run.id,
+      runStatus: "queued",
+    });
+    const [exactReplay8] = await recordKnowledgeSourceSyncObjectObservations(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      sourceId: source.id,
+      scheduledTaskRunId: run.id,
+      initiatingSubjectId: actor.subjectId,
+      scanGeneration: liveState.activeScanGeneration,
+      executionCheckpointGeneration: liveState.executionCheckpointGeneration,
+      revisionOrdering: "canonical_decimal",
+      observations: [
+        {
+          externalObjectId: "full-only-doc",
+          providerRevision: "8",
+          metadataHash: metadataHash8,
+        },
+      ],
+    });
+    expect(exactReplay8).toMatchObject({
+      disposition: "replayed",
+      providerRevision: "8",
+      metadataHash: metadataHash8,
+      currentVersion: { providerRevision: "8", metadataHash: metadataHash8 },
+    });
+    expect(
+      shouldProcessGoogleDriveDurableObservation({
+        entry: { externalObjectId: "full-only-doc" },
+        observation: exactReplay8!,
+        sourceLifecycleGeneration: source.lifecycleGeneration,
+        aclGeneration: acl.generation,
+      }),
+    ).toBe(true);
     await expect(
       checkpointKnowledgeSourceSync(client.db, {
         accountId: account!.id,

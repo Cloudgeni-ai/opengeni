@@ -841,6 +841,50 @@ describe("Google Drive Changes cursor and reconciliation planner", () => {
     ).toThrow("provider_payload_invalid");
   });
 
+  test("fails before worker mutation when an equal revision conflicts with authoritative metadata", () => {
+    const metadataHash8 = "a".repeat(64);
+    const observation = {
+      externalObjectId: "full-only-doc",
+      providerRevision: "8",
+      metadataHash: metadataHash8,
+      disposition: "conflict" as const,
+      currentVersion: {
+        providerRevision: "8",
+        metadataHash: metadataHash8,
+        sourceLifecycleGeneration: 1,
+        objectLifecycleGeneration: 1,
+        currentObjectLifecycleGeneration: 1,
+        objectLifecycleState: "active",
+        aclGeneration: 1,
+        indexObligationStatus: "indexed",
+      },
+    };
+    const mutations: string[] = [];
+
+    expect(() => {
+      if (
+        shouldProcessGoogleDriveDurableObservation({
+          entry: { externalObjectId: "full-only-doc" },
+          observation,
+          sourceLifecycleGeneration: 1,
+          aclGeneration: 1,
+        })
+      ) {
+        mutations.push("metadata");
+      }
+      mutations.push("checkpoint", "cursor", "settlement");
+    }).toThrow("provider_payload_invalid");
+    expect(mutations).toEqual([]);
+    expect(
+      shouldProcessGoogleDriveDurableObservation({
+        entry: { externalObjectId: "full-only-doc" },
+        observation: { ...observation, disposition: "replayed" },
+        sourceLifecycleGeneration: 1,
+        aclGeneration: 1,
+      }),
+    ).toBe(true);
+  });
+
   test("fails closed when fallback revisions conflict during delta-to-full repair", async () => {
     const deltaFile = {
       ...file("fallback-doc", [source.id]),
