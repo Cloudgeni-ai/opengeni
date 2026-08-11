@@ -19,7 +19,7 @@ import {
   UserPlusIcon,
   UsersIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { CodexSubscriptionsCard } from "@/components/codex-connection";
@@ -566,11 +566,22 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
 }
 
 /** "People with access": the workspace's USER members, with add/edit/remove. */
-function MembersSection({ workspaceId, canManage }: { workspaceId: string; canManage: boolean }) {
+export function MembersSection(props: { workspaceId: string; canManage: boolean }) {
+  return <MembersSectionContent key={props.workspaceId} {...props} />;
+}
+
+function MembersSectionContent({
+  workspaceId,
+  canManage,
+}: {
+  workspaceId: string;
+  canManage: boolean;
+}) {
   const context = useAppContext();
   const client = context.client;
   const [members, setMembers] = useState<WorkspaceMember[]>([]);
   const [slackAccessRequests, setSlackAccessRequests] = useState<SlackUserLinkAccessRequest[]>([]);
+  const [slackAccessRequestsError, setSlackAccessRequestsError] = useState<Error | null>(null);
   const [error, setError] = useState<Error | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [email, setEmail] = useState("");
@@ -579,31 +590,108 @@ function MembersSection({ workspaceId, canManage }: { workspaceId: string; canMa
   const [editPermissions, setEditPermissions] = useState<Set<string>>(() => new Set());
   const [removingMember, setRemovingMember] = useState<WorkspaceMember | null>(null);
   const callerSubjectId = context.accessContext.subjectId;
+  const refreshGenerationRef = useRef(0);
+  const currentRefreshScopeRef = useRef<{
+    canManage: boolean;
+    client: typeof client;
+    workspaceId: string;
+  }>({ canManage, client, workspaceId });
+  currentRefreshScopeRef.current = { canManage, client, workspaceId };
 
   // Only USER subjects are people; api_key subjects belong to the API keys
   // section above and are excluded here.
   const userMembers = members.filter((member) => member.subjectId.startsWith("user:"));
 
   const refresh = useCallback(async () => {
+    const currentScope = currentRefreshScopeRef.current;
+    if (
+      !currentScope ||
+      currentScope.workspaceId !== workspaceId ||
+      currentScope.canManage !== canManage ||
+      currentScope.client !== client
+    ) {
+      return;
+    }
+    const generation = ++refreshGenerationRef.current;
+    const isCurrentRefresh = () => {
+      const nextScope = currentRefreshScopeRef.current;
+      return (
+        refreshGenerationRef.current === generation &&
+        nextScope?.workspaceId === workspaceId &&
+        nextScope.canManage === canManage &&
+        nextScope.client === client
+      );
+    };
+    setMembers([]);
+    setSlackAccessRequests([]);
+    setSlackAccessRequestsError(null);
+    setError(null);
+    setLoaded(false);
+
+    // The member roster is primary; pending Slack requests are a manager-only
+    // auxiliary surface. Start both concurrently, but settle their UI state independently.
+    const membersPromise = Promise.resolve().then(() => client.listWorkspaceMembers(workspaceId));
+    const slackAccessRequestsOutcomePromise = canManage
+      ? Promise.resolve()
+          .then(() => client.listSlackUserLinkAccessRequests(workspaceId))
+          .then(
+            (value) => ({ status: "fulfilled", value }) as const,
+            (reason) => ({ status: "rejected", reason }) as const,
+          )
+      : null;
+
+    if (slackAccessRequestsOutcomePromise) {
+      void slackAccessRequestsOutcomePromise.then((outcome) => {
+        if (!isCurrentRefresh()) {
+          return;
+        }
+        if (outcome.status === "fulfilled") {
+          setSlackAccessRequests(outcome.value);
+          setSlackAccessRequestsError(null);
+        } else {
+          setSlackAccessRequests([]);
+          setSlackAccessRequestsError(
+            outcome.reason instanceof Error ? outcome.reason : new Error(String(outcome.reason)),
+          );
+        }
+      });
+    }
+
     try {
-      const [nextMembers, nextSlackAccessRequests] = await Promise.all([
-        client.listWorkspaceMembers(workspaceId),
-        canManage ? client.listSlackUserLinkAccessRequests(workspaceId) : Promise.resolve([]),
-      ]);
+      const nextMembers = await membersPromise;
+      if (!isCurrentRefresh()) {
+        return;
+      }
       setMembers(nextMembers);
-      setSlackAccessRequests(nextSlackAccessRequests);
       setError(null);
     } catch (caught) {
+      if (!isCurrentRefresh()) {
+        return;
+      }
       setMembers([]);
-      setSlackAccessRequests([]);
       setError(caught instanceof Error ? caught : new Error(String(caught)));
+      return;
     } finally {
-      setLoaded(true);
+      if (isCurrentRefresh()) {
+        setLoaded(true);
+      }
     }
   }, [canManage, client, workspaceId]);
 
   useEffect(() => {
+    refreshGenerationRef.current += 1;
+    setMembers([]);
+    setSlackAccessRequests([]);
+    setSlackAccessRequestsError(null);
+    setError(null);
+    setLoaded(false);
+    setEditing(null);
+    setEditPermissions(new Set());
+    setRemovingMember(null);
     void refresh();
+    return () => {
+      refreshGenerationRef.current += 1;
+    };
   }, [refresh]);
 
   async function addMember() {
@@ -820,6 +908,19 @@ function MembersSection({ workspaceId, canManage }: { workspaceId: string; canMa
             </div>
           ))}
         </div>
+      ) : null}
+
+      {canManage && slackAccessRequestsError ? (
+        <Notice
+          title="Pending Slack access requests unavailable"
+          action={
+            <Button type="button" size="sm" variant="ghost" onClick={() => void refresh()}>
+              Retry
+            </Button>
+          }
+        >
+          {slackAccessRequestsError.message}
+        </Notice>
       ) : null}
 
       {error ? (
