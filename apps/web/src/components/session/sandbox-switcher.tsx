@@ -4,9 +4,8 @@
 // enrolled selfhosted machines). Backed by `useMachines({ sessionId })`, whose
 // `attach(sandboxId)` performs the swap and re-polls the pointer.
 //
-// Degrades gracefully: when selfhosted is disabled the machines API 404s →
-// `fleet.machines` is empty and this falls back to a static "Run on: Cloud
-// sandbox" label with no actionable dropdown.
+// Degrades gracefully: when selfhosted is disabled the machines API 404s and
+// `fleet.machines` is empty, so this falls back to a static compute label.
 import { useMachines, type MachineView } from "@opengeni/react/machines";
 import type { SandboxBackend } from "@opengeni/sdk";
 import { CheckIcon, ChevronDownIcon, Loader2Icon, ServerIcon } from "lucide-react";
@@ -22,9 +21,10 @@ import {
 import { isMachineComputeSelectable } from "@/lib/machine-selectability";
 
 export const CLOUD_SANDBOX_LABEL = "Cloud sandbox";
+export const NO_SANDBOX_LABEL = "No sandbox";
 
-export function sessionSupportsFleetSwitching(sandboxBackend: SandboxBackend): boolean {
-  return sandboxBackend !== "none";
+export function sessionSupportsFleetSwitching(_sandboxBackend: SandboxBackend): boolean {
+  return true;
 }
 
 /** Whether a machine can be a swap target right now (the active one always can,
@@ -36,18 +36,22 @@ function isSelectable(machine: MachineView): boolean {
 export function SessionSandboxSwitcher({
   workspaceId: _workspaceId,
   sessionId,
+  sandboxBackend,
 }: {
   workspaceId: string;
   sessionId: string;
+  sandboxBackend: SandboxBackend;
 }) {
   const fleet = useMachines({ sessionId, pollIntervalMs: 5000 });
   const machines = fleet.machines;
   const activeMachine = machines.find((machine) => machine.active) ?? null;
-  const activeName = activeMachine?.name ?? CLOUD_SANDBOX_LABEL;
+  const activeName =
+    activeMachine?.name ?? (sandboxBackend === "none" ? NO_SANDBOX_LABEL : CLOUD_SANDBOX_LABEL);
 
   // No machines to choose between (selfhosted off, or only the session box and
   // it is already active): render a static, non-interactive label.
-  const hasChoices = machines.length > 1 && fleet.canAttach;
+  const hasChoices =
+    fleet.canAttach && machines.some((machine) => !machine.active && isSelectable(machine));
   if (!hasChoices) {
     return (
       <span className="inline-flex min-w-0 items-center gap-1 truncate text-2xs text-fg-muted">

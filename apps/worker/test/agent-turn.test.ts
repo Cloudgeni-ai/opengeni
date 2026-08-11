@@ -87,6 +87,7 @@ import {
   safeErrorDiagnostic,
   sandboxArtifactRuntimeAdmission,
   sandboxDeadlineRotationRecoveryDelayMs,
+  shouldEstablishSandboxForTurn,
   shouldRecoverCompactionProviderFailure,
   shouldStartOnTurnRecording,
   shouldRunTurnEndWorkspacePersistence,
@@ -2281,6 +2282,11 @@ describe("active sandbox backend resolution (Case B: clone-onto-real-disk gate)"
 });
 
 describe("machine-primary sandbox ownership isolation", () => {
+  test("establishes an attached Connected Machine even when the session has no home sandbox", () => {
+    expect(shouldEstablishSandboxForTurn(true, "none", true)).toBe(true);
+    expect(shouldEstablishSandboxForTurn(true, "none", false)).toBe(false);
+  });
+
   test("does not acquire the managed-home lease for a Connected Machine turn", () => {
     expect(managedSandboxOwnershipForTurn(true, "attempt-1", "cloud-home-group")).toBeNull();
   });

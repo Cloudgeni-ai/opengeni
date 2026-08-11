@@ -269,7 +269,12 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
-type SeedOpts = { online?: boolean; hasDisplay?: boolean; allowScreenControl?: boolean };
+type SeedOpts = {
+  online?: boolean;
+  hasDisplay?: boolean;
+  allowScreenControl?: boolean;
+  sandboxBackend?: "modal" | "none";
+};
 async function seed(opts: SeedOpts = {}) {
   const { accountId, workspaceId } = await freshWorkspace();
   const session = await createSession(db, {
@@ -279,7 +284,7 @@ async function seed(opts: SeedOpts = {}) {
     resources: [],
     metadata: {},
     model: "gpt-test",
-    sandboxBackend: "modal",
+    sandboxBackend: opts.sandboxBackend ?? "modal",
   });
   const enrollment = await createEnrollment(db, {
     accountId,
@@ -304,6 +309,29 @@ async function seed(opts: SeedOpts = {}) {
 }
 
 describe("M10 GET /machines — dashboard list + states + metrics", () => {
+  test("a backend:none session exposes its machine fleet without a synthetic home", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, session, sandbox, bus } = await seed({
+      sandboxBackend: "none",
+    });
+    const app = appFor(bus);
+    const auth = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read"])}`;
+
+    const response = await app.request(
+      `/v1/workspaces/${workspaceId}/machines?sessionId=${session.id}`,
+      { headers: { authorization: auth } },
+    );
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      activeSandboxId: string | null;
+      machines: Array<{ sandboxId: string; active: boolean; isSessionGroup: boolean }>;
+    };
+    expect(body.activeSandboxId).toBeNull();
+    expect(body.machines).toEqual([
+      expect.objectContaining({ sandboxId: sandbox.id, active: false, isSessionGroup: false }),
+    ]);
+  }, 60_000);
+
   test("an online machine returns the contract shape with latest metrics; ?sessionId adds the synthetic group + active pointer", async () => {
     if (!available) return;
     const { accountId, workspaceId, session, enrollment, sandbox, bus } = await seed();

@@ -97,12 +97,14 @@ Rules to keep in mind:
 
 `listMachines` returns the workspace fleet plus the active-sandbox pointer. Pass
 `sessionId` for an in-session view, which also folds in that session's synthetic
-Modal group box and the session's active-sandbox pointer.
+home group box when one exists and the session's active-sandbox pointer. A
+`backend:none` session has no synthetic home, but its owned Connected Machines
+remain visible and attachable.
 
 ```ts
 const res = await client.listMachines(workspaceId, { sessionId });
 // res.activeSandboxId — the session's currently-active sandbox (null ⇒ the
-//                       session's own group box is active)
+//                       home box is active, or none is attached for backend:none)
 // res.activeEpoch     — monotonic fence for the pointer (see "swap" below)
 // res.machines        — MachineView[]
 ```
