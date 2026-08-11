@@ -8233,6 +8233,9 @@ export type GitStatusRequest = z.infer<typeof GitStatusRequest>;
 export const GitStatusResponse = z.object({
   isRepo: z.boolean(),
   head: z.string().nullable(), // branch name
+  // Exact commit object identity. null for unborn/non-repositories; optional
+  // only so older adapters and serialized captures remain readable.
+  headOid: z.string().nullable().optional(),
   detached: z.boolean().default(false),
   upstream: z.string().nullable(),
   ahead: z.number().int().nonnegative().default(0),
@@ -8358,6 +8361,9 @@ export type WorkspaceCaptureFile = z.infer<typeof WorkspaceCaptureFile>;
 export const WorkspaceCaptureRepo = z.object({
   root: z.string(),
   head: z.string().nullable(),
+  // Exact HEAD commit object identity. null for unborn repositories; optional
+  // for workspace captures written before commit identity was retained.
+  headOid: z.string().nullable().optional(),
   detached: z.boolean().default(false),
   upstream: z.string().nullable(),
   ahead: z.number().int().nonnegative().default(0),

@@ -209,14 +209,9 @@ jobs:
             jq -cn --argjson total "$total" \
               '[range(0; $total) | {index: ., number: (. + 1), total: $total}]'
           }
-          # Focused PRs stay compact. Full inventories need two more bins: the
-          # four-way hosted proof left one 197-file shard within 2m27s of its
-          # timeout even though no individual terminal test was slow.
-          unit_maximum=4
-          if jq -e '.mode == "full"' impact-plan.json >/dev/null; then
-            unit_maximum=6
-          fi
-          echo "unit_matrix=$(matrix "$(jq '.unitTests | length' impact-plan.json)" "$unit_maximum")" >> "$GITHUB_OUTPUT"
+          # PR unit shards are coverage-identical independent runners. Six is the
+          # smallest measured matrix that keeps source-byte skew off the critical path.
+          echo "unit_matrix=$(matrix "$(jq '.unitTests | length' impact-plan.json)" 6)" >> "$GITHUB_OUTPUT"
           echo "integration_matrix=$(matrix "$(jq '.integrationTests | length' impact-plan.json)" 6)" >> "$GITHUB_OUTPUT"
           echo "e2e_matrix=$(matrix "$(jq '.e2eTests | length' impact-plan.json)" 4)" >> "$GITHUB_OUTPUT"
           echo "browser_lane_matrix=$(jq -c '.browserAcceptanceLanes | if length == 0 then [{lane:"none"}] else map({lane:.}) end' impact-plan.json)" >> "$GITHUB_OUTPUT"

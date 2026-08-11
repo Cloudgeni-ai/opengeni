@@ -66,7 +66,10 @@ export type SessionWorkflowClient = {
     agentRunUsageIdempotencyKey: string;
     triggerWorkflowId: string;
     initiator: TurnInitiator;
-    triggerType?: Extract<ScheduledTaskTriggerType, "manual" | "initial" | "retry" | "repair">;
+    triggerType?: Extract<
+      ScheduledTaskTriggerType,
+      "manual" | "initial" | "provider_event" | "retry" | "repair"
+    >;
   }) => Promise<void>;
   startRigVerification: (input: {
     workspaceId: string;

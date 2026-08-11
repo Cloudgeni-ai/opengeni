@@ -2971,9 +2971,9 @@ describe("workflow contracts", () => {
     const planScript = plan.steps.find((step: any) => step.id === "plan").run;
     expect(planScript).toContain('bun scripts/ci/impact.ts --base "$BASE_SHA" --head "$HEAD_SHA"');
     expect(planScript).toContain("bun scripts/ci/impact.ts --full --output impact-plan.json");
-    expect(planScript).toContain("unit_maximum=4");
-    expect(planScript).toContain("if jq -e '.mode == \"full\"' impact-plan.json");
-    expect(planScript).toContain("unit_maximum=6");
+    expect(planScript).toContain(
+      "unit_matrix=$(matrix \"$(jq '.unitTests | length' impact-plan.json)\" 6)",
+    );
 
     const source = ci.jobs["source-contracts"];
     expect(source.needs).toEqual(["automation-admission", "plan"]);

@@ -18,6 +18,7 @@ import {
   googleDriveKnowledgeScope,
   inventoryGoogleDriveSource,
   type GoogleDriveInventoryEntry,
+  type GoogleDriveInventoryCheckpoint,
   type GoogleDriveInventoryPage,
   type GoogleDriveInventoryProviderItem,
   type GoogleDriveInventoryStopReason,
@@ -37,6 +38,7 @@ import {
   buildConnectionTokenResolver,
   checkpointKnowledgeSourceSync,
   claimKnowledgeSourceSyncLease,
+  compareCanonicalDecimalProviderRevisions,
   completeKnowledgeSyncRun,
   completeKnowledgeSourceSyncWakeWithoutLease,
   deauthorizeKnowledgeSourceRetrieval,
@@ -50,6 +52,8 @@ import {
   getKnowledgeSourceObjectForSyncAuthority,
   getKnowledgeSourceSyncIndexObligationForVersion,
   getScheduledTask,
+  listObservedKnowledgeSourceSyncExternalObjectIds,
+  KnowledgeSourceSyncObservationFenceError,
   reconcileKnowledgeSourceSyncCompleteScan,
   reconcileKnowledgeSourceSyncLiveGeneration,
   recordKnowledgeSourceSyncItemOutcomes,
@@ -64,6 +68,8 @@ import {
   updateScheduledTaskRun,
   upsertKnowledgeSourceObject,
   type Database,
+  type KnowledgeSourceSyncObjectObservationResult,
+  type KnowledgeSourceSyncObservationFloor,
 } from "@opengeni/db";
 import { readResponseJsonBounded } from "@opengeni/network";
 import { createDocumentActivities } from "./documents";
@@ -73,14 +79,37 @@ import type {
   RunKnowledgeSourceSyncBatchResult,
 } from "./types";
 import type { KnowledgeSourceSyncDriver } from "./knowledge-source-sync-driver";
+import {
+  advanceGoogleDriveChangesCursor,
+  buildGoogleDriveChangesCursor,
+  drainGoogleDriveChanges,
+  GoogleDriveChangesProtocolError,
+  GoogleDriveCursorInvalidError,
+  googleDriveFullReconciliationDue,
+  parseGoogleDriveChangesCheckpoint,
+  parseGoogleDriveChangesCursor,
+  resolveGoogleDriveChangesBoundaryId,
+  type GoogleDriveChangesCheckpoint,
+  type GoogleDriveChangesPage,
+  type GoogleDriveSyncBudget,
+} from "./google-drive-changes";
 
 const DRIVE_API_BASE = "https://www.googleapis.com/drive/v3";
 const DRIVE_JSON_MAX_BYTES = 2 * 1024 * 1024;
+const GOOGLE_DRIVE_FULL_RECONCILIATION_INTERVAL_MS = 24 * 60 * 60 * 1_000;
+const GOOGLE_DRIVE_SYNC_INVOCATION_SLICE_MS = 30_000;
+const GOOGLE_DRIVE_EXECUTION_CHECKPOINT_MAX_BYTES = 2 * 1024 * 1024;
 const ATLASSIAN_API_BASE = "https://api.atlassian.com";
 const ATLASSIAN_JSON_MAX_BYTES = 4 * 1024 * 1024;
 
 type KnowledgeSyncEntry = GoogleDriveInventoryEntry | AtlassianInventoryEntry;
 type KnowledgeSyncStopReason = GoogleDriveInventoryStopReason | AtlassianInventoryStopReason;
+
+export function knowledgeSyncObservationPolicy(kind: "google_drive" | "atlassian") {
+  return kind === "google_drive"
+    ? { revisionOrdering: "canonical_decimal" as const, filterWithDriveDurability: true }
+    : { revisionOrdering: "first_observation" as const, filterWithDriveDurability: false };
+}
 
 export function createKnowledgeSourceSyncActivities(
   services: () => Promise<ControlActivityServices>,
@@ -203,6 +232,13 @@ export function createKnowledgeSourceSyncActivities(
             sourceSyncGeneration: replayedRun.inputSyncGeneration,
             completedSourceSyncGeneration:
               replayedRun.state === "succeeded" ? replayedRun.inputSyncGeneration + 1 : null,
+            ...(replayedRun.state === "succeeded" &&
+            replayedRun.metadata.providerCursor &&
+            typeof replayedRun.metadata.providerCursor === "object"
+              ? {
+                  providerCursor: replayedRun.metadata.providerCursor as Record<string, unknown>,
+                }
+              : {}),
           };
           const settled =
             replayedRun.state === "failed" && replayedSummary.reconnectRequired
@@ -238,9 +274,11 @@ export function createKnowledgeSourceSyncActivities(
           accountId: input.accountId,
           workspaceId: input.workspaceId,
           action,
+          sourceId: input.sourceId,
           externalSourceId: resolved.source.externalSourceId,
         });
         const selectedDestination = provider.selectedDestination;
+        const observationPolicy = knowledgeSyncObservationPolicy(provider.kind);
 
         let aclGeneration = resolved.source.currentAclGeneration;
         let acl = aclGeneration
@@ -289,7 +327,10 @@ export function createKnowledgeSourceSyncActivities(
         knowledgeRunId = knowledgeRun.id;
 
         const driver = provider.driver;
-        const inventory = await driver.inventory(lease.state.executionCheckpoint);
+        const inventory = await driver.inventory(
+          lease.state.executionCheckpoint,
+          lease.state.providerCursor,
+        );
         summary.providerRequests = inventory.providerRequests;
         summary.elapsedMs = inventory.elapsedMs;
 
@@ -301,18 +342,45 @@ export function createKnowledgeSourceSyncActivities(
             });
         if (!base) throw new SyncFailure("authority_changed", false);
 
-        await recordKnowledgeSourceSyncObjectObservations(db, {
+        const durableObservations = await recordKnowledgeSourceSyncObjectObservations(db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
           sourceId: input.sourceId,
           scheduledTaskRunId: input.scheduledTaskRunId,
+          initiatingSubjectId: action.initiatingSubjectId,
           scanGeneration: liveState.activeScanGeneration,
+          executionCheckpointGeneration: lease.state.executionCheckpointGeneration,
+          revisionOrdering: observationPolicy.revisionOrdering,
           observations: inventory.entries.map((entry) => ({
             externalObjectId: entry.externalObjectId,
             providerRevision: entry.externalVersionId,
             metadataHash: entryMetadataHash(entry),
           })),
         });
+        const entriesToProcess = observationPolicy.filterWithDriveDurability
+          ? inventory.entries.filter((entry, index) =>
+              shouldProcessGoogleDriveDurableObservation({
+                entry,
+                observation: durableObservations[index]!,
+                sourceLifecycleGeneration: resolved.source.lifecycleGeneration,
+                aclGeneration: aclGeneration!,
+              }),
+            )
+          : inventory.entries;
+        const observationFloorsById = new Map<string, KnowledgeSourceSyncObservationFloor>();
+        for (const observation of durableObservations) {
+          observationFloorsById.set(observation.externalObjectId, {
+            externalObjectId: observation.externalObjectId,
+            providerRevision: observation.providerRevision,
+            metadataHash: observation.metadataHash,
+          });
+        }
+        const observationFloors = [...observationFloorsById.values()];
+        const executionCheckpoint = mergeGoogleDriveDurableObservationFloors(
+          inventory.checkpoint,
+          observationFloors,
+          action.limits.maxItems,
+        );
 
         const ensureVersionIndexed = async (details: {
           entry: KnowledgeSyncEntry;
@@ -413,8 +481,16 @@ export function createKnowledgeSourceSyncActivities(
         };
 
         const outcomes = [];
-        for (const entry of inventory.entries) {
+        for (const entry of entriesToProcess) {
           heartbeat({ sourceId: input.sourceId, externalObjectId: entry.externalObjectId });
+          const observationFloor = observationFloorsById.get(entry.externalObjectId);
+          if (!observationFloor) throw new SyncFailure("provider_payload_invalid", false);
+          const syncObservation = {
+            scheduledTaskRunId: input.scheduledTaskRunId,
+            scanGeneration: liveState.activeScanGeneration,
+            providerRevision: observationFloor.providerRevision,
+            metadataHash: observationFloor.metadataHash,
+          };
           summary.scanned += 1;
           if (entry.transfer.action === "skip") {
             summary.skipped += 1;
@@ -516,6 +592,7 @@ export function createKnowledgeSourceSyncActivities(
                 sourceUri: entry.sourceUri,
                 sourceVersion: entry.externalVersionId ?? currentVersion.contentSha256,
                 sourceUpdatedAt: entry.modifiedTime,
+                syncObservation,
               });
               const obligation = await ensureVersionIndexed({
                 entry,
@@ -591,6 +668,7 @@ export function createKnowledgeSourceSyncActivities(
                   sourceVersion: entry.externalVersionId ?? contentSha256,
                   sourceUpdatedAt: entry.modifiedTime,
                 },
+                syncObservation,
                 operationId: `document-observation:${object.id}:${observationKey}`,
                 reasonCode: "source_metadata_observed",
                 actor,
@@ -609,6 +687,7 @@ export function createKnowledgeSourceSyncActivities(
                 sourceUri: entry.sourceUri,
                 sourceVersion: entry.externalVersionId ?? contentSha256,
                 sourceUpdatedAt: entry.modifiedTime,
+                syncObservation,
               });
               const obligation = await ensureVersionIndexed({
                 entry,
@@ -705,6 +784,7 @@ export function createKnowledgeSourceSyncActivities(
               documentId: document.id,
               fileId: file.id,
               locationMetadata: { sourceUri: entry.sourceUri },
+              syncObservation,
               operationId: `document-version:${object.id}:${observationKey}`,
               reasonCode: "source_content_observed",
               actor,
@@ -730,6 +810,9 @@ export function createKnowledgeSourceSyncActivities(
               indexObligationId: obligation.id,
             });
           } catch (error) {
+            if (error instanceof KnowledgeSourceSyncObservationFenceError) {
+              throw new SyncFailure("provider_payload_invalid", false);
+            }
             const message = boundedError(error);
             const itemFailure =
               error instanceof SyncFailure
@@ -779,6 +862,10 @@ export function createKnowledgeSourceSyncActivities(
               inventory.stopReason === "provider_error",
             );
           }
+          if (inventory.hardLimitReached) {
+            summary.limitReached = inventoryLimit(inventory.stopReason);
+            throw new SyncFailure("resource_limit", false);
+          }
           if (inventory.stopReason !== "elapsed_time_limit") {
             summary.limitReached = inventoryLimit(inventory.stopReason);
             throw new SyncFailure("resource_limit", false);
@@ -792,22 +879,30 @@ export function createKnowledgeSourceSyncActivities(
             scheduledTaskRunId: input.scheduledTaskRunId,
             sourceConfigGeneration: action.sourceConfigGeneration,
             sourceLifecycleGeneration: action.sourceLifecycleGeneration,
-            executionCheckpoint: inventory.checkpoint as unknown as Record<string, unknown>,
+            executionCheckpoint: executionCheckpoint as Record<string, unknown>,
+            observationFence: {
+              initiatingSubjectId: action.initiatingSubjectId,
+              scanGeneration: liveState.activeScanGeneration,
+              executionCheckpointGeneration: lease.state.executionCheckpointGeneration,
+              observations: observationFloors,
+            },
           });
           return { action: "continue" };
         }
 
-        const tombstonedExternalObjectIds = await reconcileKnowledgeSourceSyncCompleteScan(db, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sourceId: input.sourceId,
-          scheduledTaskRunId: input.scheduledTaskRunId,
-          initiatingSubjectId: action.initiatingSubjectId,
-          sourceSyncGeneration: knowledgeRun.inputSyncGeneration,
-          sourceConfigGeneration: action.sourceConfigGeneration,
-          sourceLifecycleGeneration: action.sourceLifecycleGeneration,
-          scanGeneration: liveState.activeScanGeneration,
-        });
+        const tombstonedExternalObjectIds = inventory.authoritativeFullScan
+          ? await reconcileKnowledgeSourceSyncCompleteScan(db, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sourceId: input.sourceId,
+              scheduledTaskRunId: input.scheduledTaskRunId,
+              initiatingSubjectId: action.initiatingSubjectId,
+              sourceSyncGeneration: knowledgeRun.inputSyncGeneration,
+              sourceConfigGeneration: action.sourceConfigGeneration,
+              sourceLifecycleGeneration: action.sourceLifecycleGeneration,
+              scanGeneration: liveState.activeScanGeneration,
+            })
+          : [];
         if (tombstonedExternalObjectIds.length > 0) {
           summary.skipped += tombstonedExternalObjectIds.length;
           await recordKnowledgeSourceSyncItemOutcomes(db, {
@@ -835,7 +930,7 @@ export function createKnowledgeSourceSyncActivities(
           state: "succeeded",
           outputCursor: null,
           watermark: new Date().toISOString(),
-          metadata: summary,
+          metadata: { ...summary, providerCursor: inventory.providerCursor },
           reasonCode: "scheduled_source_sync",
         });
         summary.phase = "completed";
@@ -852,6 +947,13 @@ export function createKnowledgeSourceSyncActivities(
           sourceLifecycleGeneration: action.sourceLifecycleGeneration,
           sourceSyncGeneration: knowledgeRun.inputSyncGeneration,
           completedSourceSyncGeneration: knowledgeRun.inputSyncGeneration + 1,
+          providerCursor: inventory.providerCursor,
+          observationFence: {
+            initiatingSubjectId: action.initiatingSubjectId,
+            scanGeneration: liveState.activeScanGeneration,
+            executionCheckpointGeneration: lease.state.executionCheckpointGeneration,
+            observations: observationFloors,
+          },
         });
         await recordConnectorUsage("completed", summary.scanned, "item");
         await recordConnectorUsage("items", summary.imported, "item");
@@ -1073,14 +1175,33 @@ export async function deauthorizeAndSettleKnowledgeSourceSyncFailure(
   return await settleKnowledgeSourceSyncLease(db, input.settlement);
 }
 
+export type GoogleDriveSyncProviderPort = {
+  now?: () => number;
+  getStartPageToken: (driveId: string | null) => Promise<string>;
+  listChanges: (
+    pageToken: string,
+    driveId: string | null,
+    pageSize: number,
+  ) => Promise<GoogleDriveChangesPage>;
+  getFile: (fileId: string) => Promise<GoogleDriveInventoryProviderItem | null>;
+  listChildren: (input: {
+    folderId: string;
+    driveId: string | null;
+    pageToken: string | null;
+    pageSize: number;
+  }) => Promise<GoogleDriveInventoryPage>;
+};
+
 async function resolveKnowledgeSyncProvider(input: {
   db: Database;
   settings: Settings;
   accountId: string;
   workspaceId: string;
   action: Extract<ScheduledTask["action"], { kind: "knowledge_source_sync" }>;
+  sourceId: string;
   externalSourceId: string;
 }): Promise<{
+  kind: "google_drive" | "atlassian";
   selectedDestination: NonNullable<
     GoogleDriveSelectedSource["destination"] | AtlassianSelectedSource["destination"]
   >;
@@ -1207,6 +1328,7 @@ async function resolveKnowledgeSyncProvider(input: {
       throw new SyncFailure("authority_changed", false);
     }
     return {
+      kind: "google_drive",
       selectedDestination: source.destination!,
       driver: googleDriveSyncDriver({
         actionProviderCoordinationKey: action.providerCoordinationKey,
@@ -1217,6 +1339,15 @@ async function resolveKnowledgeSyncProvider(input: {
         initiatingSubjectId: action.initiatingSubjectId,
         authorization,
         limits: action.limits,
+        connectionId: resolvedConnection.id,
+        fullReconciliationIntervalMs: GOOGLE_DRIVE_FULL_RECONCILIATION_INTERVAL_MS,
+        observedExternalObjectIds: async (externalObjectIds) =>
+          await listObservedKnowledgeSourceSyncExternalObjectIds(input.db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sourceId: input.sourceId,
+            externalObjectIds,
+          }),
       }) as unknown as KnowledgeSourceSyncDriver<KnowledgeSyncEntry, KnowledgeSyncStopReason>,
     };
   }
@@ -1233,6 +1364,7 @@ async function resolveKnowledgeSyncProvider(input: {
       throw new SyncFailure("authority_changed", false);
     }
     return {
+      kind: "atlassian",
       selectedDestination: source.destination!,
       driver: atlassianSyncDriver({
         actionProviderCoordinationKey: action.providerCoordinationKey,
@@ -1284,8 +1416,8 @@ function atlassianSyncDriver(input: {
     providerKey: "atlassian",
     providerDomain: ATLASSIAN_PROVIDER_DOMAIN,
     providerCoordinationKey: input.actionProviderCoordinationKey,
-    inventory: async (checkpoint) =>
-      await inventoryAtlassianSource({
+    inventory: async (checkpoint) => {
+      const inventory = await inventoryAtlassianSource({
         cloudId: input.selectedSource.cloudId,
         source: input.selectedSource,
         limits: {
@@ -1297,7 +1429,18 @@ function atlassianSyncDriver(input: {
         checkpoint,
         listPage: async (cursor, pageSize) =>
           await listAtlassianItems(input.selectedSource, cursor, pageSize, input.authorization),
-      }),
+      });
+      return {
+        ...inventory,
+        providerCursor: null,
+        authoritativeFullScan: inventory.status === "complete",
+        cursorInvalidated: false,
+        hardLimitReached:
+          inventory.status === "paused" &&
+          inventory.stopReason !== "elapsed_time_limit" &&
+          inventory.stopReason !== "provider_error",
+      };
+    },
     fetchContent: async (entry, maxBytes) =>
       await fetchAtlassianContent(input.selectedSource, entry, input.authorization, maxBytes),
     citationLocator: (entry) => ({
@@ -1312,14 +1455,18 @@ function atlassianSyncDriver(input: {
   };
 }
 
-function googleDriveSyncDriver(input: {
+export function googleDriveSyncDriver(input: {
   actionProviderCoordinationKey: string;
   metadata: ReturnType<typeof GoogleDriveConnectionMetadata.parse>;
   selectedSource: GoogleDriveSelectedSource;
+  connectionId: string;
   accountId: string;
   workspaceId: string;
   initiatingSubjectId: string;
   authorization: string | undefined;
+  fullReconciliationIntervalMs: number;
+  observedExternalObjectIds: (ids: string[]) => Promise<Set<string>>;
+  provider?: GoogleDriveSyncProviderPort;
   limits: {
     maxItems: number;
     maxBytes: number;
@@ -1328,38 +1475,364 @@ function googleDriveSyncDriver(input: {
     maxElapsedSeconds: number;
   };
 }): KnowledgeSourceSyncDriver<GoogleDriveInventoryEntry, GoogleDriveInventoryStopReason> {
+  const maxElapsedMs = input.limits.maxElapsedSeconds * 1_000;
+  const provider: GoogleDriveSyncProviderPort = input.provider ?? {
+    getStartPageToken: async (driveId) =>
+      await getDriveStartPageToken(driveId, input.authorization),
+    listChanges: async (pageToken, driveId, pageSize) =>
+      await listDriveChanges(pageToken, driveId, pageSize, input.authorization),
+    getFile: async (fileId) => await getDriveFile(fileId, input.authorization),
+    listChildren: async (request) => await listDriveChildren(request, input.authorization),
+  };
+  const clock = provider.now ?? Date.now;
+  const budgetLimits = {
+    maxItems: input.limits.maxItems,
+    maxProviderRequests: input.limits.maxProviderRequests,
+    maxElapsedMs,
+  };
   return {
     providerKey: "google_drive",
     providerDomain: GOOGLE_DRIVE_PROVIDER_DOMAIN,
     providerCoordinationKey: input.actionProviderCoordinationKey,
-    inventory: async (executionCheckpoint) => {
-      const inventory = await inventoryGoogleDriveSource({
+    inventory: async (executionCheckpoint, providerCursor) => {
+      const expectedCursor = {
+        connectionId: input.connectionId,
         googlePermissionId: input.metadata.googlePermissionId,
-        googleEmail: input.metadata.googleEmail,
-        source: input.selectedSource,
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        connectionSubjectId: input.initiatingSubjectId,
-        limits: {
-          maxItems: input.limits.maxItems,
-          maxKnownBytes: input.limits.maxBytes,
-          maxApiRequests: input.limits.maxProviderRequests,
-          maxElapsedMs: input.limits.maxElapsedSeconds * 1_000,
-          maxFileBytes: input.limits.maxFileBytes,
-          maxFolders: Math.min(input.limits.maxItems * 2, 2_000),
-          pageSize: Math.min(input.limits.maxItems, 100),
-        },
-        checkpoint: executionCheckpoint as never,
-        listChildren: async (request) => await listDriveChildren(request, input.authorization),
-      });
-      return {
-        status: inventory.status,
-        stopReason: inventory.stopReason,
-        entries: inventory.entries,
-        checkpoint: inventory.checkpoint as Record<string, unknown> | null,
-        providerRequests: inventory.run.apiRequestCount,
-        elapsedMs: inventory.run.elapsedMs,
+        sourceId: input.selectedSource.id,
+        driveId: input.selectedSource.driveId,
       };
+      const legacyFullCheckpoint = isLegacyGoogleDriveFullReconciliationCheckpoint(
+        executionCheckpoint,
+        expectedCursor,
+      );
+      const cursor = parseGoogleDriveChangesCursor(providerCursor, expectedCursor);
+      const checkpoint = parseGoogleDriveExecutionCheckpoint(
+        executionCheckpoint,
+        expectedCursor,
+        budgetLimits,
+      );
+      const now = new Date(clock());
+
+      const runFullReconciliation = async (full: {
+        boundaryId: string;
+        startPageToken: string;
+        cursorInvalidated: boolean;
+        budgetBeforeInventory: GoogleDriveSyncBudget;
+        inventoryElapsedMs: number;
+        inventoryCheckpoint: GoogleDriveInventoryCheckpoint | null;
+        revisionFloors: GoogleDriveRevisionFloor[];
+      }) => {
+        const inventoryItems = full.inventoryCheckpoint?.totals.itemCount ?? 0;
+        const inventoryProviderRequests = full.inventoryCheckpoint?.totals.apiRequestCount ?? 0;
+        const budgetBeforeInvocation = {
+          examinedItems: full.budgetBeforeInventory.examinedItems + inventoryItems,
+          providerRequests: full.budgetBeforeInventory.providerRequests + inventoryProviderRequests,
+          elapsedMs: full.budgetBeforeInventory.elapsedMs + full.inventoryElapsedMs,
+        } satisfies GoogleDriveSyncBudget;
+        const hardStopReason = googleDriveHardLimitReason(budgetBeforeInvocation, budgetLimits);
+        const fullCheckpoint = buildGoogleDriveFullReconciliationCheckpoint({
+          ...expectedCursor,
+          ...full,
+        });
+        if (hardStopReason) {
+          return {
+            status: "paused" as const,
+            stopReason: hardStopReason,
+            entries: [],
+            checkpoint: fullCheckpoint,
+            providerCursor,
+            authoritativeFullScan: false,
+            cursorInvalidated: full.cursorInvalidated,
+            providerRequests: budgetBeforeInvocation.providerRequests,
+            elapsedMs: budgetBeforeInvocation.elapsedMs,
+            hardLimitReached: true,
+          };
+        }
+
+        const phaseMaxItems = input.limits.maxItems - full.budgetBeforeInventory.examinedItems;
+        const phaseMaxProviderRequests =
+          input.limits.maxProviderRequests - full.budgetBeforeInventory.providerRequests;
+        const remainingElapsedMs = maxElapsedMs - budgetBeforeInvocation.elapsedMs;
+        const inventory = await inventoryGoogleDriveSource({
+          googlePermissionId: input.metadata.googlePermissionId,
+          googleEmail: input.metadata.googleEmail,
+          source: input.selectedSource,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          connectionSubjectId: input.initiatingSubjectId,
+          limits: {
+            maxItems: phaseMaxItems,
+            maxKnownBytes: input.limits.maxBytes,
+            maxApiRequests: phaseMaxProviderRequests,
+            maxElapsedMs: Math.min(GOOGLE_DRIVE_SYNC_INVOCATION_SLICE_MS, remainingElapsedMs),
+            maxFileBytes: input.limits.maxFileBytes,
+            maxFolders: Math.min(phaseMaxItems * 2, 2_000),
+            pageSize: Math.min(phaseMaxItems, 100),
+          },
+          checkpoint: full.inventoryCheckpoint,
+          listChildren: provider.listChildren,
+          now: clock,
+        });
+        const inventoryElapsedMs = full.inventoryElapsedMs + inventory.run.elapsedMs;
+        const budget = {
+          examinedItems: full.budgetBeforeInventory.examinedItems + inventory.totals.itemCount,
+          providerRequests:
+            full.budgetBeforeInventory.providerRequests + inventory.totals.apiRequestCount,
+          elapsedMs: full.budgetBeforeInventory.elapsedMs + inventoryElapsedMs,
+        } satisfies GoogleDriveSyncBudget;
+        const reconciled = reconcileGoogleDriveRevisionFloors(
+          inventory.entries,
+          full.revisionFloors,
+          input.limits.maxItems,
+        );
+        if (reconciled.conflict) {
+          return {
+            status: "paused" as const,
+            stopReason: "incomplete_search" as const,
+            entries: [],
+            checkpoint: fullCheckpoint,
+            providerCursor,
+            authoritativeFullScan: false,
+            cursorInvalidated: full.cursorInvalidated,
+            providerRequests: budget.providerRequests,
+            elapsedMs: budget.elapsedMs,
+            hardLimitReached: false,
+          };
+        }
+        const nextCursor =
+          inventory.status === "complete"
+            ? buildGoogleDriveChangesCursor({
+                ...expectedCursor,
+                boundaryId: full.boundaryId,
+                pageToken: full.startPageToken,
+                previousGeneration: cursor?.cursorGeneration ?? 0,
+                reconciledAt: now,
+                fullReconciliationIntervalMs: input.fullReconciliationIntervalMs,
+              })
+            : providerCursor;
+        return {
+          status: inventory.status,
+          stopReason: inventory.stopReason,
+          entries: reconciled.entries,
+          checkpoint:
+            inventory.status === "paused" && inventory.checkpoint
+              ? buildGoogleDriveFullReconciliationCheckpoint({
+                  ...expectedCursor,
+                  boundaryId: full.boundaryId,
+                  startPageToken: full.startPageToken,
+                  cursorInvalidated: full.cursorInvalidated,
+                  budgetBeforeInventory: full.budgetBeforeInventory,
+                  inventoryElapsedMs,
+                  inventoryCheckpoint: inventory.checkpoint,
+                  revisionFloors: reconciled.revisionFloors,
+                })
+              : null,
+          providerCursor: nextCursor,
+          authoritativeFullScan: inventory.status === "complete",
+          cursorInvalidated: full.cursorInvalidated,
+          providerRequests: budget.providerRequests,
+          elapsedMs: budget.elapsedMs,
+          hardLimitReached:
+            inventory.status === "paused" &&
+            googleDriveInventoryStopIsHard(inventory.stopReason, budget, budgetLimits),
+        };
+      };
+
+      const acquireFullReconciliation = async (details: {
+        budget: GoogleDriveSyncBudget;
+        boundaryId: string | null;
+        cursorInvalidated: boolean;
+      }) => {
+        const acquisitionStartedAt = clock();
+        const initialElapsedMs = details.budget.elapsedMs;
+        const budget = { ...details.budget };
+        const refreshElapsed = () => {
+          budget.elapsedMs = initialElapsedMs + Math.max(0, clock() - acquisitionStartedAt);
+        };
+        const requireProviderCapacity = () => {
+          refreshElapsed();
+          if (googleDriveHardLimitReason(budget, budgetLimits)) {
+            throw new SyncFailure("resource_limit", false);
+          }
+          budget.providerRequests += 1;
+        };
+
+        requireProviderCapacity();
+        const startPageToken = await provider.getStartPageToken(input.selectedSource.driveId);
+        refreshElapsed();
+
+        let boundaryId = details.boundaryId;
+        if (!boundaryId) {
+          if (input.selectedSource.id === "root" && input.selectedSource.driveId === null) {
+            requireProviderCapacity();
+            try {
+              boundaryId = await resolveGoogleDriveChangesBoundaryId({
+                source: input.selectedSource,
+                getFile: provider.getFile,
+              });
+            } catch (error) {
+              if (error instanceof GoogleDriveChangesProtocolError) {
+                throw new SyncFailure("provider_payload_invalid", false);
+              }
+              throw error;
+            }
+            refreshElapsed();
+          } else {
+            boundaryId = input.selectedSource.id;
+          }
+        }
+
+        return {
+          boundaryId,
+          startPageToken,
+          cursorInvalidated: details.cursorInvalidated,
+          budgetBeforeInventory: budget,
+          inventoryElapsedMs: 0,
+          inventoryCheckpoint: null,
+          revisionFloors: [],
+        };
+      };
+
+      if (checkpoint?.kind === "google_drive_full_reconciliation") {
+        return await runFullReconciliation(checkpoint);
+      }
+      if (!cursor) {
+        const budget =
+          checkpoint?.kind === "google_drive_changes"
+            ? checkpoint.changesCheckpoint.budget
+            : emptyGoogleDriveSyncBudget();
+        return await runFullReconciliation(
+          await acquireFullReconciliation({
+            budget,
+            boundaryId: null,
+            cursorInvalidated: providerCursor !== null,
+          }),
+        );
+      }
+      if (!checkpoint && !legacyFullCheckpoint && googleDriveFullReconciliationDue(cursor, now)) {
+        return await runFullReconciliation(
+          await acquireFullReconciliation({
+            budget: emptyGoogleDriveSyncBudget(),
+            boundaryId: cursor.boundaryId,
+            cursorInvalidated: false,
+          }),
+        );
+      }
+
+      try {
+        const forceFullReconciliation =
+          legacyFullCheckpoint || googleDriveFullReconciliationDue(cursor, now);
+        const changesCheckpoint =
+          checkpoint?.kind === "google_drive_changes"
+            ? {
+                ...checkpoint.changesCheckpoint,
+                requiresFullReconciliation:
+                  checkpoint.changesCheckpoint.requiresFullReconciliation ||
+                  forceFullReconciliation,
+              }
+            : null;
+        const changes = await drainGoogleDriveChanges({
+          source: input.selectedSource,
+          cursor,
+          checkpoint: changesCheckpoint,
+          maxItems: input.limits.maxItems,
+          maxProviderRequests: input.limits.maxProviderRequests,
+          maxElapsedMs,
+          maxInvocationElapsedMs: Math.min(GOOGLE_DRIVE_SYNC_INVOCATION_SLICE_MS, maxElapsedMs),
+          maxFileBytes: input.limits.maxFileBytes,
+          listChanges: async (pageToken, pageSize) =>
+            await provider.listChanges(pageToken, input.selectedSource.driveId, pageSize),
+          getFile: provider.getFile,
+          observedExternalObjectIds: input.observedExternalObjectIds,
+          now: clock,
+        });
+        if (changes.status === "paused" && changes.checkpoint) {
+          return {
+            status: "paused" as const,
+            stopReason: changes.stopReason,
+            entries: changes.entries,
+            checkpoint: {
+              version: 2,
+              kind: "google_drive_changes",
+              ...expectedCursor,
+              changesCheckpoint: {
+                ...changes.checkpoint,
+                requiresFullReconciliation:
+                  changes.checkpoint.requiresFullReconciliation || forceFullReconciliation,
+              },
+            } satisfies GoogleDriveExecutionCheckpoint,
+            providerCursor,
+            authoritativeFullScan: false,
+            cursorInvalidated: false,
+            providerRequests: changes.providerRequests,
+            elapsedMs: changes.elapsedMs,
+            hardLimitReached: changes.hardLimitReached,
+          };
+        }
+        if (!changes.newStartPageToken) throw new Error("google_drive_changes_cursor_missing");
+        if (changes.requiresFullReconciliation || forceFullReconciliation) {
+          const hardStopReason = googleDriveHardLimitReason(changes.budget, budgetLimits);
+          return {
+            status: "paused" as const,
+            stopReason: hardStopReason ?? ("elapsed_time_limit" as const),
+            entries: changes.entries,
+            checkpoint: buildGoogleDriveFullReconciliationCheckpoint({
+              ...expectedCursor,
+              boundaryId: cursor.boundaryId,
+              startPageToken: changes.newStartPageToken,
+              cursorInvalidated: false,
+              budgetBeforeInventory: changes.budget,
+              inventoryElapsedMs: 0,
+              inventoryCheckpoint: null,
+              revisionFloors: revisionFloorsForEntries(changes.entries, input.limits.maxItems),
+            }),
+            providerCursor,
+            authoritativeFullScan: false,
+            cursorInvalidated: false,
+            providerRequests: changes.providerRequests,
+            elapsedMs: changes.elapsedMs,
+            hardLimitReached: hardStopReason !== null,
+          };
+        }
+        return {
+          status: "complete" as const,
+          stopReason: null,
+          entries: changes.entries,
+          checkpoint: null,
+          providerCursor: advanceGoogleDriveChangesCursor(cursor, changes.newStartPageToken),
+          authoritativeFullScan: false,
+          cursorInvalidated: false,
+          providerRequests: changes.providerRequests,
+          elapsedMs: changes.elapsedMs,
+          hardLimitReached: false,
+        };
+      } catch (error) {
+        if (error instanceof GoogleDriveChangesProtocolError) {
+          throw new SyncFailure("provider_payload_invalid", false);
+        }
+        if (!(error instanceof GoogleDriveCursorInvalidError)) throw error;
+        const full = await acquireFullReconciliation({
+          budget: error.budget ?? emptyGoogleDriveSyncBudget(),
+          boundaryId: cursor.boundaryId,
+          cursorInvalidated: true,
+        });
+        const hardStopReason = googleDriveHardLimitReason(full.budgetBeforeInventory, budgetLimits);
+        return {
+          status: "paused" as const,
+          stopReason: hardStopReason ?? ("elapsed_time_limit" as const),
+          entries: [],
+          checkpoint: buildGoogleDriveFullReconciliationCheckpoint({
+            ...expectedCursor,
+            ...full,
+          }),
+          providerCursor,
+          authoritativeFullScan: false,
+          cursorInvalidated: true,
+          providerRequests: full.budgetBeforeInventory.providerRequests,
+          elapsedMs: full.budgetBeforeInventory.elapsedMs,
+          hardLimitReached: hardStopReason !== null,
+        };
+      }
     },
     fetchContent: async (entry, maxBytes) =>
       await fetchDriveBytes(entry, input.authorization, maxBytes),
@@ -1371,6 +1844,428 @@ function googleDriveSyncDriver(input: {
       sourceUri: entry.sourceUri,
     }),
   };
+}
+
+type GoogleDriveCheckpointIdentity = {
+  connectionId: string;
+  googlePermissionId: string;
+  sourceId: string;
+  driveId: string | null;
+};
+
+type GoogleDriveRevisionFloor = [externalObjectId: string, providerRevision: string | null];
+
+type GoogleDriveFullReconciliationCheckpoint = GoogleDriveCheckpointIdentity & {
+  version: 3;
+  kind: "google_drive_full_reconciliation";
+  boundaryId: string;
+  startPageToken: string;
+  cursorInvalidated: boolean;
+  budgetBeforeInventory: GoogleDriveSyncBudget;
+  inventoryElapsedMs: number;
+  inventoryCheckpoint: GoogleDriveInventoryCheckpoint | null;
+  revisionFloors: GoogleDriveRevisionFloor[];
+};
+
+type GoogleDriveExecutionCheckpoint = GoogleDriveCheckpointIdentity &
+  (
+    | {
+        version: 2;
+        kind: "google_drive_changes";
+        changesCheckpoint: GoogleDriveChangesCheckpoint;
+      }
+    | GoogleDriveFullReconciliationCheckpoint
+  );
+
+function isLegacyGoogleDriveFullReconciliationCheckpoint(
+  value: Record<string, unknown> | null,
+  expected: GoogleDriveCheckpointIdentity,
+): boolean {
+  return (
+    value?.version === 2 &&
+    value.kind === "google_drive_full_reconciliation" &&
+    value.connectionId === expected.connectionId &&
+    value.googlePermissionId === expected.googlePermissionId &&
+    value.sourceId === expected.sourceId &&
+    value.driveId === expected.driveId &&
+    encodedJsonBytes(value) <= GOOGLE_DRIVE_EXECUTION_CHECKPOINT_MAX_BYTES
+  );
+}
+
+function parseGoogleDriveExecutionCheckpoint(
+  value: Record<string, unknown> | null,
+  expected: GoogleDriveCheckpointIdentity,
+  limits: { maxItems: number; maxProviderRequests: number; maxElapsedMs: number },
+): GoogleDriveExecutionCheckpoint | null {
+  if (
+    !value ||
+    value.connectionId !== expected.connectionId ||
+    value.googlePermissionId !== expected.googlePermissionId ||
+    value.sourceId !== expected.sourceId ||
+    value.driveId !== expected.driveId ||
+    encodedJsonBytes(value) > GOOGLE_DRIVE_EXECUTION_CHECKPOINT_MAX_BYTES
+  ) {
+    return null;
+  }
+  if (value.version === 2 && value.kind === "google_drive_changes") {
+    const changesCheckpoint = parseGoogleDriveChangesCheckpoint(value.changesCheckpoint, limits);
+    return changesCheckpoint
+      ? ({ ...value, changesCheckpoint } as GoogleDriveExecutionCheckpoint)
+      : null;
+  }
+  if (value.version === 3 && value.kind === "google_drive_full_reconciliation") {
+    const budgetBeforeInventory = parseGoogleDriveSyncBudget(value.budgetBeforeInventory, limits);
+    const revisionFloors = parseGoogleDriveRevisionFloors(value.revisionFloors, limits.maxItems);
+    if (
+      typeof value.boundaryId !== "string" ||
+      value.boundaryId.length < 1 ||
+      value.boundaryId.length > 1024 ||
+      typeof value.startPageToken !== "string" ||
+      value.startPageToken.length < 1 ||
+      value.startPageToken.length > 4096 ||
+      typeof value.cursorInvalidated !== "boolean" ||
+      !budgetBeforeInventory ||
+      !revisionFloors ||
+      !Number.isSafeInteger(value.inventoryElapsedMs) ||
+      Number(value.inventoryElapsedMs) < 0 ||
+      Number(value.inventoryElapsedMs) > limits.maxElapsedMs ||
+      budgetBeforeInventory.elapsedMs + Number(value.inventoryElapsedMs) > limits.maxElapsedMs ||
+      (value.inventoryCheckpoint !== null &&
+        (!value.inventoryCheckpoint ||
+          typeof value.inventoryCheckpoint !== "object" ||
+          Array.isArray(value.inventoryCheckpoint)))
+    ) {
+      return null;
+    }
+    return {
+      ...value,
+      budgetBeforeInventory,
+      inventoryElapsedMs: Number(value.inventoryElapsedMs),
+      revisionFloors,
+    } as GoogleDriveExecutionCheckpoint;
+  }
+  return null;
+}
+
+function buildGoogleDriveFullReconciliationCheckpoint(
+  input: Omit<GoogleDriveFullReconciliationCheckpoint, "version" | "kind">,
+): GoogleDriveFullReconciliationCheckpoint {
+  const checkpoint = {
+    version: 3,
+    kind: "google_drive_full_reconciliation",
+    ...input,
+    revisionFloors: input.revisionFloors.map((floor) => [...floor]),
+  } satisfies GoogleDriveFullReconciliationCheckpoint;
+  if (encodedJsonBytes(checkpoint) > GOOGLE_DRIVE_EXECUTION_CHECKPOINT_MAX_BYTES) {
+    throw new SyncFailure("resource_limit", false);
+  }
+  return checkpoint;
+}
+
+function parseGoogleDriveRevisionFloors(
+  value: unknown,
+  maxItems: number,
+): GoogleDriveRevisionFloor[] | null {
+  if (!Array.isArray(value) || value.length > maxItems) return null;
+  const floors: GoogleDriveRevisionFloor[] = [];
+  const seen = new Set<string>();
+  for (const floor of value) {
+    if (
+      !Array.isArray(floor) ||
+      floor.length !== 2 ||
+      typeof floor[0] !== "string" ||
+      floor[0].trim().length < 1 ||
+      floor[0].length > 1024 ||
+      (floor[1] !== null &&
+        (typeof floor[1] !== "string" || floor[1].length < 1 || floor[1].length > 256)) ||
+      seen.has(floor[0])
+    ) {
+      return null;
+    }
+    seen.add(floor[0]);
+    floors.push([floor[0], floor[1]]);
+  }
+  return floors;
+}
+
+function revisionFloorsForEntries(
+  entries: GoogleDriveInventoryEntry[],
+  maxItems: number,
+): GoogleDriveRevisionFloor[] {
+  const reconciled = reconcileGoogleDriveRevisionFloors(entries, [], maxItems);
+  if (reconciled.conflict) throw new SyncFailure("provider_payload_invalid", false);
+  return reconciled.revisionFloors;
+}
+
+export function shouldProcessGoogleDriveDurableObservation(input: {
+  entry: Pick<GoogleDriveInventoryEntry, "externalObjectId">;
+  observation: KnowledgeSourceSyncObjectObservationResult;
+  sourceLifecycleGeneration: number;
+  aclGeneration: number;
+}): boolean {
+  if (input.observation.externalObjectId !== input.entry.externalObjectId) {
+    throw new SyncFailure("provider_payload_invalid", false);
+  }
+  if (
+    input.observation.disposition === "accepted" ||
+    input.observation.disposition === "replayed"
+  ) {
+    return true;
+  }
+  if (input.observation.disposition === "conflict") {
+    throw new SyncFailure("provider_payload_invalid", false);
+  }
+  const current = input.observation.currentVersion;
+  const comparison = current
+    ? compareCanonicalDecimalProviderRevisions(
+        current.providerRevision,
+        input.observation.providerRevision,
+      )
+    : null;
+  const fullyProcessed =
+    current !== null &&
+    current.objectLifecycleState === "active" &&
+    current.sourceLifecycleGeneration === input.sourceLifecycleGeneration &&
+    current.objectLifecycleGeneration === current.currentObjectLifecycleGeneration &&
+    current.aclGeneration === input.aclGeneration &&
+    current.indexObligationStatus === "indexed" &&
+    comparison !== null &&
+    comparison >= 0 &&
+    (comparison > 0 || current.metadataHash === input.observation.metadataHash);
+  if (!fullyProcessed) throw new SyncFailure("provider_payload_invalid", false);
+  return false;
+}
+
+export function mergeGoogleDriveDurableObservationFloors(
+  checkpoint: Record<string, unknown> | null,
+  observations: KnowledgeSourceSyncObservationFloor[],
+  maxItems: number,
+): Record<string, unknown> | null {
+  if (
+    !checkpoint ||
+    checkpoint.version !== 3 ||
+    checkpoint.kind !== "google_drive_full_reconciliation"
+  ) {
+    return checkpoint;
+  }
+  const parsedFloors = parseGoogleDriveRevisionFloors(checkpoint.revisionFloors, maxItems);
+  if (!parsedFloors) throw new SyncFailure("provider_payload_invalid", false);
+  const floors = new Map<string, string | null>(parsedFloors);
+  for (const observation of observations) {
+    floors.set(observation.externalObjectId, observation.providerRevision);
+  }
+  if (floors.size > maxItems) throw new SyncFailure("resource_limit", false);
+  const merged = {
+    ...checkpoint,
+    revisionFloors: [...floors],
+  };
+  if (encodedJsonBytes(merged) > GOOGLE_DRIVE_EXECUTION_CHECKPOINT_MAX_BYTES) {
+    throw new SyncFailure("resource_limit", false);
+  }
+  return merged;
+}
+
+function reconcileGoogleDriveRevisionFloors(
+  entries: GoogleDriveInventoryEntry[],
+  existingFloors: GoogleDriveRevisionFloor[],
+  maxItems: number,
+): {
+  entries: GoogleDriveInventoryEntry[];
+  revisionFloors: GoogleDriveRevisionFloor[];
+  conflict: boolean;
+} {
+  const floors = new Map<string, string | null>(existingFloors);
+  const accepted: GoogleDriveInventoryEntry[] = [];
+  for (const entry of entries) {
+    if (!floors.has(entry.externalObjectId)) {
+      floors.set(entry.externalObjectId, entry.externalVersionId);
+      accepted.push(entry);
+    } else {
+      const comparison = compareCanonicalDecimalProviderRevisions(
+        entry.externalVersionId,
+        floors.get(entry.externalObjectId) ?? null,
+      );
+      if (comparison === null) {
+        return {
+          entries: [],
+          revisionFloors: [...floors],
+          conflict: true,
+        };
+      }
+      if (comparison > 0) {
+        floors.set(entry.externalObjectId, entry.externalVersionId);
+        accepted.push(entry);
+      }
+    }
+    if (floors.size > maxItems) throw new SyncFailure("resource_limit", false);
+  }
+  return {
+    entries: accepted,
+    revisionFloors: [...floors],
+    conflict: false,
+  };
+}
+
+function encodedJsonBytes(value: unknown): number {
+  try {
+    return new TextEncoder().encode(JSON.stringify(value)).byteLength;
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
+}
+
+function parseGoogleDriveSyncBudget(
+  value: unknown,
+  limits: { maxItems: number; maxProviderRequests: number; maxElapsedMs: number },
+): GoogleDriveSyncBudget | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  for (const [key, maximum] of [
+    ["examinedItems", limits.maxItems],
+    ["providerRequests", limits.maxProviderRequests],
+    ["elapsedMs", limits.maxElapsedMs],
+  ] as const) {
+    const budgetValue = row[key];
+    if (
+      !Number.isSafeInteger(budgetValue) ||
+      Number(budgetValue) < 0 ||
+      Number(budgetValue) > maximum
+    ) {
+      return null;
+    }
+  }
+  return value as GoogleDriveSyncBudget;
+}
+
+function emptyGoogleDriveSyncBudget(): GoogleDriveSyncBudget {
+  return { examinedItems: 0, providerRequests: 0, elapsedMs: 0 };
+}
+
+function googleDriveHardLimitReason(
+  budget: GoogleDriveSyncBudget,
+  limits: { maxItems: number; maxProviderRequests: number; maxElapsedMs: number },
+): Extract<
+  GoogleDriveInventoryStopReason,
+  "api_request_limit" | "elapsed_time_limit" | "item_limit"
+> | null {
+  if (budget.examinedItems >= limits.maxItems) return "item_limit";
+  if (budget.providerRequests >= limits.maxProviderRequests) return "api_request_limit";
+  if (budget.elapsedMs >= limits.maxElapsedMs) return "elapsed_time_limit";
+  return null;
+}
+
+function googleDriveInventoryStopIsHard(
+  reason: GoogleDriveInventoryStopReason | null,
+  budget: GoogleDriveSyncBudget,
+  limits: { maxItems: number; maxProviderRequests: number; maxElapsedMs: number },
+): boolean {
+  if (reason === "api_request_limit" || reason === "item_limit" || reason === "known_byte_limit") {
+    return true;
+  }
+  return reason === "elapsed_time_limit" && budget.elapsedMs >= limits.maxElapsedMs;
+}
+
+async function getDriveStartPageToken(
+  driveId: string | null,
+  authorization: string | undefined,
+): Promise<string> {
+  if (!authorization) throw new SyncFailure("connection_reconnect_required", true, true);
+  const url = new URL(`${DRIVE_API_BASE}/changes/startPageToken`);
+  url.searchParams.set("supportsAllDrives", "true");
+  if (driveId) url.searchParams.set("driveId", driveId);
+  const response = await fetch(url, {
+    headers: { authorization, accept: "application/json" },
+    redirect: "error",
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!response.ok) throwGoogleDriveResponse(response);
+  const payload = (await readResponseJsonBounded(
+    response,
+    DRIVE_JSON_MAX_BYTES,
+    "Google Drive start page token",
+  )) as Record<string, unknown>;
+  return requiredString(payload.startPageToken, "start_page_token");
+}
+
+async function listDriveChanges(
+  pageToken: string,
+  driveId: string | null,
+  pageSize: number,
+  authorization: string | undefined,
+): Promise<GoogleDriveChangesPage> {
+  if (!authorization) throw new SyncFailure("connection_reconnect_required", true, true);
+  const url = new URL(`${DRIVE_API_BASE}/changes`);
+  url.searchParams.set("pageToken", pageToken);
+  url.searchParams.set("pageSize", String(pageSize));
+  url.searchParams.set("supportsAllDrives", "true");
+  url.searchParams.set("includeItemsFromAllDrives", "true");
+  url.searchParams.set("spaces", "drive");
+  url.searchParams.set(
+    "fields",
+    "nextPageToken,newStartPageToken,changes(fileId,removed,time,driveId,file(id,name,mimeType,driveId,parents,modifiedTime,createdTime,version,md5Checksum,size,webViewLink,trashed))",
+  );
+  if (driveId) url.searchParams.set("driveId", driveId);
+  const response = await fetch(url, {
+    headers: { authorization, accept: "application/json" },
+    redirect: "error",
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (response.status === 410) throw new GoogleDriveCursorInvalidError();
+  if (!response.ok) throwGoogleDriveResponse(response);
+  const payload = (await readResponseJsonBounded(
+    response,
+    DRIVE_JSON_MAX_BYTES,
+    "Google Drive changes list",
+  )) as Record<string, unknown>;
+  const changes = Array.isArray(payload.changes) ? payload.changes : [];
+  return {
+    changes: changes.map((value) => {
+      const row = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+      const fileId = requiredString(row.fileId, "change_file_id");
+      return {
+        fileId,
+        removed: row.removed === true,
+        file: row.file && typeof row.file === "object" ? parseDriveProviderItem(row.file) : null,
+      };
+    }),
+    nextPageToken: optionalString(payload.nextPageToken),
+    newStartPageToken: optionalString(payload.newStartPageToken),
+  };
+}
+
+async function getDriveFile(
+  fileId: string,
+  authorization: string | undefined,
+): Promise<GoogleDriveInventoryProviderItem | null> {
+  if (!authorization) throw new SyncFailure("connection_reconnect_required", true, true);
+  const url = new URL(`${DRIVE_API_BASE}/files/${encodeURIComponent(fileId)}`);
+  url.searchParams.set("supportsAllDrives", "true");
+  url.searchParams.set(
+    "fields",
+    "id,name,mimeType,driveId,parents,modifiedTime,createdTime,version,md5Checksum,size,webViewLink,trashed",
+  );
+  const response = await fetch(url, {
+    headers: { authorization, accept: "application/json" },
+    redirect: "error",
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (response.status === 404) return null;
+  if (!response.ok) throwGoogleDriveResponse(response);
+  return parseDriveProviderItem(
+    await readResponseJsonBounded(response, DRIVE_JSON_MAX_BYTES, "Google Drive file metadata"),
+  );
+}
+
+function throwGoogleDriveResponse(response: Response): never {
+  if (response.status === 401 || response.status === 403) {
+    throw new SyncFailure("connection_reconnect_required", true, true);
+  }
+  throw new SyncFailure(
+    response.status >= 500 || response.status === 429
+      ? "provider_unavailable"
+      : "provider_rejected",
+    response.status >= 500 || response.status === 429,
+  );
 }
 
 function selectedDriveSource(
@@ -1910,7 +2805,7 @@ function entryMetadataHash(entry: KnowledgeSyncEntry): string {
 }
 
 function inventoryLimit(
-  reason: "api_request_limit" | "elapsed_time_limit" | "item_limit" | "known_byte_limit" | null,
+  reason: GoogleDriveInventoryStopReason | null,
 ): KnowledgeSourceSyncRunSummary["limitReached"] {
   if (reason === "api_request_limit") return "provider_requests";
   if (reason === "elapsed_time_limit") return "elapsed_time";

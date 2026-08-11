@@ -13,6 +13,7 @@ import {
   RUNTIME_TABLE_PRIVILEGES,
   type RuntimeDatabasePosture,
   type RuntimeDatabasePostureOptions,
+  type RuntimeTablePosture,
 } from "../src/runtime-posture";
 
 const options: RuntimeDatabasePostureOptions = {
@@ -25,6 +26,26 @@ const options: RuntimeDatabasePostureOptions = {
   },
   protectedNoDirectDmlTables: [],
 };
+
+function knowledgeAuthorityTables(): RuntimeTablePosture[] {
+  return ["knowledge_sources", "knowledge_source_objects"].map((name) => ({
+    name,
+    owner: "opengeni_migrator",
+    rlsEnabled: false,
+    rlsForced: false,
+    rlsActive: false,
+    policyCount: 0,
+    artifactOutboxDispatcherPolicy: false,
+    artifactMaterializerPolicy: false,
+    select: false,
+    insert: false,
+    update: false,
+    delete: false,
+    truncate: false,
+    references: false,
+    trigger: false,
+  }));
+}
 
 function safePosture(): RuntimeDatabasePosture {
   return {
@@ -77,6 +98,16 @@ function safePosture(): RuntimeDatabasePosture {
         truncate: false,
         references: false,
         trigger: false,
+      },
+      ...knowledgeAuthorityTables(),
+    ],
+    targetRoutines: [
+      {
+        name: "knowledge_source_sync_lock_authority(uuid, uuid, uuid)",
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
       },
     ],
     privateRoutines: [
@@ -238,6 +269,49 @@ describe("runtime database posture evaluator", () => {
     expect(evaluateRuntimeDatabasePosture(safePosture(), options)).toEqual([]);
   });
 
+  test("accepts public-schema authority owned by the two protected tables", () => {
+    const posture = safePosture();
+    posture.schemas[0]!.owner = "pg_database_owner";
+
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+  });
+
+  test("keeps dedicated-schema same-owner authority accepted", () => {
+    const posture = safePosture();
+    posture.schemas[0]!.name = "tenantx";
+
+    expect(
+      evaluateRuntimeDatabasePosture(posture, {
+        ...options,
+        targetSchema: "tenantx",
+      }),
+    ).toEqual([]);
+  });
+
+  test("fails closed on missing or split knowledge authority table ownership", () => {
+    const missing = safePosture();
+    missing.tables = missing.tables.filter((table) => table.name !== "knowledge_source_objects");
+    expect(evaluateRuntimeDatabasePosture(missing, options)).toContain(
+      "target-schema runtime capability knowledge_source_sync_lock_authority(uuid, uuid, uuid) authority tables are missing: knowledge_source_objects",
+    );
+
+    const split = safePosture();
+    split.tables.find((table) => table.name === "knowledge_source_objects")!.owner =
+      "another_owner";
+    expect(evaluateRuntimeDatabasePosture(split, options)).toContain(
+      "target-schema runtime capability knowledge_source_sync_lock_authority(uuid, uuid, uuid) authority table owners do not match: knowledge_sources=opengeni_migrator, knowledge_source_objects=another_owner",
+    );
+  });
+
+  test("rejects knowledge authority routine and table owner mismatch", () => {
+    const posture = safePosture();
+
+    posture.targetRoutines[0]!.owner = "another_owner";
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "target-schema runtime capability knowledge_source_sync_lock_authority(uuid, uuid, uuid) owner another_owner does not match authority table owner opengeni_migrator",
+    );
+  });
+
   test("rejects bypass, inheritance, ownership, memberships, and inactive RLS", () => {
     const posture = safePosture();
     posture.identity.bypassRls = true;
@@ -352,6 +426,31 @@ describe("runtime database posture evaluator", () => {
     ).toContain("protected tables lack an explicit privilege class: tenant_rows");
   });
 
+  test("requires the exact least-privilege target-schema knowledge authority lock", () => {
+    const missing = safePosture();
+    missing.targetRoutines = [];
+    expect(evaluateRuntimeDatabasePosture(missing, options)).toContain(
+      "target-schema runtime capability knowledge_source_sync_lock_authority(uuid, uuid, uuid) is missing or ambiguous",
+    );
+
+    const invalid = safePosture();
+    invalid.targetRoutines[0] = {
+      ...invalid.targetRoutines[0]!,
+      owner: "another_owner",
+      execute: false,
+      publicExecute: true,
+      securityDefiner: false,
+    };
+    expect(evaluateRuntimeDatabasePosture(invalid, options)).toEqual(
+      expect.arrayContaining([
+        "target-schema runtime capability knowledge_source_sync_lock_authority(uuid, uuid, uuid) is not SECURITY DEFINER",
+        "target-schema runtime capability knowledge_source_sync_lock_authority(uuid, uuid, uuid) owner another_owner does not match authority table owner opengeni_migrator",
+        "runtime role lacks target-schema capability knowledge_source_sync_lock_authority(uuid, uuid, uuid)",
+        "PUBLIC has forbidden target-schema capability knowledge_source_sync_lock_authority(uuid, uuid, uuid)",
+      ]),
+    );
+  });
+
   test("requires a same-owner SECURITY DEFINER artifact outbox dispatcher path", () => {
     const posture = safePosture();
     posture.tables.push({
@@ -387,7 +486,9 @@ describe("runtime database posture evaluator", () => {
     };
     expect(evaluateRuntimeDatabasePosture(posture, artifactOptions)).toEqual([]);
 
-    posture.tables[1]!.artifactOutboxDispatcherPolicy = false;
+    posture.tables.find(
+      (table) => table.name === "editable_artifact_live_outbox",
+    )!.artifactOutboxDispatcherPolicy = false;
     posture.privateRoutines[1]!.securityDefiner = false;
     posture.privateRoutines[2]!.owner = "another_owner";
     expect(evaluateRuntimeDatabasePosture(posture, artifactOptions)).toEqual(
@@ -438,11 +539,14 @@ describe("runtime database posture evaluator", () => {
       "editable_artifact_versions",
       "editable_artifact_idempotency_receipts",
     ];
-    posture.tables = materializerTables.map((name) => ({
-      ...posture.tables[0]!,
-      name,
-      artifactMaterializerPolicy: true,
-    }));
+    posture.tables = [
+      ...materializerTables.map((name) => ({
+        ...posture.tables[0]!,
+        name,
+        artifactMaterializerPolicy: true,
+      })),
+      ...knowledgeAuthorityTables(),
+    ];
     for (const name of [
       "claim_editable_artifact_materializations(text, integer, integer, name)",
       "renew_editable_artifact_materialization(uuid, uuid, text, text, text, integer, integer, name)",

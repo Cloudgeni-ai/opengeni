@@ -6,7 +6,9 @@
 // test/integration/workspace-capture.integration.ts (doctrine: verify real
 // behavior, not a mock proxy).
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createObservability } from "@opengeni/observability";
@@ -76,6 +78,7 @@ function captureRepo(overrides: Partial<WorkspaceCaptureRepo> = {}): WorkspaceCa
   return {
     root: "",
     head: "feature",
+    headOid: "0123456789abcdef0123456789abcdef01234567",
     detached: false,
     upstream: "origin/feature",
     ahead: 0,
@@ -221,6 +224,7 @@ describe("workspace-capture — repository read authority", () => {
   const status = {
     isRepo: true as const,
     head: "main",
+    headOid: "0123456789abcdef0123456789abcdef01234567",
     detached: false,
     upstream: null,
     ahead: 0,
@@ -329,6 +333,71 @@ describe("workspace-capture — path & key helpers", () => {
 
 describe("workspace-capture — durable change fingerprint", () => {
   const noFiles: WorkspaceCaptureFile[] = [];
+
+  test("exact HEAD identity distinguishes same-tree commits and stays stable", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-workspace-capture-head-"));
+    const git = (...args: string[]): string =>
+      execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
+
+    try {
+      git("init", "-q");
+      git("config", "user.email", "test@opengeni.dev");
+      git("config", "user.name", "OpenGeni Test");
+      git("config", "commit.gpgsign", "false");
+      writeFileSync(join(root, "same.txt"), "same tree\n");
+      git("add", "same.txt");
+      git("commit", "-q", "-m", "first");
+      const firstOid = git("rev-parse", "HEAD");
+      const firstTree = git("rev-parse", "HEAD^{tree}");
+
+      git("commit", "-q", "--allow-empty", "-m", "second");
+      const secondOid = git("rev-parse", "HEAD");
+      const secondTree = git("rev-parse", "HEAD^{tree}");
+
+      expect(secondTree).toBe(firstTree);
+      expect(secondOid).not.toBe(firstOid);
+      const firstFingerprint = changeFingerprint([captureRepo({ headOid: firstOid })], noFiles);
+      expect(changeFingerprint([captureRepo({ headOid: firstOid })], noFiles)).toBe(
+        firstFingerprint,
+      );
+      expect(changeFingerprint([captureRepo({ headOid: secondOid })], noFiles)).not.toBe(
+        firstFingerprint,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("legacy and unborn null identity agree without assuming an object-id width", () => {
+    const legacy = changeFingerprint([captureRepo({ head: null, headOid: undefined })], noFiles);
+    const unborn = changeFingerprint([captureRepo({ head: null, headOid: null })], noFiles);
+    const sha1 = changeFingerprint([captureRepo({ headOid: "a".repeat(40) })], noFiles);
+    const sha256 = changeFingerprint([captureRepo({ headOid: "a".repeat(64) })], noFiles);
+
+    expect(legacy).toBe(unborn);
+    expect(sha1).not.toBe(sha256);
+    expect(sha1).not.toBe(unborn);
+    expect(sha256).not.toBe(unborn);
+  });
+
+  test("binary or truncated diff surfaces remain stable unless HEAD identity changes", () => {
+    const branchDiff = [
+      {
+        ...committedBranchDiff(),
+        isBinary: true,
+        additions: 0,
+        deletions: 0,
+        hunks: [],
+        truncated: true,
+      },
+    ];
+    const first = captureRepo({ headOid: "b".repeat(40), branchDiff });
+    const same = captureRepo({ headOid: "b".repeat(40), branchDiff });
+    const next = captureRepo({ headOid: "c".repeat(40), branchDiff });
+
+    expect(changeFingerprint([first], noFiles)).toBe(changeFingerprint([same], noFiles));
+    expect(changeFingerprint([first], noFiles)).not.toBe(changeFingerprint([next], noFiles));
+  });
 
   test("a committed-only branch diff cannot deduplicate against the prior clean revision", () => {
     const cleanFingerprint = changeFingerprint([captureRepo()], noFiles);
@@ -455,6 +524,7 @@ describe("workspace-capture — manifest & event serialization", () => {
         {
           root: "",
           head: "main",
+          headOid: "0123456789abcdef0123456789abcdef01234567",
           detached: false,
           upstream: null,
           ahead: 0,
@@ -533,6 +603,7 @@ describe("workspace-capture — manifest & event serialization", () => {
     };
     const parsed = WorkspaceCaptureManifest.parse(JSON.parse(JSON.stringify(manifest)));
     expect(parsed.revision).toBe(3);
+    expect(parsed.repos[0]?.headOid).toBe("0123456789abcdef0123456789abcdef01234567");
     expect(parsed.files.find((f) => f.tooLarge)?.contentRef).toBeNull();
     expect(parsed.files.find((f) => f.deleted)?.status).toBe("deleted");
   });

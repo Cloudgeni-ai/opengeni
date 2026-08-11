@@ -1847,6 +1847,9 @@ export type GitStatusRequest = { path?: string };
 export type GitStatusResponse = {
   isRepo: boolean;
   head: string | null;
+  /** Exact commit object identity. null for unborn/non-repositories; absent on
+   *  legacy adapters. */
+  headOid?: string | null | undefined;
   detached: boolean;
   upstream: string | null;
   ahead: number;
@@ -1955,6 +1958,9 @@ export type WorkspaceCaptureFile = {
 export type WorkspaceCaptureRepo = {
   root: string;
   head: string | null;
+  /** Exact HEAD commit object identity. null for unborn repositories; absent
+   *  on legacy captures. */
+  headOid?: string | null | undefined;
   detached: boolean;
   upstream: string | null;
   ahead: number;

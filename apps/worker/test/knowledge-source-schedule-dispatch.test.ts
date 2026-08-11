@@ -42,7 +42,10 @@ import {
 } from "@opengeni/testing";
 import postgres from "postgres";
 import { createScheduledTaskActivities } from "../src/activities/scheduled-tasks";
-import { deauthorizeAndSettleKnowledgeSourceSyncFailure } from "../src/activities/knowledge-source-sync";
+import {
+  deauthorizeAndSettleKnowledgeSourceSyncFailure,
+  shouldProcessGoogleDriveDurableObservation,
+} from "../src/activities/knowledge-source-sync";
 import type { ControlActivityServices } from "../src/activities/types";
 
 let available = true;
@@ -69,6 +72,25 @@ async function acquireDatabase(): Promise<SharedTestDatabase | null> {
     appUrl,
     release: async () => await nativeAdmin.end().catch(() => undefined),
   };
+}
+
+async function waitForKnowledgeAuthorityLock(): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  for (;;) {
+    const [activity] = await admin<Array<{ blocked: boolean }>>`
+      select exists (
+        select 1
+        from pg_stat_activity
+        where usename = 'opengeni_app'
+          and wait_event_type = 'Lock'
+          and query like '%knowledge_source_sync_lock_authority%'
+      ) as blocked`;
+    if (activity?.blocked) return;
+    if (Date.now() >= deadline) {
+      throw new Error("Timed out waiting for the app-role knowledge authority lock");
+    }
+    await Bun.sleep(10);
+  }
 }
 
 beforeAll(async () => {
@@ -1827,10 +1849,34 @@ describe("knowledge-source schedule dispatch", () => {
       workspaceId: workspace!.id,
       sourceId: source.id,
       scheduledTaskRunId: third.run.id,
+      initiatingSubjectId: actor.subjectId,
       scanGeneration: third.state.activeScanGeneration,
+      executionCheckpointGeneration: third.state.executionCheckpointGeneration,
       observations: [
         { externalObjectId: "protocol-b", providerRevision: "v1", metadataHash: "4".repeat(64) },
       ],
+    });
+    await recordKnowledgeSourceSyncObjectObservations(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      sourceId: source.id,
+      scheduledTaskRunId: third.run.id,
+      initiatingSubjectId: actor.subjectId,
+      scanGeneration: third.state.activeScanGeneration,
+      executionCheckpointGeneration: third.state.executionCheckpointGeneration,
+      observations: [
+        { externalObjectId: "protocol-b", providerRevision: "v0", metadataHash: "5".repeat(64) },
+      ],
+    });
+    const [stableObservation] = await admin<
+      Array<{ providerRevision: string | null; metadataHash: string | null }>
+    >`
+      select provider_revision as "providerRevision", metadata_hash as "metadataHash"
+      from knowledge_source_sync_object_observations
+      where source_id = ${source.id} and external_object_id = 'protocol-b'`;
+    expect(stableObservation).toEqual({
+      providerRevision: "v1",
+      metadataHash: "4".repeat(64),
     });
     await checkpointKnowledgeSourceSync(client.db, {
       accountId: account!.id,
@@ -2017,5 +2063,857 @@ describe("knowledge-source schedule dispatch", () => {
       join scheduled_task_runs run on run.id = ${third.run.id}
       where state.source_id = ${source.id}`;
     expect(released).toEqual({ leaseId: null, status: "failed" });
+  }, 120_000);
+
+  test("advances the Drive provider cursor only with successful generation-fenced settlement", async () => {
+    if (!available) return;
+    const appProbe = postgres(shared!.appUrl, { max: 1 });
+    try {
+      const [posture] = await appProbe<
+        Array<{
+          currentUser: string;
+          observationRlsEnabled: boolean;
+          observationForceRls: boolean;
+          objectRlsEnabled: boolean;
+          objectForceRls: boolean;
+          objectSelect: boolean;
+          objectUpdate: boolean;
+          lockAuthorityExecute: boolean;
+        }>
+      >`
+        select current_user as "currentUser",
+          observation.relrowsecurity as "observationRlsEnabled",
+          observation.relforcerowsecurity as "observationForceRls",
+          object.relrowsecurity as "objectRlsEnabled",
+          object.relforcerowsecurity as "objectForceRls",
+          has_table_privilege(current_user, 'knowledge_source_objects', 'select') as "objectSelect",
+          has_table_privilege(current_user, 'knowledge_source_objects', 'update') as "objectUpdate",
+          has_function_privilege(
+            current_user,
+            'knowledge_source_sync_lock_authority(uuid,uuid,uuid)',
+            'execute'
+          ) as "lockAuthorityExecute"
+        from pg_class observation
+        cross join pg_class object
+        where observation.oid = 'knowledge_source_sync_object_observations'::regclass
+          and object.oid = 'knowledge_source_objects'::regclass`;
+      expect(posture).toEqual({
+        currentUser: "opengeni_app",
+        observationRlsEnabled: true,
+        observationForceRls: true,
+        objectRlsEnabled: true,
+        objectForceRls: true,
+        objectSelect: true,
+        objectUpdate: false,
+        lockAuthorityExecute: true,
+      });
+    } finally {
+      await appProbe.end();
+    }
+    const [account] = await admin<{ id: string }[]>`
+      insert into managed_accounts (name) values ('drive cursor settlement') returning id`;
+    const [workspace] = await admin<{ id: string }[]>`
+      insert into workspaces (account_id, name)
+      values (${account!.id}, 'drive cursor settlement') returning id`;
+    const actor = {
+      kind: "human" as const,
+      subjectId: "user:drive-cursor",
+      initiatingHumanSubjectId: "user:drive-cursor",
+    };
+    const scope = {
+      kind: "workspace" as const,
+      workspaceId: workspace!.id,
+      subjectId: null,
+    };
+    const provider = await upsertKnowledgeProvider(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      scope,
+      providerKey: "google-drive",
+      externalTenantId: "permission-cursor",
+      operationId: "cursor-provider",
+      actor,
+    });
+    const source = await upsertKnowledgeSource(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      scope,
+      providerId: provider.id,
+      externalSourceId: "cursor-folder",
+      sourceKind: "google-drive-folder",
+      operationId: "cursor-source",
+      actor,
+    });
+    const task = await createScheduledTask(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      name: "Drive cursor source",
+      status: "active",
+      schedule: { type: "manual" },
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      runMode: "new_session_per_run",
+      overlapPolicy: "buffer_one",
+      action: {
+        kind: "knowledge_source_sync",
+        sourceId: source.id,
+        sourceGeneration: source.syncGeneration,
+        sourceLifecycleGeneration: source.lifecycleGeneration,
+        sourceConfigGeneration: 1,
+        controlWorkspaceId: workspace!.id,
+        providerCoordinationKey: "google-drive:permission-cursor:my-drive",
+        destination: scope,
+        initiatingSubjectId: actor.subjectId,
+        allDescendants: true,
+        connection: {
+          connectionId: "00000000-0000-4000-8000-000000000128",
+          connectionVersion: 1,
+          providerDomain: "googleapis.com",
+          kind: "oauth2",
+          ownerSubjectId: actor.subjectId,
+        },
+        limits: {
+          maxItems: 10,
+          maxBytes: 1_000,
+          maxFileBytes: 1_000,
+          maxProviderRequests: 10,
+          maxElapsedSeconds: 10,
+          maxConcurrency: 1,
+          maxFailureDetails: 5,
+        },
+      },
+      agentConfig: { prompt: "sync", resources: [], tools: [], metadata: {} },
+      metadata: {},
+    });
+    await ensureKnowledgeSourceSyncState(client.db, task);
+    const run = await createScheduledTaskRun(client.db, {
+      workspaceId: workspace!.id,
+      taskId: task.id,
+      triggerType: "initial",
+      producerKey: "cursor-initial",
+    });
+    await recordKnowledgeSourceSyncWake(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      sourceId: source.id,
+      scheduledTaskId: task.id,
+      scheduledTaskRunId: run.id,
+      cause: "initial",
+      producerKey: "cursor-initial",
+      sourceConfigGeneration: 1,
+      sourceLifecycleGeneration: source.lifecycleGeneration,
+    });
+    const lease = await claimKnowledgeSourceSyncLease(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      sourceId: source.id,
+      scheduledTaskRunId: run.id,
+      overlapPolicy: "buffer_one",
+    });
+    expect(lease.action).toBe("claimed");
+    if (lease.action !== "claimed") throw new Error("lease not claimed");
+    const liveState = await reconcileKnowledgeSourceSyncLiveGeneration(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      sourceId: source.id,
+      scheduledTaskRunId: run.id,
+      initiatingSubjectId: actor.subjectId,
+      sourceConfigGeneration: 1,
+      sourceLifecycleGeneration: source.lifecycleGeneration,
+      liveSourceSyncGeneration: source.syncGeneration,
+    });
+    const knowledgeRun = await beginKnowledgeSyncRun(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      sourceId: source.id,
+      expectedSourceLifecycleGeneration: source.lifecycleGeneration,
+      expectedSyncGeneration: 0,
+      inputCursor: null,
+      operationId: "cursor-sync-run",
+      actor,
+    });
+    const acl = await appendKnowledgeSourceAclVersion(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      sourceId: source.id,
+      audience: scope,
+      expectedSourceLifecycleGeneration: source.lifecycleGeneration,
+      expectedAclGeneration: 0,
+      aclVersion: "drive-cursor-acl-1",
+      agentAccess: false,
+      operationId: "drive-cursor-acl-1",
+      reasonCode: "source_selected",
+      actor,
+    });
+    const base = await ensureDefaultBase(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+    });
+    const contentSha256 = "8".repeat(64);
+    const file = await ensureKnowledgeSourceBlobFile(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      fileId: crypto.randomUUID(),
+      filename: "version-8.txt",
+      safeFilename: "version-8.txt",
+      contentType: "text/plain",
+      sizeBytes: 8,
+      sha256: contentSha256,
+      bucket: "test",
+      objectKey: `workspaces/${workspace!.id}/knowledge/blobs/${contentSha256}`,
+    });
+    const object = await upsertKnowledgeSourceObject(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      sourceId: source.id,
+      externalObjectId: "full-only-doc",
+      operationId: "drive-cursor-full-only-object",
+      actor,
+    });
+    const document = await addDocumentToBase(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      baseId: base.id,
+      fileId: file.id,
+      title: "version-8.txt",
+      sourceKind: "document",
+      sourceUri: "https://drive.google.com/open?id=full-only-doc",
+      sourceExternalId: "full-only-doc",
+      sourceTitle: "version-8.txt",
+      sourceVersion: "8",
+      authorityKind: "workspace",
+      initiatingSubjectId: actor.subjectId,
+      createdBy: actor.subjectId,
+      agentAccess: false,
+      knowledgeSourceIdentity: crypto.randomUUID(),
+      access: { viewerSubjectId: actor.subjectId },
+    });
+    const metadataHash8 = "a".repeat(64);
+    const [accepted8] = await recordKnowledgeSourceSyncObjectObservations(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      sourceId: source.id,
+      scheduledTaskRunId: run.id,
+      initiatingSubjectId: actor.subjectId,
+      scanGeneration: liveState.activeScanGeneration,
+      executionCheckpointGeneration: liveState.executionCheckpointGeneration,
+      revisionOrdering: "canonical_decimal",
+      observations: [
+        {
+          externalObjectId: "full-only-doc",
+          providerRevision: "8",
+          metadataHash: metadataHash8,
+        },
+      ],
+    });
+    expect(accepted8).toMatchObject({
+      disposition: "accepted",
+      providerRevision: "8",
+      metadataHash: metadataHash8,
+      currentVersion: null,
+    });
+    expect(
+      shouldProcessGoogleDriveDurableObservation({
+        entry: { externalObjectId: "full-only-doc" },
+        observation: accepted8!,
+        sourceLifecycleGeneration: source.lifecycleGeneration,
+        aclGeneration: acl.generation,
+      }),
+    ).toBe(true);
+    const version8 = await appendKnowledgeDocumentVersion(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      objectId: object.id,
+      expectedSourceLifecycleGeneration: source.lifecycleGeneration,
+      expectedObjectLifecycleGeneration: object.lifecycleGeneration,
+      expectedVersionGeneration: object.versionGeneration,
+      externalVersionId: "8",
+      contentSha256,
+      ingestionKey: "full-only-doc:8",
+      sourceMetadata: {
+        providerRevision: "8",
+        metadataHash: metadataHash8,
+        sourceLifecycleGeneration: source.lifecycleGeneration,
+        objectLifecycleGeneration: object.lifecycleGeneration,
+      },
+      aclVersionId: acl.id,
+      aclGeneration: acl.generation,
+      documentId: document.id,
+      fileId: file.id,
+      locationMetadata: { sourceUri: "https://drive.google.com/open?id=full-only-doc" },
+      documentObservationMetadata: {
+        title: "version-8.txt",
+        sourceUri: "https://drive.google.com/open?id=full-only-doc",
+        sourceVersion: "8",
+        sourceUpdatedAt: "2026-08-11T00:00:08.000Z",
+      },
+      syncObservation: {
+        scheduledTaskRunId: run.id,
+        scanGeneration: liveState.activeScanGeneration,
+        providerRevision: "8",
+        metadataHash: metadataHash8,
+      },
+      operationId: "drive-cursor-full-only-version-8",
+      reasonCode: "source_content_observed",
+      actor,
+    });
+    const obligation8 = await enqueueKnowledgeSourceSyncIndexObligation(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      scheduledTaskRunId: run.id,
+      sourceId: source.id,
+      sourceSyncGeneration: knowledgeRun.inputSyncGeneration,
+      initiatingSubjectId: actor.subjectId,
+      externalObjectId: "full-only-doc",
+      knowledgeSourceObjectId: object.id,
+      knowledgeDocumentVersionId: version8.id,
+      documentId: document.id,
+      sourceConfigGeneration: 1,
+      sourceLifecycleGeneration: source.lifecycleGeneration,
+      objectLifecycleGeneration: object.lifecycleGeneration,
+      objectVersionGeneration: version8.versionGeneration,
+      citationLocator: { sourceUri: "https://drive.google.com/open?id=full-only-doc" },
+    });
+    expect(
+      await settleKnowledgeSourceSyncIndexObligation(client.db, {
+        accountId: account!.id,
+        workspaceId: workspace!.id,
+        obligationId: obligation8.id,
+        status: "indexed",
+      }),
+    ).toBe("settled");
+
+    // Exact crash seam: version 8 and its metadata are durable, but the returned
+    // full-page checkpoint was never saved. Replaying that same generation with
+    // stale version 7 must use the durable observation/current-version floor.
+    expect((await ensureKnowledgeSourceSyncState(client.db, task)).executionCheckpoint).toBeNull();
+    const metadataHash7 = "b".repeat(64);
+    const [replayed7] = await recordKnowledgeSourceSyncObjectObservations(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      sourceId: source.id,
+      scheduledTaskRunId: run.id,
+      initiatingSubjectId: actor.subjectId,
+      scanGeneration: liveState.activeScanGeneration,
+      executionCheckpointGeneration: liveState.executionCheckpointGeneration,
+      revisionOrdering: "canonical_decimal",
+      observations: [
+        {
+          externalObjectId: "full-only-doc",
+          providerRevision: "7",
+          metadataHash: metadataHash7,
+        },
+      ],
+    });
+    expect(replayed7).toMatchObject({
+      disposition: "stale",
+      providerRevision: "8",
+      metadataHash: metadataHash8,
+      currentVersion: {
+        providerRevision: "8",
+        metadataHash: metadataHash8,
+        sourceLifecycleGeneration: source.lifecycleGeneration,
+        objectLifecycleGeneration: object.lifecycleGeneration,
+        currentObjectLifecycleGeneration: object.lifecycleGeneration,
+        objectLifecycleState: "active",
+        aclGeneration: acl.generation,
+        indexObligationStatus: "indexed",
+      },
+    });
+    expect(
+      shouldProcessGoogleDriveDurableObservation({
+        entry: { externalObjectId: "full-only-doc" },
+        observation: replayed7!,
+        sourceLifecycleGeneration: source.lifecycleGeneration,
+        aclGeneration: acl.generation,
+      }),
+    ).toBe(false);
+    // A V3 row could retain an older first observation even after a newer
+    // current version committed. Re-derive the monotonic floor from that
+    // current durable version before classifying another replay.
+    await admin`
+      update knowledge_source_sync_object_observations
+      set provider_revision = '7', metadata_hash = ${metadataHash7}
+      where source_id = ${source.id} and external_object_id = 'full-only-doc'`;
+    const [legacyReplay7] = await recordKnowledgeSourceSyncObjectObservations(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      sourceId: source.id,
+      scheduledTaskRunId: run.id,
+      initiatingSubjectId: actor.subjectId,
+      scanGeneration: liveState.activeScanGeneration,
+      executionCheckpointGeneration: liveState.executionCheckpointGeneration,
+      revisionOrdering: "canonical_decimal",
+      observations: [
+        {
+          externalObjectId: "full-only-doc",
+          providerRevision: "7",
+          metadataHash: metadataHash7,
+        },
+      ],
+    });
+    expect(legacyReplay7).toMatchObject({
+      disposition: "stale",
+      providerRevision: "8",
+      metadataHash: metadataHash8,
+      currentVersion: { providerRevision: "8", metadataHash: metadataHash8 },
+    });
+
+    // Reproduce the exact V4 defect: a regressed observation v7/hash B,
+    // authoritative current v8/hash A, and candidate v8/hash C. Admission must
+    // repair the observation from current truth before classifying the
+    // candidate, then fail closed before metadata/checkpoint/cursor settlement.
+    await admin`
+      update knowledge_source_sync_object_observations
+      set provider_revision = '7', metadata_hash = ${metadataHash7}
+      where source_id = ${source.id} and external_object_id = 'full-only-doc'`;
+    const metadataHashConflict8 = "c".repeat(64);
+    const [conflictingReplay8] = await recordKnowledgeSourceSyncObjectObservations(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      sourceId: source.id,
+      scheduledTaskRunId: run.id,
+      initiatingSubjectId: actor.subjectId,
+      scanGeneration: liveState.activeScanGeneration,
+      executionCheckpointGeneration: liveState.executionCheckpointGeneration,
+      revisionOrdering: "canonical_decimal",
+      observations: [
+        {
+          externalObjectId: "full-only-doc",
+          providerRevision: "8",
+          metadataHash: metadataHashConflict8,
+        },
+      ],
+    });
+    expect(conflictingReplay8).toMatchObject({
+      disposition: "conflict",
+      providerRevision: "8",
+      metadataHash: metadataHash8,
+      currentVersion: { providerRevision: "8", metadataHash: metadataHash8 },
+    });
+    expect(() =>
+      shouldProcessGoogleDriveDurableObservation({
+        entry: { externalObjectId: "full-only-doc" },
+        observation: conflictingReplay8!,
+        sourceLifecycleGeneration: source.lifecycleGeneration,
+        aclGeneration: acl.generation,
+      }),
+    ).toThrow("provider_payload_invalid");
+    const conflictingProviderCursor = {
+      version: 1,
+      kind: "google_drive_changes",
+      pageToken: "must-not-commit-conflicting-metadata",
+    };
+    const conflictSummary = {
+      phase: "completed" as const,
+      scanned: 1,
+      imported: 1,
+      unchanged: 0,
+      skipped: 0,
+      failed: 0,
+      bytes: 8,
+      providerRequests: 1,
+      elapsedMs: 1,
+      indexed: 1,
+      aclPending: 0,
+      retryable: false,
+      limitReached: null,
+      checkpointed: false,
+      reconnectRequired: false,
+      failures: [],
+    };
+    const conflictingObservationFence = {
+      initiatingSubjectId: actor.subjectId,
+      scanGeneration: liveState.activeScanGeneration,
+      executionCheckpointGeneration: liveState.executionCheckpointGeneration,
+      observations: [
+        {
+          externalObjectId: "full-only-doc",
+          providerRevision: "8",
+          metadataHash: metadataHashConflict8,
+        },
+      ],
+    };
+    await expect(
+      updateKnowledgeSourceDocumentObservationMetadata(client.db, {
+        accountId: account!.id,
+        workspaceId: workspace!.id,
+        initiatingSubjectId: actor.subjectId,
+        sourceId: source.id,
+        expectedSourceLifecycleGeneration: source.lifecycleGeneration,
+        objectId: object.id,
+        expectedObjectLifecycleGeneration: object.lifecycleGeneration,
+        versionId: version8.id,
+        documentId: document.id,
+        title: "must-not-replace-authoritative-title.txt",
+        sourceUri: "https://drive.google.com/open?id=full-only-doc",
+        sourceVersion: "8",
+        sourceUpdatedAt: "2026-08-11T00:00:09.000Z",
+        syncObservation: {
+          scheduledTaskRunId: run.id,
+          scanGeneration: liveState.activeScanGeneration,
+          providerRevision: "8",
+          metadataHash: metadataHashConflict8,
+        },
+      }),
+    ).rejects.toThrow("observation floor changed");
+    await expect(
+      checkpointKnowledgeSourceSync(client.db, {
+        accountId: account!.id,
+        workspaceId: workspace!.id,
+        sourceId: source.id,
+        scheduledTaskRunId: run.id,
+        sourceConfigGeneration: 1,
+        sourceLifecycleGeneration: source.lifecycleGeneration,
+        executionCheckpoint: {
+          version: 3,
+          kind: "google_drive_full_reconciliation",
+          revisionFloors: [["full-only-doc", "8"]],
+        },
+        observationFence: conflictingObservationFence,
+      }),
+    ).rejects.toThrow("observation floor changed");
+    await expect(
+      settleKnowledgeSourceSyncLease(client.db, {
+        accountId: account!.id,
+        workspaceId: workspace!.id,
+        sourceId: source.id,
+        scheduledTaskRunId: run.id,
+        knowledgeSyncRunId: knowledgeRun.id,
+        status: "succeeded",
+        summary: conflictSummary,
+        sourceConfigGeneration: 1,
+        sourceLifecycleGeneration: source.lifecycleGeneration,
+        sourceSyncGeneration: 0,
+        completedSourceSyncGeneration: 1,
+        providerCursor: conflictingProviderCursor,
+        observationFence: conflictingObservationFence,
+      }),
+    ).rejects.toThrow("observation floor changed");
+    const [conflictFacts] = await admin<
+      Array<{
+        providerRevision: string | null;
+        metadataHash: string | null;
+        currentVersionMetadataHash: string | null;
+        documentTitle: string;
+        documentSourceVersion: string | null;
+        executionCheckpoint: Record<string, unknown> | null;
+        providerCursor: Record<string, unknown> | null;
+        leaseId: string | null;
+        runStatus: string;
+      }>
+    >`
+      select observation.provider_revision as "providerRevision",
+        observation.metadata_hash as "metadataHash",
+        version.source_metadata ->> 'metadataHash' as "currentVersionMetadataHash",
+        document.title as "documentTitle",
+        document.source_version as "documentSourceVersion",
+        state.execution_checkpoint as "executionCheckpoint",
+        state.provider_cursor as "providerCursor",
+        state.lease_id as "leaseId",
+        run.status as "runStatus"
+      from knowledge_source_sync_object_observations observation
+      join knowledge_source_sync_states state on state.source_id = observation.source_id
+      join scheduled_task_runs run on run.id = ${run.id}
+      join knowledge_source_objects object
+        on object.source_id = observation.source_id
+        and object.external_object_id = observation.external_object_id
+      join knowledge_document_versions version on version.id = object.current_version_id
+      join documents document on document.id = version.document_id
+      where observation.source_id = ${source.id}
+        and observation.external_object_id = 'full-only-doc'`;
+    expect(conflictFacts).toEqual({
+      providerRevision: "8",
+      metadataHash: metadataHash8,
+      currentVersionMetadataHash: metadataHash8,
+      documentTitle: "version-8.txt",
+      documentSourceVersion: "8",
+      executionCheckpoint: null,
+      providerCursor: null,
+      leaseId: run.id,
+      runStatus: "queued",
+    });
+    const authorityBlocker = postgres(shared!.adminUrl, { max: 1 });
+    let markAuthorityLocked!: () => void;
+    const authorityLocked = new Promise<void>((resolve) => {
+      markAuthorityLocked = resolve;
+    });
+    let releaseAuthorityLock!: () => void;
+    const authorityRelease = new Promise<void>((resolve) => {
+      releaseAuthorityLock = resolve;
+    });
+    const authorityBlock = authorityBlocker.begin(async (tx) => {
+      await tx`select id from knowledge_source_objects where id = ${object.id} for update`;
+      markAuthorityLocked();
+      await authorityRelease;
+    });
+    await authorityLocked;
+    const exactReplayPromise = recordKnowledgeSourceSyncObjectObservations(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      sourceId: source.id,
+      scheduledTaskRunId: run.id,
+      initiatingSubjectId: actor.subjectId,
+      scanGeneration: liveState.activeScanGeneration,
+      executionCheckpointGeneration: liveState.executionCheckpointGeneration,
+      revisionOrdering: "canonical_decimal",
+      observations: [
+        {
+          externalObjectId: "full-only-doc",
+          providerRevision: "8",
+          metadataHash: metadataHash8,
+        },
+      ],
+    });
+    try {
+      await waitForKnowledgeAuthorityLock();
+    } finally {
+      releaseAuthorityLock();
+      await authorityBlock;
+      await authorityBlocker.end();
+    }
+    const [exactReplay8] = await exactReplayPromise;
+    expect(exactReplay8).toMatchObject({
+      disposition: "replayed",
+      providerRevision: "8",
+      metadataHash: metadataHash8,
+      currentVersion: { providerRevision: "8", metadataHash: metadataHash8 },
+    });
+    expect(
+      shouldProcessGoogleDriveDurableObservation({
+        entry: { externalObjectId: "full-only-doc" },
+        observation: exactReplay8!,
+        sourceLifecycleGeneration: source.lifecycleGeneration,
+        aclGeneration: acl.generation,
+      }),
+    ).toBe(true);
+    await expect(
+      checkpointKnowledgeSourceSync(client.db, {
+        accountId: account!.id,
+        workspaceId: workspace!.id,
+        sourceId: source.id,
+        scheduledTaskRunId: run.id,
+        sourceConfigGeneration: 1,
+        sourceLifecycleGeneration: source.lifecycleGeneration,
+        executionCheckpoint: {
+          version: 3,
+          kind: "google_drive_full_reconciliation",
+          revisionFloors: [["full-only-doc", "7"]],
+        },
+        observationFence: {
+          initiatingSubjectId: actor.subjectId,
+          scanGeneration: liveState.activeScanGeneration,
+          executionCheckpointGeneration: liveState.executionCheckpointGeneration,
+          observations: [
+            {
+              externalObjectId: "full-only-doc",
+              providerRevision: "7",
+              metadataHash: metadataHash7,
+            },
+          ],
+        },
+      }),
+    ).rejects.toThrow("observation floor changed");
+    await expect(
+      appendKnowledgeDocumentVersion(client.db, {
+        accountId: account!.id,
+        workspaceId: workspace!.id,
+        objectId: object.id,
+        expectedSourceLifecycleGeneration: source.lifecycleGeneration,
+        expectedObjectLifecycleGeneration: object.lifecycleGeneration,
+        expectedVersionGeneration: version8.versionGeneration,
+        externalVersionId: "7",
+        contentSha256,
+        ingestionKey: "full-only-doc:stale-7",
+        sourceMetadata: {
+          providerRevision: "7",
+          metadataHash: metadataHash7,
+          sourceLifecycleGeneration: source.lifecycleGeneration,
+          objectLifecycleGeneration: object.lifecycleGeneration,
+        },
+        aclVersionId: acl.id,
+        aclGeneration: acl.generation,
+        documentId: document.id,
+        fileId: file.id,
+        syncObservation: {
+          scheduledTaskRunId: run.id,
+          scanGeneration: liveState.activeScanGeneration,
+          providerRevision: "7",
+          metadataHash: metadataHash7,
+        },
+        operationId: "drive-cursor-full-only-stale-version-7",
+        reasonCode: "source_content_observed",
+        actor,
+      }),
+    ).rejects.toThrow("observation floor changed");
+    expect((await ensureKnowledgeSourceSyncState(client.db, task)).executionCheckpoint).toBeNull();
+    const providerCursor = {
+      version: 1,
+      kind: "google_drive_changes",
+      connectionId:
+        task.action.kind === "knowledge_source_sync" ? task.action.connection.connectionId : "",
+      googlePermissionId: "permission-cursor",
+      sourceId: "cursor-folder",
+      driveId: null,
+      boundaryId: "cursor-folder",
+      pageToken: "start-page-2",
+      cursorGeneration: 1,
+      lastFullReconciliationAt: "2026-08-10T00:00:00.000Z",
+      nextFullReconciliationAt: "2026-08-11T00:00:00.000Z",
+    };
+    await completeKnowledgeSyncRun(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      initiatingSubjectId: actor.subjectId,
+      runId: knowledgeRun.id,
+      state: "succeeded",
+      outputCursor: null,
+      watermark: "2026-08-10T00:00:00.000Z",
+      metadata: { providerCursor },
+      reasonCode: "drive_cursor_test",
+    });
+    const summary = {
+      phase: "completed" as const,
+      scanned: 0,
+      imported: 0,
+      unchanged: 0,
+      skipped: 0,
+      failed: 0,
+      bytes: 0,
+      providerRequests: 1,
+      elapsedMs: 1,
+      indexed: 0,
+      aclPending: 0,
+      retryable: false,
+      limitReached: null,
+      checkpointed: false,
+      reconnectRequired: false,
+      failures: [],
+    };
+    await settleKnowledgeSourceSyncLease(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      sourceId: source.id,
+      scheduledTaskRunId: run.id,
+      knowledgeSyncRunId: knowledgeRun.id,
+      status: "succeeded",
+      summary,
+      sourceConfigGeneration: 1,
+      sourceLifecycleGeneration: source.lifecycleGeneration,
+      sourceSyncGeneration: 0,
+      completedSourceSyncGeneration: 1,
+      providerCursor,
+      observationFence: {
+        initiatingSubjectId: actor.subjectId,
+        scanGeneration: liveState.activeScanGeneration,
+        executionCheckpointGeneration: liveState.executionCheckpointGeneration,
+        observations: [
+          {
+            externalObjectId: "full-only-doc",
+            providerRevision: "8",
+            metadataHash: metadataHash8,
+          },
+        ],
+      },
+    });
+    expect((await ensureKnowledgeSourceSyncState(client.db, task)).providerCursor).toEqual(
+      providerCursor,
+    );
+    const [durable] = await admin<
+      Array<{
+        providerRevision: string | null;
+        metadataHash: string | null;
+        currentExternalVersion: string;
+        documentTitle: string;
+        documentSourceVersion: string | null;
+      }>
+    >`
+      select observation.provider_revision as "providerRevision",
+        observation.metadata_hash as "metadataHash",
+        version.external_version_id as "currentExternalVersion",
+        document.title as "documentTitle",
+        document.source_version as "documentSourceVersion"
+      from knowledge_source_sync_object_observations observation
+      join knowledge_source_objects object
+        on object.source_id = observation.source_id
+        and object.external_object_id = observation.external_object_id
+      join knowledge_document_versions version on version.id = object.current_version_id
+      join documents document on document.id = version.document_id
+      where observation.source_id = ${source.id}
+        and observation.external_object_id = 'full-only-doc'`;
+    expect(durable).toEqual({
+      providerRevision: "8",
+      metadataHash: metadataHash8,
+      currentExternalVersion: "8",
+      documentTitle: "version-8.txt",
+      documentSourceVersion: "8",
+    });
+
+    const failedRun = await createScheduledTaskRun(client.db, {
+      workspaceId: workspace!.id,
+      taskId: task.id,
+      triggerType: "retry",
+      producerKey: "cursor-failed-retry",
+    });
+    await recordKnowledgeSourceSyncWake(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      sourceId: source.id,
+      scheduledTaskId: task.id,
+      scheduledTaskRunId: failedRun.id,
+      cause: "retry",
+      producerKey: "cursor-failed-retry",
+      sourceConfigGeneration: 1,
+      sourceLifecycleGeneration: source.lifecycleGeneration,
+    });
+    expect(
+      (
+        await claimKnowledgeSourceSyncLease(client.db, {
+          accountId: account!.id,
+          workspaceId: workspace!.id,
+          sourceId: source.id,
+          scheduledTaskRunId: failedRun.id,
+          overlapPolicy: "buffer_one",
+        })
+      ).action,
+    ).toBe("claimed");
+    const failedKnowledgeRun = await beginKnowledgeSyncRun(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      sourceId: source.id,
+      expectedSourceLifecycleGeneration: source.lifecycleGeneration,
+      expectedSyncGeneration: 1,
+      inputCursor: null,
+      operationId: "cursor-failed-sync-run",
+      actor,
+    });
+    const rejectedCursor = { ...providerCursor, pageToken: "must-not-commit" };
+    await completeKnowledgeSyncRun(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      initiatingSubjectId: actor.subjectId,
+      runId: failedKnowledgeRun.id,
+      state: "failed",
+      outputCursor: null,
+      watermark: null,
+      metadata: { providerCursor: rejectedCursor },
+      errorCode: "provider_unavailable",
+      reasonCode: "drive_cursor_failed_test",
+    });
+    await settleKnowledgeSourceSyncLease(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      sourceId: source.id,
+      scheduledTaskRunId: failedRun.id,
+      knowledgeSyncRunId: failedKnowledgeRun.id,
+      status: "failed",
+      summary: { ...summary, phase: "failed", failed: 1 },
+      sourceConfigGeneration: 1,
+      sourceLifecycleGeneration: source.lifecycleGeneration,
+      sourceSyncGeneration: 1,
+      providerCursor: rejectedCursor,
+    });
+    expect((await ensureKnowledgeSourceSyncState(client.db, task)).providerCursor).toEqual(
+      providerCursor,
+    );
   }, 120_000);
 });
