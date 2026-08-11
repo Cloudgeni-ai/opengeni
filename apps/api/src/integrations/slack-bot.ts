@@ -25,6 +25,7 @@ import {
   getSession,
   listConnectionsMetadata,
   markSlackBotDeleteOperationProviderStarted,
+  markSlackBotPostOperationProviderStarted,
   recordAuditEvent,
   releaseSlackBotDeleteOperationClaim,
   releaseSlackBotPostOperationClaim,
@@ -64,6 +65,7 @@ const MAX_FILE_CURSOR_LENGTH = 1_024;
 const SLACK_FILE_CURSOR_VERSION = "files-v1";
 const MAX_PROJECTED_TEXT = 4_000;
 const SLACK_POST_CLAIM_LEASE_MS = 30_000;
+const MAX_SLACK_POST_RECONCILIATION_PAGES = 8;
 const SLACK_DELETE_CLAIM_LEASE_MS = 30_000;
 
 type SlackPayload = Record<string, unknown> & { ok?: unknown; error?: unknown };
@@ -653,6 +655,11 @@ export class OpenGeniSlackBotClient {
     });
   }
 
+  /**
+   * Internal server-owned delivery only. Generic model-facing MCP callers do
+   * not have a trustworthy durable logical-delivery identity and must never
+   * reach this method with a caller-generated operation ID.
+   */
   async postMessage(input: {
     operationId: string;
     channelId?: string;
@@ -665,6 +672,7 @@ export class OpenGeniSlackBotClient {
     const claimHolderId = crypto.randomUUID();
     let claimAcquired = false;
     let providerCallStarted = false;
+    let outcomeUnknown = false;
     try {
       const headers = await this.headersFor(operation);
       let channelId = input.channelId;
@@ -712,11 +720,50 @@ export class OpenGeniSlackBotClient {
         return this.completedPostResult(claim.operation, input.operationId, input.threadTimestamp);
       }
       claimAcquired = true;
+      outcomeUnknown = claim.kind === "reconcile";
+      if (claim.kind === "reconcile") {
+        const reconciled = await this.reconcilePostMessage({
+          operationId: input.operationId,
+          channelId,
+          ...(input.threadTimestamp ? { threadTimestamp: input.threadTimestamp } : {}),
+          text: input.text,
+        });
+        const completed = await completeSlackBotPostOperation(this.db, {
+          accountId: this.context.accountId,
+          workspaceId: this.context.workspaceId,
+          connectionId: this.connection.id,
+          operationId: input.operationId,
+          claimHolderId,
+          slackChannelId: channelId,
+          slackMessageTimestamp: reconciled.timestamp,
+          subjectId: this.context.subjectId,
+          auditMetadata: this.auditMetadata(operation, "succeeded", undefined, input.operationId),
+        });
+        if (completed.kind !== "completed") {
+          throw new Error("Slack post reconciliation lost its durable operation claim");
+        }
+        claimAcquired = false;
+        return this.completedPostResult(
+          completed.operation,
+          input.operationId,
+          input.threadTimestamp,
+        );
+      }
       if (input.requireActiveNonSharedChannel) {
         if (input.userId || !input.channelId) {
           throw new Error("active non-shared channel validation requires channelId");
         }
         await this.requireActiveNonSharedMemberChannel(headers, channelId);
+      }
+      const providerStarted = await markSlackBotPostOperationProviderStarted(this.db, {
+        accountId: this.context.accountId,
+        workspaceId: this.context.workspaceId,
+        connectionId: this.connection.id,
+        operationId: input.operationId,
+        claimHolderId,
+      });
+      if (!providerStarted) {
+        throw new Error("Slack post operation lost its durable claim before provider call");
       }
       providerCallStarted = true;
       const posted = await this.call(headers, "chat.postMessage", {
@@ -749,6 +796,7 @@ export class OpenGeniSlackBotClient {
       );
     } catch (error) {
       const failureCode = safeFailureCode(error);
+      const ambiguous = providerCallStarted && slackMutationOutcomeMayBeAmbiguous(error);
       if (claimAcquired) {
         await releaseSlackBotPostOperationClaim(this.db, {
           accountId: this.context.accountId,
@@ -756,12 +804,13 @@ export class OpenGeniSlackBotClient {
           connectionId: this.connection.id,
           operationId: input.operationId,
           claimHolderId,
+          outcomeUnknown: outcomeUnknown || ambiguous,
           failureCode,
         }).catch(() => undefined);
       }
       await this.recordAudit(
         operation,
-        providerCallStarted && slackMutationOutcomeMayBeAmbiguous(error) ? "ambiguous" : "failed",
+        outcomeUnknown || ambiguous ? "ambiguous" : "failed",
         failureCode,
         input.operationId,
       );
@@ -908,6 +957,61 @@ export class OpenGeniSlackBotClient {
       }
       throw error;
     }
+  }
+
+  private async reconcilePostMessage(input: {
+    operationId: string;
+    channelId: string;
+    threadTimestamp?: string;
+    text: string;
+  }): Promise<{ timestamp: string }> {
+    const method = input.threadTimestamp ? "conversations.replies" : "conversations.history";
+    const headers = await this.headersForDestination("message.post", `${SLACK_API_BASE}${method}`);
+    const seenCursors = new Set<string>();
+    let cursor: string | null = null;
+    let matchedTimestamp: string | null = null;
+    let exhausted = false;
+    for (let page = 0; page < MAX_SLACK_POST_RECONCILIATION_PAGES; page += 1) {
+      const payload = await this.call(headers, method, {
+        channel: input.channelId,
+        limit: String(input.threadTimestamp ? MAX_THREAD_PAGE : MAX_HISTORY_PAGE),
+        ...(input.threadTimestamp ? { ts: input.threadTimestamp } : {}),
+        ...(cursor ? { cursor } : {}),
+      });
+      for (const value of slackArray(payload.messages)) {
+        const message = slackRecord(value);
+        if (!message || slackString(message.client_msg_id) !== input.operationId) continue;
+        const timestamp = requiredSlackString(message.ts, "message.ts");
+        const threadTimestamp = slackString(message.thread_ts);
+        const threadMatches = input.threadTimestamp
+          ? threadTimestamp === input.threadTimestamp
+          : !threadTimestamp || threadTimestamp === timestamp;
+        if (slackString(message.text) !== input.text || !threadMatches) {
+          throw new SlackBotProviderError("post_reconciliation_mismatch");
+        }
+        if (matchedTimestamp && matchedTimestamp !== timestamp) {
+          throw new SlackBotProviderError("post_reconciliation_duplicate");
+        }
+        matchedTimestamp = timestamp;
+      }
+      const nextCursor = responseCursor(payload);
+      if (!nextCursor) {
+        exhausted = true;
+        break;
+      }
+      if (seenCursors.has(nextCursor)) {
+        throw new SlackBotProviderError("post_reconciliation_invalid_cursor");
+      }
+      seenCursors.add(nextCursor);
+      cursor = nextCursor;
+    }
+    if (!exhausted) {
+      throw new SlackBotProviderError("post_reconciliation_truncated");
+    }
+    if (!matchedTimestamp) {
+      throw new SlackBotProviderError("post_outcome_unknown");
+    }
+    return { timestamp: matchedTimestamp };
   }
 
   private async requireMemberChannel(headers: Record<string, string>, channelId: string) {
@@ -2160,9 +2264,9 @@ function safeFailureCode(error: unknown): string {
 
 function slackMutationOutcomeMayBeAmbiguous(error: unknown): boolean {
   if (!(error instanceof SlackBotProviderError)) return true;
-  return (
-    error.code === "transport_error" ||
-    error.code === "invalid_response" ||
-    error.code.startsWith("http_")
-  );
+  if (error.code === "transport_error" || error.code === "invalid_response") return true;
+  const httpStatus = /^http_(\d{3})$/u.exec(error.code)?.[1];
+  if (!httpStatus) return false;
+  const status = Number(httpStatus);
+  return status === 408 || status >= 500;
 }

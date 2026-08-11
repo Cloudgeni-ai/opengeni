@@ -115,15 +115,19 @@ describe("release schema contract", () => {
       sourceContract.migrations.map((migration) => [migration.path, migration]),
     );
     expect(sourceContract.sha256).toBe(
-      migrations.has("0214_session_activity_commit_gate.sql")
-        ? "00b9989ef287e75bceceabc94ddfa1c118a97553ccdbc523485300046058075f"
-        : "e3048091a81b7e122b3c6d17cf52e5ffccff4c082780f6d2d330031742aef792",
+      migrations.has("0215_slack_post_outcome_reconciliation.sql")
+        ? "9d95b4bbe7d8e25bc4d2917f35831c257f1aae33d84b7ff73754cdf86d998524"
+        : migrations.has("0214_session_activity_commit_gate.sql")
+          ? "00b9989ef287e75bceceabc94ddfa1c118a97553ccdbc523485300046058075f"
+          : "e3048091a81b7e122b3c6d17cf52e5ffccff4c082780f6d2d330031742aef792",
     );
     const contract = {
       ...sourceContract,
-      sha256: migrations.has("0214_session_activity_commit_gate.sql")
-        ? "a00d56c13f4f03a3a48456860a7c63b82de5624970b3afae250e5aed0d6a2d89"
-        : "c9b19caabb946d91e6e2ec4b34bb48323a61efbfc76628fe338a277f5dcbe343",
+      sha256: migrations.has("0215_slack_post_outcome_reconciliation.sql")
+        ? "9d95b4bbe7d8e25bc4d2917f35831c257f1aae33d84b7ff73754cdf86d998524"
+        : migrations.has("0214_session_activity_commit_gate.sql")
+          ? "a00d56c13f4f03a3a48456860a7c63b82de5624970b3afae250e5aed0d6a2d89"
+          : "c9b19caabb946d91e6e2ec4b34bb48323a61efbfc76628fe338a277f5dcbe343",
     };
     expect(migrations.get("0065_codex_subscription_overview.sql")).toMatchObject({
       deploymentMode: "maintenance",
@@ -281,12 +285,17 @@ describe("release schema contract", () => {
         (migrations.has("0211_editable_artifact_session_links.sql") ? 1 : 0) +
         (migrations.has("0212_slack_installation_bindings.sql") ? 1 : 0) +
         (migrations.has("0213_slack_user_link_access_requests.sql") ? 1 : 0) +
-        (migrations.has("0214_session_activity_commit_gate.sql") ? 1 : 0),
+        (migrations.has("0214_session_activity_commit_gate.sql") ? 1 : 0) +
+        (migrations.has("0215_slack_post_outcome_reconciliation.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "a00d56c13f4f03a3a48456860a7c63b82de5624970b3afae250e5aed0d6a2d89",
+      "9d95b4bbe7d8e25bc4d2917f35831c257f1aae33d84b7ff73754cdf86d998524",
     );
-    expect(contract.latestMigration).toBe("0214_session_activity_commit_gate.sql");
+    expect(contract.latestMigration).toBe("0215_slack_post_outcome_reconciliation.sql");
+    expect(migrations.get("0215_slack_post_outcome_reconciliation.sql")).toMatchObject({
+      sha256: "fc88cdb5664c74480e1437d5e061e9e32f109afd17eb946985af38791f267c49",
+      deploymentMode: "rolling",
+    });
     expect(migrations.get("0214_session_activity_commit_gate.sql")).toMatchObject({
       sha256: "26c84bc34bc51d19f9532cf3f2c64a649f100a724cb73d968e17e7c4ecf8de36",
       deploymentMode: "maintenance",

@@ -916,9 +916,27 @@ const FIRST_PARTY_IN_PROCESS_TOOL_NAME_SET = new Set<FirstPartyMcpToolName>(
   FIRST_PARTY_IN_PROCESS_TOOL_NAMES,
 );
 
+/**
+ * Names accepted for stored-selection compatibility but intentionally omitted
+ * from the remote first-party `opengeni` MCP server.
+ *
+ * `slack_bot_post_message` cannot accept a model/caller-supplied UUID as a
+ * trustworthy logical-delivery identity. Server-owned Slack delivery paths
+ * call the internal client directly with their own durable operation IDs.
+ */
+const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAMES = [
+  "slack_bot_post_message",
+] as const satisfies readonly FirstPartyMcpToolName[];
+
+const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAME_SET = new Set<FirstPartyMcpToolName>(
+  FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAMES,
+);
+
 /** Exact catalog registered by the remote first-party `opengeni` MCP server. */
 export const FIRST_PARTY_REMOTE_MCP_TOOL_NAMES = FIRST_PARTY_MCP_TOOL_NAMES.filter(
-  (name) => !FIRST_PARTY_IN_PROCESS_TOOL_NAME_SET.has(name),
+  (name) =>
+    !FIRST_PARTY_IN_PROCESS_TOOL_NAME_SET.has(name) &&
+    !FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAME_SET.has(name),
 ) satisfies readonly FirstPartyMcpToolName[];
 
 /** Authored CodeMode paths for the canonical collaborative artifact surface. */

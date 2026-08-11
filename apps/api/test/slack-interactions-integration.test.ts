@@ -141,7 +141,6 @@ function fakeSlack(
     string,
     { error?: string; status?: number; retryAfterSeconds?: number }
   >();
-  const acceptedByClientMessageId = new Map<string, SlackPost>();
   const failedAfterAccept = new Set<string>();
   const postPauses = new Map<
     string,
@@ -214,7 +213,11 @@ function fakeSlack(
       const channel = form.get("channel") ?? "";
       const timestamp = form.get("ts") ?? "";
       const key = `${channel}:${timestamp}`;
-      const rootContext = reactionContexts.get(key);
+      const matchingPosts = posts.filter(
+        (post) => post.channel === channel && post.threadTimestamp === timestamp,
+      );
+      const rootContext =
+        reactionContexts.get(key) ?? (matchingPosts.length > 0 ? { messages: [] } : undefined);
       const cursor = form.get("cursor");
       const context = cursor ? rootContext?.pages?.[cursor] : rootContext;
       if (!context) return Response.json({ ok: false, error: "message_not_found" });
@@ -230,7 +233,16 @@ function fakeSlack(
       }
       return Response.json({
         ok: true,
-        messages: context.messages,
+        messages: [
+          ...context.messages,
+          ...matchingPosts.map((post) => ({
+            ts: post.timestamp,
+            bot_id: "B_OPEN_GENI",
+            text: post.text,
+            thread_ts: post.threadTimestamp,
+            client_msg_id: post.clientMessageId,
+          })),
+        ],
         response_metadata: { next_cursor: context.nextCursor ?? "" },
       });
     }
@@ -248,7 +260,17 @@ function fakeSlack(
       }
       return Response.json({
         ok: true,
-        messages: context.messages,
+        messages: [
+          ...context.messages,
+          ...posts
+            .filter((post) => post.channel === channel && post.threadTimestamp === null)
+            .map((post) => ({
+              ts: post.timestamp,
+              bot_id: "B_OPEN_GENI",
+              text: post.text,
+              client_msg_id: post.clientMessageId,
+            })),
+        ],
         response_metadata: { next_cursor: context.nextCursor ?? "" },
       });
     }
@@ -258,14 +280,6 @@ function fakeSlack(
     }
     if (method === "chat.postMessage") {
       const clientMessageId = form.get("client_msg_id");
-      const accepted = clientMessageId ? acceptedByClientMessageId.get(clientMessageId) : null;
-      if (accepted) {
-        return Response.json({
-          ok: true,
-          channel: accepted.channel,
-          ts: accepted.timestamp,
-        });
-      }
       const timestamp = `1800000000.${String(nextTimestamp++).padStart(6, "0")}`;
       const post = {
         channel: form.get("channel") ?? "",
@@ -281,7 +295,6 @@ function fakeSlack(
         await gate.released;
         postPauses.delete(fragment);
       }
-      posts.push(post);
       const configuredFailure =
         postFailuresByChannel.get(post.channel) ??
         [...failuresByText.entries()].find(([fragment]) => post.text.includes(fragment))?.[1];
@@ -299,7 +312,7 @@ function fakeSlack(
           },
         );
       }
-      if (clientMessageId) acceptedByClientMessageId.set(clientMessageId, post);
+      posts.push(post);
       if (options.failAfterAcceptTexts?.has(post.text) && !failedAfterAccept.has(post.text)) {
         failedAfterAccept.add(post.text);
         throw new TypeError("simulated Slack response loss after provider acceptance");
@@ -4080,6 +4093,31 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       "Progress 1",
       "Progress 2",
     ]);
+    const deferredProgress = await shared!.admin<
+      { session_event_sequence: number; slot: number; status: string }[]
+    >`
+      select delivery.session_event_sequence, delivery.slot, operation.status
+      from slack_interaction_progress_deliveries delivery
+      join slack_bot_post_operations operation
+        on operation.workspace_id = ${value.owner.workspaceId}
+       and operation.operation_id = delivery.operation_id
+      where delivery.interaction_id = ${route!.id}
+      order by delivery.slot`;
+    expect(deferredProgress.map((progress) => progress.status)).toEqual([
+      "completed",
+      "outcome_unknown",
+    ]);
+    expect(deferredProgress[1]!.slot).toBe(deferredProgress[0]!.slot + 1);
+    const [deferredCursor] = await shared!.admin<
+      { last_delivered_session_event_sequence: number; progress_count: number }[]
+    >`
+      select last_delivered_session_event_sequence, progress_count
+      from slack_interactions
+      where id = ${route!.id}`;
+    expect(deferredCursor?.last_delivered_session_event_sequence).toBeLessThan(
+      deferredProgress[0]!.session_event_sequence,
+    );
+    expect(deferredCursor?.progress_count).toBe(2);
 
     const restartedDeps = {
       ...value.deps,
@@ -4265,7 +4303,8 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(await drainSlackInteractionsOnce(value.deps)).toBe(false);
     expect(
       value.slack.posts.filter((post) => post.text.includes("Permanent delivery result")),
-    ).toHaveLength(1);
+    ).toHaveLength(0);
+    expect(value.slack.calls.filter((call) => call.method === "chat.postMessage")).toHaveLength(2);
     const [delivery] = await shared!.admin<
       {
         terminal_delivery_state: string;
@@ -4324,7 +4363,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(deferred!.delivery_last_error_code).toBe("http_429");
     expect(
       value.slack.posts.filter((post) => post.text.includes("Rate limited result")),
-    ).toHaveLength(1);
+    ).toHaveLength(0);
 
     value.slack.failuresByText.delete("Rate limited result");
     await shared!.admin`
@@ -4333,7 +4372,8 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(await drainSlackInteractionsOnce(value.deps)).toBe(false);
     expect(
       value.slack.posts.filter((post) => post.text.includes("Rate limited result")),
-    ).toHaveLength(2);
+    ).toHaveLength(1);
+    expect(value.slack.calls.filter((call) => call.method === "chat.postMessage")).toHaveLength(3);
     expect((await interactions(value.owner.workspaceId))[0]).toMatchObject({
       terminal_delivery_state: "completed",
     });
