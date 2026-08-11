@@ -1,10 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { OpenGeniClient } from "../src";
+import { OpenGeniCoreClient } from "../src/core";
+import { OpenGeniMemorySlackClient } from "../src/memory-slack";
 
 describe("Memory Slack delivery SDK", () => {
   test("uses the configuration, channel, history, and action endpoints", async () => {
     const requests: Array<{ method: string; path: string; body: unknown }> = [];
-    const client = new OpenGeniClient({
+    const coreClient = new OpenGeniCoreClient({
       baseUrl: "https://api.example.test",
       fetch: async (input, init) => {
         const url = new URL(String(input));
@@ -29,6 +30,7 @@ describe("Memory Slack delivery SDK", () => {
         });
       },
     });
+    const client = new OpenGeniMemorySlackClient(coreClient);
     const workspaceId = "11111111-1111-4111-8111-111111111111";
     await client.getMemorySlackPublicationConfiguration(workspaceId);
     await client.updateMemorySlackPublicationConfiguration(workspaceId, {

@@ -238,8 +238,7 @@ async function main(): Promise<void> {
   const serialized = `${JSON.stringify(bom, null, 2)}\n`;
   const sha256 = createHash("sha256").update(serialized).digest("hex");
   const outputPath = resolve(
-    import.meta.dir,
-    "..",
+    process.env.OPENGENI_RELEASE_SOURCE_ROOT ?? process.cwd(),
     process.env.OPENGENI_RELEASE_BOM_PATH ?? "evidence/release-bom.json",
   );
   await mkdir(dirname(outputPath), { recursive: true });

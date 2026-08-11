@@ -378,7 +378,12 @@ plus the checkpoint prompt. Aggregate tool outputs are replaced oldest-first in
 that copy; whole oldest user-delimited units are removed only if necessary. A
 provider overflow gets one smaller refit, so the path performs at most two
 provider calls rather than one failing request per history item. Other failures
-propagate without changing active history. A Codex terminal SSE failure carried
+propagate without changing active history. Remote v2 likewise keeps its first
+request unchanged and, only for the exact `context_length_exceeded` code, makes
+one same-endpoint retry with tool-result bodies temporarily reduced while every
+message, reasoning item, call/result identity, checkpoint, and item position is
+preserved. It never drops history units, folds chunks, or falls back to portable.
+A Codex terminal SSE failure carried
 on HTTP 200 is converted to one bounded, marked, non-retried provider error; it
 cannot masquerade as an empty successful summary. After a fenced durable
 replacement, the same activity, turn, attempt, and sandbox rebuild model input

@@ -1,6 +1,7 @@
 .git
 .github
 .agent
+.release/controller
 .env
 .env.*
 !.env.example

@@ -414,6 +414,7 @@ export {
   isRetainedRemoteV2Message,
   latestCompactionReplacementFingerprint,
   prepareCompactionPromptInput,
+  projectRemoteCompactionOverflowRetryInput,
   isUserMessage,
   estimateTokens,
   estimateTokensBreakdown,
@@ -440,6 +441,7 @@ export {
   SUMMARY_BUFFER_TOKENS,
   SUMMARY_PREFIX,
   USER_MESSAGE_TRUNCATION_MARKER,
+  REMOTE_COMPACTION_TOOL_RESULT_OMISSION,
   UNKNOWN_IMAGE_TOKENS,
   MAX_NATIVE_IMAGE_TOKENS,
 } from "./context-compaction";
@@ -450,6 +452,7 @@ export type {
   NativeImageTokenEstimate,
   CompactionItem,
   PreparedCompactionPromptInput,
+  RemoteCompactionOverflowRetryInput,
 } from "./context-compaction";
 export {
   MAX_MODEL_USAGE_TOKEN_COUNT,

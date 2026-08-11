@@ -16,10 +16,16 @@ const root = join(import.meta.dir, "..");
 const releaseWorkflowPath = join(root, RELEASE_AUTOMATION_CONTRACT.releaseWorkflowPath);
 const ciWorkflowPath = join(root, RELEASE_AUTOMATION_CONTRACT.ciWorkflowPath);
 const sealWorkflowPath = join(root, RELEASE_AUTOMATION_CONTRACT.sealWorkflowPath);
+const releaseSourceAdmissionPath = join(root, ".github/workflows/release-source-admission.yml");
+const releasePublicationAdmissionPath = join(
+  root,
+  ".github/workflows/release-publication-admission.yml",
+);
 const releaseAutomationPath = join(root, "scripts/check-release-pr-automation.mjs");
 const baseSha = "b".repeat(40);
 const headSha = "c".repeat(40);
 const mergeSha = "d".repeat(40);
+const controllerSha = baseSha;
 const currentMainSha = "9".repeat(40);
 const baseTreeSha = "e".repeat(40);
 const headTreeSha = "f".repeat(40);
@@ -1674,7 +1680,9 @@ describe("release head retention recovery", () => {
         env: recoverySealEnv(),
         fetchImpl: fixture.fetchImpl,
       }),
-    ).rejects.toThrow("GitHub API POST /repos/Cloudgeni-ai/opengeni/git/refs failed with HTTP 422");
+    ).rejects.toThrow(
+      "GitHub API GET /repos/Cloudgeni-ai/opengeni/git/ref/tags/opengeni-release-head-cccccccccccccccccccccccccccccccccccccccc failed with HTTP 404",
+    );
     expect(fixture.checks).toHaveLength(0);
     expect(
       fixture.requests.filter((request) => request.method !== "GET").map((request) => request.path),
@@ -1684,6 +1692,7 @@ describe("release head retention recovery", () => {
 
 function checksFixture(
   options: {
+    concurrentRetentionRace?: boolean;
     merged?: boolean;
     mergedTreeSha?: string;
     missingVersionBranch?: boolean;
@@ -1700,9 +1709,12 @@ function checksFixture(
       }
     : null;
   let release = options.release ?? null;
+  let releaseControllerRef: Record<string, any> | null = null;
+  let releaseController: Record<string, any> | null = null;
   let nextId = 700;
   const prefix = `/repos/${RELEASE_AUTOMATION_CONTRACT.repository}`;
   const releaseHeadTag = `${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${headSha}`;
+  const releaseControllerTag = `${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${baseSha}`;
   async function fetchImpl(input: string | URL | Request, init?: RequestInit) {
     const url = new URL(String(input));
     const method = init?.method ?? "GET";
@@ -1740,12 +1752,20 @@ function checksFixture(
       return releaseHeadRef === null
         ? response({ message: "missing release head ref" }, 404)
         : response(releaseHeadRef);
+    if (method === "GET" && url.pathname === `${prefix}/git/ref/tags/${releaseControllerTag}`)
+      return releaseControllerRef === null
+        ? response({ message: "missing release controller ref" }, 404)
+        : response(releaseControllerRef);
     if (method === "POST" && url.pathname === `${prefix}/git/refs`) {
-      releaseHeadRef = {
+      const created = {
         ref: body?.ref,
         object: { type: "commit", sha: body?.sha },
       };
-      return response(releaseHeadRef, 201);
+      if (body?.ref === `refs/tags/${releaseControllerTag}`) releaseControllerRef = created;
+      else releaseHeadRef = created;
+      return options.concurrentRetentionRace
+        ? response({ message: "Reference already exists" }, 422)
+        : response(created, 201);
     }
     if (method === "GET" && url.pathname === `${prefix}/releases/tags/${releaseHeadTag}`) {
       const currentRelease = options.release ?? release;
@@ -1753,9 +1773,20 @@ function checksFixture(
         ? response({ message: "missing release head release" }, 404)
         : response(currentRelease);
     }
+    if (method === "GET" && url.pathname === `${prefix}/releases/tags/${releaseControllerTag}`) {
+      return releaseController === null
+        ? response({ message: "missing immutable controller release" }, 404)
+        : response(releaseController);
+    }
     if (method === "POST" && url.pathname === `${prefix}/releases`) {
-      release = releaseHeadRelease(headSha);
-      return response(release, 201);
+      const created = releaseHeadRelease(
+        body?.tag_name === releaseControllerTag ? baseSha : headSha,
+      );
+      if (body?.tag_name === releaseControllerTag) releaseController = created;
+      else release = created;
+      return options.concurrentRetentionRace
+        ? response({ message: "Release already exists" }, 422)
+        : response(created, 201);
     }
     if (method === "GET" && url.pathname === `${prefix}/commits/${headSha}/check-runs`)
       return response({
@@ -1790,8 +1821,19 @@ test("exact-head check markers update idempotently instead of duplicating", asyn
     fetchImpl: fixture.fetchImpl,
     now: () => new Date("2026-07-23T12:00:00Z"),
   };
+  const first = await beginVersionPrChecks(options);
   await beginVersionPrChecks(options);
-  await beginVersionPrChecks(options);
+  expect(first.releaseController).toEqual({
+    name: `${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${baseSha}`,
+    ref: `refs/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${baseSha}`,
+    sha: baseSha,
+  });
+  expect(first.releaseControllerRelease).toEqual(
+    expect.objectContaining({
+      tagName: `${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${baseSha}`,
+      immutable: true,
+    }),
+  );
   expect(fixture.checks).toHaveLength(3);
   expect(new Set(fixture.checks.map((check) => check.external_id)).size).toBe(3);
   expect(
@@ -1813,13 +1855,30 @@ test("exact-head check markers update idempotently instead of duplicating", asyn
     fixture.requests.filter(
       (request) => request.method === "POST" && request.path.endsWith("/git/refs"),
     ),
-  ).toHaveLength(1);
+  ).toHaveLength(2);
   expect(
     fixture.requests.filter(
       (request) => request.method === "POST" && request.path.endsWith("/check-runs"),
     ),
   ).toHaveLength(3);
   expect(fixture.requests.filter((request) => request.method === "PATCH")).toHaveLength(3);
+});
+
+test("exact-head retention accepts concurrent creation of the same immutable evidence", async () => {
+  const fixture = checksFixture({ concurrentRetentionRace: true });
+  const result = await beginVersionPrChecks({
+    env: automationCiEnv(),
+    fetchImpl: fixture.fetchImpl,
+    now: () => new Date("2026-07-23T12:00:00Z"),
+  });
+
+  expect(result.releaseHead.sha).toBe(headSha);
+  expect(result.releaseController.sha).toBe(baseSha);
+  expect(result.releaseHeadRelease).toMatchObject({ immutable: true, tagName: expect.any(String) });
+  expect(result.releaseControllerRelease).toMatchObject({
+    immutable: true,
+    tagName: expect.any(String),
+  });
 });
 
 test("exact-head check completion succeeds while the Version PR remains unchanged", async () => {
@@ -1954,8 +2013,11 @@ function approvalEnv(overrides: Record<string, string> = {}) {
     GITHUB_EVENT_NAME: "workflow_dispatch",
     GITHUB_REPOSITORY: RELEASE_AUTOMATION_CONTRACT.repository,
     GITHUB_SERVER_URL: RELEASE_AUTOMATION_CONTRACT.serverUrl,
-    GITHUB_SHA: mergeSha,
+    GITHUB_REF: `refs/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${controllerSha}`,
+    GITHUB_SHA: controllerSha,
     GITHUB_TOKEN: "fixture-token",
+    GITHUB_WORKFLOW_SHA: controllerSha,
+    RELEASE_CONTROLLER_SHA: controllerSha,
     SOURCE_SHA: mergeSha,
     ...overrides,
   };
@@ -1971,6 +2033,9 @@ function approvalFixture(
     mergeCommitSha?: string;
     pullHeadSha?: string;
     sourceTreeSha?: string;
+    controllerTreeSha?: string;
+    controllerRefSha?: string | null;
+    controllerRelease?: Record<string, unknown> | null;
     terminalMainSha?: string;
     reviewCommit?: string;
     reviewState?: string;
@@ -1987,6 +2052,7 @@ function approvalFixture(
     historicalSourceChecks?: Array<Record<string, unknown>>;
     releaseHeadRefSha?: string | null;
     release?: Record<string, unknown> | null;
+    reviewedBaseSha?: string;
     discontinuousCompare?: boolean;
     mergeEvent?: Record<string, unknown> | null;
   } = {},
@@ -1995,6 +2061,7 @@ function approvalFixture(
   const prefix = `/repos/${RELEASE_AUTOMATION_CONTRACT.repository}`;
   const mergeMethod = options.mergeMethod ?? "merge";
   const pullHeadSha = options.pullHeadSha ?? headSha;
+  const reviewedBaseSha = options.reviewedBaseSha ?? baseSha;
   const pullCommitCount = mergeMethod === "single" ? 1 : 2;
   const sourceParents =
     mergeMethod === "merge"
@@ -2080,6 +2147,12 @@ function approvalFixture(
         tree: { sha: baseTreeSha },
         parents: [{ sha: "1".repeat(40) }],
       });
+    if (method === "GET" && url.pathname === `${prefix}/git/commits/${controllerSha}`)
+      return response({
+        sha: controllerSha,
+        tree: { sha: options.controllerTreeSha ?? baseTreeSha },
+        parents: [{ sha: "3".repeat(40) }],
+      });
     if (method === "GET" && url.pathname === `${prefix}/git/commits/${pullHeadSha}`)
       return response({
         sha: pullHeadSha,
@@ -2091,7 +2164,7 @@ function approvalFixture(
         Array.from({ length: options.associatedPullCount ?? 1 }, (_, index) => ({
           number: pullNumber + index,
           merge_commit_sha: options.mergeCommitSha ?? mergeSha,
-          base: { sha: baseSha },
+          base: { sha: reviewedBaseSha },
           head: { sha: pullHeadSha },
         })),
       );
@@ -2107,7 +2180,7 @@ function approvalFixture(
         merged_by: merger,
         base: {
           ref: "main",
-          sha: baseSha,
+          sha: reviewedBaseSha,
           repo: { full_name: RELEASE_AUTOMATION_CONTRACT.repository },
         },
         head: {
@@ -2196,6 +2269,29 @@ function approvalFixture(
     if (
       method === "GET" &&
       url.pathname ===
+        `${prefix}/git/ref/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${controllerSha}`
+    ) {
+      if (options.controllerRefSha === null)
+        return response({ message: "missing controller ref" }, 404);
+      return response({
+        ref: `refs/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${controllerSha}`,
+        object: {
+          type: "commit",
+          sha: options.controllerRefSha ?? controllerSha,
+        },
+      });
+    }
+    if (
+      method === "GET" &&
+      url.pathname ===
+        `${prefix}/releases/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${controllerSha}`
+    )
+      return options.controllerRelease === null
+        ? response({ message: "missing controller release" }, 404)
+        : response(options.controllerRelease ?? releaseHeadRelease(controllerSha));
+    if (
+      method === "GET" &&
+      url.pathname ===
         `${prefix}/git/ref/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${pullHeadSha}`
     ) {
       if (options.releaseHeadRefSha === null)
@@ -2243,6 +2339,58 @@ function approvalFixture(
 }
 
 describe("release approval provenance", () => {
+  test("requires the workflow graph and dispatch ref to be the retained controller", async () => {
+    const fixture = approvalFixture();
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv({ GITHUB_WORKFLOW_SHA: "9".repeat(40) }),
+        fetchImpl: fixture.fetchImpl,
+      }),
+    ).rejects.toThrow("workflow definition differs from release controller SHA");
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv({ GITHUB_REF: "refs/heads/main" }),
+        fetchImpl: fixture.fetchImpl,
+      }),
+    ).rejects.toThrow("not running from the retained controller ref");
+  });
+
+  test("rejects a retained controller that is not the exact reviewed base commit", async () => {
+    const fixture = approvalFixture({
+      mergeMethod: "squash",
+      reviewedBaseSha: "9".repeat(40),
+    });
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: fixture.fetchImpl,
+        logger: { log() {} },
+      }),
+    ).rejects.toThrow("release controller SHA differs from the exact reviewed base SHA");
+  });
+
+  test("requires immutable retained evidence for the workflow controller", async () => {
+    const missing = approvalFixture({ controllerRefSha: null });
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: missing.fetchImpl,
+        logger: { log() {} },
+      }),
+    ).rejects.toThrow("GitHub API GET");
+
+    const mutable = approvalFixture({
+      controllerRelease: { ...releaseHeadRelease(controllerSha), immutable: false },
+    });
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: mutable.fetchImpl,
+        logger: { log() {} },
+      }),
+    ).rejects.toThrow("immutable");
+  });
+
   test.each([
     ["merge", "merge"],
     ["squash", "squash"],
@@ -2262,6 +2410,14 @@ describe("release approval provenance", () => {
         repository: RELEASE_AUTOMATION_CONTRACT.repository,
         sourceSha: mergeSha,
         sourceTreeSha: headTreeSha,
+        controller: {
+          sha: controllerSha,
+          treeSha: baseTreeSha,
+          release: expect.objectContaining({
+            tagName: `${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${controllerSha}`,
+            immutable: true,
+          }),
+        },
         pullRequestNumber: pullNumber,
         mergeMethod: expectedMethod,
         reviewedBaseSha: baseSha,
@@ -2781,6 +2937,8 @@ describe("workflow contracts", () => {
   const releaseText = readFileSync(releaseWorkflowPath, "utf8");
   const ciText = readFileSync(ciWorkflowPath, "utf8");
   const sealText = readFileSync(sealWorkflowPath, "utf8");
+  const releaseSourceAdmissionText = readFileSync(releaseSourceAdmissionPath, "utf8");
+  const releasePublicationAdmissionText = readFileSync(releasePublicationAdmissionPath, "utf8");
   const releaseAutomationText = readFileSync(releaseAutomationPath, "utf8");
   const release = Bun.YAML.parse(releaseText) as any;
   const ci = Bun.YAML.parse(ciText) as any;
@@ -3361,7 +3519,35 @@ describe("workflow contracts", () => {
     expect(ciText).toContain("AUTOMATION_CHECK_KIND: source-admission");
     expect(ciText).toContain("AUTOMATION_CHECK_KIND: automation-ci");
     expect(releaseAutomationText).toContain("releaseHeadTagPrefix");
-    expect(releaseText).toContain("verify-approved-merge");
+    expect(releaseSourceAdmissionText).toContain("verify-approved-merge");
+  });
+
+  test("runs final publication behind the historical retained-controller gate", () => {
+    expect(release.on.workflow_dispatch.inputs.controller_sha).toEqual(
+      expect.objectContaining({ required: true }),
+    );
+    expect(release.jobs.admission).toEqual(
+      expect.objectContaining({
+        uses: "./.github/workflows/release-publication-admission.yml",
+        with: {
+          source_sha: "${{ inputs.source_sha }}",
+          controller_sha: "${{ inputs.controller_sha }}",
+          candidate_run_id: "${{ inputs.candidate_run_id }}",
+          acceptance_run_id: "${{ inputs.acceptance_run_id }}",
+        },
+        permissions: { actions: "read", contents: "read" },
+      }),
+    );
+    expect(release.jobs.publish.needs).toBe("admission");
+    expect(releasePublicationAdmissionText).toContain("ref: ${{ github.sha }}");
+    expect(releasePublicationAdmissionText).toContain(
+      'git -C .release/source merge-base --is-ancestor "$SOURCE_SHA" origin/main',
+    );
+    expect(releasePublicationAdmissionText).toContain("--kind candidate");
+    expect(releasePublicationAdmissionText).toContain("--kind acceptance");
+    expect(releasePublicationAdmissionText).toContain('--controller-sha "$CONTROLLER_SHA"');
+    expect(releasePublicationAdmissionText).not.toContain("verify-approved-merge");
+    expect(releaseText).toContain("uses: ./.release/controller/.github/actions/public-oci-login");
   });
 
   test("writes approved provenance outputs from the provider result field names", () => {

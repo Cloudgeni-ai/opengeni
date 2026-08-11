@@ -34,6 +34,10 @@
       "types": "./src/artifacts.ts",
       "default": "./src/artifacts.ts"
     },
+    "./memory-slack": {
+      "types": "./src/memory-slack.ts",
+      "default": "./src/memory-slack.ts"
+    },
     "./realtime": {
       "types": "./src/realtime.ts",
       "default": "./src/realtime.ts"

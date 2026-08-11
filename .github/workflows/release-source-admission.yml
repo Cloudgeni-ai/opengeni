@@ -1,0 +1,42 @@
+name: Release source admission
+
+# This reusable gate is loaded from the caller's immutable trusted-base ref.
+# It executes no release-source bytes and grants no mutation authority.
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        description: Exact merged release source to admit.
+        required: true
+        type: string
+      controller_sha:
+        description: Exact retained trusted Version-PR base running this workflow.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify exact reviewed release tree
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      checks: read
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Check out exact retained release controller
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify controller identity and exact reviewed merge provenance
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_CONTROLLER_SHA: ${{ inputs.controller_sha }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: node scripts/check-release-pr-automation.mjs verify-approved-merge

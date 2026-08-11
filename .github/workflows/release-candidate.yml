@@ -1,15 +1,18 @@
 name: Release candidate
 
-# Build the complete public image set exactly once before staging. Every image is
-# pushed under a full-source-SHA candidate tag. A retry reuses any already
-# present candidate manifest and an existing immutable receipt must compare
-# byte-for-byte, so a partially completed run never rebuilds accepted bytes.
+# Build the complete public image set before staging. Every attempt uses a fresh
+# run-scoped tag, so an interrupted attempt can never lend orphaned manifests to
+# a later receipt. Only the immutable receipt promotes digests beyond this job.
 
 on:
   workflow_dispatch:
     inputs:
       source_sha:
-        description: Exact retained versioned-main SHA; dispatch this workflow from that same ref.
+        description: Exact retained versioned-main SHA to build as data.
+        required: true
+        type: string
+      controller_sha:
+        description: Exact retained trusted Version-PR base SHA.
         required: true
         type: string
 
@@ -17,12 +20,28 @@ concurrency:
   group: release-candidate-${{ inputs.source_sha }}
   cancel-in-progress: false
 
+env:
+  OPENGENI_RELEASE_SOURCE_ROOT: ${{ github.workspace }}
+
 permissions:
   contents: read
 
 jobs:
+  admission:
+    name: Admit exact reviewed release tree
+    if: ${{ vars.RELEASE_ENABLED == 'true' }}
+    uses: ./.github/workflows/release-source-admission.yml
+    with:
+      source_sha: ${{ inputs.source_sha }}
+      controller_sha: ${{ inputs.controller_sha }}
+    permissions:
+      checks: read
+      contents: read
+      pull-requests: read
+
   artifact-runtime:
     name: Build exact artifact runtime inputs
+    needs: admission
     if: ${{ vars.RELEASE_ENABLED == 'true' }}
     uses: ./.github/workflows/artifact-runtime.yml
     with:
@@ -30,7 +49,7 @@ jobs:
 
   candidate:
     name: Build immutable release candidate
-    needs: artifact-runtime
+    needs: [admission, artifact-runtime]
     runs-on: ubuntu-latest
     environment: public-release
     if: ${{ vars.RELEASE_ENABLED == 'true' }}
@@ -50,9 +69,18 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Check out exact retained release controller
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.controller_sha }}
+          path: .release/controller
+          fetch-depth: 1
+          persist-credentials: false
+
       - name: Validate exact retained versioned main source
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
+          CONTROLLER_SHA: ${{ inputs.controller_sha }}
         run: |
           set -euo pipefail
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || {
@@ -63,8 +91,25 @@ jobs:
             echo "checked-out source does not match source_sha" >&2
             exit 1
           }
-          [ "$GITHUB_SHA" = "$SOURCE_SHA" ] || {
-            echo "dispatch ref must resolve to source_sha" >&2
+          expected_ref="refs/tags/opengeni-release-head-$CONTROLLER_SHA"
+          [ "$GITHUB_REF" = "$expected_ref" ] || {
+            echo "candidate workflow is not running from the retained controller ref" >&2
+            exit 1
+          }
+          [ "$GITHUB_SHA" = "$CONTROLLER_SHA" ] || {
+            echo "candidate workflow dispatch ref differs from controller_sha" >&2
+            exit 1
+          }
+          [ "$GITHUB_WORKFLOW_SHA" = "$CONTROLLER_SHA" ] || {
+            echo "candidate workflow graph differs from controller_sha" >&2
+            exit 1
+          }
+          [ "$GITHUB_WORKFLOW_REF" = "$GITHUB_REPOSITORY/.github/workflows/release-candidate.yml@$expected_ref" ] || {
+            echo "unexpected candidate workflow identity: $GITHUB_WORKFLOW_REF" >&2
+            exit 1
+          }
+          [ "$(git -C .release/controller rev-parse HEAD)" = "$CONTROLLER_SHA" ] || {
+            echo "release controller checkout differs from controller_sha" >&2
             exit 1
           }
           git fetch --no-tags origin main
@@ -101,7 +146,7 @@ jobs:
         run: |
           set -euo pipefail
           tag="opengeni-candidate-${SOURCE_SHA}"
-          state="$(bun scripts/resolve-github-release-state.ts "$tag")"
+          state="$(cd .release/controller && bun scripts/resolve-github-release-state.ts "$tag")"
           release_exists="$(jq -er '.releaseExists | if type == "boolean" then tostring else error("releaseExists must be boolean") end' <<<"$state")"
           tag_sha="$(jq -r '.tagSha // ""' <<<"$state")"
           [ -z "$tag_sha" ] || [ "$tag_sha" = "$SOURCE_SHA" ] || {
@@ -120,7 +165,7 @@ jobs:
           OPENGENI_RELEASE_PACKAGE_DERIVE_EXPECTED: "true"
           OPENGENI_RELEASE_PACKAGE_PHASE: plan
           OPENGENI_RELEASE_PACKAGE_RECEIPT: evidence/release-packages-plan.json
-        run: bun scripts/verify-release-packages.ts
+        run: cd .release/controller && bun scripts/verify-release-packages.ts
 
       - name: Resolve candidate identity
         id: meta
@@ -128,9 +173,9 @@ jobs:
           SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
           set -euo pipefail
-          version="$(bun scripts/release-version.ts deploy/helm/opengeni/Chart.yaml)"
+          version="$(cd .release/controller && bun scripts/release-version.ts "$GITHUB_WORKSPACE/deploy/helm/opengeni/Chart.yaml")"
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "candidate_tag=candidate-$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+          echo "candidate_tag=candidate-${SOURCE_SHA}-run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
           echo "source_tree_sha=$(git rev-parse "$SOURCE_SHA^{tree}")" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
@@ -144,7 +189,7 @@ jobs:
 
       - name: Log in to the public OCI registry
         id: registry
-        uses: ./.github/actions/public-oci-login
+        uses: ./.release/controller/.github/actions/public-oci-login
         with:
           oci-prefix: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}
           auth: ${{ env.OPENGENI_RELEASE_REGISTRY_AUTH }}
@@ -161,47 +206,44 @@ jobs:
           set -euo pipefail
           for role in api worker web relay sandbox artifact-materializer artifact-outbox-dispatcher; do
             ref="${OPENGENI_RELEASE_OCI_PREFIX}/opengeni-${role}:${RELEASE_VERSION}"
-            digest="$(bun scripts/resolve-optional-oci-manifest.ts "$ref")"
+            digest="$(cd .release/controller && bun scripts/resolve-optional-oci-manifest.ts "$ref")"
             if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
               echo "product release version ${RELEASE_VERSION} is already occupied by ${ref}" >&2
               exit 1
             fi
           done
           chart_ref="${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni/opengeni:${RELEASE_VERSION}"
-          chart_digest="$(bun scripts/resolve-optional-oci-manifest.ts "$chart_ref")"
+          chart_digest="$(cd .release/controller && bun scripts/resolve-optional-oci-manifest.ts "$chart_ref")"
           if [[ "$chart_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
             echo "product release version ${RELEASE_VERSION} is already occupied by ${chart_ref}" >&2
             exit 1
           fi
 
-      - name: Resolve existing API candidate
-        id: existing-api
+      - name: Refuse occupied run-scoped candidate tags
         env:
-          IMAGE_REF: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-api:${{ steps.meta.outputs.candidate_tag }}
+          CANDIDATE_TAG: ${{ steps.meta.outputs.candidate_tag }}
         run: |
           set -euo pipefail
-          digest="$(bun scripts/resolve-optional-oci-manifest.ts "$IMAGE_REF")"
-          if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "digest=$digest" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
+          for role in api worker web relay sandbox artifact-materializer artifact-outbox-dispatcher; do
+            ref="${OPENGENI_RELEASE_OCI_PREFIX}/opengeni-${role}:${CANDIDATE_TAG}"
+            digest="$(cd .release/controller && bun scripts/resolve-optional-oci-manifest.ts "$ref")"
+            if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "run-scoped candidate tag is already occupied: ${ref}" >&2
+              exit 1
+            fi
+          done
 
       - name: Install the Rust toolchain
-        if: steps.existing-api.outputs.exists != 'true'
         run: |
           rustup toolchain install 1.97.1 --profile minimal --no-self-update
           rustup default 1.97.1
 
       - name: Bake and sign per-SHA agent binaries
-        if: steps.existing-api.outputs.exists != 'true'
         env:
           OPENGENI_AGENT_MINISIGN_KEY: ${{ secrets.OPENGENI_AGENT_MINISIGN_KEY }}
         run: scripts/bake-agent.sh
 
       - name: Build and push API candidate
-        if: steps.existing-api.outputs.exists != 'true'
         id: build-api
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
@@ -229,21 +271,7 @@ jobs:
           }
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
-      - name: Resolve existing worker candidate
-        id: existing-worker
-        env:
-          IMAGE_REF: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-worker:${{ steps.meta.outputs.candidate_tag }}
-        run: |
-          set -euo pipefail
-          digest="$(bun scripts/resolve-optional-oci-manifest.ts "$IMAGE_REF")"
-          if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Build and push worker candidate
-        if: steps.existing-worker.outputs.exists != 'true'
         id: build-worker
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
@@ -268,21 +296,7 @@ jobs:
           [ -z "$BUILT_DIGEST" ] || [ "$digest" = "$BUILT_DIGEST" ] || exit 1
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
-      - name: Resolve existing web candidate
-        id: existing-web
-        env:
-          IMAGE_REF: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-web:${{ steps.meta.outputs.candidate_tag }}
-        run: |
-          set -euo pipefail
-          digest="$(bun scripts/resolve-optional-oci-manifest.ts "$IMAGE_REF")"
-          if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Build and push web candidate
-        if: steps.existing-web.outputs.exists != 'true'
         id: build-web
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
@@ -308,21 +322,7 @@ jobs:
           [ -z "$BUILT_DIGEST" ] || [ "$digest" = "$BUILT_DIGEST" ] || exit 1
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
-      - name: Resolve existing sandbox candidate
-        id: existing-sandbox
-        env:
-          IMAGE_REF: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-sandbox:${{ steps.meta.outputs.candidate_tag }}
-        run: |
-          set -euo pipefail
-          digest="$(bun scripts/resolve-optional-oci-manifest.ts "$IMAGE_REF")"
-          if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Build and push headless sandbox candidate
-        if: steps.existing-sandbox.outputs.exists != 'true'
         id: build-sandbox
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
@@ -345,21 +345,7 @@ jobs:
           [ -z "$BUILT_DIGEST" ] || [ "$digest" = "$BUILT_DIGEST" ] || exit 1
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
-      - name: Resolve existing relay candidate
-        id: existing-relay
-        env:
-          IMAGE_REF: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-relay:${{ steps.meta.outputs.candidate_tag }}
-        run: |
-          set -euo pipefail
-          digest="$(bun scripts/resolve-optional-oci-manifest.ts "$IMAGE_REF")"
-          if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Build and push relay candidate
-        if: steps.existing-relay.outputs.exists != 'true'
         id: build-relay
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
@@ -381,21 +367,7 @@ jobs:
           [ -z "$BUILT_DIGEST" ] || [ "$digest" = "$BUILT_DIGEST" ] || exit 1
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
-      - name: Resolve existing artifact materializer candidate
-        id: existing-artifact-materializer
-        env:
-          IMAGE_REF: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-artifact-materializer:${{ steps.meta.outputs.candidate_tag }}
-        run: |
-          set -euo pipefail
-          digest="$(bun scripts/resolve-optional-oci-manifest.ts "$IMAGE_REF")"
-          if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Build and push artifact materializer candidate
-        if: steps.existing-artifact-materializer.outputs.exists != 'true'
         id: build-artifact-materializer
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
@@ -420,21 +392,7 @@ jobs:
           [ -z "$BUILT_DIGEST" ] || [ "$digest" = "$BUILT_DIGEST" ] || exit 1
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
-      - name: Resolve existing artifact outbox dispatcher candidate
-        id: existing-artifact-outbox-dispatcher
-        env:
-          IMAGE_REF: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-artifact-outbox-dispatcher:${{ steps.meta.outputs.candidate_tag }}
-        run: |
-          set -euo pipefail
-          digest="$(bun scripts/resolve-optional-oci-manifest.ts "$IMAGE_REF")"
-          if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Build and push artifact outbox dispatcher candidate
-        if: steps.existing-artifact-outbox-dispatcher.outputs.exists != 'true'
         id: build-artifact-outbox-dispatcher
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
@@ -491,8 +449,18 @@ jobs:
             [ "$resolved" = "$expected" ] || {
               echo "anonymous candidate pull proof failed for ${image}: resolved ${resolved:-nothing}, expected ${expected}" >&2
               exit 1
-            }
+              }
           done
+
+      - name: Restore the exact controller after source execution
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.controller_sha }}
+          path: .release/controller
+          fetch-depth: 1
+          clean: true
+          persist-credentials: false
+
       - name: Package the deterministic immutable Helm chart candidate
         id: chart
         env:
@@ -501,17 +469,23 @@ jobs:
           set -euo pipefail
           mkdir -p .release/charts .release/chart-proof
           chart_path=".release/charts/opengeni-${RELEASE_VERSION}.tgz"
-          bun scripts/package-release-chart.ts \
-            --chart deploy/helm/opengeni \
-            --output "$chart_path" \
-            --version "$RELEASE_VERSION" \
-            --app-version "$RELEASE_VERSION"
+          (
+            cd .release/controller
+            bun scripts/package-release-chart.ts \
+              --chart "$GITHUB_WORKSPACE/deploy/helm/opengeni" \
+              --output "$GITHUB_WORKSPACE/$chart_path" \
+              --version "$RELEASE_VERSION" \
+              --app-version "$RELEASE_VERSION"
+          )
           chart_bytes_sha256="$(sha256sum "$chart_path" | awk '{print $1}')"
-          bun scripts/package-release-chart.ts \
-            --chart deploy/helm/opengeni \
-            --output .release/chart-proof/opengeni.tgz \
-            --version "$RELEASE_VERSION" \
-            --app-version "$RELEASE_VERSION"
+          (
+            cd .release/controller
+            bun scripts/package-release-chart.ts \
+              --chart "$GITHUB_WORKSPACE/deploy/helm/opengeni" \
+              --output "$GITHUB_WORKSPACE/.release/chart-proof/opengeni.tgz" \
+              --version "$RELEASE_VERSION" \
+              --app-version "$RELEASE_VERSION"
+          )
           cmp "$chart_path" .release/chart-proof/opengeni.tgz
           helm lint "$chart_path"
           test "$(helm show chart "$chart_path" | awk '$1 == "version:" { print $2 }')" = "$RELEASE_VERSION"
@@ -585,7 +559,7 @@ jobs:
               "artifact-outbox-dispatcher":$artifactOutboxDispatcher
             }')" \
           OPENGENI_RELEASE_CANDIDATE_PACKAGES="$packages" \
-            bun scripts/release-candidate.ts
+            bash -c 'cd .release/controller && bun scripts/release-candidate.ts'
           checksum="$(sha256sum evidence/release-candidate.json | awk '{print $1}')"
           printf '%s  %s\n' \
             "$checksum" \
@@ -613,7 +587,7 @@ jobs:
         run: |
           set -euo pipefail
           tag="opengeni-candidate-${SOURCE_SHA}"
-          state="$(bun scripts/resolve-github-release-state.ts "$tag")"
+          state="$(cd .release/controller && bun scripts/resolve-github-release-state.ts "$tag")"
           release_exists="$(jq -er '.releaseExists | if type == "boolean" then tostring else error("releaseExists must be boolean") end' <<<"$state")"
           tag_sha="$(jq -r '.tagSha // ""' <<<"$state")"
           [ -z "$tag_sha" ] || [ "$tag_sha" = "$SOURCE_SHA" ] || {
