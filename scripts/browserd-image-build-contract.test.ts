@@ -22,7 +22,11 @@ function buildsBrowserControllerOnBuildPlatform(dockerfile: string): boolean {
     "bun build --compile --compile-executable-path=/tmp/opengeni-target-bun",
     targetCompiler,
   );
-  const nextStage = dockerfile.indexOf("\nFROM ", crossCompile);
+  const targetController = dockerfile.indexOf(
+    'install -m 0755 "packages/browserd/node_modules/agent-browser/bin/${native}"',
+    crossCompile,
+  );
+  const nextStage = dockerfile.indexOf("\nFROM ", targetController);
   const bunRuntime = dockerfile.indexOf("FROM oven/bun:1.3.14 AS bun-runtime");
   const targetBunCopy = dockerfile.indexOf(
     "COPY --from=bun-runtime /usr/local/bin/bun /usr/local/bin/bun",
@@ -38,7 +42,8 @@ function buildsBrowserControllerOnBuildPlatform(dockerfile: string): boolean {
     targetArchitecture > ogtool &&
     targetCompiler > targetArchitecture &&
     crossCompile > targetCompiler &&
-    nextStage > crossCompile &&
+    targetController > crossCompile &&
+    nextStage > targetController &&
     bunRuntime >= 0 &&
     bunRuntime < buildStage &&
     targetBunCopy > nextStage &&

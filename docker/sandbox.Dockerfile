@@ -51,7 +51,7 @@ RUN set -eux; \
       packages/browserd/src/main.ts \
       --outfile /out/opengeni-browserd; \
     chmod 0755 /out/opengeni-browserd; \
-    install -m 0755 "node_modules/agent-browser/bin/${native}" /out/agent-browser; \
+    install -m 0755 "packages/browserd/node_modules/agent-browser/bin/${native}" /out/agent-browser; \
     test "$(sha256sum /out/agent-browser | awk '{print $1}')" = "$expected"; \
     { \
       printf '%s  %s\n' "$(sha256sum /out/opengeni-browserd | awk '{print $1}')" /usr/local/bin/opengeni-browserd; \
