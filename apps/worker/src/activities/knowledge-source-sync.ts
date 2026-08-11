@@ -24,6 +24,7 @@ import {
   buildConnectionTokenResolver,
   checkpointKnowledgeSourceSync,
   claimKnowledgeSourceSyncLease,
+  compareCanonicalDecimalProviderRevisions,
   completeKnowledgeSyncRun,
   completeKnowledgeSourceSyncWakeWithoutLease,
   deauthorizeKnowledgeSourceRetrieval,
@@ -38,6 +39,7 @@ import {
   getKnowledgeSourceSyncIndexObligationForVersion,
   getScheduledTask,
   listObservedKnowledgeSourceSyncExternalObjectIds,
+  KnowledgeSourceSyncObservationFenceError,
   reconcileKnowledgeSourceSyncCompleteScan,
   reconcileKnowledgeSourceSyncLiveGeneration,
   recordKnowledgeSourceSyncItemOutcomes,
@@ -52,6 +54,8 @@ import {
   updateScheduledTaskRun,
   upsertKnowledgeSourceObject,
   type Database,
+  type KnowledgeSourceSyncObjectObservationResult,
+  type KnowledgeSourceSyncObservationFloor,
 } from "@opengeni/db";
 import { readResponseJsonBounded } from "@opengeni/network";
 import { createDocumentActivities } from "./documents";
@@ -422,18 +426,43 @@ export function createKnowledgeSourceSyncActivities(
             });
         if (!base) throw new SyncFailure("authority_changed", false);
 
-        await recordKnowledgeSourceSyncObjectObservations(db, {
+        const durableObservations = await recordKnowledgeSourceSyncObjectObservations(db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
           sourceId: input.sourceId,
           scheduledTaskRunId: input.scheduledTaskRunId,
+          initiatingSubjectId: action.initiatingSubjectId,
           scanGeneration: liveState.activeScanGeneration,
+          executionCheckpointGeneration: lease.state.executionCheckpointGeneration,
+          revisionOrdering: "canonical_decimal",
           observations: inventory.entries.map((entry) => ({
             externalObjectId: entry.externalObjectId,
             providerRevision: entry.externalVersionId,
             metadataHash: entryMetadataHash(entry),
           })),
         });
+        const entriesToProcess = inventory.entries.filter((entry, index) =>
+          shouldProcessGoogleDriveDurableObservation({
+            entry,
+            observation: durableObservations[index]!,
+            sourceLifecycleGeneration: resolved.source.lifecycleGeneration,
+            aclGeneration: aclGeneration!,
+          }),
+        );
+        const observationFloorsById = new Map<string, KnowledgeSourceSyncObservationFloor>();
+        for (const observation of durableObservations) {
+          observationFloorsById.set(observation.externalObjectId, {
+            externalObjectId: observation.externalObjectId,
+            providerRevision: observation.providerRevision,
+            metadataHash: observation.metadataHash,
+          });
+        }
+        const observationFloors = [...observationFloorsById.values()];
+        const executionCheckpoint = mergeGoogleDriveDurableObservationFloors(
+          inventory.checkpoint,
+          observationFloors,
+          action.limits.maxItems,
+        );
 
         const ensureVersionIndexed = async (details: {
           entry: GoogleDriveInventoryEntry;
@@ -534,8 +563,16 @@ export function createKnowledgeSourceSyncActivities(
         };
 
         const outcomes = [];
-        for (const entry of inventory.entries) {
+        for (const entry of entriesToProcess) {
           heartbeat({ sourceId: input.sourceId, externalObjectId: entry.externalObjectId });
+          const observationFloor = observationFloorsById.get(entry.externalObjectId);
+          if (!observationFloor) throw new SyncFailure("provider_payload_invalid", false);
+          const syncObservation = {
+            scheduledTaskRunId: input.scheduledTaskRunId,
+            scanGeneration: liveState.activeScanGeneration,
+            providerRevision: observationFloor.providerRevision,
+            metadataHash: observationFloor.metadataHash,
+          };
           summary.scanned += 1;
           if (entry.transfer.action === "skip") {
             summary.skipped += 1;
@@ -637,6 +674,7 @@ export function createKnowledgeSourceSyncActivities(
                 sourceUri: entry.sourceUri,
                 sourceVersion: entry.externalVersionId ?? currentVersion.contentSha256,
                 sourceUpdatedAt: entry.modifiedTime,
+                syncObservation,
               });
               const obligation = await ensureVersionIndexed({
                 entry,
@@ -712,6 +750,7 @@ export function createKnowledgeSourceSyncActivities(
                   sourceVersion: entry.externalVersionId ?? contentSha256,
                   sourceUpdatedAt: entry.modifiedTime,
                 },
+                syncObservation,
                 operationId: `document-observation:${object.id}:${observationKey}`,
                 reasonCode: "source_metadata_observed",
                 actor,
@@ -730,6 +769,7 @@ export function createKnowledgeSourceSyncActivities(
                 sourceUri: entry.sourceUri,
                 sourceVersion: entry.externalVersionId ?? contentSha256,
                 sourceUpdatedAt: entry.modifiedTime,
+                syncObservation,
               });
               const obligation = await ensureVersionIndexed({
                 entry,
@@ -826,6 +866,7 @@ export function createKnowledgeSourceSyncActivities(
               documentId: document.id,
               fileId: file.id,
               locationMetadata: { sourceUri: entry.sourceUri },
+              syncObservation,
               operationId: `document-version:${object.id}:${observationKey}`,
               reasonCode: "source_content_observed",
               actor,
@@ -851,6 +892,9 @@ export function createKnowledgeSourceSyncActivities(
               indexObligationId: obligation.id,
             });
           } catch (error) {
+            if (error instanceof KnowledgeSourceSyncObservationFenceError) {
+              throw new SyncFailure("provider_payload_invalid", false);
+            }
             const message = boundedError(error);
             const itemFailure =
               error instanceof SyncFailure
@@ -917,7 +961,13 @@ export function createKnowledgeSourceSyncActivities(
             scheduledTaskRunId: input.scheduledTaskRunId,
             sourceConfigGeneration: action.sourceConfigGeneration,
             sourceLifecycleGeneration: action.sourceLifecycleGeneration,
-            executionCheckpoint: inventory.checkpoint as unknown as Record<string, unknown>,
+            executionCheckpoint: executionCheckpoint as Record<string, unknown>,
+            observationFence: {
+              initiatingSubjectId: action.initiatingSubjectId,
+              scanGeneration: liveState.activeScanGeneration,
+              executionCheckpointGeneration: lease.state.executionCheckpointGeneration,
+              observations: observationFloors,
+            },
           });
           return { action: "continue" };
         }
@@ -980,6 +1030,12 @@ export function createKnowledgeSourceSyncActivities(
           sourceSyncGeneration: knowledgeRun.inputSyncGeneration,
           completedSourceSyncGeneration: knowledgeRun.inputSyncGeneration + 1,
           providerCursor: inventory.providerCursor,
+          observationFence: {
+            initiatingSubjectId: action.initiatingSubjectId,
+            scanGeneration: liveState.activeScanGeneration,
+            executionCheckpointGeneration: lease.state.executionCheckpointGeneration,
+            observations: observationFloors,
+          },
         });
         await recordConnectorUsage("completed", summary.scanned, "item");
         await recordConnectorUsage("items", summary.imported, "item");
@@ -1760,6 +1816,74 @@ function revisionFloorsForEntries(
   return reconciled.revisionFloors;
 }
 
+export function shouldProcessGoogleDriveDurableObservation(input: {
+  entry: Pick<GoogleDriveInventoryEntry, "externalObjectId">;
+  observation: KnowledgeSourceSyncObjectObservationResult;
+  sourceLifecycleGeneration: number;
+  aclGeneration: number;
+}): boolean {
+  if (input.observation.externalObjectId !== input.entry.externalObjectId) {
+    throw new SyncFailure("provider_payload_invalid", false);
+  }
+  if (
+    input.observation.disposition === "accepted" ||
+    input.observation.disposition === "replayed"
+  ) {
+    return true;
+  }
+  if (input.observation.disposition === "conflict") {
+    throw new SyncFailure("provider_payload_invalid", false);
+  }
+  const current = input.observation.currentVersion;
+  const comparison = current
+    ? compareCanonicalDecimalProviderRevisions(
+        current.providerRevision,
+        input.observation.providerRevision,
+      )
+    : null;
+  const fullyProcessed =
+    current !== null &&
+    current.objectLifecycleState === "active" &&
+    current.sourceLifecycleGeneration === input.sourceLifecycleGeneration &&
+    current.objectLifecycleGeneration === current.currentObjectLifecycleGeneration &&
+    current.aclGeneration === input.aclGeneration &&
+    current.indexObligationStatus === "indexed" &&
+    comparison !== null &&
+    comparison >= 0 &&
+    (comparison > 0 || current.metadataHash === input.observation.metadataHash);
+  if (!fullyProcessed) throw new SyncFailure("provider_payload_invalid", false);
+  return false;
+}
+
+export function mergeGoogleDriveDurableObservationFloors(
+  checkpoint: Record<string, unknown> | null,
+  observations: KnowledgeSourceSyncObservationFloor[],
+  maxItems: number,
+): Record<string, unknown> | null {
+  if (
+    !checkpoint ||
+    checkpoint.version !== 3 ||
+    checkpoint.kind !== "google_drive_full_reconciliation"
+  ) {
+    return checkpoint;
+  }
+  const parsedFloors = parseGoogleDriveRevisionFloors(checkpoint.revisionFloors, maxItems);
+  if (!parsedFloors) throw new SyncFailure("provider_payload_invalid", false);
+  const floors = new Map<string, string | null>(parsedFloors);
+  for (const observation of observations) {
+    floors.set(observation.externalObjectId, observation.providerRevision);
+  }
+  if (floors.size > maxItems) throw new SyncFailure("resource_limit", false);
+  const merged = {
+    ...checkpoint,
+    revisionFloors: [...floors],
+  };
+  if (encodedJsonBytes(merged) > GOOGLE_DRIVE_EXECUTION_CHECKPOINT_MAX_BYTES) {
+    throw new SyncFailure("resource_limit", false);
+  }
+  return merged;
+}
+
 function reconcileGoogleDriveRevisionFloors(
   entries: GoogleDriveInventoryEntry[],
   existingFloors: GoogleDriveRevisionFloor[],
@@ -1776,7 +1900,7 @@ function reconcileGoogleDriveRevisionFloors(
       floors.set(entry.externalObjectId, entry.externalVersionId);
       accepted.push(entry);
     } else {
-      const comparison = compareGoogleDriveProviderRevisions(
+      const comparison = compareCanonicalDecimalProviderRevisions(
         entry.externalVersionId,
         floors.get(entry.externalObjectId) ?? null,
       );
@@ -1799,18 +1923,6 @@ function reconcileGoogleDriveRevisionFloors(
     revisionFloors: [...floors],
     conflict: false,
   };
-}
-
-function compareGoogleDriveProviderRevisions(
-  candidate: string | null,
-  floor: string | null,
-): -1 | 0 | 1 | null {
-  if (candidate === floor) return 0;
-  if (candidate === null || floor === null) return null;
-  if (!/^(0|[1-9]\d*)$/u.test(candidate) || !/^(0|[1-9]\d*)$/u.test(floor)) return null;
-  const candidateNumber = BigInt(candidate);
-  const floorNumber = BigInt(floor);
-  return candidateNumber < floorNumber ? -1 : candidateNumber > floorNumber ? 1 : 0;
 }
 
 function encodedJsonBytes(value: unknown): number {

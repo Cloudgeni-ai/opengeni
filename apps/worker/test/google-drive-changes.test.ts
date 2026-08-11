@@ -22,6 +22,8 @@ import {
 } from "../src/activities/google-drive-changes";
 import {
   googleDriveSyncDriver,
+  mergeGoogleDriveDurableObservationFloors,
+  shouldProcessGoogleDriveDurableObservation,
   type GoogleDriveSyncProviderPort,
 } from "../src/activities/knowledge-source-sync";
 
@@ -735,6 +737,108 @@ describe("Google Drive Changes cursor and reconciliation planner", () => {
       providerCursor: { pageToken: "start-after-v2", cursorGeneration: 2 },
     });
     expect(fullCalls).toBe(2);
+  });
+
+  test("keeps the durable version-8 floor when a lost full-page checkpoint replays version 7", async () => {
+    const baseTime = Date.parse("2026-08-11T00:00:00.000Z");
+    const clock = [baseTime, baseTime, baseTime, baseTime, baseTime + 30_000, baseTime + 30_000];
+    let clockIndex = 0;
+    let providerVersion = "8";
+    const provider: GoogleDriveSyncProviderPort = {
+      now: () => clock[Math.min(clockIndex++, clock.length - 1)]!,
+      getStartPageToken: async () => {
+        throw new Error("the durable pre-page checkpoint already owns the start token");
+      },
+      listChanges: async () => {
+        throw new Error("the durable pre-page checkpoint must stay on the full path");
+      },
+      getFile: async () => null,
+      listChildren: async () => ({
+        items: [
+          {
+            ...file("full-only-doc", [source.id]),
+            name: providerVersion === "8" ? "version-8.txt" : "stale.txt",
+            version: providerVersion,
+          },
+        ],
+        nextPageToken: "full-page-2",
+        incompleteSearch: false,
+      }),
+    };
+    const prePageCheckpoint = {
+      version: 3,
+      kind: "google_drive_full_reconciliation",
+      connectionId: "00000000-0000-4000-8000-000000000127",
+      googlePermissionId: "permission-1",
+      sourceId: source.id,
+      driveId: source.driveId,
+      boundaryId: source.id,
+      startPageToken: "start-after-full",
+      cursorInvalidated: false,
+      budgetBeforeInventory: { examinedItems: 0, providerRequests: 0, elapsedMs: 0 },
+      inventoryElapsedMs: 0,
+      inventoryCheckpoint: null,
+      revisionFloors: [],
+    };
+    const driver = driverFor(source, provider, undefined, { maxElapsedSeconds: 60 });
+
+    const accepted8 = await driver.inventory(prePageCheckpoint, null);
+    expect(accepted8).toMatchObject({
+      status: "paused",
+      stopReason: "elapsed_time_limit",
+      entries: [
+        { externalObjectId: "full-only-doc", externalVersionId: "8", title: "version-8.txt" },
+      ],
+      checkpoint: { revisionFloors: [["full-only-doc", "8"]] },
+    });
+
+    // Model the process death by discarding accepted8.checkpoint and replaying
+    // the exact same durable pre-page checkpoint against a stale provider page.
+    providerVersion = "7";
+    clockIndex = 0;
+    const replayed7 = await driver.inventory(prePageCheckpoint, null);
+    expect(replayed7).toMatchObject({
+      status: "paused",
+      stopReason: "elapsed_time_limit",
+      entries: [{ externalObjectId: "full-only-doc", externalVersionId: "7", title: "stale.txt" }],
+      checkpoint: { revisionFloors: [["full-only-doc", "7"]] },
+    });
+
+    const durableFloor = {
+      externalObjectId: "full-only-doc",
+      providerRevision: "8",
+      metadataHash: "a".repeat(64),
+      disposition: "stale" as const,
+      currentVersion: {
+        providerRevision: "8",
+        metadataHash: "a".repeat(64),
+        sourceLifecycleGeneration: 1,
+        objectLifecycleGeneration: 1,
+        currentObjectLifecycleGeneration: 1,
+        objectLifecycleState: "active",
+        aclGeneration: 1,
+        indexObligationStatus: "indexed",
+      },
+    };
+    expect(
+      shouldProcessGoogleDriveDurableObservation({
+        entry: replayed7.entries[0]!,
+        observation: durableFloor,
+        sourceLifecycleGeneration: 1,
+        aclGeneration: 1,
+      }),
+    ).toBe(false);
+    expect(
+      mergeGoogleDriveDurableObservationFloors(replayed7.checkpoint, [durableFloor], 10),
+    ).toMatchObject({ revisionFloors: [["full-only-doc", "8"]] });
+    expect(() =>
+      shouldProcessGoogleDriveDurableObservation({
+        entry: replayed7.entries[0]!,
+        observation: { ...durableFloor, currentVersion: null },
+        sourceLifecycleGeneration: 1,
+        aclGeneration: 1,
+      }),
+    ).toThrow("provider_payload_invalid");
   });
 
   test("fails closed when fallback revisions conflict during delta-to-full repair", async () => {

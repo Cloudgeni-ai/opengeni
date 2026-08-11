@@ -84,6 +84,18 @@ export class ScopedKnowledgeAuthorityError extends Error {
   readonly name = "ScopedKnowledgeAuthorityError";
 }
 
+export class KnowledgeSourceSyncObservationFenceError extends Error {
+  readonly name = "KnowledgeSourceSyncObservationFenceError";
+  readonly code = "KNOWLEDGE_SOURCE_SYNC_OBSERVATION_FENCE";
+}
+
+export type KnowledgeSourceSyncVersionObservationFence = {
+  scheduledTaskRunId: string;
+  scanGeneration: number;
+  providerRevision: string | null;
+  metadataHash: string | null;
+};
+
 function iso(value: Date | string): string {
   return (value instanceof Date ? value : new Date(value)).toISOString();
 }
@@ -1178,6 +1190,43 @@ type KnowledgeDocumentObservationMetadata = {
   sourceUpdatedAt: Date | null;
 };
 
+async function lockKnowledgeSourceSyncObservationFloor(
+  scopedDb: Database,
+  input: {
+    sourceId: string;
+    externalObjectId: string;
+    fence: KnowledgeSourceSyncVersionObservationFence;
+  },
+): Promise<void> {
+  const [observation] = await scopedDb
+    .select({
+      scheduledTaskRunId: schema.knowledgeSourceSyncObjectObservations.scheduledTaskRunId,
+      scanGeneration: schema.knowledgeSourceSyncObjectObservations.scanGeneration,
+      providerRevision: schema.knowledgeSourceSyncObjectObservations.providerRevision,
+      metadataHash: schema.knowledgeSourceSyncObjectObservations.metadataHash,
+    })
+    .from(schema.knowledgeSourceSyncObjectObservations)
+    .where(
+      and(
+        eq(schema.knowledgeSourceSyncObjectObservations.sourceId, input.sourceId),
+        eq(schema.knowledgeSourceSyncObjectObservations.externalObjectId, input.externalObjectId),
+      ),
+    )
+    .for("share")
+    .limit(1);
+  if (
+    !observation ||
+    observation.scheduledTaskRunId !== input.fence.scheduledTaskRunId ||
+    observation.scanGeneration !== input.fence.scanGeneration ||
+    observation.providerRevision !== input.fence.providerRevision ||
+    observation.metadataHash !== input.fence.metadataHash
+  ) {
+    throw new KnowledgeSourceSyncObservationFenceError(
+      "Knowledge source observation floor changed before document mutation",
+    );
+  }
+}
+
 async function lockActiveKnowledgeDocumentAuthority(
   scopedDb: Database,
   input: {
@@ -1187,7 +1236,7 @@ async function lockActiveKnowledgeDocumentAuthority(
     objectId: string;
     expectedObjectLifecycleGeneration: number;
   },
-): Promise<{ currentVersionId: string | null }> {
+): Promise<{ currentVersionId: string | null; externalObjectId: string }> {
   await scopedDb.execute(sql`
     SELECT knowledge_source_sync_lock_authority(
       ${input.accountId}::uuid,
@@ -1210,6 +1259,7 @@ async function lockActiveKnowledgeDocumentAuthority(
         lifecycleState: schema.knowledgeSourceObjects.lifecycleState,
         lifecycleGeneration: schema.knowledgeSourceObjects.lifecycleGeneration,
         currentVersionId: schema.knowledgeSourceObjects.currentVersionId,
+        externalObjectId: schema.knowledgeSourceObjects.externalObjectId,
       })
       .from(schema.knowledgeSourceObjects)
       .where(eq(schema.knowledgeSourceObjects.id, input.objectId))
@@ -1228,7 +1278,7 @@ async function lockActiveKnowledgeDocumentAuthority(
       "Knowledge document metadata authority is no longer active",
     );
   }
-  return { currentVersionId: object.currentVersionId };
+  return { currentVersionId: object.currentVersionId, externalObjectId: object.externalObjectId };
 }
 
 async function convergeKnowledgeDocumentObservationMetadata(
@@ -1299,6 +1349,7 @@ export async function updateKnowledgeSourceDocumentObservationMetadata(
     sourceUri: string;
     sourceVersion: string;
     sourceUpdatedAt: string | null;
+    syncObservation?: KnowledgeSourceSyncVersionObservationFence;
   },
 ): Promise<void> {
   const metadata: KnowledgeDocumentObservationMetadata = {
@@ -1308,6 +1359,26 @@ export async function updateKnowledgeSourceDocumentObservationMetadata(
     sourceUpdatedAt: input.sourceUpdatedAt ? new Date(input.sourceUpdatedAt) : null,
   };
   await withKnowledgeReadRls(db, { ...input, surface: "human" }, async (scopedDb) => {
+    if (input.syncObservation) {
+      const [observationObject] = await scopedDb
+        .select({
+          sourceId: schema.knowledgeSourceObjects.sourceId,
+          externalObjectId: schema.knowledgeSourceObjects.externalObjectId,
+        })
+        .from(schema.knowledgeSourceObjects)
+        .where(eq(schema.knowledgeSourceObjects.id, input.objectId))
+        .limit(1);
+      if (!observationObject || observationObject.sourceId !== input.sourceId) {
+        throw new KnowledgeSourceSyncObservationFenceError(
+          "Knowledge source observation object is no longer current",
+        );
+      }
+      await lockKnowledgeSourceSyncObservationFloor(scopedDb, {
+        sourceId: input.sourceId,
+        externalObjectId: observationObject.externalObjectId,
+        fence: input.syncObservation,
+      });
+    }
     const object = await lockActiveKnowledgeDocumentAuthority(scopedDb, input);
     const [version] = await scopedDb
       .select()
@@ -1708,6 +1779,7 @@ export async function appendKnowledgeDocumentVersion(
       sourceVersion: string;
       sourceUpdatedAt: string | null;
     };
+    syncObservation?: KnowledgeSourceSyncVersionObservationFence;
     reasonCode: string;
   },
 ): Promise<KnowledgeDocumentVersionRecord> {
@@ -1766,9 +1838,17 @@ export async function appendKnowledgeDocumentVersion(
           fileId: input.fileId ?? null,
           locationMetadata: input.locationMetadata ?? {},
           documentObservationMetadata,
+          syncObservation: input.syncObservation ?? null,
           reasonCode,
           actor: input.actor,
         });
+        if (input.syncObservation) {
+          await lockKnowledgeSourceSyncObservationFloor(scopedDb, {
+            sourceId: object.sourceId,
+            externalObjectId: object.externalObjectId,
+            fence: input.syncObservation,
+          });
+        }
         const convergeDocumentObservation = async (version: VersionRow): Promise<void> => {
           if (!documentObservationMetadata) return;
           if (!version.documentId || version.documentId !== (input.documentId ?? null)) {

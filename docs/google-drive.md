@@ -217,10 +217,24 @@ response that explicitly declares the scan complete may tombstone active
 objects absent from the complete generation. Partial, failed, paused, or
 reconnect-required scans never infer deletion, and a failed run clears its
 execution checkpoint before a later repair starts a new generation.
-The first accepted observation for one object within a scan generation is the
-durable floor: retries or later repair pages in that same generation cannot
-overwrite its provider revision or metadata hash. A newer scan generation may
-replace it normally.
+The first accepted observation for one object within a scan generation becomes
+the durable floor. Canonical decimal Drive revisions may advance that floor
+monotonically, but an older/equal/conflicting replay cannot overwrite its
+provider revision or metadata hash. Acceptance is bound to the exact sync lease,
+initiating subject, scan generation, and execution-checkpoint generation before
+item processing begins. Version/metadata writes lock and revalidate the exact
+accepted floor, and checkpoint or terminal cursor settlement atomically
+revalidates the same floor and checkpoint generation.
+
+If a process dies after accepting and fully processing version 8 but before its
+returned full-page checkpoint is saved, replaying the same durable pre-page
+checkpoint against stale version 7 reads the version-8 observation floor. The
+stale entry is suppressed only when the current immutable version, metadata,
+source/object lifecycle generations, ACL generation, and indexed obligation
+prove version 8 was fully materialized; otherwise the run fails closed without
+saving the stale checkpoint or adopting the terminal Changes token. A paused
+replay that is safe to continue rewrites its returned checkpoint to the durable
+version-8 floor. A newer scan generation may replace the observation normally.
 
 `manual`, `hourly`, and `daily` map to an on-demand Schedule, a one-hour
 interval, and a daily 00:00 UTC calendar respectively. The Schedules UI exposes

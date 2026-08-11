@@ -14,4 +14,7 @@ across delta, continuation, and full-repair checkpoints. Carry bounded
 per-object revision floors across delta-to-full and checkpointed full scans so
 older or equal Drive revisions cannot regress accepted metadata/current-version
 state, fail closed on conflicting fallback identities, and keep the first
-observation in one scan generation stable under replay.
+observation in one scan generation as a durable monotonic floor. Fence item
+version/metadata writes plus checkpoint and terminal cursor settlement to the
+exact lease, initiating subject, scan, checkpoint generation, and accepted
+floor, so a lost full-page checkpoint cannot replay version 8 as version 7.
