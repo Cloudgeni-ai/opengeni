@@ -6,7 +6,6 @@ import { and, asc, eq, inArray, ne, or, sql } from "drizzle-orm";
 import {
   assertCapabilityComponentVersionCanChange,
   cleanupOrphanedCapabilityComponents,
-  effectiveCapabilityOwnerSql,
   lockCapabilityComponentIdentity,
 } from "./capability-components";
 import { setSubjectRlsContext, withRlsContext, withWorkspaceRls, type Database } from "./database";
@@ -1083,10 +1082,11 @@ async function pluginOwnedComponents(
       .where(
         and(
           inArray(schema.capabilityComponentOwners.facetInstallationId, component.facetIds),
-          effectiveCapabilityOwnerSql(
-            schema.capabilityComponentOwners.ownerKind,
-            schema.capabilityComponentOwners.ownerId,
-          ),
+          // Retention is deliberately physical, not runtime-effective. A Plugin
+          // in needs_attention may be resumable and must keep shared component
+          // storage even though its tools stay hidden until the operation
+          // completes. Runtime projections continue to apply the effective-owner
+          // predicate at their own read boundaries.
           or(
             ne(schema.capabilityComponentOwners.ownerKind, "plugin"),
             ne(schema.capabilityComponentOwners.ownerId, ownerPluginInstallationId),
