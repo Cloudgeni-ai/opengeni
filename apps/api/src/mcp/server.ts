@@ -1466,14 +1466,25 @@ function registerFikenTools(
   sessionId: string | null,
   json: JsonResult,
 ): void {
-  const clientFor = async (connectionId?: string) => {
-    const resolved = await resolveFikenConnectionForTool({
-      db: deps.db,
-      grant,
-      sessionId,
-      ...(connectionId ? { requestedConnectionId: connectionId } : {}),
-    });
-    return createFikenClient(deps, resolved);
+  // One resolution per requested connection per MCP server instance: the
+  // bound row cannot change mid-request, and re-resolving on every tool call
+  // would pay an extra connections read each time.
+  const clients = new Map<string, Promise<ReturnType<typeof createFikenClient>>>();
+  const clientFor = (connectionId?: string) => {
+    const cacheKey = connectionId ?? "";
+    let client = clients.get(cacheKey);
+    if (!client) {
+      client = resolveFikenConnectionForTool({
+        db: deps.db,
+        grant,
+        sessionId,
+        ...(connectionId ? { requestedConnectionId: connectionId } : {}),
+      }).then((resolved) => createFikenClient(deps, resolved));
+      // A failed resolution must not be cached as a poisoned entry.
+      client.catch(() => clients.delete(cacheKey));
+      clients.set(cacheKey, client);
+    }
+    return client;
   };
   const companySlugInput = z4
     .string()

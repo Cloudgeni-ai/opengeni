@@ -8,6 +8,7 @@ import {
   CapabilityCatalogItem,
   capabilityCatalogItemIsTrustedForExposure,
   FIKEN_PROVIDER_DOMAIN,
+  FIRST_PARTY_MCP_TOOL_NAMES,
   type AccessGrant,
   type CapabilityCatalogResponse,
   type CapabilityInstallation,
@@ -1133,18 +1134,9 @@ function platformApiCatalogItems(
     metadata: {
       connectorMode: "first_party_fiken",
       ownership: "workspace",
-      firstPartyMcpTools: [
-        "fiken_companies_list",
-        "fiken_contacts_list",
-        "fiken_contact_create",
-        "fiken_products_list",
-        "fiken_invoices_list",
-        "fiken_invoice_get",
-        "fiken_invoice_draft_create",
-        "fiken_bank_accounts_list",
-        "fiken_purchases_list",
-        "fiken_sales_list",
-      ],
+      // Derived from the contracts catalog so a new fiken_* tool cannot be
+      // registered without also appearing on the capability tile.
+      firstPartyMcpTools: FIRST_PARTY_MCP_TOOL_NAMES.filter((name) => name.startsWith("fiken_")),
     },
   });
   const xConnection = preferredSocialConnection(socialConnections, "x");

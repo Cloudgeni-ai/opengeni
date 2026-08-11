@@ -360,6 +360,14 @@ describe("first-party fiken capability state", () => {
     });
   });
 
+  test("accepts the OAuth lane's oauth2 rows like the server predicate", () => {
+    const oauth = fikenRow({ kind: "oauth2" });
+    expect(connectionHealth(fikenItem, [oauth], true)).toEqual({
+      state: "connected",
+      connection: oauth,
+    });
+  });
+
   test("ignores personal, foreign-domain, and unroled rows", () => {
     expect(
       connectionHealth(

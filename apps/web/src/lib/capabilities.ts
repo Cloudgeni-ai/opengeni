@@ -379,7 +379,9 @@ export function fikenWorkspaceConnection(
       .filter(
         (connection) =>
           connection.subjectId === null &&
-          connection.kind === "api_key" &&
+          // Both verified lanes: pasted personal API token and registered-app
+          // OAuth. Must stay in sync with `isFikenConnection` in @opengeni/core.
+          (connection.kind === "api_key" || connection.kind === "oauth2") &&
           normalizeProviderDomain(connection.providerDomain) === "fiken.no" &&
           connection.metadata.credentialRole === "fiken_api_token",
       )

@@ -17,6 +17,7 @@ import {
   isFikenConnection,
   preferredFikenConnection,
   requireEnvironmentEncryption,
+  resolveFikenDefaultCompanySlug,
 } from "@opengeni/core";
 import {
   buildConnectionTokenResolver,
@@ -173,6 +174,7 @@ async function fetchFikenCompanies(
     response = await fetchImpl(`${FIKEN_API_BASE}/companies?pageSize=${MAX_PAGE_SIZE}`, {
       method: "GET",
       headers: { authorization: `Bearer ${bearerToken}`, accept: "application/json" },
+      redirect: "error",
       signal: AbortSignal.timeout(FIKEN_TIMEOUT_MS),
     });
   } catch {
@@ -357,6 +359,12 @@ export class FikenClient {
         },
       },
     );
+    if (locationId === null) {
+      // The contact may have been created; without an id the caller cannot
+      // reference it, and silently returning success would invite a duplicate
+      // retry. Surface the off-contract response instead.
+      throw new FikenProviderError("invalid_response", null, "created contact returned no id");
+    }
     return { companySlug: slug, contactId: locationId, receipt: this.receipt("contact.create") };
   }
 
@@ -443,20 +451,36 @@ export class FikenClient {
     if (input.lines.length === 0 || input.lines.length > MAX_DRAFT_LINES) {
       throw new FikenProviderError("invalid_lines");
     }
+    for (const line of input.lines) {
+      // Fiken requires an income account (or a product carrying one) per line;
+      // reject locally with a clear code instead of a post-write provider 400.
+      if (line.productId === undefined && !(line.incomeAccount && line.vatType)) {
+        throw new FikenProviderError(
+          "invalid_lines",
+          null,
+          "each line needs productId or incomeAccount + vatType",
+        );
+      }
+    }
     // Fiken drafts carry a caller-chosen uuid: reusing the operationId as that
     // uuid makes retries observable. A retry first looks the draft up and
-    // returns the existing row instead of creating a duplicate.
+    // returns the existing row instead of creating a duplicate. The client
+    // re-filters on uuid so a provider that ignored the filter cannot make an
+    // unrelated draft pass as ours.
     const existing = await this.request(
       "invoice_draft.create",
       "GET",
       `/companies/${slug}/invoices/drafts`,
       { query: { uuid: input.operationId } },
     );
-    const existingDrafts = projectArray(existing.payload);
-    if (existingDrafts.length > 0) {
+    const existingDraft = projectArray(existing.payload).find(
+      (draft) => draft.uuid === input.operationId,
+    );
+    if (existingDraft) {
       return {
         companySlug: slug,
-        draft: existingDrafts[0],
+        draftId: typeof existingDraft.draftId === "number" ? existingDraft.draftId : null,
+        draft: existingDraft,
         alreadyExisted: true,
         receipt: this.receipt("invoice_draft.create", input.operationId),
       };
@@ -489,6 +513,11 @@ export class FikenClient {
         },
       },
     );
+    if (locationId === null) {
+      // A 201 without a Location id is off-contract; the caller can retry with
+      // the same operationId and recover through the uuid lookup.
+      throw new FikenProviderError("invalid_response", null, "created draft returned no id");
+    }
     return {
       companySlug: slug,
       draftId: locationId,
@@ -586,12 +615,15 @@ export class FikenClient {
     input: { query?: Record<string, string>; body?: unknown },
   ): Promise<{ payload: unknown; page: FikenPage | null; locationId: number | null }> {
     try {
+      const url = new URL(`${FIKEN_API_BASE}${path}`);
+      for (const [key, value] of Object.entries(input.query ?? {})) {
+        url.searchParams.set(key, value);
+      }
+      // Credential resolution (DB read + possible broker refresh) happens
+      // outside the serialization chain: only the provider HTTP call itself
+      // must obey Fiken's single-concurrent-request rule.
+      const headers = await this.headersFor(operation, url.toString());
       const result = await serializedPerConnection(this.connection.id, async () => {
-        const url = new URL(`${FIKEN_API_BASE}${path}`);
-        for (const [key, value] of Object.entries(input.query ?? {})) {
-          url.searchParams.set(key, value);
-        }
-        const headers = await this.headersFor(operation, url.toString());
         let response: Response;
         try {
           response = await this.fetchImpl(url, {
@@ -602,6 +634,9 @@ export class FikenClient {
               ...(input.body !== undefined ? { "content-type": "application/json" } : {}),
             },
             ...(input.body !== undefined ? { body: JSON.stringify(input.body) } : {}),
+            // A redirect would replay the bearer to the redirect target; the
+            // Fiken API never legitimately redirects.
+            redirect: "error",
             signal: AbortSignal.timeout(FIKEN_TIMEOUT_MS),
           });
         } catch {
@@ -623,14 +658,12 @@ export class FikenClient {
   ): Promise<{ payload: unknown; page: FikenPage | null; locationId: number | null }> {
     if (response.status === 401) {
       await response.body?.cancel().catch(() => undefined);
-      // Personal tokens have no refresh; the row needs a fresh pasted token.
-      await setConnectionStatus(
-        this.db,
-        this.context.workspaceId,
-        "needs_reauth",
-        "Fiken rejected the API token",
-        { id: this.connection.id, version: this.connection.version, subjectId: null },
-      ).catch(() => undefined);
+      // A 401 after resolution means the credential is genuinely rejected
+      // (revoked token or revoked OAuth grant). setConnectionStatus is a
+      // strict version CAS and a broker refresh may have bumped the version
+      // since this client resolved the row, so re-read the current version
+      // instead of using the resolution-time snapshot.
+      await this.markNeedsReauth().catch(() => undefined);
       throw new FikenProviderError("credential_rejected", 401);
     }
     if (response.status === 429) {
@@ -664,6 +697,23 @@ export class FikenClient {
       }
     }
     return { payload, page: pageFromHeaders(response.headers), locationId };
+  }
+
+  private async markNeedsReauth(): Promise<void> {
+    const current = await getConnectionMetadata(
+      this.db,
+      this.context.workspaceId,
+      this.connection.id,
+      null,
+    );
+    if (!current || current.status === "needs_reauth") return;
+    await setConnectionStatus(
+      this.db,
+      this.context.workspaceId,
+      "needs_reauth",
+      "Fiken rejected the credential",
+      { id: current.id, version: current.version, subjectId: null },
+    );
   }
 
   private async headersFor(
@@ -884,7 +934,6 @@ export async function startFikenOAuth(
   },
 ): Promise<FikenOAuthStartResponse> {
   const fiken = requireFikenOAuthSettings(deps.settings);
-  requireIntegrationsStateSecret(deps.settings);
   const existing = input.payload.connectionId
     ? await getConnectionMetadata(deps.db, input.workspaceId, input.payload.connectionId, null)
     : null;
@@ -978,13 +1027,11 @@ export async function completeFikenOAuthCallback(
       throw new FikenOAuthCallbackError("connection_conflict");
     }
     const previousMetadata = existing ? fikenConnectionMetadata(existing.metadata) : null;
-    const previousDefault = previousMetadata?.defaultCompanySlug ?? null;
-    const defaultCompanySlug =
-      previousDefault && companies.companies.some((company) => company.slug === previousDefault)
-        ? previousDefault
-        : companies.companies.length === 1
-          ? companies.companies[0]!.slug
-          : null;
+    const defaultCompanySlug = resolveFikenDefaultCompanySlug({
+      requested: null,
+      previous: previousMetadata?.defaultCompanySlug ?? null,
+      companies: companies.companies,
+    });
     const credentialEncrypted = encryptEnvironmentValue(
       key,
       JSON.stringify({
@@ -1081,6 +1128,7 @@ async function exchangeFikenAuthorizationCode(
         redirect_uri: input.redirectUri,
         state: input.state,
       }),
+      redirect: "error",
       signal: AbortSignal.timeout(FIKEN_TIMEOUT_MS),
     });
   } catch {
@@ -1168,7 +1216,14 @@ function fikenReturnUrl(
   status: "connected" | "error",
   value: string,
 ): string {
-  const url = new URL(returnPath, returnBaseUrl);
+  // returnPath is server-minted inside the signed state, but keep the same
+  // open-redirect defense the shared OAuth helpers use: a path that resolves
+  // off the return origin (e.g. a protocol-relative "//host") is discarded.
+  const base = new URL(returnBaseUrl);
+  let url = new URL(returnPath, base);
+  if (url.origin !== base.origin) {
+    url = new URL("/", base);
+  }
   url.searchParams.set("fiken", status);
   url.searchParams.set(status === "connected" ? "connectionId" : "reason", value);
   return url.toString();

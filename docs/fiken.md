@@ -7,6 +7,10 @@ the **registered-app OAuth flow** (the default in the UI) or by pasting a
 the agent reaches Fiken through host-side `fiken_*` tools on the first-party
 MCP surface. No Fiken data or credential ever enters the sandbox.
 
+Both lanes sit behind the deployment integrations kill switch: with
+`OPENGENI_INTEGRATIONS_ENABLED=false` (the default) the install, OAuth start,
+and callback routes all 404.
+
 ## The two connect lanes
 
 Both lanes verify against Fiken before anything enters encrypted storage, and

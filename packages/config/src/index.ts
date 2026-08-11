@@ -4516,6 +4516,26 @@ function validateSettings(settings: Settings): void {
       "OPENGENI_FIKEN_OAUTH_CLIENT_ID and OPENGENI_FIKEN_OAUTH_CLIENT_SECRET must be configured together",
     );
   }
+  if (settings.fikenClientId) {
+    if (!settings.publicBaseUrl) {
+      throw new Error(
+        "OPENGENI_PUBLIC_BASE_URL is required when the Fiken OAuth integration is configured",
+      );
+    }
+    if (
+      !settings.publicBaseUrl.startsWith("https://") &&
+      !["local", "test"].includes(settings.environment)
+    ) {
+      throw new Error(
+        "OPENGENI_PUBLIC_BASE_URL must use https when the Fiken OAuth integration is configured outside local/test",
+      );
+    }
+    if (!settings.integrationsStateSecret) {
+      throw new Error(
+        "OPENGENI_INTEGRATIONS_STATE_SECRET is required when the Fiken OAuth integration is configured",
+      );
+    }
+  }
   if (settings.googleDriveClientId) {
     if (!settings.publicBaseUrl) {
       throw new Error(

@@ -16,8 +16,10 @@ import {
   encryptEnvironmentValue,
   getConnectionMetadata,
   refreshOAuthConnectionCredential,
+  updateConnection,
   type DbClient,
 } from "@opengeni/db";
+import { createSignedState } from "@opengeni/github";
 import {
   acquireSharedTestDatabase,
   testSettings,
@@ -53,12 +55,14 @@ beforeAll(async () => {
     delegationSecret: DELEGATION_SECRET,
     environmentsEncryptionKey: ENCRYPTION_KEY,
     publicBaseUrl: "https://app.example.test",
+    integrationsEnabled: true,
   }) as Settings;
   oauthSettings = testSettings({
     productAccessMode: "managed",
     delegationSecret: DELEGATION_SECRET,
     environmentsEncryptionKey: ENCRYPTION_KEY,
     publicBaseUrl: "https://app.example.test",
+    integrationsEnabled: true,
     integrationsStateSecret: "fiken-oauth-state-secret-for-tests",
     fikenClientId: "fiken-client-id",
     fikenClientSecret: "fiken-client-secret",
@@ -86,7 +90,12 @@ type FikenCall = { method: string; url: URL; body: unknown; headers: Headers };
  * call is recorded, and an in-flight counter proves the client's mandatory
  * single-concurrent-request serialization.
  */
-function fakeFiken(options: { companies?: Array<Record<string, unknown>> } = {}) {
+function fakeFiken(
+  options: {
+    companies?: Array<Record<string, unknown>>;
+    ignoreDraftUuidFilter?: boolean;
+  } = {},
+) {
   const calls: FikenCall[] = [];
   let inFlight = 0;
   let maxInFlight = 0;
@@ -148,6 +157,13 @@ function fakeFiken(options: { companies?: Array<Record<string, unknown>> } = {})
       });
     }
     if (url.pathname.endsWith("/invoices/drafts") && method === "GET") {
+      if (options.ignoreDraftUuidFilter) {
+        // Models a provider that ignores the unknown query filter and returns
+        // the company's whole first page of drafts.
+        return Response.json([
+          { draftId: 111, uuid: "00000000-0000-4000-8000-000000000000", customerId: 999 },
+        ]);
+      }
       const uuid = url.searchParams.get("uuid");
       const existing = uuid ? drafts.get(uuid) : null;
       return Response.json(existing ? [existing] : []);
@@ -574,6 +590,111 @@ describe("FikenClient", () => {
     expect(post.body).toEqual({ name: "Ny Kunde", customer: true });
   });
 
+  test("rejects fiken reserved metadata on the generic connection routes", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const auth = await bearer(workspace, "subject-a", ["connections:read", "connections:write"]);
+    const forged = await app(fakeFiken().fetch).request(
+      `/v1/workspaces/${workspace.workspaceId}/connections`,
+      {
+        method: "POST",
+        headers: { authorization: auth, "content-type": "application/json" },
+        body: JSON.stringify({
+          providerDomain: FIKEN_PROVIDER_DOMAIN,
+          kind: "api_key",
+          credential: { headers: { authorization: "Bearer forged" } },
+          metadata: {
+            credentialRole: FIKEN_CREDENTIAL_ROLE,
+            companies: [{ slug: "victim-as", name: "Victim", organizationNumber: null }],
+            defaultCompanySlug: "victim-as",
+            verifiedAt: new Date().toISOString(),
+          },
+        }),
+      },
+    );
+    expect(forged.status).toBe(422);
+    const installed = await installFiken(workspace, fakeFiken().fetch);
+    const patched = await app(fakeFiken().fetch).request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/${installed.body.connection!.id}`,
+      {
+        method: "PATCH",
+        headers: { authorization: auth, "content-type": "application/json" },
+        body: JSON.stringify({
+          metadata: { credentialRole: FIKEN_CREDENTIAL_ROLE, companies: [] },
+        }),
+      },
+    );
+    expect(patched.status).toBe(422);
+  });
+
+  test("marks needs_reauth on 401 even when the row version moved after resolution", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const failing = (async () =>
+      Response.json({ message: "revoked" }, { status: 401 })) as typeof globalThis.fetch;
+    const { fiken, resolved } = await connectedClient(workspace, failing, {
+      defaultCompanySlug: "demo-as",
+    });
+    // Simulate a concurrent writer (e.g. a broker refresh) bumping the version
+    // after this client resolved the row.
+    await updateConnection(client.db, {
+      workspaceId: workspace.workspaceId,
+      connectionId: resolved.connection.id,
+      visibleToSubjectId: null,
+      metadata: { ...resolved.connection.metadata },
+    });
+    await expect(fiken.listContacts({})).rejects.toThrow(/credential_rejected/);
+    const after = await getConnectionMetadata(
+      client.db,
+      workspace.workspaceId,
+      resolved.connection.id,
+      null,
+    );
+    expect(after?.status).toBe("needs_reauth");
+  });
+
+  test("draft idempotency ignores unrelated drafts when the provider drops the uuid filter", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const provider = fakeFiken({ ignoreDraftUuidFilter: true });
+    const { fiken } = await connectedClient(workspace, provider.fetch, {
+      defaultCompanySlug: "demo-as",
+    });
+    const created = await fiken.createInvoiceDraft({
+      operationId: crypto.randomUUID(),
+      customerId: 101,
+      daysUntilDueDate: 14,
+      lines: [
+        {
+          description: "Consulting",
+          unitPriceCents: 1000,
+          vatType: "HIGH",
+          quantity: 1,
+          incomeAccount: "3000",
+        },
+      ],
+    });
+    // The unrelated draft (uuid mismatch) must not satisfy the lookup.
+    expect(created.alreadyExisted).toBe(false);
+    expect(created.draftId).toBe(555);
+  });
+
+  test("rejects a draft line with neither productId nor incomeAccount + vatType", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const { fiken } = await connectedClient(workspace, fakeFiken().fetch, {
+      defaultCompanySlug: "demo-as",
+    });
+    await expect(
+      fiken.createInvoiceDraft({
+        operationId: crypto.randomUUID(),
+        customerId: 101,
+        daysUntilDueDate: 14,
+        lines: [{ description: "No account", unitPriceCents: 1000, quantity: 1 }],
+      }),
+    ).rejects.toThrow(/invalid_lines/);
+  });
+
   test("creates an invoice draft idempotently by operationId", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -890,6 +1011,103 @@ describe("fiken OAuth", () => {
       version: installed.body.connection!.version + 1,
       metadata: expect.objectContaining({ defaultCompanySlug: "second-as" }),
     });
+  });
+
+  test("pasting a token over an OAuth row resets kind, clears expiry, and keeps the default company", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const provider = fakeFiken();
+    const started = await startOAuth(workspace, provider.fetch);
+    const connected = await completeOAuth(provider.fetch, {
+      code: "fixture-auth-code",
+      state: started.state!,
+    });
+    const connectionId = connected.searchParams.get("connectionId")!;
+    // Give the OAuth row an explicit multi-company default to preserve.
+    const withDefault = await installFiken(workspace, fakeFiken().fetch, {
+      connectionId,
+      defaultCompanySlug: "second-as",
+    });
+    expect(withDefault.status).toBe(200);
+    const reinstalled = await installFiken(workspace, fakeFiken().fetch, { connectionId });
+    expect(reinstalled.status).toBe(200);
+    const connection = await getConnectionMetadata(
+      client.db,
+      workspace.workspaceId,
+      connectionId,
+      null,
+    );
+    expect(connection).toMatchObject({
+      kind: "api_key",
+      status: "active",
+      expiresAt: null,
+      metadata: expect.objectContaining({ defaultCompanySlug: "second-as" }),
+    });
+    // The broker must treat the rewritten row as an api_key credential again.
+    const resolved = await resolveFikenConnectionForTool({
+      db: client.db,
+      grant: grantFor(workspace),
+      sessionId: null,
+    });
+    const toolProvider = fakeFiken();
+    const fiken = createFikenClient(
+      { db: client.db, settings, fikenFetch: toolProvider.fetch },
+      resolved,
+    );
+    await fiken.listCompanies();
+    const call = toolProvider.calls.find((entry) => entry.url.pathname.endsWith("/companies"))!;
+    expect(call.headers.get("authorization")).toBe(`Bearer ${FIXTURE_TOKEN}`);
+  });
+
+  test("callback discards a forged off-origin returnPath", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const provider = fakeFiken();
+    const forgedState = createSignedState("fiken-oauth-state-secret-for-tests", {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      subjectId: "subject-a",
+      returnPath: "//evil.example/phish",
+    });
+    const redirected = await completeOAuth(provider.fetch, {
+      code: "fixture-auth-code",
+      state: forgedState,
+    });
+    expect(redirected.origin).toBe("https://app.example.test");
+    expect(redirected.searchParams.get("fiken")).toBe("connected");
+  });
+
+  test("fiken routes are covered by the integrations kill switch", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const disabled = testSettings({
+      productAccessMode: "managed",
+      delegationSecret: DELEGATION_SECRET,
+      environmentsEncryptionKey: ENCRYPTION_KEY,
+      publicBaseUrl: "https://app.example.test",
+      integrationsEnabled: false,
+    }) as Settings;
+    const disabledApp = createApp({
+      settings: disabled,
+      db: client.db,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+      fikenFetch: fakeFiken().fetch,
+    } as never);
+    const auth = await bearer(workspace, "subject-a", ["connections:read", "connections:write"]);
+    for (const [method, path] of [
+      ["POST", `/v1/workspaces/${workspace.workspaceId}/connections/fiken/install`],
+      ["POST", `/v1/workspaces/${workspace.workspaceId}/connections/fiken/oauth/start`],
+      ["GET", "/v1/integrations/fiken/callback?code=x&state=y"],
+    ] as const) {
+      const response = await disabledApp.request(path, {
+        method,
+        headers: { authorization: auth, "content-type": "application/json" },
+        ...(method === "POST" ? { body: JSON.stringify({ apiToken: FIXTURE_TOKEN }) } : {}),
+      });
+      expect(response.status).toBe(404);
+    }
   });
 
   test("the broker refreshes the stored bundle with Basic auth and keeps the rotated refresh token", async () => {
