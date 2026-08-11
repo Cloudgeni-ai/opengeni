@@ -46,10 +46,8 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuSeparator,
-  DropdownMenuSub,
-  DropdownMenuSubContent,
-  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ChannelCreateDialog } from "@/components/rail/channel-create-dialog";
@@ -1531,8 +1529,7 @@ function SessionRow(props: {
   // Creator monogram: who started this workstream, at a glance. Human subjects
   // only — service/system creators stay unadorned.
   const initials = creatorInitials(props.session.createdBy);
-  const creatorLabel =
-    props.session.createdBy.label?.trim() || props.session.createdBy.subjectId;
+  const creatorLabel = props.session.createdBy.label?.trim() || props.session.createdBy.subjectId;
   const rename = useInlineRename(props.session, props.onRename);
   const contextPinSelection = useRef(false);
   const hasChildren = props.hasChildren;
@@ -1827,39 +1824,36 @@ function RowActionsMenu({
           {session.pinned ? "Unpin" : "Pin"}
         </DropdownMenuItem>
         {canMove ? (
-          <DropdownMenuSub>
-            <DropdownMenuSubTrigger
-              className="pointer-coarse:min-h-11"
-              onClick={(event) => event.stopPropagation()}
-            >
-              <HashIcon className="size-4" />
+          // Flat section, deliberately not a Radix submenu: the Sub primitives
+          // are otherwise unused in the shell graph and pulling them in
+          // re-clusters ~470 KB of shared chunks into the startup bundle.
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel className="text-2xs font-medium uppercase tracking-wider text-fg-subtle">
               Move to channel
-            </DropdownMenuSubTrigger>
-            <DropdownMenuSubContent className="min-w-40">
-              {channels.map((channel) => (
-                <DropdownMenuItem
-                  key={channel.id}
-                  className="pointer-coarse:min-h-11"
-                  disabled={session.channelId === channel.id}
-                  onSelect={() => void onMoveToChannel(session, channel.id)}
-                  onClick={(event) => event.stopPropagation()}
-                >
-                  <HashIcon className="size-4" />
-                  <span className="truncate">{channel.name}</span>
-                </DropdownMenuItem>
-              ))}
-              <DropdownMenuSeparator />
+            </DropdownMenuLabel>
+            {channels.map((channel) => (
               <DropdownMenuItem
+                key={channel.id}
                 className="pointer-coarse:min-h-11"
-                disabled={session.channelId === null}
-                onSelect={() => void onMoveToChannel(session, null)}
+                disabled={session.channelId === channel.id}
+                onSelect={() => void onMoveToChannel(session, channel.id)}
                 onClick={(event) => event.stopPropagation()}
               >
-                <InboxIcon className="size-4" />
-                Inbox
+                <HashIcon className="size-4" />
+                <span className="truncate">{channel.name}</span>
               </DropdownMenuItem>
-            </DropdownMenuSubContent>
-          </DropdownMenuSub>
+            ))}
+            <DropdownMenuItem
+              className="pointer-coarse:min-h-11"
+              disabled={session.channelId === null}
+              onSelect={() => void onMoveToChannel(session, null)}
+              onClick={(event) => event.stopPropagation()}
+            >
+              <InboxIcon className="size-4" />
+              Inbox
+            </DropdownMenuItem>
+          </>
         ) : null}
       </DropdownMenuContent>
     </DropdownMenu>

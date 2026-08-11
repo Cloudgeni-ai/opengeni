@@ -8,11 +8,7 @@ import { ChevronRightIcon } from "lucide-react";
 import { useMemo } from "react";
 
 import { creatorHue, creatorInitials } from "@/lib/creator-initials";
-import {
-  buildPriorityFeed,
-  formatAgentMinutes,
-  type PriorityEntry,
-} from "@/lib/priority-feed";
+import { buildPriorityFeed, formatAgentMinutes, type PriorityEntry } from "@/lib/priority-feed";
 import { relativeTimeLabel } from "@/lib/sessions-group";
 import { cn } from "@/lib/utils";
 import type { Session } from "@/types";
@@ -42,11 +38,8 @@ export function PriorityRoute({ workspaceId }: { workspaceId: string }) {
   });
 
   return (
-    <div
-      data-workspace-scroll-owner="self-managed"
-      className="min-h-0 flex-1 overflow-y-auto"
-    >
-      <div className="mx-auto w-full max-w-[860px] px-6 pb-16 pt-8">
+    <div data-workspace-scroll-owner="self-managed" className="min-h-0 flex-1 overflow-y-auto">
+      <div className="mx-auto w-full max-w-3xl px-6 pb-16 pt-8">
         <header className="flex items-baseline gap-3 pb-6">
           <h1 className="text-lg font-semibold tracking-[-0.01em]">For you</h1>
           <span className="ml-auto font-mono text-2xs text-fg-subtle">
@@ -59,7 +52,11 @@ export function PriorityRoute({ workspaceId }: { workspaceId: string }) {
         ) : error && sessions.length === 0 ? (
           <div role="alert" className="px-1 py-6 text-sm text-fg-subtle">
             Workstreams are unavailable.{" "}
-            <button type="button" className="underline hover:text-fg" onClick={() => void refresh()}>
+            <button
+              type="button"
+              className="underline hover:text-fg"
+              onClick={() => void refresh()}
+            >
               Retry
             </button>
           </div>
@@ -172,7 +169,11 @@ const DOT_TONE: Record<PriorityEntry["tier"], string> = {
   waiting: "bg-status-cancelled",
 };
 
-function ledgerFigure(entry: PriorityEntry): { figure: string; quiet: boolean; basis: string | null } {
+function ledgerFigure(entry: PriorityEntry): {
+  figure: string;
+  quiet: boolean;
+  basis: string | null;
+} {
   if (entry.tier === "blocked") {
     return {
       figure: formatAgentMinutes(entry.costMinutes),
@@ -232,7 +233,7 @@ function PriorityRow(props: {
       {top ? (
         <span className="absolute -left-0.5 bottom-4 top-4 w-0.5 rounded-full bg-brand" />
       ) : null}
-      <span className="w-6 shrink-0 pt-0.5 text-right font-mono text-[13px] tabular-nums text-fg-subtle">
+      <span className="w-6 shrink-0 pt-0.5 text-right font-mono text-xs tabular-nums text-fg-subtle">
         {entry.rank ?? "·"}
       </span>
       <div className="grid min-w-0 flex-1 gap-1">
@@ -240,7 +241,7 @@ function PriorityRow(props: {
           <Link
             to="/workspaces/$workspaceId/sessions/$sessionId"
             params={{ workspaceId: props.workspaceId, sessionId: session.id }}
-            className="truncate text-sm font-semibold tracking-[-0.006em] hover:underline"
+            className="truncate text-sm font-semibold hover:underline"
           >
             {title}
           </Link>
@@ -248,7 +249,7 @@ function PriorityRow(props: {
             <span className="shrink-0 text-xs text-fg-subtle"># {channelName}</span>
           ) : null}
         </div>
-        <p className="flex items-center gap-2 text-[13px] leading-normal text-fg-muted">
+        <p className="flex items-center gap-2 text-xs leading-normal text-fg-muted">
           <span
             aria-hidden="true"
             className={cn("size-1.5 shrink-0 rounded-full", DOT_TONE[entry.tier])}
@@ -268,21 +269,21 @@ function PriorityRow(props: {
       <div className="grid w-32 shrink-0 gap-0.5 pt-0.5 text-right">
         <span
           className={cn(
-            "font-mono tabular-nums tracking-[-0.02em]",
-            quiet ? "text-[13px] text-fg-subtle" : "text-[15px] font-semibold text-fg",
-            top && "text-[19px]",
+            "font-mono tabular-nums tracking-tight",
+            quiet ? "text-xs text-fg-subtle" : "text-sm font-semibold text-fg",
+            top && "text-lg",
           )}
         >
           {figure}
         </span>
         {basis ? <span className="text-2xs text-fg-subtle">{basis}</span> : null}
       </div>
-      <div className="flex w-[74px] shrink-0 items-center justify-end gap-1.5 pt-1">
+      <div className="flex w-20 shrink-0 items-center justify-end gap-1.5 pt-1">
         {initials ? (
           <span
             aria-hidden="true"
             title={creatorLabel}
-            className="flex size-[18px] shrink-0 items-center justify-center rounded-full text-[8px] font-semibold leading-none text-white/90"
+            className="flex size-4.5 shrink-0 items-center justify-center rounded-full text-[8px] font-semibold leading-none text-white/90"
             style={{ background: `oklch(0.45 0.11 ${creatorHue(session.createdBy.subjectId)})` }}
           >
             {initials}

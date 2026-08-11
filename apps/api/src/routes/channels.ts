@@ -60,7 +60,12 @@ export function registerChannelRoutes(app: Hono, deps: ApiRouteDeps): void {
     await requireAccessGrant(c, deps, workspaceId, "sessions:create");
     const payload = UpdateChannelRequest.parse(await c.req.json());
     try {
-      const channel = await updateChannel(db, workspaceId, channelIdParam(c.req.param("channelId")), payload);
+      const channel = await updateChannel(
+        db,
+        workspaceId,
+        channelIdParam(c.req.param("channelId")),
+        payload,
+      );
       if (!channel) {
         throw new HTTPException(404, { message: "channel not found" });
       }

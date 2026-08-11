@@ -1,9 +1,4 @@
-import type {
-  Channel,
-  CreateChannelRequest,
-  Session,
-  UpdateChannelRequest,
-} from "@opengeni/sdk";
+import type { Channel, CreateChannelRequest, Session, UpdateChannelRequest } from "@opengeni/sdk";
 import { useCallback } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
 import { useMutationRunner, usePolledValue } from "./internal";

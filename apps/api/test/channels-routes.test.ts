@@ -84,7 +84,10 @@ describe("channel routes", () => {
   test("CRUD with session permissions; conflicts and unknown ids are typed", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
-    const writer = { "content-type": "application/json", authorization: await bearer(ws, "user:w", ["sessions:read", "sessions:create"]) };
+    const writer = {
+      "content-type": "application/json",
+      authorization: await bearer(ws, "user:w", ["sessions:read", "sessions:create"]),
+    };
     const reader = { authorization: await bearer(ws, "user:r", ["sessions:read"]) };
     const base = `/v1/workspaces/${ws.workspaceId}/channels`;
 
@@ -143,9 +146,7 @@ describe("channel routes", () => {
       ).status,
     ).toBe(404);
     expect(
-      (
-        await app().request(`${base}/not-a-uuid`, { method: "DELETE", headers: writer })
-      ).status,
+      (await app().request(`${base}/not-a-uuid`, { method: "DELETE", headers: writer })).status,
     ).toBe(404);
 
     expect(

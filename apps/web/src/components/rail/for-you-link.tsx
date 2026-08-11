@@ -8,7 +8,6 @@ import { SendIcon } from "lucide-react";
 import { useMemo } from "react";
 
 import { useRail } from "@/components/rail/rail-context";
-import { buildPriorityFeed } from "@/lib/priority-feed";
 import { workspacePriorityPath } from "@/lib/routes";
 import { cn } from "@/lib/utils";
 
@@ -19,7 +18,19 @@ export function ForYouLink() {
     parentSessionId: null,
     pollIntervalMs: 60_000,
   });
-  const needsYou = useMemo(() => buildPriorityFeed(sessions).needsYou, [sessions]);
+  // Deliberately NOT buildPriorityFeed: this always-loaded rail entry must not
+  // share modules with the lazy priority route, or the bundler re-clusters the
+  // route's graph into the startup bundle. Mirrors the feed's needsYou rule
+  // (blocked + broken roots) — keep the two in sync.
+  const needsYou = useMemo(
+    () =>
+      sessions.filter(
+        (session) =>
+          session.parentSessionId === null &&
+          (session.status === "requires_action" || session.status === "failed"),
+      ).length,
+    [sessions],
+  );
   const active = useRouterState({
     select: (state) => state.location.pathname === workspacePriorityPath(rail.workspaceId),
   });

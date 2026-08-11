@@ -85,9 +85,9 @@ describe("channelRailSections", () => {
 
 describe("creatorInitials", () => {
   test("derives two-letter monograms from labels and subject ids", () => {
-    expect(creatorInitials({ kind: "subject", subjectId: "user:x", label: "Davlet Dzhakishev" })).toBe(
-      "DD",
-    );
+    expect(
+      creatorInitials({ kind: "subject", subjectId: "user:x", label: "Davlet Dzhakishev" }),
+    ).toBe("DD");
     expect(creatorInitials({ kind: "subject", subjectId: "user:x", label: "iuliia" })).toBe("IU");
     expect(creatorInitials({ kind: "subject", subjectId: "user:bendik" })).toBe("BE");
   });
