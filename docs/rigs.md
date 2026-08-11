@@ -10,6 +10,7 @@ A workspace owns named **rigs**: versioned sandbox machine definitions (a base i
 4. **Verification runs in exactly leased, throwaway, secret-free sandboxes.** Rig CI uses the change/version UUID as a canonical `sandbox_leases.sandbox_group_id`, accepts only the `cold -> warming` spawner role, records the exact provider instance, proves command readiness, and only then commits it warm before setup or checks. After green checks, a backend may snapshot that clean filesystem once as a version-bound immutable image. A second independently leased clean sandbox must cold-boot the exact image and pass its content marker and declared checks before the image becomes selectable. Repositories, resources, credentials, variable-set values, archives, session state, and retained processes are never injected. Cleanup quiesces commands before termination and never erases an unconfirmed provider pointer; failed direct cleanup is handed to the ordinary lease reaper.
 5. **Workspace isolation.** `rigs`, `rig_versions`, and `rig_changes` are all FORCE-RLS workspace-scoped tables, same as every other workspace table.
 6. **Rig setup never touches selfhosted.** The rig-setup hook is part of the same owned-hooks block as the repository-clone and credential hooks, which is skipped entirely when the turn's effective sandbox backend is `selfhosted` (a [Connected Machine](connected-machines.md) is the user's own computer; the platform never runs setup against it). A machine-targeted turn therefore always behaves as if rig-less for setup purposes, even when the session carries a rig binding.
+7. **Pack selection never bypasses Rig authority.** A v2 Pack installation stores `selected_rig_id`; it does not embed or mutate a Rig version. Pack-created scheduled tasks carry that Rig id, and each resulting session freezes the then-active version through the normal session-creation boundary.
 
 ## Configuration
 
@@ -23,7 +24,9 @@ When a session's frozen rig version carries a non-empty `setupScript`, the worke
 
 ### Image precedence
 
-A rig version's `image`, when set, is the top of the image precedence chain: **rig > pack > deployment default**. It overrides both the deployment's `OPENGENI_DOCKER_IMAGE`/`OPENGENI_MODAL_IMAGE_REF` and any enabled capability pack's `sandboxImage` (see [`packs.md`](packs.md)). A rig version with no image (or a rig-less session) falls through unchanged to pack/deployment resolution.
+For v2 Pack and ordinary session execution, a frozen Rig version's `image`, when set, overrides the deployment's `OPENGENI_DOCKER_IMAGE`/`OPENGENI_MODAL_IMAGE_REF`; a Rig version with no image falls through to the deployment default. A Pack's legacy `sandboxImage` is resolved during installation as an exact compatibility requirement on the selected Rig's active version and is not read again as a runtime override.
+
+Pre-v2 Pack installation rows have neither a manifest snapshot nor a manifest digest. The worker preserves their historical fallback chain (**rig > legacy Pack > deployment default**) only for rollback compatibility. A v2 Pack install/update migrates to explicit Rig/component runtime and cannot combine both models for the same installation. See [`packs.md`](packs.md).
 
 After that logical image precedence resolves, a genuinely fresh Modal creation may select the version's `providerImages.modal.imageId` only when its status is `ready`, it carries versioned independent cold-boot proof, its backend, source image, setup hash, and full definition/content hash still match the frozen version, and the current authenticated Modal workspace/environment hashes to the same provider binding recorded at verification. Unchanged versions therefore reuse one immutable provider image. Missing, legacy-unproven, non-ready, unsupported, malformed, binding-mismatched, or content-mismatched records leave the logical image untouched and retain the ordinary runtime-setup path. If Modal authoritatively reports that a selected immutable image no longer exists during fresh creation, the same attempt retries once from the exact pre-optimization logical settings (including an ID-only logical base) and records both create outcomes; without that exact identity it fails closed rather than booting a provider default. The provider image ID does not replace the logical image reference on the lease, so publishing this optimization never rotates an already-warm box and never changes archive/wake semantics.
 
@@ -52,6 +55,8 @@ A rig-bound turn's system instructions carry a non-bypassable doctrine block (co
 ### Default rig resolution
 
 A session's rig binding resolves at create as: the explicit `rigId` on the create payload if given, else the workspace's `default_rig_id` (`workspaces.default_rig_id`), else rig-less. An explicit unknown/inactive `rigId` is a caller error (422). A stale workspace-default (deleted rig, or one somehow left with no active version) degrades silently to rig-less rather than failing the create. There is currently no API or web-console surface to set `default_rig_id` — it is a schema column consumed by session creation with no write path yet.
+
+Pack installation is another producer of the existing explicit `rigId`, not another resolution rule. Installation preview validates the selected Rig (including exact legacy image compatibility and optional verified-health requirement), stores the Rig id on the Pack installation, and Pack-created scheduled tasks copy it into their ordinary task configuration. Session creation still owns active-version lookup and freezing.
 
 ## Permissions
 

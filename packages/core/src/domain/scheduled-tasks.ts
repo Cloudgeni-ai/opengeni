@@ -155,6 +155,7 @@ export async function createValidatedScheduledTask(input: {
           input.db,
           input.grant.workspaceId,
           input.settings,
+          { subjectId: input.grant.subjectId },
         ),
         tools: [...agentConfig.tools, { kind: "mcp", id: "opengeni" }],
         source: personalConnectionDelegationSourceForGrant(input.grant),
@@ -477,6 +478,7 @@ export async function validatedScheduledTaskUpdate(input: {
       input.db,
       input.existing.workspaceId,
       input.settings,
+      { subjectId: input.grant.subjectId },
     );
     const personalConnectionDelegations = await freezePersonalConnectionDelegations({
       db: input.db,
@@ -770,6 +772,7 @@ async function validateScheduledTaskAgentConfig(input: {
     input.db,
     input.workspaceId,
     input.settings,
+    { subjectId: input.grant.subjectId },
   );
   const requestedTools = validateToolRefs(input.payload.agentConfig.tools ?? [], runtimeSettings);
   // A task whose creator did not choose tools gets the workspace's enabled

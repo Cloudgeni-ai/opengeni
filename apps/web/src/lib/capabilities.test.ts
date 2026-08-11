@@ -6,6 +6,7 @@ import {
   capabilityConnectPlan,
   capabilityFilterLabel,
   capabilityFormError,
+  capabilityItemKindLabel,
   capabilityKindLabel,
   capabilityMonogram,
   capabilityReconnectPlan,
@@ -25,6 +26,7 @@ import {
   preferredSocialConnection,
   registryResultsForQuery,
   resolveSheetItem,
+  socialConnectionsForOwnership,
   subjectOAuthConnectionRef,
   workspaceConnectionForDomain,
 } from "./capabilities";
@@ -86,6 +88,13 @@ function item(overrides: Partial<CapabilityCatalogItem> = {}): CapabilityCatalog
     staleAt: null,
     tools: [],
     runtime: { available: true, notes: null },
+    lifecycle: {
+      status: "available",
+      readiness: "setup_required",
+      detail: null,
+      managedBy: null,
+    },
+    actions: [],
     enabled: false,
     enabledReason: null,
     connectionRef: null,
@@ -151,6 +160,25 @@ describe("filterCapabilityCatalogItems", () => {
     );
     expect(filterCapabilityCatalogItems(items, "api", "summar")).toHaveLength(0);
   });
+
+  test("keeps interactive filtering bounded across five thousand catalog rows", () => {
+    const largeCatalog = Array.from({ length: 5_000 }, (_, index) =>
+      item({
+        id: `cap-${index}`,
+        kind: index % 2 === 0 ? "mcp" : "api",
+        name: index === 4_321 ? "Needle Analytics" : `Capability ${index}`,
+        description: `Bounded catalog fixture ${index}`,
+        tags: index === 4_321 ? ["needle", "analytics"] : ["catalog"],
+      }),
+    );
+
+    const startedAt = performance.now();
+    const results = filterCapabilityCatalogItems(largeCatalog, "all", "needle analytics");
+    const durationMs = performance.now() - startedAt;
+
+    expect(results.map((entry) => entry.id)).toEqual(["cap-4321"]);
+    expect(durationMs).toBeLessThan(1_000);
+  });
 });
 
 describe("human labels", () => {
@@ -158,6 +186,9 @@ describe("human labels", () => {
     expect(capabilityKindLabel("mcp")).toBe("MCP server");
     expect(capabilityKindLabel("api")).toBe("API");
     expect(capabilityKindLabel("pack")).toBe("Pack");
+    expect(
+      capabilityItemKindLabel(item({ kind: "api", surfaceType: "provider_integration" })),
+    ).toBe("Integration");
   });
 
   test("source labels are human", () => {
@@ -216,12 +247,12 @@ describe("curated skill provenance", () => {
 });
 
 describe("capabilityConnectPlan", () => {
-  test("first-party social APIs use their dedicated OAuth connector", () => {
+  test("social provider integrations use their dedicated OAuth connector", () => {
     const x = item({
       id: "api:x",
       kind: "api",
-      surfaceType: "first_party_social",
-      metadata: { provider: "x" },
+      surfaceType: "provider_integration",
+      metadata: { providerAdapter: "social", provider: "x" },
     });
     expect(capabilityConnectPlan(x)).toEqual({
       mode: "social_oauth",
@@ -387,6 +418,30 @@ describe("first-party social capability state", () => {
       updatedAt: "2026-08-02T00:00:00.000Z",
     });
     expect(preferredSocialConnection([disabled, connected], "x")?.status).toBe("connected");
+  });
+
+  test("keeps every exact account and filters ownership without singleton collapse", () => {
+    const personal = socialConnection({
+      id: "11111111-1111-4111-8111-111111111113",
+      ownership: "personal",
+      accountHandle: "personal",
+      updatedAt: "2026-08-04T00:00:00.000Z",
+    });
+    const needsReauth = socialConnection({
+      id: "11111111-1111-4111-8111-111111111114",
+      status: "needs_reauth",
+      accountHandle: "support",
+      updatedAt: "2026-08-05T00:00:00.000Z",
+    });
+    const connected = socialConnection({
+      id: "11111111-1111-4111-8111-111111111115",
+      accountHandle: "main",
+      updatedAt: "2026-08-03T00:00:00.000Z",
+    });
+    expect(socialConnectionsForOwnership([personal, needsReauth, connected], "workspace")).toEqual([
+      connected,
+      needsReauth,
+    ]);
   });
 });
 

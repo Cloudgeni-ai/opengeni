@@ -243,10 +243,16 @@ process.env.OPENAI_AGENTS_DONT_LOG_MODEL_DATA = "1";
 process.env.OPENAI_AGENTS_DONT_LOG_TOOL_DATA = "1";
 
 export {
+  buildPortableSkillArtifact,
   getSkillLibraryEntry,
   isSkillLibraryEntryId,
   listSkillLibraryEntries,
   loadSkillLibrarySkill,
+  PORTABLE_SKILL_MAX_FILE_BYTES,
+  PORTABLE_SKILL_MAX_FILES,
+  PORTABLE_SKILL_MAX_TOTAL_BYTES,
+  parsePortableSkillFrontmatter,
+  type PortableSkillArtifact,
   type SkillLibraryEntry,
   type SkillLibraryFile,
   type SkillLibrarySkill,
@@ -1266,7 +1272,7 @@ export type CodemodeTokenWriterSession = SandboxSessionLike;
 export type EffectiveSkillSelection = Readonly<{
   id: string;
   name: string;
-  source: "bundled" | "library" | "pack" | "session";
+  source: "bundled" | "imported" | "library" | "pack" | "session";
   version: string | null;
   contentSha256: string | null;
   reason: string;
@@ -2845,6 +2851,20 @@ export type PreparedAgentTools = {
   codexConnectorNamespaces: Set<string>;
 };
 
+/**
+ * One already-compiled, in-process MCP server registered under the same stable
+ * id used by Settings and ToolRef. Local adapters still pass through
+ * PrefixedMcpServer, aggregate schema bounds, lazy disclosure, approval policy,
+ * connector action policy, and lifecycle cleanup; only the remote MCP
+ * transport construction is replaced.
+ */
+export type LocalMcpServerRegistration = {
+  id: string;
+  server: MCPServer;
+  /** Exact connection identity frozen while constructing the local adapter. */
+  resolvedConnectionId?: string;
+};
+
 export type PrepareToolsOptions = {
   accountId?: string;
   workspaceId?: string;
@@ -2882,6 +2902,8 @@ export type PrepareToolsOptions = {
   };
   /** Injectable final MCP transport for tests and embedded hosts. */
   mcpFetchImpl?: FetchLike;
+  /** In-process protocol adapters keyed by their ordinary runtime registry id. */
+  localMcpServers?: readonly LocalMcpServerRegistration[];
   /** Monotonic catalog generation for this execution attempt. */
   attemptToolCatalogGeneration?: number;
   /** Durable host seam; completion is required before the model can run. */
@@ -3008,6 +3030,7 @@ export async function prepareAgentTools(
     throw new Error("in-process attempt tools require exact attempt scope");
   }
   const registry = new Map(settings.mcpServers.map((server) => [server.id, server]));
+  const localRegistry = localMcpServerRegistry(options.localMcpServers ?? [], registry);
   const aggregateToolBudget = new McpAggregateToolListBudget();
   // npm Undici's dispatcher transport can hang indefinitely under Bun even
   // after an AbortSignal fires. Bun's native fetch is the supported runtime
@@ -3026,6 +3049,30 @@ export async function prepareAgentTools(
       }
       if (config.id === CODEX_APPS_MCP_SERVER_ID && !isCodexAppsMcpServer(config)) {
         throw new Error("Codex Apps server id is reserved for the canonical endpoint");
+      }
+      const local = localRegistry.get(config.id);
+      if (local) {
+        if (local.resolvedConnectionId) {
+          recordResolvedMcpConnectionId(
+            resolvedMcpConnectionIds,
+            config,
+            local.resolvedConnectionId,
+          );
+        }
+        const optional = tool.optional === true;
+        return {
+          server: new PrefixedMcpServer(
+            local.server,
+            config.id,
+            config.allowedTools,
+            optional || Boolean(config.connectionRef),
+            aggregateToolBudget,
+            `${config.id}:${index}`,
+          ),
+          bestEffort: optional || Boolean(config.connectionRef),
+          optional,
+          timeoutMs: config.timeoutMs,
+        };
       }
       const url = firstPartyMcpServerUrlForRun(settings, config, options.workspaceId) ?? config.url;
       const firstParty = isFirstPartyMcpServer(settings, config);
@@ -3250,6 +3297,29 @@ export async function prepareAgentTools(
   };
 }
 
+function localMcpServerRegistry(
+  registrations: readonly LocalMcpServerRegistration[],
+  settingsRegistry: ReadonlyMap<string, Settings["mcpServers"][number]>,
+): ReadonlyMap<string, LocalMcpServerRegistration> {
+  assertMcpServerSelectionWithinBounds(registrations);
+  const registry = new Map<string, LocalMcpServerRegistration>();
+  for (const registration of registrations) {
+    if (!settingsRegistry.has(registration.id)) {
+      throw new Error(`Local MCP server id is not registered in settings: ${registration.id}`);
+    }
+    if (registry.has(registration.id)) {
+      throw new Error(`Duplicate local MCP server id: ${registration.id}`);
+    }
+    if (
+      registration.resolvedConnectionId !== undefined &&
+      registration.resolvedConnectionId.length === 0
+    ) {
+      throw new Error(`Local MCP server ${registration.id} has an empty connection identity`);
+    }
+    registry.set(registration.id, registration);
+  }
+  return registry;
+}
 function attemptToolScope(options: PrepareToolsOptions): AttemptToolScope | null {
   if (
     !options.accountId ||
@@ -6294,9 +6364,9 @@ export function buildManifest(
   }
   // No extraPathGrants here: remote sandbox clients (Modal) reject manifests
   // that carry them at create/apply time, which broke every Modal session.
-  // The lazy bundled-skills source no longer needs a grant because
-  // bundledSkillsDir() stages the skills inside the process working directory
-  // whenever the packaged copy lives outside it.
+  // Pack, selected-library, session, and artifact skills are represented by
+  // sandbox-safe in-memory or staged local-dir sources, so no host path grant
+  // is required here.
   return new Manifest({
     root: "/workspace",
     entries,
@@ -8492,9 +8562,7 @@ function bundledSkillsDir(): string {
       join(moduleDir, "..", "src", "bundled_hashicorp_terraform_skills"),
     ].find((candidate) => existsSync(candidate)) ??
     join(moduleDir, "bundled_hashicorp_terraform_skills");
-  if (isPathWithin(process.cwd(), packaged)) {
-    return packaged;
-  }
+  if (isPathWithin(process.cwd(), packaged)) return packaged;
   if (!stagedBundledSkillsDir) {
     stagedBundledSkillsDir = stageBundledSkills(
       packaged,
@@ -8562,14 +8630,10 @@ function isPathWithin(root: string, candidate: string): boolean {
 }
 
 /**
- * The skill source fed to the SDK Skills capability. Without pack or curated
- * skills this is the plain bundled local-dir source, byte-for-byte the
- * pre-pack behavior. With either selected source it becomes a single
- * in-memory dir source combining bundled skill directories (as local_dir
- * entries the SDK materializes lazily) with selected in-memory skill
- * directories — one skill index, one `## Skills` instruction section, lazy
- * `load_skill` for all of them. A pack skill shadows a bundled or curated
- * skill with the same directory name, case-insensitively.
+ * The skill source fed to the SDK Skills capability. Domain guidance is never
+ * mounted by deployment default: only explicitly selected library, Pack, and
+ * session skills join native artifact skills in one lazy index. Pack content
+ * shadows selected library content with the same name, case-insensitively.
  */
 export function lazySkillSourceWithPackSkills(
   packSkills: PackSkill[],
@@ -8588,9 +8652,6 @@ export function lazySkillSourceWithPackSkills(
     return bundled;
   }
   const children: Record<string, Entry> = {};
-  for (const name of bundledSkillDirNames(bundledDir)) {
-    children[name] = localDir({ src: join(bundledDir, name) });
-  }
   let artifactBundled: LocalDirLazySkillSource | null = null;
   if (editableArtifactToolsAvailable) {
     const artifactDir = bundledArtifactSkillsDir();
@@ -8643,11 +8704,6 @@ export function lazySkillSourceWithPackSkills(
   return {
     source: dir({ children }),
     getIndex: (manifest, skillsPath) => [
-      ...(bundled.getIndex?.(manifest, skillsPath) ?? []).filter(
-        (entry) =>
-          !packNameKeys.has((entry.path ?? entry.name).toLowerCase()) &&
-          !libraryNameKeys.has((entry.path ?? entry.name).toLowerCase()),
-      ),
       ...(artifactBundled?.getIndex?.(manifest, skillsPath) ?? []).filter(
         (entry) =>
           !packNameKeys.has((entry.path ?? entry.name).toLowerCase()) &&
@@ -8685,7 +8741,7 @@ function effectiveSkillSelections(
     source: "bundled" as const,
     version: null,
     contentSha256: null,
-    reason: "deployment default skill bundle",
+    reason: "native artifact capability",
   }));
   const libraryNameKeys = new Set(librarySkills.map((skill) => skill.name.toLowerCase()));
   const packNameKeys = new Set(packSkills.map((skill) => skill.name.toLowerCase()));

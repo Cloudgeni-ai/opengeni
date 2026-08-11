@@ -12,9 +12,12 @@ const accountId = "00000000-0000-4000-8000-000000000018";
 const capabilityId = "skill:browser-focus";
 const mobbinCapabilityId = "mcp:integrations-sh:mobbin-com-browser-fixture";
 const mobbinConnectionId = "00000000-0000-4000-8000-000000000120";
+const driveCapabilityId = "api:preset:google-drive-browser-fixture";
+const driveConnectionId = "00000000-0000-4000-8000-000000000130";
+const driveInstanceId = "00000000-0000-4000-8000-000000000131";
 const evidenceDir = new URL("../../.agent/evidence/capabilities-focus/", import.meta.url).pathname;
 const mobbinEvidenceDir = new URL("../../.agent/evidence/mobbin-mcp/", import.meta.url).pathname;
-const apiContractRevision = "2026-07-workspace-artifacts-v1";
+const apiContractRevision = "2026-08-social-provider-tools-v1";
 
 type CapabilityState = {
   enabled: boolean;
@@ -26,6 +29,12 @@ type MobbinUiState = {
   mode: "disconnected" | "connected" | "revoked";
   oauthStarts: number;
   oauthRequest: Record<string, unknown> | null;
+};
+
+type DriveUiState = {
+  driveSaves: number;
+  sourceRequest: Record<string, unknown> | null;
+  binding: Record<string, unknown> | null;
 };
 
 describe("capabilities browser e2e", () => {
@@ -211,6 +220,176 @@ describe("capabilities browser e2e", () => {
     }
   }, 60_000);
 
+  test("responsive theme matrix stays bounded from 320px through 1440px", async () => {
+    const viewports = [
+      { name: "320", width: 320, height: 700, mobile: true },
+      { name: "375", width: 375, height: 812, mobile: true },
+      { name: "768", width: 768, height: 900, mobile: false },
+      { name: "1280", width: 1280, height: 900, mobile: false },
+      { name: "1440", width: 1440, height: 900, mobile: false },
+    ] as const;
+
+    for (const viewport of viewports) {
+      const state: CapabilityState = { enabled: false, failNextEnable: false, enableCalls: 0 };
+      const context = await browser.newContext({
+        viewport: { width: viewport.width, height: viewport.height },
+        hasTouch: viewport.mobile,
+        isMobile: viewport.mobile,
+      });
+      const page = await context.newPage();
+      try {
+        await installCapabilityApi(page, state);
+        await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
+          waitUntil: "networkidle",
+        });
+
+        for (const theme of ["light", "dark"] as const) {
+          await setTheme(page, theme);
+          await expectVisible(page.getByLabel("Search capabilities"));
+          expect(await page.getByLabel("Search capabilities").count()).toBe(1);
+          await assertAccessibleAndBounded(page, '[role="region"][aria-label="Capabilities"]');
+          await page.screenshot({
+            path: `${evidenceDir}responsive-${viewport.name}-${theme}.png`,
+            fullPage: true,
+          });
+        }
+      } finally {
+        await context.close();
+      }
+    }
+  }, 150_000);
+
+  test("forced-colors and reduced-motion preserve the complete control surface", async () => {
+    const state: CapabilityState = { enabled: false, failNextEnable: false, enableCalls: 0 };
+    const context = await browser.newContext({
+      viewport: { width: 768, height: 900 },
+      forcedColors: "active",
+      reducedMotion: "reduce",
+    });
+    const page = await context.newPage();
+    try {
+      await installCapabilityApi(page, state);
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
+        waitUntil: "networkidle",
+      });
+      expect(await page.evaluate(() => matchMedia("(forced-colors: active)").matches)).toBe(true);
+      expect(
+        await page.evaluate(() => matchMedia("(prefers-reduced-motion: reduce)").matches),
+      ).toBe(true);
+      const tile = page.locator(`[data-capability-catalog-tile="${capabilityId}"]`);
+      await expectVisible(tile);
+      const transitionMs = await tile.evaluate((element) => {
+        const value = getComputedStyle(element).transitionDuration.split(",")[0]?.trim() ?? "0s";
+        return value.endsWith("ms") ? Number.parseFloat(value) : Number.parseFloat(value) * 1_000;
+      });
+      expect(transitionMs).toBeLessThanOrEqual(0.01);
+      await assertBounded(page);
+      await page.screenshot({
+        path: `${evidenceDir}forced-colors-reduced-motion-768.png`,
+        fullPage: true,
+      });
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
+
+  test("a delayed five-thousand-item catalog renders one bounded window and filters responsively", async () => {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+    const page = await context.newPage();
+    try {
+      await installLargeCatalogApi(page, 1_500);
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
+        waitUntil: "domcontentloaded",
+      });
+      await expectVisible(page.locator("[data-capability-catalog-skeleton]"));
+
+      const tiles = page.locator("[data-capability-catalog-tile]");
+      await expectVisible(tiles.first());
+      const initialCount = await tiles.count();
+      expect(initialCount).toBeGreaterThan(0);
+      expect(initialCount).toBeLessThanOrEqual(48);
+
+      const startedAt = performance.now();
+      await page.getByLabel("Search capabilities").fill("Capability 4999");
+      await expectVisible(page.locator('[data-capability-catalog-tile="mcp:large-4999"]'));
+      expect(performance.now() - startedAt).toBeLessThan(1_000);
+      expect(await tiles.count()).toBe(1);
+      await assertAccessibleAndBounded(page, '[role="region"][aria-label="Capabilities"]');
+      await page.screenshot({
+        path: `${evidenceDir}large-catalog-filtered-1280.png`,
+        fullPage: true,
+      });
+    } finally {
+      await context.close();
+    }
+  }, 90_000);
+
+  test("Google Drive folders configure only the exact named Integration instance", async () => {
+    const state: DriveUiState = {
+      driveSaves: 0,
+      sourceRequest: null,
+      binding: null,
+    };
+    const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    const page = await context.newPage();
+    try {
+      await installCapabilityApi(page, state);
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
+        waitUntil: "networkidle",
+      });
+
+      await page
+        .getByRole("button", {
+          name: "Google Drive Browse selected folders and Shared Drives for read-only knowledge sync. Not connected",
+          exact: true,
+        })
+        .click();
+      const advancedAccounts = page.getByText("Agent file access and additional accounts", {
+        exact: true,
+      });
+      await expectVisible(advancedAccounts);
+      await advancedAccounts.click();
+
+      const instance = page.locator('[data-integration-instance="finance"]');
+      await expectVisible(instance);
+      await expectText(instance, "Google Drive — Finance");
+      await instance
+        .getByRole("button", { name: "Manage features for Google Drive — Finance" })
+        .click();
+      const feature = instance.locator('[data-integration-feature="drive-content"]');
+      await expectVisible(feature);
+      await feature.getByRole("button", { name: "Configure" }).click();
+
+      const dialog = page.locator('[data-slot="dialog-content"]').filter({
+        hasText: "Google Drive locations · Google Drive — Finance",
+      });
+      await expectVisible(dialog);
+      await expectText(dialog, "Google Drive locations · Google Drive — Finance");
+      await dialog.getByRole("checkbox", { name: "Connect My Drive" }).check();
+      await assertAccessibleAndBounded(page, '[data-slot="dialog-content"]');
+      await dialog.getByRole("button", { name: "Save 1 location" }).click();
+      await expectHidden(dialog);
+
+      expect(state.driveSaves).toBe(1);
+      expect(state.sourceRequest).toMatchObject({
+        sources: [
+          {
+            id: "root",
+            name: "My Drive",
+            mimeType: "application/vnd.google-apps.folder",
+            driveId: null,
+          },
+        ],
+        destination: { authorityKind: "workspace", collectionId: null },
+        syncCadence: "hourly",
+        readPolicy: "allow",
+      });
+      await expectText(feature, "Active");
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
+
   test("Mobbin OAuth states stay truthful, bounded, accessible, and responsive", async () => {
     const state: MobbinUiState = {
       mode: "disconnected",
@@ -264,7 +443,9 @@ describe("capabilities browser e2e", () => {
       expect(await setupLink.getAttribute("href")).toBe(
         "https://docs.mobbin.com/mcp/clients/overview",
       );
-      await expectVisible(page.getByRole("dialog").getByRole("button", { name: "Connect Mobbin" }));
+      await expectVisible(
+        page.getByRole("dialog").getByRole("button", { name: "Connect for workspace" }),
+      );
       await assertAccessibleAndBounded(page, '[role="dialog"]');
       await page.screenshot({
         path: `${mobbinEvidenceDir}disconnected-desktop-light.png`,
@@ -278,7 +459,7 @@ describe("capabilities browser e2e", () => {
       });
       await Promise.all([
         page.waitForURL(`${authorizationOrigin}/**`),
-        page.getByRole("dialog").getByRole("button", { name: "Connect Mobbin" }).click(),
+        page.getByRole("dialog").getByRole("button", { name: "Connect for workspace" }).click(),
       ]);
       await expectVisible(page.getByRole("heading", { name: "Authorize Mobbin for OpenGeni" }));
       expect(state.oauthStarts).toBe(1);
@@ -298,7 +479,7 @@ describe("capabilities browser e2e", () => {
       });
       await setTheme(page, "dark");
       await openMobbinSheet(page, true);
-      await expectText(page.getByRole("dialog"), "Connected to mobbin.com");
+      await expectText(page.getByRole("dialog"), "Personal connection to mobbin.com");
       await assertAccessibleAndBounded(page, '[role="dialog"]');
       await page.screenshot({
         path: `${mobbinEvidenceDir}connected-desktop-dark.png`,
@@ -324,7 +505,10 @@ describe("capabilities browser e2e", () => {
       await setTheme(mobilePage, "dark");
       await expectText(mobilePage.getByRole("region", { name: "Capabilities" }), "Needs attention");
       await openMobbinSheet(mobilePage, true);
-      await expectText(mobilePage.getByRole("dialog"), "Reconnect to restore access");
+      await expectText(
+        mobilePage.getByRole("dialog"),
+        "Personal connection needs to be reconnected",
+      );
       await expectVisible(
         mobilePage.getByRole("dialog").getByRole("button", { name: "Reconnect Mobbin" }),
       );
@@ -366,6 +550,10 @@ async function openMobbinSheet(page: Page, enabled: boolean): Promise<void> {
 async function assertAccessibleAndBounded(page: Page, selector: string): Promise<void> {
   const axe = await new AxeBuilder({ page }).include(selector).analyze();
   expect(axe.violations).toEqual([]);
+  await assertBounded(page);
+}
+
+async function assertBounded(page: Page): Promise<void> {
   expect(
     await page.evaluate(
       () =>
@@ -381,6 +569,7 @@ async function setTheme(page: Page, theme: "light" | "dark"): Promise<void> {
     await new Promise<void>((resolve) => {
       requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
     });
+    await new Promise<void>((resolve) => setTimeout(resolve, 250));
   }, theme);
 }
 
@@ -404,7 +593,7 @@ async function expectText(locator: import("playwright").Locator, expected: strin
 
 async function installCapabilityApi(
   page: Page,
-  state: CapabilityState | MobbinUiState,
+  state: CapabilityState | MobbinUiState | DriveUiState,
 ): Promise<void> {
   await page.route("http://127.0.0.1:9/**", async (route) => {
     const request = route.request();
@@ -444,7 +633,12 @@ async function installCapabilityApi(
             accountId,
             subjectId: "browser-focus-subject",
             role: "owner",
-            permissions: ["workspace:admin", "capabilities:read", "capabilities:write"],
+            permissions: [
+              "account:admin",
+              "workspace:admin",
+              "capabilities:read",
+              "capabilities:write",
+            ],
           },
         ],
         workspaceGrants: [
@@ -469,12 +663,67 @@ async function installCapabilityApi(
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/capabilities`) {
       return json({
-        items: ["mode" in state ? mobbinCapability(state.mode) : capability(state.enabled)],
+        items:
+          "driveSaves" in state
+            ? []
+            : ["mode" in state ? mobbinCapability(state.mode) : capability(state.enabled)],
         installations: [],
       });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/connections`) {
-      return json({ connections: "mode" in state ? mobbinConnections(state.mode) : [] });
+      return json({
+        connections:
+          "driveSaves" in state
+            ? [driveConnection()]
+            : "mode" in state
+              ? mobbinConnections(state.mode)
+              : [],
+      });
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/integrations/presets`) {
+      return json({ presets: "driveSaves" in state ? [drivePreset()] : [] });
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/integrations`) {
+      return json({ integrations: "driveSaves" in state ? [driveInstallation()] : [] });
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/plugins`) {
+      return json({ plugins: [] });
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/social/connections`) {
+      return json([]);
+    }
+    if (
+      "driveSaves" in state &&
+      request.method() === "GET" &&
+      url.pathname ===
+        `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(driveCapabilityId)}/instances/finance/features`
+    ) {
+      return json(driveFeatures(state.binding));
+    }
+    if (
+      "driveSaves" in state &&
+      request.method() === "GET" &&
+      url.pathname ===
+        `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(driveCapabilityId)}/instances/finance/features/drive-content/browse`
+    ) {
+      return json(driveBrowse());
+    }
+    if (
+      "driveSaves" in state &&
+      request.method() === "PUT" &&
+      url.pathname ===
+        `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(driveCapabilityId)}/instances/finance/features/drive-content/source`
+    ) {
+      state.driveSaves += 1;
+      state.sourceRequest = request.postDataJSON() as Record<string, unknown>;
+      state.binding = driveBinding(state.sourceRequest);
+      return json({
+        capabilityId: driveCapabilityId,
+        instanceKey: "finance",
+        featureKey: "drive-content",
+        status: "configured",
+        binding: state.binding,
+      });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/packs`) {
       return json({ packs: [], installations: [] });
@@ -482,6 +731,7 @@ async function installCapabilityApi(
     if (url.pathname === `/v1/workspaces/${workspaceId}/variable-sets`) {
       return json([]);
     }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/rigs`) return json([]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/github/app`) {
       return json({ configured: false, missing: [], installUrl: null });
     }
@@ -526,6 +776,104 @@ async function installCapabilityApi(
         enabledAt: new Date(0).toISOString(),
         updatedAt: new Date(0).toISOString(),
       });
+    }
+    return json({});
+  });
+}
+
+async function installLargeCatalogApi(page: Page, catalogDelayMs: number): Promise<void> {
+  const catalog = Array.from({ length: 5_000 }, (_, index) => ({
+    ...capability(false),
+    id: `mcp:large-${index}`,
+    kind: "mcp",
+    source: "public_registry",
+    name: `Capability ${index}`,
+    description: `Large catalog performance fixture ${index}.`,
+    category: "integrations",
+    tags: ["large-catalog", `row-${index}`],
+    surfaceType: "mcp",
+  }));
+
+  await page.route("http://127.0.0.1:9/**", async (route) => {
+    const url = new URL(route.request().url());
+    const headers = { "x-opengeni-api-contract": apiContractRevision };
+    const json = (body: unknown, status = 200) =>
+      route.fulfill({
+        status,
+        headers,
+        contentType: "application/json",
+        body: JSON.stringify(body),
+      });
+
+    if (url.pathname === "/v1/config/client") {
+      return json({
+        deploymentRevision: "large-catalog-browser-test",
+        apiContractRevision,
+        defaultModel: "gpt-5.6-sol",
+        allowedModels: ["gpt-5.6-sol"],
+        models: [],
+        defaultReasoningEffort: "low",
+        allowedReasoningEfforts: ["low"],
+        mcpServers: [],
+        fileUploads: { enabled: false, maxSizeBytes: 1_048_576 },
+        productAccessMode: "configured",
+        auth: { mode: "none" },
+        structuredServices: { fileSystem: false, git: false, terminalEvents: false },
+      });
+    }
+    if (url.pathname === "/v1/access/me") {
+      return json({
+        mode: "configured",
+        subjectId: "large-catalog-subject",
+        subjectLabel: "Large catalog test",
+        accountGrants: [
+          {
+            accountId,
+            subjectId: "large-catalog-subject",
+            role: "owner",
+            permissions: ["account:admin", "workspace:admin", "capabilities:read"],
+          },
+        ],
+        workspaceGrants: [
+          {
+            workspaceId,
+            accountId,
+            subjectId: "large-catalog-subject",
+            permissions: ["workspace:admin", "capabilities:read", "connections:read"],
+          },
+        ],
+        defaultAccountId: accountId,
+        defaultWorkspaceId: workspaceId,
+      });
+    }
+    if (url.pathname === "/v1/workspaces") return json([workspace()]);
+    if (url.pathname === `/v1/workspaces/${workspaceId}/capabilities`) {
+      await new Promise((resolve) => setTimeout(resolve, catalogDelayMs));
+      return json({ items: catalog, installations: [] });
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/connections`) {
+      return json({ connections: [] });
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/social/connections`) return json([]);
+    if (url.pathname === `/v1/workspaces/${workspaceId}/integrations/presets`) {
+      return json({ presets: [] });
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/integrations`) {
+      return json({ integrations: [] });
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/plugins`) {
+      return json({ plugins: [] });
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/packs`) {
+      return json({ packs: [], installations: [] });
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/variable-sets`) return json([]);
+    if (url.pathname === `/v1/workspaces/${workspaceId}/rigs`) return json([]);
+    if (url.pathname === `/v1/workspaces/${workspaceId}/github/app`) {
+      return json({ configured: false, missing: [], installUrl: null });
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/sessions`) {
+      return json({ sessions: [], pinned: [], pinnedTruncated: false, nextCursor: null });
     }
     return json({});
   });
@@ -675,4 +1023,181 @@ function mobbinConnections(mode: MobbinUiState["mode"]) {
       updatedAt: new Date(0).toISOString(),
     },
   ];
+}
+
+function drivePreset() {
+  return {
+    id: "google-drive",
+    name: "Google Drive",
+    summary: "Files, folders, permissions, and shared drives.",
+    family: "google",
+    protocol: "openapi",
+    providerDomain: "www.googleapis.com",
+    scopes: ["openid", "email", "profile", "https://www.googleapis.com/auth/drive"],
+    features: [driveFeatureDefinition(), driveIdentityDefinition()],
+  };
+}
+
+function driveInstallation() {
+  return {
+    capabilityId: driveCapabilityId,
+    pluginKey: "integration/google-drive-browser-fixture",
+    installationVersion: 1,
+    instanceId: driveInstanceId,
+    instanceKey: "finance",
+    displayName: "Google Drive — Finance",
+    instanceVersion: 1,
+    serverId: "google_drive_browser_fixture",
+    name: "Google Drive",
+    description: "Files, folders, permissions, and shared drives.",
+    protocol: "openapi",
+    presetId: "google-drive",
+    providerDomain: "www.googleapis.com",
+    baseUrl: "https://www.googleapis.com/drive/v3/",
+    sourceUrl: "https://www.googleapis.com/discovery/v1/apis/drive/v3/rest",
+    connected: true,
+    requiresConnection: true,
+    connectionId: driveConnectionId,
+    ownership: "personal",
+    allowedTools: ["drive_files_list"],
+    toolCount: 1,
+    approvalRequiredToolCount: 0,
+    revisionId: "openapi:444444444444444444444444",
+    contentSha256: "4".repeat(64),
+  };
+}
+
+function driveConnection() {
+  return {
+    id: driveConnectionId,
+    accountId,
+    workspaceId,
+    subjectId: "browser-focus-subject",
+    providerDomain: "www.googleapis.com",
+    kind: "oauth2",
+    status: "active",
+    grantedScopes: ["https://www.googleapis.com/auth/drive"],
+    expiresAt: null,
+    lastRefreshAt: null,
+    lastUsedAt: null,
+    lastError: null,
+    version: 1,
+    metadata: {
+      credentialRole: "api_integration_oauth",
+      providerFamily: "google",
+      providerPrincipalId: "google-finance",
+      providerEmail: "finance@example.com",
+      providerDisplayName: "Finance",
+      authorizedPresetIds: ["google-drive"],
+      verifiedAt: new Date(0).toISOString(),
+    },
+    createdBySubjectId: "browser-focus-subject",
+    updatedBySubjectId: "browser-focus-subject",
+    createdAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString(),
+  };
+}
+
+function driveFeatures(binding: Record<string, unknown> | null) {
+  return {
+    capabilityId: driveCapabilityId,
+    instanceKey: "finance",
+    providerDomain: "www.googleapis.com",
+    connectionId: driveConnectionId,
+    features: [
+      { definition: driveIdentityDefinition(), binding: null },
+      { definition: driveFeatureDefinition(), binding },
+    ],
+  };
+}
+
+function driveFeatureDefinition() {
+  return {
+    featureKey: "drive-content",
+    kind: "knowledge_source",
+    configSchema: {
+      type: "object",
+      required: ["sources", "destination", "syncCadence", "readPolicy"],
+      properties: {
+        sources: { type: "array", minItems: 1, maxItems: 100, items: { type: "object" } },
+        destination: { type: "object" },
+        syncCadence: { type: "string", enum: ["manual", "hourly", "daily"] },
+        readPolicy: { type: "string", enum: ["allow", "ask", "block"] },
+      },
+    },
+    capabilities: { provider: "google-drive", connectionRequired: true },
+  };
+}
+
+function driveIdentityDefinition() {
+  return {
+    featureKey: "account-identity",
+    kind: "identity_link",
+    configSchema: { type: "object", properties: {}, additionalProperties: false },
+    capabilities: { provider: "google", connectionRequired: true },
+  };
+}
+
+function driveBrowse() {
+  return {
+    connection: driveConnection(),
+    parentId: "root",
+    current: {
+      id: "root",
+      name: "My Drive",
+      mimeType: "application/vnd.google-apps.folder",
+      kind: "folder",
+      driveId: null,
+      modifiedTime: null,
+      size: null,
+      webViewLink: "https://drive.google.com/drive/my-drive",
+    },
+    items: [
+      {
+        id: "folder-1",
+        name: "Product",
+        mimeType: "application/vnd.google-apps.folder",
+        kind: "folder",
+        driveId: null,
+        modifiedTime: "2026-08-11T00:00:00.000Z",
+        size: null,
+        webViewLink: "https://drive.google.com/drive/folders/folder-1",
+      },
+    ],
+    nextPageToken: null,
+    incompleteSearch: false,
+  };
+}
+
+function driveBinding(request: Record<string, unknown>) {
+  const sources = Array.isArray(request.sources) ? request.sources : [];
+  return {
+    id: "00000000-0000-4000-8000-000000000132",
+    featureKey: "drive-content",
+    kind: "knowledge_source",
+    bindingKey: "finance",
+    displayName: "Google Drive — Finance — Drive Content",
+    connectionId: driveConnectionId,
+    status: "active",
+    config: {
+      sources: sources.map((source) => ({
+        ...(source as Record<string, unknown>),
+        sourceKind: (source as Record<string, unknown>).id === "root" ? "my_drive" : "folder",
+        includeDescendants: true,
+      })),
+      destination: {
+        authorityKind: "workspace",
+        authorityAccountId: accountId,
+        authorityWorkspaceId: workspaceId,
+      },
+      syncCadence: request.syncCadence,
+      readPolicy: request.readPolicy,
+    },
+    version: 1,
+    hasCursor: false,
+    lastSuccessAt: null,
+    lastErrorCode: null,
+    createdAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString(),
+  };
 }

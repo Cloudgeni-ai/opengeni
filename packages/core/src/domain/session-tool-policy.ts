@@ -169,8 +169,11 @@ export async function workspaceSessionToolPolicyServerIds(
   db: Database,
   workspaceId: string,
   settings: Settings,
+  subjectId?: string,
 ): Promise<string[]> {
-  const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(db, workspaceId, settings);
+  const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(db, workspaceId, settings, {
+    ...(subjectId ? { subjectId } : {}),
+  });
   return sortedIds(runtimeSettings.mcpServers.map((server) => server.id));
 }
 
@@ -179,8 +182,11 @@ export async function workspaceSessionToolPolicyDefaultServerIds(
   db: Database,
   workspaceId: string,
   settings: Settings,
+  subjectId?: string,
 ): Promise<string[]> {
-  const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(db, workspaceId, settings);
+  const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(db, workspaceId, settings, {
+    ...(subjectId ? { subjectId } : {}),
+  });
   return defaultSessionMcpServerIds(runtimeSettings.mcpServers);
 }
 

@@ -63,8 +63,8 @@ async function buildApi(): Promise<void> {
   });
   await copyDirectory(join(repositoryRoot, "agent/install"), join(outdir, "assets/agent-install"));
   await copyDirectory(
-    join(repositoryRoot, "packages/runtime/src/bundled_hashicorp_terraform_skills"),
-    join(outdir, "assets/runtime/bundled_hashicorp_terraform_skills"),
+    join(repositoryRoot, "packages/runtime/src/bundled_skill_library"),
+    join(outdir, "assets/runtime/bundled_skill_library"),
   );
 }
 
@@ -93,10 +93,6 @@ async function buildWorker(): Promise<void> {
   await cp(
     join(repositoryRoot, "apps/worker/dist/workflow-bundle.js"),
     join(outdir, "workflow-bundle.js"),
-  );
-  await copyDirectory(
-    join(repositoryRoot, "packages/runtime/src/bundled_hashicorp_terraform_skills"),
-    join(outdir, "assets/runtime/bundled_hashicorp_terraform_skills"),
   );
   await copyDirectory(
     join(repositoryRoot, "packages/runtime/src/bundled_skill_library"),

@@ -233,6 +233,11 @@ import {
   type IdempotentPersistenceTransactionOptions,
 } from "./persistence-errors";
 import {
+  assertCapabilityComponentVersionCanChange,
+  effectiveCapabilityOwnerSql,
+  lockCapabilityComponentIdentity,
+} from "./capability-components";
+import {
   closePendingSessionToolCallsInTransaction,
   historyCallId,
   historyItemType,
@@ -327,6 +332,9 @@ export {
 } from "./environment-crypto";
 export * from "./persistence-errors";
 export * from "./runtime-posture";
+export * from "./capability-integrations";
+export * from "./integration-bindings";
+export * from "./integration-features";
 export * from "./insights";
 export { memoryTextForStorage } from "./memory-domain";
 // Re-exported so external consumers can `import { migrate } from "@opengeni/db"`.
@@ -1886,7 +1894,10 @@ export type TemporalScheduleCleanupClaim = {
 };
 
 export type DeleteWorkspaceIfQuiescentResult =
-  | { status: "deleted"; temporalScheduleCleanups: TemporalScheduleCleanupClaim[] }
+  | {
+      status: "deleted";
+      temporalScheduleCleanups: TemporalScheduleCleanupClaim[];
+    }
   | {
       status:
         | "not_found"
@@ -2078,7 +2089,9 @@ export async function deleteWorkspaceIfQuiescent(
           }
 
           const schedules = await tx
-            .select({ temporalScheduleId: schema.scheduledTasks.temporalScheduleId })
+            .select({
+              temporalScheduleId: schema.scheduledTasks.temporalScheduleId,
+            })
             .from(schema.scheduledTasks)
             .where(eq(schema.scheduledTasks.workspaceId, input.workspaceId))
             .for("update", { noWait: true });
@@ -3564,6 +3577,11 @@ export type CreatePackInstallationInput = {
   accountId: string;
   workspaceId: string;
   packId: string;
+  status?: PackInstallationStatus;
+  manifestSnapshot?: CapabilityPack | null;
+  manifestDigest?: string | null;
+  selectedRigId?: string | null;
+  installedBySubjectId?: string | null;
   metadata?: Record<string, unknown>;
 };
 
@@ -3703,6 +3721,15 @@ export type UpdateConnectionInput = {
   verifiedInstallVersion?: number | null;
   metadata?: Record<string, unknown>;
   updatedBySubjectId?: string | null;
+};
+
+export type PersistProviderOAuthConnectionInput = CreateConnectionInput & {
+  visibleToSubjectId: string;
+  credentialRole: string;
+  providerFamily: string;
+  providerPrincipalId: string;
+  requestedConnectionId?: string;
+  requestedConnectionVersion?: number;
 };
 
 export type UpdateSlackBotDocumentDestinationInput = {
@@ -3945,6 +3972,97 @@ export type EnableCapabilityInstallationInput = {
   config?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
 };
+
+export type InstallPortableSkillInput = {
+  accountId: string;
+  workspaceId: string;
+  subjectId: string;
+  capabilityId: string;
+  pluginKey: string;
+  source: "github" | "skills_sh" | "pack";
+  sourceUrl: string;
+  repositoryUrl: string;
+  sourceCommit: string;
+  sourcePath: string;
+  name: string;
+  description: string;
+  contentSha256: string;
+  totalBytes: number;
+  license?: string | null;
+  files: Array<{
+    path: string;
+    content: string;
+    byteSize: number;
+    contentSha256: string;
+  }>;
+  owner?: PortableSkillOwner;
+  expectedInstallationVersion?: number;
+};
+
+export type InstalledPortableSkill = {
+  capabilityId: string;
+  pluginId: string;
+  pluginVersionId: string;
+  facetId: string;
+  pluginInstallationId: string;
+  facetInstallationId: string;
+  installationVersion: number;
+  source: "github" | "skills_sh" | "pack";
+  sourceUrl: string;
+  sourceCommit: string;
+  contentSha256: string;
+  name: string;
+};
+
+export type PortableSkillRuntime = {
+  capabilityId: string;
+  name: string;
+  description: string;
+  sourceUrl: string;
+  sourceCommit: string;
+  sourcePath: string;
+  contentSha256: string;
+  files: Array<{ path: string; content: string }>;
+};
+
+export type PortableSkillOwner = {
+  kind: "direct" | "plugin" | "pack" | "migration";
+  id: string;
+  removable: boolean;
+};
+
+export type PortableSkillUninstallPreview = {
+  capabilityId: string;
+  installed: boolean;
+  installationVersion: number | null;
+  directOwner: PortableSkillOwner | null;
+  remainingOwners: PortableSkillOwner[];
+  removesRuntimeSkill: boolean;
+};
+
+export type UninstallPortableSkillResult = {
+  capabilityId: string;
+  status: "not_installed" | "uninstalled" | "retained_by_other_owners";
+  remainingOwners: PortableSkillOwner[];
+};
+
+export class PortableSkillInstallationVersionConflictError extends Error {
+  readonly name = "PortableSkillInstallationVersionConflictError";
+
+  constructor(
+    readonly capabilityId: string,
+    readonly expectedVersion: number,
+    readonly actualVersion: number,
+  ) {
+    super(
+      `Portable Skill installation ${capabilityId} changed: expected version ${expectedVersion}, current version ${actualVersion}`,
+    );
+  }
+}
+
+export class PortableSkillInstallationVersionRequiredError extends Error {
+  readonly name = "PortableSkillInstallationVersionRequiredError";
+}
 
 export type EnabledMcpCapabilityServer = {
   capabilityId: string;
@@ -4283,7 +4401,9 @@ export function durableUserHistoryItem(
     content: renderTimelineAnnotationsForModel(prompt, annotations),
     ...(attachmentRefs.length > 0 ? { [MODEL_ATTACHMENT_REFS_FIELD]: attachmentRefs } : {}),
     ...(annotations.length > 0
-      ? { [MODEL_TIMELINE_ANNOTATIONS_FIELD]: TimelineAnnotations.parse(annotations) }
+      ? {
+          [MODEL_TIMELINE_ANNOTATIONS_FIELD]: TimelineAnnotations.parse(annotations),
+        }
       : {}),
   };
 }
@@ -4423,11 +4543,19 @@ export async function prepareRetainedScreenshotArtifact(
       await scopedDb.transaction(async (tx) => {
         await tx
           .insert(schema.workspaceScreenshotQuotas)
-          .values({ accountId: input.accountId, workspaceId: input.workspaceId })
-          .onConflictDoNothing({ target: schema.workspaceScreenshotQuotas.workspaceId });
+          .values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+          })
+          .onConflictDoNothing({
+            target: schema.workspaceScreenshotQuotas.workspaceId,
+          });
 
         const [existing] = await tx
-          .select({ artifact: schema.retainedScreenshotArtifacts, file: schema.files })
+          .select({
+            artifact: schema.retainedScreenshotArtifacts,
+            file: schema.files,
+          })
           .from(schema.retainedScreenshotArtifacts)
           .innerJoin(
             schema.files,
@@ -4673,7 +4801,10 @@ export async function getRetainedScreenshotArtifact(
 ): Promise<RetainedScreenshotArtifact | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
-      .select({ artifact: schema.retainedScreenshotArtifacts, file: schema.files })
+      .select({
+        artifact: schema.retainedScreenshotArtifacts,
+        file: schema.files,
+      })
       .from(schema.retainedScreenshotArtifacts)
       .innerJoin(
         schema.files,
@@ -4791,7 +4922,9 @@ export async function promoteRetainedScreenshotMaintenanceCleanup(
             eq(schema.retainedScreenshotArtifacts.maintenanceClaimId, input.claimId),
           ),
         )
-        .returning({ artifactId: schema.retainedScreenshotArtifacts.artifactId });
+        .returning({
+          artifactId: schema.retainedScreenshotArtifacts.artifactId,
+        });
       return updated !== undefined;
     },
   );
@@ -5002,7 +5135,10 @@ async function getRetainedScreenshotArtifactByWorkspace(
 ): Promise<RetainedScreenshotArtifact | null> {
   return await withRlsContext(db, { accountId, workspaceId }, async (scopedDb) => {
     const [row] = await scopedDb
-      .select({ artifact: schema.retainedScreenshotArtifacts, file: schema.files })
+      .select({
+        artifact: schema.retainedScreenshotArtifacts,
+        file: schema.files,
+      })
       .from(schema.retainedScreenshotArtifacts)
       .innerJoin(schema.files, eq(schema.files.id, schema.retainedScreenshotArtifacts.artifactId))
       .where(
@@ -5411,7 +5547,22 @@ export async function enablePackInstallation(
         const [row] = await scopedDb
           .update(schema.packInstallations)
           .set({
-            status: "active",
+            status: input.status ?? "active",
+            version: existing.version + 1,
+            manifestSnapshot:
+              input.manifestSnapshot === undefined
+                ? existing.manifestSnapshot
+                : input.manifestSnapshot === null
+                  ? null
+                  : (input.manifestSnapshot as unknown as Record<string, unknown>),
+            manifestDigest:
+              input.manifestDigest === undefined ? existing.manifestDigest : input.manifestDigest,
+            selectedRigId:
+              input.selectedRigId === undefined ? existing.selectedRigId : input.selectedRigId,
+            installedBySubjectId:
+              input.installedBySubjectId === undefined
+                ? existing.installedBySubjectId
+                : input.installedBySubjectId,
             metadata: input.metadata ?? existing.metadata,
             enabledAt: now,
             updatedAt: now,
@@ -5434,7 +5585,14 @@ export async function enablePackInstallation(
           accountId: input.accountId,
           workspaceId: input.workspaceId,
           packId: input.packId,
-          status: "active",
+          status: input.status ?? "active",
+          manifestSnapshot:
+            input.manifestSnapshot === undefined || input.manifestSnapshot === null
+              ? null
+              : (input.manifestSnapshot as unknown as Record<string, unknown>),
+          manifestDigest: input.manifestDigest ?? null,
+          selectedRigId: input.selectedRigId ?? null,
+          installedBySubjectId: input.installedBySubjectId ?? null,
           metadata: input.metadata ?? {},
         })
         .returning();
@@ -5491,6 +5649,7 @@ export async function updatePackInstallationStatus(
       .update(schema.packInstallations)
       .set({
         status,
+        version: sql`${schema.packInstallations.version} + 1`,
         updatedAt: new Date(),
       })
       .where(
@@ -5952,6 +6111,684 @@ export async function getCapabilityCatalogItem(
   });
 }
 
+/**
+ * Install one immutable, already-validated portable Skill through the v2
+ * Plugin/facet ownership model and dual-write the v1 compatibility projection.
+ * Repeating the same exact source is idempotent; changing a commit's content
+ * fails instead of silently rewriting immutable history.
+ */
+export async function installPortableSkill(
+  db: Database,
+  input: InstallPortableSkillInput,
+): Promise<InstalledPortableSkill> {
+  return await withRlsContext(
+    db,
+    {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+    },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const now = new Date();
+        await lockCapabilityComponentIdentity(
+          tx as unknown as Database,
+          input.workspaceId,
+          input.pluginKey,
+        );
+        let [plugin] = await tx
+          .select()
+          .from(schema.capabilityPlugins)
+          .where(
+            and(
+              eq(schema.capabilityPlugins.workspaceId, input.workspaceId),
+              eq(schema.capabilityPlugins.pluginKey, input.pluginKey),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!plugin) {
+          [plugin] = await tx
+            .insert(schema.capabilityPlugins)
+            .values({
+              pluginKey: input.pluginKey,
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              name: input.name,
+              description: input.description,
+              category: "skills",
+              tags: ["skill", "imported", input.source],
+              provenance: "workspace",
+            })
+            .returning();
+        } else if (plugin.accountId !== input.accountId) {
+          throw new Error("Portable Skill plugin tenant mismatch");
+        } else if (plugin.name !== input.name || plugin.description !== input.description) {
+          [plugin] = await tx
+            .update(schema.capabilityPlugins)
+            .set({
+              name: input.name,
+              description: input.description,
+              updatedAt: now,
+            })
+            .where(eq(schema.capabilityPlugins.id, plugin.id))
+            .returning();
+        }
+        if (!plugin) throw new Error("Failed to create portable Skill plugin");
+
+        const manifest = {
+          schemaVersion: 1,
+          kind: "skill",
+          source: input.source,
+          sourceUrl: input.sourceUrl,
+          repositoryUrl: input.repositoryUrl,
+          sourceCommit: input.sourceCommit,
+          sourcePath: input.sourcePath,
+          contentSha256: input.contentSha256,
+          fileCount: input.files.length,
+          totalBytes: input.totalBytes,
+        };
+        const manifestDigest = createHash("sha256").update(stableJson(manifest)).digest("hex");
+        const [versionByName] = await tx
+          .select()
+          .from(schema.capabilityPluginVersions)
+          .where(
+            and(
+              eq(schema.capabilityPluginVersions.pluginId, plugin.id),
+              eq(schema.capabilityPluginVersions.version, input.sourceCommit),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (versionByName && versionByName.manifestDigest !== manifestDigest) {
+          throw new Error(
+            `Portable Skill source commit ${input.sourceCommit} conflicts with immutable stored content`,
+          );
+        }
+        let pluginVersion = versionByName;
+        if (!pluginVersion) {
+          [pluginVersion] = await tx
+            .insert(schema.capabilityPluginVersions)
+            .values({
+              pluginId: plugin.id,
+              version: input.sourceCommit,
+              manifestDigest,
+              manifest,
+              status: "published",
+            })
+            .returning();
+        }
+        if (!pluginVersion) throw new Error("Failed to create portable Skill plugin version");
+
+        let [facet] = await tx
+          .select()
+          .from(schema.capabilityFacets)
+          .where(
+            and(
+              eq(schema.capabilityFacets.pluginVersionId, pluginVersion.id),
+              eq(schema.capabilityFacets.facetKey, "skill"),
+            ),
+          )
+          .limit(1);
+        if (!facet) {
+          [facet] = await tx
+            .insert(schema.capabilityFacets)
+            .values({
+              pluginVersionId: pluginVersion.id,
+              facetKey: "skill",
+              kind: "skill",
+              activationMode: "workspace_managed",
+              required: true,
+            })
+            .returning();
+        }
+        if (!facet) throw new Error("Failed to create portable Skill facet");
+
+        const [existingSkill] = await tx
+          .select()
+          .from(schema.capabilitySkillFacets)
+          .where(eq(schema.capabilitySkillFacets.facetId, facet.id))
+          .limit(1);
+        if (
+          existingSkill &&
+          (existingSkill.contentSha256 !== input.contentSha256 ||
+            existingSkill.capabilityId !== input.capabilityId)
+        ) {
+          throw new Error("Portable Skill facet conflicts with immutable stored content");
+        }
+        if (!existingSkill) {
+          await tx.insert(schema.capabilitySkillFacets).values({
+            facetId: facet.id,
+            capabilityId: input.capabilityId,
+            name: input.name,
+            description: input.description,
+            sourceUrl: input.sourceUrl,
+            sourceCommit: input.sourceCommit,
+            sourcePath: input.sourcePath,
+            contentSha256: input.contentSha256,
+            fileCount: input.files.length,
+            totalBytes: input.totalBytes,
+            license: input.license ?? null,
+          });
+          await tx.insert(schema.capabilitySkillFiles).values(
+            input.files.map((file) => ({
+              skillFacetId: facet.id,
+              path: file.path,
+              content: file.content,
+              byteSize: file.byteSize,
+              contentSha256: file.contentSha256,
+            })),
+          );
+        }
+
+        let [pluginInstallation] = await tx
+          .select()
+          .from(schema.capabilityPluginInstallations)
+          .where(
+            and(
+              eq(schema.capabilityPluginInstallations.workspaceId, input.workspaceId),
+              eq(schema.capabilityPluginInstallations.pluginId, plugin.id),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        const changesInstalledVersion = Boolean(
+          pluginInstallation &&
+          pluginInstallation.status !== "disabled" &&
+          (pluginInstallation.pluginVersionId !== pluginVersion.id ||
+            pluginInstallation.status !== "active"),
+        );
+        const directInstall = !input.owner || input.owner.kind === "direct";
+        if (changesInstalledVersion && directInstall) {
+          if (input.expectedInstallationVersion === undefined) {
+            throw new PortableSkillInstallationVersionRequiredError(
+              "Updating a Skill requires the previewed installation version",
+            );
+          }
+          if (pluginInstallation!.version !== input.expectedInstallationVersion) {
+            throw new PortableSkillInstallationVersionConflictError(
+              input.capabilityId,
+              input.expectedInstallationVersion,
+              pluginInstallation!.version,
+            );
+          }
+        }
+        if (pluginInstallation && pluginInstallation.pluginVersionId !== pluginVersion.id) {
+          await assertCapabilityComponentVersionCanChange(tx as unknown as Database, {
+            workspaceId: input.workspaceId,
+            pluginKey: input.pluginKey,
+            pluginInstallationId: pluginInstallation.id,
+            owner: {
+              kind: input.owner?.kind ?? "direct",
+              id: input.owner?.id ?? input.capabilityId,
+            },
+          });
+        }
+        if (!pluginInstallation) {
+          [pluginInstallation] = await tx
+            .insert(schema.capabilityPluginInstallations)
+            .values({
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              pluginId: plugin.id,
+              pluginVersionId: pluginVersion.id,
+              status: "active",
+              installedBySubjectId: input.subjectId,
+            })
+            .returning();
+        } else if (
+          pluginInstallation.pluginVersionId !== pluginVersion.id ||
+          pluginInstallation.status !== "active"
+        ) {
+          await tx
+            .delete(schema.capabilityFacetInstallations)
+            .where(
+              eq(schema.capabilityFacetInstallations.pluginInstallationId, pluginInstallation.id),
+            );
+          [pluginInstallation] = await tx
+            .update(schema.capabilityPluginInstallations)
+            .set({
+              pluginVersionId: pluginVersion.id,
+              status: "active",
+              version: pluginInstallation.version + 1,
+              installedBySubjectId: input.subjectId,
+              installedAt: now,
+              updatedAt: now,
+            })
+            .where(eq(schema.capabilityPluginInstallations.id, pluginInstallation.id))
+            .returning();
+        }
+        if (!pluginInstallation) {
+          throw new Error("Failed to create portable Skill plugin installation");
+        }
+
+        let [facetInstallation] = await tx
+          .select()
+          .from(schema.capabilityFacetInstallations)
+          .where(
+            and(
+              eq(schema.capabilityFacetInstallations.pluginInstallationId, pluginInstallation.id),
+              eq(schema.capabilityFacetInstallations.facetId, facet.id),
+            ),
+          )
+          .limit(1);
+        if (!facetInstallation) {
+          [facetInstallation] = await tx
+            .insert(schema.capabilityFacetInstallations)
+            .values({
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              pluginInstallationId: pluginInstallation.id,
+              facetId: facet.id,
+              status: "active",
+            })
+            .returning();
+        }
+        if (!facetInstallation) throw new Error("Failed to create portable Skill installation");
+
+        await tx
+          .insert(schema.capabilityComponentOwners)
+          .values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            facetInstallationId: facetInstallation.id,
+            ownerKind: input.owner?.kind ?? "direct",
+            ownerId: input.owner?.id ?? input.capabilityId,
+            removable: input.owner?.removable ?? true,
+          })
+          .onConflictDoNothing();
+
+        const compatibilityMetadata = {
+          platformVersion: 2,
+          source: input.source,
+          sourceUrl: input.sourceUrl,
+          repositoryUrl: input.repositoryUrl,
+          sourceCommit: input.sourceCommit,
+          sourcePath: input.sourcePath,
+          contentSha256: input.contentSha256,
+          pluginId: plugin.id,
+          pluginVersionId: pluginVersion.id,
+          facetId: facet.id,
+          provenance: "workspace_import",
+        };
+        await tx
+          .insert(schema.capabilityCatalogItems)
+          .values({
+            id: input.capabilityId,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            kind: "skill",
+            source: "manual",
+            name: input.name,
+            description: input.description,
+            category: "skills",
+            tags: ["skill", "imported", input.source],
+            homepageUrl: input.repositoryUrl,
+            installUrl: input.sourceUrl,
+            provenance: "workspace_import",
+            tier: "community",
+            metadata: compatibilityMetadata,
+            updatedAt: now,
+          })
+          .onConflictDoUpdate({
+            target: [schema.capabilityCatalogItems.workspaceId, schema.capabilityCatalogItems.id],
+            set: {
+              name: input.name,
+              description: input.description,
+              tags: ["skill", "imported", input.source],
+              homepageUrl: input.repositoryUrl,
+              installUrl: input.sourceUrl,
+              provenance: "workspace_import",
+              tier: "community",
+              metadata: compatibilityMetadata,
+              updatedAt: now,
+            },
+          });
+        const compatibilityInstallationMetadata = {
+          ...compatibilityMetadata,
+          pluginInstallationId: pluginInstallation.id,
+          facetInstallationId: facetInstallation.id,
+        };
+        await tx
+          .insert(schema.capabilityInstallations)
+          .values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            capabilityId: input.capabilityId,
+            kind: "skill",
+            status: "active",
+            config: { sourceCommit: input.sourceCommit },
+            metadata: compatibilityInstallationMetadata,
+            enabledAt: now,
+            updatedAt: now,
+          })
+          .onConflictDoUpdate({
+            target: [
+              schema.capabilityInstallations.workspaceId,
+              schema.capabilityInstallations.capabilityId,
+            ],
+            set: {
+              status: "active",
+              config: { sourceCommit: input.sourceCommit },
+              metadata: compatibilityInstallationMetadata,
+              enabledAt: now,
+              updatedAt: now,
+            },
+          });
+
+        return {
+          capabilityId: input.capabilityId,
+          pluginId: plugin.id,
+          pluginVersionId: pluginVersion.id,
+          facetId: facet.id,
+          pluginInstallationId: pluginInstallation.id,
+          facetInstallationId: facetInstallation.id,
+          installationVersion: pluginInstallation.version,
+          source: input.source,
+          sourceUrl: input.sourceUrl,
+          sourceCommit: input.sourceCommit,
+          contentSha256: input.contentSha256,
+          name: input.name,
+        };
+      }),
+  );
+}
+
+/** Return exact text artifacts for active v2 Skill installations. */
+export async function listInstalledPortableSkills(
+  db: Database,
+  workspaceId: string,
+): Promise<PortableSkillRuntime[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({
+        capabilityId: schema.capabilitySkillFacets.capabilityId,
+        facetId: schema.capabilitySkillFacets.facetId,
+        name: schema.capabilitySkillFacets.name,
+        description: schema.capabilitySkillFacets.description,
+        sourceUrl: schema.capabilitySkillFacets.sourceUrl,
+        sourceCommit: schema.capabilitySkillFacets.sourceCommit,
+        sourcePath: schema.capabilitySkillFacets.sourcePath,
+        contentSha256: schema.capabilitySkillFacets.contentSha256,
+        path: schema.capabilitySkillFiles.path,
+        content: schema.capabilitySkillFiles.content,
+      })
+      .from(schema.capabilityPluginInstallations)
+      .innerJoin(
+        schema.capabilityFacetInstallations,
+        eq(
+          schema.capabilityFacetInstallations.pluginInstallationId,
+          schema.capabilityPluginInstallations.id,
+        ),
+      )
+      .innerJoin(
+        schema.capabilitySkillFacets,
+        eq(schema.capabilitySkillFacets.facetId, schema.capabilityFacetInstallations.facetId),
+      )
+      .innerJoin(
+        schema.capabilitySkillFiles,
+        eq(schema.capabilitySkillFiles.skillFacetId, schema.capabilitySkillFacets.facetId),
+      )
+      .where(
+        and(
+          eq(schema.capabilityPluginInstallations.workspaceId, workspaceId),
+          eq(schema.capabilityPluginInstallations.status, "active"),
+          eq(schema.capabilityFacetInstallations.status, "active"),
+          sql`exists (
+            select 1
+            from ${schema.capabilityComponentOwners} owner
+            where owner.facet_installation_id = ${schema.capabilityFacetInstallations.id}
+              and ${effectiveCapabilityOwnerSql(sql`owner.owner_kind`, sql`owner.owner_id`)}
+          )`,
+        ),
+      )
+      .orderBy(asc(schema.capabilitySkillFacets.name), asc(schema.capabilitySkillFiles.path));
+    const skills = new Map<string, PortableSkillRuntime>();
+    for (const row of rows) {
+      const existing = skills.get(row.facetId);
+      if (existing) {
+        existing.files.push({ path: row.path, content: row.content });
+        continue;
+      }
+      skills.set(row.facetId, {
+        capabilityId: row.capabilityId,
+        name: row.name,
+        description: row.description,
+        sourceUrl: row.sourceUrl,
+        sourceCommit: row.sourceCommit,
+        sourcePath: row.sourcePath,
+        contentSha256: row.contentSha256,
+        files: [{ path: row.path, content: row.content }],
+      });
+    }
+    return [...skills.values()];
+  });
+}
+
+export async function getPortableSkillUninstallPreview(
+  db: Database,
+  workspaceId: string,
+  capabilityId: string,
+): Promise<PortableSkillUninstallPreview> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const context = await portableSkillOwnerContext(scopedDb, workspaceId, capabilityId);
+    if (!context) {
+      return {
+        capabilityId,
+        installed: false,
+        installationVersion: null,
+        directOwner: null,
+        remainingOwners: [],
+        removesRuntimeSkill: false,
+      };
+    }
+    const owners = await portableSkillOwners(scopedDb, context.facetInstallationId);
+    const directOwner = owners.find(
+      (owner) => owner.kind === "direct" && owner.id === capabilityId,
+    );
+    const remainingOwners = owners.filter(
+      (owner) => !(owner.kind === "direct" && owner.id === capabilityId),
+    );
+    return {
+      capabilityId,
+      installed: true,
+      installationVersion: context.installationVersion,
+      directOwner: directOwner ?? null,
+      remainingOwners,
+      removesRuntimeSkill: remainingOwners.length === 0,
+    };
+  });
+}
+
+export async function uninstallPortableSkill(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    capabilityId: string;
+    expectedInstallationVersion: number;
+  },
+): Promise<UninstallPortableSkillResult> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const context = await portableSkillOwnerContext(
+          tx as unknown as Database,
+          input.workspaceId,
+          input.capabilityId,
+          true,
+        );
+        if (!context) {
+          return {
+            capabilityId: input.capabilityId,
+            status: "not_installed",
+            remainingOwners: [],
+          };
+        }
+        if (context.installationVersion !== input.expectedInstallationVersion) {
+          throw new PortableSkillInstallationVersionConflictError(
+            input.capabilityId,
+            input.expectedInstallationVersion,
+            context.installationVersion,
+          );
+        }
+        await tx
+          .delete(schema.capabilityComponentOwners)
+          .where(
+            and(
+              eq(schema.capabilityComponentOwners.facetInstallationId, context.facetInstallationId),
+              eq(schema.capabilityComponentOwners.ownerKind, "direct"),
+              eq(schema.capabilityComponentOwners.ownerId, input.capabilityId),
+            ),
+          );
+        const remainingOwners = await portableSkillOwners(
+          tx as unknown as Database,
+          context.facetInstallationId,
+        );
+        if (remainingOwners.length > 0) {
+          await tx
+            .update(schema.capabilityPluginInstallations)
+            .set({
+              version: context.installationVersion + 1,
+              updatedAt: new Date(),
+            })
+            .where(eq(schema.capabilityPluginInstallations.id, context.pluginInstallationId));
+          return {
+            capabilityId: input.capabilityId,
+            status: "retained_by_other_owners",
+            remainingOwners,
+          };
+        }
+
+        const now = new Date();
+        await tx
+          .delete(schema.capabilityFacetInstallations)
+          .where(eq(schema.capabilityFacetInstallations.id, context.facetInstallationId));
+        const siblingFacets = await tx
+          .select({ id: schema.capabilityFacetInstallations.id })
+          .from(schema.capabilityFacetInstallations)
+          .where(
+            eq(
+              schema.capabilityFacetInstallations.pluginInstallationId,
+              context.pluginInstallationId,
+            ),
+          )
+          .limit(1);
+        await tx
+          .update(schema.capabilityPluginInstallations)
+          .set({
+            status: siblingFacets.length === 0 ? "disabled" : "active",
+            version: context.installationVersion + 1,
+            updatedAt: now,
+          })
+          .where(eq(schema.capabilityPluginInstallations.id, context.pluginInstallationId));
+        await tx
+          .update(schema.capabilityInstallations)
+          .set({ status: "disabled", updatedAt: now })
+          .where(
+            and(
+              eq(schema.capabilityInstallations.workspaceId, input.workspaceId),
+              eq(schema.capabilityInstallations.capabilityId, input.capabilityId),
+            ),
+          );
+        return {
+          capabilityId: input.capabilityId,
+          status: "uninstalled",
+          remainingOwners: [],
+        };
+      }),
+  );
+}
+
+async function portableSkillOwnerContext(
+  db: Database,
+  workspaceId: string,
+  capabilityId: string,
+  lock = false,
+): Promise<{
+  pluginInstallationId: string;
+  facetInstallationId: string;
+  installationVersion: number;
+} | null> {
+  let query = db
+    .select({
+      pluginInstallationId: schema.capabilityPluginInstallations.id,
+      facetInstallationId: schema.capabilityFacetInstallations.id,
+      installationVersion: schema.capabilityPluginInstallations.version,
+    })
+    .from(schema.capabilityComponentOwners)
+    .innerJoin(
+      schema.capabilityFacetInstallations,
+      eq(
+        schema.capabilityFacetInstallations.id,
+        schema.capabilityComponentOwners.facetInstallationId,
+      ),
+    )
+    .innerJoin(
+      schema.capabilityPluginInstallations,
+      eq(
+        schema.capabilityPluginInstallations.id,
+        schema.capabilityFacetInstallations.pluginInstallationId,
+      ),
+    )
+    .innerJoin(
+      schema.capabilitySkillFacets,
+      eq(schema.capabilitySkillFacets.facetId, schema.capabilityFacetInstallations.facetId),
+    )
+    .where(
+      and(
+        eq(schema.capabilityComponentOwners.workspaceId, workspaceId),
+        eq(schema.capabilityComponentOwners.ownerKind, "direct"),
+        eq(schema.capabilityComponentOwners.ownerId, capabilityId),
+      ),
+    )
+    .limit(2);
+  if (lock) query = query.for("update") as typeof query;
+  const rows = await query;
+  if (rows.length > 1) {
+    throw new Error(`Portable Skill ${capabilityId} has duplicate direct owners`);
+  }
+  return rows[0] ?? null;
+}
+
+async function portableSkillOwners(
+  db: Database,
+  facetInstallationId: string,
+): Promise<PortableSkillOwner[]> {
+  const rows = await db
+    .select({
+      kind: schema.capabilityComponentOwners.ownerKind,
+      id: schema.capabilityComponentOwners.ownerId,
+      removable: schema.capabilityComponentOwners.removable,
+    })
+    .from(schema.capabilityComponentOwners)
+    .where(
+      and(
+        eq(schema.capabilityComponentOwners.facetInstallationId, facetInstallationId),
+        effectiveCapabilityOwnerSql(
+          schema.capabilityComponentOwners.ownerKind,
+          schema.capabilityComponentOwners.ownerId,
+        ),
+      ),
+    )
+    .orderBy(
+      asc(schema.capabilityComponentOwners.ownerKind),
+      asc(schema.capabilityComponentOwners.ownerId),
+    );
+  return rows.map((row) => {
+    if (
+      row.kind !== "direct" &&
+      row.kind !== "plugin" &&
+      row.kind !== "pack" &&
+      row.kind !== "migration"
+    ) {
+      throw new Error(`Unknown portable Skill owner kind: ${row.kind}`);
+    }
+    return { kind: row.kind, id: row.id, removable: row.removable };
+  });
+}
+
 export async function enableCapabilityInstallation(
   db: Database,
   input: EnableCapabilityInstallationInput,
@@ -6109,6 +6946,15 @@ export async function listEnabledMcpCapabilityServers(
             eq(schema.capabilityInstallations.kind, "mcp"),
             eq(schema.capabilityInstallations.status, "active"),
             eq(schema.capabilityCatalogItems.stale, false),
+            sql`(
+              ${schema.capabilityInstallations.metadata} ->> 'facetInstallationId' is null
+              or exists (
+                select 1
+                from ${schema.capabilityComponentOwners} owner
+                where owner.facet_installation_id::text = ${schema.capabilityInstallations.metadata} ->> 'facetInstallationId'
+                  and ${effectiveCapabilityOwnerSql(sql`owner.owner_kind`, sql`owner.owner_id`)}
+              )
+            )`,
           ),
         )
         .orderBy(asc(schema.capabilityCatalogItems.name)),
@@ -6341,6 +7187,127 @@ export async function createConnection(
         await setSubjectRlsContext(scopedDb, input.subjectId);
       }
       return await createConnectionInScope(scopedDb, input);
+    },
+  );
+}
+
+/**
+ * Serialize one provider-principal/owner connection generation. Distinct OAuth
+ * starts for the same principal converge on one row, while an explicit
+ * reconnect remains fenced to the exact Connection version captured in state.
+ */
+export async function persistProviderOAuthConnection(
+  db: Database,
+  input: PersistProviderOAuthConnectionInput,
+): Promise<ConnectionMetadataWithVerification | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      if (input.subjectId) {
+        await setSubjectRlsContext(scopedDb, input.subjectId);
+      }
+      return await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        const ownerKey = input.subjectId ?? "workspace";
+        await tx.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${`provider-oauth-connection:${input.workspaceId}:${ownerKey}:${input.providerDomain}:${input.providerFamily}:${input.providerPrincipalId}`}, 0))`,
+        );
+        const exactOwner = connectionExactSubject(input.subjectId ?? null);
+        const requested = input.requestedConnectionId
+          ? (
+              await tx
+                .select(connectionMetadataColumns)
+                .from(schema.connections)
+                .where(
+                  and(
+                    eq(schema.connections.workspaceId, input.workspaceId),
+                    eq(schema.connections.id, input.requestedConnectionId),
+                    exactOwner,
+                  ),
+                )
+                .for("update")
+                .limit(1)
+            )[0]
+          : null;
+        if (
+          input.requestedConnectionId &&
+          (!requested ||
+            requested.version !== input.requestedConnectionVersion ||
+            requested.providerDomain !== input.providerDomain ||
+            requested.kind !== "oauth2" ||
+            requested.metadata.credentialRole !== input.credentialRole ||
+            requested.metadata.providerFamily !== input.providerFamily ||
+            requested.metadata.providerPrincipalId !== input.providerPrincipalId)
+        ) {
+          return null;
+        }
+        const existing =
+          requested ??
+          (
+            await tx
+              .select(connectionMetadataColumns)
+              .from(schema.connections)
+              .where(
+                and(
+                  eq(schema.connections.workspaceId, input.workspaceId),
+                  exactOwner,
+                  eq(schema.connections.providerDomain, input.providerDomain),
+                  eq(schema.connections.kind, "oauth2"),
+                  sql`${schema.connections.metadata} ->> 'credentialRole' = ${input.credentialRole}`,
+                  sql`${schema.connections.metadata} ->> 'providerFamily' = ${input.providerFamily}`,
+                  sql`${schema.connections.metadata} ->> 'providerPrincipalId' = ${input.providerPrincipalId}`,
+                ),
+              )
+              .orderBy(desc(schema.connections.updatedAt), desc(schema.connections.id))
+              .for("update")
+              .limit(1)
+          )[0];
+        if (!existing) {
+          return await createConnectionInScope(tx, input);
+        }
+        if (
+          !input.requestedConnectionId &&
+          existing.grantedScopes.some((scope) => !(input.grantedScopes ?? []).includes(scope))
+        ) {
+          return null;
+        }
+        const existingPresetIds = Array.isArray(existing.metadata.authorizedPresetIds)
+          ? existing.metadata.authorizedPresetIds.filter(
+              (value): value is string => typeof value === "string",
+            )
+          : [];
+        const incomingPresetIds = Array.isArray(input.metadata?.authorizedPresetIds)
+          ? input.metadata.authorizedPresetIds.filter(
+              (value): value is string => typeof value === "string",
+            )
+          : [];
+        return await updateConnectionInScope(tx, {
+          workspaceId: input.workspaceId,
+          connectionId: existing.id,
+          visibleToSubjectId: input.visibleToSubjectId,
+          expectedVersion: existing.version,
+          subjectId: input.subjectId ?? null,
+          providerDomain: input.providerDomain,
+          kind: "oauth2",
+          status: input.status ?? "active",
+          credentialEncrypted: input.credentialEncrypted,
+          grantedScopes: input.grantedScopes ?? [],
+          expiresAt: input.expiresAt ?? null,
+          metadata: {
+            ...existing.metadata,
+            ...(input.metadata ?? {}),
+            ...(existingPresetIds.length > 0 || incomingPresetIds.length > 0
+              ? {
+                  authorizedPresetIds: [
+                    ...new Set([...existingPresetIds, ...incomingPresetIds]),
+                  ].sort(),
+                }
+              : {}),
+          },
+          updatedBySubjectId: input.updatedBySubjectId ?? input.createdBySubjectId ?? null,
+        });
+      });
     },
   );
 }
@@ -12919,7 +13886,10 @@ export async function getRigVersionById(
 
 export type RigProviderImageBuildClaim =
   | { status: "claimed"; image: RigProviderImage }
-  | { status: "ready" | "in_progress" | "unsupported" | "conflict"; image: RigProviderImage };
+  | {
+      status: "ready" | "in_progress" | "unsupported" | "conflict";
+      image: RigProviderImage;
+    };
 
 async function retainRigProviderImageArtifacts(
   db: Database,
@@ -34367,7 +35337,10 @@ export async function acquireSandboxLeaseReaperHold(
       await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
         const rows = await tx.execute<
-          LeaseRow & { reaper_hold_active: boolean; provider_hold_safe: boolean }
+          LeaseRow & {
+            reaper_hold_active: boolean;
+            provider_hold_safe: boolean;
+          }
         >(sql`
           select lease.*,
             (lease.reaper_hold_id is not null and lease.reaper_hold_until > now())
@@ -34403,16 +35376,28 @@ export async function acquireSandboxLeaseReaperHold(
           return { status: "held_by_other" as const, lease: mapLeaseRow(row) };
         }
         if (renewing && row.reaper_hold_reason !== reason) {
-          return { status: "reason_conflict" as const, lease: mapLeaseRow(row) };
+          return {
+            status: "reason_conflict" as const,
+            lease: mapLeaseRow(row),
+          };
         }
         if (row.archive_capture_id !== null || row.rotation_reason === "teardown_claim") {
-          return { status: "teardown_in_progress" as const, lease: mapLeaseRow(row) };
+          return {
+            status: "teardown_in_progress" as const,
+            lease: mapLeaseRow(row),
+          };
         }
         if (row.rotation_requested_at !== null) {
-          return { status: "rotation_in_progress" as const, lease: mapLeaseRow(row) };
+          return {
+            status: "rotation_in_progress" as const,
+            lease: mapLeaseRow(row),
+          };
         }
         if (!row.provider_hold_safe) {
-          return { status: "provider_deadline_conflict" as const, lease: mapLeaseRow(row) };
+          return {
+            status: "provider_deadline_conflict" as const,
+            lease: mapLeaseRow(row),
+          };
         }
         const held = await tx.execute<LeaseRow>(sql`
           update sandbox_leases set
@@ -34430,7 +35415,11 @@ export async function acquireSandboxLeaseReaperHold(
         if (!lease) {
           return { status: "lease_fenced" as const, lease: mapLeaseRow(row) };
         }
-        return { status: "held" as const, renewed: renewing, lease: mapLeaseRow(lease) };
+        return {
+          status: "held" as const,
+          renewed: renewing,
+          lease: mapLeaseRow(lease),
+        };
       }),
   );
 }
@@ -45014,7 +46003,10 @@ export async function settleSessionAttemptInterruptions(
                       turnGeneration: turn.executionGeneration,
                       turnAttemptId: attemptId,
                       turnAssociation: null,
-                      payload: { status: "idle", reason: "paused_recovery_settled" },
+                      payload: {
+                        status: "idle",
+                        reason: "paused_recovery_settled",
+                      },
                       clientEventId: `opengeni:paused-recovery-settled:${attemptId}`,
                       occurredAt: now,
                     },
@@ -50750,6 +51742,13 @@ function mapPackInstallation(row: typeof schema.packInstallations.$inferSelect):
     workspaceId: row.workspaceId,
     packId: row.packId,
     status: row.status as PackInstallationStatus,
+    version: row.version,
+    manifestSnapshot: row.manifestSnapshot
+      ? (row.manifestSnapshot as unknown as CapabilityPack)
+      : null,
+    manifestDigest: row.manifestDigest,
+    selectedRigId: row.selectedRigId,
+    installedBySubjectId: row.installedBySubjectId,
     metadata: row.metadata,
     enabledAt: row.enabledAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -50903,6 +51902,15 @@ function mapCapabilityCatalogItem(
     staleAt: row.staleAt?.toISOString() ?? null,
     tools: [],
     runtime,
+    // Lifecycle is projected with installation/connection truth by
+    // @opengeni/core. A storage row on its own is only available for setup.
+    lifecycle: {
+      status: "available",
+      readiness: runtime.available ? "setup_required" : "unavailable",
+      detail: runtime.notes,
+      managedBy: "workspace",
+    },
+    actions: [],
     enabled: false,
     enabledReason: null,
     // Overwritten by applyCapabilityEnablement in @opengeni/core, which knows
@@ -51490,6 +52498,58 @@ export {
   type ResolveConnectionCredentialInput,
   type ResolveConnectionCredentialResult,
 } from "./connection-token-resolver";
+export {
+  CapabilityComponentVersionConflictError,
+  cleanupOrphanedCapabilityComponents,
+  effectiveCapabilityOwnerSql,
+  type CapabilityComponentOwnerIdentity,
+} from "./capability-components";
+export {
+  adoptPackComponentReferences,
+  finalizePackComponentOwnership,
+  listPackInstallationComponents,
+  PackComponentResolutionError,
+  previewPackComponentRelease,
+  recordPackInlineSkillComponent,
+  releasePackComponents,
+  resolvePackComponentReferences,
+  resolvePackInlineSkillReferences,
+  type PackInlineSkillRequirement,
+  type StoredPackInstallationComponent,
+} from "./pack-components";
+export {
+  deferPackInstallationOperation,
+  finalizePackInstallationOperation,
+  finalizePackUninstallOperation,
+  PackManifestChangedError,
+  PackOperationClaimLostError,
+  PackOperationInProgressError,
+  PackInstallationVersionConflictError,
+  PackInstallationVersionRequiredError,
+  PackOperationIdempotencyError,
+  preparePackInstallationOperation,
+  preparePackUninstallOperation,
+  touchPackInstallationOperation,
+  type PreparedPackInstallation,
+} from "./pack-installations";
+export {
+  checkpointPluginPackageOperation,
+  deferPluginPackageOperation,
+  finalizePluginPackageInstall,
+  getInstalledPluginPackage,
+  getPluginPackageUninstallPreview,
+  installPluginMcpReference,
+  listInstalledPluginPackages,
+  PluginInstallationVersionConflictError,
+  PluginInstallationVersionRequiredError,
+  PluginOperationIdempotencyError,
+  preparePluginPackageInstall,
+  uninstallPluginPackage,
+  type InstalledPluginPackage,
+  type InstalledPluginPackageSummary,
+  type PluginBomComponent,
+  type PreparedPluginPackage,
+} from "./plugin-packages";
 
 export * from "./workspace-artifacts";
 export * from "./transcription-recordings";

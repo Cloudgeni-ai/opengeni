@@ -36,6 +36,7 @@ import {
   grantWorkspaceAccess,
   listGitHubInstallationAccessForWorkspace,
   initializeSessionStartAtomically,
+  listInstalledPortableSkills,
   listSessionEvents,
   listScheduledTasks,
   listOutstandingSessionSystemUpdates,
@@ -2615,11 +2616,9 @@ describe("API component integration", () => {
         .filter((item) => item.id.startsWith("api:"))
         .map((item) => [item.id, item.metadata.endpointPath]),
     );
-    expect(apiPaths).toMatchObject({
-      "api:github-app": "/v1/workspaces/{workspaceId}/github/app",
-      "api:documents": "/v1/workspaces/{workspaceId}/document-bases",
-      "api:social": "/v1/workspaces/{workspaceId}/social/connections",
-      "api:scheduled-tasks": "/v1/workspaces/{workspaceId}/scheduled-tasks",
+    expect(apiPaths).toEqual({
+      "api:x": undefined,
+      "api:reddit": undefined,
     });
     expect(catalog.items.find((item) => item.id === capabilityId)).toMatchObject({
       enabled: true,
@@ -3719,7 +3718,7 @@ describe("API component integration", () => {
     expect(capabilityInstallationAfterDelete?.status).toBe("disabled");
   });
 
-  test("allows only one enabled pack per workspace to declare a sandbox image", async () => {
+  test("installs image Packs through explicit Rigs and shares identical inline Skills", async () => {
     const app = createApp({
       settings: testSettings({
         databaseUrl: services.databaseUrl,
@@ -3731,6 +3730,7 @@ describe("API component integration", () => {
     });
     const workspaceId = await defaultWorkspaceId(app);
     const suffix = crypto.randomUUID().slice(0, 8);
+    const skillName = `infra-ops-${suffix}`;
     const imagePackManifest = (id: string, image: string, modalImageId?: string) => ({
       id,
       name: `Pack ${id}`,
@@ -3742,13 +3742,12 @@ describe("API component integration", () => {
       ...(modalImageId ? { sandboxProviderImages: { modal: { imageId: modalImageId } } } : {}),
       skills: [
         {
-          name: "infra-ops",
+          name: skillName,
           description: "Operate infrastructure with the pack runbook.",
           files: [
             {
               path: "SKILL.md",
-              content:
-                "---\nname: infra-ops\ndescription: Operate infrastructure.\n---\n# Infra ops\n",
+              content: `---\nname: ${skillName}\ndescription: Operate infrastructure.\n---\n# Infra ops\n`,
             },
             { path: "references/runbook.md", content: "Runbook." },
           ],
@@ -3766,10 +3765,12 @@ describe("API component integration", () => {
     const packB = `img-b-${suffix}`;
     const packAImage =
       "example.com/sandbox-a@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const packBImage =
+      "example.com/sandbox-b@sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
     const packAModalImageId = "im-1234567890123456789012";
     for (const [packId, image, modalImageId] of [
       [packA, packAImage, packAModalImageId],
-      [packB, "example.com/sandbox-b@sha256:bbbb", undefined],
+      [packB, packBImage, undefined],
     ] as const) {
       const registered = await app.request(workspacePath(workspaceId, "/packs"), {
         method: "POST",
@@ -3779,12 +3780,155 @@ describe("API component integration", () => {
       expect(registered.status).toBe(201);
     }
 
-    const enabledA = await app.request(workspacePath(workspaceId, `/packs/${packA}/enable`), {
+    // Packs that compose runtime components cannot use the legacy enable
+    // paths. They must be reviewed against an explicit Rig first.
+    const legacyEnableA = await app.request(workspacePath(workspaceId, `/packs/${packA}/enable`), {
       method: "POST",
       body: JSON.stringify({}),
       headers: { "content-type": "application/json" },
     });
-    expect(enabledA.status).toBe(201);
+    expect(legacyEnableA.status).toBe(409);
+    expect(await legacyEnableA.text()).toContain("Pack installation flow");
+    const capabilityEnableB = await app.request(
+      workspacePath(workspaceId, `/capabilities/${encodeURIComponent(`pack:${packB}`)}/enable`),
+      {
+        method: "POST",
+        body: JSON.stringify({}),
+        headers: { "content-type": "application/json" },
+      },
+    );
+    expect(capabilityEnableB.status).toBe(409);
+
+    const previewWithoutRig = await app.request(
+      workspacePath(workspaceId, `/packs/${packA}/installation-preview`),
+      {
+        method: "POST",
+        body: JSON.stringify({}),
+        headers: { "content-type": "application/json" },
+      },
+    );
+    expect(previewWithoutRig.status).toBe(200);
+    expect(await previewWithoutRig.json()).toMatchObject({
+      ready: false,
+      rig: { required: true, status: "missing" },
+      legacyInlineSkillCount: 1,
+      legacySandboxImage: packAImage,
+    });
+
+    const createRig = async (name: string, image: string): Promise<{ id: string }> => {
+      const response = await app.request(workspacePath(workspaceId, "/rigs"), {
+        method: "POST",
+        body: JSON.stringify({
+          name,
+          image,
+          checks: [],
+          credentialHooks: [],
+          defaultVariableSetIds: [],
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      const body = await response.text();
+      expect(response.status, body).toBe(201);
+      return JSON.parse(body) as { id: string };
+    };
+    const [rigA, rigB] = await Promise.all([
+      createRig(`Pack A ${suffix}`, packAImage),
+      createRig(`Pack B ${suffix}`, packBImage),
+    ]);
+
+    const previewPack = async (
+      packId: string,
+      rigId: string,
+    ): Promise<{
+      manifestDigest: string;
+      installationVersion: number | null;
+      ready: boolean;
+      components: Array<{
+        key: string;
+        kind: string;
+        status: string;
+        resolvedId: string | null;
+      }>;
+    }> => {
+      const response = await app.request(
+        workspacePath(workspaceId, `/packs/${packId}/installation-preview`),
+        {
+          method: "POST",
+          body: JSON.stringify({ rigId }),
+          headers: { "content-type": "application/json" },
+        },
+      );
+      const body = await response.text();
+      expect(response.status, body).toBe(200);
+      return JSON.parse(body) as {
+        manifestDigest: string;
+        installationVersion: number | null;
+        ready: boolean;
+        components: Array<{
+          key: string;
+          kind: string;
+          status: string;
+          resolvedId: string | null;
+        }>;
+      };
+    };
+    const installPack = async (
+      packId: string,
+      rigId: string,
+      preview: Awaited<ReturnType<typeof previewPack>>,
+    ): Promise<{ status: string; selectedRigId: string | null; version: number }> => {
+      const response = await app.request(workspacePath(workspaceId, `/packs/${packId}/install`), {
+        method: "POST",
+        body: JSON.stringify({
+          expectedManifestDigest: preview.manifestDigest,
+          ...(preview.installationVersion === null
+            ? {}
+            : { expectedInstallationVersion: preview.installationVersion }),
+          rigId,
+          idempotencyKey: crypto.randomUUID(),
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      const body = await response.text();
+      expect(response.status, body).toBe(preview.installationVersion === null ? 201 : 200);
+      return JSON.parse(body) as {
+        status: string;
+        selectedRigId: string | null;
+        version: number;
+      };
+    };
+
+    const previewA = await previewPack(packA, rigA.id);
+    expect(previewA).toMatchObject({ ready: true, installationVersion: null });
+    expect(previewA.components).toEqual([
+      expect.objectContaining({
+        key: `inline-skill/${skillName}`,
+        kind: "inline_skill",
+        status: "ready",
+      }),
+    ]);
+    const installedA = await installPack(packA, rigA.id, previewA);
+    expect(installedA).toMatchObject({ status: "active", selectedRigId: rigA.id });
+
+    const previewB = await previewPack(packB, rigB.id);
+    expect(previewB).toMatchObject({ ready: true, installationVersion: null });
+    expect(previewB.components).toEqual([
+      expect.objectContaining({
+        key: `inline-skill/${skillName}`,
+        kind: "inline_skill",
+        status: "ready",
+      }),
+    ]);
+    expect(previewB.components[0]?.resolvedId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+    const installedB = await installPack(packB, rigB.id, previewB);
+    expect(installedB).toMatchObject({ status: "active", selectedRigId: rigB.id });
+    expect(
+      (await listInstalledPortableSkills(dbClient.db, workspaceId)).filter(
+        (skill) => skill.name === skillName,
+      ),
+    ).toHaveLength(1);
 
     // The catalog surfaces the pack's runtime composition (image ref and
     // skill names) without leaking skill file content.
@@ -3797,39 +3941,12 @@ describe("API component integration", () => {
     expect(packAItem?.metadata.sandboxProviderImages).toEqual({
       modal: { imageId: packAModalImageId },
     });
-    expect(packAItem?.metadata.skills).toEqual(["infra-ops"]);
+    expect(packAItem?.metadata.skills).toEqual([skillName]);
     expect(JSON.stringify(packAItem?.metadata)).not.toContain("spoofed");
     expect(JSON.stringify(packAItem?.metadata)).not.toContain("Runbook.");
 
-    // A second image-declaring pack cannot be enabled, on either enable path.
-    const enabledB = await app.request(workspacePath(workspaceId, `/packs/${packB}/enable`), {
-      method: "POST",
-      body: JSON.stringify({}),
-      headers: { "content-type": "application/json" },
-    });
-    expect(enabledB.status).toBe(409);
-    expect(await enabledB.text()).toContain(
-      "only one enabled pack per workspace may declare sandboxImage",
-    );
-    const capabilityEnabledB = await app.request(
-      workspacePath(workspaceId, `/capabilities/${encodeURIComponent(`pack:${packB}`)}/enable`),
-      {
-        method: "POST",
-        body: JSON.stringify({}),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(capabilityEnabledB.status).toBe(409);
-
-    // Re-enabling the already-enabled image pack stays allowed.
-    const reenabledA = await app.request(workspacePath(workspaceId, `/packs/${packA}/enable`), {
-      method: "POST",
-      body: JSON.stringify({}),
-      headers: { "content-type": "application/json" },
-    });
-    expect(reenabledA.status).toBe(200);
-
-    // Disabling the first pack frees the slot for the second.
+    // V2 Packs cannot be disabled or unregistered through legacy paths while
+    // their component ownership ledger is active.
     const disabledA = await app.request(
       workspacePath(workspaceId, `/capabilities/${encodeURIComponent(`pack:${packA}`)}/disable`),
       {
@@ -3838,16 +3955,96 @@ describe("API component integration", () => {
         headers: { "content-type": "application/json" },
       },
     );
-    expect(disabledA.status).toBeLessThan(300);
-    const enabledBAfterDisable = await app.request(
-      workspacePath(workspaceId, `/packs/${packB}/enable`),
+    expect(disabledA.status).toBe(409);
+    expect(await disabledA.text()).toContain("Pack uninstall preview flow");
+    const unregisterActiveA = await app.request(workspacePath(workspaceId, `/packs/${packA}`), {
+      method: "DELETE",
+    });
+    expect(unregisterActiveA.status).toBe(409);
+
+    const uninstallPreviewAResponse = await app.request(
+      workspacePath(workspaceId, `/packs/${packA}/uninstall-preview`),
+    );
+    expect(uninstallPreviewAResponse.status).toBe(200);
+    const uninstallPreviewA = (await uninstallPreviewAResponse.json()) as {
+      installed: boolean;
+      installationVersion: number;
+      components: Array<{
+        key: string;
+        kind: string;
+        retainedByOtherOwners: boolean;
+      }>;
+    };
+    expect(uninstallPreviewA).toMatchObject({ installed: true });
+    expect(uninstallPreviewA.components).toEqual([
+      expect.objectContaining({
+        key: `inline-skill/${skillName}`,
+        kind: "inline_skill",
+        retainedByOtherOwners: true,
+      }),
+    ]);
+    const uninstallAResponse = await app.request(
+      workspacePath(workspaceId, `/packs/${packA}/installation`),
       {
-        method: "POST",
-        body: JSON.stringify({}),
+        method: "DELETE",
+        body: JSON.stringify({
+          expectedInstallationVersion: uninstallPreviewA.installationVersion,
+          idempotencyKey: crypto.randomUUID(),
+        }),
         headers: { "content-type": "application/json" },
       },
     );
-    expect(enabledBAfterDisable.status).toBe(201);
+    const uninstallABody = await uninstallAResponse.text();
+    expect(uninstallAResponse.status, uninstallABody).toBe(200);
+    expect(JSON.parse(uninstallABody)).toMatchObject({
+      packId: packA,
+      status: "uninstalled",
+    });
+    expect(
+      (await listInstalledPortableSkills(dbClient.db, workspaceId)).filter(
+        (skill) => skill.name === skillName,
+      ),
+    ).toHaveLength(1);
+
+    const unregisterA = await app.request(workspacePath(workspaceId, `/packs/${packA}`), {
+      method: "DELETE",
+    });
+    expect(unregisterA.status).toBe(204);
+
+    const uninstallPreviewBResponse = await app.request(
+      workspacePath(workspaceId, `/packs/${packB}/uninstall-preview`),
+    );
+    expect(uninstallPreviewBResponse.status).toBe(200);
+    const uninstallPreviewB = (await uninstallPreviewBResponse.json()) as {
+      installationVersion: number;
+      components: Array<{ retainedByOtherOwners: boolean }>;
+    };
+    expect(uninstallPreviewB.components).toEqual([
+      expect.objectContaining({ retainedByOtherOwners: false }),
+    ]);
+    const uninstallBResponse = await app.request(
+      workspacePath(workspaceId, `/packs/${packB}/installation`),
+      {
+        method: "DELETE",
+        body: JSON.stringify({
+          expectedInstallationVersion: uninstallPreviewB.installationVersion,
+          idempotencyKey: crypto.randomUUID(),
+        }),
+        headers: { "content-type": "application/json" },
+      },
+    );
+    const uninstallBBody = await uninstallBResponse.text();
+    expect(uninstallBResponse.status, uninstallBBody).toBe(200);
+    expect(JSON.parse(uninstallBBody)).toMatchObject({
+      packId: packB,
+      status: "uninstalled",
+      retainedComponents: [],
+    });
+    expect(
+      (await listInstalledPortableSkills(dbClient.db, workspaceId)).filter(
+        (skill) => skill.name === skillName,
+      ),
+    ).toHaveLength(0);
   });
 
   test("keeps scheduled task persistence consistent when schedule sync fails", async () => {

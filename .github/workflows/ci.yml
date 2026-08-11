@@ -677,6 +677,13 @@ jobs:
           OPENGENI_CODEX_QUOTA_EVIDENCE_DIR: /tmp/codex-quota-evidence
         run: bun scripts/run-browser-e2e.ts ./test/e2e/codex-overview.e2e.ts
 
+      - name: Capabilities control-center browser acceptance
+        if: ${{ matrix.lane == 'interaction' }}
+        run: |
+          bun scripts/run-browser-e2e.ts \
+            ./test/e2e/custom-api-control-center.browser.e2e.ts \
+            ./test/e2e/source-packages-control-center.browser.e2e.ts
+
       - name: Queue surface browser acceptance
         if: ${{ matrix.lane == 'interaction' }}
         id: queue_surface_browser

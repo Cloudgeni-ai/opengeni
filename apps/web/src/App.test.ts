@@ -1314,7 +1314,7 @@ describe("composer reasoning-effort picker (full host enum)", () => {
   function clientConfig(patch: Partial<ClientConfig> = {}): ClientConfig {
     return {
       deploymentRevision: "rev-1",
-      apiContractRevision: "2026-07-workspace-artifacts-v1",
+      apiContractRevision: "2026-08-social-provider-tools-v1",
       defaultModel: "gpt-5.6-sol",
       allowedModels: ["gpt-5.6-sol"],
       models: [],
@@ -2050,6 +2050,13 @@ function capabilityItem(
     staleAt: null,
     tools: [],
     runtime: { available: false, notes: null },
+    lifecycle: {
+      status: "available",
+      readiness: "setup_required",
+      detail: null,
+      managedBy: null,
+    },
+    actions: [],
     enabled: false,
     enabledReason: null,
     connectionRef: null,

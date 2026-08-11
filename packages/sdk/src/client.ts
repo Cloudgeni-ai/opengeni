@@ -83,6 +83,29 @@ import type {
   CapabilityCatalogItem,
   CapabilityCatalogResponse,
   CapabilityInstallation,
+  ApiIntegrationPreview,
+  ApiIntegrationOAuthStartRequest,
+  ApiIntegrationUninstallPreview,
+  InstallApiIntegrationRequest,
+  InstalledApiIntegration,
+  IntegrationFeatureMutationResult,
+  IntegrationFeatureRemovalResult,
+  IntegrationInstanceFeaturesResponse,
+  ListApiIntegrationPresetsResponse,
+  ListApiIntegrationsResponse,
+  MutateIntegrationFeatureRequest,
+  PreviewApiIntegrationRequest,
+  UninstallApiIntegrationRequest,
+  UninstallApiIntegrationResult,
+  UpsertIntegrationFeatureRequest,
+  PreviewPluginRequest,
+  PluginPreview,
+  InstallPluginRequest,
+  InstalledPlugin,
+  ListInstalledPluginsResponse,
+  PluginUninstallPreview,
+  UninstallPluginRequest,
+  UninstallPluginResult,
   AddDocumentRequest,
   CreateKnowledgeDropRequest,
   MoveDocumentRequest,
@@ -96,6 +119,8 @@ import type {
   CreateApiKeyRequest,
   CreateApiKeyResponse,
   CreateCapabilityCatalogItemRequest,
+  InstallSkillRequest,
+  InstalledSkill,
   CreateCheckoutRequest,
   CreateCheckoutResponse,
   OpenGeniSlackBotInstallRequest,
@@ -133,7 +158,9 @@ import type {
   GetPackResponse,
   GitHubAppInfo,
   GitHubRepositoriesResponse,
+  GoogleDriveBrowseResponse,
   GoogleDriveDisconnectRequest,
+  SaveGoogleDriveIntegrationSourceRequest,
   GoogleDriveLifecycleActionRequest,
   KnowledgeMemory,
   KnowledgeMemorySearchRequest,
@@ -149,12 +176,15 @@ import type {
   SwapActiveSandboxRequest,
   SwapActiveSandboxResponse,
   ListWorkspaceMembersResponse,
+  InstallPackRequest,
+  PackInstallationPreview,
   ListSlackUserLinkAccessRequestsResponse,
   PrepareSlackUserLinkAccessRequest,
   SlackUserLinkAccessMutationRequest,
   SlackUserLinkAccessRequest,
   ApproveSlackUserLinkAccessRequest,
   PackInstallation,
+  PackUninstallPreview,
   LatencyMode,
   ReasoningEffort,
   RetainedScreenshotDownload,
@@ -172,12 +202,16 @@ import type {
   WorkspaceVideoGenerationSettings,
   RegisterCapabilityPackRequest,
   ResourceRef,
+  PreviewPackInstallationRequest,
+  PreviewSkillImportRequest,
   ScheduledTask,
   ScheduledTaskRun,
   Session,
   SessionListResponse,
   AgentTopologyPageResponse,
   UpdateSessionPinRequest,
+  UninstallPackRequest,
+  UninstallPackResult,
   SessionEvent,
   SessionEventCompactResult,
   SessionEventCompactResultOptions,
@@ -290,6 +324,10 @@ import type {
   OAuthStartResponse,
   SocialConnection,
   SocialOAuthStartRequest,
+  SkillImportPreview,
+  SkillUninstallPreview,
+  UninstallSkillRequest,
+  UninstallSkillResult,
 } from "./types";
 import { GENERATED_VIDEO_MAX_BYTES } from "./types";
 import { parseRetainedGeneratedImageReference } from "./retained-artifacts";
@@ -4255,6 +4293,53 @@ export class OpenGeniClient {
     );
   }
 
+  /** Resolve pinned components, Variable Set, and Rig requirements before installation. */
+  async previewPackInstallation(
+    workspaceId: string,
+    packId: string,
+    request: PreviewPackInstallationRequest = {},
+  ): Promise<PackInstallationPreview> {
+    return await this.requestJson<PackInstallationPreview>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/packs/${encodeURIComponent(packId)}/installation-preview`,
+      request,
+    );
+  }
+
+  /** Install, update, or repair a Pack from an exact previewed manifest. */
+  async installPack(
+    workspaceId: string,
+    packId: string,
+    request: InstallPackRequest,
+  ): Promise<PackInstallation> {
+    return await this.requestJson<PackInstallation>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/packs/${encodeURIComponent(packId)}/install`,
+      request,
+    );
+  }
+
+  /** Preview which Pack-owned components will be retained by other owners. */
+  async previewPackUninstall(workspaceId: string, packId: string): Promise<PackUninstallPreview> {
+    return await this.requestJson<PackUninstallPreview>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/packs/${encodeURIComponent(packId)}/uninstall-preview`,
+    );
+  }
+
+  /** Safely release Pack ownership and disable only now-ownerless components. */
+  async uninstallPack(
+    workspaceId: string,
+    packId: string,
+    request: UninstallPackRequest,
+  ): Promise<UninstallPackResult> {
+    return await this.requestJson<UninstallPackResult>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/packs/${encodeURIComponent(packId)}/installation`,
+      request,
+    );
+  }
+
   /** Unregister a workspace-scoped pack (built-in packs cannot be deleted). */
   async deletePack(workspaceId: string, packId: string): Promise<void> {
     await this.requestVoid(
@@ -4326,6 +4411,298 @@ export class OpenGeniClient {
         ...(options.query !== undefined ? { query: options.query } : {}),
         ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
       },
+    );
+  }
+
+  /** List installed protocol-neutral OpenAPI and GraphQL Integrations. */
+  async listApiIntegrations(workspaceId: string): Promise<ListApiIntegrationsResponse> {
+    return await this.requestJson<ListApiIntegrationsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/integrations`,
+    );
+  }
+
+  /** List curated provider presets without exposing deployment OAuth credentials. */
+  async listApiIntegrationPresets(workspaceId: string): Promise<ListApiIntegrationPresetsResponse> {
+    return await this.requestJson<ListApiIntegrationPresetsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/integrations/presets`,
+    );
+  }
+
+  /** Detect and compile an Integration without mutating workspace state. */
+  async previewApiIntegration(
+    workspaceId: string,
+    request: PreviewApiIntegrationRequest,
+  ): Promise<ApiIntegrationPreview> {
+    return await this.requestJson<ApiIntegrationPreview>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/integrations/preview`,
+      request,
+    );
+  }
+
+  /** Start a signed PKCE OAuth flow for a built-in Google or Microsoft preset. */
+  async startApiIntegrationOAuth(
+    workspaceId: string,
+    request: ApiIntegrationOAuthStartRequest,
+  ): Promise<OAuthStartResponse> {
+    return await this.requestJson<OAuthStartResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/integrations/oauth/start`,
+      request,
+    );
+  }
+
+  /** Install only the exact immutable revision and digest accepted in preview. */
+  async installApiIntegration(
+    workspaceId: string,
+    request: InstallApiIntegrationRequest,
+  ): Promise<InstalledApiIntegration> {
+    return await this.requestJson<InstalledApiIntegration>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/integrations/install`,
+      request,
+    );
+  }
+
+  async previewApiIntegrationUninstall(
+    workspaceId: string,
+    capabilityId: string,
+    instanceKey: string,
+  ): Promise<ApiIntegrationUninstallPreview> {
+    return await this.requestJson<ApiIntegrationUninstallPreview>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(capabilityId)}/instances/${encodeURIComponent(instanceKey)}/uninstall-preview`,
+    );
+  }
+
+  /** Remove one Integration instance without deleting its Connection or sibling instances. */
+  async uninstallApiIntegration(
+    workspaceId: string,
+    capabilityId: string,
+    instanceKey: string,
+    request: UninstallApiIntegrationRequest,
+  ): Promise<UninstallApiIntegrationResult> {
+    return await this.requestJson<UninstallApiIntegrationResult>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(capabilityId)}/instances/${encodeURIComponent(instanceKey)}`,
+      request,
+    );
+  }
+
+  /** List immutable provider facets and their exact per-account bindings. */
+  async listIntegrationFeatures(
+    workspaceId: string,
+    capabilityId: string,
+    instanceKey: string,
+  ): Promise<IntegrationInstanceFeaturesResponse> {
+    return await this.requestJson<IntegrationInstanceFeaturesResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(capabilityId)}/instances/${encodeURIComponent(instanceKey)}/features`,
+    );
+  }
+
+  /** Configure or OCC-update one adapter-owned feature on an Integration instance. */
+  async configureIntegrationFeature(
+    workspaceId: string,
+    capabilityId: string,
+    instanceKey: string,
+    featureKey: string,
+    request: UpsertIntegrationFeatureRequest,
+  ): Promise<IntegrationFeatureMutationResult> {
+    return await this.requestJson<IntegrationFeatureMutationResult>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(capabilityId)}/instances/${encodeURIComponent(instanceKey)}/features/${encodeURIComponent(featureKey)}`,
+      request,
+    );
+  }
+
+  /** Browse source metadata through one exact Google Drive Integration instance. */
+  async browseGoogleDriveIntegrationSource(
+    workspaceId: string,
+    capabilityId: string,
+    instanceKey: string,
+    featureKey: string,
+    options: { parentId?: string | undefined; pageToken?: string | undefined } = {},
+  ): Promise<GoogleDriveBrowseResponse> {
+    const query = new URLSearchParams();
+    if (options.parentId) query.set("parentId", options.parentId);
+    if (options.pageToken) query.set("pageToken", options.pageToken);
+    const suffix = query.size > 0 ? `?${query}` : "";
+    return await this.requestJson<GoogleDriveBrowseResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(capabilityId)}/instances/${encodeURIComponent(instanceKey)}/features/${encodeURIComponent(featureKey)}/browse${suffix}`,
+    );
+  }
+
+  /** Verify and bind document sources to one exact Google Drive Integration instance. */
+  async saveGoogleDriveIntegrationSource(
+    workspaceId: string,
+    capabilityId: string,
+    instanceKey: string,
+    featureKey: string,
+    request: SaveGoogleDriveIntegrationSourceRequest,
+  ): Promise<IntegrationFeatureMutationResult> {
+    return await this.requestJson<IntegrationFeatureMutationResult>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(capabilityId)}/instances/${encodeURIComponent(instanceKey)}/features/${encodeURIComponent(featureKey)}/source`,
+      request,
+    );
+  }
+
+  async pauseIntegrationFeature(
+    workspaceId: string,
+    capabilityId: string,
+    instanceKey: string,
+    featureKey: string,
+    request: MutateIntegrationFeatureRequest,
+  ): Promise<IntegrationFeatureMutationResult> {
+    return await this.mutateIntegrationFeatureLifecycle(
+      workspaceId,
+      capabilityId,
+      instanceKey,
+      featureKey,
+      "pause",
+      request,
+    );
+  }
+
+  async resumeIntegrationFeature(
+    workspaceId: string,
+    capabilityId: string,
+    instanceKey: string,
+    featureKey: string,
+    request: MutateIntegrationFeatureRequest,
+  ): Promise<IntegrationFeatureMutationResult> {
+    return await this.mutateIntegrationFeatureLifecycle(
+      workspaceId,
+      capabilityId,
+      instanceKey,
+      featureKey,
+      "resume",
+      request,
+    );
+  }
+
+  async removeIntegrationFeature(
+    workspaceId: string,
+    capabilityId: string,
+    instanceKey: string,
+    featureKey: string,
+    request: MutateIntegrationFeatureRequest,
+  ): Promise<IntegrationFeatureRemovalResult> {
+    return await this.requestJson<IntegrationFeatureRemovalResult>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(capabilityId)}/instances/${encodeURIComponent(instanceKey)}/features/${encodeURIComponent(featureKey)}`,
+      request,
+    );
+  }
+
+  private async mutateIntegrationFeatureLifecycle(
+    workspaceId: string,
+    capabilityId: string,
+    instanceKey: string,
+    featureKey: string,
+    action: "pause" | "resume",
+    request: MutateIntegrationFeatureRequest,
+  ): Promise<IntegrationFeatureMutationResult> {
+    return await this.requestJson<IntegrationFeatureMutationResult>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(capabilityId)}/instances/${encodeURIComponent(instanceKey)}/features/${encodeURIComponent(featureKey)}/${action}`,
+      request,
+    );
+  }
+
+  async previewPlugin(workspaceId: string, request: PreviewPluginRequest): Promise<PluginPreview> {
+    return await this.requestJson<PluginPreview>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/plugins/preview`,
+      request,
+    );
+  }
+
+  async listInstalledPlugins(workspaceId: string): Promise<ListInstalledPluginsResponse> {
+    return await this.requestJson<ListInstalledPluginsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/plugins`,
+    );
+  }
+
+  async installPlugin(
+    workspaceId: string,
+    request: InstallPluginRequest,
+  ): Promise<InstalledPlugin> {
+    return await this.requestJson<InstalledPlugin>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/plugins/install`,
+      request,
+    );
+  }
+
+  async previewPluginUninstall(
+    workspaceId: string,
+    pluginKey: string,
+  ): Promise<PluginUninstallPreview> {
+    return await this.requestJson<PluginUninstallPreview>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/plugins/${encodeURIComponent(pluginKey)}/uninstall-preview`,
+    );
+  }
+
+  async uninstallPlugin(
+    workspaceId: string,
+    pluginKey: string,
+    request: UninstallPluginRequest,
+  ): Promise<UninstallPluginResult> {
+    return await this.requestJson<UninstallPluginResult>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/plugins/${encodeURIComponent(pluginKey)}`,
+      request,
+    );
+  }
+
+  /** Resolve one public skills.sh or GitHub Skill folder to an immutable review preview. */
+  async previewSkillImport(
+    workspaceId: string,
+    request: PreviewSkillImportRequest,
+  ): Promise<SkillImportPreview> {
+    return await this.requestJson<SkillImportPreview>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/skills/preview`,
+      request,
+    );
+  }
+
+  /** Install only the exact commit and full-content digest accepted during preview. */
+  async installSkill(workspaceId: string, request: InstallSkillRequest): Promise<InstalledSkill> {
+    return await this.requestJson<InstalledSkill>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/skills/install`,
+      request,
+    );
+  }
+
+  async previewSkillUninstall(
+    workspaceId: string,
+    capabilityId: string,
+  ): Promise<SkillUninstallPreview> {
+    return await this.requestJson<SkillUninstallPreview>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/skills/${encodeURIComponent(capabilityId)}/uninstall-preview`,
+    );
+  }
+
+  /** Remove the direct owner under an optimistic installation-version fence. */
+  async uninstallSkill(
+    workspaceId: string,
+    capabilityId: string,
+    request: UninstallSkillRequest,
+  ): Promise<UninstallSkillResult> {
+    return await this.requestJson<UninstallSkillResult>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/skills/${encodeURIComponent(capabilityId)}`,
+      request,
     );
   }
 

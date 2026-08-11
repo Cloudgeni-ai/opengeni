@@ -212,17 +212,25 @@ describe("connection ownership UI", () => {
   });
 });
 
-describe("first-party social connector UI", () => {
+describe("social provider integration UI", () => {
   const x = { id: "api:x", name: "X" } as CapabilityCatalogItem;
 
-  test("shows workspace automation semantics and emits reconnect/disconnect actions", async () => {
+  test("shows every workspace account and emits exact disconnect plus add/reconnect actions", async () => {
     const onAction = mock((_action: unknown) => {});
     const connected = socialConnection();
+    const needsReauth = socialConnection({
+      id: "55555555-5555-4555-8555-555555555555",
+      accountHandle: "opengeni_support",
+      accountName: "OpenGeni Support",
+      externalAccountId: "x-account-2",
+      status: "needs_reauth",
+      updatedAt: "2026-08-02T00:00:00.000Z",
+    });
     const rendered = await render(
       <SocialConnectorControls
         item={x}
         provider="x"
-        connections={[connected]}
+        connections={[needsReauth, connected]}
         ownership="workspace"
         onOwnershipChange={() => undefined}
         busy={false}
@@ -231,14 +239,18 @@ describe("first-party social connector UI", () => {
       />,
     );
     try {
-      expect(rendered.container.textContent).toContain("Connected as @opengeni");
+      expect(rendered.container.textContent).toContain("OpenGeni");
+      expect(rendered.container.textContent).toContain("OpenGeni Support");
+      expect(rendered.container.textContent).toContain("Needs reconnection");
       expect(rendered.container.textContent).toContain("Workspace shared");
       expect(rendered.container.textContent).toContain("scheduled automations");
       const buttons = [...rendered.container.querySelectorAll("button")];
       expect(buttons.map((button) => button.textContent?.trim())).toEqual([
-        "Reconnect X",
         "Disconnect",
+        "Disconnect",
+        "Reconnect or add X account",
       ]);
+      await act(async () => buttons[2]!.click());
       await act(async () => buttons[0]!.click());
       await act(async () => buttons[1]!.click());
       expect(onAction).toHaveBeenNthCalledWith(1, {
@@ -251,6 +263,11 @@ describe("first-party social connector UI", () => {
         type: "disconnect_social",
         item: x,
         connectionId: connected.id,
+      });
+      expect(onAction).toHaveBeenNthCalledWith(3, {
+        type: "disconnect_social",
+        item: x,
+        connectionId: needsReauth.id,
       });
     } finally {
       await rendered.unmount();
