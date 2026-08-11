@@ -8,6 +8,7 @@
 // an honest lower bound, not billing — the point is that the biggest number
 // is the thing to look at first, with zero color required to read the order.
 import type { Session } from "../types";
+import { rootNeedsYou } from "./needs-you";
 import { sessionStateLabel } from "./session-rail";
 
 export type PriorityTier = "blocked" | "broken" | "finished" | "waiting";
@@ -21,7 +22,11 @@ export type PriorityEntry = {
   reason: string;
   /** Minutes since the workstream last moved (entered its current state). */
   waitingMinutes: number;
-  /** Turns visibly waiting on a human in this tree (>= 1 for blocked). */
+  /**
+   * Tier-specific agent count for the ledger basis line: blocked = turns
+   * visibly waiting on a human in this tree (>= 1); broken = 1; finished =
+   * the whole tree's agents ("N agents' work"); waiting = 0.
+   */
   waitingAgents: number;
   /** Sort key: agent-minutes lost. Zero for tiers that don't burn time. */
   costMinutes: number;
@@ -46,18 +51,16 @@ function minutesSince(iso: string, now: Date): number {
   return Math.max(0, Math.floor((now.getTime() - timestamp) / 60_000));
 }
 
-function attentionAgents(session: Session): number {
-  return 1 + (session.treeStats?.attentionDescendants ?? 0);
-}
-
 function treeAgents(session: Session): number {
   return 1 + (session.treeStats?.totalDescendants ?? 0);
 }
 
+// Attention-descendant roots are classified blocked before this runs, so live
+// work here means only actually-executing descendants.
 function treeHasLiveWork(session: Session): boolean {
   const stats = session.treeStats;
   if (!stats) return false;
-  return stats.runningDescendants + stats.queuedDescendants + stats.attentionDescendants > 0;
+  return stats.runningDescendants + stats.queuedDescendants > 0;
 }
 
 /** "25 m", "1 h 40 m", "3 d 2 h" — the mono ledger duration. */
@@ -91,18 +94,8 @@ export function buildPriorityFeed(sessions: Session[], now: Date = new Date()): 
   for (const session of roots) {
     const waitingMinutes = minutesSince(session.updatedAt, now);
     const reason = sessionStateLabel(session);
-    if (session.status === "requires_action") {
-      const waitingAgents = attentionAgents(session);
-      blocked.push({
-        session,
-        tier: "blocked",
-        rank: null,
-        reason,
-        waitingMinutes,
-        waitingAgents,
-        costMinutes: waitingMinutes * waitingAgents,
-      });
-    } else if (session.status === "failed") {
+    const attentionDescendants = session.treeStats?.attentionDescendants ?? 0;
+    if (session.status === "failed") {
       broken.push({
         session,
         tier: "broken",
@@ -111,6 +104,27 @@ export function buildPriorityFeed(sessions: Session[], now: Date = new Date()): 
         waitingMinutes,
         waitingAgents: 1,
         costMinutes: waitingMinutes,
+      });
+    } else if (rootNeedsYou(session)) {
+      // A root whose own turn needs a human, OR a root whose spawned agents
+      // do — an idle/running manager with a blocked child is still blocked
+      // work, not "running fine". Failed roots were taken by the broken tier
+      // above, so this branch is exactly requires_action or attention
+      // descendants; the rail badge counts the same predicate.
+      const waitingAgents = attentionDescendants + (session.status === "requires_action" ? 1 : 0);
+      blocked.push({
+        session,
+        tier: "blocked",
+        rank: null,
+        reason:
+          session.status === "requires_action"
+            ? reason
+            : `${attentionDescendants} spawned agent${
+                attentionDescendants === 1 ? " needs" : "s need"
+              } you`,
+        waitingMinutes,
+        waitingAgents,
+        costMinutes: waitingMinutes * waitingAgents,
       });
     } else if (
       session.status === "waiting_capacity" ||

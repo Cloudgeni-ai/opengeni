@@ -3535,6 +3535,11 @@ function optionalEventSequence(raw: string | undefined): number | undefined {
 
 /** Stable, value-free JSON errors for only the create-session boundary. */
 export function sessionCreateErrorResponse(c: Context, error: unknown): Response {
+  if (error instanceof ChannelNotFoundError) {
+    // Covers the create-vs-channel-delete race the pre-validation cannot: the
+    // insert's FK rejection surfaces as the same 422 an unknown id gets.
+    return c.json({ code: "SESSION_CREATE_REJECTED", message: error.message }, 422);
+  }
   if (error instanceof SessionSpawnDeniedError) {
     return c.json(
       sessionSpawnDenialEnvelope(error),

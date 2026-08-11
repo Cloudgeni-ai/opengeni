@@ -9,12 +9,12 @@ import { useMemo } from "react";
 
 import { creatorHue, creatorInitials } from "@/lib/creator-initials";
 import { buildPriorityFeed, formatAgentMinutes, type PriorityEntry } from "@/lib/priority-feed";
+import { sessionDisplayTitle } from "@/lib/session-rename";
 import { relativeTimeLabel } from "@/lib/sessions-group";
 import { cn } from "@/lib/utils";
-import type { Session } from "@/types";
 
 export function PriorityRoute({ workspaceId }: { workspaceId: string }) {
-  const { sessions, loading, error, refresh } = useWorkspaceSessions({
+  const { sessions, nextCursor, loading, error, refresh } = useWorkspaceSessions({
     limit: 50,
     parentSessionId: null,
     pollIntervalMs: 15_000,
@@ -25,17 +25,22 @@ export function PriorityRoute({ workspaceId }: { workspaceId: string }) {
     [channels],
   );
   const feed = useMemo(() => buildPriorityFeed(sessions), [sessions]);
+  // The date caption changes once a day; don't rebuild the Intl formatter on
+  // every 15s poll re-render.
+  const today = useMemo(
+    () =>
+      new Date().toLocaleDateString(undefined, {
+        weekday: "long",
+        month: "short",
+        day: "numeric",
+      }),
+    [],
+  );
   const empty =
     feed.blocked.length === 0 &&
     feed.broken.length === 0 &&
     feed.finished.length === 0 &&
     feed.waiting.length === 0;
-
-  const today = new Date().toLocaleDateString(undefined, {
-    weekday: "long",
-    month: "short",
-    day: "numeric",
-  });
 
   return (
     <div data-workspace-scroll-owner="self-managed" className="min-h-0 flex-1 overflow-y-auto">
@@ -121,6 +126,23 @@ export function PriorityRoute({ workspaceId }: { workspaceId: string }) {
                 </span>
               </Link>
             ) : null}
+            {nextCursor ? (
+              // Honest truncation: the feed ranks only the most recently
+              // active root page, so long-stalled workstreams past it are not
+              // ranked here yet.
+              <p role="status" className="px-3 pt-3 text-xs text-fg-subtle">
+                Ranked over the {sessions.length} most recently active workstreams. Older ones are
+                in{" "}
+                <Link
+                  to="/workspaces/$workspaceId/sessions"
+                  params={{ workspaceId }}
+                  className="underline hover:text-fg-muted"
+                >
+                  Workstreams
+                </Link>
+                .
+              </p>
+            ) : null}
           </>
         )}
       </div>
@@ -201,10 +223,6 @@ function ledgerFigure(entry: PriorityEntry): {
   return { figure: "—", quiet: true, basis: null };
 }
 
-function sessionTitle(session: Session): string {
-  return session.title?.trim() || session.initialMessage?.trim() || "Untitled session";
-}
-
 function PriorityRow(props: {
   entry: PriorityEntry;
   first: boolean;
@@ -213,7 +231,7 @@ function PriorityRow(props: {
 }) {
   const { entry } = props;
   const session = entry.session;
-  const title = sessionTitle(session);
+  const title = sessionDisplayTitle(session);
   const channelName = session.channelId ? props.channelNames.get(session.channelId) : undefined;
   const initials = creatorInitials(session.createdBy);
   const creatorLabel = session.createdBy.label?.trim() || session.createdBy.subjectId;

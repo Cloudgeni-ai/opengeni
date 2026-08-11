@@ -8,6 +8,7 @@ import { SendIcon } from "lucide-react";
 import { useMemo } from "react";
 
 import { useRail } from "@/components/rail/rail-context";
+import { rootNeedsYou } from "@/lib/needs-you";
 import { workspacePriorityPath } from "@/lib/routes";
 import { cn } from "@/lib/utils";
 
@@ -18,19 +19,10 @@ export function ForYouLink() {
     parentSessionId: null,
     pollIntervalMs: 60_000,
   });
-  // Deliberately NOT buildPriorityFeed: this always-loaded rail entry must not
-  // share modules with the lazy priority route, or the bundler re-clusters the
-  // route's graph into the startup bundle. Mirrors the feed's needsYou rule
-  // (blocked + broken roots) — keep the two in sync.
-  const needsYou = useMemo(
-    () =>
-      sessions.filter(
-        (session) =>
-          session.parentSessionId === null &&
-          (session.status === "requires_action" || session.status === "failed"),
-      ).length,
-    [sessions],
-  );
+  // rootNeedsYou is the same leaf predicate buildPriorityFeed classifies its
+  // blocked+broken tiers with, so the badge and the page cannot drift. The
+  // full feed lib stays un-imported here on purpose (bundle clustering).
+  const needsYou = useMemo(() => sessions.filter(rootNeedsYou).length, [sessions]);
   const active = useRouterState({
     select: (state) => state.location.pathname === workspacePriorityPath(rail.workspaceId),
   });

@@ -48,9 +48,9 @@ $grants$;
 -- inbox). The single-column ON DELETE SET NULL follows the variable_set_id
 -- precedent; workspace scoping is enforced by RLS plus the application
 -- create/update boundary, which resolves the channel workspace-scoped.
+-- The supporting sessions index is built CONCURRENTLY in migration 0219 —
+-- a plain CREATE INDEX here would hold the ADD COLUMN's ACCESS EXCLUSIVE
+-- lock on the live sessions table for a full-table scan.
 SET LOCAL lock_timeout = '5s';
 ALTER TABLE "sessions"
   ADD COLUMN "channel_id" uuid REFERENCES "channels"("id") ON DELETE SET NULL;
-CREATE INDEX "sessions_workspace_channel_idx"
-  ON "sessions" ("workspace_id", "channel_id")
-  WHERE "channel_id" IS NOT NULL;

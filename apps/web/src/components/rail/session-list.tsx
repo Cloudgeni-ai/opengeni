@@ -1067,7 +1067,11 @@ export function SessionList() {
         <p className="sr-only" aria-live="polite" aria-atomic="true">
           {announcement}
         </p>
-        {loading && allSessions.length === 0 ? (
+        {(loading && allSessions.length === 0) ||
+        (hierarchyMode && channelsQuery.loading && channels.length === 0) ? (
+          // The second clause holds the skeleton until the initial channels
+          // read resolves, so a channel-using workspace paints channel
+          // sections directly instead of flashing the recency layout first.
           <SessionListSkeleton />
         ) : error && allSessions.length === 0 ? (
           <div role="alert" className="px-2 py-3 text-xs text-fg-subtle">
@@ -1126,6 +1130,7 @@ export function SessionList() {
                 <SessionGroup
                   key={section.key}
                   label={section.name}
+                  sectionId={`channel-${section.key}`}
                   channelHeader
                   nodes={section.sessions}
                   flat={flat}
@@ -1237,6 +1242,12 @@ export function SessionList() {
 
 function SessionGroup(props: {
   label: string;
+  /**
+   * Stable DOM id suffix. Required for channel sections: labels are
+   * user-controlled, so slugging them can collide with each other and with
+   * the fixed groups ("Pinned", the synthetic "inbox").
+   */
+  sectionId?: string;
   /** Channel-styled header: "# name" instead of the uppercase recency label. */
   channelHeader?: boolean;
   nodes: SessionTreeNode[];
@@ -1257,7 +1268,7 @@ function SessionGroup(props: {
   return (
     <div role="group" aria-label={props.label} className="mb-1.5 min-w-0">
       <p
-        id={`session-group-${props.label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`}
+        id={`session-group-${props.sectionId ?? props.label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`}
         className={
           props.channelHeader
             ? "flex min-w-0 items-center gap-1 px-2 pb-0.5 pt-2 text-xs font-semibold text-fg-muted"

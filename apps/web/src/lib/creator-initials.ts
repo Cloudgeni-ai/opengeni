@@ -33,11 +33,13 @@ export function creatorInitials(createdBy: CreatorRef): string | null {
   if (source.length === 0) {
     return null;
   }
+  // Spread to code points so astral characters (emoji, supplementary-plane
+  // scripts) are not split into lone surrogates.
   const words = source.split(/\s+/).filter(Boolean);
   if (words.length >= 2) {
-    return `${words[0]![0]}${words[1]![0]}`.toUpperCase();
+    return `${[...words[0]!][0]}${[...words[1]!][0]}`.toUpperCase();
   }
-  return source.slice(0, 2).toUpperCase();
+  return [...source].slice(0, 2).join("").toUpperCase();
 }
 
 /** Stable hue (0–359) hashed from the subject id, for the monogram chip. */

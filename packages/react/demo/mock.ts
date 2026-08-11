@@ -1084,11 +1084,16 @@ export class MockOpenGeniClient implements SessionClientLike {
     this.channels = this.channels.filter((row) => row.id !== channelId);
   }
 
+  // Sessions are fabricated per read, so moves must persist here or the rail's
+  // post-move refresh would visibly snap the row back to the inbox.
+  private sessionChannelOverrides = new Map<string, string | null>();
+
   async updateSessionChannel(
     workspaceId: string,
     sessionId: string,
     request: UpdateSessionChannelRequest,
   ): Promise<Session> {
+    this.sessionChannelOverrides.set(sessionId, request.channelId);
     const session = await this.getSession(workspaceId, sessionId);
     return { ...session, channelId: request.channelId };
   }
@@ -3103,7 +3108,7 @@ export class MockOpenGeniClient implements SessionClientLike {
       environmentId: null,
       rigId: null,
       rigVersionId: null,
-      channelId: null,
+      channelId: this.sessionChannelOverrides.get(sessionId) ?? null,
       firstPartyMcpPermissions: null,
       firstPartyMcpTools: [],
       mcpServers: [],

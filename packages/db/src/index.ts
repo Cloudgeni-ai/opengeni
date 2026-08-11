@@ -238,7 +238,9 @@ import {
 export { LOSSLESS_TEXT_PREFIX } from "./lossless-json";
 import { seedNewSessionDraftInTransaction } from "./new-session-drafts";
 import {
+  nestedPostgresSqlState,
   runIdempotentPersistenceTransaction,
+  safeDatabaseErrorFacts,
   type IdempotentPersistenceTransactionOptions,
 } from "./persistence-errors";
 import {
@@ -13639,25 +13641,23 @@ export class ChannelNotFoundError extends Error {
 }
 
 function isChannelNameUniqueViolation(error: unknown): boolean {
-  const candidate = error as {
-    code?: unknown;
-    constraint?: unknown;
-    constraint_name?: unknown;
-    message?: unknown;
-    cause?: unknown;
-  } | null;
-  if (!candidate || typeof candidate !== "object") {
-    return false;
-  }
-  const constraint = String(candidate.constraint ?? candidate.constraint_name ?? "");
-  if (candidate.code === "23505" && constraint === "channels_workspace_name_idx") {
-    return true;
-  }
-  const message = typeof candidate.message === "string" ? candidate.message : "";
-  if (message.includes("channels_workspace_name_idx")) {
-    return true;
-  }
-  return isChannelNameUniqueViolation(candidate.cause);
+  return (
+    nestedPostgresSqlState(error) === "23505" &&
+    safeDatabaseErrorFacts(error).constraint === "channels_workspace_name_idx"
+  );
+}
+
+/**
+ * A write raced a concurrent channel delete: the sessions.channel_id FK
+ * rejected the row after the workspace-scoped existence check passed. Mapped
+ * to the same typed not-found error the pre-check throws, so callers keep
+ * one 422 path instead of a driver-level 500.
+ */
+function isSessionChannelFkViolation(error: unknown): boolean {
+  return (
+    nestedPostgresSqlState(error) === "23503" &&
+    safeDatabaseErrorFacts(error).constraint === "sessions_channel_id_fkey"
+  );
 }
 
 function mapChannel(row: typeof schema.channels.$inferSelect): Channel {
@@ -13804,17 +13804,26 @@ export async function setSessionChannel(
         throw new ChannelNotFoundError(input.channelId);
       }
     }
-    const rows = await scopedDb
-      .update(schema.sessions)
-      .set({ channelId: input.channelId })
-      .where(
-        and(
-          eq(schema.sessions.workspaceId, input.workspaceId),
-          eq(schema.sessions.id, input.sessionId),
-        ),
-      )
-      .returning({ id: schema.sessions.id });
-    return rows.length > 0;
+    try {
+      const rows = await scopedDb
+        .update(schema.sessions)
+        .set({ channelId: input.channelId })
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, input.workspaceId),
+            eq(schema.sessions.id, input.sessionId),
+          ),
+        )
+        .returning({ id: schema.sessions.id });
+      return rows.length > 0;
+    } catch (error) {
+      // The channel passed the existence check above but was deleted before
+      // the UPDATE committed.
+      if (input.channelId !== null && isSessionChannelFkViolation(error)) {
+        throw new ChannelNotFoundError(input.channelId);
+      }
+      throw error;
+    }
   });
 }
 
@@ -21349,60 +21358,71 @@ async function createSessionInTransaction(
       ? input.createdByActor.turnId
       : null
     : null;
-  const [inserted] = await tx
-    .insert(schema.sessions)
-    .values(
-      withLosslessContentWriteVersion(
-        {
-          id,
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          initialMessage: input.initialMessage,
-          initialTurnInstructions: input.initialTurnInstructions ?? null,
-          resources: input.resources,
-          skills: input.skills ?? [],
-          tools: input.tools ?? [],
-          toolPolicy: input.toolPolicy ?? {
-            mode: "explicit",
-            inheritedFromSessionId: input.parentSessionId ?? null,
+  let insertedRows: (typeof schema.sessions.$inferSelect)[];
+  try {
+    insertedRows = await tx
+      .insert(schema.sessions)
+      .values(
+        withLosslessContentWriteVersion(
+          {
+            id,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            initialMessage: input.initialMessage,
+            initialTurnInstructions: input.initialTurnInstructions ?? null,
+            resources: input.resources,
+            skills: input.skills ?? [],
+            tools: input.tools ?? [],
+            toolPolicy: input.toolPolicy ?? {
+              mode: "explicit",
+              inheritedFromSessionId: input.parentSessionId ?? null,
+            },
+            metadata: input.metadata,
+            ...creatorColumns(frozenCreator),
+            model: input.model,
+            sandboxBackend: input.sandboxBackend,
+            sandboxOs: input.sandboxOs ?? "linux",
+            sandboxGroupId: input.sandboxGroupId ?? id,
+            variableSetId: input.variableSetId ?? null,
+            rigId: input.rigId ?? null,
+            rigVersionId: input.rigVersionId ?? null,
+            channelId: input.channelId ?? null,
+            firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
+            firstPartyMcpTools: input.firstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+            initialPersonalConnectionDelegations: input.personalConnectionDelegations ?? [],
+            instructions: input.instructions ?? null,
+            policyRole: input.policyRole ?? null,
+            parentSessionId: input.parentSessionId ?? null,
+            parentTurnId,
+            createIdempotencyKey,
+            rootSessionId: decision.rootSessionId,
+            nestedAgentDepth: decision.nestedAgentDepth,
+            maxNestedAgentDepthOverride: decision.maxNestedAgentDepthOverride,
+            effectiveMaxNestedAgentDepth: decision.effectiveMaxNestedAgentDepth,
+            nestedAgentDepthPolicySource: decision.nestedAgentDepthPolicySource,
+            nestedAgentDepthPolicySessionId: decision.nestedAgentDepthPolicySessionId,
+            // Freeze once at create from the effective create model + workspace
+            // default. Later workspace setting changes never move existing sessions.
+            codexCompactionMode: isCodexBilledModel(input.model)
+              ? resolveWorkspaceCodexCompactionDefault(workspace.settings)
+              : "portable",
+            status: "queued",
           },
-          metadata: input.metadata,
-          ...creatorColumns(frozenCreator),
-          model: input.model,
-          sandboxBackend: input.sandboxBackend,
-          sandboxOs: input.sandboxOs ?? "linux",
-          sandboxGroupId: input.sandboxGroupId ?? id,
-          variableSetId: input.variableSetId ?? null,
-          rigId: input.rigId ?? null,
-          rigVersionId: input.rigVersionId ?? null,
-          channelId: input.channelId ?? null,
-          firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
-          firstPartyMcpTools: input.firstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
-          initialPersonalConnectionDelegations: input.personalConnectionDelegations ?? [],
-          instructions: input.instructions ?? null,
-          policyRole: input.policyRole ?? null,
-          parentSessionId: input.parentSessionId ?? null,
-          parentTurnId,
-          createIdempotencyKey,
-          rootSessionId: decision.rootSessionId,
-          nestedAgentDepth: decision.nestedAgentDepth,
-          maxNestedAgentDepthOverride: decision.maxNestedAgentDepthOverride,
-          effectiveMaxNestedAgentDepth: decision.effectiveMaxNestedAgentDepth,
-          nestedAgentDepthPolicySource: decision.nestedAgentDepthPolicySource,
-          nestedAgentDepthPolicySessionId: decision.nestedAgentDepthPolicySessionId,
-          // Freeze once at create from the effective create model + workspace
-          // default. Later workspace setting changes never move existing sessions.
-          codexCompactionMode: isCodexBilledModel(input.model)
-            ? resolveWorkspaceCodexCompactionDefault(workspace.settings)
-            : "portable",
-          status: "queued",
-        },
-        "initialMessage",
-        "initialMessageCodecVersion",
-      ),
-    )
-    .onConflictDoNothing()
-    .returning();
+          "initialMessage",
+          "initialMessageCodecVersion",
+        ),
+      )
+      .onConflictDoNothing()
+      .returning();
+  } catch (error) {
+    // The caller validated the channel workspace-scoped, but a concurrent
+    // channel delete can still race the insert; keep the typed 422 path.
+    if (input.channelId && isSessionChannelFkViolation(error)) {
+      throw new ChannelNotFoundError(input.channelId);
+    }
+    throw error;
+  }
+  const [inserted] = insertedRows;
   if (!inserted) {
     if (createIdempotencyKey) {
       const existing = await existingSessionForCreateKey(

@@ -87,6 +87,29 @@ describe("buildPriorityFeed", () => {
     expect(feed.needsYou).toBe(3);
   });
 
+  test("an idle manager with blocked children is blocked work, not healthy", () => {
+    const feed = buildPriorityFeed(
+      [
+        session({
+          id: "s-mgr",
+          status: "idle",
+          updatedAt: minutesAgo(30),
+          treeStats: stats({
+            attentionDescendants: 2,
+            runningDescendants: 3,
+            totalDescendants: 10,
+          }),
+        }),
+      ],
+      NOW,
+    );
+    expect(feed.blocked.map((entry) => entry.session.id)).toEqual(["s-mgr"]);
+    expect(feed.blocked[0]!.waitingAgents).toBe(2);
+    expect(feed.blocked[0]!.reason).toBe("2 spawned agents need you");
+    expect(feed.healthy.workstreams).toBe(0);
+    expect(feed.needsYou).toBe(1);
+  });
+
   test("healthy trees collapse to counts and never rank", () => {
     const feed = buildPriorityFeed(
       [

@@ -26,8 +26,23 @@ describe("migration 0218 session channels", () => {
     expect(migration).toContain(
       'ADD COLUMN "channel_id" uuid REFERENCES "channels"("id") ON DELETE SET NULL',
     );
-    // Rolling safety: the sessions DDL is guarded by a bounded lock wait.
+    // Rolling safety: the sessions DDL is guarded by a bounded lock wait, and
+    // the sessions index is NOT built here — a plain CREATE INDEX would hold
+    // the ADD COLUMN's ACCESS EXCLUSIVE lock for a full-table scan. It lives
+    // in 0219 as a concurrent-index migration.
     expect(migration).toContain("SET LOCAL lock_timeout");
+    expect(migration).not.toContain('CREATE INDEX "sessions_');
+    const followUp = await readFile(
+      migrationPath.replace("0218_session_channels.sql", "0219_sessions_channel_index.sql"),
+      "utf8",
+    );
+    expect(followUp.split(/\r?\n/, 2)).toEqual([
+      "-- deployment-mode: rolling",
+      "-- opengeni:concurrent-index lock-timeout=5s",
+    ]);
+    expect(followUp).toContain(
+      'CREATE INDEX CONCURRENTLY IF NOT EXISTS "sessions_workspace_channel_idx"',
+    );
 
     const blank = await acquireBlankTestDatabase("migration-0218");
     if (!blank) {
@@ -65,6 +80,12 @@ describe("migration 0218 session channels", () => {
       const names = indexes.map((row) => row.indexname);
       expect(names).toContain("channels_workspace_name_idx");
       expect(names).toContain("channels_workspace_id_uq");
+      const [sessionsIndex] = await sql<Array<{ indexname: string }>>`
+        select indexname from pg_indexes
+        where schemaname = 'public'
+          and tablename = 'sessions'
+          and indexname = 'sessions_workspace_channel_idx'`;
+      expect(sessionsIndex?.indexname).toBe("sessions_workspace_channel_idx");
     } finally {
       await sql.end();
       await blank.release();
