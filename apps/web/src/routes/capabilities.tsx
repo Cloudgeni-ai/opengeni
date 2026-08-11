@@ -747,6 +747,9 @@ export function CapabilitiesRoute({
         const response = await startMcpOAuthWithTimeout(client, workspaceId, {
           ...(mcpUrl ? { mcpUrl } : {}),
           ...(providerDomain ? { providerDomain } : {}),
+          ...(plan.mode === "oauth" && plan.requestedScopes.length > 0
+            ? { requestedScopes: plan.requestedScopes }
+            : {}),
           // Reuse the existing row when it survives; a null id means the row was
           // deleted, so OAuth mints a fresh connection and the return handler
           // re-enables against it.
@@ -805,6 +808,7 @@ export function CapabilitiesRoute({
         const response = await startMcpOAuthWithTimeout(client, workspaceId, {
           ...(plan.mcpUrl ? { mcpUrl: plan.mcpUrl } : {}),
           ...(plan.providerDomain ? { providerDomain: plan.providerDomain } : {}),
+          ...(plan.requestedScopes.length > 0 ? { requestedScopes: plan.requestedScopes } : {}),
           ownership: action.ownership,
           returnPath,
         });

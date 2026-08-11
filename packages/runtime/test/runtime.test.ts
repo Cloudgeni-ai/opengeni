@@ -4831,6 +4831,91 @@ describe("runtime event normalization", () => {
     }
   });
 
+  test("substitutes the opt-in Gmail REST adapter for the hosted preview MCP", async () => {
+    const resolved: ResolveConnectionCredentialInput[] = [];
+    const fetched: string[] = [];
+    const prepared = await prepareAgentTools(
+      testSettings({
+        gmailRestAdapterEnabled: true,
+        mcpServers: [
+          {
+            id: "gmail",
+            name: "Gmail",
+            url: "https://gmailmcp.googleapis.com/mcp/v1",
+            allowedTools: ["list_labels"],
+            requireApproval: ["create_draft"],
+            connectionRef: {
+              providerDomain: "gmailmcp.googleapis.com",
+              kind: "oauth2",
+              subjectScope: "subject",
+            },
+            cacheToolsList: false,
+          },
+        ],
+      }),
+      [{ kind: "mcp", id: "gmail" }],
+      {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        turnId: "44444444-4444-4444-8444-444444444444",
+        attemptId: "55555555-5555-4555-8555-555555555555",
+        executionGeneration: 1,
+        credentialSubjectId: "subject-a",
+        resolveCredential: async (input) => {
+          resolved.push(input);
+          return {
+            status: "ok",
+            connectionId: "gmail-connection",
+            headers: { authorization: "Bearer gmail-token" },
+          };
+        },
+        mcpFetchImpl: async (input) => {
+          fetched.push(input.toString());
+          return Response.json({
+            labels: [{ id: "Label_1", name: "Projects", type: "user" }],
+          });
+        },
+      },
+    );
+    try {
+      expect(prepared.mcpServers).toHaveLength(1);
+      expect((await prepared.mcpServers[0]!.listTools()).map((tool) => tool.name)).toEqual([
+        "gmail__list_labels",
+      ]);
+      const result = await prepared.mcpServers[0]!.callTool("gmail__list_labels", {});
+      expect(JSON.stringify(result)).toContain("Projects");
+      const codemodeResult = await prepared.attemptToolEnvironment!.call({
+        operationId: "66666666-6666-4666-8666-666666666666",
+        catalogDigest: prepared.attemptToolCatalog!.digest,
+        identity: { serverId: "gmail", toolName: "list_labels" },
+        arguments: {},
+        caller: { kind: "codemode", subjectId: "agent:test" },
+      });
+      expect(JSON.stringify(codemodeResult)).toContain("Projects");
+      expect(fetched).toEqual([
+        "https://gmail.googleapis.com/gmail/v1/users/me/labels",
+        "https://gmail.googleapis.com/gmail/v1/users/me/labels",
+      ]);
+      expect(resolved).toHaveLength(3);
+      expect(resolved[1]).toMatchObject({
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        subjectId: "subject-a",
+        serverId: "gmail",
+        toolName: "list_labels",
+        destinationUrl: "https://gmail.googleapis.com/gmail/v1/users/me/labels",
+      });
+      expect(resolved[2]).toMatchObject({
+        subjectId: "subject-a",
+        serverId: "gmail",
+        toolName: "list_labels",
+      });
+      expect(prepared.resolvedMcpConnectionIds.get("gmail")).toBe("gmail-connection");
+    } finally {
+      await prepared.close();
+    }
+  });
+
   test("sends configured credential headers to third-party MCP servers", async () => {
     const mcp = startTestMcpServer({
       requiredHeaders: { "x-api-key": "capability-credential" },

@@ -13,6 +13,10 @@ const allowedHosts = process.env.OPENGENI_WEB_ALLOWED_HOSTS?.split(",")
 
 export default defineConfig({
   build: {
+    // The canonical post-build budget below computes gzip sizes for the exact
+    // initial/session graphs and every chunk. Avoid Vite recomputing compressed
+    // sizes for hundreds of lazy syntax assets before that bounded gate runs.
+    reportCompressedSize: false,
     // Vite's default 500 kB raw threshold misclassifies deliberately lazy
     // syntax/WASM assets. The post-build budget gate measures the recursive
     // initial graph and every chunk by gzip size; 800 kB remains a hard raw cap.

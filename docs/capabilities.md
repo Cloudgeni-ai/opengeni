@@ -188,6 +188,89 @@ or a repository outside the durable allowlist. On success the browser returns
 to the originating session and subsequent tool calls use the existing
 host-owned GitHub authority.
 
+## Official Gmail MCP
+
+The reviewed catalog includes Google's official hosted Gmail MCP at
+`https://gmailmcp.googleapis.com/mcp/v1`. It is currently a Google Developer
+Preview. OpenGeni requests only the three scopes used by the reviewed tool
+surface:
+
+- `https://www.googleapis.com/auth/gmail.readonly`
+- `https://www.googleapis.com/auth/gmail.compose`
+- `https://www.googleapis.com/auth/gmail.modify`
+
+Those scopes support search/read, draft creation, and the reviewed label and
+unlabel operations. The Google scope is broader than the exposed tools, but the
+reviewed Google MCP surface and REST fallback do not expose a direct-send or
+delete tool. Gmail OAuth is handled by the ordinary encrypted connection broker,
+with a narrow Google
+compatibility path: authorization requests ask for offline consent, Google
+authorization/token origins are pinned, and the RFC 8707 `resource` parameter
+is omitted from Google's authorization, token, and refresh requests. The MCP
+resource remains stored in the encrypted bundle and bound to the runtime
+connection.
+
+Gmail is personal-only. Enabling the capability makes Gmail available in the
+workspace catalog, but it does not share a mailbox: each member must authorize
+their own Google account. Personal connection rows and identifiers are hidden
+from other members, and a turn can execute Gmail only through the initiating
+member's frozen personal delegation. OpenGeni rejects workspace-owned Gmail
+OAuth and capability bindings at the API boundary. Gmail content that a user
+asks the agent to quote, summarize, or otherwise add to a session follows that
+session's visibility; connection privacy does not turn a shared session into a
+private one.
+
+The catalog also pins the exact ten tools in Google's reviewed Developer
+Preview surface. A newly added remote tool is unavailable until the catalog
+contract is reviewed and updated. Draft creation and label/unlabel tools require
+the ordinary durable human approval; search, message/thread reads, draft lists,
+and label lists do not.
+
+While hosted MCP enrollment is pending, a deployment can set
+`OPENGENI_GMAIL_REST_ADAPTER_ENABLED=true`. This opt-in substitutes a bounded
+Gmail REST implementation for that exact official MCP endpoint in agent turns
+and the attempt-frozen Codemode projection; it does not create a second
+capability or connection. The
+adapter preserves the reviewed ten-tool allowlist, tool names, output field
+shape, subject-owned delegation, and approval policy. Its credential broker
+binding permits only `https://gmail.googleapis.com/gmail/v1/users/me/...`: it
+cannot call another Google API or address another mailbox. Read-only calls may
+refresh after one 401 and retry once; a mutation is never replayed after an
+ambiguous provider response. Keep the flag off by default and disable it after
+the hosted endpoint works for the enrolled account and project.
+
+Before importing/enabling the capability in a deployment:
+
+1. Join the [Google Workspace Developer Preview
+   Program](https://developers.google.com/workspace/preview) with the Google
+   Workspace account that will authorize Gmail. Include the deployment's exact
+   Google Cloud project in the application and wait for Google to confirm that
+   both the account and project are registered. Enabling the APIs and granting
+   OAuth scopes alone is not sufficient for the hosted MCP preview.
+2. In that registered Google Cloud project, enable both the Gmail API and Gmail
+   MCP API, configure the OAuth consent screen, and create a **Web application**
+   OAuth client.
+3. Register
+   `${OPENGENI_PUBLIC_BASE_URL}/v1/integrations/oauth/callback` as an authorized
+   redirect URI.
+4. Set `OPENGENI_INTEGRATIONS_ENABLED=true`, configure the normal integration
+   state/encryption secrets, and add the deployment-owned client:
+
+   ```dotenv
+   OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON='{"https://accounts.google.com":{"clientId":"...","clientSecret":"...","tokenEndpointAuthMethod":"client_secret_post"}}'
+   ```
+
+5. Run the normal reviewed catalog import, open **Capabilities**, search for
+   **Gmail**, and select **Connect only for me**. The ownership choice is fixed:
+   every member connects their own mailbox, and other workspace members cannot
+   see or use it.
+
+The fixed tool allowlist and approval defaults are defense in depth for the
+provider's Developer Preview behavior. See Google's [configuration
+guide](https://developers.google.com/workspace/gmail/api/guides/configure-mcp-server)
+and [MCP tool
+reference](https://developers.google.com/workspace/gmail/api/reference/mcp).
+
 ## integrations.sh Snapshot Imports
 
 The integrations catalog import pipeline is offline and reviewable. It never

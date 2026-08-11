@@ -75,6 +75,16 @@ import {
   lazyToolRuntimeForAgent,
   type LazyToolTransport,
 } from "./lazy-tool-transport";
+import { GmailRestMcpServer, isOfficialGmailMcpConfig } from "./gmail-rest-mcp";
+export {
+  GMAIL_REST_API_BASE,
+  GMAIL_REST_MCP_TOOLS,
+  GmailRestMcpServer,
+  OFFICIAL_GMAIL_MCP_URL,
+  gmailRestToolIsMutation,
+  isOfficialGmailMcpConfig,
+  type GmailRestMcpServerOptions,
+} from "./gmail-rest-mcp";
 import {
   Agent,
   AgentsError,
@@ -3059,34 +3069,58 @@ export async function prepareAgentTools(
       // auth misses are still published as actionable state because the
       // workspace catalog explicitly told the user that the surface existed.
       const bestEffort = isCodexAppsMcpServer(config) || optional || !!config.connectionRef;
+      const useGmailRestAdapter =
+        settings.gmailRestAdapterEnabled &&
+        isOfficialGmailMcpConfig(config.url, config.connectionRef);
+      const innerServer = useGmailRestAdapter
+        ? new GmailRestMcpServer({
+            workspaceId: options.workspaceId ?? "",
+            ...(options.credentialSubjectId ? { subjectId: options.credentialSubjectId } : {}),
+            serverId: config.id,
+            connectionRef: config.connectionRef!,
+            resolveCredential: async (request) =>
+              await resolveConnectionForRequest(
+                options,
+                request.serverId,
+                request.connectionRef,
+                request.destinationUrl,
+                request.toolName,
+                request.forceRefresh === true,
+              ),
+            onAuthNeeded: async (payload) => await publishAuthNeeded(options, payload),
+            onResolvedConnectionId: (connectionId) =>
+              recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, connectionId),
+            fetchImpl: mcpFetchImpl,
+          })
+        : new MCPServerStreamableHttp({
+            url,
+            name: config.name ?? config.id,
+            cacheToolsList: config.cacheToolsList,
+            // The upstream transport logger receives raw thrown errors, whose
+            // messages may contain response bodies, URLs, headers, or echoed
+            // credentials. Keep its diagnostic surface structural only.
+            logger: mcpTransportLogger(config.id, {
+              // Codex Apps setup is a read-only initialize/tools-list handshake.
+              // A statusless transport failure is safe to retry, while auth
+              // responses remain non-retryable and publish their specific
+              // reconnect reason through codexAppsAuthFetch.
+              recoverySafeSetup: isCodexAppsMcpServer(config),
+            }),
+            // codex_apps returns connector tools with empty `outputSchema: {}` that the
+            // MCP SDK's strict Tool schema rejects (fails the turn during tools/list);
+            // sanitize the response on the wire before validation. The namespace Set
+            // also captures each tool's original connector namespace (P4 Part B.1).
+            fetch: fetchImpl,
+            ...(await mcpServerRequestInit(settings, config)),
+            ...(config.timeoutMs
+              ? {
+                  timeout: config.timeoutMs,
+                  clientSessionTimeoutSeconds: Math.ceil(config.timeoutMs / 1000),
+                }
+              : {}),
+          });
       const server = new PrefixedMcpServer(
-        new MCPServerStreamableHttp({
-          url,
-          name: config.name ?? config.id,
-          cacheToolsList: config.cacheToolsList,
-          // The upstream transport logger receives raw thrown errors, whose
-          // messages may contain response bodies, URLs, headers, or echoed
-          // credentials. Keep its diagnostic surface structural only.
-          logger: mcpTransportLogger(config.id, {
-            // Codex Apps setup is a read-only initialize/tools-list handshake.
-            // A statusless transport failure is safe to retry, while auth
-            // responses remain non-retryable and publish their specific
-            // reconnect reason through codexAppsAuthFetch.
-            recoverySafeSetup: isCodexAppsMcpServer(config),
-          }),
-          // codex_apps returns connector tools with empty `outputSchema: {}` that the
-          // MCP SDK's strict Tool schema rejects (fails the turn during tools/list);
-          // sanitize the response on the wire before validation. The namespace Set
-          // also captures each tool's original connector namespace (P4 Part B.1).
-          fetch: fetchImpl,
-          ...(await mcpServerRequestInit(settings, config)),
-          ...(config.timeoutMs
-            ? {
-                timeout: config.timeoutMs,
-                clientSessionTimeoutSeconds: Math.ceil(config.timeoutMs / 1000),
-              }
-            : {}),
-        }),
+        innerServer,
         config.id,
         config.allowedTools,
         bestEffort,

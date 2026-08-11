@@ -2,12 +2,15 @@ import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
+import { CapabilityCatalogItem as CapabilityCatalogItemSchema } from "@opengeni/contracts";
 
 import type { ConnectionHealth } from "@/lib/capabilities";
 import type { CapabilityCatalogItem, ConnectionMetadata, SocialConnection } from "@/types";
+import { Sheet } from "@/components/ui/sheet";
 import {
   ConnectionStatus,
   DEFAULT_CONNECTION_OWNERSHIP,
+  DetailBody,
   OwnershipSelector,
   SocialConnectorControls,
 } from "./capability-detail-sheet";
@@ -155,6 +158,54 @@ describe("connection ownership UI", () => {
       expect(rendered.container.textContent).toContain("Personal connection to linear.app");
       expect(rendered.container.textContent).toContain("only when explicitly delegated");
       expect(rendered.container.textContent).not.toContain("11111111-1111-4111-8111-111111111111");
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("official Gmail exposes only a personal connect action and explains isolation", async () => {
+    const gmail = CapabilityCatalogItemSchema.parse({
+      id: "registry:gmail",
+      kind: "mcp",
+      source: "registry",
+      name: "Gmail",
+      category: "integrations",
+      providerDomain: "gmailmcp.googleapis.com",
+      mcpUrl: "https://gmailmcp.googleapis.com/mcp/v1",
+      endpointUrl: "https://gmailmcp.googleapis.com/mcp/v1",
+      authKind: "oauth2",
+      runtime: { available: true, mcpServerId: "gmail-runtime", notes: null },
+      metadata: { connectionOwnership: "personal_only" },
+    });
+    const onAction = mock((_action: unknown) => {});
+    const rendered = await render(
+      <Sheet open>
+        <DetailBody
+          item={gmail}
+          health={{ state: "none" }}
+          logoSrc={null}
+          busy={false}
+          errorMessage={null}
+          canManageSocial={false}
+          onAction={onAction}
+        />
+      </Sheet>,
+    );
+    try {
+      expect(rendered.container.textContent).toContain(
+        "Other workspace members cannot discover or use",
+      );
+      expect(rendered.container.textContent).toContain("Each member connects their own");
+      expect(rendered.container.textContent).toContain(
+        "content added to a session follows that session's visibility",
+      );
+      expect(rendered.container.textContent).not.toContain("Connect for workspace");
+      const connect = [...rendered.container.querySelectorAll("button")].find((button) =>
+        button.textContent?.includes("Connect only for me"),
+      );
+      expect(connect).toBeDefined();
+      await act(async () => connect!.click());
+      expect(onAction).toHaveBeenCalledWith({ type: "oauth", item: gmail, ownership: "personal" });
     } finally {
       await rendered.unmount();
     }

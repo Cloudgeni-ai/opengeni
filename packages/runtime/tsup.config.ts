@@ -1,10 +1,11 @@
 import { defineConfig } from "tsup";
 
-// @opengeni/runtime has four public entry points:
+// @opengeni/runtime has five public entry points:
 //   .             -> the full agent loop
 //   ./sandbox     -> the API-safe sandbox leaf
 //   ./skill-library -> immutable bundled skill metadata
 //   ./mcp-network -> the credential-bearing MCP network leaf
+//   ./gmail-rest-mcp -> the bounded API-safe Gmail transport adapter
 //
 // The runtime ships `src/` as well as `dist/` because the bundled skill library
 // is data, not compiled JS; index.ts resolves it from src when running from dist.
@@ -14,6 +15,7 @@ export default defineConfig({
     "sandbox/index": "src/sandbox/index.ts",
     "skill-library": "src/skill-library.ts",
     "mcp-network": "src/mcp-network.ts",
+    "gmail-rest-mcp": "src/gmail-rest-mcp.ts",
   },
   format: ["esm"],
   target: "es2022",

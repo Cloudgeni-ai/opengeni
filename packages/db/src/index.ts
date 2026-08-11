@@ -136,6 +136,7 @@ import {
   MODEL_TIMELINE_ANNOTATIONS_FIELD,
   TimelineAnnotations,
   renderTimelineAnnotationsForModel,
+  SessionMcpApprovalPolicy as SessionMcpApprovalPolicySchema,
   type TimelineAnnotation,
 } from "@opengeni/contracts";
 
@@ -3953,6 +3954,7 @@ export type EnabledMcpCapabilityServer = {
   allowedTools?: string[];
   timeoutMs?: number;
   cacheToolsList?: boolean;
+  requireApproval?: SessionMcpApprovalPolicy;
   /**
    * Credential request headers stored encrypted at enable time
    * (AES-256-GCM under the workspace-variableSets key). Decrypted only at
@@ -6145,6 +6147,9 @@ export async function listEnabledMcpCapabilityServers(
     const allowedTools = stringArrayConfig(config.allowedTools ?? metadata.allowedTools);
     const timeoutMs = positiveIntegerConfig(config.timeoutMs ?? metadata.timeoutMs);
     const cacheToolsList = booleanConfig(config.cacheToolsList ?? metadata.cacheToolsList);
+    const requireApproval = sessionMcpApprovalPolicyConfig(
+      config.requireApproval ?? metadata.requireApproval,
+    );
     return [
       {
         capabilityId: item.id,
@@ -6154,6 +6159,7 @@ export async function listEnabledMcpCapabilityServers(
         ...(allowedTools ? { allowedTools } : {}),
         ...(timeoutMs ? { timeoutMs } : {}),
         ...(cacheToolsList !== undefined ? { cacheToolsList } : {}),
+        ...(requireApproval !== undefined ? { requireApproval } : {}),
         ...(headersEncrypted ? { headersEncrypted } : {}),
         ...(connectionRef ? { connectionRef } : {}),
       },
@@ -51205,6 +51211,11 @@ function stringArrayConfig(value: unknown): string[] | undefined {
     (item): item is string => typeof item === "string" && item.trim().length > 0,
   );
   return values.length > 0 ? [...new Set(values.map((item) => item.trim()))] : undefined;
+}
+
+function sessionMcpApprovalPolicyConfig(value: unknown): SessionMcpApprovalPolicy | undefined {
+  const parsed = SessionMcpApprovalPolicySchema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
 }
 
 function cleanDbString(value: string | undefined | null): string | undefined {
