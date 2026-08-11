@@ -7,6 +7,7 @@ import { describe, expect, test } from "bun:test";
 import {
   planUnitTestProcesses,
   runBoundedTestProcesses,
+  sourceMutatesSharedPostgresRole,
   sourceUsesExplicitTestConcurrency,
   sourceUsesWallClockPerformanceAssertion,
 } from "./run-unit-shard";
@@ -86,7 +87,25 @@ describe("unit process planning", () => {
     expect(sourceUsesWallClockPerformanceAssertion("expect(rows).toBeLessThan(100);")).toBe(false);
   });
 
-  test("keeps explicit concurrency and wall-clock assertions out of the parallel pool", () => {
+  test("recognizes only shared-container cluster-role mutations", () => {
+    expect(
+      sourceMutatesSharedPostgresRole(
+        "await sql.unsafe(`alter role opengeni_app with password 'test'`);",
+      ),
+    ).toBe(true);
+    expect(
+      sourceMutatesSharedPostgresRole(
+        "const blank = await acquireBlankTestDatabase('x'); await provisionRoles(blank.databaseUrl, {});",
+      ),
+    ).toBe(true);
+    expect(
+      sourceMutatesSharedPostgresRole(
+        "const shared = await acquireSharedTestDatabase('x'); if (externalUrl) await provisionRoles(externalUrl, {});",
+      ),
+    ).toBe(false);
+  });
+
+  test("keeps explicit concurrency, wall clocks, and cluster roles out of the parallel pool", () => {
     const root = mkdtempSync(join(tmpdir(), "opengeni-unit-process-plan-"));
     try {
       for (const path of ["batch-a.test.ts", "isolated-a.test.ts"]) {
@@ -96,6 +115,10 @@ describe("unit process planning", () => {
         join(root, "timed.test.ts"),
         "const started = performance.now(); expect(performance.now() - started).toBeLessThan(100);\n",
       );
+      writeFileSync(
+        join(root, "role.test.ts"),
+        "await sql.unsafe(`alter role opengeni_app with password 'test'`);\n",
+      );
       mkdirSync(join(root, "nested"));
       writeFileSync(
         join(root, "nested/concurrent.test.ts"),
@@ -103,7 +126,7 @@ describe("unit process planning", () => {
       );
       const plan = planUnitTestProcesses(
         root,
-        ["batch-a.test.ts", "nested/concurrent.test.ts", "timed.test.ts"],
+        ["batch-a.test.ts", "nested/concurrent.test.ts", "timed.test.ts", "role.test.ts"],
         ["isolated-a.test.ts"],
         1,
       );
@@ -115,6 +138,7 @@ describe("unit process planning", () => {
         ],
         explicitConcurrency: [{ files: ["nested/concurrent.test.ts"], isolated: false }],
         wallClockSensitive: [{ files: ["timed.test.ts"], isolated: false }],
+        clusterRoleSensitive: [{ files: ["role.test.ts"], isolated: false }],
       });
     } finally {
       rmSync(root, { recursive: true, force: true });

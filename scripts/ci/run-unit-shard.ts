@@ -23,6 +23,7 @@ export type UnitTestProcessPlan = {
   parallel: UnitTestProcess[];
   explicitConcurrency: UnitTestProcess[];
   wallClockSensitive: UnitTestProcess[];
+  clusterRoleSensitive: UnitTestProcess[];
 };
 
 export function sanitizedTestEnvironment(
@@ -60,6 +61,13 @@ export function sourceUsesWallClockPerformanceAssertion(source: string): boolean
   );
 }
 
+export function sourceMutatesSharedPostgresRole(source: string): boolean {
+  return (
+    /\b(?:create|alter|drop)\s+role\s+opengeni_app\b/i.test(source) ||
+    (/\bacquireBlankTestDatabase\b/.test(source) && /\bprovisionRoles\s*\(/.test(source))
+  );
+}
+
 export function planUnitTestProcesses(
   root: string,
   batch: readonly string[],
@@ -82,18 +90,31 @@ export function planUnitTestProcesses(
       )
       .map(([path]) => path),
   );
+  const clusterRoleSensitive = new Set(
+    [...sources]
+      .filter(
+        ([path, source]) =>
+          !explicitConcurrency.has(path) &&
+          !wallClockSensitive.has(path) &&
+          sourceMutatesSharedPostgresRole(source),
+      )
+      .map(([path]) => path),
+  );
   const usesExplicitConcurrency = (path: string): boolean => explicitConcurrency.has(path);
   const usesWallClock = (path: string): boolean => wallClockSensitive.has(path);
+  const mutatesClusterRole = (path: string): boolean => clusterRoleSensitive.has(path);
   const parallelBatch = batch.filter(
-    (path) => !usesExplicitConcurrency(path) && !usesWallClock(path),
+    (path) => !usesExplicitConcurrency(path) && !usesWallClock(path) && !mutatesClusterRole(path),
   );
   const concurrentBatch = batch.filter(usesExplicitConcurrency);
   const wallClockBatch = batch.filter(usesWallClock);
+  const clusterRoleBatch = batch.filter(mutatesClusterRole);
   const parallelIsolated = isolated.filter(
-    (path) => !usesExplicitConcurrency(path) && !usesWallClock(path),
+    (path) => !usesExplicitConcurrency(path) && !usesWallClock(path) && !mutatesClusterRole(path),
   );
   const concurrentIsolated = isolated.filter(usesExplicitConcurrency);
   const wallClockIsolated = isolated.filter(usesWallClock);
+  const clusterRoleIsolated = isolated.filter(mutatesClusterRole);
   return {
     parallel: [
       ...deterministicFileBatches(parallelBatch, batchSize).map((files) => ({
@@ -116,6 +137,14 @@ export function planUnitTestProcesses(
     wallClockSensitive: [
       ...wallClockBatch.map((path) => ({ files: [path], isolated: false })),
       ...wallClockIsolated.map((path) => ({ files: [path], isolated: true })),
+    ],
+    // PostgreSQL roles are cluster-global even when every test file owns a
+    // distinct database. Run role-password/DDL mutation tests last and alone,
+    // after every shared app-role connection has closed. Each blank-database
+    // acquisition then resets the canonical role before its own mutation.
+    clusterRoleSensitive: [
+      ...clusterRoleBatch.map((path) => ({ files: [path], isolated: false })),
+      ...clusterRoleIsolated.map((path) => ({ files: [path], isolated: true })),
     ],
   };
 }
@@ -210,7 +239,7 @@ async function main(): Promise<void> {
   const budget = testConcurrencyBudget();
   const processes = planUnitTestProcesses(process.cwd(), batch, isolated, configuredBatchSize);
   process.stdout.write(
-    `[unit-shard] process plan: ${describeTestConcurrencyBudget(budget)} parallel=${processes.parallel.length} explicitConcurrency=${processes.explicitConcurrency.length} wallClockSensitive=${processes.wallClockSensitive.length}\n`,
+    `[unit-shard] process plan: ${describeTestConcurrencyBudget(budget)} parallel=${processes.parallel.length} explicitConcurrency=${processes.explicitConcurrency.length} wallClockSensitive=${processes.wallClockSensitive.length} clusterRoleSensitive=${processes.clusterRoleSensitive.length}\n`,
   );
   const parallelStatus = await runBoundedTestProcesses(
     processes.parallel,
@@ -226,6 +255,12 @@ async function main(): Promise<void> {
     run(task, budget, 1, 1),
   );
   if (wallClockStatus !== 0) process.exit(wallClockStatus);
+  const clusterRoleStatus = await runBoundedTestProcesses(
+    processes.clusterRoleSensitive,
+    1,
+    (task) => run(task, budget, 1, 1),
+  );
+  if (clusterRoleStatus !== 0) process.exit(clusterRoleStatus);
   process.stdout.write(
     `[unit-shard] shard ${index + 1}/${count} passed (${selected.length} files)\n`,
   );
