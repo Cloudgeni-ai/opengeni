@@ -3,6 +3,7 @@ import {
   ConnectionResponse,
   CreateConnectionRequest,
   IntegrationClientMetadata,
+  ListSlackInstallationBindingsResponse,
   ListConnectionsResponse,
   OpenGeniSlackBotInstallRequest,
   OpenGeniSlackBotInstallStart,
@@ -34,17 +35,18 @@ import {
 import {
   consumeIntegrationOAuthStateNonce,
   createConnection,
-  createConnectionWithSlackBotSuccessAudit,
   encryptEnvironmentValue,
   getConnectionMetadata,
   getWorkspaceGrant,
   listConnectionsMetadata,
+  listSlackInstallationBindings,
+  persistSlackBotInstallationWithSuccessAudit,
   recordSlackBotInstallCallbackFailure,
   revokeConnection,
   revokeConnectionWithSlackBotSuccessAudit,
   SlackBotLifecycleSuccessAuditError,
+  SlackInstallationBindingConflictError,
   updateConnection,
-  updateConnectionWithSlackBotSuccessAudit,
   updateSlackBotDocumentDestination,
   type SlackBotInstallCallbackFailureReason,
   type SlackBotInstallCallbackFailureStage,
@@ -105,6 +107,19 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(
       ListConnectionsResponse.parse({
         connections: await listConnectionsMetadata(db, workspaceId, grant.subjectId),
+      }),
+    );
+  });
+
+  app.get("/v1/workspaces/:workspaceId/connections/slack-bot/bindings", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:read");
+    return c.json(
+      ListSlackInstallationBindingsResponse.parse({
+        bindings: await listSlackInstallationBindings(db, {
+          accountId: grant.accountId,
+          workspaceId,
+        }),
       }),
     );
   });
@@ -671,14 +686,9 @@ async function persistOpenGeniSlackBotConnection(input: {
       "principal_validation",
     );
   }
-  const existing =
-    requestedExisting ??
-    (await findMatchingOpenGeniSlackBotConnection(
-      db,
-      input.state.workspaceId,
-      input.verified.metadata,
-    ));
-  const existingMetadata = existing ? openGeniSlackBotMetadata(existing.metadata) : null;
+  const existingMetadata = requestedExisting
+    ? openGeniSlackBotMetadata(requestedExisting.metadata)
+    : null;
   if (existingMetadata && existingMetadata.slackTeamId !== input.verified.metadata.slackTeamId) {
     throw new SlackInstallCallbackError(
       409,
@@ -700,83 +710,36 @@ async function persistOpenGeniSlackBotConnection(input: {
     );
   }
   const verifiedInstallAt = new Date(input.verified.metadata.verifiedAt);
-  const lifecycleAudit = {
-    accountId: input.state.accountId,
-    workspaceId: input.state.workspaceId,
-    subjectId: input.state.subjectId,
-    credentialRole: OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
-    credentialLabel: OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
-    slackTeamId: input.verified.metadata.slackTeamId,
-  };
-  const connection = existing
-    ? await updateConnectionWithSlackBotSuccessAudit(db, {
-        ...lifecycleAudit,
-        connection: {
-          workspaceId: input.state.workspaceId,
-          connectionId: existing.id,
-          visibleToSubjectId: input.state.subjectId,
-          expectedVersion: existing.version,
-          subjectId: null,
-          providerDomain: "slack.com",
-          kind: "app_install",
-          status: "active",
-          credentialEncrypted,
-          grantedScopes: input.verified.grantedScopes,
-          expiresAt: null,
-          verifiedInstallAt,
-          verifiedInstallVersion: existing.version + 1,
-          metadata: input.verified.metadata,
-          updatedBySubjectId: input.state.subjectId,
-        },
-      })
-    : await createConnectionWithSlackBotSuccessAudit(db, {
-        ...lifecycleAudit,
-        connection: {
-          accountId: input.state.accountId,
-          workspaceId: input.state.workspaceId,
-          subjectId: null,
-          providerDomain: "slack.com",
-          kind: "app_install",
-          credentialEncrypted,
-          grantedScopes: input.verified.grantedScopes,
-          expiresAt: null,
-          verifiedInstallAt,
-          verifiedInstallVersion: 1,
-          metadata: input.verified.metadata,
-          createdBySubjectId: input.state.subjectId,
-        },
-      });
-  if (!connection) {
-    throw new SlackInstallCallbackError(
-      409,
-      "connection_conflict",
-      "Slack bot connection changed during reinstall; start again",
-      "principal_validation",
-    );
-  }
-  return connection;
-}
-
-async function findMatchingOpenGeniSlackBotConnection(
-  db: ApiRouteDeps["db"],
-  workspaceId: string,
-  verified: Awaited<ReturnType<typeof verifyOpenGeniSlackBotCredential>>["metadata"],
-) {
-  const connections = await listConnectionsMetadata(db, workspaceId, null);
-  return (
-    connections.find((connection) => {
-      const metadata = openGeniSlackBotMetadata(connection.metadata);
-      return (
-        connection.subjectId === null &&
-        connection.providerDomain === "slack.com" &&
-        connection.kind === "app_install" &&
-        metadata?.credentialRole === OPENGENI_SLACK_BOT_CREDENTIAL_ROLE &&
-        metadata.slackTeamId === verified.slackTeamId &&
-        metadata.botId === verified.botId &&
-        metadata.botUserId === verified.botUserId
+  try {
+    return await persistSlackBotInstallationWithSuccessAudit(db, {
+      accountId: input.state.accountId,
+      workspaceId: input.state.workspaceId,
+      subjectId: input.state.subjectId,
+      credentialRole: OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
+      credentialLabel: OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
+      slackTeamId: input.verified.metadata.slackTeamId,
+      ...(input.state.connectionId
+        ? {
+            requestedConnectionId: input.state.connectionId,
+            requestedConnectionVersion: input.state.connectionVersion,
+          }
+        : {}),
+      credentialEncrypted,
+      grantedScopes: input.verified.grantedScopes,
+      verifiedInstallAt,
+      metadata: input.verified.metadata,
+    });
+  } catch (error) {
+    if (error instanceof SlackInstallationBindingConflictError) {
+      throw new SlackInstallCallbackError(
+        409,
+        "connection_conflict",
+        error.message,
+        "principal_validation",
       );
-    }) ?? null
-  );
+    }
+    throw error;
+  }
 }
 
 function requireOpenGeniSlackOAuthSettings(settings: ApiRouteDeps["settings"]): {

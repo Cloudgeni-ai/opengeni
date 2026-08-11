@@ -7,6 +7,7 @@ import type {
   McpServerConnectionRef,
   RigProviderImages,
   SessionMcpApprovalPolicy,
+  SlackUserLinkAccessRequest,
   TimelineAnnotation,
 } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
@@ -26,6 +27,7 @@ import {
   primaryKey,
   text,
   timestamp,
+  unique,
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
@@ -768,6 +770,72 @@ export const connections = pgTable(
   }),
 );
 
+// One durable routing authority per installed Slack team. The active partial
+// unique index is the database fence that prevents a team from being routed to
+// two OpenGeni workspaces. Legacy ambiguous rows are retained as quarantined
+// evidence instead of deleting credentials or guessing a winner.
+export const slackInstallationBindings = pgTable(
+  "slack_installation_bindings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => connections.id, { onDelete: "cascade" }),
+    slackTeamId: text("slack_team_id").notNull(),
+    slackTeamName: text("slack_team_name").notNull(),
+    botId: text("bot_id").notNull(),
+    botUserId: text("bot_user_id").notNull(),
+    botDisplayName: text("bot_display_name").notNull(),
+    state: text("state").$type<"active" | "quarantined">().notNull(),
+    quarantineReason: text("quarantine_reason"),
+    version: integer("version").notNull().default(1),
+    createdBySubjectId: text("created_by_subject_id"),
+    updatedBySubjectId: text("updated_by_subject_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    connection: uniqueIndex("slack_installation_bindings_connection_uq").on(table.connectionId),
+    activeTeam: uniqueIndex("slack_installation_bindings_active_team_uq")
+      .on(table.slackTeamId)
+      .where(sql`${table.state} = 'active'`),
+    workspaceState: index("slack_installation_bindings_workspace_state_idx").on(
+      table.workspaceId,
+      table.state,
+      table.updatedAt,
+    ),
+    workspaceAccount: foreignKey({
+      name: "slack_installation_bindings_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    stateValid: check(
+      "slack_installation_bindings_state_check",
+      sql`${table.state} in ('active', 'quarantined')`,
+    ),
+    quarantineConsistent: check(
+      "slack_installation_bindings_quarantine_check",
+      sql`(${table.state} = 'active' and ${table.quarantineReason} is null)
+        or (${table.state} = 'quarantined' and length(btrim(${table.quarantineReason})) > 0)`,
+    ),
+    identityBounded: check(
+      "slack_installation_bindings_identity_check",
+      sql`octet_length(${table.slackTeamId}) between 1 and 64
+        and octet_length(${table.slackTeamName}) between 1 and 256
+        and octet_length(${table.botId}) between 1 and 64
+        and octet_length(${table.botUserId}) between 1 and 64
+        and ${table.botDisplayName} = 'OpenGeni'`,
+    ),
+    versionPositive: check("slack_installation_bindings_version_check", sql`${table.version} > 0`),
+  }),
+);
+
 export const connectionDisconnectOperations = pgTable(
   "connection_disconnect_operations",
   {
@@ -882,6 +950,173 @@ export const slackBotUserLinks = pgTable(
     workspaceSubject: index("slack_bot_user_links_workspace_subject_idx").on(
       table.workspaceId,
       table.subjectId,
+    ),
+  }),
+);
+
+export const slackUserLinkAccessRequests = pgTable(
+  "slack_user_link_access_requests",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    tokenDigest: text("token_digest").notNull(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => connections.id, { onDelete: "cascade" }),
+    slackTeamId: text("slack_team_id").notNull(),
+    slackUserId: text("slack_user_id").notNull(),
+    subjectId: text("subject_id").notNull(),
+    subjectLabel: text("subject_label"),
+    status: text("status").notNull().default("prepared"),
+    version: integer("version").notNull().default(1),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    requestedAt: timestamp("requested_at", { withTimezone: true }),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    decisionBySubjectId: text("decision_by_subject_id"),
+    approvedRole: text("approved_role"),
+    approvedPermissions: jsonb("approved_permissions").$type<string[]>(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "slack_user_link_access_requests_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    tenantIdentity: unique("slack_user_link_access_requests_tenant_uq").on(
+      table.id,
+      table.workspaceId,
+      table.accountId,
+    ),
+    tokenDigestUnique: uniqueIndex("slack_user_link_access_requests_token_digest_uq").on(
+      table.tokenDigest,
+    ),
+    activePrincipal: uniqueIndex("slack_user_link_access_requests_active_principal_uq")
+      .on(table.workspaceId, table.connectionId, table.slackUserId, table.subjectId)
+      .where(sql`${table.status} in ('prepared', 'pending')`),
+    workspacePending: index("slack_user_link_access_requests_workspace_pending_idx").on(
+      table.workspaceId,
+      table.status,
+      table.expiresAt,
+      table.createdAt,
+    ),
+    subjectLookup: index("slack_user_link_access_requests_subject_idx").on(
+      table.workspaceId,
+      table.subjectId,
+      table.id,
+    ),
+    identityValid: check(
+      "slack_user_link_access_requests_identity_check",
+      sql`length(${table.tokenDigest}) = 64
+        and ${table.tokenDigest} ~ '^[0-9a-f]{64}$'
+        and length(${table.slackTeamId}) between 1 and 64
+        and length(${table.slackUserId}) between 1 and 64
+        and length(${table.subjectId}) between 1 and 512
+        and (${table.subjectLabel} is null or length(${table.subjectLabel}) between 1 and 512)
+        and ${table.version} > 0`,
+    ),
+    statusValid: check(
+      "slack_user_link_access_requests_status_check",
+      sql`${table.status} in ('prepared', 'pending', 'completed', 'denied', 'cancelled', 'expired')`,
+    ),
+    lifecycleValid: check(
+      "slack_user_link_access_requests_lifecycle_check",
+      sql`(${table.status} = 'prepared' and ${table.requestedAt} is null and ${table.decidedAt} is null and ${table.completedAt} is null)
+        or (${table.status} = 'pending' and ${table.requestedAt} is not null and ${table.decidedAt} is null and ${table.completedAt} is null)
+        or (${table.status} = 'completed' and ${table.completedAt} is not null)
+        or (${table.status} in ('denied', 'cancelled', 'expired') and ${table.decidedAt} is not null and ${table.completedAt} is null)`,
+    ),
+  }),
+);
+
+export const slackUserLinkAccessRequestOperations = pgTable(
+  "slack_user_link_access_request_operations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    requestId: uuid("request_id").notNull(),
+    actorSubjectId: text("actor_subject_id").notNull(),
+    operation: text("operation").notNull(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    requestDigest: text("request_digest").notNull(),
+    expectedVersion: integer("expected_version").notNull(),
+    resultVersion: integer("result_version").notNull(),
+    resultStatus: text("result_status").notNull(),
+    result: jsonb("result").$type<SlackUserLinkAccessRequest>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "slack_user_link_access_request_operations_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    requestTenant: foreignKey({
+      name: "slack_user_link_access_request_operations_request_tenant_fk",
+      columns: [table.requestId, table.workspaceId, table.accountId],
+      foreignColumns: [
+        slackUserLinkAccessRequests.id,
+        slackUserLinkAccessRequests.workspaceId,
+        slackUserLinkAccessRequests.accountId,
+      ],
+    }).onDelete("cascade"),
+    idempotency: uniqueIndex("slack_user_link_access_request_operations_idempotency_uq").on(
+      table.requestId,
+      table.actorSubjectId,
+      table.operation,
+      table.idempotencyKey,
+    ),
+    resultVersionUnique: uniqueIndex(
+      "slack_user_link_access_request_operations_result_version_uq",
+    ).on(table.requestId, table.resultVersion),
+    identityValid: check(
+      "slack_user_link_access_request_operations_identity_check",
+      sql`length(${table.actorSubjectId}) between 1 and 512
+        and length(${table.idempotencyKey}) between 1 and 200
+        and ${table.idempotencyKey} = btrim(${table.idempotencyKey})
+        and length(${table.requestDigest}) = 64
+        and ${table.requestDigest} ~ '^[0-9a-f]{64}$'
+        and ${table.expectedVersion} > 0
+        and ${table.resultVersion} = ${table.expectedVersion} + 1
+        and ${table.operation} in ('request', 'cancel', 'approve', 'deny')
+        and ${table.resultStatus} in ('pending', 'completed', 'denied', 'cancelled')
+        and jsonb_typeof(${table.result}) = 'object'
+        and ${table.result} ?& array[
+          'id', 'workspaceId', 'workspaceDisplayName', 'subjectLabel', 'status', 'version',
+          'expiresAt', 'requestedAt', 'decidedAt', 'completedAt', 'createdAt', 'updatedAt'
+        ]
+        and ${table.result} - array[
+          'id', 'workspaceId', 'workspaceDisplayName', 'subjectLabel', 'status', 'version',
+          'expiresAt', 'requestedAt', 'decidedAt', 'completedAt', 'createdAt', 'updatedAt'
+        ] = '{}'::jsonb
+        and jsonb_typeof(${table.result}->'id') = 'string'
+        and jsonb_typeof(${table.result}->'workspaceId') = 'string'
+        and jsonb_typeof(${table.result}->'workspaceDisplayName') in ('string', 'null')
+        and jsonb_typeof(${table.result}->'subjectLabel') in ('string', 'null')
+        and jsonb_typeof(${table.result}->'status') = 'string'
+        and jsonb_typeof(${table.result}->'version') = 'number'
+        and jsonb_typeof(${table.result}->'expiresAt') = 'string'
+        and jsonb_typeof(${table.result}->'requestedAt') in ('string', 'null')
+        and jsonb_typeof(${table.result}->'decidedAt') in ('string', 'null')
+        and jsonb_typeof(${table.result}->'completedAt') in ('string', 'null')
+        and jsonb_typeof(${table.result}->'createdAt') = 'string'
+        and jsonb_typeof(${table.result}->'updatedAt') = 'string'
+        and ${table.result}->>'id' = ${table.requestId}::text
+        and ${table.result}->>'workspaceId' = ${table.workspaceId}::text
+        and ${table.result}->>'status' = ${table.resultStatus}
+        and ${table.result}->'version' = to_jsonb(${table.resultVersion})`,
     ),
   }),
 );

@@ -39,6 +39,11 @@ import {
   MachineMetricsSeriesResponse as ContractMachineMetricsSeriesResponse,
   NewSessionDraft as ContractNewSessionDraft,
   SaveNewSessionDraftRequest as ContractSaveNewSessionDraftRequest,
+  SlackUserLinkAccessRequest as ContractSlackUserLinkAccessRequest,
+  PrepareSlackUserLinkAccessRequest as ContractPrepareSlackUserLinkAccessRequest,
+  SlackUserLinkAccessMutationRequest as ContractSlackUserLinkAccessMutationRequest,
+  ApproveSlackUserLinkAccessRequest as ContractApproveSlackUserLinkAccessRequest,
+  ListSlackUserLinkAccessRequestsResponse as ContractListSlackUserLinkAccessRequestsResponse,
   OPENGENI_CORRELATION_HEADER as CONTRACT_CORRELATION_HEADER,
   SandboxBackend as ContractSandboxBackend,
   SandboxOs as ContractSandboxOs,
@@ -125,6 +130,11 @@ import type {
   NewSessionDraftOptions,
   ReasoningEffort,
   SaveNewSessionDraftRequest,
+  SlackUserLinkAccessRequest,
+  PrepareSlackUserLinkAccessRequest,
+  SlackUserLinkAccessMutationRequest,
+  ApproveSlackUserLinkAccessRequest,
+  ListSlackUserLinkAccessRequestsResponse,
   SandboxBackend,
   SandboxOs,
   ScheduledTask,
@@ -178,6 +188,29 @@ describe("SDK / contracts parity", () => {
   });
   test("pins the default uploaded-file mount root", () => {
     expect(DEFAULT_FILE_RESOURCE_MOUNT_ROOT).toBe(CONTRACT_DEFAULT_FILE_RESOURCE_MOUNT_ROOT);
+  });
+
+  test("Slack user-link access continuation shapes match the public contracts", () => {
+    const acceptRequest = (
+      value: z.infer<typeof ContractSlackUserLinkAccessRequest>,
+    ): SlackUserLinkAccessRequest => value;
+    const acceptPrepare = (
+      value: PrepareSlackUserLinkAccessRequest,
+    ): z.input<typeof ContractPrepareSlackUserLinkAccessRequest> => value;
+    const acceptMutation = (
+      value: SlackUserLinkAccessMutationRequest,
+    ): z.input<typeof ContractSlackUserLinkAccessMutationRequest> => value;
+    const acceptApproval = (
+      value: Omit<ApproveSlackUserLinkAccessRequest, "permissions">,
+    ): Omit<z.input<typeof ContractApproveSlackUserLinkAccessRequest>, "permissions"> => value;
+    const acceptList = (
+      value: z.infer<typeof ContractListSlackUserLinkAccessRequestsResponse>,
+    ): ListSlackUserLinkAccessRequestsResponse => value;
+    expect(
+      [acceptRequest, acceptPrepare, acceptMutation, acceptApproval, acceptList].every(
+        (fn) => typeof fn === "function",
+      ),
+    ).toBe(true);
   });
   test("known session event types match the contracts enum exactly", () => {
     expect([...SESSION_EVENT_TYPES].sort()).toEqual([...ContractSessionEventType.options].sort());

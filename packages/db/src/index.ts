@@ -59,6 +59,7 @@ import type {
   ScheduledTaskScheduleSpec,
   ScheduledTaskStatus,
   ScheduledTaskTriggerType,
+  SlackInstallationBinding,
   Session,
   SessionAuthorizationListScope,
   SessionListResponse,
@@ -311,6 +312,7 @@ export * from "./memory-governance";
 export * from "./scoped-knowledge";
 export * from "./knowledge-source-sync";
 export * from "./generated-images";
+export * from "./slack-user-link-access";
 export * from "./video-generation";
 export { interruptedToolCallResult } from "./session-tool-call-settlement";
 export { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
@@ -6729,6 +6731,114 @@ export type SlackInstallationRoute = {
   botUserId: string;
 };
 
+export class SlackInstallationBindingConflictError extends Error {
+  constructor(
+    readonly reason:
+      | "conflicting_workspace"
+      | "conflicting_principal"
+      | "legacy_quarantine"
+      | "stale_reinstall",
+  ) {
+    super(
+      reason === "legacy_quarantine"
+        ? "Slack team has conflicting legacy installations and is quarantined"
+        : reason === "stale_reinstall"
+          ? "Slack installation changed during reinstall; start again"
+          : "Slack team is already bound to a different OpenGeni installation",
+    );
+    this.name = "SlackInstallationBindingConflictError";
+  }
+}
+
+type SlackInstallationBindingInspection = {
+  outcome:
+    | "available"
+    | "same_binding"
+    | "conflicting_workspace"
+    | "conflicting_principal"
+    | "legacy_quarantine";
+  connectionId: string | null;
+  connectionVersion: number | null;
+};
+
+async function inspectSlackInstallationBindingInScope(
+  db: Database,
+  input: { slackTeamId: string; botId: string; botUserId: string },
+): Promise<SlackInstallationBindingInspection> {
+  const [row] = await db.execute<{
+    outcome: SlackInstallationBindingInspection["outcome"];
+    connection_id: string | null;
+    connection_version: number | string | null;
+  }>(
+    sql`select * from opengeni_private.inspect_slack_installation_binding(
+      ${input.slackTeamId}, ${input.botId}, ${input.botUserId}
+    )`,
+  );
+  if (!row) throw new Error("Slack installation binding inspection returned no row");
+  return {
+    outcome: row.outcome,
+    connectionId: row.connection_id,
+    connectionVersion: row.connection_version == null ? null : Number(row.connection_version),
+  };
+}
+
+export async function listSlackInstallationBindings(
+  db: Database,
+  input: { accountId: string; workspaceId: string },
+): Promise<SlackInstallationBinding[]> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({
+        binding: schema.slackInstallationBindings,
+        accountName: schema.managedAccounts.name,
+        workspaceName: schema.workspaces.name,
+        connectionStatus: schema.connections.status,
+        connectionVersion: schema.connections.version,
+      })
+      .from(schema.slackInstallationBindings)
+      .innerJoin(
+        schema.managedAccounts,
+        eq(schema.managedAccounts.id, schema.slackInstallationBindings.accountId),
+      )
+      .innerJoin(
+        schema.workspaces,
+        eq(schema.workspaces.id, schema.slackInstallationBindings.workspaceId),
+      )
+      .innerJoin(
+        schema.connections,
+        eq(schema.connections.id, schema.slackInstallationBindings.connectionId),
+      )
+      .where(eq(schema.slackInstallationBindings.workspaceId, input.workspaceId))
+      .orderBy(
+        asc(schema.slackInstallationBindings.state),
+        desc(schema.slackInstallationBindings.updatedAt),
+        desc(schema.slackInstallationBindings.id),
+      );
+    return rows.map(
+      ({ binding, accountName, workspaceName, connectionStatus, connectionVersion }) => ({
+        id: binding.id,
+        accountId: binding.accountId,
+        accountName,
+        workspaceId: binding.workspaceId,
+        workspaceName,
+        connectionId: binding.connectionId,
+        connectionStatus: connectionStatus as ConnectionStatus,
+        connectionVersion,
+        slackTeamId: binding.slackTeamId,
+        slackTeamName: binding.slackTeamName,
+        botId: binding.botId,
+        botUserId: binding.botUserId,
+        botDisplayName: "OpenGeni" as const,
+        state: binding.state,
+        quarantineReason: binding.quarantineReason,
+        version: binding.version,
+        createdAt: binding.createdAt.toISOString(),
+        updatedAt: binding.updatedAt.toISOString(),
+      }),
+    );
+  });
+}
+
 export type SlackBotUserLink = {
   id: string;
   accountId: string;
@@ -7874,6 +7984,20 @@ type SlackBotLifecycleSuccessAuditInput = {
   slackTeamId: string;
 };
 
+export type PersistSlackBotInstallationInput = SlackBotLifecycleSuccessAuditInput & {
+  requestedConnectionId?: string;
+  requestedConnectionVersion?: number;
+  credentialEncrypted: string;
+  grantedScopes: string[];
+  verifiedInstallAt: Date;
+  metadata: Record<string, unknown> & {
+    slackTeamId: string;
+    slackTeamName: string;
+    botId: string;
+    botUserId: string;
+  };
+};
+
 async function insertSlackBotLifecycleSuccessAuditInScope(
   db: Database,
   input: SlackBotLifecycleSuccessAuditInput & {
@@ -7882,6 +8006,12 @@ async function insertSlackBotLifecycleSuccessAuditInScope(
   },
 ): Promise<void> {
   try {
+    const [binding] = await db
+      .select({ version: schema.slackInstallationBindings.version })
+      .from(schema.slackInstallationBindings)
+      .where(eq(schema.slackInstallationBindings.connectionId, input.connectionId))
+      .limit(1);
+    if (!binding) throw new Error("Slack lifecycle mutation omitted its installation binding");
     await db.insert(schema.auditEvents).values(
       withLosslessContentWriteVersion(
         {
@@ -7896,6 +8026,7 @@ async function insertSlackBotLifecycleSuccessAuditInScope(
             credentialLabel: input.credentialLabel,
             connectionId: input.connectionId,
             slackTeamId: input.slackTeamId,
+            bindingVersion: binding.version,
             outcome: "succeeded",
           },
         },
@@ -7908,6 +8039,81 @@ async function insertSlackBotLifecycleSuccessAuditInScope(
     // the RLS transaction is what rolls the paired connection mutation back.
     throw new SlackBotLifecycleSuccessAuditError();
   }
+}
+
+export async function persistSlackBotInstallationWithSuccessAudit(
+  db: Database,
+  input: PersistSlackBotInstallationInput,
+): Promise<ConnectionMetadataWithVerification> {
+  return await withSlackBotLifecycleRls(db, input, async (scopedDb) => {
+    const inspection = await inspectSlackInstallationBindingInScope(scopedDb, {
+      slackTeamId: input.metadata.slackTeamId,
+      botId: input.metadata.botId,
+      botUserId: input.metadata.botUserId,
+    });
+    if (inspection.outcome !== "available" && inspection.outcome !== "same_binding") {
+      throw new SlackInstallationBindingConflictError(inspection.outcome);
+    }
+
+    let action: "slack_bot.connected" | "slack_bot.reinstalled";
+    let connection: ConnectionMetadataWithVerification | null;
+    if (inspection.outcome === "same_binding") {
+      if (!inspection.connectionId || !inspection.connectionVersion) {
+        throw new Error("same Slack installation binding omitted its connection fence");
+      }
+      if (
+        (input.requestedConnectionId && input.requestedConnectionId !== inspection.connectionId) ||
+        (input.requestedConnectionVersion !== undefined &&
+          input.requestedConnectionVersion !== inspection.connectionVersion)
+      ) {
+        throw new SlackInstallationBindingConflictError("stale_reinstall");
+      }
+      action = "slack_bot.reinstalled";
+      connection = await updateConnectionInScope(scopedDb, {
+        workspaceId: input.workspaceId,
+        connectionId: inspection.connectionId,
+        visibleToSubjectId: input.subjectId,
+        expectedVersion: inspection.connectionVersion,
+        subjectId: null,
+        providerDomain: "slack.com",
+        kind: "app_install",
+        status: "active",
+        credentialEncrypted: input.credentialEncrypted,
+        grantedScopes: input.grantedScopes,
+        expiresAt: null,
+        verifiedInstallAt: input.verifiedInstallAt,
+        verifiedInstallVersion: inspection.connectionVersion + 1,
+        metadata: input.metadata,
+        updatedBySubjectId: input.subjectId,
+      });
+    } else {
+      if (input.requestedConnectionId || input.requestedConnectionVersion !== undefined) {
+        throw new SlackInstallationBindingConflictError("stale_reinstall");
+      }
+      action = "slack_bot.connected";
+      connection = await createConnectionInScope(scopedDb, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: null,
+        providerDomain: "slack.com",
+        kind: "app_install",
+        credentialEncrypted: input.credentialEncrypted,
+        grantedScopes: input.grantedScopes,
+        expiresAt: null,
+        verifiedInstallAt: input.verifiedInstallAt,
+        verifiedInstallVersion: 1,
+        metadata: input.metadata,
+        createdBySubjectId: input.subjectId,
+      });
+    }
+    if (!connection) throw new SlackInstallationBindingConflictError("stale_reinstall");
+    await insertSlackBotLifecycleSuccessAuditInScope(scopedDb, {
+      ...input,
+      action,
+      connectionId: connection.id,
+    });
+    return connection;
+  });
 }
 
 async function assertWorkspaceAccountPairInScope(

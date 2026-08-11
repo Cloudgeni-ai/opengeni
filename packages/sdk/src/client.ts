@@ -149,6 +149,11 @@ import type {
   SwapActiveSandboxRequest,
   SwapActiveSandboxResponse,
   ListWorkspaceMembersResponse,
+  ListSlackUserLinkAccessRequestsResponse,
+  PrepareSlackUserLinkAccessRequest,
+  SlackUserLinkAccessMutationRequest,
+  SlackUserLinkAccessRequest,
+  ApproveSlackUserLinkAccessRequest,
   PackInstallation,
   LatencyMode,
   ReasoningEffort,
@@ -278,6 +283,8 @@ import type {
   WorkspaceRegisteredPack,
   Workspace,
   ListConnectionsResponse,
+  ListSlackInstallationBindingsResponse,
+  SlackInstallationBinding,
   ConnectionResponse,
   OAuthStartRequest,
   OAuthStartResponse,
@@ -3169,6 +3176,86 @@ export class OpenGeniClient {
     );
   }
 
+  /** Exchange one signed Slack bearer for durable, token-free continuation state. */
+  async prepareSlackUserLinkAccess(
+    workspaceId: string,
+    request: PrepareSlackUserLinkAccessRequest,
+  ): Promise<SlackUserLinkAccessRequest> {
+    return await this.requestJson<SlackUserLinkAccessRequest>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/integrations/slack/user-link-intents`,
+      request,
+    );
+  }
+
+  async getSlackUserLinkAccess(
+    workspaceId: string,
+    requestId: string,
+  ): Promise<SlackUserLinkAccessRequest> {
+    return await this.requestJson<SlackUserLinkAccessRequest>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/integrations/slack/user-link-intents/${requestId}`,
+    );
+  }
+
+  async requestSlackUserLinkWorkspaceAccess(
+    workspaceId: string,
+    requestId: string,
+    request: SlackUserLinkAccessMutationRequest,
+  ): Promise<SlackUserLinkAccessRequest> {
+    return await this.requestJson<SlackUserLinkAccessRequest>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/integrations/slack/user-link-intents/${requestId}/request-access`,
+      request,
+    );
+  }
+
+  async cancelSlackUserLinkAccess(
+    workspaceId: string,
+    requestId: string,
+    request: SlackUserLinkAccessMutationRequest,
+  ): Promise<SlackUserLinkAccessRequest> {
+    return await this.requestJson<SlackUserLinkAccessRequest>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/integrations/slack/user-link-intents/${requestId}/cancel`,
+      request,
+    );
+  }
+
+  async listSlackUserLinkAccessRequests(
+    workspaceId: string,
+  ): Promise<SlackUserLinkAccessRequest[]> {
+    const response = await this.requestJson<ListSlackUserLinkAccessRequestsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/members/access-requests/slack`,
+    );
+    return response.requests;
+  }
+
+  async approveSlackUserLinkAccessRequest(
+    workspaceId: string,
+    requestId: string,
+    request: ApproveSlackUserLinkAccessRequest,
+  ): Promise<SlackUserLinkAccessRequest> {
+    return await this.requestJson<SlackUserLinkAccessRequest>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/members/access-requests/slack/${requestId}/approve`,
+      request,
+    );
+  }
+
+  async denySlackUserLinkAccessRequest(
+    workspaceId: string,
+    requestId: string,
+    request: SlackUserLinkAccessMutationRequest,
+  ): Promise<SlackUserLinkAccessRequest> {
+    return await this.requestJson<SlackUserLinkAccessRequest>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/members/access-requests/slack/${requestId}/deny`,
+      request,
+    );
+  }
+
   // --- Scheduled tasks (write + runs) -------------------------------------------
 
   async createScheduledTask(
@@ -4241,6 +4328,15 @@ export class OpenGeniClient {
       `/v1/workspaces/${workspaceId}/connections`,
     );
     return response.connections;
+  }
+
+  /** List the secret-free Slack team -> OpenGeni tenant routing authority. */
+  async listSlackInstallationBindings(workspaceId: string): Promise<SlackInstallationBinding[]> {
+    const response = await this.requestJson<ListSlackInstallationBindingsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/connections/slack-bot/bindings`,
+    );
+    return response.bindings;
   }
 
   async createConnection(

@@ -2214,6 +2214,61 @@ export const UpdateWorkspaceMemberRequest = z.object({
 });
 export type UpdateWorkspaceMemberRequest = z.infer<typeof UpdateWorkspaceMemberRequest>;
 
+export const SlackUserLinkAccessRequestStatus = z.enum([
+  "prepared",
+  "pending",
+  "completed",
+  "denied",
+  "cancelled",
+  "expired",
+]);
+export type SlackUserLinkAccessRequestStatus = z.infer<typeof SlackUserLinkAccessRequestStatus>;
+
+/**
+ * Durable, token-free projection of one signed Slack identity-link intent.
+ * The original bearer and its digest are deliberately absent from every
+ * public response.
+ */
+export const SlackUserLinkAccessRequest = z.object({
+  id: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  workspaceDisplayName: z.string().min(1).max(256).nullable(),
+  subjectLabel: z.string().min(1).max(512).nullable(),
+  status: SlackUserLinkAccessRequestStatus,
+  version: z.number().int().positive(),
+  expiresAt: z.string().datetime({ offset: true }),
+  requestedAt: z.string().datetime({ offset: true }).nullable(),
+  decidedAt: z.string().datetime({ offset: true }).nullable(),
+  completedAt: z.string().datetime({ offset: true }).nullable(),
+  createdAt: z.string().datetime({ offset: true }),
+  updatedAt: z.string().datetime({ offset: true }),
+});
+export type SlackUserLinkAccessRequest = z.infer<typeof SlackUserLinkAccessRequest>;
+
+export const PrepareSlackUserLinkAccessRequest = z.object({
+  linkToken: z.string().min(1).max(2_048),
+});
+export type PrepareSlackUserLinkAccessRequest = z.infer<typeof PrepareSlackUserLinkAccessRequest>;
+
+export const SlackUserLinkAccessMutationRequest = z.object({
+  expectedVersion: z.number().int().positive(),
+  idempotencyKey: z.string().trim().min(1).max(200),
+});
+export type SlackUserLinkAccessMutationRequest = z.infer<typeof SlackUserLinkAccessMutationRequest>;
+
+export const ApproveSlackUserLinkAccessRequest = SlackUserLinkAccessMutationRequest.extend({
+  role: z.string().trim().min(1).max(128).optional(),
+  permissions: z.array(Permission).min(1),
+});
+export type ApproveSlackUserLinkAccessRequest = z.infer<typeof ApproveSlackUserLinkAccessRequest>;
+
+export const ListSlackUserLinkAccessRequestsResponse = z.object({
+  requests: z.array(SlackUserLinkAccessRequest),
+});
+export type ListSlackUserLinkAccessRequestsResponse = z.infer<
+  typeof ListSlackUserLinkAccessRequestsResponse
+>;
+
 export const UsageEventType = z.enum([
   "agent_run.created",
   "agent_run.completed",
@@ -6872,6 +6927,38 @@ export const OpenGeniSlackBotInstallStart = z.object({
   expiresAt: z.string().datetime({ offset: true }),
 });
 export type OpenGeniSlackBotInstallStart = z.infer<typeof OpenGeniSlackBotInstallStart>;
+
+export const SlackInstallationBindingState = z.enum(["active", "quarantined"]);
+export type SlackInstallationBindingState = z.infer<typeof SlackInstallationBindingState>;
+
+export const SlackInstallationBinding = z.object({
+  id: z.string().uuid(),
+  accountId: z.string().uuid(),
+  accountName: z.string().min(1),
+  workspaceId: z.string().uuid(),
+  workspaceName: z.string().min(1),
+  connectionId: z.string().uuid(),
+  connectionStatus: ConnectionStatus,
+  connectionVersion: z.number().int().positive(),
+  slackTeamId: z.string().min(1).max(64),
+  slackTeamName: z.string().min(1).max(256),
+  botId: z.string().min(1).max(64),
+  botUserId: z.string().min(1).max(64),
+  botDisplayName: z.literal("OpenGeni"),
+  state: SlackInstallationBindingState,
+  quarantineReason: z.string().min(1).nullable(),
+  version: z.number().int().positive(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type SlackInstallationBinding = z.infer<typeof SlackInstallationBinding>;
+
+export const ListSlackInstallationBindingsResponse = z.object({
+  bindings: z.array(SlackInstallationBinding),
+});
+export type ListSlackInstallationBindingsResponse = z.infer<
+  typeof ListSlackInstallationBindingsResponse
+>;
 
 export const UpdateConnectionRequest = z.object({
   providerDomain: z.string().min(1).optional(),

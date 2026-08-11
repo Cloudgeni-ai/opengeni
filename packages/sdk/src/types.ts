@@ -645,6 +645,33 @@ export type OpenGeniSlackBotInstallStart = {
   expiresAt: string;
 };
 
+export type SlackInstallationBindingState = "active" | "quarantined";
+
+export type SlackInstallationBinding = {
+  id: string;
+  accountId: string;
+  accountName: string;
+  workspaceId: string;
+  workspaceName: string;
+  connectionId: string;
+  connectionStatus: ConnectionStatus;
+  connectionVersion: number;
+  slackTeamId: string;
+  slackTeamName: string;
+  botId: string;
+  botUserId: string;
+  botDisplayName: "OpenGeni";
+  state: SlackInstallationBindingState;
+  quarantineReason: string | null;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ListSlackInstallationBindingsResponse = {
+  bindings: SlackInstallationBinding[];
+};
+
 export type GoogleDriveTargetScope = "user" | "workspace" | "organization";
 export type ConnectorDocumentDestinationAuthority = "organization" | "workspace" | "personal";
 export type ConnectorDocumentDestinationSelection = {
@@ -3029,6 +3056,48 @@ export type AddWorkspaceMemberRequest = {
 export type UpdateWorkspaceMemberRequest = {
   role?: string | undefined;
   permissions: Permission[];
+};
+
+export type SlackUserLinkAccessRequestStatus =
+  | "prepared"
+  | "pending"
+  | "completed"
+  | "denied"
+  | "cancelled"
+  | "expired";
+
+/** Token-free durable projection of one signed Slack identity-link intent. */
+export type SlackUserLinkAccessRequest = {
+  id: string;
+  workspaceId: string;
+  workspaceDisplayName: string | null;
+  subjectLabel: string | null;
+  status: SlackUserLinkAccessRequestStatus;
+  version: number;
+  expiresAt: string;
+  requestedAt: string | null;
+  decidedAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type PrepareSlackUserLinkAccessRequest = {
+  linkToken: string;
+};
+
+export type SlackUserLinkAccessMutationRequest = {
+  expectedVersion: number;
+  idempotencyKey: string;
+};
+
+export type ApproveSlackUserLinkAccessRequest = SlackUserLinkAccessMutationRequest & {
+  role?: string | undefined;
+  permissions: Permission[];
+};
+
+export type ListSlackUserLinkAccessRequestsResponse = {
+  requests: SlackUserLinkAccessRequest[];
 };
 
 // --- Goals -------------------------------------------------------------------
