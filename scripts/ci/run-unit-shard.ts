@@ -1,13 +1,28 @@
 #!/usr/bin/env bun
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 import type { ImpactPlan } from "./impact";
-import { describeTestConcurrencyBudget, testConcurrencyBudget } from "./resource-budget";
+import {
+  describeTestConcurrencyBudget,
+  testConcurrencyBudget,
+  type TestConcurrencyBudget,
+} from "./resource-budget";
 import {
   deterministicFileBatches,
   deterministicShards,
   fileUsesProcessGlobalTestState,
 } from "./workspace";
+
+export type UnitTestProcess = {
+  files: string[];
+  isolated: boolean;
+};
+
+export type UnitTestProcessPlan = {
+  parallel: UnitTestProcess[];
+  explicitConcurrency: UnitTestProcess[];
+};
 
 export function sanitizedTestEnvironment(
   source: Readonly<Record<string, string | undefined>> = process.env,
@@ -30,24 +45,92 @@ export function sanitizedTestEnvironment(
   return environment;
 }
 
-async function run(files: string[], isolated: boolean): Promise<number> {
+export function sourceUsesExplicitTestConcurrency(source: string): boolean {
+  return (
+    /\.\s*concurrent\b|\[\s*["']concurrent["']\s*\]/.test(source) ||
+    /\{[^}]*\bconcurrent\b[^}]*\}\s*=\s*(?:test|it|describe)\b/.test(source)
+  );
+}
+
+export function planUnitTestProcesses(
+  root: string,
+  batch: readonly string[],
+  isolated: readonly string[],
+  batchSize: number,
+): UnitTestProcessPlan {
+  const explicitConcurrency = new Set(
+    [...batch, ...isolated].filter((path) =>
+      sourceUsesExplicitTestConcurrency(readFileSync(join(root, path), "utf8")),
+    ),
+  );
+  const usesExplicitConcurrency = (path: string): boolean => explicitConcurrency.has(path);
+  const parallelBatch = batch.filter((path) => !usesExplicitConcurrency(path));
+  const concurrentBatch = batch.filter(usesExplicitConcurrency);
+  const parallelIsolated = isolated.filter((path) => !usesExplicitConcurrency(path));
+  const concurrentIsolated = isolated.filter(usesExplicitConcurrency);
+  return {
+    parallel: [
+      ...deterministicFileBatches(parallelBatch, batchSize).map((files) => ({
+        files,
+        isolated: false,
+      })),
+      ...parallelIsolated.map((path) => ({ files: [path], isolated: true })),
+    ],
+    // Explicitly concurrent tests retain the complete inner Bun concurrency
+    // budget and therefore run one process at a time. Ordinary files have no
+    // authored concurrent tests, so separate processes may safely share that
+    // same total budget with inner concurrency fixed to one.
+    explicitConcurrency: [
+      ...concurrentBatch.map((path) => ({ files: [path], isolated: false })),
+      ...concurrentIsolated.map((path) => ({ files: [path], isolated: true })),
+    ],
+  };
+}
+
+export async function runBoundedTestProcesses<T>(
+  tasks: readonly T[],
+  concurrency: number,
+  execute: (task: T, index: number) => Promise<number>,
+): Promise<number> {
+  if (!Number.isSafeInteger(concurrency) || concurrency < 1) {
+    throw new Error("unit process concurrency must be a positive integer");
+  }
+  let next = 0;
+  let failure = 0;
+  const workers = Array.from({ length: Math.min(concurrency, tasks.length) }, async () => {
+    while (failure === 0) {
+      const index = next;
+      next += 1;
+      if (index >= tasks.length) return;
+      const task = tasks[index]!;
+      const status = await execute(task, index);
+      if (status !== 0 && failure === 0) failure = status;
+    }
+  });
+  await Promise.all(workers);
+  return failure;
+}
+
+async function run(
+  task: UnitTestProcess,
+  budget: TestConcurrencyBudget,
+  processConcurrency: number,
+  innerConcurrency: number,
+): Promise<number> {
+  const { files, isolated } = task;
   if (files.length === 0) return 0;
-  const budget = testConcurrencyBudget();
   // One file worker per runner prevents Bun's CPU-count default from launching
   // the whole repository at once. A fresh global per file contains mock.module,
   // Happy DOM, fake timers, and process-global teardown. Tests within one file
   // remain bounded as well; individual tests are still serial unless authored
   // with test.concurrent.
-  const args = [
-    "bun",
-    "test",
-    "--no-orphans",
-    "--timeout=30000",
-    `--max-concurrency=${budget.concurrency}`,
-    ...files,
-  ];
+  const concurrencyArgument =
+    innerConcurrency === budget.concurrency
+      ? `--max-concurrency=${budget.concurrency}`
+      : `--max-concurrency=${innerConcurrency}`;
+  const args = ["bun", "test", "--no-orphans", "--timeout=30000", concurrencyArgument, ...files];
   process.stdout.write(
-    `[unit-shard] ${isolated ? "isolated" : "batch"}: ${describeTestConcurrencyBudget(budget)} files=${files.join(", ")}\n`,
+    `[unit-shard] ${isolated ? "isolated" : "batch"}: ${describeTestConcurrencyBudget(budget)} processPool=${processConcurrency} innerConcurrency=${innerConcurrency} files=${files.join(", ")}\n`,
   );
   const child = Bun.spawn(args, {
     cwd: process.cwd(),
@@ -91,14 +174,21 @@ async function main(): Promise<void> {
   // full-suite cgroup peak substantially. Measured larger runners may opt into
   // a higher, still deterministic batch size explicitly.
   const configuredBatchSize = Number(process.env.OPENGENI_TEST_FILES_PER_PROCESS ?? "1");
-  for (const files of deterministicFileBatches(batch, configuredBatchSize)) {
-    const batchStatus = await run(files, false);
-    if (batchStatus !== 0) process.exit(batchStatus);
-  }
-  for (const path of isolated) {
-    const status = await run([path], true);
-    if (status !== 0) process.exit(status);
-  }
+  const budget = testConcurrencyBudget();
+  const processes = planUnitTestProcesses(process.cwd(), batch, isolated, configuredBatchSize);
+  process.stdout.write(
+    `[unit-shard] process plan: ${describeTestConcurrencyBudget(budget)} parallel=${processes.parallel.length} explicitConcurrency=${processes.explicitConcurrency.length}\n`,
+  );
+  const parallelStatus = await runBoundedTestProcesses(
+    processes.parallel,
+    budget.concurrency,
+    (task) => run(task, budget, budget.concurrency, 1),
+  );
+  if (parallelStatus !== 0) process.exit(parallelStatus);
+  const explicitStatus = await runBoundedTestProcesses(processes.explicitConcurrency, 1, (task) =>
+    run(task, budget, 1, budget.concurrency),
+  );
+  if (explicitStatus !== 0) process.exit(explicitStatus);
   process.stdout.write(
     `[unit-shard] shard ${index + 1}/${count} passed (${selected.length} files)\n`,
   );

@@ -1,0 +1,103 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { describe, expect, test } from "bun:test";
+
+import {
+  planUnitTestProcesses,
+  runBoundedTestProcesses,
+  sourceUsesExplicitTestConcurrency,
+} from "./run-unit-shard";
+
+describe("bounded unit process execution", () => {
+  test("runs every task exactly once within the configured process bound", async () => {
+    const started: number[] = [];
+    const completed: number[] = [];
+    let active = 0;
+    let maximumActive = 0;
+    const status = await runBoundedTestProcesses([0, 1, 2, 3, 4, 5], 2, async (task) => {
+      started.push(task);
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      await Bun.sleep(task % 2 === 0 ? 4 : 1);
+      active -= 1;
+      completed.push(task);
+      return 0;
+    });
+
+    expect(status).toBe(0);
+    expect(started).toEqual([0, 1, 2, 3, 4, 5]);
+    expect([...completed].sort((left, right) => left - right)).toEqual([0, 1, 2, 3, 4, 5]);
+    expect(maximumActive).toBe(2);
+  });
+
+  test("stops admitting new work after a failure while settling in-flight tasks", async () => {
+    let release = (): void => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const started: number[] = [];
+    const execution = runBoundedTestProcesses([0, 1, 2, 3], 2, async (task) => {
+      started.push(task);
+      if (task === 0) return 7;
+      await gate;
+      return 0;
+    });
+    while (started.length < 2) await Bun.sleep(1);
+    await Bun.sleep(1);
+    release();
+
+    expect(await execution).toBe(7);
+    expect(started).toEqual([0, 1]);
+  });
+
+  test("rejects an invalid process bound", async () => {
+    await expect(runBoundedTestProcesses([1], 0, async () => 0)).rejects.toThrow(
+      "positive integer",
+    );
+  });
+});
+
+describe("unit process planning", () => {
+  test("recognizes authored concurrent-test syntax without matching prose", () => {
+    expect(sourceUsesExplicitTestConcurrency("test.concurrent('race', () => {})")).toBe(true);
+    expect(sourceUsesExplicitTestConcurrency("it ['concurrent']('race', () => {})")).toBe(true);
+    expect(
+      sourceUsesExplicitTestConcurrency("describe.concurrent.each([])('race', () => {})"),
+    ).toBe(true);
+    expect(sourceUsesExplicitTestConcurrency("const { concurrent: race } = test;")).toBe(true);
+    expect(sourceUsesExplicitTestConcurrency("test('concurrent sessions', () => {})")).toBe(false);
+  });
+
+  test("keeps explicit concurrency serial while every other file retains a fresh process", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-unit-process-plan-"));
+    try {
+      for (const path of ["batch-a.test.ts", "batch-b.test.ts", "isolated-a.test.ts"]) {
+        writeFileSync(join(root, path), "test('ordinary', () => {});\n");
+      }
+      mkdirSync(join(root, "nested"));
+      writeFileSync(
+        join(root, "nested/concurrent.test.ts"),
+        "test.concurrent('authored race', () => {});\n",
+      );
+      const plan = planUnitTestProcesses(
+        root,
+        ["batch-a.test.ts", "nested/concurrent.test.ts", "batch-b.test.ts"],
+        ["isolated-a.test.ts"],
+        1,
+      );
+
+      expect(plan).toEqual({
+        parallel: [
+          { files: ["batch-a.test.ts"], isolated: false },
+          { files: ["batch-b.test.ts"], isolated: false },
+          { files: ["isolated-a.test.ts"], isolated: true },
+        ],
+        explicitConcurrency: [{ files: ["nested/concurrent.test.ts"], isolated: false }],
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
