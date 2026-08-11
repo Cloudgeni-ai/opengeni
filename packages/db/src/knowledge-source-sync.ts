@@ -888,8 +888,31 @@ export async function recordKnowledgeSourceSyncObjectObservations(
           throw new Error("Knowledge source observation scan generation advanced");
         }
 
+        const [currentObjectIdentity] = await scopedDb
+          .select({ id: schema.knowledgeSourceObjects.id })
+          .from(schema.knowledgeSourceObjects)
+          .where(
+            and(
+              eq(schema.knowledgeSourceObjects.sourceId, input.sourceId),
+              eq(schema.knowledgeSourceObjects.externalObjectId, observation.externalObjectId),
+            ),
+          )
+          .limit(1);
+        await scopedDb.execute(sql`
+          SELECT knowledge_source_sync_lock_authority(
+            ${input.accountId}::uuid,
+            ${input.sourceId}::uuid,
+            ${currentObjectIdentity?.id ?? null}::uuid
+          )
+        `);
+        // The SECURITY DEFINER helper holds the object (when present) and then
+        // source authority locks until this withRlsContext transaction ends.
+        // Re-read only after that lock so candidate classification cannot use
+        // pre-lock current-version metadata; plain SELECT preserves the
+        // intentionally read-only app-role grant on scoped-knowledge heads.
         const [currentObject] = await scopedDb
           .select({
+            id: schema.knowledgeSourceObjects.id,
             currentVersionId: schema.knowledgeSourceObjects.currentVersionId,
             lifecycleGeneration: schema.knowledgeSourceObjects.lifecycleGeneration,
             lifecycleState: schema.knowledgeSourceObjects.lifecycleState,
@@ -901,8 +924,10 @@ export async function recordKnowledgeSourceSyncObjectObservations(
               eq(schema.knowledgeSourceObjects.externalObjectId, observation.externalObjectId),
             ),
           )
-          .for("share")
           .limit(1);
+        if (currentObjectIdentity && currentObject?.id !== currentObjectIdentity.id) {
+          throw new Error("Knowledge source object authority changed before observation");
+        }
         let currentVersion: KnowledgeSourceSyncObjectObservationResult["currentVersion"] = null;
         if (currentObject?.currentVersionId) {
           const [current] = await scopedDb

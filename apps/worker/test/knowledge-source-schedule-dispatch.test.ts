@@ -74,6 +74,25 @@ async function acquireDatabase(): Promise<SharedTestDatabase | null> {
   };
 }
 
+async function waitForKnowledgeAuthorityLock(): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  for (;;) {
+    const [activity] = await admin<Array<{ blocked: boolean }>>`
+      select exists (
+        select 1
+        from pg_stat_activity
+        where usename = 'opengeni_app'
+          and wait_event_type = 'Lock'
+          and query like '%knowledge_source_sync_lock_authority%'
+      ) as blocked`;
+    if (activity?.blocked) return;
+    if (Date.now() >= deadline) {
+      throw new Error("Timed out waiting for the app-role knowledge authority lock");
+    }
+    await Bun.sleep(10);
+  }
+}
+
 beforeAll(async () => {
   shared = await acquireDatabase();
   if (!shared) {
@@ -2051,17 +2070,42 @@ describe("knowledge-source schedule dispatch", () => {
     const appProbe = postgres(shared!.appUrl, { max: 1 });
     try {
       const [posture] = await appProbe<
-        Array<{ currentUser: string; rlsEnabled: boolean; forceRls: boolean }>
+        Array<{
+          currentUser: string;
+          observationRlsEnabled: boolean;
+          observationForceRls: boolean;
+          objectRlsEnabled: boolean;
+          objectForceRls: boolean;
+          objectSelect: boolean;
+          objectUpdate: boolean;
+          lockAuthorityExecute: boolean;
+        }>
       >`
         select current_user as "currentUser",
-          cls.relrowsecurity as "rlsEnabled",
-          cls.relforcerowsecurity as "forceRls"
-        from pg_class cls
-        where cls.oid = 'knowledge_source_sync_object_observations'::regclass`;
+          observation.relrowsecurity as "observationRlsEnabled",
+          observation.relforcerowsecurity as "observationForceRls",
+          object.relrowsecurity as "objectRlsEnabled",
+          object.relforcerowsecurity as "objectForceRls",
+          has_table_privilege(current_user, 'knowledge_source_objects', 'select') as "objectSelect",
+          has_table_privilege(current_user, 'knowledge_source_objects', 'update') as "objectUpdate",
+          has_function_privilege(
+            current_user,
+            'knowledge_source_sync_lock_authority(uuid,uuid,uuid)',
+            'execute'
+          ) as "lockAuthorityExecute"
+        from pg_class observation
+        cross join pg_class object
+        where observation.oid = 'knowledge_source_sync_object_observations'::regclass
+          and object.oid = 'knowledge_source_objects'::regclass`;
       expect(posture).toEqual({
         currentUser: "opengeni_app",
-        rlsEnabled: true,
-        forceRls: true,
+        observationRlsEnabled: true,
+        observationForceRls: true,
+        objectRlsEnabled: true,
+        objectForceRls: true,
+        objectSelect: true,
+        objectUpdate: false,
+        lockAuthorityExecute: true,
       });
     } finally {
       await appProbe.end();
@@ -2588,7 +2632,22 @@ describe("knowledge-source schedule dispatch", () => {
       leaseId: run.id,
       runStatus: "queued",
     });
-    const [exactReplay8] = await recordKnowledgeSourceSyncObjectObservations(client.db, {
+    const authorityBlocker = postgres(shared!.adminUrl, { max: 1 });
+    let markAuthorityLocked!: () => void;
+    const authorityLocked = new Promise<void>((resolve) => {
+      markAuthorityLocked = resolve;
+    });
+    let releaseAuthorityLock!: () => void;
+    const authorityRelease = new Promise<void>((resolve) => {
+      releaseAuthorityLock = resolve;
+    });
+    const authorityBlock = authorityBlocker.begin(async (tx) => {
+      await tx`select id from knowledge_source_objects where id = ${object.id} for update`;
+      markAuthorityLocked();
+      await authorityRelease;
+    });
+    await authorityLocked;
+    const exactReplayPromise = recordKnowledgeSourceSyncObjectObservations(client.db, {
       accountId: account!.id,
       workspaceId: workspace!.id,
       sourceId: source.id,
@@ -2605,6 +2664,14 @@ describe("knowledge-source schedule dispatch", () => {
         },
       ],
     });
+    try {
+      await waitForKnowledgeAuthorityLock();
+    } finally {
+      releaseAuthorityLock();
+      await authorityBlock;
+      await authorityBlocker.end();
+    }
+    const [exactReplay8] = await exactReplayPromise;
     expect(exactReplay8).toMatchObject({
       disposition: "replayed",
       providerRevision: "8",
