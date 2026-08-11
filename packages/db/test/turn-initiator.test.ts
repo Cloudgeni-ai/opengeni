@@ -682,6 +682,7 @@ describe("immutable session turn initiators", () => {
       subjectId: "scheduler",
       label: "OpenGeni scheduler",
     });
+    expect(scheduledClaim.turn.initiatingHumanSubjectId).toBeNull();
     expect(scheduledClaim.turn.initiatorContext.scheduledRunIds).toEqual([scheduledRunId]);
 
     const mixedTarget = await createSession(client.db, sessionInput(grant));

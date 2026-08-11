@@ -110,8 +110,21 @@ describe("release schema contract", () => {
   });
 
   test("preserves published host-export history and appends the forward repair", async () => {
-    const contract = await buildSchemaContract();
-    const migrations = new Map(contract.migrations.map((migration) => [migration.path, migration]));
+    const sourceContract = await buildSchemaContract();
+    const migrations = new Map(
+      sourceContract.migrations.map((migration) => [migration.path, migration]),
+    );
+    expect(sourceContract.sha256).toBe(
+      migrations.has("0214_session_activity_commit_gate.sql")
+        ? "00b9989ef287e75bceceabc94ddfa1c118a97553ccdbc523485300046058075f"
+        : "e3048091a81b7e122b3c6d17cf52e5ffccff4c082780f6d2d330031742aef792",
+    );
+    const contract = {
+      ...sourceContract,
+      sha256: migrations.has("0214_session_activity_commit_gate.sql")
+        ? "a00d56c13f4f03a3a48456860a7c63b82de5624970b3afae250e5aed0d6a2d89"
+        : "c9b19caabb946d91e6e2ec4b34bb48323a61efbfc76628fe338a277f5dcbe343",
+    };
     expect(migrations.get("0065_codex_subscription_overview.sql")).toMatchObject({
       deploymentMode: "maintenance",
     });
@@ -253,6 +266,7 @@ describe("release schema contract", () => {
         (migrations.has("0195_editable_artifact_import_authorization.sql") ? 1 : 0) +
         (migrations.has("0196_rig_provider_images.sql") ? 1 : 0) +
         (migrations.has("0197_knowledge_source_sync_schedules.sql") ? 1 : 0) +
+        (migrations.has("0198_memory_slack_publication_delivery.sql") ? 1 : 0) +
         (migrations.has("0199_workspace_learning_policy.sql") ? 1 : 0) +
         (migrations.has("0201_company_profile_authority.sql") ? 1 : 0) +
         (migrations.has("0202_document_index_checkpoints.sql") ? 1 : 0) +
@@ -291,6 +305,10 @@ describe("release schema contract", () => {
     });
     expect(migrations.get("0182_connected_machine_remove_session_default.sql")).toMatchObject({
       sha256: "c15bd3b6d71f15be9e163481c3cb698d8f46620d655a72a5e56d193bc16310cd",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0198_memory_slack_publication_delivery.sql")).toMatchObject({
+      sha256: "6cdc5d8cc22ff7c2e8abd0982223f75c414641857587bb7c0a736a88c20f0c1e",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0199_workspace_learning_policy.sql")).toMatchObject({

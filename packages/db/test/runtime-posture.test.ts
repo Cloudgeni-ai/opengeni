@@ -92,6 +92,101 @@ function safePosture(): RuntimeDatabasePosture {
 
 describe("runtime database posture evaluator", () => {
   test("freezes the unique, sorted current-ledger table privilege classes", () => {
+    const hasOpe121SlackPublicationLedger = FORCE_RLS_TABLES.includes("memory_slack_publications");
+    if (hasOpe121SlackPublicationLedger) {
+      const hasCurrentMainActivityLedger = new Set<string>(FORCE_RLS_TABLES).has(
+        "slack_user_link_access_request_operations",
+      );
+      const readUpdateTables = Object.entries(RUNTIME_TABLE_PRIVILEGES)
+        .filter(
+          ([, privileges]) =>
+            privileges.length === 2 && privileges[0] === "SELECT" && privileges[1] === "UPDATE",
+        )
+        .map(([table]) => table)
+        .sort();
+      const contracts = hasCurrentMainActivityLedger
+        ? ([
+            [FORCE_RLS_TABLES, 192],
+            [NON_RLS_RUNTIME_TABLES, 11],
+            [RUNTIME_FULL_DML_TABLES, 123],
+            [RUNTIME_READ_ONLY_TABLES, 14],
+            [readUpdateTables, 1],
+            [RUNTIME_READ_INSERT_TABLES, 41],
+            [RUNTIME_READ_INSERT_UPDATE_TABLES, 17],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 7],
+            [RUNTIME_DML_TABLES, 196],
+          ] as const)
+        : ([
+            [FORCE_RLS_TABLES, 164],
+            [NON_RLS_RUNTIME_TABLES, 11],
+            [RUNTIME_FULL_DML_TABLES, 117],
+            [RUNTIME_READ_ONLY_TABLES, 13],
+            [readUpdateTables, 0],
+            [RUNTIME_READ_INSERT_TABLES, 37],
+            [RUNTIME_READ_INSERT_UPDATE_TABLES, 1],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 7],
+            [RUNTIME_DML_TABLES, 168],
+          ] as const);
+      for (const [tables, length] of contracts) {
+        expect(tables).toHaveLength(length);
+        expect(new Set(tables).size).toBe(tables.length);
+        expect([...tables].sort()).toEqual([...tables]);
+      }
+
+      expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
+      const tableCount = hasCurrentMainActivityLedger ? 203 : 175;
+      expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
+        tableCount,
+      );
+      expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(tableCount);
+      expect(RUNTIME_TABLE_PRIVILEGES.memory_slack_publication_configurations).toEqual([
+        "SELECT",
+        "INSERT",
+        "UPDATE",
+        "DELETE",
+      ]);
+      expect(RUNTIME_TABLE_PRIVILEGES.memory_slack_publications).toEqual([
+        "SELECT",
+        "INSERT",
+        "UPDATE",
+        "DELETE",
+      ]);
+      expect(RUNTIME_TABLE_PRIVILEGES.memory_slack_publication_receipts).toEqual([
+        "SELECT",
+        "INSERT",
+        "UPDATE",
+        "DELETE",
+      ]);
+      if (hasCurrentMainActivityLedger) {
+        expect(RUNTIME_TABLE_PRIVILEGES.editable_artifact_session_links).toEqual([
+          "SELECT",
+          "INSERT",
+          "UPDATE",
+        ]);
+        expect(RUNTIME_TABLE_PRIVILEGES.workspace_session_activity_revisions).toEqual([
+          "SELECT",
+          "UPDATE",
+        ]);
+        expect(RUNTIME_TABLE_PRIVILEGES.slack_user_link_access_requests).toEqual([
+          "SELECT",
+          "INSERT",
+          "UPDATE",
+        ]);
+        expect(RUNTIME_TABLE_PRIVILEGES.slack_user_link_access_request_operations).toEqual([
+          "SELECT",
+          "INSERT",
+        ]);
+      }
+      expect(
+        FORCE_RLS_TABLES.every(
+          (table) =>
+            table in RUNTIME_TABLE_PRIVILEGES ||
+            new Set<string>(PROTECTED_NO_DIRECT_DML_TABLES).has(table),
+        ),
+      ).toBe(true);
+      return;
+    }
+
     const contracts = [
       [FORCE_RLS_TABLES, 189],
       [NON_RLS_RUNTIME_TABLES, 11],

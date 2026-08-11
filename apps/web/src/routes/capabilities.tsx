@@ -111,6 +111,10 @@ const GoogleDriveConnectorCard = lazy(async () => {
   const module = await import("@/components/capabilities/google-drive-connector-card");
   return { default: module.GoogleDriveConnectorCard };
 });
+const MemorySlackPublicationCard = lazy(async () => {
+  const module = await import("@/components/capabilities/memory-slack-publication-card");
+  return { default: module.MemorySlackPublicationCard };
+});
 import type {
   AccessContext,
   CapabilityCatalogItem,
@@ -1425,6 +1429,14 @@ export function CapabilitiesRoute({
                           onUpdatePermissions={() => void installSlackBot(false)}
                         />
                       </div>
+
+                      <Suspense fallback={null}>
+                        <MemorySlackPublicationCard
+                          workspaceId={workspaceId}
+                          connections={slackBotConnections}
+                          canManage={canManageSlackReaction}
+                        />
+                      </Suspense>
 
                       <details className="group mt-3 border-t border-border/70 pt-3">
                         <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 text-2xs text-fg-subtle transition-colors hover:text-fg-muted">

@@ -6,12 +6,14 @@ import {
   sessionEventJsonBytes,
   type SessionEventBoundarySurface,
 } from "./event-preview";
+import { MemorySlackPublicationDistribution } from "./memory-slack-delivery";
 import { WorkspaceInstructionPolicyRoleKeyInput } from "./workspace-instruction-policies";
 import { ClientResumableVoiceInputConfig } from "./transcription-recordings";
 import { MediaGenerationResult } from "./video-generation";
 
 export * from "./slack-bot-scopes";
 export * from "./connector-destinations";
+export * from "./memory-slack-delivery";
 export * from "./image-generation";
 export * from "./video-generation";
 export * from "./editable-artifacts";
@@ -3851,6 +3853,7 @@ export const CreateKnowledgeMemoryRequest = z.object({
   createdBySessionId: z.string().uuid().optional(),
   pinned: z.boolean().optional(),
   replacesId: z.string().min(1).optional(),
+  slackPublication: MemorySlackPublicationDistribution.optional(),
 });
 export type CreateKnowledgeMemoryRequest = z.infer<typeof CreateKnowledgeMemoryRequest>;
 
@@ -4790,6 +4793,8 @@ export const SessionAuthorizationActor = z.discriminatedUnion("kind", [
     /** Frozen authority that admitted the calling turn. */
     initiator: TurnInitiator,
     initiatorContext: TurnInitiatorContext,
+    /** Durable causal human for delegated/service work; null for pure service work. */
+    initiatingHumanSubjectId: z.string().min(1).max(1024).nullable(),
   }),
 ]);
 export type SessionAuthorizationActor = z.infer<typeof SessionAuthorizationActor>;

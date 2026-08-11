@@ -238,5 +238,8 @@ async function resolveSessionAuthorizationActor(
     executionGeneration,
     initiator: turn.initiator,
     initiatorContext: turn.initiatorContext,
+    initiatingHumanSubjectId:
+      turn.initiatingHumanSubjectId ??
+      (turn.initiator.kind === "subject" ? turn.initiator.subjectId : null),
   });
 }

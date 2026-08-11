@@ -17,10 +17,13 @@ import {
   claimSlackBotPostOperation,
   createConnection,
   createDb,
+  createMemorySlackPublicationConfiguration,
   createSession,
+  enqueueMemorySlackPublication,
   getConnectionMetadata,
   getSlackBotDeleteOperation,
   getSlackBotPostOperation,
+  listMemorySlackPublications,
   markSlackBotDeleteOperationProviderStarted,
   listConnectionsMetadata,
   listSlackInstallationBindings,
@@ -48,6 +51,7 @@ import {
   resolveSlackBotConnectionForTool,
   verifyOpenGeniSlackBotCredential,
 } from "../src/integrations/slack-bot";
+import { drainMemorySlackPublicationsOnce } from "../src/memory-slack-delivery";
 
 const DELEGATION_SECRET = randomBytes(32).toString("hex");
 const ENCRYPTION_KEY = randomBytes(32).toString("base64");
@@ -163,6 +167,12 @@ function fakeSlack(
   let postAttempts = 0;
   let deleteAttempts = 0;
   let failNextMemberChannelCheck = false;
+  let memberChannelState = {
+    isArchived: false,
+    isShared: false,
+    isExternallyShared: false,
+    isOrgShared: false,
+  };
   const fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
     const method = url.pathname.replace(/^\/api\//, "");
@@ -270,6 +280,10 @@ function fakeSlack(
           name: channel === "C_MEMBER" ? "general" : "private",
           is_private: channel.startsWith("G"),
           is_member: channel === "C_MEMBER",
+          is_archived: channel === "C_MEMBER" && memberChannelState.isArchived,
+          is_shared: channel === "C_MEMBER" && memberChannelState.isShared,
+          is_ext_shared: channel === "C_MEMBER" && memberChannelState.isExternallyShared,
+          is_org_shared: channel === "C_MEMBER" && memberChannelState.isOrgShared,
         },
       });
     }
@@ -475,6 +489,9 @@ function fakeSlack(
     committedDeletes,
     failNextMemberChannelCheck: () => {
       failNextMemberChannelCheck = true;
+    },
+    setMemberChannelState: (state: Partial<typeof memberChannelState>) => {
+      memberChannelState = { ...memberChannelState, ...state };
     },
   };
 }
@@ -2561,6 +2578,122 @@ describe("OpenGeni Slack bot connection", () => {
     );
     expect(operationAudits.some((audit) => audit.metadata.outcome === "ambiguous")).toBe(true);
     expect(JSON.stringify(operationAudits)).not.toContain("idempotent fixture text");
+  });
+
+  test("cancels Memory delivery when an eligible channel becomes Slack Connect before posting", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack();
+    const connected = await connectBot(workspace, slack.fetch);
+    const connection = await getConnectionMetadata(
+      client.db,
+      workspace.workspaceId,
+      connected.body.connection.id,
+      null,
+    );
+    const resolved = await resolveSlackBotConnectionForTool({
+      db: client.db,
+      grant: {
+        ...workspace,
+        subjectId: "subject-a",
+        permissions: ["connections:read"],
+        metadata: {},
+      },
+      sessionId: null,
+      requestedConnectionId: connection!.id,
+    });
+    const bot = createOpenGeniSlackBotClient(
+      { db: client.db, settings, slackFetch: slack.fetch },
+      resolved,
+    );
+
+    expect(await bot.verifyChannelAccess("C_MEMBER")).toMatchObject({
+      isMember: true,
+      isArchived: false,
+      isShared: false,
+      isExternallyShared: false,
+      isOrgShared: false,
+    });
+    await createMemorySlackPublicationConfiguration(client.db, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      expectedRevision: 0,
+      enabled: true,
+      connectionId: connection!.id,
+      slackTeamId: "T_OPEN_GENI",
+      slackChannelId: "C_MEMBER",
+      slackChannelName: "general",
+      autoImportances: ["major"],
+      reviewImportances: ["normal"],
+      subjectId: "subject-a",
+    });
+    const sourceId = crypto.randomUUID();
+    const enqueued = await enqueueMemorySlackPublication(client.db, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      sourceType: "workspace_memory",
+      sourceId,
+      sourceVersion: "1",
+      sourceIdempotencyKey: `slack-connect-drift:${sourceId}`,
+      projection: {
+        summary: "This publication must remain inside the configured Slack workspace.",
+        changeKind: "created",
+      },
+      importance: "major",
+      deliveryMode: "auto",
+      actor: { kind: "human", subjectId: "subject-a" },
+    });
+    if (enqueued.kind !== "enqueued") throw new Error("expected a newly enqueued publication");
+    const operationId = enqueued.publication.receipts[0]?.operationId;
+    expect(operationId).toMatch(/^[0-9a-f-]{36}$/);
+    slack.setMemberChannelState({ isShared: true, isExternallyShared: true });
+
+    expect(
+      await drainMemorySlackPublicationsOnce({
+        db: client.db,
+        settings,
+        slackFetch: slack.fetch,
+      } as Parameters<typeof drainMemorySlackPublicationsOnce>[0]),
+    ).toBe(true);
+    expect(slack.calls.filter((call) => call.method === "chat.postMessage")).toHaveLength(0);
+    expect(slack.committedPosts.size).toBe(0);
+    const [publication] = await listMemorySlackPublications(client.db, workspace.workspaceId, {
+      limit: 10,
+    });
+    expect(publication).toMatchObject({
+      sourceId,
+      state: "cancelled",
+      attemptCount: 1,
+      lastErrorCode: "slack_connect_unsupported",
+      slackMessageTimestamp: null,
+      deliveredAt: null,
+      terminalAt: expect.any(String),
+    });
+    expect(publication?.receipts.at(-1)).toMatchObject({
+      kind: "cancelled",
+      state: "cancelled",
+      attemptNumber: 1,
+      actorKind: "service",
+      actorSubjectId: "memory-slack-delivery",
+      operationId,
+      errorCode: "slack_connect_unsupported",
+      slackChannelId: null,
+      slackMessageTimestamp: null,
+    });
+    expect(
+      await getSlackBotPostOperation(
+        client.db,
+        workspace.workspaceId,
+        connection!.id,
+        operationId!,
+      ),
+    ).toMatchObject({
+      status: "provider_started",
+      claimHolderId: null,
+      attemptCount: 1,
+      lastFailureCode: "slack_connect_unsupported",
+      slackMessageTimestamp: null,
+    });
   });
 
   test("reconciles ambiguous delete outcomes without blindly issuing chat.delete twice", async () => {
