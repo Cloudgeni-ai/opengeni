@@ -6,6 +6,9 @@ export const CODEMODE_ENVIRONMENT = {
   tokenFile: "OPENGENI_CODEMODE_TOKEN_FILE",
 } as const;
 
+/** Minimal environment shape; public declarations must not require `@types/node`. */
+export type CodemodeEnvironment = Readonly<Record<string, string | undefined>>;
+
 export type CodemodeClientProvider = () => CodemodeClient | Promise<CodemodeClient>;
 
 /** A lazy catalog path. Every nested property remains callable at runtime. */
@@ -29,7 +32,7 @@ let cachedEnvironmentClient: { key: string; client: CodemodeClient } | null = nu
  * The bearer file is reread for every HTTP request so worker renewal is live.
  */
 export function environmentCodemodeClient(
-  environment: NodeJS.ProcessEnv = process.env,
+  environment: CodemodeEnvironment = process.env,
 ): CodemodeClient {
   const baseUrl = requiredEnvironment(environment, CODEMODE_ENVIRONMENT.url);
   const tokenFile = requiredEnvironment(environment, CODEMODE_ENVIRONMENT.tokenFile);
@@ -94,7 +97,7 @@ async function readBearerFile(path: string): Promise<string> {
   return token;
 }
 
-function requiredEnvironment(environment: NodeJS.ProcessEnv, name: string): string {
+function requiredEnvironment(environment: CodemodeEnvironment, name: string): string {
   const value = environment[name]?.trim();
   if (!value) throw new Error(`${name} is required`);
   return value;
