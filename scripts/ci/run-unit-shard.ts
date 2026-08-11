@@ -61,10 +61,23 @@ export function sourceUsesWallClockPerformanceAssertion(source: string): boolean
   );
 }
 
+function sourceProvisionsRolesOnSharedDatabase(source: string): boolean {
+  for (const match of source.matchAll(
+    /\b([A-Za-z_$][\w$]*)\s*=\s*await\s+acquireSharedTestDatabase\s*\(/g,
+  )) {
+    const sharedDatabase = match[1]!;
+    if (new RegExp(`\\bprovisionRoles\\s*\\(\\s*${sharedDatabase}\\.adminUrl\\b`).test(source)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export function sourceMutatesSharedPostgresRole(source: string): boolean {
   return (
     /\b(?:create|alter|drop)\s+role\b/i.test(source) ||
-    (/\bacquireBlankTestDatabase\b/.test(source) && /\bprovisionRoles\s*\(/.test(source))
+    (/\bacquireBlankTestDatabase\b/.test(source) && /\bprovisionRoles\s*\(/.test(source)) ||
+    sourceProvisionsRolesOnSharedDatabase(source)
   );
 }
 

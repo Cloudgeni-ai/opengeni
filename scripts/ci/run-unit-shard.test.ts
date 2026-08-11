@@ -100,6 +100,11 @@ describe("unit process planning", () => {
     ).toBe(true);
     expect(
       sourceMutatesSharedPostgresRole(
+        "const shared = await acquireSharedTestDatabase('x'); await provisionRoles(shared.adminUrl, {});",
+      ),
+    ).toBe(true);
+    expect(
+      sourceMutatesSharedPostgresRole(
         "await shared.admin.unsafe(`create role ${quotedRole} nologin`);",
       ),
     ).toBe(true);
@@ -115,9 +120,12 @@ describe("unit process planning", () => {
     ).toBe(false);
   });
 
-  test("classifies generated shared-cluster role DDL in the real test corpus", () => {
+  test("classifies generated and helper-driven shared-cluster role DDL in the real corpus", () => {
     const root = join(import.meta.dir, "../..");
     for (const path of [
+      "apps/worker/test/editable-artifact-outbox-posture-postgres.test.ts",
+      "packages/db/test/editable-artifact-materialization-postgres.test.ts",
+      "packages/db/test/editable-artifacts-postgres.test.ts",
       "packages/db/test/session-activity-commit-gate.test.ts",
       "packages/db/test/migration-0120-durable-goal-wake.test.ts",
       "packages/db/test/migration-0138-sandbox-checkpoints.test.ts",
@@ -138,7 +146,7 @@ describe("unit process planning", () => {
       );
       writeFileSync(
         join(root, "role.test.ts"),
-        "await sql.unsafe(`create role ${quoteIdentifier(generatedRole)} nologin`);\n",
+        "const shared = await acquireSharedTestDatabase('x'); await provisionRoles(shared.adminUrl, {});\n",
       );
       mkdirSync(join(root, "nested"));
       writeFileSync(
