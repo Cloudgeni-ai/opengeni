@@ -78,6 +78,8 @@ import {
   modelResponseUsageFromResponse,
   normalizeSdkEvent,
   normalizeToolOutputForEvent,
+  OPENGENI_INNER_MCP_CUSTOM_DATA_KEY,
+  OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY,
   PrefixedMcpServer,
   prepareRunInput,
   runAgentStream,
@@ -1257,6 +1259,102 @@ describe("runtime event normalization", () => {
     expect(Object.hasOwn(output, "structuredContent")).toBe(true);
   });
 
+  test("prefers a validated complete MCP result marker while preserving explicit false", () => {
+    const [event] = normalizeSdkEvent({
+      type: "run_item_stream_event",
+      item: {
+        id: "item-mcp-result",
+        type: "tool_call_output_item",
+        rawItem: { callId: "call-mcp-result", type: "function_call_result" },
+        output: { type: "text", text: "model-visible content" },
+        customData: {
+          [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: {
+            content: [{ type: "text", text: "model-visible content" }],
+            structuredContent: { receiptId: "receipt-1" },
+            isError: false,
+            _meta: { providerTrace: "trace-1" },
+          },
+        },
+      },
+    } as any);
+
+    expect(event?.type).toBe("agent.toolCall.output");
+    expect((event!.payload as { output?: unknown }).output).toEqual({
+      content: [{ type: "text", text: "model-visible content" }],
+      structuredContent: { receiptId: "receipt-1" },
+      isError: false,
+      _meta: { providerTrace: "trace-1" },
+    });
+  });
+
+  test("preserves explicit MCP errors and does not invent a missing outcome", () => {
+    const events = [true, undefined].map((isError, index) => {
+      const result = {
+        content: [{ type: "text", text: `result-${index}` }],
+        ...(isError === undefined ? {} : { isError }),
+      };
+      return normalizeSdkEvent({
+        type: "run_item_stream_event",
+        item: {
+          id: `item-mcp-outcome-${index}`,
+          type: "tool_call_output_item",
+          rawItem: { callId: `call-mcp-outcome-${index}`, type: "function_call_result" },
+          output: result.content[0],
+          customData: { [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: result },
+        },
+      } as any)[0];
+    });
+
+    const failed = (events[0]!.payload as { output: Record<string, unknown> }).output;
+    const unknown = (events[1]!.payload as { output: Record<string, unknown> }).output;
+    expect(failed.isError).toBe(true);
+    expect(Object.hasOwn(unknown, "isError")).toBe(false);
+  });
+
+  test("trusted tool output overrides take precedence over retained MCP custom data", () => {
+    const override = { type: "generated_image", artifactId: "artifact-1" };
+    const [event] = normalizeSdkEvent(
+      {
+        type: "run_item_stream_event",
+        item: {
+          id: "item-override",
+          type: "tool_call_output_item",
+          rawItem: { callId: "call-override", type: "function_call_result" },
+          output: { type: "text", text: "model output" },
+          customData: {
+            [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: {
+              content: [{ type: "text", text: "retained result" }],
+              isError: false,
+            },
+          },
+        },
+      } as any,
+      { toolOutputOverride: override },
+    );
+
+    expect((event!.payload as { output?: unknown }).output).toEqual(override);
+  });
+
+  test("ignores invalid MCP result markers and falls back to the SDK output", () => {
+    const fallback = { type: "text", text: "sdk output" };
+    const [event] = normalizeSdkEvent({
+      type: "run_item_stream_event",
+      item: {
+        id: "item-invalid-mcp-result",
+        type: "tool_call_output_item",
+        rawItem: { callId: "call-invalid-mcp-result", type: "function_call_result" },
+        output: fallback,
+        customData: {
+          [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: {
+            content: [{ type: "unsupported", value: "not MCP content" }],
+          },
+        },
+      },
+    } as any);
+
+    expect((event!.payload as { output?: unknown }).output).toEqual(fallback);
+  });
+
   test("compacts a codex computer_screenshot Uint8Array output to a non-retained media fact", () => {
     const pngBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
     const [event] = normalizeSdkEvent({
@@ -1409,6 +1507,51 @@ describe("runtime event normalization", () => {
         content: [{ type: "text", text: "delivery failed" }],
       };
       expect(normalizeToolOutputForEvent(mcp)).toEqual(mcp);
+    });
+
+    test("MCP result media blocks become content-free previews without losing result fields", () => {
+      const normalized = normalizeToolOutputForEvent({
+        content: [
+          { type: "text", text: "capture" },
+          { type: "image", data: "aGk=", mimeType: "image/png" },
+          { type: "audio", data: "aGk=", mimeType: "audio/wav" },
+          {
+            type: "resource",
+            resource: {
+              uri: "file:///capture.bin",
+              blob: "aGk=",
+              mimeType: "application/octet-stream",
+            },
+          },
+        ],
+        structuredContent: { captureId: "capture-1" },
+        isError: false,
+        _meta: { providerTrace: "trace-1" },
+      });
+      expect(normalized).toEqual({
+        content: [
+          { type: "text", text: "capture" },
+          expect.objectContaining({
+            type: "media_preview",
+            mediaType: "image/png",
+            inlineBytes: 2,
+          }),
+          expect.objectContaining({
+            type: "media_preview",
+            mediaType: "audio/wav",
+            inlineBytes: 2,
+          }),
+          expect.objectContaining({
+            type: "media_preview",
+            mediaType: "application/octet-stream",
+            inlineBytes: 2,
+          }),
+        ],
+        structuredContent: { captureId: "capture-1" },
+        isError: false,
+        _meta: { providerTrace: "trace-1" },
+      });
+      expect(JSON.stringify(normalized)).not.toContain("aGk=");
     });
   });
 
@@ -4464,6 +4607,114 @@ describe("runtime event normalization", () => {
     );
   });
 
+  test("PrefixedMcpServer exposes content through callTool and the complete result through callToolResult", async () => {
+    const fullResult = {
+      content: [{ type: "text" as const, text: "model-visible content" }],
+      structuredContent: { receiptId: "receipt-1" },
+      isError: false,
+      _meta: { providerTrace: "trace-1" },
+    };
+    const inner: MCPServer = {
+      name: "rich-inner",
+      cacheToolsList: false,
+      async connect() {},
+      async close() {},
+      async listTools() {
+        return [
+          {
+            name: "inspect",
+            description: "Inspect one item.",
+            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+          },
+        ];
+      },
+      async callTool() {
+        return fullResult.content;
+      },
+      async callToolResult() {
+        return fullResult;
+      },
+      async invalidateToolsCache() {},
+    };
+    const wrapped = new PrefixedMcpServer(inner, "rich");
+
+    expect(await wrapped.callTool("rich__inspect", {})).toEqual(fullResult.content);
+    expect(await wrapped.callToolResult("rich__inspect", {})).toEqual(fullResult);
+  });
+
+  test("the Agents SDK keeps MCP content model-visible and retains the complete result as custom data", async () => {
+    const fullResult = {
+      content: [{ type: "text" as const, text: "model-visible content" }],
+      structuredContent: { receiptId: "receipt-1", structuredOnly: true },
+      isError: false,
+      _meta: { providerTrace: "trace-1" },
+    };
+    const innerContexts: Array<{ serverName: string; toolName: string }> = [];
+    const inner: MCPServer = {
+      name: "rich-inner",
+      cacheToolsList: false,
+      customDataExtractor: async (context) => {
+        innerContexts.push({ serverName: context.serverName, toolName: context.toolName });
+        return { innerReceipt: "inner-1" };
+      },
+      async connect() {},
+      async close() {},
+      async listTools() {
+        return [
+          {
+            name: "inspect",
+            description: "Inspect one item.",
+            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+          },
+        ];
+      },
+      async callTool() {
+        return fullResult.content;
+      },
+      async callToolResult() {
+        return fullResult;
+      },
+      async invalidateToolsCache() {},
+    };
+    const wrapped = new PrefixedMcpServer(inner, "rich");
+    const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false });
+    const model = new ScriptedModel([
+      {
+        output: [scriptedFunctionCall("rich__inspect", {}, "rich-call")],
+      },
+      { outputText: "done" },
+    ]);
+    const agent = buildOpenGeniAgent(settings, [], {
+      model,
+      hostedWebSearch: false,
+      mcpServers: [wrapped],
+    });
+
+    const result = await runAgentStream(agent, "Inspect it", settings);
+    const streamed: any[] = [];
+    for await (const event of result.toStream()) streamed.push(event);
+    await result.completed;
+
+    const outputEvent = streamed.find(
+      (event) =>
+        event.type === "run_item_stream_event" && event.item?.type === "tool_call_output_item",
+    );
+    expect(outputEvent?.item.output).toEqual(fullResult.content[0]);
+    expect(outputEvent?.item.customData).toEqual({
+      [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: fullResult,
+      [OPENGENI_INNER_MCP_CUSTOM_DATA_KEY]: { innerReceipt: "inner-1" },
+    });
+    expect(innerContexts).toEqual([{ serverName: "rich-inner", toolName: "inspect" }]);
+
+    const [durable] = normalizeSdkEvent(outputEvent);
+    expect((durable!.payload as { output?: unknown }).output).toEqual(fullResult);
+
+    const secondRequest = JSON.stringify(model.requests[1]?.input);
+    expect(secondRequest).toContain("model-visible content");
+    expect(secondRequest).not.toContain("structuredOnly");
+    expect(secondRequest).not.toContain("providerTrace");
+  });
+
   test("connects to real Streamable HTTP MCP servers with prefixes and allowed tool filtering", async () => {
     const mcp = startTestMcpServer();
     const prepared = await prepareAgentTools(
@@ -5240,9 +5491,12 @@ describe("runtime event normalization", () => {
       },
     );
     try {
-      const result = await prepared.mcpServers[0]!.callTool("cap-uncertain__search_documents", {
-        query: "do not duplicate",
-      });
+      const result = await prepared.mcpServers[0]!.callToolResult!(
+        "cap-uncertain__search_documents",
+        {
+          query: "do not duplicate",
+        },
+      );
       expect(result).toMatchObject({ isError: true });
       const text = JSON.stringify(result);
       expect(text).toMatch(/outcome uncertain/i);
@@ -5305,7 +5559,7 @@ describe("runtime event normalization", () => {
     );
     try {
       await prepared.mcpServers[0]!.listTools();
-      const result = await prepared.mcpServers[0]!.callTool("cap-scoped__search_documents", {
+      const result = await prepared.mcpServers[0]!.callToolResult!("cap-scoped__search_documents", {
         query: "scope",
       });
       expect(result).toMatchObject({ isError: true });
@@ -5370,9 +5624,12 @@ describe("runtime event normalization", () => {
       // invocation isolation degrades the tool-call failure to an isError result
       // the model sees rather than throwing out of the turn — and it must still
       // NOT be misclassified as an auth-needed.
-      const result = await prepared.mcpServers[0]!.callTool("cap-forbidden__search_documents", {
-        query: "scope",
-      });
+      const result = await prepared.mcpServers[0]!.callToolResult!(
+        "cap-forbidden__search_documents",
+        {
+          query: "scope",
+        },
+      );
       expect(result).toMatchObject({ isError: true });
       expect(authNeeded).toEqual([]);
     } finally {
@@ -5428,9 +5685,12 @@ describe("runtime event normalization", () => {
     );
     try {
       await prepared.mcpServers[0]!.listTools();
-      const result = await prepared.mcpServers[0]!.callTool("cap-auth-needed__search_documents", {
-        query: "auth",
-      });
+      const result = await prepared.mcpServers[0]!.callToolResult!(
+        "cap-auth-needed__search_documents",
+        {
+          query: "auth",
+        },
+      );
       expect(result).toMatchObject({
         isError: true,
         content: [
@@ -5881,7 +6141,7 @@ describe("runtime event normalization", () => {
       expect(prepared.mcpServers).toHaveLength(1);
       await prepared.mcpServers[0]!.listTools();
       authorized = false;
-      const result = await prepared.mcpServers[0]!.callTool("codex_apps__search_documents", {
+      const result = await prepared.mcpServers[0]!.callToolResult!("codex_apps__search_documents", {
         query: "must-not-run",
       });
       expect(result).toMatchObject({ isError: true });
@@ -6854,7 +7114,7 @@ describe("runtime event normalization", () => {
       const cap = prepared.mcpServers.find((server) => runtimeMcpServerId(server) === "cap")!;
       const docs = prepared.mcpServers.find((server) => runtimeMcpServerId(server) === "docs")!;
       await cap.listTools();
-      const result = await cap.callTool("cap__search_documents", {
+      const result = await cap.callToolResult!("cap__search_documents", {
         query: "x",
       });
       expect(result).toMatchObject({ isError: true });
@@ -6920,7 +7180,7 @@ describe("runtime event normalization", () => {
         )!;
         const docs = prepared.mcpServers.find((server) => runtimeMcpServerId(server) === "docs")!;
         await flakySrv.listTools(); // fine — only tools/call 401s
-        const result = await flakySrv.callTool("flaky__search_documents", {
+        const result = await flakySrv.callToolResult!("flaky__search_documents", {
           query: "x",
         });
         expect(result).toMatchObject({ isError: true });
@@ -6993,7 +7253,7 @@ describe("runtime event normalization", () => {
       try {
         const flakySrv = prepared.mcpServers[0]!;
         await flakySrv.listTools(); // fine — only tools/call 500s
-        const result = await flakySrv.callTool("flaky__search_documents", {
+        const result = await flakySrv.callToolResult!("flaky__search_documents", {
           query: "x",
         });
         expect(result).toMatchObject({ isError: true });
