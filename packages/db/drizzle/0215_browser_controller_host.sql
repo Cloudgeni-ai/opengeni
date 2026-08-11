@@ -220,12 +220,14 @@ BEGIN
               )
             RETURNING computer.workspace_id
           ), updated AS (
-            SELECT workspace_id FROM updated_browser
+            SELECT updated_browser.workspace_id AS interaction_workspace_id
+            FROM updated_browser
             UNION
-            SELECT workspace_id FROM updated_computer
+            SELECT updated_computer.workspace_id AS interaction_workspace_id
+            FROM updated_computer
           )
           SELECT coalesce(
-            pg_catalog.array_agg(DISTINCT updated.workspace_id),
+            pg_catalog.array_agg(DISTINCT updated.interaction_workspace_id),
             ARRAY[]::uuid[]
           )
           INTO changed_interaction_workspaces
