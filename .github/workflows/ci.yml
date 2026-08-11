@@ -199,7 +199,9 @@ jobs:
             jq -cn --argjson total "$total" \
               '[range(0; $total) | {index: ., number: (. + 1), total: $total}]'
           }
-          echo "unit_matrix=$(matrix "$(jq '.unitTests | length' impact-plan.json)" 4)" >> "$GITHUB_OUTPUT"
+          # PR unit shards are coverage-identical independent runners. Six is the
+          # smallest measured matrix that keeps source-byte skew off the critical path.
+          echo "unit_matrix=$(matrix "$(jq '.unitTests | length' impact-plan.json)" 6)" >> "$GITHUB_OUTPUT"
           echo "integration_matrix=$(matrix "$(jq '.integrationTests | length' impact-plan.json)" 6)" >> "$GITHUB_OUTPUT"
           {
             echo '### Change-impact plan'
