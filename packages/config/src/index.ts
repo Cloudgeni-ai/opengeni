@@ -739,6 +739,14 @@ const SettingsSchema = z.object({
   // --- cloudflare (headless) ---
   cloudflareWorkerUrl: z.string().url().optional(),
   cloudflareApiKey: z.string().optional(),
+  // --- remote browser placements ---
+  // Provider credentials are injected only into the placement-resident
+  // browserd launch. They never enter session contracts, journals, or sandboxes.
+  browserbaseApiKey: z.string().min(1).max(8192).optional(),
+  kernelApiKey: z.string().min(1).max(8192).optional(),
+  kernelEndpoint: z.string().url().optional(),
+  kernelBrowserTimeoutSeconds: z.coerce.number().int().positive().max(86_400).default(3_600),
+  kernelBrowserStealth: EnvBoolean.default(false),
   // --- vercel (headless) ---
   vercelToken: z.string().optional(),
   vercelProjectId: z.string().optional(),
@@ -2040,6 +2048,11 @@ export function getSettings(): Settings {
     blaxelTtl: optional("OPENGENI_BLAXEL_TTL"),
     cloudflareWorkerUrl: optional("OPENGENI_CLOUDFLARE_WORKER_URL"),
     cloudflareApiKey: optional("OPENGENI_CLOUDFLARE_API_KEY"),
+    browserbaseApiKey: optional("OPENGENI_BROWSERBASE_API_KEY"),
+    kernelApiKey: optional("OPENGENI_KERNEL_API_KEY"),
+    kernelEndpoint: optional("OPENGENI_KERNEL_ENDPOINT"),
+    kernelBrowserTimeoutSeconds: optional("OPENGENI_KERNEL_BROWSER_TIMEOUT_SECONDS"),
+    kernelBrowserStealth: optional("OPENGENI_KERNEL_BROWSER_STEALTH"),
     vercelToken: optional("OPENGENI_VERCEL_TOKEN"),
     vercelProjectId: optional("OPENGENI_VERCEL_PROJECT_ID"),
     vercelTeamId: optional("OPENGENI_VERCEL_TEAM_ID"),

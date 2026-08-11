@@ -56,6 +56,13 @@ export type AgentBrowserRunnerOptions = {
   browserExecutablePath?: string;
   workingDirectory?: string;
   environment?: Readonly<Record<string, string | undefined>>;
+  provider?: {
+    id: "browserbase" | "kernel";
+    apiKey: string;
+    endpoint?: string;
+    timeoutSeconds?: number;
+    stealth?: boolean;
+  };
   /** Private launch authority. It is injected into the daemon environment,
    * never into argv, logs, or durable browser metadata. */
   proxyUrl?: string;
@@ -87,7 +94,10 @@ export class AgentBrowserJsonRunner {
     this.workingDirectory = resolve(options.workingDirectory ?? process.cwd());
     const proxy = options.proxyUrl ? privateProxyAuthority(options.proxyUrl) : null;
     this.environment = isolatedEnvironment(options, proxy);
-    this.globalArguments = proxy ? ["--proxy", proxy.server] : [];
+    this.globalArguments = [
+      ...(proxy ? ["--proxy", proxy.server] : []),
+      ...(options.provider ? ["--provider", options.provider.id] : []),
+    ];
     this.daemonPidFile = join(
       resolve(options.socketDirectory),
       "namespaces",
@@ -404,6 +414,17 @@ function isolatedEnvironment(
   for (const key of Object.keys(environment)) {
     if (key.startsWith("AGENT_BROWSER_")) delete environment[key];
   }
+  for (const key of [
+    "BROWSERBASE_API_KEY",
+    "KERNEL_API_KEY",
+    "KERNEL_ENDPOINT",
+    "KERNEL_HEADLESS",
+    "KERNEL_STEALTH",
+    "KERNEL_TIMEOUT_SECONDS",
+    "KERNEL_PROFILE_NAME",
+  ]) {
+    delete environment[key];
+  }
   Object.assign(environment, {
     AGENT_BROWSER_NAMESPACE: options.namespace,
     AGENT_BROWSER_SESSION: options.sessionName,
@@ -424,10 +445,62 @@ function isolatedEnvironment(
     }
   }
   if (options.timezone) environment.TZ = supportedTimezone(options.timezone);
+  if (options.provider?.id === "browserbase") {
+    environment.BROWSERBASE_API_KEY = providerCredential(options.provider.apiKey);
+  } else if (options.provider?.id === "kernel") {
+    environment.KERNEL_API_KEY = providerCredential(options.provider.apiKey);
+    environment.KERNEL_HEADLESS = options.headed ? "false" : "true";
+    environment.KERNEL_STEALTH = options.provider.stealth === true ? "true" : "false";
+    if (options.provider.timeoutSeconds !== undefined) {
+      if (
+        !Number.isSafeInteger(options.provider.timeoutSeconds) ||
+        options.provider.timeoutSeconds < 1 ||
+        options.provider.timeoutSeconds > 86_400
+      ) {
+        throw new Error("Kernel browser timeout is invalid");
+      }
+      environment.KERNEL_TIMEOUT_SECONDS = String(options.provider.timeoutSeconds);
+    }
+    if (options.provider.endpoint) {
+      environment.KERNEL_ENDPOINT = providerEndpoint(options.provider.endpoint);
+    }
+  }
   if (options.browserExecutablePath) {
     environment.AGENT_BROWSER_EXECUTABLE_PATH = resolve(options.browserExecutablePath);
   }
   return environment;
+}
+
+function providerCredential(value: string): string {
+  if (
+    Buffer.byteLength(value) < 1 ||
+    Buffer.byteLength(value) > 8_192 ||
+    /[\u0000-\u001f\u007f]/u.test(value)
+  ) {
+    throw new Error("external browser provider credential is invalid");
+  }
+  return value;
+}
+
+function providerEndpoint(value: string): string {
+  if (Buffer.byteLength(value) > 16_384) {
+    throw new Error("external browser provider endpoint is invalid");
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error("external browser provider endpoint is invalid");
+  }
+  if (
+    (parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
+    parsed.username ||
+    parsed.password ||
+    parsed.hash
+  ) {
+    throw new Error("external browser provider endpoint is invalid");
+  }
+  return parsed.toString().replace(/\/$/u, "");
 }
 
 type PrivateProxyAuthority = {

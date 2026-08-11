@@ -32,6 +32,53 @@ afterEach(async () => {
 });
 
 describe("BrowserControlClient", () => {
+  test("serializes bounded remote-provider launch authority without returning it", async () => {
+    const browserSessionId = randomUUID();
+    const controllerGeneration = "provider-controller-1";
+    let wire: Record<string, unknown> | null = null;
+    const target = browserTarget(browserSessionId, controllerGeneration);
+    const observation = browserObservation(target);
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        wire = (await request.json()) as Record<string, unknown>;
+        return success({ browserSessionId, controllerGeneration, observation }, 201);
+      },
+    });
+    const placement = await localPlacement();
+    try {
+      const client = new BrowserControlClient(placement.session, {
+        adminToken,
+        port: server.port,
+      });
+      const created = await client.createSession({
+        browserSessionId,
+        controllerGeneration,
+        tokenGeneration: 1,
+        controlToken,
+        viewToken,
+        headed: false,
+        transport: {
+          kind: "external_provider",
+          providerId: "browserbase",
+          placementId: "default",
+          authority: { apiKey: "browserbase-private-key" },
+        },
+      });
+      expect(wire).toMatchObject({
+        transport: {
+          kind: "external_provider",
+          providerId: "browserbase",
+          placementId: "default",
+          authority: { apiKey: "browserbase-private-key" },
+        },
+      });
+      expect(JSON.stringify(created)).not.toContain("browserbase-private-key");
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("drives the typed placement protocol without putting credentials in shell commands", async () => {
     const browserSessionId = randomUUID();
     const workspaceId = randomUUID();

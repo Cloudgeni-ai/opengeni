@@ -78,6 +78,49 @@ describe("BrowserControlServer", () => {
     );
   });
 
+  test("delivers remote-provider authority only to the browser supervisor", async () => {
+    let browserContext: BrowserSupervisorDriverContext | null = null;
+    await withServer(
+      async ({ server, reference }) => {
+        const created = await request(server, "/v1/browser-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference, {
+            transport: {
+              kind: "external_provider",
+              providerId: "kernel",
+              placementId: "default",
+              authority: {
+                apiKey: "kernel-private-key",
+                endpoint: "https://kernel.example.test",
+              },
+              timeoutSeconds: 7_200,
+              stealth: true,
+            },
+          }),
+        });
+        expect(created.status).toBe(201);
+        expect(browserContext?.transport).toMatchObject({
+          kind: "external_provider",
+          providerId: "kernel",
+          placementId: "default",
+          authority: {
+            apiKey: "kernel-private-key",
+            endpoint: "https://kernel.example.test",
+          },
+          timeoutSeconds: 7_200,
+          stealth: true,
+        });
+        expect(await created.text()).not.toContain("kernel-private-key");
+      },
+      {
+        onBrowserContext: (context) => {
+          browserContext = context;
+        },
+      },
+    );
+  });
+
   test("resolves a linked ComputerSession into the browser launch environment", async () => {
     const computerSessionId = randomUUID();
     let browserContext: BrowserSupervisorDriverContext | null = null;
@@ -993,7 +1036,16 @@ function createBody(
     headed: boolean;
     linkedComputer: { computerSessionId: string; controllerGeneration: string };
     networkRoute: ReturnType<typeof proxyRoute>;
-    transport: { kind: "managed"; engine: "chromium" | "lightpanda" };
+    transport:
+      | { kind: "managed"; engine: "chromium" | "lightpanda" }
+      | {
+          kind: "external_provider";
+          providerId: "browserbase" | "kernel";
+          placementId: string;
+          authority: { apiKey: string; endpoint?: string };
+          timeoutSeconds?: number;
+          stealth?: boolean;
+        };
   }> = {},
 ) {
   return {

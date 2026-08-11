@@ -146,6 +146,29 @@ describe("interaction contracts", () => {
       }).success,
     ).toBe(false);
     expect(
+      CreateBrowserSessionRequest.parse({
+        operationId,
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        placement: {
+          kind: "external_provider",
+          providerId: "kernel",
+          placementId: "default",
+        },
+      }).placement,
+    ).toEqual({ kind: "external_provider", providerId: "kernel", placementId: "default" });
+    expect(
+      CreateBrowserSessionRequest.safeParse({
+        operationId,
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        placement: {
+          kind: "external_provider",
+          providerId: "kernel",
+          placementId: "default",
+        },
+        identityId: "44444444-4444-4444-8444-444444444444",
+      }).success,
+    ).toBe(false);
+    expect(
       BrowserActionRequest.safeParse({
         operationId,
         targetId: "target-1",

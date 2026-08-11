@@ -183,6 +183,18 @@ export type PlacementBrowserNetworkRoute = {
 export type PlacementBrowserTransport =
   | { kind: "managed"; engine?: "chromium" | "lightpanda" }
   | {
+      kind: "external_provider";
+      providerId: "browserbase" | "kernel";
+      placementId: string;
+      /** Private launch authority. Browserd never returns or journals it. */
+      authority: {
+        apiKey: string;
+        endpoint?: string;
+      };
+      timeoutSeconds?: number;
+      stealth?: boolean;
+    }
+  | {
       kind: "attached_chrome";
       deviceId: string;
       connectionGeneration: string;
@@ -1361,6 +1373,34 @@ function placementBrowserTransport(input: PlacementBrowserTransport): PlacementB
     }
     return { kind: "managed", engine: input.engine ?? "chromium" };
   }
+  if (input.kind === "external_provider") {
+    if (input.providerId !== "browserbase" && input.providerId !== "kernel") {
+      throw new BrowserControlProtocolError("external browser provider is unsupported");
+    }
+    const endpoint = input.authority.endpoint
+      ? boundedHttpUrl(input.authority.endpoint, "external browser provider endpoint")
+      : undefined;
+    return {
+      kind: "external_provider",
+      providerId: input.providerId,
+      placementId: requireOpaqueId(input.placementId, "external browser placement id"),
+      authority: {
+        apiKey: requireBoundedText(
+          input.authority.apiKey,
+          1,
+          8_192,
+          "external browser provider credential",
+        ),
+        ...(endpoint ? { endpoint } : {}),
+      },
+      ...(input.timeoutSeconds === undefined
+        ? {}
+        : {
+            timeoutSeconds: boundedExternalBrowserTimeout(input.timeoutSeconds),
+          }),
+      ...(input.stealth === undefined ? {} : { stealth: input.stealth }),
+    };
+  }
   return {
     kind: "attached_chrome",
     deviceId: requireUuid(input.deviceId, "attached browser id"),
@@ -1368,6 +1408,35 @@ function placementBrowserTransport(input: PlacementBrowserTransport): PlacementB
     browserName: requireBoundedText(input.browserName, 1, 100, "attached browser name"),
     browserVersion: requireBoundedText(input.browserVersion, 1, 256, "attached browser version"),
   };
+}
+
+function boundedExternalBrowserTimeout(value: number): number {
+  const timeout = positiveSafeInteger(value, "external browser timeout");
+  if (timeout > 86_400) {
+    throw new BrowserControlProtocolError("external browser timeout is invalid");
+  }
+  return timeout;
+}
+
+function boundedHttpUrl(value: string, label: string): string {
+  if (Buffer.byteLength(value) > 16_384) {
+    throw new BrowserControlProtocolError(`${label} is invalid`);
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new BrowserControlProtocolError(`${label} is invalid`);
+  }
+  if (
+    (parsed.protocol !== "https:" && parsed.protocol !== "http:") ||
+    parsed.username ||
+    parsed.password ||
+    parsed.hash
+  ) {
+    throw new BrowserControlProtocolError(`${label} is invalid`);
+  }
+  return parsed.toString().replace(/\/$/u, "");
 }
 
 function placementBrowserNetworkRoute(

@@ -82,6 +82,26 @@ export const ATTACHED_BROWSER_SESSION_CAPABILITIES = BrowserSessionCapabilities.
   parallelTargets: true,
 });
 
+/** Remote Chromium controlled through the same native CDP driver. Files and
+ * portable profile state remain false because their bytes live on another host. */
+export const EXTERNAL_BROWSER_SESSION_CAPABILITIES = BrowserSessionCapabilities.parse({
+  semanticObservation: true,
+  screenshots: true,
+  liveFrames: true,
+  humanInput: true,
+  tabs: true,
+  downloads: false,
+  uploads: false,
+  clipboard: true,
+  permissions: true,
+  diagnostics: true,
+  rawCdp: false,
+  linkedComputer: false,
+  privateCheckpoint: false,
+  identityPublication: false,
+  parallelTargets: true,
+});
+
 /** Measured against Lightpanda 0.3.5. Unsupported Chromium-only affordances
  * remain false instead of being emulated or silently routed elsewhere. */
 export const LIGHTPANDA_BROWSER_SESSION_CAPABILITIES = BrowserSessionCapabilities.parse({
@@ -164,6 +184,9 @@ export type BrowserSessionControlRecord = {
   session: BrowserSession;
   tokenGeneration: number;
   sourceSessionId: string;
+  /** Placement hosting browserd. It equals the logical sandbox placement for
+   * managed browsers and remains the source home sandbox for remote browsers. */
+  controllerHostSandboxGroupId: string | null;
   createOperationId: string;
   networkRouteAuthority: BrowserSessionNetworkRouteAuthority | null;
   operation: null | {
@@ -618,6 +641,7 @@ async function controlRecordFromRows(
     session: browserSessionFromRows(row, associations),
     tokenGeneration: row.tokenGeneration,
     sourceSessionId: createdAssociations[0]!.sessionId,
+    controllerHostSandboxGroupId: row.controllerHostSandboxGroupId,
     createOperationId: row.createOperationId,
     networkRouteAuthority: networkRouteAuthorityFromRow(row),
     operation: operation
@@ -675,7 +699,7 @@ export async function prepareBrowserSessionCreate(
           });
         }
         const [sourceSession] = await tx
-          .select({ id: schema.sessions.id })
+          .select({ id: schema.sessions.id, sandboxGroupId: schema.sessions.sandboxGroupId })
           .from(schema.sessions)
           .where(
             and(
@@ -720,6 +744,12 @@ export async function prepareBrowserSessionCreate(
         }
 
         const placementColumns = placementToColumns(input.placement);
+        const controllerHostSandboxGroupId =
+          input.placement.kind === "sandbox_group"
+            ? input.placement.sandboxGroupId
+            : input.placement.kind === "external_provider"
+              ? sourceSession.sandboxGroupId
+              : null;
         const [insertedSession] = await tx
           .insert(schema.browserSessions)
           .values({
@@ -729,6 +759,7 @@ export async function prepareBrowserSessionCreate(
             name: input.name,
             lifecycle: "starting",
             ...placementColumns,
+            controllerHostSandboxGroupId,
             driverId: input.driverId,
             engine: input.engine,
             headless: input.headless,
@@ -2183,7 +2214,7 @@ export async function touchBrowserSessionController(
           )
           .limit(1);
         if (!observed) return false;
-        if (observed.placementKind === "sandbox_group") {
+        if (observed.controllerHostSandboxGroupId) {
           // Match the reaper's exact lease -> holder -> BrowserSession lock
           // order. The pre-lock observation is only a locator; every authority
           // predicate is repeated below while the corresponding row is locked.
@@ -2193,7 +2224,7 @@ export async function touchBrowserSessionController(
             join browser_sessions browser
               on browser.account_id = lease.account_id
              and browser.workspace_id = lease.workspace_id
-             and browser.sandbox_group_id = lease.sandbox_group_id
+             and browser.controller_host_sandbox_group_id = lease.sandbox_group_id
             where browser.account_id = ${input.accountId}
               and browser.workspace_id = ${input.workspaceId}
               and browser.id = ${input.browserSessionId}
@@ -2212,7 +2243,7 @@ export async function touchBrowserSessionController(
             and holder.kind = 'interaction'
             and holder.holder_id = ${`browser-session:${input.browserSessionId}`}
             and lease.workspace_id = ${input.workspaceId}
-            and lease.sandbox_group_id = ${observed.sandboxGroupId}
+            and lease.sandbox_group_id = ${observed.controllerHostSandboxGroupId}
             and lease.instance_id = ${observed.placementInstanceId}
           returning holder.id
         `);

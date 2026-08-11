@@ -40968,7 +40968,7 @@ export async function forceDrainOverLimitViewerOnlyBoxes(
         updated_at = now()
       where browser.workspace_id = ${input.workspaceId}
         and browser.lifecycle in ('starting', 'active', 'suspending', 'restoring', 'ending')
-        and browser.sandbox_group_id in (
+        and browser.controller_host_sandbox_group_id in (
           select sandbox_group_id from sandbox_leases
           where workspace_id = ${input.workspaceId}
             and liveness = 'warm' and turn_holders = 0

@@ -55,6 +55,7 @@ import {
   acquireLease,
   activateBrowserSession,
   ATTACHED_BROWSER_SESSION_CAPABILITIES,
+  EXTERNAL_BROWSER_SESSION_CAPABILITIES,
   LIGHTPANDA_BROWSER_SESSION_CAPABILITIES,
   bindBrowserSessionNetworkRouteAuthority,
   AttachedBrowserDeviceNotFoundError,
@@ -184,11 +185,13 @@ import { sanitizeFilename } from "./files";
 
 const BROWSER_DRIVER_ID = "opengeni.cdp.v1";
 const LIGHTPANDA_DRIVER_ID = "opengeni.lightpanda.cdp.v1";
+const EXTERNAL_BROWSER_DRIVER_ID = "opengeni.external.cdp.v1";
 const BROWSER_WORKSPACE_FILE_AUTHORITY_TTL_SECONDS = 20 * 60;
 const BROWSER_STATE_UPLOAD_CLEANUP_GRACE_MS = 24 * 60 * 60 * 1_000;
 
 type BrowserPlacement = {
   placement: InteractionPlacement;
+  controllerHostSandboxGroupId: string | null;
   placementInstanceId: string;
   session: BrowserControlPlacementSession;
   lease: LeaseSnapshot | null;
@@ -431,7 +434,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
                   grant,
                   workspaceId,
                   prepared.session.id,
-                  placement.placement,
+                  placement.controllerHostSandboxGroupId,
                 ).catch(() => undefined);
               }
               return failed;
@@ -1689,6 +1692,11 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
           browserSessionId,
         });
         await authorizeSourceSession(deps, grant, before.sourceSessionId, "session.control");
+        if (!before.session.capabilities.privateCheckpoint) {
+          throw new BrowserControlUnsupportedError(
+            "this browser placement does not support private checkpoint suspension",
+          );
+        }
         browserAuthorityRoot(deps);
         if (!deps.objectStorage) {
           throw new HTTPException(503, {
@@ -1852,7 +1860,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
                 grant,
                 workspaceId,
                 browserSessionId,
-                record.session.placement,
+                record.controllerHostSandboxGroupId,
               );
               return BrowserSessionMutationResponse.parse({
                 session: (
@@ -2066,7 +2074,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
                   grant,
                   workspaceId,
                   browserSessionId,
-                  prepared.session.placement,
+                  placement.controllerHostSandboxGroupId,
                 ).catch(() => undefined);
               }
               return failed;
@@ -2128,7 +2136,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
               grant,
               workspaceId,
               browserSessionId,
-              before.session.placement,
+              before.controllerHostSandboxGroupId,
             ).catch(() => undefined);
           }
           const parsed = BrowserSessionMutationResponse.parse(prepared);
@@ -2156,7 +2164,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
             grant,
             workspaceId,
             browserSessionId,
-            record.session.placement,
+            record.controllerHostSandboxGroupId,
           ).catch(() => undefined);
           const parsed = BrowserSessionMutationResponse.parse(completed);
           observeLifecycleResult(deps.observability, startedAtMs, parsed);
@@ -2206,7 +2214,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
               grant,
               workspaceId,
               browserSessionId,
-              record.session.placement,
+              placement.controllerHostSandboxGroupId,
             ).catch(() => undefined);
             return completed;
           },
@@ -2274,6 +2282,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
       waitSignal.throwIfAborted();
       return await callback({
         placement: expectedPlacement,
+        controllerHostSandboxGroupId: null,
         placementInstanceId: device.connectionGeneration,
         session: built.session as unknown as BrowserControlPlacementSession,
         lease: null,
@@ -2307,10 +2316,28 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
           assertPlacementInstance(expectedPlacementInstanceId, handle.lease.instanceId);
           return await callback({
             placement: expectedPlacement,
+            controllerHostSandboxGroupId: expectedPlacement.sandboxGroupId,
             placementInstanceId: handle.lease.instanceId,
             session: handle.homeSession,
             lease: handle.lease,
             transport: { kind: "managed" },
+          });
+        }
+
+        if (expectedPlacement?.kind === "external_provider") {
+          if (!handle.lease?.instanceId) {
+            throw new BrowserSessionStateError(
+              "Remote BrowserSession controller placement is unavailable",
+            );
+          }
+          assertPlacementInstance(expectedPlacementInstanceId, handle.lease.instanceId);
+          return await callback({
+            placement: expectedPlacement,
+            controllerHostSandboxGroupId: sourceSession.sandboxGroupId,
+            placementInstanceId: handle.lease.instanceId,
+            session: handle.homeSession,
+            lease: handle.lease,
+            transport: externalBrowserTransport(deps, expectedPlacement),
           });
         }
 
@@ -2328,18 +2355,13 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
           assertPlacementInstance(expectedPlacementInstanceId, placementInstanceId);
           return await callback({
             placement: expectedPlacement,
+            controllerHostSandboxGroupId: null,
             placementInstanceId,
             session: resolved.session as unknown as BrowserControlPlacementSession,
             lease: null,
             transport: { kind: "managed" },
           });
         }
-        if (expectedPlacement) {
-          throw new BrowserControlUnsupportedError(
-            `browser placement ${expectedPlacement.kind} is not executable yet`,
-          );
-        }
-
         if (resolved.sandboxId === null) {
           if (!handle.lease?.instanceId) {
             throw new BrowserSessionStateError("BrowserSession home placement is unavailable");
@@ -2355,6 +2377,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
               kind: "sandbox_group",
               sandboxGroupId: sourceSession.sandboxGroupId,
             },
+            controllerHostSandboxGroupId: sourceSession.sandboxGroupId,
             placementInstanceId: handle.lease.instanceId,
             session: handle.homeSession,
             lease: handle.lease,
@@ -2368,6 +2391,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
           };
           return await callback({
             placement,
+            controllerHostSandboxGroupId: null,
             placementInstanceId: resolved.providerInstanceId ?? resolved.sandboxId,
             session: resolved.session as unknown as BrowserControlPlacementSession,
             lease: null,
@@ -2533,7 +2557,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
       grant,
       workspaceId,
       browserSessionId,
-      record.session.placement,
+      record.controllerHostSandboxGroupId,
     );
   }
 }
@@ -2545,7 +2569,8 @@ function browserCreateInput(
   placement: InteractionPlacement,
 ) {
   const attached = placement.kind === "attached_device";
-  const engine = attached ? ("chrome" as const) : request.engine;
+  const external = placement.kind === "external_provider";
+  const engine = attached ? ("chrome" as const) : external ? ("external" as const) : request.engine;
   if (engine === "lightpanda" && placement.kind !== "sandbox_group") {
     throw new BrowserControlUnsupportedError(
       "Lightpanda is currently available only in managed agent sandboxes",
@@ -2560,7 +2585,12 @@ function browserCreateInput(
     name: request.name ?? "Browser",
     initialUrl: request.initialUrl ?? null,
     placement,
-    driverId: engine === "lightpanda" ? LIGHTPANDA_DRIVER_ID : BROWSER_DRIVER_ID,
+    driverId:
+      engine === "lightpanda"
+        ? LIGHTPANDA_DRIVER_ID
+        : external
+          ? EXTERNAL_BROWSER_DRIVER_ID
+          : BROWSER_DRIVER_ID,
     engine,
     headless: attached ? false : request.headless,
     identityId: request.identityId ?? null,
@@ -2568,12 +2598,17 @@ function browserCreateInput(
     networkRouteId: request.networkRouteId ?? null,
     linkedComputerSessionId: request.linkedComputerSessionId ?? null,
     resolveDefaultRevision:
-      !attached && request.identityId !== undefined && request.baseRevisionId === undefined,
+      !attached &&
+      !external &&
+      request.identityId !== undefined &&
+      request.baseRevisionId === undefined,
     ...(attached
       ? { capabilities: ATTACHED_BROWSER_SESSION_CAPABILITIES }
-      : engine === "lightpanda"
-        ? { capabilities: LIGHTPANDA_BROWSER_SESSION_CAPABILITIES }
-        : {}),
+      : external
+        ? { capabilities: EXTERNAL_BROWSER_SESSION_CAPABILITIES }
+        : engine === "lightpanda"
+          ? { capabilities: LIGHTPANDA_BROWSER_SESSION_CAPABILITIES }
+          : {}),
   };
 }
 
@@ -2588,6 +2623,51 @@ function browserRuntimeTransport(
   };
 }
 
+function externalBrowserTransport(
+  deps: ApiRouteDeps,
+  placement: Extract<InteractionPlacement, { kind: "external_provider" }>,
+): PlacementBrowserTransport {
+  if (placement.placementId !== "default") {
+    throw new BrowserControlUnsupportedError(
+      "only the configured default external browser placement is available",
+    );
+  }
+  if (placement.providerId === "browserbase") {
+    if (!deps.settings.browserbaseApiKey) {
+      throw new HTTPException(503, {
+        message: "Browserbase browser placement is not configured",
+      });
+    }
+    return {
+      kind: "external_provider",
+      providerId: "browserbase",
+      placementId: placement.placementId,
+      authority: { apiKey: deps.settings.browserbaseApiKey },
+    };
+  }
+  if (placement.providerId === "kernel") {
+    if (!deps.settings.kernelApiKey) {
+      throw new HTTPException(503, {
+        message: "Kernel browser placement is not configured",
+      });
+    }
+    return {
+      kind: "external_provider",
+      providerId: "kernel",
+      placementId: placement.placementId,
+      authority: {
+        apiKey: deps.settings.kernelApiKey,
+        ...(deps.settings.kernelEndpoint ? { endpoint: deps.settings.kernelEndpoint } : {}),
+      },
+      timeoutSeconds: deps.settings.kernelBrowserTimeoutSeconds,
+      stealth: deps.settings.kernelBrowserStealth,
+    };
+  }
+  throw new BrowserControlUnsupportedError(
+    `external browser provider ${placement.providerId} is not supported`,
+  );
+}
+
 function assertCreateReplay(
   request: CreateBrowserSessionRequestValue,
   session: BrowserSessionValue,
@@ -2597,7 +2677,12 @@ function assertCreateReplay(
       "BrowserSession create operation is bound to another placement",
     );
   }
-  const expectedEngine = session.placement.kind === "attached_device" ? "chrome" : request.engine;
+  const expectedEngine =
+    session.placement.kind === "attached_device"
+      ? "chrome"
+      : session.placement.kind === "external_provider"
+        ? "external"
+        : request.engine;
   if (session.engine !== expectedEngine) {
     throw new BrowserSessionOperationConflictError(
       "BrowserSession create operation is bound to another browser engine",
@@ -2861,14 +2946,14 @@ async function ensureInteractionHolder(
   placement: BrowserPlacement,
   waitSignal: AbortSignal,
 ): Promise<boolean> {
-  if (placement.placement.kind !== "sandbox_group") return false;
+  if (!placement.controllerHostSandboxGroupId) return false;
   if (!placement.lease?.instanceId) {
     throw new BrowserSessionStateError("BrowserSession lease placement is unavailable");
   }
   const acquired = await acquireLease(deps.db, {
     accountId: grant.accountId,
     workspaceId: sourceSession.workspaceId,
-    sandboxGroupId: placement.placement.sandboxGroupId,
+    sandboxGroupId: placement.controllerHostSandboxGroupId,
     kind: "interaction",
     holderId: interactionHolderId(browserSessionId),
     subjectId: sourceSession.id,
@@ -2893,7 +2978,7 @@ async function ensureInteractionHolder(
       grant,
       sourceSession.workspaceId,
       browserSessionId,
-      placement.placement,
+      placement.controllerHostSandboxGroupId,
     ).catch(() => undefined);
     throw new BrowserSessionStateError("BrowserSession placement fence changed; retry");
   }
@@ -3011,13 +3096,13 @@ async function releaseInteractionHolder(
   grant: AccessGrant,
   workspaceId: string,
   browserSessionId: string,
-  placement: InteractionPlacement,
+  controllerHostSandboxGroupId: string | null,
 ): Promise<void> {
-  if (placement.kind !== "sandbox_group") return;
+  if (!controllerHostSandboxGroupId) return;
   await releaseLeaseHolder(deps.db, {
     accountId: grant.accountId,
     workspaceId,
-    sandboxGroupId: placement.sandboxGroupId,
+    sandboxGroupId: controllerHostSandboxGroupId,
     kind: "interaction",
     holderId: interactionHolderId(browserSessionId),
     idleGraceMs: deps.settings.sandboxIdleGraceMs,

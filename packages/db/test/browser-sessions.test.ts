@@ -835,6 +835,35 @@ describe("durable BrowserSession lifecycle", () => {
     ).rejects.toBeInstanceOf(BrowserSessionNotFoundError);
   });
 
+  test("pins remote browserd authority to the immutable source sandbox", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const prepared = await prepareBrowserSessionCreate(client.db, {
+      ...createInput(scope),
+      placement: {
+        kind: "external_provider",
+        providerId: "kernel",
+        placementId: "default",
+      },
+      driverId: "opengeni.external.cdp.v1",
+      engine: "external",
+      capabilities: ATTACHED_BROWSER_SESSION_CAPABILITIES,
+    });
+    expect(prepared.session.placement).toEqual({
+      kind: "external_provider",
+      providerId: "kernel",
+      placementId: "default",
+    });
+    expect(
+      (
+        await getBrowserSessionControlRecord(client.db, {
+          ...scope,
+          browserSessionId: prepared.session.id,
+        })
+      ).controllerHostSandboxGroupId,
+    ).toBe(scope.sandboxGroupId);
+  });
+
   test("rejects a control operation bound to another BrowserSession", async () => {
     if (!available) return;
     const scope = await fixture();

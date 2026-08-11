@@ -2172,6 +2172,36 @@ export const CreateBrowserSessionRequest = z
         });
       }
     }
+    if (value.placement?.kind === "external_provider") {
+      if (value.engine !== "chromium") {
+        context.addIssue({
+          code: "custom",
+          path: ["engine"],
+          message: "external browser providers use their Chromium-compatible engine",
+        });
+      }
+      if (value.identityId || value.baseRevisionId) {
+        context.addIssue({
+          code: "custom",
+          path: ["identityId"],
+          message: "external browser providers do not yet support portable BrowserIdentity state",
+        });
+      }
+      if (value.networkRouteId) {
+        context.addIssue({
+          code: "custom",
+          path: ["networkRouteId"],
+          message: "external browser provider network routes require a provider adapter",
+        });
+      }
+      if (value.linkedComputerSessionId) {
+        context.addIssue({
+          code: "custom",
+          path: ["linkedComputerSessionId"],
+          message: "external browser providers cannot link a placement desktop",
+        });
+      }
+    }
   });
 export type CreateBrowserSessionRequest = z.infer<typeof CreateBrowserSessionRequest>;
 

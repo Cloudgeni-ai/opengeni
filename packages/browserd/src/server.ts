@@ -1677,6 +1677,56 @@ function parseBrowserTransport(
     }
     return { kind: "managed", engine: value.engine ?? "chromium" };
   }
+  if (value.kind === "external_provider") {
+    assertOnlyKeys(value, [
+      "kind",
+      "providerId",
+      "placementId",
+      "authority",
+      "timeoutSeconds",
+      "stealth",
+    ]);
+    if (value.providerId !== "browserbase" && value.providerId !== "kernel") {
+      throw new ProtocolError("invalid_action", "external browser provider is unsupported", 400);
+    }
+    if (!isRecord(value.authority)) {
+      throw new ProtocolError("invalid_action", "external browser authority is invalid", 400);
+    }
+    assertOnlyKeys(value.authority, ["apiKey", "endpoint"]);
+    return {
+      kind: "external_provider",
+      providerId: value.providerId,
+      placementId: requireOpaqueId(value.placementId, "external browser placement id"),
+      authority: {
+        apiKey: requireString(
+          value.authority.apiKey,
+          "external browser provider credential",
+          8_192,
+        ),
+        ...(value.authority.endpoint === undefined
+          ? {}
+          : {
+              endpoint: requireHttpEndpoint(
+                value.authority.endpoint,
+                "external browser provider endpoint",
+              ),
+            }),
+      },
+      ...(value.timeoutSeconds === undefined
+        ? {}
+        : {
+            timeoutSeconds: requireInteger(
+              value.timeoutSeconds,
+              "external browser timeout",
+              1,
+              86_400,
+            ),
+          }),
+      ...(value.stealth === undefined
+        ? {}
+        : { stealth: requireBoolean(value.stealth, "external browser stealth") }),
+    };
+  }
   if (value.kind !== "attached_chrome") {
     throw new ProtocolError("invalid_action", "browser transport is unsupported", 400);
   }
@@ -1698,6 +1748,25 @@ function parseBrowserTransport(
     browserName: requireString(value.browserName, "attached browser name", 100),
     browserVersion: requireString(value.browserVersion, "attached browser version", 256),
   };
+}
+
+function requireHttpEndpoint(value: unknown, label: string): string {
+  const text = requireString(value, label, 16_384);
+  let parsed: URL;
+  try {
+    parsed = new URL(text);
+  } catch {
+    throw new ProtocolError("invalid_action", `${label} is invalid`, 400);
+  }
+  if (
+    (parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
+    parsed.username ||
+    parsed.password ||
+    parsed.hash
+  ) {
+    throw new ProtocolError("invalid_action", `${label} is invalid`, 400);
+  }
+  return parsed.toString().replace(/\/$/u, "");
 }
 
 function parseStateRestore(

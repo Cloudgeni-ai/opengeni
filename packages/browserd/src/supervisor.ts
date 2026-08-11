@@ -121,6 +121,17 @@ export type BrowserSupervisorNetworkRoute = {
 export type BrowserSupervisorTransport =
   | { kind: "managed"; engine?: "chromium" | "lightpanda" }
   | {
+      kind: "external_provider";
+      providerId: "browserbase" | "kernel";
+      placementId: string;
+      authority: {
+        apiKey: string;
+        endpoint?: string;
+      };
+      timeoutSeconds?: number;
+      stealth?: boolean;
+    }
+  | {
       kind: "attached_chrome";
       deviceId: string;
       connectionGeneration: string;
@@ -769,7 +780,9 @@ export class BrowserSupervisor {
           engine:
             options.transport.kind === "attached_chrome"
               ? "chrome"
-              : (options.transport.engine ?? "chromium"),
+              : options.transport.kind === "managed"
+                ? (options.transport.engine ?? "chromium")
+                : "chromium",
           engineVersion: null,
           tabs: [],
         },
@@ -845,6 +858,7 @@ export class BrowserSupervisor {
     const runtime = this.requireBound(input);
     if (
       runtime.options.transport.kind === "attached_chrome" ||
+      runtime.options.transport.kind === "external_provider" ||
       runtime.options.transport.engine === "lightpanda"
     ) {
       throw new InteractionControllerError(
@@ -1004,7 +1018,13 @@ export class BrowserSupervisor {
   }
 
   private async recoverIfUnavailable(runtime: Runtime): Promise<boolean> {
-    if (runtime.options.transport.kind !== "managed" || !runtime.driver.isAvailable) return false;
+    if (
+      runtime.options.transport.kind === "attached_chrome" ||
+      (runtime.options.transport.kind === "managed" &&
+        runtime.options.transport.engine === "lightpanda") ||
+      !runtime.driver.isAvailable
+    )
+      return false;
     if (await runtime.driver.isAvailable()) return false;
     await this.recoverRuntimeAfterLoss(runtime);
     return true;
@@ -1339,7 +1359,7 @@ async function createBrowserDriver(
       permissionControl: false,
     });
   }
-  if (context.transport.engine === "lightpanda") {
+  if (context.transport.kind === "managed" && context.transport.engine === "lightpanda") {
     if (!lightpandaBinary) {
       throw new InteractionControllerError(
         "resource_unavailable",
@@ -1360,6 +1380,34 @@ async function createBrowserDriver(
       frameStreaming: false,
       permissionControl: false,
       resolveWorkspaceFiles: context.resolveWorkspaceFiles,
+    });
+  }
+  if (context.transport.kind === "external_provider") {
+    const runner = await AgentBrowserJsonRunner.create({
+      namespace: "og",
+      sessionName: `b${randomUUID().replaceAll("-", "").slice(0, 16)}`,
+      socketDirectory: context.socketDirectory,
+      profileDirectory: context.profileDirectory,
+      downloadDirectory: context.downloadDirectory,
+      screenshotDirectory: context.screenshotDirectory,
+      headed: context.headed,
+      provider: {
+        id: context.transport.providerId,
+        apiKey: context.transport.authority.apiKey,
+        ...(context.transport.authority.endpoint
+          ? { endpoint: context.transport.authority.endpoint }
+          : {}),
+        ...(context.transport.timeoutSeconds
+          ? { timeoutSeconds: context.transport.timeoutSeconds }
+          : {}),
+        ...(context.transport.stealth === undefined ? {} : { stealth: context.transport.stealth }),
+      },
+      ...(binary ? { binary } : {}),
+    });
+    return new AgentBrowserDriver({
+      browserSessionId: context.browserSessionId,
+      controllerGeneration: context.controllerGeneration,
+      runner,
     });
   }
   const route = context.networkRoute;
@@ -1462,6 +1510,23 @@ function validateSessionOptions(
       throw new Error("attached Chrome cannot select another browser executable");
     }
   }
+  if (transport.kind === "external_provider") {
+    if (options.restore) {
+      throw new InteractionControllerError(
+        "unsupported",
+        "external browser providers cannot restore a portable BrowserIdentity revision",
+      );
+    }
+    if (options.browserExecutablePath) {
+      throw new Error("external browser providers cannot select a local browser executable");
+    }
+    if (options.networkRoute) {
+      throw new InteractionControllerError(
+        "unsupported",
+        "external browser provider network routes require a provider adapter",
+      );
+    }
+  }
   if (transport.kind === "managed" && transport.engine === "lightpanda") {
     if (options.headed) {
       throw new InteractionControllerError("unsupported", "Lightpanda is headless-only");
@@ -1499,6 +1564,31 @@ function validateBrowserTransport(input: BrowserSupervisorTransport): BrowserSup
     }
     return { kind: "managed", engine: input.engine ?? "chromium" };
   }
+  if (input.kind === "external_provider") {
+    if (input.providerId !== "browserbase" && input.providerId !== "kernel") {
+      throw new Error("external browser provider is unsupported");
+    }
+    const timeoutSeconds = input.timeoutSeconds;
+    if (
+      timeoutSeconds !== undefined &&
+      (!Number.isSafeInteger(timeoutSeconds) || timeoutSeconds < 1 || timeoutSeconds > 86_400)
+    ) {
+      throw new Error("external browser timeout is invalid");
+    }
+    return {
+      kind: "external_provider",
+      providerId: input.providerId,
+      placementId: boundedText(input.placementId, 1, 512, "external browser placement id"),
+      authority: {
+        apiKey: providerCredential(input.authority.apiKey),
+        ...(input.authority.endpoint
+          ? { endpoint: providerEndpoint(input.authority.endpoint) }
+          : {}),
+      },
+      ...(timeoutSeconds === undefined ? {} : { timeoutSeconds }),
+      ...(input.stealth === undefined ? {} : { stealth: input.stealth }),
+    };
+  }
   if (input.kind !== "attached_chrome") throw new Error("browser transport is unsupported");
   if (!isUuid(input.deviceId)) throw new Error("attached browser id must be a UUID");
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,511}$/u.test(input.connectionGeneration)) {
@@ -1514,6 +1604,38 @@ function validateBrowserTransport(input: BrowserSupervisorTransport): BrowserSup
     browserVersion,
     ...(input.authorityFile ? { authorityFile: resolve(input.authorityFile) } : {}),
   };
+}
+
+function providerCredential(value: string): string {
+  if (
+    Buffer.byteLength(value) < 1 ||
+    Buffer.byteLength(value) > 8_192 ||
+    /[\u0000-\u001f\u007f]/u.test(value)
+  ) {
+    throw new Error("external browser provider credential is invalid");
+  }
+  return value;
+}
+
+function providerEndpoint(value: string): string {
+  if (Buffer.byteLength(value) > 16_384) {
+    throw new Error("external browser provider endpoint is invalid");
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error("external browser provider endpoint is invalid");
+  }
+  if (
+    (parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
+    parsed.username ||
+    parsed.password ||
+    parsed.hash
+  ) {
+    throw new Error("external browser provider endpoint is invalid");
+  }
+  return parsed.toString().replace(/\/$/u, "");
 }
 
 function validateBrowserNetworkRoute(

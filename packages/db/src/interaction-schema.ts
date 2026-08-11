@@ -569,6 +569,9 @@ export const browserSessions = pgTable(
     deviceId: uuid("device_id"),
     externalProviderId: text("external_provider_id"),
     externalPlacementId: text("external_placement_id"),
+    /** Sandbox group hosting browserd when the logical browser itself lives
+     * on a remote provider. This is deliberately separate from placement. */
+    controllerHostSandboxGroupId: uuid("controller_host_sandbox_group_id"),
     controllerId: text("controller_id"),
     controllerGeneration: text("controller_generation"),
     placementInstanceId: text("placement_instance_id"),
@@ -620,6 +623,11 @@ export const browserSessions = pgTable(
     sandboxGroup: index("browser_sessions_sandbox_group_idx").on(
       table.workspaceId,
       table.sandboxGroupId,
+      table.lifecycle,
+    ),
+    controllerHostSandboxGroup: index("browser_sessions_controller_host_sandbox_group_idx").on(
+      table.workspaceId,
+      table.controllerHostSandboxGroupId,
       table.lifecycle,
     ),
     networkRoute: index("browser_sessions_workspace_network_route_idx").on(
@@ -707,6 +715,19 @@ export const browserSessions = pgTable(
           and ${table.placementInstanceId} is not null
           and octet_length(${table.placementInstanceId}) between 1 and 512
           and ${table.controllerHeartbeatAt} is not null
+        )`,
+    ),
+    controllerHostValid: check(
+      "browser_sessions_controller_host_check",
+      sql`(
+          ${table.placementKind} = 'sandbox_group'
+          and ${table.controllerHostSandboxGroupId} = ${table.sandboxGroupId}
+        ) or (
+          ${table.placementKind} = 'external_provider'
+          and ${table.controllerHostSandboxGroupId} is not null
+        ) or (
+          ${table.placementKind} in ('connected_machine', 'attached_device')
+          and ${table.controllerHostSandboxGroupId} is null
         )`,
     ),
     identityRevisionValid: check(

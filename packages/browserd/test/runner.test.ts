@@ -112,6 +112,65 @@ describe("managed browser profile cryptography", () => {
   );
 
   test.skipIf(process.platform === "win32")(
+    "passes remote-provider authority only through the isolated daemon environment",
+    async () => {
+      const root = await mkdtemp("/tmp/og-runner-provider-");
+      const binaryPath = join(root, "fixture-agent-browser");
+      await writeFile(
+        binaryPath,
+        `#!/usr/bin/env bun
+console.log(JSON.stringify({ success: true, data: { argv: process.argv.slice(2), kernelKey: process.env.KERNEL_API_KEY, endpoint: process.env.KERNEL_ENDPOINT, headless: process.env.KERNEL_HEADLESS, stealth: process.env.KERNEL_STEALTH, timeout: process.env.KERNEL_TIMEOUT_SECONDS }, error: null }));
+`,
+        { mode: 0o700 },
+      );
+      const runner = await AgentBrowserJsonRunner.create({
+        namespace: "og",
+        sessionName: "provider",
+        socketDirectory: join(root, "socket"),
+        profileDirectory: join(root, "profile"),
+        downloadDirectory: join(root, "downloads"),
+        screenshotDirectory: join(root, "screenshots"),
+        headed: false,
+        provider: {
+          id: "kernel",
+          apiKey: "kernel-private-key",
+          endpoint: "https://kernel.example.test/",
+          timeoutSeconds: 7_200,
+          stealth: true,
+        },
+        binary: {
+          path: binaryPath,
+          name: "agent-browser-darwin-arm64",
+          version: "0.33.2",
+          sha256: "fixture",
+        },
+      });
+      try {
+        const result = await runner.run<{
+          argv: string[];
+          kernelKey: string;
+          endpoint: string;
+          headless: string;
+          stealth: string;
+          timeout: string;
+        }>(["open", "about:blank"]);
+        expect(result.argv).toContain("--provider");
+        expect(result.argv).toContain("kernel");
+        expect(result.argv.join(" ")).not.toContain("kernel-private-key");
+        expect(result).toMatchObject({
+          kernelKey: "kernel-private-key",
+          endpoint: "https://kernel.example.test",
+          headless: "true",
+          stealth: "true",
+          timeout: "7200",
+        });
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
     "times out even when a daemon inherits the command pipes",
     async () => {
       const root = await mkdtemp("/tmp/og-runner-timeout-");
