@@ -703,6 +703,26 @@ BEGIN
         ${literal(role)}
       );
     END IF;
+    -- Migration 0197 creates this target-schema-local SECURITY DEFINER lock
+    -- before opengeni_app may exist. Re-converge only its exact EXECUTE grant
+    -- for the supported migrate-then-provision install order; keep PUBLIC
+    -- revoked and do not widen table privileges.
+    IF to_regprocedure(
+      format(
+        '%I.knowledge_source_sync_lock_authority(uuid,uuid,uuid)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.knowledge_source_sync_lock_authority(uuid, uuid, uuid) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.knowledge_source_sync_lock_authority(uuid, uuid, uuid) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
     IF to_regprocedure(
       format(
         '%I.scoped_knowledge_advance_source_acl(uuid,uuid,bigint,bigint,uuid,text,text,text,text,text,text)',

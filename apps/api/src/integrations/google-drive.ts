@@ -94,6 +94,74 @@ type GoogleDriveOAuthState = {
   iat: number;
 };
 
+export async function wakeGoogleDriveSourcesFromWorkspaceEvent(
+  deps: ApiRouteDeps,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    connectionId: string;
+    connectionOwnerSubjectId: string;
+    eventId: string;
+    driveId: string | null;
+  },
+): Promise<{ enabled: boolean; triggered: number }> {
+  if (deps.settings.googleDriveWorkspaceEventsEnabled !== true) {
+    return { enabled: false, triggered: 0 };
+  }
+  const eventId = input.eventId.trim();
+  if (eventId.length < 1 || eventId.length > 1024) {
+    throw new Error("google_drive_workspace_event_id_invalid");
+  }
+  const connection = await getConnectionMetadata(
+    deps.db,
+    input.workspaceId,
+    input.connectionId,
+    input.connectionOwnerSubjectId,
+  );
+  if (!connection || connection.accountId !== input.accountId) {
+    throw new Error("google_drive_workspace_event_connection_not_found");
+  }
+  const metadata = requireGoogleDriveConnection(connection, input.connectionOwnerSubjectId);
+  if (effectiveGoogleDriveLifecycle(connection, metadata).state !== "active") {
+    return { enabled: true, triggered: 0 };
+  }
+  const selectedSources =
+    metadata.selectedSources ?? (metadata.selectedSource ? [metadata.selectedSource] : []);
+  const selectedById = new Map(selectedSources.map((source) => [source.id, source]));
+  const tasks = await listKnowledgeSourceSyncTasksForConnection(
+    deps.db,
+    input.workspaceId,
+    input.connectionId,
+  );
+  let triggered = 0;
+  for (const task of tasks) {
+    if (task.action.kind !== "knowledge_source_sync" || task.status !== "active") continue;
+    const externalSourceId =
+      typeof task.metadata.externalSourceId === "string" ? task.metadata.externalSourceId : null;
+    const selectedSource = externalSourceId ? selectedById.get(externalSourceId) : null;
+    if (
+      !selectedSource ||
+      !selectedSource.syncEnabled ||
+      selectedSource.driveId !== input.driveId
+    ) {
+      continue;
+    }
+    const token = createHash("sha256")
+      .update(`google-drive-workspace-event:${task.id}:${eventId}`)
+      .digest("hex")
+      .slice(0, 48);
+    await deps.workflowClient.triggerScheduledTask({
+      task,
+      agentRunUsageIdempotencyKey: `knowledge-source-sync:provider-event:${task.id}:${token}`,
+      triggerWorkflowId: manualScheduledTaskTriggerWorkflowId(task.id, `provider-event-${token}`),
+      initiator: { kind: "service", subjectId: "google-drive-workspace-events" },
+      triggerType: "provider_event",
+    });
+    triggered += 1;
+  }
+  return { enabled: true, triggered };
+}
+
 type GoogleTokenResponse = {
   accessToken: string;
   refreshToken?: string;

@@ -4,7 +4,7 @@ import {
   KnowledgeSourceSyncRunSummary,
   type ScheduledTask,
 } from "@opengeni/contracts";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Database } from "./database";
 import { setSubjectRlsContext, withRlsContext } from "./database";
 import { recordKnowledgeLifecycleEvent } from "./scoped-knowledge";
@@ -29,6 +29,45 @@ export type KnowledgeSourceSyncState = {
   lastCompletedAt: string | null;
   lastSummary: ReturnType<typeof KnowledgeSourceSyncRunSummary.parse> | null;
 };
+
+export type KnowledgeSourceSyncObservationFloor = {
+  externalObjectId: string;
+  providerRevision: string | null;
+  metadataHash: string | null;
+};
+
+export type KnowledgeSourceSyncObservationFence = {
+  initiatingSubjectId: string;
+  scanGeneration: number;
+  executionCheckpointGeneration: number;
+  observations: KnowledgeSourceSyncObservationFloor[];
+};
+
+export type KnowledgeSourceSyncObjectObservationResult = KnowledgeSourceSyncObservationFloor & {
+  disposition: "accepted" | "replayed" | "stale" | "conflict";
+  currentVersion: {
+    providerRevision: string | null;
+    metadataHash: string | null;
+    sourceLifecycleGeneration: number;
+    objectLifecycleGeneration: number;
+    currentObjectLifecycleGeneration: number;
+    objectLifecycleState: string;
+    aclGeneration: number;
+    indexObligationStatus: string | null;
+  } | null;
+};
+
+export function compareCanonicalDecimalProviderRevisions(
+  candidate: string | null,
+  floor: string | null,
+): -1 | 0 | 1 | null {
+  if (candidate === floor) return 0;
+  if (candidate === null || floor === null) return null;
+  if (!/^(0|[1-9]\d*)$/u.test(candidate) || !/^(0|[1-9]\d*)$/u.test(floor)) return null;
+  const candidateNumber = BigInt(candidate);
+  const floorNumber = BigInt(floor);
+  return candidateNumber < floorNumber ? -1 : candidateNumber > floorNumber ? 1 : 0;
+}
 
 export async function ensureKnowledgeSourceSyncState(
   db: Database,
@@ -327,6 +366,57 @@ export async function claimKnowledgeSourceSyncLease(
   );
 }
 
+async function assertKnowledgeSourceSyncObservationFence(
+  scopedDb: Database,
+  input: {
+    sourceId: string;
+    scheduledTaskRunId: string;
+    state: typeof schema.knowledgeSourceSyncStates.$inferSelect;
+    fence: KnowledgeSourceSyncObservationFence;
+  },
+): Promise<void> {
+  if (
+    input.state.leaseId !== input.scheduledTaskRunId ||
+    input.state.initiatingSubjectId !== input.fence.initiatingSubjectId ||
+    input.state.activeScanGeneration !== input.fence.scanGeneration ||
+    input.state.executionCheckpointGeneration !== input.fence.executionCheckpointGeneration
+  ) {
+    throw new Error("Knowledge source observation fence authority changed");
+  }
+  for (const expected of [...input.fence.observations].sort((left, right) =>
+    left.externalObjectId.localeCompare(right.externalObjectId),
+  )) {
+    const [observation] = await scopedDb
+      .select({
+        scheduledTaskRunId: schema.knowledgeSourceSyncObjectObservations.scheduledTaskRunId,
+        scanGeneration: schema.knowledgeSourceSyncObjectObservations.scanGeneration,
+        providerRevision: schema.knowledgeSourceSyncObjectObservations.providerRevision,
+        metadataHash: schema.knowledgeSourceSyncObjectObservations.metadataHash,
+      })
+      .from(schema.knowledgeSourceSyncObjectObservations)
+      .where(
+        and(
+          eq(schema.knowledgeSourceSyncObjectObservations.sourceId, input.sourceId),
+          eq(
+            schema.knowledgeSourceSyncObjectObservations.externalObjectId,
+            expected.externalObjectId,
+          ),
+        ),
+      )
+      .for("share")
+      .limit(1);
+    if (
+      !observation ||
+      observation.scheduledTaskRunId !== input.scheduledTaskRunId ||
+      observation.scanGeneration !== input.fence.scanGeneration ||
+      observation.providerRevision !== expected.providerRevision ||
+      observation.metadataHash !== expected.metadataHash
+    ) {
+      throw new Error("Knowledge source observation floor changed before settlement");
+    }
+  }
+}
+
 export async function checkpointKnowledgeSourceSync(
   db: Database,
   input: {
@@ -337,12 +427,36 @@ export async function checkpointKnowledgeSourceSync(
     sourceConfigGeneration: number;
     sourceLifecycleGeneration: number;
     executionCheckpoint: Record<string, unknown>;
+    observationFence?: KnowledgeSourceSyncObservationFence;
   },
 ): Promise<KnowledgeSourceSyncState> {
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
+      const [state] = await scopedDb
+        .select()
+        .from(schema.knowledgeSourceSyncStates)
+        .where(eq(schema.knowledgeSourceSyncStates.sourceId, input.sourceId))
+        .for("update")
+        .limit(1);
+      if (
+        !state ||
+        state.leaseId !== input.scheduledTaskRunId ||
+        state.sourceConfigGeneration !== input.sourceConfigGeneration ||
+        state.sourceLifecycleGeneration !== input.sourceLifecycleGeneration
+      ) {
+        throw new Error("Knowledge source sync lease changed before checkpoint");
+      }
+      if (input.observationFence) {
+        await setSubjectRlsContext(scopedDb, input.observationFence.initiatingSubjectId);
+        await assertKnowledgeSourceSyncObservationFence(scopedDb, {
+          sourceId: input.sourceId,
+          scheduledTaskRunId: input.scheduledTaskRunId,
+          state,
+          fence: input.observationFence,
+        });
+      }
       const [row] = await scopedDb
         .update(schema.knowledgeSourceSyncStates)
         .set({
@@ -363,6 +477,14 @@ export async function checkpointKnowledgeSourceSync(
               schema.knowledgeSourceSyncStates.sourceLifecycleGeneration,
               input.sourceLifecycleGeneration,
             ),
+            ...(input.observationFence
+              ? [
+                  eq(
+                    schema.knowledgeSourceSyncStates.executionCheckpointGeneration,
+                    input.observationFence.executionCheckpointGeneration,
+                  ),
+                ]
+              : []),
           ),
         )
         .returning();
@@ -388,6 +510,8 @@ export async function settleKnowledgeSourceSyncLease(
     sourceSyncGeneration: number;
     completedSourceSyncGeneration?: number | null;
     executionCheckpoint?: Record<string, unknown> | null;
+    providerCursor?: Record<string, unknown> | null;
+    observationFence?: KnowledgeSourceSyncObservationFence;
   },
 ): Promise<{ bufferedWake: boolean; bufferedScheduledTaskRunId: string | null }> {
   const summary = KnowledgeSourceSyncRunSummary.parse(input.summary);
@@ -411,6 +535,14 @@ export async function settleKnowledgeSourceSyncLease(
           throw new Error("Knowledge source sync lease changed before settlement");
         }
         await setSubjectRlsContext(tx, state.initiatingSubjectId);
+        if (input.observationFence) {
+          await assertKnowledgeSourceSyncObservationFence(tx, {
+            sourceId: input.sourceId,
+            scheduledTaskRunId: input.scheduledTaskRunId,
+            state,
+            fence: input.observationFence,
+          });
+        }
         await tx.execute(sql`
           SELECT knowledge_source_sync_lock_authority(
             ${input.accountId}::uuid,
@@ -457,6 +589,9 @@ export async function settleKnowledgeSourceSyncLease(
             leaseId: null,
             leaseUntil: null,
             executionCheckpoint: input.executionCheckpoint ?? null,
+            ...(input.status === "succeeded" && Object.hasOwn(input, "providerCursor")
+              ? { providerCursor: input.providerCursor ?? null }
+              : {}),
             bufferedWake: false,
             bufferedScheduledTaskRunId: null,
             reconnectRequired: summary.reconnectRequired,
@@ -519,6 +654,35 @@ export async function settleKnowledgeSourceSyncLease(
           bufferedScheduledTaskRunId: nextWake?.scheduledTaskRunId ?? null,
         };
       }),
+  );
+}
+
+export async function listObservedKnowledgeSourceSyncExternalObjectIds(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sourceId: string;
+    externalObjectIds: string[];
+  },
+): Promise<Set<string>> {
+  const ids = [...new Set(input.externalObjectIds)].filter((id) => id.length > 0).slice(0, 1_000);
+  if (ids.length === 0) return new Set();
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb
+        .select({ externalObjectId: schema.knowledgeSourceSyncObjectObservations.externalObjectId })
+        .from(schema.knowledgeSourceSyncObjectObservations)
+        .where(
+          and(
+            eq(schema.knowledgeSourceSyncObjectObservations.sourceId, input.sourceId),
+            inArray(schema.knowledgeSourceSyncObjectObservations.externalObjectId, ids),
+          ),
+        );
+      return new Set(rows.map((row) => row.externalObjectId));
+    },
   );
 }
 
@@ -667,43 +831,269 @@ export async function recordKnowledgeSourceSyncObjectObservations(
     workspaceId: string;
     sourceId: string;
     scheduledTaskRunId: string;
+    initiatingSubjectId: string;
     scanGeneration: number;
+    executionCheckpointGeneration: number;
+    revisionOrdering?: "first_observation" | "canonical_decimal";
     observations: Array<{
       externalObjectId: string;
       providerRevision?: string | null;
       metadataHash?: string | null;
     }>;
   },
-): Promise<void> {
-  if (input.observations.length === 0) return;
-  await withRlsContext(
+): Promise<KnowledgeSourceSyncObjectObservationResult[]> {
+  if (input.observations.length === 0) return [];
+  return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
-      for (const observation of input.observations) {
-        await scopedDb.execute(sql`
-          INSERT INTO knowledge_source_sync_object_observations (
-            source_id, external_object_id, account_id, workspace_id,
-            scheduled_task_run_id, scan_generation, provider_revision,
-            metadata_hash, observed_at
-          ) VALUES (
-            ${input.sourceId}::uuid, ${observation.externalObjectId},
-            ${input.accountId}::uuid, ${input.workspaceId}::uuid,
-            ${input.scheduledTaskRunId}::uuid, ${input.scanGeneration}::bigint,
-            ${observation.providerRevision ?? null}, ${observation.metadataHash ?? null},
-            clock_timestamp()
-          )
-          ON CONFLICT (source_id, external_object_id) DO UPDATE SET
-            account_id = EXCLUDED.account_id,
-            workspace_id = EXCLUDED.workspace_id,
-            scheduled_task_run_id = EXCLUDED.scheduled_task_run_id,
-            scan_generation = EXCLUDED.scan_generation,
-            provider_revision = EXCLUDED.provider_revision,
-            metadata_hash = EXCLUDED.metadata_hash,
-            observed_at = EXCLUDED.observed_at
-          WHERE knowledge_source_sync_object_observations.scan_generation <= EXCLUDED.scan_generation
-        `);
+      await setSubjectRlsContext(scopedDb, input.initiatingSubjectId);
+      const [state] = await scopedDb
+        .select()
+        .from(schema.knowledgeSourceSyncStates)
+        .where(eq(schema.knowledgeSourceSyncStates.sourceId, input.sourceId))
+        .for("update")
+        .limit(1);
+      if (
+        !state ||
+        state.leaseId !== input.scheduledTaskRunId ||
+        state.initiatingSubjectId !== input.initiatingSubjectId ||
+        state.activeScanGeneration !== input.scanGeneration ||
+        state.executionCheckpointGeneration !== input.executionCheckpointGeneration
+      ) {
+        throw new Error("Knowledge source observation authority changed");
       }
+
+      const results: KnowledgeSourceSyncObjectObservationResult[] = [];
+      for (const observation of input.observations) {
+        const candidate = {
+          providerRevision: observation.providerRevision ?? null,
+          metadataHash: observation.metadataHash ?? null,
+        };
+        const [existing] = await scopedDb
+          .select()
+          .from(schema.knowledgeSourceSyncObjectObservations)
+          .where(
+            and(
+              eq(schema.knowledgeSourceSyncObjectObservations.sourceId, input.sourceId),
+              eq(
+                schema.knowledgeSourceSyncObjectObservations.externalObjectId,
+                observation.externalObjectId,
+              ),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (existing && existing.scanGeneration > input.scanGeneration) {
+          throw new Error("Knowledge source observation scan generation advanced");
+        }
+
+        const [currentObjectIdentity] = await scopedDb
+          .select({ id: schema.knowledgeSourceObjects.id })
+          .from(schema.knowledgeSourceObjects)
+          .where(
+            and(
+              eq(schema.knowledgeSourceObjects.sourceId, input.sourceId),
+              eq(schema.knowledgeSourceObjects.externalObjectId, observation.externalObjectId),
+            ),
+          )
+          .limit(1);
+        await scopedDb.execute(sql`
+          SELECT knowledge_source_sync_lock_authority(
+            ${input.accountId}::uuid,
+            ${input.sourceId}::uuid,
+            ${currentObjectIdentity?.id ?? null}::uuid
+          )
+        `);
+        // The SECURITY DEFINER helper holds the object (when present) and then
+        // source authority locks until this withRlsContext transaction ends.
+        // Re-read only after that lock so candidate classification cannot use
+        // pre-lock current-version metadata; plain SELECT preserves the
+        // intentionally read-only app-role grant on scoped-knowledge heads.
+        const [currentObject] = await scopedDb
+          .select({
+            id: schema.knowledgeSourceObjects.id,
+            currentVersionId: schema.knowledgeSourceObjects.currentVersionId,
+            lifecycleGeneration: schema.knowledgeSourceObjects.lifecycleGeneration,
+            lifecycleState: schema.knowledgeSourceObjects.lifecycleState,
+          })
+          .from(schema.knowledgeSourceObjects)
+          .where(
+            and(
+              eq(schema.knowledgeSourceObjects.sourceId, input.sourceId),
+              eq(schema.knowledgeSourceObjects.externalObjectId, observation.externalObjectId),
+            ),
+          )
+          .limit(1);
+        if (currentObjectIdentity && currentObject?.id !== currentObjectIdentity.id) {
+          throw new Error("Knowledge source object authority changed before observation");
+        }
+        let currentVersion: KnowledgeSourceSyncObjectObservationResult["currentVersion"] = null;
+        if (currentObject?.currentVersionId) {
+          const [current] = await scopedDb
+            .select({
+              sourceMetadata: schema.knowledgeDocumentVersions.sourceMetadata,
+              aclGeneration: schema.knowledgeDocumentVersions.aclGeneration,
+              indexObligationStatus: schema.knowledgeSourceSyncIndexObligations.status,
+            })
+            .from(schema.knowledgeDocumentVersions)
+            .leftJoin(
+              schema.knowledgeSourceSyncIndexObligations,
+              eq(
+                schema.knowledgeSourceSyncIndexObligations.knowledgeDocumentVersionId,
+                schema.knowledgeDocumentVersions.id,
+              ),
+            )
+            .where(eq(schema.knowledgeDocumentVersions.id, currentObject.currentVersionId))
+            .limit(1);
+          if (current) {
+            const sourceMetadata = current.sourceMetadata ?? {};
+            currentVersion = {
+              providerRevision:
+                typeof sourceMetadata.providerRevision === "string"
+                  ? sourceMetadata.providerRevision
+                  : null,
+              metadataHash:
+                typeof sourceMetadata.metadataHash === "string"
+                  ? sourceMetadata.metadataHash
+                  : null,
+              sourceLifecycleGeneration: Number(sourceMetadata.sourceLifecycleGeneration ?? 0),
+              objectLifecycleGeneration: Number(sourceMetadata.objectLifecycleGeneration ?? 0),
+              currentObjectLifecycleGeneration: currentObject.lifecycleGeneration,
+              objectLifecycleState: currentObject.lifecycleState,
+              aclGeneration: current.aclGeneration,
+              indexObligationStatus: current.indexObligationStatus ?? null,
+            };
+          }
+        }
+
+        const sameGenerationObservation =
+          existing?.scanGeneration === input.scanGeneration ? existing : null;
+        let authoritativeFloor: {
+          providerRevision: string | null;
+          metadataHash: string | null;
+        } | null = sameGenerationObservation
+          ? {
+              providerRevision: sameGenerationObservation.providerRevision,
+              metadataHash: sameGenerationObservation.metadataHash,
+            }
+          : null;
+        if (input.revisionOrdering === "canonical_decimal" && currentVersion) {
+          if (!authoritativeFloor) {
+            authoritativeFloor = {
+              providerRevision: currentVersion.providerRevision,
+              metadataHash: currentVersion.metadataHash,
+            };
+          } else {
+            const currentComparison = compareCanonicalDecimalProviderRevisions(
+              currentVersion.providerRevision,
+              authoritativeFloor.providerRevision,
+            );
+            if (
+              currentComparison !== null &&
+              (currentComparison > 0 ||
+                (currentComparison === 0 &&
+                  currentVersion.metadataHash !== authoritativeFloor.metadataHash))
+            ) {
+              authoritativeFloor = {
+                providerRevision: currentVersion.providerRevision,
+                metadataHash: currentVersion.metadataHash,
+              };
+            }
+          }
+        }
+
+        let disposition: KnowledgeSourceSyncObjectObservationResult["disposition"] = "accepted";
+        let desiredFloor = candidate;
+        if (input.revisionOrdering === "canonical_decimal" && authoritativeFloor) {
+          const comparison = compareCanonicalDecimalProviderRevisions(
+            candidate.providerRevision,
+            authoritativeFloor.providerRevision,
+          );
+          if (comparison === null) {
+            disposition = "conflict";
+            desiredFloor = authoritativeFloor;
+          } else if (comparison < 0) {
+            disposition = "stale";
+            desiredFloor = authoritativeFloor;
+          } else if (comparison === 0) {
+            disposition =
+              candidate.metadataHash === authoritativeFloor.metadataHash ? "replayed" : "conflict";
+            desiredFloor = authoritativeFloor;
+          }
+        } else if (sameGenerationObservation) {
+          disposition =
+            candidate.providerRevision === sameGenerationObservation.providerRevision &&
+            candidate.metadataHash === sameGenerationObservation.metadataHash
+              ? "replayed"
+              : "stale";
+          desiredFloor = {
+            providerRevision: sameGenerationObservation.providerRevision,
+            metadataHash: sameGenerationObservation.metadataHash,
+          };
+        }
+
+        let durable = existing;
+        if (!existing) {
+          [durable] = await scopedDb
+            .insert(schema.knowledgeSourceSyncObjectObservations)
+            .values({
+              sourceId: input.sourceId,
+              externalObjectId: observation.externalObjectId,
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              scheduledTaskRunId: input.scheduledTaskRunId,
+              scanGeneration: input.scanGeneration,
+              providerRevision: desiredFloor.providerRevision,
+              metadataHash: desiredFloor.metadataHash,
+              observedAt: new Date(),
+            })
+            .onConflictDoNothing()
+            .returning();
+          if (!durable) throw new Error("Knowledge source observation changed before insert");
+        } else if (
+          existing.scanGeneration !== input.scanGeneration ||
+          existing.scheduledTaskRunId !== input.scheduledTaskRunId ||
+          existing.providerRevision !== desiredFloor.providerRevision ||
+          existing.metadataHash !== desiredFloor.metadataHash
+        ) {
+          [durable] = await scopedDb
+            .update(schema.knowledgeSourceSyncObjectObservations)
+            .set({
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              scheduledTaskRunId: input.scheduledTaskRunId,
+              scanGeneration: input.scanGeneration,
+              providerRevision: desiredFloor.providerRevision,
+              metadataHash: desiredFloor.metadataHash,
+              observedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(schema.knowledgeSourceSyncObjectObservations.sourceId, input.sourceId),
+                eq(
+                  schema.knowledgeSourceSyncObjectObservations.externalObjectId,
+                  observation.externalObjectId,
+                ),
+                eq(
+                  schema.knowledgeSourceSyncObjectObservations.scanGeneration,
+                  existing.scanGeneration,
+                ),
+              ),
+            )
+            .returning();
+          if (!durable) throw new Error("Knowledge source observation floor changed");
+        }
+        if (!durable) throw new Error("Knowledge source observation disappeared");
+        results.push({
+          externalObjectId: observation.externalObjectId,
+          providerRevision: durable.providerRevision,
+          metadataHash: durable.metadataHash,
+          disposition,
+          currentVersion,
+        });
+      }
+      return results;
     },
   );
 }

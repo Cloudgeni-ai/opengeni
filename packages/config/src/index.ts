@@ -317,6 +317,7 @@ const SettingsSchema = z.object({
   slackSigningSecret: z.string().optional(),
   googleDriveClientId: z.string().optional(),
   googleDriveClientSecret: z.string().optional(),
+  googleDriveWorkspaceEventsEnabled: EnvBoolean.optional(),
   atlassianClientId: z.string().optional(),
   atlassianClientSecret: z.string().optional(),
   // Undefined is meaningful: the migration boundary persists the product
@@ -1882,6 +1883,7 @@ export function getSettings(): Settings {
     slackSigningSecret: optional("OPENGENI_SLACK_SIGNING_SECRET"),
     googleDriveClientId: optional("OPENGENI_GOOGLE_DRIVE_CLIENT_ID"),
     googleDriveClientSecret: optional("OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET"),
+    googleDriveWorkspaceEventsEnabled: optional("OPENGENI_GOOGLE_DRIVE_WORKSPACE_EVENTS_ENABLED"),
     atlassianClientId: optional("OPENGENI_ATLASSIAN_CLIENT_ID"),
     atlassianClientSecret: optional("OPENGENI_ATLASSIAN_CLIENT_SECRET"),
     maxNestedAgentDepth: optional("OPENGENI_MAX_NESTED_AGENT_DEPTH"),

@@ -1,5 +1,22 @@
 import { describe, expect, test } from "bun:test";
-import { adfToMarkdown, confluenceCursor } from "../src/activities/knowledge-source-sync";
+import {
+  adfToMarkdown,
+  confluenceCursor,
+  knowledgeSyncObservationPolicy,
+} from "../src/activities/knowledge-source-sync";
+
+describe("knowledge sync provider coexistence", () => {
+  test("keeps Atlassian outside Google Drive revision filtering", () => {
+    expect(knowledgeSyncObservationPolicy("google_drive")).toEqual({
+      revisionOrdering: "canonical_decimal",
+      filterWithDriveDurability: true,
+    });
+    expect(knowledgeSyncObservationPolicy("atlassian")).toEqual({
+      revisionOrdering: "first_observation",
+      filterWithDriveDurability: false,
+    });
+  });
+});
 
 describe("Atlassian content projection", () => {
   test("renders common Jira ADF without exposing provider JSON", () => {

@@ -359,7 +359,34 @@ describe("embedded worker lifecycle contract", () => {
       ],
       [],
       [],
-      [],
+      [
+        ...["knowledge_sources", "knowledge_source_objects"].map((name) => ({
+          name,
+          owner: "opengeni_migrator",
+          rls_enabled: false,
+          rls_forced: false,
+          rls_active: false,
+          policy_count: 0,
+          artifact_outbox_dispatcher_policy: false,
+          artifact_materializer_policy: false,
+          can_select: false,
+          can_insert: false,
+          can_update: false,
+          can_delete: false,
+          can_truncate: false,
+          can_references: false,
+          can_trigger: false,
+        })),
+      ],
+      [
+        {
+          name: "knowledge_source_sync_lock_authority(uuid, uuid, uuid)",
+          owner: "opengeni_migrator",
+          can_execute: true,
+          public_execute: false,
+          security_definer: true,
+        },
+      ],
       [
         {
           name: "workspace_rls_visible(uuid, uuid)",
