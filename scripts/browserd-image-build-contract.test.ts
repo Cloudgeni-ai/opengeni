@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 
 const root = resolve(import.meta.dir, "..");
 const imagePaths = ["docker/sandbox.Dockerfile", "docker/desktop.Dockerfile"] as const;
+const startupScriptPath = "docker/desktop/opengeni-browserd-up.sh";
 
 function buildsBrowserControllerOnTargetPlatform(dockerfile: string): boolean {
   const sourceStage = dockerfile.indexOf(
@@ -76,4 +77,17 @@ describe("browser controller image build contract", () => {
       expect(buildsBrowserControllerOnTargetPlatform(missingPreparedSource)).toBe(false);
     });
   }
+
+  test("startup distinguishes a live setsid/env child from a completed browserd exec", async () => {
+    const source = await readFile(resolve(root, startupScriptPath), "utf8");
+    const startupLoop = source.indexOf("for _ in $(seq 1 100); do");
+    const processAlive = source.indexOf('if ! kill -0 "$PID" 2>/dev/null; then', startupLoop);
+    const browserdExecComplete = source.indexOf('if ! same_process "$PID"; then', processAlive);
+    const readiness = source.indexOf("if admin_ready; then", browserdExecComplete);
+
+    expect(startupLoop).toBeGreaterThan(-1);
+    expect(processAlive).toBeGreaterThan(startupLoop);
+    expect(browserdExecComplete).toBeGreaterThan(processAlive);
+    expect(readiness).toBeGreaterThan(browserdExecComplete);
+  });
 });

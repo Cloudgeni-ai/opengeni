@@ -95,10 +95,18 @@ printf '%s\n' "$PID" >"${PID_FILE}.new"
 mv -f "${PID_FILE}.new" "$PID_FILE"
 
 for _ in $(seq 1 100); do
-  if ! same_process "$PID"; then
+  if ! kill -0 "$PID" 2>/dev/null; then
     rm -f "$PID_FILE"
     echo "browser controller exited during startup" >&2
     exit 14
+  fi
+  # setsid launches `env`, which then execs browserd. On a cold or remote
+  # placement /proc/$PID/exe can briefly still name env even though the exact
+  # child is healthy and transitioning. Wait for that exec boundary; only a
+  # physically absent PID is an early exit.
+  if ! same_process "$PID"; then
+    sleep 0.1
+    continue
   fi
   if admin_ready; then
     echo "OPENGENI_BROWSERD_UP port=${PORT}"
