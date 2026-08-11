@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/sdk",
-  "version": "0.50.1",
+  "version": "0.52.0",
   "description": "Framework-agnostic TypeScript SDK for the OpenGeni API: typed client, session lifecycle, SSE event streaming with reconnect + replay-by-sequence, and proxy re-streaming helpers.",
   "license": "Apache-2.0",
   "repository": {
@@ -42,13 +42,13 @@
       "types": "./src/editable-artifacts.ts",
       "default": "./src/editable-artifacts.ts"
     },
-    "./editable-artifact-publication": {
-      "types": "./src/editable-artifact-publication.ts",
-      "default": "./src/editable-artifact-publication.ts"
-    },
     "./editable-artifacts/worker": {
       "types": "./src/editable-artifacts-worker.ts",
       "default": "./src/editable-artifacts-worker.ts"
+    },
+    "./interaction": {
+      "types": "./src/interaction.ts",
+      "default": "./src/interaction.ts"
     },
     "./codex-realtime-controller": {
       "types": "./src/codex-realtime-controller.ts",

@@ -112,8 +112,8 @@ export type EnsureTerminalServerResult = {
  * assert the exact command sequence without a live box. Mirrors
  * buildDisplayStackScript. A ttyd process is sandbox-group-global, not
  * OpenGeni-session-specific, so it must never inherit the box-global legacy
- * Toolspace pointer. Session-scoped interactive exec/PTY uses Channel A; the
- * shared ttyd shell fails closed for Toolspace until that stream plane itself is
+ * Codemode pointer. Session-scoped interactive exec/PTY uses Channel A; the
+ * shared ttyd shell fails closed for Codemode until that stream plane itself is
  * session-isolated.
  */
 export function buildTerminalServerScript(options: EnsureTerminalServerOptions = {}): string {
@@ -127,7 +127,7 @@ export function buildTerminalServerScript(options: EnsureTerminalServerOptions =
     // pinning this lock for its entire lifetime. The flock parent still holds
     // the lock until opengeni-terminal-up exits.
     `flock -w 30 --close /tmp/opengeni-terminal/up.outer.lock ` +
-    `env TERMINAL_PORT=${port} OPENGENI_TOOLSPACE_TOKEN_FILE=/dev/null opengeni-terminal-up`
+    `env TERMINAL_PORT=${port} OPENGENI_CODEMODE_TOKEN_FILE=/dev/null opengeni-terminal-up`
   );
 }
 

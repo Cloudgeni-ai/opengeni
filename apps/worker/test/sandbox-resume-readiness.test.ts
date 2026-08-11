@@ -65,12 +65,19 @@ describe("sandbox exec readiness", () => {
 
   test("bounds a Modal exec RPC that never returns", async () => {
     const pending = new Promise<never>(() => undefined);
-    await expect(
-      waitForSandboxExecReadiness(
-        established("modal", () => pending),
-        10,
-      ),
-    ).rejects.toBeInstanceOf(SandboxWarmingTimeoutError);
+    const error = await waitForSandboxExecReadiness(
+      established("modal", () => pending),
+      10,
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(SandboxWarmingTimeoutError);
+    expect(error).toMatchObject({
+      backend: "modal",
+      timeoutMs: 10,
+      stage: "exec_readiness",
+    });
+    expect((error as Error).message).toContain("command-ready within 1s");
+    expect((error as Error).message).not.toContain("capacity");
   });
 
   test("does not probe other backends", async () => {

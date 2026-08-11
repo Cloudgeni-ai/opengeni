@@ -13,7 +13,7 @@ import {
   disposeArtifact,
   getArtifactCompositeDiagnostics,
 } from "../src";
-import { createArtifactPublicationSnapshot } from "../src/publication";
+import { createArtifactSnapshot } from "../src/snapshot";
 import {
   Document as ReferenceDocument,
   DocumentFile as ReferenceDocumentFile,
@@ -47,7 +47,7 @@ const ONE_PIXEL_PNG =
   "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 describe("production facade over the real native addon", () => {
-  test("captures exact durable publication snapshots for every modality", () => {
+  test("captures exact durable snapshots for every modality", () => {
     const workbook = Workbook.create();
     workbook.worksheets.add("Published").getRange("A1").values = [[42]];
     const document = Document.create({ idNamespace: "1234567890abcdef" });
@@ -61,7 +61,7 @@ describe("production facade over the real native addon", () => {
     });
 
     try {
-      const spreadsheet = createArtifactPublicationSnapshot(workbook);
+      const spreadsheet = createArtifactSnapshot(workbook);
       expect(spreadsheet).toMatchObject({
         schemaVersion: 1,
         modality: "spreadsheet",
@@ -87,7 +87,7 @@ describe("production facade over the real native addon", () => {
       reopenedWorkbook.dispose();
 
       for (const artifact of [document, presentation] as const) {
-        const snapshot = createArtifactPublicationSnapshot(artifact);
+        const snapshot = createArtifactSnapshot(artifact);
         expect(snapshot.modality).not.toBe("spreadsheet");
         if (snapshot.modality === "spreadsheet") throw new Error("Unexpected modality");
         expect(snapshot).toMatchObject({

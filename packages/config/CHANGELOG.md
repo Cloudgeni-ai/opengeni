@@ -1,5 +1,53 @@
 # @opengeni/config
 
+## 0.13.1
+
+### Patch Changes
+
+- 87e9ae6: Add durable Google Drive Changes cursors, Shared Drive-aware delta draining,
+  bounded full reconciliation, cursor-invalid repair, and a default-off
+  Workspace Events wake seam. Normalize My Drive's root alias before ancestry
+  checks and preserve cumulative item, provider-request, and elapsed budgets
+  across delta, continuation, and full-repair checkpoints. Carry bounded
+  per-object revision floors across delta-to-full and checkpointed full scans so
+  older or equal Drive revisions cannot regress accepted metadata/current-version
+  state, fail closed on conflicting fallback identities, and keep the first
+  observation in one scan generation as a durable monotonic floor. Fence item
+  version/metadata writes plus checkpoint and terminal cursor settlement to the
+  exact lease, initiating subject, scan, checkpoint generation, and accepted
+  floor, so a lost full-page checkpoint cannot replay version 8 as version 7.
+- 8b6803a: Make Modal sandbox recovery command-ready and accurately diagnosed, use workspace-only snapshots for new sessions, enforce checkpoint cadence, and publish cached rig images only after an independent cold boot.
+- ff7203c: Add a read-only Atlassian Jira and Confluence connector with shared OAuth setup, selected-source live agent search and reads, and optional governed knowledge synchronization.
+- Updated dependencies [8b6803a]
+- Updated dependencies [aeb07f4]
+- Updated dependencies [ff7203c]
+  - @opengeni/contracts@0.44.0
+
+## 0.13.0
+
+### Minor Changes
+
+- dcfe6eb: Add canonical attempt-scoped CodeMode, browser and computer interaction, and durable collaborative editable artifacts. Agents and humans now share one artifact head through the same application authority; direct MCP and CodeMode support bounded inspection, fenced edits, trusted Office import, and asynchronous export to workspace files. The session UI gains a first-class Artifacts workspace, and React interaction viewers move to an explicit lazy-loadable subpath.
+
+### Patch Changes
+
+- 2f4ce5e: Add durable Seedance video generation with workspace model and funding policy,
+  secure media references, retained video artifacts, sandbox materialization,
+  OpenGeni-credit and workspace-gateway funding, and SDK/React playback surfaces.
+- 5fcad0a: Expose an agent-safe checkpointed listing of newly indexed documents with source and provenance metadata.
+- Updated dependencies [b46f4de]
+- Updated dependencies [2f4ce5e]
+- Updated dependencies [d55a093]
+- Updated dependencies [dcfe6eb]
+- Updated dependencies [ad9123b]
+- Updated dependencies [31666e2]
+- Updated dependencies [bd5514e]
+- Updated dependencies [90eea29]
+- Updated dependencies [a858835]
+- Updated dependencies [5fcad0a]
+  - @opengeni/contracts@0.43.0
+  - @opengeni/codex@0.2.15
+
 ## 0.12.10
 
 ### Patch Changes

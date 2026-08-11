@@ -1,15 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { Buffer } from "node:buffer";
 import { randomBytes } from "node:crypto";
-import {
-  GOOGLE_DRIVE_PRESET,
-  integrationFeaturesForPreset,
-  providerDomainForPreset,
-} from "@opengeni/capabilities";
 import type { Settings } from "@opengeni/config";
 import {
-  API_INTEGRATION_OAUTH_CREDENTIAL_ROLE,
-  ApiIntegrationOAuthConnectionMetadata,
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
   signDelegatedAccessToken,
@@ -23,25 +15,22 @@ import {
   GOOGLE_DRIVE_READONLY_SCOPE,
 } from "@opengeni/contracts/google-drive";
 import {
-  createConnection,
   createDb,
-  encryptEnvironmentValue,
   getConnectionMetadata,
-  installApiIntegration,
-  listIntegrationInstanceFeatures,
   listConnectionsMetadata,
+  listScheduledTasks,
   loadConnectionCredentialForBroker,
+  migrate,
   type DbClient,
 } from "@opengeni/db";
-import { migrate } from "@opengeni/db/migrate";
 import {
   acquireSharedTestDatabase,
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import postgres from "postgres";
-
 import { createApp } from "../src/app";
+import { wakeGoogleDriveSourcesFromWorkspaceEvent } from "../src/integrations/google-drive";
 
 const DELEGATION_SECRET = "google-drive-delegation-secret";
 const STATE_SECRET = "google-drive-state-secret";
@@ -53,32 +42,33 @@ let shared: SharedTestDatabase | null = null;
 let client: DbClient;
 let settings: Settings;
 
-beforeAll(async () => {
-  const adminUrl = process.env.OPENGENI_GOOGLE_DRIVE_TEST_POSTGRES_ADMIN_URL;
-  const appUrl = process.env.OPENGENI_GOOGLE_DRIVE_TEST_POSTGRES_APP_URL;
-  if ((adminUrl && !appUrl) || (!adminUrl && appUrl)) {
+async function acquireDatabase(): Promise<SharedTestDatabase | null> {
+  const adminUrl = process.env.OPENGENI_TEST_POSTGRES_ADMIN_URL;
+  const appUrl = process.env.OPENGENI_TEST_POSTGRES_APP_URL;
+  if (!adminUrl && !appUrl) return await acquireSharedTestDatabase("api_google_drive");
+  if (!adminUrl || !appUrl) {
     throw new Error(
-      "OPENGENI_GOOGLE_DRIVE_TEST_POSTGRES_ADMIN_URL and OPENGENI_GOOGLE_DRIVE_TEST_POSTGRES_APP_URL must be set together",
+      "OPENGENI_TEST_POSTGRES_ADMIN_URL and OPENGENI_TEST_POSTGRES_APP_URL must be set together",
     );
   }
-  if (adminUrl && appUrl) {
-    await migrate(adminUrl);
-    const admin = postgres(adminUrl, { max: 4 });
-    shared = {
-      admin,
-      adminUrl,
-      appUrl,
-      release: async () => await admin.end().catch(() => undefined),
-    };
-  } else {
-    shared = await acquireSharedTestDatabase("api_google_drive");
-  }
+  const admin = postgres(adminUrl, { max: 4 });
+  return {
+    admin,
+    adminUrl,
+    appUrl,
+    release: async () => await admin.end().catch(() => undefined),
+  };
+}
+
+beforeAll(async () => {
+  shared = await acquireDatabase();
   if (!shared) {
     available = false;
     // eslint-disable-next-line no-console
     console.warn("[google-drive] docker unavailable, skipping");
     return;
   }
+  await migrate(shared.adminUrl);
   client = createDb(shared.appUrl);
   settings = testSettings({
     productAccessMode: "managed",
@@ -141,6 +131,7 @@ function googleFixture(
     permissionId?: string;
     omitRefreshToken?: boolean;
     scopes?: string[];
+    refreshScopes?: string[];
     refreshError?: { status: number; error: string; description: string };
     fileListError?: { status: number; reason: string; message: string };
   } = {},
@@ -156,7 +147,8 @@ function googleFixture(
           ? init.body
           : new URLSearchParams(typeof init?.body === "string" ? init.body : "");
       tokenRequests.push(body);
-      if (body.get("grant_type") === "refresh_token" && options.refreshError) {
+      const isRefresh = body.get("grant_type") === "refresh_token";
+      if (isRefresh && options.refreshError) {
         return Response.json(
           {
             error: options.refreshError.error,
@@ -170,7 +162,10 @@ function googleFixture(
         ...(options.omitRefreshToken ? {} : { refresh_token: "google-refresh-token" }),
         token_type: "Bearer",
         expires_in: 3600,
-        scope: (options.scopes ?? [GOOGLE_DRIVE_READONLY_SCOPE]).join(" "),
+        scope: (isRefresh
+          ? (options.refreshScopes ?? options.scopes ?? [GOOGLE_DRIVE_READONLY_SCOPE])
+          : (options.scopes ?? [GOOGLE_DRIVE_READONLY_SCOPE])
+        ).join(" "),
       });
     }
     apiAuthorizationHeaders.push(new Headers(init?.headers).get("authorization") ?? "");
@@ -260,7 +255,11 @@ function app(googleDriveFetch: typeof globalThis.fetch, overrides: Partial<Setti
     settings: { ...settings, ...overrides },
     db: client.db,
     bus: {} as never,
-    workflowClient: {} as never,
+    workflowClient: {
+      syncScheduledTask: async () => {},
+      triggerScheduledTask: async () => {},
+      deleteScheduledTaskSchedule: async () => {},
+    } as never,
     managedAuth: null,
     googleDriveFetch,
   } as never);
@@ -422,7 +421,7 @@ describe("Google Drive local source preview", () => {
     }
   });
 
-  test("browses metadata server-side and saves only connector configuration", async () => {
+  test("browses metadata server-side and materializes schedules without documents", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const google = googleFixture();
@@ -479,6 +478,7 @@ describe("Google Drive local source preview", () => {
           ],
           destination: { authorityKind: "workspace", collectionId: null },
           syncCadence: "hourly",
+          syncEnabled: true,
           readPolicy: "allow",
         }),
       },
@@ -509,6 +509,8 @@ describe("Google Drive local source preview", () => {
             authoritySubjectId: null,
           },
           syncCadence: "hourly",
+          syncEnabled: true,
+          configGeneration: 1,
           readPolicy: "allow",
         },
         {
@@ -521,10 +523,30 @@ describe("Google Drive local source preview", () => {
             authoritySubjectId: null,
           },
           syncCadence: "hourly",
+          syncEnabled: true,
+          configGeneration: 1,
           readPolicy: "allow",
         },
       ],
     });
+    const tasks = await listScheduledTasks(client.db, workspace.workspaceId, 10);
+    expect(tasks).toHaveLength(2);
+    expect(tasks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          status: "active",
+          schedule: { type: "interval", everySeconds: 3_600 },
+          action: expect.objectContaining({ kind: "knowledge_source_sync" }),
+          metadata: expect.objectContaining({ externalSourceId: "folder-1" }),
+        }),
+        expect.objectContaining({
+          status: "active",
+          schedule: { type: "interval", everySeconds: 3_600 },
+          action: expect.objectContaining({ kind: "knowledge_source_sync" }),
+          metadata: expect.objectContaining({ externalSourceId: "root" }),
+        }),
+      ]),
+    );
     expect(
       await shared!.admin`
       select id from documents where workspace_id = ${workspace.workspaceId}
@@ -532,305 +554,216 @@ describe("Google Drive local source preview", () => {
     ).toHaveLength(0);
   });
 
-  test("binds sources to the exact named Google Drive Integration instance", async () => {
+  test("keeps Workspace Events default-off and emits deterministic wake-only provider events", async () => {
     if (!available) return;
+    expect(
+      await wakeGoogleDriveSourcesFromWorkspaceEvent(
+        {
+          settings,
+        } as never,
+        {
+          accountId: crypto.randomUUID(),
+          workspaceId: crypto.randomUUID(),
+          connectionId: crypto.randomUUID(),
+          connectionOwnerSubjectId: "subject-a",
+          eventId: "event-disabled",
+          driveId: null,
+        },
+      ),
+    ).toEqual({ enabled: false, triggered: 0 });
+
     const workspace = await freshWorkspace();
     const google = googleFixture();
-    const providerDomain = providerDomainForPreset(GOOGLE_DRIVE_PRESET);
-    const encryptionKey = Buffer.from(settings.environmentsEncryptionKey!, "base64");
-    const createProviderConnection = async (suffix: string) =>
-      await createConnection(client.db, {
-        accountId: workspace.accountId,
-        workspaceId: workspace.workspaceId,
-        subjectId: "subject-a",
-        providerDomain,
-        kind: "oauth2",
-        credentialEncrypted: encryptEnvironmentValue(
-          encryptionKey,
-          JSON.stringify({
-            access_token: `integration-access-${suffix}`,
-            refresh_token: `integration-refresh-${suffix}`,
-            token_type: "Bearer",
-            expires_at: new Date(Date.now() + 3_600_000).toISOString(),
-            token_endpoint: GOOGLE_DRIVE_PRESET.oauth.tokenUrl,
-            client_id: CLIENT_ID,
-            client_secret: CLIENT_SECRET,
-            token_endpoint_auth_method: "client_secret_post",
-            scope: GOOGLE_DRIVE_PRESET.oauth.scopes.join(" "),
-          }),
-        ),
-        grantedScopes: [...GOOGLE_DRIVE_PRESET.oauth.scopes],
-        expiresAt: new Date(Date.now() + 3_600_000),
-        metadata: ApiIntegrationOAuthConnectionMetadata.parse({
-          credentialRole: API_INTEGRATION_OAUTH_CREDENTIAL_ROLE,
-          providerFamily: "google",
-          providerPrincipalId: `google-principal-${suffix}`,
-          providerEmail: `${suffix}@example.com`,
-          providerDisplayName: `Drive ${suffix.toUpperCase()}`,
-          authorizedPresetIds: [GOOGLE_DRIVE_PRESET.id],
-          verifiedAt: new Date().toISOString(),
-        }),
-        createdBySubjectId: "subject-a",
-      });
-    const financeConnection = await createProviderConnection("finance");
-    const salesConnection = await createProviderConnection("sales");
-    const capabilityId = "api:preset:google-drive-source-test";
-    const installInstance = async (instanceKey: string, connectionId: string) =>
-      await installApiIntegration(client.db, {
-        accountId: workspace.accountId,
-        workspaceId: workspace.workspaceId,
-        subjectId: "subject-a",
-        capabilityId,
-        pluginKey: "integration/google-drive-source-test",
-        serverId: "google_drive_source_test",
-        name: GOOGLE_DRIVE_PRESET.name,
-        description: GOOGLE_DRIVE_PRESET.summary,
-        presetId: GOOGLE_DRIVE_PRESET.id,
-        provider: GOOGLE_DRIVE_PRESET.family,
-        providerDomain,
-        protocol: "openapi",
-        baseUrl: GOOGLE_DRIVE_PRESET.baseUrl,
-        sourceUrl: GOOGLE_DRIVE_PRESET.sourceUrl,
-        authScheme: { kind: "oauth2" },
-        connectionId,
-        instanceKey,
-        displayName: `${GOOGLE_DRIVE_PRESET.name} — ${instanceKey}`,
-        requiredScopes: [...GOOGLE_DRIVE_PRESET.oauth.scopes],
-        ownership: "subject",
-        allowedTools: ["drive_files_list"],
-        featureDefinitions: integrationFeaturesForPreset(GOOGLE_DRIVE_PRESET.id),
-        revision: {
-          id: "openapi:444444444444444444444444",
-          protocol: "openapi",
-          integrationId: "google-drive-source-test",
-          contentSha256: "4".repeat(64),
-          source: { url: GOOGLE_DRIVE_PRESET.sourceUrl },
-          title: GOOGLE_DRIVE_PRESET.name,
-          tools: [
-            {
-              id: "drive_files_list",
-              operationKey: "drive.files.list",
-              name: "List Drive files",
-              description: "List files in Google Drive.",
-              inputSchema: { type: "object", properties: {} },
-              safety: "read",
-              approvalMode: "never",
-              deprecated: false,
-            },
-          ],
-          bindings: {
-            drive_files_list: {
-              method: "get",
-              pathTemplate: "/files",
-              serverUrl: GOOGLE_DRIVE_PRESET.baseUrl,
-              parameters: [],
-            },
-          },
-        },
-      });
-    await installInstance("finance", financeConnection.id);
-    await installInstance("sales", salesConnection.id);
+    const connected = await connect(workspace, google);
     const authorization = await bearer(workspace, "subject-a", [
       "connections:read",
       "connections:write",
-      "workspace:read",
       "workspace:admin",
     ]);
-    const featurePath = (instanceKey: string, suffix: string) =>
-      `/v1/workspaces/${workspace.workspaceId}/integrations/${encodeURIComponent(capabilityId)}` +
-      `/instances/${instanceKey}/features/drive-content/${suffix}`;
-    const browse = async (instanceKey: string) =>
-      await app(google.fetch).request(`${featurePath(instanceKey, "browse")}?parentId=root`, {
-        headers: {
-          authorization,
-          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
-        },
-      });
-    expect((await browse("finance")).status).toBe(200);
-    expect((await browse("sales")).status).toBe(200);
-    expect(google.apiAuthorizationHeaders).toEqual([
-      "Bearer integration-access-finance",
-      "Bearer integration-access-sales",
-    ]);
-
-    const providerReadsBeforeGenericBypass = google.apiAuthorizationHeaders.length;
-    const genericBypass = await app(google.fetch).request(
-      featurePath("finance", "source").replace(/\/source$/, ""),
+    const save = await app(google.fetch).request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/${connected.connection.id}/source`,
       {
-        method: "PUT",
+        method: "POST",
         headers: {
           authorization,
           "content-type": "application/json",
           [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
         },
         body: JSON.stringify({
-          displayName: "Forged Finance source",
-          config: {
-            sources: [
-              {
-                id: "folder-1",
-                name: "Product",
-                mimeType: "application/vnd.google-apps.folder",
-                sourceKind: "folder",
-                includeDescendants: true,
-              },
-            ],
-            destination: {
-              authorityKind: "organization",
-              authorityAccountId: "forged-account",
+          sources: [
+            {
+              id: "folder-1",
+              name: "Product",
+              mimeType: "application/vnd.google-apps.folder",
+              driveId: null,
             },
-            syncCadence: "hourly",
-            readPolicy: "allow",
-          },
-          idempotencyKey: crypto.randomUUID(),
+          ],
+          destination: { authorityKind: "workspace", collectionId: null },
+          syncCadence: "hourly",
+          syncEnabled: true,
+          readPolicy: "allow",
         }),
       },
     );
-    expect(genericBypass.status).toBe(422);
-    expect(google.apiAuthorizationHeaders).toHaveLength(providerReadsBeforeGenericBypass);
-    expect(
-      (
-        await listIntegrationInstanceFeatures(
-          client.db,
-          workspace.workspaceId,
-          "subject-a",
-          capabilityId,
-          "finance",
-        )
-      ).features.find((feature) => feature.definition.featureKey === "drive-content")?.binding,
-    ).toBeNull();
+    expect(save.status).toBe(200);
 
-    const sourcePayload = {
-      sources: [
-        {
-          id: "folder-1",
-          name: "Product",
-          mimeType: "application/vnd.google-apps.folder",
-          driveId: null,
+    const triggered: Array<{
+      taskId: string;
+      triggerWorkflowId: string;
+      agentRunUsageIdempotencyKey: string;
+      triggerType: string | undefined;
+    }> = [];
+    const deps = {
+      settings: { ...settings, googleDriveWorkspaceEventsEnabled: true },
+      db: client.db,
+      workflowClient: {
+        triggerScheduledTask: async (input: {
+          task: { id: string };
+          triggerWorkflowId: string;
+          agentRunUsageIdempotencyKey: string;
+          triggerType?: string;
+        }) => {
+          triggered.push({
+            taskId: input.task.id,
+            triggerWorkflowId: input.triggerWorkflowId,
+            agentRunUsageIdempotencyKey: input.agentRunUsageIdempotencyKey,
+            triggerType: input.triggerType,
+          });
         },
-      ],
-      destination: { authorityKind: "workspace", collectionId: null },
-      syncCadence: "hourly",
-      readPolicy: "allow",
-      idempotencyKey: crypto.randomUUID(),
-    };
-    const save = await app(google.fetch).request(featurePath("finance", "source"), {
-      method: "PUT",
-      headers: {
-        authorization,
-        "content-type": "application/json",
-        [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
       },
-      body: JSON.stringify(sourcePayload),
-    });
-    const saveBody = (await save.json()) as {
-      binding: { id: string; version: number; config: Record<string, unknown> };
-      error?: { message?: string };
+    } as never;
+    const input = {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      connectionId: connected.connection.id,
+      connectionOwnerSubjectId: "subject-a",
+      eventId: "workspace-event-1",
+      driveId: null,
     };
-    expect({ status: save.status, body: saveBody }).toMatchObject({ status: 200 });
-    const configured = saveBody;
-    expect(configured.binding).toMatchObject({
-      version: 1,
-      config: {
-        sources: [
-          {
-            id: "folder-1",
-            name: "Product",
-            mimeType: "application/vnd.google-apps.folder",
-            sourceKind: "folder",
-            includeDescendants: true,
-          },
-        ],
-        destination: {
-          authorityKind: "workspace",
-          authorityAccountId: workspace.accountId,
-          authorityWorkspaceId: workspace.workspaceId,
-        },
-        syncCadence: "hourly",
-        readPolicy: "allow",
-      },
+    expect(await wakeGoogleDriveSourcesFromWorkspaceEvent(deps, input)).toEqual({
+      enabled: true,
+      triggered: 1,
     });
-    expect(google.apiAuthorizationHeaders.at(-1)).toBe("Bearer integration-access-finance");
+    expect(await wakeGoogleDriveSourcesFromWorkspaceEvent(deps, input)).toEqual({
+      enabled: true,
+      triggered: 1,
+    });
+    expect(triggered).toHaveLength(2);
+    expect(triggered[0]).toEqual(triggered[1]);
+    expect(triggered[0]).toMatchObject({ triggerType: "provider_event" });
+  });
 
-    const [financeFeatures, salesFeatures] = await Promise.all([
-      listIntegrationInstanceFeatures(
-        client.db,
-        workspace.workspaceId,
-        "subject-a",
-        capabilityId,
-        "finance",
-      ),
-      listIntegrationInstanceFeatures(
-        client.db,
-        workspace.workspaceId,
-        "subject-a",
-        capabilityId,
-        "sales",
-      ),
+  test("schedule deletion durably disables sync until the initiating subject explicitly re-enables it", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const google = googleFixture();
+    const connected = await connect(workspace, google);
+    const authorization = await bearer(workspace, "subject-a", [
+      "connections:read",
+      "connections:write",
+      "workspace:admin",
+      "scheduled_tasks:manage",
     ]);
-    expect(
-      financeFeatures.features.find((feature) => feature.definition.featureKey === "drive-content")
-        ?.binding,
-    ).toMatchObject({ id: configured.binding.id, version: 1 });
-    expect(
-      salesFeatures.features.find((feature) => feature.definition.featureKey === "drive-content")
-        ?.binding,
-    ).toBeNull();
-    expect(
-      (
-        await getConnectionMetadata(
-          client.db,
-          workspace.workspaceId,
-          financeConnection.id,
-          "subject-a",
-        )
-      )?.metadata,
-    ).not.toHaveProperty("selectedSources");
-    expect(
-      (
-        await getConnectionMetadata(
-          client.db,
-          workspace.workspaceId,
-          salesConnection.id,
-          "subject-a",
-        )
-      )?.metadata,
-    ).not.toHaveProperty("documentDestination");
+    const endpoint =
+      `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/` +
+      `${connected.connection.id}/source`;
+    const saveSelection = async (syncEnabled: boolean): Promise<Response> =>
+      await app(google.fetch).request(endpoint, {
+        method: "POST",
+        headers: {
+          authorization,
+          "content-type": "application/json",
+          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+        },
+        body: JSON.stringify({
+          sources: [
+            {
+              id: "folder-1",
+              name: "Product",
+              mimeType: "application/vnd.google-apps.folder",
+              driveId: null,
+            },
+          ],
+          destination: { authorityKind: "workspace", collectionId: null },
+          syncCadence: "hourly",
+          syncEnabled,
+          readPolicy: "allow",
+        }),
+      });
 
-    const stale = await app(google.fetch).request(featurePath("finance", "source"), {
-      method: "PUT",
-      headers: {
-        authorization,
-        "content-type": "application/json",
-        [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+    expect((await saveSelection(true)).status).toBe(200);
+    const [createdTask] = await listScheduledTasks(client.db, workspace.workspaceId, 10);
+    expect(createdTask?.action.kind).toBe("knowledge_source_sync");
+    if (!createdTask || createdTask.action.kind !== "knowledge_source_sync") {
+      throw new Error("knowledge source schedule was not created");
+    }
+    const wrongSubjectDelete = await app(google.fetch).request(
+      `/v1/workspaces/${workspace.workspaceId}/scheduled-tasks/${createdTask.id}`,
+      {
+        method: "DELETE",
+        headers: {
+          authorization: await bearer(workspace, "subject-b", ["scheduled_tasks:manage"]),
+          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+        },
       },
-      body: JSON.stringify({
-        ...sourcePayload,
-        syncCadence: "daily",
-        expectedVersion: 2,
-        idempotencyKey: crypto.randomUUID(),
-      }),
-    });
-    expect(stale.status).toBe(409);
+    );
+    expect(wrongSubjectDelete.status).toBe(403);
+    expect(await listScheduledTasks(client.db, workspace.workspaceId, 10)).toHaveLength(1);
+    const deleteResponse = await app(google.fetch).request(
+      `/v1/workspaces/${workspace.workspaceId}/scheduled-tasks/${createdTask.id}`,
+      {
+        method: "DELETE",
+        headers: {
+          authorization,
+          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+        },
+      },
+    );
+    expect(deleteResponse.status).toBe(200);
+    expect(await listScheduledTasks(client.db, workspace.workspaceId, 10)).toHaveLength(0);
+    const disabledConnection = await getConnectionMetadata(
+      client.db,
+      workspace.workspaceId,
+      connected.connection.id,
+      "subject-a",
+    );
+    expect(disabledConnection?.metadata.selectedSources).toEqual([
+      expect.objectContaining({ id: "folder-1", syncEnabled: false, configGeneration: 2 }),
+    ]);
+    const [deletedSource] = await shared!.admin<
+      Array<{ lifecycleState: string; lifecycleGeneration: number }>
+    >`
+      select lifecycle_state as "lifecycleState",
+        lifecycle_generation::int as "lifecycleGeneration"
+      from knowledge_sources where id = ${createdTask.action.sourceId}`;
+    expect(deletedSource).toEqual({ lifecycleState: "deleted", lifecycleGeneration: 2 });
 
-    const providerReadsBeforeDeniedSave = google.apiAuthorizationHeaders.length;
-    const deniedOrganization = await app(google.fetch).request(featurePath("finance", "source"), {
-      method: "PUT",
-      headers: {
-        authorization,
-        "content-type": "application/json",
-        [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
-      },
-      body: JSON.stringify({
-        ...sourcePayload,
-        destination: { authorityKind: "organization", collectionId: null },
-        expectedVersion: 1,
-        idempotencyKey: crypto.randomUUID(),
-      }),
+    expect((await saveSelection(false)).status).toBe(200);
+    expect(await listScheduledTasks(client.db, workspace.workspaceId, 10)).toHaveLength(0);
+    const [stillDeleted] = await shared!.admin<
+      Array<{ lifecycleState: string; lifecycleGeneration: number }>
+    >`
+      select lifecycle_state as "lifecycleState",
+        lifecycle_generation::int as "lifecycleGeneration"
+      from knowledge_sources where id = ${createdTask.action.sourceId}`;
+    expect(stillDeleted).toEqual({ lifecycleState: "deleted", lifecycleGeneration: 2 });
+
+    expect((await saveSelection(true)).status).toBe(200);
+    const recreatedTasks = await listScheduledTasks(client.db, workspace.workspaceId, 10);
+    expect(recreatedTasks).toHaveLength(1);
+    expect(recreatedTasks[0]?.action).toMatchObject({
+      kind: "knowledge_source_sync",
+      sourceId: createdTask.action.sourceId,
+      sourceLifecycleGeneration: 3,
     });
-    expect(deniedOrganization.status).toBe(403);
-    expect(google.apiAuthorizationHeaders).toHaveLength(providerReadsBeforeDeniedSave);
-  }, 60_000);
+    const [restoredSource] = await shared!.admin<
+      Array<{ lifecycleState: string; lifecycleGeneration: number }>
+    >`
+      select lifecycle_state as "lifecycleState",
+        lifecycle_generation::int as "lifecycleGeneration"
+      from knowledge_sources where id = ${createdTask.action.sourceId}`;
+    expect(restoredSource).toEqual({ lifecycleState: "active", lifecycleGeneration: 3 });
+  });
 
   test("authorizes all connector destinations and keeps legacy config workspace-bound", async () => {
     if (!available) return;
@@ -1064,6 +997,90 @@ describe("Google Drive local source preview", () => {
         accessMode: "readonly",
         lifecycle: { state: "active", recoverable: true },
       },
+    });
+  });
+
+  test("revalidates refreshed Drive scopes before provider access", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const google = googleFixture({ refreshScopes: [GOOGLE_DRIVE_METADATA_READONLY_SCOPE] });
+    const connected = await connect(workspace, google);
+    await shared!.admin`
+      update connections
+      set expires_at = now() - interval '1 minute'
+      where id = ${connected.connection.id}
+    `;
+    google.apiAuthorizationHeaders.length = 0;
+
+    const browse = await app(google.fetch).request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/${connected.connection.id}/browse?parentId=root`,
+      {
+        headers: {
+          authorization: await bearer(workspace, "subject-a", ["connections:read"]),
+          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+        },
+      },
+    );
+
+    expect(browse.status).toBe(401);
+    expect(await browse.json()).toMatchObject({
+      error: {
+        message: "Google Drive needs permission re-consent for selected-source read access",
+      },
+    });
+    expect(google.tokenRequests).toHaveLength(2);
+    expect(google.apiAuthorizationHeaders).toEqual([]);
+    expect(
+      await getConnectionMetadata(
+        client.db,
+        workspace.workspaceId,
+        connected.connection.id,
+        "subject-a",
+      ),
+    ).toMatchObject({
+      status: "needs_reauth",
+      grantedScopes: [GOOGLE_DRIVE_METADATA_READONLY_SCOPE],
+      lastError: "google_drive_reconsent_required",
+      metadata: { lifecycle: { state: "reconsent_required", recoverable: true } },
+    });
+  });
+
+  test("continues after refresh when the refreshed scope preserves recursive access", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const google = googleFixture({ refreshScopes: ["openid", GOOGLE_DRIVE_FULL_SCOPE] });
+    const connected = await connect(workspace, google);
+    await shared!.admin`
+      update connections
+      set expires_at = now() - interval '1 minute'
+      where id = ${connected.connection.id}
+    `;
+    google.apiAuthorizationHeaders.length = 0;
+
+    const browse = await app(google.fetch).request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/${connected.connection.id}/browse?parentId=root`,
+      {
+        headers: {
+          authorization: await bearer(workspace, "subject-a", ["connections:read"]),
+          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+        },
+      },
+    );
+
+    expect(browse.status).toBe(200);
+    expect(google.tokenRequests).toHaveLength(2);
+    expect(google.apiAuthorizationHeaders).toEqual(["Bearer google-access-token"]);
+    expect(
+      await getConnectionMetadata(
+        client.db,
+        workspace.workspaceId,
+        connected.connection.id,
+        "subject-a",
+      ),
+    ).toMatchObject({
+      status: "active",
+      grantedScopes: ["openid", GOOGLE_DRIVE_FULL_SCOPE],
+      metadata: { lifecycle: { state: "active", recoverable: true } },
     });
   });
 

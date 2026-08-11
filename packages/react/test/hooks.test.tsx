@@ -2704,15 +2704,30 @@ describe("useComposer durable draft and control binding", () => {
       );
       await flush();
 
-      await flushing(async () => expect(await hook.result.current[delivery]()).toBe(false));
-      expect(hook.result.current.error).toMatchObject({
-        status: 402,
-        code: "payment_required",
-        retryable: false,
-        outcomeUnknown: false,
-      });
-      expect(hook.result.current.value).toBe(serverDraft.text);
-      expect(hook.result.current.restoredResources).toEqual([resource]);
+      await flushing(async () =>
+        expect(await hook.result.current[delivery]()).toBe(delivery === "send"),
+      );
+      await flush();
+      if (delivery === "send") {
+        expect(hook.result.current.value).toBe("");
+        expect(hook.result.current.restoredResources).toEqual([]);
+        expect(
+          hook.result.current.optimisticMessages?.find(
+            (message) =>
+              message.resources[0]?.kind === "file" &&
+              message.resources[0].fileId === resource.fileId,
+          ),
+        ).toMatchObject({ state: "failed", resources: [resource], outcomeUnknown: false });
+      } else {
+        expect(hook.result.current.error).toMatchObject({
+          status: 402,
+          code: "payment_required",
+          retryable: false,
+          outcomeUnknown: false,
+        });
+        expect(hook.result.current.value).toBe(serverDraft.text);
+        expect(hook.result.current.restoredResources).toEqual([resource]);
+      }
       expect(attempts).toHaveLength(1);
       expect(attempts[0]).toMatchObject({
         text: "read the exact attached bytes",
@@ -2721,7 +2736,18 @@ describe("useComposer durable draft and control binding", () => {
       });
 
       await hook.rerender("codex/gpt-5.6-sol");
-      await flushing(async () => expect(await hook.result.current[delivery]()).toBe(true));
+      if (delivery === "send") {
+        const failed = hook.result.current.optimisticMessages?.find(
+          (message) =>
+            message.resources[0]?.kind === "file" &&
+            message.resources[0].fileId === resource.fileId,
+        );
+        expect(failed).toBeDefined();
+        await flushing(() => hook.result.current.retryOptimisticMessage?.(failed!.clientEventId));
+        await flush();
+      } else {
+        await flushing(async () => expect(await hook.result.current[delivery]()).toBe(true));
+      }
 
       expect(attempts).toHaveLength(2);
       expect(attempts[1]).toMatchObject({
@@ -2774,12 +2800,23 @@ describe("useComposer durable draft and control binding", () => {
       );
       await flush();
 
-      await flushing(async () => expect(await hook.result.current[delivery]()).toBe(false));
-      expect(hook.result.current.value).toBe(initial.text);
-      expect(hook.result.current.restoredResources).toEqual([resource]);
-      expect(hook.result.current.error).toMatchObject({ outcomeUnknown: true });
-
-      await flushing(async () => expect(await hook.result.current[delivery]()).toBe(true));
+      await flushing(async () =>
+        expect(await hook.result.current[delivery]()).toBe(delivery === "send"),
+      );
+      await flush();
+      if (delivery === "send") {
+        const failed = hook.result.current.optimisticMessages?.find(
+          (message) => message.outcomeUnknown,
+        );
+        expect(failed).toMatchObject({ state: "failed", outcomeUnknown: true });
+        await flushing(() => hook.result.current.retryOptimisticMessage?.(failed!.clientEventId));
+        await flush();
+      } else {
+        expect(hook.result.current.value).toBe(initial.text);
+        expect(hook.result.current.restoredResources).toEqual([resource]);
+        expect(hook.result.current.error).toMatchObject({ outcomeUnknown: true });
+        await flushing(async () => expect(await hook.result.current[delivery]()).toBe(true));
+      }
       expect(attempts).toHaveLength(2);
       expect(attempts[0]!.clientEventId).toBe(attempts[1]!.clientEventId);
       expect(attempts[0]!.resources).toEqual([resource]);
@@ -2825,12 +2862,21 @@ describe("useComposer durable draft and control binding", () => {
       );
       await flush();
 
-      await flushing(async () => expect(await hook.result.current[delivery]()).toBe(false));
+      await flushing(async () =>
+        expect(await hook.result.current[delivery]()).toBe(delivery === "send"),
+      );
+      await flush();
       acceptedEvent = {
         ...makeEvent(1, "user.message"),
         clientEventId: attempts[0]!.clientEventId,
       };
-      await flushing(async () => expect(await hook.result.current[delivery]()).toBe(true));
+      if (delivery === "send") {
+        const failed = hook.result.current.optimisticMessages?.[0];
+        await flushing(() => hook.result.current.retryOptimisticMessage?.(failed!.clientEventId));
+        await flush();
+      } else {
+        await flushing(async () => expect(await hook.result.current[delivery]()).toBe(true));
+      }
 
       expect(attempts).toHaveLength(1);
       expect(hook.result.current.value).toBe("");
@@ -2880,7 +2926,10 @@ describe("useComposer durable draft and control binding", () => {
         undefined,
       );
       await flush();
-      await flushing(async () => expect(await first.result.current[delivery]()).toBe(false));
+      await flushing(async () =>
+        expect(await first.result.current[delivery]()).toBe(delivery === "send"),
+      );
+      await flush();
       await first.unmount();
 
       const second = await renderHook(
@@ -2888,8 +2937,12 @@ describe("useComposer durable draft and control binding", () => {
         undefined,
       );
       await flush();
-      expect(second.result.current.value).toBe("original uncertain prompt");
-      expect(second.result.current.restoredResources).toEqual([originalResource]);
+      expect(second.result.current.value).toBe(
+        delivery === "send" ? "" : "original uncertain prompt",
+      );
+      expect(second.result.current.restoredResources).toEqual(
+        delivery === "send" ? [] : [originalResource],
+      );
       await flushing(() =>
         second.result.current.applyDraft({
           ...initial,
@@ -2899,7 +2952,16 @@ describe("useComposer durable draft and control binding", () => {
       );
       expect(second.result.current.value).toBe("edited after timeout");
       expect(second.result.current.restoredResources).toEqual([newerResource]);
-      await flushing(async () => expect(await second.result.current[delivery]()).toBe(true));
+      if (delivery === "send") {
+        const failed = second.result.current.optimisticMessages?.find(
+          (message) => message.outcomeUnknown,
+        );
+        expect(failed).toBeDefined();
+        await flushing(() => second.result.current.retryOptimisticMessage?.(failed!.clientEventId));
+        await flush();
+      } else {
+        await flushing(async () => expect(await second.result.current[delivery]()).toBe(true));
+      }
 
       expect(attempts).toHaveLength(2);
       expect(attempts[1]!.clientEventId).toBe(attempts[0]!.clientEventId);

@@ -17,6 +17,8 @@ import {
   useWorkspaceSessions,
 } from "@opengeni/react";
 import { MANAGER_SESSION_ID, MockOpenGeniClient } from "./mock";
+import { createDemoBrowserWebSocketFactory } from "./fake-browser";
+import { createDemoComputerWebSocketFactory } from "./fake-computer";
 import "./styles.css";
 
 type DemoView = "session" | "fleet" | "schedules";
@@ -209,6 +211,8 @@ function Harness() {
               sessionId={MANAGER_SESSION_ID}
               events={events}
               autoSaveId="og.demo.dock"
+              browserWebSocketFactory={browserWebSocketFactory}
+              computerWebSocketFactory={computerWebSocketFactory}
               {...(compact
                 ? {
                     collapsed: !workspaceOpen,
@@ -502,6 +506,12 @@ function Schedules({ standalone }: { standalone: boolean }) {
 }
 
 const client = new MockOpenGeniClient();
+const browserWebSocketFactory = createDemoBrowserWebSocketFactory((browserSessionId, targetId) =>
+  client.demoBrowserFrameTarget(browserSessionId, targetId),
+);
+const computerWebSocketFactory = createDemoComputerWebSocketFactory((computerSessionId, targetId) =>
+  client.demoComputerFrameTarget(computerSessionId, targetId),
+);
 createRoot(document.getElementById("root")!).render(
   <OpenGeniProvider client={client} workspaceId="11111111-2222-4333-8444-555555555555">
     <Harness />

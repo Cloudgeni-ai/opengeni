@@ -60,6 +60,25 @@ describe("Helm database upgrade contract", () => {
     }
   });
 
+  test("keeps runtime provider overrides authoritative over Helm config defaults", async () => {
+    const workloads = await Promise.all([
+      source("deploy/helm/opengeni/templates/api-deployment.yaml"),
+      source("deploy/helm/opengeni/templates/worker-deployment.yaml"),
+      source("deploy/helm/opengeni/templates/worker-turns-deployment.yaml"),
+    ]);
+
+    for (const workload of workloads) {
+      const configMap = workload.indexOf("- configMapRef:");
+      const runtimeSecret = workload.indexOf("- secretRef:");
+
+      expect(configMap).toBeGreaterThan(-1);
+      expect(runtimeSecret).toBeGreaterThan(configMap);
+      expect(workload.slice(configMap, runtimeSecret)).toContain(
+        "Later envFrom sources win duplicate keys",
+      );
+    }
+  });
+
   test("projects only dedicated credentials into the artifact materializer", async () => {
     const values = await source("deploy/helm/opengeni/values.yaml");
     const materializer = await source(

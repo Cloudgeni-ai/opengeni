@@ -198,6 +198,13 @@ New session, Send, Steer, scheduled-task, child-session, and workspace-policy
 admission store canonical product IDs. Alias strings are retained only as
 secret-safe requested-input evidence for an explicit per-turn switch.
 
+An agent-spawned child that omits `model`, `reasoningEffort`, or `latencyMode`
+inherits those fields from the exact worker-signed calling turn. Explicit child
+values still win. The fallback for legacy session-bound grants is the parent
+session, never the deployment default; consequently a Codex-subscription
+manager cannot silently spawn an OpenGeni-credit worker merely by omitting
+`model`.
+
 Configuration fails loud when:
 
 - two providers declare the same canonical product ID;
@@ -446,6 +453,16 @@ token, concrete connected credential, authorization header, or
 credential-bearing URL.
 
 ## Runtime routing and billing
+
+`packages/runtime/src/model-provider.ts` is the canonical package-private facade
+for the runtime provider surface. Cohesive sibling leaves own client/transport
+construction (`model-provider-client.ts`), typed failures
+(`model-provider-errors.ts`), object-stage request policy
+(`model-provider-request-policy.ts`), and provider-bound model construction plus
+name routing (`model-provider-routing.ts`). Gateway HTTP fallback and shared
+model-call detection live in `model-provider-transport.ts`. The package root
+re-exports only the facade surface for compatibility; none of the leaves is a
+public package subpath.
 
 `MultiProviderModelProvider` is installed as the process default so both
 in-process and sandboxed agent paths resolve the same product model. A resolved

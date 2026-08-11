@@ -1,19 +1,27 @@
 import { z } from "zod";
+import { ScopedKnowledgeScope } from "./scoped-knowledge";
 import {
   boundSessionEventPayload,
   measureSessionEventJson,
   sessionEventJsonBytes,
   type SessionEventBoundarySurface,
 } from "./event-preview";
+import { MemorySlackPublicationDistribution } from "./memory-slack-delivery";
 import { WorkspaceInstructionPolicyRoleKeyInput } from "./workspace-instruction-policies";
 import { ClientResumableVoiceInputConfig } from "./transcription-recordings";
+import { MediaGenerationResult } from "./video-generation";
 
 export * from "./slack-bot-scopes";
+export * from "./atlassian";
 export * from "./connector-destinations";
+export * from "./memory-slack-delivery";
 export * from "./image-generation";
+export * from "./video-generation";
 export * from "./editable-artifacts";
 export * from "./editable-artifact-committed-transaction";
 export * from "./editable-artifact-serialized-commit";
+export * from "./tool-catalog";
+export * from "./interaction";
 
 export {
   CreateWorkspaceArtifactRequest,
@@ -76,6 +84,7 @@ export {
   COMPUTER_SCREENSHOT_RETENTION_MS,
   COMPUTER_SCREENSHOT_WORKSPACE_QUOTA_BYTES,
   GENERATED_IMAGE_MAX_BYTES,
+  GENERATED_VIDEO_MAX_BYTES,
   RETAINED_OUTPUT_DEFAULT_PAGE_BYTES,
   RETAINED_OUTPUT_MAX_PAGE_BYTES,
   RETAINED_OUTPUT_RECEIPT_MAX_BYTES,
@@ -87,6 +96,7 @@ export {
   RetainedOutputUnavailableReason,
   retainedArtifactReferenceFromFile,
   retainedGeneratedImageReferenceFromFile,
+  retainedGeneratedVideoReferenceFromFile,
   retainedScreenshotReferenceFromFile,
   retainedOutputUnavailable,
   resolveRetainedOutputRange,
@@ -95,6 +105,7 @@ export {
   type RetainedArtifactMetadata,
   type RetainedArtifactReference,
   type RetainedGeneratedImageArtifactInput,
+  type RetainedGeneratedVideoArtifactInput,
   type RetainedScreenshotArtifactInput,
   type RetainedArtifactUnavailable,
   type RetainedOutputAvailableEvidence,
@@ -273,6 +284,7 @@ export const DESKTOP_STREAM_PORT = 6080;
 // ttyd's default; the box bakes ttyd and launches it on this port. The pty-ws
 // Terminal cell's `url` is the tunnel address resolved against this port.
 export const TERMINAL_STREAM_PORT = 7681;
+export const BROWSER_CONTROL_PORT = 7682;
 
 // The provider capability matrix (sandbox contract PART D + module 03-providers). One row per
 // backend (10 rows). v1 reachable cells are all Linux; macos/windows are seam
@@ -720,7 +732,7 @@ export const Permission = z.enum([
   // Programmatic sandbox -> tool access through the first-party MCP gate. This is
   // intentionally narrow and is never part of first-party MCP defaults; callers
   // must receive it through an explicit delegated `ogd_` mint carrying sessionId.
-  "toolspace:call",
+  "codemode:call",
   "goals:manage",
   // Bring-your-own-compute (M5). enrollments:read lists a workspace's machines;
   // enrollments:manage approves a device-flow enrollment (the LOUD whole-machine
@@ -753,6 +765,7 @@ export type Permission = z.infer<typeof Permission>;
  */
 export const DEFAULT_FIRST_PARTY_MCP_PERMISSIONS = [
   "workspace:read",
+  "files:upload",
   "files:read",
   "documents:search",
   "scheduled_tasks:manage",
@@ -812,6 +825,20 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "session_resume",
   "session_steer",
   "set_other_session_title",
+  "interaction_discover",
+  "browser_open",
+  "browser_tabs",
+  "browser_observe",
+  "browser_act",
+  "browser_debug",
+  "browser_identity",
+  "browser_publish",
+  "browser_lifecycle",
+  "computer_open",
+  "computer_targets",
+  "computer_observe",
+  "computer_act",
+  "computer_lifecycle",
   "variable_set_list",
   "environment_list",
   "variable_set_get_variable",
@@ -859,14 +886,68 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "slack_bot_file_content",
   "slack_bot_post_message",
   "slack_bot_delete_message",
+  "atlassian_sources_list",
+  "atlassian_search",
+  "atlassian_get",
   "artifacts_list",
   "artifacts_get_source",
   "artifacts_create",
   "artifacts_publish",
   "artifacts_rollback",
+  "editable_artifact_list",
+  "editable_artifact_create",
+  "editable_artifact_import",
+  "editable_artifact_get",
+  "editable_artifact_inspect",
+  "editable_artifact_apply",
+  "editable_artifact_export",
+  "editable_artifact_export_status",
 ] as const;
 export const FirstPartyMcpToolName = z.enum(FIRST_PARTY_MCP_TOOL_NAMES);
 export type FirstPartyMcpToolName = z.infer<typeof FirstPartyMcpToolName>;
+
+/**
+ * First-party interaction tools executed inside the frozen attempt rather than
+ * registered on the remote `opengeni` MCP server. They still belong to the
+ * same user-selectable first-party catalog and use the same attempt executor.
+ */
+export const FIRST_PARTY_IN_PROCESS_TOOL_NAMES = [
+  "interaction_discover",
+  "browser_open",
+  "browser_tabs",
+  "browser_observe",
+  "browser_act",
+  "browser_debug",
+  "browser_identity",
+  "browser_publish",
+  "browser_lifecycle",
+  "computer_open",
+  "computer_targets",
+  "computer_observe",
+  "computer_act",
+  "computer_lifecycle",
+] as const satisfies readonly FirstPartyMcpToolName[];
+
+const FIRST_PARTY_IN_PROCESS_TOOL_NAME_SET = new Set<FirstPartyMcpToolName>(
+  FIRST_PARTY_IN_PROCESS_TOOL_NAMES,
+);
+
+/** Exact catalog registered by the remote first-party `opengeni` MCP server. */
+export const FIRST_PARTY_REMOTE_MCP_TOOL_NAMES = FIRST_PARTY_MCP_TOOL_NAMES.filter(
+  (name) => !FIRST_PARTY_IN_PROCESS_TOOL_NAME_SET.has(name),
+) satisfies readonly FirstPartyMcpToolName[];
+
+/** Authored CodeMode paths for the canonical collaborative artifact surface. */
+export const EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS = {
+  editable_artifact_list: ["artifacts", "list"],
+  editable_artifact_create: ["artifacts", "create"],
+  editable_artifact_import: ["artifacts", "import"],
+  editable_artifact_get: ["artifacts", "get"],
+  editable_artifact_inspect: ["artifacts", "inspect"],
+  editable_artifact_apply: ["artifacts", "apply"],
+  editable_artifact_export: ["artifacts", "export"],
+  editable_artifact_export_status: ["artifacts", "exportStatus"],
+} as const satisfies Partial<Record<FirstPartyMcpToolName, readonly [string, string]>>;
 
 /**
  * Connector-wide tools are explicit-only. Ordinary session omission selects
@@ -878,7 +959,8 @@ export const DEFAULT_FIRST_PARTY_MCP_TOOLS = FIRST_PARTY_MCP_TOOL_NAMES.filter(
     !name.startsWith("social_") &&
     !name.startsWith("x_") &&
     !name.startsWith("reddit_") &&
-    !name.startsWith("slack_bot_"),
+    !name.startsWith("slack_bot_") &&
+    !name.startsWith("atlassian_"),
 ) satisfies readonly FirstPartyMcpToolName[];
 
 export function prefixedMcpToolName(registryId: string, toolName: string): string {
@@ -1294,12 +1376,7 @@ export * from "./transcription-recordings";
 export const CodexCompactionMode = z.enum(["remote_v2", "portable"]);
 export type CodexCompactionMode = z.infer<typeof CodexCompactionMode>;
 
-export const SlackReactionEmojiName = z
-  .string()
-  .trim()
-  .min(1)
-  .max(64)
-  .regex(/^[a-z0-9_+-]+$/, "use the exact Slack emoji name without surrounding colons");
+export const SlackReactionEmojiName = z.literal("genie");
 export type SlackReactionEmojiName = z.infer<typeof SlackReactionEmojiName>;
 
 export const WorkspaceSlackReactionChannelPolicy = z.discriminatedUnion("mode", [
@@ -2160,6 +2237,61 @@ export const UpdateWorkspaceMemberRequest = z.object({
 });
 export type UpdateWorkspaceMemberRequest = z.infer<typeof UpdateWorkspaceMemberRequest>;
 
+export const SlackUserLinkAccessRequestStatus = z.enum([
+  "prepared",
+  "pending",
+  "completed",
+  "denied",
+  "cancelled",
+  "expired",
+]);
+export type SlackUserLinkAccessRequestStatus = z.infer<typeof SlackUserLinkAccessRequestStatus>;
+
+/**
+ * Durable, token-free projection of one signed Slack identity-link intent.
+ * The original bearer and its digest are deliberately absent from every
+ * public response.
+ */
+export const SlackUserLinkAccessRequest = z.object({
+  id: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  workspaceDisplayName: z.string().min(1).max(256).nullable(),
+  subjectLabel: z.string().min(1).max(512).nullable(),
+  status: SlackUserLinkAccessRequestStatus,
+  version: z.number().int().positive(),
+  expiresAt: z.string().datetime({ offset: true }),
+  requestedAt: z.string().datetime({ offset: true }).nullable(),
+  decidedAt: z.string().datetime({ offset: true }).nullable(),
+  completedAt: z.string().datetime({ offset: true }).nullable(),
+  createdAt: z.string().datetime({ offset: true }),
+  updatedAt: z.string().datetime({ offset: true }),
+});
+export type SlackUserLinkAccessRequest = z.infer<typeof SlackUserLinkAccessRequest>;
+
+export const PrepareSlackUserLinkAccessRequest = z.object({
+  linkToken: z.string().min(1).max(2_048),
+});
+export type PrepareSlackUserLinkAccessRequest = z.infer<typeof PrepareSlackUserLinkAccessRequest>;
+
+export const SlackUserLinkAccessMutationRequest = z.object({
+  expectedVersion: z.number().int().positive(),
+  idempotencyKey: z.string().trim().min(1).max(200),
+});
+export type SlackUserLinkAccessMutationRequest = z.infer<typeof SlackUserLinkAccessMutationRequest>;
+
+export const ApproveSlackUserLinkAccessRequest = SlackUserLinkAccessMutationRequest.extend({
+  role: z.string().trim().min(1).max(128).optional(),
+  permissions: z.array(Permission).min(1),
+});
+export type ApproveSlackUserLinkAccessRequest = z.infer<typeof ApproveSlackUserLinkAccessRequest>;
+
+export const ListSlackUserLinkAccessRequestsResponse = z.object({
+  requests: z.array(SlackUserLinkAccessRequest),
+});
+export type ListSlackUserLinkAccessRequestsResponse = z.infer<
+  typeof ListSlackUserLinkAccessRequestsResponse
+>;
+
 export const UsageEventType = z.enum([
   "agent_run.created",
   "agent_run.completed",
@@ -2169,6 +2301,10 @@ export const UsageEventType = z.enum([
   "file.deleted",
   "document.indexed",
   "scheduled_task.fired",
+  "knowledge_source_sync.fired",
+  "knowledge_source_sync.completed",
+  "knowledge_source_sync.items",
+  "knowledge_source_sync.bytes",
   "api_key.request",
   // --- sandbox warm-time metering (P2.1) ---
   // Wall-clock seconds a box was warm — the billable warm-time meter. Accrued on
@@ -2543,7 +2679,7 @@ export type GitCredentialRepositoryRef = z.infer<typeof GitCredentialRepositoryR
 //     `loadVariableSetForRun` (today decrypted with
 //     `environmentsEncryptionKeyBytes(settings)`).
 //   - MCP credentials: request-time transport headers for connection-backed
-//     servers, shared by normal model tools and Toolspace/Code Mode.
+//     servers, shared by normal model tools and Codemode/Code Mode.
 //
 // In embedded/separate topologies the HOST owns these external connections
 // (its GitHub App, its secret vault + encryption key). When a host binds this
@@ -2826,7 +2962,7 @@ export const McpPersonalConnectionDelegation = z
     ownerSubjectId: z.string().min(1).max(512),
     providerDomain: z.string().min(1).max(2048),
     kind: z.enum(["oauth2", "api_key", "app_install", "delegated"]).optional(),
-    connectionType: z.enum(["mcp", "social"]).optional(),
+    connectionType: z.enum(["mcp", "social", "atlassian"]).optional(),
   })
   .strict();
 export type McpPersonalConnectionDelegation = z.infer<typeof McpPersonalConnectionDelegation>;
@@ -2862,7 +2998,7 @@ export type McpPersonalConnectionSummary = z.infer<typeof McpPersonalConnectionS
 export type McpCredentialsRequest = {
   accountId: string;
   workspaceId: string;
-  /** Immediate session whose model or Toolspace call needs the credential. */
+  /** Immediate session whose model or Codemode call needs the credential. */
   sessionId: string;
   /** Workspace-scoped lineage root for host authorization and binding lookup. */
   rootSessionId: string;
@@ -2875,7 +3011,7 @@ export type McpCredentialsRequest = {
   initiatorContext: TurnInitiatorContext;
   /** Immediate technical caller, retained only as non-authoritative audit context. */
   callerSubjectId?: string;
-  surface: "model" | "toolspace";
+  surface: "model" | "codemode";
   /** Canonical MCP destination that will receive the resolved headers. */
   destinationUrl: string;
   /**
@@ -2958,7 +3094,7 @@ export type ConnectionCredentialsPort = {
    * Resolve rotating MCP transport credentials at request time. Embedded hosts
    * use this to keep their provider connection as the sole credential source;
    * OpenGeni never requires a duplicate connection record. The same resolver is
-   * used by model-visible MCP tools and the additive Toolspace/Code Mode proxy.
+   * used by model-visible MCP tools and the exact-attempt Codemode projection.
    */
   mcpCredentials?(input: McpCredentialsRequest): Promise<McpCredentialResolution>;
 };
@@ -3569,6 +3705,56 @@ export const DocumentSearchResponse = z.object({
 });
 export type DocumentSearchResponse = z.infer<typeof DocumentSearchResponse>;
 
+export const IndexedDocumentSource = z.object({
+  kind: KnowledgeSourceKind,
+  uri: z.string().nullable(),
+  externalId: z.string().nullable(),
+  title: z.string().nullable(),
+  author: z.string().nullable(),
+  createdAt: z.string().nullable(),
+  updatedAt: z.string().nullable(),
+  version: z.string().nullable(),
+});
+export type IndexedDocumentSource = z.infer<typeof IndexedDocumentSource>;
+
+export const IndexedDocumentProvenance = z.object({
+  ingestionWorkspaceId: z.string().uuid(),
+  baseId: z.string().uuid(),
+  fileId: z.string().uuid(),
+  authorityKind: DocumentAuthorityKind,
+  authorityWorkspaceId: z.string().uuid().nullable(),
+  authoritySubjectId: z.string().nullable(),
+  createdBy: z.string().nullable(),
+  createdAt: z.string(),
+});
+export type IndexedDocumentProvenance = z.infer<typeof IndexedDocumentProvenance>;
+
+export const IndexedDocumentSummary = z.object({
+  id: z.string().uuid(),
+  title: z.string(),
+  parser: z.string(),
+  chunkCount: z.number().int().nonnegative(),
+  indexedAt: z.string(),
+  summary: z.string().nullable(),
+  topics: z.array(z.string()),
+  source: IndexedDocumentSource,
+  provenance: IndexedDocumentProvenance,
+});
+export type IndexedDocumentSummary = z.infer<typeof IndexedDocumentSummary>;
+
+export const ListIndexedDocumentsRequest = z.object({
+  checkpoint: z.string().min(1).max(1_024).optional(),
+  limit: z.number().int().positive().max(100).default(50),
+});
+export type ListIndexedDocumentsRequest = z.infer<typeof ListIndexedDocumentsRequest>;
+
+export const ListIndexedDocumentsResponse = z.object({
+  documents: z.array(IndexedDocumentSummary),
+  nextCheckpoint: z.string().min(1).max(1_024),
+  hasMore: z.boolean(),
+});
+export type ListIndexedDocumentsResponse = z.infer<typeof ListIndexedDocumentsResponse>;
+
 export const CreateDocumentBaseRequest = z.object({
   name: z.string().min(1),
   description: z.string().optional(),
@@ -3708,6 +3894,7 @@ export const CreateKnowledgeMemoryRequest = z.object({
   createdBySessionId: z.string().uuid().optional(),
   pinned: z.boolean().optional(),
   replacesId: z.string().min(1).optional(),
+  slackPublication: MemorySlackPublicationDistribution.optional(),
 });
 export type CreateKnowledgeMemoryRequest = z.infer<typeof CreateKnowledgeMemoryRequest>;
 
@@ -4322,7 +4509,7 @@ export const SessionAuthorizationSurface = z.enum([
   "core",
   "stream",
   "first_party_mcp",
-  "toolspace",
+  "codemode",
 ]);
 export type SessionAuthorizationSurface = z.infer<typeof SessionAuthorizationSurface>;
 
@@ -4611,7 +4798,7 @@ export const SessionAuthorizationOperation = z.enum([
   "session.viewer.control",
   "session.first_party_mcp.call",
   "session.secret.read",
-  "session.toolspace.call",
+  "session.codemode.call",
   "session.pin.write",
   "session.codex_account.write",
   "session.realtime.start",
@@ -4647,6 +4834,8 @@ export const SessionAuthorizationActor = z.discriminatedUnion("kind", [
     /** Frozen authority that admitted the calling turn. */
     initiator: TurnInitiator,
     initiatorContext: TurnInitiatorContext,
+    /** Durable causal human for delegated/service work; null for pure service work. */
+    initiatingHumanSubjectId: z.string().min(1).max(1024).nullable(),
   }),
 ]);
 export type SessionAuthorizationActor = z.infer<typeof SessionAuthorizationActor>;
@@ -5379,6 +5568,7 @@ export const SessionSystemUpdateKind = z.enum([
   "agent_message",
   "agent_steer_instruction",
   "child_terminal_result",
+  "media_generation_result",
 ]);
 export type SessionSystemUpdateKind = z.infer<typeof SessionSystemUpdateKind>;
 
@@ -5423,6 +5613,7 @@ export const SessionSystemUpdatePayload = z.discriminatedUnion("type", [
       status: z.enum(["idle", "failed", "cancelled"]),
     })
     .passthrough(),
+  MediaGenerationResult,
 ]);
 export type SessionSystemUpdatePayload = z.infer<typeof SessionSystemUpdatePayload>;
 
@@ -5675,6 +5866,15 @@ export const RigProviderImage = z
       .string()
       .regex(/^sha256:[0-9a-f]{64}$/u)
       .nullable(),
+    // Added after provider-image v1 shipped. Absence is retained for rolling
+    // compatibility but means runtime must use logical-image + setup fallback
+    // until an explicit verification cold-boots this exact image.
+    coldBootValidation: z
+      .object({
+        version: z.literal(1),
+        checkedAt: z.string().datetime(),
+      })
+      .optional(),
     provenance: z.object({
       kind: z.literal("rig_verification"),
       targetKind: z.enum(["change", "version"]),
@@ -5750,6 +5950,13 @@ export const RigProviderImage = z
         code: "custom",
         path: ["error"],
         message: "ready provider images cannot retain an error",
+      });
+    }
+    if (value.status !== "ready" && value.coldBootValidation !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["coldBootValidation"],
+        message: "only ready provider images may retain cold-boot validation",
       });
     }
   });
@@ -5891,26 +6098,112 @@ export const ProposeRigChangeRequest = z.discriminatedUnion("kind", [
 ]);
 export type ProposeRigChangeRequest = z.infer<typeof ProposeRigChangeRequest>;
 
-export const ScheduledTaskStatus = z.enum(["active", "paused"]);
+export const ScheduledTaskStatus = /* @__PURE__ */ z.enum(["active", "paused"]);
 export type ScheduledTaskStatus = z.infer<typeof ScheduledTaskStatus>;
 
-export const ScheduledTaskRunStatus = z.enum(["queued", "dispatched", "failed"]);
+export const ScheduledTaskRunStatus = /* @__PURE__ */ z.enum([
+  "queued",
+  "dispatched",
+  "succeeded",
+  "skipped",
+  "failed",
+]);
 export type ScheduledTaskRunStatus = z.infer<typeof ScheduledTaskRunStatus>;
 
-export const ScheduledTaskRunMode = z.enum([
+export const ScheduledTaskRunMode = /* @__PURE__ */ z.enum([
   "new_session_per_run",
   "reusable_session",
   "existing_session",
 ]);
 export type ScheduledTaskRunMode = z.infer<typeof ScheduledTaskRunMode>;
 
-export const ScheduledTaskOverlapPolicy = z.enum(["allow_concurrent", "skip", "buffer_one"]);
+export const ScheduledTaskOverlapPolicy = /* @__PURE__ */ z.enum([
+  "allow_concurrent",
+  "skip",
+  "buffer_one",
+]);
 export type ScheduledTaskOverlapPolicy = z.infer<typeof ScheduledTaskOverlapPolicy>;
 
-export const ScheduledTaskTriggerType = z.enum(["scheduled", "manual"]);
+export const ScheduledTaskTriggerType = /* @__PURE__ */ z.enum([
+  "scheduled",
+  "manual",
+  "initial",
+  "provider_event",
+  "retry",
+  "repair",
+]);
 export type ScheduledTaskTriggerType = z.infer<typeof ScheduledTaskTriggerType>;
 
-export const ScheduledTaskScheduleSpec = z.discriminatedUnion("type", [
+export const ScheduledTaskActionKind = /* @__PURE__ */ z.enum([
+  "agent_turn",
+  "knowledge_source_sync",
+]);
+export type ScheduledTaskActionKind = z.infer<typeof ScheduledTaskActionKind>;
+
+const KnowledgeSourceSyncPositiveInteger = z.number().int().positive();
+const KnowledgeSourceSyncNonnegativeInteger = z.number().int().nonnegative();
+const KnowledgeSourceSyncZeroInteger = KnowledgeSourceSyncNonnegativeInteger.default(0);
+const KnowledgeSourceSyncUuid = z.string().uuid();
+const KnowledgeSourceSyncSubject = z.string().min(1).max(1024);
+const KnowledgeSourceSyncEnabled = z.boolean().default(true);
+const KnowledgeSourceSyncDisabled = z.boolean().default(false);
+
+export const KnowledgeSourceSyncLimits = /* @__PURE__ */ z.object({
+  maxItems: KnowledgeSourceSyncPositiveInteger.max(10_000).default(500),
+  maxBytes: KnowledgeSourceSyncPositiveInteger.max(5_000_000_000).default(500_000_000),
+  maxFileBytes: KnowledgeSourceSyncPositiveInteger.max(5_000_000_000).default(100_000_000),
+  maxProviderRequests: KnowledgeSourceSyncPositiveInteger.max(10_000).default(1_000),
+  maxElapsedSeconds: KnowledgeSourceSyncPositiveInteger.max(3_600).default(300),
+  maxConcurrency: KnowledgeSourceSyncPositiveInteger.max(32).default(4),
+  maxFailureDetails: KnowledgeSourceSyncPositiveInteger.max(100).default(25),
+});
+export type KnowledgeSourceSyncLimits = z.infer<typeof KnowledgeSourceSyncLimits>;
+
+export const KnowledgeSourceSyncConnectionAuthority = /* @__PURE__ */ z.object({
+  connectionId: KnowledgeSourceSyncUuid,
+  connectionVersion: KnowledgeSourceSyncPositiveInteger,
+  providerDomain: z.string().min(1).max(2048),
+  kind: z.enum(["oauth2", "api_key", "app_install", "delegated"]),
+  ownerSubjectId: KnowledgeSourceSyncSubject,
+});
+export type KnowledgeSourceSyncConnectionAuthority = z.infer<
+  typeof KnowledgeSourceSyncConnectionAuthority
+>;
+
+export const KnowledgeSourceSyncAction = /* @__PURE__ */ z
+  .object({
+    kind: z.literal("knowledge_source_sync"),
+    sourceId: KnowledgeSourceSyncUuid,
+    sourceGeneration: KnowledgeSourceSyncNonnegativeInteger,
+    sourceLifecycleGeneration: KnowledgeSourceSyncPositiveInteger,
+    sourceConfigGeneration: KnowledgeSourceSyncPositiveInteger,
+    controlWorkspaceId: KnowledgeSourceSyncUuid,
+    providerCoordinationKey: z.string().trim().min(1).max(1024),
+    connection: KnowledgeSourceSyncConnectionAuthority,
+    destination: ScopedKnowledgeScope,
+    initiatingSubjectId: KnowledgeSourceSyncSubject,
+    allDescendants: KnowledgeSourceSyncEnabled,
+    limits: KnowledgeSourceSyncLimits.prefault({}),
+  })
+  .strict();
+export type KnowledgeSourceSyncAction = z.infer<typeof KnowledgeSourceSyncAction>;
+
+export const KnowledgeSourceSyncScheduleControl = /* @__PURE__ */ z
+  .object({
+    sourceEnabled: KnowledgeSourceSyncEnabled,
+    connectionPaused: KnowledgeSourceSyncDisabled,
+  })
+  .strict();
+export type KnowledgeSourceSyncScheduleControl = z.infer<typeof KnowledgeSourceSyncScheduleControl>;
+
+export const ScheduledTaskAction = /* @__PURE__ */ z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("agent_turn") }).strict(),
+  KnowledgeSourceSyncAction,
+]);
+export type ScheduledTaskAction = z.infer<typeof ScheduledTaskAction>;
+
+export const ScheduledTaskScheduleSpec = /* @__PURE__ */ z.discriminatedUnion("type", [
+  z.object({ type: z.literal("manual") }).strict(),
   z.object({
     type: z.literal("once"),
     runAt: z.string().datetime({ offset: true }),
@@ -5935,7 +6228,7 @@ export const ScheduledTaskScheduleSpec = z.discriminatedUnion("type", [
 ]);
 export type ScheduledTaskScheduleSpec = z.infer<typeof ScheduledTaskScheduleSpec>;
 
-export const ScheduledTaskAgentConfig = z.object({
+export const ScheduledTaskAgentConfig = /* @__PURE__ */ z.object({
   prompt: z.string().min(1),
   resources: z.array(ResourceRef).default([]),
   tools: z.array(ToolRef).default([]),
@@ -5954,7 +6247,7 @@ export const ScheduledTaskAgentConfig = z.object({
 });
 export type ScheduledTaskAgentConfig = z.infer<typeof ScheduledTaskAgentConfig>;
 
-export const ScheduledTask = z.object({
+export const ScheduledTask = /* @__PURE__ */ z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),
   workspaceId: z.string().uuid(),
@@ -5964,6 +6257,7 @@ export const ScheduledTask = z.object({
   temporalScheduleId: z.string(),
   runMode: ScheduledTaskRunMode,
   overlapPolicy: ScheduledTaskOverlapPolicy,
+  action: ScheduledTaskAction.default({ kind: "agent_turn" }),
   agentConfig: ScheduledTaskAgentConfig,
   createdBy: TurnInitiator.default({
     kind: "service",
@@ -5986,7 +6280,52 @@ export const ScheduledTask = z.object({
 });
 export type ScheduledTask = z.infer<typeof ScheduledTask>;
 
-export const ScheduledTaskRun = z.object({
+export const KnowledgeSourceSyncFailure = /* @__PURE__ */ z.object({
+  externalObjectId: KnowledgeSourceSyncSubject,
+  code: z.enum([
+    "authority_changed",
+    "connection_reconnect_required",
+    "provider_unavailable",
+    "provider_rejected",
+    "provider_payload_invalid",
+    "content_unsupported",
+    "content_too_large",
+    "resource_limit",
+    "item_processing_failed",
+    "indexing_failed",
+    "internal_failure",
+  ]),
+  retryable: z.boolean(),
+  message: z.string().min(1).max(1000),
+});
+export type KnowledgeSourceSyncFailure = z.infer<typeof KnowledgeSourceSyncFailure>;
+
+export const KnowledgeSourceSyncRunSummary = /* @__PURE__ */ z.object({
+  phase: z
+    .enum(["queued", "inventory", "transfer", "index", "checkpoint", "completed", "failed"])
+    .default("queued"),
+  scanned: KnowledgeSourceSyncZeroInteger,
+  imported: KnowledgeSourceSyncZeroInteger,
+  unchanged: KnowledgeSourceSyncZeroInteger,
+  skipped: KnowledgeSourceSyncZeroInteger,
+  failed: KnowledgeSourceSyncZeroInteger,
+  bytes: KnowledgeSourceSyncZeroInteger,
+  providerRequests: KnowledgeSourceSyncZeroInteger,
+  elapsedMs: KnowledgeSourceSyncZeroInteger,
+  indexed: KnowledgeSourceSyncZeroInteger,
+  aclPending: KnowledgeSourceSyncZeroInteger,
+  retryable: KnowledgeSourceSyncDisabled,
+  limitReached: z
+    .enum(["items", "bytes", "file_bytes", "provider_requests", "elapsed_time"])
+    .nullable()
+    .default(null),
+  checkpointed: KnowledgeSourceSyncDisabled,
+  reconnectRequired: KnowledgeSourceSyncDisabled,
+  failures: z.array(KnowledgeSourceSyncFailure).max(100).default([]),
+});
+export type KnowledgeSourceSyncRunSummary = z.infer<typeof KnowledgeSourceSyncRunSummary>;
+
+export const ScheduledTaskRun = /* @__PURE__ */ z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),
   workspaceId: z.string().uuid(),
@@ -5997,15 +6336,23 @@ export const ScheduledTaskRun = z.object({
   firedAt: z.string(),
   sessionId: z.string().uuid().nullable(),
   triggerEventId: z.string().uuid().nullable(),
+  actionKind: ScheduledTaskActionKind.default("agent_turn"),
+  knowledgeSyncRunId: KnowledgeSourceSyncUuid.nullable().default(null),
+  knowledgeSummary: KnowledgeSourceSyncRunSummary.nullable().default(null),
+  completedAt: z.string().nullable().default(null),
   error: z.string().nullable(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
 export type ScheduledTaskRun = z.infer<typeof ScheduledTaskRun>;
 
-export const CreateScheduledTaskRequest = withVariableSetIdAlias({
+const CreateAgentScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias({
   name: z.string().min(1),
   schedule: ScheduledTaskScheduleSpec,
+  action: z
+    .object({ kind: z.literal("agent_turn") })
+    .strict()
+    .default({ kind: "agent_turn" }),
   runMode: ScheduledTaskRunMode.default("new_session_per_run"),
   overlapPolicy: ScheduledTaskOverlapPolicy.default("allow_concurrent"),
   targetSessionId: z.string().uuid().nullable().optional(),
@@ -6039,13 +6386,44 @@ export const CreateScheduledTaskRequest = withVariableSetIdAlias({
     });
   }
 });
+
+const CreateKnowledgeSourceSyncScheduledTaskRequest = /* @__PURE__ */ z
+  .object({
+    name: z.string().min(1),
+    schedule: ScheduledTaskScheduleSpec,
+    action: KnowledgeSourceSyncAction,
+    overlapPolicy: z.enum(["skip", "buffer_one"]).default("buffer_one"),
+    status: ScheduledTaskStatus.default("active"),
+    metadata: z.record(z.string(), z.unknown()).default({}),
+  })
+  .strict()
+  .transform((value) => ({
+    ...value,
+    runMode: "new_session_per_run" as const,
+    targetSessionId: null,
+    agentConfig: {
+      prompt: "Knowledge source synchronization",
+      resources: [],
+      tools: [],
+      metadata: {},
+    },
+    variableSetId: null,
+    environmentId: null,
+    rigId: null,
+  }));
+
+export const CreateScheduledTaskRequest = /* @__PURE__ */ z.union([
+  CreateKnowledgeSourceSyncScheduledTaskRequest,
+  CreateAgentScheduledTaskRequest,
+]);
 export type CreateScheduledTaskRequest = z.infer<typeof CreateScheduledTaskRequest>;
 
-export const UpdateScheduledTaskRequest = withVariableSetIdAlias({
+export const UpdateScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias({
   name: z.string().min(1).optional(),
   schedule: ScheduledTaskScheduleSpec.optional(),
   runMode: ScheduledTaskRunMode.optional(),
   overlapPolicy: ScheduledTaskOverlapPolicy.optional(),
+  action: ScheduledTaskAction.optional(),
   targetSessionId: z.string().uuid().nullable().optional(),
   agentConfig: ScheduledTaskAgentConfig.optional(),
   status: ScheduledTaskStatus.optional(),
@@ -6838,6 +7216,38 @@ export const OpenGeniSlackBotInstallStart = z.object({
   expiresAt: z.string().datetime({ offset: true }),
 });
 export type OpenGeniSlackBotInstallStart = z.infer<typeof OpenGeniSlackBotInstallStart>;
+
+export const SlackInstallationBindingState = z.enum(["active", "quarantined"]);
+export type SlackInstallationBindingState = z.infer<typeof SlackInstallationBindingState>;
+
+export const SlackInstallationBinding = z.object({
+  id: z.string().uuid(),
+  accountId: z.string().uuid(),
+  accountName: z.string().min(1),
+  workspaceId: z.string().uuid(),
+  workspaceName: z.string().min(1),
+  connectionId: z.string().uuid(),
+  connectionStatus: ConnectionStatus,
+  connectionVersion: z.number().int().positive(),
+  slackTeamId: z.string().min(1).max(64),
+  slackTeamName: z.string().min(1).max(256),
+  botId: z.string().min(1).max(64),
+  botUserId: z.string().min(1).max(64),
+  botDisplayName: z.literal("OpenGeni"),
+  state: SlackInstallationBindingState,
+  quarantineReason: z.string().min(1).nullable(),
+  version: z.number().int().positive(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type SlackInstallationBinding = z.infer<typeof SlackInstallationBinding>;
+
+export const ListSlackInstallationBindingsResponse = z.object({
+  bindings: z.array(SlackInstallationBinding),
+});
+export type ListSlackInstallationBindingsResponse = z.infer<
+  typeof ListSlackInstallationBindingsResponse
+>;
 
 export const UpdateConnectionRequest = z.object({
   providerDomain: z.string().min(1).optional(),
@@ -8002,6 +8412,57 @@ export const SessionListResponse = z.object({
 });
 export type SessionListResponse = z.infer<typeof SessionListResponse>;
 
+/** Compact, bounded session projection for workspace agent-topology browsers. */
+export const AgentTopologySession = z.object({
+  id: z.string().uuid(),
+  title: z.string().nullable(),
+  titleTruncated: z.boolean(),
+  parentSessionId: z.string().uuid().nullable(),
+  rootSessionId: z.string().uuid(),
+  nestedAgentDepth: NestedAgentDepthValue,
+  ancestorPath: z.array(
+    z.object({
+      id: z.string().uuid(),
+      title: z.string().nullable(),
+      titleTruncated: z.boolean(),
+    }),
+  ),
+  status: SessionStatus,
+  pause: z.object({
+    state: z.enum(["active", "paused"]),
+    additionalBlockerCount: z.number().int().nonnegative(),
+    source: z
+      .object({
+        kind: z.enum(["session", "workspace"]),
+        sessionId: z.string().uuid().optional(),
+        displayName: z.string(),
+        displayNameTruncated: z.boolean(),
+      })
+      .nullable(),
+  }),
+  children: z.object({
+    directChildren: z.number().int().nonnegative(),
+    totalDescendants: z.number().int().nonnegative(),
+    runningDescendants: z.number().int().nonnegative(),
+    queuedDescendants: z.number().int().nonnegative(),
+    attentionDescendants: z.number().int().nonnegative(),
+    pausedDescendants: z.number().int().nonnegative(),
+    failedDescendants: z.number().int().nonnegative(),
+    truncated: z.boolean(),
+  }),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type AgentTopologySession = z.infer<typeof AgentTopologySession>;
+
+export const AgentTopologyPageResponse = z.object({
+  sessions: z.array(AgentTopologySession),
+  total: z.number().int().nonnegative(),
+  hasMore: z.boolean(),
+  nextCursor: z.string().nullable(),
+});
+export type AgentTopologyPageResponse = z.infer<typeof AgentTopologyPageResponse>;
+
 // Recursive: the TS type is declared first so the schema annotation can carry
 // the FULL recursive shape (a shallow annotation loses type information for
 // contracts consumers after one level of nesting).
@@ -8789,6 +9250,9 @@ export type GitStatusRequest = z.infer<typeof GitStatusRequest>;
 export const GitStatusResponse = z.object({
   isRepo: z.boolean(),
   head: z.string().nullable(), // branch name
+  // Exact commit object identity. null for unborn/non-repositories; optional
+  // only so older adapters and serialized captures remain readable.
+  headOid: z.string().nullable().optional(),
   detached: z.boolean().default(false),
   upstream: z.string().nullable(),
   ahead: z.number().int().nonnegative().default(0),
@@ -8914,6 +9378,9 @@ export type WorkspaceCaptureFile = z.infer<typeof WorkspaceCaptureFile>;
 export const WorkspaceCaptureRepo = z.object({
   root: z.string(),
   head: z.string().nullable(),
+  // Exact HEAD commit object identity. null for unborn repositories; optional
+  // for workspace captures written before commit identity was retained.
+  headOid: z.string().nullable().optional(),
   detached: z.boolean().default(false),
   upstream: z.string().nullable(),
   ahead: z.number().int().nonnegative().default(0),
@@ -11027,10 +11494,23 @@ export const RevokeEnrollmentResponse = z.object({
   lastSeenAt: z.string().datetime({ offset: true }).nullable(),
   revokedAt: z.string().datetime({ offset: true }).nullable(),
   code: z
-    .enum(["active_route", "active_commands", "active_lease", "recovery_pending", "not_selfhosted"])
+    .enum([
+      "active_route",
+      "active_commands",
+      "machine_home",
+      "active_lease",
+      "recovery_pending",
+      "not_selfhosted",
+    ])
     .nullable(),
   message: z.string(),
   action: z.string(),
+  dependentSessions: z.array(
+    z.object({
+      id: z.string().uuid(),
+      title: z.string().nullable(),
+    }),
+  ),
 });
 export type RevokeEnrollmentResponse = z.infer<typeof RevokeEnrollmentResponse>;
 

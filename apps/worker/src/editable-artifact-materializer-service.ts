@@ -271,7 +271,6 @@ function materializerFailureErrorCode(
   | "artifact_materializer_native_input_framing_failed"
   | "artifact_materializer_native_snapshot_open_failed"
   | "artifact_materializer_native_state_mismatch"
-  | "artifact_materializer_native_revision_mismatch"
   | undefined {
   const key = `${String(attributes.failureStage)}:${String(attributes.failureSubcode)}`;
   switch (key) {
@@ -289,8 +288,6 @@ function materializerFailureErrorCode(
       return "artifact_materializer_native_snapshot_open_failed";
     case "native:state_mismatch":
       return "artifact_materializer_native_state_mismatch";
-    case "native:revision_mismatch":
-      return "artifact_materializer_native_revision_mismatch";
   }
 }
 

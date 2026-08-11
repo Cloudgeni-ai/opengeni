@@ -1,0 +1,71 @@
+# `@opengeni/codemode`
+
+OpenGeni's canonical attempt-frozen programmatic tool surface. It compiles one
+catalog from the exact tools admitted to an execution attempt and dispatches
+both model MCP calls and sandbox Codemode calls through the same opaque tool
+identities and executors.
+
+The package owns deterministic catalog projection, collision-safe JavaScript
+paths, catalog digests, stale-catalog fencing, approval classification, and
+result-shape preservation. It does not discover MCP servers, resolve
+credentials, persist attempts, or bypass host authorization; callers provide
+the already-admitted definitions and one authorization hook.
+
+`modelName` and `codemodePath` are projections only. Execution authority is
+always the exact `{ serverId, toolName }` identity in the frozen catalog.
+
+Inside an OpenGeni sandbox the worker supplies `OPENGENI_CODEMODE_URL` and a
+renewed bearer file. The package exposes one lazy namespace over that exact
+attempt catalog:
+
+```ts
+import { tools } from "@opengeni/codemode";
+
+const sessions = await tools.opengeni.sessions_list({ status: "running" });
+const hits = await tools.slack.search({ query: "release blocker" });
+```
+
+Generate digest-pinned project declarations from the live attempt catalog with
+`ogtool declarations opengeni-codemode.d.ts`. Runtime schema validation remains
+authoritative when a script outlives a catalog generation.
+
+The bearer is reread for every request. Namespace paths are resolved against
+the signed catalog and never parsed into authority from flattened model names.
+For Browser/Computer work, the authored facade wraps those same atomic entries:
+
+```ts
+import { openGeni } from "@opengeni/codemode";
+
+const browser = await openGeni.browsers.open({ initialUrl: "http://127.0.0.1:3000" });
+const tab = await browser.tabs.selected();
+await tab.getByRole("button", { name: "Save" }).click();
+
+const computer = await openGeni.computers.open();
+const app = await computer.apps.focused();
+await app.getByRole("button", { name: "1" }).invoke();
+```
+
+Both surfaces return the same durable tool receipts. Human approval, catalog
+generation, operation idempotency, and outcome-unknown behavior remain enforced
+by the shared attempt executor.
+
+Editable artifacts use the same path. The object remains in OpenGeni; files are
+only explicit import/export boundaries:
+
+```ts
+import { openGeni } from "@opengeni/codemode";
+
+const workbook = await openGeni.artifacts.create("spreadsheet", "Forecast");
+const sheetId = openGeni.artifacts.ids.stable();
+await workbook.apply([
+  { kind: "sheet.create", sheetId, name: "Inputs", after: null },
+  {
+    kind: "cells.set",
+    sheet: { kind: "created-in-batch", sheetId, createCommandIndex: 0 },
+    anchor: { row: 0, column: 0 },
+    rows: 2,
+    columns: 2,
+    cells: ["Metric", "Value", "Revenue", 120],
+  },
+]);
+```

@@ -235,6 +235,7 @@ export function GoogleDriveKnowledgeSourceDialog({
           })),
           destination: { authorityKind, collectionId: null },
           syncCadence,
+          syncEnabled: true,
           readPolicy,
           ...(entry.binding ? { expectedVersion: entry.binding.version } : {}),
           idempotencyKey: crypto.randomUUID(),

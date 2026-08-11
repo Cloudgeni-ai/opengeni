@@ -26,6 +26,7 @@ import { RigVersionsTimeline } from "@/components/rigs/rig-versions-timeline";
 import { LoadErrorState } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { ContentPage } from "@/components/ui/content-layout";
 import { Input } from "@/components/ui/input";
 import { MetaChip } from "@/components/ui/meta-chip";
 import { Notice } from "@/components/ui/notice";
@@ -348,7 +349,7 @@ export function RigDetailRoute({ workspaceId, rigId }: { workspaceId: string; ri
 
 function Shell({ workspaceId, children }: { workspaceId: string; children: React.ReactNode }) {
   return (
-    <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col px-4 py-5 sm:px-6 lg:px-8">
+    <ContentPage width="standard">
       <Link
         to="/workspaces/$workspaceId/rigs"
         params={{ workspaceId }}
@@ -358,7 +359,7 @@ function Shell({ workspaceId, children }: { workspaceId: string; children: React
         Rigs
       </Link>
       {children}
-    </div>
+    </ContentPage>
   );
 }
 

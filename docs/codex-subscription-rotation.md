@@ -124,7 +124,7 @@ Codex quota adds three deliberately separate product seams:
   token `version`, health, connection, cooldown, quota history, active leases,
   and accepted turns remain independent; reconnect, refresh and redemption never
   auto-enable the row.
-- **Reset redemption** has no SDK method, MCP/Toolspace tool, worker activity,
+- **Reset redemption** has no SDK method, MCP/Codemode tool, worker activity,
   scheduled/background hook, or allocator/rotation call. Its REST mutation
   requires managed product mode, an actual Better Auth cookie with no
   `Authorization` header, workspace admin, the exact `user:<id>` who most

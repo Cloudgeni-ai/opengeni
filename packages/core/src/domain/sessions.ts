@@ -61,7 +61,6 @@ import {
   getSession,
   SessionIdConflictError,
   getSessionSpawnDenialByIdempotencyKey,
-  getSessionEvent,
   getWorkspaceControlEvent,
   getSessionLineage,
   getSessionTurn,
@@ -73,12 +72,13 @@ import {
   submitHumanPromptInTransaction,
   appendSessionEventsWithLockedSessionUpdate,
   updateSessionTitle as updateSessionTitleRow,
-  withWorkspaceSubjectRls,
+  withWorkspaceSubjectSessionActivityRls,
   type CreateSessionMcpServerInput,
   type Database,
   type UpdateSessionMcpServerCredentialsInput,
   QueueCommandConflictError,
   AgentCommandAuthorityError,
+  runIdempotentPersistenceTransaction,
   SessionSpawnDeniedDbError,
   SessionControlConflictError,
   SessionToolPolicyVersionConflictError,
@@ -244,7 +244,9 @@ export function creationInitiatorForGrant(grant: AccessGrant): FrozenCreationIni
       !Number.isSafeInteger(callerExecutionGeneration) ||
       callerExecutionGeneration < 1
     ) {
-      throw new HTTPException(403, { message: "caller attempt claims are incomplete" });
+      throw new HTTPException(403, {
+        message: "caller attempt claims are incomplete",
+      });
     }
     const actor = {
       type: "agent_attempt",
@@ -287,11 +289,15 @@ function normalizedSessionMcpCredentialHeaders(
   const seen = new Set<string>();
   for (const [name, value] of entries) {
     if (!sessionMcpCredentialHeaderName.test(name)) {
-      throw new HTTPException(422, { message: `invalid credential header name: ${name}` });
+      throw new HTTPException(422, {
+        message: `invalid credential header name: ${name}`,
+      });
     }
     const lower = name.toLowerCase();
     if (seen.has(lower)) {
-      throw new HTTPException(422, { message: `duplicate credential header name: ${name}` });
+      throw new HTTPException(422, {
+        message: `duplicate credential header name: ${name}`,
+      });
     }
     seen.add(lower);
     if (value.length === 0 || value.length > maxSessionMcpCredentialHeaderValueLength) {
@@ -391,11 +397,15 @@ function validateSessionMcpServersForCreate(
   const metadata: SessionMcpServerMetadata[] = [];
   for (const server of servers) {
     if (seenIds.has(server.id)) {
-      throw new HTTPException(422, { message: `duplicate session MCP server id: ${server.id}` });
+      throw new HTTPException(422, {
+        message: `duplicate session MCP server id: ${server.id}`,
+      });
     }
     seenIds.add(server.id);
     if (reservedSessionMcpServerIds.has(server.id) || existingIds.has(server.id)) {
-      throw new HTTPException(422, { message: `MCP server id already exists: ${server.id}` });
+      throw new HTTPException(422, {
+        message: `MCP server id already exists: ${server.id}`,
+      });
     }
     const headers = normalizedSessionMcpCredentialHeaders(server.headers);
     const headersEncrypted = Object.fromEntries(
@@ -493,7 +503,9 @@ function validateSessionMcpCredentialUpdates(input: {
     }
     seenIds.add(update.id);
     if (!knownIds.has(update.id)) {
-      throw new HTTPException(422, { message: `unknown session MCP server id: ${update.id}` });
+      throw new HTTPException(422, {
+        message: `unknown session MCP server id: ${update.id}`,
+      });
     }
     const headers = normalizedSessionMcpCredentialHeaders(update.headers);
     return {
@@ -605,10 +617,17 @@ export async function createAndStartSessionWithOutcome(input: {
   // target fails the create (422) — never a silent fall-back to the default box.
   // `workingDir` (optional) is the path/cwd base the chosen machine runs under,
   // seeded alongside the pointer through the epoch-fenced CAS.
-  seedTargetSandbox?: { sandboxId: string; settings: Settings; workingDir?: string | null } | null;
+  seedTargetSandbox?: {
+    sandboxId: string;
+    settings: Settings;
+    workingDir?: string | null;
+  } | null;
   // Exact actor-private pre-session draft represented by this create. The
   // initializer consumes it only after the first durable runnable unit commits.
-  consumeNewSessionDraft?: { subjectId: string; expectedRevision: number } | null;
+  consumeNewSessionDraft?: {
+    subjectId: string;
+    expectedRevision: number;
+  } | null;
   // A child may lower its inherited nested-agent depth limit freely; increases
   // are authorized by the caller's workspace:admin grant and checked again by
   // the database admission transaction.
@@ -770,7 +789,10 @@ async function finishStartSession(
       settings: Settings;
       workingDir?: string | null;
     } | null;
-    consumeNewSessionDraft?: { subjectId: string; expectedRevision: number } | null;
+    consumeNewSessionDraft?: {
+      subjectId: string;
+      expectedRevision: number;
+    } | null;
   },
   session: Session,
 ): Promise<{ session: CreateSessionResponse; changed: boolean }> {
@@ -793,7 +815,11 @@ async function finishStartSession(
       sessionGroupId: session.sandboxGroupId,
     };
     const seeded = await swapActiveSandbox(
-      { db: input.db, settings: input.seedTargetSandbox.settings, bus: input.bus },
+      {
+        db: input.db,
+        settings: input.seedTargetSandbox.settings,
+        bus: input.bus,
+      },
       ctx,
       input.seedTargetSandbox.sandboxId,
       // The working dir is committed in the SAME epoch-fenced CAS that seeds the
@@ -816,7 +842,10 @@ async function finishStartSession(
     createdEventPayload: {
       toolPolicy: input.toolPolicy,
       ...(input.variableSet
-        ? { variableSetId: input.variableSet.id, variableSetName: input.variableSet.name }
+        ? {
+            variableSetId: input.variableSet.id,
+            variableSetName: input.variableSet.name,
+          }
         : {}),
       ...(input.sessionMcpServers?.length ? { mcpServers: input.sessionMcpServers } : {}),
     },
@@ -866,10 +895,10 @@ export function workflowIdForSession(sessionId: string): string {
  * it cannot be resolved to a provider at run time, so we fail the request at
  * the API edge with 422 rather than enqueuing a turn the worker can't honor.
  *
- * `model` is the explicit, caller-supplied value (null/undefined when omitted).
- * An omitted model defaults to `settings.openaiModel` downstream — which is
- * always first in `configuredAllowedModels` — so only an explicit value is
- * checked. Centralized here so every model-carrying choke point
+ * `model` is the effective value selected by the caller's boundary. Top-level
+ * omission defaults to `settings.openaiModel`; child-session omission inherits
+ * the worker-signed calling turn before reaching this helper. Centralized here
+ * so every model-carrying choke point
  * (create-session, user-message/turn-accept, queued-turn update, and
  * scheduled-task agentConfig — a scheduled task is a session the worker runs
  * later) and the MCP surfaces that share them validate identically and cannot
@@ -1044,6 +1073,8 @@ export async function postUserMessageTurn(input: {
   expectedDraftRevision?: number | null;
   reasoningEffortFallback?: Settings["openaiReasoningEffort"];
   turnExecutionPolicy: TurnExecutionPolicyV1;
+  recordAgentRunUsage?: boolean;
+  schedulePostCommit?: (task: () => Promise<void>) => void;
 }): Promise<{
   accepted: SessionEvent;
   turn: SessionTurn;
@@ -1070,36 +1101,50 @@ export async function postUserMessageTurn(input: {
   const operationKey = input.clientEventId ?? crypto.randomUUID();
   let result;
   try {
-    result = await withWorkspaceSubjectRls(db, workspaceId, input.actor ?? accountId, (scoped) =>
-      scoped.transaction((tx) =>
-        submitHumanPromptInTransaction(tx as unknown as Database, {
-          accountId,
+    result = await runIdempotentPersistenceTransaction(
+      {
+        stage: "session.prompt.submit",
+        eventTypes: ["user.message", "turn.queued", "session.status.changed"],
+        maxAttempts: 3,
+      },
+      async () =>
+        await withWorkspaceSubjectSessionActivityRls(
+          db,
           workspaceId,
-          sessionId,
-          subjectId: input.actor ?? accountId,
-          ...(input.actorLabel ? { subjectLabel: input.actorLabel } : {}),
-          actor: input.commandActor ?? {
-            type: "human",
-            subjectId: input.actor ?? accountId,
-          },
-          operationKey,
-          delivery: input.delivery ?? "send",
-          controlEtag: input.controlEtag ?? null,
-          expectedDraftRevision: input.expectedDraftRevision ?? null,
-          text: input.text,
-          annotations: input.annotations ?? [],
-          turnInstructions: input.turnInstructions ?? null,
-          resources: input.resources,
-          model: requestedModel,
-          reasoningEffort: requestedReasoningEffort,
-          latencyMode: input.latencyMode ?? null,
-          reasoningEffortFallback: input.reasoningEffortFallback ?? settings.openaiReasoningEffort,
-          turnExecutionPolicy: input.turnExecutionPolicy,
-          source: input.origin === "operator" ? "api" : "user",
-          personalConnectionDelegations: input.personalConnectionDelegations ?? [],
-          mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
-        }),
-      ),
+          input.actor ?? accountId,
+          (scoped) =>
+            submitHumanPromptInTransaction(scoped, {
+              accountId,
+              workspaceId,
+              sessionId,
+              subjectId: input.actor ?? accountId,
+              ...(input.actorLabel ? { subjectLabel: input.actorLabel } : {}),
+              actor: input.commandActor ?? {
+                type: "human",
+                subjectId: input.actor ?? accountId,
+              },
+              operationKey,
+              delivery: input.delivery ?? "send",
+              controlEtag: input.controlEtag ?? null,
+              expectedDraftRevision: input.expectedDraftRevision ?? null,
+              text: input.text,
+              annotations: input.annotations ?? [],
+              turnInstructions: input.turnInstructions ?? null,
+              resources: input.resources,
+              model: requestedModel,
+              reasoningEffort: requestedReasoningEffort,
+              latencyMode: input.latencyMode ?? null,
+              reasoningEffortFallback:
+                input.reasoningEffortFallback ?? settings.openaiReasoningEffort,
+              turnExecutionPolicy: input.turnExecutionPolicy,
+              source: input.origin === "operator" ? "api" : "user",
+              ...(input.recordAgentRunUsage !== undefined
+                ? { recordAgentRunUsage: input.recordAgentRunUsage }
+                : {}),
+              personalConnectionDelegations: input.personalConnectionDelegations ?? [],
+              mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
+            }),
+        ),
     );
   } catch (error) {
     if (
@@ -1116,56 +1161,65 @@ export async function postUserMessageTurn(input: {
     }
     throw error;
   }
-  const events = await Promise.all(
-    result.eventIds.map((eventId) => getSessionEvent(db, workspaceId, eventId)),
-  );
-  if (events.some((event) => event === null)) {
-    throw new Error("Committed prompt events could not be reloaded");
-  }
-  const turn = await getSessionTurn(db, workspaceId, result.turnId);
-  if (!turn) throw new Error("Committed prompt turn could not be reloaded");
-  const accepted = events.find((event) => event?.id === result.acceptedEventId);
-  if (!accepted) throw new Error("Committed user.message event could not be reloaded");
-  await publishDurableSessionEvents(
-    bus,
-    workspaceId,
-    sessionId,
-    events.filter((event): event is SessionEvent => event !== null),
-  );
-  if (result.workspaceControlEventId) {
-    const controlEvent = await getWorkspaceControlEvent(
-      db,
-      workspaceId,
-      result.workspaceControlEventId,
-    );
-    if (!controlEvent) {
-      throw new Error(
-        `Committed workspace control event disappeared: ${result.workspaceControlEventId}`,
-      );
+  const postCommitTask = async () => {
+    try {
+      await publishDurableSessionEvents(bus, workspaceId, sessionId, result.events);
+      if (result.workspaceControlEventId) {
+        const controlEvent = await getWorkspaceControlEvent(
+          db,
+          workspaceId,
+          result.workspaceControlEventId,
+        );
+        if (!controlEvent) {
+          throw new Error(
+            `Committed workspace control event disappeared: ${result.workspaceControlEventId}`,
+          );
+        }
+        await publishDurableWorkspaceControlEvent(bus, workspaceId, controlEvent);
+      }
+    } catch {
+      console.warn("[sessions] prompt event fanout failed; durable rows remain replayable", {
+        errorClass: "PromptEventFanoutOperationError",
+        errorCode: "session_prompt_event_fanout_failed",
+        origin: "core",
+      });
     }
-    await publishDurableWorkspaceControlEvent(bus, workspaceId, controlEvent);
-  }
-  try {
-    await workflowClient.wakeSessionWorkflow({
-      accountId,
-      workspaceId,
-      sessionId,
-      workflowId: turn.temporalWorkflowId,
-      wakeRevision: result.wakeRevision,
-      ...((input.delivery ?? "send") === "steer" || result.interruptionCount > 0
-        ? { interruptionRequested: true }
-        : {}),
+    try {
+      await workflowClient.wakeSessionWorkflow({
+        accountId,
+        workspaceId,
+        sessionId,
+        workflowId: result.turn.temporalWorkflowId,
+        wakeRevision: result.wakeRevision,
+        ...((input.delivery ?? "send") === "steer" || result.interruptionCount > 0
+          ? { interruptionRequested: true }
+          : {}),
+      });
+    } catch {
+      console.warn("[sessions] workflow wake failed; durable outbox will retry", {
+        errorClass: "WorkflowWakeOperationError",
+        errorCode: "session_workflow_wake_failed",
+        origin: "core",
+      });
+    }
+  };
+  const schedulePostCommit =
+    input.schedulePostCommit ??
+    ((task: () => Promise<void>) => {
+      void task();
     });
+  try {
+    schedulePostCommit(postCommitTask);
   } catch {
-    console.warn("[sessions] workflow wake failed; durable outbox will retry", {
-      errorClass: "WorkflowWakeOperationError",
-      errorCode: "session_workflow_wake_failed",
+    console.warn("[sessions] prompt post-commit scheduling failed; durable recovery remains", {
+      errorClass: "PromptPostCommitScheduleError",
+      errorCode: "session_prompt_post_commit_schedule_failed",
       origin: "core",
     });
   }
   return {
-    accepted,
-    turn,
+    accepted: result.accepted,
+    turn: result.turn,
     interruptionCount: result.interruptionCount,
     replay: result.replay,
   };
@@ -1228,6 +1282,19 @@ export async function createSessionForRequestWithOutcome(
       message: `parent session not found in workspace: ${parentSessionId}`,
     });
   }
+  const creationInitiator = creationInitiatorForGrant(grant);
+  const parentCallingTurn =
+    parentSession && creationInitiator.actor
+      ? await getSessionTurn(db, workspaceId, creationInitiator.actor.turnId)
+      : null;
+  if (
+    creationInitiator.actor &&
+    (!parentCallingTurn || parentCallingTurn.sessionId !== parentSession?.id)
+  ) {
+    throw new HTTPException(403, {
+      message: "caller attempt does not belong to the parent session",
+    });
+  }
   const capabilityRuntimeSettings = await settingsWithEnabledCapabilityMcpServers(
     db,
     workspaceId,
@@ -1278,7 +1345,10 @@ export async function createSessionForRequestWithOutcome(
         "child tools may only narrow the parent session tool policy",
       );
       selectedTools = requestedTools;
-      toolPolicy = { mode: "explicit", inheritedFromSessionId: parentSession.id };
+      toolPolicy = {
+        mode: "explicit",
+        inheritedFromSessionId: parentSession.id,
+      };
     } else {
       selectedTools = parentEffective;
       toolPolicy = {
@@ -1311,7 +1381,9 @@ export async function createSessionForRequestWithOutcome(
   });
   await validateGitHubRepositorySelection(db, workspaceId, resources);
   if (resources.some((resource) => resource.kind === "file") && !objectStorage) {
-    throw new HTTPException(503, { message: "object storage is not configured" });
+    throw new HTTPException(503, {
+      message: "object storage is not configured",
+    });
   }
   await validateFileResources(db, workspaceId, resources);
   // VariableSet attachment requires variable-sets:use on the calling grant
@@ -1356,25 +1428,56 @@ export async function createSessionForRequestWithOutcome(
       frozenRigVersionId = rig.activeVersion.id;
     }
   }
-  const model = canonicalConfiguredModel(settings, payload.model ?? settings.openaiModel);
+  // A spawned worker is causally part of the exact turn that created it. Omitted
+  // execution policy fields therefore inherit that calling turn rather than the
+  // deployment defaults. This is especially important for Codex subscription
+  // managers: falling back to the deployment model would silently move a child
+  // onto the OpenGeni-credits billing path. Legacy session-bound grants without
+  // exact attempt claims fall back to the parent session's persisted defaults.
+  const inheritedModel = parentCallingTurn?.model ?? parentSession?.model ?? settings.openaiModel;
+  const model = canonicalConfiguredModel(settings, payload.model ?? inheritedModel);
   if (model === null || model === undefined) {
     throw new Error("effective session model unexpectedly resolved to null");
   }
-  // Session creation persists the EFFECTIVE model — an omitted payload.model
-  // stamps the deployment default onto the session — so the policy must vet
-  // that effective value, not just explicit ones (a restricted workspace's
-  // default-model session would otherwise be born blocked).
+  // Session creation persists the EFFECTIVE model — the explicit selection,
+  // inherited calling-turn model, or deployment default — so the policy must
+  // vet that effective value, not just explicit ones (a restricted workspace's
+  // inherited/default-model session would otherwise be born blocked).
   await assertWorkspaceModelPolicyAllows(db, settings, workspaceId, model);
-  const reasoningEffort = payload.reasoningEffort ?? settings.openaiReasoningEffort;
-  const latencyMode = payload.latencyMode ?? "standard";
+  const inheritedReasoningEffort =
+    parentCallingTurn?.reasoningEffort ??
+    (parentSession
+      ? reasoningEffortForSession(parentSession.metadata, settings.openaiReasoningEffort)
+      : settings.openaiReasoningEffort);
+  const inheritedLatencyMode =
+    parentCallingTurn?.latencyMode ??
+    (parentSession ? latencyModeForSession(parentSession.metadata, "standard") : "standard");
+  const reasoningEffort = payload.reasoningEffort ?? inheritedReasoningEffort;
+  const latencyMode = payload.latencyMode ?? inheritedLatencyMode;
+  const inheritedFromParent = parentSession !== null;
   const turnExecutionPolicy = resolveTurnExecutionPolicyV1(settings, {
     modelId: model,
     requestedModelId: payload.model ?? null,
-    modelSource: payload.model === undefined ? "deployment" : "explicit",
+    modelSource:
+      payload.model === undefined
+        ? inheritedFromParent
+          ? "continuation"
+          : "deployment"
+        : "explicit",
     reasoningEffort,
-    reasoningSource: payload.reasoningEffort === undefined ? "deployment" : "explicit",
+    reasoningSource:
+      payload.reasoningEffort === undefined
+        ? inheritedFromParent
+          ? "continuation"
+          : "deployment"
+        : "explicit",
     latencyMode,
-    latencyModeSource: payload.latencyMode === undefined ? "deployment" : "explicit",
+    latencyModeSource:
+      payload.latencyMode === undefined
+        ? inheritedFromParent
+          ? "continuation"
+          : "deployment"
+        : "explicit",
   });
   // Parent linkage was resolved above, before context validation. A child with
   // no explicit permission override inherits the creating session's effective
@@ -1679,7 +1782,6 @@ export async function createSessionForRequestWithOutcome(
       model,
     });
   }
-  const creationInitiator = creationInitiatorForGrant(grant);
   let createOutcome: CreateSessionOutcome;
   try {
     createOutcome = await createAndStartSessionWithOutcome({
@@ -1742,7 +1844,11 @@ export async function createSessionForRequestWithOutcome(
       // (after the row exists, before the first turn dispatches). Validation
       // (ownership/liveness) lives in swapActiveSandbox; an invalid target 422s.
       seedTargetSandbox: payload.targetSandboxId
-        ? { sandboxId: payload.targetSandboxId, settings, workingDir: payload.workingDir ?? null }
+        ? {
+            sandboxId: payload.targetSandboxId,
+            settings,
+            workingDir: payload.workingDir ?? null,
+          }
         : null,
       consumeNewSessionDraft:
         payload.expectedNewSessionDraftRevision !== undefined
@@ -1899,7 +2005,9 @@ export async function acceptSessionUserMessageWithOutcome(
     model: effectiveModel,
   });
   if (requestedResources.some((resource) => resource.kind === "file") && !objectStorage) {
-    throw new HTTPException(503, { message: "object storage is not configured" });
+    throw new HTTPException(503, {
+      message: "object storage is not configured",
+    });
   }
   await validateFileResources(db, workspaceId, requestedResources);
   await validateGitHubRepositorySelection(db, workspaceId, [
@@ -1961,22 +2069,8 @@ export async function acceptSessionUserMessageWithOutcome(
       ? { expectedDraftRevision: input.expectedDraftRevision }
       : {}),
     ...(input.clientEventId ? { clientEventId: input.clientEventId } : {}),
-  });
-  await recordWorkspaceUsage(deps, {
-    accountId: grant.accountId,
-    workspaceId,
-    subjectId: grant.subjectId,
-    eventType: "agent_run.created",
-    quantity: 1,
-    unit: "run",
-    sourceResourceType: "session_turn",
-    sourceResourceId: turn.id,
-    sessionId,
-    turnId: turn.id,
-    initiator: turn.initiator,
-    initiatorContext: turn.initiatorContext,
-    origin: turn.source,
-    idempotencyKey: `agent_run.created:${workspaceId}:${turn.id}`,
+    recordAgentRunUsage: true,
+    ...(deps.schedulePromptPostCommit ? { schedulePostCommit: deps.schedulePromptPostCommit } : {}),
   });
   return { accepted, turn, interruptionCount, replay };
 }
@@ -2035,7 +2129,12 @@ export async function updateSessionTitle(
     surface: "core",
   });
   const workspaceId = grant.workspaceId;
-  const result = await updateSessionTitleRow(db, { workspaceId, sessionId, title, source });
+  const result = await updateSessionTitleRow(db, {
+    workspaceId,
+    sessionId,
+    title,
+    source,
+  });
   if (result.updated) {
     await appendAndPublishEvents(db, bus, workspaceId, sessionId, [
       {
@@ -2086,7 +2185,9 @@ export async function updateSessionMcpApprovalPolicy(
     async (_session, context) => {
       const result = await context.updateSessionMcpApprovalPolicy(serverId, normalizedPolicy);
       if (!result.server) {
-        throw new HTTPException(404, { message: "session MCP server not found" });
+        throw new HTTPException(404, {
+          message: "session MCP server not found",
+        });
       }
       outcome.server = result.server;
       return {
@@ -2103,6 +2204,7 @@ export async function updateSessionMcpApprovalPolicy(
           : [],
       };
     },
+    { activity: "semantic" },
   );
   const updatedServer = outcome.server;
   if (!updatedServer) {
@@ -2201,7 +2303,9 @@ export async function updateSessionToolPolicy(
           (tool) => !validatedIds.has(`${tool.kind}:${tool.id}`),
         );
         if (unknown) {
-          throw new HTTPException(422, { message: `unknown MCP server id: ${unknown.id}` });
+          throw new HTTPException(422, {
+            message: `unknown MCP server id: ${unknown.id}`,
+          });
         }
         return withFirstPartyTools(validatedTools, runtimeSettings);
       })()
@@ -2230,7 +2334,9 @@ export async function updateSessionToolPolicy(
       if (session.parentSessionId) {
         const parent = await context.getLockedSession(session.parentSessionId);
         if (!parent) {
-          throw new HTTPException(409, { message: "parent session is no longer available" });
+          throw new HTTPException(409, {
+            message: "parent session is no longer available",
+          });
         }
         const parentTracksWorkspaceDefaults = parent.toolPolicy?.mode === "workspace_default";
         const parentEffective = withFirstPartyTools(
@@ -2343,7 +2449,7 @@ export async function updateSessionToolPolicy(
         },
       };
     },
-    { lockParentSession: true },
+    { activity: "semantic", lockParentSession: true },
   );
   if (events.length > 0) {
     await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, events);

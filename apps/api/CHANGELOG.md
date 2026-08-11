@@ -1,5 +1,94 @@
 # @opengeni/api-router
 
+## 0.26.0
+
+### Minor Changes
+
+- aeb07f4: Add durable workspace decision publication to verified Slack bot channels with immutable configuration revisions, outbox attempts and receipts, bounded retries and terminal states, admin review/history UX, typed SDK methods, and a post-persistence governed-learning outcome adapter.
+
+### Patch Changes
+
+- 87e9ae6: Add durable Google Drive Changes cursors, Shared Drive-aware delta draining,
+  bounded full reconciliation, cursor-invalid repair, and a default-off
+  Workspace Events wake seam. Normalize My Drive's root alias before ancestry
+  checks and preserve cumulative item, provider-request, and elapsed budgets
+  across delta, continuation, and full-repair checkpoints. Carry bounded
+  per-object revision floors across delta-to-full and checkpointed full scans so
+  older or equal Drive revisions cannot regress accepted metadata/current-version
+  state, fail closed on conflicting fallback identities, and keep the first
+  observation in one scan generation as a durable monotonic floor. Fence item
+  version/metadata writes plus checkpoint and terminal cursor settlement to the
+  exact lease, initiating subject, scan, checkpoint generation, and accepted
+  floor, so a lost full-page checkpoint cannot replay version 8 as version 7.
+- 8b6803a: Make Modal sandbox recovery command-ready and accurately diagnosed, use workspace-only snapshots for new sessions, enforce checkpoint cadence, and publish cached rig images only after an independent cold boot.
+- ff7203c: Add a read-only Atlassian Jira and Confluence connector with shared OAuth setup, selected-source live agent search and reads, and optional governed knowledge synchronization.
+- Updated dependencies [87e9ae6]
+- Updated dependencies [8b6803a]
+- Updated dependencies [aeb07f4]
+- Updated dependencies [ff7203c]
+  - @opengeni/config@0.13.1
+  - @opengeni/core@0.24.0
+  - @opengeni/db@0.31.0
+  - @opengeni/contracts@0.44.0
+  - @opengeni/runtime@0.19.1
+  - @opengeni/documents@0.5.31
+  - @opengeni/github@0.4.49
+  - @opengeni/storage@0.2.86
+  - @opengeni/events@0.3.102
+  - @opengeni/artifact-tool@0.2.1
+  - @opengeni/codemode@0.2.1
+  - @opengeni/observability@0.6.1
+
+## 0.25.0
+
+### Minor Changes
+
+- b46f4de: Add a compact, cursor-paginated agent-topology read surface with root, direct-child, and search filters for lazy hierarchy browsers.
+- dcfe6eb: Add canonical attempt-scoped CodeMode, browser and computer interaction, and durable collaborative editable artifacts. Agents and humans now share one artifact head through the same application authority; direct MCP and CodeMode support bounded inspection, fenced edits, trusted Office import, and asynchronous export to workspace files. The session UI gains a first-class Artifacts workspace, and React interaction viewers move to an explicit lazy-loadable subpath.
+- a858835: Add unambiguous Slack installation bindings and a token-free, subject-bound workspace access-request lifecycle for signed Slack identity links.
+
+### Patch Changes
+
+- 2f4ce5e: Add durable Seedance video generation with workspace model and funding policy,
+  secure media references, retained video artifacts, sandbox materialization,
+  OpenGeni-credit and workspace-gateway funding, and SDK/React playback surfaces.
+- 7954468: Recognize threaded Slack mentions delivered as message events, include bounded invocation context, and avoid duplicate final replies or repeated session links.
+- d1db1d3: Make agent-spawned workers inherit omitted model, reasoning, and latency settings from the exact calling turn so Codex subscription sessions do not silently fall back to OpenGeni-credit models.
+- bd5514e: Add explicitly enabled provider-neutral knowledge-source schedules with durable wake provenance, generation-fenced execution checkpoints and index obligations, fail-closed ACL activation seams, no-agent execution, layered pause state, shared schedule administration, and Google Drive source lifecycle integration.
+- 90eea29: Make connected-machine removal show every dependent session and support an explicit canonical move-to-default-sandbox confirmation before revocation. Default moves prove managed sandbox readiness through the existing fleet route, active turns remain fail-closed, and typed swap rejections surface as visible errors instead of false success.
+- 5fcad0a: Expose an agent-safe checkpointed listing of newly indexed documents with source and provenance metadata.
+- Updated dependencies [b46f4de]
+- Updated dependencies [2f4ce5e]
+- Updated dependencies [d55a093]
+- Updated dependencies [7954468]
+- Updated dependencies [dcfe6eb]
+- Updated dependencies [cccc2b3]
+- Updated dependencies [d1db1d3]
+- Updated dependencies [96965c2]
+- Updated dependencies [a8e44ae]
+- Updated dependencies [ad9123b]
+- Updated dependencies [eade67f]
+- Updated dependencies [31666e2]
+- Updated dependencies [bd5514e]
+- Updated dependencies [90eea29]
+- Updated dependencies [a858835]
+- Updated dependencies [5fcad0a]
+  - @opengeni/contracts@0.43.0
+  - @opengeni/db@0.30.0
+  - @opengeni/config@0.13.0
+  - @opengeni/core@0.23.0
+  - @opengeni/network@0.2.2
+  - @opengeni/runtime@0.19.0
+  - @opengeni/agent-proto@0.4.0
+  - @opengeni/artifact-tool@0.2.0
+  - @opengeni/codemode@0.2.0
+  - @opengeni/observability@0.6.0
+  - @opengeni/documents@0.5.30
+  - @opengeni/events@0.3.101
+  - @opengeni/github@0.4.48
+  - @opengeni/storage@0.2.85
+  - @opengeni/codex@0.2.15
+
 ## 0.24.2
 
 ### Patch Changes

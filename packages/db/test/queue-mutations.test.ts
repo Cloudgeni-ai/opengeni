@@ -26,8 +26,8 @@ import {
   settleSessionAttemptInterruptions,
   steerQueuedTurnInTransaction,
   submitHumanPromptInTransaction,
-  withWorkspaceRls,
-  withWorkspaceSubjectRls,
+  withWorkspaceSessionActivityRls as withWorkspaceRls,
+  withWorkspaceSubjectSessionActivityRls as withWorkspaceSubjectRls,
 } from "../src/index";
 import * as schema from "../src/schema";
 
@@ -144,7 +144,7 @@ describe("canonical queue commands", () => {
       operationKey,
     };
     const moved = await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
-      db.transaction((tx) => moveQueuedTurnInTransaction(tx as typeof db, command)),
+      db.transaction((tx) => moveQueuedTurnInTransaction(tx as unknown as typeof db, command)),
     );
     expect(moved.queueVersion).toBe(2);
     expect(moved.eventIds).toHaveLength(1);
@@ -166,7 +166,7 @@ describe("canonical queue commands", () => {
     ]);
 
     const replay = await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
-      db.transaction((tx) => moveQueuedTurnInTransaction(tx as typeof db, command)),
+      db.transaction((tx) => moveQueuedTurnInTransaction(tx as unknown as typeof db, command)),
     );
     expect(replay.replay).toBe(true);
     expect(replay.eventIds).toEqual([]);
@@ -174,7 +174,7 @@ describe("canonical queue commands", () => {
     await expect(
       withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
         db.transaction((tx) =>
-          moveQueuedTurnInTransaction(tx as typeof db, {
+          moveQueuedTurnInTransaction(tx as unknown as typeof db, {
             ...command,
             beforeTurnId: null,
           }),
@@ -193,7 +193,7 @@ describe("canonical queue commands", () => {
     });
     const deleted = await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
       db.transaction((tx) =>
-        deleteSessionQueueItemInTransaction(tx as typeof db, {
+        deleteSessionQueueItemInTransaction(tx as unknown as typeof db, {
           accountId: value.grant.accountId,
           workspaceId: value.grant.workspaceId!,
           sessionId: value.session.id,
@@ -223,7 +223,7 @@ describe("canonical queue commands", () => {
       value.grant.subjectId,
       (db) =>
         db.transaction((tx) =>
-          editQueuedTurnInTransaction(tx as typeof db, {
+          editQueuedTurnInTransaction(tx as unknown as typeof db, {
             accountId: value.grant.accountId,
             workspaceId: value.grant.workspaceId!,
             sessionId: value.session.id,
@@ -278,7 +278,7 @@ describe("canonical queue commands", () => {
       value.grant.subjectId,
       (db) =>
         db.transaction((tx) =>
-          editQueuedTurnInTransaction(tx as typeof db, {
+          editQueuedTurnInTransaction(tx as unknown as typeof db, {
             accountId: value.grant.accountId,
             workspaceId: value.grant.workspaceId!,
             sessionId: value.session.id,
@@ -298,7 +298,7 @@ describe("canonical queue commands", () => {
       value.grant.subjectId,
       (db) =>
         db.transaction((tx) =>
-          saveComposerDraftInTransaction(tx as typeof db, {
+          saveComposerDraftInTransaction(tx as unknown as typeof db, {
             accountId: value.grant.accountId,
             workspaceId: value.grant.workspaceId!,
             sessionId: value.session.id,
@@ -333,7 +333,8 @@ describe("canonical queue commands", () => {
       client.db,
       value.grant.workspaceId!,
       value.grant.subjectId,
-      (db) => db.transaction((tx) => submitHumanPromptInTransaction(tx as typeof db, command)),
+      (db) =>
+        db.transaction((tx) => submitHumanPromptInTransaction(tx as unknown as typeof db, command)),
     );
     const [stored] = await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
       db
@@ -384,7 +385,8 @@ describe("canonical queue commands", () => {
       client.db,
       value.grant.workspaceId!,
       value.grant.subjectId,
-      (db) => db.transaction((tx) => submitHumanPromptInTransaction(tx as typeof db, command)),
+      (db) =>
+        db.transaction((tx) => submitHumanPromptInTransaction(tx as unknown as typeof db, command)),
     );
     expect(replay).toMatchObject({ replay: true, turnId: submitted.turnId });
   });
@@ -397,7 +399,7 @@ describe("canonical queue commands", () => {
       value.grant.subjectId,
       (db) =>
         db.transaction((tx) =>
-          submitHumanPromptInTransaction(tx as typeof db, {
+          submitHumanPromptInTransaction(tx as unknown as typeof db, {
             accountId: value.grant.accountId,
             workspaceId: value.grant.workspaceId!,
             sessionId: value.session.id,
@@ -427,7 +429,7 @@ describe("canonical queue commands", () => {
       value.grant.subjectId,
       (db) =>
         db.transaction((tx) =>
-          editQueuedTurnInTransaction(tx as typeof db, {
+          editQueuedTurnInTransaction(tx as unknown as typeof db, {
             accountId: value.grant.accountId,
             workspaceId: value.grant.workspaceId!,
             sessionId: value.session.id,
@@ -450,7 +452,7 @@ describe("canonical queue commands", () => {
     await expect(
       withWorkspaceSubjectRls(client.db, value.grant.workspaceId!, value.grant.subjectId, (db) =>
         db.transaction((tx) =>
-          submitHumanPromptInTransaction(tx as typeof db, {
+          submitHumanPromptInTransaction(tx as unknown as typeof db, {
             accountId: value.grant.accountId,
             workspaceId: value.grant.workspaceId!,
             sessionId: value.session.id,
@@ -506,7 +508,7 @@ describe("canonical queue commands", () => {
     await expect(
       withWorkspaceSubjectRls(client.db, value.grant.workspaceId!, value.grant.subjectId, (db) =>
         db.transaction((tx) =>
-          editQueuedTurnInTransaction(tx as typeof db, {
+          editQueuedTurnInTransaction(tx as unknown as typeof db, {
             accountId: value.grant.accountId,
             workspaceId: value.grant.workspaceId!,
             sessionId: value.session.id,
@@ -574,7 +576,7 @@ describe("canonical queue commands", () => {
     const target = value.turns[2]!;
     const steered = await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
       db.transaction((tx) =>
-        steerQueuedTurnInTransaction(tx as typeof db, {
+        steerQueuedTurnInTransaction(tx as unknown as typeof db, {
           accountId: value.grant.accountId,
           workspaceId: value.grant.workspaceId!,
           sessionId: value.session.id,
@@ -833,7 +835,7 @@ describe("canonical queue commands", () => {
     const value = await fixture();
     const paused = await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
       db.transaction((tx) =>
-        mutateSessionControlInTransaction(tx as typeof db, {
+        mutateSessionControlInTransaction(tx as unknown as typeof db, {
           accountId: value.grant.accountId,
           workspaceId: value.grant.workspaceId!,
           sessionId: value.session.id,
@@ -884,7 +886,8 @@ describe("canonical queue commands", () => {
       client.db,
       value.grant.workspaceId!,
       value.grant.subjectId,
-      (db) => db.transaction((tx) => submitHumanPromptInTransaction(tx as typeof db, command)),
+      (db) =>
+        db.transaction((tx) => submitHumanPromptInTransaction(tx as unknown as typeof db, command)),
     );
     expect(submitted.replay).toBe(false);
     expect(
@@ -910,7 +913,8 @@ describe("canonical queue commands", () => {
       client.db,
       value.grant.workspaceId!,
       value.grant.subjectId,
-      (db) => db.transaction((tx) => submitHumanPromptInTransaction(tx as typeof db, command)),
+      (db) =>
+        db.transaction((tx) => submitHumanPromptInTransaction(tx as unknown as typeof db, command)),
     );
     expect(replay).toMatchObject({ replay: true, turnId: submitted.turnId });
   });
@@ -930,7 +934,7 @@ describe("canonical queue commands", () => {
         value.grant.subjectId,
         (db) =>
           db.transaction((tx) =>
-            saveComposerDraftInTransaction(tx as typeof db, {
+            saveComposerDraftInTransaction(tx as unknown as typeof db, {
               accountId: value.grant.accountId,
               workspaceId: value.grant.workspaceId!,
               sessionId: value.session.id,
@@ -966,7 +970,10 @@ describe("canonical queue commands", () => {
         client.db,
         value.grant.workspaceId!,
         value.grant.subjectId,
-        (db) => db.transaction((tx) => submitHumanPromptInTransaction(tx as typeof db, command)),
+        (db) =>
+          db.transaction((tx) =>
+            submitHumanPromptInTransaction(tx as unknown as typeof db, command),
+          ),
       );
       expect(submitted.replay).toBe(false);
       expect(
@@ -979,7 +986,7 @@ describe("canonical queue commands", () => {
         value.grant.subjectId,
         (db) =>
           db.transaction((tx) =>
-            submitHumanPromptInTransaction(tx as typeof db, {
+            submitHumanPromptInTransaction(tx as unknown as typeof db, {
               ...command,
               resources: [bareResource],
             }),
@@ -1004,7 +1011,7 @@ describe("canonical queue commands", () => {
         value.grant.subjectId,
         (db) =>
           db.transaction((tx) =>
-            saveComposerDraftInTransaction(tx as typeof db, {
+            saveComposerDraftInTransaction(tx as unknown as typeof db, {
               accountId: value.grant.accountId,
               workspaceId: value.grant.workspaceId!,
               sessionId: value.session.id,
@@ -1043,7 +1050,10 @@ describe("canonical queue commands", () => {
         client.db,
         value.grant.workspaceId!,
         value.grant.subjectId,
-        (db) => db.transaction((tx) => submitHumanPromptInTransaction(tx as typeof db, command)),
+        (db) =>
+          db.transaction((tx) =>
+            submitHumanPromptInTransaction(tx as unknown as typeof db, command),
+          ),
       );
       expect(submitted.replay).toBe(false);
       expect(
@@ -1056,7 +1066,7 @@ describe("canonical queue commands", () => {
         value.grant.subjectId,
         (db) =>
           db.transaction((tx) =>
-            submitHumanPromptInTransaction(tx as typeof db, {
+            submitHumanPromptInTransaction(tx as unknown as typeof db, {
               ...command,
               resources: [bareResource],
             }),
@@ -1080,7 +1090,7 @@ describe("canonical queue commands", () => {
       value.grant.subjectId,
       (db) =>
         db.transaction((tx) =>
-          saveComposerDraftInTransaction(tx as typeof db, {
+          saveComposerDraftInTransaction(tx as unknown as typeof db, {
             accountId: value.grant.accountId,
             workspaceId: value.grant.workspaceId!,
             sessionId: value.session.id,
@@ -1096,7 +1106,7 @@ describe("canonical queue commands", () => {
     const submit = (overrides: { text?: string; resources?: ResourceRef[] }) =>
       withWorkspaceSubjectRls(client.db, value.grant.workspaceId!, value.grant.subjectId, (db) =>
         db.transaction((tx) =>
-          submitHumanPromptInTransaction(tx as typeof db, {
+          submitHumanPromptInTransaction(tx as unknown as typeof db, {
             accountId: value.grant.accountId,
             workspaceId: value.grant.workspaceId!,
             sessionId: value.session.id,
@@ -1151,7 +1161,7 @@ describe("canonical queue commands", () => {
       value.grant.subjectId,
       (db) =>
         db.transaction((tx) =>
-          submitHumanPromptInTransaction(tx as typeof db, {
+          submitHumanPromptInTransaction(tx as unknown as typeof db, {
             accountId: value.grant.accountId,
             workspaceId,
             sessionId: value.session.id,
@@ -1237,7 +1247,10 @@ describe("canonical queue commands", () => {
         client.db,
         value.grant.workspaceId!,
         value.grant.subjectId,
-        (db) => db.transaction((tx) => submitHumanPromptInTransaction(tx as typeof db, command)),
+        (db) =>
+          db.transaction((tx) =>
+            submitHumanPromptInTransaction(tx as unknown as typeof db, command),
+          ),
       );
       expect(submitted.replay).toBe(false);
 
@@ -1294,7 +1307,7 @@ describe("canonical queue commands", () => {
         value.grant.subjectId,
         (db) =>
           db.transaction((tx) =>
-            submitHumanPromptInTransaction(tx as typeof db, {
+            submitHumanPromptInTransaction(tx as unknown as typeof db, {
               ...command,
               turnExecutionPolicy: retryPolicy,
             }),
@@ -1335,7 +1348,7 @@ describe("canonical queue commands", () => {
     );
     await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
       db.transaction((tx) =>
-        mutateSessionControlInTransaction(tx as typeof db, {
+        mutateSessionControlInTransaction(tx as unknown as typeof db, {
           accountId: value.grant.accountId,
           workspaceId: value.grant.workspaceId!,
           sessionId: value.session.id,
@@ -1348,7 +1361,7 @@ describe("canonical queue commands", () => {
     await expect(
       withWorkspaceSubjectRls(client.db, value.grant.workspaceId!, value.grant.subjectId, (db) =>
         db.transaction((tx) =>
-          submitHumanPromptInTransaction(tx as typeof db, {
+          submitHumanPromptInTransaction(tx as unknown as typeof db, {
             accountId: value.grant.accountId,
             workspaceId: value.grant.workspaceId!,
             sessionId: value.session.id,

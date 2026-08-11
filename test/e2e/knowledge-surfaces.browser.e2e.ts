@@ -296,6 +296,45 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     }
   }, 240_000);
 
+  test("keeps a long schedules list inside the workspace scroll owner", async () => {
+    const desktop = await configuredContext(
+      browser,
+      {
+        viewport: { width: 1280, height: 900 },
+        extraHTTPHeaders: ownerHeaders,
+      },
+      browserTestSettings.sandboxSelfhostedEnabled,
+    );
+    let workspaceId: string;
+    let tailTask: SeededScheduledTask;
+    try {
+      const page = await desktop.newPage();
+      await page.goto(webBaseUrl);
+      workspaceId = await workspaceFromPage(page);
+      tailTask = await seedScheduledTasks(page, apiBaseUrl, workspaceId);
+      await expectSchedulesScroll(page, webBaseUrl, workspaceId, tailTask);
+      expect(unexpectedDiagnostics(desktop)).toEqual([]);
+    } finally {
+      await desktop.close();
+    }
+
+    const constrained = await configuredContext(
+      browser,
+      {
+        viewport: { width: 375, height: 720 },
+        extraHTTPHeaders: ownerHeaders,
+      },
+      browserTestSettings.sandboxSelfhostedEnabled,
+    );
+    try {
+      const page = await constrained.newPage();
+      await expectSchedulesScroll(page, webBaseUrl, workspaceId, tailTask);
+      expect(unexpectedDiagnostics(constrained)).toEqual([]);
+    } finally {
+      await constrained.close();
+    }
+  }, 120_000);
+
   async function exerciseTruthfulStates(
     page: Page,
     workspaceId: string,
@@ -320,7 +359,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     await page.route(basesPattern, delayedBases);
     await page.goto(surfaceUrl(webBaseUrl, workspaceId, "documents", fixtures));
     await basesRequest;
-    await page.getByText("Loading collections", { exact: true }).waitFor();
+    await page.getByText("Loading documents", { exact: true }).waitFor();
     releaseBases();
     await page.getByText("No documents yet", { exact: true }).waitFor();
     await page.unroute(basesPattern, delayedBases);
@@ -452,6 +491,11 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
 type SeededFixtures = {
   proposedMemoryId: string;
   tailMemoryId: string;
+};
+
+type SeededScheduledTask = {
+  id: string;
+  name: string;
 };
 
 type Surface = "variable-sets" | "documents" | "memory";
@@ -643,6 +687,71 @@ async function seedKnowledgeSurfaces(
   );
 }
 
+async function seedScheduledTasks(
+  page: Page,
+  apiBaseUrl: string,
+  workspaceId: string,
+): Promise<SeededScheduledTask> {
+  return await page.evaluate(
+    async ({ apiBaseUrl: targetApiBaseUrl, workspaceId: targetWorkspaceId }) => {
+      let tailTask: SeededScheduledTask | null = null;
+      for (let index = 0; index < 16; index += 1) {
+        const name =
+          index === 0
+            ? `Tail schedule ${"reachable-without-document-scroll-".repeat(3)}`
+            : `Responsive schedule ${String(index + 1).padStart(2, "0")}`;
+        const response = await fetch(
+          `${targetApiBaseUrl}/v1/workspaces/${targetWorkspaceId}/scheduled-tasks`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              name,
+              schedule: { type: "interval", everySeconds: 3600 + index },
+              agentConfig: { prompt: `Run responsive schedule fixture ${index + 1}` },
+            }),
+          },
+        );
+        if (!response.ok) {
+          throw new Error(
+            `POST scheduled task failed: ${response.status} ${await response.text()}`,
+          );
+        }
+        const created = (await response.json()) as SeededScheduledTask;
+        tailTask ??= { id: created.id, name: created.name };
+      }
+      if (!tailTask) throw new Error("Scheduled task fixture was not created");
+      return tailTask;
+    },
+    { apiBaseUrl, workspaceId },
+  );
+}
+
+async function expectSchedulesScroll(
+  page: Page,
+  baseUrl: string,
+  workspaceId: string,
+  tailTask: SeededScheduledTask,
+): Promise<void> {
+  await page.goto(`${baseUrl}/workspaces/${workspaceId}/schedules`);
+  await page.getByRole("heading", { level: 1, name: "Schedules", exact: true }).waitFor();
+  const tailCard = page.locator(`[data-scheduled-task-id="${tailTask.id}"]`);
+  await tailCard.getByText(tailTask.name, { exact: true }).waitFor();
+  const scrollOwner = page.locator('[data-workspace-scroll-owner="page"]');
+  expect(await scrollOwner.count()).toBe(1);
+  await expectContentPageScrollAndFocus(
+    page,
+    tailCard.getByRole("button", { name: "Edit", exact: true }),
+  );
+  await expectNoPageOverflow(page);
+  const documentScroll = await page.evaluate(() => ({
+    scrollX: window.scrollX,
+    scrollY: window.scrollY,
+  }));
+  expect(documentScroll.scrollX).toBe(0);
+  expect(documentScroll.scrollY).toBe(0);
+}
+
 function surfaceUrl(
   baseUrl: string,
   workspaceId: string,
@@ -677,16 +786,14 @@ async function openSurface(
     await page.getByText(longVariableSetName, { exact: true }).waitFor();
     await ensureVariableSetExpanded(page);
   } else if (surface === "documents") {
-    await page.getByText(longBaseName, { exact: true }).waitFor();
     await page.getByText("No documents yet", { exact: true }).waitFor();
-    const bases = page.getByRole("complementary", {
-      name: "Collections (optional)",
-      exact: true,
-    });
     const search = page.getByRole("complementary", { name: "Search", exact: true });
-    await bases.waitFor();
     await search.waitFor();
-    await search.getByRole("textbox", { name: "ACL tags", exact: true }).waitFor();
+    await search.getByRole("textbox", { name: "Search indexed documents", exact: true }).waitFor();
+    expect(await page.getByRole("complementary", { name: "Collections (optional)" }).count()).toBe(
+      0,
+    );
+    expect(await search.getByRole("textbox", { name: "ACL tags", exact: true }).count()).toBe(0);
     expect(await page.getByRole("heading", { name: "Working set" }).count()).toBe(0);
   } else {
     await page
@@ -854,8 +961,8 @@ async function expectOwnedTouchTargets(page: Page, surface: Surface): Promise<vo
         ]
       : surface === "documents"
         ? [
-            page.locator("summary").getByText("New collectionoptional", { exact: true }),
-            page.getByRole("button", { name: longBaseName, exact: true }),
+            page.getByRole("button", { name: "Choose files", exact: true }),
+            page.getByRole("combobox", { name: "Drop authority", exact: true }),
           ]
         : [page.getByRole("button", { name: "Add memory", exact: true })];
   for (const target of targets) {

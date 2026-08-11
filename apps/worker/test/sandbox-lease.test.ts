@@ -64,7 +64,7 @@ import {
   settleRetainedProcess,
   touchLeaseHolder,
   verifyWorkspaceMutationSettlement,
-  withWorkspaceRls,
+  withWorkspaceSessionActivityRls,
   type Database,
   type DbClient,
 } from "@opengeni/db";
@@ -1213,18 +1213,16 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       resumeBackendId: "modal",
       resumeState: { backendId: "modal", sessionState: { workspaceReady: true } },
     });
-    const paused = await withWorkspaceRls(db, ids.workspaceId, (scopedDb) =>
-      scopedDb.transaction((tx) =>
-        mutateSessionControlInTransaction(tx as typeof scopedDb, {
-          accountId: ids.accountId,
-          workspaceId: ids.workspaceId,
-          sessionId: attempt.sessionId,
-          actor: { type: "human", subjectId: "snapshot-control-test" },
-          operationKey: crypto.randomUUID(),
-          action: "pause",
-          reason: "prove warm snapshot control fence",
-        }),
-      ),
+    const paused = await withWorkspaceSessionActivityRls(db, ids.workspaceId, (scopedDb) =>
+      mutateSessionControlInTransaction(scopedDb, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: attempt.sessionId,
+        actor: { type: "human", subjectId: "snapshot-control-test" },
+        operationKey: crypto.randomUUID(),
+        action: "pause",
+        reason: "prove warm snapshot control fence",
+      }),
     );
     expect(paused.interruptionCount).toBe(1);
 
@@ -1250,7 +1248,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect((row!.resume_state as any).sessionState.workspaceArchive).toBeUndefined();
   }, 60_000);
 
-  test("(1b-generation) exact group admission invalidates stale capture, bypasses throttle while dirty, and folds the matching generation", async () => {
+  test("(1b-generation) exact group admission invalidates stale capture and preserves the bounded checkpoint interval while dirty", async () => {
     if (!available) return;
     const ids = await freshWorkspace();
     const attempt = await freshWarmSnapshotAttempt(ids);
@@ -1417,11 +1415,11 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(resolvedSettlement?.provider_outcome).toBe("resolved");
     expect(resolvedSettlement?.settled_at).not.toBeNull();
 
-    // The prior timestamp is still inside the throttle window, but generation 1
-    // is dirty (archive_generation=0), so truth outranks throttling.
+    // A dirty generation does not bypass the bounded-loss interval. Otherwise
+    // every ordinary command would trigger a provider snapshot at turn end.
     const archive1 = Buffer.from("generation-one").toString("base64");
     const descriptor1 = archiveDescriptor(archive1, t0 + 2_000);
-    const current = await persistWarmSnapshot(db, {
+    const throttled = await persistWarmSnapshot(db, {
       accountId: ids.accountId,
       workspaceId: ids.workspaceId,
       ...attempt,
@@ -1433,6 +1431,23 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       workspaceArchiveMeta: descriptor1,
       minIntervalMs: 60_000,
       capturedAtMs: t0 + 2_000,
+    });
+    expect(throttled).toMatchObject({ wrote: false, throttled: true, superseded: false });
+
+    // A forced rotation bypasses only the interval and publishes the exact
+    // current generation before provider teardown.
+    const current = await persistWarmSnapshot(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      ...attempt,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 9,
+      expectedInstanceId: "box-generation",
+      expectedWorkspaceGeneration: 1,
+      workspaceArchive: archive1,
+      workspaceArchiveMeta: descriptor1,
+      minIntervalMs: 0,
+      capturedAtMs: t0 + 2_001,
     });
     expect(current).toMatchObject({ wrote: true, throttled: false, superseded: false });
 
@@ -1928,6 +1943,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       'MODAL_SANDBOX_FS_SNAPSHOT_V1\n{"snapshot_id":"im-warm-checkpoint","workspace_persistence":"snapshot_filesystem"}',
     );
     let providerRequestId: string | null = null;
+    let captureCalls = 0;
     const mockSession = {
       state: { workspacePersistence: "snapshot_filesystem" },
       modal: {
@@ -1938,6 +1954,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
         environmentName: () => "main",
       },
       persistWorkspace: async (options?: { requestId: string }) => {
+        captureCalls += 1;
         providerRequestId = options?.requestId ?? null;
         return snapshotBytes;
       },
@@ -1980,6 +1997,32 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       from sandbox_checkpoint_artifacts
       where id = ${lease!.currentCheckpointArtifactId}`;
     expect(artifact).toEqual({ state: "current", object_id: "im-warm-checkpoint" });
+
+    // Wall-clock expiry cannot make an unchanged generation more durable. A
+    // second checkpoint attempt must stop before calling the provider.
+    await Bun.sleep(2);
+    expect(
+      await maybePersistWarmWorkspaceSnapshot(
+        {
+          db,
+          settings: testSettings({
+            sandboxSnapshotIntervalMs: 1,
+            sandboxSnapshotTimeoutMs: 5_000,
+          }),
+        },
+        {
+          accountId: ids.accountId,
+          workspaceId: ids.workspaceId,
+          sessionId: attempt.sessionId,
+          turnId: attempt.turnId,
+          attemptId: attempt.attemptId,
+          sandboxGroupId: ids.groupId,
+        },
+        mockSession,
+        17,
+      ),
+    ).toBe(false);
+    expect(captureCalls).toBe(1);
   }, 60_000);
 
   test("(1b-capture-recovery) an expired drain claim is replaced only under its exact zero-holder identity", async () => {

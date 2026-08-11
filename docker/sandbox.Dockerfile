@@ -6,6 +6,58 @@ RUN set -eux; \
     python -m venv /opt/checkov; \
     /opt/checkov/bin/pip install --no-cache-dir "checkov==${CHECKOV_VERSION}"
 
+FROM oven/bun:1.3.14 AS bun-runtime
+
+FROM --platform=$BUILDPLATFORM oven/bun:1.3.14 AS browserd-build
+
+WORKDIR /src
+COPY . .
+RUN bun install --frozen-lockfile
+
+# Install the exact lock-resolved Codemode package closure for ordinary Bun
+# programs. The CLI and imported module therefore share source, catalog rules,
+# and transport behavior without resolving mutable registry versions at runtime.
+RUN set -eux; \
+    runtime=/out/codemode-runtime; \
+    install -d -m 0755 "$runtime/node_modules/@opengeni/codemode" \
+                        "$runtime/node_modules/@opengeni/contracts" \
+                        "$runtime/node_modules/@noble"; \
+    install -m 0644 packages/codemode/package.json "$runtime/node_modules/@opengeni/codemode/package.json"; \
+    cp -a packages/codemode/src "$runtime/node_modules/@opengeni/codemode/src"; \
+    install -m 0644 packages/contracts/package.json "$runtime/node_modules/@opengeni/contracts/package.json"; \
+    cp -a packages/contracts/src "$runtime/node_modules/@opengeni/contracts/src"; \
+    cp -aL packages/codemode/node_modules/ajv "$runtime/node_modules/ajv"; \
+    ajv_modules="$(dirname "$(readlink -f packages/codemode/node_modules/ajv)")"; \
+    for dependency in fast-deep-equal fast-uri json-schema-traverse require-from-string; do \
+      cp -aL "$ajv_modules/$dependency" "$runtime/node_modules/$dependency"; \
+    done; \
+    cp -aL packages/contracts/node_modules/zod "$runtime/node_modules/zod"; \
+    cp -aL packages/contracts/node_modules/@noble/hashes "$runtime/node_modules/@noble/hashes"; \
+    test -f "$runtime/node_modules/@opengeni/codemode/src/index.ts"
+
+RUN cd packages/ogtool && bun run build
+
+ARG TARGETARCH
+COPY --from=bun-runtime /usr/local/bin/bun /tmp/opengeni-target-bun
+RUN set -eux; \
+    arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
+    case "$arch" in \
+      amd64) native=agent-browser-linux-x64; expected=b7bc3dfcf0a7326c1f5a60423163259ba2349eebfa5bd2e70e111af743da4a49 ;; \
+      arm64) native=agent-browser-linux-arm64; expected=6ccaba1eb26a0e6f5c23c59d2c63e6e0237fde82713cfdb543ba506490cac9c1 ;; \
+      *) echo "unsupported browser controller architecture=${arch}" >&2; exit 1 ;; \
+    esac; \
+    mkdir -p /out; \
+    bun build --compile --compile-executable-path=/tmp/opengeni-target-bun \
+      packages/browserd/src/main.ts \
+      --outfile /out/opengeni-browserd; \
+    chmod 0755 /out/opengeni-browserd; \
+    install -m 0755 "packages/browserd/node_modules/agent-browser/bin/${native}" /out/agent-browser; \
+    test "$(sha256sum /out/agent-browser | awk '{print $1}')" = "$expected"; \
+    { \
+      printf '%s  %s\n' "$(sha256sum /out/opengeni-browserd | awk '{print $1}')" /usr/local/bin/opengeni-browserd; \
+      printf '%s  %s\n' "$expected" /usr/local/lib/opengeni/agent-browser; \
+    } > /out/SHA256SUMS
+
 FROM node:22.22.0-bookworm-slim AS node-runtime
 
 FROM oven/bun:1.3.14 AS artifact-runtime-builder
@@ -65,6 +117,7 @@ FROM python:3.12-slim
 ARG TERRAFORM_VERSION=1.13.3
 ARG TTYD_VERSION=1.7.7
 ARG TARGETARCH
+ARG OPENGENI_CHROMIUM_VERSION=151.0.7922.108-1~deb13u1
 
 RUN set -eux; \
     packages=" \
@@ -86,21 +139,31 @@ RUN set -eux; \
         unzip \
         util-linux \
         wget \
+        xvfb \
+        xauth \
+        fonts-liberation \
+        fonts-noto-color-emoji \
     "; \
     for attempt in 1 2 3; do \
         rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/partial/*; \
         apt-get update \
-        && apt-get install -y --download-only --no-install-recommends $packages \
+        && apt-get install -y --download-only --no-install-recommends \
+            $packages "chromium=${OPENGENI_CHROMIUM_VERSION}" \
         && break; \
         if [ "$attempt" = "3" ]; then exit 1; fi; \
         sleep $((attempt * 5)); \
     done; \
-    apt-get install -y --no-install-recommends $packages; \
-    rm -rf /var/lib/apt/lists/*
+    apt-get install -y --no-install-recommends \
+        $packages "chromium=${OPENGENI_CHROMIUM_VERSION}"; \
+    rm -rf /var/lib/apt/lists/*; \
+    install -d -m 0755 /etc/opengeni; \
+    printf '%s\n' /usr/lib/chromium/chromium > /etc/opengeni/browser-engine; \
+    test -x /usr/lib/chromium/chromium
 
-# ogtool is dependency-free but requires a supported Node runtime. Copy the
-# exact official LTS binary instead of trusting a mutable third-party apt key.
+# ogtool requires a supported Node runtime. Ordinary typed Codemode programs
+# use the exact Bun binary from the already-pinned build image.
 COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
+COPY --from=bun-runtime /usr/local/bin/bun /usr/local/bin/bun
 RUN test "$(node --version)" = "v22.22.0"
 
 RUN set -eux; \
@@ -173,22 +236,40 @@ ENV HOME=/workspace
 ENV OPENGENI_TERMINAL_STREAM_PORT=7681
 ENV OPENGENI_ARTIFACT_RASTER_FONT_FILES="[\"/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf\",\"/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf\",\"/usr/share/fonts/truetype/liberation/LiberationSans-Italic.ttf\",\"/usr/share/fonts/truetype/liberation/LiberationSans-BoldItalic.ttf\"]"
 ENV OPENGENI_ARTIFACT_RASTER_DEFAULT_FONT_FAMILY="Liberation Sans"
+ENV OPENGENI_BROWSERD_PORT=7682
+ENV OPENGENI_BROWSERD_AGENT_BROWSER_BINARY=/usr/local/lib/opengeni/agent-browser
+ENV OPENGENI_BROWSERD_BROWSER_EXECUTABLE=/usr/lib/chromium/chromium
+ENV NODE_PATH=/opt/opengeni/codemode-runtime/node_modules
 
+COPY --from=browserd-build /out/opengeni-browserd /usr/local/bin/opengeni-browserd
+COPY --from=browserd-build /out/agent-browser /usr/local/lib/opengeni/agent-browser
+COPY --from=browserd-build /out/SHA256SUMS /usr/local/share/opengeni/browserd-SHA256SUMS
+COPY --from=browserd-build /out/codemode-runtime /opt/opengeni/codemode-runtime
 COPY docker/opengeni-git-askpass /usr/local/bin/opengeni-git-askpass
 COPY packages/ogtool/package.json  /opt/opengeni/ogtool/package.json
-COPY packages/ogtool/bin/ogtool.cjs /opt/opengeni/ogtool/bin/ogtool.cjs
+COPY --from=browserd-build /src/packages/ogtool/dist/bin/ogtool.cjs /opt/opengeni/ogtool/bin/ogtool.cjs
 COPY docker/desktop/opengeni-terminal-up.sh   /usr/local/bin/opengeni-terminal-up
 COPY docker/desktop/opengeni-terminal-down.sh /usr/local/bin/opengeni-terminal-down
+COPY docker/desktop/opengeni-browserd-up.sh     /usr/local/bin/opengeni-browserd-up
+COPY docker/desktop/opengeni-browserd-down.sh   /usr/local/bin/opengeni-browserd-down
 RUN set -eux; \
     chmod 0755 /usr/local/bin/opengeni-git-askpass \
-               /usr/local/bin/opengeni-terminal-up /usr/local/bin/opengeni-terminal-down; \
+               /usr/local/bin/opengeni-terminal-up /usr/local/bin/opengeni-terminal-down \
+               /usr/local/bin/opengeni-browserd-up /usr/local/bin/opengeni-browserd-down \
+               /usr/local/bin/opengeni-browserd /usr/local/lib/opengeni/agent-browser; \
     chmod 0755 /opt/opengeni/ogtool/bin/ogtool.cjs; \
     ln -s /opt/opengeni/ogtool/bin/ogtool.cjs /usr/local/bin/ogtool; \
     node --check /opt/opengeni/ogtool/bin/ogtool.cjs; \
     test -n "$(ogtool --version)"; \
+    bun -e 'const module = await import("@opengeni/codemode"); if (typeof module.CodemodeClient !== "function" || typeof module.openGeni !== "object") process.exit(1)'; \
     bash -n /usr/local/bin/opengeni-terminal-up; \
-    bash -n /usr/local/bin/opengeni-terminal-down
+    bash -n /usr/local/bin/opengeni-terminal-down; \
+    bash -n /usr/local/bin/opengeni-browserd-up; \
+    bash -n /usr/local/bin/opengeni-browserd-down; \
+    chromium --version; \
+    sha256sum -c /usr/local/share/opengeni/browserd-SHA256SUMS
 
 EXPOSE 7681
+EXPOSE 7682
 
 WORKDIR /workspace

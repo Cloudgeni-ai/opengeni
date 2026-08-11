@@ -7,6 +7,7 @@ import {
 } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { createHash, randomUUID } from "node:crypto";
+import { sql } from "drizzle-orm";
 import {
   activateRigVersion,
   claimRigVersionProviderImageBuild,
@@ -18,6 +19,7 @@ import {
   createRigChange,
   createRigVersion,
   createRigVersionForChangePromotion,
+  createSession,
   deleteRig,
   deleteRigIfNoActiveSessions,
   finalizeRigVersionProviderImageBuild,
@@ -35,6 +37,7 @@ import {
   RigChangeTransitionError,
   updateRig,
   updateRigChangeStatus,
+  withWorkspaceSessionActivityRls,
   type Database,
   type DbClient,
 } from "../src/index";
@@ -79,18 +82,17 @@ async function insertSessionForRig(
   ws: { accountId: string; workspaceId: string },
   rigId: string,
 ): Promise<string> {
-  const [row] = await shared!.admin<{ id: string }[]>`
-    insert into sessions (
-      account_id, workspace_id, initial_message, model, sandbox_backend,
-      sandbox_group_id, rig_id, tool_policy
-    )
-    values (
-      ${ws.accountId}, ${ws.workspaceId}, 'hello', 'gpt-5.6-sol', 'none',
-      gen_random_uuid(), ${rigId},
-      jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
-    )
-    returning id`;
-  return row!.id;
+  const session = await createSession(db, {
+    accountId: ws.accountId,
+    workspaceId: ws.workspaceId,
+    initialMessage: "hello",
+    resources: [],
+    metadata: {},
+    model: "gpt-5.6-sol",
+    sandboxBackend: "none",
+    rigId,
+  });
+  return session.id;
 }
 
 function rigProviderImage(overrides: Partial<RigProviderImage> = {}): RigProviderImage {
@@ -107,6 +109,14 @@ function rigProviderImage(overrides: Partial<RigProviderImage> = {}): RigProvide
     imageDigest: null,
     artifactId: status === "ready" ? "66666666-6666-4666-8666-666666666666" : null,
     providerBindingKeyHash: status === "ready" ? `sha256:${"c".repeat(64)}` : null,
+    ...(status === "ready"
+      ? {
+          coldBootValidation: {
+            version: 1 as const,
+            checkedAt: new Date().toISOString(),
+          },
+        }
+      : {}),
     provenance: {
       kind: "rig_verification",
       targetKind: "version",
@@ -532,6 +542,64 @@ describe("rig provider image build ledger", () => {
     );
   });
 
+  test("a legacy ready image is rebuilt under the current cold-boot protocol", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const rig = await createRig(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      name: "provider-image-cold-boot-upgrade",
+    });
+    const versionId = rig.activeVersion!.id;
+    const legacyBuild = rigProviderImage({
+      buildRequestId: "77777777-7777-4777-8777-777777777777",
+      provenance: {
+        kind: "rig_verification",
+        targetKind: "version",
+        targetId: versionId,
+      },
+    });
+    const claim = await claimRigVersionProviderImageBuild(db, {
+      workspaceId: ws.workspaceId,
+      versionId,
+      image: legacyBuild,
+      staleAfterMs: 60_000,
+    });
+    expect(claim.status).toBe("claimed");
+    const artifact = await registerRigProviderImageArtifact(ws, versionId, "im-legacy-rig");
+    const { coldBootValidation: _unproven, ...legacyReady } = rigProviderImage({
+      ...claim.image,
+      status: "ready",
+      imageId: "im-legacy-rig",
+      artifactId: artifact.artifactId,
+      providerBindingKeyHash: artifact.providerBindingKeyHash,
+      finishedAt: new Date().toISOString(),
+      error: null,
+    });
+    expect(
+      await finalizeRigVersionProviderImageBuild(db, {
+        workspaceId: ws.workspaceId,
+        versionId,
+        image: legacyReady,
+      }),
+    ).toBe(true);
+
+    const currentBuild = rigProviderImage({
+      ...legacyBuild,
+      buildRequestId: "88888888-8888-4888-8888-888888888888",
+      startedAt: new Date().toISOString(),
+    });
+    const upgrade = await claimRigVersionProviderImageBuild(db, {
+      workspaceId: ws.workspaceId,
+      versionId,
+      image: currentBuild,
+      staleAfterMs: 60_000,
+    });
+    expect(upgrade.status).toBe("claimed");
+    expect(upgrade.image.buildRequestId).toBe(currentBuild.buildRequestId);
+    expect(upgrade.image.coldBootValidation).toBeUndefined();
+  });
+
   test("an unsupported record retries only after the caller proves provider support", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
@@ -816,7 +884,11 @@ describe("rig delete guard", () => {
     });
     expect(await getRig(db, ws.workspaceId, rig.id)).not.toBeNull();
 
-    await shared!.admin`update sessions set status = 'cancelled' where id = ${sessionId}`;
+    await withWorkspaceSessionActivityRls(db, ws.workspaceId, async (tx) => {
+      await tx.execute(
+        sql`update sessions set status = 'cancelled', updated_at = now() where workspace_id = ${ws.workspaceId} and id = ${sessionId}`,
+      );
+    });
     expect(await deleteRigIfNoActiveSessions(db, ws.workspaceId, rig.id)).toEqual({
       deleted: true,
       activeSessionCount: 0,

@@ -13,12 +13,24 @@ import {
   type DraftTimelineAnnotation,
   type LatencyMode,
   type ReasoningEffort,
+  type SandboxBackend,
+  type SandboxOs,
+  type SessionEvent,
+  type SessionEventType,
+  type SessionTurn,
+  type SessionTurnSource,
+  type SessionTurnStatus,
+  type ToolRef,
   type TurnExecutionPolicyV1,
   type TimelineAnnotation,
 } from "@opengeni/contracts";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
-import type { Database } from "./database";
-import { withLosslessContentWriteVersion } from "./lossless-json";
+import type { Database, SessionActivityDatabase } from "./database";
+import {
+  fromPostgresLosslessJson,
+  fromPostgresLosslessText,
+  withLosslessContentWriteVersion,
+} from "./lossless-json";
 import { closePendingSessionToolCallsInTransaction } from "./session-tool-call-settlement";
 import {
   assertAgentCommandAuthorityInTransaction,
@@ -102,6 +114,10 @@ export type SteerQueueCommandResult = QueueCommandResult & {
 export type SubmitHumanPromptResult = {
   receipt: SessionCommandReceiptRow;
   queueVersion: number;
+  accepted: SessionEvent;
+  events: SessionEvent[];
+  turn: SessionTurn;
+  /** Backward-compatible row identities for lower-level callers. */
   acceptedEventId: string;
   eventIds: string[];
   turnId: string;
@@ -110,6 +126,69 @@ export type SubmitHumanPromptResult = {
   workspaceControlEventId: string | null;
   replay: boolean;
 };
+
+function mapSubmittedPromptEvent(row: typeof schema.sessionEvents.$inferSelect): SessionEvent {
+  return {
+    id: row.id,
+    workspaceId: row.workspaceId,
+    sessionId: row.sessionId,
+    sequence: row.sequence,
+    type: row.type as SessionEventType,
+    payload: fromPostgresLosslessJson(row.payload, row.payloadCodecVersion),
+    occurredAt: row.occurredAt.toISOString(),
+    clientEventId: row.clientEventId,
+    turnId: row.turnId,
+    turnGeneration: row.turnGeneration,
+    turnAttemptId: row.turnAttemptId,
+    turnAssociation: row.turnAssociation as SessionEvent["turnAssociation"],
+    duplicateOfEventId: row.duplicateOfEventId,
+    duplicateReason: row.duplicateReason,
+  };
+}
+
+function mapSubmittedPromptTurn(row: typeof schema.sessionTurns.$inferSelect): SessionTurn {
+  const personalConnections = McpPersonalConnectionDelegations.parse(
+    row.personalConnectionDelegations,
+  ).map(({ serverId, providerDomain }) => ({ serverId, providerDomain }));
+  return {
+    id: row.id,
+    workspaceId: row.workspaceId,
+    sessionId: row.sessionId,
+    triggerEventId: row.triggerEventId,
+    temporalWorkflowId: row.temporalWorkflowId,
+    status: row.status as SessionTurnStatus,
+    source: row.source as SessionTurnSource,
+    position: row.position,
+    prompt: fromPostgresLosslessText(row.prompt, row.promptCodecVersion),
+    annotations: TimelineAnnotations.parse(row.annotations),
+    resources: row.resources as ResourceRef[],
+    tools: row.tools as ToolRef[],
+    toolsProvided: row.toolsProvided,
+    model: row.model,
+    reasoningEffort: row.reasoningEffort as ReasoningEffort,
+    latencyMode: (row.latencyMode as LatencyMode | null | undefined) ?? "standard",
+    sandboxBackend: row.sandboxBackend as SandboxBackend,
+    sandboxOs: (row.sandboxOs as SandboxOs | null) ?? null,
+    metadata: row.metadata,
+    version: row.version,
+    executionGeneration: row.executionGeneration,
+    activeAttemptId: row.activeAttemptId,
+    lineage: row.lineage,
+    initiator: initiatorFromStorage(
+      row.initiatorKind,
+      row.initiatorSubjectId,
+      row.initiatorContext ?? {},
+    ),
+    initiatorContext: row.initiatorContext ?? {},
+    personalConnections,
+    cancelledBy: row.cancelledBy,
+    cancelReason: row.cancelReason,
+    startedAt: row.startedAt ? row.startedAt.toISOString() : null,
+    finishedAt: row.finishedAt ? row.finishedAt.toISOString() : null,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
 
 export type AgentInternalUpdateCommandResult = {
   receipt: SessionCommandReceiptRow;
@@ -419,7 +498,7 @@ async function loadQueuedTurns(
 }
 
 async function normalizeQueuePositions(
-  db: Database,
+  db: SessionActivityDatabase,
   workspaceId: string,
   sessionId: string,
   orderedIds: string[],
@@ -578,7 +657,7 @@ export async function saveComposerDraftInTransaction(
 }
 
 export async function moveQueuedTurnInTransaction(
-  db: Database,
+  db: SessionActivityDatabase,
   input: {
     accountId: string;
     workspaceId: string;
@@ -714,7 +793,7 @@ export async function moveQueuedTurnInTransaction(
 }
 
 export async function deleteSessionQueueItemInTransaction(
-  db: Database,
+  db: SessionActivityDatabase,
   input: {
     accountId: string;
     workspaceId: string;
@@ -845,7 +924,7 @@ export async function deleteSessionQueueItemInTransaction(
 }
 
 export async function editQueuedTurnInTransaction(
-  db: Database,
+  db: SessionActivityDatabase,
   input: {
     accountId: string;
     workspaceId: string;
@@ -1027,7 +1106,7 @@ export async function editQueuedTurnInTransaction(
 }
 
 export async function steerQueuedTurnInTransaction(
-  db: Database,
+  db: SessionActivityDatabase,
   input: {
     accountId: string;
     workspaceId: string;
@@ -1260,7 +1339,7 @@ export async function steerQueuedTurnInTransaction(
 }
 
 export async function submitHumanPromptInTransaction(
-  db: Database,
+  db: SessionActivityDatabase,
   input: {
     accountId: string;
     workspaceId: string;
@@ -1291,6 +1370,8 @@ export async function submitHumanPromptInTransaction(
       context: string;
     };
     source: "user" | "api";
+    /** Record the admitted run's durable usage fact in this transaction. */
+    recordAgentRunUsage?: boolean;
     personalConnectionDelegations?: McpPersonalConnectionDelegation[];
     mcpCredentialUpdates?: Array<{
       id: string;
@@ -1355,9 +1436,39 @@ export async function submitHumanPromptInTransaction(
     if (!turnId || !acceptedEventId || wakeRevision < 1) {
       throw new SessionControlInvariantError("Replayed prompt receipt is incomplete");
     }
+    const replayEvents = await db
+      .select()
+      .from(schema.sessionEvents)
+      .where(
+        and(
+          eq(schema.sessionEvents.workspaceId, input.workspaceId),
+          eq(schema.sessionEvents.sessionId, input.sessionId),
+          inArray(schema.sessionEvents.id, eventIds),
+        ),
+      )
+      .orderBy(asc(schema.sessionEvents.sequence));
+    const [replayTurn] = await db
+      .select()
+      .from(schema.sessionTurns)
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, input.workspaceId),
+          eq(schema.sessionTurns.sessionId, input.sessionId),
+          eq(schema.sessionTurns.id, turnId),
+        ),
+      )
+      .limit(1);
+    const events = replayEvents.map(mapSubmittedPromptEvent);
+    const accepted = events.find((event) => event.id === acceptedEventId);
+    if (!accepted || !replayTurn || events.length !== eventIds.length) {
+      throw new SessionControlInvariantError("Replayed prompt rows are incomplete");
+    }
     return {
       receipt: reserved.receipt,
       queueVersion: Number(reserved.receipt.appliedQueueVersion),
+      accepted,
+      events,
+      turn: mapSubmittedPromptTurn(replayTurn),
       acceptedEventId,
       eventIds,
       turnId,
@@ -1628,6 +1739,7 @@ export async function submitHumanPromptInTransaction(
     )
     .returning();
   if (!turn) throw new SessionControlInvariantError("Prompt turn was not inserted");
+  let committedTurn = turn;
   eventValues.push({
     accountId: input.accountId,
     workspaceId: input.workspaceId,
@@ -1678,7 +1790,7 @@ export async function submitHumanPromptInTransaction(
   // settlement has already cleared sessions.active_turn_id. Do not infer this
   // state from a local request spinner or queue position.
   if (input.delivery === "steer") {
-    await db
+    const [updatedTurn] = await db
       .update(schema.sessionTurns)
       .set({
         metadata: {
@@ -1696,7 +1808,12 @@ export async function submitHumanPromptInTransaction(
           eq(schema.sessionTurns.sessionId, input.sessionId),
           eq(schema.sessionTurns.id, turnId),
         ),
-      );
+      )
+      .returning();
+    if (!updatedTurn) {
+      throw new SessionControlInvariantError("Steer prompt turn metadata was not updated");
+    }
+    committedTurn = updatedTurn;
   }
   if (supersession.replacedTurn) {
     const current = supersession.replacedTurn;
@@ -1838,6 +1955,27 @@ export async function submitHumanPromptInTransaction(
       "metadataCodecVersion",
     ),
   );
+  if (input.recordAgentRunUsage) {
+    await db
+      .insert(schema.usageEvents)
+      .values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId,
+        eventType: "agent_run.created",
+        quantity: 1,
+        unit: "run",
+        sourceResourceType: "session_turn",
+        sourceResourceId: turnId,
+        sessionId: input.sessionId,
+        turnId,
+        ...initiatorColumns(frozenInitiator),
+        origin: input.source,
+        idempotencyKey: `agent_run.created:${input.workspaceId}:${turnId}`,
+        occurredAt: now,
+      })
+      .onConflictDoNothing({ target: schema.usageEvents.idempotencyKey });
+  }
   const eventIds = eventRows.map((event) => event.id);
   const receipt = await updateSessionCommandReceiptResult(db, reserved.receipt.id, {
     controlRevision: resumed.revision,
@@ -1859,9 +1997,17 @@ export async function submitHumanPromptInTransaction(
         : {}),
     },
   });
+  const events = eventRows.map(mapSubmittedPromptEvent);
+  const accepted = events.find((event) => event.id === acceptedEventId);
+  if (!accepted) {
+    throw new SessionControlInvariantError("Inserted user.message event is missing");
+  }
   return {
     receipt,
     queueVersion,
+    accepted,
+    events,
+    turn: mapSubmittedPromptTurn(committedTurn),
     acceptedEventId,
     eventIds,
     turnId,
@@ -1873,7 +2019,7 @@ export async function submitHumanPromptInTransaction(
 }
 
 export async function sendAgentMessageInTransaction(
-  db: Database,
+  db: SessionActivityDatabase,
   input: {
     accountId: string;
     workspaceId: string;
@@ -2077,7 +2223,7 @@ export async function sendAgentMessageInTransaction(
 }
 
 export async function steerAgentSessionInTransaction(
-  db: Database,
+  db: SessionActivityDatabase,
   input: {
     accountId: string;
     workspaceId: string;

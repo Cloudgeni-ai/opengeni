@@ -37,8 +37,12 @@ export type {
   PersistSessionAttemptQuiescenceInput,
   ReconcileSessionAttemptQuiescenceInput,
   ReconcileSessionAttemptQuiescenceResult,
+  RunKnowledgeSourceSyncBatchInput,
+  RunKnowledgeSourceSyncBatchResult,
   RunAgentTurnInput,
   RunAgentTurnResult,
+  VideoGenerationReconcileResult,
+  VideoGenerationTerminalStatus,
   SessionAttemptQuiescenceProof,
   SharedActivityServices,
   TurnActivityDependencies,
@@ -80,6 +84,8 @@ const defaultControlActivities = createControlActivities();
 const defaultTurnActivities = createTurnActivities();
 
 export const runAgentTurn = defaultTurnActivities.runAgentTurn;
+export const reconcileVideoGenerationOperation =
+  defaultTurnActivities.reconcileVideoGenerationOperation;
 export const indexDocument = defaultControlActivities.indexDocument;
 export const failSessionAttempt = defaultControlActivities.failSessionAttempt;
 export const settleSessionInterruptions = defaultControlActivities.settleSessionInterruptions;
@@ -93,6 +99,7 @@ export const peekSessionWork = defaultControlActivities.peekSessionWork;
 export const expireSessionHumanInput = defaultControlActivities.expireSessionHumanInput;
 export const markSessionIdle = defaultControlActivities.markSessionIdle;
 export const dispatchScheduledTaskRun = defaultControlActivities.dispatchScheduledTaskRun;
+export const runKnowledgeSourceSyncBatch = defaultControlActivities.runKnowledgeSourceSyncBatch;
 export const enqueueGoalRetryWake = defaultControlActivities.enqueueGoalRetryWake;
 export const maybeContinueGoal = defaultControlActivities.maybeContinueGoal;
 export const getCodexCapacityWait = defaultControlActivities.getCodexCapacityWait;
@@ -102,6 +109,8 @@ export const drainSandboxLease = defaultControlActivities.drainSandboxLease;
 export const maintainSandboxLeaseSweep = defaultControlActivities.maintainSandboxLeaseSweep;
 export const reapSandboxLeases = defaultControlActivities.reapSandboxLeases;
 export const reapExpiredFileUploads = defaultControlActivities.reapExpiredFileUploads;
+export const recoverVideoGenerationWorkflows =
+  defaultControlActivities.recoverVideoGenerationWorkflows;
 export const maintainRetainedScreenshots = defaultControlActivities.maintainRetainedScreenshots;
 export const dispatchSessionWorkflowWakes = defaultControlActivities.dispatchSessionWorkflowWakes;
 export const verifyRigChange = defaultControlActivities.verifyRigChange;

@@ -350,6 +350,10 @@ describe("catalog import persistence", () => {
       endpointUrl: "https://workspace.enabled-dedupe.example/mcp",
       category: "custom",
       tags: ["mcp", "workspace"],
+      metadata: {
+        allowedTools: ["search", "create_draft"],
+        requireApproval: ["create_draft"],
+      },
     });
     await enableCapabilityInstallation(db, {
       accountId: ws.accountId,
@@ -364,6 +368,8 @@ describe("catalog import persistence", () => {
 
     expect(matching).toHaveLength(1);
     expect(matching[0]?.url).toBe("https://workspace.enabled-dedupe.example/mcp");
+    expect(matching[0]?.allowedTools).toEqual(["search", "create_draft"]);
+    expect(matching[0]?.requireApproval).toEqual(["create_draft"]);
   }, 180_000);
 
   test("listEnabledMcpCapabilityServers excludes stale registry entries", async () => {

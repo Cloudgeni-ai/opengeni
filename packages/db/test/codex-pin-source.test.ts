@@ -3,6 +3,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import postgres from "postgres";
 import {
   createDb,
+  createSession,
   getSessionCodexState,
   setSessionCodexPin,
   type Database,
@@ -34,17 +35,16 @@ async function freshWorkspace(): Promise<{ accountId: string; workspaceId: strin
 }
 
 async function seedSession(ws: { accountId: string; workspaceId: string }): Promise<string> {
-  const id = crypto.randomUUID();
-  await admin`
-    insert into sessions (
-      id, account_id, workspace_id, initial_message, model,
-      sandbox_backend, sandbox_group_id, tool_policy
-    )
-    values (
-      ${id}, ${ws.accountId}, ${ws.workspaceId}, 'go', 'gpt', 'modal', ${id},
-      jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
-    )`;
-  return id;
+  const session = await createSession(db, {
+    accountId: ws.accountId,
+    workspaceId: ws.workspaceId,
+    initialMessage: "go",
+    resources: [],
+    metadata: {},
+    model: "gpt",
+    sandboxBackend: "modal",
+  });
+  return session.id;
 }
 
 // A codex account for the pin to validate against (setSessionCodexPin checks ownership).

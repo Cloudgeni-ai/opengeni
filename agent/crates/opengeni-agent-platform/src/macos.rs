@@ -9,7 +9,8 @@
 //! # Desktop (structured, live-deferred to native desktop milestone)
 //!
 //! macOS computer-use is **CGEvent** (synthetic input) + **ScreenCaptureKit**
-//! (capture), both **TCC-gated** (Screen Recording + Accessibility grants that
+//! (capture), both **TCC-gated** (Screen Recording + Accessibility + Input
+//! Monitoring grants that
 //! cannot be auto-clicked on an ephemeral CI runner). The
 //! backend is therefore a compile-only structured seam: it has the exact
 //! [`DesktopBackend`] shape so the dispatch + capability path are identical to
@@ -75,14 +76,15 @@ use opengeni_agent_macos_ffi as macffi;
 // --- TCC grant status + consent request (feature `macos-desktop`) -----------
 //
 // `MacosDesktop::probe`/`capture`/`inject` all fail closed until the two macOS
-// TCC grants are in place: Screen Recording (probe + capture) and Accessibility
-// (CGEvent input delivery). These small helpers let the agent's lifecycle code
+// TCC grants are in place: Screen Recording (probe + capture), Accessibility
+// (CGEvent input delivery), and Input Monitoring (physical-input precedence).
+// These small helpers let the agent's lifecycle code
 // (`opengeni-agent`'s startup/enroll seam) READ the current grant state without
 // prompting and fire the OS consent prompts ONCE, so a display-capable Mac can
 // actually advertise its display. They are macOS + feature gated, so the default
 // and non-macOS builds compile nothing here (byte-identical).
 
-/// A non-prompting snapshot of the two macOS TCC grants the desktop backend needs.
+/// A non-prompting snapshot of the macOS TCC grants the desktop backend needs.
 #[cfg(feature = "macos-desktop")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DesktopGrants {
@@ -90,6 +92,8 @@ pub struct DesktopGrants {
     pub screen_recording: bool,
     /// Accessibility (`AXIsProcessTrusted`) — required for CGEvent input delivery.
     pub accessibility: bool,
+    /// Input Monitoring — required to yield synthetic input to the local user.
+    pub input_monitoring: bool,
 }
 
 #[cfg(feature = "macos-desktop")]
@@ -97,25 +101,25 @@ impl DesktopGrants {
     /// Both grants are in place, so the backend can fully probe/capture/inject.
     #[must_use]
     pub fn all_granted(self) -> bool {
-        self.screen_recording && self.accessibility
+        self.screen_recording && self.accessibility && self.input_monitoring
     }
 }
 
 /// Reads the current macOS TCC grant status WITHOUT prompting (the leaf crate's
-/// non-prompting `CGPreflightScreenCaptureAccess` + `AXIsProcessTrusted`).
+/// non-prompting CoreGraphics preflights + `AXIsProcessTrusted`).
 #[cfg(feature = "macos-desktop")]
 #[must_use]
 pub fn desktop_grants() -> DesktopGrants {
     DesktopGrants {
         screen_recording: macffi::screen_capture_granted(),
         accessibility: macffi::accessibility_trusted(),
+        input_monitoring: macffi::input_monitoring_granted(),
     }
 }
 
-/// Fires the two macOS TCC consent prompts once (Screen Recording via
-/// `CGRequestScreenCaptureAccess`, Accessibility via the prompting
-/// `AXIsProcessTrustedWithOptions`) and deep-links to the Settings panes. Only the
-/// on-machine process can trigger the prompts; the user still flips the toggles.
+/// Fires the macOS Screen Recording, Accessibility, and Input Monitoring consent
+/// prompts once. Only the on-machine process can trigger the prompts; the user
+/// still flips the toggles.
 #[cfg(feature = "macos-desktop")]
 pub fn request_desktop_grants() {
     macffi::request_grants();
@@ -189,11 +193,11 @@ impl DesktopBackend for MacosDesktop {
     }
 
     async fn inject(&self, input: &v1::DesktopInput) -> PlatformResult<()> {
-        // Accessibility gate: without it CGEventPost is silently dropped, so
-        // report a typed Unsupported rather than pretend the input landed.
-        if !macffi::accessibility_trusted() {
+        // Both gates are mandatory: Accessibility delivers CGEvents; Input
+        // Monitoring lets the controller yield rather than race physical input.
+        if !macffi::accessibility_trusted() || !macffi::input_monitoring_granted() {
             return Err(PlatformError::Unsupported(
-                "macOS Accessibility permission not granted (computer-use input cannot be delivered)"
+                "macOS Accessibility and Input Monitoring permissions are required for safe computer-use input"
                     .to_string(),
             ));
         }
@@ -226,8 +230,17 @@ impl DesktopBackend for MacosDesktop {
 #[cfg(feature = "macos-desktop")]
 fn map_ffi_err(err: macffi::MacFfiError) -> PlatformError {
     match err {
-        macffi::MacFfiError::Unsupported(message) => PlatformError::Unsupported(message),
-        macffi::MacFfiError::Ffi(message) => PlatformError::os(message),
+        macffi::MacFfiError::Unsupported(message)
+        | macffi::MacFfiError::ActionUnsupported(message) => PlatformError::Unsupported(message),
+        macffi::MacFfiError::PermissionDenied(message) => PlatformError::ConsentRequired(message),
+        macffi::MacFfiError::TargetStale(message) | macffi::MacFfiError::SelectorStale(message) => {
+            PlatformError::NotFound(message)
+        }
+        macffi::MacFfiError::TimedOut(message) => PlatformError::Timeout(message),
+        macffi::MacFfiError::Ffi(message)
+        | macffi::MacFfiError::Invalid(message)
+        | macffi::MacFfiError::OutcomeUnknown(message)
+        | macffi::MacFfiError::InputInterrupted(message) => PlatformError::os(message),
     }
 }
 

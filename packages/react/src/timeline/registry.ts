@@ -1,4 +1,4 @@
-import type { RetainedArtifactReference } from "@opengeni/sdk";
+import type { RetainedArtifactReference, VideoArtifactPlaybackSource } from "@opengeni/sdk";
 import type { ComponentType } from "react";
 import { mcpToolLeaf } from "./tool-display-name";
 import type { ToolCallItem } from "./types";
@@ -36,6 +36,12 @@ export type RetainedArtifactLoader = (
   artifact: RetainedArtifactReference,
   signal: AbortSignal,
 ) => Promise<Uint8Array | { url: string } | null>;
+
+/** Mint an expiring source for native browser playback without loading video bytes in JS. */
+export type VideoArtifactPlaybackLoader = (
+  artifactId: string,
+  signal: AbortSignal,
+) => Promise<VideoArtifactPlaybackSource>;
 
 export type ToolRenderer = ComponentType<ToolRendererProps>;
 

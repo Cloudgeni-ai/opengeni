@@ -228,6 +228,6 @@ The SDK exposes:
 - HTTP lifecycle: `apps/api/src/routes/packs.ts`
 - operation/installation persistence: `packages/db/src/pack-installations.ts`
 - component resolution/ownership: `packages/db/src/pack-components.ts`
-- schema and rolling migration: `packages/db/src/schema.ts`, `packages/db/drizzle/0203_pack_component_ownership.sql`
+- schema and rolling migration: `packages/db/src/schema.ts`, `packages/db/drizzle/0216_pack_component_ownership.sql`
 - legacy worker compatibility: `apps/worker/src/activities/packs.ts`
 - web review UI: `apps/web/src/components/capabilities/packs-section.tsx`

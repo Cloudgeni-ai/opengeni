@@ -56,6 +56,7 @@ export function PreferenceToggleRow(props: {
   checked: boolean;
   disabled?: boolean;
   saving?: boolean;
+  control?: ReactNode;
   onToggle: () => void;
 }) {
   return (
@@ -67,6 +68,7 @@ export function PreferenceToggleRow(props: {
           {props.description}
         </p>
       </div>
+      {props.control}
       {props.saving ? (
         <Loader2Icon className="size-3.5 shrink-0 animate-spin text-fg-subtle" />
       ) : null}

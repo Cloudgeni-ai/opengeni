@@ -24,6 +24,29 @@ export type ScheduledTaskFormState = {
   resources: ResourceRef[];
 };
 
+export function scheduledTaskStateLabel(task: ScheduledTask): {
+  label: string;
+  active: boolean;
+  reason: "active" | "user_paused" | "connection_paused" | "source_disabled";
+} {
+  if (task.status === "paused") {
+    return { label: "Paused", active: false, reason: "user_paused" };
+  }
+  if (task.action.kind === "knowledge_source_sync") {
+    const value = task.metadata.knowledgeSourceSync;
+    if (value && typeof value === "object") {
+      const control = value as Record<string, unknown>;
+      if (control.sourceEnabled === false) {
+        return { label: "Sync disabled", active: false, reason: "source_disabled" };
+      }
+      if (control.connectionPaused === true) {
+        return { label: "Connection paused", active: false, reason: "connection_paused" };
+      }
+    }
+  }
+  return { label: "Active", active: true, reason: "active" };
+}
+
 export function newScheduledTaskFormState(
   includeOpenGeniTool: boolean,
   resources: ResourceRef[] = [],
@@ -58,10 +81,13 @@ export function formStateFromScheduledTask(task: ScheduledTask): ScheduledTaskFo
     base.scheduleType = "calendar";
     base.calendarTime = `${String(schedule.hour).padStart(2, "0")}:${String(schedule.minute).padStart(2, "0")}`;
     base.timeZone = schedule.timeZone;
-  } else {
+  } else if (schedule.type === "once") {
     base.scheduleType = "once";
     base.runAt = localDateTimeValue(new Date(schedule.runAt));
     base.timeZone = schedule.timeZone ?? base.timeZone;
+  } else {
+    base.scheduleType = "interval";
+    base.intervalMinutes = 60;
   }
   return {
     ...base,
@@ -140,6 +166,7 @@ function scheduledTaskSchedule(
 }
 
 export function scheduleLabel(schedule: ScheduledTaskScheduleSpec): string {
+  if (schedule.type === "manual") return "On demand";
   if (schedule.type === "interval") {
     return `Every ${Math.round(schedule.everySeconds / 60)} min`;
   }
@@ -168,6 +195,19 @@ export function summarizeLastRun(runs: ScheduledTaskRun[]): LastRunSummary | nul
       label: `last run failed${last.error ? `: ${last.error}` : ""}`,
       tone: "failed",
     };
+  }
+  if (last.status === "succeeded") {
+    const summary = last.knowledgeSummary;
+    return {
+      run: last,
+      label: summary
+        ? `last sync imported ${summary.imported}, unchanged ${summary.unchanged}, failed ${summary.failed}`
+        : `last run succeeded ${formatTimestamp(last.completedAt ?? last.firedAt)}`,
+      tone: "ok",
+    };
+  }
+  if (last.status === "skipped") {
+    return { run: last, label: "last run skipped due to overlap", tone: "pending" };
   }
   if (last.status === "dispatched") {
     return { run: last, label: `last run ${formatTimestamp(last.firedAt)}`, tone: "ok" };

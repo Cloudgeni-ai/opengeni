@@ -9,6 +9,7 @@ import type {
 } from "@opengeni/contracts";
 import {
   getSessionTurnPersonalConnectionDelegations,
+  getConnectionMetadata,
   getSocialConnection,
   getWorkspaceGrant,
   listConnectionsMetadata,
@@ -23,6 +24,10 @@ export type PersonalConnectionDelegationSource =
   | { kind: "turn"; sessionId: string; turnId: string }
   | { kind: "none" };
 export type AuthorizedSocialConnection = { connection: SocialConnection; subjectId: string | null };
+export type AuthorizedAtlassianConnection = {
+  connection: ConnectionMetadata;
+  subjectId: string | null;
+};
 
 export function directPersonalConnectionSubjectId(
   turn: Pick<SessionTurn, "source" | "initiator" | "initiatorContext">,
@@ -107,6 +112,70 @@ export async function authorizedSocialConnectionsForGrant(input: {
   return [...workspace.map((connection) => ({ connection, subjectId: null })), ...personal];
 }
 
+export async function authorizedAtlassianConnectionsForGrant(input: {
+  db: Database;
+  grant: AccessGrant;
+}): Promise<AuthorizedAtlassianConnection[]> {
+  const workspace = (await listConnectionsMetadata(input.db, input.grant.workspaceId, null)).filter(
+    (connection) =>
+      connection.subjectId === null &&
+      connection.status === "active" &&
+      sameProviderDomain(connection.providerDomain, "api.atlassian.com"),
+  );
+  const source = personalConnectionDelegationSourceForGrant(input.grant);
+  if (source.kind === "none") {
+    return workspace.map((connection) => ({ connection, subjectId: null }));
+  }
+  if (source.kind === "subject") {
+    const visible = await listConnectionsMetadata(
+      input.db,
+      input.grant.workspaceId,
+      source.subjectId,
+    );
+    return visible
+      .filter(
+        (connection) =>
+          connection.status === "active" &&
+          sameProviderDomain(connection.providerDomain, "api.atlassian.com"),
+      )
+      .map((connection) => ({
+        connection,
+        subjectId: connection.subjectId === null ? null : source.subjectId,
+      }));
+  }
+  const delegations = (
+    await getSessionTurnPersonalConnectionDelegations(
+      input.db,
+      input.grant.workspaceId,
+      source.sessionId,
+      source.turnId,
+    )
+  ).filter((item) => item.connectionType === "atlassian");
+  const personal: AuthorizedAtlassianConnection[] = [];
+  for (const delegation of delegations) {
+    if (!(await getWorkspaceGrant(input.db, delegation.ownerSubjectId, input.grant.workspaceId))) {
+      continue;
+    }
+    const connection = await getConnectionMetadata(
+      input.db,
+      input.grant.workspaceId,
+      delegation.connectionId,
+      delegation.ownerSubjectId,
+    );
+    if (
+      !connection ||
+      connection.subjectId !== delegation.ownerSubjectId ||
+      connection.status !== "active" ||
+      !sameProviderDomain(connection.providerDomain, delegation.providerDomain) ||
+      !sameProviderDomain(connection.providerDomain, "api.atlassian.com")
+    ) {
+      continue;
+    }
+    personal.push({ connection, subjectId: delegation.ownerSubjectId });
+  }
+  return [...workspace.map((connection) => ({ connection, subjectId: null })), ...personal];
+}
+
 export function selectedPersonalConnectionServers(
   settings: Pick<Settings, "mcpServers">,
   tools: ToolRef[],
@@ -181,7 +250,7 @@ export function personalConnectionDelegationsFromParent(input: {
   return [
     ...mcp,
     ...input.parentDelegations
-      .filter((item) => item.connectionType === "social")
+      .filter((item) => item.connectionType === "social" || item.connectionType === "atlassian")
       .map((item) => ({ ...item })),
   ];
 }
@@ -241,7 +310,7 @@ function personalAuthorityUnavailable(
 
 /**
  * Resolves subject-owned MCP credentials only through the exact authority
- * frozen on the causal turn. A direct human subject, worker Toolspace caller,
+ * frozen on the causal turn. A direct human subject, worker Codemode caller,
  * retry, or recovery can identify the caller, but none may widen or replace
  * the persisted connection UUID.
  */
@@ -288,8 +357,10 @@ export async function freezePersonalConnectionDelegations(input: {
   source: PersonalConnectionDelegationSource;
 }): Promise<McpPersonalConnectionDelegation[]> {
   const servers = selectedPersonalConnectionServers(input.settings, input.tools);
-  const includeSocial = input.tools.some((tool) => tool.id === "opengeni");
-  if ((servers.length === 0 && !includeSocial) || input.source.kind === "none") return [];
+  const includeFirstPartyConnections = input.tools.some((tool) => tool.id === "opengeni");
+  if ((servers.length === 0 && !includeFirstPartyConnections) || input.source.kind === "none") {
+    return [];
+  }
   if (input.source.kind === "turn") {
     const inherited = personalConnectionDelegationsFromParent({
       servers,
@@ -300,7 +371,11 @@ export async function freezePersonalConnectionDelegations(input: {
         input.source.turnId,
       ),
     });
-    return includeSocial ? inherited : inherited.filter((item) => item.connectionType !== "social");
+    return includeFirstPartyConnections
+      ? inherited
+      : inherited.filter(
+          (item) => item.connectionType !== "social" && item.connectionType !== "atlassian",
+        );
   }
   const membership = await getWorkspaceGrant(input.db, input.source.subjectId, input.workspaceId);
   if (!membership) return [];
@@ -309,7 +384,7 @@ export async function freezePersonalConnectionDelegations(input: {
     subjectId: input.source.subjectId,
     connections: await listConnectionsMetadata(input.db, input.workspaceId, input.source.subjectId),
   });
-  if (!includeSocial) return mcp;
+  if (!includeFirstPartyConnections) return mcp;
   const ownerSubjectId = input.source.subjectId;
   const visible = await listSocialConnections(input.db, input.workspaceId, 500, ownerSubjectId);
   const latest = new Map<"x" | "reddit", (typeof visible)[number]>();
@@ -324,6 +399,14 @@ export async function freezePersonalConnectionDelegations(input: {
     if (!prior || connection.updatedAt > prior.updatedAt)
       latest.set(connection.provider, connection);
   }
+  const personalAtlassian = (
+    await listConnectionsMetadata(input.db, input.workspaceId, ownerSubjectId)
+  ).filter(
+    (connection) =>
+      connection.subjectId === ownerSubjectId &&
+      connection.status === "active" &&
+      sameProviderDomain(connection.providerDomain, "api.atlassian.com"),
+  );
   return [
     ...mcp,
     ...[...latest.values()].map((connection) => ({
@@ -333,6 +416,14 @@ export async function freezePersonalConnectionDelegations(input: {
       providerDomain: connection.provider === "x" ? "x.com" : `${connection.provider}.com`,
       kind: "oauth2" as const,
       connectionType: "social" as const,
+    })),
+    ...personalAtlassian.map((connection) => ({
+      serverId: `atlassian:${connection.id}`,
+      connectionId: connection.id,
+      ownerSubjectId,
+      providerDomain: connection.providerDomain,
+      kind: connection.kind,
+      connectionType: "atlassian" as const,
     })),
   ];
 }

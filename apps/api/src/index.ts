@@ -37,6 +37,7 @@ import { observabilityEventLogger } from "./observability";
 import { startAuthCalloutResponder } from "./sandbox/auth-callout";
 import { startHelloIngestion, startMetricsIngestion } from "./sandbox/metrics-ingestion";
 import { startSlackInteractionPump } from "./integrations/slack-interactions";
+import { startMemorySlackPublicationPump } from "./memory-slack-delivery";
 import { startTemporalScheduleCleanupPump } from "./temporal-schedule-cleanup";
 import {
   EDITABLE_ARTIFACT_LIVE_WEBSOCKET_MAX_MESSAGE_BYTES,
@@ -168,6 +169,14 @@ export async function createTemporalWorkflowClient(
     },
     syncScheduledTask: async ({ task }) => {
       const schedule = temporal.schedule.getHandle(task.temporalScheduleId);
+      if (task.schedule.type === "manual") {
+        try {
+          await schedule.delete();
+        } catch (error) {
+          if (!(error instanceof ScheduleNotFoundError)) throw error;
+        }
+        return;
+      }
       const options = temporalScheduleOptions(task, settings.temporalTaskQueue);
       try {
         await schedule.update(() => temporalScheduleUpdateOptions(options));
@@ -193,6 +202,7 @@ export async function createTemporalWorkflowClient(
       agentRunUsageIdempotencyKey,
       triggerWorkflowId,
       initiator,
+      triggerType = "manual",
     }) => {
       // Deterministic workflowId (derived from the trigger token by the
       // caller) + REJECT_DUPLICATE makes a retried manual trigger idempotent:
@@ -209,7 +219,7 @@ export async function createTemporalWorkflowClient(
               accountId: task.accountId,
               workspaceId: task.workspaceId,
               taskId: task.id,
-              triggerType: "manual",
+              triggerType,
               agentRunUsageIdempotencyKey,
               initiator,
             },
@@ -229,18 +239,25 @@ export async function createTemporalWorkflowClient(
       if (!targetId) {
         throw new Error("rig verification requires changeId or versionId");
       }
-      await temporal.workflow.start("rigVerificationWorkflow", {
-        taskQueue: settings.temporalTaskQueue,
-        workflowId: workflowId ?? `rig-verification-${targetId}-${crypto.randomUUID()}`,
-        workflowIdReusePolicy: "ALLOW_DUPLICATE",
-        args: [
-          {
-            workspaceId,
-            ...(changeId ? { changeId } : {}),
-            ...(versionId ? { versionId } : {}),
-          },
-        ],
-      });
+      try {
+        await temporal.workflow.start("rigVerificationWorkflow", {
+          taskQueue: settings.temporalTaskQueue,
+          workflowId: workflowId ?? `rig-verification-${targetId}-${crypto.randomUUID()}`,
+          workflowIdReusePolicy: "REJECT_DUPLICATE",
+          args: [
+            {
+              workspaceId,
+              ...(changeId ? { changeId } : {}),
+              ...(versionId ? { versionId } : {}),
+            },
+          ],
+        });
+      } catch (error) {
+        // A lost start acknowledgement is indistinguishable from a retry. The
+        // caller-owned workflow id makes both cases the same successful start.
+        if (isWorkflowAlreadyStarted(error)) return;
+        throw error;
+      }
     },
     check: async () => {
       await connection.workflowService.getSystemInfo({});
@@ -353,6 +370,8 @@ export async function startApi() {
       ? {
           editableArtifacts: editableArtifactComposition.application,
           editableArtifactExports: editableArtifactComposition.durableExports,
+          editableArtifactAgent: editableArtifactComposition.agent,
+          editableArtifactOfficeImports: editableArtifactComposition.officeImports,
         }
       : {}),
     observability,
@@ -389,6 +408,7 @@ export async function startApi() {
   const stopSlackInteractionPump = settings.slackSigningSecret
     ? startSlackInteractionPump(routeDeps)
     : undefined;
+  const stopMemorySlackPublicationPump = startMemorySlackPublicationPump(routeDeps);
   const stopTemporalScheduleCleanupPump = startTemporalScheduleCleanupPump({
     db: dbClient.db,
     deleteSchedule: async (temporalScheduleId) => {
@@ -455,6 +475,7 @@ export async function startApi() {
     close: async () => {
       server.stop(true);
       stopSlackInteractionPump?.();
+      await stopMemorySlackPublicationPump();
       stopMetricsIngestion?.();
       stopHelloIngestion?.();
       await stopTemporalScheduleCleanupPump();
@@ -488,6 +509,9 @@ export function shouldCreateScheduleAfterUpdateError(error: unknown): boolean {
 }
 
 export function temporalScheduleSpec(schedule: ScheduledTaskScheduleSpec): ScheduleSpec {
+  if (schedule.type === "manual") {
+    throw new Error("manual scheduled tasks do not have a Temporal Schedule spec");
+  }
   if (schedule.type === "interval") {
     return {
       intervals: [temporalIntervalSpec(schedule)],
@@ -574,7 +598,7 @@ function temporalScheduleOptions(task: ScheduledTask, taskQueue: string): Schedu
       pauseOnFailure: false,
     },
     state: {
-      paused: task.status === "paused",
+      paused: scheduledTaskEffectivelyPaused(task),
       ...(task.schedule.type === "once" ? { remainingActions: 1 } : {}),
     },
     memo: {
@@ -584,6 +608,15 @@ function temporalScheduleOptions(task: ScheduledTask, taskQueue: string): Schedu
       name: task.name,
     },
   };
+}
+
+function scheduledTaskEffectivelyPaused(task: ScheduledTask): boolean {
+  if (task.status === "paused") return true;
+  if (task.action.kind !== "knowledge_source_sync") return false;
+  const control = task.metadata.knowledgeSourceSync;
+  if (!control || typeof control !== "object") return false;
+  const record = control as Record<string, unknown>;
+  return record.sourceEnabled === false || record.connectionPaused === true;
 }
 
 function temporalScheduleUpdateOptions(options: ScheduleOptions): ScheduleUpdateOptions {

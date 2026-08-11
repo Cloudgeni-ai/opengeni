@@ -17,36 +17,35 @@ describe("Agent Brain authority surface", () => {
     expect(navigation).toContain('description: "What agents always know and retrieve"');
   });
 
-  test("makes four bounded authorities plain while preserving canonical governance APIs", async () => {
-    const [route, overview, loader, preferences] = await Promise.all([
+  test("keeps the default Agent Brain simple while preserving canonical governance APIs", async () => {
+    const [route, overview, prompt, loader, preferences] = await Promise.all([
       source("routes/workspace-state.tsx"),
       source("routes/agent-brain-overview.tsx"),
+      source("routes/agent-brain-prompt.tsx"),
       source("routes/workspace-state-loader.ts"),
       source("routes/preference-registry-admin.tsx"),
     ]);
     for (const required of [
       "Loading Agent Brain",
       "Couldn't load Agent Brain",
-      "Four authorities, two ways agents use them",
-      "Always known",
-      "Retrieved when relevant",
-      "Charter & policy",
-      "Preference Registry",
-      "Documents / RAG",
+      "What every agent starts with, and what it can find when needed.",
+      "Included automatically",
+      "Company profile & goals",
+      "Not configured",
+      "Workspace instructions",
+      "Not set",
+      "Preferences",
+      "Short summaries are always known; full instructions are fetched when needed.",
+      "Back to Agent Brain",
+      "Instructions for this workspace",
+      "Save instructions",
+      "Changes are versioned and can be audited or rolled back.",
+      "Available when needed",
+      "Documents",
       "Memory",
-      "Bounded descriptor metadata plus exact retrieval handle",
-      "On demand; never loaded by this overview",
-      "Not projected; no combined effective source is inferred",
-      "No structured active heads",
-      "Partial ·",
-      "Unavailable · permission",
-      "Empty sample",
-      "Partial sample ·",
-      "Searchable evidence",
-      "Learned facts and decisions",
-      "Pending changes",
-      "History & rollback",
+      "Facts, decisions and observations learned across agent work.",
       "Advanced & diagnostics",
+      "Technical details, audit history and administration.",
       "No instruction-policy revisions exist yet.",
       "Preference authority inventory",
       "PreferenceRegistryAdministration",
@@ -61,9 +60,6 @@ describe("Agent Brain authority surface", () => {
       "Deterministic drift compares stable IDs",
       "Base list truncated",
       "Memory sample reached",
-      "Open Documents",
-      "Skills & capabilities",
-      "Sessions & agents",
       "Create draft proposal",
       "Proposals never activate themselves",
       "Inactive proposal",
@@ -71,12 +67,28 @@ describe("Agent Brain authority surface", () => {
       expect(`${route}\n${overview}`).toContain(required);
     }
     expect(route.indexOf("<BrainOverview")).toBeLessThan(route.indexOf('id="brain-diagnostics"'));
-    expect(overview).toContain("it is not another knowledge store and never merges or");
-    expect(overview).toContain("the Brain never performs a cross-authority rollback");
-    expect(overview).toContain("organization profile is not projected here");
-    expect(overview).toContain("onOpenDiagnostics");
+    expect(overview).toContain("search={{ view }}");
+    expect(overview).toContain('view="company"');
+    expect(overview).toContain('view="instructions"');
+    expect(overview).toContain('view="preferences"');
+    expect(route).toContain("compact");
+    expect(preferences).toContain("Write manually");
+    expect(preferences).toContain("Save preference");
+    expect(preferences).toContain("Always visible summary");
+    expect(prompt).toContain("Tell OpenGeni what you want it to remember");
+    expect(prompt).toContain("Tell OpenGeni how agents should work");
+    expect(prompt).toContain("Tell OpenGeni about your company and goals");
+    expect(prompt).toContain("show you the result before saving it");
+    expect(prompt).toContain("context.startSession");
+    expect(prompt).toContain("canonical durable-learning");
+    expect(prompt).toContain("Never save the preference as ordinary Memory");
+    expect(overview).not.toContain("workspace_instruction_policy_heads");
+    expect(overview).not.toContain("Runtime composition");
+    expect(overview).not.toContain("Four authorities, two ways agents use them");
+    expect(route).not.toContain("Authoritative source surfaces");
+    expect(route).not.toContain("Generated {formatDate(state.generatedAt)}");
     expect(route).toContain("open={diagnosticsOpen}");
-    expect(route.indexOf("<PreferenceRegistryAdministration")).toBeGreaterThan(
+    expect(route.lastIndexOf("<PreferenceRegistryAdministration")).toBeGreaterThan(
       route.indexOf('id="brain-diagnostics"'),
     );
     expect(overview).not.toMatch(/getPreferenceRegistry|preference_registry_get/);
@@ -145,8 +157,10 @@ describe("Agent Brain authority surface", () => {
     ]) {
       expect(preferences).toContain(operation);
     }
+    expect(route).toContain("createWorkspaceInstructionPolicyDraft");
+    expect(route).toContain("activateWorkspaceInstructionPolicyRevision");
     expect(`${route}\n${overview}\n${loader}\n${preferences}`).not.toMatch(
-      /activateWorkspaceInstruction|updateKnowledgeMemory|createKnowledgeMemory/,
+      /updateKnowledgeMemory|createKnowledgeMemory/,
     );
     expect(route).not.toMatch(/method:\s*["'](?:POST|PATCH|PUT|DELETE)/);
     expect(route).not.toContain("policy snapshots are not implemented");

@@ -309,8 +309,7 @@ export type EditableArtifactMaterializerFailureDiagnostic = Readonly<{
     | "revalidate"
     | "input_framing"
     | "snapshot_open"
-    | "state_mismatch"
-    | "revision_mismatch";
+    | "state_mismatch";
 }>;
 
 export class EditableArtifactMaterializerPermanentError extends Error {

@@ -17,6 +17,8 @@ export const COMPUTER_SCREENSHOT_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 export const COMPUTER_SCREENSHOT_WORKSPACE_QUOTA_BYTES = 5 * 1024 * 1024 * 1024;
 /** Generated images are permanent workspace files, never inline history blobs. */
 export const GENERATED_IMAGE_MAX_BYTES = 64 * 1024 * 1024;
+/** Generated videos are permanent workspace files and are always streamed. */
+export const GENERATED_VIDEO_MAX_BYTES = 512 * 1024 * 1024;
 
 const encoder = new TextEncoder();
 const LOWERCASE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -34,6 +36,7 @@ export const RetainedOutputKind = z.enum([
   "event_media",
   "computer_screenshot",
   "generated_image",
+  "generated_video",
   "file",
 ]);
 export type RetainedOutputKind = z.infer<typeof RetainedOutputKind>;
@@ -119,7 +122,11 @@ export const RetainedArtifactReferenceSchema = z
       });
     }
 
-    if (value.kind === "computer_screenshot" || value.kind === "generated_image") {
+    if (
+      value.kind === "computer_screenshot" ||
+      value.kind === "generated_image" ||
+      value.kind === "generated_video"
+    ) {
       if (!value.dimensions) {
         ctx.addIssue({
           code: "custom",
@@ -155,6 +162,27 @@ export const RetainedArtifactReferenceSchema = z
           code: "custom",
           path: ["contentType"],
           message: "generated image media metadata is invalid",
+        });
+      }
+    }
+
+    if (value.kind === "generated_video") {
+      if (value.retention.policy !== "workspace_file" || !workspaceMatch || sessionMatch) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["retention"],
+          message: "generated videos require permanent workspace-file retrieval",
+        });
+      }
+      if (
+        value.contentType !== "video/mp4" ||
+        value.originalBytes <= 0 ||
+        value.originalBytes > GENERATED_VIDEO_MAX_BYTES
+      ) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["contentType"],
+          message: "generated video media metadata is invalid",
         });
       }
     }
@@ -227,6 +255,11 @@ export type RetainedScreenshotArtifactInput = RetainedArtifactFileInput & {
 };
 
 export type RetainedGeneratedImageArtifactInput = RetainedArtifactFileInput & {
+  width: number;
+  height: number;
+};
+
+export type RetainedGeneratedVideoArtifactInput = RetainedArtifactFileInput & {
   width: number;
   height: number;
 };
@@ -310,6 +343,43 @@ export function retainedGeneratedImageReferenceFromFile(
     artifactId: file.id,
     kind: "generated_image" as const,
     contentType: canonicalRetainedContentType(file.contentType),
+    originalBytes: file.sizeBytes,
+    sha256: file.sha256,
+    retainedAt: file.updatedAt,
+    dimensions: { width: file.width, height: file.height },
+    retention: {
+      policy: "workspace_file" as const,
+      expiresAt: null,
+    },
+    retrieval: {
+      method: "GET" as const,
+      path: `/v1/workspaces/${file.workspaceId}/artifacts/${file.id}/content`,
+      acceptRanges: "bytes" as const,
+      maxRangeBytes: RETAINED_OUTPUT_MAX_PAGE_BYTES,
+    },
+  };
+  const parsed = RetainedArtifactReferenceSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
+/** Build the permanent workspace receipt for one validated generated video. */
+export function retainedGeneratedVideoReferenceFromFile(
+  file: RetainedGeneratedVideoArtifactInput,
+): RetainedArtifactReference | null {
+  if (
+    file.status !== "ready" ||
+    file.contentType !== "video/mp4" ||
+    !file.sha256 ||
+    file.sizeBytes <= 0 ||
+    file.sizeBytes > GENERATED_VIDEO_MAX_BYTES
+  ) {
+    return null;
+  }
+  const value = {
+    available: true as const,
+    artifactId: file.id,
+    kind: "generated_video" as const,
+    contentType: "video/mp4" as const,
     originalBytes: file.sizeBytes,
     sha256: file.sha256,
     retainedAt: file.updatedAt,

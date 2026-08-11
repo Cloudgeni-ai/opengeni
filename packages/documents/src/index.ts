@@ -12,7 +12,9 @@ import type {
   DocumentStatus,
   DocumentVisibility,
   FileAsset,
+  IndexedDocumentSummary,
   KnowledgeSourceKind,
+  ListIndexedDocumentsResponse,
 } from "@opengeni/contracts";
 import {
   requireFile,
@@ -25,7 +27,8 @@ import {
 } from "@opengeni/db";
 import * as schema from "@opengeni/db/schema";
 import type { ObjectStorage } from "@opengeni/storage";
-import { and, asc, desc, eq, inArray, or, sql, type SQL } from "drizzle-orm";
+import { createHash } from "node:crypto";
+import { and, asc, desc, eq, gt, inArray, isNotNull, or, sql, type SQL } from "drizzle-orm";
 import type OpenAI from "openai";
 
 export const DEFAULT_DOCUMENT_PARSER = "liteparse";
@@ -38,6 +41,7 @@ export const DEFAULT_DOCUMENT_CURATION_MODEL = "gpt-4o-mini";
 // classify without paying for a full-document prompt on every drop.
 export const DOCUMENT_CURATION_MAX_INPUT_CHARS = 24_000;
 export const DOCUMENT_AUTHORITY_SUBJECT_MAX_BYTES = 1024;
+export const DOCUMENT_INDEX_CHECKPOINT_MAX_CHARS = 1_024;
 // A base move is applied automatically only at or above this curator
 // confidence; below it the suggestion is surfaced for human review instead.
 export const DOCUMENT_CURATION_AUTO_FILE_CONFIDENCE = 0.75;
@@ -183,6 +187,15 @@ export type EffectiveDocumentSearchInput = Omit<DocumentSearchInput, "access"> &
   initiatingSubjectId: string;
   /** Agent retrieval additionally enforces documents.agent_access. */
   surface: "human" | "agent";
+};
+
+export type ListEffectiveIndexedDocumentsInput = {
+  accountId: string;
+  workspaceId: string;
+  /** Immutable human subject accepted for the logical request/turn. */
+  initiatingSubjectId: string;
+  checkpoint?: string | undefined;
+  limit?: number | undefined;
 };
 
 export type DocumentIndexHooks = {
@@ -907,6 +920,7 @@ export async function addDocumentToBase(
     organizationAuthorityGranted?: boolean | undefined;
     curationStatus?: DocumentCurationStatus | undefined;
     access?: DocumentAccessFilter | undefined;
+    knowledgeSourceIdentity?: string | null | undefined;
   },
 ): Promise<Document> {
   return await withRlsContext(
@@ -934,6 +948,10 @@ export async function addDocumentToBase(
       const base = await getDocumentBase(scopedDb, input.workspaceId, input.baseId);
       if (!base) throw new Error(`Document base not found: ${input.baseId}`);
       const file = await requireReadyFile(scopedDb, input.workspaceId, input.fileId);
+      const knowledgeSourceIdentity = cleanString(input.knowledgeSourceIdentity ?? null);
+      if (knowledgeSourceIdentity && knowledgeSourceIdentity.length > 512) {
+        throw new Error("knowledge source document identity exceeds 512 characters");
+      }
       const now = new Date();
       const [existing] = await scopedDb
         .select()
@@ -941,12 +959,19 @@ export async function addDocumentToBase(
         .where(
           and(
             eq(schema.documents.workspaceId, input.workspaceId),
-            eq(schema.documents.baseId, input.baseId),
-            eq(schema.documents.fileId, input.fileId),
+            ...(knowledgeSourceIdentity
+              ? [eq(schema.documents.knowledgeSourceIdentity, knowledgeSourceIdentity)]
+              : [
+                  eq(schema.documents.baseId, input.baseId),
+                  eq(schema.documents.fileId, input.fileId),
+                ]),
           ),
         )
         .limit(1);
       if (existing) {
+        if (knowledgeSourceIdentity && existing.fileId !== input.fileId) {
+          throw new Error("knowledge source document identity is bound to different content");
+        }
         if (!documentMatchesAccess(existing, input.workspaceId, input.access)) {
           throw new Error(`Document not found: ${existing.id}`);
         }
@@ -1002,6 +1027,7 @@ export async function addDocumentToBase(
           sourceCreatedAt: parseOptionalDate(input.sourceCreatedAt),
           sourceUpdatedAt: parseOptionalDate(input.sourceUpdatedAt),
           sourceVersion: cleanString(input.sourceVersion) ?? null,
+          knowledgeSourceIdentity,
           aclTags: cleanStringArray(input.aclTags),
           authorityKind: authority.kind,
           authorityWorkspaceId: authority.workspaceId,
@@ -1070,7 +1096,9 @@ export async function moveDocumentToBase(
           and(
             eq(schema.documents.workspaceId, input.workspaceId),
             eq(schema.documents.baseId, targetBaseId),
-            eq(schema.documents.fileId, row.fileId),
+            ...(row.knowledgeSourceIdentity
+              ? [eq(schema.documents.knowledgeSourceIdentity, row.knowledgeSourceIdentity)]
+              : [eq(schema.documents.fileId, row.fileId)]),
           ),
         )
         .limit(1);
@@ -1186,6 +1214,151 @@ export async function listDocuments(
       .orderBy(asc(schema.documents.createdAt));
     return rows.map(mapDocument);
   });
+}
+
+/**
+ * List newly ready documents in the same effective scope used by agent
+ * retrieval. The opaque checkpoint is bound to the account, requesting
+ * workspace, and immutable initiating subject, so it cannot be reused across
+ * scheduled-task authority boundaries.
+ */
+export async function listEffectiveIndexedDocuments(
+  db: Database,
+  input: ListEffectiveIndexedDocumentsInput,
+): Promise<ListIndexedDocumentsResponse> {
+  const initiatingSubjectId = canonicalEffectiveDocumentSubject(input.initiatingSubjectId);
+  const limit = input.limit ?? 50;
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+    throw new Error("indexed document list limit must be between 1 and 100");
+  }
+  const afterSequence = input.checkpoint
+    ? decodeDocumentIndexCheckpoint(input.checkpoint, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        initiatingSubjectId,
+      })
+    : 0n;
+  const access: DocumentAccessFilter = {
+    agentOnly: true,
+    viewerSubjectId: initiatingSubjectId,
+  };
+  const rows = await withDocumentAccountRls(
+    db,
+    input.accountId,
+    input.workspaceId,
+    access,
+    async (scopedDb) =>
+      await scopedDb
+        .select()
+        .from(schema.documents)
+        .where(
+          and(
+            eq(schema.documents.accountId, input.accountId),
+            eq(schema.documents.status, "ready"),
+            isNotNull(schema.documents.indexSequence),
+            gt(schema.documents.indexSequence, afterSequence),
+            ...documentAccessConditions(input.workspaceId, access),
+          ),
+        )
+        .orderBy(asc(schema.documents.indexSequence))
+        .limit(limit + 1),
+  );
+  const hasMore = rows.length > limit;
+  const pageRows = rows.slice(0, limit);
+  const nextSequence = pageRows.at(-1)?.indexSequence ?? afterSequence;
+  if (nextSequence === null) {
+    throw new Error("ready document is missing its index sequence");
+  }
+  return {
+    documents: pageRows.map(mapIndexedDocumentSummary),
+    nextCheckpoint: encodeDocumentIndexCheckpoint({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      initiatingSubjectId,
+      sequence: nextSequence,
+    }),
+    hasMore,
+  };
+}
+
+export function encodeDocumentIndexCheckpoint(input: {
+  accountId: string;
+  workspaceId: string;
+  initiatingSubjectId: string;
+  sequence: bigint;
+}): string {
+  if (input.sequence < 0n) throw new Error("document index checkpoint sequence is invalid");
+  return Buffer.from(
+    JSON.stringify({
+      v: 1,
+      s: documentIndexCheckpointScope(input),
+      q: input.sequence.toString(),
+    }),
+    "utf8",
+  ).toString("base64url");
+}
+
+export function decodeDocumentIndexCheckpoint(
+  value: string,
+  scope: { accountId: string; workspaceId: string; initiatingSubjectId: string },
+): bigint {
+  try {
+    if (!value || value.length > DOCUMENT_INDEX_CHECKPOINT_MAX_CHARS) {
+      throw new Error("checkpoint length");
+    }
+    const bytes = Buffer.from(value, "base64url");
+    if (bytes.toString("base64url") !== value) throw new Error("checkpoint encoding");
+    const parsed = JSON.parse(bytes.toString("utf8")) as Record<string, unknown>;
+    if (
+      Object.keys(parsed).sort().join(",") !== "q,s,v" ||
+      parsed.v !== 1 ||
+      typeof parsed.s !== "string" ||
+      typeof parsed.q !== "string" ||
+      !/^(0|[1-9][0-9]*)$/.test(parsed.q)
+    ) {
+      throw new Error("checkpoint payload");
+    }
+    if (parsed.s !== documentIndexCheckpointScope(scope)) {
+      throw new Error("document index checkpoint belongs to a different workspace or subject");
+    }
+    return BigInt(parsed.q);
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message === "document index checkpoint belongs to a different workspace or subject"
+    ) {
+      throw error;
+    }
+    throw new Error("invalid document index checkpoint", { cause: error });
+  }
+}
+
+function documentIndexCheckpointScope(input: {
+  accountId: string;
+  workspaceId: string;
+  initiatingSubjectId: string;
+}): string {
+  return createHash("sha256")
+    .update("opengeni:document-index-checkpoint:v1\0")
+    .update(input.accountId)
+    .update("\0")
+    .update(input.workspaceId)
+    .update("\0")
+    .update(canonicalEffectiveDocumentSubject(input.initiatingSubjectId))
+    .digest("hex");
+}
+
+function canonicalEffectiveDocumentSubject(value: string): string {
+  const subjectId = cleanString(value);
+  if (!subjectId || subjectId !== value) {
+    throw new Error("effective document retrieval requires an initiating subject");
+  }
+  if (new TextEncoder().encode(subjectId).byteLength > DOCUMENT_AUTHORITY_SUBJECT_MAX_BYTES) {
+    throw new Error(
+      `effective document initiating subject exceeds ${DOCUMENT_AUTHORITY_SUBJECT_MAX_BYTES} UTF-8 bytes`,
+    );
+  }
+  return subjectId;
 }
 
 export async function getDocument(
@@ -2324,6 +2497,43 @@ function mapDocument(row: typeof schema.documents.$inferSelect): Document {
     curation: (row.curation as DocumentCuration | null) ?? null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+function mapIndexedDocumentSummary(
+  row: typeof schema.documents.$inferSelect,
+): IndexedDocumentSummary {
+  if (row.indexSequence === null || row.indexedAt === null) {
+    throw new Error(`Ready document is missing index completion metadata: ${row.id}`);
+  }
+  return {
+    id: row.id,
+    title: row.title,
+    parser: row.parser,
+    chunkCount: row.chunkCount,
+    indexedAt: row.indexedAt.toISOString(),
+    summary: row.summary,
+    topics: cleanStringArray(row.topics),
+    source: {
+      kind: normalizeKnowledgeSourceKind(row.sourceKind),
+      uri: row.sourceUri,
+      externalId: row.sourceExternalId,
+      title: row.sourceTitle,
+      author: row.sourceAuthor,
+      createdAt: row.sourceCreatedAt?.toISOString() ?? null,
+      updatedAt: row.sourceUpdatedAt?.toISOString() ?? null,
+      version: row.sourceVersion,
+    },
+    provenance: {
+      ingestionWorkspaceId: row.workspaceId,
+      baseId: row.baseId,
+      fileId: row.fileId,
+      authorityKind: normalizeDocumentAuthorityKind(row.authorityKind),
+      authorityWorkspaceId: row.authorityWorkspaceId,
+      authoritySubjectId: row.authoritySubjectId,
+      createdBy: row.createdBy,
+      createdAt: row.createdAt.toISOString(),
+    },
   };
 }
 

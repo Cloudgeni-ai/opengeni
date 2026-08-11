@@ -25,6 +25,13 @@ outputs and the current shell variable set. The generated Helm values file
 contains non-secret provider wiring; `runtime.env` is intended for a private
 Kubernetes Secret and must not be committed:
 
+For the API, control worker, and turn worker, the chart loads the Helm ConfigMap
+before the selected runtime Secret. If both sources define the same key, the
+protected runtime value is authoritative. This permits reviewed runtime
+provider/model rotations without weakening the application's configured-model
+allow-list; keep the Secret and non-secret Helm defaults intentionally aligned
+for the next ordinary deployment.
+
 ```bash
 terraform -chdir=deploy/terraform/gcp output -json \
   > .agent/generated/gcp-managed/terraform-output.json
@@ -336,6 +343,25 @@ lease-lifecycle table locks, so a missed live application fails with SQLSTATE
 `55000` and leaves the prior schema intact. After 0138 commits, rollback to an
 older application image is forbidden; stop admission and fix forward.
 
+Migration `0197_knowledge_source_sync_schedules.sql` is likewise a
+maintenance-only application and index cutover. A pre-0197 control worker does
+not understand the scheduled-task action discriminator and can route a newly
+created `knowledge_source_sync` task through session/model/billing dispatch.
+The migration also replaces the live Document file-identity index. Therefore:
+
+1. stop the API plus every control and turn worker before running 0197;
+2. prove there are no other `opengeni_app` sessions in `pg_stat_activity`;
+3. run the migration from the exact new image and require 0197 in
+   `schema_migrations`;
+4. start only that same image generation and complete readiness checks before
+   reopening admission.
+
+The migration repeats the application-session guard around exclusive locks on
+the schedule and Document identity tables. A live application rejects the
+cutover with SQLSTATE `55000`; a lock timeout or guard failure rolls back the
+whole migration. After commit, never restart a pre-0197 image or attempt a
+mixed-version rolling rollback—remain in maintenance and fix forward.
+
 For Azure managed Blob storage, the artifact generator can consume the
 sensitive Terraform output `object_storage_azure_connection_string` into the
 private `runtime.env` file. Keep the Terraform output JSON under `.agent/` or
@@ -582,8 +608,12 @@ review state, reviewed head, and submission time:
   single-maintainer PR whose author, exact-head reviewer, and merge actor are
   that same human; it is never a substitute for approving a bot-authored
   Version PR;
-- any base/head update invalidates the prior verdict, and a review submitted
-  after merge is not release evidence.
+- a candidate-head update invalidates a head-bound verdict. For the structured
+  admin-PASS form, changing the explicitly selected `reviewedBaseSha` also
+  requires replacement evidence on the same candidate head. Ordinary protected
+  `main` movement is not itself a candidate update and must not trigger a source
+  merge/rebase; and
+- a review submitted after merge is not release evidence.
 
 Candidate or operator admission must fail closed when those provider identities
 do not match; do not weaken the provenance check or recreate approval from a
@@ -602,23 +632,33 @@ body continue to bind the exact base/head verdict.
 For a single-maintainer source PR, generate the exact structured review body
 before merging. Submit the result as a native `COMMENTED` pull-request review;
 the formatter can also print the canonical SHA-256 needed by an external
-operator to bind the same artifact:
+operator to bind the same artifact. Use the exact provider-retained PR base SHA
+from the pull-request detail (`pull.base.sha`) as `--base`; this is the
+reviewed-base identity that the release verifier reconstructs, not the latest
+SHA currently at the tip of protected `main`:
 
 ```bash
 bun scripts/release-review.ts \
-  --base <exact-current-main-sha> \
+  --base <exact-provider-retained-pull.base.sha> \
   --head <exact-reviewed-pr-head-sha> \
   --reviewer <trusted-maintainer-login>
 
 bun scripts/release-review.ts \
-  --base <exact-current-main-sha> \
+  --base <exact-provider-retained-pull.base.sha> \
   --head <exact-reviewed-pr-head-sha> \
   --reviewer <trusted-maintainer-login> \
   --digest
 ```
 
-Regenerate the body and verdict after every head or base movement. Do not edit a
-submitted review after merge to manufacture evidence retroactively.
+Regenerate the body and verdict when the candidate head or its provider-retained
+`pull.base.sha` (the verifier's exact accepted reviewed-base identity) changes.
+An ordinary protected-`main` advance does not itself change that base-bound
+review artifact. Separately, let the merge authority refresh latest-current-main
+mergeability and material-compatibility evidence on the same candidate head;
+that evidence is not `reviewedBaseSha` and does not require replacing the review
+or mutating the candidate. Do not merge or rebase `main` into the source branch solely to refresh
+evidence, and do not edit a submitted review after merge to manufacture
+evidence retroactively.
 
 GitHub check lookup is ref-sensitive: a checked head can become undiscoverable
 after its source branch is deleted or rewritten even though the check itself
@@ -962,8 +1002,10 @@ Production Docker/Modal references must be digest-pinned; pack, rig, mutable,
 self-hosted, and mismatched images fail closed. The worker runs the absolute
 runtime doctor inside the actual box before the model starts. `bun run dev`
 automatically caches an exact clean-HEAD CI runtime when available, source-tags
-the local image, and otherwise leaves native agent artifact skills disabled
-unless `OPENGENI_REQUIRE_SANDBOX_ARTIFACT_RUNTIME=1` requests a hard failure.
+the local image, and otherwise leaves only standalone sandbox-local Office file
+operations disabled unless `OPENGENI_REQUIRE_SANDBOX_ARTIFACT_RUNTIME=1`
+requests a hard failure. Collaborative artifact skills are independent: the
+worker admits them from the exact frozen first-party tool catalog.
 
 The Connected Machine stream relay is a separate deployed component built from
 the `agent/` Cargo workspace. It is only needed when Connected Machines are
@@ -1526,7 +1568,7 @@ Minimum production dashboards should cover:
 - API traffic: request rate, error rate, and p50/p95/p99 latency by `route`, `method`, `status`, `variable set`, and `component`.
 - Worker execution: activity run rate, failure rate, and p50/p95/p99 `runAgentTurn` duration by `activity`, `status`, `variable set`, and `component`.
 - Turn lifecycle: `opengeni_turns_total{outcome}`, `opengeni_turn_duration_seconds`, `opengeni_turns_inflight`, and `opengeni_turn_oldest_inflight_age_seconds`.
-- Model, Codex, and sandbox SLIs: `opengeni_model_calls_total{provider,outcome}`, `opengeni_model_call_duration_seconds{provider}`, `opengeni_codex_credential_selections_total{strategy,reason}`, `opengeni_codex_credential_failures_total{kind,outcome}`, `opengeni_codex_pool_observations_total{depth}`, `opengeni_codex_pool_low_total{depth}`, `opengeni_sandbox_creates_total{backend,image_source,outcome}`, `opengeni_sandbox_create_duration_seconds{backend,image_source}`, `opengeni_sandbox_operations_total{backend,op,outcome}` (`ok`, expected path `not_found`, or actual `failed`), `opengeni_sandbox_operation_duration_seconds{backend,op}`, `opengeni_sandbox_inventory_refresh_timestamp_seconds{domain}`, the chart's freshness-filtered `opengeni:*:fresh_max` inventory recording rules, `opengeni_sandbox_warming_timeouts_total`, and `opengeni_sandbox_orphans_terminated_total`.
+- Model, Codex, and sandbox SLIs: `opengeni_model_calls_total{provider,outcome}`, `opengeni_model_call_duration_seconds{provider}`, `opengeni_codex_credential_selections_total{strategy,reason}`, `opengeni_codex_credential_failures_total{kind,outcome}`, `opengeni_codex_pool_observations_total{depth}`, `opengeni_codex_pool_low_total{depth}`, `opengeni_sandbox_creates_total{backend,image_source,outcome}`, `opengeni_sandbox_create_duration_seconds{backend,image_source}`, `opengeni_sandbox_operations_total{backend,op,outcome}` (`ok`, expected path `not_found`, or actual `failed`), `opengeni_sandbox_operation_duration_seconds{backend,op}`, `opengeni_sandbox_inventory_refresh_timestamp_seconds{domain}`, the chart's freshness-filtered `opengeni:*:fresh_max` inventory recording rules, `opengeni_sandbox_warming_timeouts_total{backend,stage}`, and `opengeni_sandbox_orphans_terminated_total`.
 - Queue, admission, and billing: `opengeni_turns_queued`, `opengeni_turn_eligible_backlog`, `opengeni_turn_eligible_backlog_oldest_age_seconds`, `opengeni_turn_slot_saturation_ratio`, `opengeni_credit_balance_micros{account_id}`, `opengeni_credit_micros_total{kind}`, and `opengeni_build_info{version,revision}`.
 - Dependency health: Postgres connection health, Temporal worker poll health, NATS connectivity, object-storage write/read conformance, and sandbox backend readiness.
 - Runtime health: API/worker restarts, continuous turn-worker host/cgroup utilization and RSS reserve consumption, node memory/I/O PSI, swap-out activity, kubelet runtime errors, node readiness, pod pending time, collector scrape/export errors, and OTLP export failures.

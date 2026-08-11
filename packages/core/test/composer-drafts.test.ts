@@ -6,7 +6,7 @@ import {
   createDb,
   createSession,
   submitHumanPromptInTransaction,
-  withWorkspaceSubjectRls,
+  withWorkspaceSubjectSessionActivityRls,
   type Database,
   type DbClient,
 } from "@opengeni/db";
@@ -248,26 +248,24 @@ describe("established-session composer drafts", () => {
 
     expect(saved.resources).toEqual(canonicalResources);
     await expect(
-      withWorkspaceSubjectRls(db, workspaceId, grant.subjectId, (scoped) =>
-        scoped.transaction((tx) =>
-          submitHumanPromptInTransaction(tx as unknown as Database, {
-            accountId: grant.accountId,
-            workspaceId,
-            sessionId: session.id,
-            subjectId: grant.subjectId,
-            actor: { type: "human", subjectId: grant.subjectId },
-            operationKey: crypto.randomUUID(),
-            delivery: "send",
-            expectedDraftRevision: saved.revision,
-            text: saved.text,
-            resources: canonicalResources,
-            model: saved.model,
-            reasoningEffort: saved.reasoningEffort,
-            latencyMode: saved.latencyMode,
-            reasoningEffortFallback: "medium",
-            source: "user",
-          }),
-        ),
+      withWorkspaceSubjectSessionActivityRls(db, workspaceId, grant.subjectId, (scoped) =>
+        submitHumanPromptInTransaction(scoped, {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId: session.id,
+          subjectId: grant.subjectId,
+          actor: { type: "human", subjectId: grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          expectedDraftRevision: saved.revision,
+          text: saved.text,
+          resources: canonicalResources,
+          model: saved.model,
+          reasoningEffort: saved.reasoningEffort,
+          latencyMode: saved.latencyMode,
+          reasoningEffortFallback: "medium",
+          source: "user",
+        }),
       ),
     ).resolves.toMatchObject({ replay: false });
   }, 180_000);

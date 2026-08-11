@@ -1,5 +1,54 @@
 # @opengeni/runtime
 
+## 0.19.1
+
+### Patch Changes
+
+- 8b6803a: Make Modal sandbox recovery command-ready and accurately diagnosed, use workspace-only snapshots for new sessions, enforce checkpoint cadence, and publish cached rig images only after an independent cold boot.
+- Updated dependencies [87e9ae6]
+- Updated dependencies [8b6803a]
+- Updated dependencies [aeb07f4]
+- Updated dependencies [ff7203c]
+  - @opengeni/config@0.13.1
+  - @opengeni/contracts@0.44.0
+  - @opengeni/sdk@0.52.0
+  - @opengeni/codemode@0.2.1
+
+## 0.19.0
+
+### Minor Changes
+
+- dcfe6eb: Add canonical attempt-scoped CodeMode, browser and computer interaction, and durable collaborative editable artifacts. Agents and humans now share one artifact head through the same application authority; direct MCP and CodeMode support bounded inspection, fenced edits, trusted Office import, and asynchronous export to workspace files. The session UI gains a first-class Artifacts workspace, and React interaction viewers move to an explicit lazy-loadable subpath.
+
+### Patch Changes
+
+- 2f4ce5e: Add durable Seedance video generation with workspace model and funding policy,
+  secure media references, retained video artifacts, sandbox materialization,
+  OpenGeni-credit and workspace-gateway funding, and SDK/React playback surfaces.
+- cccc2b3: Split the package-private model-provider implementation into acyclic client,
+  error, request-policy, routing, and transport modules while preserving the
+  existing public runtime surface and provider behavior.
+- 96965c2: Retain explicit image-tool outputs before they enter live agent history, preventing inline image bytes from reaching durable session history during SDK event/state ordering skew.
+- a8e44ae: Extract provider client construction, request policy, and model routing into a package-private runtime module while preserving the existing public entrypoint and exports.
+- eade67f: Allow Modal cold filesystem-snapshot restores up to 60 seconds to become command-ready before failing lease warm-up.
+- Updated dependencies [b46f4de]
+- Updated dependencies [2f4ce5e]
+- Updated dependencies [d55a093]
+- Updated dependencies [dcfe6eb]
+- Updated dependencies [ad9123b]
+- Updated dependencies [31666e2]
+- Updated dependencies [bd5514e]
+- Updated dependencies [90eea29]
+- Updated dependencies [a858835]
+- Updated dependencies [5fcad0a]
+  - @opengeni/contracts@0.43.0
+  - @opengeni/sdk@0.51.0
+  - @opengeni/config@0.13.0
+  - @opengeni/network@0.2.2
+  - @opengeni/agent-proto@0.4.0
+  - @opengeni/codemode@0.2.0
+  - @opengeni/codex@0.2.15
+
 ## 0.18.39
 
 ### Patch Changes

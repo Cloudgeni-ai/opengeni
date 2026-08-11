@@ -21,7 +21,14 @@ import {
   type UserMessageItem,
 } from "@opengeni/react/session";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { CheckIcon, Loader2Icon, MenuIcon, MessagesSquareIcon, XIcon } from "lucide-react";
+import {
+  CheckIcon,
+  Loader2Icon,
+  MenuIcon,
+  MessagesSquareIcon,
+  PanelsTopLeftIcon,
+  XIcon,
+} from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -29,6 +36,10 @@ import { isApiErrorStatus } from "@/api";
 import { ConsoleComposer } from "@/components/Composer";
 import { ComposerMobilePlus } from "@/components/composer-mobile-plus";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
+import {
+  FollowUpRepositoryMenuBody,
+  FollowUpRepositoryPicker,
+} from "@/components/follow-up-repository-picker";
 import { MarkdownText } from "@/components/markdown";
 import { ModelPicker, SessionToolPicker, type SessionToolSelection } from "@/components/pickers";
 import {
@@ -45,7 +56,12 @@ import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Notice } from "@/components/ui/notice";
 import type { WorkspaceTab } from "@opengeni/react";
+import type { EditableArtifactResource } from "@opengeni/sdk/artifacts";
 import { useAppContext } from "@/context";
+import type {
+  SessionEditableArtifactSummary,
+  SessionEditableArtifactsStatus,
+} from "@/components/session/editable-artifacts-workspace";
 import {
   normalizeProviderDomain,
   oauthConnectionOwnership,
@@ -69,12 +85,14 @@ import { resolveSessionComposerModel } from "@/lib/session-model";
 import { mergeSessionContextProjection } from "@/lib/session-pins";
 import { createWorkspaceRetainedArtifactLoader } from "@/lib/retained-artifact-loader";
 import { createSessionRetainedScreenshotLoader } from "@/lib/retained-screenshot-loader";
+import { createWorkspaceRetainedVideoLoader } from "@/lib/retained-video-loader";
 import {
   firstPartySessionToolOptions,
   isIntelligenceEffort,
   sessionPolicyPickerIds,
   toolsForPolicySelection,
 } from "@/lib/session-tools";
+import { useFollowUpRepositories } from "@/lib/use-follow-up-repositories";
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 import type { ComposerDraft, LineageNode, SessionRealtimeModel } from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
@@ -83,6 +101,14 @@ const LazySessionInspector = lazy(() =>
   import("@/components/session/inspector").then(({ SessionInspector }) => ({
     default: SessionInspector,
   })),
+);
+
+const LazySessionEditableArtifactsWorkspace = lazy(() =>
+  import("@/components/session/editable-artifacts-workspace").then(
+    ({ SessionEditableArtifactsWorkspace }) => ({
+      default: SessionEditableArtifactsWorkspace,
+    }),
+  ),
 );
 
 const LazyCodexRealtimeControl = lazy(() =>
@@ -592,25 +618,74 @@ function SessionDock(props: {
   onOpenNavigation: () => void;
 }) {
   // The workbench (Changes | Files | Terminal | Desktop + machine chip) lives in
-  // the package now; the app injects Debug around it. Agents remain in the one
-  // compact composer-adjacent surface.
-  const trailingTabs: WorkspaceTab[] = props.session
-    ? [
-        {
-          id: "debug",
-          label: "Debug",
-          content: (
-            <Suspense fallback={<LoadingPanel label="Opening debug inspector" />}>
-              <LazySessionInspector
-                session={props.session}
-                events={props.events}
-                connectionState={props.connectionState}
-              />
-            </Suspense>
-          ),
-        },
-      ]
-    : [];
+  // the package now; the app injects durable artifacts and Debug around it.
+  // Heavy editor/runtime code stays lazy until the user opens the tab.
+  const artifactRefreshSequence = useMemo(() => {
+    for (let index = props.events.length - 1; index >= 0; index -= 1) {
+      const event = props.events[index];
+      if (
+        event &&
+        (event.type === "agent.toolCall.output" ||
+          event.type === "turn.completed" ||
+          event.type === "turn.failed" ||
+          event.type === "turn.cancelled")
+      ) {
+        return event.sequence;
+      }
+    }
+    return 0;
+  }, [props.events]);
+  const artifactState = useSessionEditableArtifactSummaries({
+    workspaceId: props.workspaceId,
+    sessionId: props.sessionId,
+    refreshSequence: artifactRefreshSequence,
+  });
+  const artifactSummaries = artifactState.artifacts;
+  const trailingTabs: WorkspaceTab[] = [
+    {
+      id: "artifacts",
+      label: (
+        <span className="inline-flex items-center gap-1.5">
+          <PanelsTopLeftIcon className="size-3.5" aria-hidden />
+          <span>Artifacts</span>
+        </span>
+      ),
+      ...(artifactSummaries.length > 0
+        ? {
+            badge: (
+              <span className="rounded-og-xs bg-og-accent-soft px-1 text-og-xs text-og-fg-muted">
+                {artifactSummaries.length}
+              </span>
+            ),
+          }
+        : {}),
+      content: (
+        <Suspense fallback={<LoadingPanel label="Opening artifact" />}>
+          <LazySessionEditableArtifactsWorkspace
+            workspaceId={props.workspaceId}
+            artifacts={artifactSummaries}
+            status={artifactState.status}
+            onRetry={artifactState.retry}
+          />
+        </Suspense>
+      ),
+    },
+  ];
+  if (props.session) {
+    trailingTabs.push({
+      id: "debug",
+      label: "Debug",
+      content: (
+        <Suspense fallback={<LoadingPanel label="Opening debug inspector" />}>
+          <LazySessionInspector
+            session={props.session}
+            events={props.events}
+            connectionState={props.connectionState}
+          />
+        </Suspense>
+      ),
+    });
+  }
 
   return (
     <SessionWorkspace
@@ -635,6 +710,73 @@ function SessionDock(props: {
       }
     />
   );
+}
+
+function useSessionEditableArtifactSummaries(input: {
+  workspaceId: string;
+  sessionId: string;
+  refreshSequence: number;
+}): Readonly<{
+  artifacts: readonly SessionEditableArtifactSummary[];
+  status: SessionEditableArtifactsStatus;
+  retry: () => void;
+}> {
+  const context = useAppContext();
+  const authorityKey = `${input.workspaceId}:${input.sessionId}:${context.accessKeyVersion}`;
+  const [retrySequence, setRetrySequence] = useState(0);
+  const [loaded, setLoaded] = useState<{
+    key: string;
+    status: SessionEditableArtifactsStatus;
+    artifacts: readonly EditableArtifactResource[];
+  } | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let current = true;
+    setLoaded((previous) =>
+      previous?.key === authorityKey && previous.status === "ready"
+        ? previous
+        : {
+            key: authorityKey,
+            status: "loading",
+            artifacts: previous?.key === authorityKey ? previous.artifacts : [],
+          },
+    );
+    void Promise.all([
+      import("@/lib/editable-artifact-client"),
+      import("@/lib/editable-artifact-browser"),
+    ])
+      .then(async ([{ editableArtifactClient }, { createConsoleEditableArtifactReplicaId }]) => {
+        const result = await editableArtifactClient.listSessionEditableArtifacts(
+          input.workspaceId,
+          input.sessionId,
+          {
+            replicaId: createConsoleEditableArtifactReplicaId(),
+            signal: controller.signal,
+          },
+        );
+        if (current) {
+          setLoaded({ key: authorityKey, status: "ready", artifacts: result.artifacts });
+        }
+      })
+      .catch(() => {
+        if (!current || controller.signal.aborted) return;
+        setLoaded((previous) => ({
+          key: authorityKey,
+          status: "error",
+          artifacts: previous?.key === authorityKey ? previous.artifacts : [],
+        }));
+      });
+    return () => {
+      current = false;
+      controller.abort();
+    };
+  }, [authorityKey, input.refreshSequence, input.sessionId, input.workspaceId, retrySequence]);
+
+  const retry = useCallback(() => setRetrySequence((value) => value + 1), []);
+  return loaded?.key === authorityKey
+    ? { artifacts: loaded.artifacts, status: loaded.status, retry }
+    : { artifacts: [], status: "loading", retry };
 }
 
 function SessionChatPane(props: {
@@ -690,6 +832,10 @@ function SessionChatPane(props: {
   );
   const loadRetainedArtifact = useMemo(
     () => createWorkspaceRetainedArtifactLoader(context.client, props.session.workspaceId),
+    [context.client, props.session.workspaceId],
+  );
+  const loadVideoArtifactPlayback = useMemo(
+    () => createWorkspaceRetainedVideoLoader(context.client, props.session.workspaceId),
     [context.client, props.session.workspaceId],
   );
   const terminal = isTerminalSessionStatus(props.session.status);
@@ -769,6 +915,7 @@ function SessionChatPane(props: {
   // Workspace-scoped: the provider (mounted on the workspace route) supplies
   // the workspaceId, so the hook needs no positional argument.
   const attachments = useFileAttachments();
+  const repositories = useFollowUpRepositories(props.session);
   const { effortForSession, latencyMode } = context;
   const selectableSessionMcpServers = context.toolMcpServers;
   const selectableToolIds = useMemo(
@@ -1015,24 +1162,60 @@ function SessionChatPane(props: {
     events: props.events,
     sendExtras: () => {
       return {
-        resources: attachments.readyResources,
+        resources: [...attachments.readyResources, ...repositories.pendingResources],
         model,
         reasoningEffort,
         latencyMode,
       };
     },
-    sendBlocked: () => attachments.hasUnresolved,
+    sendBlocked: () => attachments.hasUnresolved || repositories.error !== null,
     effectiveControl: props.queue.effectiveControl ?? props.session.effectiveControl,
     onDraftApplied: applyComposerSettings,
-    // Clear only files included in the accepted wire input. A file added while
-    // sendMessage is in flight belongs to the next message and must survive.
-    onSent: (_text, input) =>
+    // Ordinary Send is acknowledged locally. Clear only resources captured in
+    // that immutable optimistic operation; later additions belong to the next
+    // draft, while retry keeps the original resource refs in the failed bubble.
+    onSubmitted: (_text, input) => {
       attachments.removeReadyFiles(
         (input.resources ?? []).flatMap((resource) =>
           resource.kind === "file" ? [resource.fileId] : [],
         ),
-      ),
+      );
+      repositories.commitSent(input.resources ?? []);
+    },
   });
+  const timelineWithOptimisticSends = useMemo<TimelineItem[]>(() => {
+    const acceptedClientEventIds = new Set(
+      props.events
+        .filter((event) => event.type === "user.message" && event.clientEventId)
+        .map((event) => event.clientEventId as string),
+    );
+    const optimisticItems: UserMessageItem[] = (composer.optimisticMessages ?? [])
+      .filter((message) => !acceptedClientEventIds.has(message.clientEventId))
+      .map((message) => ({
+        kind: "user-message",
+        id: `optimistic:${message.clientEventId}`,
+        text: message.text,
+        annotations: message.annotations.map((annotation, ordinal) => ({
+          ...annotation,
+          ordinal,
+        })),
+        resources: message.resources,
+        tools: [],
+        occurredAt: message.occurredAt,
+        delivery: {
+          state: message.state,
+          ...(message.error ? { error: message.error } : {}),
+          ...(message.state === "failed"
+            ? {
+                onRetry: () => composer.retryOptimisticMessage?.(message.clientEventId),
+                onRemove: () => composer.removeOptimisticMessage?.(message.clientEventId),
+              }
+            : {}),
+        },
+      }));
+    return [...props.timeline, ...optimisticItems];
+  }, [composer, props.events, props.timeline]);
+  const repositoryPickerProps = repositories.pickerProps(terminal || composer.sending);
 
   // Slash-command palette context: the operator controls (/goal, /clear,
   // /compact, /help) act on THIS session. Permissions come from the workspace
@@ -1076,7 +1259,10 @@ function SessionChatPane(props: {
   );
 
   return (
-    <section className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
+    <section
+      data-workspace-scroll-owner="self-managed"
+      className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden"
+    >
       {terminal ? (
         <div className="mx-auto w-full max-w-3xl px-4 pt-6 sm:px-6">
           <TerminalSessionBanner session={props.session} onNewSession={props.onNewSession} />
@@ -1101,7 +1287,7 @@ function SessionChatPane(props: {
           <div data-testid="session-timeline" className="min-h-0 min-w-0 flex-1">
             <MessageTimeline
               className="h-full"
-              items={props.timeline}
+              items={timelineWithOptimisticSends}
               status={props.session.status}
               computeLabel={computeLabel}
               renderMessageText={renderMessageText}
@@ -1112,6 +1298,7 @@ function SessionChatPane(props: {
               resolveProviderLogo={props.resolveProviderLogo}
               loadRetainedScreenshot={loadRetainedScreenshot}
               loadRetainedArtifact={loadRetainedArtifact}
+              loadVideoArtifactPlayback={loadVideoArtifactPlayback}
               hasOlder={props.hasOlder}
               loadingOlder={props.loadingOlder}
               onLoadOlder={() => void props.onLoadOlder()}
@@ -1275,6 +1462,11 @@ function SessionChatPane(props: {
                   composer.sending || terminal || durableToolsSaving || !durableToolsHydrated
                 }
                 onToolSelectionChange={(next) => void saveDurableToolPolicy(next)}
+                repositories={{
+                  selectedCount: repositories.selectionCount,
+                  disabled: terminal || composer.sending,
+                  panel: <FollowUpRepositoryMenuBody {...repositoryPickerProps} />,
+                }}
               />
             }
             actions={
@@ -1347,6 +1539,10 @@ function SessionChatPane(props: {
                   }
                   saving={durableToolsSaving}
                   onChange={(next) => void saveDurableToolPolicy(next)}
+                />
+                <FollowUpRepositoryPicker
+                  {...repositoryPickerProps}
+                  triggerClassName="max-sm:hidden"
                 />
                 {durableToolsError ? (
                   <span className="sr-only" role="alert">

@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/contracts",
-  "version": "0.42.1",
+  "version": "0.44.0",
   "description": "Shared zod schemas and wire-contract types for the OpenGeni API.",
   "license": "Apache-2.0",
   "repository": {
@@ -30,9 +30,17 @@
       "types": "./src/google-drive.ts",
       "default": "./src/google-drive.ts"
     },
+    "./atlassian": {
+      "types": "./src/atlassian.ts",
+      "default": "./src/atlassian.ts"
+    },
     "./connector-destinations": {
       "types": "./src/connector-destinations.ts",
       "default": "./src/connector-destinations.ts"
+    },
+    "./video-generation": {
+      "types": "./src/video-generation.ts",
+      "default": "./src/video-generation.ts"
     },
     "./editable-artifacts": {
       "types": "./src/editable-artifacts.ts",
@@ -61,14 +69,6 @@
     "./editable-artifact-versions": {
       "types": "./src/editable-artifact-versions.ts",
       "default": "./src/editable-artifact-versions.ts"
-    },
-    "./editable-artifact-publication": {
-      "types": "./src/editable-artifact-publication.ts",
-      "default": "./src/editable-artifact-publication.ts"
-    },
-    "./editable-artifact-publication-receipt": {
-      "types": "./src/editable-artifact-publication-receipt.ts",
-      "default": "./src/editable-artifact-publication-receipt.ts"
     },
     "./spreadsheet-artifact-commands": {
       "types": "./src/spreadsheet-artifact-commands.ts",
