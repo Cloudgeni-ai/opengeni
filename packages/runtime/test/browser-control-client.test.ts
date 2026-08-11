@@ -741,6 +741,46 @@ describe("BrowserControlClient", () => {
     }
   });
 
+  test("uses the SDK execCommand banner and writeStdin surface when exec is unavailable", async () => {
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        if (request.headers.get("authorization") !== `Bearer ${adminToken}`) {
+          return failure(401, "permission_denied", "no authority");
+        }
+        const body = (await request.json()) as { origins: string[] };
+        return success({ origins: body.origins });
+      },
+    });
+    const placement = await localPlacement({
+      confinePrivateReads: true,
+      fakeControllerStartup: true,
+      streamWrites: true,
+    });
+    const exec = placement.session.exec!;
+    const writeStdin = placement.session.writeStdin!;
+    placement.session.execCommand = async (args) => execBanner(await exec(args));
+    placement.session.writeStdin = async (args) =>
+      execBanner({ output: await writeStdin(args), exitCode: 0 });
+    delete placement.session.exec;
+    const tokenFile = join(placement.root, "exec-command-authority", "admin-token");
+    try {
+      await provisionBrowserControlClient(placement.session, {
+        adminToken,
+        adminTokenFile: tokenFile,
+        allowedOrigins: ["https://app.opengeni.test"],
+        port: server.port,
+      });
+
+      expect(placement.session.exec).toBeUndefined();
+      expect((await readFile(tokenFile, "utf8")).trim()).toBe(adminToken);
+      expect(placement.stdinWrites.length).toBeGreaterThanOrEqual(2);
+      expect(placement.commands.every((command) => !command.includes(adminToken))).toBe(true);
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("uses agent-supervised sidecar and typed browser relay on connected machines", async () => {
     const ensured: unknown[] = [];
     const opened: unknown[] = [];
@@ -861,6 +901,30 @@ describe("BrowserControlClient", () => {
     ]);
   });
 });
+
+function execBanner(result: {
+  output?: string;
+  stdout?: string;
+  stderr?: string;
+  exitCode?: number | null;
+  sessionId?: number;
+}): string {
+  const output =
+    result.output ??
+    [result.stdout, result.stderr]
+      .filter((value): value is string => typeof value === "string")
+      .join("\n");
+  return [
+    "Chunk ID: fixture",
+    result.sessionId === undefined
+      ? `Process exited with code ${result.exitCode ?? 0}`
+      : `Process running with session ID ${result.sessionId}`,
+    "Wall time: 0.1 seconds",
+    "Process output:",
+    "Output:",
+    output,
+  ].join("\n");
+}
 
 async function localPlacement(
   options: {

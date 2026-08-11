@@ -1783,7 +1783,8 @@ function requirePlacementRequestSurface(session: BrowserControlPlacementSession)
   const hasPrivateWrite =
     typeof session.writePlacementPrivate === "function" ||
     typeof session.writeFile === "function" ||
-    (typeof session.exec === "function" && typeof session.writeStdin === "function");
+    ((typeof session.exec === "function" || typeof session.execCommand === "function") &&
+      typeof session.writeStdin === "function");
   if (
     (typeof session.exec !== "function" && typeof session.execCommand !== "function") ||
     !hasPrivateWrite
@@ -1811,7 +1812,7 @@ async function writePrivateFile(
     await session.writeFile(input);
     return;
   }
-  if (!session.exec || !session.writeStdin) {
+  if ((!session.exec && !session.execCommand) || !session.writeStdin) {
     throw new BrowserControlUnsupportedError("browser placement has no private file transport");
   }
   const path = absolutePrivatePath(input.path, "browser private file path");
@@ -1851,22 +1852,33 @@ async function writePrivateFile(
     `chmod 0600 -- ${shellQuote(path)};`,
     `printf '%s\n' ${shellQuote(COMMAND_OK)}`,
   ].join(" ");
-  const started = await session.exec({
-    cmd: command,
-    yieldTimeMs: 250,
-    maxOutputTokens: 2_000,
-  });
-  if (
-    typeof started === "string" ||
-    !Number.isSafeInteger(started.sessionId) ||
-    (started.sessionId ?? 0) < 1
-  ) {
+  const started = session.exec
+    ? await session.exec({
+        cmd: command,
+        yieldTimeMs: 250,
+        maxOutputTokens: 2_000,
+      })
+    : await session.execCommand!({
+        cmd: command,
+        yieldTimeMs: 250,
+        maxOutputTokens: 2_000,
+      });
+  const startedSessionId =
+    typeof started === "string"
+      ? (() => {
+          const banner = parseExecResponseBanner(started);
+          return banner.kind === "running" ? banner.sessionId : null;
+        })()
+      : Number.isSafeInteger(started.sessionId) && (started.sessionId ?? -1) >= 0
+        ? started.sessionId!
+        : null;
+  if (startedSessionId === null) {
     throw new BrowserControlTransportError(
       "browser private file transport did not yield an input session",
     );
   }
   const output = await session.writeStdin({
-    sessionId: started.sessionId!,
+    sessionId: startedSessionId,
     chars: payload,
     yieldTimeMs: boundedTimeout(timeoutMs),
     maxOutputTokens: 2_000,

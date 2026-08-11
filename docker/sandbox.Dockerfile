@@ -15,11 +15,10 @@ ADD --checksum=sha256:8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb
 
 FROM oven/bun:1.3.14 AS bun-runtime
 
-FROM --platform=$BUILDPLATFORM oven/bun:1.3.14 AS browserd-build
+FROM --platform=$BUILDPLATFORM oven/bun:1.3.14 AS browserd-source-build
 
 WORKDIR /src
 COPY . .
-COPY --from=lightpanda-assets / /lightpanda-assets/
 RUN bun install --frozen-lockfile
 
 # Install the exact lock-resolved Codemode package closure for ordinary Bun
@@ -45,8 +44,14 @@ RUN set -eux; \
 
 RUN cd packages/ogtool && bun run build
 
+FROM oven/bun:1.3.14 AS browserd-build
+
+WORKDIR /src
+COPY --from=browserd-source-build /src /src
+COPY --from=browserd-source-build /out/codemode-runtime /out/codemode-runtime
+COPY --from=lightpanda-assets / /lightpanda-assets/
+
 ARG TARGETARCH
-COPY --from=bun-runtime /usr/local/bin/bun /tmp/opengeni-target-bun
 RUN set -eux; \
     arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
     case "$arch" in \
@@ -55,7 +60,7 @@ RUN set -eux; \
       *) echo "unsupported browser controller architecture=${arch}" >&2; exit 1 ;; \
     esac; \
     mkdir -p /out; \
-    bun build --compile --compile-executable-path=/tmp/opengeni-target-bun \
+    bun build --compile \
       packages/browserd/src/main.ts \
       --outfile /out/opengeni-browserd; \
     chmod 0755 /out/opengeni-browserd; \
