@@ -360,6 +360,11 @@ async function main(): Promise<void> {
     if (observation.target.title !== "OpenGeni Interaction Acceptance") {
       throw new Error(`browser fixture title is ${JSON.stringify(observation.target.title)}`);
     }
+    for (let index = 1; index < args.iterations; index += 1) {
+      started = performance.now();
+      observation = await browser.observe(target.id);
+      record("browserObserve", performance.now() - started);
+    }
     checks.push("browser.semantic-observation");
 
     started = performance.now();
@@ -412,6 +417,50 @@ async function main(): Promise<void> {
       }
     }
 
+    const browserClipboardMarker = `BROWSER_PASTE_${crypto.randomUUID().slice(0, 8)}`;
+    let browserClipboardReceipt = await browser.act({
+      operationId: crypto.randomUUID(),
+      targetId: observation.target.id,
+      expectedTargetGeneration: observation.target.targetGeneration,
+      expectedDocumentGeneration: observation.target.documentGeneration,
+      expectedFrameId: observation.frameId,
+      action: {
+        type: "clipboard",
+        operation: "write",
+        text: browserClipboardMarker,
+      },
+    });
+    if (browserClipboardReceipt.state !== "completed" || !browserClipboardReceipt.observation) {
+      throw new Error(`browser clipboard write settled as ${browserClipboardReceipt.state}`);
+    }
+    observation = browserClipboardReceipt.observation;
+    const browserClipboard = await browser.clipboard.read();
+    if (browserClipboard.text !== browserClipboardMarker) {
+      throw new Error("browser clipboard read did not match the exact written value");
+    }
+    started = performance.now();
+    browserClipboardReceipt = await browser.act({
+      operationId: crypto.randomUUID(),
+      targetId: observation.target.id,
+      expectedTargetGeneration: observation.target.targetGeneration,
+      expectedDocumentGeneration: observation.target.documentGeneration,
+      expectedFrameId: observation.frameId,
+      action: {
+        type: "clipboard",
+        operation: "paste",
+        locator: { kind: "css", selector: "#acceptance-input" },
+      },
+    });
+    const browserClipboardAcknowledged = performance.now();
+    if (browserClipboardReceipt.state !== "completed" || !browserClipboardReceipt.observation) {
+      throw new Error(`browser clipboard paste settled as ${browserClipboardReceipt.state}`);
+    }
+    browserFrame = await browserProbe.nextChangedAfter(browserFrame);
+    record("browserActionAcknowledged", browserClipboardAcknowledged - started);
+    record("browserActionVisible", performance.now() - started);
+    observation = browserClipboardReceipt.observation;
+    checks.push("browser.clipboard-roundtrip-visible");
+
     started = performance.now();
     browserProbe.close();
     browserProbe = await FrameProbe.browser(
@@ -442,8 +491,13 @@ async function main(): Promise<void> {
         targets.targets.find((candidate) => candidate.kind === "screen") ?? computerTarget;
       if (!computerTarget || !frameTarget) throw new Error("computer opened without a target");
       started = performance.now();
-      const computerObservation = await computer.observe(computerTarget.id);
+      let computerObservation = await computer.observe(computerTarget.id);
       record("computerObserve", performance.now() - started);
+      for (let index = 1; index < args.iterations; index += 1) {
+        started = performance.now();
+        computerObservation = await computer.observe(computerTarget.id);
+        record("computerObserve", performance.now() - started);
+      }
       const inputNode = findSemanticNode(computerObservation.semantic, (node) => {
         return (
           node.role === "entry" &&
@@ -512,6 +566,75 @@ async function main(): Promise<void> {
       }
       checks.push("computer.keyboard-visible");
 
+      const clipboardMarker = `NATIVE_PASTE_${crypto.randomUUID().slice(0, 8)}_Ω`;
+      let currentObservation = computerReceipt.observation ?? controlObservation;
+      const clipboardWriteReceipt = await computer.act({
+        operationId: crypto.randomUUID(),
+        targetId: currentObservation.target.id,
+        expectedTargetGeneration: currentObservation.target.targetGeneration,
+        expectedObservationId: currentObservation.observationId,
+        expectedFrameId: null,
+        action: { type: "clipboard", operation: "write", text: clipboardMarker },
+      });
+      if (clipboardWriteReceipt.state !== "completed") {
+        throw new Error(
+          `computer clipboard write settled as ${clipboardWriteReceipt.state}: ${JSON.stringify(clipboardWriteReceipt.error)}`,
+        );
+      }
+      currentObservation = clipboardWriteReceipt.observation ?? currentObservation;
+      const nativeClipboard = await computer.clipboard.read();
+      if (nativeClipboard.text !== clipboardMarker || nativeClipboard.truncated) {
+        throw new Error("computer clipboard read did not match the exact written value");
+      }
+      const selectReceipt = await computer.act({
+        operationId: crypto.randomUUID(),
+        targetId: currentObservation.target.id,
+        expectedTargetGeneration: currentObservation.target.targetGeneration,
+        expectedObservationId: currentObservation.observationId,
+        expectedFrameId: null,
+        action: { type: "keyboard", action: "press", value: "Control+a" },
+      });
+      if (selectReceipt.state !== "completed") {
+        throw new Error(`computer select-all settled as ${selectReceipt.state}`);
+      }
+      currentObservation = selectReceipt.observation ?? currentObservation;
+      started = performance.now();
+      const pasteReceipt = await computer.act({
+        operationId: crypto.randomUUID(),
+        targetId: currentObservation.target.id,
+        expectedTargetGeneration: currentObservation.target.targetGeneration,
+        expectedObservationId: currentObservation.observationId,
+        expectedFrameId: null,
+        action: { type: "clipboard", operation: "paste" },
+      });
+      const pasteAcknowledged = performance.now();
+      if (pasteReceipt.state !== "completed") {
+        throw new Error(
+          `computer clipboard paste settled as ${pasteReceipt.state}: ${JSON.stringify(pasteReceipt.error)}`,
+        );
+      }
+      const [nextComputerFrame, clipboardObservation] = await Promise.all([
+        computerProbe.nextChangedAfter(computerFrame),
+        waitForSemanticValue(
+          // The native screen action and the BrowserSession control the same
+          // linked Chromium. Browser DOM semantics give an exact content proof
+          // even when the large AT-SPI tree intentionally omits expensive text
+          // values from its compact observation.
+          () => browser!.observe(observation.target.id),
+          clipboardMarker,
+          2_000,
+        ),
+      ]);
+      computerFrame = nextComputerFrame;
+      record("computerActionAcknowledged", pasteAcknowledged - started);
+      record("computerActionVisible", performance.now() - started);
+      if (!semanticContainsValue(clipboardObservation.semantic, clipboardMarker)) {
+        throw new Error(
+          `computer semantic state did not converge to the pasted clipboard value: ${JSON.stringify(semanticEntrySummary(clipboardObservation.semantic))}`,
+        );
+      }
+      checks.push("computer.clipboard-roundtrip-visible");
+
       started = performance.now();
       computerProbe.close();
       computerProbe = await FrameProbe.computer(
@@ -546,6 +669,9 @@ async function main(): Promise<void> {
       computer = null;
     }
 
+    process.stderr.write(
+      `${JSON.stringify({ measurements: Object.fromEntries([...raw].map(([metric, samples]) => [metric, measurement(samples)])) })}\n`,
+    );
     for (const [metric, samples] of raw) assertBudget(metric, samples);
     checks.push("latency.budgets");
 
@@ -713,6 +839,81 @@ function findSemanticNode(
     pending.unshift(...(node.children ?? []));
   }
   throw new Error("computer semantic observation did not expose the acceptance input");
+}
+
+function semanticContainsValue(
+  semantic:
+    | {
+        kind: string;
+        roots?: InteractionSemanticNode[];
+        changed?: InteractionSemanticNode[];
+      }
+    | null,
+  value: string,
+): boolean {
+  const pending =
+    semantic?.kind === "snapshot"
+      ? [...(semantic.roots ?? [])]
+      : semantic?.kind === "diff"
+        ? [...(semantic.changed ?? [])]
+        : [];
+  while (pending.length > 0) {
+    const node = pending.shift()!;
+    if (
+      (typeof node.value === "string" && node.value.includes(value)) ||
+      node.name?.includes(value) ||
+      node.description?.includes(value)
+    ) {
+      return true;
+    }
+    pending.unshift(...(node.children ?? []));
+  }
+  return false;
+}
+
+function semanticEntrySummary(
+  semantic:
+    | {
+        kind: string;
+        roots?: InteractionSemanticNode[];
+        changed?: InteractionSemanticNode[];
+      }
+    | null,
+): Array<{ role: string; name: string | null; value: string | null }> {
+  const pending =
+    semantic?.kind === "snapshot"
+      ? [...(semantic.roots ?? [])]
+      : semantic?.kind === "diff"
+        ? [...(semantic.changed ?? [])]
+        : [];
+  const entries: Array<{ role: string; name: string | null; value: string | null }> = [];
+  while (pending.length > 0 && entries.length < 12) {
+    const node = pending.shift()!;
+    if (node.role === "textbox" || node.role === "entry") {
+      entries.push({
+        role: node.role,
+        name: node.name?.slice(0, 160) ?? null,
+        value: typeof node.value === "string" ? node.value.slice(0, 160) : null,
+      });
+    }
+    pending.unshift(...(node.children ?? []));
+  }
+  return entries;
+}
+
+async function waitForSemanticValue<T extends { semantic: Parameters<typeof semanticContainsValue>[0] }>(
+  observe: () => Promise<T>,
+  value: string,
+  timeoutMs: number,
+): Promise<T> {
+  const deadline = performance.now() + timeoutMs;
+  let latest = await observe();
+  while (!semanticContainsValue(latest.semantic, value)) {
+    if (performance.now() >= deadline) return latest;
+    await Bun.sleep(25);
+    latest = await observe();
+  }
+  return latest;
 }
 
 function relayDatagram(tag: number, body: Uint8Array): ArrayBuffer {

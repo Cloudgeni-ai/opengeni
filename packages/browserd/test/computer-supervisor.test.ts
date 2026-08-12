@@ -46,6 +46,7 @@ describe("ComputerSupervisor", () => {
         displayId: ":101",
       });
       expect(supervisor.listSessions()).toHaveLength(1);
+      expect(drivers[0]?.listTargetCalls).toBe(1);
       const environment = supervisor.launchEnvironment(options());
       expect(environment).toMatchObject({ PATH: process.env.PATH ?? "/usr/bin" });
       environment.DISPLAY = ":mutated";
@@ -124,6 +125,7 @@ class FixtureComputerDriver implements ComputerSupervisorDriver {
     parallelApps: true,
   };
   dispatches = 0;
+  listTargetCalls = 0;
 
   constructor(
     private readonly sessionId: string,
@@ -131,6 +133,7 @@ class FixtureComputerDriver implements ComputerSupervisorDriver {
   ) {}
 
   async listTargets(): Promise<ComputerTarget[]> {
+    this.listTargetCalls += 1;
     return [this.targetValue()];
   }
 

@@ -80,6 +80,7 @@ import {
   deriveComputerSessionControllerTokens,
   deriveComputerViewGrantToken,
 } from "../browser-controller-authority";
+import { withCachedController } from "../controller-data-plane";
 import { allowedCorsOrigin } from "../http/cors";
 import { observeComputerActionResult, observeLifecycleResult } from "../interaction-metrics";
 import { withChannelA, withChannelARead, type ChannelAOperation } from "../sandbox/channel-a";
@@ -196,6 +197,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
             request.operationId,
             placement.placementInstanceId,
           );
+          const preparedSession = prepared.session;
           const controllerGeneration = requireOperationGeneration(record);
           const adminToken = deriveBrowserControllerAdminToken({
             rootSecret: authority,
@@ -216,17 +218,20 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
           });
           let physical;
           try {
-            const { client } = await provisionBrowserControlClient(placement.session, {
+            physical = await withComputerCreationController(
+              grant,
+              workspaceId,
+              placement,
               adminToken,
-              nativeAuthority: nativeControllerAuthority(workspaceId, placement),
-              ...(origin ? { allowedOrigins: [origin] } : {}),
-            });
-            physical = await client.createComputerSession({
-              computerSessionId: prepared.session.id,
-              controllerGeneration,
-              tokenGeneration: record.tokenGeneration,
-              ...tokens,
-            });
+              origin,
+              async (client) =>
+                await client.createComputerSession({
+              computerSessionId: preparedSession.id,
+                  controllerGeneration,
+                  tokenGeneration: record.tokenGeneration,
+                  ...tokens,
+                }),
+            );
             await cacheComputerControllerPlacement(grant, workspaceId, placement).catch(
               () => placement,
             );
@@ -244,7 +249,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
               accountId: grant.accountId,
               workspaceId,
               operationId: request.operationId,
-              computerSessionId: prepared.session.id,
+              computerSessionId: preparedSession.id,
               ...(error instanceof BrowserControlProtocolError
                 ? { state: "outcome_unknown" as const }
                 : {}),
@@ -266,7 +271,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
             accountId: grant.accountId,
             workspaceId,
             operationId: request.operationId,
-            computerSessionId: prepared.session.id,
+                  computerSessionId: preparedSession.id,
             controller: {
               controllerId: "opengeni-browserd",
               controllerGeneration,
@@ -875,6 +880,49 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
     });
     if (!lease) return placement;
     return { ...placement, session: controllerOnlySession(url), lease };
+  }
+
+  async function withComputerCreationController<T>(
+    grant: AccessGrant,
+    workspaceId: string,
+    placement: ComputerPlacement,
+    adminToken: string,
+    origin: string | null,
+    operation: (client: BrowserControlClient) => Promise<T>,
+  ): Promise<T> {
+    const cachedUrl = placement.lease?.controllerDataPlaneUrl;
+    const sandboxGroupId =
+      placement.placement.kind === "sandbox_group"
+        ? placement.placement.sandboxGroupId
+        : null;
+    return await withCachedController({
+      cachedUrl: sandboxGroupId ? (cachedUrl ?? null) : null,
+      createCachedClient: (url) =>
+        new BrowserControlClient(controllerOnlySession(url), { adminToken }),
+      prepareCachedClient: async (client) => {
+        if (origin) await client.addAllowedOrigins([origin]);
+      },
+      invalidateCachedUrl: async () => {
+        if (!sandboxGroupId || !placement.lease) return;
+        await recordLeaseControllerDataPlaneUrl(deps.db, {
+          accountId: grant.accountId,
+          workspaceId,
+          sandboxGroupId,
+          expectedEpoch: placement.lease.leaseEpoch,
+          expectedInstanceId: placement.placementInstanceId,
+          controllerDataPlaneUrl: null,
+        });
+      },
+      provisionClient: async () => {
+        const { client } = await provisionBrowserControlClient(placement.session, {
+          adminToken,
+          nativeAuthority: nativeControllerAuthority(workspaceId, placement),
+          ...(origin ? { allowedOrigins: [origin] } : {}),
+        });
+        return client;
+      },
+      use: operation,
+    });
   }
 
   async function withActiveComputerController<T>(
