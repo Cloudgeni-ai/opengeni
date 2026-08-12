@@ -15,6 +15,12 @@ afterAll(async () => {
 
 describe("0132/0133 session realtime ledger migrations", () => {
   test("installs both exact FORCE-RLS runtime DML tables", async () => {
+    const [ledger] = await shared.admin<{ hasSessionVisibilityPolicy: boolean }[]>`
+      select exists (
+        select 1 from schema_migrations
+        where name = '0234_session_visibility_slack_policy.sql'
+      ) as "hasSessionVisibilityPolicy"`;
+    const expectedPolicyCount = ledger?.hasSessionVisibilityPolicy ? 2 : 1;
     const rows = await shared.admin<
       {
         tableName: string;
@@ -46,7 +52,7 @@ describe("0132/0133 session realtime ledger migrations", () => {
         tableName: "session_realtime_connections",
         rlsEnabled: true,
         rlsForced: true,
-        policyCount: 1,
+        policyCount: expectedPolicyCount,
         appSelect: true,
         appInsert: true,
         appUpdate: true,
@@ -56,7 +62,7 @@ describe("0132/0133 session realtime ledger migrations", () => {
         tableName: "session_realtime_entries",
         rlsEnabled: true,
         rlsForced: true,
-        policyCount: 1,
+        policyCount: expectedPolicyCount,
         appSelect: true,
         appInsert: true,
         appUpdate: true,

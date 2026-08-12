@@ -15,6 +15,12 @@ afterAll(async () => {
 
 describe("0131 session realtime mode migration", () => {
   test("installs the exact FORCE-RLS, index, constraint, and runtime-grant contract", async () => {
+    const [ledger] = await shared.admin<{ hasSessionVisibilityPolicy: boolean }[]>`
+      select exists (
+        select 1 from schema_migrations
+        where name = '0234_session_visibility_slack_policy.sql'
+      ) as "hasSessionVisibilityPolicy"`;
+    const expectedPolicyCount = ledger?.hasSessionVisibilityPolicy ? 2 : 1;
     const [table] = await shared.admin<
       {
         rlsEnabled: boolean;
@@ -41,7 +47,7 @@ describe("0131 session realtime mode migration", () => {
     expect(table).toEqual({
       rlsEnabled: true,
       rlsForced: true,
-      policyCount: 1,
+      policyCount: expectedPolicyCount,
       appSelect: true,
       appInsert: true,
       appUpdate: true,
