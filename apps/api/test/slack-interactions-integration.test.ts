@@ -3434,6 +3434,62 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     );
   });
 
+  test("file-only Slack mentions import the exact authorized image once", async () => {
+    if (!available) return;
+    const value = await fixture();
+    const channelId = "C_FILE_ONLY";
+    const messageTimestamp = "1722000000.000001";
+    const eventId = `E_FILE_ONLY_${crypto.randomUUID()}`;
+    const objectStore = reactionObjectStorage();
+    Reflect.set(value.deps, "objectStorage", objectStore.storage);
+    value.slack.privateFiles.set("F_FILE_ONLY", {
+      channelId,
+      filename: "incident.png",
+      contentType: "image/png",
+      bytes: fixturePng(),
+    });
+    value.slack.channelHistories.set(channelId, {
+      messages: [
+        {
+          ts: messageTimestamp,
+          user: value.ownerSlackUserId,
+          text: "",
+          files: [{ id: "F_FILE_ONLY", name: "incident.png", title: "Incident" }],
+        },
+      ],
+    });
+    const event = {
+      teamId: value.teamId,
+      eventId,
+      event: {
+        type: "app_mention",
+        user: value.ownerSlackUserId,
+        channel: channelId,
+        ts: messageTimestamp,
+        files: [{ id: "F_FILE_ONLY", name: "incident.png", title: "Incident" }],
+      },
+    };
+    expect((await postEvent(value.app, event)).status).toBe(200);
+    expect((await postEvent(value.app, event)).status).toBe(200);
+    await drainAll(value.deps);
+
+    const [route] = await interactions(value.owner.workspaceId);
+    const [session] = await shared!.admin<
+      { resources: Array<{ kind: string; mountPath: string }>; initial_message: string }[]
+    >`
+      select resources, initial_message
+      from sessions
+      where workspace_id = ${value.owner.workspaceId}
+        and id = ${route!.session_id}`;
+    expect(session!.resources.map((resource) => resource.mountPath)).toEqual([
+      "attachments/slack/01-incident.png",
+    ]);
+    expect(session!.initial_message).toContain("(file-only Slack invocation)");
+    expect(session!.initial_message).toContain("Imported invocation attachments");
+    expect(objectStore.objects.size).toBe(1);
+    expect(value.slack.calls.filter((call) => call.method === "files.info")).toHaveLength(1);
+  });
+
   test("requester-bound native controls update the exact Slack message and settle sibling handles", async () => {
     if (!available) return;
     const value = await fixture();
