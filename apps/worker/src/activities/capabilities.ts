@@ -4,6 +4,7 @@ import {
   withCodexCatalogProvider,
   withWorkspaceGatewayCatalogProvider,
   withWorkspaceGatewayCredential,
+  withXaiSubscriptionCatalogProvider,
 } from "@opengeni/config";
 import { settingsWithEnabledCapabilityMcpServers } from "@opengeni/core";
 import {
@@ -112,6 +113,15 @@ export async function settingsWithCodexCredential(
 /** Pure: append the synthetic codex-subscription provider, idempotently. */
 export function withCodexProvider(settings: Settings): Settings {
   return withCodexCatalogProvider(settings);
+}
+
+/**
+ * Pure: append the synthetic SuperGrok/xAI subscription provider,
+ * idempotently. The overlay is catalogue metadata only; the exact account,
+ * authority snapshot, and bearer remain frozen later at turn admission.
+ */
+export function withXaiSubscriptionProvider(settings: Settings): Settings {
+  return withXaiSubscriptionCatalogProvider(settings);
 }
 
 export async function settingsWithWorkspaceGatewayCredential(
