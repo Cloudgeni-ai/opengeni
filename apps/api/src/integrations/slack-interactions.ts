@@ -228,7 +228,9 @@ export function slackEventInboxEntry(
   const channelId = boundedString(event.channel, 64);
   const timestamp = boundedString(event.ts, 64);
   const threadTimestamp = boundedString(event.thread_ts, 64);
-  const text = boundedText(event.text);
+  const hasFiles =
+    Array.isArray(event.files) && event.files.some((file) => boundedString(record(file)?.id, 64));
+  const text = boundedText(event.text) ?? (hasFiles ? "(file-only Slack invocation)" : null);
   if (!userId || !channelId || !timestamp || !text) return null;
   let triggerKind: SlackInteractionTriggerKind;
   const explicitlyMentionsBot = text.includes(`<@${bot.botUserId}>`);
@@ -951,15 +953,41 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     return;
   }
 
+  let preparedEntry = entry;
+  let preparedAttachments: PreparedSlackReactionTask = {
+    resources: [],
+    attachments: [],
+    omissionCodes: [],
+    omittedCount: 0,
+  };
+  if (
+    entry.triggerKind === "app_mention" ||
+    (entry.triggerKind === "dm" && entry.text === "(file-only Slack invocation)")
+  ) {
+    const prepared = await prepareSlackInvocationEntry(deps, client, entry);
+    preparedEntry = prepared.entry;
+    preparedAttachments = prepared.attachments;
+  }
+
   if (existing?.sessionId) {
-    await continueSlackSession(deps, grant, existing, entry);
+    const remounted = await remountSlackReactionTaskForSession(
+      deps,
+      entry.workspaceId,
+      existing.sessionId,
+      preparedAttachments,
+    );
+    await continueSlackSession(
+      deps,
+      grant,
+      existing,
+      slackInvocationPreparedEntry(preparedEntry, remounted),
+      remounted.resources,
+    );
     return;
   }
   if (!hasPermission(grant.permissions, "sessions:create")) {
     throw new SlackInteractionPermanentError("sessions_create_denied");
   }
-  const preparedEntry =
-    entry.triggerKind === "app_mention" ? await prepareSlackInvocationEntry(client, entry) : entry;
   const { interaction } = await getOrCreateSlackInteraction(deps.db, {
     accountId: entry.accountId,
     workspaceId: entry.workspaceId,
@@ -974,7 +1002,19 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     visibility: routePolicy.visibility,
   });
   if (interaction.sessionId) {
-    await continueSlackSession(deps, grant, interaction, entry);
+    const remounted = await remountSlackReactionTaskForSession(
+      deps,
+      entry.workspaceId,
+      interaction.sessionId,
+      preparedAttachments,
+    );
+    await continueSlackSession(
+      deps,
+      grant,
+      interaction,
+      slackInvocationPreparedEntry(preparedEntry, remounted),
+      remounted.resources,
+    );
     return;
   }
   const preferredModel = await getLatestSessionModelForSubject(
@@ -986,9 +1026,10 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
   try {
     session = await createSessionForRequest(deps, grant, entry.workspaceId, {
       requestedSessionId: interaction.sessionReservationId,
-      initialMessage: preparedEntry.text,
+      initialMessage: slackInvocationPreparedEntry(preparedEntry, preparedAttachments).text,
       turnInstructions: SLACK_TASK_INSTRUCTIONS,
       firstPartyMcpTools: [...SLACK_TASK_FIRST_PARTY_MCP_TOOLS],
+      resources: preparedAttachments.resources,
       ...(preferredModel ? { model: preferredModel } : {}),
       idempotencyKey: `slack:${entry.connectionId}:${entry.providerEventId}`,
       clientEventId: `slack:${entry.providerEventId}`,
@@ -1033,9 +1074,10 @@ export type SlackInvocationMessageContext = {
 };
 
 async function prepareSlackInvocationEntry(
+  deps: ApiRouteDeps,
   client: OpenGeniSlackBotClient,
   entry: SlackInteractionInboxEntry,
-): Promise<SlackInteractionInboxEntry> {
+): Promise<{ entry: SlackInteractionInboxEntry; attachments: PreparedSlackReactionTask }> {
   const context = entry.slackThreadTs
     ? await client.threadReplies({
         channelId: entry.slackChannelId,
@@ -1048,14 +1090,42 @@ async function prepareSlackInvocationEntry(
         inclusive: true,
         limit: MAX_SLACK_CHANNEL_CONTEXT_MESSAGES,
       });
+  const exactMessage = context.messages.find(
+    (message) => message.timestamp === entry.slackMessageTs,
+  );
+  const attachments = exactMessage
+    ? await prepareSlackMessageAttachments(deps, client, entry, exactMessage.files)
+    : {
+        resources: [],
+        attachments: [],
+        omissionCodes:
+          entry.text === "(file-only Slack invocation)" ? ["attachment_unavailable"] : [],
+        omittedCount: entry.text === "(file-only Slack invocation)" ? 1 : 0,
+      };
+  const baseText =
+    entry.triggerKind === "app_mention"
+      ? slackInvocationTaskText(entry, {
+          messages: context.messages,
+          nextCursor: context.nextCursor,
+          kind: entry.slackThreadTs ? "thread" : "channel",
+        })
+      : entry.text;
   return {
-    ...entry,
-    text: slackInvocationTaskText(entry, {
-      messages: context.messages,
-      nextCursor: context.nextCursor,
-      kind: entry.slackThreadTs ? "thread" : "channel",
-    }),
+    entry: { ...entry, text: baseText },
+    attachments,
   };
+}
+
+function slackInvocationPreparedEntry(
+  entry: SlackInteractionInboxEntry,
+  attachments: PreparedSlackReactionTask,
+): SlackInteractionInboxEntry {
+  const manifest = slackAttachmentManifest(
+    attachments,
+    "Imported invocation attachments",
+    "invocation",
+  );
+  return manifest ? { ...entry, text: `${entry.text}\n\n${manifest}` } : entry;
 }
 
 export function slackInvocationTaskText(
@@ -1528,7 +1598,15 @@ async function prepareSlackReactionTask(
   entry: SlackInteractionInboxEntry,
   context: SlackReactionMessageContext,
 ): Promise<PreparedSlackReactionTask> {
-  const exactFiles = context.reactedMessage.files;
+  return await prepareSlackMessageAttachments(deps, client, entry, context.reactedMessage.files);
+}
+
+async function prepareSlackMessageAttachments(
+  deps: ApiRouteDeps,
+  client: OpenGeniSlackBotClient,
+  entry: SlackInteractionInboxEntry,
+  exactFiles: readonly { id: string; name: string; title: string }[],
+): Promise<PreparedSlackReactionTask> {
   if (exactFiles.length === 0) {
     return { resources: [], attachments: [], omissionCodes: [], omittedCount: 0 };
   }
@@ -1610,19 +1688,31 @@ async function prepareSlackReactionTask(
 }
 
 function slackReactionAttachmentManifest(prepared: PreparedSlackReactionTask): string {
+  return slackAttachmentManifest(
+    prepared,
+    "Imported reacted-message attachments",
+    "reacted-message",
+  );
+}
+
+function slackAttachmentManifest(
+  prepared: PreparedSlackReactionTask,
+  heading: string,
+  sourceLabel: string,
+): string {
   const lines = prepared.attachments.map(
     (attachment, index) =>
       `${index + 1}. ${attachment.resource.mountPath} (${attachment.contentType}, ${attachment.sizeBytes} bytes)`,
   );
   const omission =
     prepared.omittedCount > 0
-      ? `Some reacted-message attachments were omitted (${prepared.omittedCount}; ${
+      ? `Some ${sourceLabel} attachments were omitted (${prepared.omittedCount}; ${
           [...new Set(prepared.omissionCodes)].slice(0, 4).join(", ") || "unavailable"
         }). Continue with the available attachments and text.`
       : "";
   if (lines.length === 0) return omission;
   return [
-    "Imported reacted-message attachments (Slack order; aligned to attached resources):",
+    `${heading} (Slack order; aligned to attached resources):`,
     ...lines,
     ...(omission ? [omission] : []),
   ].join("\n");
@@ -1738,6 +1828,7 @@ async function continueSlackSession(
   grant: AccessGrant,
   interaction: SlackInteraction,
   entry: SlackInteractionInboxEntry,
+  resources: FileResourceRef[] = [],
 ) {
   if (
     !interaction.sessionId ||
@@ -1811,6 +1902,7 @@ async function continueSlackSession(
   await acceptSessionUserMessage(deps, grant, entry.workspaceId, interaction.sessionId, {
     text: entry.text,
     turnInstructions: SLACK_TASK_INSTRUCTIONS,
+    resources,
     clientEventId: `slack:${entry.providerEventId}`,
   });
 }
