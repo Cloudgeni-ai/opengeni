@@ -7,29 +7,29 @@ import type { Database } from "./database";
 import { effectiveCapabilityOwnerSql } from "./capability-components";
 import * as schema from "./schema";
 
-export type IntegrationFeatureBindingOwner = {
+export type IntegrationFacetBindingOwner = {
   kind: "direct" | "plugin" | "pack" | "migration";
   id: string;
   removable: boolean;
 };
 
-export type UpsertIntegrationFeatureBindingInput = {
+export type UpsertIntegrationFacetBindingInput = {
   accountId: string;
   workspaceId: string;
   integrationFacetInstallationId: string;
-  featureFacetId: string;
+  facetDefinitionId: string;
   bindingKey: string;
   displayName: string;
   runtimeKey?: string | null;
   connectionId?: string | null;
   config: Record<string, unknown>;
   createdBySubjectId: string;
-  owner: IntegrationFeatureBindingOwner;
+  owner: IntegrationFacetBindingOwner;
   expectedVersion?: number;
 };
 
-export class IntegrationFeatureBindingVersionConflictError extends Error {
-  readonly name = "IntegrationFeatureBindingVersionConflictError";
+export class IntegrationFacetBindingVersionConflictError extends Error {
+  readonly name = "IntegrationFacetBindingVersionConflictError";
 
   constructor(
     readonly bindingKey: string,
@@ -42,12 +42,12 @@ export class IntegrationFeatureBindingVersionConflictError extends Error {
   }
 }
 
-export class IntegrationFeatureBindingVersionRequiredError extends Error {
-  readonly name = "IntegrationFeatureBindingVersionRequiredError";
+export class IntegrationFacetBindingVersionRequiredError extends Error {
+  readonly name = "IntegrationFacetBindingVersionRequiredError";
 }
 
-export class IntegrationFeatureBindingOwnershipConflictError extends Error {
-  readonly name = "IntegrationFeatureBindingOwnershipConflictError";
+export class IntegrationFacetBindingOwnershipConflictError extends Error {
+  readonly name = "IntegrationFacetBindingOwnershipConflictError";
 }
 
 export function integrationBindingKey(
@@ -74,11 +74,11 @@ export function integrationRuntimeKey(baseServerId: string, bindingKey: string):
   return runtimeKey;
 }
 
-export async function ensureIntegrationFeatureFacet(
+export async function ensureIntegrationFacetDefinition(
   db: Database,
   input: {
     integrationFacetId: string;
-    featureKey: string;
+    facetKey: string;
     kind:
       | "tools"
       | "knowledge_source"
@@ -88,14 +88,14 @@ export async function ensureIntegrationFeatureFacet(
     configSchema?: Record<string, unknown>;
     capabilities?: Record<string, unknown>;
   },
-): Promise<typeof schema.integrationFeatureFacets.$inferSelect> {
+): Promise<typeof schema.integrationFacetDefinitions.$inferSelect> {
   const [existing] = await db
     .select()
-    .from(schema.integrationFeatureFacets)
+    .from(schema.integrationFacetDefinitions)
     .where(
       and(
-        eq(schema.integrationFeatureFacets.integrationFacetId, input.integrationFacetId),
-        eq(schema.integrationFeatureFacets.featureKey, input.featureKey),
+        eq(schema.integrationFacetDefinitions.integrationFacetId, input.integrationFacetId),
+        eq(schema.integrationFacetDefinitions.facetKey, input.facetKey),
       ),
     )
     .limit(1);
@@ -107,50 +107,50 @@ export async function ensureIntegrationFeatureFacet(
       stableJson(existing.configSchema) !== stableJson(configSchema) ||
       stableJson(existing.capabilities) !== stableJson(capabilities)
     ) {
-      throw new Error(`Integration feature ${input.featureKey} conflicts with stored definition`);
+      throw new Error(`Integration facet ${input.facetKey} conflicts with stored definition`);
     }
     return existing;
   }
   const [created] = await db
-    .insert(schema.integrationFeatureFacets)
+    .insert(schema.integrationFacetDefinitions)
     .values({
       integrationFacetId: input.integrationFacetId,
-      featureKey: input.featureKey,
+      facetKey: input.facetKey,
       kind: input.kind,
       configSchema,
       capabilities,
     })
     .returning();
-  if (!created) throw new Error(`Failed to create Integration feature ${input.featureKey}`);
+  if (!created) throw new Error(`Failed to create Integration facet ${input.facetKey}`);
   return created;
 }
 
-export async function upsertIntegrationFeatureBinding(
+export async function upsertIntegrationFacetBinding(
   db: Database,
-  input: UpsertIntegrationFeatureBindingInput,
-): Promise<{ row: typeof schema.integrationFeatureBindings.$inferSelect; changed: boolean }> {
+  input: UpsertIntegrationFacetBindingInput,
+): Promise<{ row: typeof schema.integrationFacetBindings.$inferSelect; changed: boolean }> {
   assertBindingKey(input.bindingKey);
   if (input.displayName.trim().length === 0 || input.displayName.trim().length > 200) {
     throw new Error("Integration instance display name must contain 1-200 characters");
   }
   await db.execute(
-    sql`select pg_advisory_xact_lock(hashtextextended(${`integration-binding:${input.workspaceId}:${input.runtimeKey ?? `${input.featureFacetId}:${input.bindingKey}`}`}, 0))`,
+    sql`select pg_advisory_xact_lock(hashtextextended(${`integration-binding:${input.workspaceId}:${input.runtimeKey ?? `${input.facetDefinitionId}:${input.bindingKey}`}`}, 0))`,
   );
   const [existing] = await db
     .select()
-    .from(schema.integrationFeatureBindings)
+    .from(schema.integrationFacetBindings)
     .where(
       and(
-        eq(schema.integrationFeatureBindings.workspaceId, input.workspaceId),
+        eq(schema.integrationFacetBindings.workspaceId, input.workspaceId),
         input.runtimeKey
-          ? eq(schema.integrationFeatureBindings.runtimeKey, input.runtimeKey)
+          ? eq(schema.integrationFacetBindings.runtimeKey, input.runtimeKey)
           : and(
               eq(
-                schema.integrationFeatureBindings.integrationFacetInstallationId,
+                schema.integrationFacetBindings.integrationFacetInstallationId,
                 input.integrationFacetInstallationId,
               ),
-              eq(schema.integrationFeatureBindings.featureFacetId, input.featureFacetId),
-              eq(schema.integrationFeatureBindings.bindingKey, input.bindingKey),
+              eq(schema.integrationFacetBindings.facetDefinitionId, input.facetDefinitionId),
+              eq(schema.integrationFacetBindings.bindingKey, input.bindingKey),
             ),
       ),
     )
@@ -158,19 +158,19 @@ export async function upsertIntegrationFeatureBinding(
     .limit(1);
   if (!existing) {
     if (input.expectedVersion !== undefined) {
-      throw new IntegrationFeatureBindingVersionConflictError(
+      throw new IntegrationFacetBindingVersionConflictError(
         input.bindingKey,
         input.expectedVersion,
         0,
       );
     }
     const [created] = await db
-      .insert(schema.integrationFeatureBindings)
+      .insert(schema.integrationFacetBindings)
       .values({
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         integrationFacetInstallationId: input.integrationFacetInstallationId,
-        featureFacetId: input.featureFacetId,
+        facetDefinitionId: input.facetDefinitionId,
         bindingKey: input.bindingKey,
         displayName: input.displayName.trim(),
         runtimeKey: input.runtimeKey ?? null,
@@ -181,17 +181,17 @@ export async function upsertIntegrationFeatureBinding(
       })
       .returning();
     if (!created) throw new Error("Failed to create Integration instance");
-    await addIntegrationFeatureBindingOwner(db, created.id, input);
+    await addIntegrationFacetBindingOwner(db, created.id, input);
     return { row: created, changed: true };
   }
   if (existing.bindingKey !== input.bindingKey) {
-    throw new IntegrationFeatureBindingOwnershipConflictError(
+    throw new IntegrationFacetBindingOwnershipConflictError(
       "Integration runtime identity is already assigned to another instance",
     );
   }
   const changed =
     existing.integrationFacetInstallationId !== input.integrationFacetInstallationId ||
-    existing.featureFacetId !== input.featureFacetId ||
+    existing.facetDefinitionId !== input.facetDefinitionId ||
     existing.displayName !== input.displayName.trim() ||
     existing.runtimeKey !== (input.runtimeKey ?? null) ||
     existing.connectionId !== (input.connectionId ?? null) ||
@@ -200,31 +200,31 @@ export async function upsertIntegrationFeatureBinding(
   let row = existing;
   if (changed) {
     if (input.expectedVersion !== undefined && existing.version !== input.expectedVersion) {
-      throw new IntegrationFeatureBindingVersionConflictError(
+      throw new IntegrationFacetBindingVersionConflictError(
         input.bindingKey,
         input.expectedVersion,
         existing.version,
       );
     }
     if (input.owner.kind === "direct" && input.expectedVersion === undefined) {
-      throw new IntegrationFeatureBindingVersionRequiredError(
+      throw new IntegrationFacetBindingVersionRequiredError(
         "Updating an Integration instance requires its previewed version",
       );
     }
-    const owners = await listIntegrationFeatureBindingOwners(db, existing.id);
+    const owners = await listIntegrationFacetBindingOwners(db, existing.id);
     const otherOwners = owners.filter(
       (owner) => owner.kind !== input.owner.kind || owner.id !== input.owner.id,
     );
     if (otherOwners.length > 0) {
-      throw new IntegrationFeatureBindingOwnershipConflictError(
+      throw new IntegrationFacetBindingOwnershipConflictError(
         "Integration instance is shared by another owner and cannot be changed in place",
       );
     }
     const [updated] = await db
-      .update(schema.integrationFeatureBindings)
+      .update(schema.integrationFacetBindings)
       .set({
         integrationFacetInstallationId: input.integrationFacetInstallationId,
-        featureFacetId: input.featureFacetId,
+        facetDefinitionId: input.facetDefinitionId,
         displayName: input.displayName.trim(),
         runtimeKey: input.runtimeKey ?? null,
         connectionId: input.connectionId ?? null,
@@ -235,48 +235,48 @@ export async function upsertIntegrationFeatureBinding(
         lastErrorCode: null,
         updatedAt: new Date(),
       })
-      .where(eq(schema.integrationFeatureBindings.id, existing.id))
+      .where(eq(schema.integrationFacetBindings.id, existing.id))
       .returning();
     if (!updated) throw new Error("Failed to update Integration instance");
     row = updated;
   }
-  await addIntegrationFeatureBindingOwner(db, row.id, input);
+  await addIntegrationFacetBindingOwner(db, row.id, input);
   return { row, changed };
 }
 
-export async function listIntegrationFeatureBindingOwners(
+export async function listIntegrationFacetBindingOwners(
   db: Database,
   bindingId: string,
-): Promise<IntegrationFeatureBindingOwner[]> {
-  return await loadIntegrationFeatureBindingOwners(db, bindingId, true);
+): Promise<IntegrationFacetBindingOwner[]> {
+  return await loadIntegrationFacetBindingOwners(db, bindingId, true);
 }
 
-async function loadIntegrationFeatureBindingOwners(
+async function loadIntegrationFacetBindingOwners(
   db: Database,
   bindingId: string,
   effectiveOnly: boolean,
-): Promise<IntegrationFeatureBindingOwner[]> {
+): Promise<IntegrationFacetBindingOwner[]> {
   const rows = await db
     .select({
-      kind: schema.integrationFeatureBindingOwners.ownerKind,
-      id: schema.integrationFeatureBindingOwners.ownerId,
-      removable: schema.integrationFeatureBindingOwners.removable,
+      kind: schema.integrationFacetBindingOwners.ownerKind,
+      id: schema.integrationFacetBindingOwners.ownerId,
+      removable: schema.integrationFacetBindingOwners.removable,
     })
-    .from(schema.integrationFeatureBindingOwners)
+    .from(schema.integrationFacetBindingOwners)
     .where(
       and(
-        eq(schema.integrationFeatureBindingOwners.bindingId, bindingId),
+        eq(schema.integrationFacetBindingOwners.bindingId, bindingId),
         effectiveOnly
           ? effectiveCapabilityOwnerSql(
-              schema.integrationFeatureBindingOwners.ownerKind,
-              schema.integrationFeatureBindingOwners.ownerId,
+              schema.integrationFacetBindingOwners.ownerKind,
+              schema.integrationFacetBindingOwners.ownerId,
             )
           : sql`true`,
       ),
     )
     .orderBy(
-      asc(schema.integrationFeatureBindingOwners.ownerKind),
-      asc(schema.integrationFeatureBindingOwners.ownerId),
+      asc(schema.integrationFacetBindingOwners.ownerKind),
+      asc(schema.integrationFacetBindingOwners.ownerId),
     );
   return rows.map((row) => {
     if (
@@ -291,95 +291,95 @@ async function loadIntegrationFeatureBindingOwners(
   });
 }
 
-export async function removeIntegrationFeatureBindingOwner(
+export async function removeIntegrationFacetBindingOwner(
   db: Database,
   input: {
     workspaceId: string;
     bindingId: string;
-    owner: Pick<IntegrationFeatureBindingOwner, "kind" | "id">;
+    owner: Pick<IntegrationFacetBindingOwner, "kind" | "id">;
     expectedVersion?: number;
   },
 ): Promise<{
-  binding: typeof schema.integrationFeatureBindings.$inferSelect | null;
-  remainingOwners: IntegrationFeatureBindingOwner[];
+  binding: typeof schema.integrationFacetBindings.$inferSelect | null;
+  remainingOwners: IntegrationFacetBindingOwner[];
 }> {
   const [binding] = await db
     .select()
-    .from(schema.integrationFeatureBindings)
+    .from(schema.integrationFacetBindings)
     .where(
       and(
-        eq(schema.integrationFeatureBindings.workspaceId, input.workspaceId),
-        eq(schema.integrationFeatureBindings.id, input.bindingId),
+        eq(schema.integrationFacetBindings.workspaceId, input.workspaceId),
+        eq(schema.integrationFacetBindings.id, input.bindingId),
       ),
     )
     .for("update")
     .limit(1);
   if (!binding) return { binding: null, remainingOwners: [] };
   if (input.expectedVersion !== undefined && binding.version !== input.expectedVersion) {
-    throw new IntegrationFeatureBindingVersionConflictError(
+    throw new IntegrationFacetBindingVersionConflictError(
       binding.bindingKey,
       input.expectedVersion,
       binding.version,
     );
   }
   await db
-    .delete(schema.integrationFeatureBindingOwners)
+    .delete(schema.integrationFacetBindingOwners)
     .where(
       and(
-        eq(schema.integrationFeatureBindingOwners.workspaceId, input.workspaceId),
-        eq(schema.integrationFeatureBindingOwners.bindingId, binding.id),
-        eq(schema.integrationFeatureBindingOwners.ownerKind, input.owner.kind),
-        eq(schema.integrationFeatureBindingOwners.ownerId, input.owner.id),
+        eq(schema.integrationFacetBindingOwners.workspaceId, input.workspaceId),
+        eq(schema.integrationFacetBindingOwners.bindingId, binding.id),
+        eq(schema.integrationFacetBindingOwners.ownerKind, input.owner.kind),
+        eq(schema.integrationFacetBindingOwners.ownerId, input.owner.id),
       ),
     );
   // Pending or repairing owners are not runtime-effective yet, but they still
   // preserve the shared binding so their operation can resume safely.
-  const remainingOwners = await loadIntegrationFeatureBindingOwners(db, binding.id, false);
+  const remainingOwners = await loadIntegrationFacetBindingOwners(db, binding.id, false);
   if (remainingOwners.length > 0) return { binding, remainingOwners };
   const [disabled] = await db
-    .update(schema.integrationFeatureBindings)
+    .update(schema.integrationFacetBindings)
     .set({ status: "disabled", version: binding.version + 1, updatedAt: new Date() })
-    .where(eq(schema.integrationFeatureBindings.id, binding.id))
+    .where(eq(schema.integrationFacetBindings.id, binding.id))
     .returning();
   return { binding: disabled ?? binding, remainingOwners: [] };
 }
 
-export async function removeIntegrationFeatureBindingOwnersForOwner(
+export async function removeIntegrationFacetBindingOwnersForOwner(
   db: Database,
   input: {
     workspaceId: string;
-    owner: Pick<IntegrationFeatureBindingOwner, "kind" | "id">;
+    owner: Pick<IntegrationFacetBindingOwner, "kind" | "id">;
   },
 ): Promise<{ disabledBindingIds: string[]; retainedBindingIds: string[] }> {
   const deleted = await db
-    .delete(schema.integrationFeatureBindingOwners)
+    .delete(schema.integrationFacetBindingOwners)
     .where(
       and(
-        eq(schema.integrationFeatureBindingOwners.workspaceId, input.workspaceId),
-        eq(schema.integrationFeatureBindingOwners.ownerKind, input.owner.kind),
-        eq(schema.integrationFeatureBindingOwners.ownerId, input.owner.id),
+        eq(schema.integrationFacetBindingOwners.workspaceId, input.workspaceId),
+        eq(schema.integrationFacetBindingOwners.ownerKind, input.owner.kind),
+        eq(schema.integrationFacetBindingOwners.ownerId, input.owner.id),
       ),
     )
-    .returning({ bindingId: schema.integrationFeatureBindingOwners.bindingId });
+    .returning({ bindingId: schema.integrationFacetBindingOwners.bindingId });
   const disabledBindingIds: string[] = [];
   const retainedBindingIds: string[] = [];
   for (const bindingId of [...new Set(deleted.map((row) => row.bindingId))]) {
-    const owners = await loadIntegrationFeatureBindingOwners(db, bindingId, false);
+    const owners = await loadIntegrationFacetBindingOwners(db, bindingId, false);
     if (owners.length > 0) {
       retainedBindingIds.push(bindingId);
       continue;
     }
     await db
-      .update(schema.integrationFeatureBindings)
+      .update(schema.integrationFacetBindings)
       .set({
         status: "disabled",
-        version: sql`${schema.integrationFeatureBindings.version} + 1`,
+        version: sql`${schema.integrationFacetBindings.version} + 1`,
         updatedAt: new Date(),
       })
       .where(
         and(
-          eq(schema.integrationFeatureBindings.workspaceId, input.workspaceId),
-          eq(schema.integrationFeatureBindings.id, bindingId),
+          eq(schema.integrationFacetBindings.workspaceId, input.workspaceId),
+          eq(schema.integrationFacetBindings.id, bindingId),
         ),
       );
     disabledBindingIds.push(bindingId);
@@ -392,33 +392,33 @@ export async function integrationDefinitionHasBindingOwner(
   input: {
     workspaceId: string;
     pluginInstallationId: string;
-    owner: Pick<IntegrationFeatureBindingOwner, "kind" | "id">;
+    owner: Pick<IntegrationFacetBindingOwner, "kind" | "id">;
   },
 ): Promise<boolean> {
   const [row] = await db
-    .select({ id: schema.integrationFeatureBindingOwners.id })
-    .from(schema.integrationFeatureBindingOwners)
+    .select({ id: schema.integrationFacetBindingOwners.id })
+    .from(schema.integrationFacetBindingOwners)
     .innerJoin(
-      schema.integrationFeatureBindings,
-      eq(schema.integrationFeatureBindings.id, schema.integrationFeatureBindingOwners.bindingId),
+      schema.integrationFacetBindings,
+      eq(schema.integrationFacetBindings.id, schema.integrationFacetBindingOwners.bindingId),
     )
     .innerJoin(
       schema.capabilityFacetInstallations,
       eq(
         schema.capabilityFacetInstallations.id,
-        schema.integrationFeatureBindings.integrationFacetInstallationId,
+        schema.integrationFacetBindings.integrationFacetInstallationId,
       ),
     )
     .where(
       and(
-        eq(schema.integrationFeatureBindingOwners.workspaceId, input.workspaceId),
-        eq(schema.integrationFeatureBindingOwners.ownerKind, input.owner.kind),
-        eq(schema.integrationFeatureBindingOwners.ownerId, input.owner.id),
+        eq(schema.integrationFacetBindingOwners.workspaceId, input.workspaceId),
+        eq(schema.integrationFacetBindingOwners.ownerKind, input.owner.kind),
+        eq(schema.integrationFacetBindingOwners.ownerId, input.owner.id),
         eq(schema.capabilityFacetInstallations.pluginInstallationId, input.pluginInstallationId),
         or(
-          eq(schema.integrationFeatureBindings.status, "active"),
-          eq(schema.integrationFeatureBindings.status, "needs_attention"),
-          eq(schema.integrationFeatureBindings.status, "paused"),
+          eq(schema.integrationFacetBindings.status, "active"),
+          eq(schema.integrationFacetBindings.status, "needs_attention"),
+          eq(schema.integrationFacetBindings.status, "paused"),
         ),
       ),
     )
@@ -426,13 +426,13 @@ export async function integrationDefinitionHasBindingOwner(
   return Boolean(row);
 }
 
-export async function addIntegrationFeatureBindingOwner(
+export async function addIntegrationFacetBindingOwner(
   db: Database,
   bindingId: string,
-  input: Pick<UpsertIntegrationFeatureBindingInput, "accountId" | "workspaceId" | "owner">,
+  input: Pick<UpsertIntegrationFacetBindingInput, "accountId" | "workspaceId" | "owner">,
 ): Promise<void> {
   await db
-    .insert(schema.integrationFeatureBindingOwners)
+    .insert(schema.integrationFacetBindingOwners)
     .values({
       accountId: input.accountId,
       workspaceId: input.workspaceId,

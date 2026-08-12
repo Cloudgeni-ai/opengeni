@@ -13,7 +13,7 @@ import {
 const revision: ApiIntegrationRuntime["revision"] = {
   id: "openapi:111111111111111111111111",
   protocol: "openapi",
-  integrationId: "inventory",
+  definitionId: "inventory",
   contentSha256: "1".repeat(64),
   source: { url: "https://inventory.example.com/openapi.json" },
   title: "Inventory API",
@@ -49,6 +49,8 @@ function runtime(overrides: Partial<ApiIntegrationRuntime> = {}): ApiIntegration
     name: "Inventory API",
     description: "Read inventory.",
     protocol: "openapi",
+    definitionId: "inventory",
+    definitionProvenance: "workspace",
     baseUrl: "https://inventory.example.com/v1/",
     sourceUrl: "https://inventory.example.com/openapi.json",
     providerDomain: "inventory.example.com",
@@ -175,7 +177,7 @@ describe("API Integration capability projection", () => {
     });
   });
 
-  test("projects a v2 Integration as enabled only from an executable active installation", () => {
+  test("never treats a generic API installation projection as Integration authority", () => {
     const item = CapabilityCatalogItem.parse({
       id: "api:inventory",
       kind: "api",
@@ -219,13 +221,9 @@ describe("API Integration capability projection", () => {
     });
 
     expect(applyCapabilityEnablement(item, installation, new Set())).toMatchObject({
-      enabled: true,
-      enabledReason: "installed immutable Integration revision",
-      connectionRef: {
-        providerDomain: "inventory.example.com",
-        kind: "api_key",
-        subjectScope: "subject",
-      },
+      enabled: false,
+      enabledReason: null,
+      connectionRef: null,
     });
     expect(
       applyCapabilityEnablement(item, { ...installation, status: "disabled" }, new Set()),

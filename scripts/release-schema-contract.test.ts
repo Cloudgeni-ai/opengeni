@@ -114,41 +114,45 @@ describe("release schema contract", () => {
     const migrations = new Map(
       sourceContract.migrations.map((migration) => [migration.path, migration]),
     );
+    const sessionVisibilityContractHash = (includesActivation: boolean): string | null => {
+      if (!migrations.has("0234_session_visibility_slack_policy.sql")) return null;
+      if (migrations.has("0233_skill_and_integration_authority_cutover.sql")) {
+        return includesActivation
+          ? "bab034047e6d9f2fd84fb06327d017d60a7c2713ba8e2373f019ce677c9a5dad"
+          : "d6dc76fbd59317fc2604580576dbaeec5059701f0ac9bf9348f13e09d75a52e1";
+      }
+      if (migrations.has("0232_integration_facet_authority_cutover.sql")) {
+        return includesActivation
+          ? "0bf2986ba3314333bed489dc5be1984da26101e983b5ba44f516bdd54ed5df00"
+          : "589d0adff84c6f22f73666e42e9bf0e9eea02c1e5471a8536a676a2a9d357815";
+      }
+      if (migrations.has("0231_integration_definition_identity_cutover.sql")) {
+        return includesActivation
+          ? "84e1fad94ee9084a8e5246d34d6a8f0573fdd5e9108e8d8c6f2ac55a1c815e9f"
+          : "82b1ea825ea6005dd4dc97993f39d0f3fbdf3d1318889a4a45b396cc2863b499";
+      }
+      return includesActivation
+        ? "8a06693668fe7a4bb0b65602cf06a6e6c5904a259ac1179b7dde79789bb9fe1c"
+        : "e6d8af32631e54e0d5bf570c558ba6e7f1885d0b0f6302593f5bd7bcb5b36728";
+    };
     const activationMigration = migrations.get("0225_session_visibility_fork_activation.sql");
     if (activationMigration) {
-      const includesSlackOutcomeReconciliation = migrations.has(
-        "0224_slack_post_outcome_reconciliation.sql",
-      );
-      const includesSlackTaskPolicy = migrations.has("0228_slack_task_policy.sql");
-      const includesSessionVisibilitySlackPolicy = migrations.has(
-        "0234_session_visibility_slack_policy.sql",
-      );
       expect(sourceContract.sha256).toBe(
-        includesSessionVisibilitySlackPolicy
-          ? "8a06693668fe7a4bb0b65602cf06a6e6c5904a259ac1179b7dde79789bb9fe1c"
-          : includesSlackTaskPolicy
+        sessionVisibilityContractHash(true) ??
+          (migrations.has("0228_slack_task_policy.sql")
             ? "78738732aab49dc471c97288093e6f337ab01a85ba11191874404703e75adb27"
-            : includesSlackOutcomeReconciliation
+            : migrations.has("0224_slack_post_outcome_reconciliation.sql")
               ? "75a4cc7f563136e2e42f82dae6a1d30ed0ff250e0a474e09af7543f027fcc24a"
-              : "4b42f61f3fe276ec4e29f1b3256b386fb5eeb53042924c924c288252c3ab0a29",
-      );
-      expect(sourceContract.latestMigration).toBe(
-        includesSessionVisibilitySlackPolicy
-          ? "0234_session_visibility_slack_policy.sql"
-          : includesSlackTaskPolicy
-            ? "0228_slack_task_policy.sql"
-            : "0225_session_visibility_fork_activation.sql",
+              : "4b42f61f3fe276ec4e29f1b3256b386fb5eeb53042924c924c288252c3ab0a29"),
       );
       expect(activationMigration).toMatchObject({
         sha256: "8f6c2d494afda6a7df98e5a50ed2b939654c642c142d4976507a1ea7e5632706",
         deploymentMode: "rolling",
       });
-      if (includesSessionVisibilitySlackPolicy) {
-        expect(migrations.get("0234_session_visibility_slack_policy.sql")).toMatchObject({
-          sha256: "e9ea17bd8d573aa8a774d102d4d291db0056f6d85c3c54af6ae0a14bd423d696",
-          deploymentMode: "rolling",
-        });
-      }
+      expect(migrations.get("0234_session_visibility_slack_policy.sql")).toMatchObject({
+        sha256: "e9ea17bd8d573aa8a774d102d4d291db0056f6d85c3c54af6ae0a14bd423d696",
+        deploymentMode: "rolling",
+      });
 
       migrations.delete("0225_session_visibility_fork_activation.sql");
       sourceContract.migrations = sourceContract.migrations.filter(
@@ -156,96 +160,111 @@ describe("release schema contract", () => {
       );
       sourceContract.fileCount -= 1;
       sourceContract.latestMigration = sourceContract.migrations.at(-1)?.path ?? null;
-      sourceContract.sha256 = includesSessionVisibilitySlackPolicy
-        ? "e6d8af32631e54e0d5bf570c558ba6e7f1885d0b0f6302593f5bd7bcb5b36728"
-        : includesSlackTaskPolicy
+      sourceContract.sha256 =
+        sessionVisibilityContractHash(false) ??
+        (migrations.has("0228_slack_task_policy.sql")
           ? "7b7fd3a19e1e2a9b5cf98b8ad8e5720f1e3c329ad42f9f012172b028c26e8363"
-          : includesSlackOutcomeReconciliation
+          : migrations.has("0224_slack_post_outcome_reconciliation.sql")
             ? "8c742400ca1e21ddc4fe1db810d58af7dca037df360406fc71dbd85205eb5a64"
-            : "257511509811c24cc2e60afca38362b9a065924101fcd1df52850b01fbe5fafa";
+            : "257511509811c24cc2e60afca38362b9a065924101fcd1df52850b01fbe5fafa");
     }
     expect(sourceContract.sha256).toBe(
-      migrations.has("0234_session_visibility_slack_policy.sql")
-        ? "e6d8af32631e54e0d5bf570c558ba6e7f1885d0b0f6302593f5bd7bcb5b36728"
-        : migrations.has("0228_slack_task_policy.sql")
-          ? migrations.has("0226_personal_codex_authority_foundation.sql")
-            ? "7b7fd3a19e1e2a9b5cf98b8ad8e5720f1e3c329ad42f9f012172b028c26e8363"
-            : "bbedea10fef52aeaf32d6e16c27d1042a9f68483ba54c241f5184659e86b3c89"
-          : migrations.has("0227_slack_native_actions.sql")
-            ? migrations.has("0226_personal_codex_authority_foundation.sql")
-              ? "fb41447bb063da5239197ceb5dc0c179427cc08f6593b77e5c18b98f85804dab"
-              : "32e38ffe1fce657245e30bf413e594f84d967ef68ff9bc4cbd8e08e2bb5ebffc"
-            : migrations.has("0226_personal_codex_authority_foundation.sql")
-              ? migrations.has("0224_slack_post_outcome_reconciliation.sql")
-                ? "b2daba323004014d21b87f53eb20993fda4216c249cd2c07e15a9fdab294742c"
-                : "ad366c52845dde14bc42d9c42e93e02c72ba916b6e7ab7ec15d7e2d5f2f5f14f"
-              : migrations.has("0224_slack_post_outcome_reconciliation.sql")
-                ? "8c742400ca1e21ddc4fe1db810d58af7dca037df360406fc71dbd85205eb5a64"
-                : migrations.has("0223_sessions_channel_fk_validate.sql")
-                  ? "6bc5dfdf4468f6be4adc5ea7c6ed98397ee865c21a0175106320159b15588a6c"
-                  : migrations.has("0221_sessions_channel_index.sql")
-                    ? "e7beb14a48c19cdc2d185fd27b77052a66e9d2e52fe321bc3e2fc14bba8d8712"
-                    : migrations.has("0220_memory_slack_append_only_cascade.sql")
-                      ? migrations.has("0219_organization_tenancy_managed_human_provisioning.sql")
-                        ? "c9821a930c52d8c40604b9d2f39408227b377f3b2d70b4bb74c14ef93f605756"
-                        : migrations.has("0218_organization_tenancy_foundation.sql")
-                          ? "d78d099f9393a3dcf7d8b54fd75d155448f1a3846712c0aee41d58e7b92b6e9b"
-                          : "85c02e09061ba359a0fa747b1ccffa87a5dd115cbfd8f36ad90c62292ef27bba"
-                      : migrations.has("0219_site_auth_maintenance_sessions.sql")
-                        ? migrations.has("0218_organization_tenancy_foundation.sql")
-                          ? "a002c6b3da822dfff2aca5fd88e76371ecadf87e1fc0c9f5a603b674f67676d1"
-                          : "67238deb9f46f6459e46c882a4dd5231b0ba739f715dfc9e51d8539f54ff3039"
-                        : migrations.has("0218_organization_tenancy_foundation.sql")
-                          ? "eb6d0099f5362add0eb799641deace18326831ac61c8922c3f4f91c6a489f6a9"
-                          : migrations.has("0217_capability_definition_delete_authority.sql")
-                            ? "2d8e3211f1526419a8421c4388f7cf2297839318d7a7dbd194362d81c503c70a"
-                            : migrations.has("0216_pack_component_ownership.sql")
-                              ? "85a5f5320fd7c673bfe16240d4615b93ce635e9724d8f1bc467ce336e5c93022"
-                              : migrations.has("0214_session_activity_commit_gate.sql")
-                                ? "00b9989ef287e75bceceabc94ddfa1c118a97553ccdbc523485300046058075f"
-                                : "e3048091a81b7e122b3c6d17cf52e5ffccff4c082780f6d2d330031742aef792",
+      sessionVisibilityContractHash(false) ??
+        (migrations.has("0233_skill_and_integration_authority_cutover.sql")
+          ? "03b2633febc6805e697fb5aa2002136a80c8699181f9b4c65b3b559ef6726d18"
+          : migrations.has("0232_integration_facet_authority_cutover.sql")
+            ? "329a693f62feec5c85716be710791c98c24933796f542a33fae8af82ccfba927"
+            : migrations.has("0231_integration_definition_identity_cutover.sql")
+              ? "4fe8a5b026a6e87309d8881e0fef4f06de895b3e9960d63a82f1bb0ad5200a10"
+              : migrations.has("0228_slack_task_policy.sql")
+                ? migrations.has("0226_personal_codex_authority_foundation.sql")
+                  ? "7b7fd3a19e1e2a9b5cf98b8ad8e5720f1e3c329ad42f9f012172b028c26e8363"
+                  : "bbedea10fef52aeaf32d6e16c27d1042a9f68483ba54c241f5184659e86b3c89"
+                : migrations.has("0227_slack_native_actions.sql")
+                  ? migrations.has("0226_personal_codex_authority_foundation.sql")
+                    ? "fb41447bb063da5239197ceb5dc0c179427cc08f6593b77e5c18b98f85804dab"
+                    : "32e38ffe1fce657245e30bf413e594f84d967ef68ff9bc4cbd8e08e2bb5ebffc"
+                  : migrations.has("0226_personal_codex_authority_foundation.sql")
+                    ? migrations.has("0224_slack_post_outcome_reconciliation.sql")
+                      ? "b2daba323004014d21b87f53eb20993fda4216c249cd2c07e15a9fdab294742c"
+                      : "ad366c52845dde14bc42d9c42e93e02c72ba916b6e7ab7ec15d7e2d5f2f5f14f"
+                    : migrations.has("0224_slack_post_outcome_reconciliation.sql")
+                      ? "8c742400ca1e21ddc4fe1db810d58af7dca037df360406fc71dbd85205eb5a64"
+                      : migrations.has("0223_sessions_channel_fk_validate.sql")
+                        ? "6bc5dfdf4468f6be4adc5ea7c6ed98397ee865c21a0175106320159b15588a6c"
+                        : migrations.has("0221_sessions_channel_index.sql")
+                          ? "e7beb14a48c19cdc2d185fd27b77052a66e9d2e52fe321bc3e2fc14bba8d8712"
+                          : migrations.has("0220_memory_slack_append_only_cascade.sql")
+                            ? migrations.has(
+                                "0219_organization_tenancy_managed_human_provisioning.sql",
+                              )
+                              ? "c9821a930c52d8c40604b9d2f39408227b377f3b2d70b4bb74c14ef93f605756"
+                              : migrations.has("0218_organization_tenancy_foundation.sql")
+                                ? "d78d099f9393a3dcf7d8b54fd75d155448f1a3846712c0aee41d58e7b92b6e9b"
+                                : "85c02e09061ba359a0fa747b1ccffa87a5dd115cbfd8f36ad90c62292ef27bba"
+                            : migrations.has("0219_site_auth_maintenance_sessions.sql")
+                              ? migrations.has("0218_organization_tenancy_foundation.sql")
+                                ? "a002c6b3da822dfff2aca5fd88e76371ecadf87e1fc0c9f5a603b674f67676d1"
+                                : "67238deb9f46f6459e46c882a4dd5231b0ba739f715dfc9e51d8539f54ff3039"
+                              : migrations.has("0218_organization_tenancy_foundation.sql")
+                                ? "eb6d0099f5362add0eb799641deace18326831ac61c8922c3f4f91c6a489f6a9"
+                                : migrations.has("0217_capability_definition_delete_authority.sql")
+                                  ? "2d8e3211f1526419a8421c4388f7cf2297839318d7a7dbd194362d81c503c70a"
+                                  : migrations.has("0216_pack_component_ownership.sql")
+                                    ? "85a5f5320fd7c673bfe16240d4615b93ce635e9724d8f1bc467ce336e5c93022"
+                                    : migrations.has("0214_session_activity_commit_gate.sql")
+                                      ? "00b9989ef287e75bceceabc94ddfa1c118a97553ccdbc523485300046058075f"
+                                      : "e3048091a81b7e122b3c6d17cf52e5ffccff4c082780f6d2d330031742aef792"),
     );
     const contract = {
       ...sourceContract,
-      sha256: migrations.has("0234_session_visibility_slack_policy.sql")
-        ? "e6d8af32631e54e0d5bf570c558ba6e7f1885d0b0f6302593f5bd7bcb5b36728"
-        : migrations.has("0228_slack_task_policy.sql")
-          ? migrations.has("0226_personal_codex_authority_foundation.sql")
-            ? "7b7fd3a19e1e2a9b5cf98b8ad8e5720f1e3c329ad42f9f012172b028c26e8363"
-            : "bbedea10fef52aeaf32d6e16c27d1042a9f68483ba54c241f5184659e86b3c89"
-          : migrations.has("0227_slack_native_actions.sql")
-            ? migrations.has("0226_personal_codex_authority_foundation.sql")
-              ? "fb41447bb063da5239197ceb5dc0c179427cc08f6593b77e5c18b98f85804dab"
-              : "32e38ffe1fce657245e30bf413e594f84d967ef68ff9bc4cbd8e08e2bb5ebffc"
-            : migrations.has("0226_personal_codex_authority_foundation.sql")
-              ? migrations.has("0224_slack_post_outcome_reconciliation.sql")
-                ? "b2daba323004014d21b87f53eb20993fda4216c249cd2c07e15a9fdab294742c"
-                : "ad366c52845dde14bc42d9c42e93e02c72ba916b6e7ab7ec15d7e2d5f2f5f14f"
-              : migrations.has("0224_slack_post_outcome_reconciliation.sql")
-                ? "8c742400ca1e21ddc4fe1db810d58af7dca037df360406fc71dbd85205eb5a64"
-                : migrations.has("0223_sessions_channel_fk_validate.sql")
-                  ? "6bc5dfdf4468f6be4adc5ea7c6ed98397ee865c21a0175106320159b15588a6c"
-                  : migrations.has("0221_sessions_channel_index.sql")
-                    ? "e7beb14a48c19cdc2d185fd27b77052a66e9d2e52fe321bc3e2fc14bba8d8712"
-                    : migrations.has("0220_memory_slack_append_only_cascade.sql")
-                      ? migrations.has("0219_organization_tenancy_managed_human_provisioning.sql")
-                        ? "c9821a930c52d8c40604b9d2f39408227b377f3b2d70b4bb74c14ef93f605756"
-                        : migrations.has("0218_organization_tenancy_foundation.sql")
-                          ? "d78d099f9393a3dcf7d8b54fd75d155448f1a3846712c0aee41d58e7b92b6e9b"
-                          : "85c02e09061ba359a0fa747b1ccffa87a5dd115cbfd8f36ad90c62292ef27bba"
-                      : migrations.has("0219_site_auth_maintenance_sessions.sql")
-                        ? migrations.has("0218_organization_tenancy_foundation.sql")
-                          ? "a002c6b3da822dfff2aca5fd88e76371ecadf87e1fc0c9f5a603b674f67676d1"
-                          : "67238deb9f46f6459e46c882a4dd5231b0ba739f715dfc9e51d8539f54ff3039"
-                        : migrations.has("0218_organization_tenancy_foundation.sql")
-                          ? "eb6d0099f5362add0eb799641deace18326831ac61c8922c3f4f91c6a489f6a9"
-                          : migrations.has("0217_capability_definition_delete_authority.sql")
-                            ? "2d8e3211f1526419a8421c4388f7cf2297839318d7a7dbd194362d81c503c70a"
-                            : migrations.has("0216_pack_component_ownership.sql")
-                              ? "85a5f5320fd7c673bfe16240d4615b93ce635e9724d8f1bc467ce336e5c93022"
-                              : migrations.has("0214_session_activity_commit_gate.sql")
-                                ? "a00d56c13f4f03a3a48456860a7c63b82de5624970b3afae250e5aed0d6a2d89"
-                                : "c9b19caabb946d91e6e2ec4b34bb48323a61efbfc76628fe338a277f5dcbe343",
+      sha256:
+        sessionVisibilityContractHash(false) ??
+        (migrations.has("0233_skill_and_integration_authority_cutover.sql")
+          ? "03b2633febc6805e697fb5aa2002136a80c8699181f9b4c65b3b559ef6726d18"
+          : migrations.has("0232_integration_facet_authority_cutover.sql")
+            ? "329a693f62feec5c85716be710791c98c24933796f542a33fae8af82ccfba927"
+            : migrations.has("0231_integration_definition_identity_cutover.sql")
+              ? "4fe8a5b026a6e87309d8881e0fef4f06de895b3e9960d63a82f1bb0ad5200a10"
+              : migrations.has("0228_slack_task_policy.sql")
+                ? migrations.has("0226_personal_codex_authority_foundation.sql")
+                  ? "7b7fd3a19e1e2a9b5cf98b8ad8e5720f1e3c329ad42f9f012172b028c26e8363"
+                  : "bbedea10fef52aeaf32d6e16c27d1042a9f68483ba54c241f5184659e86b3c89"
+                : migrations.has("0227_slack_native_actions.sql")
+                  ? migrations.has("0226_personal_codex_authority_foundation.sql")
+                    ? "fb41447bb063da5239197ceb5dc0c179427cc08f6593b77e5c18b98f85804dab"
+                    : "32e38ffe1fce657245e30bf413e594f84d967ef68ff9bc4cbd8e08e2bb5ebffc"
+                  : migrations.has("0226_personal_codex_authority_foundation.sql")
+                    ? migrations.has("0224_slack_post_outcome_reconciliation.sql")
+                      ? "b2daba323004014d21b87f53eb20993fda4216c249cd2c07e15a9fdab294742c"
+                      : "ad366c52845dde14bc42d9c42e93e02c72ba916b6e7ab7ec15d7e2d5f2f5f14f"
+                    : migrations.has("0224_slack_post_outcome_reconciliation.sql")
+                      ? "8c742400ca1e21ddc4fe1db810d58af7dca037df360406fc71dbd85205eb5a64"
+                      : migrations.has("0223_sessions_channel_fk_validate.sql")
+                        ? "6bc5dfdf4468f6be4adc5ea7c6ed98397ee865c21a0175106320159b15588a6c"
+                        : migrations.has("0221_sessions_channel_index.sql")
+                          ? "e7beb14a48c19cdc2d185fd27b77052a66e9d2e52fe321bc3e2fc14bba8d8712"
+                          : migrations.has("0220_memory_slack_append_only_cascade.sql")
+                            ? migrations.has(
+                                "0219_organization_tenancy_managed_human_provisioning.sql",
+                              )
+                              ? "c9821a930c52d8c40604b9d2f39408227b377f3b2d70b4bb74c14ef93f605756"
+                              : migrations.has("0218_organization_tenancy_foundation.sql")
+                                ? "d78d099f9393a3dcf7d8b54fd75d155448f1a3846712c0aee41d58e7b92b6e9b"
+                                : "85c02e09061ba359a0fa747b1ccffa87a5dd115cbfd8f36ad90c62292ef27bba"
+                            : migrations.has("0219_site_auth_maintenance_sessions.sql")
+                              ? migrations.has("0218_organization_tenancy_foundation.sql")
+                                ? "a002c6b3da822dfff2aca5fd88e76371ecadf87e1fc0c9f5a603b674f67676d1"
+                                : "67238deb9f46f6459e46c882a4dd5231b0ba739f715dfc9e51d8539f54ff3039"
+                              : migrations.has("0218_organization_tenancy_foundation.sql")
+                                ? "eb6d0099f5362add0eb799641deace18326831ac61c8922c3f4f91c6a489f6a9"
+                                : migrations.has("0217_capability_definition_delete_authority.sql")
+                                  ? "2d8e3211f1526419a8421c4388f7cf2297839318d7a7dbd194362d81c503c70a"
+                                  : migrations.has("0216_pack_component_ownership.sql")
+                                    ? "85a5f5320fd7c673bfe16240d4615b93ce635e9724d8f1bc467ce336e5c93022"
+                                    : migrations.has("0214_session_activity_commit_gate.sql")
+                                      ? "a00d56c13f4f03a3a48456860a7c63b82de5624970b3afae250e5aed0d6a2d89"
+                                      : "c9b19caabb946d91e6e2ec4b34bb48323a61efbfc76628fe338a277f5dcbe343"),
     };
     expect(migrations.get("0065_codex_subscription_overview.sql")).toMatchObject({
       deploymentMode: "maintenance",
@@ -426,63 +445,79 @@ describe("release schema contract", () => {
         (migrations.has("0226_personal_codex_authority_foundation.sql") ? 1 : 0) +
         (migrations.has("0227_slack_native_actions.sql") ? 1 : 0) +
         (migrations.has("0228_slack_task_policy.sql") ? 1 : 0) +
+        (migrations.has("0231_integration_definition_identity_cutover.sql") ? 1 : 0) +
+        (migrations.has("0232_integration_facet_authority_cutover.sql") ? 1 : 0) +
+        (migrations.has("0233_skill_and_integration_authority_cutover.sql") ? 1 : 0) +
         (migrations.has("0234_session_visibility_slack_policy.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      migrations.has("0234_session_visibility_slack_policy.sql")
-        ? "e6d8af32631e54e0d5bf570c558ba6e7f1885d0b0f6302593f5bd7bcb5b36728"
-        : migrations.has("0228_slack_task_policy.sql")
-          ? migrations.has("0226_personal_codex_authority_foundation.sql")
-            ? "7b7fd3a19e1e2a9b5cf98b8ad8e5720f1e3c329ad42f9f012172b028c26e8363"
-            : "bbedea10fef52aeaf32d6e16c27d1042a9f68483ba54c241f5184659e86b3c89"
-          : migrations.has("0227_slack_native_actions.sql")
-            ? migrations.has("0226_personal_codex_authority_foundation.sql")
-              ? "fb41447bb063da5239197ceb5dc0c179427cc08f6593b77e5c18b98f85804dab"
-              : "32e38ffe1fce657245e30bf413e594f84d967ef68ff9bc4cbd8e08e2bb5ebffc"
-            : migrations.has("0226_personal_codex_authority_foundation.sql")
-              ? migrations.has("0224_slack_post_outcome_reconciliation.sql")
-                ? "b2daba323004014d21b87f53eb20993fda4216c249cd2c07e15a9fdab294742c"
-                : "ad366c52845dde14bc42d9c42e93e02c72ba916b6e7ab7ec15d7e2d5f2f5f14f"
-              : migrations.has("0224_slack_post_outcome_reconciliation.sql")
-                ? "8c742400ca1e21ddc4fe1db810d58af7dca037df360406fc71dbd85205eb5a64"
-                : migrations.has("0223_sessions_channel_fk_validate.sql")
-                  ? "6bc5dfdf4468f6be4adc5ea7c6ed98397ee865c21a0175106320159b15588a6c"
-                  : migrations.has("0221_sessions_channel_index.sql")
-                    ? "e7beb14a48c19cdc2d185fd27b77052a66e9d2e52fe321bc3e2fc14bba8d8712"
-                    : migrations.has("0220_memory_slack_append_only_cascade.sql")
-                      ? migrations.has("0219_organization_tenancy_managed_human_provisioning.sql")
-                        ? "c9821a930c52d8c40604b9d2f39408227b377f3b2d70b4bb74c14ef93f605756"
-                        : migrations.has("0218_organization_tenancy_foundation.sql")
-                          ? "d78d099f9393a3dcf7d8b54fd75d155448f1a3846712c0aee41d58e7b92b6e9b"
-                          : "85c02e09061ba359a0fa747b1ccffa87a5dd115cbfd8f36ad90c62292ef27bba"
-                      : migrations.has("0219_site_auth_maintenance_sessions.sql")
-                        ? migrations.has("0218_organization_tenancy_foundation.sql")
-                          ? "a002c6b3da822dfff2aca5fd88e76371ecadf87e1fc0c9f5a603b674f67676d1"
-                          : "67238deb9f46f6459e46c882a4dd5231b0ba739f715dfc9e51d8539f54ff3039"
-                        : migrations.has("0218_organization_tenancy_foundation.sql")
-                          ? "eb6d0099f5362add0eb799641deace18326831ac61c8922c3f4f91c6a489f6a9"
-                          : "2d8e3211f1526419a8421c4388f7cf2297839318d7a7dbd194362d81c503c70a",
+      sessionVisibilityContractHash(false) ??
+        (migrations.has("0233_skill_and_integration_authority_cutover.sql")
+          ? "03b2633febc6805e697fb5aa2002136a80c8699181f9b4c65b3b559ef6726d18"
+          : migrations.has("0232_integration_facet_authority_cutover.sql")
+            ? "329a693f62feec5c85716be710791c98c24933796f542a33fae8af82ccfba927"
+            : migrations.has("0231_integration_definition_identity_cutover.sql")
+              ? "4fe8a5b026a6e87309d8881e0fef4f06de895b3e9960d63a82f1bb0ad5200a10"
+              : migrations.has("0228_slack_task_policy.sql")
+                ? migrations.has("0226_personal_codex_authority_foundation.sql")
+                  ? "7b7fd3a19e1e2a9b5cf98b8ad8e5720f1e3c329ad42f9f012172b028c26e8363"
+                  : "bbedea10fef52aeaf32d6e16c27d1042a9f68483ba54c241f5184659e86b3c89"
+                : migrations.has("0227_slack_native_actions.sql")
+                  ? migrations.has("0226_personal_codex_authority_foundation.sql")
+                    ? "fb41447bb063da5239197ceb5dc0c179427cc08f6593b77e5c18b98f85804dab"
+                    : "32e38ffe1fce657245e30bf413e594f84d967ef68ff9bc4cbd8e08e2bb5ebffc"
+                  : migrations.has("0226_personal_codex_authority_foundation.sql")
+                    ? migrations.has("0224_slack_post_outcome_reconciliation.sql")
+                      ? "b2daba323004014d21b87f53eb20993fda4216c249cd2c07e15a9fdab294742c"
+                      : "ad366c52845dde14bc42d9c42e93e02c72ba916b6e7ab7ec15d7e2d5f2f5f14f"
+                    : migrations.has("0224_slack_post_outcome_reconciliation.sql")
+                      ? "8c742400ca1e21ddc4fe1db810d58af7dca037df360406fc71dbd85205eb5a64"
+                      : migrations.has("0223_sessions_channel_fk_validate.sql")
+                        ? "6bc5dfdf4468f6be4adc5ea7c6ed98397ee865c21a0175106320159b15588a6c"
+                        : migrations.has("0221_sessions_channel_index.sql")
+                          ? "e7beb14a48c19cdc2d185fd27b77052a66e9d2e52fe321bc3e2fc14bba8d8712"
+                          : migrations.has("0220_memory_slack_append_only_cascade.sql")
+                            ? migrations.has(
+                                "0219_organization_tenancy_managed_human_provisioning.sql",
+                              )
+                              ? "c9821a930c52d8c40604b9d2f39408227b377f3b2d70b4bb74c14ef93f605756"
+                              : migrations.has("0218_organization_tenancy_foundation.sql")
+                                ? "d78d099f9393a3dcf7d8b54fd75d155448f1a3846712c0aee41d58e7b92b6e9b"
+                                : "85c02e09061ba359a0fa747b1ccffa87a5dd115cbfd8f36ad90c62292ef27bba"
+                            : migrations.has("0219_site_auth_maintenance_sessions.sql")
+                              ? migrations.has("0218_organization_tenancy_foundation.sql")
+                                ? "a002c6b3da822dfff2aca5fd88e76371ecadf87e1fc0c9f5a603b674f67676d1"
+                                : "67238deb9f46f6459e46c882a4dd5231b0ba739f715dfc9e51d8539f54ff3039"
+                              : migrations.has("0218_organization_tenancy_foundation.sql")
+                                ? "eb6d0099f5362add0eb799641deace18326831ac61c8922c3f4f91c6a489f6a9"
+                                : "2d8e3211f1526419a8421c4388f7cf2297839318d7a7dbd194362d81c503c70a"),
     );
     expect(contract.latestMigration).toBe(
       migrations.has("0234_session_visibility_slack_policy.sql")
         ? "0234_session_visibility_slack_policy.sql"
-        : migrations.has("0228_slack_task_policy.sql")
-          ? "0228_slack_task_policy.sql"
-          : migrations.has("0227_slack_native_actions.sql")
-            ? "0227_slack_native_actions.sql"
-            : migrations.has("0224_slack_post_outcome_reconciliation.sql")
-              ? "0224_slack_post_outcome_reconciliation.sql"
-              : migrations.has("0223_sessions_channel_fk_validate.sql")
-                ? "0223_sessions_channel_fk_validate.sql"
-                : migrations.has("0221_sessions_channel_index.sql")
-                  ? "0221_sessions_channel_index.sql"
-                  : migrations.has("0220_memory_slack_append_only_cascade.sql")
-                    ? "0220_memory_slack_append_only_cascade.sql"
-                    : migrations.has("0219_site_auth_maintenance_sessions.sql")
-                      ? "0219_site_auth_maintenance_sessions.sql"
-                      : migrations.has("0218_organization_tenancy_foundation.sql")
-                        ? "0218_organization_tenancy_foundation.sql"
-                        : "0217_capability_definition_delete_authority.sql",
+        : migrations.has("0233_skill_and_integration_authority_cutover.sql")
+          ? "0233_skill_and_integration_authority_cutover.sql"
+          : migrations.has("0232_integration_facet_authority_cutover.sql")
+            ? "0232_integration_facet_authority_cutover.sql"
+            : migrations.has("0231_integration_definition_identity_cutover.sql")
+              ? "0231_integration_definition_identity_cutover.sql"
+              : migrations.has("0228_slack_task_policy.sql")
+                ? "0228_slack_task_policy.sql"
+                : migrations.has("0227_slack_native_actions.sql")
+                  ? "0227_slack_native_actions.sql"
+                  : migrations.has("0224_slack_post_outcome_reconciliation.sql")
+                    ? "0224_slack_post_outcome_reconciliation.sql"
+                    : migrations.has("0223_sessions_channel_fk_validate.sql")
+                      ? "0223_sessions_channel_fk_validate.sql"
+                      : migrations.has("0221_sessions_channel_index.sql")
+                        ? "0221_sessions_channel_index.sql"
+                        : migrations.has("0220_memory_slack_append_only_cascade.sql")
+                          ? "0220_memory_slack_append_only_cascade.sql"
+                          : migrations.has("0219_site_auth_maintenance_sessions.sql")
+                            ? "0219_site_auth_maintenance_sessions.sql"
+                            : migrations.has("0218_organization_tenancy_foundation.sql")
+                              ? "0218_organization_tenancy_foundation.sql"
+                              : "0217_capability_definition_delete_authority.sql",
     );
     expect(migrations.get("0214_session_activity_commit_gate.sql")).toMatchObject({
       sha256: "26c84bc34bc51d19f9532cf3f2c64a649f100a724cb73d968e17e7c4ecf8de36",
@@ -618,6 +653,24 @@ describe("release schema contract", () => {
       sha256: "34b72f6ab031596c90f2f35957c707aaf013c2f52aee8ca92a70fdb8ab9cb9ce",
       deploymentMode: "rolling",
     });
+    if (migrations.has("0231_integration_definition_identity_cutover.sql")) {
+      expect(migrations.get("0231_integration_definition_identity_cutover.sql")).toMatchObject({
+        sha256: "535a806746d99d9b338df230c133477ca0e3d554ae6950077a3409b077f4b1cb",
+        deploymentMode: "maintenance",
+      });
+    }
+    if (migrations.has("0232_integration_facet_authority_cutover.sql")) {
+      expect(migrations.get("0232_integration_facet_authority_cutover.sql")).toMatchObject({
+        sha256: "acf779d1bd931ea208be8a97b9f930a2387f53151722198704f0aecbe76f1fb6",
+        deploymentMode: "maintenance",
+      });
+    }
+    if (migrations.has("0233_skill_and_integration_authority_cutover.sql")) {
+      expect(migrations.get("0233_skill_and_integration_authority_cutover.sql")).toMatchObject({
+        sha256: "26ed3d2ffcaf572623ad263aaa0103625b4ed1e9d28bcb7b5d35eb972d9762d1",
+        deploymentMode: "maintenance",
+      });
+    }
     expect(migrations.get("0183_model_call_provider_cost_estimates.sql")).toMatchObject({
       sha256: "2cb087b69996c62e8836f2d65c9e2af3fb580fe1822d327600bf40e3a6977d64",
       deploymentMode: "rolling",

@@ -19,7 +19,8 @@ function integration(): ApiIntegrationRuntime {
     name: "Inventory API",
     description: "Inventory operations.",
     protocol: "openapi",
-    presetId: null,
+    definitionId: "inventory",
+    definitionProvenance: "workspace",
     baseUrl: "https://127.0.0.1/v1/",
     sourceUrl: "https://127.0.0.1/openapi.json",
     providerDomain: "127.0.0.1",
@@ -36,7 +37,7 @@ function integration(): ApiIntegrationRuntime {
     revision: {
       id: "openapi:111111111111111111111111",
       protocol: "openapi",
-      integrationId: "inventory",
+      definitionId: "inventory",
       contentSha256: "1".repeat(64),
       source: { url: "https://127.0.0.1/openapi.json" },
       title: "Inventory API",

@@ -1,5 +1,13 @@
 # @opengeni/events
 
+## 0.3.105
+
+### Patch Changes
+
+- Updated dependencies [3d74340]
+  - @opengeni/contracts@0.46.0
+  - @opengeni/db@0.33.0
+
 ## 0.3.104
 
 ### Patch Changes

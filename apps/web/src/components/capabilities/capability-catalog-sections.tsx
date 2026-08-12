@@ -83,6 +83,7 @@ export function EnabledCapabilitiesSection({
   busyId,
   connectionHealth,
   logoUrl,
+  canManageSkills,
   onOpen,
   onDisable,
 }: {
@@ -90,6 +91,7 @@ export function EnabledCapabilitiesSection({
   busyId: string | null;
   connectionHealth: (item: CapabilityCatalogItem) => ConnectionHealth;
   logoUrl: (item: CapabilityCatalogItem) => string | null;
+  canManageSkills: boolean;
   onOpen: (item: CapabilityCatalogItem) => void;
   onDisable: (item: CapabilityCatalogItem) => void;
 }) {
@@ -107,6 +109,7 @@ export function EnabledCapabilitiesSection({
             health={connectionHealth(item)}
             logoSrc={logoUrl(item)}
             busy={busyId === item.id}
+            canManageSkills={canManageSkills}
             onOpen={() => onOpen(item)}
             onDisable={() => onDisable(item)}
           />
@@ -218,6 +221,7 @@ function EnabledCard({
   health,
   logoSrc,
   busy,
+  canManageSkills,
   onOpen,
   onDisable,
 }: {
@@ -225,11 +229,14 @@ function EnabledCard({
   health: ConnectionHealth;
   logoSrc: string | null;
   busy: boolean;
+  canManageSkills: boolean;
   onOpen: () => void;
   onDisable: () => void;
 }) {
   const needsAttention = health.state === "attention";
-  const canDisable = item.source !== "built_in" && item.source !== "configured";
+  const canRemove =
+    (item.kind === "skill" && item.actions.includes("uninstall")) ||
+    (item.kind === "mcp" && item.actions.includes("disconnect"));
   const status = needsAttention
     ? {
         label: "Needs attention",
@@ -270,19 +277,36 @@ function EnabledCard({
           </div>
         </div>
       </button>
-      {canDisable ? (
+      {canRemove ? (
         <Button
           type="button"
           variant="ghost"
           size="sm"
-          disabled={busy}
+          disabled={busy || (item.kind === "skill" && !canManageSkills)}
+          title={
+            item.kind === "skill" && !canManageSkills
+              ? "Workspace administrator permission is required to remove Skills"
+              : undefined
+          }
           onClick={onDisable}
           className="shrink-0 pointer-coarse:min-h-11"
         >
-          {busy ? <Loader2Icon className="animate-spin motion-reduce:animate-none" /> : "Disable"}
+          {busy ? (
+            <Loader2Icon className="animate-spin motion-reduce:animate-none" />
+          ) : item.kind === "skill" ? (
+            "Remove"
+          ) : (
+            "Disconnect"
+          )}
         </Button>
       ) : (
-        <span className="shrink-0 px-2 text-2xs text-fg-subtle">Built in</span>
+        <span className="shrink-0 px-2 text-2xs text-fg-subtle">
+          {item.source === "configured"
+            ? "Managed"
+            : item.source === "built_in"
+              ? "Built in"
+              : "Manage separately"}
+        </span>
       )}
     </div>
   );

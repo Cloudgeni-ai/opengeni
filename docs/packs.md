@@ -2,14 +2,14 @@
 
 Capability Packs are role-oriented bundles that compose existing OpenGeni primitives rather than creating a second runtime. A Pack may describe:
 
-- exact Plugin, Skill, Integration-instance, and Integration-feature components;
+- exact Plugin, Skill, Integration-instance, and Integration-Facet components;
 - legacy inline Skills that the v2 installer migrates into ordinary immutable Skill components;
 - an explicit Rig requirement, including compatibility with a legacy `sandboxImage` declaration;
 - MCP tool selections, connector requirements, and optional knowledge;
 - a Variable Set requirement;
 - scheduled-task templates and task metadata.
 
-The built-in `marketing-social-daily-analysis` Pack connects social accounts, attaches marketing knowledge, and creates an ordinary scheduled agent run. It has no component or Rig plan, so it remains compatible with the simple legacy enable route.
+The built-in `marketing-social-daily-analysis` Pack connects social accounts, attaches marketing knowledge, and creates an ordinary scheduled agent run. It has no component or Rig plan, so it remains compatible with the dedicated simple Pack enable route.
 
 ## Product model
 
@@ -31,7 +31,7 @@ The portable Pack manifest is the **blueprint**. Installation preview resolves i
 3. **Ownership is shared and reversible.** Pack ownership uses the same normalized component ledgers as direct installs and Plugins. Uninstall removes only the Pack's owner edges; exact components retained by another direct, Plugin, Pack, or migration owner remain active.
 4. **Only active owners affect runtime.** An `installing`, `needs_attention`, or `disabled` Pack owner does not make an otherwise unowned component executable. A partially completed Pack therefore cannot leak a half-installed runtime.
 5. **V2 runtime comes from components plus a Rig.** A v2 installation is identified by its frozen `manifestSnapshot` and `manifestDigest`. The worker does not directly load that manifest's inline Skills or `sandboxImage`; the installer already migrated those Skills and selected a Rig.
-6. **Connections remain independent.** A Pack may adopt an exact named Integration instance or feature binding, but uninstalling the Pack never deletes the underlying Connection.
+6. **Connections remain independent.** A Pack may adopt an exact named Integration instance or Facet binding, but uninstalling the Pack never deletes the underlying Connection.
 7. **Tenant boundaries are enforced twice.** Pack installation, selected Rig, component ledger, and operation rows are workspace/account scoped under FORCE RLS, and database triggers reject cross-tenant Rig or ledger references.
 
 ## Manifest composition
@@ -43,7 +43,7 @@ The portable Pack manifest is the **blueprint**. Installation preview resolves i
 | `plugin` | `pluginKey`, version, and manifest SHA-256 |
 | `skill` | capability ID and whole-artifact content SHA-256 |
 | `integration` | capability ID, named `instanceKey`, immutable revision ID, and content SHA-256 |
-| `feature` | capability ID, named `instanceKey`, feature key, binding key, and exact configuration SHA-256 |
+| `facet` | capability ID, named `instanceKey`, Facet key, binding key, and exact configuration SHA-256 |
 
 Each reference is required by default. A missing or mismatched optional reference is reported in preview but does not block installation; a required one does.
 
@@ -143,11 +143,16 @@ Each component reports `retainedByOtherOwners`. Then uninstall with the previewe
 DELETE /v1/workspaces/:workspaceId/packs/:packId/installation
 ```
 
-The body contains `expectedInstallationVersion` and a UUID `idempotencyKey`. Uninstall removes only Pack owner edges, cleans up truly orphaned component installations and feature bindings, deletes the Pack's component ledger rows, and marks the installation disabled. An active v2 Pack cannot be disabled through the generic capability route or unregistered until this lifecycle completes.
+The body contains `expectedInstallationVersion` and a UUID `idempotencyKey`. Uninstall removes only Pack owner edges, cleans up truly orphaned component installations and Facet bindings, deletes the Pack's component ledger rows, and marks the installation disabled. An active v2 Pack cannot be disabled through the generic capability route or unregistered until this lifecycle completes.
 
-### Legacy enable compatibility
+### Simple Pack compatibility
 
-`POST /packs/:packId/enable` and generic capability Enable remain available only for simple Packs that have no `components`, inline `skills`, `rig`, `sandboxImage`, or `sandboxProviderImages`. This preserves existing built-in and metadata/task-template Packs without allowing new composed Packs to bypass review.
+`POST /packs/:packId/enable` remains available only for simple Packs that have
+no `components`, inline `skills`, `rig`, `sandboxImage`, or
+`sandboxProviderImages`. Generic capability Enable no longer handles Packs;
+all Pack lifecycle state belongs to `pack_installations`. This preserves
+existing built-in and metadata/task-template Packs without allowing composed
+Packs to bypass review.
 
 Pre-v2 active installation rows have no `manifestSnapshot` and no `manifestDigest`. The worker retains their old direct Pack Skill/image behavior for rollback compatibility. Any v2 install/update freezes the manifest and moves the Pack to component/Rig runtime; the two models are never combined for one installation.
 

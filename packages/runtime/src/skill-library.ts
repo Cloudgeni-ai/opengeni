@@ -253,9 +253,9 @@ const skillLibraryEntries: readonly SkillLibraryEntry[] = Object.freeze([
 const skillLibraryRootCandidates = (): string[] => {
   const moduleDir = dirname(fileURLToPath(import.meta.url));
   return [
-    join(moduleDir, "assets", "runtime", "bundled_skill_library"),
-    join(moduleDir, "bundled_skill_library"),
-    join(moduleDir, "..", "src", "bundled_skill_library"),
+    join(moduleDir, "assets", "runtime", "curated_skill_library"),
+    join(moduleDir, "curated_skill_library"),
+    join(moduleDir, "..", "src", "curated_skill_library"),
   ];
 };
 
@@ -334,6 +334,16 @@ export function loadSkillLibrarySkill(
   };
 }
 
+/** Return the immutable repository origin for a reviewed library source URL. */
+export function skillLibraryRepositoryUrl(sourceUrl: string): string {
+  const url = new URL(sourceUrl);
+  const segments = url.pathname.split("/").filter(Boolean);
+  if (url.hostname === "github.com" && segments.length >= 2) {
+    return `${url.origin}/${segments[0]}/${segments[1]}`;
+  }
+  return sourceUrl;
+}
+
 /**
  * Read a curated artifact and calculate its canonical whole-artifact digest.
  *
@@ -366,6 +376,45 @@ export function readSkillLibraryArtifact(root: string): SkillLibraryArtifact {
 export function buildPortableSkillArtifact(
   inputFiles: readonly SkillLibraryFile[],
 ): PortableSkillArtifact {
+  const { materialized, totalBytes } = materializePortableSkillFiles(inputFiles);
+  const skillMarkdown = materialized.find((file) => file.path === "SKILL.md")?.content;
+  if (skillMarkdown === undefined) {
+    throw new Error("Skill artifact is missing a top-level SKILL.md");
+  }
+  const metadata = parsePortableSkillFrontmatter(skillMarkdown);
+  if (!metadata.name || !portableSkillName.test(metadata.name)) {
+    throw new Error("Skill artifact SKILL.md must declare a safe name");
+  }
+  if (
+    !metadata.description ||
+    metadata.description.length > 2_048 ||
+    /[\r\n]/u.test(metadata.description)
+  ) {
+    throw new Error("Skill artifact SKILL.md must declare a single-line description");
+  }
+  return Object.freeze({
+    name: metadata.name,
+    description: metadata.description,
+    files: Object.freeze(materialized.map(({ path, content }) => Object.freeze({ path, content }))),
+    contentSha256: skillLibraryArtifactSha256(materialized),
+    totalBytes,
+  });
+}
+
+/**
+ * Canonical whole-artifact identity for any validated runtime Skill shape.
+ * This deliberately does not require frontmatter because legacy Pack/session
+ * contracts historically allowed a top-level SKILL.md without metadata. The
+ * content identity is nevertheless byte-exact and shared with portable imports.
+ */
+export function skillArtifactContentSha256(inputFiles: readonly SkillLibraryFile[]): string {
+  return skillLibraryArtifactSha256(materializePortableSkillFiles(inputFiles).materialized);
+}
+
+function materializePortableSkillFiles(inputFiles: readonly SkillLibraryFile[]): {
+  materialized: Array<Readonly<{ path: string; content: string; bytes: Uint8Array }>>;
+  totalBytes: number;
+} {
   if (inputFiles.length === 0 || inputFiles.length > PORTABLE_SKILL_MAX_FILES) {
     throw new Error(`Skill artifact must contain 1-${PORTABLE_SKILL_MAX_FILES} files`);
   }
@@ -391,28 +440,7 @@ export function buildPortableSkillArtifact(
       return Object.freeze({ path, content: file.content, bytes });
     })
     .sort((left, right) => compareCanonicalPath(left.path, right.path));
-  const skillMarkdown = materialized.find((file) => file.path === "SKILL.md")?.content;
-  if (skillMarkdown === undefined) {
-    throw new Error("Skill artifact is missing a top-level SKILL.md");
-  }
-  const metadata = parsePortableSkillFrontmatter(skillMarkdown);
-  if (!metadata.name || !portableSkillName.test(metadata.name)) {
-    throw new Error("Skill artifact SKILL.md must declare a safe name");
-  }
-  if (
-    !metadata.description ||
-    metadata.description.length > 2_048 ||
-    /[\r\n]/u.test(metadata.description)
-  ) {
-    throw new Error("Skill artifact SKILL.md must declare a single-line description");
-  }
-  return Object.freeze({
-    name: metadata.name,
-    description: metadata.description,
-    files: Object.freeze(materialized.map(({ path, content }) => Object.freeze({ path, content }))),
-    contentSha256: skillLibraryArtifactSha256(materialized),
-    totalBytes,
-  });
+  return { materialized, totalBytes };
 }
 
 export function parsePortableSkillFrontmatter(markdown: string): {

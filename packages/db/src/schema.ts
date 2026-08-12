@@ -8025,6 +8025,7 @@ export const capabilityCatalogItems = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    kindAuthority: check("capability_catalog_items_kind_authority_chk", sql`${table.kind} = 'mcp'`),
     workspaceCapability: uniqueIndex("capability_catalog_items_workspace_capability_idx").on(
       table.workspaceId,
       table.id,
@@ -8071,6 +8072,7 @@ export const capabilityInstallations = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    kindAuthority: check("capability_installations_kind_authority_chk", sql`${table.kind} = 'mcp'`),
     workspaceCapability: uniqueIndex("capability_installations_workspace_capability_idx").on(
       table.workspaceId,
       table.capabilityId,
@@ -8083,9 +8085,9 @@ export const capabilityInstallations = pgTable(
   }),
 );
 
-// --- Capabilities platform v2 ------------------------------------------------
-// Expand-only normalized state. The v1 catalog/installations remain intact
-// while adapters shadow-read and migrate exact owners into this model.
+// --- Capabilities platform ---------------------------------------------------
+// Authoritative Plugin, immutable Version, Facet, installation, and ownership
+// state. The generic catalog/installations ledger is reserved for MCP.
 
 export const capabilityPlugins = pgTable(
   "capability_plugins",
@@ -8412,33 +8414,33 @@ export const integrationTools = pgTable(
   }),
 );
 
-export const integrationFeatureFacets = pgTable(
-  "integration_feature_facets",
+export const integrationFacetDefinitions = pgTable(
+  "integration_facet_definitions",
   {
     id: uuid("id").primaryKey().defaultRandom(),
     integrationFacetId: uuid("integration_facet_id")
       .notNull()
       .references(() => capabilityIntegrationFacets.facetId, { onDelete: "cascade" }),
-    featureKey: text("feature_key").notNull(),
+    facetKey: text("facet_key").notNull(),
     kind: text("kind").notNull(),
     configSchema: jsonb("config_schema").$type<Record<string, unknown>>().notNull().default({}),
     capabilities: jsonb("capabilities").$type<Record<string, unknown>>().notNull().default({}),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    integrationFeature: uniqueIndex("integration_feature_facets_integration_feature_idx").on(
+    integrationFacet: uniqueIndex("integration_facet_definitions_integration_facet_idx").on(
       table.integrationFacetId,
-      table.featureKey,
+      table.facetKey,
     ),
-    integrationKind: index("integration_feature_facets_integration_kind_idx").on(
+    integrationKind: index("integration_facet_definitions_integration_kind_idx").on(
       table.integrationFacetId,
       table.kind,
     ),
   }),
 );
 
-export const integrationFeatureBindings = pgTable(
-  "integration_feature_bindings",
+export const integrationFacetBindings = pgTable(
+  "integration_facet_bindings",
   {
     id: uuid("id").primaryKey().defaultRandom(),
     accountId: uuid("account_id")
@@ -8447,9 +8449,9 @@ export const integrationFeatureBindings = pgTable(
     workspaceId: uuid("workspace_id")
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
-    featureFacetId: uuid("feature_facet_id")
+    facetDefinitionId: uuid("facet_definition_id")
       .notNull()
-      .references(() => integrationFeatureFacets.id, { onDelete: "restrict" }),
+      .references(() => integrationFacetDefinitions.id, { onDelete: "restrict" }),
     integrationFacetInstallationId: uuid("integration_facet_installation_id")
       .notNull()
       .references(() => capabilityFacetInstallations.id, { onDelete: "cascade" }),
@@ -8470,26 +8472,24 @@ export const integrationFeatureBindings = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    installationFeatureKey: uniqueIndex(
-      "integration_feature_bindings_installation_feature_key_idx",
-    ).on(
+    installationFacetKey: uniqueIndex("integration_facet_bindings_installation_facet_key_idx").on(
       table.workspaceId,
       table.integrationFacetInstallationId,
-      table.featureFacetId,
+      table.facetDefinitionId,
       table.bindingKey,
     ),
-    workspaceRuntime: uniqueIndex("integration_feature_bindings_workspace_runtime_idx")
+    workspaceRuntime: uniqueIndex("integration_facet_bindings_workspace_runtime_idx")
       .on(table.workspaceId, table.runtimeKey)
       .where(sql`${table.runtimeKey} is not null`),
-    workspaceStatus: index("integration_feature_bindings_workspace_status_idx").on(
+    workspaceStatus: index("integration_facet_bindings_workspace_status_idx").on(
       table.workspaceId,
       table.status,
     ),
   }),
 );
 
-export const integrationFeatureBindingOwners = pgTable(
-  "integration_feature_binding_owners",
+export const integrationFacetBindingOwners = pgTable(
+  "integration_facet_binding_owners",
   {
     id: uuid("id").primaryKey().defaultRandom(),
     accountId: uuid("account_id")
@@ -8500,19 +8500,19 @@ export const integrationFeatureBindingOwners = pgTable(
       .references(() => workspaces.id, { onDelete: "cascade" }),
     bindingId: uuid("binding_id")
       .notNull()
-      .references(() => integrationFeatureBindings.id, { onDelete: "cascade" }),
+      .references(() => integrationFacetBindings.id, { onDelete: "cascade" }),
     ownerKind: text("owner_kind").notNull(),
     ownerId: text("owner_id").notNull(),
     removable: boolean("removable").notNull().default(true),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    uniqueOwner: uniqueIndex("integration_feature_binding_owners_unique_idx").on(
+    uniqueOwner: uniqueIndex("integration_facet_binding_owners_unique_idx").on(
       table.bindingId,
       table.ownerKind,
       table.ownerId,
     ),
-    workspaceOwner: index("integration_feature_binding_owners_workspace_owner_idx").on(
+    workspaceOwner: index("integration_facet_binding_owners_workspace_owner_idx").on(
       table.workspaceId,
       table.ownerKind,
       table.ownerId,

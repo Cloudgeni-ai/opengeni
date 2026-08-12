@@ -642,8 +642,8 @@ describe("API helpers", () => {
     expect(routeLabel(`/v1/workspaces/${workspace}/integrations/oauth/start`)).toBe(
       "/v1/workspaces/:workspaceId/integrations/oauth/start",
     );
-    expect(routeLabel(`/v1/workspaces/${workspace}/integrations/presets`)).toBe(
-      "/v1/workspaces/:workspaceId/integrations/presets",
+    expect(routeLabel(`/v1/workspaces/${workspace}/integrations/definitions`)).toBe(
+      "/v1/workspaces/:workspaceId/integrations/definitions",
     );
     expect(
       routeLabel(
@@ -659,17 +659,17 @@ describe("API helpers", () => {
     ).toBe("/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey");
     expect(
       routeLabel(
-        `/v1/workspaces/${workspace}/integrations/api%3Aopenapi%3Agmail/instances/account-a/features/mail-inbox`,
+        `/v1/workspaces/${workspace}/integrations/api%3Aopenapi%3Agmail/instances/account-a/facets/mail-inbox`,
       ),
     ).toBe(
-      "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey",
+      "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey",
     );
     expect(
       routeLabel(
-        `/v1/workspaces/${workspace}/integrations/api%3Aopenapi%3Agmail/instances/account-a/features/mail-inbox/pause`,
+        `/v1/workspaces/${workspace}/integrations/api%3Aopenapi%3Agmail/instances/account-a/facets/mail-inbox/pause`,
       ),
     ).toBe(
-      "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey/pause",
+      "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey/pause",
     );
     expect(routeLabel("/v1/integrations/provider-oauth/callback")).toBe(
       "/v1/integrations/provider-oauth/callback",
@@ -1511,7 +1511,7 @@ describe("curated skill catalog enablement", () => {
     expect(item.enabledReason).toBeNull();
   });
 
-  test("an active installation enables it without exposing a connection", () => {
+  test("a complete generic installation cannot enable a normalized Skill", () => {
     const item = applyCapabilityEnablement(
       librarySkill(),
       {
@@ -1528,8 +1528,8 @@ describe("curated skill catalog enablement", () => {
       },
       new Set(),
     );
-    expect(item.enabled).toBe(true);
-    expect(item.enabledReason).toBe("explicitly selected");
+    expect(item.enabled).toBe(false);
+    expect(item.enabledReason).toBeNull();
     expect(item.connectionRef).toBeNull();
   });
 

@@ -1,6 +1,8 @@
 import { IntegrationProtocolError } from "./types";
 
-export interface OAuthProviderPreset {
+export interface IntegrationDefinitionOAuth2Authentication {
+  readonly kind: "oauth2";
+  readonly provider: "google" | "microsoft";
   readonly authorizationUrl: string;
   readonly tokenUrl: string;
   readonly scopes: readonly string[];
@@ -11,32 +13,45 @@ export interface OAuthProviderPreset {
   };
 }
 
-export interface OpenApiProviderPreset {
+export type IntegrationDefinitionSource =
+  | Readonly<{
+      kind: "google_discovery";
+      url: string;
+    }>
+  | Readonly<{
+      kind: "openapi";
+      url: string;
+      operationPathPrefixes?: readonly string[];
+    }>;
+
+export interface IntegrationDefinition {
   readonly id: string;
   readonly name: string;
   readonly summary: string;
-  readonly family: "google" | "microsoft";
-  readonly sourceFormat: "google-discovery" | "openapi";
-  readonly sourceUrl: string;
+  readonly protocol: "openapi";
+  readonly provider: Readonly<{
+    id: "google" | "microsoft";
+    domain: string;
+  }>;
+  readonly source: IntegrationDefinitionSource;
   readonly baseUrl: string;
-  readonly oauth: OAuthProviderPreset;
-  readonly pathPrefixes?: readonly string[];
-  readonly healthOperation?: string;
-  readonly healthArgs?: Readonly<Record<string, unknown>>;
-  readonly features: readonly IntegrationFeatureDefinition[];
+  readonly authentication: IntegrationDefinitionOAuth2Authentication;
+  readonly healthCheck?: Readonly<{
+    operationKey: string;
+    arguments: Readonly<Record<string, unknown>>;
+  }>;
+  readonly facets: readonly IntegrationFacetDefinition[];
 }
 
-export interface IntegrationFeatureDefinition {
-  readonly featureKey: string;
+export interface IntegrationFacetDefinition {
+  readonly facetKey: string;
   readonly kind: "knowledge_source" | "inbound_trigger" | "delivery_destination" | "identity_link";
   readonly configSchema: Readonly<Record<string, unknown>>;
   readonly capabilities: Readonly<Record<string, unknown>>;
 }
 
-const accountIdentityFeature = (
-  provider: "google" | "microsoft",
-): IntegrationFeatureDefinition => ({
-  featureKey: "account-identity",
+const accountIdentityFacet = (provider: "google" | "microsoft"): IntegrationFacetDefinition => ({
+  facetKey: "account-identity",
   kind: "identity_link",
   configSchema: { type: "object", properties: {}, additionalProperties: false },
   capabilities: {
@@ -46,10 +61,10 @@ const accountIdentityFeature = (
   },
 });
 
-const driveKnowledgeFeature = (
+const driveKnowledgeFacet = (
   provider: "google-drive" | "microsoft-onedrive",
-): IntegrationFeatureDefinition => ({
-  featureKey: "drive-content",
+): IntegrationFacetDefinition => ({
+  facetKey: "drive-content",
   kind: "knowledge_source",
   configSchema: {
     type: "object",
@@ -107,11 +122,11 @@ const driveKnowledgeFeature = (
   },
 });
 
-const mailboxFeatures = (
+const mailboxFacets = (
   provider: "google-gmail" | "microsoft-outlook-mail",
-): readonly IntegrationFeatureDefinition[] => [
+): readonly IntegrationFacetDefinition[] => [
   {
-    featureKey: "mail-inbox",
+    facetKey: "mail-inbox",
     kind: "inbound_trigger",
     configSchema: {
       type: "object",
@@ -129,7 +144,7 @@ const mailboxFeatures = (
     },
   },
   {
-    featureKey: "mail-delivery",
+    facetKey: "mail-delivery",
     kind: "delivery_destination",
     configSchema: {
       type: "object",
@@ -145,100 +160,114 @@ const mailboxFeatures = (
       delivery: "email",
     },
   },
-  accountIdentityFeature(provider === "google-gmail" ? "google" : "microsoft"),
+  accountIdentityFacet(provider === "google-gmail" ? "google" : "microsoft"),
 ];
 
 const googleDiscoveryUrl = (service: string, version: string): string =>
   `https://www.googleapis.com/discovery/v1/apis/${service}/${version}/rest`;
 
-const googleOAuth = (scopes: readonly string[]): OAuthProviderPreset => ({
+const googleOAuth = (scopes: readonly string[]): IntegrationDefinitionOAuth2Authentication => ({
+  kind: "oauth2",
+  provider: "google",
   authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth",
   tokenUrl: "https://oauth2.googleapis.com/token",
   scopes: ["openid", "email", "profile", ...scopes],
   tokenPlacement: { carrier: "header", name: "Authorization", prefix: "Bearer " },
 });
 
-export const GOOGLE_DRIVE_PRESET: OpenApiProviderPreset = {
+export const GOOGLE_DRIVE_INTEGRATION_DEFINITION: IntegrationDefinition = {
   id: "google-drive",
   name: "Google Drive",
   summary: "Files, folders, permissions, and shared drives.",
-  family: "google",
-  sourceFormat: "google-discovery",
-  sourceUrl: googleDiscoveryUrl("drive", "v3"),
+  protocol: "openapi",
+  provider: { id: "google", domain: "www.googleapis.com" },
+  source: { kind: "google_discovery", url: googleDiscoveryUrl("drive", "v3") },
   baseUrl: "https://www.googleapis.com/drive/v3/",
-  oauth: googleOAuth(["https://www.googleapis.com/auth/drive"]),
-  healthOperation: "drive.about.get",
-  healthArgs: { query: { fields: "user" } },
-  features: [driveKnowledgeFeature("google-drive"), accountIdentityFeature("google")],
+  authentication: googleOAuth(["https://www.googleapis.com/auth/drive"]),
+  healthCheck: {
+    operationKey: "drive.about.get",
+    arguments: { query: { fields: "user" } },
+  },
+  facets: [driveKnowledgeFacet("google-drive"), accountIdentityFacet("google")],
 };
 
-export const GOOGLE_GMAIL_PRESET: OpenApiProviderPreset = {
+export const GOOGLE_GMAIL_INTEGRATION_DEFINITION: IntegrationDefinition = {
   id: "google-gmail",
   name: "Gmail",
   summary: "Messages, threads, labels, drafts, and sending mail.",
-  family: "google",
-  sourceFormat: "google-discovery",
-  sourceUrl: googleDiscoveryUrl("gmail", "v1"),
+  protocol: "openapi",
+  provider: { id: "google", domain: "gmail.googleapis.com" },
+  source: { kind: "google_discovery", url: googleDiscoveryUrl("gmail", "v1") },
   baseUrl: "https://gmail.googleapis.com/",
-  oauth: googleOAuth(["https://mail.google.com/"]),
-  healthOperation: "gmail.users.labels.list",
-  healthArgs: { path: { userId: "me" } },
-  features: mailboxFeatures("google-gmail"),
+  authentication: googleOAuth(["https://mail.google.com/"]),
+  healthCheck: {
+    operationKey: "gmail.users.labels.list",
+    arguments: { path: { userId: "me" } },
+  },
+  facets: mailboxFacets("google-gmail"),
 };
 
 export const MICROSOFT_GRAPH_OPENAPI_URL =
   "https://raw.githubusercontent.com/microsoftgraph/msgraph-metadata/master/openapi/v1.0/openapi.yaml";
 export const MICROSOFT_GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0";
 
-const microsoftOAuth = (scopes: readonly string[]): OAuthProviderPreset => ({
+const microsoftOAuth = (scopes: readonly string[]): IntegrationDefinitionOAuth2Authentication => ({
+  kind: "oauth2",
+  provider: "microsoft",
   authorizationUrl: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
   tokenUrl: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
   scopes: ["offline_access", "User.Read", ...scopes],
   tokenPlacement: { carrier: "header", name: "Authorization", prefix: "Bearer " },
 });
 
-export const MICROSOFT_OUTLOOK_MAIL_PRESET: OpenApiProviderPreset = {
+export const MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION: IntegrationDefinition = {
   id: "microsoft-outlook-mail",
   name: "Outlook Mail",
   summary: "Messages, folders, attachments, settings, and sending mail.",
-  family: "microsoft",
-  sourceFormat: "openapi",
-  sourceUrl: MICROSOFT_GRAPH_OPENAPI_URL,
+  protocol: "openapi",
+  provider: { id: "microsoft", domain: "graph.microsoft.com" },
+  source: {
+    kind: "openapi",
+    url: MICROSOFT_GRAPH_OPENAPI_URL,
+    operationPathPrefixes: [
+      "/me/messages",
+      "/me/mailFolders",
+      "/me/sendMail",
+      "/me/getMailTips",
+      "/me/inferenceClassification",
+      "/me/mailboxSettings",
+      "/me/outlook",
+    ],
+  },
   baseUrl: MICROSOFT_GRAPH_BASE_URL,
-  oauth: microsoftOAuth(["Mail.ReadWrite", "Mail.Send", "MailboxSettings.ReadWrite"]),
-  pathPrefixes: [
-    "/me/messages",
-    "/me/mailFolders",
-    "/me/sendMail",
-    "/me/getMailTips",
-    "/me/inferenceClassification",
-    "/me/mailboxSettings",
-    "/me/outlook",
-  ],
-  features: mailboxFeatures("microsoft-outlook-mail"),
+  authentication: microsoftOAuth(["Mail.ReadWrite", "Mail.Send", "MailboxSettings.ReadWrite"]),
+  facets: mailboxFacets("microsoft-outlook-mail"),
 };
 
-export const MICROSOFT_OUTLOOK_CALENDAR_PRESET: OpenApiProviderPreset = {
+export const MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION: IntegrationDefinition = {
   id: "microsoft-outlook-calendar",
   name: "Outlook Calendar",
   summary: "Calendars, events, availability, and scheduling.",
-  family: "microsoft",
-  sourceFormat: "openapi",
-  sourceUrl: MICROSOFT_GRAPH_OPENAPI_URL,
+  protocol: "openapi",
+  provider: { id: "microsoft", domain: "graph.microsoft.com" },
+  source: {
+    kind: "openapi",
+    url: MICROSOFT_GRAPH_OPENAPI_URL,
+    operationPathPrefixes: [
+      "/me/calendar",
+      "/me/calendars",
+      "/me/calendarGroups",
+      "/me/calendarView",
+      "/me/events",
+      "/me/findMeetingTimes",
+      "/me/reminderView",
+    ],
+  },
   baseUrl: MICROSOFT_GRAPH_BASE_URL,
-  oauth: microsoftOAuth(["Calendars.ReadWrite"]),
-  pathPrefixes: [
-    "/me/calendar",
-    "/me/calendars",
-    "/me/calendarGroups",
-    "/me/calendarView",
-    "/me/events",
-    "/me/findMeetingTimes",
-    "/me/reminderView",
-  ],
-  features: [
+  authentication: microsoftOAuth(["Calendars.ReadWrite"]),
+  facets: [
     {
-      featureKey: "calendar-events",
+      facetKey: "calendar-events",
       kind: "inbound_trigger",
       configSchema: {
         type: "object",
@@ -256,7 +285,7 @@ export const MICROSOFT_OUTLOOK_CALENDAR_PRESET: OpenApiProviderPreset = {
       },
     },
     {
-      featureKey: "calendar-delivery",
+      facetKey: "calendar-delivery",
       kind: "delivery_destination",
       configSchema: {
         type: "object",
@@ -271,82 +300,91 @@ export const MICROSOFT_OUTLOOK_CALENDAR_PRESET: OpenApiProviderPreset = {
         delivery: "calendar_event",
       },
     },
-    accountIdentityFeature("microsoft"),
+    accountIdentityFacet("microsoft"),
   ],
 };
 
-export const MICROSOFT_OUTLOOK_CONTACTS_PRESET: OpenApiProviderPreset = {
+export const MICROSOFT_OUTLOOK_CONTACTS_INTEGRATION_DEFINITION: IntegrationDefinition = {
   id: "microsoft-outlook-contacts",
   name: "Outlook Contacts",
   summary: "Contacts, contact folders, and people suggestions.",
-  family: "microsoft",
-  sourceFormat: "openapi",
-  sourceUrl: MICROSOFT_GRAPH_OPENAPI_URL,
+  protocol: "openapi",
+  provider: { id: "microsoft", domain: "graph.microsoft.com" },
+  source: {
+    kind: "openapi",
+    url: MICROSOFT_GRAPH_OPENAPI_URL,
+    operationPathPrefixes: ["/me/contacts", "/me/contactFolders", "/me/people"],
+  },
   baseUrl: MICROSOFT_GRAPH_BASE_URL,
-  oauth: microsoftOAuth(["Contacts.ReadWrite", "People.Read.All"]),
-  pathPrefixes: ["/me/contacts", "/me/contactFolders", "/me/people"],
-  features: [accountIdentityFeature("microsoft")],
+  authentication: microsoftOAuth(["Contacts.ReadWrite", "People.Read.All"]),
+  facets: [accountIdentityFacet("microsoft")],
 };
 
-export const MICROSOFT_ONEDRIVE_PRESET: OpenApiProviderPreset = {
+export const MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION: IntegrationDefinition = {
   id: "microsoft-onedrive",
   name: "OneDrive",
   summary: "Drives, files, folders, sharing links, and permissions.",
-  family: "microsoft",
-  sourceFormat: "openapi",
-  sourceUrl: MICROSOFT_GRAPH_OPENAPI_URL,
+  protocol: "openapi",
+  provider: { id: "microsoft", domain: "graph.microsoft.com" },
+  source: {
+    kind: "openapi",
+    url: MICROSOFT_GRAPH_OPENAPI_URL,
+    operationPathPrefixes: ["/me/drive", "/me/drives", "/me/followedSites", "/drives", "/shares"],
+  },
   baseUrl: MICROSOFT_GRAPH_BASE_URL,
-  oauth: microsoftOAuth(["Files.ReadWrite.All", "Sites.ReadWrite.All"]),
-  pathPrefixes: ["/me/drive", "/me/drives", "/me/followedSites", "/drives", "/shares"],
-  features: [driveKnowledgeFeature("microsoft-onedrive"), accountIdentityFeature("microsoft")],
+  authentication: microsoftOAuth(["Files.ReadWrite.All", "Sites.ReadWrite.All"]),
+  facets: [driveKnowledgeFacet("microsoft-onedrive"), accountIdentityFacet("microsoft")],
 };
 
-export const CORE_PROVIDER_PRESETS: readonly OpenApiProviderPreset[] = [
-  GOOGLE_DRIVE_PRESET,
-  GOOGLE_GMAIL_PRESET,
-  MICROSOFT_OUTLOOK_MAIL_PRESET,
-  MICROSOFT_OUTLOOK_CALENDAR_PRESET,
-  MICROSOFT_OUTLOOK_CONTACTS_PRESET,
-  MICROSOFT_ONEDRIVE_PRESET,
+export const CORE_INTEGRATION_DEFINITIONS: readonly IntegrationDefinition[] = [
+  GOOGLE_DRIVE_INTEGRATION_DEFINITION,
+  GOOGLE_GMAIL_INTEGRATION_DEFINITION,
+  MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION,
+  MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION,
+  MICROSOFT_OUTLOOK_CONTACTS_INTEGRATION_DEFINITION,
+  MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION,
 ];
 
-export function providerPresetById(id: string): OpenApiProviderPreset | undefined {
-  return CORE_PROVIDER_PRESETS.find((preset) => preset.id === id);
+export function integrationDefinitionById(id: string): IntegrationDefinition | undefined {
+  return CORE_INTEGRATION_DEFINITIONS.find((definition) => definition.id === id);
 }
 
-export function providerDomainForPreset(preset: OpenApiProviderPreset): string {
-  return new URL(preset.baseUrl).hostname.toLowerCase();
+export function integrationDefinitionProviderDomain(definition: IntegrationDefinition): string {
+  return definition.provider.domain;
 }
 
-export function integrationFeaturesForPreset(
-  presetId: string | null | undefined,
-): readonly IntegrationFeatureDefinition[] {
-  return presetId ? (providerPresetById(presetId)?.features ?? []) : [];
+export function integrationFacetDefinitions(
+  definitionId: string | null | undefined,
+): readonly IntegrationFacetDefinition[] {
+  return definitionId ? (integrationDefinitionById(definitionId)?.facets ?? []) : [];
 }
 
-export function filterOpenApiDocumentForPreset(
+export function filterOpenApiDocumentForDefinition(
   document: Record<string, unknown>,
-  preset: OpenApiProviderPreset,
+  definition: IntegrationDefinition,
 ): Record<string, unknown> {
-  if (!preset.pathPrefixes?.length) return document;
+  if (definition.source.kind !== "openapi" || !definition.source.operationPathPrefixes?.length) {
+    return document;
+  }
+  const operationPathPrefixes = definition.source.operationPathPrefixes;
   if (!isRecord(document.paths)) {
     throw new IntegrationProtocolError("openapi_paths", "OpenAPI document has no paths object");
   }
   const paths = Object.fromEntries(
     Object.entries(document.paths).filter(([path]) =>
-      preset.pathPrefixes!.some((prefix) => path === prefix || path.startsWith(`${prefix}/`)),
+      operationPathPrefixes.some((prefix) => path === prefix || path.startsWith(`${prefix}/`)),
     ),
   );
   if (Object.keys(paths).length === 0) {
     throw new IntegrationProtocolError(
-      "provider_preset_empty",
-      `${preset.name} did not match any operations in the supplied OpenAPI document`,
+      "integration_definition_empty",
+      `${definition.name} did not match any operations in the supplied OpenAPI document`,
     );
   }
   return {
     ...document,
     paths,
-    ...(preset.baseUrl ? { servers: [{ url: preset.baseUrl }] } : {}),
+    servers: [{ url: definition.baseUrl }],
   };
 }
 

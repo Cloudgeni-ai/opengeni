@@ -54,7 +54,7 @@ export interface IntegrationInvocationAuthority {
 
 export interface ResolveIntegrationCredentialRequest extends IntegrationInvocationAuthority {
   readonly protocol: Exclude<IntegrationProtocol, "mcp">;
-  readonly integrationId: string;
+  readonly definitionId: string;
   readonly revisionId: string;
   readonly operationKey: string;
   readonly destinationUrl: string;
@@ -90,7 +90,7 @@ export interface IntegrationRevision<
 > {
   readonly id: string;
   readonly protocol: TProtocol;
-  readonly integrationId: string;
+  readonly definitionId: string;
   readonly contentSha256: string;
   readonly source: IntegrationRevisionSource;
   readonly title: string;

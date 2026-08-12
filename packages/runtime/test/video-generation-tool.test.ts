@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { SEEDANCE_2_5_MODEL_ID } from "@opengeni/contracts";
 import { testSettings } from "@opengeni/testing";
 import { Manifest } from "@openai/agents/sandbox";
-import { buildOpenGeniAgent, lazySkillSourceWithPackSkills } from "../src";
+import { buildOpenGeniAgent, composeRuntimeSkills } from "../src";
 
 const capabilities = {
   schemaVersion: 1 as const,
@@ -54,8 +54,11 @@ describe("video generation runtime surface", () => {
 
   test("keeps its lazy skill absent unless the same executable boundary is enabled", () => {
     const manifest = new Manifest({ root: "/workspace", entries: {}, environment: {} });
-    const disabled = lazySkillSourceWithPackSkills([], [], false, false);
-    const enabled = lazySkillSourceWithPackSkills([], [], false, true);
+    const disabled = composeRuntimeSkills([]).lazySource;
+    const enabled = composeRuntimeSkills([], {
+      editableArtifacts: false,
+      videoGeneration: true,
+    }).lazySource;
     expect(disabled.getIndex?.(manifest, ".agents")?.map((entry) => entry.name)).not.toContain(
       "opengeni-video-generation",
     );

@@ -1,13 +1,12 @@
 import {
-  CORE_PROVIDER_PRESETS,
+  CORE_INTEGRATION_DEFINITIONS,
   createPinnedIntegrationTransport,
-  integrationFeaturesForPreset,
-  providerDomainForPreset,
+  integrationFacetDefinitions,
   type IntegrationCredentialResolver,
 } from "@opengeni/capabilities";
 import {
   ApiIntegrationPreview,
-  ListApiIntegrationPresetsResponse,
+  ListIntegrationDefinitionsResponse,
   ApiIntegrationUninstallPreview,
   InstallApiIntegrationRequest,
   InstalledApiIntegration,
@@ -23,9 +22,9 @@ import {
   getApiIntegrationUninstallPreview,
   getConnectionMetadata,
   installApiIntegration,
-  IntegrationFeatureBindingOwnershipConflictError,
-  IntegrationFeatureBindingVersionConflictError,
-  IntegrationFeatureBindingVersionRequiredError,
+  IntegrationFacetBindingOwnershipConflictError,
+  IntegrationFacetBindingVersionConflictError,
+  IntegrationFacetBindingVersionRequiredError,
   listInstalledApiIntegrations,
   uninstallApiIntegration,
   type ConnectionMetadataWithVerification,
@@ -56,24 +55,26 @@ export function registerApiIntegrationRoutes(
     ...(overrides.fetchImpl ? { fetchImpl: overrides.fetchImpl } : {}),
   });
 
-  app.get("/v1/workspaces/:workspaceId/integrations/presets", async (c) => {
+  app.get("/v1/workspaces/:workspaceId/integrations/definitions", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "workspace:read");
     return c.json(
-      ListApiIntegrationPresetsResponse.parse({
-        presets: CORE_PROVIDER_PRESETS.map((preset) => ({
-          id: preset.id,
-          name: preset.name,
-          summary: preset.summary,
-          family: preset.family,
-          protocol: "openapi",
-          providerDomain: providerDomainForPreset(preset),
-          scopes: [...preset.oauth.scopes],
-          features: preset.features.map((feature) => ({
-            featureKey: feature.featureKey,
-            kind: feature.kind,
-            configSchema: { ...feature.configSchema },
-            capabilities: { ...feature.capabilities },
+      ListIntegrationDefinitionsResponse.parse({
+        definitions: CORE_INTEGRATION_DEFINITIONS.map((definition) => ({
+          id: definition.id,
+          name: definition.name,
+          summary: definition.summary,
+          protocol: definition.protocol,
+          provider: { ...definition.provider },
+          authentication: {
+            kind: definition.authentication.kind,
+            scopes: [...definition.authentication.scopes],
+          },
+          facets: definition.facets.map((facet) => ({
+            facetKey: facet.facetKey,
+            kind: facet.kind,
+            configSchema: { ...facet.configSchema },
+            capabilities: { ...facet.capabilities },
           })),
         })),
       }),
@@ -99,7 +100,8 @@ export function registerApiIntegrationRoutes(
             name: integration.name,
             description: integration.description,
             protocol: integration.protocol,
-            presetId: integration.presetId,
+            definitionId: integration.definitionId,
+            definitionProvenance: integration.definitionProvenance,
             providerDomain: integration.providerDomain,
             baseUrl: integration.baseUrl,
             sourceUrl: integration.sourceUrl,
@@ -193,7 +195,8 @@ export function registerApiIntegrationRoutes(
             description: resolved.preview.description,
             category: "integrations",
             tags: [resolved.preview.protocol, resolved.preview.provider ?? "custom"],
-            presetId: resolved.preview.presetId,
+            definitionId: resolved.preview.definitionId,
+            definitionProvenance: resolved.preview.definitionProvenance,
             ...(resolved.provider ? { provider: resolved.provider } : {}),
             providerDomain: resolved.preview.providerDomain,
             protocol: resolved.preview.protocol,
@@ -210,7 +213,7 @@ export function registerApiIntegrationRoutes(
             ownership:
               resolved.preview.connectionOwnership === "personal" ? "subject" : "workspace",
             ...(payload.allowedTools ? { allowedTools: payload.allowedTools } : {}),
-            featureDefinitions: integrationFeaturesForPreset(resolved.preview.presetId),
+            facetDefinitions: integrationFacetDefinitions(resolved.preview.definitionId),
             revision: resolved.revision,
           }),
         ),
@@ -218,9 +221,9 @@ export function registerApiIntegrationRoutes(
       );
     } catch (error) {
       if (
-        error instanceof IntegrationFeatureBindingVersionConflictError ||
-        error instanceof IntegrationFeatureBindingVersionRequiredError ||
-        error instanceof IntegrationFeatureBindingOwnershipConflictError
+        error instanceof IntegrationFacetBindingVersionConflictError ||
+        error instanceof IntegrationFacetBindingVersionRequiredError ||
+        error instanceof IntegrationFacetBindingOwnershipConflictError
       ) {
         throw new HTTPException(409, {
           message:
@@ -275,7 +278,7 @@ export function registerApiIntegrationRoutes(
       } catch (error) {
         if (
           error instanceof ApiIntegrationInstallationVersionConflictError ||
-          error instanceof IntegrationFeatureBindingVersionConflictError
+          error instanceof IntegrationFacetBindingVersionConflictError
         ) {
           throw new HTTPException(409, {
             message:
