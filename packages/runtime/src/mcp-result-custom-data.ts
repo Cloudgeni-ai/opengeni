@@ -35,6 +35,7 @@ export class McpResultCustomDataBridge {
     private readonly input?: {
       innerServer?: MCPServer;
       unprefixToolName?: (toolName: string) => string;
+      sdkModelOutput?: "content" | "result";
     },
   ) {
     this.toolMetaResolver = async (context) => {
@@ -101,11 +102,17 @@ export class McpResultCustomDataBridge {
   async captureResult(
     args: Record<string, unknown> | null,
     invoke: (cleanArgs: Record<string, unknown> | null) => Promise<unknown>,
-  ): Promise<AttemptToolResultValue> {
+  ): Promise<unknown> {
     const token = this.takeToken(args);
     try {
       const result = AttemptToolResult.parse(await invoke(args));
       if (token) this.resultsByToken.set(token, result);
+      if (token && this.input?.sdkModelOutput === "result") {
+        // The prefixed server historically exposed the complete MCP result as
+        // model output. Keep that shape while the SDK reads the standard result
+        // fields and the bridge retains the exact audit copy out of band.
+        return { ...result, content: result };
+      }
       return result;
     } finally {
       if (args && token) {

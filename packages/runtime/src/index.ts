@@ -4817,6 +4817,7 @@ export class PrefixedMcpServer implements MCPServer {
     this.resultCustomDataBridge = new McpResultCustomDataBridge({
       innerServer: inner,
       unprefixToolName: (toolName) => this.unprefixToolName(toolName),
+      sdkModelOutput: "result",
     });
     this.customDataExtractor = this.resultCustomDataBridge.customDataExtractor;
     this.toolMetaResolver = this.resultCustomDataBridge.toolMetaResolver;
@@ -4952,7 +4953,7 @@ export class PrefixedMcpServer implements MCPServer {
     meta?: Record<string, unknown> | null,
     options?: { signal?: AbortSignal },
   ): Promise<any> {
-    return (await this.callToolResult(toolName, args, meta, options)).content;
+    return await this.callToolResult(toolName, args, meta, options);
   }
 
   async callToolResult(

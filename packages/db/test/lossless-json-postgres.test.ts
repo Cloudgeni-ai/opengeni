@@ -855,6 +855,22 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       callType: "function_call",
       resultType: "function_call_result",
     });
+    const legacyApp = postgres(shared.appUrl, { max: 1, onnotice: () => undefined });
+    try {
+      await expect(
+        legacyApp.begin(async (sql) => {
+          await sql`select set_config('opengeni.account_id', ${grant.accountId}, true)`;
+          await sql`select set_config('opengeni.workspace_id', ${workspaceId}, true)`;
+          await sql`delete from session_pending_tool_calls where call_id = ${callId}`;
+        }),
+      ).rejects.toThrow("rich pending tool output requires a v1-aware settlement worker");
+    } finally {
+      await legacyApp.end();
+    }
+    const [retainedAfterLegacyDelete] = await shared.admin<Array<{ eventOutput: unknown | null }>>`
+      select event_output as "eventOutput"
+      from session_pending_tool_calls where call_id = ${callId}`;
+    expect(retainedAfterLegacyDelete?.eventOutput).not.toBeNull();
 
     const settled = await withWorkspaceRls(app.db, workspaceId, (db) =>
       db.transaction(async (tx) => {
