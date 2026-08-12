@@ -8,6 +8,7 @@ import {
   applyCanonicalHumanIdentityOperation,
   ensureCanonicalHumanIdentityForAuthUser,
   getCanonicalHumanIdentityProjection,
+  synchronizeCanonicalHumanLoginBindings,
   validateCanonicalHumanSession,
 } from "../src/canonical-human-identities";
 import { createDb, nestedPostgresSqlState, type DbClient } from "../src";
@@ -217,6 +218,30 @@ describe("migration 0223 canonical human identities and login bindings", () => {
       select count(*)::int as count from auth_sessions where id = ${sessionId}
     `;
     expect(sessionCount).toEqual({ count: 0 });
+  });
+
+  test("synchronizes verified authentication accounts idempotently before session stamping", async () => {
+    if (!shared || !client) return;
+    const userId = await createAuthUser({ name: "Authentication Sync Human" });
+    await createVerifiedBinding(userId, "credential", userId);
+    await createVerifiedBinding(userId, "github", `github-${userId}`);
+
+    const first = await synchronizeCanonicalHumanLoginBindings(client.db, userId);
+    expect(first.identityStatus).toBe("active");
+    const projection = await getCanonicalHumanIdentityProjection(client.db, userId);
+    expect(projection.loginBindings.map((binding) => binding.providerId).sort()).toEqual([
+      "credential",
+      "github",
+    ]);
+
+    const second = await synchronizeCanonicalHumanLoginBindings(client.db, userId);
+    expect(second).toEqual(first);
+    const [operationCount] = await shared.admin<{ count: number }[]>`
+      select count(*)::int as count
+      from canonical_human_identity_operations
+      where actor_auth_user_id = ${userId}
+    `;
+    expect(operationCount).toEqual({ count: 2 });
   });
 
   test("fails closed into lost-factor recovery and requires a recovery-only reauthentication", async () => {

@@ -2,7 +2,7 @@ import type { Settings } from "@opengeni/config";
 import { type ManagedAuth } from "@opengeni/core";
 import type { Database } from "@opengeni/db";
 import { ensureManagedAccessForUser } from "@opengeni/db";
-import { ensureCanonicalHumanIdentityForAuthUser } from "@opengeni/db/canonical-human-identities";
+import { synchronizeCanonicalHumanLoginBindings } from "@opengeni/db/canonical-human-identities";
 import { betterAuth } from "better-auth";
 import { createEmailVerificationToken } from "better-auth/api";
 import { Pool } from "pg";
@@ -162,7 +162,7 @@ export function createManagedAuth(settings: Settings, db: Database): ManagedAuth
       session: {
         create: {
           before: async (session) => {
-            const authority = await ensureCanonicalHumanIdentityForAuthUser(db, session.userId);
+            const authority = await synchronizeCanonicalHumanLoginBindings(db, session.userId);
             if (
               authority.identityStatus === "disputed" ||
               authority.identityStatus === "disabled"

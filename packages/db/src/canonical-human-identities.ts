@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   CanonicalHumanIdentityMutationResponse,
   CanonicalHumanIdentityProjection,
@@ -45,6 +46,14 @@ export class CanonicalHumanIdentityNotFoundError extends Error {
 
 export class CanonicalHumanIdentityAuthorityError extends Error {
   readonly name = "CanonicalHumanIdentityAuthorityError";
+}
+
+function deterministicOperationId(seed: string): string {
+  const bytes = createHash("sha256").update(seed, "utf8").digest().subarray(0, 16);
+  bytes[6] = (bytes[6]! & 0x0f) | 0x50;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 function projectionValue(value: unknown): unknown {
@@ -116,6 +125,73 @@ export async function ensureCanonicalHumanIdentityForAuthUser(
     authUserId,
     displayName: user.displayName,
   });
+}
+
+export async function synchronizeCanonicalHumanLoginBindings(
+  db: Database,
+  authUserId: string,
+): Promise<CanonicalHumanSessionAuthority> {
+  let authority = await ensureCanonicalHumanIdentityForAuthUser(db, authUserId);
+  const accounts = await rawRows<{
+    id: string;
+    providerId: string;
+    providerAccountId: string;
+  }>(
+    db,
+    sql`
+      select
+        id,
+        lower(provider_id) as "providerId",
+        account_id as "providerAccountId"
+      from auth_identities
+      where user_id = ${authUserId}
+      order by created_at, id
+    `,
+  );
+
+  for (const account of accounts) {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const projection = await getCanonicalHumanIdentityProjection(db, authUserId);
+      const existing = projection.loginBindings.find(
+        (binding) =>
+          binding.providerId === account.providerId &&
+          binding.providerAccountId === account.providerAccountId,
+      );
+      if (existing?.status === "active") {
+        authority = {
+          identityId: projection.activeIdentity.id,
+          identityRevision: projection.activeIdentity.identityRevision,
+          authRevision: projection.activeIdentity.authRevision,
+          identityStatus: projection.activeIdentity.status,
+        };
+        break;
+      }
+      try {
+        const result = await applyCanonicalHumanIdentityOperation(db, {
+          operationId: deterministicOperationId(
+            `canonical-human-account-link\n${account.id}\n${projection.activeIdentity.identityRevision}`,
+          ),
+          authUserId,
+          expectedIdentityRevision: projection.activeIdentity.identityRevision,
+          operationType: "link",
+          providerId: account.providerId,
+          providerAccountId: account.providerAccountId,
+          reason: "Synchronize verified authentication account",
+        });
+        authority = {
+          identityId: result.identity.activeIdentity.id,
+          identityRevision: result.identity.activeIdentity.identityRevision,
+          authRevision: result.identity.activeIdentity.authRevision,
+          identityStatus: result.identity.activeIdentity.status,
+        };
+        break;
+      } catch (error) {
+        if (error instanceof CanonicalHumanIdentityConflictError && attempt < 3) continue;
+        throw error;
+      }
+    }
+  }
+  return authority;
 }
 
 export async function validateCanonicalHumanSession(
