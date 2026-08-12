@@ -47,6 +47,31 @@ function knowledgeAuthorityTables(): RuntimeTablePosture[] {
   }));
 }
 
+function xaiAuthorityTables(): RuntimeTablePosture[] {
+  return [
+    "organization_memberships",
+    "organization_user_resource_authorities",
+    "workspace_memberships",
+    "xai_subscription_credentials",
+  ].map((name) => ({
+    name,
+    owner: "opengeni_migrator",
+    rlsEnabled: false,
+    rlsForced: false,
+    rlsActive: false,
+    policyCount: 0,
+    artifactOutboxDispatcherPolicy: false,
+    artifactMaterializerPolicy: false,
+    select: false,
+    insert: false,
+    update: false,
+    delete: false,
+    truncate: false,
+    references: false,
+    trigger: false,
+  }));
+}
+
 function safePosture(): RuntimeDatabasePosture {
   return {
     identity: {
@@ -100,10 +125,32 @@ function safePosture(): RuntimeDatabasePosture {
         trigger: false,
       },
       ...knowledgeAuthorityTables(),
+      ...xaiAuthorityTables(),
     ],
     targetRoutines: [
       {
+        name: "create_xai_subscription_credential(uuid, uuid, text, text, text, text, text, text, text, timestamp with time zone)",
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+      },
+      {
         name: "knowledge_source_sync_lock_authority(uuid, uuid, uuid)",
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+      },
+      {
+        name: "resolve_xai_authority_pool(uuid, uuid, text, jsonb)",
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+      },
+      {
+        name: "revalidate_xai_subscription_authority(uuid, text, uuid, jsonb)",
         owner: "opengeni_migrator",
         execute: true,
         publicExecute: false,
@@ -144,26 +191,26 @@ describe("runtime database posture evaluator", () => {
         .sort();
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 222],
+            [FORCE_RLS_TABLES, 227],
             [NON_RLS_RUNTIME_TABLES, 11],
-            [RUNTIME_FULL_DML_TABLES, 133],
-            [RUNTIME_READ_ONLY_TABLES, 17],
+            [RUNTIME_FULL_DML_TABLES, 138],
+            [RUNTIME_READ_ONLY_TABLES, 14],
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 42],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 29],
             [PROTECTED_NO_DIRECT_DML_TABLES, 11],
-            [RUNTIME_DML_TABLES, 222],
+            [RUNTIME_DML_TABLES, 227],
           ] as const)
         : ([
-            [FORCE_RLS_TABLES, 173],
+            [FORCE_RLS_TABLES, 178],
             [NON_RLS_RUNTIME_TABLES, 11],
-            [RUNTIME_FULL_DML_TABLES, 107],
-            [RUNTIME_READ_ONLY_TABLES, 16],
+            [RUNTIME_FULL_DML_TABLES, 112],
+            [RUNTIME_READ_ONLY_TABLES, 13],
             [readUpdateTables, 0],
             [RUNTIME_READ_INSERT_TABLES, 38],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 12],
             [PROTECTED_NO_DIRECT_DML_TABLES, 11],
-            [RUNTIME_DML_TABLES, 173],
+            [RUNTIME_DML_TABLES, 178],
           ] as const);
       for (const [tables, length] of contracts) {
         expect(tables).toHaveLength(length);
@@ -172,7 +219,7 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = hasCurrentMainActivityLedger ? 233 : 184;
+      const tableCount = hasCurrentMainActivityLedger ? 238 : 189;
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount,
       );
@@ -231,15 +278,15 @@ describe("runtime database posture evaluator", () => {
     }
 
     const contracts = [
-      [FORCE_RLS_TABLES, 197],
+      [FORCE_RLS_TABLES, 202],
       [NON_RLS_RUNTIME_TABLES, 11],
-      [RUNTIME_FULL_DML_TABLES, 128],
+      [RUNTIME_FULL_DML_TABLES, 133],
       [RUNTIME_READ_ONLY_TABLES, 14],
       [RUNTIME_READ_UPDATE_TABLES, 1],
       [RUNTIME_READ_INSERT_TABLES, 41],
       [RUNTIME_READ_INSERT_UPDATE_TABLES, 18],
       [PROTECTED_NO_DIRECT_DML_TABLES, 11],
-      [RUNTIME_DML_TABLES, 202],
+      [RUNTIME_DML_TABLES, 207],
     ] as const;
     for (const [tables, length] of contracts) {
       expect(tables).toHaveLength(length);
@@ -248,8 +295,8 @@ describe("runtime database posture evaluator", () => {
     }
 
     expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-    expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(213);
-    expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(208);
+    expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(218);
+    expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(213);
     expect(RUNTIME_TABLE_PRIVILEGES.editable_artifact_session_links).toEqual([
       "SELECT",
       "INSERT",
@@ -318,9 +365,21 @@ describe("runtime database posture evaluator", () => {
   test("rejects knowledge authority routine and table owner mismatch", () => {
     const posture = safePosture();
 
-    posture.targetRoutines[0]!.owner = "another_owner";
+    posture.targetRoutines.find(
+      (routine) => routine.name === "knowledge_source_sync_lock_authority(uuid, uuid, uuid)",
+    )!.owner = "another_owner";
     expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
       "target-schema runtime capability knowledge_source_sync_lock_authority(uuid, uuid, uuid) owner another_owner does not match authority table owner opengeni_migrator",
+    );
+  });
+
+  test("rejects xAI authority routine and table owner mismatch", () => {
+    const posture = safePosture();
+    posture.tables.find((table) => table.name === "xai_subscription_credentials")!.owner =
+      "another_owner";
+
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "target-schema runtime capability create_xai_subscription_credential(uuid, uuid, text, text, text, text, text, text, text, timestamp with time zone) authority table owners do not match: organization_memberships=opengeni_migrator, organization_user_resource_authorities=opengeni_migrator, workspace_memberships=opengeni_migrator, xai_subscription_credentials=another_owner",
     );
   });
 
@@ -475,8 +534,11 @@ describe("runtime database posture evaluator", () => {
     );
 
     const invalid = safePosture();
-    invalid.targetRoutines[0] = {
-      ...invalid.targetRoutines[0]!,
+    const knowledgeRoutineIndex = invalid.targetRoutines.findIndex(
+      (routine) => routine.name === "knowledge_source_sync_lock_authority(uuid, uuid, uuid)",
+    );
+    invalid.targetRoutines[knowledgeRoutineIndex] = {
+      ...invalid.targetRoutines[knowledgeRoutineIndex]!,
       owner: "another_owner",
       execute: false,
       publicExecute: true,
