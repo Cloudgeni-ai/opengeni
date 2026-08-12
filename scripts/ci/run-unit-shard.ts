@@ -203,7 +203,15 @@ async function run(
     innerConcurrency === budget.concurrency
       ? `--max-concurrency=${budget.concurrency}`
       : `--max-concurrency=${innerConcurrency}`;
-  const args = ["bun", "test", "--no-orphans", "--timeout=30000", concurrencyArgument, ...files];
+  const args = [
+    "bun",
+    "--no-env-file",
+    "test",
+    "--no-orphans",
+    "--timeout=30000",
+    concurrencyArgument,
+    ...files,
+  ];
   process.stdout.write(
     `[unit-shard] ${isolated ? "isolated" : "batch"}: ${describeTestConcurrencyBudget(budget)} processPool=${processConcurrency} innerConcurrency=${innerConcurrency} files=${files.join(", ")}\n`,
   );

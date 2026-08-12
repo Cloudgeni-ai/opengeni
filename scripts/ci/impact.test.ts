@@ -348,6 +348,7 @@ describe("deterministic bounded execution", () => {
       expect(source).not.toContain('"--isolate"');
       expect(source).toContain("--max-concurrency=${budget.concurrency}");
     }
+    expect(readFileSync("scripts/ci/run-unit-shard.ts", "utf8")).toContain('"--no-env-file"');
   });
 });
 
