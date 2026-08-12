@@ -645,6 +645,7 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
         dbClient.db,
         grant,
         "idle target must admit only the newest Agent Steer",
+        actor.sessionId,
       );
       const steer = (instruction: string) =>
         withWorkspaceSessionActivityRls(dbClient.db, grant.workspaceId, (db) =>
@@ -1177,10 +1178,12 @@ async function createDurableSession(
   db: ReturnType<typeof createDb>["db"],
   grant: AccessGrant,
   initialMessage: string,
+  parentSessionId?: string,
 ) {
   return await createSession(db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
+    parentSessionId,
     initialMessage,
     resources: [],
     tools: [],

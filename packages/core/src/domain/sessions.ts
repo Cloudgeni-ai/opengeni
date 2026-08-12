@@ -99,7 +99,10 @@ import type {
   ApiRouteDeps,
   SessionWorkflowClient,
 } from "../dependencies";
-import { requireSessionAuthorization } from "../session-authorization";
+import {
+  requireSessionAuthorization,
+  SessionAuthorizationDeniedError,
+} from "../session-authorization";
 import { swapActiveSandbox, type FleetContext } from "../sandbox/fleet";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 import { validateSubmittedTimelineAnnotations } from "./timeline-annotations";
@@ -1281,11 +1284,18 @@ export async function createSessionForRequestWithOutcome(
       ? (grant.metadata["sessionId"] as string)
       : null;
   if (parentSessionId) {
-    await requireSessionAuthorization(deps, grant, {
-      sessionId: parentSessionId,
-      operation: "session.child.create",
-      surface: "core",
-    });
+    try {
+      await requireSessionAuthorization(deps, grant, {
+        sessionId: parentSessionId,
+        operation: "session.child.create",
+        surface: "core",
+      });
+    } catch (error) {
+      if (error instanceof SessionAuthorizationDeniedError) {
+        throw new HTTPException(403, { message: error.message, cause: error });
+      }
+      throw error;
+    }
   }
   const parentSession = parentSessionId ? await getSession(db, workspaceId, parentSessionId) : null;
   if (parentSessionId && !parentSession) {
@@ -1976,6 +1986,7 @@ export async function acceptSessionUserMessageWithOutcome(
   replay: boolean;
 }> {
   const { settings, db, bus, workflowClient, objectStorage } = deps;
+  const delegatedServiceInitiator = serviceInitiatorForGrant(grant);
   await requireSessionAuthorization(deps, grant, {
     sessionId,
     operation: input.delivery === "steer" ? "session.steer" : "session.append",
@@ -2055,7 +2066,6 @@ export async function acceptSessionUserMessageWithOutcome(
     tools: existingSession.tools,
     source: personalConnectionDelegationSourceForGrant(grant),
   });
-  const delegatedServiceInitiator = serviceInitiatorForGrant(grant);
   const { accepted, turn, interruptionCount, replay } = await postUserMessageTurn({
     db,
     bus,

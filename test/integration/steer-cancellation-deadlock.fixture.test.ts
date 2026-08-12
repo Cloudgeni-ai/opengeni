@@ -131,6 +131,7 @@ describe("cancellation-settlement lane Agent Steer cancellation deadlock product
       const target = await createSession(dbClient.db, {
         accountId: grant.accountId,
         workspaceId,
+        parentSessionId: caller.id,
         initialMessage: "target",
         resources: [],
         tools: [],
@@ -457,6 +458,7 @@ describe("cancellation-settlement lane Agent Steer cancellation deadlock product
       const target = await createSession(dbClient.db, {
         accountId: grant.accountId,
         workspaceId,
+        parentSessionId: caller.id,
         initialMessage: "target",
         resources: [],
         tools: [],
