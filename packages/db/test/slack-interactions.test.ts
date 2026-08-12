@@ -15,13 +15,16 @@ import {
   createSessionWithIdempotencyKeyResult,
   enqueueSlackInteractionInbox,
   getOrCreateSlackInteraction,
+  getSlackInteractionActionHandle,
   getSessionForSubject,
   grantWorkspaceAccess,
   listSessionsForSubject,
   releaseSlackInteractionInbox,
+  reserveSlackInteractionActionHandles,
   resolveSlackInstallationRoute,
   saveSlackInteractionInboxReactionCheckpoint,
   settleSlackInteractionInbox,
+  settleSlackInteractionActionHandles,
   type Database,
   type DbClient,
 } from "../src/index";
@@ -31,6 +34,10 @@ const migrationPath = new URL("../drizzle/0150_slack_task_interactions.sql", imp
   .pathname;
 const reactionMigrationPath = new URL("../drizzle/0156_slack_reaction_trigger.sql", import.meta.url)
   .pathname;
+const nativeActionMigrationPath = new URL(
+  "../drizzle/0227_slack_native_actions.sql",
+  import.meta.url,
+).pathname;
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -170,6 +177,19 @@ describe("Slack interaction migration and durable database boundary", () => {
     expect(sql).toContain('octet_length("reaction_context_checkpoint"::text) <= 131072');
     expect(sql).not.toContain("CREATE TABLE");
     expect(sql).not.toContain("ALTER TYPE");
+  });
+
+  test("adds requester-bound native action and update ledgers", async () => {
+    const sql = await readFile(nativeActionMigrationPath, "utf8");
+    expect(sql).toContain('ADD COLUMN "initiating_slack_user_id" text');
+    expect(sql).toContain("'block_action'");
+    expect(sql).toContain('CREATE TABLE "slack_interaction_action_handles"');
+    expect(sql).toContain('CREATE TABLE "slack_bot_update_operations"');
+    expect(sql.match(/FORCE ROW LEVEL SECURITY/g)).toHaveLength(2);
+    expect(sql).toContain("slack_interaction_action_handles_identity_uq");
+    expect(sql).toContain("slack_bot_update_operations_workspace_operation_uq");
+    expect(sql).not.toContain("rawItem");
+    expect(sql).not.toContain("arguments");
   });
 
   test("enforces FORCE RLS and grants only the declared runtime DML", async () => {
@@ -503,6 +523,103 @@ describe("Slack interaction migration and durable database boundary", () => {
     expect(await getSessionForSubject(db, target.workspaceId, root.id, other)).toBeNull();
     expect(await getSessionForSubject(db, target.workspaceId, child.id, other)).toBeNull();
     expect(await getSessionForSubject(db, target.workspaceId, child.id, owner)).not.toBeNull();
+  });
+
+  test("reserves opaque requester-bound actions and settles one card once", async () => {
+    if (!available) return;
+    const target = await workspace("native-actions");
+    const owner = `user:slack-action-owner-${crypto.randomUUID()}`;
+    await member(target, owner);
+    const connection = await botConnection(target, "T_NATIVE_ACTION", {
+      botId: "B_NATIVE_ACTION",
+      botUserId: "U_NATIVE_ACTION_BOT",
+    });
+    const { interaction: reserved } = await getOrCreateSlackInteraction(db, {
+      ...target,
+      connectionId: connection.id,
+      slackTeamId: "T_NATIVE_ACTION",
+      slackChannelId: "C_NATIVE_ACTION",
+      slackThreadTs: "1710000000.000030",
+      routeKey: "C_NATIVE_ACTION:1710000000.000030",
+      triggeringProviderEventId: "E_NATIVE_ACTION",
+      initiatingSlackUserId: "U_NATIVE_ACTION",
+      owningSubjectId: owner,
+      visibility: "workspace",
+    });
+    const session = await createSession(db, {
+      ...target,
+      requestedSessionId: reserved.sessionReservationId,
+      initialMessage: "native action root",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: owner },
+      model: "test-model",
+      sandboxBackend: "none",
+    });
+    const interaction = await bindSlackInteractionSession(db, {
+      ...reserved,
+      owningSubjectId: owner,
+      sessionId: session.id,
+    });
+    if (!interaction) throw new Error("native action interaction did not bind");
+    const messageOperationId = crypto.randomUUID();
+    const handles = await reserveSlackInteractionActionHandles(db, {
+      interaction,
+      sessionEventSequence: 7,
+      messageOperationId,
+      expiresAt: new Date(Date.now() + 60_000),
+      actions: [
+        {
+          actionKind: "approval_approve",
+          actionKey: "approval:call-1:approve",
+          targetId: "call-1",
+        },
+        {
+          actionKind: "approval_reject",
+          actionKey: "approval:call-1:reject",
+          targetId: "call-1",
+        },
+      ],
+    });
+    expect(handles).toHaveLength(2);
+    expect(handles[0]).toMatchObject({
+      authorizedSubjectId: owner,
+      authorizedSlackUserId: "U_NATIVE_ACTION",
+      messageOperationId,
+      status: "pending",
+    });
+    const replay = await reserveSlackInteractionActionHandles(db, {
+      interaction,
+      sessionEventSequence: 7,
+      messageOperationId,
+      expiresAt: new Date(Date.now() + 60_000),
+      actions: [
+        {
+          actionKind: "approval_approve",
+          actionKey: "approval:call-1:approve",
+          targetId: "call-1",
+        },
+        {
+          actionKind: "approval_reject",
+          actionKey: "approval:call-1:reject",
+          targetId: "call-1",
+        },
+      ],
+    });
+    expect(replay.map((handle) => handle.id)).toEqual(handles.map((handle) => handle.id));
+    expect(
+      await settleSlackInteractionActionHandles(db, {
+        ...target,
+        handleId: handles[0]!.id,
+        result: "approved",
+      }),
+    ).toMatchObject({ status: "completed", result: "approved" });
+    expect(
+      await getSlackInteractionActionHandle(db, {
+        ...target,
+        handleId: handles[1]!.id,
+      }),
+    ).toMatchObject({ status: "stale", result: "superseded" });
   });
 
   test("keeps a reserved private session unreadable before, during, and after bind across crash retry", async () => {

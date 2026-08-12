@@ -3914,6 +3914,25 @@ export type SlackBotPostOperation = {
   updatedAt: Date;
 };
 
+export type SlackBotUpdateOperation = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  connectionId: string;
+  operationId: string;
+  slackChannelId: string;
+  slackMessageTimestamp: string;
+  requestDigest: string;
+  status: "provider_started" | "completed";
+  claimHolderId: string | null;
+  claimExpiresAt: Date | null;
+  attemptCount: number;
+  lastFailureCode: string | null;
+  completedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
 export type SlackBotDeleteOperation = {
   id: string;
   accountId: string;
@@ -7951,7 +7970,8 @@ export type SlackInteractionTriggerKind =
   | "reaction"
   | "slash_command"
   | "message_shortcut"
-  | "thread_reply";
+  | "thread_reply"
+  | "block_action";
 
 export type SlackInteractionInboxEntry = {
   id: string;
@@ -7989,6 +8009,7 @@ export type SlackInteraction = {
   slackThreadTs: string;
   routeKey: string;
   triggeringProviderEventId: string;
+  initiatingSlackUserId: string | null;
   owningSubjectId: string;
   visibility: "private" | "workspace";
   sessionReservationId: string;
@@ -8015,6 +8036,38 @@ export type SlackInteractionProgressDelivery = {
   slot: number;
   operationId: string;
   createdAt: Date;
+};
+
+export type SlackInteractionActionKind =
+  | "approval_approve"
+  | "approval_reject"
+  | "human_input_select"
+  | "human_input_skip"
+  | "session_status"
+  | "session_pause"
+  | "session_resume";
+
+export type SlackInteractionActionHandle = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  connectionId: string;
+  interactionId: string;
+  sessionId: string;
+  sessionEventSequence: number;
+  actionKind: SlackInteractionActionKind;
+  actionKey: string;
+  targetId: string | null;
+  targetValue: string | null;
+  authorizedSubjectId: string;
+  authorizedSlackUserId: string;
+  messageOperationId: string;
+  status: "pending" | "completed" | "stale";
+  result: string | null;
+  expiresAt: Date;
+  completedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
 };
 
 export async function resolveSlackInstallationRoute(
@@ -8272,6 +8325,7 @@ export async function getOrCreateSlackInteraction(
   input: Omit<
     SlackInteraction,
     | "id"
+    | "initiatingSlackUserId"
     | "sessionReservationId"
     | "sessionId"
     | "lastDeliveredSessionEventSequence"
@@ -8285,12 +8339,12 @@ export async function getOrCreateSlackInteraction(
     | "terminalDeliveryState"
     | "createdAt"
     | "updatedAt"
-  >,
+  > & { initiatingSlackUserId?: string | null },
 ): Promise<{ created: boolean; interaction: SlackInteraction }> {
   return await withRlsContext(db, input, async (scopedDb) => {
     const [created] = await scopedDb
       .insert(schema.slackInteractions)
-      .values(input)
+      .values({ ...input, initiatingSlackUserId: input.initiatingSlackUserId ?? null })
       .onConflictDoNothing()
       .returning();
     if (created) return { created: true, interaction: mapSlackInteraction(created) };
@@ -8329,6 +8383,237 @@ export async function getSlackInteractionByRoute(
       .limit(1);
     return row ? mapSlackInteraction(row) : null;
   });
+}
+
+export async function getSlackInteractionById(
+  db: Database,
+  input: { accountId: string; workspaceId: string; interactionId: string },
+): Promise<SlackInteraction | null> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.slackInteractions)
+      .where(
+        and(
+          eq(schema.slackInteractions.accountId, input.accountId),
+          eq(schema.slackInteractions.workspaceId, input.workspaceId),
+          eq(schema.slackInteractions.id, input.interactionId),
+        ),
+      )
+      .limit(1);
+    return row ? mapSlackInteraction(row) : null;
+  });
+}
+
+export async function reserveSlackInteractionActionHandles(
+  db: Database,
+  input: {
+    interaction: Pick<
+      SlackInteraction,
+      | "id"
+      | "accountId"
+      | "workspaceId"
+      | "connectionId"
+      | "sessionId"
+      | "owningSubjectId"
+      | "initiatingSlackUserId"
+    >;
+    sessionEventSequence: number;
+    messageOperationId: string;
+    expiresAt: Date;
+    actions: Array<{
+      actionKind: SlackInteractionActionKind;
+      actionKey: string;
+      targetId?: string | null;
+      targetValue?: string | null;
+    }>;
+  },
+): Promise<SlackInteractionActionHandle[]> {
+  if (
+    !input.interaction.sessionId ||
+    !input.interaction.initiatingSlackUserId ||
+    !Number.isSafeInteger(input.sessionEventSequence) ||
+    input.sessionEventSequence < 0 ||
+    input.actions.length < 1 ||
+    input.actions.length > 25
+  ) {
+    throw new RangeError("invalid Slack action handle reservation");
+  }
+  const sessionId = input.interaction.sessionId;
+  const initiatingSlackUserId = input.interaction.initiatingSlackUserId;
+  if (!sessionId || !initiatingSlackUserId) {
+    throw new RangeError("Slack action handle reservation requires a bound requester");
+  }
+  return await withRlsContext(
+    db,
+    input.interaction,
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        const [interaction] = await tx
+          .select()
+          .from(schema.slackInteractions)
+          .where(
+            and(
+              eq(schema.slackInteractions.accountId, input.interaction.accountId),
+              eq(schema.slackInteractions.workspaceId, input.interaction.workspaceId),
+              eq(schema.slackInteractions.id, input.interaction.id),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (
+          !interaction ||
+          interaction.connectionId !== input.interaction.connectionId ||
+          interaction.sessionId !== input.interaction.sessionId ||
+          interaction.owningSubjectId !== input.interaction.owningSubjectId ||
+          interaction.initiatingSlackUserId !== input.interaction.initiatingSlackUserId
+        ) {
+          throw new Error("Slack interaction action authority changed");
+        }
+        for (const action of input.actions) {
+          await tx
+            .insert(schema.slackInteractionActionHandles)
+            .values({
+              accountId: input.interaction.accountId,
+              workspaceId: input.interaction.workspaceId,
+              connectionId: input.interaction.connectionId,
+              interactionId: input.interaction.id,
+              sessionId,
+              sessionEventSequence: input.sessionEventSequence,
+              actionKind: action.actionKind,
+              actionKey: action.actionKey,
+              targetId: action.targetId ?? null,
+              targetValue: action.targetValue ?? null,
+              authorizedSubjectId: input.interaction.owningSubjectId,
+              authorizedSlackUserId: initiatingSlackUserId,
+              messageOperationId: input.messageOperationId,
+              expiresAt: input.expiresAt,
+            })
+            .onConflictDoNothing({
+              target: [
+                schema.slackInteractionActionHandles.interactionId,
+                schema.slackInteractionActionHandles.sessionEventSequence,
+                schema.slackInteractionActionHandles.actionKey,
+              ],
+            });
+        }
+        const rows = await tx
+          .select()
+          .from(schema.slackInteractionActionHandles)
+          .where(
+            and(
+              eq(schema.slackInteractionActionHandles.interactionId, input.interaction.id),
+              eq(
+                schema.slackInteractionActionHandles.sessionEventSequence,
+                input.sessionEventSequence,
+              ),
+              inArray(
+                schema.slackInteractionActionHandles.actionKey,
+                input.actions.map((action) => action.actionKey),
+              ),
+            ),
+          );
+        const byKey = new Map(rows.map((row) => [row.actionKey, row]));
+        return input.actions.map((action) => {
+          const row = byKey.get(action.actionKey);
+          if (
+            !row ||
+            row.actionKind !== action.actionKind ||
+            row.targetId !== (action.targetId ?? null) ||
+            row.targetValue !== (action.targetValue ?? null) ||
+            row.messageOperationId !== input.messageOperationId
+          ) {
+            throw new Error("Slack action handle identity conflict");
+          }
+          return mapSlackInteractionActionHandle(row);
+        });
+      }),
+  );
+}
+
+export async function getSlackInteractionActionHandle(
+  db: Database,
+  input: { accountId: string; workspaceId: string; handleId: string },
+): Promise<SlackInteractionActionHandle | null> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.slackInteractionActionHandles)
+      .where(
+        and(
+          eq(schema.slackInteractionActionHandles.accountId, input.accountId),
+          eq(schema.slackInteractionActionHandles.workspaceId, input.workspaceId),
+          eq(schema.slackInteractionActionHandles.id, input.handleId),
+        ),
+      )
+      .limit(1);
+    return row ? mapSlackInteractionActionHandle(row) : null;
+  });
+}
+
+export async function settleSlackInteractionActionHandles(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    handleId: string;
+    result: string;
+    stale?: boolean;
+  },
+): Promise<SlackInteractionActionHandle | null> {
+  return await withRlsContext(
+    db,
+    input,
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        const [current] = await tx
+          .select()
+          .from(schema.slackInteractionActionHandles)
+          .where(
+            and(
+              eq(schema.slackInteractionActionHandles.accountId, input.accountId),
+              eq(schema.slackInteractionActionHandles.workspaceId, input.workspaceId),
+              eq(schema.slackInteractionActionHandles.id, input.handleId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!current) return null;
+        if (current.status === "pending") {
+          await tx
+            .update(schema.slackInteractionActionHandles)
+            .set({
+              status: "stale",
+              result: "superseded",
+              completedAt: sql`now()`,
+              updatedAt: sql`now()`,
+            })
+            .where(
+              and(
+                eq(
+                  schema.slackInteractionActionHandles.messageOperationId,
+                  current.messageOperationId,
+                ),
+                eq(schema.slackInteractionActionHandles.status, "pending"),
+              ),
+            );
+          const [settled] = await tx
+            .update(schema.slackInteractionActionHandles)
+            .set({
+              status: input.stale ? "stale" : "completed",
+              result: input.result.slice(0, 64),
+              completedAt: sql`now()`,
+              updatedAt: sql`now()`,
+            })
+            .where(eq(schema.slackInteractionActionHandles.id, current.id))
+            .returning();
+          return settled ? mapSlackInteractionActionHandle(settled) : null;
+        }
+        return mapSlackInteractionActionHandle(current);
+      }),
+  );
 }
 
 /**
@@ -8963,6 +9248,11 @@ function mapSlackInteraction(
       "triggeringProviderEventId",
       "triggering_provider_event_id",
     ),
+    initiatingSlackUserId: slackRowNullableString(
+      row,
+      "initiatingSlackUserId",
+      "initiating_slack_user_id",
+    ),
     owningSubjectId: slackRowString(row, "owningSubjectId", "owning_subject_id"),
     visibility: slackRowString(row, "visibility", "visibility") as SlackInteraction["visibility"],
     sessionReservationId: slackRowString(row, "sessionReservationId", "session_reservation_id"),
@@ -8998,6 +9288,33 @@ function mapSlackInteraction(
     ) as SlackInteraction["terminalDeliveryState"],
     createdAt: slackRowDate(row, "createdAt", "created_at"),
     updatedAt: slackRowDate(row, "updatedAt", "updated_at"),
+  };
+}
+
+function mapSlackInteractionActionHandle(
+  row: typeof schema.slackInteractionActionHandles.$inferSelect,
+): SlackInteractionActionHandle {
+  return {
+    id: row.id,
+    accountId: row.accountId,
+    workspaceId: row.workspaceId,
+    connectionId: row.connectionId,
+    interactionId: row.interactionId,
+    sessionId: row.sessionId,
+    sessionEventSequence: row.sessionEventSequence,
+    actionKind: row.actionKind,
+    actionKey: row.actionKey,
+    targetId: row.targetId,
+    targetValue: row.targetValue,
+    authorizedSubjectId: row.authorizedSubjectId,
+    authorizedSlackUserId: row.authorizedSlackUserId,
+    messageOperationId: row.messageOperationId,
+    status: row.status,
+    result: row.result,
+    expiresAt: row.expiresAt,
+    completedAt: row.completedAt,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
   };
 }
 
@@ -9733,6 +10050,216 @@ export async function getSlackBotPostOperation(
       .limit(1);
     return row ? mapSlackBotPostOperation(row) : null;
   });
+}
+
+export type ClaimSlackBotUpdateOperationResult =
+  | { kind: "claimed" | "in_progress" | "completed"; operation: SlackBotUpdateOperation }
+  | { kind: "conflict" | "connection_not_found" };
+
+export async function claimSlackBotUpdateOperation(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    connectionId: string;
+    operationId: string;
+    slackChannelId: string;
+    slackMessageTimestamp: string;
+    requestDigest: string;
+    claimHolderId: string;
+    claimLeaseMs: number;
+  },
+): Promise<ClaimSlackBotUpdateOperationResult> {
+  const claimLeaseMs = Math.max(1, Math.min(Math.trunc(input.claimLeaseMs), 120_000));
+  return await withRlsContext(
+    db,
+    input,
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        const [connection] = await tx
+          .select({ id: schema.connections.id })
+          .from(schema.connections)
+          .where(
+            and(
+              eq(schema.connections.accountId, input.accountId),
+              eq(schema.connections.workspaceId, input.workspaceId),
+              eq(schema.connections.id, input.connectionId),
+            ),
+          )
+          .for("share")
+          .limit(1);
+        if (!connection) return { kind: "connection_not_found" } as const;
+        const [created] = await tx
+          .insert(schema.slackBotUpdateOperations)
+          .values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            connectionId: input.connectionId,
+            operationId: input.operationId,
+            slackChannelId: input.slackChannelId,
+            slackMessageTimestamp: input.slackMessageTimestamp,
+            requestDigest: input.requestDigest,
+            status: "provider_started",
+            claimHolderId: input.claimHolderId,
+            claimExpiresAt: sql`now() + (${claimLeaseMs} * interval '1 millisecond')`,
+            attemptCount: 1,
+          })
+          .onConflictDoNothing({
+            target: [
+              schema.slackBotUpdateOperations.workspaceId,
+              schema.slackBotUpdateOperations.connectionId,
+              schema.slackBotUpdateOperations.operationId,
+            ],
+          })
+          .returning();
+        if (created) return { kind: "claimed", operation: mapSlackBotUpdateOperation(created) };
+        const [existing] = await tx
+          .select()
+          .from(schema.slackBotUpdateOperations)
+          .where(
+            and(
+              eq(schema.slackBotUpdateOperations.workspaceId, input.workspaceId),
+              eq(schema.slackBotUpdateOperations.connectionId, input.connectionId),
+              eq(schema.slackBotUpdateOperations.operationId, input.operationId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!existing) throw new Error("Slack update operation disappeared after conflict");
+        if (
+          existing.accountId !== input.accountId ||
+          existing.slackChannelId !== input.slackChannelId ||
+          existing.slackMessageTimestamp !== input.slackMessageTimestamp ||
+          existing.requestDigest !== input.requestDigest
+        ) {
+          return { kind: "conflict" } as const;
+        }
+        if (existing.status === "completed") {
+          return { kind: "completed", operation: mapSlackBotUpdateOperation(existing) };
+        }
+        const [reclaimed] = await tx
+          .update(schema.slackBotUpdateOperations)
+          .set({
+            claimHolderId: input.claimHolderId,
+            claimExpiresAt: sql`now() + (${claimLeaseMs} * interval '1 millisecond')`,
+            attemptCount: sql`${schema.slackBotUpdateOperations.attemptCount} + 1`,
+            lastFailureCode: null,
+            updatedAt: sql`now()`,
+          })
+          .where(
+            and(
+              eq(schema.slackBotUpdateOperations.id, existing.id),
+              or(
+                isNull(schema.slackBotUpdateOperations.claimHolderId),
+                lte(schema.slackBotUpdateOperations.claimExpiresAt, sql`now()`),
+              ),
+            ),
+          )
+          .returning();
+        return reclaimed
+          ? { kind: "claimed", operation: mapSlackBotUpdateOperation(reclaimed) }
+          : { kind: "in_progress", operation: mapSlackBotUpdateOperation(existing) };
+      }),
+  );
+}
+
+export async function releaseSlackBotUpdateOperationClaim(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    connectionId: string;
+    operationId: string;
+    claimHolderId: string;
+    failureCode: string;
+  },
+): Promise<boolean> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const rows = await scopedDb
+      .update(schema.slackBotUpdateOperations)
+      .set({
+        claimHolderId: null,
+        claimExpiresAt: null,
+        lastFailureCode: input.failureCode.slice(0, 128),
+        updatedAt: sql`now()`,
+      })
+      .where(
+        and(
+          eq(schema.slackBotUpdateOperations.workspaceId, input.workspaceId),
+          eq(schema.slackBotUpdateOperations.connectionId, input.connectionId),
+          eq(schema.slackBotUpdateOperations.operationId, input.operationId),
+          eq(schema.slackBotUpdateOperations.status, "provider_started"),
+          eq(schema.slackBotUpdateOperations.claimHolderId, input.claimHolderId),
+        ),
+      )
+      .returning({ id: schema.slackBotUpdateOperations.id });
+    return rows.length === 1;
+  });
+}
+
+export async function completeSlackBotUpdateOperation(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    connectionId: string;
+    operationId: string;
+    claimHolderId: string;
+    subjectId?: string | null;
+    auditMetadata: Record<string, unknown>;
+  },
+): Promise<"completed" | "not_found" | "not_owned"> {
+  return await withRlsContext(
+    db,
+    input,
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        const [current] = await tx
+          .select()
+          .from(schema.slackBotUpdateOperations)
+          .where(
+            and(
+              eq(schema.slackBotUpdateOperations.workspaceId, input.workspaceId),
+              eq(schema.slackBotUpdateOperations.connectionId, input.connectionId),
+              eq(schema.slackBotUpdateOperations.operationId, input.operationId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!current) return "not_found" as const;
+        if (current.status === "completed") return "completed" as const;
+        if (current.claimHolderId !== input.claimHolderId) return "not_owned" as const;
+        await tx
+          .update(schema.slackBotUpdateOperations)
+          .set({
+            status: "completed",
+            claimHolderId: null,
+            claimExpiresAt: null,
+            lastFailureCode: null,
+            completedAt: sql`now()`,
+            updatedAt: sql`now()`,
+          })
+          .where(eq(schema.slackBotUpdateOperations.id, current.id));
+        await tx.insert(schema.auditEvents).values(
+          withLosslessContentWriteVersion(
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              subjectId: input.subjectId ?? null,
+              action: "slack_bot.message.update",
+              targetType: "connection",
+              targetId: input.connectionId,
+              metadata: input.auditMetadata,
+            },
+            "metadata",
+            "metadataCodecVersion",
+          ),
+        );
+        return "completed" as const;
+      }),
+  );
 }
 
 export type ClaimSlackBotDeleteOperationResult =
@@ -52698,6 +53225,29 @@ function mapSlackBotPostOperation(
     lastFailureCode: row.lastFailureCode,
     slackChannelId: row.slackChannelId,
     slackMessageTimestamp: row.slackMessageTimestamp,
+    completedAt: row.completedAt,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
+function mapSlackBotUpdateOperation(
+  row: typeof schema.slackBotUpdateOperations.$inferSelect,
+): SlackBotUpdateOperation {
+  return {
+    id: row.id,
+    accountId: row.accountId,
+    workspaceId: row.workspaceId,
+    connectionId: row.connectionId,
+    operationId: row.operationId,
+    slackChannelId: row.slackChannelId,
+    slackMessageTimestamp: row.slackMessageTimestamp,
+    requestDigest: row.requestDigest,
+    status: row.status,
+    claimHolderId: row.claimHolderId,
+    claimExpiresAt: row.claimExpiresAt,
+    attemptCount: row.attemptCount,
+    lastFailureCode: row.lastFailureCode,
     completedAt: row.completedAt,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
