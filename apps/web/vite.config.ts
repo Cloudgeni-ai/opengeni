@@ -66,6 +66,14 @@ export default defineConfig({
               entriesAwareMergeThreshold: 128 * 1024,
               priority: 3,
             },
+            {
+              // Keep schema parsing from being folded into a larger shared
+              // startup chunk when a lazy route changes its import boundary.
+              name: "schema-runtime",
+              test: /(?:node_modules|\.bun)[\\/]zod(?:@|[\\/])/,
+              includeDependenciesRecursively: false,
+              priority: 4,
+            },
           ],
         },
       },
