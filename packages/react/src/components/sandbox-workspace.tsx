@@ -337,6 +337,9 @@ export function useSandboxWorkspaceTabs(
         name,
         ...(placement ? { placement } : {}),
       });
+      if (response.operation.state !== "completed" || response.session.lifecycle !== "active") {
+        throw new Error(response.operation.error?.message ?? "The computer could not be opened.");
+      }
       return {
         id: response.session.id,
         placement: response.session.placement,

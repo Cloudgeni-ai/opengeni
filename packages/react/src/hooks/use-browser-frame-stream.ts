@@ -42,6 +42,7 @@ const RELAY_TAG_OPEN = 1;
 const RELAY_TAG_OPEN_ACK = 2;
 const RELAY_TAG_FRAME = 3;
 const RELAY_TAG_CLOSE = 4;
+const MAX_CONSECUTIVE_RECONNECTS = 6;
 
 export type UseBrowserFrameStreamOptions = EmbeddedBrowserInteractionClientOverride & {
   browserSessionId: string | null;
@@ -152,8 +153,16 @@ export function useBrowserFrameStream(
 
     const scheduleReconnect = () => {
       if (disposed || reconnectTimer) return;
-      const delay = Math.min(5_000, 250 * 2 ** Math.min(failures, 5));
       failures += 1;
+      if (failures > MAX_CONSECUTIVE_RECONNECTS) {
+        setResult((current) => ({
+          ...current,
+          state: "error",
+          error: current.error ?? new Error("Browser view could not reconnect."),
+        }));
+        return;
+      }
+      const delay = Math.min(5_000, 250 * 2 ** Math.min(failures, 5));
       setResult((current) => ({ ...current, state: "reconnecting" }));
       reconnectTimer = setTimeout(() => {
         reconnectTimer = null;
@@ -171,7 +180,6 @@ export function useBrowserFrameStream(
 
     const onOpen = () => {
       if (disposed) return;
-      failures = 0;
       if (activeStream?.kind === "relay") {
         const body = encodeStreamOpen({
           channel: {
@@ -237,6 +245,7 @@ export function useBrowserFrameStream(
           const key = `${browserSessionId}:${targetId}:${frame.controllerGeneration}:${frame.targetGeneration}:${frame.documentGeneration}`;
           if (latestRef.current.key === key && frame.sequence <= latestRef.current.sequence) return;
           latestRef.current = { key, sequence: frame.sequence };
+          failures = 0;
           setResult((current) => ({
             ...current,
             state: "live",

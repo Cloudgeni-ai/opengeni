@@ -77,8 +77,9 @@ export type BrowserViewerProps = EmbeddedBrowserInteractionClientOverride & {
   /** Tests/demos only. Production uses the browser's native WebSocket. */
   webSocketFactory?: BrowserFrameWebSocketFactory | undefined;
   renderEmpty?: ((create: () => void, creating: boolean) => ReactNode) | undefined;
-  /** Optional host capability for a headed managed browser. Browser-only
-   * embedders remain valid and create headless sessions instead. */
+  /** Optional host capability for placing a human-created headed browser inside
+   * an exact ComputerSession. Browser-only embedders still create a headed
+   * browser; they simply omit the linked desktop resource. */
   createLinkedComputer?:
     | ((
         name: string,
@@ -92,7 +93,6 @@ export type BrowserViewerProps = EmbeddedBrowserInteractionClientOverride & {
 type BrowserSelection = { sessionId: string; pinned: boolean } | null;
 type BrowserLaunchChoice =
   | { kind: "clean" }
-  | { kind: "fast" }
   | { kind: "profile"; identityId: string }
   | { kind: "attached"; device: AttachedBrowserDevice };
 type PointerStart = {
@@ -328,7 +328,11 @@ export function BrowserViewer({
     stream: { format: "jpeg", quality: 76, maxWidth: 1_920, maxHeight: 1_200 },
     ...(webSocketFactory ? { webSocketFactory } : {}),
   });
-  const displayedFrame = frameMatchesObservation(frames.frame, browser.observation)
+  const displayedFrame = frameMatchesSelectedTarget(
+    frames.frame,
+    browser.session,
+    browser.selectedTarget,
+  )
     ? frames.frame
     : null;
   const supportsLiveFrames = browser.session?.capabilities.liveFrames === true;
@@ -447,27 +451,26 @@ export function BrowserViewer({
           ? profiles.identities.find((candidate) => candidate.id === choice.identityId)
           : null;
       const device = choice.kind === "attached" ? choice.device : null;
-      const fast = choice.kind === "fast";
       const browserName =
-        device?.profileLabel ??
-        device?.name ??
-        (identity ? `${identity.name} browser` : fast ? "Fast browser" : "Browser");
+        device?.profileLabel ?? device?.name ?? (identity ? `${identity.name} browser` : "Browser");
       setCreating(true);
       void (async () => {
-        const linkedComputer =
-          !fast && createLinkedComputer
-            ? await createLinkedComputer(
-                `${browserName} computer`,
-                device ? { kind: "attached_device", deviceId: device.id } : undefined,
-              )
-            : null;
+        const linkedComputer = createLinkedComputer
+          ? await createLinkedComputer(
+              `${browserName} computer`,
+              device ? { kind: "attached_device", deviceId: device.id } : undefined,
+            )
+          : null;
         const response = await createRegistryBrowser({
           sessionId,
           name: browserName,
-          ...(fast ? { engine: "lightpanda" as const, headless: true } : {}),
+          // Human-created browsers are always ordinary visual Chromium/Chrome.
+          // Lightpanda remains an agent-only optimization requested explicitly
+          // through browser_open; if an agent creates one it is still visible in
+          // the shared BrowserSession switcher.
+          headless: false,
           ...(device
             ? {
-                headless: false,
                 placement: {
                   kind: "attached_device" as const,
                   deviceId: device.id,
@@ -476,7 +479,6 @@ export function BrowserViewer({
             : {}),
           ...(linkedComputer
             ? {
-                headless: false,
                 linkedComputerSessionId: linkedComputer.id,
                 placement: linkedComputer.placement,
               }
@@ -508,7 +510,17 @@ export function BrowserViewer({
         if (!identity) {
           const name = newProfileName?.trim() ?? "";
           if (!name) return false;
-          identity = (await profiles.create({ name })).identity;
+          // First-save is intentionally two-phase: the named identity exists
+          // before its first immutable revision. If capture/upload failed after
+          // that create, retry into the same empty identity instead of turning
+          // the recoverable draft into a permanent name conflict.
+          identity =
+            profiles.identities.find(
+              (candidate) =>
+                candidate.status === "active" &&
+                candidate.revisionCount === 0 &&
+                candidate.name.localeCompare(name, undefined, { sensitivity: "base" }) === 0,
+            ) ?? (await profiles.create({ name })).identity;
         }
         const response = await profiles.publish(session.id, {
           identityId: identity.id,
@@ -629,7 +641,7 @@ export function BrowserViewer({
           <BrowserTabs
             targets={browser.targets}
             selectedTargetId={browser.selectedTarget?.id ?? null}
-            mutating={browser.mutating || savingProfile}
+            mutating={savingProfile}
             tabControl={browser.session?.capabilities.tabs === true}
             onSelect={(targetId) =>
               void browser
@@ -1033,19 +1045,8 @@ function BrowserLaunchMenu(props: {
         >
           <Globe2Icon className="size-3.5 text-og-muted" />
           <span>
-            <span className="block text-og-control text-og-fg">Clean browser</span>
-            <span className="block text-og-xs text-og-subtle">No saved profile</span>
-          </span>
-        </button>
-        <button
-          type="button"
-          onClick={() => choose({ kind: "fast" })}
-          className="flex w-full items-center gap-2 rounded-og-sm px-2 py-2 text-left transition hover:bg-og-surface-2"
-        >
-          <ZapIcon className="size-3.5 text-og-muted" />
-          <span>
-            <span className="block text-og-control text-og-fg">Fast semantic browser</span>
-            <span className="block text-og-xs text-og-subtle">Headless · optimized for agents</span>
+            <span className="block text-og-control text-og-fg">Fresh browser</span>
+            <span className="block text-og-xs text-og-subtle">Visual browser · no saved state</span>
           </span>
         </button>
         {props.identities.length > 0 ? (
@@ -1351,7 +1352,6 @@ function BrowserViewport(props: {
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const composingRef = useRef(false);
   const pointerStartRef = useRef<PointerStart | null>(null);
-  const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastClickRef = useRef<{
     at: number;
     x: number;
@@ -1375,47 +1375,75 @@ function BrowserViewport(props: {
   const readClipboardRef = useRef(props.onReadClipboard);
   const errorRef = useRef(props.onError);
   const actionTailRef = useRef<Promise<void>>(Promise.resolve());
+  const queuedFrameRef = useRef<BrowserFrame | null>(null);
+  const decodingFrameRef = useRef(false);
+  const mountedRef = useRef(true);
   actionRef.current = props.onAction;
   readClipboardRef.current = props.onReadClipboard;
   errorRef.current = props.onError;
 
-  useEffect(() => {
-    const frame = props.frame;
-    const canvas = canvasRef.current;
-    if (!frame || !canvas) return;
-    let cancelled = false;
-    let objectUrl: string | null = null;
+  const paintQueuedFrames = useCallback(() => {
+    if (decodingFrameRef.current) return;
+    decodingFrameRef.current = true;
     void (async () => {
       try {
-        const blob = new Blob([frame.data.slice().buffer], {
-          type: frame.mediaType,
-        });
-        if (typeof createImageBitmap === "function") {
-          const bitmap = await createImageBitmap(blob);
-          if (cancelled) {
-            bitmap.close();
-            return;
+        while (mountedRef.current) {
+          const frame = queuedFrameRef.current;
+          queuedFrameRef.current = null;
+          if (!frame) break;
+
+          let objectUrl: string | null = null;
+          try {
+            const blob = new Blob([frame.data.slice().buffer], {
+              type: frame.mediaType,
+            });
+            if (typeof createImageBitmap === "function") {
+              const bitmap = await createImageBitmap(blob);
+              try {
+                const canvas = canvasRef.current;
+                if (mountedRef.current && canvas) {
+                  paintCanvas(canvas, bitmap, frame.width, frame.height);
+                }
+              } finally {
+                bitmap.close();
+              }
+              continue;
+            }
+            objectUrl = URL.createObjectURL(blob);
+            const image = await loadImage(objectUrl);
+            const canvas = canvasRef.current;
+            if (mountedRef.current && canvas) {
+              paintCanvas(canvas, image, frame.width, frame.height);
+            }
+          } catch (cause) {
+            if (mountedRef.current) errorRef.current(cause);
+          } finally {
+            if (objectUrl) URL.revokeObjectURL(objectUrl);
           }
-          paintCanvas(canvas, bitmap, frame.width, frame.height);
-          bitmap.close();
-          return;
         }
-        objectUrl = URL.createObjectURL(blob);
-        const image = await loadImage(objectUrl);
-        if (!cancelled) paintCanvas(canvas, image, frame.width, frame.height);
-      } catch (cause) {
-        if (!cancelled) errorRef.current(cause);
+      } finally {
+        decodingFrameRef.current = false;
+        if (mountedRef.current && queuedFrameRef.current) paintQueuedFrames();
       }
     })();
+  }, []);
+
+  useEffect(() => {
+    mountedRef.current = true;
     return () => {
-      cancelled = true;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      mountedRef.current = false;
+      queuedFrameRef.current = null;
     };
-  }, [props.frame]);
+  }, []);
+
+  useEffect(() => {
+    if (!props.frame) return;
+    queuedFrameRef.current = props.frame;
+    paintQueuedFrames();
+  }, [paintQueuedFrames, props.frame]);
 
   useEffect(
     () => () => {
-      if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
       if (wheelRef.current?.timer) clearTimeout(wheelRef.current.timer);
       if (pendingTextRef.current?.timer) clearTimeout(pendingTextRef.current.timer);
     },
@@ -1454,16 +1482,16 @@ function BrowserViewport(props: {
   }, [enqueue]);
 
   const flushPendingClick = useCallback(() => {
-    const pending = lastClickRef.current;
-    if (!pending) return;
-    if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
-    clickTimerRef.current = null;
     lastClickRef.current = null;
-    enqueue({ type: "pointer", action: "click", x: pending.x, y: pending.y }, pending.frame);
-  }, [enqueue]);
+  }, []);
 
   const pointerDown = (event: PointerEvent<HTMLCanvasElement>) => {
-    if (!props.frame || props.mutating || event.button !== 0) return;
+    if (!props.frame || event.button !== 0) return;
+    // Keep the hidden keyboard sink focused after the browser performs the
+    // pointerdown default action for the canvas. Without preventing that
+    // default, Chrome immediately moves focus back to the document and all
+    // subsequent typing/paste is silently lost.
+    event.preventDefault();
     flushPendingText();
     pointerStartRef.current = {
       x: event.clientX,
@@ -1505,18 +1533,15 @@ function BrowserViewport(props: {
       Math.hypot(previous.x - to.x, previous.y - to.y) < 6 &&
       sameFrameFence(previous.frame, start.frame)
     ) {
-      if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
-      clickTimerRef.current = null;
       lastClickRef.current = null;
-      enqueue({ type: "pointer", action: "double_click", x: to.x, y: to.y }, start.frame);
+      // The first click was already dispatched immediately. Tell CDP this is
+      // the continuation (clickCount=2), so the page receives a true dblclick
+      // without making every ordinary click wait for the double-click window.
+      enqueue({ type: "pointer", action: "click", clickCount: 2, x: to.x, y: to.y }, start.frame);
       return;
     }
     lastClickRef.current = { at: now, x: to.x, y: to.y, frame: start.frame };
-    clickTimerRef.current = setTimeout(() => {
-      clickTimerRef.current = null;
-      lastClickRef.current = null;
-      enqueue({ type: "pointer", action: "click", x: to.x, y: to.y }, start.frame);
-    }, 280);
+    enqueue({ type: "pointer", action: "click", x: to.x, y: to.y }, start.frame);
   };
 
   const contextMenu = (event: MouseEvent<HTMLCanvasElement>) => {
@@ -2395,19 +2420,24 @@ function semanticNodes(roots: readonly InteractionSemanticNode[]): InteractionSe
   return result;
 }
 
-function frameMatchesObservation(
+function frameMatchesSelectedTarget(
   frame: BrowserFrame | null,
-  observation: BrowserObservation | null,
+  session: BrowserSession | null,
+  target: BrowserTarget | null,
 ): frame is BrowserFrame {
+  // The stream hook already validates the frame against the authenticated
+  // attachment's controller generation. The separately-polled BrowserSession
+  // can briefly carry the previous generation while an attachment is issued;
+  // comparing against it here discarded valid frames and left the viewer on
+  // "Connecting" indefinitely.
   return Boolean(
     frame &&
-    observation &&
-    frame.browserSessionId === observation.browserSessionId &&
-    frame.controllerGeneration === observation.target.controllerGeneration &&
-    frame.targetId === observation.target.id &&
-    frame.targetGeneration === observation.target.targetGeneration &&
-    frame.documentGeneration === observation.target.documentGeneration &&
-    frame.frameId === observation.frameId,
+    session &&
+    target &&
+    frame.browserSessionId === session.id &&
+    frame.targetId === target.id &&
+    frame.targetGeneration === target.targetGeneration &&
+    frame.documentGeneration === target.documentGeneration,
   );
 }
 

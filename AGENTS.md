@@ -102,6 +102,7 @@ For a map of every app, package, and how the parts fit together, start at [`docs
 - Temporal is orchestration only. Token streams do not go through workflow history.
 - OpenAI Agents SDK execution happens inside non-retryable worker activities.
 - Agent activities are side-effectful. Do not add automatic Temporal retries around full agent turns unless each model/tool/sandbox boundary has been made idempotent.
+- Live agent session authority is vertical and immediate. An exact current agent attempt may read/message itself, its direct parent, or a direct child; cross-session mutation/control may target only a direct child, while existing session-local self-operation guards remain. Siblings, skipped generations, other branches, and unrelated roots are denied before optional host policy. Compact `sessions_list` discovery is separate and still validates the live attempt. Do not turn workspace permission, sandbox sharing, a common root, or a permissive embedding-host callback into lateral authority. See `docs/agent-session-authority.md`.
 - Codex rate-limit reset credits are never automatic agent capacity. Their
   irreversible consume path is managed-cookie owning-human web-only with durable
   provider idempotency; do not add an SDK, MCP, Codemode, worker, scheduled, or

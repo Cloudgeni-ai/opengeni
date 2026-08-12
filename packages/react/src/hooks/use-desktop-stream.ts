@@ -6,7 +6,7 @@ import {
   type DesktopRfbLike,
   type DesktopStreamCapability,
 } from "@opengeni/sdk";
-import { type RefObject, useEffect, useRef, useState } from "react";
+import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
 import { type DesktopWebSocketFactory, useRelayFrameStream } from "./use-relay-frame-stream";
 
 export type UseDesktopStreamOptions = {
@@ -31,6 +31,8 @@ export type UseDesktopStreamResult = {
   error: Error | null;
   /** Manual reconnect (e.g. after a securityfailure once a fresh URL arrives). */
   reconnect: () => void;
+  /** Paste directly through an interactive RFB connection. */
+  pasteText: (text: string) => boolean;
 };
 
 /** Lazy-load @novnc/novnc's RFB as the default factory. Imported inside the
@@ -111,6 +113,14 @@ export function useDesktopStream(options: UseDesktopStreamOptions): UseDesktopSt
   const token = capability?.token ?? null;
   const transport = capability?.transport ?? null;
   const mode = capability?.mode ?? "read-only";
+  // For direct sandbox RFB, authorization is carried in WebSocket
+  // subprotocols rather than `capability.token`. The view grant rotates before
+  // expiry while the URL stays stable, so the protocol credential is a real
+  // connection boundary: keeping the old socket leaves the viewer black once
+  // browserd expires it. Key the effect on the primitive value (not the caller's
+  // array identity) so credential rotation reconnects exactly once without
+  // churning on ordinary renders.
+  const webSocketProtocolsKey = webSocketProtocols?.join("\u0000") ?? "";
 
   // The live RFB handle. Holding it in a ref lets us flip view-only (take
   // control / return control) and re-scale on the OPEN connection instead of
@@ -215,11 +225,12 @@ export function useDesktopStream(options: UseDesktopStreamOptions): UseDesktopSt
       }
     };
     // ONLY a real transport change reconnects: a fresh url (rotation), a new
-    // credential, the transport flipping, or an explicit manual reconnect
+    // credential (RFB password OR bearer subprotocol), the transport flipping,
+    // or an explicit manual reconnect
     // (`nonce`). `interactive`/`scaleViewport`/`mode`/`rfbFactory` are read via
     // refs and applied live below — they must never re-open the socket.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [url, token, transport, nonce]);
+  }, [url, token, transport, webSocketProtocolsKey, nonce]);
 
   // Apply take-control / return-control to the OPEN connection in place. noVNC
   // honours `viewOnly` live, so flipping it neither blinks the surface nor drops
@@ -246,10 +257,33 @@ export function useDesktopStream(options: UseDesktopStreamOptions): UseDesktopSt
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scaleViewport, state]);
 
+  const pasteText = useCallback((text: string): boolean => {
+    const rfb = rfbRef.current;
+    if (
+      stateRef.current !== "connected" ||
+      !rfb ||
+      rfb.viewOnly ||
+      !rfb.clipboardPasteFrom ||
+      !rfb.sendKey
+    ) {
+      return false;
+    }
+    rfb.clipboardPasteFrom(text);
+    // x11vnc applies ClientCutText asynchronously. Shift+Insert is the native
+    // Linux paste chord in terminals and browsers and avoids two API trips.
+    setTimeout(() => {
+      if (rfbRef.current !== rfb || stateRef.current !== "connected" || rfb.viewOnly) return;
+      rfb.sendKey?.(0xffe1, "ShiftLeft", true);
+      rfb.sendKey?.(0xff63, "Insert");
+      rfb.sendKey?.(0xffe1, "ShiftLeft", false);
+    }, 20);
+    return true;
+  }, []);
+
   // Delegate to whichever transport owns the surface. For `relay-frames` the
   // noVNC effect above is dormant (it bailed to idle) and the frame renderer
   // drives; for `vnc-ws` (and everything else) the noVNC path drives while the
   // frame renderer stays idle. Same public shape either way.
-  if (transport === "relay-frames") return frameStream;
-  return { state, error, reconnect };
+  if (transport === "relay-frames") return { ...frameStream, pasteText: () => false };
+  return { state, error, reconnect, pasteText };
 }

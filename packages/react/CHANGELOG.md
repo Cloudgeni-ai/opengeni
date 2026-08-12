@@ -1,5 +1,23 @@
 # @opengeni/react
 
+## 0.53.1
+
+### Patch Changes
+
+- @opengeni/sdk@0.53.1
+
+## 0.53.0
+
+### Minor Changes
+
+- d2def0c: Add the complete browser-native and semantic computer interaction system across managed sandboxes, Connected Machines, attached Chrome, and external browser placements. Ship durable browser identities, authentication repair, network routing, downloads/uploads, shared causal control, public SDK and React workbench surfaces, and one exact MCP/Codemode execution catalog with native Connected Machine access.
+
+### Patch Changes
+
+- Updated dependencies [d2def0c]
+- Updated dependencies [5215c0e]
+  - @opengeni/sdk@0.53.0
+
 ## 0.52.1
 
 ### Patch Changes

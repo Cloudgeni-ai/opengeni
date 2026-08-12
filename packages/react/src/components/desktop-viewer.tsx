@@ -4,7 +4,7 @@ import type {
   DesktopStreamCapability,
 } from "@opengeni/sdk";
 import { LoaderCircleIcon, MonitorIcon, MousePointerClickIcon, WifiOffIcon } from "lucide-react";
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { type ClipboardEvent, type ReactNode, useEffect, useRef, useState } from "react";
 import { cn } from "../lib/cn";
 import { useDesktopStream } from "../hooks/use-desktop-stream";
 import type { DesktopWebSocketFactory } from "../hooks/use-relay-frame-stream";
@@ -377,6 +377,15 @@ export function DesktopViewer({
     stream.reconnect();
   };
 
+  const paste = (event: ClipboardEvent<HTMLDivElement>) => {
+    if (!inControl) return;
+    const text = event.clipboardData.getData("text/plain");
+    if (!text && !event.clipboardData.types.includes("text/plain")) return;
+    if (!stream.pasteText(text)) return;
+    event.preventDefault();
+    event.stopPropagation();
+  };
+
   // ── Resolve the single UI state (priority order) ────────────────────────────
   let uiState: DesktopUiState;
   if (viewerCapReached) uiState = "viewer_cap";
@@ -452,6 +461,7 @@ export function DesktopViewer({
       data-state={stream.state}
       data-ui-state={uiState}
       data-in-control={inControl ? "true" : undefined}
+      onPasteCapture={paste}
     >
       {/* noVNC mount target. It appends a `width:100%;height:100%` `_screen` div
           and AUTOSCALES the 1280x800 framebuffer to fit THIS box. We pin it to

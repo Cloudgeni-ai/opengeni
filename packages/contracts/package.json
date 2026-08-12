@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/contracts",
-  "version": "0.44.1",
+  "version": "0.46.0",
   "description": "Shared zod schemas and wire-contract types for the OpenGeni API.",
   "license": "Apache-2.0",
   "repository": {
@@ -45,6 +45,10 @@
     "./canonical-human-identities": {
       "types": "./src/canonical-human-identities.ts",
       "default": "./src/canonical-human-identities.ts"
+    },
+    "./codex-provider-account-authority": {
+      "types": "./src/codex-provider-account-authority.ts",
+      "default": "./src/codex-provider-account-authority.ts"
     },
     "./editable-artifacts": {
       "types": "./src/editable-artifacts.ts",

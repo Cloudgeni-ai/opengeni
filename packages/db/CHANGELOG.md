@@ -1,5 +1,43 @@
 # @opengeni/db
 
+## 0.33.0
+
+### Minor Changes
+
+- 3d74340: Add the inert personal Codex provider-account authority foundation and opaque
+  accepted-work snapshot contract without activating user-scoped consumption.
+
+### Patch Changes
+
+- Updated dependencies [73d34d6]
+- Updated dependencies [3d74340]
+  - @opengeni/codex@0.2.16
+  - @opengeni/contracts@0.46.0
+  - @opengeni/config@0.14.1
+  - @opengeni/codemode@0.3.1
+
+## 0.32.0
+
+### Minor Changes
+
+- d2def0c: Add the complete browser-native and semantic computer interaction system across managed sandboxes, Connected Machines, attached Chrome, and external browser placements. Ship durable browser identities, authentication repair, network routing, downloads/uploads, shared causal control, public SDK and React workbench surfaces, and one exact MCP/Codemode execution catalog with native Connected Machine access.
+- d241d13: Add the managed-human organization-membership and personal-workspace lifecycle
+  provisioning capability while preserving legacy workspace access behavior.
+- 733c22f: Add the organization-tenancy foundation contracts and inert database scaffolding for organization memberships, user-owned resource authority and grants, personal retention, and generic session visibility, fork provenance, and authority epochs.
+
+### Patch Changes
+
+- d15d3e8: Repair the Slack reaction-task experience with initial-only session links, disabled link/media unfurls, workspace-service-principal delivery, conservative terminal-output coalescing, direct execution of safe specified requests, and bounded deterministic import of exact reacted-message PNG/JPEG/WebP attachments as reference-only workspace files. Preserve fail-closed provider-outcome reconciliation and keep generic model-facing posting unavailable without a trusted durable logical-delivery identity.
+- 3f81608: Stage and validate the session-channel foreign key without retaining the column-addition lock across a populated sessions-table scan.
+- 42a1242: Raise the serving envelope for active session history so tool-heavy orchestration turns remain compactable.
+- Updated dependencies [d2def0c]
+- Updated dependencies [5215c0e]
+- Updated dependencies [d15d3e8]
+- Updated dependencies [733c22f]
+  - @opengeni/codemode@0.3.0
+  - @opengeni/config@0.14.0
+  - @opengeni/contracts@0.45.0
+
 ## 0.31.1
 
 ### Patch Changes

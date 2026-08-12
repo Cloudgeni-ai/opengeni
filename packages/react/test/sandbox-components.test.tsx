@@ -565,4 +565,45 @@ describe("DesktopViewer", () => {
     expect(instances.length).toBe(1); // survived the renegotiation — no reconnect.
     await r.unmount();
   });
+
+  test("rotating the direct-RFB bearer protocol reconnects exactly once", async () => {
+    const { factory, instances } = trackingRfb();
+    const cap = { ...fakeCapabilities().DesktopStream, mode: "interactive" as const };
+    const first = ["opengeni.rfb.v1", "opengeni.auth.first"];
+    const r = await renderComponent(
+      <DesktopViewer
+        capability={cap}
+        interactive
+        webSocketProtocols={first}
+        rfbFactory={factory}
+      />,
+    );
+    await flush(5);
+    expect(instances.length).toBe(1);
+
+    await r.rerender(
+      <DesktopViewer
+        capability={cap}
+        interactive
+        webSocketProtocols={["opengeni.rfb.v1", "opengeni.auth.second"]}
+        rfbFactory={factory}
+      />,
+    );
+    await flush(5);
+    expect(instances.length).toBe(2);
+
+    // A normal render can allocate a fresh array. Identical protocol values
+    // must not churn the live RFB connection.
+    await r.rerender(
+      <DesktopViewer
+        capability={cap}
+        interactive
+        webSocketProtocols={["opengeni.rfb.v1", "opengeni.auth.second"]}
+        rfbFactory={factory}
+      />,
+    );
+    await flush(5);
+    expect(instances.length).toBe(2);
+    await r.unmount();
+  });
 });

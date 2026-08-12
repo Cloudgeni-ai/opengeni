@@ -97,6 +97,12 @@ export type CodexRequestContext = {
   onUsageHeaders?: (snapshot: CodexUsageHeaderSnapshot) => void;
   /** Optional per-run override, primarily for deterministic transport tests. */
   responseTimeoutPolicy?: Partial<CodexResponseTimeoutPolicy>;
+  /**
+   * Synchronous, best-effort diagnostics for the request lifecycle. This hook
+   * runs before the durable audit sink and MUST remain non-blocking: a throw is
+   * swallowed by the transport and it must never receive request bodies/auth.
+   */
+  onModelRequestDiagnostic?: (event: CodexModelRequestEvent) => void;
   /** Worker-owned durable audit sink; payloads never contain request bodies or auth. */
   onModelRequestEvent?: (event: CodexModelRequestEvent) => Promise<void> | void;
   /** Exact opaque artifacts on the normalized wire request, never their ciphertext. */

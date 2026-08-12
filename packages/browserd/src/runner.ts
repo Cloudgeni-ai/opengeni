@@ -55,6 +55,9 @@ export type AgentBrowserRunnerOptions = {
   screenshotDirectory: string;
   headed: boolean;
   browserExecutablePath?: string;
+  /** macOS lifecycle-preserving background launcher. Defaults to the packaged
+   * native helper discovered by browserd's parent agent. */
+  browserLaunchHelperPath?: string;
   workingDirectory?: string;
   environment?: Readonly<Record<string, string | undefined>>;
   provider?: {
@@ -121,11 +124,24 @@ export class AgentBrowserJsonRunner {
       await mkdir(directory, { recursive: true, mode: 0o700 });
       await chmod(directory, 0o700);
     }
-    const browserExecutablePath = await managedBrowserExecutablePath(options);
+    const browserLaunch = await managedBrowserLaunch(options);
     const binary = options.binary ?? (await resolvePinnedAgentBrowserBinary());
     return new AgentBrowserJsonRunner(binary, {
       ...options,
-      ...(browserExecutablePath ? { browserExecutablePath } : {}),
+      ...(browserLaunch
+        ? {
+            browserExecutablePath: browserLaunch.executablePath,
+            environment: {
+              ...options.environment,
+              ...(browserLaunch.backgroundBrowserExecutable
+                ? {
+                    OPENGENI_BACKGROUND_BROWSER_EXECUTABLE:
+                      browserLaunch.backgroundBrowserExecutable,
+                  }
+                : {}),
+            },
+          }
+        : {}),
     });
   }
 
@@ -308,20 +324,32 @@ const MACOS_BROWSER_EXECUTABLES = [
   "/Applications/Chromium.app/Contents/MacOS/Chromium",
 ] as const;
 
-async function managedBrowserExecutablePath(
+async function managedBrowserLaunch(
   options: AgentBrowserRunnerOptions,
-): Promise<string | undefined> {
+): Promise<{ executablePath: string; backgroundBrowserExecutable?: string } | undefined> {
   const configured = options.browserExecutablePath
     ? resolve(options.browserExecutablePath)
     : undefined;
-  if (process.platform !== "darwin" || !options.headed || options.provider) return configured;
+  if (process.platform !== "darwin" || !options.headed || options.provider) {
+    return configured ? { executablePath: configured } : undefined;
+  }
 
   const executable = configured ?? (await firstExecutable(MACOS_BROWSER_EXECUTABLES));
-  // Keep the process and DevTools startup handshake visible to agent-browser.
-  // Wrapping Chrome in `open -g -n` hides that handshake, so the driver retries
-  // while every retry creates another empty window. CDP target creation itself
-  // remains backgrounded.
-  return executable ?? configured;
+  if (!executable) return undefined;
+  const helper = options.browserLaunchHelperPath
+    ? resolve(options.browserLaunchHelperPath)
+    : process.env.OPENGENI_BROWSERD_COMPUTER_NATIVE_BINARY
+      ? resolve(process.env.OPENGENI_BROWSERD_COMPUTER_NATIVE_BINARY)
+      : undefined;
+  if (!helper) return { executablePath: executable };
+  await access(helper, constants.X_OK);
+  // The packaged helper stays alive for Chrome's full lifetime while using
+  // LaunchServices' background+hidden flags. This preserves agent-browser's
+  // DevToolsActivePort/child-process handshake without activating Chrome.
+  return {
+    executablePath: helper,
+    backgroundBrowserExecutable: executable,
+  };
 }
 
 async function firstExecutable(candidates: readonly string[]): Promise<string | undefined> {

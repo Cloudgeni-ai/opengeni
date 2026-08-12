@@ -104,6 +104,39 @@ describe("NativeComputerDriver", () => {
       await driver.close();
     }
   });
+
+  test("replaces a poisoned native helper once before failing the frame stream", async () => {
+    const poisoned = new FixtureNativeTransport();
+    poisoned.startCaptureError = new NativeComputerError(
+      "timeout",
+      "ScreenCaptureKit stream startup timed out",
+      true,
+      false,
+    );
+    const replacement = new FixtureNativeTransport();
+    let recoveries = 0;
+    const driver = new NativeComputerDriver({
+      computerSessionId,
+      controllerGeneration,
+      client: poisoned,
+      clientFactory: async () => {
+        recoveries += 1;
+        return replacement;
+      },
+    });
+    try {
+      const frames = await driver.subscribeFrames("window-1");
+      await expect(frames[Symbol.asyncIterator]().next()).resolves.toMatchObject({
+        done: false,
+        value: { frameId: "frame-2", sequence: 1 },
+      });
+      await frames.close();
+      expect(recoveries).toBe(1);
+      expect(poisoned.closed).toBe(true);
+    } finally {
+      await driver.close();
+    }
+  });
 });
 
 class FixtureNativeTransport implements ComputerNativeTransport {
@@ -116,6 +149,7 @@ class FixtureNativeTransport implements ComputerNativeTransport {
   validated: NativeComputerActionCommand | null = null;
   dispatched: NativeComputerActionCommand | null = null;
   validateError: Error | null = null;
+  startCaptureError: Error | null = null;
   closed = false;
 
   async capabilities(): Promise<ComputerSessionCapabilities> {
@@ -143,7 +177,9 @@ class FixtureNativeTransport implements ComputerNativeTransport {
     };
   }
 
-  async startCapture(): Promise<void> {}
+  async startCapture(): Promise<void> {
+    if (this.startCaptureError) throw this.startCaptureError;
+  }
 
   async stopCapture(): Promise<void> {}
 

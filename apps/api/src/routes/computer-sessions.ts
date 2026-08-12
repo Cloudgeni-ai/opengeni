@@ -79,7 +79,7 @@ import {
 } from "../browser-controller-authority";
 import { allowedCorsOrigin } from "../http/cors";
 import { observeComputerActionResult, observeLifecycleResult } from "../interaction-metrics";
-import { withChannelA, type ChannelAOperation } from "../sandbox/channel-a";
+import { withChannelA, withChannelARead, type ChannelAOperation } from "../sandbox/channel-a";
 
 type ComputerPlacement = {
   placement: InteractionPlacement;
@@ -748,7 +748,13 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         lease: null,
       });
     }
-    return await withChannelA(
+    const runWithChannelA =
+      operation === "computer.read" ||
+      operation === "computer.control" ||
+      operation === "computer.attach"
+        ? withChannelARead
+        : withChannelA;
+    return await runWithChannelA(
       channelServices,
       {
         accountId: grant.accountId,

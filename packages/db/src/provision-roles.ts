@@ -693,6 +693,18 @@ BEGIN
     END IF;
     IF to_regprocedure(
       format(
+        '%I.slack_task_policy_update(uuid,text,uuid,uuid,jsonb,uuid,bigint,text,text)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.slack_task_policy_update(uuid, text, uuid, uuid, jsonb, uuid, bigint, text, text) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
         '%I.scoped_knowledge_apply_lifecycle(uuid,text,uuid,text,bigint,text,text,text,text,text,text)',
         ${literal(schema)}
       )

@@ -1,5 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { sendAgentSessionMessage, steerAgentSession } from "@opengeni/core";
+import {
+  sendAgentSessionMessage,
+  SessionAuthorizationDeniedError,
+  steerAgentSession,
+} from "@opengeni/core";
 import { appendAndPublishEvents } from "@opengeni/events";
 import {
   acquireSharedTestDatabase,
@@ -1500,8 +1504,8 @@ describe("event-ordering invariant canonical session-event lock order", () => {
   test("locks actor and target rows before command receipt foreign keys can form an upgrade cycle", async () => {
     const workspace = await freshWorkspace();
     const actor = await seedRunningSession(workspace);
-    const firstTarget = await seedRunningSession(workspace);
-    const secondTarget = await seedRunningSession(workspace);
+    const firstTarget = await seedIdleChild(workspace, crypto.randomUUID(), actor.sessionId);
+    const secondTarget = await seedIdleChild(workspace, crypto.randomUUID(), actor.sessionId);
     const lockId = nextBarrierId++;
     await barrier`select pg_advisory_lock(${BARRIER_CLASS}, ${lockId})`;
     await admin`
@@ -1622,8 +1626,8 @@ describe("event-ordering invariant canonical session-event lock order", () => {
             2,
           ),
       });
-      expect(error).toBeInstanceOf(AgentCommandAuthorityError);
-      expect(error).toMatchObject({ code: "CALLER_STALE" });
+      expect(error).toBeInstanceOf(SessionAuthorizationDeniedError);
+      expect(error).toMatchObject({ reason: "caller_stale" });
     }
 
     {
@@ -1658,8 +1662,8 @@ describe("event-ordering invariant canonical session-event lock order", () => {
             wakes += 1;
           }),
       });
-      expect(error).toBeInstanceOf(AgentCommandAuthorityError);
-      expect(error).toMatchObject({ code: "CALLER_INTERRUPTED" });
+      expect(error).toBeInstanceOf(SessionAuthorizationDeniedError);
+      expect(error).toMatchObject({ reason: "caller_stale" });
     }
 
     {

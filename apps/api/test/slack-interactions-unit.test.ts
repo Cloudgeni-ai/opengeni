@@ -280,6 +280,38 @@ describe("Slack event classification and safe projection", () => {
     ).toBe("thread_reply");
   });
 
+  test("accepts explicit file-only events with one bounded internal placeholder", () => {
+    expect(
+      slackEventInboxEntry(
+        envelope({
+          type: "app_mention",
+          user: "U1",
+          channel: "C1",
+          ts: "4.1",
+          files: [{ id: "F1", name: "diagram.png" }],
+        }),
+        bot,
+      ),
+    ).toMatchObject({
+      triggerKind: "app_mention",
+      text: "(file-only Slack invocation)",
+      slackMessageTs: "4.1",
+    });
+    expect(
+      slackEventInboxEntry(
+        envelope({
+          type: "message",
+          channel_type: "im",
+          user: "U1",
+          channel: "D1",
+          ts: "4.2",
+          files: [{ id: "F2", title: "screenshot.png" }],
+        }),
+        bot,
+      )?.triggerKind,
+    ).toBe("dm");
+  });
+
   test("keeps a maximum-size mention plus context inside the Slack input budget", () => {
     const prompt = slackInvocationTaskText(
       {

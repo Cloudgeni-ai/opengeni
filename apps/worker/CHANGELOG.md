@@ -1,5 +1,53 @@
 # @opengeni/worker-bundle
 
+## 0.18.1
+
+### Patch Changes
+
+- 73d34d6: Fence provider model-request terminal outcomes and expose bounded request lifecycle diagnostics for headers, first byte, and semantic completion.
+- Updated dependencies [73d34d6]
+- Updated dependencies [3d74340]
+  - @opengeni/codex@0.2.16
+  - @opengeni/contracts@0.46.0
+  - @opengeni/db@0.33.0
+  - @opengeni/config@0.14.1
+  - @opengeni/core@0.25.1
+  - @opengeni/runtime@0.20.1
+  - @opengeni/codemode@0.3.1
+  - @opengeni/documents@0.5.34
+  - @opengeni/events@0.3.105
+  - @opengeni/github@0.4.52
+  - @opengeni/observability@0.7.1
+  - @opengeni/storage@0.2.89
+
+## 0.18.0
+
+### Minor Changes
+
+- d2def0c: Add the complete browser-native and semantic computer interaction system across managed sandboxes, Connected Machines, attached Chrome, and external browser placements. Ship durable browser identities, authentication repair, network routing, downloads/uploads, shared causal control, public SDK and React workbench surfaces, and one exact MCP/Codemode execution catalog with native Connected Machine access.
+
+### Patch Changes
+
+- Updated dependencies [d2def0c]
+- Updated dependencies [314c7ba]
+- Updated dependencies [5215c0e]
+- Updated dependencies [d15d3e8]
+- Updated dependencies [d241d13]
+- Updated dependencies [3f81608]
+- Updated dependencies [733c22f]
+- Updated dependencies [42a1242]
+  - @opengeni/codemode@0.3.0
+  - @opengeni/config@0.14.0
+  - @opengeni/contracts@0.45.0
+  - @opengeni/core@0.25.0
+  - @opengeni/db@0.32.0
+  - @opengeni/observability@0.7.0
+  - @opengeni/runtime@0.20.0
+  - @opengeni/documents@0.5.33
+  - @opengeni/github@0.4.51
+  - @opengeni/storage@0.2.88
+  - @opengeni/events@0.3.104
+
 ## 0.17.2
 
 ### Patch Changes

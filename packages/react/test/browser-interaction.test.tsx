@@ -1171,7 +1171,14 @@ describe("BrowserViewer", () => {
       },
     });
     const rendered = await renderComponent(
-      <BrowserViewer client={client} workspaceId={WORKSPACE_ID} sessionId={SESSION_ID} />,
+      <BrowserViewer
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        webSocketFactory={(url, protocols) =>
+          new FakeBrowserSocket(url, protocols) as unknown as BrowserFrameWebSocket
+        }
+      />,
     );
     await flush(40);
 
@@ -1204,7 +1211,14 @@ describe("BrowserViewer", () => {
       }),
     });
     const rendered = await renderComponent(
-      <BrowserViewer client={client} workspaceId={WORKSPACE_ID} sessionId={SESSION_ID} />,
+      <BrowserViewer
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        webSocketFactory={(url, protocols) =>
+          new FakeBrowserSocket(url, protocols) as unknown as BrowserFrameWebSocket
+        }
+      />,
     );
     await flush(30);
 
@@ -1402,6 +1416,22 @@ describe("BrowserViewer", () => {
         "textarea[aria-label='Browser keyboard input']",
       );
       expect(keyboard).not.toBeNull();
+      const canvas = rendered.container.querySelector<HTMLCanvasElement>(
+        "canvas[aria-label='Interactive browser page']",
+      );
+      expect(canvas).not.toBeNull();
+      const focusPointer = new MouseEvent("pointerdown", {
+        bubbles: true,
+        cancelable: true,
+        button: 0,
+        clientX: 10,
+        clientY: 10,
+      });
+      await actRun(() => {
+        canvas!.dispatchEvent(focusPointer);
+      });
+      expect(focusPointer.defaultPrevented).toBe(true);
+      expect(document.activeElement).toBe(keyboard);
       const paste = new ClipboardEvent("paste", { bubbles: true, cancelable: true });
       Object.defineProperty(paste, "clipboardData", {
         value: { getData: (kind: string) => (kind === "text/plain" ? "local paste" : "") },
@@ -1546,6 +1576,83 @@ describe("BrowserViewer", () => {
     await rendered.unmount();
   });
 
+  test("retries first-save publication into the existing empty identity", async () => {
+    const current: BrowserSession = {
+      ...browserSession(),
+      capabilities: { ...browserSession().capabilities, identityPublication: true },
+    };
+    const emptyIdentity: BrowserIdentity = { ...browserIdentity(), name: "Google" };
+    let createCalls = 0;
+    const publishRequests: unknown[] = [];
+    const currentTarget = target();
+    const client = fakeClient({
+      listBrowserSessions: async () => ({ revision: 1, sessions: [current] }),
+      listBrowserIdentities: async () => ({ revision: 1, identities: [emptyIdentity] }),
+      createBrowserIdentity: async () => {
+        createCalls += 1;
+        throw new Error("the empty identity should be reused");
+      },
+      publishBrowserRevision: async (_workspaceId, browserSessionId, request) => {
+        publishRequests.push({ browserSessionId, ...request });
+        const revision = browserRevision(emptyIdentity, current);
+        return {
+          identity: {
+            ...emptyIdentity,
+            defaultRevisionId: revision.id,
+            headGeneration: 1,
+            revisionCount: 1,
+          },
+          revision,
+          outcome: "saved_as_default",
+          replayed: false,
+        };
+      },
+      getBrowserSession: async () => current,
+      listBrowserTargets: async () => ({
+        browserSessionId: BROWSER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        targets: [currentTarget],
+      }),
+      observeBrowserTarget: async () => observation(BROWSER_SESSION_ID, currentTarget),
+      attachBrowserSession: async () => attachment(currentTarget.id),
+    });
+    const rendered = await renderComponent(
+      <BrowserViewer
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        webSocketFactory={(url, protocols) =>
+          new FakeBrowserSocket(url, protocols) as unknown as BrowserFrameWebSocket
+        }
+      />,
+    );
+    await flush(30);
+
+    const profileSummary = [...rendered.container.querySelectorAll("summary")].find((summary) =>
+      summary.textContent?.includes("Temporary"),
+    );
+    await actRun(() => profileSummary!.click());
+    const name = rendered.container.querySelector<HTMLInputElement>("input[placeholder='Work']")!;
+    await actRun(() => {
+      name.value = "google";
+      name.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const save = [...rendered.container.querySelectorAll("button")].find(
+      (button) => button.textContent?.trim() === "Save",
+    );
+    await actRun(() => save!.click());
+    await flush(30);
+
+    expect(createCalls).toBe(0);
+    expect(publishRequests).toHaveLength(1);
+    expect(publishRequests[0]).toMatchObject({
+      identityId: emptyIdentity.id,
+      expectedHeadGeneration: 0,
+      advanceDefault: true,
+    });
+    await rendered.unmount();
+  });
+
   test("starts a browser from a selected reusable profile", async () => {
     const identity: BrowserIdentity = {
       ...browserIdentity(),
@@ -1657,7 +1764,7 @@ describe("BrowserViewer", () => {
     expect(launchSummary).not.toBeNull();
     await actRun(() => launchSummary!.click());
     const clean = [...(launchSummary!.closest("details")?.querySelectorAll("button") ?? [])].find(
-      (button) => button.textContent?.includes("Clean browser"),
+      (button) => button.textContent?.includes("Fresh browser"),
     );
     expect(clean).toBeDefined();
     await actRun(() => clean!.click());
@@ -1681,31 +1788,28 @@ describe("BrowserViewer", () => {
     await rendered.unmount();
   });
 
-  test("starts a fast semantic browser without inventing a desktop or frame stream", async () => {
-    const currentTarget = target();
-    const created: BrowserSession = {
-      ...browserSession(),
-      name: "Fast browser",
-      driverId: "opengeni.lightpanda.cdp.v1",
-      engine: "lightpanda",
-      engineVersion: "0.3.5",
-      headless: true,
-      capabilities: {
-        ...browserSession().capabilities,
-        liveFrames: false,
-        humanInput: false,
-        tabs: false,
-        downloads: false,
-        clipboard: false,
-        permissions: false,
-        privateCheckpoint: false,
-        identityPublication: false,
-        parallelTargets: false,
-      },
-    };
+  test("keeps the fast semantic browser agent-only in human creation UI", async () => {
+    const client = fakeClient({
+      listBrowserSessions: async () => ({ revision: 1, sessions: [] }),
+      listBrowserIdentities: async () => ({ revision: 1, identities: [] }),
+    });
+    const rendered = await renderComponent(
+      <BrowserViewer client={client} workspaceId={WORKSPACE_ID} sessionId={SESSION_ID} />,
+    );
+    await flush(30);
+
+    const launchSummary = rendered.container.querySelector<HTMLElement>(
+      "summary[aria-label='New browser']",
+    );
+    expect(launchSummary).not.toBeNull();
+    await actRun(() => launchSummary!.click());
+    expect(launchSummary!.closest("details")?.textContent).not.toContain("Fast semantic browser");
+    await rendered.unmount();
+  });
+
+  test("human creation is headed even when the embed has no linked computer", async () => {
+    const created: BrowserSession = { ...browserSession(), headless: false };
     const createRequests: unknown[] = [];
-    let linkedComputerCreates = 0;
-    let frameAttachments = 0;
     const client = fakeClient({
       listBrowserSessions: async () => ({ revision: 1, sessions: [] }),
       listBrowserIdentities: async () => ({ revision: 1, identities: [] }),
@@ -1717,24 +1821,11 @@ describe("BrowserViewer", () => {
       listBrowserTargets: async () => ({
         browserSessionId: created.id,
         controllerGeneration: "controller-1",
-        targets: [currentTarget],
+        targets: [],
       }),
-      observeBrowserTarget: async () => observation(created.id, currentTarget),
-      attachBrowserSession: async () => {
-        frameAttachments += 1;
-        return attachment(currentTarget.id);
-      },
     });
     const rendered = await renderComponent(
-      <BrowserViewer
-        client={client}
-        workspaceId={WORKSPACE_ID}
-        sessionId={SESSION_ID}
-        createLinkedComputer={async () => {
-          linkedComputerCreates += 1;
-          return { id: COMPUTER_SESSION_ID, placement: created.placement };
-        }}
-      />,
+      <BrowserViewer client={client} workspaceId={WORKSPACE_ID} sessionId={SESSION_ID} />,
     );
     await flush(30);
 
@@ -1743,25 +1834,20 @@ describe("BrowserViewer", () => {
     );
     expect(launchSummary).not.toBeNull();
     await actRun(() => launchSummary!.click());
-    const fast = [...(launchSummary!.closest("details")?.querySelectorAll("button") ?? [])].find(
-      (button) => button.textContent?.includes("Fast semantic browser"),
+    const clean = [...(launchSummary!.closest("details")?.querySelectorAll("button") ?? [])].find(
+      (button) => button.textContent?.includes("Fresh browser"),
     );
-    expect(fast).toBeDefined();
-    await actRun(() => fast!.click());
-    await flush(40);
+    expect(clean).toBeDefined();
+    await actRun(() => clean!.click());
+    await flush(30);
 
     expect(createRequests).toHaveLength(1);
     expect(createRequests[0]).toMatchObject({
       sessionId: SESSION_ID,
-      name: "Fast browser",
-      engine: "lightpanda",
-      headless: true,
+      name: "Browser",
+      headless: false,
     });
-    expect(linkedComputerCreates).toBe(0);
-    expect(frameAttachments).toBe(0);
-    expect(rendered.container.querySelector("button[aria-label='New tab']")).toBeNull();
-    expect(rendered.container.textContent).toContain("Semantic browser");
-    expect(rendered.container.textContent).toContain("Available page controls");
+    expect(createRequests[0]).not.toHaveProperty("linkedComputerSessionId");
     await rendered.unmount();
   });
 

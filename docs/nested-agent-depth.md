@@ -4,6 +4,13 @@ OpenGeni enforces an inclusive maximum depth for session trees at the
 PostgreSQL session-creation boundary. The policy limits new descendants without
 changing the lifecycle or control state of sessions that already exist.
 
+Depth admission is separate from runtime communication authority. Once a child
+exists, a live agent may address only itself, its immediate parent, and its
+immediate children; see [`agent-session-authority.md`](agent-session-authority.md).
+Siblings, skipped generations, other branches, and unrelated roots are not
+agent authority even when workspace permissions or an embedding-host policy are
+broader.
+
 ## Depth and precedence
 
 - A root session has depth `0` and its `rootSessionId` is its own id.

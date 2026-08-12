@@ -63,7 +63,7 @@ organization-tenancy tables.
 
 ## Canonical human identity and login bindings
 
-Migration `0229_canonical_human_login_bindings.sql` adds a separate,
+Migration `0235_canonical_human_login_bindings.sql` adds a separate,
 organization-independent identity authority. One Better Auth user converges on
 one canonical human identity, and that identity may have multiple verified
 provider/account login bindings. A canonical identity or login binding never
