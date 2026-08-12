@@ -117,12 +117,20 @@ describe("release schema contract", () => {
     expect(sourceContract.sha256).toBe(
       migrations.has("0235_canonical_human_login_bindings.sql")
         ? migrations.has("0234_xai_subscription_authority.sql")
-          ? "5450adec25b4684b082ce97c0ab5ce76f33b15de2e943945b5e73534ff67be82"
-          : "e0f7b19f681fee92ea7813660fee0227fef4ed885032a134f36b399591888d8c"
+          ? migrations.has("0223_pending_tool_event_output.sql")
+            ? "94db34c0bd7ee7a3fe9c7a44f7e2705de9bdbe39d1503fa79ec52b024d71ad42"
+            : "5450adec25b4684b082ce97c0ab5ce76f33b15de2e943945b5e73534ff67be82"
+          : migrations.has("0223_pending_tool_event_output.sql")
+            ? "bdf9243aad43605eb2cc380992f564a706aa06ffea885854f6be5911abe2f5c3"
+            : "e0f7b19f681fee92ea7813660fee0227fef4ed885032a134f36b399591888d8c"
         : migrations.has("0234_xai_subscription_authority.sql")
-          ? "035c70dfee83fe5b0962697bf7167bfd09b77d69ea3d3b0e25907998f58d7005"
+          ? migrations.has("0223_pending_tool_event_output.sql")
+            ? "f6370d47ee43da07781d21a67fe07ffb353c9c8ea4e22ec3bf75ba3793f7634a"
+            : "035c70dfee83fe5b0962697bf7167bfd09b77d69ea3d3b0e25907998f58d7005"
           : migrations.has("0233_skill_and_integration_authority_cutover.sql")
-            ? "03b2633febc6805e697fb5aa2002136a80c8699181f9b4c65b3b559ef6726d18"
+            ? migrations.has("0223_pending_tool_event_output.sql")
+              ? "2ec6043704c9f0b8c635ff989d5155e2f047a2377b6a8784139c98b006bcc487"
+              : "03b2633febc6805e697fb5aa2002136a80c8699181f9b4c65b3b559ef6726d18"
             : migrations.has("0232_integration_facet_authority_cutover.sql")
               ? "329a693f62feec5c85716be710791c98c24933796f542a33fae8af82ccfba927"
               : migrations.has("0231_integration_definition_identity_cutover.sql")
@@ -173,12 +181,20 @@ describe("release schema contract", () => {
       ...sourceContract,
       sha256: migrations.has("0235_canonical_human_login_bindings.sql")
         ? migrations.has("0234_xai_subscription_authority.sql")
-          ? "5450adec25b4684b082ce97c0ab5ce76f33b15de2e943945b5e73534ff67be82"
-          : "e0f7b19f681fee92ea7813660fee0227fef4ed885032a134f36b399591888d8c"
+          ? migrations.has("0223_pending_tool_event_output.sql")
+            ? "94db34c0bd7ee7a3fe9c7a44f7e2705de9bdbe39d1503fa79ec52b024d71ad42"
+            : "5450adec25b4684b082ce97c0ab5ce76f33b15de2e943945b5e73534ff67be82"
+          : migrations.has("0223_pending_tool_event_output.sql")
+            ? "bdf9243aad43605eb2cc380992f564a706aa06ffea885854f6be5911abe2f5c3"
+            : "e0f7b19f681fee92ea7813660fee0227fef4ed885032a134f36b399591888d8c"
         : migrations.has("0234_xai_subscription_authority.sql")
-          ? "035c70dfee83fe5b0962697bf7167bfd09b77d69ea3d3b0e25907998f58d7005"
+          ? migrations.has("0223_pending_tool_event_output.sql")
+            ? "f6370d47ee43da07781d21a67fe07ffb353c9c8ea4e22ec3bf75ba3793f7634a"
+            : "035c70dfee83fe5b0962697bf7167bfd09b77d69ea3d3b0e25907998f58d7005"
           : migrations.has("0233_skill_and_integration_authority_cutover.sql")
-            ? "03b2633febc6805e697fb5aa2002136a80c8699181f9b4c65b3b559ef6726d18"
+            ? migrations.has("0223_pending_tool_event_output.sql")
+              ? "2ec6043704c9f0b8c635ff989d5155e2f047a2377b6a8784139c98b006bcc487"
+              : "03b2633febc6805e697fb5aa2002136a80c8699181f9b4c65b3b559ef6726d18"
             : migrations.has("0232_integration_facet_authority_cutover.sql")
               ? "329a693f62feec5c85716be710791c98c24933796f542a33fae8af82ccfba927"
               : migrations.has("0231_integration_definition_identity_cutover.sql")
@@ -398,6 +414,7 @@ describe("release schema contract", () => {
         (migrations.has("0220_session_channels.sql") ? 1 : 0) +
         (migrations.has("0221_sessions_channel_index.sql") ? 1 : 0) +
         (migrations.has("0222_session_visibility_authority_epochs.sql") ? 1 : 0) +
+        (migrations.has("0223_pending_tool_event_output.sql") ? 1 : 0) +
         (migrations.has("0222_sessions_channel_fk.sql") ? 1 : 0) +
         (migrations.has("0223_sessions_channel_fk_validate.sql") ? 1 : 0) +
         (migrations.has("0224_slack_post_outcome_reconciliation.sql") ? 1 : 0) +
@@ -413,12 +430,20 @@ describe("release schema contract", () => {
     expect(contract.sha256).toBe(
       migrations.has("0235_canonical_human_login_bindings.sql")
         ? migrations.has("0234_xai_subscription_authority.sql")
-          ? "5450adec25b4684b082ce97c0ab5ce76f33b15de2e943945b5e73534ff67be82"
-          : "e0f7b19f681fee92ea7813660fee0227fef4ed885032a134f36b399591888d8c"
+          ? migrations.has("0223_pending_tool_event_output.sql")
+            ? "94db34c0bd7ee7a3fe9c7a44f7e2705de9bdbe39d1503fa79ec52b024d71ad42"
+            : "5450adec25b4684b082ce97c0ab5ce76f33b15de2e943945b5e73534ff67be82"
+          : migrations.has("0223_pending_tool_event_output.sql")
+            ? "bdf9243aad43605eb2cc380992f564a706aa06ffea885854f6be5911abe2f5c3"
+            : "e0f7b19f681fee92ea7813660fee0227fef4ed885032a134f36b399591888d8c"
         : migrations.has("0234_xai_subscription_authority.sql")
-          ? "035c70dfee83fe5b0962697bf7167bfd09b77d69ea3d3b0e25907998f58d7005"
+          ? migrations.has("0223_pending_tool_event_output.sql")
+            ? "f6370d47ee43da07781d21a67fe07ffb353c9c8ea4e22ec3bf75ba3793f7634a"
+            : "035c70dfee83fe5b0962697bf7167bfd09b77d69ea3d3b0e25907998f58d7005"
           : migrations.has("0233_skill_and_integration_authority_cutover.sql")
-            ? "03b2633febc6805e697fb5aa2002136a80c8699181f9b4c65b3b559ef6726d18"
+            ? migrations.has("0223_pending_tool_event_output.sql")
+              ? "2ec6043704c9f0b8c635ff989d5155e2f047a2377b6a8784139c98b006bcc487"
+              : "03b2633febc6805e697fb5aa2002136a80c8699181f9b4c65b3b559ef6726d18"
             : migrations.has("0232_integration_facet_authority_cutover.sql")
               ? "329a693f62feec5c85716be710791c98c24933796f542a33fae8af82ccfba927"
               : migrations.has("0231_integration_definition_identity_cutover.sql")
@@ -632,6 +657,12 @@ describe("release schema contract", () => {
       sha256: "26ed3d2ffcaf572623ad263aaa0103625b4ed1e9d28bcb7b5d35eb972d9762d1",
       deploymentMode: "maintenance",
     });
+    if (migrations.has("0223_pending_tool_event_output.sql")) {
+      expect(migrations.get("0223_pending_tool_event_output.sql")).toMatchObject({
+        sha256: "851cdb5dfe14f1cf6323e6cf59e55269b87d2db4406ea2ad10147553635eb707",
+        deploymentMode: "rolling",
+      });
+    }
     if (migrations.has("0234_xai_subscription_authority.sql")) {
       expect(migrations.get("0234_xai_subscription_authority.sql")).toMatchObject({
         sha256: "be0c23d624d545226068ce7627a2b458fe9aad996ea7ee750753c81eeb8988a8",
