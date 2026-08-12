@@ -180,6 +180,7 @@
         "@opengeni/observability": "workspace:*",
         "@opengeni/runtime": "workspace:*",
         "@opengeni/storage": "workspace:*",
+        "@opengeni/xai-subscription": "workspace:*",
         "@temporalio/activity": "^1.17.0",
         "@temporalio/client": "^1.17.0",
         "@temporalio/worker": "^1.17.0",
