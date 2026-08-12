@@ -1,5 +1,4 @@
 import { afterAll, beforeAll, describe, expect, test as bunTest } from "bun:test";
-import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { copyFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -543,44 +542,21 @@ async function invoke(
   argument: string,
   input?: Uint8Array,
 ): Promise<Readonly<{ exitCode: number; stdout: Uint8Array; stderr: string }>> {
-  return new Promise((resolve, reject) => {
-    // Use the same Node subprocess/stream implementation as the production
-    // worker launcher. Bun's Response wrapper around Bun.spawn stdout can
-    // resolve a partial pipe under full-suite process pressure, making a valid
-    // frame appear truncated even though the executable completed normally.
-    const child = spawn(target.executable, [argument], {
-      env: { ...target.environment, LANG: "C", LC_ALL: "C", TZ: "UTC" },
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    const stdout: Uint8Array[] = [];
-    const stderr: Uint8Array[] = [];
-    child.stdout.on("data", (chunk: Uint8Array) => stdout.push(chunk));
-    child.stderr.on("data", (chunk: Uint8Array) => stderr.push(chunk));
-    child.once("error", reject);
-    child.once("close", (code, signal) => {
-      if (signal) {
-        reject(new Error(`materializer fixture terminated by ${signal}`));
-        return;
-      }
-      const stdoutBytes = new Uint8Array(Buffer.concat(stdout));
-      const stderrText = Buffer.concat(stderr).toString("utf8");
-      if (argument !== IDENTITY && stdoutBytes.byteLength < 20) {
-        reject(
-          new Error(
-            `materializer fixture returned ${stdoutBytes.byteLength} bytes (exit ${String(code)}): ${stderrText}`,
-          ),
-        );
-        return;
-      }
-      resolve(
-        Object.freeze({
-          exitCode: code ?? -1,
-          stdout: stdoutBytes,
-          stderr: stderrText,
-        }),
-      );
-    });
-    child.stdin.end(input ? Buffer.from(input) : undefined);
+  const child = Bun.spawn([target.executable, argument], {
+    env: { ...target.environment, LANG: "C", LC_ALL: "C", TZ: "UTC" },
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  if (input) await child.stdin.write(input);
+  await child.stdin.end();
+  const stdout = new Response(child.stdout).arrayBuffer();
+  const stderr = new Response(child.stderr).text();
+  const exitCode = await child.exited;
+  return Object.freeze({
+    exitCode,
+    stdout: new Uint8Array(await stdout),
+    stderr: await stderr,
   });
 }
 

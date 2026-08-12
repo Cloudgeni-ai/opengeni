@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
-import { writeSync } from "node:fs";
+import { once } from "node:events";
 
 import {
   SPREADSHEET_ARTIFACT_PROJECTION_MAX_BYTES,
@@ -102,7 +102,7 @@ export async function runArtifactMaterializerCli(
   const command = args[0];
   if (command === IDENTITY_ARGUMENT) {
     const capabilities = await loadCapabilities(environment);
-    await writeStdout(bytes(JSON.stringify(capabilities)));
+    process.stdout.write(JSON.stringify(capabilities));
     return;
   }
   if (command === MATERIALIZE_ARGUMENT) {
@@ -596,17 +596,7 @@ async function writeFrame(
 }
 
 async function writeStdout(value: Uint8Array): Promise<void> {
-  // This is a one-shot framed subprocess, not an interactive stream. A
-  // Bun-compiled executable can finish top-level evaluation before an accepted
-  // process.stdout pipe write has actually flushed. Write the bounded frame
-  // chunks directly and handle partial writes so exit can never truncate a
-  // successful response.
-  let offset = 0;
-  while (offset < value.byteLength) {
-    const written = writeSync(1, value, offset, value.byteLength - offset);
-    if (written <= 0) throw new Error("materializer stdout made no progress");
-    offset += written;
-  }
+  if (!process.stdout.write(value)) await once(process.stdout, "drain");
 }
 
 class InputReader {
@@ -616,10 +606,6 @@ class InputReader {
 
   constructor(stream: NodeJS.ReadableStream & AsyncIterable<Buffer | string>) {
     this.#iterator = stream[Symbol.asyncIterator]();
-    // Bun does not consistently keep a piped stdin handle alive merely because
-    // an async iterator exists. Resume only after creating the iterator so it
-    // owns every chunk, and the compiled CLI cannot exit 0 before input arrives.
-    stream.resume();
   }
 
   async readExactly(length: number): Promise<Uint8Array> {
