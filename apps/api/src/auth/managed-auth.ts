@@ -2,6 +2,7 @@ import type { Settings } from "@opengeni/config";
 import { type ManagedAuth } from "@opengeni/core";
 import type { Database } from "@opengeni/db";
 import { ensureManagedAccessForUser } from "@opengeni/db";
+import { ensureCanonicalHumanIdentityForAuthUser } from "@opengeni/db/canonical-human-identities";
 import { betterAuth } from "better-auth";
 import { createEmailVerificationToken } from "better-auth/api";
 import { Pool } from "pg";
@@ -64,6 +65,28 @@ export function createManagedAuth(settings: Settings, db: Database): ManagedAuth
         userAgent: "user_agent",
         createdAt: "created_at",
         updatedAt: "updated_at",
+      },
+      additionalFields: {
+        identityId: {
+          type: "string",
+          fieldName: "identity_id",
+          input: false,
+          returned: false,
+        },
+        identityRevision: {
+          type: "number",
+          fieldName: "identity_revision",
+          input: false,
+          returned: false,
+          bigint: true,
+        },
+        authRevision: {
+          type: "number",
+          fieldName: "auth_revision",
+          input: false,
+          returned: false,
+          bigint: true,
+        },
       },
     },
     account: {
@@ -136,6 +159,27 @@ export function createManagedAuth(settings: Settings, db: Database): ManagedAuth
       },
     },
     databaseHooks: {
+      session: {
+        create: {
+          before: async (session) => {
+            const authority = await ensureCanonicalHumanIdentityForAuthUser(db, session.userId);
+            if (
+              authority.identityStatus === "disputed" ||
+              authority.identityStatus === "disabled"
+            ) {
+              return false;
+            }
+            return {
+              data: {
+                ...session,
+                identityId: authority.identityId,
+                identityRevision: authority.identityRevision,
+                authRevision: authority.authRevision,
+              },
+            };
+          },
+        },
+      },
       user: {
         create: {
           after: async (user) => {

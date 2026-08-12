@@ -252,7 +252,7 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
   }
 
   if (deps.managedAuth) {
-    const session = await getManagedSession(c, deps.managedAuth);
+    const session = await getManagedSession(c, deps.managedAuth, { db: deps.db });
     if (session?.user) {
       return await ensureManagedAccessForUser(deps.db, {
         userId: session.user.id,

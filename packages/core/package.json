@@ -29,6 +29,10 @@
     "./editable-artifact-live": {
       "types": "./src/editable-artifact-live.ts",
       "default": "./src/editable-artifact-live.ts"
+    },
+    "./canonical-human-identities": {
+      "types": "./src/canonical-human-identities.ts",
+      "default": "./src/canonical-human-identities.ts"
     }
   },
   "publishConfig": {

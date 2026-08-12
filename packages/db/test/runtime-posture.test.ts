@@ -47,6 +47,31 @@ function knowledgeAuthorityTables(): RuntimeTablePosture[] {
   }));
 }
 
+function canonicalHumanIdentityAuthorityTables(): RuntimeTablePosture[] {
+  return [
+    "canonical_human_identities",
+    "canonical_human_identity_operations",
+    "canonical_human_identity_subjects",
+    "canonical_human_login_bindings",
+  ].map((name) => ({
+    name,
+    owner: "opengeni_migrator",
+    rlsEnabled: false,
+    rlsForced: false,
+    rlsActive: false,
+    policyCount: 0,
+    artifactOutboxDispatcherPolicy: false,
+    artifactMaterializerPolicy: false,
+    select: false,
+    insert: false,
+    update: false,
+    delete: false,
+    truncate: false,
+    references: false,
+    trigger: false,
+  }));
+}
+
 function safePosture(): RuntimeDatabasePosture {
   return {
     identity: {
@@ -100,6 +125,7 @@ function safePosture(): RuntimeDatabasePosture {
         trigger: false,
       },
       ...knowledgeAuthorityTables(),
+      ...canonicalHumanIdentityAuthorityTables(),
     ],
     targetRoutines: [
       {
@@ -116,6 +142,18 @@ function safePosture(): RuntimeDatabasePosture {
         publicExecute: false,
         securityDefiner: true,
       },
+      ...[
+        "ensure_canonical_human_identity(text, text)",
+        "validate_canonical_human_session(text, text, boolean)",
+        "get_canonical_human_identity_projection(text)",
+        "apply_canonical_human_identity_operation(uuid, text, bigint, text, uuid, text, text, text)",
+      ].map((name) => ({
+        name,
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+      })),
     ],
     privateRoutines: [
       {
@@ -144,25 +182,25 @@ describe("runtime database posture evaluator", () => {
         .sort();
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 216],
+            [FORCE_RLS_TABLES, 220],
             [NON_RLS_RUNTIME_TABLES, 11],
             [RUNTIME_FULL_DML_TABLES, 131],
             [RUNTIME_READ_ONLY_TABLES, 14],
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 41],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 29],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 11],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 15],
             [RUNTIME_DML_TABLES, 216],
           ] as const)
         : ([
-            [FORCE_RLS_TABLES, 169],
+            [FORCE_RLS_TABLES, 173],
             [NON_RLS_RUNTIME_TABLES, 11],
             [RUNTIME_FULL_DML_TABLES, 107],
             [RUNTIME_READ_ONLY_TABLES, 13],
             [readUpdateTables, 0],
             [RUNTIME_READ_INSERT_TABLES, 37],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 12],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 11],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 15],
             [RUNTIME_DML_TABLES, 169],
           ] as const);
       for (const [tables, length] of contracts) {
@@ -172,7 +210,7 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = hasCurrentMainActivityLedger ? 227 : 180;
+      const tableCount = hasCurrentMainActivityLedger ? 231 : 184;
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount,
       );
@@ -231,14 +269,14 @@ describe("runtime database posture evaluator", () => {
     }
 
     const contracts = [
-      [FORCE_RLS_TABLES, 197],
+      [FORCE_RLS_TABLES, 201],
       [NON_RLS_RUNTIME_TABLES, 11],
       [RUNTIME_FULL_DML_TABLES, 128],
       [RUNTIME_READ_ONLY_TABLES, 14],
       [RUNTIME_READ_UPDATE_TABLES, 1],
       [RUNTIME_READ_INSERT_TABLES, 41],
       [RUNTIME_READ_INSERT_UPDATE_TABLES, 18],
-      [PROTECTED_NO_DIRECT_DML_TABLES, 11],
+      [PROTECTED_NO_DIRECT_DML_TABLES, 15],
       [RUNTIME_DML_TABLES, 202],
     ] as const;
     for (const [tables, length] of contracts) {
@@ -248,8 +286,8 @@ describe("runtime database posture evaluator", () => {
     }
 
     expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-    expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(213);
-    expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(208);
+    expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(217);
+    expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(212);
     expect(RUNTIME_TABLE_PRIVILEGES.editable_artifact_session_links).toEqual([
       "SELECT",
       "INSERT",
@@ -322,6 +360,36 @@ describe("runtime database posture evaluator", () => {
     expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
       "target-schema runtime capability knowledge_source_sync_lock_authority(uuid, uuid, uuid) owner another_owner does not match authority table owner opengeni_migrator",
     );
+  });
+
+  test("fails closed on missing or split canonical human identity authority", () => {
+    const missing = safePosture();
+    missing.tables = missing.tables.filter(
+      (table) => table.name !== "canonical_human_login_bindings",
+    );
+    expect(evaluateRuntimeDatabasePosture(missing, options)).toContain(
+      "target-schema runtime capability ensure_canonical_human_identity(text, text) canonical identity authority tables are missing",
+    );
+
+    const split = safePosture();
+    split.tables.find((table) => table.name === "canonical_human_identity_operations")!.owner =
+      "another_owner";
+    expect(evaluateRuntimeDatabasePosture(split, options)).toContain(
+      "target-schema runtime capability ensure_canonical_human_identity(text, text) authority table owners do not match: canonical_human_identities=opengeni_migrator, canonical_human_identity_subjects=opengeni_migrator, canonical_human_login_bindings=opengeni_migrator, canonical_human_identity_operations=another_owner",
+    );
+  });
+
+  test("classifies canonical human identity tables as FORCE-RLS with no direct DML", () => {
+    for (const table of [
+      "canonical_human_identities",
+      "canonical_human_identity_operations",
+      "canonical_human_identity_subjects",
+      "canonical_human_login_bindings",
+    ] as const) {
+      expect(FORCE_RLS_TABLES).toContain(table);
+      expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain(table);
+      expect(RUNTIME_TABLE_PRIVILEGES[table]).toBeUndefined();
+    }
   });
 
   test("rejects bypass, inheritance, ownership, memberships, and inactive RLS", () => {
@@ -442,6 +510,7 @@ describe("runtime database posture evaluator", () => {
         delete: false,
       },
       ...knowledgeAuthorityTables(),
+      ...canonicalHumanIdentityAuthorityTables(),
     ];
     const inertOptions: RuntimeDatabasePostureOptions = {
       ...options,
@@ -587,6 +656,7 @@ describe("runtime database posture evaluator", () => {
         artifactMaterializerPolicy: true,
       })),
       ...knowledgeAuthorityTables(),
+      ...canonicalHumanIdentityAuthorityTables(),
     ];
     for (const name of [
       "claim_editable_artifact_materializations(text, integer, integer, name)",

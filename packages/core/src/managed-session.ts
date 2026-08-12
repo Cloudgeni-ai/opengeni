@@ -1,5 +1,7 @@
 import type { Context } from "hono";
 import type { ManagedAuth } from "./managed-auth-type";
+import type { Database } from "@opengeni/db";
+import { validateCanonicalHumanSession } from "@opengeni/db/canonical-human-identities";
 
 /**
  * Read a Better Auth session without bypassing its sliding-cookie renewal.
@@ -8,7 +10,11 @@ import type { ManagedAuth } from "./managed-auth-type";
  * Programmatic callers must explicitly request and forward the returned cookie
  * headers; the HTTP handler does this automatically, but direct API calls do not.
  */
-export async function getManagedSession(c: Context, auth: ManagedAuth) {
+export async function getManagedSession(
+  c: Context,
+  auth: ManagedAuth,
+  options?: { db?: Database; allowIdentityRecovery?: boolean },
+) {
   const result = await auth.api.getSession({
     headers: c.req.raw.headers,
     returnHeaders: true,
@@ -18,7 +24,18 @@ export async function getManagedSession(c: Context, auth: ManagedAuth) {
     c.header("set-cookie", cookie, { append: true });
   }
 
-  return result.response;
+  const session = result.response;
+  if (!session?.user || !options?.db) return session;
+  const authSessionId = session.session?.id;
+  if (typeof authSessionId !== "string") return null;
+  const valid = await validateCanonicalHumanSession(options.db, {
+    authSessionId,
+    authUserId: session.user.id,
+    ...(options.allowIdentityRecovery === undefined
+      ? {}
+      : { allowRecovery: options.allowIdentityRecovery }),
+  });
+  return valid ? session : null;
 }
 
 function setCookieHeaders(headers: Headers): string[] {
