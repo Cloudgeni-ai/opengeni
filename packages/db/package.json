@@ -46,6 +46,10 @@
     "./video-generation": {
       "types": "./src/video-generation.ts",
       "default": "./src/video-generation.ts"
+    },
+    "./canonical-human-identities": {
+      "types": "./src/canonical-human-identities.ts",
+      "default": "./src/canonical-human-identities.ts"
     }
   },
   "publishConfig": {

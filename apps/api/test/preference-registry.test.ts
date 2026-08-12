@@ -9,6 +9,7 @@ import {
   deleteWorkspace,
   ensureManagedAccessForUser,
   getWorkspaceGrant,
+  synchronizeCanonicalHumanLoginBindings,
   withWorkspaceSubjectRls,
   type DbClient,
 } from "@opengeni/db";
@@ -349,6 +350,25 @@ describe("structured preference registry API and PostgreSQL authority", () => {
       email: `hosted-${suffix}@example.test`,
       name: "Hosted preference owner",
     };
+    await shared.admin`
+      insert into auth_users (id, name, email, email_verified)
+      values (${user.id}, ${user.name}, ${user.email}, true)
+    `;
+    await shared.admin`
+      insert into auth_identities (id, user_id, provider_id, account_id)
+      values (${crypto.randomUUID()}, ${user.id}, 'credential', ${user.id})
+    `;
+    const identity = await synchronizeCanonicalHumanLoginBindings(client.db, user.id);
+    const authSessionId = crypto.randomUUID();
+    await shared.admin`
+      insert into auth_sessions (
+        id, user_id, token, expires_at,
+        identity_id, identity_revision, auth_revision
+      ) values (
+        ${authSessionId}, ${user.id}, ${crypto.randomUUID()}, now() + interval '1 hour',
+        ${identity.identityId}, ${identity.identityRevision}, ${identity.authRevision}
+      )
+    `;
     const hostedAccess = await ensureManagedAccessForUser(client.db, {
       userId: user.id,
       email: user.email,
@@ -396,7 +416,7 @@ describe("structured preference registry API and PostgreSQL authority", () => {
         api: {
           getSession: async () => ({
             headers: new Headers(),
-            response: { user },
+            response: { session: { id: authSessionId }, user },
           }),
         },
       },

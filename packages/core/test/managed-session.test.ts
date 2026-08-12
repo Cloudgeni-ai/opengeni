@@ -2,6 +2,15 @@ import { describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import { getManagedSession } from "../src/managed-session";
 
+function validationDatabase(valid: boolean, onExecute?: () => void) {
+  return {
+    execute: async () => {
+      onExecute?.();
+      return [{ valid }];
+    },
+  };
+}
+
 describe("getManagedSession", () => {
   test("requests and forwards every Better Auth session renewal cookie", async () => {
     const renewedSession = "better-auth.session_token=renewed; Path=/; HttpOnly";
@@ -60,6 +69,79 @@ describe("getManagedSession", () => {
     const response = await app.request("/");
 
     expect(response.headers.get("set-cookie")).toBeNull();
+    expect(await response.json()).toEqual({ authenticated: false });
+  });
+
+  test("accepts a managed session only when its canonical authority stamp is current", async () => {
+    const auth = {
+      api: {
+        getSession: async () => ({
+          headers: new Headers(),
+          response: {
+            session: { id: "session-current" },
+            user: { id: "user-1" },
+          },
+        }),
+      },
+    };
+    const app = new Hono().get("/", async (c) => {
+      const session = await getManagedSession(c, auth as never, {
+        db: validationDatabase(true) as never,
+      });
+      return c.json({ authenticated: session !== null });
+    });
+
+    const response = await app.request("/");
+
+    expect(await response.json()).toEqual({ authenticated: true });
+  });
+
+  test("denies a managed-session projection that omits the Better Auth session id", async () => {
+    let validationQueries = 0;
+    const auth = {
+      api: {
+        getSession: async () => ({
+          headers: new Headers(),
+          response: { user: { id: "user-1" } },
+        }),
+      },
+    };
+    const app = new Hono().get("/", async (c) => {
+      const session = await getManagedSession(c, auth as never, {
+        db: validationDatabase(true, () => {
+          validationQueries += 1;
+        }) as never,
+      });
+      return c.json({ authenticated: session !== null });
+    });
+
+    const response = await app.request("/");
+
+    expect(validationQueries).toBe(0);
+    expect(await response.json()).toEqual({ authenticated: false });
+  });
+
+  test("denies a managed session whose canonical authority stamp is stale", async () => {
+    const auth = {
+      api: {
+        getSession: async () => ({
+          headers: new Headers(),
+          response: {
+            session: { id: "session-stale" },
+            user: { id: "user-1" },
+          },
+        }),
+      },
+    };
+    const app = new Hono().get("/", async (c) => {
+      const session = await getManagedSession(c, auth as never, {
+        db: validationDatabase(false) as never,
+      });
+      return c.json({ authenticated: session !== null });
+    });
+
+    const response = await app.request("/");
+
     expect(await response.json()).toEqual({ authenticated: false });
   });
 });

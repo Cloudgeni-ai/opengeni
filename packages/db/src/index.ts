@@ -53839,3 +53839,4 @@ export * from "./browser-auth";
 export * from "./browser-downloads";
 export * from "./attached-browser-devices";
 export * from "./interaction-revisions";
+export * from "./canonical-human-identities";

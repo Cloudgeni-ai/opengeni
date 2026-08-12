@@ -42,6 +42,10 @@
       "types": "./src/video-generation.ts",
       "default": "./src/video-generation.ts"
     },
+    "./canonical-human-identities": {
+      "types": "./src/canonical-human-identities.ts",
+      "default": "./src/canonical-human-identities.ts"
+    },
     "./codex-provider-account-authority": {
       "types": "./src/codex-provider-account-authority.ts",
       "default": "./src/codex-provider-account-authority.ts"

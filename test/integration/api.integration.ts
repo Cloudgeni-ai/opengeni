@@ -52,6 +52,7 @@ import {
   saveRunState,
   setSessionGoalStatus,
   sumUsageQuantity,
+  synchronizeCanonicalHumanLoginBindings,
   updateScheduledTask,
   updateWorkspaceSettings,
   upsertCapabilityCatalogItem,
@@ -1303,6 +1304,25 @@ describe("API component integration", () => {
   test("managed session cookie still authenticates when an invalid bearer header is present", async () => {
     const userId = `managed-user-${crypto.randomUUID()}`;
     const email = `managed-cookie-${crypto.randomUUID()}@example.com`;
+    await dbClient.db.execute(dbSql`
+      insert into auth_users (id, name, email, email_verified)
+      values (${userId}, 'Managed Cookie User', ${email}, true)
+    `);
+    await dbClient.db.execute(dbSql`
+      insert into auth_identities (id, user_id, provider_id, account_id)
+      values (${crypto.randomUUID()}, ${userId}, 'credential', ${userId})
+    `);
+    const identity = await synchronizeCanonicalHumanLoginBindings(dbClient.db, userId);
+    const authSessionId = crypto.randomUUID();
+    await dbClient.db.execute(dbSql`
+      insert into auth_sessions (
+        id, user_id, token, expires_at,
+        identity_id, identity_revision, auth_revision
+      ) values (
+        ${authSessionId}, ${userId}, ${crypto.randomUUID()}, now() + interval '1 hour',
+        ${identity.identityId}, ${identity.identityRevision}, ${identity.authRevision}
+      )
+    `);
     const app = createApp({
       settings: testSettings({
         databaseUrl: services.databaseUrl,
@@ -1318,6 +1338,7 @@ describe("API component integration", () => {
           getSession: async () => ({
             headers: new Headers(),
             response: {
+              session: { id: authSessionId },
               user: { id: userId, email, name: "Managed Cookie User" },
             },
           }),
