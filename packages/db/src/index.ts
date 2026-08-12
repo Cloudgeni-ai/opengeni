@@ -3901,9 +3901,10 @@ export type SlackBotPostOperation = {
   targetKind: "channel" | "user";
   targetId: string;
   requestDigest: string;
-  status: "provider_started" | "completed";
+  status: "pending" | "provider_started" | "outcome_unknown" | "completed";
   claimHolderId: string | null;
   claimExpiresAt: Date | null;
+  claimMode: "send" | "reconcile" | null;
   attemptCount: number;
   lastFailureCode: string | null;
   slackChannelId: string | null;
@@ -9403,7 +9404,7 @@ export async function recordSlackBotInstallCallbackFailure(
 
 export type ClaimSlackBotPostOperationResult =
   | {
-      kind: "claimed" | "in_progress" | "completed";
+      kind: "claimed" | "reconcile" | "in_progress" | "completed";
       operation: SlackBotPostOperation;
     }
   | { kind: "conflict" | "connection_not_found" };
@@ -9411,8 +9412,8 @@ export type ClaimSlackBotPostOperationResult =
 /**
  * Claims one durable Slack post identity. The insert occurs before any provider
  * call; retries retain the original client_msg_id and immutable request digest.
- * A live claim suppresses concurrent sends, while a released/expired claim can
- * be reclaimed after response loss or process death.
+ * A live claim suppresses concurrent work. An expired provider_started claim is
+ * conservatively converted to outcome_unknown and may only be reconciled.
  */
 export async function claimSlackBotPostOperation(
   db: Database,
@@ -9460,9 +9461,10 @@ export async function claimSlackBotPostOperation(
             targetKind: input.targetKind,
             targetId: input.targetId,
             requestDigest: input.requestDigest,
-            status: "provider_started",
+            status: "pending",
             claimHolderId: input.claimHolderId,
             claimExpiresAt: sql`now() + (${claimLeaseMs} * interval '1 millisecond')`,
+            claimMode: "send",
             attemptCount: 1,
           })
           .onConflictDoNothing({
@@ -9509,35 +9511,72 @@ export async function claimSlackBotPostOperation(
           } as const;
         }
 
+        if (
+          existing.claimHolderId &&
+          existing.claimExpiresAt &&
+          existing.claimExpiresAt > new Date()
+        ) {
+          return {
+            kind: "in_progress",
+            operation: mapSlackBotPostOperation(existing),
+          } as const;
+        }
+
+        const nextStatus =
+          existing.status === "provider_started" ? "outcome_unknown" : existing.status;
+        const claimMode = nextStatus === "outcome_unknown" ? "reconcile" : "send";
+
         const [reclaimed] = await tx
           .update(schema.slackBotPostOperations)
           .set({
+            status: nextStatus,
             claimHolderId: input.claimHolderId,
             claimExpiresAt: sql`now() + (${claimLeaseMs} * interval '1 millisecond')`,
+            claimMode,
             attemptCount: sql`${schema.slackBotPostOperations.attemptCount} + 1`,
-            lastFailureCode: null,
             updatedAt: sql`now()`,
           })
-          .where(
-            and(
-              eq(schema.slackBotPostOperations.id, existing.id),
-              or(
-                isNull(schema.slackBotPostOperations.claimHolderId),
-                lte(schema.slackBotPostOperations.claimExpiresAt, sql`now()`),
-              ),
-            ),
-          )
+          .where(eq(schema.slackBotPostOperations.id, existing.id))
           .returning();
-        return reclaimed
-          ? ({
-              kind: "claimed",
-              operation: mapSlackBotPostOperation(reclaimed),
-            } as const)
-          : ({
-              kind: "in_progress",
-              operation: mapSlackBotPostOperation(existing),
-            } as const);
+        if (!reclaimed) throw new Error("Slack post operation reclaim returned no row");
+        return {
+          kind: claimMode === "reconcile" ? "reconcile" : "claimed",
+          operation: mapSlackBotPostOperation(reclaimed),
+        } as const;
       }),
+  );
+}
+
+export async function markSlackBotPostOperationProviderStarted(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    connectionId: string;
+    operationId: string;
+    claimHolderId: string;
+  },
+): Promise<boolean> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb
+        .update(schema.slackBotPostOperations)
+        .set({ status: "provider_started", updatedAt: sql`now()` })
+        .where(
+          and(
+            eq(schema.slackBotPostOperations.workspaceId, input.workspaceId),
+            eq(schema.slackBotPostOperations.connectionId, input.connectionId),
+            eq(schema.slackBotPostOperations.operationId, input.operationId),
+            eq(schema.slackBotPostOperations.status, "pending"),
+            eq(schema.slackBotPostOperations.claimMode, "send"),
+            eq(schema.slackBotPostOperations.claimHolderId, input.claimHolderId),
+          ),
+        )
+        .returning({ id: schema.slackBotPostOperations.id });
+      return rows.length === 1;
+    },
   );
 }
 
@@ -9549,6 +9588,7 @@ export async function releaseSlackBotPostOperationClaim(
     connectionId: string;
     operationId: string;
     claimHolderId: string;
+    outcomeUnknown: boolean;
     failureCode: string;
   },
 ): Promise<boolean> {
@@ -9559,8 +9599,10 @@ export async function releaseSlackBotPostOperationClaim(
       const rows = await scopedDb
         .update(schema.slackBotPostOperations)
         .set({
+          status: input.outcomeUnknown ? "outcome_unknown" : "pending",
           claimHolderId: null,
           claimExpiresAt: null,
+          claimMode: null,
           lastFailureCode: input.failureCode.slice(0, 128),
           updatedAt: sql`now()`,
         })
@@ -9569,7 +9611,7 @@ export async function releaseSlackBotPostOperationClaim(
             eq(schema.slackBotPostOperations.workspaceId, input.workspaceId),
             eq(schema.slackBotPostOperations.connectionId, input.connectionId),
             eq(schema.slackBotPostOperations.operationId, input.operationId),
-            eq(schema.slackBotPostOperations.status, "provider_started"),
+            ne(schema.slackBotPostOperations.status, "completed"),
             eq(schema.slackBotPostOperations.claimHolderId, input.claimHolderId),
           ),
         )
@@ -9637,6 +9679,7 @@ export async function completeSlackBotPostOperation(
             status: "completed",
             claimHolderId: null,
             claimExpiresAt: null,
+            claimMode: null,
             lastFailureCode: null,
             slackChannelId: input.slackChannelId,
             slackMessageTimestamp: input.slackMessageTimestamp,
@@ -52650,6 +52693,7 @@ function mapSlackBotPostOperation(
     status: row.status,
     claimHolderId: row.claimHolderId,
     claimExpiresAt: row.claimExpiresAt,
+    claimMode: row.claimMode,
     attemptCount: row.attemptCount,
     lastFailureCode: row.lastFailureCode,
     slackChannelId: row.slackChannelId,

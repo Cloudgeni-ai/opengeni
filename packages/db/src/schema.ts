@@ -1444,9 +1444,9 @@ export const slackInteractionProgressDeliveries = pgTable(
 );
 
 // Durable provider-operation identity for OpenGeni Slack bot posts. The
-// caller-supplied operation UUID is also Slack's client_msg_id; a bounded claim
-// serializes live attempts while an expired/released claim can safely retry the
-// same provider identity after response loss or process death.
+// server-owned durable operation UUID is also Slack's client_msg_id. `pending` is
+// safe to send, `provider_started` and `outcome_unknown` require provider read
+// reconciliation, and only `completed` may expose the provider result.
 export const slackBotPostOperations = pgTable(
   "slack_bot_post_operations",
   {
@@ -1465,9 +1465,12 @@ export const slackBotPostOperations = pgTable(
     targetKind: text("target_kind").$type<"channel" | "user">().notNull(),
     targetId: text("target_id").notNull(),
     requestDigest: text("request_digest").notNull(),
-    status: text("status").$type<"provider_started" | "completed">().notNull(),
+    status: text("status")
+      .$type<"pending" | "provider_started" | "outcome_unknown" | "completed">()
+      .notNull(),
     claimHolderId: uuid("claim_holder_id"),
     claimExpiresAt: timestamp("claim_expires_at", { withTimezone: true }),
+    claimMode: text("claim_mode").$type<"send" | "reconcile">(),
     attemptCount: integer("attempt_count").notNull().default(0),
     lastFailureCode: text("last_failure_code"),
     slackChannelId: text("slack_channel_id"),
@@ -1493,7 +1496,7 @@ export const slackBotPostOperations = pgTable(
     ),
     statusValid: check(
       "slack_bot_post_operations_status_check",
-      sql`${table.status} in ('provider_started', 'completed')`,
+      sql`${table.status} in ('pending', 'provider_started', 'outcome_unknown', 'completed')`,
     ),
     identityValid: check(
       "slack_bot_post_operations_identity_check",
@@ -1501,12 +1504,26 @@ export const slackBotPostOperations = pgTable(
         and length(${table.targetId}) between 1 and 64
         and ${table.requestDigest} ~ '^[0-9a-f]{64}$'
         and ${table.attemptCount} > 0
-        and ((${table.claimHolderId} is null) = (${table.claimExpiresAt} is null))`,
+        and (
+          (
+            ${table.claimHolderId} is null
+            and ${table.claimExpiresAt} is null
+            and ${table.claimMode} is null
+          )
+          or (
+            ${table.claimHolderId} is not null
+            and ${table.claimExpiresAt} is not null
+            and (
+              (${table.claimMode} = 'send' and ${table.status} in ('pending', 'provider_started'))
+              or (${table.claimMode} = 'reconcile' and ${table.status} = 'outcome_unknown')
+            )
+          )
+        )`,
     ),
     completionValid: check(
       "slack_bot_post_operations_completion_check",
       sql`(
-          ${table.status} = 'provider_started'
+          ${table.status} <> 'completed'
           and ${table.slackChannelId} is null
           and ${table.slackMessageTimestamp} is null
           and ${table.completedAt} is null

@@ -1692,38 +1692,6 @@ function registerSlackBotTools(
   );
 
   server.registerTool(
-    "slack_bot_post_message",
-    {
-      description:
-        "Post as the workspace-shared OpenGeni bot. Pass channelId for a channel where the bot is already a member, or userId to open/post a DM; pass exactly one. To reply in a thread, also pass its parent message timestamp as threadTimestamp. Generate one operationId UUID per intended message and reuse that same UUID on every retry.",
-      inputSchema: {
-        connectionId: z4.string().uuid().optional(),
-        operationId: z4.string().uuid(),
-        channelId: z4.string().min(1).max(64).optional(),
-        userId: z4.string().min(1).max(64).optional(),
-        threadTimestamp: z4.string().min(1).max(64).optional(),
-        text: z4.string().min(1).max(40_000),
-      },
-    },
-    async ({ connectionId, operationId, channelId, userId, threadTimestamp, text }) => {
-      if (Boolean(channelId) === Boolean(userId)) {
-        throw new Error("exactly one of channelId or userId is required");
-      }
-      return json(
-        await (
-          await clientFor(connectionId)
-        ).postMessage({
-          operationId,
-          ...(channelId ? { channelId } : {}),
-          ...(userId ? { userId } : {}),
-          ...(threadTimestamp ? { threadTimestamp } : {}),
-          text,
-        }),
-      );
-    },
-  );
-
-  server.registerTool(
     "slack_bot_delete_message",
     {
       description:

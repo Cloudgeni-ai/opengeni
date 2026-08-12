@@ -8,6 +8,7 @@ import { isApiContractProtectedMutation } from "../src/app";
 import { requireAccessKey } from "../src/http/auth";
 import {
   registerSlackInteractionRoutes,
+  slackDeliveryTextsCoalesce,
   slackEventInboxEntry,
   slackInteractionRoutePolicy,
   slackInvocationTaskText,
@@ -399,6 +400,19 @@ describe("Slack event classification and safe projection", () => {
     expect(SLACK_TASK_INSTRUCTIONS).toContain("task-local only");
     expect(SLACK_TASK_INSTRUCTIONS).toContain("Do not write Slack context to Documents");
     expect(SLACK_TASK_INSTRUCTIONS).toContain("Never expose private reasoning");
+    expect(SLACK_TASK_INSTRUCTIONS).toContain(
+      "Execute direct, safe, sufficiently specified requests immediately",
+    );
+    expect(SLACK_TASK_INSTRUCTIONS).toContain("materially required information is missing");
+  });
+
+  test("coalesces only exact or boundary-safe terminal prefix shapes", () => {
+    expect(slackDeliveryTextsCoalesce("Final result", "Final result")).toBe(true);
+    expect(slackDeliveryTextsCoalesce("Final result", "Final result\n\nDetails")).toBe(true);
+    expect(slackDeliveryTextsCoalesce("Final result. Details", "Final result")).toBe(true);
+    expect(slackDeliveryTextsCoalesce("Final", "Finally different")).toBe(false);
+    expect(slackDeliveryTextsCoalesce("middle", "prefix middle suffix")).toBe(false);
+    expect(slackDeliveryTextsCoalesce("", "Final result")).toBe(false);
   });
 
   test("pins the exact reacted message before budgeting long surrounding context", () => {
@@ -441,6 +455,8 @@ describe("Slack event classification and safe projection", () => {
     expect(prompt).toContain(exactText);
     expect(prompt).toContain("[reacted message]");
     expect(prompt).toContain("Pinned deployment plan");
+    expect(prompt).toContain("Execute a direct, safe, sufficiently specified request immediately");
+    expect(prompt).toContain("Ask one concise clarifying question only when materially required");
     expect(prompt.indexOf("[reacted message]")).toBeLessThan(
       prompt.indexOf("Bounded surrounding thread context:"),
     );
