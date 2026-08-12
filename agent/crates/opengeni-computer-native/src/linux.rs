@@ -76,6 +76,7 @@ struct TargetRecord {
 #[derive(Clone)]
 struct TargetLocator {
     application_root: ObjectRefOwned,
+    record: TargetRecord,
 }
 
 #[derive(Clone)]
@@ -389,12 +390,7 @@ impl AtspiComputerAdapter {
     ) -> NativeAdapterResult<(TargetRecord, Vec<CacheItem>)> {
         if let Some(locator) = self.target_locators.read().await.get(target_id).cloned() {
             if let Ok(items) = self.application_cache(&locator.application_root).await {
-                if let Some(target) = self
-                    .target_records(&items)
-                    .await?
-                    .into_iter()
-                    .find(|record| record.target.id == target_id)
-                {
+                if let Some(target) = self.refresh_target(locator.record, &items).await {
                     return Ok((target, items));
                 }
             }
@@ -413,6 +409,34 @@ impl AtspiComputerAdapter {
                 )
             })?;
         Ok((target, items))
+    }
+
+    /// Refresh one previously resolved target from its coherent application
+    /// cache. This avoids re-enriching every nested Chromium frame on each
+    /// observation while still re-reading the exact target bounds and X11
+    /// correlation. A missing or uncorrelated target falls back to the full
+    /// discovery path in `load_target`.
+    async fn refresh_target(
+        &self,
+        mut record: TargetRecord,
+        items: &[CacheItem],
+    ) -> Option<TargetRecord> {
+        let item = items
+            .iter()
+            .find(|item| object_key(&item.object).ok().as_ref() == Some(&record.key))?;
+        record.target.title = first_nonempty(&[&item.name, &item.short_name])
+            .unwrap_or_else(|| item.role.to_string());
+        record.target.focused =
+            item.states.contains(State::Focused) || item.states.contains(State::Active);
+        record.target.bounds = self.component_bounds(&item.object, item.ifaces).await;
+        if record.target.kind == NativeTargetKind::Window {
+            let windows = self.desktop.as_ref()?.windows().await.ok()?;
+            record.x11_window = correlate_x11_window(&record.target, &windows);
+            if record.x11_window.is_none() {
+                return None;
+            }
+        }
+        Some(record)
     }
 
     async fn replace_target_locators(
@@ -437,6 +461,7 @@ impl AtspiComputerAdapter {
                         record.target.id.clone(),
                         TargetLocator {
                             application_root: item.object.clone(),
+                            record: record.clone(),
                         },
                     );
                     break;
