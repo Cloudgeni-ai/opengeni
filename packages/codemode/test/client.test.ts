@@ -5,6 +5,7 @@ import {
   CodemodeToolCallError,
   createCodemodeTools,
   createAttemptToolEnvironment,
+  environmentCodemodeClient,
   type AttemptToolDefinition,
 } from "../src";
 
@@ -54,6 +55,34 @@ function operation(
 }
 
 describe("CodemodeClient", () => {
+  test("uses a transient direct bearer without requiring a token file", async () => {
+    const catalog = createAttemptToolEnvironment({
+      scope,
+      generation: 1,
+      definitions: [definition],
+    }).catalog;
+    const authorizations: Array<string | null> = [];
+    const server = Bun.serve({
+      port: 0,
+      fetch(request) {
+        authorizations.push(request.headers.get("authorization"));
+        return Response.json(catalog);
+      },
+    });
+    try {
+      const environment: Record<string, string> = {
+        OPENGENI_CODEMODE_URL: `http://127.0.0.1:${server.port}/codemode`,
+        OPENGENI_CODEMODE_TOKEN: "transient-attempt-bearer",
+        // A stale ambient pointer must never override exact per-exec delivery.
+        OPENGENI_CODEMODE_TOKEN_FILE: "/does/not/exist",
+      };
+      expect((await environmentCodemodeClient(environment).catalog()).digest).toBe(catalog.digest);
+      expect(authorizations).toEqual(["Bearer transient-attempt-bearer"]);
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("builds the frozen namespace and polls one idempotent operation to completion", async () => {
     const catalog = createAttemptToolEnvironment({
       scope,

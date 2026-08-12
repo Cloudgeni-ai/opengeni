@@ -26,8 +26,16 @@ materializes a scoped knowledge source and a shared Schedule action:
   Background sync is authorized solely by **Enable synchronization** and does
   not pause for per-run approval.
 - Deleting a sync Schedule first disables that exact source selection and
-  tombstones its scoped source. Later saves keep it disabled until the same
-  initiating subject explicitly enables synchronization again.
+tombstones its scoped source. Later saves keep it disabled until the same
+initiating subject explicitly enables synchronization again.
+
+The Capabilities platform can install multiple named Drive instances (for
+example, Finance and Sales). Each instance is bound to one exact Personal or
+workspace Connection and its own feature configuration; provider-domain
+fallback and singleton credential reuse are not authority. The newer provider
+preset may expose separately reviewed Drive read/write tools, while scheduled
+knowledge ingestion remains an explicit source feature with its own destination
+and enablement fences.
 
 Google currently classifies `drive.readonly` as a restricted scope.
 Keep the OAuth app in Testing with explicit test users for local development.
@@ -55,9 +63,9 @@ contract:
   persistence, model context, agent sandboxes, source metadata, logs, or webhook
   payloads.
 - The first enabled sync inventories existing supported files. Later scheduled
-  runs are bounded repair scans that skip unchanged provider revisions; they are
-  not a Changes-API-only flow. Google Changes API event production remains a
-  separate follow-on.
+  runs drain the Google Drive Changes feed and periodically perform a bounded
+  full repair that skips unchanged provider revisions. Workspace Events/Pub/Sub
+  delivery remains a separate, default-off release follow-on.
 
 ## Launch OAuth scope decision
 
@@ -163,12 +171,53 @@ any visible subfolder; selecting a parent includes every nested folder. Multiple
 locations can be connected in one setup. A Shared Drive or shared folder can be
 added by pasting its full `https://drive.google.com/.../folders/...` URL or ID.
 
-The first successful run recursively inventories all existing supported
-documents inside an enabled boundary. Scheduled inventory currently remains a
-bounded repair scan: stable provider revisions avoid downloading unchanged
-objects, while a provider-specific change cursor is reserved for the separate
-Google Changes API follow-on. OpenGeni does not overload the scoped-knowledge
-`sync_cursor` column with execution checkpoint state.
+The first successful run captures a Google Drive Changes start page token before
+recursively inventorying all existing supported documents inside an enabled
+boundary. For My Drive, OpenGeni resolves Google's `root` alias to the actual
+root folder ID before using parent ancestry to classify later changes; an
+unresolved or non-folder root fails closed instead of advancing the cursor.
+After that complete inventory settles, normal scheduled runs drain the Changes
+feed page by page and durably advance the provider cursor only with the
+successful source lease settlement. Shared Drive token, change, metadata, and
+inventory requests carry the exact drive identity plus Google's all-drives
+support parameters. OpenGeni does not overload the scoped-knowledge
+`sync_cursor` column with provider cursor or execution checkpoint state.
+
+Changes checkpoints persist cumulative examined-change, provider-request, and
+elapsed-time budgets across every continuation. Every returned change counts,
+including removal-only pages, and ancestry metadata requests share the same
+provider-request budget. Page requests use only the remaining item allowance;
+hard item, request, or total-time exhaustion fails as `resource_limit` rather
+than creating another continuation. Bounded invocation-time pauses may resume,
+but retain their consumed totals. Repeated page tokens and oversized provider
+pages fail as invalid provider payloads. A delta that requires a full repair
+carries the same consumed budget into the full inventory checkpoint.
+
+That delta-to-full checkpoint also carries a bounded per-object provider
+revision floor for every accepted delta object and every accepted full-page
+object. Full inventory entries with an equal or older canonical decimal Drive
+revision are ignored, so they cannot replace the newer delta observation or
+current version before the terminal Changes token settles. Exact repeats of a
+fallback revision identity are likewise ignored; differing fallback identities,
+including a missing identity on only one side, are not ordered by guesswork and
+fail as invalid provider payloads without adopting the terminal token.
+Full-reconciliation checkpoints use version 3 for this contract. Older
+version-2 full checkpoints replay the still-unsettled Changes window before
+creating a replacement version-3 full checkpoint, while version-2 Changes
+checkpoints remain replay-compatible. The complete encoded execution checkpoint
+remains capped at the database's 2 MiB bound.
+
+Changes that cannot be represented safely as a bounded object update trigger a
+full repair instead of guessing. This includes known removals, trashing,
+reparenting or moves outside the configured boundary, unresolved ancestry, and
+folder topology changes. A later move/removal in the same drained window also
+removes any earlier pending import for that object before repair. A rejected or
+invalid Changes cursor similarly captures a fresh start token and completes a
+full repair before adopting that token; it never skips directly to the new
+cursor. Google documents start page tokens as non-expiring, so renewal is
+driven by explicit invalidation rather than a guessed TTL. A bounded daily full
+reconciliation remains an independent safety repair for missed provider history
+even when no invalid-cursor response is observed.
 
 Each repair scan has its own durable scan generation. Every object observed
 across checkpointed pages is stamped into that generation; only a provider
@@ -176,6 +225,24 @@ response that explicitly declares the scan complete may tombstone active
 objects absent from the complete generation. Partial, failed, paused, or
 reconnect-required scans never infer deletion, and a failed run clears its
 execution checkpoint before a later repair starts a new generation.
+The first accepted observation for one object within a scan generation becomes
+the durable floor. Canonical decimal Drive revisions may advance that floor
+monotonically, but an older/equal/conflicting replay cannot overwrite its
+provider revision or metadata hash. Acceptance is bound to the exact sync lease,
+initiating subject, scan generation, and execution-checkpoint generation before
+item processing begins. Version/metadata writes lock and revalidate the exact
+accepted floor, and checkpoint or terminal cursor settlement atomically
+revalidates the same floor and checkpoint generation.
+
+If a process dies after accepting and fully processing version 8 but before its
+returned full-page checkpoint is saved, replaying the same durable pre-page
+checkpoint against stale version 7 reads the version-8 observation floor. The
+stale entry is suppressed only when the current immutable version, metadata,
+source/object lifecycle generations, ACL generation, and indexed obligation
+prove version 8 was fully materialized; otherwise the run fails closed without
+saving the stale checkpoint or adopting the terminal Changes token. A paused
+replay that is safe to continue rewrites its returned checkpoint to the durable
+version-8 floor. A newer scan generation may replace the observation normally.
 
 `manual`, `hourly`, and `daily` map to an on-demand Schedule, a one-hour
 interval, and a daily 00:00 UTC calendar respectively. The Schedules UI exposes
@@ -271,16 +338,22 @@ removal, re-consent/reconnect requirements, and permission loss also advance a
 deny ACL generation, invalidate outstanding index obligations, revoke Document
 agent access, and delete materialized chunks. Resume or reconnect never restores
 the old retrieval eligibility: a newly observed immutable version, successful
-index obligation, and fresh generation-fenced ACL evidence are required. Durable
-Google Changes API event delivery and live Drive ACL/citation reauthorization
-remain separate follow-ons.
+index obligation, and fresh generation-fenced ACL evidence are required.
+
+As of August 10, 2026, Google Drive support in Workspace Events remains a
+Developer Preview. `OPENGENI_GOOGLE_DRIVE_WORKSPACE_EVENTS_ENABLED` is therefore
+default-off and exposes only an internal, deterministic `provider_event` wake
+seam. Event payloads never mutate source truth or advance provider cursors; the
+authoritative Changes drain and periodic full repair still do that work.
+Workspace Events subscription/Pub/Sub provisioning and live provider acceptance
+remain release work, as does Drive ACL/citation reauthorization.
 
 The **Only me**, **This workspace**, and **Company** options are immutable
 knowledge authority, not presentation labels. **Hourly**, **Daily**, and **On
 demand** seed the newly created shared Schedule; later edits happen there.
 **Allow**, **Ask**, and **Block** remain
 the connector read-policy configuration used by the common connector-action
-boundary. Google Changes API eventing, provider ACL projection,
+boundary. Workspace Events subscription provisioning, provider ACL projection,
 policy-UI wiring, and memory updates are not activated by the inventory planner.
 
 Disconnecting revokes the OpenGeni connection locally. The confirmation dialog
@@ -312,9 +385,10 @@ demo video, privacy policy, user help, and security-assessment evidence:
 3. Saving a selection is inert. Content access begins only after the separate
    **Enable synchronization** decision, and the user can manage cadence and
    source pause state through Schedules.
-4. The first sync inventories existing supported files. Later runs use bounded
-   repair scans and provider revisions to avoid unchanged downloads. Google
-   Changes API eventing is not currently shipped.
+4. The first sync inventories existing supported files. Later runs drain the
+   Google Drive Changes feed and use bounded full repairs plus provider
+   revisions to avoid unchanged downloads. Workspace Events/Pub/Sub delivery is
+   not currently shipped.
 5. OpenGeni reads supported file metadata and content within enabled selected
    boundaries. It does not create, edit, rename, move, share, or delete Google
    Drive files.
@@ -371,8 +445,8 @@ following without widening the claims beyond shipped behavior:
 - demo-video narration showing Connect, consent, boundary selection, destination
   authority, explicit sync enablement, pause, local disconnect, and separate
   provider-side revocation guidance;
-- launch gating that does not claim Google Changes API eventing, Drive writes,
-  live Google ACL/citation reauthorization, or production deployment.
+- launch gating that does not claim Workspace Events/Pub/Sub delivery, Drive
+  writes, live Google ACL/citation reauthorization, or production deployment.
 
 ### Privacy, Limited Use, retention, and deletion packet
 

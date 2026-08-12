@@ -16,6 +16,7 @@ import {
   getSessionRootId,
   getSessionGoal,
   getHumanInputResumeForEvent,
+  getInteractionInterventionResumeForEvent,
   getSessionHumanInputRequest,
   installOrReadTurnExecutionPolicyForAttempt,
   persistAttemptToolCatalog,
@@ -91,6 +92,7 @@ import {
   type CodexCredentialLeaseResult,
   type CodexCredentialLeaseSelectionContext,
   type ApplySessionTurnSettlementInput,
+  type ApiIntegrationRuntime,
   type SessionAttemptQuiescenceCommit,
   type SessionTurnRecordingSettlement,
 } from "@opengeni/db";
@@ -163,6 +165,7 @@ import {
   stopRecording as stopRecordingOnBox,
 } from "@opengeni/runtime";
 import { connectionTokenResolverForTurn } from "./mcp-credentials";
+import { buildApiIntegrationServersForTurn } from "./api-integrations";
 import {
   assertTurnExecutionPolicyMatchesConfigV1,
   calculateGatewayReportedCostBreakdown,
@@ -178,6 +181,7 @@ import {
   OPENGENI_GATEWAY_MODELS,
   OPENGENI_GATEWAY_PROVIDER_ID,
   WORKSPACE_GATEWAY_PROVIDER_ID,
+  codemodeWorkspaceUrl,
   isDirectOpenAiApiBaseUrl,
   resolveModelProvider,
   type ModelUsageInput,
@@ -698,6 +702,55 @@ export function stableHumanInputRequestId(
 ): string {
   const hex = createHash("sha256")
     .update("opengeni-human-input-v1\0")
+    .update(sessionId)
+    .update("\0")
+    .update(turnId)
+    .update("\0")
+    .update(toolCallId)
+    .digest("hex")
+    .slice(0, 32)
+    .split("");
+  hex[12] = "5";
+  hex[16] = ["8", "9", "a", "b"][Number.parseInt(hex[16] ?? "0", 16) % 4] ?? "8";
+  const value = hex.join("");
+  return `${value.slice(0, 8)}-${value.slice(8, 12)}-${value.slice(12, 16)}-${value.slice(16, 20)}-${value.slice(20)}`;
+}
+
+export function stableInteractionInterventionId(
+  sessionId: string,
+  turnId: string,
+  toolCallId: string,
+): string {
+  return stableInteractionInterventionUuid(
+    "opengeni-interaction-intervention-v1",
+    sessionId,
+    turnId,
+    toolCallId,
+  );
+}
+
+export function stableInteractionInterventionOperationId(
+  sessionId: string,
+  turnId: string,
+  toolCallId: string,
+): string {
+  return stableInteractionInterventionUuid(
+    "opengeni-interaction-intervention-operation-v1",
+    sessionId,
+    turnId,
+    toolCallId,
+  );
+}
+
+function stableInteractionInterventionUuid(
+  namespace: string,
+  sessionId: string,
+  turnId: string,
+  toolCallId: string,
+): string {
+  const hex = createHash("sha256")
+    .update(namespace)
+    .update("\0")
     .update(sessionId)
     .update("\0")
     .update(turnId)
@@ -1896,6 +1949,15 @@ export function managedSandboxOwnershipForTurn(
   };
 }
 
+/** A sandboxless home still establishes an explicitly attached Connected Machine. */
+export function shouldEstablishSandboxForTurn(
+  sandboxOwnershipEnabled: boolean,
+  homeBackend: Settings["sandboxBackend"],
+  machinePrimary: boolean,
+): boolean {
+  return sandboxOwnershipEnabled && (homeBackend !== "none" || machinePrimary);
+}
+
 /**
  * Classify a persisted active-sandbox pointer for TURN-START RECONCILE (issue #341
  * invariant B). Returns the typed reason to RESET the pointer to the session HOME,
@@ -2431,15 +2493,17 @@ export function isLazySandboxProvisionRetryable(error: unknown): boolean {
   }
   if (
     error instanceof SandboxLeaseSupersededError ||
-    error instanceof SandboxLeaseTransitionError ||
-    error instanceof SandboxWarmingTimeoutError
+    error instanceof SandboxLeaseTransitionError
   ) {
     return true;
   }
-  const message = error instanceof Error ? error.message : String(error);
-  return /(?:capacity|create|creation|provider|sandbox).*(?:timeout|timed out)|(?:timeout|timed out).*(?:capacity|create|creation|provider|sandbox)|ECONNRESET|ETIMEDOUT|EAI_AGAIN|temporar/i.test(
-    message,
-  );
+  if (error instanceof SandboxWarmingTimeoutError) {
+    return false;
+  }
+  // Provider/transport text is not durable evidence that creation never
+  // happened. Retrying an ambiguous unknown here can create a second box; only
+  // typed, ownership-fenced lifecycle outcomes above are safe to replay.
+  return false;
 }
 
 /** Short workflow-visible anti-churn pacing after a lifecycle transition. The
@@ -3679,7 +3743,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (!activeTurnId) {
         throw new Error("Session image tool completed before turn initialization");
       }
-      const typedScreenshot = typedScreenshotFromToolOutput({ callId: toolCallId, output });
+      const typedScreenshot = typedScreenshotFromToolOutput({
+        callId: toolCallId,
+        output,
+      });
       retainedSessionImageCallIds.add(toolCallId);
       if (!typedScreenshot) {
         if (toolOutputContainsInlineImage(output)) {
@@ -3859,10 +3926,39 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // only exists in the RunState blob), never through a swapped trigger.
     let triggerType: string | null = null;
     try {
+      const session = await requireSession(db, input.workspaceId, input.sessionId);
+      const claim = await claimSessionWorkForAttempt(db, input.workspaceId, {
+        sessionId: input.sessionId,
+        workflowId: input.workflowId,
+        workflowRunId: input.workflowRunId,
+        attemptId: input.attemptId,
+        dispatchId,
+        trigger: input.trigger,
+      });
+      if (claim.action === "unclaimed") {
+        activityStatus = "unclaimed";
+        return { status: "unclaimed", reason: claim.reason };
+      }
+      const turn = claim.turn;
+      turnId = turn.id;
+      executionGeneration = turn.executionGeneration;
+      providerRecoveryCount = providerRecoveryCountFromMetadata(turn.metadata);
+      let installedApiIntegrations: readonly ApiIntegrationRuntime[] = [];
+      const credentialSubjectId = credentialSubjectIdForTurnInitiator(turn);
       const mcpSettings = await settingsWithEnabledCapabilityMcpServers(
         db,
         input.workspaceId,
         settings,
+        {
+          ...(credentialSubjectId
+            ? { subjectId: credentialSubjectId }
+            : {
+                personalConnectionDelegations: turn.personalConnectionDelegations,
+              }),
+          onResolvedApiIntegrations: (integrations) => {
+            installedApiIntegrations = integrations;
+          },
+        },
       );
       // Read the active-credential flag once for the runtime capability overlay.
       // Accepted billing/provider identity comes from the turn policy below,
@@ -3887,23 +3983,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         ? await resolveCodexAppsCredentialIdForRun(db, input.workspaceId)
         : null;
       runtime.configure(capabilitySettings);
-      const session = await requireSession(db, input.workspaceId, input.sessionId);
-      const claim = await claimSessionWorkForAttempt(db, input.workspaceId, {
-        sessionId: input.sessionId,
-        workflowId: input.workflowId,
-        workflowRunId: input.workflowRunId,
-        attemptId: input.attemptId,
-        dispatchId,
-        trigger: input.trigger,
-      });
-      if (claim.action === "unclaimed") {
-        activityStatus = "unclaimed";
-        return { status: "unclaimed", reason: claim.reason };
-      }
-      const turn = claim.turn;
-      turnId = turn.id;
-      executionGeneration = turn.executionGeneration;
-      providerRecoveryCount = providerRecoveryCountFromMetadata(turn.metadata);
       const claimedPolicy = readTurnExecutionPolicyV1(turn.metadata);
       const policyForAbsent =
         claimedPolicy.kind === "valid"
@@ -3943,6 +4022,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         throw new Error(`Trigger event not found: ${triggerEventId}`);
       }
       const humanInputResume = await getHumanInputResumeForEvent(
+        db,
+        input.workspaceId,
+        input.sessionId,
+        trigger,
+      );
+      const interactionInterventionResume = await getInteractionInterventionResumeForEvent(
         db,
         input.workspaceId,
         input.sessionId,
@@ -4864,11 +4949,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         turn.sandboxBackend,
       );
       const baseRunSettings = {
-        // IMAGE PRECEDENCE (M3): rig > pack > deployment. settingsWithRigImage runs
-        // OUTERMOST so a rig-pinned image overrides both the pack image and the
-        // deployment default; a rig with no image (or a rig-less turn) is a
-        // pass-through. A matching verified provider-native ID is then applied
-        // only to fresh creation without changing the logical lease image.
+        // IMAGE PRECEDENCE: rig > pre-V2 Pack compatibility > deployment.
+        // resolveWorkspacePackRuntime returns no image for V2 Pack rows, so
+        // settingsWithRigImage runs outermost over only the intentionally
+        // retained legacy fallback. A matching verified provider-native ID is
+        // then applied only to fresh creation without changing the logical
+        // lease image.
         ...providerImageSettings,
         openaiModel: turn.model,
         openaiReasoningEffort: turn.reasoningEffort,
@@ -5505,6 +5591,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         activeSandboxBackend === "selfhosted" &&
         Boolean(activeSandboxPointer?.activeSandboxId) &&
         Boolean(activeSandboxRecord?.enrollmentId);
+      // `none` describes the durable home, not an explicit per-turn route. Give
+      // the runtime the effective backend so it builds a SandboxAgent for the
+      // attached Connected Machine without mutating the session or turn record.
+      if (machinePrimary && modelRunSettings.sandboxBackend === "none") {
+        modelRunSettings = { ...modelRunSettings, sandboxBackend: "selfhosted" };
+      }
       // The backend that can actually create a sandbox for this turn. In the
       // common path this is runSettings.sandboxBackend. A selfhosted home turn
       // that is NOT machine-primary falls back to the deployment cloud backend
@@ -5656,7 +5748,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           sandboxWorkspaceEnvironmentValues,
           {
             skipGitHubToken: activeSandboxBackend === "selfhosted",
-            skipCodemode: activeSandboxBackend === "selfhosted",
+            codemodeDelivery:
+              activeSandboxBackend === "selfhosted" ? "transient_exec" : "managed_file",
             deferGitHubToken:
               activeSandboxBackend !== "selfhosted" && establishPolicy === "on-demand",
             scope: connectionScope,
@@ -5675,6 +5768,22 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const sandboxEnvironment = sandboxArtifactRuntime.available
         ? { ...baseSandboxEnvironment, ...sandboxArtifactRuntime.environment }
         : baseSandboxEnvironment;
+
+      // One mutable in-memory bearer cell serves every Connected Machine route
+      // in this attempt. SelfhostedSession snapshots it into each exact exec
+      // request; it never enters the manifest, argv, filesystem, RunState, or
+      // serialized session state. Managed renewal updates the same cell so a
+      // later mid-turn swap sees the fresh bearer too.
+      const codemodeTokenState = sandboxCodemodeToken ? { token: sandboxCodemodeToken } : undefined;
+      const transientCodemodeEnvironment = codemodeTokenState
+        ? (): Readonly<Record<string, string>> => ({
+            OPENGENI_CODEMODE_URL: codemodeWorkspaceUrl(runSettings, input.workspaceId),
+            OPENGENI_CODEMODE_TOKEN: codemodeTokenState.token,
+            ...(runSettings.ogtoolPackageSpec
+              ? { OPENGENI_OGTOOL_PACKAGE_SPEC: runSettings.ogtoolPackageSpec }
+              : {}),
+          })
+        : undefined;
 
       const sandboxCodemodeTokenFile = sandboxCodemodeToken
         ? codemodeTokenFileFromEnvironment(sandboxEnvironment, input.sessionId)
@@ -5791,11 +5900,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       };
 
       const attachCodemodeTokenRenewal = async (
-        tokenSession: CodemodeTokenWriterSession,
+        tokenSession?: CodemodeTokenWriterSession,
         initialExpiresAt = sandboxCodemodeTokenExpiresAt,
         initialSandbox?: ResumedTurnSandbox,
       ): Promise<void> => {
-        if (!sandboxCodemodeToken || !initialExpiresAt) return;
+        if (!codemodeTokenState || !initialExpiresAt) return;
         const previous = codemodeTokenRenewal;
         codemodeTokenRenewal = null;
         await previous?.stop();
@@ -5807,37 +5916,38 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             connectionScope,
             codemodeAuthority,
           );
-          if (material) {
-          }
           return material;
         };
         const write = async (material: NonNullable<Awaited<ReturnType<typeof mint>>>) => {
-          const runAs = sandboxRunAs(runSettings);
-          const targetSandbox = resolvedSandbox ?? initialSandbox;
-          if (!targetSandbox) {
-            throw new Error("Codemode token renewal has no exact sandbox lease target");
+          if (tokenSession) {
+            const runAs = sandboxRunAs(runSettings);
+            const targetSandbox = resolvedSandbox ?? initialSandbox;
+            if (!targetSandbox) {
+              throw new Error("Codemode token renewal has no exact sandbox lease target");
+            }
+            await runWorkspaceMutationForSandbox(
+              targetSandbox,
+              "codemodeTokenRenewal",
+              async () =>
+                await refreshCodemodeTokenFile(tokenSession, material.token, {
+                  ...(runAs ? { runAs } : {}),
+                  ...(sandboxCodemodeTokenFile
+                    ? {
+                        tokenFile: sandboxCodemodeTokenFile,
+                        legacyTokenFile: sandboxEnvironment.OPENGENI_CODEMODE_TOKEN_FILE!,
+                      }
+                    : {}),
+                  ...(toolCancellationFenceRef.current
+                    ? {
+                        commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
+                          toolCancellationFenceRef.current,
+                        ),
+                      }
+                    : {}),
+                }),
+            );
           }
-          await runWorkspaceMutationForSandbox(
-            targetSandbox,
-            "codemodeTokenRenewal",
-            async () =>
-              await refreshCodemodeTokenFile(tokenSession, material.token, {
-                ...(runAs ? { runAs } : {}),
-                ...(sandboxCodemodeTokenFile
-                  ? {
-                      tokenFile: sandboxCodemodeTokenFile,
-                      legacyTokenFile: sandboxEnvironment.OPENGENI_CODEMODE_TOKEN_FILE!,
-                    }
-                  : {}),
-                ...(toolCancellationFenceRef.current
-                  ? {
-                      commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
-                        toolCancellationFenceRef.current,
-                      ),
-                    }
-                  : {}),
-              }),
-          );
+          codemodeTokenState.token = material.token;
         };
         let renewalExpiresAt = initialExpiresAt;
         if (renewalExpiresAt.getTime() <= Date.now() + CODEMODE_TOKEN_EXPIRY_LEAD_MS) {
@@ -5879,6 +5989,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         }
         codemodeTokenRenewal = controller;
       };
+
+      // A Connected Machine needs renewal, but renewal is purely worker-local:
+      // starting this loop performs no control-plane or machine operation.
+      if (activeSandboxBackend === "selfhosted") {
+        await attachCodemodeTokenRenewal();
+      }
 
       const attachRunCredentialRenewal = async (
         credentialSession: RunCredentialCommandSession,
@@ -6025,7 +6141,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // applies the agent's manifest to this provided session and throws on ANY
       // variableSet delta (validateNoEnvironmentDelta). Passing sandboxEnvironment
       // here makes current==target so the delta is empty.
-      if (settings.sandboxOwnershipEnabled && turn.sandboxBackend !== "none") {
+      if (
+        shouldEstablishSandboxForTurn(
+          settings.sandboxOwnershipEnabled,
+          turn.sandboxBackend,
+          machinePrimary,
+        )
+      ) {
         const managedOwnership = managedSandboxOwnershipForTurn(
           machinePrimary,
           input.attemptId,
@@ -6073,6 +6195,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               opStream: machineOpStream,
               epoch: activeSandboxPointer!.activeEpoch,
               environment: sandboxEnvironment,
+              ...(transientCodemodeEnvironment
+                ? { transientExecEnvironment: transientCodemodeEnvironment }
+                : {}),
               workingDir: activeSandboxPointer!.workingDir,
             },
           );
@@ -6102,6 +6227,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 workspaceId: input.workspaceId,
                 sessionId: input.sessionId,
                 environment: sandboxEnvironment,
+                ...(transientCodemodeEnvironment
+                  ? { transientExecEnvironment: transientCodemodeEnvironment }
+                  : {}),
                 workspaceMutationFence: {
                   accountId: input.accountId,
                   turnId: turn.id,
@@ -6218,6 +6346,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 workspaceId: input.workspaceId,
                 sessionId: input.sessionId,
                 environment: sandboxEnvironment,
+                ...(transientCodemodeEnvironment
+                  ? { transientExecEnvironment: transientCodemodeEnvironment }
+                  : {}),
                 workspaceMutationFence: {
                   accountId: input.accountId,
                   turnId: turn.id,
@@ -6260,7 +6391,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (objectStorage && requiredGeneratedVideoFiles.length > 0) {
         const downloadStorage = objectStorageForSandboxDownloads(modelRunSettings, objectStorage);
         for (const file of requiredGeneratedVideoFiles) {
-          const signed = await downloadStorage.createGetUrl({ key: file.objectKey });
+          const signed = await downloadStorage.createGetUrl({
+            key: file.objectKey,
+          });
           generatedVideoDownloads.push({
             fileId: file.fileId,
             mountPath: "generated-videos",
@@ -6320,7 +6453,30 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         }
         return result;
       };
-      const credentialSubjectId = credentialSubjectIdForTurnInitiator(turn);
+      const publishToolAuthNeeded = async (payload: ToolAuthNeededPayload): Promise<void> => {
+        if (!shouldPublishToolAuthNeededForTurn(payload, trigger, turn)) {
+          return;
+        }
+        await publish!([{ type: "tool.auth_needed", payload }], true);
+      };
+      const selectedApiIntegrationIds = new Set(turnTools.map((tool) => tool.id));
+      const localMcpServers = buildApiIntegrationServersForTurn({
+        settings: runSettings,
+        integrations: installedApiIntegrations.filter((integration) =>
+          selectedApiIntegrationIds.has(integration.serverId),
+        ),
+        authority: {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          rootSessionId: session.rootSessionId,
+          turnId: turn.id,
+          attemptId: input.attemptId,
+          ...(credentialSubjectId ? { initiatingSubjectId: credentialSubjectId } : {}),
+        },
+        resolveCredential,
+        onAuthNeeded: publishToolAuthNeeded,
+      });
       const codexAppsAuth = codexAppsCredentialId
         ? (() => {
             const resolver = buildCodexTokenResolver(
@@ -6367,14 +6523,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           ...(credentialSubjectId ? { credentialSubjectId } : {}),
           ...(codexAppsAuth ? { codexAppsAuth } : {}),
           resolveCredential,
+          onAuthNeeded: publishToolAuthNeeded,
+          localMcpServers,
           onAttemptToolCatalog: async (catalog) => {
             await persistAttemptToolCatalog(db, catalog);
-          },
-          onAuthNeeded: async (payload) => {
-            if (!shouldPublishToolAuthNeededForTurn(payload, trigger, turn)) {
-              return;
-            }
-            await publish!([{ type: "tool.auth_needed", payload }], true);
           },
           // Manager-style sessions carry a creation-validated permission set
           // for their first-party MCP token; null keeps the fixed default.
@@ -6398,6 +6550,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             selectedTools: session.firstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
             subjectId: "worker:first-party-mcp",
             subjectLabel: "OpenGeni worker",
+            ...(interactionInterventionResume
+              ? { interventionResume: interactionInterventionResume }
+              : {}),
           }),
         }),
         cancellationSignal,
@@ -6720,10 +6875,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         ...(activeSandboxBackend !== "selfhosted" && !sandboxGitTokens && sandboxGitToken
           ? { gitTokenSeed: sandboxGitToken }
           : {}),
-        // Codemode delivery is managed-sandbox-only. Connected Machines own any
-        // manually configured API credentials and must never be contacted during
-        // turn admission merely to seed OpenGeni tooling.
-        ...(sandboxCodemodeToken
+        ...(sandboxCodemodeToken ? { codemodeAvailable: true } : {}),
+        // Managed boxes receive the bearer through their protected per-session
+        // token file. Connected Machines use transient per-exec delivery above,
+        // so they must not run the file-seeding lifecycle hook.
+        ...(activeSandboxBackend !== "selfhosted" && sandboxCodemodeToken
           ? {
               codemodeTokenSeed: sandboxCodemodeToken,
               codemodeTokenSessionId: input.sessionId,
@@ -7062,6 +7218,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             workspaceId: input.workspaceId,
             sessionId: input.sessionId,
             environment: sandboxEnvironment,
+            ...(transientCodemodeEnvironment
+              ? { transientExecEnvironment: transientCodemodeEnvironment }
+              : {}),
             workspaceMutationFence: {
               accountId: input.accountId,
               turnId: turn.id,
@@ -7646,7 +7805,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   },
                 }
               : {}),
-            ...(sandboxCodemodeToken && sandboxCodemodeTokenExpiresAt && !lazyOwnedSandbox
+            ...(activeSandboxBackend !== "selfhosted" &&
+            sandboxCodemodeToken &&
+            sandboxCodemodeTokenExpiresAt &&
+            !lazyOwnedSandbox
               ? {
                   onCodemodeTokenSessionReady: async (tokenSession: CodemodeTokenWriterSession) => {
                     const renewalSession =
@@ -8123,6 +8285,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const approvals = runtime.serializeApprovals(stream.interruptions);
           const humanInputInterruptions =
             runtime.serializeHumanInputRequests?.(stream.interruptions) ?? [];
+          const interactionInterventionInterruptions =
+            runtime.serializeInteractionInterventionRequests?.(stream.interruptions) ?? [];
           const latestWorkspace = await getWorkspace(db, input.workspaceId);
           if (!latestWorkspace) throw new Error(`Workspace not found: ${input.workspaceId}`);
           assertWorkspaceHumanInputAllowed(
@@ -8174,6 +8338,26 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 },
               },
             }));
+          const interactionInterventionRequests = interactionInterventionInterruptions.map(
+            (interruption) => ({
+              id: stableInteractionInterventionId(
+                input.sessionId,
+                activeTurnId,
+                interruption.toolCallId,
+              ),
+              operationId: stableInteractionInterventionOperationId(
+                input.sessionId,
+                activeTurnId,
+                interruption.toolCallId,
+              ),
+              toolCallId: interruption.toolCallId,
+              input: interruption.input,
+            }),
+          );
+          const pendingApprovals = [
+            ...approvals,
+            ...interactionInterventionInterruptions.map((interruption) => interruption.approval),
+          ];
           if (
             !(await settle!({
               events: [
@@ -8196,10 +8380,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               activeTurnId,
               runState: {
                 serializedRunState: compactMediaRunState(stream.state.toString()),
-                pendingApprovals: approvals,
+                pendingApprovals,
                 humanInputRequests: humanInputRequests.map(
                   ({ isNew: _isNew, ...request }) => request,
                 ),
+                interactionInterventionRequests,
               },
             }))
           ) {

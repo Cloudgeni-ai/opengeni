@@ -2704,15 +2704,30 @@ describe("useComposer durable draft and control binding", () => {
       );
       await flush();
 
-      await flushing(async () => expect(await hook.result.current[delivery]()).toBe(false));
-      expect(hook.result.current.error).toMatchObject({
-        status: 402,
-        code: "payment_required",
-        retryable: false,
-        outcomeUnknown: false,
-      });
-      expect(hook.result.current.value).toBe(serverDraft.text);
-      expect(hook.result.current.restoredResources).toEqual([resource]);
+      await flushing(async () =>
+        expect(await hook.result.current[delivery]()).toBe(delivery === "send"),
+      );
+      await flush();
+      if (delivery === "send") {
+        expect(hook.result.current.value).toBe("");
+        expect(hook.result.current.restoredResources).toEqual([]);
+        expect(
+          hook.result.current.optimisticMessages?.find(
+            (message) =>
+              message.resources[0]?.kind === "file" &&
+              message.resources[0].fileId === resource.fileId,
+          ),
+        ).toMatchObject({ state: "failed", resources: [resource], outcomeUnknown: false });
+      } else {
+        expect(hook.result.current.error).toMatchObject({
+          status: 402,
+          code: "payment_required",
+          retryable: false,
+          outcomeUnknown: false,
+        });
+        expect(hook.result.current.value).toBe(serverDraft.text);
+        expect(hook.result.current.restoredResources).toEqual([resource]);
+      }
       expect(attempts).toHaveLength(1);
       expect(attempts[0]).toMatchObject({
         text: "read the exact attached bytes",
@@ -2721,7 +2736,18 @@ describe("useComposer durable draft and control binding", () => {
       });
 
       await hook.rerender("codex/gpt-5.6-sol");
-      await flushing(async () => expect(await hook.result.current[delivery]()).toBe(true));
+      if (delivery === "send") {
+        const failed = hook.result.current.optimisticMessages?.find(
+          (message) =>
+            message.resources[0]?.kind === "file" &&
+            message.resources[0].fileId === resource.fileId,
+        );
+        expect(failed).toBeDefined();
+        await flushing(() => hook.result.current.retryOptimisticMessage?.(failed!.clientEventId));
+        await flush();
+      } else {
+        await flushing(async () => expect(await hook.result.current[delivery]()).toBe(true));
+      }
 
       expect(attempts).toHaveLength(2);
       expect(attempts[1]).toMatchObject({
@@ -2774,12 +2800,23 @@ describe("useComposer durable draft and control binding", () => {
       );
       await flush();
 
-      await flushing(async () => expect(await hook.result.current[delivery]()).toBe(false));
-      expect(hook.result.current.value).toBe(initial.text);
-      expect(hook.result.current.restoredResources).toEqual([resource]);
-      expect(hook.result.current.error).toMatchObject({ outcomeUnknown: true });
-
-      await flushing(async () => expect(await hook.result.current[delivery]()).toBe(true));
+      await flushing(async () =>
+        expect(await hook.result.current[delivery]()).toBe(delivery === "send"),
+      );
+      await flush();
+      if (delivery === "send") {
+        const failed = hook.result.current.optimisticMessages?.find(
+          (message) => message.outcomeUnknown,
+        );
+        expect(failed).toMatchObject({ state: "failed", outcomeUnknown: true });
+        await flushing(() => hook.result.current.retryOptimisticMessage?.(failed!.clientEventId));
+        await flush();
+      } else {
+        expect(hook.result.current.value).toBe(initial.text);
+        expect(hook.result.current.restoredResources).toEqual([resource]);
+        expect(hook.result.current.error).toMatchObject({ outcomeUnknown: true });
+        await flushing(async () => expect(await hook.result.current[delivery]()).toBe(true));
+      }
       expect(attempts).toHaveLength(2);
       expect(attempts[0]!.clientEventId).toBe(attempts[1]!.clientEventId);
       expect(attempts[0]!.resources).toEqual([resource]);
@@ -2825,12 +2862,21 @@ describe("useComposer durable draft and control binding", () => {
       );
       await flush();
 
-      await flushing(async () => expect(await hook.result.current[delivery]()).toBe(false));
+      await flushing(async () =>
+        expect(await hook.result.current[delivery]()).toBe(delivery === "send"),
+      );
+      await flush();
       acceptedEvent = {
         ...makeEvent(1, "user.message"),
         clientEventId: attempts[0]!.clientEventId,
       };
-      await flushing(async () => expect(await hook.result.current[delivery]()).toBe(true));
+      if (delivery === "send") {
+        const failed = hook.result.current.optimisticMessages?.[0];
+        await flushing(() => hook.result.current.retryOptimisticMessage?.(failed!.clientEventId));
+        await flush();
+      } else {
+        await flushing(async () => expect(await hook.result.current[delivery]()).toBe(true));
+      }
 
       expect(attempts).toHaveLength(1);
       expect(hook.result.current.value).toBe("");
@@ -2880,7 +2926,10 @@ describe("useComposer durable draft and control binding", () => {
         undefined,
       );
       await flush();
-      await flushing(async () => expect(await first.result.current[delivery]()).toBe(false));
+      await flushing(async () =>
+        expect(await first.result.current[delivery]()).toBe(delivery === "send"),
+      );
+      await flush();
       await first.unmount();
 
       const second = await renderHook(
@@ -2888,8 +2937,12 @@ describe("useComposer durable draft and control binding", () => {
         undefined,
       );
       await flush();
-      expect(second.result.current.value).toBe("original uncertain prompt");
-      expect(second.result.current.restoredResources).toEqual([originalResource]);
+      expect(second.result.current.value).toBe(
+        delivery === "send" ? "" : "original uncertain prompt",
+      );
+      expect(second.result.current.restoredResources).toEqual(
+        delivery === "send" ? [] : [originalResource],
+      );
       await flushing(() =>
         second.result.current.applyDraft({
           ...initial,
@@ -2899,7 +2952,16 @@ describe("useComposer durable draft and control binding", () => {
       );
       expect(second.result.current.value).toBe("edited after timeout");
       expect(second.result.current.restoredResources).toEqual([newerResource]);
-      await flushing(async () => expect(await second.result.current[delivery]()).toBe(true));
+      if (delivery === "send") {
+        const failed = second.result.current.optimisticMessages?.find(
+          (message) => message.outcomeUnknown,
+        );
+        expect(failed).toBeDefined();
+        await flushing(() => second.result.current.retryOptimisticMessage?.(failed!.clientEventId));
+        await flush();
+      } else {
+        await flushing(async () => expect(await second.result.current[delivery]()).toBe(true));
+      }
 
       expect(attempts).toHaveLength(2);
       expect(attempts[1]!.clientEventId).toBe(attempts[0]!.clientEventId);
@@ -3618,14 +3680,19 @@ describe("useEnvironments", () => {
 });
 
 describe("usePacks", () => {
-  test("lists packs/installations and enables a pack", async () => {
-    let enabled = false;
+  test("previews, installs, and safely uninstalls a pack", async () => {
+    let installed = false;
     const installation = {
       id: "inst-1",
       accountId: "acc",
       workspaceId: WORKSPACE_ID,
       packId: "autonomous-devops",
       status: "active" as const,
+      version: 1,
+      manifestSnapshot: null,
+      manifestDigest: "a".repeat(64),
+      selectedRigId: null,
+      installedBySubjectId: "user:test",
       metadata: {},
       enabledAt: "",
       updatedAt: "",
@@ -3633,11 +3700,43 @@ describe("usePacks", () => {
     const client = fakeClient({
       listPacks: async () => ({
         packs: [{ id: "autonomous-devops", name: "Autonomous DevOps" } as never],
-        installations: enabled ? [installation] : [],
+        installations: installed ? [installation] : [],
       }),
-      enablePack: async (_ws, packId, request) => {
-        enabled = true;
-        return { ...installation, packId, metadata: request?.metadata ?? {} };
+      previewPackInstallation: async (_ws, packId) => ({
+        packId,
+        packVersion: "1.0.0",
+        manifestDigest: "a".repeat(64),
+        installationVersion: null,
+        action: "install",
+        ready: true,
+        blockers: [],
+        components: [],
+        rig: {
+          required: false,
+          status: "not_required",
+          requestedRigId: null,
+          rigId: null,
+          rigVersionId: null,
+          name: null,
+          image: null,
+        },
+        variableSetId: null,
+        legacyInlineSkillCount: 0,
+        legacySandboxImage: null,
+      }),
+      installPack: async (_ws, packId) => {
+        installed = true;
+        return { ...installation, packId };
+      },
+      previewPackUninstall: async (_ws, packId) => ({
+        packId,
+        installed,
+        installationVersion: installation.version,
+        components: [],
+      }),
+      uninstallPack: async (_ws, packId) => {
+        installed = false;
+        return { packId, status: "uninstalled", retainedComponents: [] };
       },
     });
     const hook = await renderHook(() => usePacks({ client, workspaceId: WORKSPACE_ID }), undefined);
@@ -3645,9 +3744,21 @@ describe("usePacks", () => {
     expect(hook.result.current.packs.map((pack) => pack.id)).toEqual(["autonomous-devops"]);
     expect(hook.result.current.installationFor("autonomous-devops")).toBeNull();
     await flushing(async () => {
-      await hook.result.current.enable("autonomous-devops");
+      const preview = await hook.result.current.previewInstallation("autonomous-devops");
+      await hook.result.current.install("autonomous-devops", {
+        expectedManifestDigest: preview!.manifestDigest,
+        idempotencyKey: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      });
     });
     expect(hook.result.current.installationFor("autonomous-devops")?.status).toBe("active");
+    await flushing(async () => {
+      const preview = await hook.result.current.previewUninstall("autonomous-devops");
+      await hook.result.current.uninstall("autonomous-devops", {
+        expectedInstallationVersion: preview!.installationVersion!,
+        idempotencyKey: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      });
+    });
+    expect(hook.result.current.installationFor("autonomous-devops")).toBeNull();
     await hook.unmount();
   });
 });

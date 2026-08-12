@@ -9,9 +9,11 @@ monorepo (the bun workspaces glob excludes it, and Cargo build output is gitigno
 [`../docs/architecture.md`](../docs/architecture.md) §3.8 and [`../AGENTS.md`](../AGENTS.md)):
 a machine-targeted turn runs on this agent **directly** — the control plane
 establishes the session on the machine and does **not** create, lease, or bill a
-cloud box for it. It ships the machine **no OpenGeni credential**: the platform
-GitHub-App token mint is skipped and exec carries `env: {}` on the wire, so this
-agent authenticates git with the machine's **own** credentials. The session runs
+cloud box for it. It ships no durable OpenGeni credential or platform Git setup,
+so this agent authenticates Git with the machine's **own** credentials. The sole
+transient exception is a renewable exact-attempt Codemode bearer placed only in
+each authorized child exec; this binary exposes `codemode list|call|doctor` there and
+never persists the bearer. The session runs
 under a **per-session working directory** (the control plane's `sessions.working_dir`,
 threaded to the agent as `workingDir`); the agent's reported `workspace_root` is the
 default base. Exact `~` / `~/...` paths resolve against the service user's home;
@@ -23,7 +25,7 @@ never `git clone`s a repo onto the machine.
 | Crate | Role |
 |---|---|
 | `opengeni-agent-proto` | Generated wire-protocol types (Rust side of the codegen). |
-| `opengeni-agent` | The binary: `run`/`connect`/`connections`/`disconnect`/`service`/`update`/`uninstall`; multi-deployment dial, RPC dispatch, supervisor. |
+| `opengeni-agent` | The binary: `run`/`connect`/`connections`/`disconnect`/`service`/`update`/`uninstall`, plus the exact-attempt `codemode list|call` client; multi-deployment dial, RPC dispatch, supervisor. |
 | `opengeni-agent-platform` | Per-OS `Platform` + the `service` (systemd/launchd/SCM) renderer. |
 | `opengeni-agent-stream` | Relay-edge stream transport + pty/framebuffer pumps. |
 | `opengeni-agent-update` | Self-update: signed-manifest discovery, minisign+sha256 verify, atomic replace, rollback. |

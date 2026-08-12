@@ -105,6 +105,7 @@ export type ChannelAOperation =
   | "browser.end"
   | "browser.read"
   | "browser.control"
+  | "browser.download.save"
   | "browser.attach"
   | "computer.create"
   | "computer.end"

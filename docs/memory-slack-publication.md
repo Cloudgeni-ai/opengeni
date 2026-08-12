@@ -131,8 +131,9 @@ The authenticated workspace routes are under
 - `GET /` for bounded delivery/receipt history;
 - `POST /:publicationId/action` for revision-fenced approve, reject, or retry.
 
-The public SDK exposes matching typed methods. Workspace reads require
-`workspace:read`; configuration and actions require `workspace:admin`.
+The opt-in `@opengeni/sdk/memory-slack` client exposes matching typed methods
+without adding this capability to the eager core client graph. Workspace reads
+require `workspace:read`; configuration and actions require `workspace:admin`.
 
 Release, deployment, and production Slack acceptance are separate operational
 steps and are not claimed by this source change.

@@ -5453,6 +5453,65 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
         });
         expect(reconciledUnknownOutcome).toEqual(candidate);
 
+        const successorSource = {
+          sourceLeaseId: crypto.randomUUID(),
+          sourceLeaseEpoch: currentEpoch + 10,
+          sourceInstanceId: `${currentInstanceId}-successor`,
+          sourceWorkspaceGeneration: 3,
+        };
+        const successorDescriptor = {
+          ...descriptor,
+          revision: `wa2:${capturedAtMs + 10_000}:${descriptor.archiveSha256}`,
+          capturedAt: new Date(capturedAtMs + 10_000).toISOString(),
+        };
+        await expect(
+          registerSandboxCheckpointArtifact(db, {
+            accountId,
+            workspaceId,
+            sandboxGroupId: groupId,
+            ...successorSource,
+            providerBindingKey: bindingKey,
+            providerBinding: binding,
+            workspaceArchive: archive,
+            workspaceArchiveMeta: successorDescriptor,
+          }),
+        ).rejects.toThrow(SandboxCheckpointArtifactRegistrationConflictError);
+        await expect(
+          registerSandboxCheckpointArtifact(db, {
+            accountId,
+            workspaceId,
+            sandboxGroupId: groupId,
+            ...successorSource,
+            providerBindingKey: bindingKey,
+            providerBinding: binding,
+            workspaceArchive: archive,
+            workspaceArchiveMeta: successorDescriptor,
+            registrationIdentity: "provider_object",
+          }),
+        ).resolves.toEqual(candidate);
+
+        expect(
+          await markSandboxCheckpointArtifactDeletePending(db, {
+            accountId,
+            workspaceId,
+            artifactId: candidate.id,
+            reason: "simulated interrupted provider-image verification",
+          }),
+        ).toBe(true);
+        await expect(
+          registerSandboxCheckpointArtifact(db, {
+            accountId,
+            workspaceId,
+            sandboxGroupId: groupId,
+            ...successorSource,
+            providerBindingKey: bindingKey,
+            providerBinding: binding,
+            workspaceArchive: archive,
+            workspaceArchiveMeta: successorDescriptor,
+            registrationIdentity: "provider_object",
+          }),
+        ).resolves.toEqual({ ...candidate, state: "candidate" });
+
         await expect(
           registerSandboxCheckpointArtifact(db, {
             accountId,

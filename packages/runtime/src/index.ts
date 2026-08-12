@@ -16,6 +16,7 @@ import {
 } from "@opengeni/codemode";
 import {
   approvalIdentifier,
+  INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,
   CAPABILITY_DESCRIPTORS,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
@@ -75,6 +76,16 @@ import {
   lazyToolRuntimeForAgent,
   type LazyToolTransport,
 } from "./lazy-tool-transport";
+import { GmailRestMcpServer, isOfficialGmailMcpConfig } from "./gmail-rest-mcp";
+export {
+  GMAIL_REST_API_BASE,
+  GMAIL_REST_MCP_TOOLS,
+  GmailRestMcpServer,
+  OFFICIAL_GMAIL_MCP_URL,
+  gmailRestToolIsMutation,
+  isOfficialGmailMcpConfig,
+  type GmailRestMcpServerOptions,
+} from "./gmail-rest-mcp";
 import {
   Agent,
   AgentsError,
@@ -144,7 +155,7 @@ import {
   codexAppsSanitizingFetch,
 } from "@opengeni/codex";
 import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join, posix as posixPath, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -218,11 +229,13 @@ import {
   modelResponseUsageFromResponse,
   serializeApprovals,
   serializeHumanInputRequests,
+  serializeInteractionInterventionRequests,
 } from "./run-events";
 import type {
   ModelResponseUsage,
   NormalizedRuntimeEvent,
   SerializedHumanInputInterruption,
+  SerializedInteractionInterventionInterruption,
 } from "./run-events";
 
 // The Agents SDK's debug namespaces can otherwise serialize complete model
@@ -233,10 +246,16 @@ process.env.OPENAI_AGENTS_DONT_LOG_MODEL_DATA = "1";
 process.env.OPENAI_AGENTS_DONT_LOG_TOOL_DATA = "1";
 
 export {
+  buildPortableSkillArtifact,
   getSkillLibraryEntry,
   isSkillLibraryEntryId,
   listSkillLibraryEntries,
   loadSkillLibrarySkill,
+  PORTABLE_SKILL_MAX_FILE_BYTES,
+  PORTABLE_SKILL_MAX_FILES,
+  PORTABLE_SKILL_MAX_TOTAL_BYTES,
+  parsePortableSkillFrontmatter,
+  type PortableSkillArtifact,
   type SkillLibraryEntry,
   type SkillLibraryFile,
   type SkillLibrarySkill,
@@ -333,6 +352,7 @@ export {
   normalizeToolOutputForEvent,
   serializeApprovals,
   serializeHumanInputRequests,
+  serializeInteractionInterventionRequests,
 } from "./run-events";
 export type {
   ModelResponseServiceTierEvent,
@@ -341,6 +361,7 @@ export type {
   NormalizedRuntimeEvent,
   NormalizeSdkEventOptions,
   SerializedHumanInputInterruption,
+  SerializedInteractionInterventionInterruption,
 } from "./run-events";
 
 // Inject the SDK's V4A `applyDiff` into the selfhosted session's apply_patch editor
@@ -398,6 +419,7 @@ export {
   isRetainedRemoteV2Message,
   latestCompactionReplacementFingerprint,
   prepareCompactionPromptInput,
+  projectRemoteCompactionOverflowRetryInput,
   isUserMessage,
   estimateTokens,
   estimateTokensBreakdown,
@@ -424,6 +446,7 @@ export {
   SUMMARY_BUFFER_TOKENS,
   SUMMARY_PREFIX,
   USER_MESSAGE_TRUNCATION_MARKER,
+  REMOTE_COMPACTION_TOOL_RESULT_OMISSION,
   UNKNOWN_IMAGE_TOKENS,
   MAX_NATIVE_IMAGE_TOKENS,
 } from "./context-compaction";
@@ -434,6 +457,7 @@ export type {
   NativeImageTokenEstimate,
   CompactionItem,
   PreparedCompactionPromptInput,
+  RemoteCompactionOverflowRetryInput,
 } from "./context-compaction";
 export {
   MAX_MODEL_USAGE_TOKEN_COUNT,
@@ -616,6 +640,9 @@ export type OpenGeniRuntime = {
   ) => Promise<Awaited<ReturnType<typeof runAgentStream>>>;
   serializeApprovals: (interruptions: unknown[]) => unknown[];
   serializeHumanInputRequests?: (interruptions: unknown[]) => SerializedHumanInputInterruption[];
+  serializeInteractionInterventionRequests?: (
+    interruptions: unknown[],
+  ) => SerializedInteractionInterventionInterruption[];
 };
 
 export type ProductionRuntimeOverrides = {
@@ -652,6 +679,7 @@ export function createProductionAgentRuntime(
       }),
     serializeApprovals,
     serializeHumanInputRequests,
+    serializeInteractionInterventionRequests,
   };
 }
 
@@ -1256,7 +1284,7 @@ export type CodemodeTokenWriterSession = SandboxSessionLike;
 export type EffectiveSkillSelection = Readonly<{
   id: string;
   name: string;
-  source: "bundled" | "library" | "pack" | "session";
+  source: "bundled" | "imported" | "library" | "pack" | "session";
   version: string | null;
   contentSha256: string | null;
   reason: string;
@@ -1474,6 +1502,12 @@ export type BuildAgentOptions = {
   // per-session token file. Required together with codemodeTokenSeed so two
   // sessions sharing one box never overwrite the same pointer.
   codemodeTokenSessionId?: string;
+  /**
+   * Whether this attempt exposes the frozen Codemode catalog. Managed sandboxes
+   * infer this from `codemodeTokenSeed`; Connected Machines set it explicitly
+   * because their bearer is delivered per exec rather than through a token file.
+   */
+  codemodeAvailable?: boolean;
   // Genesis turn only: inject a one-shot instruction into the FIRST model
   // call telling it to title the session via opengeni__set_session_title.
   // Keeping this out of the persistent Agent.instructions prevents every
@@ -1709,10 +1743,7 @@ function composedPersistentAgentInstructions(
         appendSessionInstructions(
           appendWorkspaceMemory(
             appendGitCredentialBindingInstructions(
-              appendCodemodeInstructions(
-                personaAndCore,
-                options.activeSandboxBackend !== "selfhosted" && Boolean(options.codemodeTokenSeed),
-              ),
+              appendCodemodeInstructions(personaAndCore, codemodeIsAvailable(options)),
               options.gitCredentialBindings,
               options.activeSandboxBackend,
             ),
@@ -1742,7 +1773,7 @@ function composedPersistentAgentInstructions(
           ),
           options.persistentSessionSettings,
         ),
-        options.activeSandboxBackend !== "selfhosted" && Boolean(options.codemodeTokenSeed),
+        codemodeIsAvailable(options),
       ),
       options.gitCredentialBindings,
       options.activeSandboxBackend,
@@ -1756,15 +1787,18 @@ function composedPersistentAgentInstructions(
  * composed workspace + CORE instructions, joined by " ". This is GENERIC
  * substrate prompting — the same text for every host, never per-host copy.
  *
- * Included ONLY when `codemodeAvailable` is true, which the caller sets from the
- * exact condition that gates the managed-sandbox token mint: the effective
- * backend is not selfhosted and a token was minted for this turn. A turn with
- * no minted token has no Codemode URL/token and must not
- * advertise a capability that is not there. Placed before the per-session
- * instructions so host/session specificity still wins over this substrate note.
+ * Included ONLY when `codemodeAvailable` is true. Managed sandboxes derive that
+ * from their token-file seed; Connected Machines assert it from the same minted
+ * attempt authority while delivering the bearer in each exact child exec. A turn
+ * with no minted token must not advertise a capability that is not there. Placed
+ * before per-session instructions so host/session specificity still wins.
  */
 export function appendCodemodeInstructions(composed: string, codemodeAvailable: boolean): string {
   return codemodeAvailable ? `${composed} ${CODEMODE_PROGRAMMATIC_DIRECTIVE}` : composed;
+}
+
+function codemodeIsAvailable(options: BuildAgentOptions): boolean {
+  return options.codemodeAvailable ?? Boolean(options.codemodeTokenSeed);
 }
 
 const GIT_BINDING_DISCOVERY_DIRECTIVE =
@@ -1940,6 +1974,9 @@ export function buildOpenGeniAgent(
 ): Agent<any, any> {
   if (Boolean(options.codemodeTokenSeed) !== Boolean(options.codemodeTokenSessionId)) {
     throw new Error("codemodeTokenSeed and codemodeTokenSessionId must be supplied together");
+  }
+  if (options.codemodeAvailable === false && options.codemodeTokenSeed) {
+    throw new Error("codemodeAvailable cannot be false when a Codemode token seed is supplied");
   }
   const artifactRuntimeAvailable = artifactRuntimeIsAvailable(options);
   const editableArtifactToolsAvailable = hasCanonicalEditableArtifactToolSurface(
@@ -2151,6 +2188,7 @@ export function buildOpenGeniAgent(
       options.connectorActionPolicy,
       options.resolvedMcpConnectionIds,
     );
+    installInteractionInterventionPolicy(agent as unknown as ApprovalCapableAgent);
     return agent;
   }
 
@@ -2271,6 +2309,7 @@ export function buildOpenGeniAgent(
     options.connectorActionPolicy,
     options.resolvedMcpConnectionIds,
   );
+  installInteractionInterventionPolicy(agent as unknown as ApprovalCapableAgent);
   return agent;
 }
 
@@ -2489,6 +2528,32 @@ function installMcpApprovalPolicy(
     agent.clone = (config: unknown) => {
       const cloned = originalClone(config);
       installMcpApprovalPolicy(cloned, policies, connectorActionPolicy);
+      return cloned;
+    };
+  }
+}
+
+/**
+ * Turn the canonical interaction-request tool into a typed SDK interruption.
+ * Its MCP/Codemode catalog entry and execution stay unchanged; this projection
+ * only makes Runner freeze before the first execution so the worker can persist
+ * the exact Browser/Computer intervention beside the saved RunState.
+ */
+function installInteractionInterventionPolicy(agent: ApprovalCapableAgent): void {
+  const listMcpTools = agent.getMcpTools.bind(agent);
+  agent.getMcpTools = async (resolutionContext: unknown) => {
+    const tools = await listMcpTools(resolutionContext);
+    return tools.map((tool) =>
+      tool.type === "function" && tool.name === INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME
+        ? { ...tool, needsApproval: async () => true }
+        : tool,
+    );
+  };
+  const originalClone = agent.clone?.bind(agent);
+  if (originalClone) {
+    agent.clone = (config: unknown) => {
+      const cloned = originalClone(config);
+      installInteractionInterventionPolicy(cloned);
       return cloned;
     };
   }
@@ -2758,17 +2823,23 @@ export function buildAgentCapabilities(
     }),
   );
   if (options.workspaceSkillPaths?.length) {
+    const bundledWorkspaceSkillNames = [
+      ...bundledSkillDirNames(bundledSkillsDir()),
+      ...(options.editableArtifactToolsAvailable
+        ? bundledSkillDirNames(bundledArtifactSkillsDir())
+        : []),
+      ...(options.videoGenerationAvailable ? bundledSkillDirNames(bundledVideoSkillsDir()) : []),
+    ];
     caps.push(
-      workspaceSkills(options.workspaceSkillPaths, [
-        ...bundledSkillDirNames(bundledSkillsDir()),
-        ...(options.editableArtifactToolsAvailable
-          ? bundledSkillDirNames(bundledArtifactSkillsDir())
-          : []),
-        ...(options.videoGenerationAvailable ? bundledSkillDirNames(bundledVideoSkillsDir()) : []),
-        ...(options.skillLibrarySkills ?? []).map((skill) => skill.name),
-        ...packSkills.map((skill) => skill.name),
-        ...sessionSkills.map((skill) => skill.name),
-      ]),
+      workspaceSkills(
+        options.workspaceSkillPaths,
+        [
+          ...(options.skillLibrarySkills ?? []).map((skill) => skill.name),
+          ...packSkills.map((skill) => skill.name),
+          ...sessionSkills.map((skill) => skill.name),
+        ],
+        bundledWorkspaceSkillNames,
+      ),
     );
   }
   // P4.3 computer-use: the agent drives the SAME :0 humans watch (xdotool/XTEST +
@@ -2835,6 +2906,20 @@ export type PreparedAgentTools = {
   codexConnectorNamespaces: Set<string>;
 };
 
+/**
+ * One already-compiled, in-process MCP server registered under the same stable
+ * id used by Settings and ToolRef. Local adapters still pass through
+ * PrefixedMcpServer, aggregate schema bounds, lazy disclosure, approval policy,
+ * connector action policy, and lifecycle cleanup; only the remote MCP
+ * transport construction is replaced.
+ */
+export type LocalMcpServerRegistration = {
+  id: string;
+  server: MCPServer;
+  /** Exact connection identity frozen while constructing the local adapter. */
+  resolvedConnectionId?: string;
+};
+
 export type PrepareToolsOptions = {
   accountId?: string;
   workspaceId?: string;
@@ -2872,6 +2957,8 @@ export type PrepareToolsOptions = {
   };
   /** Injectable final MCP transport for tests and embedded hosts. */
   mcpFetchImpl?: FetchLike;
+  /** In-process protocol adapters keyed by their ordinary runtime registry id. */
+  localMcpServers?: readonly LocalMcpServerRegistration[];
   /** Monotonic catalog generation for this execution attempt. */
   attemptToolCatalogGeneration?: number;
   /** Durable host seam; completion is required before the model can run. */
@@ -2998,6 +3085,7 @@ export async function prepareAgentTools(
     throw new Error("in-process attempt tools require exact attempt scope");
   }
   const registry = new Map(settings.mcpServers.map((server) => [server.id, server]));
+  const localRegistry = localMcpServerRegistry(options.localMcpServers ?? [], registry);
   const aggregateToolBudget = new McpAggregateToolListBudget();
   // npm Undici's dispatcher transport can hang indefinitely under Bun even
   // after an AbortSignal fires. Bun's native fetch is the supported runtime
@@ -3016,6 +3104,30 @@ export async function prepareAgentTools(
       }
       if (config.id === CODEX_APPS_MCP_SERVER_ID && !isCodexAppsMcpServer(config)) {
         throw new Error("Codex Apps server id is reserved for the canonical endpoint");
+      }
+      const local = localRegistry.get(config.id);
+      if (local) {
+        if (local.resolvedConnectionId) {
+          recordResolvedMcpConnectionId(
+            resolvedMcpConnectionIds,
+            config,
+            local.resolvedConnectionId,
+          );
+        }
+        const optional = tool.optional === true;
+        return {
+          server: new PrefixedMcpServer(
+            local.server,
+            config.id,
+            config.allowedTools,
+            optional || Boolean(config.connectionRef),
+            aggregateToolBudget,
+            `${config.id}:${index}`,
+          ),
+          bestEffort: optional || Boolean(config.connectionRef),
+          optional,
+          timeoutMs: config.timeoutMs,
+        };
       }
       const url = firstPartyMcpServerUrlForRun(settings, config, options.workspaceId) ?? config.url;
       const firstParty = isFirstPartyMcpServer(settings, config);
@@ -3059,34 +3171,58 @@ export async function prepareAgentTools(
       // auth misses are still published as actionable state because the
       // workspace catalog explicitly told the user that the surface existed.
       const bestEffort = isCodexAppsMcpServer(config) || optional || !!config.connectionRef;
+      const useGmailRestAdapter =
+        settings.gmailRestAdapterEnabled &&
+        isOfficialGmailMcpConfig(config.url, config.connectionRef);
+      const innerServer = useGmailRestAdapter
+        ? new GmailRestMcpServer({
+            workspaceId: options.workspaceId ?? "",
+            ...(options.credentialSubjectId ? { subjectId: options.credentialSubjectId } : {}),
+            serverId: config.id,
+            connectionRef: config.connectionRef!,
+            resolveCredential: async (request) =>
+              await resolveConnectionForRequest(
+                options,
+                request.serverId,
+                request.connectionRef,
+                request.destinationUrl,
+                request.toolName,
+                request.forceRefresh === true,
+              ),
+            onAuthNeeded: async (payload) => await publishAuthNeeded(options, payload),
+            onResolvedConnectionId: (connectionId) =>
+              recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, connectionId),
+            fetchImpl: mcpFetchImpl,
+          })
+        : new MCPServerStreamableHttp({
+            url,
+            name: config.name ?? config.id,
+            cacheToolsList: config.cacheToolsList,
+            // The upstream transport logger receives raw thrown errors, whose
+            // messages may contain response bodies, URLs, headers, or echoed
+            // credentials. Keep its diagnostic surface structural only.
+            logger: mcpTransportLogger(config.id, {
+              // Codex Apps setup is a read-only initialize/tools-list handshake.
+              // A statusless transport failure is safe to retry, while auth
+              // responses remain non-retryable and publish their specific
+              // reconnect reason through codexAppsAuthFetch.
+              recoverySafeSetup: isCodexAppsMcpServer(config),
+            }),
+            // codex_apps returns connector tools with empty `outputSchema: {}` that the
+            // MCP SDK's strict Tool schema rejects (fails the turn during tools/list);
+            // sanitize the response on the wire before validation. The namespace Set
+            // also captures each tool's original connector namespace (P4 Part B.1).
+            fetch: fetchImpl,
+            ...(await mcpServerRequestInit(settings, config)),
+            ...(config.timeoutMs
+              ? {
+                  timeout: config.timeoutMs,
+                  clientSessionTimeoutSeconds: Math.ceil(config.timeoutMs / 1000),
+                }
+              : {}),
+          });
       const server = new PrefixedMcpServer(
-        new MCPServerStreamableHttp({
-          url,
-          name: config.name ?? config.id,
-          cacheToolsList: config.cacheToolsList,
-          // The upstream transport logger receives raw thrown errors, whose
-          // messages may contain response bodies, URLs, headers, or echoed
-          // credentials. Keep its diagnostic surface structural only.
-          logger: mcpTransportLogger(config.id, {
-            // Codex Apps setup is a read-only initialize/tools-list handshake.
-            // A statusless transport failure is safe to retry, while auth
-            // responses remain non-retryable and publish their specific
-            // reconnect reason through codexAppsAuthFetch.
-            recoverySafeSetup: isCodexAppsMcpServer(config),
-          }),
-          // codex_apps returns connector tools with empty `outputSchema: {}` that the
-          // MCP SDK's strict Tool schema rejects (fails the turn during tools/list);
-          // sanitize the response on the wire before validation. The namespace Set
-          // also captures each tool's original connector namespace (P4 Part B.1).
-          fetch: fetchImpl,
-          ...(await mcpServerRequestInit(settings, config)),
-          ...(config.timeoutMs
-            ? {
-                timeout: config.timeoutMs,
-                clientSessionTimeoutSeconds: Math.ceil(config.timeoutMs / 1000),
-              }
-            : {}),
-        }),
+        innerServer,
         config.id,
         config.allowedTools,
         bestEffort,
@@ -3216,6 +3352,29 @@ export async function prepareAgentTools(
   };
 }
 
+function localMcpServerRegistry(
+  registrations: readonly LocalMcpServerRegistration[],
+  settingsRegistry: ReadonlyMap<string, Settings["mcpServers"][number]>,
+): ReadonlyMap<string, LocalMcpServerRegistration> {
+  assertMcpServerSelectionWithinBounds(registrations);
+  const registry = new Map<string, LocalMcpServerRegistration>();
+  for (const registration of registrations) {
+    if (!settingsRegistry.has(registration.id)) {
+      throw new Error(`Local MCP server id is not registered in settings: ${registration.id}`);
+    }
+    if (registry.has(registration.id)) {
+      throw new Error(`Duplicate local MCP server id: ${registration.id}`);
+    }
+    if (
+      registration.resolvedConnectionId !== undefined &&
+      registration.resolvedConnectionId.length === 0
+    ) {
+      throw new Error(`Local MCP server ${registration.id} has an empty connection identity`);
+    }
+    registry.set(registration.id, registration);
+  }
+  return registry;
+}
 function attemptToolScope(options: PrepareToolsOptions): AttemptToolScope | null {
   if (
     !options.accountId ||
@@ -5150,10 +5309,11 @@ function takeGenesisTitleInputFilter(agent: Agent<any, any>): CallModelInputFilt
 // Generic substrate prompting for programmatic tool calling (codemode). Same
 // text for every host; gated per-turn by appendCodemodeInstructions on the
 // presence of a minted codemode token, so it only appears when the sandbox
-// exposes $OPENGENI_CODEMODE_URL/_TOKEN_FILE. Stock images carry the importable
-// package and ogtool; custom environments get an exact pinned CLI hint.
+// exposes an attempt-scoped Codemode bearer. Stock images carry the importable
+// package and ogtool; Connected Machines carry the native agent client; custom
+// environments can use the exact pinned package hint.
 export const CODEMODE_PROGRAMMATIC_DIRECTIVE =
-  'Every tool available to you is also callable programmatically from the sandbox through the same frozen catalog, authority, credentials, policy, and execution path. In stock sandboxes, write persistent Bun code with `import { tools, openGeni } from "@opengeni/codemode"`; run `ogtool declarations <file.d.ts>` when project-local catalog types are useful. For shell calls, run `ogtool list`, then `ogtool call <tool-path> \'<json-args>\'`. If `ogtool` is absent and Bun plus $OPENGENI_OGTOOL_PACKAGE_SPEC are available, run the exact deployment-pinned package with `bun x -p "$OPENGENI_OGTOOL_PACKAGE_SPEC" ogtool ...`; never guess a version or install `latest`. Prefer Codemode for loops, polling, bulk filtering, and intermediate data that should remain in the sandbox instead of consuming your context window. Tools requiring human approval return a typed error in Codemode and must be invoked normally.';
+  'Every tool available to you is also callable programmatically from the sandbox through the same frozen catalog, authority, credentials, policy, and execution path. In stock sandboxes, write persistent Bun code with `import { tools, openGeni } from "@opengeni/codemode"`; run `ogtool declarations <file.d.ts>` when project-local catalog types are useful. For shell calls, run `ogtool list`, then `ogtool call <tool-path> \'<json-args>\'`. If `ogtool` is absent and $OPENGENI_CODEMODE_NATIVE_CLIENT is available, use `"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode list` and `"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode call <tool-path> \'<json-args>\'`; this uses the same public Codemode operation journal, not another tool path. Otherwise, if Bun plus $OPENGENI_OGTOOL_PACKAGE_SPEC are available, run the exact deployment-pinned package with `bun x -p "$OPENGENI_OGTOOL_PACKAGE_SPEC" ogtool ...`; never guess a version or install `latest`. Prefer Codemode for loops, polling, bulk filtering, and intermediate data that should remain in the sandbox instead of consuming your context window. Tools requiring human approval return a typed error in Codemode and must be invoked normally.';
 
 function modelModalityProjectionFilterForAgent(
   agent: object,
@@ -6260,9 +6420,9 @@ export function buildManifest(
   }
   // No extraPathGrants here: remote sandbox clients (Modal) reject manifests
   // that carry them at create/apply time, which broke every Modal session.
-  // The lazy bundled-skills source no longer needs a grant because
-  // bundledSkillsDir() stages the skills inside the process working directory
-  // whenever the packaged copy lives outside it.
+  // Pack, selected-library, session, and artifact skills are represented by
+  // sandbox-safe in-memory or staged local-dir sources, so no host path grant
+  // is required here.
   return new Manifest({
     root: "/workspace",
     entries,
@@ -7951,6 +8111,9 @@ const RIG_SETUP_SKIPPED_SENTINEL = "__OPENGENI_RIG_SETUP_SKIPPED__";
 
 const RIG_SETUP_RUNTIME_MARKER_ROOT = "/tmp/opengeni/rig-setup";
 const RIG_SETUP_PROVIDER_IMAGE_MARKER_ROOT = "/var/opengeni";
+const RIG_SETUP_INLINE_COMMAND_MAX_BYTES = 32 * 1024;
+const RIG_SETUP_PAYLOAD_CHUNK_CHARS = 24 * 1024;
+const RIG_SETUP_PAYLOAD_ROOT = "/tmp/opengeni/rig-setup-payloads";
 
 export type RigSetupScriptCommandOptions = {
   timeoutMs?: number;
@@ -7962,6 +8125,30 @@ export type RigSetupScriptCommandOptions = {
    * provider image's root-owned marker directory. */
   trustedContentMarkerRoot?: string;
 };
+
+function rigSetupHeredocDelimiter(script: string): string {
+  const occupied = new Set(script.split(/\r?\n/u));
+  const digest = createHash("sha256").update(script, "utf8").digest("hex").slice(0, 16);
+  let delimiter = `__OPENGENI_RIG_SETUP_${digest}__`;
+  while (occupied.has(delimiter)) delimiter += "_";
+  return delimiter;
+}
+
+function rigSetupExistingMarkerProbe(versionId: string, contentHash?: string): string {
+  if (contentHash !== undefined && !/^sha256:[0-9a-f]{64}$/u.test(contentHash)) {
+    throw new Error("Rig setup content hash must be a canonical SHA-256 value");
+  }
+  const markers = [`${RIG_SETUP_RUNTIME_MARKER_ROOT}/rig-setup-${versionId}.done`];
+  if (contentHash) {
+    const suffix = `rig-setup-content-${contentHash.slice("sha256:".length)}.done`;
+    markers.push(
+      `${RIG_SETUP_RUNTIME_MARKER_ROOT}/${suffix}`,
+      `${RIG_SETUP_PROVIDER_IMAGE_MARKER_ROOT}/${suffix}`,
+    );
+  }
+  const ready = markers.map((marker) => `[ -f ${shellQuote(marker)} ]`).join(" || ");
+  return `if ${ready}; then printf '%s\\n' ${shellQuote(RIG_SETUP_SKIPPED_SENTINEL)}; exit 0; fi\nexit 42`;
+}
 
 /**
  * The rig-setup command (M3). One idempotent bash program:
@@ -8015,6 +8202,7 @@ export function rigSetupScriptCommand(
   const markerReady = contentMarker
     ? '[ -f "$__OG_RIG_VERSION_MARKER" ] || [ -f "$__OG_RIG_CONTENT_MARKER" ] || [ -f "$__OG_RIG_TRUSTED_CONTENT_MARKER" ]'
     : '[ -f "$__OG_RIG_VERSION_MARKER" ]';
+  const heredocDelimiter = rigSetupHeredocDelimiter(script);
   return [
     "set -u",
     `if ! mkdir -p ${shellQuote(markerRoot)}; then printf '%s\\n' 'unable to create rig setup marker root' >&2; exit 73; fi`,
@@ -8031,9 +8219,9 @@ export function rigSetupScriptCommand(
     "    trap 'rm -rf \"$__OG_RIG_LOCK\"' EXIT",
     `    if ${markerReady}; then printf '%s\\n' ${shellQuote(RIG_SETUP_SKIPPED_SENTINEL)}; exit 0; fi`,
     "    if ! __OG_RIG_SCRIPT=\"$(mktemp)\"; then printf '%s\\n' 'unable to create rig setup script file' >&2; exit 73; fi",
-    "cat > \"$__OG_RIG_SCRIPT\" <<'__OPENGENI_RIG_SETUP_SCRIPT_EOF__'",
+    `cat > "$__OG_RIG_SCRIPT" <<'${heredocDelimiter}'`,
     script,
-    "__OPENGENI_RIG_SETUP_SCRIPT_EOF__",
+    heredocDelimiter,
     '    timeout -k 5s "${__OG_RIG_TIMEOUT_SECS}s" bash "$__OG_RIG_SCRIPT"',
     "__OG_RIG_RC=$?",
     '    rm -f "$__OG_RIG_SCRIPT"',
@@ -8056,6 +8244,57 @@ export function rigSetupScriptCommand(
     "  if ! rmdir \"$__OG_RIG_LOCK\" 2>/dev/null && [ -d \"$__OG_RIG_LOCK\" ]; then printf '%s\\n' 'unable to reclaim stale rig setup lock' >&2; exit 73; fi",
     "done",
   ].join("\n");
+}
+
+async function stageRigSetupScript(
+  session: SandboxSessionLike,
+  script: string,
+  context: SandboxLifecycleHookContext,
+): Promise<string> {
+  const payloadPath = `${RIG_SETUP_PAYLOAD_ROOT}/${randomUUID()}.sh`;
+  const encodedPath = `${payloadPath}.b64`;
+  const encoded = Buffer.from(script, "utf8").toString("base64");
+  const commands = [
+    `set -eu\numask 077\nmkdir -p ${shellQuote(RIG_SETUP_PAYLOAD_ROOT)}\n: > ${shellQuote(encodedPath)}`,
+  ];
+  for (let offset = 0; offset < encoded.length; offset += RIG_SETUP_PAYLOAD_CHUNK_CHARS) {
+    commands.push(
+      `printf '%s' ${shellQuote(encoded.slice(offset, offset + RIG_SETUP_PAYLOAD_CHUNK_CHARS))} >> ${shellQuote(encodedPath)}`,
+    );
+  }
+  commands.push(
+    `set -eu\nbase64 -d ${shellQuote(encodedPath)} > ${shellQuote(payloadPath)}\nchmod 0700 ${shellQuote(payloadPath)}\nrm -f ${shellQuote(encodedPath)}`,
+  );
+  try {
+    for (const command of commands) {
+      const result = await runSandboxLifecycleCommand(
+        session,
+        {
+          cmd: command,
+          workdir: "/workspace",
+          ...(context.runAs ? { runAs: context.runAs } : {}),
+          yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+          maxOutputTokens: 4_000,
+        },
+        context.commandRunner,
+      );
+      assertSandboxCommandSucceeded(result, "Rig setup payload staging");
+    }
+    return payloadPath;
+  } catch (error) {
+    await runSandboxLifecycleCommand(
+      session,
+      {
+        cmd: `rm -f ${shellQuote(payloadPath)} ${shellQuote(encodedPath)}`,
+        workdir: "/workspace",
+        ...(context.runAs ? { runAs: context.runAs } : {}),
+        yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+        maxOutputTokens: 1_000,
+      },
+      context.commandRunner,
+    ).catch(() => undefined);
+    throw error;
+  }
 }
 
 /**
@@ -8083,14 +8322,20 @@ export async function runRigSetupHook(
     rigName: rigSetup.rigName,
   };
   await context.onRuntimeEvent?.({ type: "rig.setup.started", payload });
-  const command = rigSetupScriptCommand(rigSetup.script, rigSetup.versionId, {
+  const commandOptions = {
     timeoutMs: rigSetup.timeoutMs,
     markerRoot: RIG_SETUP_RUNTIME_MARKER_ROOT,
     ...(rigSetup.contentHash !== undefined ? { contentHash: rigSetup.contentHash } : {}),
     trustedContentMarkerRoot: RIG_SETUP_PROVIDER_IMAGE_MARKER_ROOT,
-  });
+  };
+  const inlineCommand = rigSetupScriptCommand(rigSetup.script, rigSetup.versionId, commandOptions);
+  let stagedScriptPath: string | null = null;
+  let executableCommand =
+    Buffer.byteLength(inlineCommand, "utf8") <= RIG_SETUP_INLINE_COMMAND_MAX_BYTES
+      ? inlineCommand
+      : "";
   const execArgs = {
-    cmd: command,
+    cmd: executableCommand,
     workdir: "/workspace",
     ...(context.runAs ? { runAs: context.runAs } : {}),
     // The in-box coreutils timeout is the hard deadline; the SDK yield waits a
@@ -8101,7 +8346,41 @@ export async function runRigSetupHook(
   };
   let result: unknown;
   try {
-    result = await runSandboxLifecycleCommand(session, execArgs, context.commandRunner);
+    if (!executableCommand) {
+      const markerProbe = await runSandboxLifecycleCommand(
+        session,
+        {
+          cmd: rigSetupExistingMarkerProbe(rigSetup.versionId, rigSetup.contentHash),
+          workdir: "/workspace",
+          ...(context.runAs ? { runAs: context.runAs } : {}),
+          yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+          maxOutputTokens: 1_000,
+        },
+        context.commandRunner,
+      );
+      const markerProbeExitCode = sandboxCommandExitCode(markerProbe);
+      if (
+        markerProbeExitCode === 0 &&
+        sandboxCommandOutput(markerProbe).includes(RIG_SETUP_SKIPPED_SENTINEL)
+      ) {
+        result = markerProbe;
+      } else if (markerProbeExitCode !== 42) {
+        assertSandboxCommandSucceeded(markerProbe, "Rig setup marker probe");
+        throw new Error("Rig setup marker probe returned success without its sentinel");
+      }
+      if (result === undefined) {
+        stagedScriptPath = await stageRigSetupScript(session, rigSetup.script, context);
+        executableCommand = rigSetupScriptCommand(
+          `exec bash ${shellQuote(stagedScriptPath)}`,
+          rigSetup.versionId,
+          commandOptions,
+        );
+        execArgs.cmd = executableCommand;
+      }
+    }
+    if (result === undefined) {
+      result = await runSandboxLifecycleCommand(session, execArgs, context.commandRunner);
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await context.onRuntimeEvent?.({
@@ -8115,6 +8394,20 @@ export async function runRigSetupHook(
       `Rig setup failed for rig "${rigSetup.rigName}" (version ${rigSetup.versionId}): ${message}`,
       { cause: error },
     );
+  } finally {
+    if (stagedScriptPath) {
+      await runSandboxLifecycleCommand(
+        session,
+        {
+          cmd: `rm -f ${shellQuote(stagedScriptPath)} ${shellQuote(`${stagedScriptPath}.b64`)}`,
+          workdir: "/workspace",
+          ...(context.runAs ? { runAs: context.runAs } : {}),
+          yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+          maxOutputTokens: 1_000,
+        },
+        context.commandRunner,
+      ).catch(() => undefined);
+    }
   }
   const output = sandboxCommandOutput(result);
   // Marker present → the guard skipped the script. Distinct terminal signal.
@@ -8316,18 +8609,20 @@ let stagedBundledSkillsDir: string | null = null;
 let stagedBundledArtifactSkillsDir: string | null = null;
 let stagedBundledVideoSkillsDir: string | null = null;
 
-function bundledSkillsDir(): string {
+function packagedBundledSkillsDir(directoryName: string): string {
   const moduleDir = dirname(fileURLToPath(import.meta.url));
-  const packaged =
+  return (
     [
-      join(moduleDir, "assets", "runtime", "bundled_hashicorp_terraform_skills"),
-      join(moduleDir, "bundled_hashicorp_terraform_skills"),
-      join(moduleDir, "..", "src", "bundled_hashicorp_terraform_skills"),
-    ].find((candidate) => existsSync(candidate)) ??
-    join(moduleDir, "bundled_hashicorp_terraform_skills");
-  if (isPathWithin(process.cwd(), packaged)) {
-    return packaged;
-  }
+      join(moduleDir, "assets", "runtime", directoryName),
+      join(moduleDir, directoryName),
+      join(moduleDir, "..", "src", directoryName),
+    ].find((candidate) => existsSync(candidate)) ?? join(moduleDir, directoryName)
+  );
+}
+
+function bundledSkillsDir(): string {
+  const packaged = packagedBundledSkillsDir("bundled_hashicorp_terraform_skills");
+  if (isPathWithin(process.cwd(), packaged)) return packaged;
   if (!stagedBundledSkillsDir) {
     stagedBundledSkillsDir = stageBundledSkills(
       packaged,
@@ -8338,12 +8633,7 @@ function bundledSkillsDir(): string {
 }
 
 function bundledArtifactSkillsDir(): string {
-  const moduleDir = dirname(fileURLToPath(import.meta.url));
-  const packaged =
-    [
-      join(moduleDir, "bundled_artifact_skills"),
-      join(moduleDir, "..", "src", "bundled_artifact_skills"),
-    ].find((candidate) => existsSync(candidate)) ?? join(moduleDir, "bundled_artifact_skills");
+  const packaged = packagedBundledSkillsDir("bundled_artifact_skills");
   if (isPathWithin(process.cwd(), packaged)) return packaged;
   if (!stagedBundledArtifactSkillsDir) {
     stagedBundledArtifactSkillsDir = stageBundledSkills(
@@ -8355,12 +8645,7 @@ function bundledArtifactSkillsDir(): string {
 }
 
 function bundledVideoSkillsDir(): string {
-  const moduleDir = dirname(fileURLToPath(import.meta.url));
-  const packaged =
-    [
-      join(moduleDir, "bundled_video_skills"),
-      join(moduleDir, "..", "src", "bundled_video_skills"),
-    ].find((candidate) => existsSync(candidate)) ?? join(moduleDir, "bundled_video_skills");
+  const packaged = packagedBundledSkillsDir("bundled_video_skills");
   if (isPathWithin(process.cwd(), packaged)) return packaged;
   if (!stagedBundledVideoSkillsDir) {
     stagedBundledVideoSkillsDir = stageBundledSkills(
@@ -8395,14 +8680,10 @@ function isPathWithin(root: string, candidate: string): boolean {
 }
 
 /**
- * The skill source fed to the SDK Skills capability. Without pack or curated
- * skills this is the plain bundled local-dir source, byte-for-byte the
- * pre-pack behavior. With either selected source it becomes a single
- * in-memory dir source combining bundled skill directories (as local_dir
- * entries the SDK materializes lazily) with selected in-memory skill
- * directories — one skill index, one `## Skills` instruction section, lazy
- * `load_skill` for all of them. A pack skill shadows a bundled or curated
- * skill with the same directory name, case-insensitively.
+ * The skill source fed to the SDK Skills capability. Domain guidance is never
+ * mounted by deployment default: only explicitly selected library, Pack, and
+ * session skills join native artifact skills in one lazy index. Pack content
+ * shadows selected library content with the same name, case-insensitively.
  */
 export function lazySkillSourceWithPackSkills(
   packSkills: PackSkill[],
@@ -8421,9 +8702,6 @@ export function lazySkillSourceWithPackSkills(
     return bundled;
   }
   const children: Record<string, Entry> = {};
-  for (const name of bundledSkillDirNames(bundledDir)) {
-    children[name] = localDir({ src: join(bundledDir, name) });
-  }
   let artifactBundled: LocalDirLazySkillSource | null = null;
   if (editableArtifactToolsAvailable) {
     const artifactDir = bundledArtifactSkillsDir();
@@ -8476,11 +8754,6 @@ export function lazySkillSourceWithPackSkills(
   return {
     source: dir({ children }),
     getIndex: (manifest, skillsPath) => [
-      ...(bundled.getIndex?.(manifest, skillsPath) ?? []).filter(
-        (entry) =>
-          !packNameKeys.has((entry.path ?? entry.name).toLowerCase()) &&
-          !libraryNameKeys.has((entry.path ?? entry.name).toLowerCase()),
-      ),
       ...(artifactBundled?.getIndex?.(manifest, skillsPath) ?? []).filter(
         (entry) =>
           !packNameKeys.has((entry.path ?? entry.name).toLowerCase()) &&
@@ -8518,7 +8791,7 @@ function effectiveSkillSelections(
     source: "bundled" as const,
     version: null,
     contentSha256: null,
-    reason: "deployment default skill bundle",
+    reason: "native artifact capability",
   }));
   const libraryNameKeys = new Set(librarySkills.map((skill) => skill.name.toLowerCase()));
   const packNameKeys = new Set(packSkills.map((skill) => skill.name.toLowerCase()));

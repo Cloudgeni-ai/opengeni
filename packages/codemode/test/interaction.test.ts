@@ -35,6 +35,9 @@ describe("OpenGeni Codemode interaction facade", () => {
     const receipt = await tab
       .getByRole("button", { name: "Save" })
       .click({ button: "left" }, { operationId: "33333333-3333-4333-8333-333333333333" });
+    await tab.setPermission("geolocation", "denied", {
+      expectedDocumentGeneration: "document-1",
+    });
 
     expect(browser.id).toBe(browserSessionId);
     expect(tab.id).toBe("tab-1");
@@ -62,6 +65,111 @@ describe("OpenGeni Codemode interaction facade", () => {
           },
         },
         options: { operationId: "33333333-3333-4333-8333-333333333333" },
+      },
+      {
+        path: "interaction.browser.act",
+        args: {
+          browserSessionId,
+          targetId: "tab-1",
+          expectedDocumentGeneration: "document-1",
+          action: {
+            type: "permission",
+            permission: "geolocation",
+            setting: "denied",
+          },
+        },
+        options: {},
+      },
+    ]);
+  });
+
+  test("exposes private BrowserSession clipboard reads and atomic mutations", async () => {
+    const clipboard = {
+      browserSessionId,
+      controllerGeneration: "controller-1",
+      revision: 2,
+      text: "private browser text",
+      source: "copy" as const,
+      sourceTargetId: "tab-1",
+      updatedAt: "2026-08-10T10:00:00.000Z",
+    };
+    const fake = fakeClient((path) => {
+      if (path === "interaction.browser.clipboard") return result(clipboard);
+      if (path === "interaction.browser.tabs") {
+        return result({
+          browserSessionId,
+          controllerGeneration: "controller-1",
+          targets: [{ id: "tab-1", selected: true }],
+        });
+      }
+      if (path === "interaction.browser.act") {
+        return result({ operationId: "operation-1", state: "completed" });
+      }
+      throw new Error(`unexpected path: ${path}`);
+    });
+    const browser = createOpenGeniCodemode(fake.client).browsers.use(browserSessionId);
+
+    expect(await browser.clipboard.read()).toEqual(clipboard);
+    await browser.clipboard.write("draft");
+    await browser.clipboard.copy({
+      targetId: "tab-1",
+      locator: { kind: "label", text: "Source" },
+      content: "value",
+    });
+    await browser.clipboard.paste({ targetId: "tab-1" });
+
+    expect(fake.calls).toEqual([
+      {
+        path: "interaction.browser.clipboard",
+        args: { browserSessionId },
+        options: {},
+      },
+      {
+        path: "interaction.browser.tabs",
+        args: { operation: "list", browserSessionId },
+        options: {},
+      },
+      {
+        path: "interaction.browser.act",
+        args: {
+          browserSessionId,
+          targetId: "tab-1",
+          action: { type: "clipboard", operation: "write", text: "draft" },
+        },
+        options: {},
+      },
+      {
+        path: "interaction.browser.tabs",
+        args: { operation: "list", browserSessionId },
+        options: {},
+      },
+      {
+        path: "interaction.browser.act",
+        args: {
+          browserSessionId,
+          targetId: "tab-1",
+          action: {
+            type: "clipboard",
+            operation: "copy",
+            locator: { kind: "label", text: "Source" },
+            content: "value",
+          },
+        },
+        options: {},
+      },
+      {
+        path: "interaction.browser.tabs",
+        args: { operation: "list", browserSessionId },
+        options: {},
+      },
+      {
+        path: "interaction.browser.act",
+        args: {
+          browserSessionId,
+          targetId: "tab-1",
+          action: { type: "clipboard", operation: "paste" },
+        },
+        options: {},
       },
     ]);
   });
@@ -103,6 +211,89 @@ describe("OpenGeni Codemode interaction facade", () => {
     });
   });
 
+  test("keeps native Computer clipboard mutations on the causal action path", async () => {
+    const clipboard = {
+      computerSessionId,
+      controllerGeneration: "controller-1",
+      text: "native text",
+      truncated: false,
+      observedAt: "2026-08-10T10:00:00.000Z",
+    };
+    const fake = fakeClient((path) => {
+      if (path === "interaction.computer.clipboard") return result(clipboard);
+      if (path === "interaction.computer.targets") {
+        return result({
+          computerSessionId,
+          controllerGeneration: "controller-1",
+          targets: [
+            { id: "window-1", kind: "window", focused: true },
+            { id: "screen-1", kind: "screen", focused: true },
+          ],
+        });
+      }
+      if (path === "interaction.computer.act") {
+        return result({ operationId: "operation-3", state: "completed" });
+      }
+      throw new Error(`unexpected path: ${path}`);
+    });
+    const computer = createOpenGeniCodemode(fake.client).computers.use(computerSessionId);
+
+    expect(await computer.clipboard.read()).toEqual(clipboard);
+    await computer.clipboard.write("draft");
+    await computer.clipboard.copy({ targetId: "window-1" });
+    await computer.clipboard.paste();
+
+    expect(fake.calls).toEqual([
+      {
+        path: "interaction.computer.clipboard",
+        args: { computerSessionId },
+        options: {},
+      },
+      {
+        path: "interaction.computer.targets",
+        args: { computerSessionId },
+        options: {},
+      },
+      {
+        path: "interaction.computer.act",
+        args: {
+          computerSessionId,
+          targetId: "screen-1",
+          action: { type: "clipboard", operation: "write", text: "draft" },
+        },
+        options: {},
+      },
+      {
+        path: "interaction.computer.targets",
+        args: { computerSessionId },
+        options: {},
+      },
+      {
+        path: "interaction.computer.act",
+        args: {
+          computerSessionId,
+          targetId: "window-1",
+          action: { type: "clipboard", operation: "copy" },
+        },
+        options: {},
+      },
+      {
+        path: "interaction.computer.targets",
+        args: { computerSessionId },
+        options: {},
+      },
+      {
+        path: "interaction.computer.act",
+        args: {
+          computerSessionId,
+          targetId: "screen-1",
+          action: { type: "clipboard", operation: "paste" },
+        },
+        options: {},
+      },
+    ]);
+  });
+
   test("keeps identity creation on the caller-owned Codemode operation id", async () => {
     const fake = fakeClient((_path, args) =>
       result({
@@ -120,6 +311,102 @@ describe("OpenGeni Codemode interaction facade", () => {
         path: "interaction.browser.identity",
         args: { operation: "create", name: "Work" },
         options: { operationId: "44444444-4444-4444-8444-444444444444" },
+      },
+    ]);
+  });
+
+  test("keeps auth and human handoff on the same typed atomic paths", async () => {
+    const authRunId = "55555555-5555-4555-8555-555555555555";
+    const fake = fakeClient((path, args) => {
+      if (path === "interaction.browser.auth") {
+        if (args.operation === "advance_external") {
+          return result({
+            operation: "advance_external",
+            result: { run: { id: authRunId }, status: "needs_human" },
+          });
+        }
+        return result({ operation: "start", result: { run: { id: authRunId } } });
+      }
+      if (path === "interaction.browser.observe") {
+        return result({
+          target: {
+            controllerGeneration: "controller-1",
+            targetGeneration: "target-1",
+            documentGeneration: "document-1",
+          },
+        });
+      }
+      if (path === "interaction.requestHuman") {
+        return result({ intervention: { id: "intervention-1" }, observation: null });
+      }
+      throw new Error(`unexpected path: ${path}`);
+    });
+    const browser = createOpenGeniCodemode(fake.client).browsers.use(browserSessionId);
+    const run = await browser.auth.start(
+      {
+        siteAuthConnectionId: "66666666-6666-4666-8666-666666666666",
+        targetId: "tab-1",
+        expectedTargetGeneration: "target-1",
+        expectedDocumentGeneration: "document-1",
+      },
+      { operationId: "77777777-7777-4777-8777-777777777777" },
+    );
+    await run.advanceExternal(
+      { expectedVersion: 1, action: "start" },
+      { operationId: "88888888-8888-4888-8888-888888888888" },
+    );
+    await browser.tabs.use("tab-1").requestHuman("Complete MFA.", {
+      kind: "mfa",
+      authRunId: run.id,
+      expiresInSeconds: 300,
+    });
+
+    expect(run.id).toBe(authRunId);
+    expect(fake.calls).toEqual([
+      {
+        path: "interaction.browser.auth",
+        args: {
+          operation: "start",
+          browserSessionId,
+          siteAuthConnectionId: "66666666-6666-4666-8666-666666666666",
+          targetId: "tab-1",
+          expectedTargetGeneration: "target-1",
+          expectedDocumentGeneration: "document-1",
+        },
+        options: { operationId: "77777777-7777-4777-8777-777777777777" },
+      },
+      {
+        path: "interaction.browser.auth",
+        args: {
+          operation: "advance_external",
+          browserSessionId,
+          authRunId,
+          expectedVersion: 1,
+          action: "start",
+        },
+        options: { operationId: "88888888-8888-4888-8888-888888888888" },
+      },
+      {
+        path: "interaction.browser.observe",
+        args: { browserSessionId, targetId: "tab-1" },
+        options: {},
+      },
+      {
+        path: "interaction.requestHuman",
+        args: {
+          operation: "request",
+          resourceKind: "browser_session",
+          resourceId: browserSessionId,
+          targetId: "tab-1",
+          expectedControllerGeneration: "controller-1",
+          expectedTargetGeneration: "target-1",
+          expectedDocumentGeneration: "document-1",
+          kind: "mfa",
+          reason: "Complete MFA.",
+          authRunId,
+          expiresInSeconds: 300,
+        },
+        options: {},
       },
     ]);
   });

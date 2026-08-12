@@ -20,7 +20,7 @@ function usage(exitCode = 1): void {
     "  ogtool doctor",
     "  ogtool --version",
     "",
-    "requires OPENGENI_CODEMODE_TOKEN_FILE and OPENGENI_CODEMODE_URL",
+    "requires OPENGENI_CODEMODE_URL and OPENGENI_CODEMODE_TOKEN or OPENGENI_CODEMODE_TOKEN_FILE",
   ].join("\n");
   (exitCode === 0 ? process.stdout : process.stderr).write(`${output}\n`);
   process.exitCode = exitCode;
@@ -28,13 +28,24 @@ function usage(exitCode = 1): void {
 
 function configuredClient(): CodemodeClient {
   const baseUrl = process.env.OPENGENI_CODEMODE_URL?.trim();
+  const directTokenConfigured = process.env.OPENGENI_CODEMODE_TOKEN !== undefined;
   const tokenFile = process.env.OPENGENI_CODEMODE_TOKEN_FILE?.trim();
   if (!baseUrl) throw new Error("OPENGENI_CODEMODE_URL is required");
-  if (!tokenFile) throw new Error("OPENGENI_CODEMODE_TOKEN_FILE is required");
+  if (!directTokenConfigured && !tokenFile) {
+    throw new Error("OPENGENI_CODEMODE_TOKEN or OPENGENI_CODEMODE_TOKEN_FILE is required");
+  }
   return new CodemodeClient({
     baseUrl,
-    token: async () => readToken(tokenFile),
+    token: directTokenConfigured
+      ? async () => requiredDirectToken()
+      : async () => readToken(tokenFile!),
   });
+}
+
+function requiredDirectToken(): string {
+  const token = process.env.OPENGENI_CODEMODE_TOKEN?.trim();
+  if (!token) throw new Error("OPENGENI_CODEMODE_TOKEN is empty");
+  return token;
 }
 
 function readToken(tokenFile: string): string {
@@ -49,6 +60,9 @@ function readToken(tokenFile: string): string {
 }
 
 function doctor(): void {
+  const directTokenRaw = process.env.OPENGENI_CODEMODE_TOKEN;
+  const directTokenConfigured = directTokenRaw !== undefined;
+  const directTokenNonempty = Boolean(directTokenRaw?.trim().length);
   const tokenFile = process.env.OPENGENI_CODEMODE_TOKEN_FILE ?? null;
   const rawUrl = process.env.OPENGENI_CODEMODE_URL ?? null;
   let urlValid = false;
@@ -72,7 +86,9 @@ function doctor(): void {
       tokenFileReadable = false;
     }
   }
-  const ok = urlValid && tokenFileReadable && tokenFileNonempty;
+  const tokenMode = directTokenConfigured ? "environment" : tokenFile ? "file" : null;
+  const tokenReady = directTokenConfigured ? directTokenNonempty : tokenFileNonempty;
+  const ok = urlValid && tokenReady;
   process.stdout.write(
     `${JSON.stringify(
       {
@@ -83,6 +99,9 @@ function doctor(): void {
         urlConfigured: rawUrl !== null,
         urlValid,
         protocol,
+        tokenMode,
+        directTokenConfigured,
+        directTokenNonempty,
         tokenFileConfigured: tokenFile !== null,
         tokenFileReadable,
         tokenFileNonempty,

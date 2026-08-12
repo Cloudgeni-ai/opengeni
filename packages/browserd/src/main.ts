@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { BROWSER_CONTROL_PORT } from "@opengeni/contracts";
 import { BROWSER_CONTROL_PROTOCOL_VERSION } from "./protocol";
 import { resolvePinnedAgentBrowserBinary } from "./binary";
+import { resolvePinnedLightpandaBinary } from "./lightpanda-binary";
 import {
   ExistingComputerEnvironmentAllocator,
   LinuxVirtualComputerEnvironmentAllocator,
@@ -17,6 +18,9 @@ export async function runBrowserd(environment: NodeJS.ProcessEnv = process.env):
   const agentBrowserBinary = config.agentBrowserBinaryPath
     ? await resolvePinnedAgentBrowserBinary({ binaryPath: config.agentBrowserBinaryPath })
     : undefined;
+  const lightpandaBinary = config.lightpandaBinaryPath
+    ? await resolvePinnedLightpandaBinary({ binaryPath: config.lightpandaBinaryPath })
+    : undefined;
   const computerNativeBinaryPath = config.computerNativeBinaryPath
     ? await resolveExecutable(config.computerNativeBinaryPath, "computer native helper")
     : undefined;
@@ -25,6 +29,7 @@ export async function runBrowserd(environment: NodeJS.ProcessEnv = process.env):
     ...(config.socketRootDirectory ? { socketRootDirectory: config.socketRootDirectory } : {}),
     maxSessions: config.maxSessions,
     ...(agentBrowserBinary ? { agentBrowserBinary } : {}),
+    ...(lightpandaBinary ? { lightpandaBinary } : {}),
   });
   let computerSupervisor: ComputerSupervisor | undefined;
   try {
@@ -55,6 +60,7 @@ export async function runBrowserd(environment: NodeJS.ProcessEnv = process.env):
       ...(config.browserExecutablePath
         ? { browserExecutablePath: config.browserExecutablePath }
         : {}),
+      onUnexpectedError: reportUnexpectedControllerError,
     });
   } catch (error) {
     await Promise.allSettled([
@@ -77,6 +83,47 @@ export async function runBrowserd(environment: NodeJS.ProcessEnv = process.env):
   await server.stop();
 }
 
+function reportUnexpectedControllerError(
+  error: unknown,
+  context: { method: string; pathname: string },
+): void {
+  const value =
+    error instanceof Error
+      ? {
+          name: boundedDiagnostic(error.name, 256),
+          message: boundedDiagnostic(error.message, 4_096),
+          stack: boundedDiagnostic(error.stack ?? "", 16_384),
+        }
+      : {
+          name: "UnknownError",
+          message: boundedDiagnostic(nonErrorDiagnostic(error), 4_096),
+          stack: "",
+        };
+  process.stderr.write(
+    `${JSON.stringify({
+      service: "opengeni-browserd",
+      event: "unexpected_request_error",
+      method: context.method,
+      pathname: context.pathname,
+      error: value,
+    })}\n`,
+  );
+}
+
+function nonErrorDiagnostic(value: unknown): string {
+  try {
+    const serialized = JSON.stringify(value);
+    return serialized === undefined ? String(value) : serialized;
+  } catch {
+    return String(value);
+  }
+}
+
+function boundedDiagnostic(value: string, maxBytes: number): string {
+  const bytes = Buffer.from(value);
+  return bytes.byteLength <= maxBytes ? value : bytes.subarray(0, maxBytes).toString("utf8");
+}
+
 type BrowserdConfig = {
   rootDirectory: string;
   socketRootDirectory?: string;
@@ -87,6 +134,7 @@ type BrowserdConfig = {
   allowedOrigins: string[];
   browserExecutablePath?: string;
   agentBrowserBinaryPath?: string;
+  lightpandaBinaryPath?: string;
   computerNativeBinaryPath?: string;
   maxComputerSessions: number;
   computerEnvironmentMode: "existing" | "isolated_linux";
@@ -132,6 +180,9 @@ async function browserdConfig(environment: NodeJS.ProcessEnv): Promise<BrowserdC
       : {}),
     ...(environment.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
       ? { agentBrowserBinaryPath: resolve(environment.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY) }
+      : {}),
+    ...(environment.OPENGENI_BROWSERD_LIGHTPANDA_BINARY
+      ? { lightpandaBinaryPath: resolve(environment.OPENGENI_BROWSERD_LIGHTPANDA_BINARY) }
       : {}),
     ...(environment.OPENGENI_BROWSERD_COMPUTER_NATIVE_BINARY
       ? {
@@ -225,8 +276,9 @@ async function waitForShutdownSignal(): Promise<void> {
 }
 
 if (import.meta.main) {
-  void runBrowserd().catch(() => {
-    process.stderr.write("opengeni-browserd failed\n");
+  void runBrowserd().catch((error: unknown) => {
+    const message = error instanceof Error ? `${error.name}: ${error.message}` : "unknown error";
+    process.stderr.write(`opengeni-browserd failed: ${boundedDiagnostic(message, 4_096)}\n`);
     process.exitCode = 1;
   });
 }

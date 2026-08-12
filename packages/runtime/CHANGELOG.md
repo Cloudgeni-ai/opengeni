@@ -1,5 +1,35 @@
 # @opengeni/runtime
 
+## 0.19.2
+
+### Patch Changes
+
+- b57d61f: Keep Codex image-tool schemas within the provider-supported regex subset and
+  restore all bundled runtime skills to production API and worker process builds.
+- 5c5ea4a: Add the universal capabilities platform with named API integration instances,
+  provider-specific feature bindings, and local runtime adapters.
+- 98e807e: Keep the normal remote context-compaction request unchanged, then recover once from an exact context-length rejection by temporarily reducing only tool-result bodies. Preserve the full durable history unless the retry returns a valid compaction checkpoint.
+- Updated dependencies [b57d61f]
+- Updated dependencies [5c5ea4a]
+  - @opengeni/contracts@0.44.1
+  - @opengeni/sdk@0.52.1
+  - @opengeni/codemode@0.2.2
+  - @opengeni/config@0.13.2
+
+## 0.19.1
+
+### Patch Changes
+
+- 8b6803a: Make Modal sandbox recovery command-ready and accurately diagnosed, use workspace-only snapshots for new sessions, enforce checkpoint cadence, and publish cached rig images only after an independent cold boot.
+- Updated dependencies [87e9ae6]
+- Updated dependencies [8b6803a]
+- Updated dependencies [aeb07f4]
+- Updated dependencies [ff7203c]
+  - @opengeni/config@0.13.1
+  - @opengeni/contracts@0.44.0
+  - @opengeni/sdk@0.52.0
+  - @opengeni/codemode@0.2.1
+
 ## 0.19.0
 
 ### Minor Changes

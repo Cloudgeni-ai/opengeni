@@ -37,7 +37,6 @@ import {
   type SelfhostedRelayConfig,
   type SelfhostedOpStreamDeps,
 } from "@opengeni/runtime/sandbox";
-import { HTTPException } from "hono/http-exception";
 import { relayConfigFromSettings } from "./routing";
 
 export type FleetServices = {
@@ -69,8 +68,9 @@ export type FleetContext = {
 
 /**
  * Build a session-scoped {@link FleetContext}: load the session (workspace-
- * scoped), reject a session with no box (backend:none — the fleet is only
- * meaningful for a sandboxed session), and project its group backend/id. Shared
+ * scoped) and project its group backend/id. A backend:none session has no home
+ * box, but it may still discover, run on, and attach an owned Connected Machine.
+ * Shared
  * by the worker-signed MCP fleet tools and the user-authenticated swap REST
  * route so both resolve the SAME context (no drift). The `accountId`/`workspaceId`/
  * `sessionId` come from the trusted grant/route; the backend + group id come from
@@ -81,11 +81,6 @@ export async function buildFleetContextForSession(
   ctx: { accountId: string; workspaceId: string; sessionId: string },
 ): Promise<FleetContext> {
   const session = await requireSession(deps.db, ctx.workspaceId, ctx.sessionId);
-  if (session.sandboxBackend === "none") {
-    throw new HTTPException(422, {
-      message: "this session has no sandbox (backend: none); the fleet is unavailable",
-    });
-  }
   return {
     accountId: ctx.accountId,
     workspaceId: ctx.workspaceId,
@@ -229,9 +224,11 @@ async function probeEnrollment(
 }
 
 /**
- * List the fleet: the session's own Modal group box (a synthetic entry) + the
- * workspace's first-class selfhosted sandboxes (each probed for liveness), each
- * with an `active` marker derived from the session's active pointer.
+ * List the fleet: the session's own group box when it has one (a synthetic
+ * entry) + the workspace's first-class selfhosted sandboxes (each probed for
+ * liveness), each with an `active` marker derived from the session's active
+ * pointer. A backend:none session has no synthetic home entry; a null pointer
+ * then means no compute is attached.
  */
 export async function listFleet(
   services: FleetServices,
@@ -245,61 +242,63 @@ export async function listFleet(
 
   const entries: FleetSandboxEntry[] = [];
 
-  // The session's own group box (the default/home sandbox; null active pointer ==
-  // this box). A session/group row is not provider existence. Online requires a
-  // warm lease, observed provider existence, and verified workspace readiness.
-  const groupActive = pointer.activeSandboxId === null;
-  const groupLease = await readLease(db, ctx.workspaceId, ctx.sessionGroupId);
-  const groupOnline = Boolean(
-    groupLease?.liveness === "warm" &&
-    groupLease.recovery.provider.status === "exists" &&
-    groupLease.recovery.workspace.status === "ready",
-  );
-  const groupRecovering = Boolean(
-    groupLease &&
-    (groupLease.liveness === "warming" ||
-      groupLease.recovery.restore.status === "pending" ||
-      groupLease.recovery.restore.status === "restoring" ||
-      groupLease.recovery.restore.status === "verifying"),
-  );
-  const groupRecoveryUnavailable = Boolean(
-    groupLease &&
-    (groupLease.recovery.restore.status === "degraded" ||
-      groupLease.recovery.restore.status === "unrecoverable" ||
-      groupLease.recovery.workspace.status === "degraded" ||
-      groupLease.recovery.workspace.status === "unrecoverable"),
-  );
-  const groupOperationAvailability: FleetOperationAvailability = groupOnline
-    ? "ready"
-    : groupRecoveryUnavailable
-      ? "unavailable"
-      : groupRecovering
-        ? "recovering"
-        : ctx.sessionBackend === "selfhosted"
-          ? "unavailable"
-          : "wakeable";
-  entries.push({
-    id: ctx.sessionGroupId,
-    kind: ctx.sessionBackend === "selfhosted" ? "selfhosted" : "modal",
-    name: "session sandbox",
-    liveness: groupOnline ? "online" : groupRecovering ? "reconnecting" : "offline",
-    active: groupActive,
-    isSessionGroup: true,
-    enrollmentId: null,
-    attachable: groupOnline,
-    operationAvailability: groupOperationAvailability,
-    providerStatus: groupLease?.recovery.provider.status ?? "not_created",
-    leaseLiveness: groupLease?.liveness ?? null,
-    routeStatus: groupActive ? "attached" : "detached",
-    archiveStatus: groupLease?.recovery.archive.status ?? "none",
-    restoreStatus: groupLease?.recovery.restore.status ?? "not_required",
-    workspaceStatus: groupLease?.recovery.workspace.status ?? "unknown",
-    leaseEpoch: groupLease?.leaseEpoch ?? null,
-    routeEpoch: pointer.activeEpoch,
-    workspaceGeneration: groupLease?.workspaceGeneration ?? null,
-    archiveGeneration: groupLease?.archiveGeneration ?? null,
-    archiveComplete: groupLease?.archiveComplete ?? false,
-  });
+  if (ctx.sessionBackend !== "none") {
+    // The session's own group box (the default/home sandbox; null active pointer ==
+    // this box). A session/group row is not provider existence. Online requires a
+    // warm lease, observed provider existence, and verified workspace readiness.
+    const groupActive = pointer.activeSandboxId === null;
+    const groupLease = await readLease(db, ctx.workspaceId, ctx.sessionGroupId);
+    const groupOnline = Boolean(
+      groupLease?.liveness === "warm" &&
+      groupLease.recovery.provider.status === "exists" &&
+      groupLease.recovery.workspace.status === "ready",
+    );
+    const groupRecovering = Boolean(
+      groupLease &&
+      (groupLease.liveness === "warming" ||
+        groupLease.recovery.restore.status === "pending" ||
+        groupLease.recovery.restore.status === "restoring" ||
+        groupLease.recovery.restore.status === "verifying"),
+    );
+    const groupRecoveryUnavailable = Boolean(
+      groupLease &&
+      (groupLease.recovery.restore.status === "degraded" ||
+        groupLease.recovery.restore.status === "unrecoverable" ||
+        groupLease.recovery.workspace.status === "degraded" ||
+        groupLease.recovery.workspace.status === "unrecoverable"),
+    );
+    const groupOperationAvailability: FleetOperationAvailability = groupOnline
+      ? "ready"
+      : groupRecoveryUnavailable
+        ? "unavailable"
+        : groupRecovering
+          ? "recovering"
+          : ctx.sessionBackend === "selfhosted"
+            ? "unavailable"
+            : "wakeable";
+    entries.push({
+      id: ctx.sessionGroupId,
+      kind: ctx.sessionBackend === "selfhosted" ? "selfhosted" : "modal",
+      name: "session sandbox",
+      liveness: groupOnline ? "online" : groupRecovering ? "reconnecting" : "offline",
+      active: groupActive,
+      isSessionGroup: true,
+      enrollmentId: null,
+      attachable: groupOnline,
+      operationAvailability: groupOperationAvailability,
+      providerStatus: groupLease?.recovery.provider.status ?? "not_created",
+      leaseLiveness: groupLease?.liveness ?? null,
+      routeStatus: groupActive ? "attached" : "detached",
+      archiveStatus: groupLease?.recovery.archive.status ?? "none",
+      restoreStatus: groupLease?.recovery.restore.status ?? "not_required",
+      workspaceStatus: groupLease?.recovery.workspace.status ?? "unknown",
+      leaseEpoch: groupLease?.leaseEpoch ?? null,
+      routeEpoch: pointer.activeEpoch,
+      workspaceGeneration: groupLease?.workspaceGeneration ?? null,
+      archiveGeneration: groupLease?.archiveGeneration ?? null,
+      archiveComplete: groupLease?.archiveComplete ?? false,
+    });
+  }
 
   // The workspace's first-class selfhosted sandboxes (enrolled machines). Probe
   // each for liveness; a missing enrollment is offline.
@@ -374,6 +373,13 @@ async function resolveTarget(
 > {
   // The session's own group box → the default pointer (null).
   if (target === ctx.sessionGroupId || target === "session" || target === "default") {
+    if (ctx.sessionBackend === "none") {
+      return {
+        ok: false,
+        reason: "this session has no home sandbox; attach a Connected Machine",
+        code: "unsupported_backend_context",
+      };
+    }
     return { ok: true, targetSandboxId: null };
   }
   const sandbox = await getSandbox(services.db, ctx.workspaceId, target);

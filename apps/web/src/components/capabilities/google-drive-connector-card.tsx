@@ -30,6 +30,7 @@ import {
   type GoogleDriveDisconnectAttempt,
 } from "@/lib/google-drive-connection";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
+import { cn } from "@/lib/utils";
 import type {
   ConnectorDocumentDestinationAuthority,
   ConnectionMetadata,
@@ -50,7 +51,13 @@ type ConfiguredGoogleDriveSource = GoogleDriveBrowseItem & {
   readPolicy: GoogleDriveReadPolicy;
 };
 
-export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string }) {
+export function GoogleDriveConnectorCard({
+  workspaceId,
+  embedded = false,
+}: {
+  workspaceId: string;
+  embedded?: boolean;
+}) {
   const context = useAppContext();
   const client = context.client;
   const canRead = hasWorkspacePermission(context.accessContext, workspaceId, "connections:read");
@@ -387,7 +394,12 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
 
   return (
     <>
-      <section className="mt-12 rounded-lg border border-border bg-surface/35 p-4">
+      <section
+        className={cn(
+          "rounded-lg border border-border bg-surface/35 p-4",
+          embedded ? "mt-3" : "mt-12",
+        )}
+      >
         <div className="flex items-center gap-3">
           <div className="flex min-w-0 flex-1 gap-3">
             <div className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-border bg-bg">

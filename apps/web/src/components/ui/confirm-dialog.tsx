@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useState, type ReactNode, type RefObject } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -9,6 +9,14 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+
+export function destructiveActionFocusTarget(
+  trigger: HTMLElement | null,
+  fallback: HTMLElement | null,
+): HTMLElement | null {
+  if (trigger?.isConnected) return trigger;
+  return fallback?.isConnected ? fallback : null;
+}
 
 /* ----------------------------------------------------------------------------
    ConfirmDialog — the one gate for destructive actions (doctrine D5).
@@ -30,6 +38,8 @@ export function ConfirmDialog({
   cancelLabel = "Cancel",
   cancelAutoFocus = false,
   destructive = true,
+  restoreFocusRef,
+  restoreFocusFallbackRef,
   onConfirm,
 }: {
   open: boolean;
@@ -46,6 +56,8 @@ export function ConfirmDialog({
   /** Opt in when the safe/default action must receive initial focus. */
   cancelAutoFocus?: boolean;
   destructive?: boolean;
+  restoreFocusRef?: RefObject<HTMLElement | null>;
+  restoreFocusFallbackRef?: RefObject<HTMLElement | null>;
   /**
    * May be async; the dialog shows pending state while it runs. The dialog
    * closes on success — returning `false` (or throwing) keeps it open so a
@@ -72,7 +84,19 @@ export function ConfirmDialog({
 
   return (
     <Dialog open={open} onOpenChange={(next) => (pending ? undefined : onOpenChange(next))}>
-      <DialogContent showCloseButton={false} className="sm:max-w-md">
+      <DialogContent
+        showCloseButton={false}
+        className="sm:max-w-md"
+        onCloseAutoFocus={(event) => {
+          const destination = destructiveActionFocusTarget(
+            restoreFocusRef?.current ?? null,
+            restoreFocusFallbackRef?.current ?? null,
+          );
+          if (!destination) return;
+          event.preventDefault();
+          destination.focus();
+        }}
+      >
         <DialogHeader>
           <DialogTitle className="text-base">{title}</DialogTitle>
           {description ? <DialogDescription>{description}</DialogDescription> : null}

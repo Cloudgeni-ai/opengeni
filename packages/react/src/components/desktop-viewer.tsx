@@ -24,6 +24,8 @@ export type DesktopViewerProps = {
   scaleViewport?: boolean | undefined;
   /** Custom RFB factory (tests / a WebRTC swap). Defaults to lazy @novnc/novnc. */
   rfbFactory?: DesktopRfbFactory | undefined;
+  /** Authenticated controller protocols for proxied RFB transports. */
+  webSocketProtocols?: string[] | undefined;
   /** Custom socket factory for the self-hosted `relay-frames` transport (tests).
    *  Defaults to `new WebSocket(url)`. Mirrors `rfbFactory`. */
   webSocketFactory?: DesktopWebSocketFactory | undefined;
@@ -138,6 +140,7 @@ export function DesktopViewer({
   showControlToggle = true,
   scaleViewport,
   rfbFactory,
+  webSocketProtocols,
   webSocketFactory,
   onActivate,
   onAcknowledge,
@@ -273,6 +276,7 @@ export function DesktopViewer({
     interactive: inControl,
     ...(scaleViewport !== undefined ? { scaleViewport } : {}),
     ...(rfbFactory ? { rfbFactory } : {}),
+    ...(webSocketProtocols ? { webSocketProtocols } : {}),
     ...(webSocketFactory ? { webSocketFactory } : {}),
   });
 

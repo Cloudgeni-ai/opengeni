@@ -1,7 +1,23 @@
 import { createHash } from "node:crypto";
 import {
+  ATLASSIAN_PROVIDER_DOMAIN,
+  AtlassianConnectionMetadata,
+  AtlassianDisconnectRequest,
+  AtlassianLifecycleActionRequest,
+  AtlassianOAuthStartRequest,
+  AtlassianOAuthStartResponse,
+} from "@opengeni/contracts/atlassian";
+import {
+  API_INTEGRATION_OAUTH_CREDENTIAL_ROLE,
+  ApiIntegrationOAuthStartRequest,
   ConnectionResponse,
   CreateConnectionRequest,
+  FIKEN_CREDENTIAL_LABEL,
+  FIKEN_CREDENTIAL_ROLE,
+  FIKEN_PROVIDER_DOMAIN,
+  FikenInstallRequest,
+  FikenOAuthStartRequest,
+  FikenOAuthStartResponse,
   IntegrationClientMetadata,
   ListSlackInstallationBindingsResponse,
   ListConnectionsResponse,
@@ -24,13 +40,17 @@ import {
   GoogleDriveOAuthStartResponse,
 } from "@opengeni/contracts/google-drive";
 import {
+  fikenConnectionMetadata,
   hasPermission,
+  hasReservedFikenMetadata,
   hasReservedOpenGeniSlackBotMetadata,
+  isFikenConnection,
   isOpenGeniSlackBotConnection,
   openGeniSlackBotMetadata,
   requireAccessGrant,
   requireAccessGrantAuthorization,
   requireEnvironmentEncryption,
+  resolveFikenDefaultCompanySlug,
 } from "@opengeni/core";
 import {
   consumeIntegrationOAuthStateNonce,
@@ -63,6 +83,19 @@ import {
   transitionGoogleDriveLifecycle,
 } from "../integrations/google-drive";
 import {
+  completeApiIntegrationProviderOAuth,
+  isApiIntegrationProviderOAuthState,
+  startApiIntegrationProviderOAuth,
+} from "../integrations/provider-oauth";
+import {
+  browseAtlassianSources,
+  completeAtlassianOAuthCallback,
+  disconnectAtlassian,
+  saveAtlassianSources,
+  startAtlassianOAuth,
+  transitionAtlassianLifecycle,
+} from "../integrations/atlassian";
+import {
   completeMcpOAuthCallback,
   integrationBaseUrl,
   startMcpOAuth,
@@ -73,6 +106,12 @@ import {
   SlackBotCredentialVerificationError,
   verifyOpenGeniSlackBotCredential,
 } from "../integrations/slack-bot";
+import {
+  completeFikenOAuthCallback,
+  fikenCredentialBundle,
+  startFikenOAuth,
+  verifyFikenApiToken,
+} from "../integrations/fiken";
 import {
   OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
   OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
@@ -129,11 +168,14 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
     const payload = CreateConnectionRequest.parse(await c.req.json());
     assertNotReservedSlackBotMetadata(payload.metadata);
+    assertNotReservedFikenMetadata(payload.metadata);
+    assertNotReservedApiIntegrationOAuthMetadata(payload.metadata);
     const key = requireEnvironmentEncryption(settings);
     const subjectId = createConnectionSubjectId(payload, grant.subjectId);
     const providerDomain = canonicalProviderDomain(payload.providerDomain);
     assertNotDirectPersonalSlackOAuth(providerDomain, payload.kind);
     assertNotDirectGoogleDriveOAuth(providerDomain, payload.kind, payload.metadata);
+    assertNotDirectAtlassianOAuth(providerDomain, payload.kind, payload.metadata);
     const connection = await createConnection(db, {
       accountId: grant.accountId,
       workspaceId,
@@ -281,6 +323,120 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
   });
 
+  // Verified paste-a-token install for the first-party Fiken connector. The
+  // token is validated against Fiken (and its accessible companies discovered)
+  // before it enters encrypted storage. Workspace-owned only.
+  app.post("/v1/workspaces/:workspaceId/connections/fiken/install", async (c) => {
+    assertIntegrationsEnabled();
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
+    const payload = FikenInstallRequest.parse(await c.req.json());
+    const key = requireEnvironmentEncryption(settings);
+    const existing = payload.connectionId
+      ? await getConnectionMetadata(db, workspaceId, payload.connectionId, null)
+      : null;
+    if (payload.connectionId && !existing) {
+      throw new HTTPException(404, { message: "connection not found" });
+    }
+    if (existing && !isFikenConnection(existing)) {
+      throw new HTTPException(422, { message: "connectionId is not a Fiken connection" });
+    }
+    const verified = await verifyFikenApiToken(payload.apiToken, deps.fikenFetch ?? fetch);
+    const previousDefault = existing
+      ? (fikenConnectionMetadata(existing.metadata)?.defaultCompanySlug ?? null)
+      : null;
+    const defaultCompanySlug = resolveFikenDefaultCompanySlug({
+      requested: payload.defaultCompanySlug ?? null,
+      previous: previousDefault,
+      companies: verified.companies,
+    });
+    if (payload.defaultCompanySlug && defaultCompanySlug !== payload.defaultCompanySlug) {
+      throw new HTTPException(422, {
+        message: `defaultCompanySlug is not among the companies this token can access: ${verified.companies
+          .map((company) => company.slug)
+          .join(", ")}`,
+      });
+    }
+    const metadata = {
+      credentialRole: FIKEN_CREDENTIAL_ROLE,
+      credentialLabel: FIKEN_CREDENTIAL_LABEL,
+      companies: verified.companies,
+      defaultCompanySlug,
+      verifiedAt: new Date().toISOString(),
+    };
+    const credentialEncrypted = encryptCredentialBundle(
+      key,
+      fikenCredentialBundle(payload.apiToken),
+    );
+    if (existing) {
+      // Rewrites the whole credential identity: a token pasted over an OAuth
+      // row must also flip kind and clear the OAuth expiry, or the broker
+      // keeps treating the api_key bundle as a refreshable oauth2 credential.
+      const updated = await updateConnection(db, {
+        workspaceId,
+        connectionId: existing.id,
+        visibleToSubjectId: null,
+        expectedVersion: existing.version,
+        kind: "api_key",
+        status: "active",
+        credentialEncrypted,
+        grantedScopes: [],
+        expiresAt: null,
+        metadata,
+        updatedBySubjectId: grant.subjectId,
+      });
+      if (!updated) {
+        throw new HTTPException(409, { message: "the Fiken connection changed; retry" });
+      }
+      return c.json(ConnectionResponse.parse({ connection: updated }));
+    }
+    const connection = await createConnection(db, {
+      accountId: grant.accountId,
+      workspaceId,
+      subjectId: null,
+      providerDomain: FIKEN_PROVIDER_DOMAIN,
+      kind: "api_key",
+      credentialEncrypted,
+      grantedScopes: [],
+      expiresAt: null,
+      metadata,
+      createdBySubjectId: grant.subjectId,
+    });
+    return c.json(ConnectionResponse.parse({ connection }), 201);
+  });
+
+  // Fiken OAuth (registered app) start. Both Fiken lanes produce the same
+  // workspace-owned connection shape; this one refreshes through the broker.
+  app.post("/v1/workspaces/:workspaceId/connections/fiken/oauth/start", async (c) => {
+    assertIntegrationsEnabled();
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
+    const payload = FikenOAuthStartRequest.parse(await c.req.json());
+    requireEnvironmentEncryption(settings);
+    return c.json(
+      FikenOAuthStartResponse.parse(
+        await startFikenOAuth(deps, {
+          accountId: grant.accountId,
+          workspaceId,
+          subjectId: grant.subjectId,
+          requestUrl: c.req.url,
+          payload,
+        }),
+      ),
+    );
+  });
+
+  app.get("/v1/integrations/fiken/callback", async (c) => {
+    assertIntegrationsEnabled();
+    const result = await completeFikenOAuthCallback(deps, {
+      ...(c.req.query("code") ? { code: c.req.query("code") } : {}),
+      ...(c.req.query("state") ? { state: c.req.query("state") } : {}),
+      ...(c.req.query("error") ? { error: c.req.query("error") } : {}),
+      requestUrl: c.req.url,
+    });
+    return c.redirect(result.redirectTo, 302);
+  });
+
   app.post("/v1/workspaces/:workspaceId/connections/google-drive/install", async (c) => {
     assertIntegrationsEnabled();
     const workspaceId = c.req.param("workspaceId");
@@ -302,14 +458,111 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
   });
 
-  app.get("/v1/integrations/google-drive/callback", async (c) => {
+  app.post("/v1/workspaces/:workspaceId/connections/atlassian/install", async (c) => {
     assertIntegrationsEnabled();
-    const result = await completeGoogleDriveOAuthCallback(deps, {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
+    const parsed = AtlassianOAuthStartRequest.safeParse(await c.req.json());
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "invalid Atlassian install request" });
+    }
+    return c.json(
+      AtlassianOAuthStartResponse.parse(
+        await startAtlassianOAuth(deps, {
+          accountId: grant.accountId,
+          workspaceId,
+          subjectId: grant.subjectId,
+          requestUrl: c.req.url,
+          payload: parsed.data,
+        }),
+      ),
+    );
+  });
+
+  app.get("/v1/integrations/atlassian/callback", async (c) => {
+    assertIntegrationsEnabled();
+    const result = await completeAtlassianOAuthCallback(deps, {
       ...(c.req.query("code") ? { code: c.req.query("code") } : {}),
       ...(c.req.query("state") ? { state: c.req.query("state") } : {}),
       ...(c.req.query("error") ? { error: c.req.query("error") } : {}),
       requestUrl: c.req.url,
     });
+    return c.redirect(result.redirectTo, 302);
+  });
+
+  app.patch(
+    "/v1/workspaces/:workspaceId/connections/atlassian/:connectionId/lifecycle",
+    async (c) => {
+      assertIntegrationsEnabled();
+      const workspaceId = c.req.param("workspaceId");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
+      const parsed = AtlassianLifecycleActionRequest.safeParse(await c.req.json());
+      if (!parsed.success) {
+        throw new HTTPException(400, { message: "invalid Atlassian lifecycle request" });
+      }
+      return c.json(
+        ConnectionResponse.parse({
+          connection: await transitionAtlassianLifecycle(deps, {
+            workspaceId,
+            subjectId: grant.subjectId,
+            connectionId: c.req.param("connectionId"),
+            payload: parsed.data,
+          }),
+        }),
+      );
+    },
+  );
+
+  app.get("/v1/workspaces/:workspaceId/connections/atlassian/:connectionId/browse", async (c) => {
+    assertIntegrationsEnabled();
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:read");
+    return c.json(
+      await browseAtlassianSources(deps, {
+        workspaceId,
+        subjectId: grant.subjectId,
+        connectionId: c.req.param("connectionId"),
+      }),
+    );
+  });
+
+  app.post("/v1/workspaces/:workspaceId/connections/atlassian/:connectionId/source", async (c) => {
+    assertIntegrationsEnabled();
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "connections:write",
+    );
+    const { grant } = authorization;
+    const connection = await saveAtlassianSources(deps, {
+      accountId: grant.accountId,
+      workspaceId,
+      subjectId: grant.subjectId,
+      grant,
+      connectionId: c.req.param("connectionId"),
+      payload: await c.req.json(),
+      canManageOrganizationDestination:
+        authorization.accountGrant?.permissions.includes("account:admin") === true,
+      canManageWorkspaceDestination: hasPermission(grant.permissions, "workspace:admin"),
+      canManagePersonalDestination:
+        authorization.contextIntegrity && authorization.authenticatedSubjectId === grant.subjectId,
+    });
+    return c.json(ConnectionResponse.parse({ connection }));
+  });
+
+  app.get("/v1/integrations/google-drive/callback", async (c) => {
+    assertIntegrationsEnabled();
+    const input = {
+      ...(c.req.query("code") ? { code: c.req.query("code") } : {}),
+      ...(c.req.query("state") ? { state: c.req.query("state") } : {}),
+      ...(c.req.query("error") ? { error: c.req.query("error") } : {}),
+      requestUrl: c.req.url,
+    };
+    const result = isApiIntegrationProviderOAuthState(input.state, deps.settings)
+      ? await completeApiIntegrationProviderOAuth(deps, input)
+      : await completeGoogleDriveOAuthCallback(deps, input);
     return c.redirect(result.redirectTo, 302);
   });
 
@@ -410,6 +663,8 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const { grant } = authorization;
     const payload = UpdateConnectionRequest.parse(await c.req.json());
     assertNotReservedSlackBotMetadata(payload.metadata);
+    assertNotReservedFikenMetadata(payload.metadata);
+    assertNotReservedApiIntegrationOAuthMetadata(payload.metadata);
     const existing = await getConnectionMetadata(
       db,
       workspaceId,
@@ -486,6 +741,16 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "use the dedicated Google Drive reconnect or source-selection flow",
       });
     }
+    if (existing?.metadata.credentialRole === API_INTEGRATION_OAUTH_CREDENTIAL_ROLE) {
+      throw new HTTPException(422, {
+        message: "use the dedicated Integration provider OAuth flow to update this connection",
+      });
+    }
+    if (existing && AtlassianConnectionMetadata.safeParse(existing.metadata).success) {
+      throw new HTTPException(422, {
+        message: "use the dedicated Atlassian reconnect or source-selection flow",
+      });
+    }
     if (existing) {
       const providerDomain = canonicalProviderDomain(
         payload.providerDomain ?? existing.providerDomain,
@@ -493,6 +758,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       const kind = payload.kind ?? existing.kind;
       assertNotDirectPersonalSlackOAuth(providerDomain, kind);
       assertNotDirectGoogleDriveOAuth(providerDomain, kind, payload.metadata ?? existing.metadata);
+      assertNotDirectAtlassianOAuth(providerDomain, kind, payload.metadata ?? existing.metadata);
     }
     // Status is not a free-form field: revocation goes through DELETE, and the
     // broker owns needs_reauth/error. Reactivating a connection is only
@@ -554,8 +820,14 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       existing.providerDomain === GOOGLE_DRIVE_PROVIDER_DOMAIN &&
       existing.kind === "oauth2" &&
       GoogleDriveConnectionMetadata.safeParse(existing.metadata).success;
+    const isAtlassian =
+      existing.subjectId === grant.subjectId &&
+      existing.providerDomain === ATLASSIAN_PROVIDER_DOMAIN &&
+      existing.kind === "oauth2" &&
+      AtlassianConnectionMetadata.safeParse(existing.metadata).success;
+    const disconnectPayload = await c.req.json().catch(() => null);
     const googleDriveDisconnect = isGoogleDrive
-      ? GoogleDriveDisconnectRequest.safeParse(await c.req.json().catch(() => null))
+      ? GoogleDriveDisconnectRequest.safeParse(disconnectPayload)
       : null;
     if (googleDriveDisconnect && !googleDriveDisconnect.success) {
       throw new HTTPException(400, {
@@ -564,7 +836,16 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           "invalid Google Drive disconnect request",
       });
     }
-    if (existing.status === "revoked" && !isGoogleDrive) {
+    const atlassianDisconnect = isAtlassian
+      ? AtlassianDisconnectRequest.safeParse(disconnectPayload)
+      : null;
+    if (atlassianDisconnect && !atlassianDisconnect.success) {
+      throw new HTTPException(400, {
+        message:
+          atlassianDisconnect.error.issues[0]?.message ?? "invalid Atlassian disconnect request",
+      });
+    }
+    if (existing.status === "revoked" && !isGoogleDrive && !isAtlassian) {
       return c.json(ConnectionResponse.parse({ connection: existing }));
     }
     const connection = isGoogleDrive
@@ -574,18 +855,31 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           connection: existing,
           payload: googleDriveDisconnect!.data,
         })
-      : isOpenGeniSlackBotConnection(existing)
-        ? await revokeConnectionWithSlackBotSuccessAudit(db, {
-            accountId: grant.accountId,
+      : isAtlassian
+        ? await disconnectAtlassian(deps, {
             workspaceId,
             subjectId: grant.subjectId,
-            connectionId,
-            expectedVersion: existing.version,
-            credentialRole: OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
-            credentialLabel: OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
-            slackTeamId: openGeniSlackBotMetadata(existing.metadata)!.slackTeamId,
+            connection: existing,
+            payload: atlassianDisconnect!.data,
           })
-        : await revokeConnection(db, workspaceId, connectionId, grant.subjectId, existing.version);
+        : isOpenGeniSlackBotConnection(existing)
+          ? await revokeConnectionWithSlackBotSuccessAudit(db, {
+              accountId: grant.accountId,
+              workspaceId,
+              subjectId: grant.subjectId,
+              connectionId,
+              expectedVersion: existing.version,
+              credentialRole: OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
+              credentialLabel: OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
+              slackTeamId: openGeniSlackBotMetadata(existing.metadata)!.slackTeamId,
+            })
+          : await revokeConnection(
+              db,
+              workspaceId,
+              connectionId,
+              grant.subjectId,
+              existing.version,
+            );
     if (!connection) {
       throw new HTTPException(409, { message: "connection changed during disconnect; try again" });
     }
@@ -616,6 +910,29 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(OAuthStartResponse.parse(result));
   });
 
+  app.post("/v1/workspaces/:workspaceId/integrations/oauth/start", async (c) => {
+    assertIntegrationsEnabled();
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
+    const parsed = ApiIntegrationOAuthStartRequest.safeParse(await c.req.json());
+    if (!parsed.success) {
+      throw new HTTPException(400, {
+        message: parsed.error.issues[0]?.message ?? "invalid Integration OAuth start request",
+      });
+    }
+    return c.json(
+      OAuthStartResponse.parse(
+        await startApiIntegrationProviderOAuth(deps, {
+          accountId: grant.accountId,
+          workspaceId,
+          subjectId: grant.subjectId,
+          requestUrl: c.req.url,
+          payload: parsed.data,
+        }),
+      ),
+    );
+  });
+
   app.get("/v1/integrations/oauth/callback", async (c) => {
     assertIntegrationsEnabled();
     const result = await completeMcpOAuthCallback(
@@ -626,6 +943,17 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         requestUrl: c.req.url,
       },
     );
+    return c.redirect(result.redirectTo, 302);
+  });
+
+  app.get("/v1/integrations/provider-oauth/callback", async (c) => {
+    assertIntegrationsEnabled();
+    const result = await completeApiIntegrationProviderOAuth(deps, {
+      ...(c.req.query("code") ? { code: c.req.query("code") } : {}),
+      ...(c.req.query("state") ? { state: c.req.query("state") } : {}),
+      ...(c.req.query("error") ? { error: c.req.query("error") } : {}),
+      requestUrl: c.req.url,
+    });
     return c.redirect(result.redirectTo, 302);
   });
 
@@ -916,10 +1244,43 @@ function assertNotDirectGoogleDriveOAuth(
   }
 }
 
+function assertNotDirectAtlassianOAuth(
+  providerDomain: string,
+  kind: string,
+  metadata: Record<string, unknown> | undefined,
+): void {
+  if (
+    (providerDomain === ATLASSIAN_PROVIDER_DOMAIN && kind === "oauth2") ||
+    AtlassianConnectionMetadata.safeParse(metadata).success
+  ) {
+    throw new HTTPException(422, {
+      message: "Atlassian credentials must use the dedicated OAuth connection flow",
+    });
+  }
+}
+
 function assertNotReservedSlackBotMetadata(metadata: Record<string, unknown> | undefined): void {
   if (hasReservedOpenGeniSlackBotMetadata(metadata)) {
     throw new HTTPException(422, {
       message: "OpenGeni Slack bot metadata is reserved for the dedicated connection flow",
+    });
+  }
+}
+
+function assertNotReservedFikenMetadata(metadata: Record<string, unknown> | undefined): void {
+  if (hasReservedFikenMetadata(metadata)) {
+    throw new HTTPException(422, {
+      message: "Fiken connection metadata is reserved for the verified Fiken connect flows",
+    });
+  }
+}
+
+function assertNotReservedApiIntegrationOAuthMetadata(
+  metadata: Record<string, unknown> | undefined,
+): void {
+  if (metadata?.credentialRole === API_INTEGRATION_OAUTH_CREDENTIAL_ROLE) {
+    throw new HTTPException(422, {
+      message: "API Integration OAuth metadata is reserved for the dedicated provider flow",
     });
   }
 }

@@ -312,11 +312,17 @@ const SettingsSchema = z.object({
   integrationsStateSecret: z.string().optional(),
   integrationsAllowPrivateNetworkTargets: EnvBoolean.default(false),
   integrationsOauthClientsJson: z.string().default("{}"),
+  gmailRestAdapterEnabled: EnvBoolean.default(false),
   slackClientId: z.string().optional(),
   slackClientSecret: z.string().optional(),
   slackSigningSecret: z.string().optional(),
   googleDriveClientId: z.string().optional(),
   googleDriveClientSecret: z.string().optional(),
+  fikenClientId: z.string().optional(),
+  fikenClientSecret: z.string().optional(),
+  googleDriveWorkspaceEventsEnabled: EnvBoolean.optional(),
+  atlassianClientId: z.string().optional(),
+  atlassianClientSecret: z.string().optional(),
   // Undefined is meaningful: the migration boundary persists the product
   // default of 3 when no deployment override is supplied.
   maxNestedAgentDepth: z.coerce.number().int().nonnegative().max(MAX_NESTED_AGENT_DEPTH).optional(),
@@ -647,17 +653,16 @@ const SettingsSchema = z.object({
   // SOONER than the hard lifetime; the boot invariant forbids a value that would
   // reap before reaperPeriod + idleGrace elapses.
   modalIdleTimeoutSeconds: z.coerce.number().int().positive().optional(),
-  // /workspace FILE PERSISTENCE across warm/cold cycles. Defaults to
-  // `snapshot_filesystem` so EVERY box is created persistence-capable: the reaper
-  // snapshots the live box before it terminates a drained group, and a later
-  // cold-restore hydrates a fresh box from that snapshot (sandbox-file-persistence).
-  // `snapshot_filesystem` requires the manifest declare NO ephemeralPersistencePaths
-  // (buildManifest never sets entry.ephemeral, so it never downgrades to tar). Set
-  // OPENGENI_MODAL_WORKSPACE_PERSISTENCE=tar to opt back out (no native snapshot;
-  // the reaper persists a tar archive — same store+hydrate plumbing, slower).
+  // /workspace FILE PERSISTENCE across warm/cold cycles. Directory snapshots
+  // preserve only the durable user workspace, so provider recovery does not
+  // restore an entire machine image or replace the selected rig/base image.
+  // Existing serialized sessions retain their original persistence mode and
+  // remain recoverable; this default governs newly created Modal sandboxes.
+  // `snapshot_filesystem` remains available for explicit compatibility and
+  // immutable rig-image materialization. `tar` is the portable fallback.
   modalWorkspacePersistence: z
     .enum(["tar", "snapshot_filesystem", "snapshot_directory"])
-    .default("snapshot_filesystem"),
+    .default("snapshot_directory"),
   // Shared desktop toggle: this module reads it for the 6080 port-merge; the
   // owner module (P4.x) acts on it to launch the display stack.
   sandboxDesktopEnabled: EnvBoolean.default(false),
@@ -736,6 +741,14 @@ const SettingsSchema = z.object({
   // --- cloudflare (headless) ---
   cloudflareWorkerUrl: z.string().url().optional(),
   cloudflareApiKey: z.string().optional(),
+  // --- remote browser placements ---
+  // Provider credentials are injected only into the placement-resident
+  // browserd launch. They never enter session contracts, journals, or sandboxes.
+  browserbaseApiKey: z.string().min(1).max(8192).optional(),
+  kernelApiKey: z.string().min(1).max(8192).optional(),
+  kernelEndpoint: z.string().url().optional(),
+  kernelBrowserTimeoutSeconds: z.coerce.number().int().positive().max(86_400).default(3_600),
+  kernelBrowserStealth: EnvBoolean.default(false),
   // --- vercel (headless) ---
   vercelToken: z.string().optional(),
   vercelProjectId: z.string().optional(),
@@ -1875,11 +1888,17 @@ export function getSettings(): Settings {
       "OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS",
     ),
     integrationsOauthClientsJson: optional("OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON"),
+    gmailRestAdapterEnabled: optional("OPENGENI_GMAIL_REST_ADAPTER_ENABLED"),
     slackClientId: optional("OPENGENI_SLACK_CLIENT_ID"),
     slackClientSecret: optional("OPENGENI_SLACK_CLIENT_SECRET"),
     slackSigningSecret: optional("OPENGENI_SLACK_SIGNING_SECRET"),
     googleDriveClientId: optional("OPENGENI_GOOGLE_DRIVE_CLIENT_ID"),
     googleDriveClientSecret: optional("OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET"),
+    fikenClientId: optional("OPENGENI_FIKEN_OAUTH_CLIENT_ID"),
+    fikenClientSecret: optional("OPENGENI_FIKEN_OAUTH_CLIENT_SECRET"),
+    googleDriveWorkspaceEventsEnabled: optional("OPENGENI_GOOGLE_DRIVE_WORKSPACE_EVENTS_ENABLED"),
+    atlassianClientId: optional("OPENGENI_ATLASSIAN_CLIENT_ID"),
+    atlassianClientSecret: optional("OPENGENI_ATLASSIAN_CLIENT_SECRET"),
     maxNestedAgentDepth: optional("OPENGENI_MAX_NESTED_AGENT_DEPTH"),
     socialOauthClientsJson: optional("OPENGENI_SOCIAL_OAUTH_CLIENTS_JSON"),
     goalMaxAutoContinuations: optional("OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS"),
@@ -2033,6 +2052,11 @@ export function getSettings(): Settings {
     blaxelTtl: optional("OPENGENI_BLAXEL_TTL"),
     cloudflareWorkerUrl: optional("OPENGENI_CLOUDFLARE_WORKER_URL"),
     cloudflareApiKey: optional("OPENGENI_CLOUDFLARE_API_KEY"),
+    browserbaseApiKey: optional("OPENGENI_BROWSERBASE_API_KEY"),
+    kernelApiKey: optional("OPENGENI_KERNEL_API_KEY"),
+    kernelEndpoint: optional("OPENGENI_KERNEL_ENDPOINT"),
+    kernelBrowserTimeoutSeconds: optional("OPENGENI_KERNEL_BROWSER_TIMEOUT_SECONDS"),
+    kernelBrowserStealth: optional("OPENGENI_KERNEL_BROWSER_STEALTH"),
     vercelToken: optional("OPENGENI_VERCEL_TOKEN"),
     vercelProjectId: optional("OPENGENI_VERCEL_PROJECT_ID"),
     vercelTeamId: optional("OPENGENI_VERCEL_TEAM_ID"),
@@ -4599,6 +4623,31 @@ function validateSettings(settings: Settings): void {
       "OPENGENI_GOOGLE_DRIVE_CLIENT_ID and OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET must be configured together",
     );
   }
+  if (Boolean(settings.fikenClientId) !== Boolean(settings.fikenClientSecret)) {
+    throw new Error(
+      "OPENGENI_FIKEN_OAUTH_CLIENT_ID and OPENGENI_FIKEN_OAUTH_CLIENT_SECRET must be configured together",
+    );
+  }
+  if (settings.fikenClientId) {
+    if (!settings.publicBaseUrl) {
+      throw new Error(
+        "OPENGENI_PUBLIC_BASE_URL is required when the Fiken OAuth integration is configured",
+      );
+    }
+    if (
+      !settings.publicBaseUrl.startsWith("https://") &&
+      !["local", "test"].includes(settings.environment)
+    ) {
+      throw new Error(
+        "OPENGENI_PUBLIC_BASE_URL must use https when the Fiken OAuth integration is configured outside local/test",
+      );
+    }
+    if (!settings.integrationsStateSecret) {
+      throw new Error(
+        "OPENGENI_INTEGRATIONS_STATE_SECRET is required when the Fiken OAuth integration is configured",
+      );
+    }
+  }
   if (settings.googleDriveClientId) {
     if (!settings.publicBaseUrl) {
       throw new Error(
@@ -4616,6 +4665,31 @@ function validateSettings(settings: Settings): void {
     if (!settings.integrationsStateSecret) {
       throw new Error(
         "OPENGENI_INTEGRATIONS_STATE_SECRET is required when the Google Drive integration is configured",
+      );
+    }
+  }
+  if (Boolean(settings.atlassianClientId) !== Boolean(settings.atlassianClientSecret)) {
+    throw new Error(
+      "OPENGENI_ATLASSIAN_CLIENT_ID and OPENGENI_ATLASSIAN_CLIENT_SECRET must be configured together",
+    );
+  }
+  if (settings.atlassianClientId) {
+    if (!settings.publicBaseUrl) {
+      throw new Error(
+        "OPENGENI_PUBLIC_BASE_URL is required when the Atlassian integration is configured",
+      );
+    }
+    if (
+      !settings.publicBaseUrl.startsWith("https://") &&
+      !["local", "test"].includes(settings.environment)
+    ) {
+      throw new Error(
+        "OPENGENI_PUBLIC_BASE_URL must use https when the Atlassian integration is configured outside local/test",
+      );
+    }
+    if (!settings.integrationsStateSecret) {
+      throw new Error(
+        "OPENGENI_INTEGRATIONS_STATE_SECRET is required when the Atlassian integration is configured",
       );
     }
   }

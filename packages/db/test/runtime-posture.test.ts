@@ -13,6 +13,7 @@ import {
   RUNTIME_TABLE_PRIVILEGES,
   type RuntimeDatabasePosture,
   type RuntimeDatabasePostureOptions,
+  type RuntimeTablePosture,
 } from "../src/runtime-posture";
 
 const options: RuntimeDatabasePostureOptions = {
@@ -25,6 +26,26 @@ const options: RuntimeDatabasePostureOptions = {
   },
   protectedNoDirectDmlTables: [],
 };
+
+function knowledgeAuthorityTables(): RuntimeTablePosture[] {
+  return ["knowledge_sources", "knowledge_source_objects"].map((name) => ({
+    name,
+    owner: "opengeni_migrator",
+    rlsEnabled: false,
+    rlsForced: false,
+    rlsActive: false,
+    policyCount: 0,
+    artifactOutboxDispatcherPolicy: false,
+    artifactMaterializerPolicy: false,
+    select: false,
+    insert: false,
+    update: false,
+    delete: false,
+    truncate: false,
+    references: false,
+    trigger: false,
+  }));
+}
 
 function safePosture(): RuntimeDatabasePosture {
   return {
@@ -78,6 +99,23 @@ function safePosture(): RuntimeDatabasePosture {
         references: false,
         trigger: false,
       },
+      ...knowledgeAuthorityTables(),
+    ],
+    targetRoutines: [
+      {
+        name: "knowledge_source_sync_lock_authority(uuid, uuid, uuid)",
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+      },
+      {
+        name: "ensure_managed_human_personal_workspace(uuid, text, uuid)",
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+      },
     ],
     privateRoutines: [
       {
@@ -106,25 +144,25 @@ describe("runtime database posture evaluator", () => {
         .sort();
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 192],
+            [FORCE_RLS_TABLES, 215],
             [NON_RLS_RUNTIME_TABLES, 11],
-            [RUNTIME_FULL_DML_TABLES, 123],
+            [RUNTIME_FULL_DML_TABLES, 130],
             [RUNTIME_READ_ONLY_TABLES, 14],
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 41],
-            [RUNTIME_READ_INSERT_UPDATE_TABLES, 17],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 7],
-            [RUNTIME_DML_TABLES, 196],
+            [RUNTIME_READ_INSERT_UPDATE_TABLES, 29],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 11],
+            [RUNTIME_DML_TABLES, 215],
           ] as const)
         : ([
-            [FORCE_RLS_TABLES, 164],
+            [FORCE_RLS_TABLES, 168],
             [NON_RLS_RUNTIME_TABLES, 11],
-            [RUNTIME_FULL_DML_TABLES, 117],
+            [RUNTIME_FULL_DML_TABLES, 106],
             [RUNTIME_READ_ONLY_TABLES, 13],
             [readUpdateTables, 0],
             [RUNTIME_READ_INSERT_TABLES, 37],
-            [RUNTIME_READ_INSERT_UPDATE_TABLES, 1],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 7],
+            [RUNTIME_READ_INSERT_UPDATE_TABLES, 12],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 11],
             [RUNTIME_DML_TABLES, 168],
           ] as const);
       for (const [tables, length] of contracts) {
@@ -134,7 +172,7 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = hasCurrentMainActivityLedger ? 203 : 175;
+      const tableCount = hasCurrentMainActivityLedger ? 226 : 179;
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount,
       );
@@ -158,6 +196,11 @@ describe("runtime database posture evaluator", () => {
         "DELETE",
       ]);
       if (hasCurrentMainActivityLedger) {
+        expect(RUNTIME_TABLE_PRIVILEGES.browser_state_uploads).toEqual([
+          "SELECT",
+          "INSERT",
+          "UPDATE",
+        ]);
         expect(RUNTIME_TABLE_PRIVILEGES.editable_artifact_session_links).toEqual([
           "SELECT",
           "INSERT",
@@ -188,15 +231,15 @@ describe("runtime database posture evaluator", () => {
     }
 
     const contracts = [
-      [FORCE_RLS_TABLES, 189],
+      [FORCE_RLS_TABLES, 197],
       [NON_RLS_RUNTIME_TABLES, 11],
-      [RUNTIME_FULL_DML_TABLES, 120],
+      [RUNTIME_FULL_DML_TABLES, 128],
       [RUNTIME_READ_ONLY_TABLES, 14],
       [RUNTIME_READ_UPDATE_TABLES, 1],
       [RUNTIME_READ_INSERT_TABLES, 41],
-      [RUNTIME_READ_INSERT_UPDATE_TABLES, 17],
-      [PROTECTED_NO_DIRECT_DML_TABLES, 7],
-      [RUNTIME_DML_TABLES, 193],
+      [RUNTIME_READ_INSERT_UPDATE_TABLES, 18],
+      [PROTECTED_NO_DIRECT_DML_TABLES, 11],
+      [RUNTIME_DML_TABLES, 202],
     ] as const;
     for (const [tables, length] of contracts) {
       expect(tables).toHaveLength(length);
@@ -205,8 +248,8 @@ describe("runtime database posture evaluator", () => {
     }
 
     expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-    expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(200);
-    expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(200);
+    expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(213);
+    expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(208);
     expect(RUNTIME_TABLE_PRIVILEGES.editable_artifact_session_links).toEqual([
       "SELECT",
       "INSERT",
@@ -236,6 +279,49 @@ describe("runtime database posture evaluator", () => {
 
   test("accepts the exact least-privilege FORCE-RLS contract", () => {
     expect(evaluateRuntimeDatabasePosture(safePosture(), options)).toEqual([]);
+  });
+
+  test("accepts public-schema authority owned by the two protected tables", () => {
+    const posture = safePosture();
+    posture.schemas[0]!.owner = "pg_database_owner";
+
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+  });
+
+  test("keeps dedicated-schema same-owner authority accepted", () => {
+    const posture = safePosture();
+    posture.schemas[0]!.name = "tenantx";
+
+    expect(
+      evaluateRuntimeDatabasePosture(posture, {
+        ...options,
+        targetSchema: "tenantx",
+      }),
+    ).toEqual([]);
+  });
+
+  test("fails closed on missing or split knowledge authority table ownership", () => {
+    const missing = safePosture();
+    missing.tables = missing.tables.filter((table) => table.name !== "knowledge_source_objects");
+    expect(evaluateRuntimeDatabasePosture(missing, options)).toContain(
+      "target-schema runtime capability knowledge_source_sync_lock_authority(uuid, uuid, uuid) authority tables are missing: knowledge_source_objects",
+    );
+
+    const split = safePosture();
+    split.tables.find((table) => table.name === "knowledge_source_objects")!.owner =
+      "another_owner";
+    expect(evaluateRuntimeDatabasePosture(split, options)).toContain(
+      "target-schema runtime capability knowledge_source_sync_lock_authority(uuid, uuid, uuid) authority table owners do not match: knowledge_sources=opengeni_migrator, knowledge_source_objects=another_owner",
+    );
+  });
+
+  test("rejects knowledge authority routine and table owner mismatch", () => {
+    const posture = safePosture();
+
+    posture.targetRoutines[0]!.owner = "another_owner";
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "target-schema runtime capability knowledge_source_sync_lock_authority(uuid, uuid, uuid) owner another_owner does not match authority table owner opengeni_migrator",
+    );
   });
 
   test("rejects bypass, inheritance, ownership, memberships, and inactive RLS", () => {
@@ -343,6 +429,35 @@ describe("runtime database posture evaluator", () => {
     );
   });
 
+  test("accepts one explicit deny-all policy for protected no-DML tables", () => {
+    const posture = safePosture();
+    posture.tables = [
+      {
+        ...posture.tables[0]!,
+        name: "organization_memberships",
+        policyCount: 1,
+        select: false,
+        insert: false,
+        update: false,
+        delete: false,
+      },
+      ...knowledgeAuthorityTables(),
+    ];
+    const inertOptions: RuntimeDatabasePostureOptions = {
+      ...options,
+      protectedTables: ["organization_memberships"],
+      tablePrivileges: {},
+      protectedNoDirectDmlTables: ["organization_memberships"],
+    };
+
+    expect(evaluateRuntimeDatabasePosture(posture, inertOptions)).toEqual([]);
+
+    posture.tables[0]!.policyCount = 0;
+    expect(evaluateRuntimeDatabasePosture(posture, inertOptions)).toContain(
+      "table organization_memberships has no RLS policy",
+    );
+  });
+
   test("rejects a protected table without an explicit privilege class", () => {
     expect(
       evaluateRuntimeDatabasePosture(safePosture(), {
@@ -350,6 +465,31 @@ describe("runtime database posture evaluator", () => {
         tablePrivileges: {},
       }),
     ).toContain("protected tables lack an explicit privilege class: tenant_rows");
+  });
+
+  test("requires the exact least-privilege target-schema knowledge authority lock", () => {
+    const missing = safePosture();
+    missing.targetRoutines = [];
+    expect(evaluateRuntimeDatabasePosture(missing, options)).toContain(
+      "target-schema runtime capability knowledge_source_sync_lock_authority(uuid, uuid, uuid) is missing or ambiguous",
+    );
+
+    const invalid = safePosture();
+    invalid.targetRoutines[0] = {
+      ...invalid.targetRoutines[0]!,
+      owner: "another_owner",
+      execute: false,
+      publicExecute: true,
+      securityDefiner: false,
+    };
+    expect(evaluateRuntimeDatabasePosture(invalid, options)).toEqual(
+      expect.arrayContaining([
+        "target-schema runtime capability knowledge_source_sync_lock_authority(uuid, uuid, uuid) is not SECURITY DEFINER",
+        "target-schema runtime capability knowledge_source_sync_lock_authority(uuid, uuid, uuid) owner another_owner does not match authority table owner opengeni_migrator",
+        "runtime role lacks target-schema capability knowledge_source_sync_lock_authority(uuid, uuid, uuid)",
+        "PUBLIC has forbidden target-schema capability knowledge_source_sync_lock_authority(uuid, uuid, uuid)",
+      ]),
+    );
   });
 
   test("requires a same-owner SECURITY DEFINER artifact outbox dispatcher path", () => {
@@ -387,7 +527,9 @@ describe("runtime database posture evaluator", () => {
     };
     expect(evaluateRuntimeDatabasePosture(posture, artifactOptions)).toEqual([]);
 
-    posture.tables[1]!.artifactOutboxDispatcherPolicy = false;
+    posture.tables.find(
+      (table) => table.name === "editable_artifact_live_outbox",
+    )!.artifactOutboxDispatcherPolicy = false;
     posture.privateRoutines[1]!.securityDefiner = false;
     posture.privateRoutines[2]!.owner = "another_owner";
     expect(evaluateRuntimeDatabasePosture(posture, artifactOptions)).toEqual(
@@ -438,11 +580,14 @@ describe("runtime database posture evaluator", () => {
       "editable_artifact_versions",
       "editable_artifact_idempotency_receipts",
     ];
-    posture.tables = materializerTables.map((name) => ({
-      ...posture.tables[0]!,
-      name,
-      artifactMaterializerPolicy: true,
-    }));
+    posture.tables = [
+      ...materializerTables.map((name) => ({
+        ...posture.tables[0]!,
+        name,
+        artifactMaterializerPolicy: true,
+      })),
+      ...knowledgeAuthorityTables(),
+    ];
     for (const name of [
       "claim_editable_artifact_materializations(text, integer, integer, name)",
       "renew_editable_artifact_materialization(uuid, uuid, text, text, text, integer, integer, name)",

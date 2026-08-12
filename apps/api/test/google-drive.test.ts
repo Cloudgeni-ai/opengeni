@@ -20,6 +20,7 @@ import {
   listConnectionsMetadata,
   listScheduledTasks,
   loadConnectionCredentialForBroker,
+  migrate,
   type DbClient,
 } from "@opengeni/db";
 import {
@@ -27,7 +28,9 @@ import {
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
+import postgres from "postgres";
 import { createApp } from "../src/app";
+import { wakeGoogleDriveSourcesFromWorkspaceEvent } from "../src/integrations/google-drive";
 
 const DELEGATION_SECRET = "google-drive-delegation-secret";
 const STATE_SECRET = "google-drive-state-secret";
@@ -39,14 +42,33 @@ let shared: SharedTestDatabase | null = null;
 let client: DbClient;
 let settings: Settings;
 
+async function acquireDatabase(): Promise<SharedTestDatabase | null> {
+  const adminUrl = process.env.OPENGENI_TEST_POSTGRES_ADMIN_URL;
+  const appUrl = process.env.OPENGENI_TEST_POSTGRES_APP_URL;
+  if (!adminUrl && !appUrl) return await acquireSharedTestDatabase("api_google_drive");
+  if (!adminUrl || !appUrl) {
+    throw new Error(
+      "OPENGENI_TEST_POSTGRES_ADMIN_URL and OPENGENI_TEST_POSTGRES_APP_URL must be set together",
+    );
+  }
+  const admin = postgres(adminUrl, { max: 4 });
+  return {
+    admin,
+    adminUrl,
+    appUrl,
+    release: async () => await admin.end().catch(() => undefined),
+  };
+}
+
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("api_google_drive");
+  shared = await acquireDatabase();
   if (!shared) {
     available = false;
     // eslint-disable-next-line no-console
     console.warn("[google-drive] docker unavailable, skipping");
     return;
   }
+  await migrate(shared.adminUrl);
   client = createDb(shared.appUrl);
   settings = testSettings({
     productAccessMode: "managed",
@@ -530,6 +552,105 @@ describe("Google Drive local source preview", () => {
       select id from documents where workspace_id = ${workspace.workspaceId}
     `,
     ).toHaveLength(0);
+  });
+
+  test("keeps Workspace Events default-off and emits deterministic wake-only provider events", async () => {
+    if (!available) return;
+    expect(
+      await wakeGoogleDriveSourcesFromWorkspaceEvent(
+        {
+          settings,
+        } as never,
+        {
+          accountId: crypto.randomUUID(),
+          workspaceId: crypto.randomUUID(),
+          connectionId: crypto.randomUUID(),
+          connectionOwnerSubjectId: "subject-a",
+          eventId: "event-disabled",
+          driveId: null,
+        },
+      ),
+    ).toEqual({ enabled: false, triggered: 0 });
+
+    const workspace = await freshWorkspace();
+    const google = googleFixture();
+    const connected = await connect(workspace, google);
+    const authorization = await bearer(workspace, "subject-a", [
+      "connections:read",
+      "connections:write",
+      "workspace:admin",
+    ]);
+    const save = await app(google.fetch).request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/${connected.connection.id}/source`,
+      {
+        method: "POST",
+        headers: {
+          authorization,
+          "content-type": "application/json",
+          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+        },
+        body: JSON.stringify({
+          sources: [
+            {
+              id: "folder-1",
+              name: "Product",
+              mimeType: "application/vnd.google-apps.folder",
+              driveId: null,
+            },
+          ],
+          destination: { authorityKind: "workspace", collectionId: null },
+          syncCadence: "hourly",
+          syncEnabled: true,
+          readPolicy: "allow",
+        }),
+      },
+    );
+    expect(save.status).toBe(200);
+
+    const triggered: Array<{
+      taskId: string;
+      triggerWorkflowId: string;
+      agentRunUsageIdempotencyKey: string;
+      triggerType: string | undefined;
+    }> = [];
+    const deps = {
+      settings: { ...settings, googleDriveWorkspaceEventsEnabled: true },
+      db: client.db,
+      workflowClient: {
+        triggerScheduledTask: async (input: {
+          task: { id: string };
+          triggerWorkflowId: string;
+          agentRunUsageIdempotencyKey: string;
+          triggerType?: string;
+        }) => {
+          triggered.push({
+            taskId: input.task.id,
+            triggerWorkflowId: input.triggerWorkflowId,
+            agentRunUsageIdempotencyKey: input.agentRunUsageIdempotencyKey,
+            triggerType: input.triggerType,
+          });
+        },
+      },
+    } as never;
+    const input = {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      connectionId: connected.connection.id,
+      connectionOwnerSubjectId: "subject-a",
+      eventId: "workspace-event-1",
+      driveId: null,
+    };
+    expect(await wakeGoogleDriveSourcesFromWorkspaceEvent(deps, input)).toEqual({
+      enabled: true,
+      triggered: 1,
+    });
+    expect(await wakeGoogleDriveSourcesFromWorkspaceEvent(deps, input)).toEqual({
+      enabled: true,
+      triggered: 1,
+    });
+    expect(triggered).toHaveLength(2);
+    expect(triggered[0]).toEqual(triggered[1]);
+    expect(triggered[0]).toMatchObject({ triggerType: "provider_event" });
   });
 
   test("schedule deletion durably disables sync until the initiating subject explicitly re-enables it", async () => {

@@ -436,7 +436,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     // Creation has committed by this point. Keep response projection outside
     // the create-rejection boundary so a post-commit policy read cannot be
     // misreported as though the session itself was rejected.
-    return c.json(await withEffectivePolicy(deps, workspaceId, session), 202);
+    return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session), 202);
   });
 
   app.get("/v1/workspaces/:workspaceId/new-session-draft", async (c) => {
@@ -540,7 +540,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     // body for older clients while still making its older-pin omission visible
     // to raw HTTP consumers without changing that response shape.
     c.header("x-opengeni-pinned-truncated", page.pinnedTruncated === true ? "true" : "false");
-    const policy = await loadEffectivePolicyContext(deps, workspaceId);
+    const policy = await loadEffectivePolicyContext(deps, workspaceId, grant.subjectId);
     const decorate = (session: Session): Session =>
       sessionWithEffectiveToolPolicy(
         session,
@@ -656,7 +656,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (!session) {
       throw new HTTPException(404, { message: "session not found" });
     }
-    return c.json(await withEffectivePolicy(deps, workspaceId, session));
+    return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
   });
 
   const publishRealtimeMutation = async (
@@ -1180,6 +1180,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         await withEffectivePolicy(
           deps,
           workspaceId,
+          grant.subjectId,
           projectSessionForRelatedAccess(session, relatedSessionAccessFor(c)),
         ),
       );
@@ -1204,7 +1205,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const lineage = await readSessionLineage(deps, grant, c.req.param("sessionId"));
-    const policy = await loadEffectivePolicyContext(deps, workspaceId);
+    const policy = await loadEffectivePolicyContext(deps, workspaceId, grant.subjectId);
     return c.json({
       ...lineage,
       ancestors: lineage.ancestors.map((session) =>
@@ -1306,7 +1307,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (!session) {
       throw new HTTPException(404, { message: "session not found" });
     }
-    return c.json(await withEffectivePolicy(deps, workspaceId, session));
+    return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
   });
 
   app.patch(
@@ -1344,7 +1345,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const payload = UpdateSessionToolPolicyRequest.parse(await c.req.json().catch(() => null));
     try {
       const session = await updateSessionToolPolicy(deps, grant, sessionId, payload);
-      return c.json(await withEffectivePolicy(deps, workspaceId, session));
+      return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
     } catch (error) {
       if (error instanceof SessionToolPolicyVersionConflictError) {
         return c.json(
@@ -2493,7 +2494,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       terminalUrl: terminal?.url ?? null,
       terminalToken: terminal?.token ?? null,
       terminalExpiresAt: terminal?.expiresAt ?? null,
-      terminalTransport: terminal ? ("pty-ws" as const) : null,
+      terminalTransport: terminal?.transport ?? null,
     } satisfies AttachViewerResponse;
     return c.json(response, 201);
   });
@@ -3571,10 +3572,11 @@ type EffectivePolicyContext = {
 async function loadEffectivePolicyContext(
   deps: ApiRouteDeps,
   workspaceId: string,
+  subjectId: string,
 ): Promise<EffectivePolicyContext> {
   const [workspaceServerIds, workspaceDefaultServerIds] = await Promise.all([
-    workspaceSessionToolPolicyServerIds(deps.db, workspaceId, deps.settings),
-    workspaceSessionToolPolicyDefaultServerIds(deps.db, workspaceId, deps.settings),
+    workspaceSessionToolPolicyServerIds(deps.db, workspaceId, deps.settings, subjectId),
+    workspaceSessionToolPolicyDefaultServerIds(deps.db, workspaceId, deps.settings, subjectId),
   ]);
   return { workspaceServerIds, workspaceDefaultServerIds };
 }
@@ -3582,9 +3584,10 @@ async function loadEffectivePolicyContext(
 async function withEffectivePolicy(
   deps: ApiRouteDeps,
   workspaceId: string,
+  subjectId: string,
   session: Session,
 ): Promise<Session> {
-  const policy = await loadEffectivePolicyContext(deps, workspaceId);
+  const policy = await loadEffectivePolicyContext(deps, workspaceId, subjectId);
   return sessionWithEffectiveToolPolicy(
     session,
     policy.workspaceServerIds,

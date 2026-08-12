@@ -61,7 +61,6 @@ import {
   getSession,
   SessionIdConflictError,
   getSessionSpawnDenialByIdempotencyKey,
-  getSessionEvent,
   getWorkspaceControlEvent,
   getSessionLineage,
   getSessionTurn,
@@ -541,7 +540,10 @@ export async function createAndStartSessionWithOutcome(input: {
   requestedSessionId?: string;
   db: Database;
   bus: EventBus;
-  workflowClient: SessionWorkflowClient;
+  workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
+  /** Internal database-only composition seam. The exact session shell and this
+   * linkage commit together before its first event/turn can be initialized. */
+  beforeCreateCommit?: (tx: Database, sessionId: string) => Promise<void>;
   accountId: string;
   workspaceId: string;
   initialMessage: string;
@@ -679,6 +681,7 @@ export async function createAndStartSessionWithOutcome(input: {
       maxNestedAgentDepthOverride: input.maxNestedAgentDepthOverride ?? null,
       allowNestedAgentDepthIncrease: input.allowNestedAgentDepthIncrease ?? false,
       subjectId: input.subjectId ?? null,
+      ...(input.beforeCreateCommit ? { beforeCreateCommit: input.beforeCreateCommit } : {}),
     });
     if (keyedResult.denied) {
       throw new SessionSpawnDeniedError(SessionSpawnDenial.parse(keyedResult.denial));
@@ -737,6 +740,7 @@ export async function createAndStartSessionWithOutcome(input: {
       maxNestedAgentDepthOverride: input.maxNestedAgentDepthOverride ?? null,
       allowNestedAgentDepthIncrease: input.allowNestedAgentDepthIncrease ?? false,
       subjectId: input.subjectId ?? null,
+      ...(input.beforeCreateCommit ? { beforeCreateCommit: input.beforeCreateCommit } : {}),
     });
   } catch (error) {
     if (error instanceof SessionSpawnDeniedDbError) {
@@ -770,7 +774,7 @@ async function finishStartSession(
   input: {
     db: Database;
     bus: EventBus;
-    workflowClient: SessionWorkflowClient;
+    workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
     initialMessage: string;
     deferInitialTurn?: boolean;
     turnInstructions?: string | null;
@@ -1074,6 +1078,8 @@ export async function postUserMessageTurn(input: {
   expectedDraftRevision?: number | null;
   reasoningEffortFallback?: Settings["openaiReasoningEffort"];
   turnExecutionPolicy: TurnExecutionPolicyV1;
+  recordAgentRunUsage?: boolean;
+  schedulePostCommit?: (task: () => Promise<void>) => void;
 }): Promise<{
   accepted: SessionEvent;
   turn: SessionTurn;
@@ -1137,6 +1143,9 @@ export async function postUserMessageTurn(input: {
                 input.reasoningEffortFallback ?? settings.openaiReasoningEffort,
               turnExecutionPolicy: input.turnExecutionPolicy,
               source: input.origin === "operator" ? "api" : "user",
+              ...(input.recordAgentRunUsage !== undefined
+                ? { recordAgentRunUsage: input.recordAgentRunUsage }
+                : {}),
               personalConnectionDelegations: input.personalConnectionDelegations ?? [],
               mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
             }),
@@ -1157,56 +1166,65 @@ export async function postUserMessageTurn(input: {
     }
     throw error;
   }
-  const events = await Promise.all(
-    result.eventIds.map((eventId) => getSessionEvent(db, workspaceId, eventId)),
-  );
-  if (events.some((event) => event === null)) {
-    throw new Error("Committed prompt events could not be reloaded");
-  }
-  const turn = await getSessionTurn(db, workspaceId, result.turnId);
-  if (!turn) throw new Error("Committed prompt turn could not be reloaded");
-  const accepted = events.find((event) => event?.id === result.acceptedEventId);
-  if (!accepted) throw new Error("Committed user.message event could not be reloaded");
-  await publishDurableSessionEvents(
-    bus,
-    workspaceId,
-    sessionId,
-    events.filter((event): event is SessionEvent => event !== null),
-  );
-  if (result.workspaceControlEventId) {
-    const controlEvent = await getWorkspaceControlEvent(
-      db,
-      workspaceId,
-      result.workspaceControlEventId,
-    );
-    if (!controlEvent) {
-      throw new Error(
-        `Committed workspace control event disappeared: ${result.workspaceControlEventId}`,
-      );
+  const postCommitTask = async () => {
+    try {
+      await publishDurableSessionEvents(bus, workspaceId, sessionId, result.events);
+      if (result.workspaceControlEventId) {
+        const controlEvent = await getWorkspaceControlEvent(
+          db,
+          workspaceId,
+          result.workspaceControlEventId,
+        );
+        if (!controlEvent) {
+          throw new Error(
+            `Committed workspace control event disappeared: ${result.workspaceControlEventId}`,
+          );
+        }
+        await publishDurableWorkspaceControlEvent(bus, workspaceId, controlEvent);
+      }
+    } catch {
+      console.warn("[sessions] prompt event fanout failed; durable rows remain replayable", {
+        errorClass: "PromptEventFanoutOperationError",
+        errorCode: "session_prompt_event_fanout_failed",
+        origin: "core",
+      });
     }
-    await publishDurableWorkspaceControlEvent(bus, workspaceId, controlEvent);
-  }
-  try {
-    await workflowClient.wakeSessionWorkflow({
-      accountId,
-      workspaceId,
-      sessionId,
-      workflowId: turn.temporalWorkflowId,
-      wakeRevision: result.wakeRevision,
-      ...((input.delivery ?? "send") === "steer" || result.interruptionCount > 0
-        ? { interruptionRequested: true }
-        : {}),
+    try {
+      await workflowClient.wakeSessionWorkflow({
+        accountId,
+        workspaceId,
+        sessionId,
+        workflowId: result.turn.temporalWorkflowId,
+        wakeRevision: result.wakeRevision,
+        ...((input.delivery ?? "send") === "steer" || result.interruptionCount > 0
+          ? { interruptionRequested: true }
+          : {}),
+      });
+    } catch {
+      console.warn("[sessions] workflow wake failed; durable outbox will retry", {
+        errorClass: "WorkflowWakeOperationError",
+        errorCode: "session_workflow_wake_failed",
+        origin: "core",
+      });
+    }
+  };
+  const schedulePostCommit =
+    input.schedulePostCommit ??
+    ((task: () => Promise<void>) => {
+      void task();
     });
+  try {
+    schedulePostCommit(postCommitTask);
   } catch {
-    console.warn("[sessions] workflow wake failed; durable outbox will retry", {
-      errorClass: "WorkflowWakeOperationError",
-      errorCode: "session_workflow_wake_failed",
+    console.warn("[sessions] prompt post-commit scheduling failed; durable recovery remains", {
+      errorClass: "PromptPostCommitScheduleError",
+      errorCode: "session_prompt_post_commit_schedule_failed",
       origin: "core",
     });
   }
   return {
-    accepted,
-    turn,
+    accepted: result.accepted,
+    turn: result.turn,
     interruptionCount: result.interruptionCount,
     replay: result.replay,
   };
@@ -1286,6 +1304,7 @@ export async function createSessionForRequestWithOutcome(
     db,
     workspaceId,
     settings,
+    { subjectId: grant.subjectId },
   );
   const sessionMcpServers = hasOwnProperty(rawPayload, "mcpServers")
     ? validateSessionMcpServersForCreate(capabilityRuntimeSettings, grant, payload.mcpServers)
@@ -2007,7 +2026,9 @@ export async function acceptSessionUserMessageWithOutcome(
     session: existingSession,
     updates: input.mcpCredentialUpdates ?? [],
   });
-  const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(db, workspaceId, settings);
+  const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(db, workspaceId, settings, {
+    subjectId: grant.subjectId,
+  });
   const personalConnectionDelegations = await freezePersonalConnectionDelegations({
     db,
     workspaceId,
@@ -2056,22 +2077,8 @@ export async function acceptSessionUserMessageWithOutcome(
       ? { expectedDraftRevision: input.expectedDraftRevision }
       : {}),
     ...(input.clientEventId ? { clientEventId: input.clientEventId } : {}),
-  });
-  await recordWorkspaceUsage(deps, {
-    accountId: grant.accountId,
-    workspaceId,
-    subjectId: grant.subjectId,
-    eventType: "agent_run.created",
-    quantity: 1,
-    unit: "run",
-    sourceResourceType: "session_turn",
-    sourceResourceId: turn.id,
-    sessionId,
-    turnId: turn.id,
-    initiator: turn.initiator,
-    initiatorContext: turn.initiatorContext,
-    origin: turn.source,
-    idempotencyKey: `agent_run.created:${workspaceId}:${turn.id}`,
+    recordAgentRunUsage: true,
+    ...(deps.schedulePromptPostCommit ? { schedulePostCommit: deps.schedulePromptPostCommit } : {}),
   });
   return { accepted, turn, interruptionCount, replay };
 }
@@ -2289,6 +2296,7 @@ export async function updateSessionToolPolicy(
     deps.db,
     grant.workspaceId,
     deps.settings,
+    { subjectId: grant.subjectId },
   );
   const runtimeSettings = settingsWithSessionMcpServerMetadata(
     capabilityRuntimeSettings,

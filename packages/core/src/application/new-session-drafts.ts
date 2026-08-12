@@ -67,6 +67,7 @@ async function hydrateNewSessionDraft(
     deps.db,
     workspaceId,
     deps.settings,
+    { subjectId: grant.subjectId },
   );
   const resources = [] as NewSessionDraftValue["resources"];
   for (const resource of mapped.resources) {
@@ -200,6 +201,7 @@ export async function saveActorNewSessionDraft(
     deps.db,
     workspaceId,
     deps.settings,
+    { subjectId: grant.subjectId },
   );
   const resources = normalizeResources(input.resources);
   const tools = toolsProvided ? validateToolRefs(input.tools, runtimeSettings) : [];

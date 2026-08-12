@@ -58,7 +58,9 @@ test.skipIf(process.platform === "win32")(
     try {
       expect(await withTimeout(child.exited, 3_000, "invalid browserd did not exit")).toBe(1);
       expect(await new Response(child.stdout).text()).toBe("");
-      expect(await new Response(child.stderr).text()).toBe("opengeni-browserd failed\n");
+      expect(await new Response(child.stderr).text()).toBe(
+        "opengeni-browserd failed: Error: browserd admin token file must be owner-only\n",
+      );
     } finally {
       child.kill("SIGKILL");
       await child.exited;

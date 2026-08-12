@@ -548,8 +548,8 @@ async function invoke(
     stdout: "pipe",
     stderr: "pipe",
   });
-  if (input) child.stdin.write(input);
-  child.stdin.end();
+  if (input) await child.stdin.write(input);
+  await child.stdin.end();
   const stdout = new Response(child.stdout).arrayBuffer();
   const stderr = new Response(child.stderr).text();
   const exitCode = await child.exited;

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { chmod, mkdir, rm } from "node:fs/promises";
+import { connect, createServer } from "node:net";
 import { join } from "node:path";
 import type { Readable } from "node:stream";
 import { InteractionControllerError } from "@opengeni/interaction";
@@ -19,6 +20,9 @@ export type ComputerEnvironmentContext = {
 export type ComputerEnvironmentLease = {
   seatId: string;
   displayId: string;
+  /** Placement-local RFB endpoint for the isolated Linux seat. Null on a
+   * physical seat; browserd authenticates and proxies it to human viewers. */
+  rfbPort: number | null;
   environment: NodeJS.ProcessEnv;
   close(): Promise<void>;
 };
@@ -178,10 +182,39 @@ export class LinuxVirtualComputerEnvironmentAllocator implements ComputerEnviron
         await assertStillRunning(windowManager, "virtual window manager");
       }
 
+      // Human screen control must not poll full PNG screenshots. Give every
+      // isolated Linux seat its own loopback-only RFB server; browserd exposes
+      // it through the same short-lived authenticated WebSocket boundary as the
+      // semantic ComputerSession. The raw port never leaves the placement.
+      const rfbPort = await reserveLoopbackPort();
+      const rfb = spawn(
+        "x11vnc",
+        [
+          "-display",
+          displayId,
+          "-rfbport",
+          String(rfbPort),
+          "-localhost",
+          "-forever",
+          "-shared",
+          "-nopw",
+          "-quiet",
+        ],
+        {
+          detached: true,
+          env: sessionEnvironment,
+          stdio: ["ignore", "ignore", "pipe"],
+        },
+      );
+      processes.push(rfb);
+      drain(rfb.stderr);
+      await waitForLoopbackPort(rfbPort, rfb, "virtual RFB server");
+
       let closed = false;
       return {
         seatId: `linux-virtual:${context.computerSessionId}`,
         displayId,
+        rfbPort,
         environment: sessionEnvironment,
         async close() {
           if (closed) return;
@@ -244,10 +277,64 @@ export class ExistingComputerEnvironmentAllocator implements ComputerEnvironment
     return {
       seatId: platform === "darwin" ? "macos-login-seat" : `host-seat:${displayId}`,
       displayId,
+      rfbPort: null,
       environment,
       async close() {},
     };
   }
+}
+
+async function reserveLoopbackPort(): Promise<number> {
+  const server = createServer();
+  return await new Promise<number>((resolve, reject) => {
+    const finish = (error: Error | null, port?: number) => {
+      server.removeAllListeners();
+      if (error) reject(error);
+      else resolve(port!);
+    };
+    server.once("error", (error) => finish(error));
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        server.close(() => finish(new Error("could not allocate an RFB port")));
+        return;
+      }
+      const port = address.port;
+      server.close((error) => finish(error ?? null, port));
+    });
+  });
+}
+
+async function waitForLoopbackPort(
+  port: number,
+  child: ChildProcess,
+  label: string,
+): Promise<void> {
+  const deadline = Date.now() + START_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      throw new Error(`${label} exited before becoming ready`);
+    }
+    const ready = await new Promise<boolean>((resolve) => {
+      const socket = connect({ host: "127.0.0.1", port });
+      const timer = setTimeout(() => {
+        socket.destroy();
+        resolve(false);
+      }, 100);
+      socket.once("connect", () => {
+        clearTimeout(timer);
+        socket.destroy();
+        resolve(true);
+      });
+      socket.once("error", () => {
+        clearTimeout(timer);
+        resolve(false);
+      });
+    });
+    if (ready) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`${label} did not become ready`);
 }
 
 /** Deliberately excludes cloud/API credentials from the native helper process. */

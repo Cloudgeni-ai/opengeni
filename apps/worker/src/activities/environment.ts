@@ -209,7 +209,13 @@ export async function sandboxEnvironmentForRun(
   // value later. `= {}` default so the non-optional reads below are safe.
   options: RunGitCredentialOptions & {
     skipGitHubToken?: boolean;
-    skipCodemode?: boolean;
+    /**
+     * Codemode credential delivery for this attempt. Managed sandboxes receive
+     * stable URL/file pointers in their manifest and the bearer through the
+     * lifecycle file writer. Connected Machines receive no manifest pointers;
+     * the worker injects the minted bearer only into exact exec requests.
+     */
+    codemodeDelivery?: "managed_file" | "transient_exec" | "none";
     deferGitHubToken?: boolean;
     codemodeAuthority?: SandboxCodemodeAuthority;
   } = {},
@@ -241,21 +247,21 @@ export async function sandboxEnvironmentForRun(
   // proactively renews every selected provider behind these stable pointers.
   const stableOptions = options.scope ? { workspaceId: options.scope.workspaceId } : {};
   const environment = stableSandboxEnvironmentForRun(settings, workspaceEnvironment, stableOptions);
-  // Connected Machines own their environment and credentials. They do not
-  // receive OpenGeni Codemode pointers, package hints, or delegated tokens.
-  // Scrub the stable pointers as well as skipping the mint because a session
-  // whose home backend is managed may be actively routed to selfhosted.
-  if (options.skipCodemode) {
+  const codemodeDelivery = options.codemodeDelivery ?? "managed_file";
+  // Connected Machines keep their machine-wide environment untouched. Their
+  // URL, package hint, and direct bearer are projected only onto an exact child
+  // exec request by SelfhostedSession, never into the manifest or filesystem.
+  if (codemodeDelivery !== "managed_file") {
     delete environment.OPENGENI_CODEMODE_URL;
     delete environment.OPENGENI_CODEMODE_TOKEN_FILE;
     delete environment.OPENGENI_OGTOOL_PACKAGE_SPEC;
   }
   const codemodeScope = options.scope;
   const codemodeToken =
-    !options.skipCodemode && codemodeScope && options.codemodeAuthority
+    codemodeDelivery !== "none" && codemodeScope && options.codemodeAuthority
       ? await mintSandboxCodemodeToken(settings, codemodeScope, options.codemodeAuthority)
       : undefined;
-  if (codemodeToken && codemodeScope) {
+  if (codemodeDelivery === "managed_file" && codemodeToken && codemodeScope) {
     environment.OPENGENI_CODEMODE_URL ??= codemodeWorkspaceUrl(settings, codemodeScope.workspaceId);
   }
   const selections = gitCredentialSelections(resources);

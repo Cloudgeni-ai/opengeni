@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { normalizeCdpAccessibilityTree, type CdpAxNode } from "../src";
+import {
+  namespaceCdpAccessibilityFrame,
+  normalizeCdpAccessibilityTree,
+  type CdpAxNode,
+} from "../src";
 
 describe("normalizeCdpAccessibilityTree", () => {
   test("promotes ignored ancestors, preserves static text, and keeps native ids private", () => {
@@ -63,6 +67,42 @@ describe("normalizeCdpAccessibilityTree", () => {
     expect(snapshot.roots[0]).not.toHaveProperty("value");
     expect(JSON.stringify(snapshot.roots)).not.toContain("super-secret");
     expect(snapshot.entries).toHaveLength(1);
+  });
+
+  test("keeps colliding frame-local AX ids and backend ids independently addressable", () => {
+    const frame = (frameId: string, name: string) =>
+      namespaceCdpAccessibilityFrame(frameId, [
+        {
+          nodeId: "root",
+          ignored: false,
+          role: { value: "RootWebArea" },
+          childIds: ["button"],
+        },
+        {
+          nodeId: "button",
+          parentId: "root",
+          ignored: false,
+          role: { value: "button" },
+          name: { value: name },
+          backendDOMNodeId: 42,
+        },
+      ]);
+    const snapshot = normalizeCdpAccessibilityTree({
+      controllerGeneration: "controller-1",
+      targetId: "target-1",
+      documentGeneration: "document-1",
+      nodes: [...frame("frame-a", "Frame A"), ...frame("frame-b", "Frame B")],
+    });
+
+    expect(snapshot.roots).toHaveLength(2);
+    expect(snapshot.entries.filter((entry) => entry.role === "button")).toHaveLength(2);
+    const refs = snapshot.entries
+      .filter((entry) => entry.role === "button")
+      .map((entry) => entry.ref);
+    expect(new Set(refs).size).toBe(2);
+    expect(snapshot.entries.map((entry) => entry.frameId)).toEqual(
+      expect.arrayContaining(["frame-a", "frame-b"]),
+    );
   });
 });
 

@@ -24,19 +24,24 @@ used only host-side; agents never see credentials, only normalized posts.
    `OPENGENI_INTEGRATIONS_STATE_SECRET` and
    `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`.
 
-## Connecting an account
+## Connecting accounts
 
 In the web app, open **Capabilities → X** and choose either **Connect for
 workspace** (the default) or **Connect only for me**.
-The catalog item uses this first-party OAuth flow and remains visibly enabled
-when the account needs reconnection, so the repair action does not disappear.
+The provider card lists every account visible under the selected ownership,
+with an independent lifecycle and disconnect action for each row. **Add another
+account** starts a new OAuth flow instead of replacing an existing account. A
+card remains visible when one or more accounts need reconnection, so repair and
+healthy sibling accounts do not disappear behind a singleton projection.
 
 `POST /v1/workspaces/:id/social/oauth/start` with
 `{"provider": "x", "ownership": "workspace"}` or
 `{"provider": "reddit", "ownership": "personal"}` returns an `authorizationUrl`;
 open it in a browser and approve. The callback upserts a `social_connections`
-row. Workspace ownership requires `workspace:admin`; personal ownership requires
-workspace membership and remains visible only to that subject. SDK:
+row. Repeated consent for the same provider principal updates that account;
+consent for a different principal creates another account. Workspace ownership
+requires `workspace:admin`; personal ownership requires workspace membership
+and remains visible only to that subject. SDK:
 `client.startSocialOAuth(workspaceId, { provider: "x" })`, then
 `client.listSocialConnections(workspaceId)`.
 
@@ -46,21 +51,42 @@ flips to `needs_reauth` and tools return an actionable error.
 
 ## Agent tools (first-party MCP)
 
-Read tools (gated on `connections:read`):
+Provider-scoped read tools are gated on `connections:read`:
 
-- `social_connections_list` — find connectionIds.
-- `social_search_live` — X recent search / Reddit search (`subreddit` to scope).
-- `social_mentions_live` — X mentions timeline / Reddit inbox (mentions + replies).
-- `social_thread_fetch` — X conversation / Reddit post + top comments.
-- `social_posts_sync` — pull the account's own recent posts into `social_posts`
-  (idempotent) so `social_posts_recent` and daily analysis stay fresh.
+- X: `x_accounts_list`, `x_search_live`, `x_mentions_live`,
+  and `x_thread_fetch`.
+- Reddit: `reddit_accounts_list`, `reddit_search_live`,
+  `reddit_mentions_live`, and `reddit_thread_fetch`.
 
-Write tool (gated on `connections:write`, never in the default agent
-permission set):
+The account-list tools return only accounts for their named provider. Every
+live tool accepts an exact `connectionId` and verifies that the connection's
+provider matches the tool namespace before any provider call. For example,
+passing a Reddit connection to `x_search_live` fails closed rather than routing
+through a generic social adapter. Reddit search may use `subreddit` to scope a
+query.
 
-- `social_post_reply` — publish a reply. X takes a tweet id; Reddit takes a
-  fullname (`t3_…` post / `t1_…` comment). Pair it with a `requireApproval`
-  policy when a human should sign off on every outbound post.
+Provider-scoped write tools are gated on `connections:write` and are never in
+the default agent permission set:
+
+- `x_post_reply` publishes an X reply using a tweet id.
+- `x_posts_sync` idempotently stores an X account's recent posts in
+  `social_posts`.
+- `reddit_post_reply` publishes a Reddit reply using a fullname (`t3_…` post /
+  `t1_…` comment).
+- `reddit_posts_sync` idempotently stores a Reddit account's recent posts in
+  `social_posts`.
+
+Sync requires write authority because it mutates OpenGeni's durable analysis
+store, even though it does not publish to the provider. Pair either reply tool
+with a `requireApproval` policy when a human should sign off on every outbound
+post.
+
+Aggregate Pack tools remain provider-neutral: `social_connections_list`,
+`social_posts_recent`, and `social_daily_analysis_context` compose X and Reddit
+data for cross-provider workflows. The older `social_search_live`,
+`social_mentions_live`, `social_thread_fetch`, `social_posts_sync`, and
+`social_post_reply` names remain registered for rolling compatibility, but new
+explicit policies and provider catalog cards use the provider-scoped names.
 
 ## Identity model
 
@@ -82,5 +108,5 @@ judgment:
    agent to: search/fetch mentions with the live tools, judge relevance
    against the playbook documents, and write reply drafts into a document or
    session output for review.
-3. Keep `social_post_reply` behind `connections:write` (and optionally
-   tool-call approval) so publishing stays a deliberate step.
+3. Keep `x_post_reply` and `reddit_post_reply` behind `connections:write` (and
+   optionally tool-call approval) so publishing stays a deliberate step.

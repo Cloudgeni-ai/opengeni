@@ -1,5 +1,9 @@
 import { createHmac } from "node:crypto";
-import type { InteractionPlacement } from "@opengeni/contracts";
+import type {
+  InteractionPlacement,
+  NetworkRouteConfiguration,
+  NetworkRouteConsistency,
+} from "@opengeni/contracts";
 
 type BrowserControllerAuthorityScope = {
   rootSecret: string;
@@ -52,6 +56,35 @@ export function deriveBrowserSessionControllerTokens(scope: BrowserSessionAuthor
     controlToken: derive(scope.rootSecret, "session-control.v1", fields),
     viewToken: derive(scope.rootSecret, "session-view.v1", fields),
   };
+}
+
+/** Secret-safe durable identity for one exact route launch. The digest binds
+ * the route snapshot and proxy credential without making a password-verifier
+ * hash available to database readers. */
+export function deriveBrowserNetworkRouteAuthorityDigest(scope: {
+  rootSecret: string;
+  accountId: string;
+  workspaceId: string;
+  browserSessionId: string;
+  routeId: string;
+  routeVersion: number;
+  credentialVersion: number | null;
+  configuration: NetworkRouteConfiguration;
+  consistency: NetworkRouteConsistency;
+  proxyCredential: { username: string; password: string } | null;
+}): string {
+  return derive(scope.rootSecret, "network-route-launch.v1", [
+    scope.accountId,
+    scope.workspaceId,
+    scope.browserSessionId,
+    scope.routeId,
+    scope.routeVersion,
+    scope.credentialVersion ?? "none",
+    canonicalJson(scope.configuration),
+    canonicalJson(scope.consistency),
+    scope.proxyCredential?.username ?? "none",
+    scope.proxyCredential?.password ?? "none",
+  ]).replace(/^ogb\./u, "ogr.");
 }
 
 export function deriveBrowserViewGrantToken(
@@ -121,6 +154,22 @@ function writeField(hmac: ReturnType<typeof createHmac>, value: string): void {
   hmac.update(String(bytes.byteLength), "utf8");
   hmac.update(":", "utf8");
   hmac.update(bytes);
+}
+
+function canonicalJson(value: unknown): string {
+  return JSON.stringify(canonicalJsonValue(value));
+}
+
+function canonicalJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalJsonValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, entry]) => [key, canonicalJsonValue(entry)]),
+    );
+  }
+  return value;
 }
 
 function placementKey(placement: InteractionPlacement): string {

@@ -23,6 +23,7 @@ import {
   getScheduledTaskPersonalConnectionDelegations,
   getSession,
   requireWorkspace,
+  scopedKnowledgeScopeKey,
   updateScheduledTask,
   type Database,
   type UpdateScheduledTaskInput,
@@ -154,6 +155,7 @@ export async function createValidatedScheduledTask(input: {
           input.db,
           input.grant.workspaceId,
           input.settings,
+          { subjectId: input.grant.subjectId },
         ),
         tools: [...agentConfig.tools, { kind: "mcp", id: "opengeni" }],
         source: personalConnectionDelegationSourceForGrant(input.grant),
@@ -476,6 +478,7 @@ export async function validatedScheduledTaskUpdate(input: {
       input.db,
       input.existing.workspaceId,
       input.settings,
+      { subjectId: input.grant.subjectId },
     );
     const personalConnectionDelegations = await freezePersonalConnectionDelegations({
       db: input.db,
@@ -620,7 +623,8 @@ async function validateKnowledgeSourceSyncAction(input: {
   if (
     resolved.source.syncGeneration !== input.action.sourceGeneration ||
     resolved.source.lifecycleGeneration !== input.action.sourceLifecycleGeneration ||
-    JSON.stringify(resolved.source.scope) !== JSON.stringify(input.action.destination)
+    scopedKnowledgeScopeKey(resolved.source.scope) !==
+      scopedKnowledgeScopeKey(input.action.destination)
   ) {
     throw new HTTPException(409, {
       message: "knowledge source authority or generation changed",
@@ -768,6 +772,7 @@ async function validateScheduledTaskAgentConfig(input: {
     input.db,
     input.workspaceId,
     input.settings,
+    { subjectId: input.grant.subjectId },
   );
   const requestedTools = validateToolRefs(input.payload.agentConfig.tools ?? [], runtimeSettings);
   // A task whose creator did not choose tools gets the workspace's enabled

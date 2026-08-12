@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/browserd",
-  "version": "0.1.1",
+  "version": "0.1.3",
   "private": true,
   "description": "Placement-resident browser controller and audited agent-browser adapter for OpenGeni.",
   "license": "Apache-2.0",
@@ -9,10 +9,10 @@
   "main": "./src/index.ts",
   "types": "./src/index.ts",
   "scripts": {
-    "build:binary": "bun build --compile ./src/main.ts --outfile ./dist/opengeni-browserd",
+    "build:binary": "bun build --compile ./src/main.ts --outfile ./dist/opengeni-browserd && bun ./scripts/stage-agent-browser.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
-    "test:e2e": "OPENGENI_BROWSERD_E2E=1 bun test test/cdp-driver.e2e.test.ts test/supervisor.e2e.test.ts test/server.e2e.test.ts test/state-restore.e2e.test.ts"
+    "test:e2e": "OPENGENI_BROWSERD_E2E=1 bun test test/cdp-driver.e2e.test.ts test/browser-conformance.e2e.test.ts test/supervisor.e2e.test.ts test/server.e2e.test.ts test/state-restore.e2e.test.ts test/external-provider.e2e.test.ts"
   },
   "dependencies": {
     "@opengeni/contracts": "workspace:*",

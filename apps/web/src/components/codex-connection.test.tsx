@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import { copyTextToClipboard } from "@opengeni/react/clipboard";
 import { act, type ComponentProps } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -37,6 +38,7 @@ function setClipboard(writeText: (value: string) => Promise<void>): void {
 const defaultPanelProps = {
   userCode: "ABCD-1234",
   verificationUri: "https://auth.openai.com/codex/device",
+  loadClipboard: async () => ({ copyTextToClipboard }),
 } satisfies ComponentProps<typeof CodexDeviceCodePanel>;
 
 async function renderPanel(props: ComponentProps<typeof CodexDeviceCodePanel> = defaultPanelProps) {
@@ -52,8 +54,13 @@ async function renderPanel(props: ComponentProps<typeof CodexDeviceCodePanel> = 
 describe("CodexDeviceCodePanel", () => {
   test("copies the exact device code and confirms the action", async () => {
     const copies: string[] = [];
+    let copied!: () => void;
+    const copiedPromise = new Promise<void>((resolve) => {
+      copied = resolve;
+    });
     setClipboard(async (value) => {
       copies.push(value);
+      copied();
     });
     const { container, root } = await renderPanel();
 
@@ -64,6 +71,7 @@ describe("CodexDeviceCodePanel", () => {
 
       await act(async () => {
         button!.click();
+        await copiedPromise;
         await Promise.resolve();
       });
 

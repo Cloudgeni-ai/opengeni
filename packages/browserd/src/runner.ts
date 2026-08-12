@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import { chmod, lstat, mkdir, readFile, readlink, realpath, rm } from "node:fs/promises";
+import { constants } from "node:fs";
+import { access, chmod, lstat, mkdir, readFile, readlink, realpath, rm } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { resolvePinnedAgentBrowserBinary, type ResolvedAgentBrowserBinary } from "./binary";
 
@@ -56,6 +57,18 @@ export type AgentBrowserRunnerOptions = {
   browserExecutablePath?: string;
   workingDirectory?: string;
   environment?: Readonly<Record<string, string | undefined>>;
+  provider?: {
+    id: "browserbase" | "kernel";
+    apiKey: string;
+    endpoint?: string;
+    timeoutSeconds?: number;
+    stealth?: boolean;
+  };
+  /** Private launch authority. It is injected into the daemon environment,
+   * never into argv, logs, or durable browser metadata. */
+  proxyUrl?: string;
+  launchArguments?: readonly string[];
+  timezone?: string;
   binary?: ResolvedAgentBrowserBinary;
 };
 
@@ -73,13 +86,19 @@ export function browserProfileCryptoPolicy(platform: NodeJS.Platform): BrowserPr
 export class AgentBrowserJsonRunner {
   readonly binary: ResolvedAgentBrowserBinary;
   private readonly environment: NodeJS.ProcessEnv;
+  private readonly globalArguments: readonly string[];
   private readonly workingDirectory: string;
   private readonly daemonPidFile: string;
 
   private constructor(binary: ResolvedAgentBrowserBinary, options: AgentBrowserRunnerOptions) {
     this.binary = binary;
     this.workingDirectory = resolve(options.workingDirectory ?? process.cwd());
-    this.environment = isolatedEnvironment(options);
+    const proxy = options.proxyUrl ? privateProxyAuthority(options.proxyUrl) : null;
+    this.environment = isolatedEnvironment(options, proxy);
+    this.globalArguments = [
+      ...(proxy ? ["--proxy", proxy.server] : []),
+      ...(options.provider ? ["--provider", options.provider.id] : []),
+    ];
     this.daemonPidFile = join(
       resolve(options.socketDirectory),
       "namespaces",
@@ -92,7 +111,7 @@ export class AgentBrowserJsonRunner {
   static async create(options: AgentBrowserRunnerOptions): Promise<AgentBrowserJsonRunner> {
     validateSegment(options.namespace, "namespace");
     validateSegment(options.sessionName, "session name");
-    validateSocketPath(options);
+    assertAgentBrowserSocketPath(options);
     for (const directory of [
       options.socketDirectory,
       options.profileDirectory,
@@ -102,8 +121,12 @@ export class AgentBrowserJsonRunner {
       await mkdir(directory, { recursive: true, mode: 0o700 });
       await chmod(directory, 0o700);
     }
+    const browserExecutablePath = await managedBrowserExecutablePath(options);
     const binary = options.binary ?? (await resolvePinnedAgentBrowserBinary());
-    return new AgentBrowserJsonRunner(binary, options);
+    return new AgentBrowserJsonRunner(binary, {
+      ...options,
+      ...(browserExecutablePath ? { browserExecutablePath } : {}),
+    });
   }
 
   async run<T = unknown>(
@@ -115,7 +138,7 @@ export class AgentBrowserJsonRunner {
     if (options.signal?.aborted) {
       throw new AgentBrowserCommandError("aborted", "agent-browser command was aborted");
     }
-    const child = spawn(this.binary.path, ["--json", ...args], {
+    const child = spawn(this.binary.path, ["--json", ...this.globalArguments, ...args], {
       cwd: this.workingDirectory,
       env: this.environment,
       stdio: ["ignore", "pipe", "pipe"],
@@ -228,8 +251,27 @@ export class AgentBrowserJsonRunner {
   /** Stop only the daemon whose private PID sidecar resolves to this exact
    * pinned executable. Used when upstream `close` cannot reconcile a failed
    * browser launch; never scans or kills by name. */
-  async terminate(): Promise<void> {
+  async daemonPid(): Promise<number | null> {
     const pid = await readDaemonPid(this.daemonPidFile);
+    if (pid === null || !(await processRunning(pid))) return null;
+    if (!(await sameExecutable(pid, this.binary.path))) {
+      throw new AgentBrowserCommandError(
+        "process_failed",
+        "agent-browser daemon PID does not identify the pinned executable",
+      );
+    }
+    return pid;
+  }
+
+  async terminate(expectedPid?: number | null): Promise<void> {
+    const recordedPid = await readDaemonPid(this.daemonPidFile);
+    if (recordedPid !== null && expectedPid != null && recordedPid !== expectedPid) {
+      throw new AgentBrowserCommandError(
+        "process_failed",
+        "agent-browser daemon identity changed during shutdown",
+      );
+    }
+    const pid = recordedPid ?? expectedPid ?? null;
     if (pid === null || !(await processRunning(pid))) {
       await rm(this.daemonPidFile, { force: true });
       return;
@@ -258,6 +300,40 @@ export class AgentBrowserJsonRunner {
     }
     await rm(this.daemonPidFile, { force: true });
   }
+}
+
+const MACOS_BROWSER_EXECUTABLES = [
+  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+  "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+  "/Applications/Chromium.app/Contents/MacOS/Chromium",
+] as const;
+
+async function managedBrowserExecutablePath(
+  options: AgentBrowserRunnerOptions,
+): Promise<string | undefined> {
+  const configured = options.browserExecutablePath
+    ? resolve(options.browserExecutablePath)
+    : undefined;
+  if (process.platform !== "darwin" || !options.headed || options.provider) return configured;
+
+  const executable = configured ?? (await firstExecutable(MACOS_BROWSER_EXECUTABLES));
+  // Keep the process and DevTools startup handshake visible to agent-browser.
+  // Wrapping Chrome in `open -g -n` hides that handshake, so the driver retries
+  // while every retry creates another empty window. CDP target creation itself
+  // remains backgrounded.
+  return executable ?? configured;
+}
+
+async function firstExecutable(candidates: readonly string[]): Promise<string | undefined> {
+  for (const candidate of candidates) {
+    try {
+      await access(candidate, constants.X_OK);
+      return resolve(candidate);
+    } catch {
+      // Continue to the next known Chrome/Chromium application.
+    }
+  }
+  return undefined;
 }
 
 async function readDaemonPid(path: string): Promise<number | null> {
@@ -359,7 +435,10 @@ async function waitForProcessStop(pid: number, timeoutMs: number): Promise<boole
 }
 
 async function boundedProcessOutput(command: string, args: readonly string[]): Promise<string> {
-  const child = spawn(command, args, { stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
+  const child = spawn(command, args, {
+    stdio: ["ignore", "pipe", "ignore"],
+    windowsHide: true,
+  });
   const chunks: Buffer[] = [];
   let bytes = 0;
   let overflow = false;
@@ -381,7 +460,10 @@ async function boundedProcessOutput(command: string, args: readonly string[]): P
   return Buffer.concat(chunks).toString("utf8");
 }
 
-function isolatedEnvironment(options: AgentBrowserRunnerOptions): NodeJS.ProcessEnv {
+function isolatedEnvironment(
+  options: AgentBrowserRunnerOptions,
+  proxy: PrivateProxyAuthority | null,
+): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = {};
   for (const key of PASSTHROUGH_ENVIRONMENT_KEYS) {
     if (process.env[key] !== undefined) environment[key] = process.env[key];
@@ -389,6 +471,17 @@ function isolatedEnvironment(options: AgentBrowserRunnerOptions): NodeJS.Process
   Object.assign(environment, options.environment);
   for (const key of Object.keys(environment)) {
     if (key.startsWith("AGENT_BROWSER_")) delete environment[key];
+  }
+  for (const key of [
+    "BROWSERBASE_API_KEY",
+    "KERNEL_API_KEY",
+    "KERNEL_ENDPOINT",
+    "KERNEL_HEADLESS",
+    "KERNEL_STEALTH",
+    "KERNEL_TIMEOUT_SECONDS",
+    "KERNEL_PROFILE_NAME",
+  ]) {
+    delete environment[key];
   }
   Object.assign(environment, {
     AGENT_BROWSER_NAMESPACE: options.namespace,
@@ -399,16 +492,137 @@ function isolatedEnvironment(options: AgentBrowserRunnerOptions): NodeJS.Process
     AGENT_BROWSER_SCREENSHOT_DIR: resolve(options.screenshotDirectory),
     AGENT_BROWSER_IDLE_TIMEOUT_MS: "0",
     AGENT_BROWSER_HEADED: options.headed ? "1" : "0",
-    AGENT_BROWSER_ARGS: browserLaunchArguments(process.platform),
+    AGENT_BROWSER_ARGS: browserLaunchArguments(process.platform, options.launchArguments),
     NO_COLOR: "1",
   });
+  if (proxy) {
+    environment.AGENT_BROWSER_PROXY = proxy.server;
+    if (proxy.username !== null && proxy.password !== null) {
+      environment.AGENT_BROWSER_PROXY_USERNAME = proxy.username;
+      environment.AGENT_BROWSER_PROXY_PASSWORD = proxy.password;
+    }
+  }
+  if (options.timezone) environment.TZ = supportedTimezone(options.timezone);
+  if (options.provider?.id === "browserbase") {
+    environment.BROWSERBASE_API_KEY = providerCredential(options.provider.apiKey);
+  } else if (options.provider?.id === "kernel") {
+    environment.KERNEL_API_KEY = providerCredential(options.provider.apiKey);
+    environment.KERNEL_HEADLESS = options.headed ? "false" : "true";
+    environment.KERNEL_STEALTH = options.provider.stealth === true ? "true" : "false";
+    if (options.provider.timeoutSeconds !== undefined) {
+      if (
+        !Number.isSafeInteger(options.provider.timeoutSeconds) ||
+        options.provider.timeoutSeconds < 1 ||
+        options.provider.timeoutSeconds > 86_400
+      ) {
+        throw new Error("Kernel browser timeout is invalid");
+      }
+      environment.KERNEL_TIMEOUT_SECONDS = String(options.provider.timeoutSeconds);
+    }
+    if (options.provider.endpoint) {
+      environment.KERNEL_ENDPOINT = providerEndpoint(options.provider.endpoint);
+    }
+  }
   if (options.browserExecutablePath) {
     environment.AGENT_BROWSER_EXECUTABLE_PATH = resolve(options.browserExecutablePath);
   }
   return environment;
 }
 
-export function browserLaunchArguments(platform: NodeJS.Platform): string {
+function providerCredential(value: string): string {
+  if (
+    Buffer.byteLength(value) < 1 ||
+    Buffer.byteLength(value) > 8_192 ||
+    /[\u0000-\u001f\u007f]/u.test(value)
+  ) {
+    throw new Error("external browser provider credential is invalid");
+  }
+  return value;
+}
+
+function providerEndpoint(value: string): string {
+  if (Buffer.byteLength(value) > 16_384) {
+    throw new Error("external browser provider endpoint is invalid");
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error("external browser provider endpoint is invalid");
+  }
+  if (
+    (parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
+    parsed.username ||
+    parsed.password ||
+    parsed.hash
+  ) {
+    throw new Error("external browser provider endpoint is invalid");
+  }
+  return parsed.toString().replace(/\/$/u, "");
+}
+
+type PrivateProxyAuthority = {
+  server: string;
+  username: string | null;
+  password: string | null;
+};
+
+function privateProxyAuthority(value: string): PrivateProxyAuthority {
+  if (Buffer.byteLength(value) > 16_384) throw new Error("proxy authority exceeds its envelope");
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("proxy authority URL is invalid");
+  }
+  if (
+    !["http:", "https:", "socks5:"].includes(url.protocol) ||
+    !url.hostname ||
+    (!url.port && url.protocol !== "http:" && url.protocol !== "https:") ||
+    (url.pathname !== "" && url.pathname !== "/") ||
+    url.search ||
+    url.hash
+  ) {
+    throw new Error("proxy authority URL is invalid");
+  }
+  const hasUsername = url.username.length > 0;
+  const hasPassword = url.password.length > 0;
+  if (hasUsername !== hasPassword) {
+    throw new Error("proxy authority credentials are incomplete");
+  }
+  const username = hasUsername ? decodeUrlCredential(url.username) : null;
+  const password = hasPassword ? decodeUrlCredential(url.password) : null;
+  if (username?.includes("\0") || password?.includes("\0")) {
+    throw new Error("proxy authority credentials are invalid");
+  }
+  const server = `${url.protocol}//${url.host}`;
+  return { server, username, password };
+}
+
+function decodeUrlCredential(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    throw new Error("proxy authority credentials are invalid");
+  }
+}
+
+function supportedTimezone(value: string): string {
+  if (Buffer.byteLength(value) > 128 || /[,\r\n\0]/u.test(value)) {
+    throw new Error("browser timezone is invalid");
+  }
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: value }).format();
+  } catch {
+    throw new Error("browser timezone is unsupported");
+  }
+  return value;
+}
+
+export function browserLaunchArguments(
+  platform: NodeJS.Platform,
+  additional: readonly string[] = [],
+): string {
   const policy = browserProfileCryptoPolicy(platform);
   const profileCryptoArgument =
     policy === "chromium_basic"
@@ -416,7 +630,22 @@ export function browserLaunchArguments(platform: NodeJS.Platform): string {
       : policy === "chromium_mock_keychain"
         ? "--use-mock-keychain"
         : null;
-  return ["--restore-last-session", profileCryptoArgument]
+  const validatedAdditional = additional.map((argument) => {
+    if (!argument.startsWith("--") || argument.length > 512 || /[,\r\n\0]/u.test(argument)) {
+      throw new Error("browser launch argument is invalid");
+    }
+    return argument;
+  });
+  if (validatedAdditional.length > 32) {
+    throw new Error("too many browser launch arguments");
+  }
+  return [
+    "--restore-last-session",
+    "--disable-background-timer-throttling",
+    "--disable-renderer-backgrounding",
+    profileCryptoArgument,
+    ...validatedAdditional,
+  ]
     .filter((value): value is string => value !== null)
     .join(",");
 }
@@ -443,7 +672,9 @@ const PASSTHROUGH_ENVIRONMENT_KEYS = [
   "COMSPEC",
 ] as const;
 
-function validateSocketPath(options: AgentBrowserRunnerOptions): void {
+export function assertAgentBrowserSocketPath(
+  options: Pick<AgentBrowserRunnerOptions, "namespace" | "sessionName" | "socketDirectory">,
+): void {
   if (process.platform === "win32") return;
   const projected = join(
     resolve(options.socketDirectory),

@@ -473,6 +473,53 @@ describe("API helpers", () => {
     expect(routeLabel(`/v1/workspaces/${workspace}/control-events/stream`)).toBe(
       "/v1/workspaces/:workspaceId/control-events/stream",
     );
+    expect(
+      routeLabel(
+        `/v1/workspaces/${workspace}/browser-sessions/browser-1/targets/target-1/diagnostics`,
+      ),
+    ).toBe(
+      "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId/diagnostics",
+    );
+    expect(
+      routeLabel(
+        `/v1/workspaces/${workspace}/browser-sessions/browser-1/auth-runs/run-1/protected-fill`,
+      ),
+    ).toBe(
+      "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/protected-fill",
+    );
+    expect(
+      routeLabel(
+        `/v1/workspaces/${workspace}/browser-sessions/browser-1/auth-runs/run-1/external-auth/interactive`,
+      ),
+    ).toBe(
+      "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/external-auth/interactive",
+    );
+    expect(
+      routeLabel(
+        `/v1/workspaces/${workspace}/browser-sessions/browser-1/downloads/download-1/save`,
+      ),
+    ).toBe(
+      "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/downloads/:downloadId/save",
+    );
+    expect(routeLabel(`/v1/workspaces/${workspace}/browser-sessions/browser-1/clipboard`)).toBe(
+      "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/clipboard",
+    );
+    expect(
+      routeLabel(
+        `/v1/workspaces/${workspace}/computer-sessions/computer-1/targets/window-1/observation`,
+      ),
+    ).toBe(
+      "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/targets/:targetId/observation",
+    );
+    expect(routeLabel(`/v1/workspaces/${workspace}/computer-sessions/computer-1/clipboard`)).toBe(
+      "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/clipboard",
+    );
+    expect(routeLabel(`/v1/workspaces/${workspace}/network-routes/route-1`)).toBe(
+      "/v1/workspaces/:workspaceId/network-routes/:networkRouteId",
+    );
+    expect(
+      routeLabel(`/v1/workspaces/${workspace}/interaction-interventions/intervention-1/resolve`),
+    ).toBe("/v1/workspaces/:workspaceId/interaction-interventions/:interventionId/resolve");
     expect(routeLabel(`/v1/workspaces/${workspace}/inference-control`)).toBe(
       "/v1/workspaces/:workspaceId/inference-control",
     );
@@ -523,6 +570,56 @@ describe("API helpers", () => {
     );
     expect(routeLabel(`/v1/workspaces/${workspace}/capabilities/mcp%3Aexample/disable`)).toBe(
       "/v1/workspaces/:workspaceId/capabilities/:id/disable",
+    );
+    expect(routeLabel(`/v1/workspaces/${workspace}/integrations/oauth/start`)).toBe(
+      "/v1/workspaces/:workspaceId/integrations/oauth/start",
+    );
+    expect(routeLabel(`/v1/workspaces/${workspace}/integrations/presets`)).toBe(
+      "/v1/workspaces/:workspaceId/integrations/presets",
+    );
+    expect(
+      routeLabel(
+        `/v1/workspaces/${workspace}/integrations/api%3Aopenapi%3Agmail/instances/account-a/uninstall-preview`,
+      ),
+    ).toBe(
+      "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/uninstall-preview",
+    );
+    expect(
+      routeLabel(
+        `/v1/workspaces/${workspace}/integrations/api%3Aopenapi%3Agmail/instances/account-a`,
+      ),
+    ).toBe("/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey");
+    expect(
+      routeLabel(
+        `/v1/workspaces/${workspace}/integrations/api%3Aopenapi%3Agmail/instances/account-a/features/mail-inbox`,
+      ),
+    ).toBe(
+      "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey",
+    );
+    expect(
+      routeLabel(
+        `/v1/workspaces/${workspace}/integrations/api%3Aopenapi%3Agmail/instances/account-a/features/mail-inbox/pause`,
+      ),
+    ).toBe(
+      "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey/pause",
+    );
+    expect(routeLabel("/v1/integrations/provider-oauth/callback")).toBe(
+      "/v1/integrations/provider-oauth/callback",
+    );
+    expect(routeLabel("/v1/integrations/google-drive/callback")).toBe(
+      "/v1/integrations/google-drive/callback",
+    );
+    expect(routeLabel(`/v1/workspaces/${workspace}/plugins/preview`)).toBe(
+      "/v1/workspaces/:workspaceId/plugins/preview",
+    );
+    expect(routeLabel(`/v1/workspaces/${workspace}/plugins/install`)).toBe(
+      "/v1/workspaces/:workspaceId/plugins/install",
+    );
+    expect(
+      routeLabel(`/v1/workspaces/${workspace}/plugins/example%2Fplugin/uninstall-preview`),
+    ).toBe("/v1/workspaces/:workspaceId/plugins/:pluginKey/uninstall-preview");
+    expect(routeLabel(`/v1/workspaces/${workspace}/plugins/example%2Fplugin`)).toBe(
+      "/v1/workspaces/:workspaceId/plugins/:pluginKey",
     );
     expect(
       routeLabel(`/v1/workspaces/${workspace}/packs/marketing-social-daily-analysis/enable`),
@@ -979,12 +1076,16 @@ describe("API helpers", () => {
         id: "cap-brokered",
         name: "Brokered MCP",
         url: "https://brokered.example/mcp",
+        allowedTools: ["search", "create_draft"],
+        requireApproval: ["create_draft"],
         connectionRef,
       },
     ]);
 
     const server = merged.mcpServers.find((candidate) => candidate.id === "cap-brokered");
     expect(server?.connectionRef).toEqual(connectionRef);
+    expect(server?.allowedTools).toEqual(["search", "create_draft"]);
+    expect(server?.requireApproval).toEqual(["create_draft"]);
     expect(server?.headers).toBeUndefined();
   });
 

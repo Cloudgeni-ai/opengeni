@@ -49,11 +49,16 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   }
   if (
     path === "/v1/integrations/oauth/callback" ||
+    path === "/v1/integrations/provider-oauth/callback" ||
+    path === "/v1/integrations/google-drive/callback" ||
     path === "/v1/integrations/oauth/client-metadata.json" ||
     path === "/v1/integrations/slack/callback" ||
     path === "/v1/integrations/slack/events" ||
     path === "/v1/integrations/slack/commands" ||
-    path === "/v1/integrations/slack/interactions"
+    path === "/v1/integrations/slack/interactions" ||
+    // Fiken OAuth browser redirect: exact path only, protected by signed
+    // single-use state plus a callback-time grant recheck.
+    path === "/v1/integrations/fiken/callback"
   ) {
     return true;
   }

@@ -286,6 +286,17 @@ export type ExpireSessionHumanInputResult = {
   action: "expired" | "stale" | "not_found";
 };
 
+export type ExpireSessionInteractionInterventionInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  interventionId: string;
+};
+
+export type ExpireSessionInteractionInterventionResult = {
+  action: "expired" | "stale" | "not_found";
+};
+
 export type MarkSessionIdleInput = {
   workspaceId: string;
   sessionId: string;

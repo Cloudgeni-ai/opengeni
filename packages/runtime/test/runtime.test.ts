@@ -32,6 +32,7 @@ import {
 import {
   CLEARED_RUN_STATE_BLOB,
   EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS,
+  INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,
   MODEL_ATTACHMENT_REFS_FIELD,
   sessionSystemUpdateBatchHistoryItem,
   type ToolAuthNeededPayload,
@@ -96,6 +97,7 @@ import {
   mcpTransportErrorWithRetryMetadata,
   serializeApprovals,
   serializeHumanInputRequests,
+  serializeInteractionInterventionRequests,
   refreshCodemodeTokenFile,
   withStructuredViewImageFunctionResults,
   sandboxCommandExitCode,
@@ -115,7 +117,12 @@ import { Manifest } from "@openai/agents/sandbox";
 import { createAttemptToolEnvironment } from "@opengeni/codemode";
 import { TurnSandboxCommandCancelledError } from "../src/sandbox/turn-tool-cancellation";
 import { CompactionNeededError } from "../src/context-compaction";
-import { readSkillLibraryArtifact, verifySkillLibraryArtifact } from "../src/skill-library";
+import {
+  buildPortableSkillArtifact,
+  PORTABLE_SKILL_MAX_FILE_BYTES,
+  readSkillLibraryArtifact,
+  verifySkillLibraryArtifact,
+} from "../src/skill-library";
 import { MCP_MAX_CONCURRENT_SERVER_OPERATIONS } from "../src/mcp-network";
 import {
   ScriptedModel,
@@ -374,6 +381,39 @@ describe("structured human-input runtime boundary", () => {
           ],
           allowSkip: true,
           expiresInSeconds: 60,
+        },
+      },
+    ]);
+  });
+
+  test("partitions typed interaction waits while preserving their exact SDK approval", () => {
+    const interaction = {
+      name: INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,
+      rawItem: {
+        callId: "interaction-human-call-1",
+        name: INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,
+        arguments: JSON.stringify({
+          operation: "wait",
+          interventionId: "00000000-0000-4000-8000-000000000001",
+        }),
+      },
+    };
+    expect(serializeApprovals([interaction])).toEqual([]);
+    expect(serializeInteractionInterventionRequests([interruption, interaction])).toEqual([
+      {
+        toolCallId: "interaction-human-call-1",
+        input: {
+          operation: "wait",
+          interventionId: "00000000-0000-4000-8000-000000000001",
+        },
+        approval: {
+          id: "interaction-human-call-1",
+          name: INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,
+          arguments: JSON.stringify({
+            operation: "wait",
+            interventionId: "00000000-0000-4000-8000-000000000001",
+          }),
+          raw: interaction,
         },
       },
     ]);
@@ -1587,6 +1627,45 @@ describe("runtime event normalization", () => {
         docs__search_documents: false,
         docs__fetch_document: false,
       });
+    });
+
+    test("the canonical interaction wait always interrupts, including sandbox clones", async () => {
+      const interactionServer: MCPServer = {
+        name: "interaction",
+        cacheToolsList: false,
+        async connect() {},
+        async close() {},
+        async listTools() {
+          return [
+            {
+              name: INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,
+              description: "Wait for exact human interaction",
+              inputSchema: {
+                type: "object" as const,
+                properties: {},
+                required: [],
+                additionalProperties: true,
+              },
+            },
+          ];
+        },
+        async callTool() {
+          return [];
+        },
+        async invalidateToolsCache() {},
+      };
+      for (const backend of ["none", "modal"] as const) {
+        const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: backend }), [], {
+          mcpServers: [interactionServer],
+        });
+        expect(await approvalMapForAgent(agent)).toEqual({
+          [INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME]: true,
+        });
+        const clone = (agent as unknown as { clone: (config: unknown) => ApprovalAgent }).clone({});
+        expect(await approvalMapForAgent(clone)).toEqual({
+          [INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME]: true,
+        });
+      }
     });
 
     test("requireApproval survives the sandbox clone() tool-resolution path", async () => {
@@ -2847,9 +2926,9 @@ describe("runtime event normalization", () => {
   });
 
   // ── generic programmatic-tool-calling (codemode) substrate directive ──────
-  // The block is GENERIC substrate prompting, gated by the SAME condition that
-  // gates the sandbox authority: a Codemode token minted for this exact attempt
-  // (surfaced as options.codemodeTokenSeed for a non-selfhosted turn).
+  // The block is GENERIC substrate prompting, gated by exact-attempt Codemode
+  // authority. Managed boxes infer it from the file seed; Connected Machines
+  // assert availability separately because delivery is per exec.
   const codemodeOn = {
     sandboxBackend: "none",
   } as const;
@@ -2870,6 +2949,21 @@ describe("runtime event normalization", () => {
     const agent = buildOpenGeniAgent(testSettings(codemodeOn), []);
     expect(agent.instructions).not.toContain(CODEMODE_PROGRAMMATIC_DIRECTIVE);
     expect(agent.instructions).toBe(HISTORICAL_DEFAULT_INSTRUCTIONS);
+  });
+
+  test("a Connected Machine advertises Codemode without installing a token file", () => {
+    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "modal" }), [], {
+      activeSandboxBackend: "selfhosted",
+      codemodeAvailable: true,
+    });
+    expect(agent.instructions).toContain(CODEMODE_PROGRAMMATIC_DIRECTIVE);
+    expect(() =>
+      buildOpenGeniAgent(testSettings(codemodeOn), [], {
+        codemodeAvailable: false,
+        codemodeTokenSeed: "ogd_seed",
+        codemodeTokenSessionId: "session-instructions",
+      }),
+    ).toThrow("codemodeAvailable cannot be false");
   });
 
   test("a Codemode bearer cannot be built without its durable session identity", () => {
@@ -2967,7 +3061,7 @@ describe("runtime event normalization", () => {
     // It must name only generic substrate handles (ogtool, $OPENGENI_CODEMODE_*),
     // never a host/product name.
     expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toBe(
-      'Every tool available to you is also callable programmatically from the sandbox through the same frozen catalog, authority, credentials, policy, and execution path. In stock sandboxes, write persistent Bun code with `import { tools, openGeni } from "@opengeni/codemode"`; run `ogtool declarations <file.d.ts>` when project-local catalog types are useful. For shell calls, run `ogtool list`, then `ogtool call <tool-path> \'<json-args>\'`. If `ogtool` is absent and Bun plus $OPENGENI_OGTOOL_PACKAGE_SPEC are available, run the exact deployment-pinned package with `bun x -p "$OPENGENI_OGTOOL_PACKAGE_SPEC" ogtool ...`; never guess a version or install `latest`. Prefer Codemode for loops, polling, bulk filtering, and intermediate data that should remain in the sandbox instead of consuming your context window. Tools requiring human approval return a typed error in Codemode and must be invoked normally.',
+      'Every tool available to you is also callable programmatically from the sandbox through the same frozen catalog, authority, credentials, policy, and execution path. In stock sandboxes, write persistent Bun code with `import { tools, openGeni } from "@opengeni/codemode"`; run `ogtool declarations <file.d.ts>` when project-local catalog types are useful. For shell calls, run `ogtool list`, then `ogtool call <tool-path> \'<json-args>\'`. If `ogtool` is absent and $OPENGENI_CODEMODE_NATIVE_CLIENT is available, use `"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode list` and `"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode call <tool-path> \'<json-args>\'`; this uses the same public Codemode operation journal, not another tool path. Otherwise, if Bun plus $OPENGENI_OGTOOL_PACKAGE_SPEC are available, run the exact deployment-pinned package with `bun x -p "$OPENGENI_OGTOOL_PACKAGE_SPEC" ogtool ...`; never guess a version or install `latest`. Prefer Codemode for loops, polling, bulk filtering, and intermediate data that should remain in the sandbox instead of consuming your context window. Tools requiring human approval return a typed error in Codemode and must be invoked normally.',
     );
   });
 
@@ -4826,6 +4920,91 @@ describe("runtime event normalization", () => {
       expect(transportCalls).toEqual([]);
       expect(resolverCalls).toBeGreaterThan(0);
       expect(authNeeded).toEqual([]);
+    } finally {
+      await prepared.close();
+    }
+  });
+
+  test("substitutes the opt-in Gmail REST adapter for the hosted preview MCP", async () => {
+    const resolved: ResolveConnectionCredentialInput[] = [];
+    const fetched: string[] = [];
+    const prepared = await prepareAgentTools(
+      testSettings({
+        gmailRestAdapterEnabled: true,
+        mcpServers: [
+          {
+            id: "gmail",
+            name: "Gmail",
+            url: "https://gmailmcp.googleapis.com/mcp/v1",
+            allowedTools: ["list_labels"],
+            requireApproval: ["create_draft"],
+            connectionRef: {
+              providerDomain: "gmailmcp.googleapis.com",
+              kind: "oauth2",
+              subjectScope: "subject",
+            },
+            cacheToolsList: false,
+          },
+        ],
+      }),
+      [{ kind: "mcp", id: "gmail" }],
+      {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        turnId: "44444444-4444-4444-8444-444444444444",
+        attemptId: "55555555-5555-4555-8555-555555555555",
+        executionGeneration: 1,
+        credentialSubjectId: "subject-a",
+        resolveCredential: async (input) => {
+          resolved.push(input);
+          return {
+            status: "ok",
+            connectionId: "gmail-connection",
+            headers: { authorization: "Bearer gmail-token" },
+          };
+        },
+        mcpFetchImpl: async (input) => {
+          fetched.push(input.toString());
+          return Response.json({
+            labels: [{ id: "Label_1", name: "Projects", type: "user" }],
+          });
+        },
+      },
+    );
+    try {
+      expect(prepared.mcpServers).toHaveLength(1);
+      expect((await prepared.mcpServers[0]!.listTools()).map((tool) => tool.name)).toEqual([
+        "gmail__list_labels",
+      ]);
+      const result = await prepared.mcpServers[0]!.callTool("gmail__list_labels", {});
+      expect(JSON.stringify(result)).toContain("Projects");
+      const codemodeResult = await prepared.attemptToolEnvironment!.call({
+        operationId: "66666666-6666-4666-8666-666666666666",
+        catalogDigest: prepared.attemptToolCatalog!.digest,
+        identity: { serverId: "gmail", toolName: "list_labels" },
+        arguments: {},
+        caller: { kind: "codemode", subjectId: "agent:test" },
+      });
+      expect(JSON.stringify(codemodeResult)).toContain("Projects");
+      expect(fetched).toEqual([
+        "https://gmail.googleapis.com/gmail/v1/users/me/labels",
+        "https://gmail.googleapis.com/gmail/v1/users/me/labels",
+      ]);
+      expect(resolved).toHaveLength(3);
+      expect(resolved[1]).toMatchObject({
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        subjectId: "subject-a",
+        serverId: "gmail",
+        toolName: "list_labels",
+        destinationUrl: "https://gmail.googleapis.com/gmail/v1/users/me/labels",
+      });
+      expect(resolved[2]).toMatchObject({
+        subjectId: "subject-a",
+        serverId: "gmail",
+        toolName: "list_labels",
+      });
+      expect(prepared.resolvedMcpConnectionIds.get("gmail")).toBe("gmail-connection");
     } finally {
       await prepared.close();
     }
@@ -6926,6 +7105,121 @@ describe("runtime event normalization", () => {
     }
   });
 
+  test("routes selected local MCP adapters through prefixing, bounds, connection identity, and cancellation", async () => {
+    const connectionId = "11111111-2222-4333-8444-555555555555";
+    let connected = 0;
+    let closed = 0;
+    let observedSignal: AbortSignal | undefined;
+    const local: MCPServer = {
+      name: "local-openapi",
+      cacheToolsList: true,
+      async connect() {
+        connected += 1;
+      },
+      async close() {
+        closed += 1;
+      },
+      async listTools() {
+        return [
+          {
+            name: "list_items",
+            description: "List items.",
+            inputSchema: { type: "object", properties: {}, required: [] },
+          },
+        ];
+      },
+      async callTool(_name, _args, _meta, options) {
+        observedSignal = options?.signal;
+        return { content: [{ type: "text", text: "ok" }] };
+      },
+      async invalidateToolsCache() {},
+    };
+    let remoteFetchCalled = false;
+    const prepared = await prepareAgentTools(
+      testSettings({
+        mcpServers: [
+          {
+            id: "inventory_api",
+            name: "Inventory API",
+            url: "https://inventory.example.test/",
+            cacheToolsList: true,
+            connectionRef: {
+              connectionId,
+              providerDomain: "inventory.example.test",
+              kind: "oauth2",
+              subjectScope: "workspace",
+            },
+          },
+        ],
+      }),
+      [{ kind: "mcp", id: "inventory_api" }],
+      {
+        localMcpServers: [
+          { id: "inventory_api", server: local, resolvedConnectionId: connectionId },
+        ],
+        mcpFetchImpl: async () => {
+          remoteFetchCalled = true;
+          throw new Error("local adapters must not use the remote MCP transport");
+        },
+      },
+    );
+    try {
+      expect(connected).toBe(1);
+      expect(remoteFetchCalled).toBe(false);
+      expect(prepared.resolvedMcpConnectionIds.get("inventory_api")).toBe(connectionId);
+      const tools = await prepared.mcpServers[0]!.listTools();
+      expect(tools.map((tool) => tool.name)).toEqual(["inventory_api__list_items"]);
+      const controller = new AbortController();
+      await prepared.mcpServers[0]!.callTool("inventory_api__list_items", {}, null, {
+        signal: controller.signal,
+      });
+      expect(observedSignal).toBe(controller.signal);
+    } finally {
+      await prepared.close();
+    }
+    expect(closed).toBe(1);
+  });
+
+  test("rejects duplicate, unregistered, and connection-mismatched local MCP adapters", async () => {
+    const settings = testSettings({
+      mcpServers: [
+        {
+          id: "local_api",
+          url: "https://local.example.test/",
+          connectionRef: {
+            connectionId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            providerDomain: "local.example.test",
+          },
+        },
+      ],
+    });
+    const local = fakeMcpServer("local");
+    await expect(
+      prepareAgentTools(settings, [{ kind: "mcp", id: "local_api" }], {
+        localMcpServers: [
+          { id: "local_api", server: local },
+          { id: "local_api", server: local },
+        ],
+      }),
+    ).rejects.toThrow("Duplicate local MCP server id");
+    await expect(
+      prepareAgentTools(settings, [{ kind: "mcp", id: "local_api" }], {
+        localMcpServers: [{ id: "missing", server: local }],
+      }),
+    ).rejects.toThrow("not registered in settings");
+    await expect(
+      prepareAgentTools(settings, [{ kind: "mcp", id: "local_api" }], {
+        localMcpServers: [
+          {
+            id: "local_api",
+            server: local,
+            resolvedConnectionId: "ffffffff-1111-4222-8333-444444444444",
+          },
+        ],
+      }),
+    ).rejects.toThrow("connection identity changed");
+  });
+
   test("rejects unknown MCP tool ids during runtime preparation", async () => {
     await expect(
       prepareAgentTools(testSettings(), [{ kind: "mcp", id: "missing" }]),
@@ -6995,7 +7289,7 @@ describe("pack skills in the sandbox skill index", () => {
     environment: {},
   });
 
-  test("without pack skills the source is the unchanged bundled local-dir source", () => {
+  test("without explicit selections the skill index retains bundled guidance", () => {
     const source = lazySkillSourceWithPackSkills([]);
     expect((source.source as { type: string }).type).toBe("local_dir");
     const index = source.getIndex?.(emptyManifest, ".agents") ?? [];
@@ -7118,15 +7412,13 @@ describe("pack skills in the sandbox skill index", () => {
     );
   });
 
-  test("pack skills join the bundled skills in one lazy skill index", () => {
+  test("pack skills join the explicit skill index", () => {
     const source = lazySkillSourceWithPackSkills([infraSkill]);
     const sourceDir = source.source as {
       type: string;
       children: Record<string, any>;
     };
     expect(sourceDir.type).toBe("dir");
-    // Bundled skills stay lazily materializable from their local directories.
-    expect(sourceDir.children.checkov.type).toBe("local_dir");
     // Pack skill content is carried in-memory from the manifest.
     expect(sourceDir.children["infra-ops"].type).toBe("dir");
     expect(sourceDir.children["infra-ops"].children["SKILL.md"].content).toContain("# Infra ops");
@@ -7135,7 +7427,7 @@ describe("pack skills in the sandbox skill index", () => {
     );
     const index = source.getIndex?.(emptyManifest, ".agents") ?? [];
     const names = index.map((entry) => entry.name);
-    expect(names).toContain("checkov");
+    expect(names).not.toContain("checkov");
     expect(names).toContain("infra-ops");
     const infra = index.find((entry) => entry.name === "infra-ops");
     expect(infra?.description).toBe("Operate workspace infrastructure.");
@@ -7152,7 +7444,7 @@ describe("pack skills in the sandbox skill index", () => {
     );
   });
 
-  test("a pack skill shadows a bundled skill with the same name", () => {
+  test("a Pack may explicitly contribute a former deployment-default skill", () => {
     const source = lazySkillSourceWithPackSkills([
       {
         name: "checkov",
@@ -7251,8 +7543,8 @@ describe("pack skills in the sandbox skill index", () => {
     expect(skillsCapability?.lazyFrom?.source.type).toBe("dir");
     const index = skillsCapability?.lazyFrom?.getIndex?.(emptyManifest, ".agents") ?? [];
     expect(index.map((entry) => entry.name)).toContain("infra-ops");
-    // Backward compatibility: without pack skills the capability keeps the
-    // plain bundled local-dir source.
+    // Without explicit skills, the capability retains an empty in-memory
+    // source so repository and later session skills can still compose.
     const plainAgent = buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), []);
     const plainCapability = (
       (plainAgent as any).capabilities as Array<{
@@ -7357,6 +7649,51 @@ describe("curated skill-library artifact integrity", () => {
       symlinkSync("SKILL.md", join(root, "linked.md"));
       expect(() => readSkillLibraryArtifact(root)).toThrow(/symbolic link/);
     });
+  });
+});
+
+describe("portable skill artifact validation", () => {
+  test("normalizes, sorts, and fingerprints the complete artifact", () => {
+    const artifact = buildPortableSkillArtifact([
+      { path: "references/runbook.md", content: "Runbook.\n" },
+      {
+        path: "SKILL.md",
+        content:
+          "---\nname: incident-response\ndescription: >-\n  Triage incidents and\n  preserve evidence.\n---\n# Incident response\n",
+      },
+    ]);
+    expect(artifact).toMatchObject({
+      name: "incident-response",
+      description: "Triage incidents and preserve evidence.",
+      totalBytes: expect.any(Number),
+      contentSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+    });
+    expect(artifact.files.map((file) => file.path)).toEqual(["SKILL.md", "references/runbook.md"]);
+  });
+
+  test("rejects path traversal, duplicate files, missing metadata, and size overflow", () => {
+    const validMarkdown = "---\nname: safe\ndescription: Safe guidance.\n---\n";
+    expect(() =>
+      buildPortableSkillArtifact([
+        { path: "SKILL.md", content: validMarkdown },
+        { path: "../escape.md", content: "x" },
+      ]),
+    ).toThrow("unsafe path");
+    expect(() =>
+      buildPortableSkillArtifact([
+        { path: "SKILL.md", content: validMarkdown },
+        { path: "SKILL.md", content: validMarkdown },
+      ]),
+    ).toThrow("duplicate file path");
+    expect(() =>
+      buildPortableSkillArtifact([{ path: "SKILL.md", content: "# Missing\n" }]),
+    ).toThrow("must declare a safe name");
+    expect(() =>
+      buildPortableSkillArtifact([
+        { path: "SKILL.md", content: validMarkdown },
+        { path: "large.txt", content: "x".repeat(PORTABLE_SKILL_MAX_FILE_BYTES + 1) },
+      ]),
+    ).toThrow("file exceeds");
   });
 });
 

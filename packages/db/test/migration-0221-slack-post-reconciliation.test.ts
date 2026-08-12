@@ -4,10 +4,10 @@ import { readFile } from "node:fs/promises";
 import postgres from "postgres";
 import { migrate } from "../src/migrate";
 
-const migrationName = "0215_slack_post_outcome_reconciliation.sql";
+const migrationName = "0221_slack_post_outcome_reconciliation.sql";
 const migrationUrl = new URL(`../drizzle/${migrationName}`, import.meta.url);
 
-describe("migration 0215 Slack post outcome reconciliation", () => {
+describe("migration 0221 Slack post outcome reconciliation", () => {
   test("is a rolling old-writer fence with validated states and claim modes", async () => {
     const source = await readFile(migrationUrl, "utf8");
     expect(source.startsWith("-- deployment-mode: rolling\n")).toBe(true);
@@ -21,7 +21,7 @@ describe("migration 0215 Slack post outcome reconciliation", () => {
   });
 
   test("backfills live claims, blocks old unknown reclaims, and preserves FORCE RLS", async () => {
-    const blank = await acquireBlankTestDatabase("migration-0215-slack-post");
+    const blank = await acquireBlankTestDatabase("migration-0221-slack-post");
     if (!blank) return;
     const sql = postgres(blank.databaseUrl, { max: 1, onnotice: () => undefined });
     try {
@@ -35,15 +35,15 @@ describe("migration 0215 Slack post outcome reconciliation", () => {
       await migrate(blank.databaseUrl);
 
       const [account] = await sql<{ id: string }[]>`
-        insert into managed_accounts (name) values ('migration-0215-account') returning id`;
+        insert into managed_accounts (name) values ('migration-0221-account') returning id`;
       const [workspace] = await sql<{ id: string }[]>`
         insert into workspaces (account_id, name)
-        values (${account!.id}, 'migration-0215-workspace') returning id`;
+        values (${account!.id}, 'migration-0221-workspace') returning id`;
       const [otherAccount] = await sql<{ id: string }[]>`
-        insert into managed_accounts (name) values ('migration-0215-other-account') returning id`;
+        insert into managed_accounts (name) values ('migration-0221-other-account') returning id`;
       const [otherWorkspace] = await sql<{ id: string }[]>`
         insert into workspaces (account_id, name)
-        values (${otherAccount!.id}, 'migration-0215-other-workspace') returning id`;
+        values (${otherAccount!.id}, 'migration-0221-other-workspace') returning id`;
       const insertConnection = async (accountId: string, workspaceId: string) => {
         const [connection] = await sql<{ id: string }[]>`
           insert into connections (

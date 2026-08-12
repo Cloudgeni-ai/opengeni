@@ -79,7 +79,6 @@ import {
   updateScheduledTask,
   updateSessionGoalWithEvent,
   upsertSessionGoalWithEvent,
-  RigChangeAlreadyVerifyingError,
   RigChangeTransitionError,
   createWorkspaceArtifact,
   getWorkspaceArtifact,
@@ -110,7 +109,9 @@ import {
   hasLiteralPermission,
   hasPermission,
   authorizedSocialConnectionsForGrant,
+  authorizedAtlassianConnectionsForGrant,
   buildCapabilityCatalog,
+  nativeConnectionCapabilityRecommendations,
   correctWorkspaceMemoryWithSlackPublication,
   requireLiveAgentAttemptAuthorization,
   requireSessionAuthorization,
@@ -128,6 +129,7 @@ import {
 } from "../github-access";
 import { githubBrowserBaseUrl, githubBrowserGrantClaims } from "../github-browser-flow";
 import {
+  assertSocialConnectionProvider,
   socialMentionsLive,
   socialOwnPostsLive,
   socialPostReply,
@@ -204,6 +206,14 @@ import {
   createOpenGeniSlackBotClient,
   resolveSlackBotConnectionForTool,
 } from "../integrations/slack-bot";
+import { createFikenClient, resolveFikenConnectionForTool } from "../integrations/fiken";
+import {
+  browseAtlassianSources,
+  getAtlassianLiveItem,
+  revokeAtlassianScheduleAuthorization,
+  searchAtlassianLive,
+} from "../integrations/atlassian";
+import { AtlassianConnectionMetadata } from "@opengeni/contracts/atlassian";
 import { registerEditableArtifactAgentTools } from "./editable-artifacts";
 
 export type McpServerOptions = {
@@ -263,13 +273,17 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   browser_tabs: { sessionRequired: true, allOf: ["sessions:control"] },
   browser_observe: { sessionRequired: true, allOf: ["sessions:read"] },
   browser_act: { sessionRequired: true, allOf: ["sessions:control"] },
+  browser_clipboard: { sessionRequired: true, allOf: ["sessions:read"] },
   browser_debug: { sessionRequired: true, allOf: ["sessions:read"] },
+  browser_auth: { sessionRequired: true, allOf: ["sessions:control"] },
+  interaction_request_human: { sessionRequired: true, allOf: ["sessions:control"] },
   browser_identity: { sessionRequired: true, allOf: ["sessions:control"] },
   browser_publish: { sessionRequired: true, allOf: ["sessions:control"] },
   browser_lifecycle: { sessionRequired: true, allOf: ["sessions:control"] },
   computer_open: { sessionRequired: true, allOf: ["sessions:control"] },
   computer_targets: { sessionRequired: true, allOf: ["sessions:read"] },
   computer_observe: { sessionRequired: true, allOf: ["sessions:read"] },
+  computer_clipboard: { sessionRequired: true, allOf: ["sessions:read"] },
   computer_act: { sessionRequired: true, allOf: ["sessions:control"] },
   computer_lifecycle: { sessionRequired: true, allOf: ["sessions:control"] },
   variable_set_list: { allOf: ["variable-sets:list", "secrets:list"] },
@@ -301,6 +315,18 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   // Publishes under the user's identity: connections:write keeps it out of the
   // default agent permission set, unlike the read-only social tools above.
   social_post_reply: { allOf: ["connections:write"] },
+  x_accounts_list: { allOf: ["connections:read"] },
+  x_search_live: { allOf: ["connections:read"] },
+  x_mentions_live: { allOf: ["connections:read"] },
+  x_thread_fetch: { allOf: ["connections:read"] },
+  x_posts_sync: { allOf: ["connections:write"] },
+  x_post_reply: { allOf: ["connections:write"] },
+  reddit_accounts_list: { allOf: ["connections:read"] },
+  reddit_search_live: { allOf: ["connections:read"] },
+  reddit_mentions_live: { allOf: ["connections:read"] },
+  reddit_thread_fetch: { allOf: ["connections:read"] },
+  reddit_posts_sync: { allOf: ["connections:write"] },
+  reddit_post_reply: { allOf: ["connections:write"] },
   scheduled_tasks_list: {
     anyOf: ["scheduled_tasks:manage", "scheduled_tasks:run"],
   },
@@ -325,6 +351,21 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   slack_bot_file_content: { allOf: ["connections:read"] },
   slack_bot_post_message: { allOf: ["connections:read"] },
   slack_bot_delete_message: { allOf: ["connections:read"] },
+  fiken_companies_list: { allOf: ["connections:read"] },
+  fiken_contacts_list: { allOf: ["connections:read"] },
+  fiken_products_list: { allOf: ["connections:read"] },
+  fiken_invoices_list: { allOf: ["connections:read"] },
+  fiken_invoice_get: { allOf: ["connections:read"] },
+  fiken_bank_accounts_list: { allOf: ["connections:read"] },
+  fiken_purchases_list: { allOf: ["connections:read"] },
+  fiken_sales_list: { allOf: ["connections:read"] },
+  // Writes into the workspace's real accounting ledger surface take the write
+  // scope, keeping them out of the default agent permission set.
+  fiken_contact_create: { allOf: ["connections:write"] },
+  fiken_invoice_draft_create: { allOf: ["connections:write"] },
+  atlassian_sources_list: { allOf: ["connections:read"] },
+  atlassian_search: { allOf: ["connections:read"] },
+  atlassian_get: { allOf: ["connections:read"] },
   artifacts_list: { sessionRequired: true, allOf: ["artifacts:read"] },
   artifacts_get_source: { sessionRequired: true, allOf: ["artifacts:read"] },
   artifacts_create: { sessionRequired: true, allOf: ["artifacts:publish"] },
@@ -449,6 +490,14 @@ export function buildOpenGeniMcpServer(
     if (!authority) throw new Error(`Unknown or unavailable social connection: ${connectionId}`);
     return authority;
   };
+  const requireAuthorizedSocialConnectionForProvider = async (
+    provider: "x" | "reddit",
+    connectionId: string,
+  ) => {
+    const authority = await requireAuthorizedSocialConnection(connectionId);
+    assertSocialConnectionProvider(authority.connection, provider);
+    return authority;
+  };
 
   // Session-scoped tools key off the worker-asserted sessionId claim (signed
   // into the delegated token by the worker, never agent-controlled).
@@ -523,6 +572,8 @@ export function buildOpenGeniMcpServer(
   }
   registerRigTools(server, deps, grant, can, sessionId, json);
   registerSlackBotTools(server, deps, grant, sessionId, json);
+  registerFikenTools(server, deps, grant, sessionId, json);
+  registerAtlassianTools(server, deps, grant, json);
 
   // Orchestration, variableSet, and GitHub status tools are permission-gated
   // at registration: a grant without the permission does not see the tool.
@@ -778,6 +829,116 @@ export function buildOpenGeniMcpServer(
         });
       },
     );
+
+    // Provider-scoped aliases are the canonical tools advertised by the X and
+    // Reddit Integration cards. The legacy social_* names remain available to
+    // existing Packs/sessions, but these names bind the provider in the tool
+    // identity and reject a near-identical Connection from the other adapter.
+    for (const provider of ["x", "reddit"] as const) {
+      const providerName = provider === "x" ? "X" : "Reddit";
+      server.registerTool(
+        `${provider}_accounts_list`,
+        {
+          description: `List the exact visible ${providerName} accounts available to this work.`,
+          inputSchema: { limit: z4.number().int().positive().optional() },
+        },
+        async ({ limit }) =>
+          json({
+            connections: (await authorizedSocialConnections())
+              .filter(
+                ({ connection }) =>
+                  connection.provider === provider && connection.status !== "disabled",
+              )
+              .slice(0, boundedMcpLimit(limit))
+              .map(({ connection }) => connection),
+          }),
+      );
+      server.registerTool(
+        `${provider}_search_live`,
+        {
+          description:
+            provider === "x"
+              ? "Search recent X conversations through one exact connected X account."
+              : "Search Reddit through one exact connected Reddit account; optionally scope to a subreddit.",
+          inputSchema: {
+            connectionId: z4.string().uuid(),
+            query: z4.string().min(1).max(512),
+            subreddit: z4.string().min(1).max(100).optional(),
+            limit: z4.number().int().positive().optional(),
+          },
+        },
+        async ({ connectionId, query, subreddit, limit }) => {
+          const authority = await requireAuthorizedSocialConnectionForProvider(
+            provider,
+            connectionId,
+          );
+          const result = await socialSearchLive(
+            deps,
+            {
+              workspaceId: grant.workspaceId,
+              connectionId,
+              subjectId: authority.subjectId,
+            },
+            { query, subreddit, limit },
+          );
+          return json({ provider: result.connection.provider, posts: result.posts });
+        },
+      );
+      server.registerTool(
+        `${provider}_mentions_live`,
+        {
+          description: `Fetch live ${providerName} mentions and replies through one exact connected account.`,
+          inputSchema: {
+            connectionId: z4.string().uuid(),
+            sinceId: z4.string().optional(),
+            limit: z4.number().int().positive().optional(),
+          },
+        },
+        async ({ connectionId, sinceId, limit }) => {
+          const authority = await requireAuthorizedSocialConnectionForProvider(
+            provider,
+            connectionId,
+          );
+          const result = await socialMentionsLive(
+            deps,
+            {
+              workspaceId: grant.workspaceId,
+              connectionId,
+              subjectId: authority.subjectId,
+            },
+            { sinceId, limit },
+          );
+          return json({ provider: result.connection.provider, posts: result.posts });
+        },
+      );
+      server.registerTool(
+        `${provider}_thread_fetch`,
+        {
+          description: `Fetch one live ${providerName} conversation thread through an exact connected account.`,
+          inputSchema: {
+            connectionId: z4.string().uuid(),
+            id: z4.string().min(1).max(100),
+            limit: z4.number().int().positive().optional(),
+          },
+        },
+        async ({ connectionId, id, limit }) => {
+          const authority = await requireAuthorizedSocialConnectionForProvider(
+            provider,
+            connectionId,
+          );
+          const result = await socialThreadLive(
+            deps,
+            {
+              workspaceId: grant.workspaceId,
+              connectionId,
+              subjectId: authority.subjectId,
+            },
+            { id, limit },
+          );
+          return json({ provider: result.connection.provider, posts: result.posts });
+        },
+      );
+    }
   }
 
   // Writes are gated on connections:write (never in the default first-party
@@ -879,6 +1040,103 @@ export function buildOpenGeniMcpServer(
         });
       },
     );
+
+    for (const provider of ["x", "reddit"] as const) {
+      const providerName = provider === "x" ? "X" : "Reddit";
+      server.registerTool(
+        `${provider}_posts_sync`,
+        {
+          description: `Sync one exact connected ${providerName} account's recent posts into OpenGeni (idempotent).`,
+          inputSchema: {
+            connectionId: z4.string().uuid(),
+            limit: z4.number().int().positive().optional(),
+          },
+        },
+        async ({ connectionId, limit }) => {
+          const authority = await requireAuthorizedSocialConnectionForProvider(
+            provider,
+            connectionId,
+          );
+          const result = await socialOwnPostsLive(
+            deps,
+            {
+              workspaceId: grant.workspaceId,
+              connectionId,
+              subjectId: authority.subjectId,
+            },
+            { limit },
+          );
+          const datedPosts = result.posts.filter((post) => post.createdAt !== null);
+          const synced = await recordSyncedSocialPosts(deps.db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            connectionId,
+            subjectId: authority.subjectId,
+            posts: datedPosts.map((post) => ({
+              externalPostId: post.id,
+              url: post.url,
+              authorHandle: post.author,
+              text: post.text,
+              publishedAt: new Date(post.createdAt!),
+              metrics: post.metrics,
+            })),
+          });
+          return json({
+            provider: result.connection.provider,
+            fetched: result.posts.length,
+            inserted: synced.inserted,
+            skipped: synced.skipped,
+            skippedMissingDate: result.posts.length - datedPosts.length,
+          });
+        },
+      );
+      server.registerTool(
+        `${provider}_post_reply`,
+        {
+          description: `Publish a reply from one exact connected ${providerName} account. This is a public write and should require approval.`,
+          inputSchema: {
+            connectionId: z4.string().uuid(),
+            inReplyToId: z4.string().min(1).max(100),
+            text: z4.string().min(1).max(10000),
+          },
+        },
+        async ({ connectionId, inReplyToId, text }) => {
+          const authority = await requireAuthorizedSocialConnectionForProvider(
+            provider,
+            connectionId,
+          );
+          const result = await socialPostReply(
+            deps,
+            {
+              workspaceId: grant.workspaceId,
+              connectionId,
+              subjectId: authority.subjectId,
+            },
+            { inReplyToId, text },
+          );
+          await recordAuditEvent(deps.db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            subjectId: grant.subjectId,
+            action: "social.post_reply",
+            targetType: "social_connection",
+            targetId: connectionId,
+            metadata: {
+              provider: result.connection.provider,
+              adapterTool: `${provider}_post_reply`,
+              inReplyToId,
+              postedId: result.postedId,
+              url: result.url,
+            },
+          });
+          return json({
+            provider: result.connection.provider,
+            postedId: result.postedId,
+            url: result.url,
+          });
+        },
+      );
+    }
   }
 
   if (can("scheduled_tasks:manage") || can("scheduled_tasks:run")) {
@@ -1187,10 +1445,17 @@ export function buildOpenGeniMcpServer(
       },
       async ({ id }) => {
         const task = await requireScheduledTask(deps.db, grant.workspaceId, id);
-        await revokeKnowledgeSourceScheduleAuthorization(deps, {
-          task,
-          subjectId: grant.subjectId,
-        });
+        if (task.metadata.connectorKind === "atlassian") {
+          await revokeAtlassianScheduleAuthorization(deps, {
+            task,
+            subjectId: grant.subjectId,
+          });
+        } else {
+          await revokeKnowledgeSourceScheduleAuthorization(deps, {
+            task,
+            subjectId: grant.subjectId,
+          });
+        }
         await deps.workflowClient.deleteScheduledTaskSchedule({
           temporalScheduleId: task.temporalScheduleId,
         });
@@ -1442,6 +1707,360 @@ function registerSlackBotTools(
       json(
         await (await clientFor(connectionId)).deleteMessage({ operationId, channelId, timestamp }),
       ),
+  );
+}
+
+function registerFikenTools(
+  server: McpServer,
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  sessionId: string | null,
+  json: JsonResult,
+): void {
+  // One resolution per requested connection per MCP server instance: the
+  // bound row cannot change mid-request, and re-resolving on every tool call
+  // would pay an extra connections read each time.
+  const clients = new Map<string, Promise<ReturnType<typeof createFikenClient>>>();
+  const clientFor = (connectionId?: string) => {
+    const cacheKey = connectionId ?? "";
+    let client = clients.get(cacheKey);
+    if (!client) {
+      client = resolveFikenConnectionForTool({
+        db: deps.db,
+        grant,
+        sessionId,
+        ...(connectionId ? { requestedConnectionId: connectionId } : {}),
+      }).then((resolved) => createFikenClient(deps, resolved));
+      // A failed resolution must not be cached as a poisoned entry.
+      client.catch(() => clients.delete(cacheKey));
+      clients.set(cacheKey, client);
+    }
+    return client;
+  };
+  const companySlugInput = z4
+    .string()
+    .min(1)
+    .max(128)
+    .optional()
+    .describe(
+      "Fiken company slug. Optional when the connection has a default company or access to exactly one company.",
+    );
+  const pageInputs = {
+    page: z4.number().int().min(0).optional(),
+    pageSize: z4.number().int().min(1).max(100).optional(),
+  };
+  const isoDate = z4
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .optional();
+
+  server.registerTool(
+    "fiken_companies_list",
+    {
+      description:
+        "List the Fiken companies this workspace's Fiken connection can act on. Use the returned slug as companySlug in other fiken tools.",
+      inputSchema: { connectionId: z4.string().uuid().optional(), ...pageInputs },
+    },
+    async ({ connectionId, page, pageSize }) =>
+      json(
+        await (
+          await clientFor(connectionId)
+        ).listCompanies({
+          ...(page !== undefined ? { page } : {}),
+          ...(pageSize !== undefined ? { pageSize } : {}),
+        }),
+      ),
+  );
+
+  server.registerTool(
+    "fiken_contacts_list",
+    {
+      description:
+        "List or search contacts (customers and suppliers) in a Fiken company. Filters combine with AND. customerId used elsewhere equals a contact's contactId where customer is true.",
+      inputSchema: {
+        connectionId: z4.string().uuid().optional(),
+        companySlug: companySlugInput,
+        ...pageInputs,
+        name: z4.string().min(1).max(256).optional(),
+        email: z4.string().min(1).max(256).optional(),
+        organizationNumber: z4.string().min(1).max(64).optional(),
+        customer: z4.boolean().optional(),
+        supplier: z4.boolean().optional(),
+        inactive: z4.boolean().optional(),
+      },
+    },
+    async ({ connectionId, ...input }) =>
+      json(await (await clientFor(connectionId)).listContacts(input)),
+  );
+
+  server.registerTool(
+    "fiken_contact_create",
+    {
+      description:
+        "Create a contact in a Fiken company. Retrying after an unknown outcome may create a duplicate; search fiken_contacts_list first when unsure.",
+      inputSchema: {
+        connectionId: z4.string().uuid().optional(),
+        companySlug: companySlugInput,
+        name: z4.string().min(1).max(256),
+        email: z4.string().min(1).max(256).optional(),
+        organizationNumber: z4.string().min(1).max(64).optional(),
+        phoneNumber: z4.string().min(1).max(64).optional(),
+        customer: z4.boolean().optional(),
+        supplier: z4.boolean().optional(),
+      },
+    },
+    async ({ connectionId, ...input }) =>
+      json(await (await clientFor(connectionId)).createContact(input)),
+  );
+
+  server.registerTool(
+    "fiken_products_list",
+    {
+      description: "List products in a Fiken company.",
+      inputSchema: {
+        connectionId: z4.string().uuid().optional(),
+        companySlug: companySlugInput,
+        ...pageInputs,
+        name: z4.string().min(1).max(256).optional(),
+        active: z4.boolean().optional(),
+      },
+    },
+    async ({ connectionId, ...input }) =>
+      json(await (await clientFor(connectionId)).listProducts(input)),
+  );
+
+  server.registerTool(
+    "fiken_invoices_list",
+    {
+      description:
+        "List invoices in a Fiken company. Dates are yyyy-mm-dd; monetary amounts in results are in cents/øre of the invoice currency.",
+      inputSchema: {
+        connectionId: z4.string().uuid().optional(),
+        companySlug: companySlugInput,
+        ...pageInputs,
+        issueDateGe: isoDate,
+        issueDateLe: isoDate,
+        customerId: z4.number().int().positive().optional(),
+        settled: z4.boolean().optional(),
+        invoiceNumber: z4.string().min(1).max(64).optional(),
+      },
+    },
+    async ({ connectionId, ...input }) =>
+      json(await (await clientFor(connectionId)).listInvoices(input)),
+  );
+
+  server.registerTool(
+    "fiken_invoice_get",
+    {
+      description: "Read a single Fiken invoice by its invoiceId.",
+      inputSchema: {
+        connectionId: z4.string().uuid().optional(),
+        companySlug: companySlugInput,
+        invoiceId: z4.number().int().positive(),
+      },
+    },
+    async ({ connectionId, ...input }) =>
+      json(await (await clientFor(connectionId)).getInvoice(input)),
+  );
+
+  server.registerTool(
+    "fiken_invoice_draft_create",
+    {
+      description:
+        "Create an invoice DRAFT in Fiken. Drafts are not sent to the customer; a human finishes and sends them from Fiken. unitPriceCents is the net price per unit in cents/øre. Each line needs either productId or an incomeAccount + vatType. Generate one operationId UUID per intended draft and reuse that same UUID on every retry; a retry returns the existing draft instead of duplicating it.",
+      inputSchema: {
+        connectionId: z4.string().uuid().optional(),
+        companySlug: companySlugInput,
+        operationId: z4.string().uuid(),
+        customerId: z4.number().int().positive(),
+        daysUntilDueDate: z4.number().int().min(0).max(365),
+        invoiceText: z4.string().max(500).optional(),
+        yourReference: z4.string().max(128).optional(),
+        ourReference: z4.string().max(128).optional(),
+        currency: z4
+          .string()
+          .regex(/^[A-Z]{3}$/)
+          .optional(),
+        bankAccountNumber: z4.string().min(1).max(64).optional(),
+        lines: z4
+          .array(
+            z4.object({
+              description: z4.string().max(200).optional(),
+              productId: z4.number().int().positive().optional(),
+              unitPriceCents: z4.number().int().optional(),
+              vatType: z4.string().min(1).max(64).optional(),
+              quantity: z4.number().positive(),
+              discountPercent: z4.number().min(0).max(100).optional(),
+              incomeAccount: z4.string().min(1).max(16).optional(),
+              comment: z4.string().max(200).optional(),
+            }),
+          )
+          .min(1)
+          .max(100),
+      },
+    },
+    async ({ connectionId, ...input }) =>
+      json(await (await clientFor(connectionId)).createInvoiceDraft(input)),
+  );
+
+  server.registerTool(
+    "fiken_bank_accounts_list",
+    {
+      description:
+        "List bank accounts in a Fiken company, including reconciled balances in cents/øre.",
+      inputSchema: {
+        connectionId: z4.string().uuid().optional(),
+        companySlug: companySlugInput,
+        ...pageInputs,
+        inactive: z4.boolean().optional(),
+      },
+    },
+    async ({ connectionId, ...input }) =>
+      json(await (await clientFor(connectionId)).listBankAccounts(input)),
+  );
+
+  server.registerTool(
+    "fiken_purchases_list",
+    {
+      description: "List purchases in a Fiken company. Dates are yyyy-mm-dd.",
+      inputSchema: {
+        connectionId: z4.string().uuid().optional(),
+        companySlug: companySlugInput,
+        ...pageInputs,
+        dateGe: isoDate,
+        dateLe: isoDate,
+        paid: z4.boolean().optional(),
+      },
+    },
+    async ({ connectionId, ...input }) =>
+      json(await (await clientFor(connectionId)).listPurchases(input)),
+  );
+
+  server.registerTool(
+    "fiken_sales_list",
+    {
+      description: "List sales in a Fiken company. Dates are yyyy-mm-dd.",
+      inputSchema: {
+        connectionId: z4.string().uuid().optional(),
+        companySlug: companySlugInput,
+        ...pageInputs,
+        dateGe: isoDate,
+        dateLe: isoDate,
+        settled: z4.boolean().optional(),
+      },
+    },
+    async ({ connectionId, ...input }) =>
+      json(await (await clientFor(connectionId)).listSales(input)),
+  );
+}
+
+function registerAtlassianTools(
+  server: McpServer,
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  json: JsonResult,
+): void {
+  const connectionFor = async (connectionId?: string) => {
+    const authorized = await authorizedAtlassianConnectionsForGrant({ db: deps.db, grant });
+    const candidates = authorized.filter(({ connection }) =>
+      connectionId ? connection.id === connectionId : true,
+    );
+    if (candidates.length === 0) {
+      throw new Error(
+        connectionId
+          ? "the requested Atlassian connection is unavailable for this turn"
+          : "no Atlassian connection is available for this turn",
+      );
+    }
+    if (!connectionId && candidates.length > 1) {
+      throw new Error(
+        "connectionId is required because multiple Atlassian connections are available",
+      );
+    }
+    const authority = candidates[0]!;
+    const metadata = AtlassianConnectionMetadata.safeParse(authority.connection.metadata);
+    if (!metadata.success) throw new Error("Atlassian connection metadata is invalid");
+    return {
+      connection: authority.connection,
+      metadata: metadata.data,
+      subjectId: authority.subjectId ?? grant.subjectId,
+    };
+  };
+
+  server.registerTool(
+    "atlassian_sources_list",
+    {
+      description:
+        "List the Jira projects and Confluence spaces available through the authorized Atlassian connection, including which sources are selected for OpenGeni. Use this before search when the site or boundary is unclear.",
+      inputSchema: { connectionId: z4.string().uuid().optional() },
+    },
+    async ({ connectionId }) => {
+      const authority = await connectionFor(connectionId);
+      const response = await browseAtlassianSources(deps, {
+        workspaceId: grant.workspaceId,
+        subjectId: authority.subjectId,
+        connectionId: authority.connection.id,
+      });
+      const selected = new Set(authority.metadata.selectedSources.map((source) => source.id));
+      return json({
+        connectionId: authority.connection.id,
+        account: authority.metadata.displayName,
+        items: response.items.map((item) => ({ ...item, selected: selected.has(item.id) })),
+      });
+    },
+  );
+
+  server.registerTool(
+    "atlassian_search",
+    {
+      description:
+        "Search Jira issues and Confluence pages live within the projects and spaces selected for OpenGeni. Results reflect current Atlassian data and permissions, independent of the knowledge sync index.",
+      inputSchema: {
+        connectionId: z4.string().uuid().optional(),
+        query: z4.string().min(1).max(500),
+        product: z4.enum(["jira", "confluence"]).optional(),
+        limit: z4.number().int().min(1).max(50).optional(),
+      },
+    },
+    async ({ connectionId, query, product, limit }) => {
+      const authority = await connectionFor(connectionId);
+      return json({
+        connectionId: authority.connection.id,
+        results: await searchAtlassianLive(deps, {
+          workspaceId: grant.workspaceId,
+          subjectId: authority.subjectId,
+          connectionId: authority.connection.id,
+          query,
+          ...(product ? { product } : {}),
+          limit: limit ?? 20,
+        }),
+      });
+    },
+  );
+
+  server.registerTool(
+    "atlassian_get",
+    {
+      description:
+        "Open one current Jira issue or Confluence page, including description or page content and comments. The item must belong to a project or space selected for OpenGeni.",
+      inputSchema: {
+        connectionId: z4.string().uuid().optional(),
+        kind: z4.enum(["jira_issue", "confluence_page"]),
+        id: z4.string().min(1).max(256),
+      },
+    },
+    async ({ connectionId, kind, id }) => {
+      const authority = await connectionFor(connectionId);
+      return json(
+        await getAtlassianLiveItem(deps, {
+          workspaceId: grant.workspaceId,
+          subjectId: authority.subjectId,
+          connectionId: authority.connection.id,
+          kind,
+          id,
+        }),
+      );
+    },
   );
 }
 
@@ -2470,12 +3089,10 @@ async function beginMcpRigVerificationAttempt(
   try {
     return await beginRigChangeVerificationAttempt(deps.db, workspaceId, changeId, {
       startedAt: new Date().toISOString(),
+      allowAlreadyVerifying: true,
     });
   } catch (error) {
-    if (
-      error instanceof RigChangeAlreadyVerifyingError ||
-      error instanceof RigChangeTransitionError
-    ) {
+    if (error instanceof RigChangeTransitionError) {
       throw new Error(error.message, { cause: error });
     }
     throw error;
@@ -2891,7 +3508,7 @@ function registerWorkspaceOrchestrationTools(
         );
         return json(
           boundSessionDetailMcp(
-            await withMcpEffectivePolicy(deps, grant.workspaceId, {
+            await withMcpEffectivePolicy(deps, grant.workspaceId, grant.subjectId, {
               ...projected,
               effectiveControl: queue?.effectiveControl ?? projected.effectiveControl,
             }),
@@ -3711,7 +4328,11 @@ function registerCapabilityDiscoveryTools(
     async ({ query, limit }) => {
       await authorize();
       const current = await catalog();
-      const ranked = searchCapabilityCatalogItems(current.items, query, limit ?? 8);
+      const ranked = searchCapabilityCatalogItems(
+        [...current.items, ...nativeConnectionCapabilityRecommendations()],
+        query,
+        limit ?? 8,
+      );
       const matches = await Promise.all(
         ranked.map(async ({ item, matchedOn }) => ({
           capabilityId: item.id,
@@ -3748,7 +4369,9 @@ function registerCapabilityDiscoveryTools(
     async ({ capabilityId, rationale }) => {
       await authorize();
       const current = await catalog();
-      const item = current.items.find((candidate) => candidate.id === capabilityId);
+      const item = [...current.items, ...nativeConnectionCapabilityRecommendations()].find(
+        (candidate) => candidate.id === capabilityId,
+      );
       if (!item || !capabilityCatalogItemIsTrustedForExposure(item)) {
         throw new Error("Unknown or untrusted capability; search the catalog again.");
       }
@@ -4435,11 +5058,12 @@ function parseMcpDate(raw: string, label: string): Date {
 async function withMcpEffectivePolicy(
   deps: ApiRouteDeps,
   workspaceId: string,
+  subjectId: string,
   session: Session,
 ): Promise<Session> {
   const [workspaceServerIds, workspaceDefaultServerIds] = await Promise.all([
-    workspaceSessionToolPolicyServerIds(deps.db, workspaceId, deps.settings),
-    workspaceSessionToolPolicyDefaultServerIds(deps.db, workspaceId, deps.settings),
+    workspaceSessionToolPolicyServerIds(deps.db, workspaceId, deps.settings, subjectId),
+    workspaceSessionToolPolicyDefaultServerIds(deps.db, workspaceId, deps.settings, subjectId),
   ]);
   return sessionWithEffectiveToolPolicy(session, workspaceServerIds, workspaceDefaultServerIds);
 }

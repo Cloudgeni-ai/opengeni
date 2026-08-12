@@ -9,6 +9,8 @@ let durableEvents: SessionEvent[] = [];
 const durableReads: Array<{ after: number; limit: number }> = [];
 let durableControlEvents: WorkspaceControlEvent[] = [];
 const durableControlReads: Array<{ after: number; limit: number }> = [];
+let interactionRevisionState = { revision: 0, updatedAt: null as Date | null };
+let interactionRevisionReads = 0;
 
 function event(sequence: number): SessionEvent {
   return {
@@ -27,6 +29,7 @@ function event(sequence: number): SessionEvent {
 const realDb = await import("@opengeni/db");
 const realListSessionEvents = realDb.listSessionEvents;
 const realListWorkspaceControlEvents = realDb.listWorkspaceControlEvents;
+const realGetWorkspaceInteractionRevisionState = realDb.getWorkspaceInteractionRevisionState;
 mock.module("@opengeni/db", () => ({
   ...realDb,
   listSessionEvents: async (
@@ -63,12 +66,47 @@ mock.module("@opengeni/db", () => ({
     durableControlReads.push({ after, limit });
     return durableControlEvents.filter((candidate) => candidate.sequence > after).slice(0, limit);
   },
+  getWorkspaceInteractionRevisionState: async (
+    db: unknown,
+    input: { accountId: string; workspaceId: string },
+  ) => {
+    if (db !== fakeDb) {
+      return await realGetWorkspaceInteractionRevisionState(db as never, input);
+    }
+    interactionRevisionReads += 1;
+    return interactionRevisionState;
+  },
 }));
 
-const { sseSessionStream, sseWorkspaceControlStream } = await import("../src/http/sse");
+const { sseSessionStream, sseWorkspaceControlStream, sseWorkspaceInteractionRevisionStream } =
+  await import("../src/http/sse");
 
 afterAll(() => {
   mock.restore();
+});
+
+test("workspace interaction SSE projects only the newest durable revision", async () => {
+  interactionRevisionReads = 0;
+  interactionRevisionState = { revision: 3, updatedAt: new Date("2026-08-10T00:00:03.000Z") };
+  const controller = new AbortController();
+  const response = await sseWorkspaceInteractionRevisionStream(
+    fakeDb as never,
+    "00000000-0000-4000-8000-000000000010",
+    WORKSPACE_ID,
+    1,
+    controller.signal,
+    { pollIntervalMs: 100, heartbeatIntervalMs: 1_000 },
+  );
+  const reader = response.body!.getReader();
+  expect(await readSequences(reader, 1)).toEqual([3]);
+
+  // Intermediate revisions are cursor noise; the stream may deliver 7 directly.
+  interactionRevisionState = { revision: 7, updatedAt: new Date("2026-08-10T00:00:07.000Z") };
+  expect(await readSequences(reader, 1)).toEqual([7]);
+  expect(interactionRevisionReads).toBeGreaterThanOrEqual(2);
+
+  controller.abort();
+  await reader.cancel().catch(() => undefined);
 });
 
 test("a stalled SSE client is isolated, stops replay, and reconnects without gaps", async () => {

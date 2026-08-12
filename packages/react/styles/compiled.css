@@ -586,8 +586,14 @@
 :where(.og-root).bottom-2,:where(.og-root) .bottom-2 {
     bottom: calc(var(--spacing) * 2);
   }
+:where(.og-root).bottom-3,:where(.og-root) .bottom-3 {
+    bottom: calc(var(--spacing) * 3);
+  }
 :where(.og-root).bottom-4,:where(.og-root) .bottom-4 {
     bottom: calc(var(--spacing) * 4);
+  }
+:where(.og-root).bottom-7,:where(.og-root) .bottom-7 {
+    bottom: calc(var(--spacing) * 7);
   }
 :where(.og-root).bottom-14,:where(.og-root) .bottom-14 {
     bottom: calc(var(--spacing) * 14);
@@ -639,6 +645,9 @@
   }
 :where(.og-root).z-\[2147483647\],:where(.og-root) .z-\[2147483647\] {
     z-index: 2147483647;
+  }
+:where(.og-root).col-span-2,:where(.og-root) .col-span-2 {
+    grid-column: span 2 / span 2;
   }
 :where(.og-root).col-span-full,:where(.og-root) .col-span-full {
     grid-column: 1 / -1;
@@ -1364,6 +1373,9 @@
 :where(.og-root).grid-cols-2,:where(.og-root) .grid-cols-2 {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+:where(.og-root).grid-cols-\[7rem_minmax\(0\,1fr\)\],:where(.og-root) .grid-cols-\[7rem_minmax\(0\,1fr\)\] {
+    grid-template-columns: 7rem minmax(0,1fr);
+  }
 :where(.og-root).grid-cols-\[auto_minmax\(0\,1fr\)\],:where(.og-root) .grid-cols-\[auto_minmax\(0\,1fr\)\] {
     grid-template-columns: auto minmax(0,1fr);
   }
@@ -1502,6 +1514,12 @@
 :where(.og-root).gap-y-0\.5,:where(.og-root) .gap-y-0\.5 {
     row-gap: calc(var(--spacing) * 0.5);
   }
+:where(.og-root).gap-y-1,:where(.og-root) .gap-y-1 {
+    row-gap: calc(var(--spacing) * 1);
+  }
+:where(.og-root).gap-y-1\.5,:where(.og-root) .gap-y-1\.5 {
+    row-gap: calc(var(--spacing) * 1.5);
+  }
 :where(.og-root).gap-y-2,:where(.og-root) .gap-y-2 {
     row-gap: calc(var(--spacing) * 2);
   }
@@ -1533,6 +1551,9 @@
   }
 :where(.og-root).justify-self-end,:where(.og-root) .justify-self-end {
     justify-self: flex-end;
+  }
+:where(.og-root).justify-self-start,:where(.og-root) .justify-self-start {
+    justify-self: flex-start;
   }
 :where(.og-root).truncate,:where(.og-root) .truncate {
     overflow: hidden;
@@ -1899,6 +1920,12 @@
       background-color: color-mix(in oklab, var(--color-black) 65%, transparent);
     }
   }
+:where(.og-root).bg-black\/70,:where(.og-root) .bg-black\/70 {
+    background-color: color-mix(in srgb, #000 70%, transparent);
+    @supports (color: color-mix(in lab, red, red)) {
+      background-color: color-mix(in oklab, var(--color-black) 70%, transparent);
+    }
+  }
 :where(.og-root).bg-black\/90,:where(.og-root) .bg-black\/90 {
     background-color: color-mix(in srgb, #000 90%, transparent);
     @supports (color: color-mix(in lab, red, red)) {
@@ -2211,6 +2238,12 @@
 :where(.og-root).bg-white,:where(.og-root) .bg-white {
     background-color: var(--color-white);
   }
+:where(.og-root).bg-white\/10,:where(.og-root) .bg-white\/10 {
+    background-color: color-mix(in srgb, #fff 10%, transparent);
+    @supports (color: color-mix(in lab, red, red)) {
+      background-color: color-mix(in oklab, var(--color-white) 10%, transparent);
+    }
+  }
 :where(.og-root).bg-gradient-to-t,:where(.og-root) .bg-gradient-to-t {
     --tw-gradient-position: to top in oklab;
     background-image: linear-gradient(var(--tw-gradient-stops));
@@ -2347,6 +2380,12 @@
   }
 :where(.og-root).py-3,:where(.og-root) .py-3 {
     padding-block: calc(var(--spacing) * 3);
+  }
+:where(.og-root).py-4,:where(.og-root) .py-4 {
+    padding-block: calc(var(--spacing) * 4);
+  }
+:where(.og-root).py-5,:where(.og-root) .py-5 {
+    padding-block: calc(var(--spacing) * 5);
   }
 :where(.og-root).py-6,:where(.og-root) .py-6 {
     padding-block: calc(var(--spacing) * 6);
@@ -2568,6 +2607,10 @@
     --tw-tracking: 0.12em;
     letter-spacing: 0.12em;
   }
+:where(.og-root).tracking-\[0\.14em\],:where(.og-root) .tracking-\[0\.14em\] {
+    --tw-tracking: 0.14em;
+    letter-spacing: 0.14em;
+  }
 :where(.og-root).tracking-\[0\.25em\],:where(.og-root) .tracking-\[0\.25em\] {
     --tw-tracking: 0.25em;
     letter-spacing: 0.25em;
@@ -2736,6 +2779,9 @@
   }
 :where(.og-root).underline,:where(.og-root) .underline {
     text-decoration-line: underline;
+  }
+:where(.og-root).decoration-og-border,:where(.og-root) .decoration-og-border {
+    text-decoration-color: var(--og-color-border);
   }
 :where(.og-root).decoration-og-border-strong,:where(.og-root) .decoration-og-border-strong {
     text-decoration-color: var(--og-color-border-strong);
@@ -3676,6 +3722,16 @@
       }
     }
   }
+:where(.og-root).hover\:bg-white\/20,:where(.og-root) .hover\:bg-white\/20 {
+    &:hover {
+      @media (hover: hover) {
+        background-color: color-mix(in srgb, #fff 20%, transparent);
+        @supports (color: color-mix(in lab, red, red)) {
+          background-color: color-mix(in oklab, var(--color-white) 20%, transparent);
+        }
+      }
+    }
+  }
 :where(.og-root).hover\:text-fg,:where(.og-root) .hover\:text-fg {
     &:hover {
       @media (hover: hover) {
@@ -3772,6 +3828,14 @@
       @media (hover: hover) {
         --tw-shadow: var(--og-shadow-md);
         box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
+      }
+    }
+  }
+:where(.og-root).hover\:brightness-105,:where(.og-root) .hover\:brightness-105 {
+    &:hover {
+      @media (hover: hover) {
+        --tw-brightness: brightness(105%);
+        filter: var(--tw-blur,) var(--tw-brightness,) var(--tw-contrast,) var(--tw-grayscale,) var(--tw-hue-rotate,) var(--tw-invert,) var(--tw-saturate,) var(--tw-sepia,) var(--tw-drop-shadow,);
       }
     }
   }
@@ -3952,12 +4016,6 @@
         outline: 2px solid transparent;
         outline-offset: 2px;
       }
-    }
-  }
-:where(.og-root).focus-visible\:outline-none,:where(.og-root) .focus-visible\:outline-none {
-    &:focus-visible {
-      --tw-outline-style: none;
-      outline-style: none;
     }
   }
 :where(.og-root).focus-visible\:ring-inset,:where(.og-root) .focus-visible\:ring-inset {

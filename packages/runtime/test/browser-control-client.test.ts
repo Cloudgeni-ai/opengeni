@@ -32,10 +32,95 @@ afterEach(async () => {
 });
 
 describe("BrowserControlClient", () => {
-  test("drives the typed placement protocol without putting credentials in commands", async () => {
+  test("serializes bounded remote-provider launch authority without returning it", async () => {
+    const browserSessionId = randomUUID();
+    const controllerGeneration = "provider-controller-1";
+    let wire: Record<string, unknown> | null = null;
+    const target = browserTarget(browserSessionId, controllerGeneration);
+    const observation = browserObservation(target);
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        wire = (await request.json()) as Record<string, unknown>;
+        return success({ browserSessionId, controllerGeneration, observation }, 201);
+      },
+    });
+    const placement = await localPlacement();
+    try {
+      const client = new BrowserControlClient(placement.session, {
+        adminToken,
+        port: server.port,
+      });
+      const created = await client.createSession({
+        browserSessionId,
+        controllerGeneration,
+        tokenGeneration: 1,
+        controlToken,
+        viewToken,
+        headed: false,
+        transport: {
+          kind: "external_provider",
+          providerId: "browserbase",
+          placementId: "default",
+          authority: { apiKey: "browserbase-private-key" },
+        },
+        networkRoute: {
+          routeId: "22222222-2222-4222-8222-222222222222",
+          routeVersion: 4,
+          authorityDigest: `ogr.${"m".repeat(43)}`,
+          kind: "managed",
+          consistency: {
+            dns: "provider",
+            expectedPublicIp: null,
+            expectedRegion: "NO",
+            locale: "nb-NO",
+            timezone: "Europe/Oslo",
+            geolocation: { latitude: 59.9139, longitude: 10.7522, accuracyMeters: 25 },
+            webRtc: "disable_non_proxied_udp",
+            stability: "session",
+          },
+          providerRoute: {
+            providerId: "browserbase",
+            routeId: "default",
+            egressClass: "residential",
+            region: "NO",
+          },
+        },
+      });
+      expect(wire).toMatchObject({
+        transport: {
+          kind: "external_provider",
+          providerId: "browserbase",
+          placementId: "default",
+          authority: { apiKey: "browserbase-private-key" },
+        },
+        networkRoute: {
+          routeVersion: 4,
+          kind: "managed",
+          consistency: { dns: "provider", expectedRegion: "NO" },
+          providerRoute: {
+            providerId: "browserbase",
+            routeId: "default",
+            egressClass: "residential",
+            region: "NO",
+          },
+        },
+      });
+      expect(JSON.stringify(created)).not.toContain("browserbase-private-key");
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("drives the typed placement protocol without putting credentials in shell commands", async () => {
     const browserSessionId = randomUUID();
     const workspaceId = randomUUID();
     const stateOperationId = randomUUID();
+    const workspaceFileOperationId = randomUUID();
+    const workspaceFileId = randomUUID();
+    const protectedAuthOperationId = randomUUID();
+    const externalAuthOperationId = randomUUID();
+    const authRunId = randomUUID();
     const controllerGeneration = "controller-1";
     const linkedComputerSessionId = randomUUID();
     const restoreKey = Buffer.alloc(32, 9);
@@ -97,6 +182,81 @@ describe("BrowserControlClient", () => {
         if (url.pathname.endsWith("/targets") && request.method === "GET") {
           return success([target]);
         }
+        if (url.pathname.endsWith("/clipboard") && request.method === "GET") {
+          return success({
+            browserSessionId,
+            controllerGeneration,
+            revision: 1,
+            text: "private browser clipboard",
+            source: "copy",
+            sourceTargetId: target.id,
+            updatedAt: "2026-08-10T12:00:00.000Z",
+          });
+        }
+        if (url.pathname.endsWith("/protected-auth-fills") && request.method === "POST") {
+          const body = (await request.json()) as { operationId: string };
+          return success({
+            protocolVersion: 1,
+            operationId: body.operationId,
+            browserSessionId,
+            controllerGeneration,
+            targetId: target.id,
+            state: "completed",
+            dispatchedAt: "2026-08-10T12:00:00.000Z",
+            settledAt: "2026-08-10T12:00:01.000Z",
+            observation: { target, status: "submitted" },
+            error: null,
+          });
+        }
+        if (url.pathname.endsWith("/external-auth") && request.method === "POST") {
+          const body = (await request.json()) as {
+            operationId: string;
+            authRunId: string;
+          };
+          expect(body).toMatchObject({
+            operationId: externalAuthOperationId,
+            authRunId,
+          });
+          return success({
+            state: "needs_human",
+            externalAction: {
+              kind: "human",
+              label: "Complete sign-in securely",
+              expiresAt: null,
+            },
+            interactiveUrl: null,
+            failureCode: null,
+            profileLoaded: false,
+          });
+        }
+        if (url.pathname.endsWith("/workspace-files") && request.method === "POST") {
+          const body = (await request.json()) as {
+            operationId: string;
+            files: Array<{ fileId: string }>;
+          };
+          return success({
+            operationId: body.operationId,
+            fileIds: body.files.map((file) => file.fileId),
+            replayed: false,
+          });
+        }
+        if (
+          url.pathname.endsWith(`/protected-auth-operations/${protectedAuthOperationId}`) &&
+          request.method === "GET"
+        ) {
+          return success({
+            protocolVersion: 1,
+            operationId: protectedAuthOperationId,
+            browserSessionId,
+            controllerGeneration,
+            targetId: target.id,
+            state: "completed",
+            dispatchedAt: "2026-08-10T12:00:00.000Z",
+            settledAt: "2026-08-10T12:00:01.000Z",
+            observation: { target, status: "submitted" },
+            error: null,
+          });
+        }
         if (url.pathname === "/v1/failure") {
           return failure(409, "controller_stale", "controller moved");
         }
@@ -122,9 +282,27 @@ describe("BrowserControlClient", () => {
         controlToken,
         viewToken,
         headed: true,
+        transport: { kind: "managed", engine: "chromium" },
         linkedComputer: {
           computerSessionId: linkedComputerSessionId,
           controllerGeneration: "computer-controller-1",
+        },
+        networkRoute: {
+          routeId: randomUUID(),
+          routeVersion: 3,
+          authorityDigest: `ogr.${"r".repeat(43)}`,
+          kind: "proxy",
+          consistency: {
+            dns: "proxy",
+            expectedPublicIp: null,
+            expectedRegion: "NO",
+            locale: "nb-NO",
+            timezone: "Europe/Oslo",
+            geolocation: { latitude: 59.9139, longitude: 10.7522, accuracyMeters: 25 },
+            webRtc: "disable_non_proxied_udp",
+            stability: "session",
+          },
+          proxyUrl: "http://route-user:route-password@proxy.test:8443/",
         },
         initialUrl: "https://example.test/",
         restore: {
@@ -161,6 +339,7 @@ describe("BrowserControlClient", () => {
         observation,
       });
       expect(createRequest).toMatchObject({
+        transport: { kind: "managed", engine: "chromium" },
         linkedComputer: {
           computerSessionId: linkedComputerSessionId,
           controllerGeneration: "computer-controller-1",
@@ -169,6 +348,18 @@ describe("BrowserControlClient", () => {
           dataKeyBase64: restoreKey.toString("base64"),
           aadBase64: restoreAad.toString("base64"),
           manifestDigest: "c".repeat(64),
+        },
+        networkRoute: {
+          routeVersion: 3,
+          authorityDigest: `ogr.${"r".repeat(43)}`,
+          kind: "proxy",
+          proxyUrl: "http://route-user:route-password@proxy.test:8443/",
+          consistency: {
+            dns: "proxy",
+            expectedRegion: "NO",
+            locale: "nb-NO",
+            timezone: "Europe/Oslo",
+          },
         },
       });
       const stateKey = Buffer.alloc(32, 7);
@@ -195,15 +386,84 @@ describe("BrowserControlClient", () => {
         controllerGeneration,
         artifactDigest: "a".repeat(64),
       });
+      const browserSession = client.sessionClient({
+        reference: { browserSessionId, controllerGeneration },
+        controlToken,
+        viewToken,
+      });
+      expect(await browserSession.listTargets()).toEqual([target]);
+      expect(await browserSession.readClipboard()).toMatchObject({
+        browserSessionId,
+        revision: 1,
+        text: "private browser clipboard",
+        source: "copy",
+      });
       expect(
-        await client
-          .sessionClient({
-            reference: { browserSessionId, controllerGeneration },
-            controlToken,
-            viewToken,
-          })
-          .listTargets(),
-      ).toEqual([target]);
+        await browserSession.stageWorkspaceFiles({
+          operationId: workspaceFileOperationId,
+          files: [
+            {
+              fileId: workspaceFileId,
+              safeFilename: "fixture.txt",
+              sizeBytes: 12,
+              sha256: "d".repeat(64),
+              download: {
+                url: "https://files.example.test/object?signature=private",
+                expiresAt: new Date(Date.now() + 60_000).toISOString(),
+              },
+            },
+          ],
+        }),
+      ).toEqual({
+        operationId: workspaceFileOperationId,
+        fileIds: [workspaceFileId],
+        replayed: false,
+      });
+      const protectedAuthCommand = {
+        protocolVersion: 1 as const,
+        operationId: protectedAuthOperationId,
+        browserSessionId,
+        controllerGeneration,
+        targetId: target.id,
+        expectedTargetGeneration: target.targetGeneration,
+        expectedDocumentGeneration: target.documentGeneration!,
+        expectedFrameId: observation.frameId!,
+        actor: { kind: "system" as const, subjectId: "credential-broker" },
+        authorityId: "password-authority",
+        credentialVersion: 1,
+        allowedOrigins: ["https://example.test"],
+        fields: [
+          {
+            fieldId: "password",
+            locator: { kind: "css" as const, selector: "#password" },
+            purpose: "password" as const,
+            value: "placement-private-password",
+          },
+        ],
+        submit: { type: "press" as const, key: "Enter" },
+      };
+      expect(await browserSession.protectedAuthFill(protectedAuthCommand)).toMatchObject({
+        operationId: protectedAuthOperationId,
+        state: "completed",
+      });
+      expect(await browserSession.protectedAuthReceipt(protectedAuthOperationId)).toMatchObject({
+        operationId: protectedAuthOperationId,
+        state: "completed",
+      });
+      expect(
+        await browserSession.externalAuth({
+          browserSessionId,
+          controllerGeneration,
+          operationId: externalAuthOperationId,
+          authRunId,
+          adapterId: "kernel",
+          connectionId: "managed-auth-1",
+          action: "start",
+        }),
+      ).toMatchObject({
+        state: "needs_human",
+        interactiveUrl: null,
+      });
       expect(
         await client.frameStreamUrl({ browserSessionId, controllerGeneration }, target.id),
       ).toBe(
@@ -236,13 +496,20 @@ describe("BrowserControlClient", () => {
       expect(placement.commands.every((command) => !command.includes(controlToken))).toBe(true);
       expect(placement.commands.every((command) => !command.includes(viewToken))).toBe(true);
       expect(
+        placement.commands.every((command) => !command.includes("placement-private-password")),
+      ).toBe(true);
+      expect(placement.commands.every((command) => !command.includes("route-password"))).toBe(true);
+      expect(
         placement.commands.every((command) => !command.includes(restoreKey.toString("base64"))),
       ).toBe(true);
       expect(
         placement.commands.every((command) => !command.includes(restoreAad.toString("base64"))),
       ).toBe(true);
-      expect(placement.writes.some((entry) => entry.content.includes(adminToken))).toBe(true);
-      expect(placement.finalizations).toBe(6);
+      expect(placement.writes.every((entry) => !entry.content.includes(adminToken))).toBe(true);
+      expect(placement.writes.every((entry) => !entry.content.includes("route-password"))).toBe(
+        true,
+      );
+      expect(placement.finalizations).toBe(0);
       for (const path of placement.writes.map((entry) => dirname(entry.path))) {
         if (!path.includes("opengeni-browser-control-client")) continue;
         await expect(stat(path)).rejects.toThrow();
@@ -259,6 +526,13 @@ describe("BrowserControlClient", () => {
     const target = computerTarget(computerSessionId, controllerGeneration);
     const observation = computerObservation(target);
     const receipt = computerReceipt(operationId, observation);
+    const clipboard = {
+      computerSessionId,
+      controllerGeneration,
+      text: "fixture clipboard",
+      truncated: false,
+      observedAt: "2026-08-10T12:00:00.000Z",
+    };
     const requests: Array<{ path: string; authorization: string | null }> = [];
     const server = Bun.serve({
       port: 0,
@@ -292,6 +566,9 @@ describe("BrowserControlClient", () => {
         }
         if (url.pathname.endsWith("/observation") && request.method === "GET") {
           return success(observation);
+        }
+        if (url.pathname.endsWith("/clipboard") && request.method === "GET") {
+          return success(clipboard);
         }
         if (url.pathname.endsWith("/actions") && request.method === "POST") {
           return success(receipt);
@@ -343,6 +620,7 @@ describe("BrowserControlClient", () => {
       const session = client.computerSessionClient({ reference, controlToken, viewToken });
       expect(await session.listTargets()).toEqual([target]);
       expect(await session.observe(target.id)).toEqual(observation);
+      expect(await session.readClipboard()).toEqual(clipboard);
       expect(
         await session.action({
           protocolVersion: 1,
@@ -368,6 +646,10 @@ describe("BrowserControlClient", () => {
           { path: "POST /v1/computer-sessions", authorization: `Bearer ${adminToken}` },
           {
             path: `GET /v1/computer-sessions/${computerSessionId}/targets`,
+            authorization: `Bearer ${viewToken}`,
+          },
+          {
+            path: `GET /v1/computer-sessions/${computerSessionId}/clipboard`,
             authorization: `Bearer ${viewToken}`,
           },
           {
@@ -412,7 +694,7 @@ describe("BrowserControlClient", () => {
         true,
       );
       expect(placement.commands.every((command) => !command.includes(adminToken))).toBe(true);
-      expect(placement.finalizations).toBe(2);
+      expect(placement.finalizations).toBe(1);
     } finally {
       server.stop(true);
     }
@@ -446,16 +728,53 @@ describe("BrowserControlClient", () => {
       expect(placement.session.writeFile).toBeUndefined();
       expect((await readFile(tokenFile, "utf8")).trim()).toBe(adminToken);
       expect((await stat(tokenFile)).mode & 0o777).toBe(0o600);
-      expect(placement.stdinWrites.length).toBeGreaterThanOrEqual(2);
+      expect(placement.stdinWrites).toHaveLength(1);
       expect(
         placement.stdinWrites.some((value) =>
           Buffer.from(value, "base64").toString("utf8").includes(adminToken),
         ),
       ).toBe(true);
       expect(placement.commands.every((command) => !command.includes(adminToken))).toBe(true);
-      expect(
-        placement.commands.some((command) => command.includes("OPENGENI_BROWSER_PRIVATE_CHUNK_")),
-      ).toBe(true);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("uses the SDK execCommand banner and writeStdin surface when exec is unavailable", async () => {
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        if (request.headers.get("authorization") !== `Bearer ${adminToken}`) {
+          return failure(401, "permission_denied", "no authority");
+        }
+        const body = (await request.json()) as { origins: string[] };
+        return success({ origins: body.origins });
+      },
+    });
+    const placement = await localPlacement({
+      confinePrivateReads: true,
+      fakeControllerStartup: true,
+      streamWrites: true,
+    });
+    const exec = placement.session.exec!;
+    const writeStdin = placement.session.writeStdin!;
+    placement.session.execCommand = async (args) => execBanner(await exec(args));
+    placement.session.writeStdin = async (args) =>
+      execBanner({ output: await writeStdin(args), exitCode: 0 });
+    delete placement.session.exec;
+    const tokenFile = join(placement.root, "exec-command-authority", "admin-token");
+    try {
+      await provisionBrowserControlClient(placement.session, {
+        adminToken,
+        adminTokenFile: tokenFile,
+        allowedOrigins: ["https://app.opengeni.test"],
+        port: server.port,
+      });
+
+      expect(placement.session.exec).toBeUndefined();
+      expect((await readFile(tokenFile, "utf8")).trim()).toBe(adminToken);
+      expect(placement.stdinWrites).toHaveLength(1);
+      expect(placement.commands.every((command) => !command.includes(adminToken))).toBe(true);
     } finally {
       server.stop(true);
     }
@@ -575,12 +894,36 @@ describe("BrowserControlClient", () => {
         format: "png",
         quality: 70,
         maxWidth: 1_200,
-        maxHeight: 900,
+        maxHeight: 4_096,
         everyNthFrame: 1,
       }),
     ]);
   });
 });
+
+function execBanner(result: {
+  output?: string;
+  stdout?: string;
+  stderr?: string;
+  exitCode?: number | null;
+  sessionId?: number;
+}): string {
+  const output =
+    result.output ??
+    [result.stdout, result.stderr]
+      .filter((value): value is string => typeof value === "string")
+      .join("\n");
+  return [
+    "Chunk ID: fixture",
+    result.sessionId === undefined
+      ? `Process exited with code ${result.exitCode ?? 0}`
+      : `Process running with session ID ${result.sessionId}`,
+    "Wall time: 0.1 seconds",
+    "Process output:",
+    "Output:",
+    output,
+  ].join("\n");
+}
 
 async function localPlacement(
   options: {
@@ -728,6 +1071,7 @@ function computerCapabilities() {
     semanticActions: true,
     pointerInput: true,
     keyboardInput: true,
+    clipboard: true,
     backgroundActions: true,
     parallelApps: true,
   } as const;

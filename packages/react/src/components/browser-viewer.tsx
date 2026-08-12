@@ -1,18 +1,26 @@
 import type {
   AttachedBrowserDevice,
   BrowserAction,
+  BrowserActionReceipt,
+  BrowserDiagnosticBatch,
+  BrowserDownload,
+  BrowserDownloadSaveResponse,
   BrowserFrame,
   BrowserIdentity,
   BrowserObservation,
   BrowserSession,
   BrowserTarget,
   ComputerSession,
+  InteractionPlacement,
+  InteractionIntervention,
   InteractionSemanticNode,
 } from "@opengeni/sdk/interaction";
 import {
   BugIcon,
   ChevronDownIcon,
   CircleAlertIcon,
+  DownloadIcon,
+  FileCheck2Icon,
   Globe2Icon,
   LoaderCircleIcon,
   MonitorIcon,
@@ -21,9 +29,12 @@ import {
   SaveIcon,
   UserRoundIcon,
   XIcon,
+  ZapIcon,
 } from "lucide-react";
 import {
   type FormEvent,
+  type ClipboardEvent,
+  type CompositionEvent,
   type KeyboardEvent,
   type MouseEvent,
   type PointerEvent,
@@ -42,10 +53,15 @@ import {
 } from "../hooks/use-browser-frame-stream";
 import { useAttachedBrowsers } from "../hooks/use-attached-browsers";
 import { useBrowserIdentities } from "../hooks/use-browser-identities";
+import { useBrowserDownloads } from "../hooks/use-browser-downloads";
 import { useBrowserSession } from "../hooks/use-browser-session";
 import { useBrowserSessions } from "../hooks/use-browser-sessions";
+import { useInteractionInterventions } from "../hooks/use-interaction-interventions";
 import { cn } from "../lib/cn";
+import { copyTextToClipboard } from "../lib/clipboard";
+import { formatBytes } from "../lib/format";
 import type { EmbeddedBrowserInteractionClientOverride } from "../session-context";
+import { InteractionInterventionBanner } from "./interaction-intervention-banner";
 
 export type BrowserViewerNotification = {
   kind: "error" | "info";
@@ -64,7 +80,10 @@ export type BrowserViewerProps = EmbeddedBrowserInteractionClientOverride & {
   /** Optional host capability for a headed managed browser. Browser-only
    * embedders remain valid and create headless sessions instead. */
   createLinkedComputer?:
-    | ((name: string) => Promise<Pick<ComputerSession, "id" | "placement">>)
+    | ((
+        name: string,
+        placement?: InteractionPlacement,
+      ) => Promise<Pick<ComputerSession, "id" | "placement">>)
     | undefined;
   /** Navigate to the exact linked ComputerSession; never a lookalike desktop. */
   onOpenComputer?: ((computerSessionId: string) => void) | undefined;
@@ -73,6 +92,7 @@ export type BrowserViewerProps = EmbeddedBrowserInteractionClientOverride & {
 type BrowserSelection = { sessionId: string; pinned: boolean } | null;
 type BrowserLaunchChoice =
   | { kind: "clean" }
+  | { kind: "fast" }
   | { kind: "profile"; identityId: string }
   | { kind: "attached"; device: AttachedBrowserDevice };
 type PointerStart = {
@@ -85,6 +105,13 @@ type BrowserResumeAttempt = {
   operationId: string;
   running: boolean;
   terminal: boolean;
+  error: Error | null;
+};
+type BrowserDiagnosticsView = {
+  browserSessionId: string;
+  targetId: string;
+  loading: boolean;
+  batch: BrowserDiagnosticBatch | null;
   error: Error | null;
 };
 
@@ -118,6 +145,11 @@ export function BrowserViewer({
     [registry.relevantSessions],
   );
   const [selection, setSelection] = useState<BrowserSelection>(null);
+  const interventions = useInteractionInterventions({
+    ...override,
+    enabled,
+    resourceKind: "browser_session",
+  });
   const [creating, setCreating] = useState(false);
   const [savingProfile, setSavingProfile] = useState(false);
   const [baseRevisionOrdinal, setBaseRevisionOrdinal] = useState<number | null>(null);
@@ -127,6 +159,9 @@ export function BrowserViewer({
   } | null>(null);
   const resumeAttemptsRef = useRef(new Map<string, BrowserResumeAttempt>());
   const previousSessionIdRef = useRef(sessionId);
+  const seenInterventionIdsRef = useRef(new Set<string>());
+  const diagnosticRequestRef = useRef(0);
+  const [diagnosticsView, setDiagnosticsView] = useState<BrowserDiagnosticsView | null>(null);
 
   const notifyError = useCallback(
     (cause: unknown, fallback: string) => {
@@ -145,7 +180,11 @@ export function BrowserViewer({
 
   useEffect(() => {
     const selectedStillLive = liveSessions.some((session) => session.id === selection?.sessionId);
-    const preferred = relevant[0] ?? liveSessions[0] ?? null;
+    // A manually selected workspace browser stays selected, but an unrelated
+    // browser must never become the implicit browser for this agent. That made
+    // a Modal session appear to own a connected Mac browser.
+    if (selection?.pinned && selectedStillLive) return;
+    const preferred = relevant[0] ?? null;
     if (!preferred) {
       if (selection) setSelection(null);
       return;
@@ -160,6 +199,17 @@ export function BrowserViewer({
   const selectedRegistrySession = useMemo(
     () => liveSessions.find((session) => session.id === selection?.sessionId) ?? null,
     [liveSessions, selection?.sessionId],
+  );
+  const interventionCounts = useMemo(
+    () => countInterventions(interventions.interventions),
+    [interventions.interventions],
+  );
+  const selectedInterventions = useMemo(
+    () =>
+      interventions.interventions.filter(
+        (intervention) => intervention.resourceId === selection?.sessionId,
+      ),
+    [interventions.interventions, selection?.sessionId],
   );
   const controllerReady = selectedRegistrySession?.lifecycle === "active";
   const resumeSession = registry.resume;
@@ -225,19 +275,68 @@ export function BrowserViewer({
     browserSessionId: selection?.sessionId ?? null,
     enabled: enabled && selection !== null && controllerReady,
   });
+  const downloads = useBrowserDownloads({
+    ...override,
+    browserSessionId: selection?.sessionId ?? null,
+    enabled:
+      enabled &&
+      diagnosticsView !== null &&
+      controllerReady &&
+      browser.session?.capabilities.downloads === true,
+  });
+  const loadBrowserDiagnostics = browser.diagnostics;
+
+  useEffect(() => {
+    for (const intervention of interventions.interventions) {
+      if (seenInterventionIdsRef.current.has(intervention.id)) continue;
+      seenInterventionIdsRef.current.add(intervention.id);
+      onNotify?.({
+        kind: "info",
+        message: `${interventionTitle(intervention)}: ${intervention.reason}`,
+      });
+    }
+  }, [interventions.interventions, onNotify]);
+
+  const resolveIntervention = useCallback(
+    (intervention: InteractionIntervention, outcome: "completed" | "dismissed") => {
+      void interventions
+        .resolve(intervention.id, {
+          expectedVersion: intervention.version,
+          outcome,
+        })
+        .then(() => {
+          onNotify?.({
+            kind: "info",
+            message:
+              outcome === "completed" ? "Agent notified. Continuing work." : "Request cancelled.",
+          });
+        })
+        .catch((cause) => notifyError(cause, "Could not update the browser request."));
+    },
+    [interventions, notifyError, onNotify],
+  );
   const frames = useBrowserFrameStream({
     ...override,
     browserSessionId: selection?.sessionId ?? null,
     targetId: browser.selectedTarget?.id ?? null,
-    enabled: enabled && selection !== null && controllerReady && browser.selectedTarget !== null,
+    enabled:
+      enabled &&
+      selection !== null &&
+      controllerReady &&
+      browser.selectedTarget !== null &&
+      browser.session?.capabilities.liveFrames === true,
     stream: { format: "jpeg", quality: 76, maxWidth: 1_920, maxHeight: 1_200 },
     ...(webSocketFactory ? { webSocketFactory } : {}),
   });
   const displayedFrame = frameMatchesObservation(frames.frame, browser.observation)
     ? frames.frame
     : null;
-  const displayConnectionState =
-    frames.state === "live" && !displayedFrame ? "connecting" : frames.state;
+  const supportsLiveFrames = browser.session?.capabilities.liveFrames === true;
+  const displayConnectionState = supportsLiveFrames
+    ? frames.state === "live" && !displayedFrame
+      ? "connecting"
+      : frames.state
+    : "semantic";
   const selectedProfile = useMemo(
     () =>
       profiles.identities.find(
@@ -245,6 +344,70 @@ export function BrowserViewer({
           identity.id === (browser.session?.identityId ?? selectedRegistrySession?.identityId),
       ) ?? null,
     [browser.session?.identityId, profiles.identities, selectedRegistrySession?.identityId],
+  );
+
+  useEffect(() => {
+    diagnosticRequestRef.current += 1;
+    setDiagnosticsView(null);
+  }, [browser.session?.id, browser.selectedTarget?.id]);
+
+  const loadDiagnostics = useCallback(() => {
+    const browserSessionId = browser.session?.id;
+    const targetId = browser.selectedTarget?.id;
+    if (!browserSessionId || !targetId) return;
+    const requestId = diagnosticRequestRef.current + 1;
+    diagnosticRequestRef.current = requestId;
+    setDiagnosticsView((current) => ({
+      browserSessionId,
+      targetId,
+      loading: true,
+      batch:
+        current?.browserSessionId === browserSessionId && current.targetId === targetId
+          ? current.batch
+          : null,
+      error: null,
+    }));
+    void loadBrowserDiagnostics({ limit: 100 })
+      .then((batch) => {
+        if (diagnosticRequestRef.current !== requestId) return;
+        setDiagnosticsView({ browserSessionId, targetId, loading: false, batch, error: null });
+      })
+      .catch((cause) => {
+        if (diagnosticRequestRef.current !== requestId) return;
+        setDiagnosticsView({
+          browserSessionId,
+          targetId,
+          loading: false,
+          batch: null,
+          error: cause instanceof Error ? cause : new Error(String(cause)),
+        });
+      });
+  }, [browser.selectedTarget?.id, browser.session?.id, loadBrowserDiagnostics]);
+
+  const closeDiagnostics = useCallback(() => {
+    diagnosticRequestRef.current += 1;
+    setDiagnosticsView(null);
+  }, []);
+
+  const refreshDiagnostics = useCallback(() => {
+    loadDiagnostics();
+    if (browser.session?.capabilities.downloads) void downloads.refresh();
+  }, [browser.session?.capabilities.downloads, downloads, loadDiagnostics]);
+
+  const saveDownload = useCallback(
+    async (
+      downloadId: string,
+      destinationPath: string,
+      overwrite: boolean,
+    ): Promise<BrowserDownloadSaveResponse> => {
+      const response = await downloads.saveToWorkspace(downloadId, destinationPath, { overwrite });
+      onNotify?.({
+        kind: "info",
+        message: `${response.download.filename} saved to ${response.destinationPath}.`,
+      });
+      return response;
+    },
+    [downloads, onNotify],
   );
 
   useEffect(() => {
@@ -284,17 +447,24 @@ export function BrowserViewer({
           ? profiles.identities.find((candidate) => candidate.id === choice.identityId)
           : null;
       const device = choice.kind === "attached" ? choice.device : null;
+      const fast = choice.kind === "fast";
       const browserName =
-        device?.profileLabel ?? device?.name ?? (identity ? `${identity.name} browser` : "Browser");
+        device?.profileLabel ??
+        device?.name ??
+        (identity ? `${identity.name} browser` : fast ? "Fast browser" : "Browser");
       setCreating(true);
       void (async () => {
         const linkedComputer =
-          !device && createLinkedComputer
-            ? await createLinkedComputer(`${browserName} computer`)
+          !fast && createLinkedComputer
+            ? await createLinkedComputer(
+                `${browserName} computer`,
+                device ? { kind: "attached_device", deviceId: device.id } : undefined,
+              )
             : null;
         const response = await createRegistryBrowser({
           sessionId,
           name: browserName,
+          ...(fast ? { engine: "lightpanda" as const, headless: true } : {}),
           ...(device
             ? {
                 headless: false,
@@ -405,7 +575,9 @@ export function BrowserViewer({
   }
 
   return (
-    <div className={cn("flex h-full min-h-0 flex-col overflow-hidden bg-og-bg", className)}>
+    <div
+      className={cn("relative flex h-full min-h-0 flex-col overflow-hidden bg-og-bg", className)}
+    >
       <BrowserToolbar
         sessions={liveSessions}
         relevantSessionIds={new Set(relevant.map((session) => session.id))}
@@ -417,6 +589,7 @@ export function BrowserViewer({
         creating={creating}
         savingProfile={savingProfile}
         refreshing={registry.refreshing || attached.refreshing}
+        interventionCounts={interventionCounts}
         onSelect={(browserSessionId) => setSelection({ sessionId: browserSessionId, pinned: true })}
         onFollow={() => {
           const preferred = relevant[0];
@@ -426,7 +599,24 @@ export function BrowserViewer({
         onSaveProfile={saveProfileVersion}
         onRefresh={() => void Promise.all([registry.refresh(), attached.refresh()])}
       />
-      {selectedRegistrySession && !controllerReady ? (
+      <InteractionInterventionBanner
+        interventions={selectedInterventions}
+        activeTargetId={browser.selectedTarget?.id ?? null}
+        mutating={interventions.mutating}
+        onOpen={(intervention) =>
+          void browser
+            .selectTarget(intervention.targetId)
+            .catch((cause) => notifyError(cause, "Could not open the requested browser tab."))
+        }
+        onResolve={resolveIntervention}
+      />
+      {!selectedRegistrySession ? (
+        <BrowserUnselectedPanel
+          peerCount={liveSessions.length}
+          creating={creating}
+          onCreate={() => createBrowser()}
+        />
+      ) : !controllerReady ? (
         <BrowserLifecyclePanel
           session={selectedRegistrySession}
           attempt={
@@ -440,6 +630,7 @@ export function BrowserViewer({
             targets={browser.targets}
             selectedTargetId={browser.selectedTarget?.id ?? null}
             mutating={browser.mutating || savingProfile}
+            tabControl={browser.session?.capabilities.tabs === true}
             onSelect={(targetId) =>
               void browser
                 .selectTarget(targetId)
@@ -475,15 +666,22 @@ export function BrowserViewer({
           <BrowserViewport
             frame={displayedFrame}
             connectionState={displayConnectionState}
+            supportsLiveFrames={supportsLiveFrames}
             connectionError={frames.error}
             observation={browser.observation}
             mutating={browser.mutating || savingProfile}
             activityLabel={savingProfile ? "Saving browser version…" : undefined}
-            onAction={(action, frame) =>
-              (frame ? browser.actFromFrame(action, frame) : browser.act(action)).then(
-                () => undefined,
-              )
-            }
+            clipboardEnabled={browser.session?.capabilities.clipboard === true}
+            onAction={async (action, frame) => {
+              const receipt = frame
+                ? await browser.actFromFrame(action, frame)
+                : await browser.act(action);
+              if (receipt.state !== "completed") {
+                throw new Error(receipt.error?.message ?? "Browser input did not complete.");
+              }
+              return receipt;
+            }}
+            onReadClipboard={browser.readClipboard}
             onReconnect={frames.reconnect}
             onError={(cause) => notifyError(cause, "Browser input failed.")}
           />
@@ -494,6 +692,7 @@ export function BrowserViewer({
             observation={browser.observation}
             connectionState={displayConnectionState}
             refreshing={registry.refreshing}
+            diagnosticsOpen={diagnosticsView !== null}
             onOpenComputer={
               browser.session?.linkedComputerSessionId && onOpenComputer
                 ? () => {
@@ -502,23 +701,30 @@ export function BrowserViewer({
                   }
                 : undefined
             }
-            onDiagnostics={() =>
-              void browser
-                .diagnostics({ limit: 100 })
-                .then((batch) => {
-                  const errors = batch.entries.filter((entry) => entry.level === "error").length;
-                  onNotify?.({
-                    kind: "info",
-                    message: batch.entries.length
-                      ? `${batch.entries.length} browser diagnostic${batch.entries.length === 1 ? "" : "s"} (${errors} errors).`
-                      : "No browser diagnostics.",
-                  });
-                })
-                .catch((cause) => notifyError(cause, "Could not load browser diagnostics."))
-            }
+            onDiagnostics={diagnosticsView ? closeDiagnostics : loadDiagnostics}
           />
         </>
       )}
+      {diagnosticsView ? (
+        <BrowserDiagnosticsDrawer
+          session={browser.session}
+          profile={selectedProfile}
+          target={browser.selectedTarget}
+          observation={browser.observation}
+          baseRevisionOrdinal={baseRevisionOrdinal}
+          state={diagnosticsView}
+          downloads={downloads.downloads}
+          downloadsEnabled={browser.session?.capabilities.downloads === true}
+          downloadsLoading={downloads.loading}
+          downloadsRefreshing={downloads.refreshing}
+          downloadsError={downloads.error}
+          savingDownloadIds={downloads.savingDownloadIds}
+          onSaveDownload={saveDownload}
+          onRefreshDownloads={() => void downloads.refresh()}
+          onRefresh={refreshDiagnostics}
+          onClose={closeDiagnostics}
+        />
+      ) : null}
     </div>
   );
 }
@@ -580,6 +786,7 @@ function BrowserToolbar(props: {
   creating: boolean;
   savingProfile: boolean;
   refreshing: boolean;
+  interventionCounts: Map<string, number>;
   onSelect: (id: string) => void;
   onFollow: () => void;
   onCreate: (choice?: BrowserLaunchChoice) => void;
@@ -600,6 +807,9 @@ function BrowserToolbar(props: {
         <summary className="flex h-7 max-w-52 cursor-pointer list-none items-center gap-2 rounded-og-sm px-2 text-og-control text-og-fg transition hover:bg-og-surface-2 [&::-webkit-details-marker]:hidden">
           <Globe2Icon className="size-3.5 shrink-0 text-og-muted" />
           <span className="truncate font-medium">{selected?.name ?? "Browser"}</span>
+          {(props.interventionCounts.get(selected?.id ?? "") ?? 0) > 0 ? (
+            <span className="size-1.5 shrink-0 rounded-full bg-og-status-waiting" />
+          ) : null}
           <ChevronDownIcon className="size-3 shrink-0 text-og-subtle" />
         </summary>
         <div className="absolute left-0 top-8 z-30 w-72 overflow-hidden rounded-og-md border border-og-border bg-og-surface-1 p-1 shadow-xl">
@@ -608,13 +818,15 @@ function BrowserToolbar(props: {
             sessions={current}
             identities={props.identities}
             selectedId={props.selectedSessionId}
+            interventionCounts={props.interventionCounts}
             onSelect={choose}
           />
           <BrowserSessionGroup
-            label="Other agents"
+            label="Workspace browsers"
             sessions={others}
             identities={props.identities}
             selectedId={props.selectedSessionId}
+            interventionCounts={props.interventionCounts}
             onSelect={choose}
           />
           <div className="mt-1 flex gap-1 border-t border-og-border pt-1">
@@ -655,11 +867,43 @@ function BrowserToolbar(props: {
   );
 }
 
+function BrowserUnselectedPanel(props: {
+  peerCount: number;
+  creating: boolean;
+  onCreate: () => void;
+}) {
+  return (
+    <div className="grid min-h-0 flex-1 place-items-center bg-og-bg p-6 text-center">
+      <div className="max-w-sm">
+        <span className="mx-auto grid size-10 place-items-center rounded-og-md border border-og-border bg-og-surface-1 text-og-muted">
+          <Globe2Icon className="size-4.5" />
+        </span>
+        <p className="mt-3 text-og-menu font-medium text-og-fg">No browser for this agent</p>
+        <p className="mt-1 text-og-control leading-5 text-og-muted">
+          {props.peerCount === 1
+            ? "One workspace browser is available from the browser menu."
+            : `${props.peerCount} workspace browsers are available from the browser menu.`}
+        </p>
+        <button
+          type="button"
+          disabled={props.creating}
+          onClick={props.onCreate}
+          className="mt-4 inline-flex h-8 items-center gap-1.5 rounded-og-sm border border-og-border bg-og-surface-1 px-3 text-og-control font-medium text-og-fg transition hover:bg-og-surface-2 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <PlusIcon className="size-3.5" />
+          {props.creating ? "Opening…" : "New browser"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function BrowserSessionGroup(props: {
   label: string;
   sessions: BrowserSession[];
   identities: BrowserIdentity[];
   selectedId: string | null;
+  interventionCounts: Map<string, number>;
   onSelect: (id: string) => void;
 }) {
   if (props.sessions.length === 0) return null;
@@ -670,6 +914,7 @@ function BrowserSessionGroup(props: {
       </p>
       {props.sessions.map((session) => {
         const identity = props.identities.find((candidate) => candidate.id === session.identityId);
+        const interventionCount = props.interventionCounts.get(session.id) ?? 0;
         return (
           <button
             key={session.id}
@@ -693,6 +938,11 @@ function BrowserSessionGroup(props: {
                 {placementLabel(session)}
               </span>
             </span>
+            {interventionCount > 0 ? (
+              <span className="rounded-full bg-og-status-waiting/12 px-1.5 py-0.5 text-[10px] font-medium text-og-status-waiting">
+                {interventionCount}
+              </span>
+            ) : null}
           </button>
         );
       })}
@@ -785,6 +1035,17 @@ function BrowserLaunchMenu(props: {
           <span>
             <span className="block text-og-control text-og-fg">Clean browser</span>
             <span className="block text-og-xs text-og-subtle">No saved profile</span>
+          </span>
+        </button>
+        <button
+          type="button"
+          onClick={() => choose({ kind: "fast" })}
+          className="flex w-full items-center gap-2 rounded-og-sm px-2 py-2 text-left transition hover:bg-og-surface-2"
+        >
+          <ZapIcon className="size-3.5 text-og-muted" />
+          <span>
+            <span className="block text-og-control text-og-fg">Fast semantic browser</span>
+            <span className="block text-og-xs text-og-subtle">Headless · optimized for agents</span>
           </span>
         </button>
         {props.identities.length > 0 ? (
@@ -916,7 +1177,7 @@ function BrowserProfileMenu(props: {
                   onInput={(event) => setName(event.currentTarget.value)}
                   maxLength={200}
                   placeholder="Work"
-                  className="h-8 min-w-0 flex-1 rounded-og-sm border border-og-border bg-og-bg px-2 text-og-control text-og-fg placeholder:text-og-subtle focus:border-og-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent"
+                  className="h-8 min-w-0 flex-1 rounded-og-sm border border-og-border bg-og-bg px-2 text-og-control text-og-fg placeholder:text-og-subtle focus:border-og-accent focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent"
                 />
                 <button
                   type="submit"
@@ -967,6 +1228,7 @@ function BrowserTabs(props: {
   targets: BrowserTarget[];
   selectedTargetId: string | null;
   mutating: boolean;
+  tabControl: boolean;
   onSelect: (id: string) => void;
   onClose: (id: string) => void;
   onOpen: () => void;
@@ -991,26 +1253,30 @@ function BrowserTabs(props: {
           >
             {target.title || shortUrl(target.url)}
           </button>
-          <button
-            type="button"
-            onClick={() => props.onClose(target.id)}
-            disabled={props.mutating}
-            className="ml-1 grid size-4 shrink-0 place-items-center rounded opacity-0 transition hover:bg-og-surface-3 group-hover:opacity-100 focus:opacity-100 disabled:opacity-30"
-            aria-label={`Close ${target.title || "tab"}`}
-          >
-            <XIcon className="size-3" />
-          </button>
+          {props.tabControl ? (
+            <button
+              type="button"
+              onClick={() => props.onClose(target.id)}
+              disabled={props.mutating}
+              className="ml-1 grid size-4 shrink-0 place-items-center rounded opacity-0 transition hover:bg-og-surface-3 group-hover:opacity-100 focus:opacity-100 disabled:opacity-30"
+              aria-label={`Close ${target.title || "tab"}`}
+            >
+              <XIcon className="size-3" />
+            </button>
+          ) : null}
         </div>
       ))}
-      <button
-        type="button"
-        onClick={props.onOpen}
-        disabled={props.mutating}
-        className="mb-1 grid size-6 shrink-0 place-items-center rounded-og-sm text-og-muted transition hover:bg-og-surface-2 hover:text-og-fg disabled:opacity-40"
-        aria-label="New tab"
-      >
-        <PlusIcon className="size-3.5" />
-      </button>
+      {props.tabControl ? (
+        <button
+          type="button"
+          onClick={props.onOpen}
+          disabled={props.mutating}
+          className="mb-1 grid size-6 shrink-0 place-items-center rounded-og-sm text-og-muted transition hover:bg-og-surface-2 hover:text-og-fg disabled:opacity-40"
+          aria-label="New tab"
+        >
+          <PlusIcon className="size-3.5" />
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -1057,7 +1323,7 @@ function BrowserAddressBar(props: {
             focusedRef.current = false;
           }}
           disabled={!props.target}
-          className="min-w-0 flex-1 bg-transparent text-og-control text-og-fg placeholder:text-og-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent disabled:opacity-50"
+          className="min-w-0 flex-1 bg-transparent text-og-control text-og-fg placeholder:text-og-subtle focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent disabled:opacity-50"
           aria-label="Address"
           spellCheck={false}
           placeholder="Search or enter address"
@@ -1070,16 +1336,20 @@ function BrowserAddressBar(props: {
 function BrowserViewport(props: {
   frame: BrowserFrame | null;
   connectionState: string;
+  supportsLiveFrames: boolean;
   connectionError: Error | null;
   observation: ReturnType<typeof useBrowserSession>["observation"];
   mutating: boolean;
+  clipboardEnabled: boolean;
   activityLabel?: string | undefined;
-  onAction: (action: BrowserAction, frame: BrowserFrame | null) => Promise<void>;
+  onAction: (action: BrowserAction, frame: BrowserFrame | null) => Promise<BrowserActionReceipt>;
+  onReadClipboard: () => Promise<{ text: string }>;
   onReconnect: () => void;
   onError: (cause: unknown) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const composingRef = useRef(false);
   const pointerStartRef = useRef<PointerStart | null>(null);
   const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastClickRef = useRef<{
@@ -1096,10 +1366,17 @@ function BrowserViewport(props: {
     frame: BrowserFrame;
     timer: ReturnType<typeof setTimeout> | null;
   } | null>(null);
+  const pendingTextRef = useRef<{
+    text: string;
+    frame: BrowserFrame | null;
+    timer: ReturnType<typeof setTimeout>;
+  } | null>(null);
   const actionRef = useRef(props.onAction);
+  const readClipboardRef = useRef(props.onReadClipboard);
   const errorRef = useRef(props.onError);
   const actionTailRef = useRef<Promise<void>>(Promise.resolve());
   actionRef.current = props.onAction;
+  readClipboardRef.current = props.onReadClipboard;
   errorRef.current = props.onError;
 
   useEffect(() => {
@@ -1140,16 +1417,27 @@ function BrowserViewport(props: {
     () => () => {
       if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
       if (wheelRef.current?.timer) clearTimeout(wheelRef.current.timer);
+      if (pendingTextRef.current?.timer) clearTimeout(pendingTextRef.current.timer);
     },
     [],
   );
 
-  const enqueue = useCallback((action: BrowserAction, frame: BrowserFrame | null) => {
-    actionTailRef.current = actionTailRef.current
-      .catch(() => undefined)
-      .then(async () => await actionRef.current(action, frame))
-      .catch((cause) => errorRef.current(cause));
-  }, []);
+  const enqueue = useCallback(
+    (
+      action: BrowserAction,
+      frame: BrowserFrame | null,
+      after?: (receipt: BrowserActionReceipt) => Promise<void>,
+    ) => {
+      actionTailRef.current = actionTailRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          const receipt = await actionRef.current(action, frame);
+          await after?.(receipt);
+        })
+        .catch((cause) => errorRef.current(cause));
+    },
+    [],
+  );
 
   const point = useCallback(
     (frame: BrowserFrame, clientX: number, clientY: number) =>
@@ -1157,8 +1445,26 @@ function BrowserViewport(props: {
     [],
   );
 
+  const flushPendingText = useCallback(() => {
+    const pending = pendingTextRef.current;
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    pendingTextRef.current = null;
+    enqueue({ type: "type", text: pending.text }, pending.frame);
+  }, [enqueue]);
+
+  const flushPendingClick = useCallback(() => {
+    const pending = lastClickRef.current;
+    if (!pending) return;
+    if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
+    clickTimerRef.current = null;
+    lastClickRef.current = null;
+    enqueue({ type: "pointer", action: "click", x: pending.x, y: pending.y }, pending.frame);
+  }, [enqueue]);
+
   const pointerDown = (event: PointerEvent<HTMLCanvasElement>) => {
-    if (!props.frame || props.mutating) return;
+    if (!props.frame || props.mutating || event.button !== 0) return;
+    flushPendingText();
     pointerStartRef.current = {
       x: event.clientX,
       y: event.clientY,
@@ -1177,6 +1483,7 @@ function BrowserViewport(props: {
     const to = point(start.frame, event.clientX, event.clientY);
     if (!from || !to) return;
     if (Math.hypot(event.clientX - start.x, event.clientY - start.y) > 5) {
+      flushPendingClick();
       enqueue(
         {
           type: "pointer",
@@ -1216,6 +1523,8 @@ function BrowserViewport(props: {
     event.preventDefault();
     const frame = props.frame;
     if (!frame) return;
+    flushPendingText();
+    flushPendingClick();
     const at = point(frame, event.clientX, event.clientY);
     if (at) enqueue({ type: "pointer", action: "click", x: at.x, y: at.y, button: "right" }, frame);
   };
@@ -1225,6 +1534,8 @@ function BrowserViewport(props: {
     if (!frame) return;
     const at = point(frame, event.clientX, event.clientY);
     if (!at) return;
+    flushPendingText();
+    flushPendingClick();
     event.preventDefault();
     const pending = wheelRef.current;
     if (pending?.timer) clearTimeout(pending.timer);
@@ -1254,16 +1565,80 @@ function BrowserViewport(props: {
   };
 
   const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    const command = event.metaKey || event.ctrlKey;
+    if (
+      props.clipboardEnabled &&
+      command &&
+      !event.altKey &&
+      ["c", "v"].includes(event.key.toLowerCase())
+    ) {
+      flushPendingText();
+      return;
+    }
     const key = browserKey(event);
     if (!key) return;
     event.preventDefault();
+    flushPendingText();
+    flushPendingClick();
     enqueue({ type: "press", key }, props.frame);
   };
 
-  const input = (value: string) => {
+  const copy = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    if (!props.clipboardEnabled) return;
+    event.preventDefault();
+    flushPendingText();
+    flushPendingClick();
+    enqueue({ type: "clipboard", operation: "copy" }, props.frame, async () => {
+      const clipboard = await readClipboardRef.current();
+      if (clipboard.text.length === 0) return;
+      if (!(await copyTextToClipboard(clipboard.text))) {
+        throw new Error("Browser text could not be copied to the local clipboard");
+      }
+    });
+  };
+
+  const paste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    if (!props.clipboardEnabled) return;
+    event.preventDefault();
+    flushPendingText();
+    flushPendingClick();
+    enqueue(
+      {
+        type: "clipboard",
+        operation: "paste",
+        text: event.clipboardData.getData("text/plain"),
+      },
+      props.frame,
+    );
+  };
+
+  const input = (value: string, nativeComposing = false) => {
+    if (composingRef.current || nativeComposing) return;
     if (!value) return;
-    enqueue({ type: "type", text: value }, props.frame);
+    flushPendingClick();
+    const pending = pendingTextRef.current;
+    if (pending && sameOptionalBrowserFrame(pending.frame, props.frame)) {
+      clearTimeout(pending.timer);
+      pending.text += value;
+      pending.timer = setTimeout(flushPendingText, 16);
+    } else {
+      flushPendingText();
+      pendingTextRef.current = {
+        text: value,
+        frame: props.frame,
+        timer: setTimeout(flushPendingText, 16),
+      };
+    }
     if (inputRef.current) inputRef.current.value = "";
+  };
+
+  const compositionStart = () => {
+    composingRef.current = true;
+  };
+
+  const compositionEnd = (event: CompositionEvent<HTMLTextAreaElement>) => {
+    composingRef.current = false;
+    input(event.currentTarget.value || event.data);
   };
 
   const showCanvas = props.frame !== null;
@@ -1272,7 +1647,7 @@ function BrowserViewport(props: {
       <canvas
         ref={canvasRef}
         className={cn(
-          "absolute inset-0 m-auto max-h-full max-w-full touch-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent",
+          "absolute inset-0 m-auto max-h-full max-w-full touch-none focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent",
           !showCanvas && "invisible",
         )}
         onPointerDown={pointerDown}
@@ -1287,8 +1662,14 @@ function BrowserViewport(props: {
       <textarea
         ref={inputRef}
         defaultValue=""
-        onInput={(event) => input(event.currentTarget.value)}
+        onInput={(event) =>
+          input(event.currentTarget.value, (event.nativeEvent as InputEvent).isComposing)
+        }
+        onCompositionStart={compositionStart}
+        onCompositionEnd={compositionEnd}
         onKeyDown={keyDown}
+        onCopy={copy}
+        onPaste={paste}
         className="pointer-events-none absolute left-1/2 top-1/2 size-px resize-none overflow-hidden opacity-0"
         aria-label="Browser keyboard input"
         autoCapitalize="off"
@@ -1299,6 +1680,7 @@ function BrowserViewport(props: {
         <SemanticBrowserFallback
           observation={props.observation}
           connectionState={props.connectionState}
+          supportsLiveFrames={props.supportsLiveFrames}
           error={props.connectionError}
           onAction={(action) => enqueue(action, null)}
           onReconnect={props.onReconnect}
@@ -1316,6 +1698,7 @@ function BrowserViewport(props: {
 function SemanticBrowserFallback(props: {
   observation: ReturnType<typeof useBrowserSession>["observation"];
   connectionState: string;
+  supportsLiveFrames: boolean;
   error: Error | null;
   onAction: (action: BrowserAction) => void;
   onReconnect: () => void;
@@ -1330,16 +1713,26 @@ function SemanticBrowserFallback(props: {
         <div className="flex items-center gap-2">
           {props.error ? (
             <CircleAlertIcon className="size-4 text-og-status-error" />
+          ) : !props.supportsLiveFrames ? (
+            <ZapIcon className="size-4 text-og-muted" />
           ) : (
             <LoaderCircleIcon className="size-4 animate-spin text-og-muted" />
           )}
           <p className="text-og-menu font-medium text-og-fg">
-            {props.error ? "Live view disconnected" : browserConnectionLabel(props.connectionState)}
+            {props.error
+              ? "Live view disconnected"
+              : props.supportsLiveFrames
+                ? browserConnectionLabel(props.connectionState)
+                : "Semantic browser"}
           </p>
         </div>
         {interactive.length > 0 ? (
           <div className="mt-3 border-t border-og-border pt-3">
-            <p className="mb-2 text-og-xs text-og-subtle">Page controls remain available</p>
+            <p className="mb-2 text-og-xs text-og-subtle">
+              {props.supportsLiveFrames
+                ? "Page controls remain available"
+                : "Available page controls"}
+            </p>
             <div className="flex flex-wrap gap-1.5">
               {interactive.map((node) => (
                 <button
@@ -1359,7 +1752,7 @@ function SemanticBrowserFallback(props: {
             </div>
           </div>
         ) : null}
-        {props.error ? (
+        {props.error && props.supportsLiveFrames ? (
           <button
             type="button"
             onClick={props.onReconnect}
@@ -1380,21 +1773,30 @@ function BrowserStatusBar(props: {
   observation: ReturnType<typeof useBrowserSession>["observation"];
   connectionState: string;
   refreshing: boolean;
+  diagnosticsOpen: boolean;
   onOpenComputer?: (() => void) | undefined;
   onDiagnostics: () => void;
 }) {
-  const errors = props.observation?.diagnostics.consoleErrorCount ?? 0;
+  const errors =
+    (props.observation?.diagnostics.consoleErrorCount ?? 0) +
+    (props.observation?.diagnostics.pageErrorCount ?? 0);
   const failed = props.observation?.diagnostics.failedRequestCount ?? 0;
   return (
     <div className="flex h-7 shrink-0 items-center gap-2 border-t border-og-border bg-og-surface-0 px-2 text-og-xs text-og-subtle">
       <span
         className={cn(
           "size-1.5 rounded-full",
-          props.connectionState === "live" ? "bg-og-status-running" : "bg-og-muted",
+          props.connectionState === "live" || props.connectionState === "semantic"
+            ? "bg-og-status-running"
+            : "bg-og-muted",
         )}
       />
       <span>
-        {props.connectionState === "live" ? "Live" : browserConnectionLabel(props.connectionState)}
+        {props.connectionState === "live"
+          ? "Live"
+          : props.connectionState === "semantic"
+            ? "Semantic"
+            : browserConnectionLabel(props.connectionState)}
       </span>
       <span>{props.profile?.name ?? "Temporary browser"}</span>
       <span className="min-w-0 flex-1 truncate">{props.target?.title}</span>
@@ -1413,13 +1815,475 @@ function BrowserStatusBar(props: {
       <button
         type="button"
         onClick={props.onDiagnostics}
-        className="flex items-center gap-1 rounded px-1.5 py-0.5 transition hover:bg-og-surface-2 hover:text-og-fg"
+        aria-expanded={props.diagnosticsOpen}
+        aria-controls="browser-diagnostics-drawer"
+        className={cn(
+          "flex items-center gap-1 rounded px-1.5 py-0.5 transition hover:bg-og-surface-2 hover:text-og-fg",
+          props.diagnosticsOpen && "bg-og-surface-2 text-og-fg",
+        )}
       >
         <BugIcon className="size-3" />
         {errors + failed > 0 ? errors + failed : "Debug"}
       </button>
     </div>
   );
+}
+
+function BrowserDiagnosticsDrawer(props: {
+  session: BrowserSession | null;
+  profile: BrowserIdentity | null;
+  target: BrowserTarget | null;
+  observation: BrowserObservation | null;
+  baseRevisionOrdinal: number | null;
+  state: BrowserDiagnosticsView;
+  downloads: BrowserDownload[];
+  downloadsEnabled: boolean;
+  downloadsLoading: boolean;
+  downloadsRefreshing: boolean;
+  downloadsError: Error | null;
+  savingDownloadIds: string[];
+  onSaveDownload: (
+    downloadId: string,
+    destinationPath: string,
+    overwrite: boolean,
+  ) => Promise<BrowserDownloadSaveResponse>;
+  onRefreshDownloads: () => void;
+  onRefresh: () => void;
+  onClose: () => void;
+}) {
+  const session = props.session;
+  const diagnostics = props.observation?.diagnostics;
+  const semanticMode = props.observation?.semantic
+    ? "Semantic page structure available"
+    : props.observation?.screenshot
+      ? "Visual fallback in use"
+      : "Waiting for page observation";
+  return (
+    <aside
+      id="browser-diagnostics-drawer"
+      role="region"
+      aria-label="Browser diagnostics"
+      className="absolute bottom-7 right-0 top-10 z-40 flex w-full max-w-md flex-col border-l border-og-border bg-og-surface-0 shadow-2xl"
+    >
+      <div className="flex h-11 shrink-0 items-center gap-2 border-b border-og-border px-3">
+        <BugIcon className="size-4 text-og-muted" />
+        <div className="min-w-0 flex-1">
+          <p className="text-og-control font-semibold text-og-fg">Browser diagnostics</p>
+          <p className="truncate text-og-xs text-og-subtle">
+            {props.target?.title || shortUrl(props.target?.url ?? "") || "Current tab"}
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={props.onRefresh}
+          disabled={props.state.loading}
+          className="grid size-7 place-items-center rounded-og-sm text-og-muted transition hover:bg-og-surface-2 hover:text-og-fg disabled:opacity-40"
+          aria-label="Refresh browser diagnostics"
+        >
+          <RefreshCwIcon className={cn("size-3.5", props.state.loading && "animate-spin")} />
+        </button>
+        <button
+          type="button"
+          onClick={props.onClose}
+          className="grid size-7 place-items-center rounded-og-sm text-og-muted transition hover:bg-og-surface-2 hover:text-og-fg"
+          aria-label="Close browser diagnostics"
+        >
+          <XIcon className="size-3.5" />
+        </button>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <section className="border-b border-og-border p-3" aria-labelledby="browser-runtime-title">
+          <h3
+            id="browser-runtime-title"
+            className="text-[10px] font-semibold uppercase tracking-[0.14em] text-og-subtle"
+          >
+            Runtime
+          </h3>
+          <dl className="mt-2 grid grid-cols-[7rem_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-og-xs">
+            <DiagnosticFact label="Engine" value={browserEngineLabel(session)} />
+            <DiagnosticFact label="Driver" value={session?.driverId ?? "Unavailable"} />
+            <DiagnosticFact label="Placement" value={placementLabel(session ?? undefined)} />
+            <DiagnosticFact
+              label="Profile"
+              value={
+                props.profile
+                  ? `${props.profile.name}${props.baseRevisionOrdinal ? ` · v${props.baseRevisionOrdinal}` : ""}`
+                  : "Temporary"
+              }
+            />
+            <DiagnosticFact
+              label="Controller"
+              value={shortGeneration(session?.controller?.controllerGeneration)}
+            />
+            <DiagnosticFact
+              label="Network"
+              value={session?.networkRouteId ? "Custom route" : "Placement default"}
+            />
+            <DiagnosticFact label="Observation" value={semanticMode} />
+          </dl>
+        </section>
+
+        <section className="border-b border-og-border p-3" aria-labelledby="browser-page-title">
+          <h3
+            id="browser-page-title"
+            className="text-[10px] font-semibold uppercase tracking-[0.14em] text-og-subtle"
+          >
+            Current page
+          </h3>
+          <dl className="mt-2 grid grid-cols-2 gap-2">
+            <DiagnosticCount label="Console errors" value={diagnostics?.consoleErrorCount ?? 0} />
+            <DiagnosticCount label="Page errors" value={diagnostics?.pageErrorCount ?? 0} />
+            <DiagnosticCount label="Failed requests" value={diagnostics?.failedRequestCount ?? 0} />
+            <DiagnosticCount label="Downloads" value={diagnostics?.downloadCount ?? 0} />
+          </dl>
+          {session?.failureCode ? (
+            <p className="mt-2 rounded-og-sm border border-og-status-error/30 bg-og-status-error/5 px-2.5 py-2 text-og-xs text-og-status-error">
+              Browser state: {session.failureCode}
+            </p>
+          ) : null}
+        </section>
+
+        {props.downloadsEnabled ? (
+          <BrowserDownloadsPanel
+            downloads={props.downloads}
+            loading={props.downloadsLoading}
+            refreshing={props.downloadsRefreshing}
+            error={props.downloadsError}
+            savingDownloadIds={props.savingDownloadIds}
+            onSave={props.onSaveDownload}
+            onRefresh={props.onRefreshDownloads}
+          />
+        ) : null}
+
+        <section className="p-3" aria-labelledby="browser-events-title">
+          <div className="flex items-center justify-between gap-2">
+            <h3
+              id="browser-events-title"
+              className="text-[10px] font-semibold uppercase tracking-[0.14em] text-og-subtle"
+            >
+              Recent events
+            </h3>
+            {props.state.batch?.truncated ? (
+              <span className="text-[10px] text-og-subtle">Newest 100</span>
+            ) : null}
+          </div>
+          {props.state.loading && !props.state.batch ? (
+            <div className="flex items-center gap-2 py-6 text-og-control text-og-muted">
+              <LoaderCircleIcon className="size-3.5 animate-spin" /> Loading diagnostics…
+            </div>
+          ) : props.state.error ? (
+            <div className="py-5">
+              <p className="text-og-control text-og-status-error">{props.state.error.message}</p>
+              <button
+                type="button"
+                onClick={props.onRefresh}
+                className="mt-2 text-og-control font-medium text-og-accent hover:underline"
+              >
+                Try again
+              </button>
+            </div>
+          ) : props.state.batch?.entries.length ? (
+            <ol className="mt-2 space-y-2">
+              {props.state.batch.entries.map((entry) => (
+                <li
+                  key={entry.sequence}
+                  className="rounded-og-sm border border-og-border bg-og-bg p-2.5"
+                >
+                  <div className="flex items-center gap-2 text-[10px] text-og-subtle">
+                    <span
+                      className={cn(
+                        "font-semibold uppercase tracking-wide",
+                        diagnosticTone(entry.level),
+                      )}
+                    >
+                      {diagnosticKindLabel(entry.kind)}
+                    </span>
+                    <span className="ml-auto">{formatDiagnosticTime(entry.occurredAt)}</span>
+                  </div>
+                  <p className="mt-1 whitespace-pre-wrap break-words text-og-xs leading-5 text-og-fg">
+                    {entry.message}
+                  </p>
+                  {entry.url || entry.filename || entry.method || entry.status ? (
+                    <p className="mt-1 truncate font-og-mono text-[10px] text-og-subtle">
+                      {[entry.method, entry.status, entry.filename, entry.url]
+                        .filter((value) => value !== null)
+                        .join(" · ")}
+                    </p>
+                  ) : null}
+                </li>
+              ))}
+            </ol>
+          ) : (
+            <p className="py-6 text-og-control text-og-muted">No diagnostics for this tab.</p>
+          )}
+        </section>
+      </div>
+    </aside>
+  );
+}
+
+function BrowserDownloadsPanel(props: {
+  downloads: BrowserDownload[];
+  loading: boolean;
+  refreshing: boolean;
+  error: Error | null;
+  savingDownloadIds: string[];
+  onSave: (
+    downloadId: string,
+    destinationPath: string,
+    overwrite: boolean,
+  ) => Promise<BrowserDownloadSaveResponse>;
+  onRefresh: () => void;
+}) {
+  const [paths, setPaths] = useState<Record<string, string>>({});
+  const [overwrite, setOverwrite] = useState<Record<string, boolean>>({});
+  const [savedPaths, setSavedPaths] = useState<Record<string, string>>({});
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const saving = useMemo(() => new Set(props.savingDownloadIds), [props.savingDownloadIds]);
+
+  const save = (download: BrowserDownload) => {
+    const destinationPath = (paths[download.id] ?? defaultDownloadDestination(download)).trim();
+    if (!destinationPath || saving.has(download.id)) return;
+    setErrors((current) => ({ ...current, [download.id]: "" }));
+    void props
+      .onSave(download.id, destinationPath, overwrite[download.id] ?? false)
+      .then((response) => {
+        setSavedPaths((current) => ({ ...current, [download.id]: response.destinationPath }));
+      })
+      .catch((cause) => {
+        setErrors((current) => ({
+          ...current,
+          [download.id]: cause instanceof Error ? cause.message : "Could not save this download.",
+        }));
+      });
+  };
+
+  return (
+    <section className="border-b border-og-border p-3" aria-labelledby="browser-downloads-title">
+      <div className="flex items-center gap-2">
+        <DownloadIcon className="size-3.5 text-og-muted" />
+        <h3
+          id="browser-downloads-title"
+          className="text-[10px] font-semibold uppercase tracking-[0.14em] text-og-subtle"
+        >
+          Downloads
+        </h3>
+        {props.refreshing ? (
+          <LoaderCircleIcon className="ml-auto size-3 animate-spin text-og-muted" />
+        ) : null}
+      </div>
+
+      {props.loading ? (
+        <div className="flex items-center gap-2 py-5 text-og-control text-og-muted">
+          <LoaderCircleIcon className="size-3.5 animate-spin" /> Loading downloads…
+        </div>
+      ) : props.error ? (
+        <div className="py-4">
+          <p className="text-og-control text-og-status-error">{props.error.message}</p>
+          <button
+            type="button"
+            onClick={props.onRefresh}
+            className="mt-2 text-og-control font-medium text-og-accent hover:underline"
+          >
+            Try again
+          </button>
+        </div>
+      ) : props.downloads.length === 0 ? (
+        <p className="py-4 text-og-control text-og-muted">No files downloaded yet.</p>
+      ) : (
+        <ol className="mt-2 space-y-2">
+          {props.downloads.map((download) => {
+            const destinationPath = paths[download.id] ?? defaultDownloadDestination(download);
+            const isSaving = saving.has(download.id);
+            const isSaved = savedPaths[download.id] === destinationPath;
+            return (
+              <li
+                key={download.id}
+                className="rounded-og-sm border border-og-border bg-og-bg p-2.5"
+              >
+                <div className="flex min-w-0 items-start gap-2">
+                  <span className="mt-0.5 grid size-6 shrink-0 place-items-center rounded bg-og-surface-2 text-og-muted">
+                    {isSaved ? (
+                      <FileCheck2Icon className="size-3.5 text-og-status-success" />
+                    ) : (
+                      <DownloadIcon className="size-3.5" />
+                    )}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <p
+                      className="truncate text-og-xs font-medium text-og-fg"
+                      title={download.filename}
+                    >
+                      {download.filename}
+                    </p>
+                    <p className="mt-0.5 text-[10px] text-og-subtle">
+                      {downloadStatusLabel(download)}
+                    </p>
+                  </div>
+                </div>
+
+                {download.status === "completed" ? (
+                  <div className="mt-2">
+                    <div className="flex gap-1.5">
+                      <input
+                        type="text"
+                        value={destinationPath}
+                        onInput={(event) => {
+                          const value = event.currentTarget.value;
+                          setPaths((current) => ({ ...current, [download.id]: value }));
+                          setErrors((current) => ({ ...current, [download.id]: "" }));
+                        }}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") save(download);
+                        }}
+                        disabled={isSaving}
+                        aria-label={`Workspace path for ${download.filename}`}
+                        className="h-7 min-w-0 flex-1 rounded-og-sm border border-og-border bg-og-surface-0 px-2 font-og-mono text-[10px] text-og-fg transition focus:border-og-accent focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent disabled:opacity-50"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => save(download)}
+                        disabled={
+                          isSaving ||
+                          !destinationPath.trim() ||
+                          (isSaved && !overwrite[download.id])
+                        }
+                        className="inline-flex h-7 shrink-0 items-center gap-1 rounded-og-sm border border-og-border bg-og-surface-1 px-2 text-[10px] font-medium text-og-fg transition hover:bg-og-surface-2 disabled:opacity-40"
+                      >
+                        {isSaving ? (
+                          <LoaderCircleIcon className="size-3 animate-spin" />
+                        ) : (
+                          <SaveIcon className="size-3" />
+                        )}
+                        {isSaving
+                          ? "Saving"
+                          : isSaved
+                            ? "Saved"
+                            : overwrite[download.id]
+                              ? "Replace"
+                              : "Save"}
+                      </button>
+                    </div>
+                    <label className="mt-1.5 flex w-fit items-center gap-1.5 text-[10px] text-og-subtle">
+                      <input
+                        type="checkbox"
+                        checked={overwrite[download.id] ?? false}
+                        onChange={(event) => {
+                          setOverwrite((current) => ({
+                            ...current,
+                            [download.id]: event.currentTarget.checked,
+                          }));
+                          setErrors((current) => ({ ...current, [download.id]: "" }));
+                        }}
+                        disabled={isSaving}
+                        className="size-3 accent-og-accent"
+                      />
+                      Replace an existing workspace file
+                    </label>
+                    {errors[download.id] ? (
+                      <p className="mt-1.5 break-words text-[10px] text-og-status-error">
+                        {errors[download.id]}
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
+              </li>
+            );
+          })}
+        </ol>
+      )}
+    </section>
+  );
+}
+
+function downloadStatusLabel(download: BrowserDownload): string {
+  if (download.status === "completed") return formatBytes(download.receivedBytes);
+  if (download.status === "in_progress") {
+    const received = formatBytes(download.receivedBytes);
+    return download.totalBytes === null
+      ? `Downloading · ${received}`
+      : `Downloading · ${received} of ${formatBytes(download.totalBytes)}`;
+  }
+  if (download.status === "cancelled") return "Cancelled";
+  if (download.status === "unavailable") return "No longer available";
+  return "Download failed";
+}
+
+function defaultDownloadDestination(download: BrowserDownload): string {
+  const leaf = download.filename.split(/[\\/]/u).at(-1)?.trim() ?? "";
+  const portable = leaf
+    .normalize("NFC")
+    .replace(/[<>:"|?*\u0000-\u001f\u007f]/gu, "-")
+    .replace(/[ .]+$/u, "");
+  if (portable.length === 0 || /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(portable)) {
+    return `download-${download.id.slice(0, 8)}`;
+  }
+  return portable;
+}
+
+function DiagnosticFact(props: { label: string; value: string }) {
+  return (
+    <>
+      <dt className="text-og-subtle">{props.label}</dt>
+      <dd className="min-w-0 truncate text-og-fg" title={props.value}>
+        {props.value}
+      </dd>
+    </>
+  );
+}
+
+function DiagnosticCount(props: { label: string; value: number }) {
+  return (
+    <div className="rounded-og-sm border border-og-border bg-og-bg px-2.5 py-2">
+      <dt className="text-[10px] text-og-subtle">{props.label}</dt>
+      <dd
+        className={cn(
+          "mt-0.5 text-og-sm font-semibold",
+          props.value ? "text-og-fg" : "text-og-muted",
+        )}
+      >
+        {props.value}
+      </dd>
+    </div>
+  );
+}
+
+function browserEngineLabel(session: BrowserSession | null): string {
+  if (!session) return "Unavailable";
+  const version = session.engineVersion ? ` ${session.engineVersion}` : "";
+  return `${session.engine}${version} · ${session.headless ? "headless" : "headed"}`;
+}
+
+function shortGeneration(value: string | null | undefined): string {
+  if (!value) return "Unavailable";
+  return value.length > 16 ? `${value.slice(0, 8)}…${value.slice(-6)}` : value;
+}
+
+function diagnosticKindLabel(kind: BrowserDiagnosticBatch["entries"][number]["kind"]): string {
+  switch (kind) {
+    case "console":
+      return "Console";
+    case "page_error":
+      return "Page error";
+    case "failed_request":
+      return "Request";
+    case "download":
+      return "Download";
+  }
+}
+
+function diagnosticTone(level: BrowserDiagnosticBatch["entries"][number]["level"]): string {
+  if (level === "error") return "text-og-status-error";
+  if (level === "warning") return "text-og-status-waiting";
+  return "text-og-muted";
+}
+
+function formatDiagnosticTime(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? ""
+    : date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
 function BrowserNotice(props: { icon: ReactNode; text: string; className?: string }) {
@@ -1477,7 +2341,15 @@ function browserPoint(
   };
 }
 
-function browserKey(event: KeyboardEvent<HTMLTextAreaElement>): string | null {
+export function browserKey(
+  event: Pick<
+    KeyboardEvent<HTMLTextAreaElement>,
+    "altKey" | "ctrlKey" | "key" | "metaKey" | "shiftKey"
+  >,
+): string | null {
+  // Modifier keydowns precede the actual chord key. They are not executable
+  // browser actions by themselves (for example Meta+Meta is invalid CDP input).
+  if (["Alt", "AltGraph", "Control", "Meta", "Shift"].includes(event.key)) return null;
   const special = new Set([
     "Enter",
     "Tab",
@@ -1550,8 +2422,36 @@ function sameFrameFence(left: BrowserFrame, right: BrowserFrame): boolean {
   );
 }
 
+function sameOptionalBrowserFrame(left: BrowserFrame | null, right: BrowserFrame | null): boolean {
+  return left === null || right === null ? left === right : sameFrameFence(left, right);
+}
+
 function isLiveBrowser(session: BrowserSession): boolean {
   return !["ending", "ended", "failed", "lost"].includes(session.lifecycle);
+}
+
+function countInterventions(
+  interventions: readonly InteractionIntervention[],
+): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const intervention of interventions) {
+    counts.set(intervention.resourceId, (counts.get(intervention.resourceId) ?? 0) + 1);
+  }
+  return counts;
+}
+
+function interventionTitle(intervention: InteractionIntervention): string {
+  switch (intervention.kind) {
+    case "manual_login":
+      return "Sign in needed";
+    case "mfa":
+      return "Verification needed";
+    case "external_action":
+    case "confirmation":
+      return "Action needed";
+    case "other":
+      return "Browser needs your help";
+  }
 }
 
 function placementLabel(session: BrowserSession | undefined): string {
@@ -1578,6 +2478,8 @@ function browserConnectionLabel(state: string): string {
       return "Reconnecting…";
     case "error":
       return "Disconnected";
+    case "semantic":
+      return "Semantic";
     default:
       return "Waiting for browser…";
   }

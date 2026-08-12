@@ -39,7 +39,7 @@ for (const testFile of testFiles) {
 }
 
 function runTestFile(testFile: string, environment: Readonly<Record<string, string>>): number {
-  const testArgs = ["test", "--max-concurrency=1", testFile];
+  const testArgs = ["--no-env-file", "test", "--max-concurrency=1", testFile];
   const first = spawnSync("bun", testArgs, {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],

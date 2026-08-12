@@ -12,6 +12,7 @@ export default defineConfig({
     "src/index.ts",
     "src/core.ts",
     "src/artifacts.ts",
+    "src/memory-slack.ts",
     "src/realtime.ts",
     "src/editable-artifacts.ts",
     "src/editable-artifacts-worker.ts",

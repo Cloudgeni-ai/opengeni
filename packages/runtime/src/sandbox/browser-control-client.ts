@@ -8,29 +8,55 @@ import {
   BROWSER_STATE_ARTIFACT_CONTENT_TYPE,
   BrowserActionCommand,
   BrowserActionReceipt,
+  BrowserClipboard,
   BrowserDiagnosticBatch,
+  BrowserDownload,
+  BrowserDownloadExportReceipt,
+  BrowserDownloadExportRequest,
+  BrowserDownloadListResponse,
+  BrowserExternalAuthCommand,
+  BrowserExternalAuthResult,
   BrowserObservation,
+  BrowserProtectedAuthFillCommand,
+  BrowserProtectedAuthFillReceipt,
   BrowserRevisionMaterialization,
   BrowserTarget,
+  BrowserWorkspaceFileStageRequest,
+  BrowserWorkspaceFileStageResponse,
   ComputerActionCommand,
   ComputerActionReceipt,
+  ComputerClipboard,
   ComputerObservation,
   ComputerSessionCapabilities,
   ComputerTarget,
   InteractionError,
+  NetworkRouteConsistency,
   type BrowserActionCommand as BrowserActionCommandValue,
   type BrowserActionReceipt as BrowserActionReceiptValue,
+  type BrowserClipboard as BrowserClipboardValue,
   type BrowserDiagnosticBatch as BrowserDiagnosticBatchValue,
+  type BrowserDownload as BrowserDownloadValue,
+  type BrowserDownloadExportReceipt as BrowserDownloadExportReceiptValue,
+  type BrowserDownloadExportRequest as BrowserDownloadExportRequestValue,
+  type BrowserDownloadListResponse as BrowserDownloadListResponseValue,
+  type BrowserExternalAuthCommand as BrowserExternalAuthCommandValue,
+  type BrowserExternalAuthResult as BrowserExternalAuthResultValue,
   type BrowserDiagnosticKind,
   type BrowserObservation as BrowserObservationValue,
+  type BrowserProtectedAuthFillCommand as BrowserProtectedAuthFillCommandValue,
+  type BrowserProtectedAuthFillReceipt as BrowserProtectedAuthFillReceiptValue,
   type BrowserRevisionMaterialization as BrowserRevisionMaterializationValue,
   type BrowserTarget as BrowserTargetValue,
+  type BrowserWorkspaceFileStageRequest as BrowserWorkspaceFileStageRequestValue,
+  type BrowserWorkspaceFileStageResponse as BrowserWorkspaceFileStageResponseValue,
   type ComputerActionCommand as ComputerActionCommandValue,
   type ComputerActionReceipt as ComputerActionReceiptValue,
+  type ComputerClipboard as ComputerClipboardValue,
   type ComputerObservation as ComputerObservationValue,
   type ComputerSessionCapabilities as ComputerSessionCapabilitiesValue,
   type ComputerTarget as ComputerTargetValue,
   type InteractionError as InteractionErrorValue,
+  type NetworkRouteConsistency as NetworkRouteConsistencyValue,
 } from "@opengeni/contracts";
 import type {
   BrowserControlEnsureRequest,
@@ -54,6 +80,13 @@ const MAX_REQUEST_TIMEOUT_MS = 20 * 60_000;
 const BROWSER_STATE_TRANSFER_TIMEOUT_MS = 20 * 60_000;
 const PRIVATE_READ_CHUNK_BYTES = 512 * 1024;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
+
+// Connected-machine browserd binds an OS-assigned loopback port. The agent
+// owns that endpoint, so the API must never fall back to the image port merely
+// because a fresh request constructed a fresh client. Cache the negotiated
+// endpoint by its physical authority fence; a transport failure invalidates it
+// and performs one idempotent ensure/retry below.
+const nativeControllerPorts = new Map<string, number>();
 
 type ExecResultLike = {
   output?: string;
@@ -80,6 +113,12 @@ export type BrowserControlPlacementSession = {
     content: string | Uint8Array;
     createParents?: boolean;
   }) => Promise<unknown>;
+  writePlacementPrivate?: (args: {
+    path: string;
+    content: string | Uint8Array;
+    createParents?: boolean;
+  }) => Promise<unknown>;
+  deletePlacementPrivate?: (path: string) => Promise<void>;
   writeStdin?: (args: {
     sessionId: number;
     chars?: string;
@@ -137,10 +176,43 @@ export type CreatePlacementBrowserSessionInput = PlacementBrowserSessionReferenc
   restore?: RestorePlacementBrowserStateInput;
   transport?: PlacementBrowserTransport;
   linkedComputer?: PlacementComputerSessionReference;
+  networkRoute?: PlacementBrowserNetworkRoute;
+};
+
+export type PlacementBrowserNetworkRoute = {
+  routeId: string;
+  routeVersion: number;
+  authorityDigest: string;
+  kind: "direct" | "proxy" | "managed" | "tunnel";
+  consistency: NetworkRouteConsistencyValue;
+  /** Present for an initial authenticated-proxy launch; omitted only when
+   * replaying an already-live controller after the referenced credential was
+   * rotated. Never persisted or returned by the controller. */
+  proxyUrl?: string;
+  /** Provider-native egress selector. Provider API authority remains on the
+   * external transport and is never duplicated into this route material. */
+  providerRoute?: {
+    providerId: "browserbase" | "kernel";
+    routeId: string;
+    egressClass: "datacenter" | "residential" | "isp";
+    region: string | null;
+  };
 };
 
 export type PlacementBrowserTransport =
-  | { kind: "managed" }
+  | { kind: "managed"; engine?: "chromium" | "lightpanda" }
+  | {
+      kind: "external_provider";
+      providerId: "browserbase" | "kernel";
+      placementId: string;
+      /** Private launch authority. Browserd never returns or journals it. */
+      authority: {
+        apiKey: string;
+        endpoint?: string;
+      };
+      timeoutSeconds?: number;
+      stealth?: boolean;
+    }
   | {
       kind: "attached_chrome";
       deviceId: string;
@@ -278,6 +350,7 @@ export async function provisionBrowserControlClient(
       allowedOrigins: [...(input.allowedOrigins ?? [])],
     });
     const port = boundedPort(ensured.port);
+    nativeControllerPorts.set(nativeControllerKey(input.nativeAuthority), port);
     return {
       client: new BrowserControlClient(session, {
         adminToken,
@@ -396,6 +469,9 @@ export class BrowserControlClient {
           ...(input.transport ? { transport: placementBrowserTransport(input.transport) } : {}),
           ...(input.linkedComputer
             ? { linkedComputer: parseComputerReference(input.linkedComputer) }
+            : {}),
+          ...(input.networkRoute
+            ? { networkRoute: placementBrowserNetworkRoute(input.networkRoute) }
             : {}),
           ...(restore ? { restore: restore.wire } : {}),
         },
@@ -655,6 +731,26 @@ export class BrowserControlClient {
     return buildStreamUrl({ ...endpoint, path });
   }
 
+  async computerRfbStreamUrl(
+    reference: PlacementComputerSessionReference,
+    targetId: string,
+  ): Promise<string> {
+    const binding = parseComputerReference(reference);
+    if (!this.session.resolveExposedPort) {
+      throw new BrowserControlUnsupportedError(
+        "computer placement cannot expose its live RFB port",
+      );
+    }
+    const endpoint = await this.session.resolveExposedPort(this.port);
+    if ((endpoint.path ?? "/") !== "/") {
+      throw new BrowserControlUnsupportedError(
+        "computer placement requires a native HTTP/WebSocket relay",
+      );
+    }
+    const path = `/v1/computer-sessions/${binding.computerSessionId}/targets/${encodeURIComponent(requireOpaqueId(targetId, "computer target id"))}/rfb`;
+    return buildStreamUrl({ ...endpoint, path });
+  }
+
   /** Open the browser frame source through the connected-machine relay adapter.
    * Returns null on image-backed placements, which expose browserd directly. */
   async openRelayedFrameStream(input: {
@@ -669,7 +765,10 @@ export class BrowserControlClient {
       maxHeight?: number | undefined;
       everyNthFrame?: number | undefined;
     };
-  }): Promise<{ channel: StreamChannel; endpoint: ExposedPortEndpoint } | null> {
+  }): Promise<{
+    channel: StreamChannel;
+    endpoint: ExposedPortEndpoint;
+  } | null> {
     if (!this.session.openBrowserFrames) return null;
     if (!this.nativeAuthority) {
       throw new BrowserControlProtocolError(
@@ -717,7 +816,10 @@ export class BrowserControlClient {
       maxHeight?: number | undefined;
       everyNthFrame?: number | undefined;
     };
-  }): Promise<{ channel: StreamChannel; endpoint: ExposedPortEndpoint } | null> {
+  }): Promise<{
+    channel: StreamChannel;
+    endpoint: ExposedPortEndpoint;
+  } | null> {
     if (!this.session.openComputerFrames) return null;
     if (!this.nativeAuthority) {
       throw new BrowserControlProtocolError(
@@ -740,8 +842,8 @@ export class BrowserControlClient {
       expiresAtMs: String(expiresAtMs),
       format: stream.format ?? "jpeg",
       quality: boundedInteger(stream.quality ?? 70, 1, 100, "computer frame quality"),
-      maxWidth: boundedInteger(stream.maxWidth ?? 1_440, 1, 4_096, "computer frame width"),
-      maxHeight: boundedInteger(stream.maxHeight ?? 900, 1, 4_096, "computer frame height"),
+      maxWidth: boundedInteger(stream.maxWidth ?? 4_096, 1, 4_096, "computer frame width"),
+      maxHeight: boundedInteger(stream.maxHeight ?? 4_096, 1, 4_096, "computer frame height"),
       everyNthFrame: boundedInteger(
         stream.everyNthFrame ?? 1,
         1,
@@ -761,13 +863,41 @@ export class BrowserControlClient {
     return await this.requestJson(input);
   }
 
-  private async requestJson(input: {
-    method: "GET" | "POST" | "PUT" | "DELETE";
-    path: string;
-    token: string;
-    body?: unknown;
-    timeoutMs?: number;
-  }): Promise<unknown> {
+  private async requestJson(
+    input: {
+      method: "GET" | "POST" | "PUT" | "DELETE";
+      path: string;
+      token: string;
+      body?: unknown;
+      timeoutMs?: number;
+    },
+    retryNativeEndpoint = true,
+  ): Promise<unknown> {
+    // Image-backed placements expose browserd through the provider tunnel. Use
+    // that actual data plane for control too: one authenticated HTTP request,
+    // instead of materializing files and starting curl through the sandbox exec
+    // API for every click or key. Connected machines keep their agent transport.
+    if (this.session.resolveExposedPort && !this.session.ensureBrowserControl) {
+      try {
+        const endpoint = await this.session.resolveExposedPort(this.port);
+        if ((endpoint.path ?? "/") === "/") {
+          return await requestExposedController(endpoint, input, this.timeoutMs);
+        }
+      } catch (error) {
+        if (
+          error instanceof BrowserControlRequestError ||
+          error instanceof BrowserControlProtocolError ||
+          error instanceof RangeError
+        ) {
+          throw error;
+        }
+        // Port discovery or its transport can fail transiently. The existing
+        // idempotent operation journal makes the private exec fallback safe even
+        // if a mutation reached browserd before its response connection failed.
+      }
+    }
+
+    const controllerPort = await this.controllerPort();
     const directory = `${CLIENT_ROOT}/${randomUUID()}`;
     const configPath = `${directory}/curl.conf`;
     const requestPath = `${directory}/request.json`;
@@ -776,7 +906,7 @@ export class BrowserControlClient {
     const exitPath = `${directory}/curl-exit`;
     const token = requireToken(input.token, "browser controller token");
     const timeoutMs = boundedTimeout(input.timeoutMs ?? this.timeoutMs);
-    const url = localControllerUrl(this.port, input.path);
+    const url = localControllerUrl(controllerPort, input.path);
     const body = input.body === undefined ? undefined : JSON.stringify(input.body);
     try {
       await runChecked(
@@ -839,9 +969,16 @@ export class BrowserControlClient {
       if (
         error instanceof BrowserControlRequestError ||
         error instanceof BrowserControlProtocolError ||
-        error instanceof BrowserControlTransportError ||
         error instanceof RangeError
       ) {
+        throw error;
+      }
+      if (error instanceof BrowserControlTransportError) {
+        if (retryNativeEndpoint && this.nativeAuthority && this.session.ensureBrowserControl) {
+          nativeControllerPorts.delete(nativeControllerKey(this.nativeAuthority));
+          await this.controllerPort();
+          return await this.requestJson(input, false);
+        }
         throw error;
       }
       throw new BrowserControlTransportError("browser controller request transport failed", {
@@ -852,6 +989,26 @@ export class BrowserControlClient {
       await this.session.finalizeOpStreamOps?.().catch(() => undefined);
     }
   }
+
+  private async controllerPort(): Promise<number> {
+    if (!this.nativeAuthority || !this.session.ensureBrowserControl) return this.port;
+    const key = nativeControllerKey(this.nativeAuthority);
+    const cached = nativeControllerPorts.get(key);
+    if (cached !== undefined) return cached;
+    const ensured = await this.session.ensureBrowserControl({
+      scopeId: this.nativeAuthority.scopeId,
+      scopeGeneration: this.nativeAuthority.scopeGeneration,
+      adminToken: this.adminToken,
+      allowedOrigins: [],
+    });
+    const port = boundedPort(ensured.port);
+    nativeControllerPorts.set(key, port);
+    return port;
+  }
+}
+
+function nativeControllerKey(authority: { scopeId: string; scopeGeneration: string }): string {
+  return `${authority.scopeId}\u0000${authority.scopeGeneration}`;
 }
 
 export class BrowserControlSessionClient {
@@ -884,6 +1041,65 @@ export class BrowserControlSessionClient {
       throw new BrowserControlProtocolError("browser controller returned malformed targets");
     }
     return data.map((target) => BrowserTarget.parse(target));
+  }
+
+  async listDownloads(): Promise<BrowserDownloadListResponseValue> {
+    const data = await this.parent.requestForSession({
+      method: "GET",
+      path: this.path("downloads"),
+      token: this.viewToken,
+    });
+    const response = BrowserDownloadListResponse.parse(data);
+    if (
+      response.browserSessionId !== this.reference.browserSessionId ||
+      response.controllerGeneration !== this.reference.controllerGeneration
+    ) {
+      throw new BrowserControlProtocolError(
+        "browser controller returned downloads for another session binding",
+      );
+    }
+    return response;
+  }
+
+  async download(downloadId: string): Promise<BrowserDownloadValue> {
+    const id = requireUuid(downloadId, "download id");
+    const data = await this.parent.requestForSession({
+      method: "GET",
+      path: this.path(`downloads/${id}`),
+      token: this.viewToken,
+    });
+    const download = BrowserDownload.parse(data);
+    if (
+      download.id !== id ||
+      download.browserSessionId !== this.reference.browserSessionId ||
+      download.controllerGeneration !== this.reference.controllerGeneration
+    ) {
+      throw new BrowserControlProtocolError("browser controller returned another download binding");
+    }
+    return download;
+  }
+
+  async exportDownload(
+    downloadId: string,
+    requestInput: BrowserDownloadExportRequestValue,
+  ): Promise<BrowserDownloadExportReceiptValue> {
+    const id = requireUuid(downloadId, "download id");
+    const request = BrowserDownloadExportRequest.parse(requestInput);
+    if (request.downloadId !== id) {
+      throw new BrowserControlProtocolError("download export targets another resource");
+    }
+    const receipt = BrowserDownloadExportReceipt.parse(
+      await this.parent.requestForSession({
+        method: "POST",
+        path: this.path(`downloads/${id}/exports`),
+        token: this.controlToken,
+        body: request,
+      }),
+    );
+    if (receipt.operationId !== request.operationId || receipt.downloadId !== id) {
+      throw new BrowserControlProtocolError("browser controller returned another export receipt");
+    }
+    return receipt;
   }
 
   async openTarget(url?: string): Promise<BrowserObservationValue> {
@@ -930,6 +1146,16 @@ export class BrowserControlSessionClient {
     );
   }
 
+  async readClipboard(): Promise<BrowserClipboardValue> {
+    return BrowserClipboard.parse(
+      await this.parent.requestForSession({
+        method: "GET",
+        path: this.path("clipboard"),
+        token: this.viewToken,
+      }),
+    );
+  }
+
   async action(command: BrowserActionCommandValue): Promise<BrowserActionReceiptValue> {
     const parsed = BrowserActionCommand.parse(command);
     if (
@@ -948,12 +1174,87 @@ export class BrowserControlSessionClient {
     );
   }
 
+  /** API-broker-only file authority path. Signed read URLs are materialized by
+   * browserd and never become part of the public action or durable receipt. */
+  async stageWorkspaceFiles(
+    request: BrowserWorkspaceFileStageRequestValue,
+  ): Promise<BrowserWorkspaceFileStageResponseValue> {
+    const parsed = BrowserWorkspaceFileStageRequest.parse(request);
+    return BrowserWorkspaceFileStageResponse.parse(
+      await this.parent.requestForSession({
+        method: "POST",
+        path: this.path(`operations/${parsed.operationId}/workspace-files`),
+        token: this.controlToken,
+        body: parsed,
+        timeoutMs: BROWSER_STATE_TRANSFER_TIMEOUT_MS,
+      }),
+    );
+  }
+
   async receipt(operationId: string): Promise<BrowserActionReceiptValue> {
     return BrowserActionReceipt.parse(
       await this.parent.requestForSession({
         method: "GET",
         path: this.path(`operations/${requireUuid(operationId, "operation id")}`),
         token: this.viewToken,
+      }),
+    );
+  }
+
+  /** Broker-only credential path. Callers must never pass this command through
+   * model-visible tool arguments, events, logs, or durable session history. */
+  async protectedAuthFill(
+    command: BrowserProtectedAuthFillCommandValue,
+  ): Promise<BrowserProtectedAuthFillReceiptValue> {
+    const parsed = BrowserProtectedAuthFillCommand.parse(command);
+    if (
+      parsed.browserSessionId !== this.reference.browserSessionId ||
+      parsed.controllerGeneration !== this.reference.controllerGeneration
+    ) {
+      throw new BrowserControlProtocolError(
+        "protected fill targets another browser controller binding",
+      );
+    }
+    return BrowserProtectedAuthFillReceipt.parse(
+      await this.parent.requestForSession({
+        method: "POST",
+        path: this.path("protected-auth-fills"),
+        token: this.controlToken,
+        body: parsed,
+      }),
+    );
+  }
+
+  async protectedAuthReceipt(operationId: string): Promise<BrowserProtectedAuthFillReceiptValue> {
+    return BrowserProtectedAuthFillReceipt.parse(
+      await this.parent.requestForSession({
+        method: "GET",
+        path: this.path(`protected-auth-operations/${requireUuid(operationId, "operation id")}`),
+        token: this.controlToken,
+      }),
+    );
+  }
+
+  /** API-broker-only provider-auth path. The interactive URL response is
+   * deliberately not exposed by any model-facing SDK or Codemode facade. */
+  async externalAuth(
+    commandInput: BrowserExternalAuthCommandValue,
+  ): Promise<BrowserExternalAuthResultValue> {
+    const command = BrowserExternalAuthCommand.parse(commandInput);
+    if (
+      command.browserSessionId !== this.reference.browserSessionId ||
+      command.controllerGeneration !== this.reference.controllerGeneration
+    ) {
+      throw new BrowserControlProtocolError(
+        "external authentication targets another browser controller binding",
+      );
+    }
+    return BrowserExternalAuthResult.parse(
+      await this.parent.requestForSession({
+        method: "POST",
+        path: this.path("external-auth"),
+        token: this.controlToken,
+        body: command,
       }),
     );
   }
@@ -1043,6 +1344,16 @@ export class ComputerControlSessionClient {
     );
   }
 
+  async readClipboard(): Promise<ComputerClipboardValue> {
+    return ComputerClipboard.parse(
+      await this.parent.requestForSession({
+        method: "GET",
+        path: this.path("clipboard"),
+        token: this.viewToken,
+      }),
+    );
+  }
+
   async action(command: ComputerActionCommandValue): Promise<ComputerActionReceiptValue> {
     const parsed = ComputerActionCommand.parse(command);
     if (
@@ -1127,6 +1438,42 @@ function curlConfig(input: {
   ].join("\n");
 }
 
+async function requestExposedController(
+  endpoint: ExposedPortEndpoint,
+  input: {
+    method: "GET" | "POST" | "PUT" | "DELETE";
+    path: string;
+    token: string;
+    body?: unknown;
+    timeoutMs?: number;
+  },
+  defaultTimeoutMs: number,
+): Promise<unknown> {
+  const token = requireToken(input.token, "browser controller token");
+  const timeoutMs = boundedTimeout(input.timeoutMs ?? defaultTimeoutMs);
+  const streamUrl = new URL(buildStreamUrl({ ...endpoint, path: input.path }));
+  streamUrl.protocol = streamUrl.protocol === "wss:" ? "https:" : "http:";
+  const body = input.body === undefined ? undefined : JSON.stringify(input.body);
+  if (body !== undefined && Buffer.byteLength(body) > BROWSER_CONTROL_MAX_JSON_BYTES) {
+    throw new RangeError("browser controller request body is too large");
+  }
+  const response = await fetch(streamUrl, {
+    method: input.method,
+    headers: {
+      authorization: `Bearer ${token}`,
+      ...(body === undefined ? {} : { "content-type": "application/json" }),
+    },
+    ...(body === undefined ? {} : { body }),
+    redirect: "manual",
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  const responseText = await response.text();
+  if (Buffer.byteLength(responseText) > BROWSER_CONTROL_MAX_JSON_BYTES) {
+    throw new BrowserControlProtocolError("browser controller response is too large");
+  }
+  return parseEnvelope(responseText, response.status);
+}
+
 function parseEnvelope(body: string, status: number): unknown {
   let value: unknown;
   try {
@@ -1171,7 +1518,44 @@ function parseComputerReference(value: unknown): PlacementComputerSessionReferen
 }
 
 function placementBrowserTransport(input: PlacementBrowserTransport): PlacementBrowserTransport {
-  if (input.kind === "managed") return { kind: "managed" };
+  if (input.kind === "managed") {
+    if (
+      input.engine !== undefined &&
+      input.engine !== "chromium" &&
+      input.engine !== "lightpanda"
+    ) {
+      throw new BrowserControlProtocolError("managed browser engine is invalid");
+    }
+    return { kind: "managed", engine: input.engine ?? "chromium" };
+  }
+  if (input.kind === "external_provider") {
+    if (input.providerId !== "browserbase" && input.providerId !== "kernel") {
+      throw new BrowserControlProtocolError("external browser provider is unsupported");
+    }
+    const endpoint = input.authority.endpoint
+      ? boundedHttpUrl(input.authority.endpoint, "external browser provider endpoint")
+      : undefined;
+    return {
+      kind: "external_provider",
+      providerId: input.providerId,
+      placementId: requireOpaqueId(input.placementId, "external browser placement id"),
+      authority: {
+        apiKey: requireBoundedText(
+          input.authority.apiKey,
+          1,
+          8_192,
+          "external browser provider credential",
+        ),
+        ...(endpoint ? { endpoint } : {}),
+      },
+      ...(input.timeoutSeconds === undefined
+        ? {}
+        : {
+            timeoutSeconds: boundedExternalBrowserTimeout(input.timeoutSeconds),
+          }),
+      ...(input.stealth === undefined ? {} : { stealth: input.stealth }),
+    };
+  }
   return {
     kind: "attached_chrome",
     deviceId: requireUuid(input.deviceId, "attached browser id"),
@@ -1179,6 +1563,117 @@ function placementBrowserTransport(input: PlacementBrowserTransport): PlacementB
     browserName: requireBoundedText(input.browserName, 1, 100, "attached browser name"),
     browserVersion: requireBoundedText(input.browserVersion, 1, 256, "attached browser version"),
   };
+}
+
+function boundedExternalBrowserTimeout(value: number): number {
+  const timeout = positiveSafeInteger(value, "external browser timeout");
+  if (timeout > 86_400) {
+    throw new BrowserControlProtocolError("external browser timeout is invalid");
+  }
+  return timeout;
+}
+
+function boundedHttpUrl(value: string, label: string): string {
+  if (Buffer.byteLength(value) > 16_384) {
+    throw new BrowserControlProtocolError(`${label} is invalid`);
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new BrowserControlProtocolError(`${label} is invalid`);
+  }
+  if (
+    (parsed.protocol !== "https:" && parsed.protocol !== "http:") ||
+    parsed.username ||
+    parsed.password ||
+    parsed.hash
+  ) {
+    throw new BrowserControlProtocolError(`${label} is invalid`);
+  }
+  return parsed.toString().replace(/\/$/u, "");
+}
+
+function placementBrowserNetworkRoute(
+  input: PlacementBrowserNetworkRoute,
+): PlacementBrowserNetworkRoute {
+  const kind = input.kind;
+  if (kind !== "direct" && kind !== "proxy" && kind !== "managed" && kind !== "tunnel") {
+    throw new BrowserControlProtocolError("browser network route kind is invalid");
+  }
+  if (!/^[A-Za-z0-9._~-]{16,256}$/u.test(input.authorityDigest)) {
+    throw new BrowserControlProtocolError("browser network route authority is invalid");
+  }
+  const proxyUrl = input.proxyUrl === undefined ? undefined : boundedProxyUrl(input.proxyUrl);
+  if (kind !== "proxy" && proxyUrl !== undefined) {
+    throw new BrowserControlProtocolError("non-proxy browser route contains proxy authority");
+  }
+  const providerRoute =
+    input.providerRoute === undefined ? undefined : placementProviderRoute(input.providerRoute);
+  if (kind !== "managed" && providerRoute !== undefined) {
+    throw new BrowserControlProtocolError(
+      "non-managed browser route contains provider route material",
+    );
+  }
+  if (kind === "managed" && providerRoute === undefined) {
+    throw new BrowserControlProtocolError("managed browser route omits provider route material");
+  }
+  return {
+    routeId: requireUuid(input.routeId, "network route id"),
+    routeVersion: positiveSafeInteger(input.routeVersion, "network route version"),
+    authorityDigest: input.authorityDigest,
+    kind,
+    consistency: NetworkRouteConsistency.parse(input.consistency),
+    ...(proxyUrl === undefined ? {} : { proxyUrl }),
+    ...(providerRoute === undefined ? {} : { providerRoute }),
+  };
+}
+
+function placementProviderRoute(
+  input: NonNullable<PlacementBrowserNetworkRoute["providerRoute"]>,
+): NonNullable<PlacementBrowserNetworkRoute["providerRoute"]> {
+  if (input.providerId !== "browserbase" && input.providerId !== "kernel") {
+    throw new BrowserControlProtocolError("managed browser route provider is unsupported");
+  }
+  if (
+    input.egressClass !== "datacenter" &&
+    input.egressClass !== "residential" &&
+    input.egressClass !== "isp"
+  ) {
+    throw new BrowserControlProtocolError("managed browser route egress class is invalid");
+  }
+  return {
+    providerId: input.providerId,
+    routeId: requireOpaqueId(input.routeId, "managed browser provider route id"),
+    egressClass: input.egressClass,
+    region:
+      input.region === null
+        ? null
+        : requireBoundedText(input.region, 1, 128, "managed browser route region"),
+  };
+}
+
+function boundedProxyUrl(value: string): string {
+  if (Buffer.byteLength(value) > 16_384) {
+    throw new BrowserControlProtocolError("browser proxy authority is too large");
+  }
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new BrowserControlProtocolError("browser proxy authority is invalid");
+  }
+  if (
+    !["http:", "https:", "socks5:"].includes(url.protocol) ||
+    !url.hostname ||
+    (!url.port && url.protocol !== "http:" && url.protocol !== "https:") ||
+    (url.pathname !== "" && url.pathname !== "/") ||
+    url.search ||
+    url.hash
+  ) {
+    throw new BrowserControlProtocolError("browser proxy authority is invalid");
+  }
+  return url.toString();
 }
 
 function parseStateCaptureReceipt(value: unknown): PlacementBrowserStateCaptureReceipt {
@@ -1405,8 +1900,10 @@ function sha256(value: unknown, label: string): string {
 
 function requirePlacementRequestSurface(session: BrowserControlPlacementSession): void {
   const hasPrivateWrite =
+    typeof session.writePlacementPrivate === "function" ||
     typeof session.writeFile === "function" ||
-    (typeof session.exec === "function" && typeof session.writeStdin === "function");
+    ((typeof session.exec === "function" || typeof session.execCommand === "function") &&
+      typeof session.writeStdin === "function");
   if (
     (typeof session.exec !== "function" && typeof session.execCommand !== "function") ||
     !hasPrivateWrite
@@ -1426,11 +1923,15 @@ async function writePrivateFile(
   },
   timeoutMs = 60_000,
 ): Promise<void> {
+  if (session.writePlacementPrivate) {
+    await session.writePlacementPrivate(input);
+    return;
+  }
   if (session.writeFile) {
     await session.writeFile(input);
     return;
   }
-  if (!session.exec || !session.writeStdin) {
+  if ((!session.exec && !session.execCommand) || !session.writeStdin) {
     throw new BrowserControlUnsupportedError("browser placement has no private file transport");
   }
   const path = absolutePrivatePath(input.path, "browser private file path");
@@ -1470,22 +1971,33 @@ async function writePrivateFile(
     `chmod 0600 -- ${shellQuote(path)};`,
     `printf '%s\n' ${shellQuote(COMMAND_OK)}`,
   ].join(" ");
-  const started = await session.exec({
-    cmd: command,
-    yieldTimeMs: 250,
-    maxOutputTokens: 2_000,
-  });
-  if (
-    typeof started === "string" ||
-    !Number.isSafeInteger(started.sessionId) ||
-    (started.sessionId ?? 0) < 1
-  ) {
+  const started = session.exec
+    ? await session.exec({
+        cmd: command,
+        yieldTimeMs: 250,
+        maxOutputTokens: 2_000,
+      })
+    : await session.execCommand!({
+        cmd: command,
+        yieldTimeMs: 250,
+        maxOutputTokens: 2_000,
+      });
+  const startedSessionId =
+    typeof started === "string"
+      ? (() => {
+          const banner = parseExecResponseBanner(started);
+          return banner.kind === "running" ? banner.sessionId : null;
+        })()
+      : Number.isSafeInteger(started.sessionId) && (started.sessionId ?? -1) >= 0
+        ? started.sessionId!
+        : null;
+  if (startedSessionId === null) {
     throw new BrowserControlTransportError(
       "browser private file transport did not yield an input session",
     );
   }
   const output = await session.writeStdin({
-    sessionId: started.sessionId!,
+    sessionId: startedSessionId,
     chars: payload,
     yieldTimeMs: boundedTimeout(timeoutMs),
     maxOutputTokens: 2_000,

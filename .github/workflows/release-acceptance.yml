@@ -5,8 +5,10 @@ name: Release acceptance producer
 # This is the canonical, operator-controlled producer identity consumed by
 # release.yml. It is intentionally fail-closed until the deployment owner has
 # installed the real acceptance harness on the protected environment. A
-# workflow-dispatch input can select a source and candidate run, but it cannot
-# supply evidence URLs, hashes, workflow paths, or repository identities.
+# workflow-dispatch input can select a source and candidate run, but the
+# workflow itself must be dispatched from their retained controller tag. The
+# caller cannot supply evidence URLs, hashes, workflow paths, or repository
+# identities.
 
 on:
   workflow_dispatch:
@@ -19,6 +21,10 @@ on:
         description: Canonical release-candidate workflow run that produced this source.
         required: true
         type: string
+      controller_sha:
+        description: Exact retained controller SHA that admitted the candidate run.
+        required: true
+        type: string
       operator_run_id:
         description: Protected operator workflow run that produced the complete sanitized acceptance input.
         required: true
@@ -27,6 +33,9 @@ on:
 concurrency:
   group: release-acceptance-${{ inputs.source_sha }}
   cancel-in-progress: false
+
+env:
+  OPENGENI_RELEASE_SOURCE_ROOT: ${{ github.workspace }}
 
 permissions:
   contents: read
@@ -50,21 +59,41 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Check out exact retained release controller
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.controller_sha }}
+          path: .release/controller
+          fetch-depth: 1
+          persist-credentials: false
+
       - name: Validate source identity
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
+          CONTROLLER_SHA: ${{ inputs.controller_sha }}
         run: |
           set -euo pipefail
-          case "$GITHUB_WORKFLOW_REF" in
-            "$GITHUB_REPOSITORY/.github/workflows/release-acceptance.yml@"*) ;;
-            *)
-              echo "unexpected acceptance workflow identity: $GITHUB_WORKFLOW_REF" >&2
-              exit 1
-              ;;
-          esac
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "$CONTROLLER_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          expected_ref="refs/tags/opengeni-release-head-$CONTROLLER_SHA"
+          [ "$GITHUB_REF" = "$expected_ref" ] || {
+            echo "acceptance workflow is not running from the retained controller ref" >&2
+            exit 1
+          }
+          [ "$GITHUB_SHA" = "$CONTROLLER_SHA" ] || {
+            echo "acceptance workflow dispatch ref differs from controller_sha" >&2
+            exit 1
+          }
+          [ "$GITHUB_WORKFLOW_SHA" = "$CONTROLLER_SHA" ] || {
+            echo "acceptance workflow graph differs from controller_sha" >&2
+            exit 1
+          }
+          [ "$GITHUB_WORKFLOW_REF" = "$GITHUB_REPOSITORY/.github/workflows/release-acceptance.yml@$expected_ref" ] || {
+            echo "unexpected acceptance workflow identity: $GITHUB_WORKFLOW_REF" >&2
+            exit 1
+          }
           [ "$(git rev-parse HEAD)" = "$SOURCE_SHA" ] || exit 1
-          [ "$GITHUB_SHA" = "$SOURCE_SHA" ] || exit 1
+          [ "$(git -C .release/controller rev-parse HEAD)" = "$CONTROLLER_SHA" ] || exit 1
           git fetch --no-tags origin main
           git merge-base --is-ancestor "$SOURCE_SHA" origin/main || {
             echo "accepted source is not an ancestor of current main" >&2
@@ -81,16 +110,21 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ inputs.source_sha }}
+          CONTROLLER_SHA: ${{ inputs.controller_sha }}
           CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
         run: |
           set -euo pipefail
           mkdir -p evidence
-          bun scripts/verify-release-provenance.ts \
-            --kind candidate \
-            --source-sha "$SOURCE_SHA" \
-            --run-id "$CANDIDATE_RUN_ID" \
-            --output evidence/candidate-provenance.json \
-            --output-prefix candidate
+          (
+            cd .release/controller
+            bun scripts/verify-release-provenance.ts \
+              --kind candidate \
+              --source-sha "$SOURCE_SHA" \
+              --controller-sha "$CONTROLLER_SHA" \
+              --run-id "$CANDIDATE_RUN_ID" \
+              --output "$GITHUB_WORKSPACE/evidence/candidate-provenance.json" \
+              --output-prefix candidate
+          )
 
       - name: Verify the protected operator acceptance producer
         id: operator
@@ -102,12 +136,15 @@ jobs:
           SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
           set -euo pipefail
-          bun scripts/verify-operator-acceptance-provenance.ts \
-            --repository "$OPERATOR_REPOSITORY" \
-            --workflow-path "$OPERATOR_WORKFLOW_PATH" \
-            --source-sha "$SOURCE_SHA" \
-            --run-id "$OPERATOR_RUN_ID" \
-            --output evidence/operator-provenance.json
+          (
+            cd .release/controller
+            bun scripts/verify-operator-acceptance-provenance.ts \
+              --repository "$OPERATOR_REPOSITORY" \
+              --workflow-path "$OPERATOR_WORKFLOW_PATH" \
+              --source-sha "$SOURCE_SHA" \
+              --run-id "$OPERATOR_RUN_ID" \
+              --output "$GITHUB_WORKSPACE/evidence/operator-provenance.json"
+          )
 
       - name: Download the exact candidate receipt
         env:
@@ -168,16 +205,19 @@ jobs:
           SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
           set -euo pipefail
-          bun scripts/assemble-release-acceptance.ts \
-            --operator-bundle .release/operator/workbench-acceptance.json \
-            --candidate-receipt evidence/release-candidate.json \
-            --candidate-provenance evidence/candidate-provenance.json \
-            --candidate-receipt-sha256 "$CANDIDATE_RECEIPT_SHA256" \
-            --source-sha "$SOURCE_SHA" \
-            --acceptance-run-id "$GITHUB_RUN_ID" \
-            --acceptance-run-attempt "$GITHUB_RUN_ATTEMPT" \
-            --output evidence/workbench-acceptance.json \
-            --sha-output evidence/workbench-acceptance.sha256
+          (
+            cd .release/controller
+            bun scripts/assemble-release-acceptance.ts \
+              --operator-bundle "$GITHUB_WORKSPACE/.release/operator/workbench-acceptance.json" \
+              --candidate-receipt "$GITHUB_WORKSPACE/evidence/release-candidate.json" \
+              --candidate-provenance "$GITHUB_WORKSPACE/evidence/candidate-provenance.json" \
+              --candidate-receipt-sha256 "$CANDIDATE_RECEIPT_SHA256" \
+              --source-sha "$SOURCE_SHA" \
+              --acceptance-run-id "$GITHUB_RUN_ID" \
+              --acceptance-run-attempt "$GITHUB_RUN_ATTEMPT" \
+              --output "$GITHUB_WORKSPACE/evidence/workbench-acceptance.json" \
+              --sha-output "$GITHUB_WORKSPACE/evidence/workbench-acceptance.sha256"
+          )
 
       - name: Upload the complete acceptance artifact
         if: ${{ success() }}

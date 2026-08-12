@@ -1,8 +1,12 @@
 import {
   AttachedBrowserDevice,
+  AuthRun,
+  AuthRunListResponse,
+  AuthRunMutationResponse,
   BrowserAction,
   BrowserActionBatch,
   BrowserActionReceipt,
+  BrowserClipboard,
   BrowserDiagnosticBatch,
   BrowserIdentity,
   BrowserIdentityListResponse,
@@ -15,13 +19,26 @@ import {
   BrowserTargetListResponse,
   ComputerAction,
   ComputerActionReceipt,
+  ComputerClipboard,
   ComputerObservation,
   ComputerSession,
   ComputerSessionMutationResponse,
   ComputerTarget,
   ComputerTargetListResponse,
+  ExternalAuthRunRequest,
+  ExternalAuthRunResponse,
+  InteractionIntervention,
   InteractionPlacement,
+  ProtectedAuthFillRequest,
+  ProtectedAuthFillResponse,
   PublishBrowserRevisionResponse,
+  ReportAuthRunPayload,
+  RequestHumanInteractionToolInput,
+  RequestHumanInteractionToolOutput,
+  SiteAuthConnection,
+  SiteAuthConnectionListResponse,
+  StartAuthRunRequest,
+  VerifyAuthRunRequest,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   FIRST_PARTY_IN_PROCESS_TOOL_NAMES,
@@ -60,13 +77,17 @@ const TOOL_PERMISSION = {
   browser_tabs: "sessions:control",
   browser_observe: "sessions:read",
   browser_act: "sessions:control",
+  browser_clipboard: "sessions:read",
   browser_debug: "sessions:read",
+  browser_auth: "sessions:control",
+  interaction_request_human: "sessions:control",
   browser_identity: "sessions:control",
   browser_publish: "sessions:control",
   browser_lifecycle: "sessions:control",
   computer_open: "sessions:control",
   computer_targets: "sessions:read",
   computer_observe: "sessions:read",
+  computer_clipboard: "sessions:read",
   computer_act: "sessions:control",
   computer_lifecycle: "sessions:control",
 } as const satisfies Record<InteractionAttemptToolName, Permission>;
@@ -101,6 +122,7 @@ const BrowserOpenInput = z
     placement: InteractionPlacement.optional(),
     identityId: z.string().uuid().optional(),
     baseRevisionId: z.string().uuid().optional(),
+    networkRouteId: z.string().uuid().optional(),
     linkedComputerSessionId: z.string().uuid().optional(),
   })
   .strict()
@@ -112,7 +134,10 @@ const BrowserOpenInput = z
         message: "mode=new cannot target an existing BrowserSession",
       });
     }
-    if (value.browserSessionId && (value.identityId || value.baseRevisionId || value.placement)) {
+    if (
+      value.browserSessionId &&
+      (value.identityId || value.baseRevisionId || value.networkRouteId || value.placement)
+    ) {
       context.addIssue({
         code: "custom",
         path: ["browserSessionId"],
@@ -165,6 +190,7 @@ const BrowserActInput = z
     action: z.union([BrowserAction, BrowserActionBatch]),
   })
   .strict();
+const BrowserClipboardInput = z.object({ browserSessionId: z.string().uuid() }).strict();
 const BrowserDebugInput = z
   .object({
     browserSessionId: z.string().uuid(),
@@ -177,6 +203,90 @@ const BrowserDebugInput = z
     limit: z.number().int().min(1).max(1_000).optional(),
   })
   .strict();
+
+const BrowserAuthInput = z.discriminatedUnion("operation", [
+  z
+    .object({
+      operation: z.literal("list_connections"),
+      includeArchived: z.boolean().optional(),
+    })
+    .strict(),
+  z
+    .object({
+      operation: z.literal("get_connection"),
+      siteAuthConnectionId: z.string().uuid(),
+    })
+    .strict(),
+  z
+    .object({
+      operation: z.literal("list_runs"),
+      browserSessionId: z.string().uuid().optional(),
+      siteAuthConnectionId: z.string().uuid().optional(),
+      includeSettled: z.boolean().optional(),
+    })
+    .strict(),
+  z.object({ operation: z.literal("get_run"), authRunId: z.string().uuid() }).strict(),
+  z
+    .object({ operation: z.literal("start"), browserSessionId: z.string().uuid() })
+    .extend(StartAuthRunRequest.omit({ operationId: true }).shape)
+    .strict(),
+  ReportAuthRunPayload.safeExtend({
+    operation: z.literal("report"),
+    browserSessionId: z.string().uuid(),
+    authRunId: z.string().uuid(),
+  }),
+  z
+    .object({
+      operation: z.literal("protected_fill"),
+      browserSessionId: z.string().uuid(),
+      authRunId: z.string().uuid(),
+    })
+    .extend(ProtectedAuthFillRequest.omit({ operationId: true }).shape)
+    .strict(),
+  z
+    .object({
+      operation: z.literal("advance_external"),
+      browserSessionId: z.string().uuid(),
+      authRunId: z.string().uuid(),
+    })
+    .extend(ExternalAuthRunRequest.omit({ operationId: true }).shape)
+    .strict(),
+  z
+    .object({
+      operation: z.literal("verify"),
+      browserSessionId: z.string().uuid(),
+      authRunId: z.string().uuid(),
+    })
+    .extend(VerifyAuthRunRequest.omit({ operationId: true }).shape)
+    .strict(),
+]);
+
+const BrowserAuthOutput = z.discriminatedUnion("operation", [
+  z
+    .object({
+      operation: z.literal("list_connections"),
+      result: SiteAuthConnectionListResponse,
+    })
+    .strict(),
+  z
+    .object({
+      operation: z.literal("get_connection"),
+      result: SiteAuthConnection,
+    })
+    .strict(),
+  z.object({ operation: z.literal("list_runs"), result: AuthRunListResponse }).strict(),
+  z.object({ operation: z.literal("get_run"), result: AuthRun }).strict(),
+  z.object({ operation: z.literal("start"), result: AuthRunMutationResponse }).strict(),
+  z.object({ operation: z.literal("report"), result: AuthRunMutationResponse }).strict(),
+  z.object({ operation: z.literal("protected_fill"), result: ProtectedAuthFillResponse }).strict(),
+  z.object({ operation: z.literal("advance_external"), result: ExternalAuthRunResponse }).strict(),
+  z.object({ operation: z.literal("verify"), result: AuthRunMutationResponse }).strict(),
+]);
+
+export type InteractionInterventionResume = {
+  toolCallId: string;
+  intervention: z.infer<typeof InteractionIntervention>;
+};
 const BrowserPublishInput = z
   .object({
     browserSessionId: z.string().uuid(),
@@ -238,6 +348,7 @@ const ComputerObserveInput = z
     targetId: z.string().min(1).max(512),
   })
   .strict();
+const ComputerClipboardInput = z.object({ computerSessionId: z.string().uuid() }).strict();
 const ComputerActInput = z
   .object({
     computerSessionId: z.string().uuid(),
@@ -263,6 +374,7 @@ export type CreateInteractionAttemptToolsInput = {
   sessionId: string;
   selectedTools?: readonly FirstPartyMcpToolName[];
   permissions?: readonly Permission[];
+  interventionResume?: InteractionInterventionResume | null;
 };
 
 export function createInteractionAttemptToolDefinitions(
@@ -280,6 +392,7 @@ export function createInteractionAttemptToolDefinitions(
     output: TOutput;
     readOnly: boolean;
     idempotent: boolean;
+    approval?: "none" | "human" | "policy";
     execute: (
       value: z.output<TInput>,
       context: AttemptToolExecutionContext,
@@ -307,7 +420,7 @@ export function createInteractionAttemptToolDefinitions(
         openWorldHint: true,
       },
       source: "interaction",
-      approval: "none",
+      approval: options.approval ?? "none",
       execute: async (raw, context) =>
         await safeInteractionExecution(
           options.input,
@@ -426,7 +539,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "act"],
     title: "Act in browser tab",
     description:
-      "Perform one semantic-first browser action or bounded batch. Omit generation fences to use a fresh observation automatically; provide them to require exact previously observed state. Returns the durable receipt and changed observation.",
+      "Perform one semantic-first browser action or bounded batch, including setting a managed browser's web permission for this tab's exact current top-level origin. Omit generation fences to use a fresh observation automatically; provide them to require exact previously observed state. Returns the durable receipt and changed observation.",
     input: BrowserActInput,
     output: BrowserActionReceipt,
     readOnly: false,
@@ -453,6 +566,20 @@ export function createInteractionAttemptToolDefinitions(
   });
 
   add({
+    name: "browser_clipboard",
+    codemodePath: ["interaction", "browser", "clipboard"],
+    title: "Read browser clipboard",
+    description:
+      "Read the bounded private clipboard of one exact BrowserSession. This never reads the connected machine or host OS clipboard. Use browser_act with a clipboard action to write, clear, copy, or paste.",
+    input: BrowserClipboardInput,
+    output: BrowserClipboard,
+    readOnly: true,
+    idempotent: true,
+    execute: async (value) =>
+      await input.transport.readBrowserClipboard(input.workspaceId, value.browserSessionId),
+  });
+
+  add({
     name: "browser_debug",
     codemodePath: ["interaction", "browser", "debug"],
     title: "Inspect browser diagnostics",
@@ -473,6 +600,159 @@ export function createInteractionAttemptToolDefinitions(
           ...(value.limit !== undefined ? { limit: value.limit } : {}),
         },
       ),
+  });
+
+  add({
+    name: "browser_auth",
+    codemodePath: ["interaction", "browser", "auth"],
+    title: "Authenticate browser session",
+    description:
+      "List configured site-auth connections and durable auth runs, or start, report, provider-advance, protected-fill, and verify one exact BrowserSession authentication run. Use advance_external for an external_provider authority. Provider secrets and hosted-login URLs never enter model tool arguments or results. If an operation returns needs_human, call interaction_request_human with the returned intervention id.",
+    input: BrowserAuthInput,
+    output: BrowserAuthOutput,
+    readOnly: false,
+    idempotent: true,
+    execute: async (value, context) => {
+      if (value.operation === "list_connections") {
+        return {
+          operation: value.operation,
+          result: await input.transport.listSiteAuthConnections(input.workspaceId, {
+            includeArchived: value.includeArchived ?? false,
+          }),
+        };
+      }
+      if (value.operation === "get_connection") {
+        return {
+          operation: value.operation,
+          result: await input.transport.getSiteAuthConnection(
+            input.workspaceId,
+            value.siteAuthConnectionId,
+          ),
+        };
+      }
+      if (value.operation === "list_runs") {
+        return {
+          operation: value.operation,
+          result: await input.transport.listAuthRuns(input.workspaceId, {
+            ...(value.browserSessionId ? { browserSessionId: value.browserSessionId } : {}),
+            ...(value.siteAuthConnectionId
+              ? { siteAuthConnectionId: value.siteAuthConnectionId }
+              : {}),
+            includeSettled: value.includeSettled ?? false,
+          }),
+        };
+      }
+      if (value.operation === "get_run") {
+        return {
+          operation: value.operation,
+          result: await input.transport.getAuthRun(input.workspaceId, value.authRunId),
+        };
+      }
+      if (value.operation === "start") {
+        const { operation: _operation, browserSessionId, ...request } = value;
+        return {
+          operation: value.operation,
+          result: await input.transport.startBrowserAuthRun(input.workspaceId, browserSessionId, {
+            operationId: context.operationId,
+            ...request,
+          }),
+        };
+      }
+      if (value.operation === "report") {
+        const { operation: _operation, browserSessionId, authRunId, ...request } = value;
+        return {
+          operation: value.operation,
+          result: await input.transport.reportBrowserAuthRun(
+            input.workspaceId,
+            browserSessionId,
+            authRunId,
+            { operationId: context.operationId, ...request },
+          ),
+        };
+      }
+      if (value.operation === "protected_fill") {
+        const { operation: _operation, browserSessionId, authRunId, ...request } = value;
+        return {
+          operation: value.operation,
+          result: await input.transport.protectedBrowserAuthFill(
+            input.workspaceId,
+            browserSessionId,
+            authRunId,
+            { operationId: context.operationId, ...request },
+          ),
+        };
+      }
+      if (value.operation === "advance_external") {
+        const { operation: _operation, browserSessionId, authRunId, ...request } = value;
+        return {
+          operation: value.operation,
+          result: await input.transport.advanceExternalBrowserAuthRun(
+            input.workspaceId,
+            browserSessionId,
+            authRunId,
+            { operationId: context.operationId, ...request },
+          ),
+        };
+      }
+      const { operation: _operation, browserSessionId, authRunId, ...request } = value;
+      return {
+        operation: value.operation,
+        result: await input.transport.verifyBrowserAuthRun(
+          input.workspaceId,
+          browserSessionId,
+          authRunId,
+          { operationId: context.operationId, ...request },
+        ),
+      };
+    },
+  });
+
+  add({
+    name: "interaction_request_human",
+    codemodePath: ["interaction", "requestHuman"],
+    title: "Request human interaction",
+    description:
+      "Pause the current agent turn for a person to act in one exact browser tab or computer target. Use operation=wait for an intervention already returned by browser_auth; otherwise provide the exact observed resource generations and a concise reason. The same tool call resumes with the settled intervention and a fresh observation.",
+    input: RequestHumanInteractionToolInput,
+    output: RequestHumanInteractionToolOutput,
+    readOnly: false,
+    idempotent: true,
+    approval: "human",
+    execute: async (value) => {
+      const resumed = input.interventionResume;
+      if (!resumed) {
+        throw new Error("Interaction intervention resumed without a durable response");
+      }
+      assertInterventionResumeMatches(value, resumed.intervention);
+      try {
+        const observation =
+          resumed.intervention.resourceKind === "browser_session"
+            ? await input.transport.observeBrowserTarget(
+                input.workspaceId,
+                resumed.intervention.resourceId,
+                resumed.intervention.targetId,
+              )
+            : await input.transport.observeComputerTarget(
+                input.workspaceId,
+                resumed.intervention.resourceId,
+                resumed.intervention.targetId,
+              );
+        return {
+          intervention: resumed.intervention,
+          observation,
+          observationErrorCode: null,
+        };
+      } catch (error) {
+        return {
+          intervention: resumed.intervention,
+          observation: null,
+          observationErrorCode:
+            error instanceof OpenGeniApiError
+              ? (error.code ?? `http_${error.status}`)
+              : "observation_unavailable",
+        };
+      }
+    },
   });
 
   add({
@@ -616,11 +896,25 @@ export function createInteractionAttemptToolDefinitions(
   });
 
   add({
+    name: "computer_clipboard",
+    codemodePath: ["interaction", "computer", "clipboard"],
+    title: "Read computer clipboard",
+    description:
+      "Read the bounded native OS clipboard for one exact ComputerSession graphical seat. This may be shared by ComputerSessions on the same physical login seat and is never the BrowserSession private clipboard. Use computer_act clipboard actions to write, clear, copy, or paste.",
+    input: ComputerClipboardInput,
+    output: ComputerClipboard,
+    readOnly: true,
+    idempotent: true,
+    execute: async (value) =>
+      await input.transport.readComputerClipboard(input.workspaceId, value.computerSessionId),
+  });
+
+  add({
     name: "computer_act",
     codemodePath: ["interaction", "computer", "act"],
     title: "Act in app or window",
     description:
-      "Perform one semantic, keyboard, pointer, focus, or launch action in an exact ComputerSession target. Omit fences to use a fresh observation automatically. Returns the durable causal receipt.",
+      "Perform one action in an exact ComputerSession target. Prefer semantic actions from computer_observe: on macOS they can invoke controls and set values without foregrounding the app. Pointer, keyboard, target focus, screen actions, and clipboard paste use the physical graphical seat and may change the user's foreground app; use them only when foreground control is explicitly intended. Omit fences to use a fresh observation automatically. Returns the durable causal receipt.",
     input: ComputerActInput,
     output: ComputerActionReceipt,
     readOnly: false,
@@ -730,6 +1024,7 @@ export function createFirstPartyInteractionAttemptToolDefinitions(
     sessionId: input.scope.sessionId,
     selectedTools,
     permissions,
+    ...(input.interventionResume ? { interventionResume: input.interventionResume } : {}),
   });
 }
 
@@ -755,10 +1050,15 @@ async function openBrowser(
           sessionId: sourceSessionId,
           ...(value.name ? { name: value.name } : {}),
           ...(value.initialUrl ? { initialUrl: value.initialUrl } : {}),
-          ...(value.headless !== undefined ? { headless: value.headless } : {}),
+          ...(value.headless !== undefined
+            ? { headless: value.headless }
+            : value.placement?.kind === "attached_device"
+              ? { headless: false }
+              : {}),
           ...(value.placement ? { placement: value.placement } : {}),
           ...(value.identityId ? { identityId: value.identityId } : {}),
           ...(value.baseRevisionId ? { baseRevisionId: value.baseRevisionId } : {}),
+          ...(value.networkRouteId ? { networkRouteId: value.networkRouteId } : {}),
           ...(value.linkedComputerSessionId
             ? { linkedComputerSessionId: value.linkedComputerSessionId }
             : {}),
@@ -831,6 +1131,31 @@ function newestRelevant<
       )
       .sort((left, right) => Date.parse(right.lastUsedAt) - Date.parse(left.lastUsedAt))[0] ?? null
   );
+}
+
+function assertInterventionResumeMatches(
+  request: z.output<typeof RequestHumanInteractionToolInput>,
+  intervention: z.infer<typeof InteractionIntervention>,
+): void {
+  if (request.operation === "wait") {
+    if (request.interventionId !== intervention.id) {
+      throw new Error("Interaction response does not belong to the resumed intervention");
+    }
+    return;
+  }
+  if (
+    request.resourceKind !== intervention.resourceKind ||
+    request.resourceId !== intervention.resourceId ||
+    request.targetId !== intervention.targetId ||
+    request.expectedControllerGeneration !== intervention.controllerGeneration ||
+    request.expectedTargetGeneration !== intervention.targetGeneration ||
+    request.expectedDocumentGeneration !== intervention.documentGeneration ||
+    request.kind !== intervention.kind ||
+    request.reason !== intervention.reason ||
+    (request.authRunId ?? null) !== intervention.authRunId
+  ) {
+    throw new Error("Interaction response does not match the resumed tool request");
+  }
 }
 
 async function safeInteractionExecution<TInput extends z.ZodType, TOutput extends z.ZodType>(

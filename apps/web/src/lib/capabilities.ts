@@ -32,6 +32,12 @@ export function capabilityKindLabel(kind: CapabilityKind): string {
   }
 }
 
+export function capabilityItemKindLabel(item: CapabilityCatalogItem): string {
+  return item.surfaceType === "provider_integration"
+    ? "Integration"
+    : capabilityKindLabel(item.kind);
+}
+
 /** Human label for where a catalog item came from. */
 export function capabilitySourceLabel(source: CapabilitySource | string): string {
   switch (source) {
@@ -201,15 +207,29 @@ export type RequiredHeaderField = {
 export type CapabilityConnectPlan =
   | { mode: "enable" }
   | { mode: "social_oauth"; provider: "x" | "reddit" }
-  | { mode: "oauth"; providerDomain: string; mcpUrl: string | null }
+  | { mode: "fiken_api_token" }
+  | {
+      mode: "oauth";
+      providerDomain: string;
+      mcpUrl: string | null;
+      requestedScopes: string[];
+    }
   | { mode: "api_key"; providerDomain: string; fields: RequiredHeaderField[] };
 
 export function capabilityConnectPlan(item: CapabilityCatalogItem): CapabilityConnectPlan {
-  if (item.surfaceType === "first_party_social") {
+  if (
+    item.surfaceType === "first_party_social" ||
+    (item.surfaceType === "provider_integration" && item.metadata.providerAdapter === "social")
+  ) {
     const provider = stringValue(item.metadata.provider);
     if (provider === "x" || provider === "reddit") {
       return { mode: "social_oauth", provider };
     }
+  }
+  // First-party Fiken connects through the verified paste-a-token install
+  // route, not the generic MCP api-key/enable path.
+  if (item.surfaceType === "first_party_fiken") {
+    return { mode: "fiken_api_token" };
   }
   // Non-runtime kinds and MCPs with no auth just enable directly.
   if (item.kind !== "mcp") {
@@ -218,11 +238,20 @@ export function capabilityConnectPlan(item: CapabilityCatalogItem): CapabilityCo
   const providerDomain =
     item.providerDomain ?? domainFromUrl(item.mcpUrl ?? item.endpointUrl) ?? "";
   if (item.authKind === "oauth2") {
-    return { mode: "oauth", providerDomain, mcpUrl: item.mcpUrl ?? item.endpointUrl };
+    return {
+      mode: "oauth",
+      providerDomain,
+      mcpUrl: item.mcpUrl ?? item.endpointUrl,
+      requestedScopes: stringArray(item.metadata.scopesHint),
+    };
   }
   const requiredHeaders = stringArray((item.metadata as Record<string, unknown>).requiredHeaders);
   if (requiredHeaders.length > 0) {
-    return { mode: "api_key", providerDomain, fields: requiredHeaders.map(headerField) };
+    return {
+      mode: "api_key",
+      providerDomain,
+      fields: requiredHeaders.map(headerField),
+    };
   }
   // Imported / credential-gated MCPs carry authKind "api_key" (or authModel
   // "credential_ref") but usually NO explicit requiredHeaders in metadata. They
@@ -235,11 +264,21 @@ export function capabilityConnectPlan(item: CapabilityCatalogItem): CapabilityCo
   return { mode: "enable" };
 }
 
+const OFFICIAL_GMAIL_MCP_URL = "https://gmailmcp.googleapis.com/mcp/v1";
+
+export function capabilityRequiresPersonalConnection(item: CapabilityCatalogItem): boolean {
+  return (
+    item.metadata.connectionOwnership === "personal_only" ||
+    item.mcpUrl?.replace(/\/+$/, "") === OFFICIAL_GMAIL_MCP_URL ||
+    item.endpointUrl?.replace(/\/+$/, "") === OFFICIAL_GMAIL_MCP_URL
+  );
+}
+
 /** Short auth hint for a tile ("OAuth" / "API key"), or null when none applies. */
 export function capabilityAuthHint(item: CapabilityCatalogItem): string | null {
   const plan = capabilityConnectPlan(item);
   if (plan.mode === "oauth" || plan.mode === "social_oauth") return "OAuth";
-  if (plan.mode === "api_key") return "API key";
+  if (plan.mode === "api_key" || plan.mode === "fiken_api_token") return "API key";
   return null;
 }
 
@@ -247,18 +286,27 @@ export function preferredSocialConnection(
   connections: SocialConnection[],
   provider: "x" | "reddit",
 ): SocialConnection | null {
+  return (
+    socialConnectionsForOwnership(
+      connections.filter((connection) => connection.provider === provider),
+    )[0] ?? null
+  );
+}
+
+export function socialConnectionsForOwnership(
+  connections: SocialConnection[],
+  ownership?: ConnectionOwnership,
+): SocialConnection[] {
   const statusRank = (status: SocialConnection["status"]): number =>
     status === "connected" ? 0 : status === "needs_reauth" ? 1 : 2;
-  return (
-    connections
-      .filter((connection) => connection.provider === provider)
-      .sort(
-        (left, right) =>
-          statusRank(left.status) - statusRank(right.status) ||
-          right.updatedAt.localeCompare(left.updatedAt) ||
-          left.id.localeCompare(right.id),
-      )[0] ?? null
-  );
+  return connections
+    .filter((connection) => ownership === undefined || connection.ownership === ownership)
+    .sort(
+      (left, right) =>
+        statusRank(left.status) - statusRank(right.status) ||
+        right.updatedAt.localeCompare(left.updatedAt) ||
+        right.id.localeCompare(left.id),
+    );
 }
 
 function headerField(name: string): RequiredHeaderField {
@@ -359,11 +407,49 @@ export type ConnectionHealth =
  * and a failed load must not read as "every connection was deleted" and paint
  * healthy integrations amber.
  */
+/**
+ * The workspace-shared Fiken connection the first-party fiken tools resolve:
+ * usable status first, then newest update. Mirrors the server-side selection.
+ */
+export function fikenWorkspaceConnection(
+  connections: ConnectionMetadata[],
+): ConnectionMetadata | null {
+  const statusRank = (status: ConnectionMetadata["status"]): number =>
+    status === "active" ? 0 : status === "needs_reauth" ? 1 : 2;
+  return (
+    connections
+      .filter(
+        (connection) =>
+          connection.subjectId === null &&
+          // Both verified lanes: pasted personal API token and registered-app
+          // OAuth. Must stay in sync with `isFikenConnection` in @opengeni/core.
+          (connection.kind === "api_key" || connection.kind === "oauth2") &&
+          normalizeProviderDomain(connection.providerDomain) === "fiken.no" &&
+          connection.metadata.credentialRole === "fiken_api_token",
+      )
+      .sort(
+        (left, right) =>
+          statusRank(left.status) - statusRank(right.status) ||
+          right.updatedAt.localeCompare(left.updatedAt) ||
+          right.id.localeCompare(left.id),
+      )[0] ?? null
+  );
+}
+
 export function connectionHealth(
   item: CapabilityCatalogItem,
   connections: ConnectionMetadata[],
   loaded: boolean,
 ): ConnectionHealth {
+  // The Fiken tile carries no installation connectionRef; its health is the
+  // workspace-shared Fiken row itself.
+  if (item.surfaceType === "first_party_fiken") {
+    if (!loaded) return { state: "unverified" };
+    const connection = fikenWorkspaceConnection(connections);
+    if (!connection) return { state: "none" };
+    if (connection.status !== "active") return { state: "attention", connection };
+    return { state: "connected", connection };
+  }
   const ref = installedConnectionRef(item);
   if (!ref) return { state: "none" };
   if (!loaded) return { state: "unverified" };
@@ -389,8 +475,16 @@ export function connectionHealth(
  * surviving row to reuse, or null when it was deleted (repair mints a fresh one).
  */
 export type ReconnectPlan =
-  | { kind: "oauth"; connectionId: string | null; ownership: ConnectionOwnership }
-  | { kind: "api_key"; connectionId: string | null; ownership: ConnectionOwnership };
+  | {
+      kind: "oauth";
+      connectionId: string | null;
+      ownership: ConnectionOwnership;
+    }
+  | {
+      kind: "api_key";
+      connectionId: string | null;
+      ownership: ConnectionOwnership;
+    };
 
 export function capabilityReconnectPlan(
   item: CapabilityCatalogItem,
@@ -543,7 +637,12 @@ export function oauthConnectionRef(
     } {
   return ownership === "personal"
     ? subjectOAuthConnectionRef(providerDomain)
-    : { connectionId, providerDomain, kind: "oauth2", subjectScope: "workspace" };
+    : {
+        connectionId,
+        providerDomain,
+        kind: "oauth2",
+        subjectScope: "workspace",
+      };
 }
 
 export function apiKeyConnectionRef(
@@ -560,7 +659,12 @@ export function apiKeyConnectionRef(
     } {
   return ownership === "personal"
     ? { providerDomain, kind: "api_key", subjectScope: "subject" }
-    : { connectionId, providerDomain, kind: "api_key", subjectScope: "workspace" };
+    : {
+        connectionId,
+        providerDomain,
+        kind: "api_key",
+        subjectScope: "workspace",
+      };
 }
 
 export function oauthConnectionOwnership(value: string | null): ConnectionOwnership | null {

@@ -512,7 +512,11 @@ function SessionRouteHeader({
       policyLoading={policyLoading}
       sandboxSlot={
         sessionSupportsFleetSwitching(session.sandboxBackend) ? (
-          <SessionSandboxSwitcher workspaceId={session.workspaceId} sessionId={session.id} />
+          <SessionSandboxSwitcher
+            workspaceId={session.workspaceId}
+            sessionId={session.id}
+            sandboxBackend={session.sandboxBackend}
+          />
         ) : null
       }
       codexSlot={

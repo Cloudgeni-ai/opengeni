@@ -67,6 +67,13 @@ function capability(overrides: Partial<CapabilityCatalogItem> = {}): CapabilityC
       notes: null,
       catalogTrust: { state: "trusted", reason: "trusted_source" },
     },
+    lifecycle: {
+      status: "connected",
+      readiness: "ready",
+      detail: null,
+      managedBy: "workspace",
+    },
+    actions: ["inspect", "disconnect"],
     enabled: true,
     enabledReason: null,
     connectionRef: {

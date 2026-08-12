@@ -88,9 +88,20 @@ afterAll(async () => {
 
 afterEach(async () => {
   if (!shared) return;
-  await shared.admin.begin(async (tx) => {
-    await tx`set local client_min_messages = warning`;
-    await tx`truncate table managed_accounts cascade`;
+  // The publication configuration and receipt records are intentionally
+  // append-only in production. This test file owns a disposable database, so
+  // temporarily disable only those immutability triggers while removing its
+  // per-test tenant. Foreign-key triggers remain active and the DDL rolls back
+  // with the transaction if any cleanup step fails.
+  await shared.admin.begin(async (sql) => {
+    await sql`alter table memory_slack_publication_receipts disable trigger memory_slack_publication_receipts_immutable`;
+    await sql`alter table memory_slack_publication_configurations disable trigger memory_slack_publication_configurations_immutable`;
+    await sql`delete from memory_slack_publication_receipts where account_id in (select id from managed_accounts where name = 'slack bot acct')`;
+    await sql`delete from memory_slack_publications where account_id in (select id from managed_accounts where name = 'slack bot acct')`;
+    await sql`delete from memory_slack_publication_configurations where account_id in (select id from managed_accounts where name = 'slack bot acct')`;
+    await sql`delete from managed_accounts where name = 'slack bot acct'`;
+    await sql`alter table memory_slack_publication_configurations enable trigger memory_slack_publication_configurations_immutable`;
+    await sql`alter table memory_slack_publication_receipts enable trigger memory_slack_publication_receipts_immutable`;
   });
 });
 
@@ -3809,6 +3820,6 @@ describe("OpenGeni Slack bot connection", () => {
     expect(capabilitiesSource).toContain("Slack knowledge destination");
     expect(capabilitiesSource).toContain("slackDestinationAuthority");
     expect(capabilitiesSource).toContain("collectionId: null");
-    expect(capabilitiesSource).toContain("Save imported Slack messages");
+    expect(capabilitiesSource).toContain("Save destination");
   });
 });

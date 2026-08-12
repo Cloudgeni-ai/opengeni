@@ -99,6 +99,32 @@ describe("browser analytics configuration", () => {
   });
 });
 
+describe("remote browser placement configuration", () => {
+  test("keeps provider credentials optional and parses bounded launch policy", () => {
+    const defaults = withEnv({}, () => getSettings());
+    expect(defaults.browserbaseApiKey).toBeUndefined();
+    expect(defaults.kernelApiKey).toBeUndefined();
+    expect(defaults.kernelBrowserTimeoutSeconds).toBe(3_600);
+    expect(defaults.kernelBrowserStealth).toBe(false);
+
+    const configured = withEnv(
+      {
+        OPENGENI_BROWSERBASE_API_KEY: "bb-secret",
+        OPENGENI_KERNEL_API_KEY: "kernel-secret",
+        OPENGENI_KERNEL_ENDPOINT: "https://kernel.example.test",
+        OPENGENI_KERNEL_BROWSER_TIMEOUT_SECONDS: "7200",
+        OPENGENI_KERNEL_BROWSER_STEALTH: "true",
+      },
+      () => getSettings(),
+    );
+    expect(configured.browserbaseApiKey).toBe("bb-secret");
+    expect(configured.kernelApiKey).toBe("kernel-secret");
+    expect(configured.kernelEndpoint).toBe("https://kernel.example.test");
+    expect(configured.kernelBrowserTimeoutSeconds).toBe(7_200);
+    expect(configured.kernelBrowserStealth).toBe(true);
+  });
+});
+
 describe("Codex progressive tool disclosure", () => {
   test("is enabled by default and supports an explicit emergency opt-out", () => {
     expect(withEnv({}, () => getSettings()).codexToolSearchEnabled).toBe(true);
@@ -125,6 +151,18 @@ describe("provider-neutral progressive tool disclosure", () => {
 });
 
 describe("Google Drive integration settings", () => {
+  test("keeps Workspace Events wake hints default-off", () => {
+    expect(withEnv({}, () => getSettings()).googleDriveWorkspaceEventsEnabled).toBeUndefined();
+    expect(
+      withEnv({ OPENGENI_GOOGLE_DRIVE_WORKSPACE_EVENTS_ENABLED: "false" }, () => getSettings())
+        .googleDriveWorkspaceEventsEnabled,
+    ).toBe(false);
+    expect(
+      withEnv({ OPENGENI_GOOGLE_DRIVE_WORKSPACE_EVENTS_ENABLED: "true" }, () => getSettings())
+        .googleDriveWorkspaceEventsEnabled,
+    ).toBe(true);
+  });
+
   test("loads the split localhost browser and API origins", () => {
     const settings = withEnv(
       {
@@ -1374,6 +1412,14 @@ describe("backend-gated sandbox required-credential validation", () => {
     expect(() =>
       withEnv({ OPENGENI_MODAL_IMAGE_ID: "im-not-a-valid-id" }, () => getSettings()),
     ).toThrow();
+  });
+
+  test("layers new Modal workspaces with directory snapshots by default", () => {
+    expect(withEnv({}, () => getSettings()).modalWorkspacePersistence).toBe("snapshot_directory");
+    expect(
+      withEnv({ OPENGENI_MODAL_WORKSPACE_PERSISTENCE: "snapshot_filesystem" }, () => getSettings())
+        .modalWorkspacePersistence,
+    ).toBe("snapshot_filesystem");
   });
 
   test("keeps sandbox artifact-runtime admission explicit and disabled by default", () => {

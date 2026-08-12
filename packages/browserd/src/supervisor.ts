@@ -5,33 +5,60 @@ import { join, resolve } from "node:path";
 import type {
   BrowserActionCommand,
   BrowserActionReceipt,
+  BrowserClipboard,
   BrowserDiagnosticBatch,
   BrowserDiagnosticKind,
+  BrowserDownload,
+  BrowserExternalAuthCommand,
   BrowserObservation,
+  BrowserProtectedAuthFillCommand,
+  BrowserProtectedAuthObservation,
   BrowserRevisionMaterialization,
   BrowserTarget,
+  BrowserWorkspaceFileStageRequest,
+  BrowserWorkspaceFileStageResponse,
+  BrowserDownloadExportRequest as BrowserDownloadExportRequestValue,
+  BrowserDownloadExportReceipt as BrowserDownloadExportReceiptValue,
+  BrowserExternalAuthResult as BrowserExternalAuthResultValue,
 } from "@opengeni/contracts";
 import {
   BROWSER_PROFILE_ARTIFACT_FORMAT,
+  BrowserDownloadExportRequest,
   BrowserRevisionMaterialization as BrowserRevisionMaterializationSchema,
+  NetworkRouteConsistency,
+  type NetworkRouteConsistency as NetworkRouteConsistencyValue,
 } from "@opengeni/contracts";
 import {
   BrowserInteractionController,
+  BrowserProtectedAuthController,
   InteractionControllerError,
+  InteractionDefiniteDriverError,
   type BrowserInteractionAuthority,
   type BrowserInteractionDriver,
 } from "@opengeni/interaction";
 import { createAttachedChromeTransport } from "./attached-cdp";
+import { CdpConnection } from "./cdp";
 import { AgentBrowserDriver, type BrowserRuntimeSnapshot } from "./cdp-driver";
+import { BrowserDownloadStore, type CompletedBrowserDownloadFile } from "./downloads";
+import { uploadBrowserDownload } from "./download-upload";
 import type { ResolvedAgentBrowserBinary } from "./binary";
+import type { ResolvedLightpandaBinary } from "./lightpanda-binary";
+import { LightpandaRunner } from "./lightpanda-runner";
+import { ExternalProviderCdpRunner } from "./external-provider-runner";
 import {
   type BrowserFrameStreamOptions,
   type BrowserFrameSubscription,
   type BrowserImageFrame,
   type BrowserScreenshotOptions,
 } from "./media";
-import { AgentBrowserJsonRunner, browserProfileCryptoPolicy } from "./runner";
+import {
+  AgentBrowserJsonRunner,
+  assertAgentBrowserSocketPath,
+  browserProfileCryptoPolicy,
+} from "./runner";
 import { SqliteBrowserOperationJournal } from "./journal";
+import { SqliteBrowserProtectedAuthJournal } from "./protected-auth-journal";
+import { BrowserWorkspaceFileStager } from "./workspace-files";
 import {
   captureEncryptedBrowserProfile,
   restoreEncryptedBrowserProfile,
@@ -83,10 +110,37 @@ export type BrowserSupervisorSessionOptions = BrowserSessionReference & {
   transport?: BrowserSupervisorTransport;
   linkedComputer?: { computerSessionId: string; controllerGeneration: string };
   launchEnvironment?: NodeJS.ProcessEnv;
+  networkRoute?: BrowserSupervisorNetworkRoute;
+};
+
+export type BrowserSupervisorNetworkRoute = {
+  routeId: string;
+  routeVersion: number;
+  authorityDigest: string;
+  kind: "direct" | "proxy" | "managed" | "tunnel";
+  consistency: NetworkRouteConsistencyValue;
+  proxyUrl?: string;
+  providerRoute?: {
+    providerId: "browserbase" | "kernel";
+    routeId: string;
+    egressClass: "datacenter" | "residential" | "isp";
+    region: string | null;
+  };
 };
 
 export type BrowserSupervisorTransport =
-  | { kind: "managed" }
+  | { kind: "managed"; engine?: "chromium" | "lightpanda" }
+  | {
+      kind: "external_provider";
+      providerId: "browserbase" | "kernel";
+      placementId: string;
+      authority: {
+        apiKey: string;
+        endpoint?: string;
+      };
+      timeoutSeconds?: number;
+      stealth?: boolean;
+    }
   | {
       kind: "attached_chrome";
       deviceId: string;
@@ -144,7 +198,14 @@ export type BrowserSupervisorDriver = BrowserInteractionDriver & {
       limit?: number;
     },
   ): Promise<BrowserDiagnosticBatch>;
+  readClipboard(): BrowserClipboard;
   runtimeSnapshot(): Promise<BrowserRuntimeSnapshot>;
+  protectedFill(command: BrowserProtectedAuthFillCommand): Promise<BrowserProtectedAuthObservation>;
+  externalAuth?(command: BrowserExternalAuthCommand): Promise<BrowserExternalAuthResultValue>;
+  /** Provider liveness probe used only after another operation reports a
+   * failure. Managed Chromium implements it; unsupported providers fail
+   * honestly without implicit recovery. */
+  isAvailable?(): Promise<boolean>;
   close(): Promise<void>;
 };
 
@@ -157,7 +218,18 @@ export type BrowserSupervisorDriverContext = BrowserSessionReference & {
   headed: boolean;
   transport: BrowserSupervisorTransport;
   browserExecutablePath?: string;
+  linkedComputer?: { computerSessionId: string; controllerGeneration: string };
   launchEnvironment?: NodeJS.ProcessEnv;
+  networkRoute?: BrowserSupervisorNetworkRoute;
+  resolveWorkspaceFiles: (
+    operationId: string,
+    workspaceFileIds: readonly string[],
+  ) => Promise<readonly string[]>;
+  downloadEvents?: {
+    begin: BrowserDownloadStore["begin"];
+    progress: BrowserDownloadStore["progress"];
+    reject: BrowserDownloadStore["reject"];
+  };
 };
 
 export type BrowserSupervisorOptions = {
@@ -165,8 +237,10 @@ export type BrowserSupervisorOptions = {
   socketRootDirectory?: string;
   maxSessions?: number;
   agentBrowserBinary?: ResolvedAgentBrowserBinary;
+  lightpandaBinary?: ResolvedLightpandaBinary;
   createDriver?: (context: BrowserSupervisorDriverContext) => Promise<BrowserSupervisorDriver>;
   uploadArtifact?: (artifactPath: string, authority: BrowserStateUploadAuthority) => Promise<void>;
+  uploadDownload?: typeof uploadBrowserDownload;
 };
 
 type Runtime = {
@@ -174,18 +248,28 @@ type Runtime = {
   sessionDirectory: string;
   driverContext: BrowserSupervisorDriverContext;
   journal: SqliteBrowserOperationJournal;
+  protectedAuthJournal: SqliteBrowserProtectedAuthJournal;
   stateJournal: SqliteBrowserStateTransferJournal;
   driver: BrowserSupervisorDriver;
   controller: BrowserInteractionController;
-  lifecycle: "active" | "capturing" | "captured" | "ending";
+  protectedAuthController: BrowserProtectedAuthController;
+  workspaceFileStager: BrowserWorkspaceFileStager;
+  downloadStore: BrowserDownloadStore | null;
+  lastSnapshot: BrowserRuntimeSnapshot;
+  lastTargets: BrowserTarget[];
+  recovery: Promise<void> | null;
+  externalAuthTail: Promise<void> | null;
+  lifecycle: "active" | "recovering" | "reconfiguring" | "capturing" | "captured" | "ending";
 };
 
 type BrowserRuntimeOptions = Omit<
   BrowserSupervisorSessionOptions,
-  "restore" | "transport" | "launchEnvironment"
+  "restore" | "transport" | "launchEnvironment" | "networkRoute"
 > & {
   transport: BrowserSupervisorTransport;
   restoreAuthorityDigest: string | null;
+  networkRouteAuthorityDigest: string | null;
+  networkRouteMaterialDigest: string | null;
 };
 
 type ValidatedBrowserStateRestoreInput = Omit<BrowserStateRestoreInput, "dataKey" | "aad"> & {
@@ -213,6 +297,7 @@ export class BrowserSupervisor {
     artifactPath: string,
     authority: BrowserStateUploadAuthority,
   ) => Promise<void>;
+  private readonly uploadDownload: typeof uploadBrowserDownload;
   private readonly sessions = new Map<string, Runtime>();
   private readonly creating = new Map<string, Promise<Runtime>>();
   private readonly ending = new Map<string, Promise<void>>();
@@ -224,14 +309,23 @@ export class BrowserSupervisor {
     this.socketRootDirectory = resolve(
       options.socketRootDirectory ?? defaultSocketRoot(this.rootDirectory),
     );
+    if (!options.createDriver) {
+      assertAgentBrowserSocketPath({
+        socketDirectory: join(this.socketRootDirectory, "0".repeat(16)),
+        namespace: "og",
+        sessionName: `b${"0".repeat(16)}`,
+      });
+    }
     this.maxSessions = boundedPositiveInteger(
       options.maxSessions ?? DEFAULT_MAX_SESSIONS,
       "maxSessions",
     );
     this.createDriver =
       options.createDriver ??
-      (async (context) => await createBrowserDriver(context, options.agentBrowserBinary));
+      (async (context) =>
+        await createBrowserDriver(context, options.agentBrowserBinary, options.lightpandaBinary));
     this.uploadArtifact = options.uploadArtifact ?? uploadBrowserStateArtifact;
+    this.uploadDownload = options.uploadDownload ?? uploadBrowserDownload;
   }
 
   static async open(options: BrowserSupervisorOptions): Promise<BrowserSupervisor> {
@@ -308,45 +402,130 @@ export class BrowserSupervisor {
 
   listSessions(): BrowserSessionReference[] {
     return [...this.sessions.values()]
-      .filter((runtime) => runtime.lifecycle === "active")
+      .filter((runtime) => runtime.lifecycle === "active" || runtime.lifecycle === "recovering")
       .map(binding);
   }
 
   async listTargets(reference: BrowserSessionReference): Promise<BrowserTarget[]> {
-    return await this.requireActive(reference).driver.listTargets();
+    const runtime = this.requireActive(reference);
+    const targets = await this.readWithRecovery(runtime, async () => {
+      return await runtime.driver.listTargets();
+    });
+    this.rememberTargets(runtime, targets);
+    return targets;
   }
 
   async openTarget(reference: BrowserSessionReference, url?: string): Promise<BrowserObservation> {
-    return await this.requireActive(reference).driver.openTarget(url);
+    const runtime = this.requireActive(reference);
+    const observation = await this.mutateWithRecovery(runtime, async () => {
+      return await runtime.driver.openTarget(url);
+    });
+    this.rememberObservation(runtime, observation);
+    return observation;
   }
 
   async selectTarget(
     reference: BrowserSessionReference,
     targetId: string,
   ): Promise<BrowserObservation> {
-    return await this.requireActive(reference).driver.selectTarget(targetId);
+    const runtime = this.requireActive(reference);
+    const observation = await this.mutateWithRecovery(runtime, async () => {
+      return await runtime.driver.selectTarget(targetId);
+    });
+    this.rememberObservation(runtime, observation);
+    return observation;
   }
 
   async closeTarget(
     reference: BrowserSessionReference,
     targetId: string,
   ): Promise<BrowserTarget[]> {
-    return await this.requireActive(reference).driver.closeTarget(targetId);
+    const runtime = this.requireActive(reference);
+    const targets = await this.mutateWithRecovery(runtime, async () => {
+      return await runtime.driver.closeTarget(targetId);
+    });
+    this.rememberTargets(runtime, targets);
+    return targets;
   }
 
   async observe(reference: BrowserSessionReference, targetId: string): Promise<BrowserObservation> {
-    return await this.requireActive(reference).controller.observe(targetId);
+    const runtime = this.requireActive(reference);
+    const observation = await this.readWithRecovery(runtime, async () => {
+      return await runtime.controller.observe(targetId);
+    });
+    this.rememberObservation(runtime, observation);
+    return observation;
   }
 
-  action(command: BrowserActionCommand): Promise<BrowserActionReceipt> {
-    return this.requireActive({
+  readClipboard(reference: BrowserSessionReference): BrowserClipboard {
+    return this.requireActive(reference).driver.readClipboard();
+  }
+
+  async action(command: BrowserActionCommand): Promise<BrowserActionReceipt> {
+    const runtime = this.requireActive({
       browserSessionId: command.browserSessionId,
       controllerGeneration: command.controllerGeneration,
-    }).controller.run(command);
+    });
+    const receipt = await runtime.controller.run(command);
+    if (receipt.observation) this.rememberObservation(runtime, receipt.observation);
+    if (receipt.error?.code === "controller_lost" || receipt.error?.code === "driver_failed") {
+      await this.recoverIfUnavailable(runtime).catch(() => false);
+    }
+    if (
+      browserActionUsesWorkspaceFiles(command.action) &&
+      receipt.state === "failed" &&
+      receipt.dispatchedAt === null
+    ) {
+      await runtime.workspaceFileStager.discard(command.operationId).catch(() => undefined);
+    }
+    return receipt;
+  }
+
+  async stageWorkspaceFiles(
+    reference: BrowserSessionReference,
+    request: BrowserWorkspaceFileStageRequest,
+  ): Promise<BrowserWorkspaceFileStageResponse> {
+    return await this.requireActive(reference).workspaceFileStager.stage(request);
+  }
+
+  async protectedAuthFill(command: BrowserProtectedAuthFillCommand) {
+    const runtime = this.requireActive({
+      browserSessionId: command.browserSessionId,
+      controllerGeneration: command.controllerGeneration,
+    });
+    const receipt = await runtime.protectedAuthController.run(command);
+    if (receipt.observation) this.rememberTarget(runtime, receipt.observation.target);
+    if (receipt.error?.code === "controller_lost" || receipt.error?.code === "driver_failed") {
+      await this.recoverIfUnavailable(runtime).catch(() => false);
+    }
+    return receipt;
+  }
+
+  externalAuth(command: BrowserExternalAuthCommand): Promise<BrowserExternalAuthResultValue> {
+    this.assertOpen();
+    const runtime = this.requireBound({
+      browserSessionId: command.browserSessionId,
+      controllerGeneration: command.controllerGeneration,
+    });
+    const previous = runtime.externalAuthTail ?? Promise.resolve();
+    const operation = previous.then(async () => await this.performExternalAuth(runtime, command));
+    const tail = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    runtime.externalAuthTail = tail;
+    void tail.finally(() => {
+      if (runtime.externalAuthTail === tail) runtime.externalAuthTail = null;
+    });
+    return operation;
   }
 
   receipt(reference: BrowserSessionReference, operationId: string): BrowserActionReceipt | null {
     return this.requireBound(reference).controller.receipt(operationId);
+  }
+
+  protectedAuthReceipt(reference: BrowserSessionReference, operationId: string) {
+    return this.requireBound(reference).protectedAuthController.receipt(operationId);
   }
 
   async screenshot(
@@ -354,7 +533,10 @@ export class BrowserSupervisor {
     targetId: string,
     options?: BrowserScreenshotOptions,
   ): Promise<BrowserImageFrame> {
-    return await this.requireActive(reference).driver.captureScreenshot(targetId, options);
+    const runtime = this.requireActive(reference);
+    return await this.readWithRecovery(runtime, async () => {
+      return await runtime.driver.captureScreenshot(targetId, options);
+    });
   }
 
   async subscribeFrames(
@@ -362,7 +544,10 @@ export class BrowserSupervisor {
     targetId: string,
     options?: BrowserFrameStreamOptions,
   ): Promise<BrowserFrameSubscription> {
-    return await this.requireActive(reference).driver.subscribeFrames(targetId, options);
+    const runtime = this.requireActive(reference);
+    return await this.readWithRecovery(runtime, async () => {
+      return await runtime.driver.subscribeFrames(targetId, options);
+    });
   }
 
   async debug(
@@ -374,7 +559,64 @@ export class BrowserSupervisor {
       limit?: number;
     },
   ): Promise<BrowserDiagnosticBatch> {
-    return await this.requireActive(reference).driver.debug(targetId, options);
+    const runtime = this.requireActive(reference);
+    return await this.readWithRecovery(runtime, async () => {
+      return await runtime.driver.debug(targetId, options);
+    });
+  }
+
+  async listDownloads(reference: BrowserSessionReference): Promise<BrowserDownload[]> {
+    const store = this.requireActive(reference).downloadStore;
+    if (!store) {
+      throw new InteractionControllerError(
+        "unsupported",
+        "browser placement does not expose managed downloads",
+      );
+    }
+    return await store.list();
+  }
+
+  async getDownload(
+    reference: BrowserSessionReference,
+    downloadId: string,
+  ): Promise<BrowserDownload | null> {
+    const store = this.requireActive(reference).downloadStore;
+    if (!store) {
+      throw new InteractionControllerError(
+        "unsupported",
+        "browser placement does not expose managed downloads",
+      );
+    }
+    return await store.get(downloadId);
+  }
+
+  async completedDownloadFile(
+    reference: BrowserSessionReference,
+    downloadId: string,
+  ): Promise<CompletedBrowserDownloadFile> {
+    const store = this.requireActive(reference).downloadStore;
+    if (!store) {
+      throw new InteractionControllerError(
+        "unsupported",
+        "browser placement cannot publish device-local downloads",
+      );
+    }
+    return await store.completedFile(downloadId);
+  }
+
+  async exportDownload(
+    reference: BrowserSessionReference,
+    requestInput: BrowserDownloadExportRequestValue,
+  ): Promise<BrowserDownloadExportReceiptValue> {
+    const request = BrowserDownloadExportRequest.parse(requestInput);
+    const store = this.requireActive(reference).downloadStore;
+    if (!store) {
+      throw new InteractionControllerError(
+        "unsupported",
+        "browser placement cannot publish device-local downloads",
+      );
+    }
+    return await store.export(request, this.uploadDownload);
   }
 
   captureState(inputValue: BrowserStateCaptureInput): Promise<BrowserStateCaptureReceipt> {
@@ -409,8 +651,12 @@ export class BrowserSupervisor {
     const stateTransfer = this.stateTransferTails.get(reference.browserSessionId);
     if (stateTransfer) await stateTransfer.catch(() => undefined);
     const runtime = this.requireBound(reference);
+    if (runtime.externalAuthTail) await runtime.externalAuthTail;
     const existing = this.ending.get(reference.browserSessionId);
     if (existing) return await existing;
+    if (runtime.recovery) await runtime.recovery.catch(() => undefined);
+    const raced = this.ending.get(reference.browserSessionId);
+    if (raced) return await raced;
     const driverAlreadyClosed = runtime.lifecycle === "captured";
     runtime.lifecycle = "ending";
     const ending = this.disposeRuntime(runtime, options.removeState ?? false, driverAlreadyClosed);
@@ -436,15 +682,24 @@ export class BrowserSupervisor {
   }
 
   private async buildRuntime(options: ValidatedBrowserSupervisorSessionOptions): Promise<Runtime> {
+    if (options.networkRoute?.kind === "proxy" && !options.networkRoute.proxyUrl) {
+      throw new InteractionControllerError(
+        "resource_unavailable",
+        "proxy authority is unavailable for a new browser launch",
+        true,
+      );
+    }
     const sessionDirectory = join(this.rootDirectory, "sessions", options.browserSessionId);
     const socketDirectory = join(this.socketRootDirectory, shortDigest(options.browserSessionId));
     const profileDirectory = join(sessionDirectory, "profile");
     const downloadDirectory = join(sessionDirectory, "downloads");
+    const uploadDirectory = join(sessionDirectory, "uploads");
     const screenshotDirectory = join(sessionDirectory, "screenshots");
     for (const directory of [
       sessionDirectory,
       socketDirectory,
       downloadDirectory,
+      uploadDirectory,
       screenshotDirectory,
     ]) {
       await mkdir(directory, { recursive: true, mode: 0o700 });
@@ -463,11 +718,25 @@ export class BrowserSupervisor {
       await mkdir(profileDirectory, { recursive: true, mode: 0o700 });
       await chmod(profileDirectory, 0o700);
     }
+    const workspaceFileStager = await BrowserWorkspaceFileStager.open({
+      rootDirectory: uploadDirectory,
+    });
     const journal = await SqliteBrowserOperationJournal.open({
       path: join(sessionDirectory, "operations.sqlite"),
       browserSessionId: options.browserSessionId,
       controllerGeneration: options.controllerGeneration,
     });
+    let protectedAuthJournal: SqliteBrowserProtectedAuthJournal;
+    try {
+      protectedAuthJournal = await SqliteBrowserProtectedAuthJournal.open({
+        path: join(sessionDirectory, "protected-auth-operations.sqlite"),
+        browserSessionId: options.browserSessionId,
+        controllerGeneration: options.controllerGeneration,
+      });
+    } catch (error) {
+      journal.close();
+      throw error;
+    }
     let stateJournal: SqliteBrowserStateTransferJournal;
     try {
       stateJournal = await SqliteBrowserStateTransferJournal.open({
@@ -477,7 +746,23 @@ export class BrowserSupervisor {
       });
     } catch (error) {
       journal.close();
+      protectedAuthJournal.close();
       throw error;
+    }
+    let downloadStore: BrowserDownloadStore | null = null;
+    if (options.transport.kind === "managed" && options.transport.engine !== "lightpanda") {
+      try {
+        downloadStore = await BrowserDownloadStore.open({
+          rootDirectory: downloadDirectory,
+          browserSessionId: options.browserSessionId,
+          controllerGeneration: options.controllerGeneration,
+        });
+      } catch (error) {
+        journal.close();
+        protectedAuthJournal.close();
+        stateJournal.close();
+        throw error;
+      }
     }
     const driverContext: BrowserSupervisorDriverContext = {
       browserSessionId: options.browserSessionId,
@@ -485,30 +770,66 @@ export class BrowserSupervisor {
       sessionDirectory,
       socketDirectory,
       profileDirectory,
-      downloadDirectory,
+      downloadDirectory: downloadStore?.filesDirectory ?? downloadDirectory,
       screenshotDirectory,
       headed: options.headed,
       transport: options.transport,
+      resolveWorkspaceFiles: async (operationId, workspaceFileIds) =>
+        await workspaceFileStager.resolve(operationId, workspaceFileIds),
+      ...(downloadStore
+        ? {
+            downloadEvents: {
+              begin: downloadStore.begin.bind(downloadStore),
+              progress: downloadStore.progress.bind(downloadStore),
+              reject: downloadStore.reject.bind(downloadStore),
+            },
+          }
+        : {}),
       ...(options.browserExecutablePath
         ? { browserExecutablePath: options.browserExecutablePath }
         : {}),
+      ...(options.linkedComputer ? { linkedComputer: options.linkedComputer } : {}),
       ...(options.launchEnvironment ? { launchEnvironment: options.launchEnvironment } : {}),
+      ...(options.networkRoute ? { networkRoute: options.networkRoute } : {}),
     };
     let driver: BrowserSupervisorDriver | null = null;
     try {
       const initialJournal = journal.loadAndRecover();
+      const initialProtectedAuthJournal = protectedAuthJournal.loadAndRecover();
       driver = await this.createDriver(driverContext);
-      const runtime = {
+      const runtime: Runtime = {
         options: runtimeOptions(options),
         sessionDirectory,
         driverContext,
         journal,
+        protectedAuthJournal,
         stateJournal,
         driver,
         lifecycle: "active" as const,
+        externalAuthTail: null,
         controller: null as unknown as BrowserInteractionController,
+        protectedAuthController: null as unknown as BrowserProtectedAuthController,
+        workspaceFileStager,
+        downloadStore,
+        lastSnapshot: {
+          engine:
+            options.transport.kind === "attached_chrome"
+              ? "chrome"
+              : options.transport.kind === "managed"
+                ? (options.transport.engine ?? "chromium")
+                : "chromium",
+          engineVersion: null,
+          tabs: [],
+        },
+        lastTargets: [],
+        recovery: null,
       };
       runtime.controller = this.createController(runtime, driver, initialJournal);
+      runtime.protectedAuthController = this.createProtectedAuthController(
+        runtime,
+        driver,
+        initialProtectedAuthJournal,
+      );
       if (restoredManifest) {
         await restoreTabs(
           driver,
@@ -516,10 +837,14 @@ export class BrowserSupervisor {
             ? [{ url: options.initialUrl, selected: true }]
             : restoredManifest.tabs,
         );
-        assertRestoredRuntimeCompatible(restoredManifest, await driver.runtimeSnapshot());
+        runtime.lastSnapshot = await driver.runtimeSnapshot();
+        assertRestoredRuntimeCompatible(restoredManifest, runtime.lastSnapshot);
       } else {
         await driver.start(options.initialUrl);
+        runtime.lastSnapshot = await driver.runtimeSnapshot();
       }
+      runtime.lastTargets = await driver.listTargets();
+      runtime.lastSnapshot = snapshotWithTargets(runtime.lastSnapshot, runtime.lastTargets);
       return runtime;
     } catch (error) {
       const failures: unknown[] = [error];
@@ -543,7 +868,17 @@ export class BrowserSupervisor {
         failures.push(cleanupError);
       }
       try {
+        protectedAuthJournal.close();
+      } catch (cleanupError) {
+        failures.push(cleanupError);
+      }
+      try {
         stateJournal.close();
+      } catch (cleanupError) {
+        failures.push(cleanupError);
+      }
+      try {
+        await downloadStore?.close();
       } catch (cleanupError) {
         failures.push(cleanupError);
       }
@@ -556,10 +891,14 @@ export class BrowserSupervisor {
 
   private async performCapture(input: ValidatedBrowserStateCaptureInput) {
     const runtime = this.requireBound(input);
-    if (runtime.options.transport.kind === "attached_chrome") {
+    if (
+      runtime.options.transport.kind === "attached_chrome" ||
+      runtime.options.transport.kind === "external_provider" ||
+      runtime.options.transport.engine === "lightpanda"
+    ) {
       throw new InteractionControllerError(
         "unsupported",
-        "attached Chrome does not support placement-managed profile capture",
+        "this browser engine does not support portable profile capture",
       );
     }
     const requestDigest = captureRequestDigest(input);
@@ -599,7 +938,11 @@ export class BrowserSupervisor {
     let uploadDispatched = false;
     try {
       runtime.lifecycle = "capturing";
-      await runtime.controller.waitForIdle();
+      await Promise.all([
+        runtime.controller.waitForIdle(),
+        runtime.protectedAuthController.waitForIdle(),
+      ]);
+      await runtime.downloadStore?.interruptInProgress("browser_restarted");
       snapshot = await runtime.driver.runtimeSnapshot();
       await runtime.driver.close();
       driverClosed = true;
@@ -664,12 +1007,161 @@ export class BrowserSupervisor {
     const driver = await this.createDriver(runtime.driverContext);
     try {
       await restoreTabs(driver, snapshot.tabs);
+      const currentSnapshot = await driver.runtimeSnapshot();
+      const currentTargets = await driver.listTargets();
       runtime.driver = driver;
       runtime.controller = this.createController(runtime, driver, runtime.journal.loadAndRecover());
+      runtime.protectedAuthController = this.createProtectedAuthController(
+        runtime,
+        driver,
+        runtime.protectedAuthJournal.loadAndRecover(),
+      );
+      runtime.lastTargets = currentTargets;
+      runtime.lastSnapshot = snapshotWithTargets(currentSnapshot, currentTargets);
     } catch (error) {
       await driver.close().catch(() => undefined);
       throw error;
     }
+  }
+
+  private async performExternalAuth(
+    runtime: Runtime,
+    command: BrowserExternalAuthCommand,
+  ): Promise<BrowserExternalAuthResultValue> {
+    if (runtime.lifecycle !== "active") {
+      throw new InteractionControllerError(
+        "resource_unavailable",
+        "browser session is changing state",
+        true,
+      );
+    }
+    if (!runtime.driver.externalAuth) {
+      throw new InteractionControllerError(
+        "unsupported",
+        "browser placement does not support provider-managed authentication",
+      );
+    }
+    runtime.lifecycle = "reconfiguring";
+    try {
+      await Promise.all([
+        runtime.controller.waitForIdle(),
+        runtime.protectedAuthController.waitForIdle(),
+      ]);
+      const result = await runtime.driver.externalAuth(command);
+      if (result.profileLoaded) {
+        const [snapshot, targets] = await Promise.all([
+          runtime.driver.runtimeSnapshot(),
+          runtime.driver.listTargets(),
+        ]);
+        this.rememberTargets(runtime, targets);
+        runtime.lastSnapshot = snapshotWithTargets(snapshot, targets);
+      }
+      return result;
+    } finally {
+      if (runtime.lifecycle === "reconfiguring") runtime.lifecycle = "active";
+    }
+  }
+
+  private async readWithRecovery<T>(runtime: Runtime, operation: () => Promise<T>): Promise<T> {
+    try {
+      return await operation();
+    } catch (error) {
+      if (!(await this.recoverIfUnavailable(runtime))) throw error;
+      return await operation();
+    }
+  }
+
+  private async mutateWithRecovery<T>(runtime: Runtime, operation: () => Promise<T>): Promise<T> {
+    try {
+      return await operation();
+    } catch (error) {
+      try {
+        await this.recoverIfUnavailable(runtime);
+      } catch (recoveryError) {
+        throw aggregateFailure(
+          [error, recoveryError],
+          "browser mutation failed and its runtime could not recover",
+          error,
+        );
+      }
+      // Never replay a mutation whose dispatch boundary is not represented by
+      // the durable action journal. Recovery only makes later calls usable.
+      throw error;
+    }
+  }
+
+  private async recoverIfUnavailable(runtime: Runtime): Promise<boolean> {
+    if (
+      runtime.options.transport.kind === "attached_chrome" ||
+      (runtime.options.transport.kind === "managed" &&
+        runtime.options.transport.engine === "lightpanda") ||
+      !runtime.driver.isAvailable
+    )
+      return false;
+    if (await runtime.driver.isAvailable()) return false;
+    await this.recoverRuntimeAfterLoss(runtime);
+    return true;
+  }
+
+  private async recoverRuntimeAfterLoss(runtime: Runtime): Promise<void> {
+    if (runtime.recovery) return await runtime.recovery;
+    const recovery = this.performRuntimeRecovery(runtime);
+    runtime.recovery = recovery;
+    try {
+      await recovery;
+    } finally {
+      if (runtime.recovery === recovery) runtime.recovery = null;
+    }
+  }
+
+  private async performRuntimeRecovery(runtime: Runtime): Promise<void> {
+    if (runtime.lifecycle !== "active") {
+      throw new InteractionControllerError(
+        "resource_unavailable",
+        "browser session cannot recover while changing state",
+        true,
+      );
+    }
+    runtime.lifecycle = "recovering";
+    const previousDriver = runtime.driver;
+    const snapshot = runtime.lastSnapshot;
+    try {
+      await Promise.all([
+        runtime.controller.waitForIdle(),
+        runtime.protectedAuthController.waitForIdle(),
+      ]);
+      await runtime.downloadStore?.interruptInProgress("browser_restarted");
+      await previousDriver.close();
+      await this.restartRuntime(runtime, snapshot);
+      runtime.lifecycle = "active";
+    } catch (error) {
+      // Keep the binding addressable so a later request can retry recovery;
+      // the old driver remains unavailable and no operation is replayed.
+      runtime.lifecycle = "active";
+      throw error;
+    }
+  }
+
+  private rememberObservation(runtime: Runtime, observation: BrowserObservation): void {
+    this.rememberTarget(runtime, observation.target);
+  }
+
+  private rememberTarget(runtime: Runtime, target: BrowserTarget): void {
+    const index = runtime.lastTargets.findIndex((entry) => entry.id === target.id);
+    if (target.selected) {
+      runtime.lastTargets = runtime.lastTargets.map((entry) => ({
+        ...entry,
+        selected: false,
+      }));
+    }
+    if (index >= 0) runtime.lastTargets[index] = target;
+    else runtime.lastTargets.push(target);
+    runtime.lastSnapshot = snapshotWithTargets(runtime.lastSnapshot, runtime.lastTargets);
+  }
+
+  private rememberTargets(runtime: Runtime, targets: readonly BrowserTarget[]): void {
+    runtime.lastTargets = targets.map((target) => ({ ...target }));
+    runtime.lastSnapshot = snapshotWithTargets(runtime.lastSnapshot, runtime.lastTargets);
   }
 
   private createController(
@@ -698,11 +1190,62 @@ export class BrowserSupervisor {
     });
   }
 
+  private createProtectedAuthController(
+    runtime: Runtime,
+    driver: BrowserSupervisorDriver,
+    initialJournal: ReturnType<SqliteBrowserProtectedAuthJournal["loadAndRecover"]>,
+  ): BrowserProtectedAuthController {
+    return new BrowserProtectedAuthController({
+      browserSessionId: runtime.options.browserSessionId,
+      controllerGeneration: runtime.options.controllerGeneration,
+      initialJournal,
+      onJournalRecord: (record) => runtime.protectedAuthJournal.write(record),
+      driver: {
+        target: async (targetId) => await driver.target(targetId),
+        observe: async (targetId) => {
+          const target = await driver.target(targetId);
+          if (!target) {
+            throw new InteractionDefiniteDriverError(
+              "target_not_found",
+              "protected-fill browser target does not exist",
+            );
+          }
+          return { target, status: "working" };
+        },
+        dispatch: async (command) => await driver.protectedFill(command),
+      },
+      authority: {
+        authorizeDispatch: () => {
+          if (runtime.lifecycle !== "active") {
+            throw new InteractionControllerError(
+              "resource_unavailable",
+              "browser session is changing state",
+              true,
+            );
+          }
+        },
+      },
+    });
+  }
+
   private async currentObservation(runtime: Runtime): Promise<BrowserObservation> {
-    const targets = await runtime.driver.listTargets();
+    const targets = await this.readWithRecovery(runtime, async () => {
+      return await runtime.driver.listTargets();
+    });
+    this.rememberTargets(runtime, targets);
     const selected = targets.find((target) => target.selected) ?? targets[0];
-    if (selected) return await runtime.controller.observe(selected.id);
-    return await runtime.driver.openTarget();
+    if (selected) {
+      const observation = await this.readWithRecovery(runtime, async () => {
+        return await runtime.controller.observe(selected.id);
+      });
+      this.rememberObservation(runtime, observation);
+      return observation;
+    }
+    const observation = await this.mutateWithRecovery(runtime, async () => {
+      return await runtime.driver.openTarget();
+    });
+    this.rememberObservation(runtime, observation);
+    return observation;
   }
 
   private assertSameBinding(
@@ -722,7 +1265,13 @@ export class BrowserSupervisor {
       canonicalJson(runtime.options.transport) !== canonicalJson(requested.transport) ||
       canonicalJson(runtime.options.linkedComputer ?? null) !==
         canonicalJson(requested.linkedComputer ?? null) ||
-      runtime.options.restoreAuthorityDigest !== restoreAuthorityDigest(requested.restore)
+      runtime.options.restoreAuthorityDigest !== restoreAuthorityDigest(requested.restore) ||
+      runtime.options.networkRouteAuthorityDigest !==
+        (requested.networkRoute?.authorityDigest ?? null) ||
+      ((requested.networkRoute?.proxyUrl !== undefined ||
+        requested.networkRoute?.providerRoute !== undefined) &&
+        runtime.options.networkRouteMaterialDigest !==
+          networkRouteMaterialDigest(requested.networkRoute))
     ) {
       throw new InteractionControllerError(
         "operation_conflict",
@@ -734,7 +1283,11 @@ export class BrowserSupervisor {
   private requireActive(reference: BrowserSessionReference): Runtime {
     const runtime = this.requireBound(reference);
     if (runtime.lifecycle !== "active") {
-      throw new InteractionControllerError("resource_unavailable", "browser session is ending");
+      throw new InteractionControllerError(
+        "resource_unavailable",
+        "browser session is changing state",
+        true,
+      );
     }
     return runtime;
   }
@@ -761,8 +1314,15 @@ export class BrowserSupervisor {
     const failures: unknown[] = [];
     let driverClosed = driverAlreadyClosed;
     let actionJournalClosed = false;
+    let protectedAuthJournalClosed = false;
     let stateJournalClosed = false;
+    let downloadStoreClosed = runtime.downloadStore === null;
     if (!driverAlreadyClosed) {
+      try {
+        await runtime.downloadStore?.interruptInProgress("browser_ended");
+      } catch (error) {
+        failures.push(error);
+      }
       try {
         await runtime.driver.close();
         driverClosed = true;
@@ -777,8 +1337,20 @@ export class BrowserSupervisor {
       failures.push(error);
     }
     try {
+      runtime.protectedAuthJournal.close();
+      protectedAuthJournalClosed = true;
+    } catch (error) {
+      failures.push(error);
+    }
+    try {
       runtime.stateJournal.close();
       stateJournalClosed = true;
+    } catch (error) {
+      failures.push(error);
+    }
+    try {
+      await runtime.downloadStore?.close();
+      downloadStoreClosed = true;
     } catch (error) {
       failures.push(error);
     }
@@ -792,7 +1364,14 @@ export class BrowserSupervisor {
         failures.push(error);
       }
     }
-    if (removeState && driverClosed && actionJournalClosed && stateJournalClosed) {
+    if (
+      removeState &&
+      driverClosed &&
+      actionJournalClosed &&
+      protectedAuthJournalClosed &&
+      stateJournalClosed &&
+      downloadStoreClosed
+    ) {
       try {
         await rm(runtime.sessionDirectory, { recursive: true, force: true });
       } catch (error) {
@@ -811,9 +1390,29 @@ export class BrowserSupervisor {
   }
 }
 
+function snapshotWithTargets(
+  snapshot: BrowserRuntimeSnapshot,
+  targets: readonly BrowserTarget[],
+): BrowserRuntimeSnapshot {
+  return {
+    ...snapshot,
+    tabs: targets
+      .filter((target) => target.kind === "page" || target.kind === "popup")
+      .map((target) => ({ url: target.url, selected: target.selected })),
+  };
+}
+
+function browserActionUsesWorkspaceFiles(action: BrowserActionCommand["action"]): boolean {
+  return (
+    action.type === "upload" ||
+    (action.type === "batch" && action.actions.some((entry) => entry.type === "upload"))
+  );
+}
+
 async function createBrowserDriver(
   context: BrowserSupervisorDriverContext,
   binary?: ResolvedAgentBrowserBinary,
+  lightpandaBinary?: ResolvedLightpandaBinary,
 ): Promise<BrowserSupervisorDriver> {
   if (context.transport.kind === "attached_chrome") {
     const attached = await createAttachedChromeTransport({
@@ -831,7 +1430,68 @@ async function createBrowserDriver(
       runner: attached.runner,
       connect: async () => attached.connection,
       engine: "chrome",
+      permissionControl: false,
     });
+  }
+  if (context.transport.kind === "managed" && context.transport.engine === "lightpanda") {
+    if (!lightpandaBinary) {
+      throw new InteractionControllerError(
+        "resource_unavailable",
+        "Lightpanda is not installed on this browser placement",
+      );
+    }
+    const runner = await LightpandaRunner.create({
+      binary: lightpandaBinary,
+      sessionDirectory: join(context.sessionDirectory, "lightpanda"),
+    });
+    return new AgentBrowserDriver({
+      browserSessionId: context.browserSessionId,
+      controllerGeneration: context.controllerGeneration,
+      runner,
+      engine: "lightpanda",
+      targetLifecycle: "cdp",
+      tabControl: false,
+      frameStreaming: false,
+      permissionControl: false,
+      resolveWorkspaceFiles: context.resolveWorkspaceFiles,
+    });
+  }
+  if (context.transport.kind === "external_provider") {
+    const managedRoute = context.networkRoute?.providerRoute;
+    const runner = new ExternalProviderCdpRunner({
+      providerId: context.transport.providerId,
+      apiKey: context.transport.authority.apiKey,
+      ...(context.transport.authority.endpoint
+        ? { endpoint: context.transport.authority.endpoint }
+        : {}),
+      headed: context.headed,
+      ...(context.transport.timeoutSeconds
+        ? { timeoutSeconds: context.transport.timeoutSeconds }
+        : {}),
+      ...(context.transport.stealth === undefined ? {} : { stealth: context.transport.stealth }),
+      ...(managedRoute ? { route: managedRoute } : {}),
+    });
+    return new AgentBrowserDriver({
+      browserSessionId: context.browserSessionId,
+      controllerGeneration: context.controllerGeneration,
+      runner,
+      connect: async (endpoint) => await CdpConnection.connect(endpoint, { allowRemote: true }),
+      targetLifecycle: "cdp",
+    });
+  }
+  const route = context.networkRoute;
+  const launchArguments: string[] = [];
+  if (route?.consistency.locale) {
+    launchArguments.push(`--lang=${route.consistency.locale}`);
+  }
+  if (route?.consistency.webRtc !== "default") {
+    launchArguments.push("--force-webrtc-ip-handling-policy=disable_non_proxied_udp");
+  }
+  // A linked headed browser is also a native ComputerSession application.
+  // Chromium otherwise exposes only its outer window to Linux AT-SPI, making
+  // background semantic interaction with the page impossible.
+  if (context.linkedComputer) {
+    launchArguments.push("--force-renderer-accessibility=complete");
   }
   const runner = await AgentBrowserJsonRunner.create({
     namespace: "og",
@@ -845,6 +1505,9 @@ async function createBrowserDriver(
     downloadDirectory: context.downloadDirectory,
     screenshotDirectory: context.screenshotDirectory,
     headed: context.headed,
+    ...(route?.kind === "proxy" && route.proxyUrl ? { proxyUrl: route.proxyUrl } : {}),
+    ...(launchArguments.length > 0 ? { launchArguments } : {}),
+    ...(route?.consistency.timezone ? { timezone: route.consistency.timezone } : {}),
     ...(context.browserExecutablePath
       ? { browserExecutablePath: context.browserExecutablePath }
       : {}),
@@ -855,6 +1518,18 @@ async function createBrowserDriver(
     browserSessionId: context.browserSessionId,
     controllerGeneration: context.controllerGeneration,
     runner,
+    downloadDirectory: context.downloadDirectory,
+    ...(context.downloadEvents ? { downloadEvents: context.downloadEvents } : {}),
+    resolveWorkspaceFiles: context.resolveWorkspaceFiles,
+    ...(route
+      ? {
+          emulation: {
+            locale: route.consistency.locale,
+            timezone: route.consistency.timezone,
+            geolocation: route.consistency.geolocation,
+          },
+        }
+      : {}),
   });
 }
 
@@ -876,11 +1551,17 @@ function validateSessionOptions(
     throw new Error("initialUrl exceeds its byte envelope");
   }
   const transport = validateBrowserTransport(options.transport ?? { kind: "managed" });
+  const networkRoute = options.networkRoute
+    ? validateBrowserNetworkRoute(options.networkRoute, transport)
+    : undefined;
   if (options.linkedComputer) {
-    if (transport.kind !== "managed" || !options.headed) {
+    const managedHeaded =
+      transport.kind === "managed" && transport.engine !== "lightpanda" && options.headed;
+    const attachedChrome = transport.kind === "attached_chrome" && options.headed;
+    if (!managedHeaded && !attachedChrome) {
       throw new InteractionControllerError(
         "unsupported",
-        "linked ComputerSessions require a managed headed browser",
+        "linked ComputerSessions require a headed managed or attached browser",
       );
     }
     if (!isUuid(options.linkedComputer.computerSessionId)) {
@@ -889,8 +1570,11 @@ function validateSessionOptions(
     if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u.test(options.linkedComputer.controllerGeneration)) {
       throw new Error("linked ComputerSession controller generation is invalid");
     }
-    if (!options.launchEnvironment) {
+    if (managedHeaded && !options.launchEnvironment) {
       throw new Error("linked ComputerSession launch environment is absent");
+    }
+    if (attachedChrome && options.launchEnvironment) {
+      throw new Error("attached Chrome does not consume a browser launch environment");
     }
   } else if (options.launchEnvironment) {
     throw new Error("browser launch environment requires a linked ComputerSession");
@@ -907,16 +1591,85 @@ function validateSessionOptions(
       throw new Error("attached Chrome cannot select another browser executable");
     }
   }
-  const { restore, transport: _transport, ...session } = options;
+  if (transport.kind === "external_provider") {
+    if (options.restore) {
+      throw new InteractionControllerError(
+        "unsupported",
+        "external browser providers cannot restore a portable BrowserIdentity revision",
+      );
+    }
+    if (options.browserExecutablePath) {
+      throw new Error("external browser providers cannot select a local browser executable");
+    }
+    if (options.networkRoute && options.networkRoute.kind !== "managed") {
+      throw new InteractionControllerError(
+        "unsupported",
+        "external browser providers require a provider-managed network route",
+      );
+    }
+  }
+  if (transport.kind === "managed" && transport.engine === "lightpanda") {
+    if (options.headed) {
+      throw new InteractionControllerError("unsupported", "Lightpanda is headless-only");
+    }
+    if (options.restore) {
+      throw new InteractionControllerError(
+        "unsupported",
+        "Lightpanda cannot restore a Chromium browser identity",
+      );
+    }
+    if (options.networkRoute) {
+      throw new InteractionControllerError(
+        "unsupported",
+        "Lightpanda network routes are not supported yet",
+      );
+    }
+  }
+  const { restore, transport: _transport, networkRoute: _networkRoute, ...session } = options;
   return {
     ...session,
     transport,
+    ...(networkRoute ? { networkRoute } : {}),
     ...(restore ? { restore: validateRestoreInput(restore) } : {}),
   };
 }
 
 function validateBrowserTransport(input: BrowserSupervisorTransport): BrowserSupervisorTransport {
-  if (input.kind === "managed") return { kind: "managed" };
+  if (input.kind === "managed") {
+    if (
+      input.engine !== undefined &&
+      input.engine !== "chromium" &&
+      input.engine !== "lightpanda"
+    ) {
+      throw new Error("managed browser engine is unsupported");
+    }
+    return { kind: "managed", engine: input.engine ?? "chromium" };
+  }
+  if (input.kind === "external_provider") {
+    if (input.providerId !== "browserbase" && input.providerId !== "kernel") {
+      throw new Error("external browser provider is unsupported");
+    }
+    const timeoutSeconds = input.timeoutSeconds;
+    if (
+      timeoutSeconds !== undefined &&
+      (!Number.isSafeInteger(timeoutSeconds) || timeoutSeconds < 1 || timeoutSeconds > 86_400)
+    ) {
+      throw new Error("external browser timeout is invalid");
+    }
+    return {
+      kind: "external_provider",
+      providerId: input.providerId,
+      placementId: boundedText(input.placementId, 1, 512, "external browser placement id"),
+      authority: {
+        apiKey: providerCredential(input.authority.apiKey),
+        ...(input.authority.endpoint
+          ? { endpoint: providerEndpoint(input.authority.endpoint) }
+          : {}),
+      },
+      ...(timeoutSeconds === undefined ? {} : { timeoutSeconds }),
+      ...(input.stealth === undefined ? {} : { stealth: input.stealth }),
+    };
+  }
   if (input.kind !== "attached_chrome") throw new Error("browser transport is unsupported");
   if (!isUuid(input.deviceId)) throw new Error("attached browser id must be a UUID");
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,511}$/u.test(input.connectionGeneration)) {
@@ -932,6 +1685,194 @@ function validateBrowserTransport(input: BrowserSupervisorTransport): BrowserSup
     browserVersion,
     ...(input.authorityFile ? { authorityFile: resolve(input.authorityFile) } : {}),
   };
+}
+
+function providerCredential(value: string): string {
+  if (
+    Buffer.byteLength(value) < 1 ||
+    Buffer.byteLength(value) > 8_192 ||
+    /[\u0000-\u001f\u007f]/u.test(value)
+  ) {
+    throw new Error("external browser provider credential is invalid");
+  }
+  return value;
+}
+
+function providerEndpoint(value: string): string {
+  if (Buffer.byteLength(value) > 16_384) {
+    throw new Error("external browser provider endpoint is invalid");
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error("external browser provider endpoint is invalid");
+  }
+  if (
+    (parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
+    parsed.username ||
+    parsed.password ||
+    parsed.hash
+  ) {
+    throw new Error("external browser provider endpoint is invalid");
+  }
+  return parsed.toString().replace(/\/$/u, "");
+}
+
+function validateBrowserNetworkRoute(
+  input: BrowserSupervisorNetworkRoute,
+  transport: BrowserSupervisorTransport,
+): BrowserSupervisorNetworkRoute {
+  if (!isUuid(input.routeId)) throw new Error("network route id must be a UUID");
+  if (!Number.isSafeInteger(input.routeVersion) || input.routeVersion < 1) {
+    throw new Error("network route version is invalid");
+  }
+  if (!/^[A-Za-z0-9._~-]{16,256}$/u.test(input.authorityDigest)) {
+    throw new Error("network route authority digest is invalid");
+  }
+  if (
+    input.kind !== "direct" &&
+    input.kind !== "proxy" &&
+    input.kind !== "managed" &&
+    input.kind !== "tunnel"
+  ) {
+    throw new Error("network route kind is unsupported");
+  }
+  const consistency = NetworkRouteConsistency.parse(input.consistency);
+  if (consistency.locale) validateLocale(consistency.locale);
+  if (consistency.timezone) validateTimezone(consistency.timezone);
+  const expectedDns =
+    input.kind === "proxy" ? "proxy" : input.kind === "managed" ? "provider" : "placement";
+  if (consistency.dns !== expectedDns) {
+    throw new InteractionControllerError(
+      "unsupported",
+      `network route ${input.kind} cannot provide ${consistency.dns} DNS`,
+    );
+  }
+  if (consistency.webRtc === "proxy_only" && input.kind !== "proxy" && input.kind !== "managed") {
+    throw new InteractionControllerError(
+      "unsupported",
+      "WebRTC proxy-only routing requires a proxy network route",
+    );
+  }
+  if (transport.kind === "attached_chrome" && input.kind === "proxy") {
+    throw new InteractionControllerError(
+      "unsupported",
+      "attached Chrome cannot change its process-scoped proxy route",
+    );
+  }
+  if (
+    transport.kind === "attached_chrome" &&
+    (consistency.locale !== null ||
+      consistency.timezone !== null ||
+      consistency.geolocation !== null ||
+      consistency.webRtc !== "default")
+  ) {
+    throw new InteractionControllerError(
+      "unsupported",
+      "attached Chrome cannot change process-scoped route emulation",
+    );
+  }
+  if (input.kind !== "proxy" && input.proxyUrl !== undefined) {
+    throw new Error("non-proxy network route contains proxy authority");
+  }
+  const providerRoute =
+    input.providerRoute === undefined ? undefined : validateProviderRoute(input.providerRoute);
+  if (input.kind !== "managed" && providerRoute !== undefined) {
+    throw new Error("non-managed network route contains provider material");
+  }
+  if (input.kind === "managed" && providerRoute === undefined) {
+    throw new Error("managed network route omits provider material");
+  }
+  if (input.kind === "managed") {
+    if (transport.kind !== "external_provider") {
+      throw new InteractionControllerError(
+        "unsupported",
+        "managed network routes require an external browser provider",
+      );
+    }
+    if (providerRoute?.providerId !== transport.providerId) {
+      throw new InteractionControllerError(
+        "unsupported",
+        "managed network route belongs to another browser provider",
+      );
+    }
+  }
+  const proxyUrl = input.proxyUrl === undefined ? undefined : validateProxyUrl(input.proxyUrl);
+  return {
+    routeId: input.routeId,
+    routeVersion: input.routeVersion,
+    authorityDigest: input.authorityDigest,
+    kind: input.kind,
+    consistency,
+    ...(proxyUrl === undefined ? {} : { proxyUrl }),
+    ...(providerRoute === undefined ? {} : { providerRoute }),
+  };
+}
+
+function validateProviderRoute(
+  input: NonNullable<BrowserSupervisorNetworkRoute["providerRoute"]>,
+): NonNullable<BrowserSupervisorNetworkRoute["providerRoute"]> {
+  if (input.providerId !== "browserbase" && input.providerId !== "kernel") {
+    throw new Error("managed network route provider is unsupported");
+  }
+  if (
+    input.egressClass !== "datacenter" &&
+    input.egressClass !== "residential" &&
+    input.egressClass !== "isp"
+  ) {
+    throw new Error("managed network route egress class is invalid");
+  }
+  return {
+    providerId: input.providerId,
+    routeId: boundedOpaqueText(input.routeId, 1, 512, "managed network route provider id"),
+    egressClass: input.egressClass,
+    region:
+      input.region === null
+        ? null
+        : boundedOpaqueText(input.region, 1, 128, "managed network route region"),
+  };
+}
+
+function validateLocale(value: string): void {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(value)) {
+    throw new Error("network route locale is invalid");
+  }
+  try {
+    if (Intl.getCanonicalLocales(value).length !== 1) throw new Error();
+  } catch {
+    throw new Error("network route locale is unsupported");
+  }
+}
+
+function validateTimezone(value: string): void {
+  if (/[,\r\n\0]/u.test(value)) throw new Error("network route timezone is invalid");
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: value }).format();
+  } catch {
+    throw new Error("network route timezone is unsupported");
+  }
+}
+
+function validateProxyUrl(value: string): string {
+  if (Buffer.byteLength(value) > 16_384) throw new Error("proxy authority exceeds its envelope");
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("proxy authority URL is invalid");
+  }
+  if (
+    !["http:", "https:", "socks5:"].includes(url.protocol) ||
+    !url.hostname ||
+    (!url.port && url.protocol !== "http:" && url.protocol !== "https:") ||
+    (url.pathname !== "" && url.pathname !== "/") ||
+    url.search ||
+    url.hash
+  ) {
+    throw new Error("proxy authority URL is invalid");
+  }
+  return url.toString();
 }
 
 function validateRestoreInput(input: BrowserStateRestoreInput): ValidatedBrowserStateRestoreInput {
@@ -995,11 +1936,30 @@ function validateRestoreInput(input: BrowserStateRestoreInput): ValidatedBrowser
 }
 
 function runtimeOptions(options: ValidatedBrowserSupervisorSessionOptions): BrowserRuntimeOptions {
-  const { restore, launchEnvironment: _launchEnvironment, ...runtime } = options;
+  const { restore, launchEnvironment: _launchEnvironment, networkRoute, ...runtime } = options;
   return {
     ...runtime,
     restoreAuthorityDigest: restoreAuthorityDigest(restore),
+    networkRouteAuthorityDigest: networkRoute?.authorityDigest ?? null,
+    networkRouteMaterialDigest: networkRoute ? networkRouteMaterialDigest(networkRoute) : null,
   };
+}
+
+function networkRouteMaterialDigest(route: BrowserSupervisorNetworkRoute): string {
+  return createHash("sha256")
+    .update(
+      canonicalJson({
+        routeId: route.routeId,
+        routeVersion: route.routeVersion,
+        authorityDigest: route.authorityDigest,
+        kind: route.kind,
+        consistency: route.consistency,
+        proxyUrl: route.proxyUrl ?? null,
+        providerRoute: route.providerRoute ?? null,
+      }),
+      "utf8",
+    )
+    .digest("hex");
 }
 
 function restoreAuthorityDigest(
@@ -1192,6 +2152,19 @@ function boundedText(value: unknown, minimum: number, maximum: number, label: st
   return value;
 }
 
+function boundedOpaqueText(
+  value: unknown,
+  minimum: number,
+  maximum: number,
+  label: string,
+): string {
+  const text = boundedText(value, minimum, maximum, label);
+  if (text.trim() !== text || /[\u0000-\u001f\u007f]/u.test(text)) {
+    throw new Error(`${label} is invalid`);
+  }
+  return text;
+}
+
 type ValidatedBrowserStateCaptureInput = BrowserSessionReference & {
   operationId: string;
   objectKey: string;
@@ -1266,6 +2239,12 @@ function profileManifest(
   runtime: Runtime,
   snapshot: BrowserRuntimeSnapshot,
 ): BrowserProfileManifest {
+  if (snapshot.engine === "lightpanda") {
+    throw new InteractionControllerError(
+      "unsupported",
+      "Lightpanda sessions do not support portable browser profile capture",
+    );
+  }
   const platform =
     process.platform === "darwin"
       ? "macos"

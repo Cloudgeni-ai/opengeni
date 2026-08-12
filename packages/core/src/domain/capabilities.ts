@@ -1,5 +1,3 @@
-import { existsSync } from "node:fs";
-import { readdir, readFile } from "node:fs/promises";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
@@ -7,12 +5,17 @@ import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config"
 import {
   CapabilityCatalogItem,
   capabilityCatalogItemIsTrustedForExposure,
+  FIKEN_PROVIDER_DOMAIN,
+  FIRST_PARTY_MCP_TOOL_NAMES,
   type AccessGrant,
+  type CapabilityAction,
   type CapabilityCatalogResponse,
   type CapabilityInstallation,
+  type ConnectionMetadata,
   type CreateCapabilityCatalogItemRequest,
   type EnableCapabilityRequest,
   type McpServerConnectionRef,
+  type McpPersonalConnectionDelegation,
   type SocialConnection,
 } from "@opengeni/contracts";
 import {
@@ -40,16 +43,19 @@ import {
   listCapabilityInstallations,
   listConnectionsMetadata,
   listEnabledMcpCapabilityServers,
+  listInstalledApiIntegrations,
   listPackInstallations,
   listSocialConnections,
   mcpServerIdForCapability,
   updatePackInstallationStatus,
   upsertCapabilityCatalogItem,
   type Database,
+  type ApiIntegrationRuntime,
   type EnabledMcpCapabilityServer,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 import { hasPermission } from "../access";
+import { isFikenConnection, preferredFikenConnection } from "./fiken";
 import {
   getSkillLibraryEntry,
   listSkillLibraryEntries,
@@ -58,6 +64,7 @@ import {
 import { validateVariableSetAttachment } from "./environments";
 import {
   assertPackSandboxImageCompatible,
+  capabilityPackRequiresInstallationPlan,
   listCapabilityPacks,
   listWorkspaceCapabilityPacks,
   resolveCapabilityPack,
@@ -70,6 +77,7 @@ const mcpRegistryMaxPages = 3;
 const mcpCapabilityProbeTimeoutMs = 15000;
 const maxMcpCredentialHeaders = 16;
 const maxMcpCredentialHeaderValueLength = 4096;
+const officialGmailMcpUrl = "https://gmailmcp.googleapis.com/mcp/v1";
 // RFC 9110 field-name token characters.
 const mcpCredentialHeaderName = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/;
 
@@ -85,7 +93,7 @@ export async function buildCapabilityCatalog(input: {
     packInstallations,
     workspacePacks,
     socialConnections,
-    bundledSkills,
+    workspaceConnections,
     curatedLibrarySkills,
     codexAppsCredentialId,
   ] = await Promise.all([
@@ -94,7 +102,7 @@ export async function buildCapabilityCatalog(input: {
     listPackInstallations(input.db, input.workspaceId),
     listWorkspaceCapabilityPacks(input.db, input.workspaceId),
     listSocialConnections(input.db, input.workspaceId, 500, input.subjectId),
-    discoverBundledSkills(),
+    listConnectionsMetadata(input.db, input.workspaceId, null),
     discoverCuratedSkillLibraryItems(),
     input.settings.codexConnectedAppsEnabled
       ? resolveCodexAppsCredentialIdForRun(input.db, input.workspaceId)
@@ -114,8 +122,8 @@ export async function buildCapabilityCatalog(input: {
       packCatalogItem(pack, builtInPackIds.has(pack.id) ? "built_in" : "manual"),
     ),
     ...configuredMcpCatalogItems(input.settings),
-    ...platformApiCatalogItems(socialConnections),
-    ...bundledSkills,
+    ...providerIntegrationCatalogItems(socialConnections),
+    fikenCatalogItem(workspaceConnections.filter(isFikenConnection)),
     ...curatedLibrarySkills,
   ];
   const codexApps = input.settings.codexConnectedAppsEnabled
@@ -128,13 +136,57 @@ export async function buildCapabilityCatalog(input: {
     // legacy catalog row with the same id.
     ...(codexApps ? [codexApps] : []),
   ])
-    .map((item) =>
-      applyCapabilityEnablement(item, capabilityInstallationById.get(item.id), activePackIds),
-    )
+    .map((item) => {
+      const runtimeItem = applyInstalledArtifactRuntime(item);
+      const projected = applyCapabilityEnablement(
+        runtimeItem,
+        capabilityInstallationById.get(runtimeItem.id),
+        activePackIds,
+      );
+      return applyCapabilityLifecycle(projected);
+    })
     .sort(compareCatalogItems);
   return {
     items,
     installations: capabilityInstallations,
+  };
+}
+
+function applyInstalledArtifactRuntime(item: CapabilityCatalogItem): CapabilityCatalogItem {
+  if (
+    item.kind === "api" &&
+    item.metadata.platformVersion === 2 &&
+    typeof item.metadata.pluginVersionId === "string" &&
+    typeof item.metadata.apiFacetId === "string" &&
+    typeof item.metadata.revisionId === "string" &&
+    typeof item.metadata.serverId === "string"
+  ) {
+    return {
+      ...item,
+      runtime: {
+        available: true,
+        mcpServerId: item.metadata.serverId,
+        transport: "local-adapter",
+        notes: "Available through an immutable workspace API Integration revision.",
+      },
+    };
+  }
+  if (
+    item.kind !== "skill" ||
+    item.metadata.platformVersion !== 2 ||
+    typeof item.metadata.pluginVersionId !== "string" ||
+    typeof item.metadata.facetId !== "string" ||
+    typeof item.metadata.sourceCommit !== "string" ||
+    typeof item.metadata.contentSha256 !== "string"
+  ) {
+    return item;
+  }
+  return {
+    ...item,
+    runtime: {
+      available: true,
+      notes: "Installed from an immutable workspace Skill artifact.",
+    },
   };
 }
 
@@ -294,6 +346,12 @@ export async function enableCapability(input: {
     if (!pack) {
       throw new HTTPException(404, { message: "pack not found" });
     }
+    if (capabilityPackRequiresInstallationPlan(pack)) {
+      throw new HTTPException(409, {
+        message:
+          "This Pack uses component or Rig requirements. Preview and install it through the Pack installation flow.",
+      });
+    }
     await assertPackSandboxImageCompatible(input.db, input.workspaceId, pack);
     // The unified capability-enable path accepts an initial variableSet
     // attachment (`payload.variableSetId`), mirroring POST /packs/:id/enable:
@@ -435,11 +493,15 @@ function normalizedMcpCredentialHeaders(
   const seen = new Set<string>();
   for (const [name, value] of entries) {
     if (!mcpCredentialHeaderName.test(name)) {
-      throw new HTTPException(422, { message: `invalid credential header name: ${name}` });
+      throw new HTTPException(422, {
+        message: `invalid credential header name: ${name}`,
+      });
     }
     const lower = name.toLowerCase();
     if (seen.has(lower)) {
-      throw new HTTPException(422, { message: `duplicate credential header name: ${name}` });
+      throw new HTTPException(422, {
+        message: `duplicate credential header name: ${name}`,
+      });
     }
     seen.add(lower);
     if (value.length === 0 || value.length > maxMcpCredentialHeaderValueLength) {
@@ -465,6 +527,15 @@ async function validateMcpCapabilityConnectionRef(
   ref: McpServerConnectionRef,
 ): Promise<McpServerConnectionRef> {
   const subjectScope = ref.subjectScope ?? "workspace";
+  const personalOnly =
+    item.metadata.connectionOwnership === "personal_only" ||
+    item.endpointUrl?.replace(/\/+$/, "") === officialGmailMcpUrl;
+  if (personalOnly && subjectScope !== "subject") {
+    throw new HTTPException(422, {
+      message:
+        "this capability requires a personal connection; each workspace member must connect their own account",
+    });
+  }
   const normalized: McpServerConnectionRef = {
     providerDomain: ref.providerDomain.trim(),
     subjectScope,
@@ -474,11 +545,17 @@ async function validateMcpCapabilityConnectionRef(
     ...(ref.scopes ? { scopes: uniqueStrings(ref.scopes) } : {}),
     ...(ref.resource ? { resource: ref.resource } : {}),
     ...(ref.selectedResources
-      ? { selectedResources: ref.selectedResources.map((resource) => ({ ...resource })) }
+      ? {
+          selectedResources: ref.selectedResources.map((resource) => ({
+            ...resource,
+          })),
+        }
       : {}),
   };
   if (!normalized.providerDomain) {
-    throw new HTTPException(422, { message: "connectionRef.providerDomain is required" });
+    throw new HTTPException(422, {
+      message: "connectionRef.providerDomain is required",
+    });
   }
   if (!item.endpointUrl || !item.runtime.mcpServerId) {
     throw new HTTPException(422, {
@@ -722,6 +799,20 @@ export async function disableCapability(input: {
     });
   }
   if (item.kind === "pack") {
+    const packInstallation = await getPackInstallation(
+      input.db,
+      input.workspaceId,
+      packIdFromCapabilityId(item.id),
+    );
+    if (
+      packInstallation &&
+      (packInstallation.manifestDigest !== null || packInstallation.manifestSnapshot !== null)
+    ) {
+      throw new HTTPException(409, {
+        message:
+          "This Pack owns explicit components. Uninstall it through the Pack uninstall preview flow.",
+      });
+    }
     await updatePackInstallationStatus(
       input.db,
       input.workspaceId,
@@ -739,7 +830,9 @@ export async function disableCapability(input: {
       });
     }
   } else if (!(await getCapabilityInstallation(input.db, input.workspaceId, item.id))) {
-    throw new HTTPException(409, { message: "capability is not currently enabled" });
+    throw new HTTPException(409, {
+      message: "capability is not currently enabled",
+    });
   }
   return await disableCapabilityInstallation(input.db, input.workspaceId, item.id);
 }
@@ -748,15 +841,107 @@ export async function settingsWithEnabledCapabilityMcpServers(
   db: Database,
   workspaceId: string,
   settings: Settings,
+  options?: {
+    subjectId?: string;
+    personalConnectionDelegations?: readonly McpPersonalConnectionDelegation[];
+    onResolvedApiIntegrations?: (integrations: readonly ApiIntegrationRuntime[]) => void;
+  },
 ): Promise<Settings> {
-  const [enabled, codexAppsCredentialId] = await Promise.all([
+  const apiIntegrationsPromise = options?.subjectId
+    ? listInstalledApiIntegrations(db, workspaceId, options.subjectId)
+    : listInstalledApiIntegrationsForDelegations(
+        db,
+        workspaceId,
+        options?.personalConnectionDelegations ?? [],
+      );
+  const [enabled, apiIntegrations, codexAppsCredentialId] = await Promise.all([
     listEnabledMcpCapabilityServers(db, workspaceId),
+    apiIntegrationsPromise,
     resolveCodexAppsCredentialIdForRun(db, workspaceId),
   ]);
+  options?.onResolvedApiIntegrations?.(apiIntegrations);
   return settingsWithCodexAppsMcpServer(
-    settingsWithMcpCapabilityServers(settings, enabled),
+    settingsWithApiIntegrationServers(
+      settingsWithMcpCapabilityServers(settings, enabled),
+      apiIntegrations,
+    ),
     codexAppsCredentialId !== null,
   );
+}
+
+export function apiIntegrationsMatchingDelegations(
+  integrations: readonly ApiIntegrationRuntime[],
+  delegations: readonly McpPersonalConnectionDelegation[],
+): ApiIntegrationRuntime[] {
+  const exact = new Set(
+    delegations.map((delegation) =>
+      [
+        delegation.serverId,
+        delegation.connectionId,
+        delegation.providerDomain.toLowerCase(),
+        delegation.kind ?? "",
+      ].join("\u0000"),
+    ),
+  );
+  return integrations.filter((integration) => {
+    const ref = integration.connectionRef;
+    if (!ref || ref.subjectScope !== "subject" || !ref.connectionId) return false;
+    return exact.has(
+      [
+        integration.serverId,
+        ref.connectionId,
+        ref.providerDomain.toLowerCase(),
+        ref.kind ?? "",
+      ].join("\u0000"),
+    );
+  });
+}
+
+async function listInstalledApiIntegrationsForDelegations(
+  db: Database,
+  workspaceId: string,
+  delegations: readonly McpPersonalConnectionDelegation[],
+): Promise<ApiIntegrationRuntime[]> {
+  const workspace = await listInstalledApiIntegrations(db, workspaceId);
+  if (delegations.length === 0) return workspace;
+  const owners = [...new Set(delegations.map((delegation) => delegation.ownerSubjectId))];
+  const delegatedByOwner = await Promise.all(
+    owners.map(async (subjectId) =>
+      apiIntegrationsMatchingDelegations(
+        await listInstalledApiIntegrations(db, workspaceId, subjectId),
+        delegations.filter((delegation) => delegation.ownerSubjectId === subjectId),
+      ),
+    ),
+  );
+  const byServerId = new Map(workspace.map((integration) => [integration.serverId, integration]));
+  for (const integration of delegatedByOwner.flat())
+    byServerId.set(integration.serverId, integration);
+  return [...byServerId.values()];
+}
+
+export function settingsWithApiIntegrationServers(
+  settings: Settings,
+  integrations: readonly ApiIntegrationRuntime[],
+): Settings {
+  if (integrations.length === 0) return settings;
+  const existingIds = new Set(settings.mcpServers.map((server) => server.id));
+  const dynamicServers = integrations
+    .filter((integration) => !existingIds.has(integration.serverId))
+    .map((integration) => ({
+      id: integration.serverId,
+      name: integration.name,
+      // Local adapters never send MCP traffic to this URL. Keeping the exact
+      // provider base URL in Settings preserves destination identity for policy,
+      // diagnostics, and the stable session-MCP approval fallback.
+      url: integration.baseUrl,
+      allowedTools: [...integration.allowedTools],
+      cacheToolsList: true,
+      requireApproval: integration.requireApproval,
+      ...(integration.connectionRef ? { connectionRef: integration.connectionRef } : {}),
+    }));
+  return dynamicServers.length
+    ? { ...settings, mcpServers: [...settings.mcpServers, ...dynamicServers] }
+    : settings;
 }
 
 /**
@@ -848,6 +1033,9 @@ export function settingsWithMcpCapabilityServers(
           ...(server.allowedTools ? { allowedTools: server.allowedTools } : {}),
           ...(server.timeoutMs ? { timeoutMs: server.timeoutMs } : {}),
           cacheToolsList: server.cacheToolsList ?? false,
+          ...(server.requireApproval !== undefined
+            ? { requireApproval: server.requireApproval }
+            : {}),
           ...(headers && headers !== "unavailable" ? { headers } : {}),
           ...(server.connectionRef ? { connectionRef: server.connectionRef } : {}),
         },
@@ -933,7 +1121,9 @@ async function fetchMcpRegistryPage(
   try {
     const response = await fetchImpl(url, { signal: controller.signal });
     if (!response.ok) {
-      throw new HTTPException(502, { message: `MCP registry returned ${response.status}` });
+      throw new HTTPException(502, {
+        message: `MCP registry returned ${response.status}`,
+      });
     }
     return (await response.json()) as McpRegistryPage;
   } catch (error) {
@@ -941,7 +1131,9 @@ async function fetchMcpRegistryPage(
       throw error;
     }
     if (error instanceof Error && error.name === "AbortError") {
-      throw new HTTPException(504, { message: "MCP registry request timed out" });
+      throw new HTTPException(504, {
+        message: "MCP registry request timed out",
+      });
     }
     throw new HTTPException(502, {
       message: `MCP registry request failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -1014,34 +1206,40 @@ function packCatalogItem(
 }
 
 function configuredMcpCatalogItems(settings: Settings): CapabilityCatalogItem[] {
-  return settings.mcpServers
-    .filter((server) => server.id !== CODEX_APPS_MCP_SERVER_ID)
-    .map((server) =>
-      CapabilityCatalogItem.parse({
-        id: `mcp:${server.id}`,
-        kind: "mcp",
-        source: firstPartyMcpServerIds.has(server.id) ? "built_in" : "configured",
-        name: server.name ?? server.id,
-        description: firstPartyMcpDescription(server.id),
-        category: firstPartyMcpServerIds.has(server.id) ? "platform" : "configured",
-        tags: ["mcp", ...(server.allowedTools?.length ? ["limited-tools"] : [])],
-        endpointUrl: server.url,
-        tools: [{ kind: "mcp", id: server.id }],
-        runtime: {
-          available: true,
-          mcpServerId: server.id,
-          transport: "streamable-http",
-          notes: firstPartyMcpServerIds.has(server.id)
-            ? "Available from OpenGeni runtime configuration."
-            : "Configured through OPENGENI_MCP_SERVERS.",
-        },
-        metadata: {
-          mcpServerId: server.id,
-          allowedTools: server.allowedTools ?? [],
-          cacheToolsList: server.cacheToolsList,
-        },
-      }),
-    );
+  return (
+    settings.mcpServers
+      // OpenGeni, Files, and Document Search are native runtime surfaces. They
+      // remain available to sessions through configuration, but are not things a
+      // user installs, connects, or enables in the Capabilities control center.
+      .filter(
+        (server) =>
+          server.id !== CODEX_APPS_MCP_SERVER_ID && !firstPartyMcpServerIds.has(server.id),
+      )
+      .map((server) =>
+        CapabilityCatalogItem.parse({
+          id: `mcp:${server.id}`,
+          kind: "mcp",
+          source: "configured",
+          name: server.name ?? server.id,
+          description: null,
+          category: "configured",
+          tags: ["mcp", ...(server.allowedTools?.length ? ["limited-tools"] : [])],
+          endpointUrl: server.url,
+          tools: [{ kind: "mcp", id: server.id }],
+          runtime: {
+            available: true,
+            mcpServerId: server.id,
+            transport: "streamable-http",
+            notes: "Managed by this OpenGeni deployment through OPENGENI_MCP_SERVERS.",
+          },
+          metadata: {
+            mcpServerId: server.id,
+            allowedTools: server.allowedTools ?? [],
+            cacheToolsList: server.cacheToolsList,
+          },
+        }),
+      )
+  );
 }
 
 function isReservedCodexAppsCatalogItem(item: CapabilityCatalogItem): boolean {
@@ -1092,194 +1290,212 @@ export function codexAppsCatalogItem(available: boolean): CapabilityCatalogItem 
   });
 }
 
-function platformApiCatalogItems(socialConnections: SocialConnection[]): CapabilityCatalogItem[] {
-  const xConnection = preferredSocialConnection(socialConnections, "x");
-  const xEnabled = xConnection?.status === "connected" || xConnection?.status === "needs_reauth";
-  const x = CapabilityCatalogItem.parse({
-    id: "api:x",
-    kind: "api",
-    source: "built_in",
+type SocialProviderIntegrationDefinition = {
+  provider: "x" | "reddit";
+  name: string;
+  description: string;
+  providerDomain: string;
+  homepageUrl: string;
+  tags: string[];
+};
+
+const SOCIAL_PROVIDER_INTEGRATIONS: readonly SocialProviderIntegrationDefinition[] = [
+  {
+    provider: "x",
     name: "X",
     description:
-      "Connect an X account for live search, mentions, thread context, post sync, and permission-controlled replies.",
-    category: "social-media",
-    tags: ["api", "x", "twitter", "social", "marketing"],
-    homepageUrl: "https://x.com",
-    authModel: "oauth2_authorization_code_pkce",
+      "Connect one or more X accounts for live search, mentions, thread context, post sync, and permission-controlled replies.",
     providerDomain: "x.com",
-    surfaceType: "first_party_social",
-    authKind: "oauth2",
+    homepageUrl: "https://x.com",
+    tags: ["api", "x", "twitter", "social", "marketing"],
+  },
+  {
+    provider: "reddit",
+    name: "Reddit",
+    description:
+      "Connect one or more Reddit accounts for search, mentions, thread context, account sync, and permission-controlled replies.",
+    providerDomain: "reddit.com",
+    homepageUrl: "https://www.reddit.com",
+    tags: ["api", "reddit", "social", "community", "marketing"],
+  },
+];
+
+const SOCIAL_PROVIDER_TOOL_NAMES = {
+  x: [
+    "x_accounts_list",
+    "x_search_live",
+    "x_mentions_live",
+    "x_thread_fetch",
+    "x_posts_sync",
+    "x_post_reply",
+  ],
+  reddit: [
+    "reddit_accounts_list",
+    "reddit_search_live",
+    "reddit_mentions_live",
+    "reddit_thread_fetch",
+    "reddit_posts_sync",
+    "reddit_post_reply",
+  ],
+} as const;
+
+/**
+ * The first-party Fiken accounting connector tile. Enablement is derived from
+ * the workspace-shared verified Fiken connection (either lane), mirroring how
+ * the social provider tiles derive theirs from social connections.
+ */
+function fikenCatalogItem(fikenConnections: ConnectionMetadata[]): CapabilityCatalogItem {
+  const fikenConnection = preferredFikenConnection(fikenConnections);
+  const fikenEnabled =
+    fikenConnection?.status === "active" || fikenConnection?.status === "needs_reauth";
+  return CapabilityCatalogItem.parse({
+    id: "api:fiken",
+    kind: "api",
+    source: "built_in",
+    name: "Fiken",
+    description:
+      "Connect Fiken accounting for contacts, products, invoices, invoice drafts, purchases, sales, and bank accounts.",
+    category: "finance",
+    tags: ["api", "fiken", "accounting", "invoicing", "norway"],
+    homepageUrl: "https://fiken.no",
+    authModel: "personal_api_token",
+    providerDomain: FIKEN_PROVIDER_DOMAIN,
+    surfaceType: "first_party_fiken",
+    authKind: "api_key",
     tools: [{ kind: "mcp", id: "opengeni" }],
     runtime: {
       available: true,
       mcpServerId: "opengeni",
-      notes: "Account access is provided through OpenGeni's first-party social tools.",
+      notes: "Fiken access is provided through OpenGeni's first-party fiken tools.",
     },
-    enabled: xEnabled,
-    enabledReason: xEnabled
-      ? xConnection.status === "connected"
-        ? `${xConnection.ownership} social account connected`
-        : `${xConnection.ownership} social account needs reconnection`
+    enabled: fikenEnabled,
+    enabledReason: fikenEnabled
+      ? fikenConnection.status === "active"
+        ? "workspace Fiken connection active"
+        : "workspace Fiken connection needs reconnection"
       : null,
     metadata: {
-      connectorMode: "first_party_social",
-      provider: "x",
-      ownership: xConnection?.ownership ?? "workspace",
-      firstPartyMcpTools: [
-        "social_connections_list",
-        "social_posts_recent",
-        "social_daily_analysis_context",
-        "social_search_live",
-        "social_mentions_live",
-        "social_thread_fetch",
-        "social_posts_sync",
-        "social_post_reply",
-      ],
+      connectorMode: "first_party_fiken",
+      ownership: "workspace",
+      // Derived from the contracts catalog so a new fiken_* tool cannot be
+      // registered without also appearing on the capability tile.
+      firstPartyMcpTools: FIRST_PARTY_MCP_TOOL_NAMES.filter((name) => name.startsWith("fiken_")),
     },
   });
-  const platformApiDefinitions: Array<{
-    id: string;
-    name: string;
-    description: string;
-    category: string;
-    tags: string[];
-    endpointPath: string;
-    homepageUrl?: string;
-    providerDomain?: string;
-    authModel?: string;
-    authKind?: "oauth2" | "api_key" | "none" | "unknown";
-    surfaceType?: string;
-    firstPartyMcpTools?: string[];
-  }> = [
-    {
+}
+
+function providerIntegrationCatalogItems(
+  socialConnections: SocialConnection[],
+): CapabilityCatalogItem[] {
+  return SOCIAL_PROVIDER_INTEGRATIONS.map((definition) => {
+    const counts = socialConnectionCounts(socialConnections, definition.provider);
+    const enabled = counts.connected + counts.needsReauth > 0;
+    return CapabilityCatalogItem.parse({
+      id: `api:${definition.provider}`,
+      kind: "api",
+      source: "built_in",
+      name: definition.name,
+      description: definition.description,
+      category: "social-media",
+      tags: definition.tags,
+      homepageUrl: definition.homepageUrl,
+      authModel: "oauth2_authorization_code_pkce",
+      providerDomain: definition.providerDomain,
+      surfaceType: "provider_integration",
+      authKind: "oauth2",
+      tools: [{ kind: "mcp", id: "opengeni" }],
+      runtime: {
+        available: true,
+        mcpServerId: "opengeni",
+        notes:
+          "OpenGeni's social provider adapter routes every call through an exact visible account Connection.",
+      },
+      enabled,
+      enabledReason: socialConnectionSummary(counts),
+      provenance: "OpenGeni provider adapter",
+      metadata: {
+        providerAdapter: "social",
+        provider: definition.provider,
+        connectionCounts: counts,
+        runtimeNamespace: "social",
+        firstPartyMcpTools: SOCIAL_PROVIDER_TOOL_NAMES[definition.provider],
+      },
+    });
+  });
+}
+
+/**
+ * Native product connection recommendations are intentionally separate from
+ * the installable catalog returned to the Capabilities UI. Agents may still
+ * recommend the owning product flow without manufacturing an enabled catalog
+ * row for GitHub resources, Documents, schedules, or other platform features.
+ */
+export function nativeConnectionCapabilityRecommendations(): CapabilityCatalogItem[] {
+  return [
+    CapabilityCatalogItem.parse({
       id: "api:github-app",
+      kind: "api",
+      source: "built_in",
       name: "GitHub App",
-      description: "Repository discovery, scoped clone tokens, pushes, and pull requests.",
+      description: "Connect repositories through OpenGeni's GitHub resource picker.",
       category: "source-control",
-      tags: ["api", "github", "repositories"],
-      endpointPath: "/v1/workspaces/{workspaceId}/github/app",
+      tags: ["github", "repositories", "source-control"],
       homepageUrl: "https://github.com",
       providerDomain: "github.com",
       authModel: "github_app_owner_consent",
-      authKind: "oauth2" as const,
+      authKind: "oauth2",
       surfaceType: "first_party_github",
-      firstPartyMcpTools: ["github_connect_link", "github_repositories_list"],
-    },
-    {
-      id: "api:documents",
-      name: "Document Knowledge Base",
-      description: "Upload, index, search, and attach knowledge bases to agents.",
-      category: "knowledge",
-      tags: ["api", "documents", "knowledge"],
-      endpointPath: "/v1/workspaces/{workspaceId}/document-bases",
-    },
-    {
-      id: "api:social",
-      name: "Social Accounts",
-      description: "Connect social accounts and ingest posts for marketing agents.",
-      category: "marketing",
-      tags: ["api", "social", "marketing"],
-      endpointPath: "/v1/workspaces/{workspaceId}/social/connections",
-    },
-    {
-      id: "api:scheduled-tasks",
-      name: "Scheduled Tasks",
-      description: "Run agents once, on intervals, or on calendar schedules.",
-      category: "automation",
-      tags: ["api", "schedules", "agents"],
-      endpointPath: "/v1/workspaces/{workspaceId}/scheduled-tasks",
-    },
-  ];
-  const platformApis = platformApiDefinitions.map((item) =>
-    CapabilityCatalogItem.parse({
-      id: item.id,
-      name: item.name,
-      description: item.description,
-      category: item.category,
-      tags: item.tags,
-      kind: "api",
-      source: "built_in",
-      ...(item.homepageUrl ? { homepageUrl: item.homepageUrl } : {}),
-      ...(item.providerDomain ? { providerDomain: item.providerDomain } : {}),
-      ...(item.authModel ? { authModel: item.authModel } : {}),
-      ...(item.authKind ? { authKind: item.authKind } : {}),
-      ...(item.surfaceType ? { surfaceType: item.surfaceType } : {}),
-      ...(item.firstPartyMcpTools ? { tools: [{ kind: "mcp", id: "opengeni" }] } : {}),
+      tools: [{ kind: "mcp", id: "opengeni" }],
       runtime: {
         available: true,
         notes:
-          item.surfaceType === "first_party_github"
-            ? "GitHub credentials stay host-owned; a workspace owner must approve repository access."
-            : "Available through the OpenGeni API.",
+          "GitHub credentials stay host-owned; a workspace owner must approve repository access.",
       },
+      lifecycle: {
+        status: "available",
+        readiness: "setup_required",
+        detail: "Connect GitHub from the repository resource flow.",
+        managedBy: "platform",
+      },
+      actions: ["connect", "inspect"],
       metadata: {
-        endpointPath: item.endpointPath,
-        ...(item.firstPartyMcpTools ? { firstPartyMcpTools: item.firstPartyMcpTools } : {}),
+        endpointPath: "/v1/workspaces/{workspaceId}/github/app",
+        firstPartyMcpTools: ["github_connect_link", "github_repositories_list"],
+        recommendationOnly: true,
       },
     }),
-  );
-  return [x, ...platformApis];
+  ];
 }
 
-function preferredSocialConnection(
+function socialConnectionCounts(
   connections: SocialConnection[],
   provider: "x" | "reddit",
-): SocialConnection | null {
-  const statusRank = (status: SocialConnection["status"]): number =>
-    status === "connected" ? 0 : status === "needs_reauth" ? 1 : 2;
-  return (
-    connections
-      .filter((connection) => connection.provider === provider)
-      .sort(
-        (left, right) =>
-          statusRank(left.status) - statusRank(right.status) ||
-          right.updatedAt.localeCompare(left.updatedAt) ||
-          left.id.localeCompare(right.id),
-      )[0] ?? null
-  );
+): { connected: number; needsReauth: number; disabled: number; total: number } {
+  const matching = connections.filter((connection) => connection.provider === provider);
+  return {
+    connected: matching.filter((connection) => connection.status === "connected").length,
+    needsReauth: matching.filter((connection) => connection.status === "needs_reauth").length,
+    disabled: matching.filter((connection) => connection.status === "disabled").length,
+    total: matching.length,
+  };
 }
 
-async function discoverBundledSkills(): Promise<CapabilityCatalogItem[]> {
-  const skillsDir = [
-    new URL("./assets/runtime/bundled_hashicorp_terraform_skills/", import.meta.url),
-    new URL(
-      "../../../../packages/runtime/src/bundled_hashicorp_terraform_skills/",
-      import.meta.url,
-    ),
-  ].find((candidate) => existsSync(candidate));
-  if (!skillsDir) return [];
-  try {
-    const entries = await readdir(skillsDir, { withFileTypes: true });
-    const skills = await Promise.all(
-      entries
-        .filter((entry) => entry.isDirectory())
-        .map(async (entry) => {
-          const skill = await readSkillMetadata(
-            new URL(`${entry.name}/SKILL.md`, skillsDir),
-            entry.name,
-          );
-          return CapabilityCatalogItem.parse({
-            id: `skill:${entry.name}`,
-            kind: "skill",
-            source: "built_in",
-            name: skill.name,
-            description: skill.description,
-            category: skill.category,
-            tags: ["skill", skill.category],
-            runtime: {
-              available: true,
-              notes: "Bundled into the sandbox skill library.",
-            },
-            metadata: {
-              path: `packages/runtime/src/bundled_hashicorp_terraform_skills/${entry.name}/SKILL.md`,
-            },
-          });
-        }),
-    );
-    return skills;
-  } catch {
-    return [];
+function socialConnectionSummary(counts: ReturnType<typeof socialConnectionCounts>): string | null {
+  const parts: string[] = [];
+  if (counts.connected > 0) {
+    parts.push(`${counts.connected} connected account${counts.connected === 1 ? "" : "s"}`);
   }
+  if (counts.needsReauth > 0) {
+    parts.push(
+      `${counts.needsReauth} account${counts.needsReauth === 1 ? "" : "s"} need${
+        counts.needsReauth === 1 ? "s" : ""
+      } reconnection`,
+    );
+  }
+  if (counts.disabled > 0) {
+    parts.push(`${counts.disabled} disconnected account${counts.disabled === 1 ? "" : "s"}`);
+  }
+  return parts.length > 0 ? parts.join("; ") : null;
 }
 
 /**
@@ -1328,31 +1544,35 @@ function stringMetadata(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
 
-async function readSkillMetadata(
-  url: URL,
-  fallbackName: string,
-): Promise<{ name: string; description: string | null; category: string }> {
-  const content = await readFile(url, "utf8");
-  const frontMatter = content.match(/^---\n([\s\S]*?)\n---/);
-  const frontMatterBody = frontMatter?.[1] ?? "";
-  const name = frontMatterBody.match(/^name:\s*(.+)$/m)?.[1]?.trim() || fallbackName;
-  const blockDescription = frontMatterBody
-    .match(/^description:\s*>-\s*\n([\s\S]*?)(?:\n[a-zA-Z_-]+:|\n?$)/m)?.[1]
-    ?.split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .join(" ");
-  const inlineDescription = frontMatterBody.match(/^description:\s*(?!>-\s*$)(.+)$/m)?.[1]?.trim();
-  const description =
-    blockDescription || inlineDescription || content.match(/^#\s+(.+)$/m)?.[1]?.trim() || null;
-  const lower = `${fallbackName} ${name} ${description ?? ""}`.toLowerCase();
-  const category =
-    lower.includes("social") || lower.includes("marketing")
-      ? "marketing"
-      : lower.includes("checkov") || lower.includes("terraform") || lower.includes("azure")
-        ? "infrastructure"
-        : "general";
-  return { name, description, category };
+function isSocialProviderIntegration(item: CapabilityCatalogItem): boolean {
+  return (
+    item.surfaceType === "first_party_social" ||
+    (item.surfaceType === "provider_integration" && item.metadata.providerAdapter === "social")
+  );
+}
+
+function socialProviderConnectionCounts(item: CapabilityCatalogItem): {
+  connected: number;
+  needsReauth: number;
+} {
+  const value = item.metadata.connectionCounts;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {
+      connected: item.enabled && !item.enabledReason?.includes("reconnection") ? 1 : 0,
+      needsReauth: item.enabledReason?.includes("reconnection") ? 1 : 0,
+    };
+  }
+  const record = value as Record<string, unknown>;
+  return {
+    connected:
+      typeof record.connected === "number" && Number.isInteger(record.connected)
+        ? Math.max(0, record.connected)
+        : 0,
+    needsReauth:
+      typeof record.needsReauth === "number" && Number.isInteger(record.needsReauth)
+        ? Math.max(0, record.needsReauth)
+        : 0,
+  };
 }
 
 export function applyCapabilityEnablement(
@@ -1371,10 +1591,16 @@ export function applyCapabilityEnablement(
       enabledReason: enabled ? "enabled" : null,
     };
   }
-  if (item.surfaceType === "first_party_social") {
-    // Social connector state is derived from the authoritative workspace
-    // connection row while the catalog is built. Being built in means the
-    // connector is browseable, not that an account is already connected.
+  if (isSocialProviderIntegration(item)) {
+    // Provider-integration state is derived from every authoritative visible
+    // social Connection while the catalog is built. The catalog summary never
+    // publishes a personal connection UUID or collapses many accounts to one.
+    return { ...item, connectionRef: null };
+  }
+  if (item.surfaceType === "first_party_fiken") {
+    // Fiken connector state is derived from the authoritative workspace
+    // connection row while the catalog is built; browseable never means an
+    // account is already connected.
     return { ...item, connectionRef: null };
   }
   if (item.surfaceType === "codex_apps") {
@@ -1383,12 +1609,19 @@ export function applyCapabilityEnablement(
     // generic source-based "built in" enablement rule.
     return { ...item, connectionRef: null };
   }
-  if (item.source === "built_in" || item.source === "configured") {
+  if (item.source === "configured") {
     return {
       ...item,
       enabled: true,
-      enabledReason: item.source === "configured" ? "configured" : "built in",
+      enabledReason: "managed by deployment",
+      connectionRef: null,
     };
+  }
+  if (item.source === "built_in") {
+    // "Built in" describes provenance, not lifecycle. Native product
+    // surfaces and first-party connectors must project their authoritative
+    // state explicitly above rather than becoming enabled by taxonomy.
+    return { ...item, connectionRef: null };
   }
   if (item.source === "library") {
     const enabled =
@@ -1402,11 +1635,114 @@ export function applyCapabilityEnablement(
   }
   const activeInstallation = installation?.status === "active";
   const enabled = !!activeInstallation && capabilityInstallationRuntimeReady(item, installation);
+  if (item.kind === "api" && item.metadata.platformVersion === 2) {
+    const connectionBound = installation?.metadata.connectionBound === true;
+    const providerDomain = stringMetadata(installation?.metadata.providerDomain);
+    const connectionKind = stringMetadata(installation?.metadata.connectionKind);
+    const connectionOwnership = stringMetadata(installation?.metadata.connectionOwnership);
+    return {
+      ...item,
+      enabled,
+      enabledReason: enabled ? "installed immutable Integration revision" : null,
+      connectionRef:
+        enabled && connectionBound && providerDomain && connectionKind
+          ? {
+              providerDomain,
+              kind: connectionKind,
+              ...(connectionOwnership === "subject" ? { subjectScope: "subject" as const } : {}),
+            }
+          : null,
+    };
+  }
   return {
     ...item,
     enabled,
     enabledReason: enabled ? "enabled" : null,
     connectionRef: enabled && installation ? installationConnectionRef(installation.config) : null,
+  };
+}
+
+function applyCapabilityLifecycle(item: CapabilityCatalogItem): CapabilityCatalogItem {
+  if (item.source === "configured") {
+    return {
+      ...item,
+      lifecycle: {
+        status: "managed",
+        readiness: item.runtime.available ? "ready" : "unavailable",
+        detail: item.runtime.notes,
+        managedBy: "deployment",
+      },
+      actions: ["inspect"],
+    };
+  }
+
+  if (!item.runtime.available) {
+    return {
+      ...item,
+      lifecycle: {
+        status: "unavailable",
+        readiness: "unavailable",
+        detail: item.runtime.notes,
+        managedBy: item.source === "built_in" ? "platform" : null,
+      },
+      actions: ["inspect"],
+    };
+  }
+
+  if (isSocialProviderIntegration(item)) {
+    const counts = socialProviderConnectionCounts(item);
+    const needsAttention = counts.needsReauth > 0;
+    const connected = counts.connected > 0;
+    return {
+      ...item,
+      lifecycle: {
+        status: needsAttention ? "needs_attention" : connected ? "connected" : "available",
+        readiness: needsAttention ? "attention" : connected ? "ready" : "setup_required",
+        detail: item.enabledReason,
+        managedBy: null,
+      },
+      actions: needsAttention
+        ? ["repair", "connect", "disconnect", "inspect"]
+        : connected
+          ? ["connect", "configure", "disconnect", "inspect"]
+          : ["connect", "inspect"],
+    };
+  }
+
+  if (item.surfaceType === "codex_apps") {
+    return {
+      ...item,
+      lifecycle: {
+        status: item.enabled ? "connected" : "available",
+        readiness: item.enabled ? "ready" : "setup_required",
+        detail: item.enabledReason,
+        managedBy: "platform",
+      },
+      actions: item.enabled ? ["configure", "disconnect", "inspect"] : ["connect", "inspect"],
+    };
+  }
+
+  const installed = item.enabled;
+  const actions: CapabilityAction[] = installed
+    ? item.kind === "pack" || item.kind === "skill" || item.kind === "plugin"
+      ? ["configure", "update", "uninstall", "inspect"]
+      : ["configure", "disconnect", "inspect"]
+    : item.kind === "mcp" || item.kind === "api"
+      ? ["connect", "inspect"]
+      : ["install", "inspect"];
+  return {
+    ...item,
+    lifecycle: {
+      status: installed
+        ? item.kind === "mcp" || item.kind === "api"
+          ? "ready"
+          : "installed"
+        : "available",
+      readiness: installed ? "ready" : "setup_required",
+      detail: item.enabledReason,
+      managedBy: item.source === "built_in" ? "platform" : "workspace",
+    },
+    actions,
   };
 }
 
@@ -1577,19 +1913,6 @@ function normalizeCapabilitySearchText(value: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, " ")
     .trim();
-}
-
-function firstPartyMcpDescription(id: string): string | null {
-  if (id === "opengeni") {
-    return "First-party OpenGeni MCP tools for files, documents, schedules, and social analysis.";
-  }
-  if (id === "docs") {
-    return "Document-base search tools for indexed knowledge.";
-  }
-  if (id === "files") {
-    return "File download URL tools for sandbox-mounted file resources.";
-  }
-  return null;
 }
 
 function generatedCapabilityId(payload: CreateCapabilityCatalogItemRequest): string {

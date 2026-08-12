@@ -9,6 +9,7 @@ import {
   getSessionAttemptActivityRef,
   getSessionEvent,
   getSessionTurnForAttempt,
+  expireSessionInteractionIntervention as expireSessionInteractionInterventionDb,
   expireSessionHumanInputRequest,
   markSessionAttemptQuiesced,
   requireSession,
@@ -21,6 +22,8 @@ import type {
   ControlActivityServices,
   ExpireSessionHumanInputInput,
   ExpireSessionHumanInputResult,
+  ExpireSessionInteractionInterventionInput,
+  ExpireSessionInteractionInterventionResult,
   PeekSessionWorkInput,
   FailSessionAttemptInput,
   SettleSessionInterruptionsInput,
@@ -46,6 +49,7 @@ export type SessionStateActivityOverrides = Partial<{
   getSessionEvent: typeof getSessionEvent;
   getSessionTurnForAttempt: typeof getSessionTurnForAttempt;
   expireSessionHumanInputRequest: typeof expireSessionHumanInputRequest;
+  expireSessionInteractionIntervention: typeof expireSessionInteractionInterventionDb;
   requireSession: typeof requireSession;
   settleSessionIdleWithParentOutbox: typeof settleSessionIdleWithParentOutbox;
   markSessionAttemptQuiesced: typeof markSessionAttemptQuiesced;
@@ -82,6 +86,8 @@ export function createSessionStateActivities(
   const getSessionTurnForAttemptFn = overrides.getSessionTurnForAttempt ?? getSessionTurnForAttempt;
   const expireSessionHumanInputRequestFn =
     overrides.expireSessionHumanInputRequest ?? expireSessionHumanInputRequest;
+  const expireSessionInteractionInterventionFn =
+    overrides.expireSessionInteractionIntervention ?? expireSessionInteractionInterventionDb;
   const requireSessionFn = overrides.requireSession ?? requireSession;
   const settleSessionIdleWithParentOutboxFn =
     overrides.settleSessionIdleWithParentOutbox ?? settleSessionIdleWithParentOutbox;
@@ -347,6 +353,17 @@ export function createSessionStateActivities(
     };
   }
 
+  async function expireSessionInteractionIntervention(
+    input: ExpireSessionInteractionInterventionInput,
+  ): Promise<ExpireSessionInteractionInterventionResult> {
+    const { db, bus } = await services();
+    const result = await expireSessionInteractionInterventionFn(db, input);
+    if (result.events.length > 0) {
+      await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, result.events);
+    }
+    return { action: result.action };
+  }
+
   async function markSessionIdle(input: MarkSessionIdleInput): Promise<void> {
     const { db, bus, settings, observability, wakeSessionWorkflow } = await services();
     const settled = await settleSessionIdleWithParentOutboxFn(
@@ -383,6 +400,7 @@ export function createSessionStateActivities(
     recoverEscapedMcpTimeout,
     peekSessionWork,
     expireSessionHumanInput,
+    expireSessionInteractionIntervention,
     markSessionIdle,
   };
 }

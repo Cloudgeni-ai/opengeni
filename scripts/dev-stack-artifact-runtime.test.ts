@@ -53,6 +53,28 @@ describe("local artifact runtime stack contract", () => {
     expect(source.indexOf("bun run start:artifact-outbox")).toBeGreaterThan(clearOutboxPassword);
   });
 
+  test("derives the local forced-RLS app-role password from its loopback DSN", async () => {
+    const source = await Bun.file(scriptPath).text();
+    expect(source).toContain('if [ -z "${OPENGENI_APP_DATABASE_PASSWORD:-}" ]');
+    expect(source).toContain('OPENGENI_LOCAL_DATABASE_URL="$OPENGENI_DATABASE_URL"');
+    expect(source).toContain(
+      "Automatic local app-role password derivation requires a loopback database URL",
+    );
+    expect(source).toContain("export OPENGENI_APP_DATABASE_PASSWORD");
+  });
+
+  test("bridges standard local Modal credentials without persisting them", async () => {
+    const source = await Bun.file(scriptPath).text();
+    expect(source).toContain('[ "${OPENGENI_SANDBOX_BACKEND:-docker}" = "modal" ]');
+    expect(source).toContain(
+      "Bun.TOML.parse(await Bun.file(`${Bun.env.HOME}/.modal.toml`).text())",
+    );
+    expect(source).toContain("Bun.env.MODAL_PROFILE?.trim()");
+    expect(source).toContain("export OPENGENI_MODAL_TOKEN_ID OPENGENI_MODAL_TOKEN_SECRET");
+    expect(source).not.toContain("printf 'OPENGENI_MODAL_TOKEN_ID=%s");
+    expect(source).not.toContain("printf 'OPENGENI_MODAL_TOKEN_SECRET=%s");
+  });
+
   test("unsandboxed execution is explicitly local, loopback, and visible in runtime env", async () => {
     const source = await Bun.file(scriptPath).text();
     for (const line of [
@@ -83,6 +105,8 @@ describe("local artifact runtime stack contract", () => {
     );
     expect(source.indexOf(hostInternalEndpoint)).toBeLessThan(source.indexOf(">.env.runtime"));
     expect(source.indexOf(sandboxEndpoint)).toBeLessThan(source.indexOf(">.env.runtime"));
+    expect(source).toContain("export OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID=minioadmin");
+    expect(source).toContain("export OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY=minioadmin");
   });
 
   test("admits only an exact-head runtime in a source-tagged local image", async () => {

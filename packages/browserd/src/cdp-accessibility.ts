@@ -44,6 +44,29 @@ export type CdpAccessibilitySnapshot = {
   entriesByNodeId: Map<string, CdpAccessibilityEntry>;
 };
 
+/** AX ids and their relationships are scoped to one frame tree. Prefix them
+ * before combining independently fetched frame trees into one observation. */
+export function namespaceCdpAccessibilityFrame(
+  frameId: string,
+  nodes: readonly CdpAxNode[],
+  frameDocumentGeneration = frameId,
+): CdpAxNode[] {
+  const prefix = (value: string): string => `${frameDocumentGeneration}\0${value}`;
+  return nodes.map((node) => ({
+    ...node,
+    ...(typeof node.nodeId === "string" ? { nodeId: prefix(node.nodeId) } : {}),
+    ...(typeof node.parentId === "string" ? { parentId: prefix(node.parentId) } : {}),
+    ...(Array.isArray(node.childIds)
+      ? {
+          childIds: node.childIds.map((childId) =>
+            typeof childId === "string" ? prefix(childId) : childId,
+          ),
+        }
+      : {}),
+    frameId: typeof node.frameId === "string" ? node.frameId : frameId,
+  }));
+}
+
 export function normalizeCdpAccessibilityTree(options: {
   nodes: readonly CdpAxNode[];
   controllerGeneration: string;
@@ -68,6 +91,7 @@ export function normalizeCdpAccessibilityTree(options: {
       controllerGeneration: options.controllerGeneration,
       targetId: options.targetId,
       documentGeneration: options.documentGeneration,
+      frameId: typeof node.frameId === "string" ? node.frameId : null,
       nodeId,
       backendDOMNodeId,
     });
@@ -168,18 +192,20 @@ function semanticRef(options: {
   controllerGeneration: string;
   targetId: string;
   documentGeneration: string;
+  frameId: string | null;
   nodeId: string;
   backendDOMNodeId: number | null;
 }): string {
   const kind = options.backendDOMNodeId === null ? "ax" : "element";
-  const nativeId = options.backendDOMNodeId ?? options.nodeId;
   const digest = createHash("sha256")
     .update(
       [
         options.controllerGeneration,
         options.targetId,
         options.documentGeneration,
-        String(nativeId),
+        options.frameId ?? "",
+        options.nodeId,
+        options.backendDOMNodeId === null ? "" : String(options.backendDOMNodeId),
       ].join("\0"),
     )
     .digest("hex")

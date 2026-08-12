@@ -334,6 +334,57 @@ describe("runRigSetupHook (M3)", () => {
     expect(calls[0]?.workdir).toBe("/workspace");
   });
 
+  test("stages large setup scripts in bounded chunks before execution", async () => {
+    const script = `set -eu\n${"printf x >/dev/null\n".repeat(5_000)}`;
+    const calls: Array<Record<string, unknown>> = [];
+    const session = {
+      exec: async (args: Record<string, unknown>) => {
+        calls.push(args);
+        return calls.length === 1 ? { status: 42, output: "" } : { status: 0, output: "" };
+      },
+    };
+
+    await runRigSetupHook(session as any, {
+      environment: {},
+      rigSetup: rigSetup({ script }),
+    });
+
+    expect(calls.length).toBeGreaterThan(4);
+    expect(calls.every((call) => Buffer.byteLength(String(call.cmd), "utf8") < 32 * 1024)).toBe(
+      true,
+    );
+    expect(calls.some((call) => String(call.cmd).includes("base64 -d"))).toBe(true);
+    expect(calls.some((call) => String(call.cmd).includes("exec bash '/tmp/opengeni/"))).toBe(true);
+    expect(calls.every((call) => !String(call.cmd).includes(script))).toBe(true);
+  });
+
+  test("a cached large setup skips before transferring its payload", async () => {
+    const script = `set -eu\n${"printf x >/dev/null\n".repeat(5_000)}`;
+    const { session, calls } = fakeSession({
+      status: 0,
+      output: "__OPENGENI_RIG_SETUP_SKIPPED__\n",
+    });
+
+    await runRigSetupHook(session as any, {
+      environment: {},
+      rigSetup: rigSetup({ script, contentHash: `sha256:${"a".repeat(64)}` }),
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(String(calls[0]?.cmd)).not.toContain("base64");
+  });
+
+  test("chooses a heredoc delimiter that cannot terminate inside the setup script", () => {
+    const first = rigSetupScriptCommand("echo first", "version-1");
+    const delimiter = first.match(/<<'([^']+)'/)?.[1];
+    expect(delimiter).toBeTruthy();
+    const adversarial = `echo before\n${delimiter}\necho after`;
+    const command = rigSetupScriptCommand(adversarial, "version-1");
+    const selected = command.match(/<<'([^']+)'/)?.[1];
+    expect(selected).not.toBe(delimiter);
+    expect(command).toContain(adversarial);
+  });
+
   test("no-op when no rig setup is attached", async () => {
     const events: Array<{ type: string; payload: any }> = [];
     const { session, calls } = fakeSession({ status: 0, output: "" });

@@ -3,6 +3,7 @@ import { resolveFirstPartyDelegationSecret, resolveStreamTokenSecret } from "@op
 import {
   BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX,
   COMPUTER_CONTROL_WEBSOCKET_PROTOCOL,
+  COMPUTER_RFB_WEBSOCKET_PROTOCOL,
   ComputerActionCommand,
   ComputerActionRequest,
   ComputerSessionAttachment,
@@ -32,7 +33,9 @@ import {
   dispatchComputerSessionOperation,
   failComputerSessionOperation,
   findComputerSessionControlRecordByOperation,
+  getAttachedBrowserDevice,
   getComputerSessionControlRecord,
+  getEnrollment,
   getSession,
   listComputerSessions,
   prepareComputerSessionCreate,
@@ -45,21 +48,25 @@ import {
 import {
   requireAccessGrant,
   requireSessionAuthorization,
+  relayConfigFromSettings,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
+  BrowserControlClient,
   BrowserControlProtocolError,
   BrowserControlRequestError,
   BrowserControlServerError,
   BrowserControlServerUnsupportedError,
   BrowserControlTransportError,
   BrowserControlUnsupportedError,
+  buildSelfhostedBackendSession,
   buildStreamUrl,
   mintStreamToken,
+  NatsControlRpc,
+  NatsOpStreamTransport,
   provisionBrowserControlClient,
-  type BrowserControlClient,
   type BrowserControlPlacementSession,
 } from "@opengeni/runtime/sandbox";
 import type { Context, Hono } from "hono";
@@ -71,6 +78,7 @@ import {
   deriveComputerViewGrantToken,
 } from "../browser-controller-authority";
 import { allowedCorsOrigin } from "../http/cors";
+import { observeComputerActionResult, observeLifecycleResult } from "../interaction-metrics";
 import { withChannelA, type ChannelAOperation } from "../sandbox/channel-a";
 
 type ComputerPlacement = {
@@ -125,6 +133,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
     const workspaceId = context.req.param("workspaceId") ?? "";
     const grant = await requireAccessGrant(context, deps, workspaceId, "sessions:control");
     const request = await parseJsonBody(context, CreateComputerSessionRequest);
+    const startedAtMs = performance.now();
     await authorizeSourceSession(deps, grant, request.sessionId, "session.control");
     const origin = requestOrigin(context, deps.settings.corsAllowOriginRegex);
     const authority = controllerAuthorityRoot(deps);
@@ -148,7 +157,9 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
           )
         : null;
       if (prepared && isTerminalOperation(prepared.operation.state)) {
-        return context.json(ComputerSessionMutationResponse.parse(prepared), 200);
+        const parsed = ComputerSessionMutationResponse.parse(prepared);
+        observeLifecycleResult(deps.observability, startedAtMs, parsed);
+        return context.json(parsed, 200);
       }
 
       const sourceSession = await requireSourceSession(deps, workspaceId, request.sessionId);
@@ -216,7 +227,9 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
           } catch (error) {
             if (
               error instanceof BrowserControlTransportError ||
-              (error instanceof BrowserControlRequestError && error.retryable) ||
+              (error instanceof BrowserControlRequestError &&
+                error.retryable &&
+                error.error.code !== "machine_locked") ||
               isAbort(error)
             ) {
               throw error;
@@ -262,6 +275,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         },
       );
       const parsed = ComputerSessionMutationResponse.parse(response);
+      observeLifecycleResult(deps.observability, startedAtMs, parsed);
       return context.json(
         parsed,
         parsed.operation.state === "completed" && !parsed.operation.replayed ? 201 : 200,
@@ -317,6 +331,26 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
     },
   );
 
+  app.get(
+    "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/clipboard",
+    async (context) => {
+      const { workspaceId, grant, computerSessionId } = await routePreamble(
+        context,
+        "sessions:read",
+      );
+      const result = await withActiveComputerController(
+        context,
+        grant,
+        workspaceId,
+        computerSessionId,
+        "session.read",
+        "computer.read",
+        async ({ sessionClient }) => await sessionClient.readClipboard(),
+      );
+      return context.json(result);
+    },
+  );
+
   app.post(
     "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/actions",
     async (context) => {
@@ -325,6 +359,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         "sessions:control",
       );
       const request = await parseJsonBody(context, ComputerActionRequest);
+      const startedAtMs = performance.now();
       const result = await withActiveComputerController(
         context,
         grant,
@@ -348,6 +383,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
             }),
           ),
       );
+      observeComputerActionResult(deps.observability, startedAtMs, request, result);
       return context.json(result);
     },
   );
@@ -377,6 +413,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
     "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/attachments",
     async (context) => {
       const { workspaceId, grant, computerSessionId } = await routePreamble(context, "stream:view");
+      const origin = requestOrigin(context, deps.settings.corsAllowOriginRegex);
       const request = await parseJsonBody(context, ComputerSessionAttachmentRequest);
       const result = await withActiveComputerController(
         context,
@@ -386,7 +423,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         "session.viewer.read",
         "computer.attach",
         async ({ client, sessionClient, record, binding, placement }) => {
-          await sessionClient.observe(request.targetId);
+          if (origin) await client.addAllowedOrigins([origin]);
           const grantId = randomUUID();
           const expiresAt = new Date(Date.now() + request.expiresInSeconds * 1_000).toISOString();
           const token = deriveComputerViewGrantToken({
@@ -414,44 +451,81 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
               "computer frame relay authority is unavailable",
             );
           }
-          const relayed = await client.openRelayedComputerFrameStream({
-            reference,
-            targetId: request.targetId,
-            viewToken: token,
-            expiresAt,
-            ...(request.stream ? { stream: request.stream } : {}),
-          });
-          const stream = relayed
-            ? await (async () => {
-                const relayToken = await mintStreamToken(relaySecret!, {
-                  workspaceId,
-                  sessionId: record.sourceSessionId,
-                  viewerId: grantId,
-                  leaseEpoch: record.tokenGeneration,
-                  port: relayed.channel.port,
-                  ttlSeconds: request.expiresInSeconds,
-                });
-                return {
-                  kind: "relay" as const,
-                  url: buildStreamUrl(relayed.endpoint),
-                  token: relayToken,
-                  channel: {
-                    channelId: relayed.channel.channelId,
-                    workspaceId: relayed.channel.workspaceId,
-                    agentId: relayed.channel.agentId,
-                    kind: 4 as const,
-                    port: relayed.channel.port,
-                  },
-                };
-              })()
-            : {
-                kind: "direct_websocket" as const,
-                url: await client.computerFrameStreamUrl(reference, request.targetId),
+          let useDirectRfb = false;
+          if (record.session.platform === "linux" && !placement.session.openComputerFrames) {
+            const target = (await sessionClient.listTargets()).find(
+              (candidate) => candidate.id === request.targetId,
+            );
+            if (!target) {
+              throw new HTTPException(404, { message: "computer target does not exist" });
+            }
+            if (target.kind !== "screen") {
+              throw new BrowserControlUnsupportedError(
+                "window-native frame streaming is unavailable on this Linux placement",
+              );
+            }
+            useDirectRfb = true;
+          }
+          let relayed = null;
+          if (!useDirectRfb) {
+            try {
+              relayed = await client.openRelayedComputerFrameStream({
+                reference,
+                targetId: request.targetId,
+                viewToken: token,
+                expiresAt,
+                ...(request.stream ? { stream: request.stream } : {}),
+              });
+            } catch (error) {
+              console.error("computer frame relay open failed", {
+                computerSessionId,
+                targetId: request.targetId,
+                failure: error instanceof Error ? error.message : String(error),
+              });
+              throw error;
+            }
+          }
+          const stream = useDirectRfb
+            ? {
+                kind: "direct_rfb" as const,
+                url: await client.computerRfbStreamUrl(reference, request.targetId),
                 protocols: [
-                  COMPUTER_CONTROL_WEBSOCKET_PROTOCOL,
+                  "binary",
+                  COMPUTER_RFB_WEBSOCKET_PROTOCOL,
                   `${BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX}${token}`,
                 ],
-              };
+              }
+            : relayed
+              ? await (async () => {
+                  const relayToken = await mintStreamToken(relaySecret!, {
+                    workspaceId,
+                    sessionId: record.sourceSessionId,
+                    viewerId: grantId,
+                    leaseEpoch: record.tokenGeneration,
+                    port: relayed.channel.port,
+                    ttlSeconds: request.expiresInSeconds,
+                  });
+                  return {
+                    kind: "relay" as const,
+                    url: buildStreamUrl(relayed.endpoint),
+                    token: relayToken,
+                    channel: {
+                      channelId: relayed.channel.channelId,
+                      workspaceId: relayed.channel.workspaceId,
+                      agentId: relayed.channel.agentId,
+                      kind: 4 as const,
+                      port: relayed.channel.port,
+                    },
+                  };
+                })()
+              : {
+                  kind: "direct_websocket" as const,
+                  url: await client.computerFrameStreamUrl(reference, request.targetId),
+                  protocols: [
+                    COMPUTER_CONTROL_WEBSOCKET_PROTOCOL,
+                    `${BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX}${token}`,
+                  ],
+                };
           return ComputerSessionAttachment.parse({
             computerSessionId,
             controllerGeneration: binding.controllerGeneration,
@@ -488,6 +562,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
             alive: true,
           });
         },
+        false,
       );
       return context.json(result);
     },
@@ -500,6 +575,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
       const grant = await requireAccessGrant(context, deps, workspaceId, "sessions:control");
       const computerSessionId = requireUuidParam(context, "computerSessionId");
       const request = await parseJsonBody(context, ComputerSessionLifecycleRequest);
+      const startedAtMs = performance.now();
       const origin = requestOrigin(context, deps.settings.corsAllowOriginRegex);
       try {
         const before = await getComputerSessionControlRecord(deps.db, {
@@ -525,7 +601,9 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
               before.session.placement,
             ).catch(() => undefined);
           }
-          return context.json(ComputerSessionMutationResponse.parse(prepared), 200);
+          const parsed = ComputerSessionMutationResponse.parse(prepared);
+          observeLifecycleResult(deps.observability, startedAtMs, parsed);
+          return context.json(parsed, 200);
         }
 
         const record = await getComputerSessionControlRecord(deps.db, {
@@ -549,7 +627,9 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
             computerSessionId,
             record.session.placement,
           ).catch(() => undefined);
-          return context.json(ComputerSessionMutationResponse.parse(completed), 200);
+          const parsed = ComputerSessionMutationResponse.parse(completed);
+          observeLifecycleResult(deps.observability, startedAtMs, parsed);
+          return context.json(parsed, 200);
         }
 
         const sourceSession = await requireSourceSession(deps, workspaceId, record.sourceSessionId);
@@ -598,7 +678,9 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
             return completed;
           },
         );
-        return context.json(ComputerSessionMutationResponse.parse(response), 200);
+        const parsed = ComputerSessionMutationResponse.parse(response);
+        observeLifecycleResult(deps.observability, startedAtMs, parsed);
+        return context.json(parsed, 200);
       } catch (error) {
         throw computerRouteError(error);
       }
@@ -614,13 +696,57 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
     waitSignal: AbortSignal,
     callback: (placement: ComputerPlacement) => Promise<T>,
   ): Promise<T> {
-    if (
-      expectedPlacement?.kind === "attached_device" ||
-      expectedPlacement?.kind === "external_provider"
-    ) {
+    if (expectedPlacement?.kind === "external_provider") {
       throw new BrowserControlUnsupportedError(
         `computer placement ${expectedPlacement.kind} is not executable`,
       );
+    }
+    if (expectedPlacement?.kind === "attached_device") {
+      waitSignal.throwIfAborted();
+      const device = await getAttachedBrowserDevice(deps.db, {
+        accountId: grant.accountId,
+        workspaceId: sourceSession.workspaceId,
+        deviceId: expectedPlacement.deviceId,
+      });
+      if (device.state !== "connected") {
+        throw new ComputerSessionStateError("Attached browser machine is disconnected");
+      }
+      const enrollment = await getEnrollment(
+        deps.db,
+        sourceSession.workspaceId,
+        device.enrollmentId,
+      );
+      if (!enrollment || enrollment.status !== "active") {
+        throw new ComputerSessionStateError("Attached browser machine is unavailable");
+      }
+      assertPlacementInstance(expectedPlacementInstanceId, device.connectionGeneration);
+      const built = await buildSelfhostedBackendSession({
+        workspaceId: sourceSession.workspaceId,
+        agentId: device.enrollmentId,
+        relay: relayConfigFromSettings(deps.settings),
+        controlRpcFactory: () => new NatsControlRpc(async () => deps.bus.getRequestConnection()),
+        epoch: 0,
+        timeoutMs: deps.settings.sandboxSelfhostedControlTimeoutMs,
+        execTimeoutMs: deps.settings.sandboxSelfhostedExecTimeoutMs,
+        ...(deps.settings.agentOpStreamEnabled === true &&
+        enrollment.opStream === true &&
+        deps.bus.getOpStreamConnection
+          ? {
+              opStream: {
+                transport: new NatsOpStreamTransport(
+                  async () => deps.bus.getOpStreamConnection?.() ?? null,
+                ),
+              },
+            }
+          : {}),
+      });
+      waitSignal.throwIfAborted();
+      return await callback({
+        placement: expectedPlacement,
+        placementInstanceId: device.connectionGeneration,
+        session: built.session as unknown as BrowserControlPlacementSession,
+        lease: null,
+      });
     }
     return await withChannelA(
       channelServices,
@@ -717,6 +843,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
       binding: NonNullable<ComputerSessionControlRecord["session"]["controller"]>;
       placement: ComputerPlacement;
     }) => Promise<T>,
+    recoverMissing = true,
   ): Promise<T> {
     try {
       const record = await getComputerSessionControlRecord(deps.db, {
@@ -747,12 +874,9 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         channelOperation,
         context.req.raw.signal,
         async (placement) => {
-          const client = await provisionController(
-            grant,
-            record,
-            placement,
-            requestOrigin(context, deps.settings.corsAllowOriginRegex),
-          );
+          // The active controller binding is the provisioning fence. Live
+          // input connects to it directly instead of re-ensuring the sidecar.
+          const client = connectController(grant, record, placement);
           const tokens = deriveComputerSessionControllerTokens({
             rootSecret: controllerAuthorityRoot(deps),
             accountId: grant.accountId,
@@ -763,7 +887,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
             controllerGeneration: binding.controllerGeneration,
             tokenGeneration: record.tokenGeneration,
           });
-          const result = await callback({
+          const controller = {
             client,
             sessionClient: client.computerSessionClient({
               reference: {
@@ -775,7 +899,20 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
             record,
             binding,
             placement,
-          });
+          };
+          let result: T;
+          try {
+            result = await callback(controller);
+          } catch (error) {
+            if (!recoverMissing || !isMissingComputerControllerSession(error)) throw error;
+            await client.createComputerSession({
+              computerSessionId,
+              controllerGeneration: binding.controllerGeneration,
+              tokenGeneration: record.tokenGeneration,
+              ...tokens,
+            });
+            result = await callback(controller);
+          }
           await touchComputerSessionController(deps.db, {
             accountId: grant.accountId,
             workspaceId,
@@ -910,6 +1047,23 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
     ).client;
   }
 
+  function connectController(
+    grant: AccessGrant,
+    record: ComputerSessionControlRecord,
+    placement: ComputerPlacement,
+  ): BrowserControlClient {
+    return new BrowserControlClient(placement.session, {
+      adminToken: deriveBrowserControllerAdminToken({
+        rootSecret: controllerAuthorityRoot(deps),
+        accountId: grant.accountId,
+        workspaceId: record.session.workspaceId,
+        placement: record.session.placement,
+        placementInstanceId: placement.placementInstanceId,
+      }),
+      nativeAuthority: nativeControllerAuthority(record.session.workspaceId, placement),
+    });
+  }
+
   async function releaseInteractionHolder(
     grant: AccessGrant,
     workspaceId: string,
@@ -1005,9 +1159,11 @@ function nativeControllerAuthority(
   const placementId =
     placement.placement.kind === "connected_machine"
       ? placement.placement.sandboxId
-      : placement.placement.kind === "sandbox_group"
-        ? placement.placement.sandboxGroupId
-        : null;
+      : placement.placement.kind === "attached_device"
+        ? placement.placement.deviceId
+        : placement.placement.kind === "sandbox_group"
+          ? placement.placement.sandboxGroupId
+          : null;
   if (!placementId) {
     throw new BrowserControlUnsupportedError("computer controller placement is unsupported");
   }
@@ -1158,6 +1314,16 @@ function assertPlacementInstance(expected: string | null, actual: string): void 
 
 function isTerminalOperation(state: string): boolean {
   return state === "completed" || state === "failed" || state === "outcome_unknown";
+}
+
+function isMissingComputerControllerSession(error: unknown): boolean {
+  if (!(error instanceof BrowserControlRequestError)) return false;
+  if (error.status === 401 && error.error.code === "permission_denied") return true;
+  return (
+    error.status === 404 &&
+    error.error.code === "resource_not_found" &&
+    ["computer session not found", "computer session is not active"].includes(error.error.message)
+  );
 }
 
 function interactionFailure(error: unknown) {

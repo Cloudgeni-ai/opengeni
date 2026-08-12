@@ -32,8 +32,14 @@ export type ShardWeightResolution = {
 export const OPT_IN_TESTS: Readonly<Record<string, string>> = {
   "test/integration/workspace-capture.integration.ts":
     "requires an already-running real dev stack and is owned by the live workspace-capture gate",
+  "test/e2e/artifact-spreadsheet-canvas.browser.e2e.ts":
+    "requires cross-browser artifact evidence and is owned by the curated browser-acceptance gate",
+  "test/e2e/artifact-spreadsheet-scroll.browser.e2e.ts":
+    "requires artifact workbench setup and is owned by the curated browser-acceptance gate",
   "test/e2e/artifact-static-renderer.browser.e2e.ts":
-    "is retained for the explicit full E2E command outside default CI",
+    "requires artifact workbench setup and is owned by the curated browser-acceptance gate",
+  "test/e2e/editable-artifacts.browser.e2e.ts":
+    "requires native artifact setup and visual evidence and is owned by the curated browser-acceptance gate",
   "test/e2e/browser.e2e.ts": "is retained for the explicit full E2E command outside default CI",
   "test/e2e/capabilities.browser.e2e.ts":
     "is retained for dedicated capability acceptance outside default CI",
@@ -41,6 +47,8 @@ export const OPT_IN_TESTS: Readonly<Record<string, string>> = {
     "requires dedicated channel and sandbox acceptance outside default CI",
   "test/e2e/codex-overview.e2e.ts":
     "requires dedicated entitlement evidence and is owned by the curated browser-acceptance gate",
+  "test/e2e/custom-api-control-center.browser.e2e.ts":
+    "requires dedicated capabilities evidence and is owned by the curated browser-acceptance gate",
   "test/e2e/fleet-policy.browser.e2e.ts":
     "is retained for dedicated fleet-policy acceptance outside default CI",
   "test/e2e/knowledge-surfaces.browser.e2e.ts":
@@ -51,6 +59,8 @@ export const OPT_IN_TESTS: Readonly<Record<string, string>> = {
     "is retained for dedicated deployed-demo acceptance outside default CI",
   "test/e2e/realtime-demo.browser.e2e.ts":
     "requires dedicated public-demo evidence and is owned by the curated browser-acceptance gate",
+  "test/e2e/source-packages-control-center.browser.e2e.ts":
+    "requires dedicated capabilities evidence and is owned by the curated browser-acceptance gate",
   "test/e2e/rig-setup.e2e.ts": "requires dedicated rig lifecycle acceptance outside default CI",
   "test/e2e/rig-verification.e2e.ts":
     "requires dedicated rig verification acceptance outside default CI",

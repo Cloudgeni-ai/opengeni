@@ -87,6 +87,7 @@ import {
   safeErrorDiagnostic,
   sandboxArtifactRuntimeAdmission,
   sandboxDeadlineRotationRecoveryDelayMs,
+  shouldEstablishSandboxForTurn,
   shouldRecoverCompactionProviderFailure,
   shouldStartOnTurnRecording,
   shouldRunTurnEndWorkspacePersistence,
@@ -103,7 +104,10 @@ import {
   TurnOperationCancelledError,
   WorkspaceHumanInputDisabledError,
 } from "../src/activities/agent-turn";
-import { sandboxLeaseHolderIdForAttempt } from "../src/sandbox-resume";
+import {
+  SandboxExecReadinessTimeoutError,
+  sandboxLeaseHolderIdForAttempt,
+} from "../src/sandbox-resume";
 import { settingsWithPackSandboxImage } from "../src/activities/packs";
 import { startGitCredentialRenewalLoop } from "../src/activities/git-credential-renewal";
 
@@ -2278,6 +2282,11 @@ describe("active sandbox backend resolution (Case B: clone-onto-real-disk gate)"
 });
 
 describe("machine-primary sandbox ownership isolation", () => {
+  test("establishes an attached Connected Machine even when the session has no home sandbox", () => {
+    expect(shouldEstablishSandboxForTurn(true, "none", true)).toBe(true);
+    expect(shouldEstablishSandboxForTurn(true, "none", false)).toBe(false);
+  });
+
   test("does not acquire the managed-home lease for a Connected Machine turn", () => {
     expect(managedSandboxOwnershipForTurn(true, "attempt-1", "cloud-home-group")).toBeNull();
   });
@@ -2600,6 +2609,33 @@ describe("lazy sandbox provisioner single-flight", () => {
     expect(establishes).toBe(2);
   });
 
+  test("command-readiness timeout creates at most one sandbox for the turn", async () => {
+    let establishes = 0;
+    let failures = 0;
+    const timeout = new SandboxExecReadinessTimeoutError("modal", 60_000, {
+      sandboxGroupId: "group-1",
+      instanceId: "sb-1",
+    });
+    const provisioner = createTurnSandboxProvisioner(
+      async () => {
+        establishes += 1;
+        throw timeout;
+      },
+      {
+        onFailed: () => {
+          failures += 1;
+        },
+      },
+    );
+
+    const first = await Promise.allSettled(Array.from({ length: 5 }, () => provisioner.get()));
+    expect(first.every((result) => result.status === "rejected")).toBe(true);
+    await expect(provisioner.get()).rejects.toBe(timeout);
+    expect(establishes).toBe(1);
+    expect(failures).toBe(1);
+    expect(isLazySandboxProvisionRetryable(timeout)).toBe(false);
+  });
+
   test("image conflict is actionable and not retried", async () => {
     expect(
       isLazySandboxProvisionRetryable(new SandboxImageConflictError("group-1", "old", "new")),
@@ -2646,6 +2682,9 @@ describe("lazy sandbox provisioner single-flight", () => {
         ),
       ),
     ).toBe(false);
+    expect(isLazySandboxProvisionRetryable(new Error("ECONNRESET during sandbox create"))).toBe(
+      false,
+    );
   });
 
   test("Steer/Pause cancels a pending provision immediately and disposes its late lease", async () => {

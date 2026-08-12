@@ -3,10 +3,12 @@ import type {
   BrowserActionCommand,
   BrowserActionReceipt,
   BrowserObservation,
+  BrowserProtectedAuthFillCommand,
   BrowserTarget,
 } from "@opengeni/contracts";
 import {
   BrowserInteractionController,
+  BrowserProtectedAuthController,
   InteractionControllerError,
   type BrowserInteractionDriver,
 } from "../src";
@@ -433,5 +435,80 @@ describe("BrowserInteractionController", () => {
     await expect(controller.observe("target-1")).rejects.toMatchObject({
       code: "driver_failed",
     });
+  });
+});
+
+function protectedCommand(value: string): BrowserProtectedAuthFillCommand {
+  const base = command(20);
+  return {
+    protocolVersion: 1,
+    operationId: base.operationId,
+    browserSessionId,
+    controllerGeneration,
+    targetId: base.targetId,
+    expectedTargetGeneration: base.expectedTargetGeneration,
+    expectedDocumentGeneration: "document-1",
+    expectedFrameId: "frame-1",
+    actor: base.actor,
+    authorityId: "password-authority",
+    credentialVersion: 7,
+    allowedOrigins: ["https://target-1.test"],
+    fields: [
+      {
+        fieldId: "password",
+        locator: { kind: "ref", ref: "e-password" },
+        purpose: "password",
+        value,
+      },
+    ],
+    submit: { type: "press", key: "Enter" },
+  };
+}
+
+describe("BrowserProtectedAuthController", () => {
+  test("journals a secret-free digest and deduplicates retries without comparing value bytes", async () => {
+    const records: unknown[] = [];
+    let dispatchCount = 0;
+    const currentTarget = target();
+    const controller = new BrowserProtectedAuthController({
+      browserSessionId,
+      controllerGeneration,
+      onJournalRecord(record) {
+        records.push(record);
+      },
+      driver: {
+        async target(targetId) {
+          return targetId === currentTarget.id ? currentTarget : null;
+        },
+        async observe() {
+          return { target: currentTarget, status: "working" };
+        },
+        async dispatch() {
+          dispatchCount += 1;
+          return { target: currentTarget, status: "submitted" };
+        },
+      },
+    });
+
+    const first = await controller.run(protectedCommand("correct horse battery staple"));
+    const retry = await controller.run(protectedCommand("different one-time value"));
+    expect(first.state).toBe("completed");
+    expect(retry).toEqual(first);
+    expect(dispatchCount).toBe(1);
+    expect(JSON.stringify(records)).not.toContain("correct horse battery staple");
+    expect(JSON.stringify(records)).not.toContain("different one-time value");
+    expect(controller.journalSnapshot()[0]?.commandDigest).toMatch(/^[0-9a-f]{64}$/u);
+
+    expect(() =>
+      controller.run({
+        ...protectedCommand("correct horse battery staple"),
+        fields: [
+          {
+            ...protectedCommand("unused").fields[0]!,
+            locator: { kind: "ref", ref: "another-field" },
+          },
+        ],
+      }),
+    ).toThrow(InteractionControllerError);
   });
 });

@@ -44,6 +44,40 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     expect(mock.requests[0]?.req.op?.$case).toBe("exec");
   });
 
+  test("exec snapshots renewed transient values without persisting them", async () => {
+    const mock = new MockAgentResponder();
+    let bearer = "first-attempt-bearer";
+    const session = new SelfhostedSession({
+      workspaceId: WS,
+      agentId: AGENT,
+      controlRpc: mock,
+      relay: RELAY,
+      transientExecEnvironment: () => ({
+        OPENGENI_CODEMODE_URL: "https://api.example.test/codemode",
+        OPENGENI_CODEMODE_TOKEN: bearer,
+      }),
+    });
+
+    await session.exec({ cmd: "first" });
+    bearer = "renewed-attempt-bearer";
+    await session.exec({ cmd: "second" });
+
+    const first = mock.requests[0]?.req.op;
+    const second = mock.requests[1]?.req.op;
+    if (first?.$case !== "exec" || second?.$case !== "exec") {
+      throw new Error("expected exec requests");
+    }
+    expect(first.exec.env).toEqual({
+      OPENGENI_CODEMODE_URL: "https://api.example.test/codemode",
+      OPENGENI_CODEMODE_TOKEN: "first-attempt-bearer",
+    });
+    expect(second.exec.env.OPENGENI_CODEMODE_TOKEN).toBe("renewed-attempt-bearer");
+    expect(session.state.environment).toEqual({});
+    expect(session.state.manifest.environment).toEqual({});
+    expect(await session.serializeSessionState()).toEqual({ agentId: AGENT });
+    expect(JSON.stringify(await session.serializeSessionState())).not.toContain("bearer");
+  });
+
   test("exec bounds the host process inside a slightly larger reply deadline", async () => {
     const seen: Array<{ req: ControlRequest; timeoutMs: number }> = [];
     const rpc: ControlRpc = {

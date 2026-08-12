@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
+import type { McpCredentialsRequest } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import {
   acquireSharedTestDatabase,
@@ -864,6 +865,7 @@ describe("buildHostConnectionTokenResolver", () => {
       serverId: "github",
       toolName: "create_pull_request",
       destinationUrl: "https://github.com/mcp",
+      credentialTarget: "mcp",
       connectionRef: {
         provider: "github",
         providerDomain: "github.com",
@@ -885,6 +887,101 @@ describe("buildHostConnectionTokenResolver", () => {
     });
     headers.Authorization = "Bearer mutated-after-return";
     expect(result).toMatchObject({ headers: { Authorization: "Bearer host-token" } });
+  });
+
+  test("accepts consistent query/cookie placements only for a local HTTP API target", async () => {
+    const resolver = buildHostConnectionTokenResolver(
+      async (request) => ({
+        status: "ok",
+        accountId: request.accountId,
+        workspaceId: request.workspaceId,
+        sessionId: request.sessionId,
+        headers: { "X-Client": "client-secret" },
+        placements: [
+          { carrier: "header", name: "X-Client", value: "client-secret" },
+          { carrier: "query", name: "api_key", value: "query-secret" },
+          { carrier: "cookie", name: "session_key", value: "cookie-secret" },
+        ],
+        connectionId: "host-api-connection",
+        providerDomain: request.connectionRef.providerDomain,
+      }),
+      context,
+    );
+
+    const result = await resolver({
+      workspaceId: "ws_1",
+      serverId: "inventory-api",
+      destinationUrl: "https://api.example.com/v1/items",
+      credentialTarget: "http_api",
+      connectionRef: { providerDomain: "api.example.com", kind: "api_key" },
+    });
+    expect(result).toEqual({
+      status: "ok",
+      headers: { "X-Client": "client-secret" },
+      placements: [
+        { carrier: "header", name: "X-Client", value: "client-secret" },
+        { carrier: "query", name: "api_key", value: "query-secret" },
+        { carrier: "cookie", name: "session_key", value: "cookie-secret" },
+      ],
+      connectionId: "host-api-connection",
+    });
+
+    await expect(
+      resolver({
+        workspaceId: "ws_1",
+        serverId: "inventory-mcp",
+        destinationUrl: "https://api.example.com/mcp",
+        connectionRef: { providerDomain: "api.example.com", kind: "api_key" },
+      }),
+    ).rejects.toBeInstanceOf(HostMcpCredentialBindingError);
+  });
+
+  test("rejects inconsistent or unsafe host placement echoes", async () => {
+    const mismatched = buildHostConnectionTokenResolver(
+      async (request) => ({
+        status: "ok",
+        accountId: request.accountId,
+        workspaceId: request.workspaceId,
+        sessionId: request.sessionId,
+        headers: { Authorization: "Bearer one" },
+        placements: [{ carrier: "header", name: "Authorization", value: "Bearer two" }],
+        connectionId: "host-api-connection",
+        providerDomain: request.connectionRef.providerDomain,
+      }),
+      context,
+    );
+    await expect(
+      mismatched({
+        workspaceId: "ws_1",
+        serverId: "inventory-api",
+        destinationUrl: "https://api.example.com/v1/items",
+        credentialTarget: "http_api",
+        connectionRef: { providerDomain: "api.example.com", kind: "api_key" },
+      }),
+    ).rejects.toBeInstanceOf(HostMcpCredentialBindingError);
+
+    const injected = buildHostConnectionTokenResolver(
+      async (request) => ({
+        status: "ok",
+        accountId: request.accountId,
+        workspaceId: request.workspaceId,
+        sessionId: request.sessionId,
+        headers: {},
+        placements: [{ carrier: "query", name: "api_key", value: "secret\r\nleak" }],
+        connectionId: "host-api-connection",
+        providerDomain: request.connectionRef.providerDomain,
+      }),
+      context,
+    );
+    await expect(
+      injected({
+        workspaceId: "ws_1",
+        serverId: "inventory-api",
+        destinationUrl: "https://api.example.com/v1/items",
+        credentialTarget: "http_api",
+        connectionRef: { providerDomain: "api.example.com", kind: "api_key" },
+      }),
+    ).rejects.toThrow("invalid placement");
   });
 
   test("rejects a mismatched host scope before returning credential material", async () => {
@@ -935,6 +1032,83 @@ describe("buildHostConnectionTokenResolver", () => {
       }),
     ).rejects.toBeInstanceOf(HostMcpCredentialBindingError);
     expect(calls).toBe(0);
+  });
+
+  test("permits only the canonical Gmail users/me REST lane for the Gmail MCP grant", async () => {
+    const received: string[] = [];
+    const ref = {
+      providerDomain: "gmailmcp.googleapis.com",
+      kind: "oauth2" as const,
+      subjectScope: "subject" as const,
+    };
+    const resolveHost = async (request: McpCredentialsRequest) => {
+      received.push(request.destinationUrl);
+      return {
+        status: "ok" as const,
+        accountId: request.accountId,
+        workspaceId: request.workspaceId,
+        sessionId: request.sessionId,
+        headers: { Authorization: "Bearer gmail-token" },
+        connectionId: "gmail-connection",
+        providerDomain: "gmailmcp.googleapis.com",
+      };
+    };
+    const disabledResolver = buildHostConnectionTokenResolver(resolveHost, context);
+    await expect(
+      disabledResolver({
+        workspaceId: "ws_1",
+        subjectId: "subject-a",
+        serverId: "gmail",
+        toolName: "list_labels",
+        destinationUrl: "https://gmail.googleapis.com/gmail/v1/users/me/labels",
+        connectionRef: ref,
+      }),
+    ).rejects.toBeInstanceOf(HostMcpCredentialBindingError);
+    expect(received).toEqual([]);
+
+    const resolver = buildHostConnectionTokenResolver(resolveHost, {
+      ...context,
+      allowOfficialGmailRestDestination: true,
+    });
+
+    await expect(
+      resolver({
+        workspaceId: "ws_1",
+        subjectId: "subject-a",
+        serverId: "gmail",
+        toolName: "list_labels",
+        destinationUrl: "https://gmail.googleapis.com/gmail/v1/users/me/labels",
+        connectionRef: ref,
+      }),
+    ).resolves.toMatchObject({ status: "ok", connectionId: "gmail-connection" });
+    expect(received).toEqual(["https://gmail.googleapis.com/gmail/v1/users/me/labels"]);
+
+    await expect(
+      resolver({
+        workspaceId: "ws_1",
+        subjectId: "subject-a",
+        serverId: "gmail",
+        destinationUrl: "https://gmail.googleapis.com/gmail/v1/users/me/labels",
+        connectionRef: { ...ref, subjectScope: "workspace" },
+      }),
+    ).rejects.toBeInstanceOf(HostMcpCredentialBindingError);
+
+    for (const destinationUrl of [
+      "https://gmail.googleapis.com/gmail/v1/users/someone-else/labels",
+      "https://gmail.googleapis.com/drive/v3/files",
+      "https://attacker.example/gmail/v1/users/me/labels",
+    ]) {
+      await expect(
+        resolver({
+          workspaceId: "ws_1",
+          subjectId: "subject-a",
+          serverId: "gmail",
+          destinationUrl,
+          connectionRef: ref,
+        }),
+      ).rejects.toBeInstanceOf(HostMcpCredentialBindingError);
+    }
+    expect(received).toHaveLength(1);
   });
 
   test("rejects host credential material routed from a different binding or repository set", async () => {
@@ -1077,6 +1251,170 @@ describe("buildConnectionTokenResolver", () => {
       kind: "api_key",
     });
     expect(counts.loadInputs[0]).not.toHaveProperty("subjectId");
+  });
+
+  test("materializes bounded query/cookie API-key placements but never sends them to MCP", async () => {
+    const credential = brokerCredential({
+      credential: {
+        placements: [
+          { carrier: "header", name: "X-Client", value: "client-secret" },
+          { carrier: "query", name: "api_key", value: "query-secret" },
+          { carrier: "cookie", name: "session_key", value: "cookie-secret" },
+        ],
+      },
+    });
+    const { deps, counts } = resolverDeps({ loadCredential: async () => credential });
+    const resolver = buildConnectionTokenResolver({} as Database, settings, deps);
+    const apiResult = await resolver({
+      workspaceId: "ws_1",
+      serverId: "inventory-api",
+      destinationUrl: "https://api.example.com/v1/items",
+      credentialTarget: "http_api",
+      connectionRef: { providerDomain: "api.example.com", kind: "api_key" },
+    });
+    expect(apiResult).toEqual({
+      status: "ok",
+      headers: { "X-Client": "client-secret" },
+      placements: [
+        { carrier: "header", name: "X-Client", value: "client-secret" },
+        { carrier: "query", name: "api_key", value: "query-secret" },
+        { carrier: "cookie", name: "session_key", value: "cookie-secret" },
+      ],
+      connectionId: "conn_1",
+      connectionVersion: 1,
+      expiresAt: null,
+    });
+    expect(counts.recordUsed).toBe(1);
+
+    const mcpResult = await resolver({
+      workspaceId: "ws_1",
+      serverId: "inventory-mcp",
+      destinationUrl: "https://api.example.com/mcp",
+      connectionRef: { providerDomain: "api.example.com", kind: "api_key" },
+    });
+    expect(mcpResult).toEqual({
+      status: "auth_needed",
+      reason: "unsupported_auth",
+      providerDomain: "api.example.com",
+      connectionId: "conn_1",
+    });
+    expect(counts.recordUsed).toBe(1);
+  });
+
+  test("rejects duplicate, forbidden, and injected stored placements without exposing secrets", async () => {
+    for (const placements of [
+      [
+        { carrier: "query", name: "api_key", value: "first-secret" },
+        { carrier: "query", name: "api_key", value: "second-secret" },
+      ],
+      [{ carrier: "header", name: "Host", value: "forbidden-secret" }],
+      [{ carrier: "cookie", name: "session_key", value: "secret; injected=yes" }],
+      [{ carrier: "query", name: "api_key", value: "secret\r\nleak" }],
+    ]) {
+      const { deps, counts } = resolverDeps({
+        loadCredential: async () => brokerCredential({ credential: { placements } }),
+      });
+      const resolver = buildConnectionTokenResolver({} as Database, settings, deps);
+      const result = await resolver({
+        workspaceId: "ws_1",
+        serverId: "inventory-api",
+        destinationUrl: "https://api.example.com/v1/items",
+        credentialTarget: "http_api",
+        connectionRef: { providerDomain: "api.example.com", kind: "api_key" },
+      });
+      expect(result).toEqual({
+        status: "auth_needed",
+        reason: "refresh_failed",
+        providerDomain: "api.example.com",
+        connectionId: "conn_1",
+      });
+      expect(JSON.stringify(result)).not.toContain("secret");
+      expect(counts.recordUsed).toBe(0);
+    }
+  });
+
+  test("binds an official Gmail MCP OAuth row to only Gmail REST users/me", async () => {
+    const gmailCredential = brokerCredential({
+      id: "gmail-connection",
+      subjectId: "subject-a",
+      providerDomain: "gmailmcp.googleapis.com",
+      kind: "oauth2",
+      credential: {
+        access_token: "gmail-access-token",
+        token_type: "Bearer",
+        mcp_url: "https://gmailmcp.googleapis.com/mcp/v1",
+        resource: "https://gmailmcp.googleapis.com/mcp/v1",
+      },
+      grantedScopes: [
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/gmail.compose",
+        "https://www.googleapis.com/auth/gmail.modify",
+      ],
+    });
+    const { deps, counts } = resolverDeps({ loadCredential: async () => gmailCredential });
+    const disabledResolver = buildConnectionTokenResolver({} as Database, settings, deps);
+    await expect(
+      disabledResolver({
+        workspaceId: "ws_1",
+        subjectId: "subject-a",
+        serverId: "gmail",
+        toolName: "list_labels",
+        destinationUrl: "https://gmail.googleapis.com/gmail/v1/users/me/labels",
+        connectionRef: {
+          providerDomain: "gmailmcp.googleapis.com",
+          kind: "oauth2",
+          subjectScope: "subject",
+        },
+      }),
+    ).resolves.toMatchObject({ status: "auth_needed", reason: "missing_connection" });
+    expect(counts.recordUsed).toBe(0);
+
+    const resolver = buildConnectionTokenResolver(
+      {} as Database,
+      testSettings({
+        environmentsEncryptionKey: rawKey.toString("base64"),
+        gmailRestAdapterEnabled: true,
+      }) as Settings,
+      deps,
+    );
+    const connectionRef = {
+      providerDomain: "gmailmcp.googleapis.com",
+      kind: "oauth2" as const,
+      subjectScope: "subject" as const,
+    };
+
+    await expect(
+      resolver({
+        workspaceId: "ws_1",
+        subjectId: "subject-a",
+        serverId: "gmail",
+        toolName: "list_labels",
+        destinationUrl: "https://gmail.googleapis.com/gmail/v1/users/me/labels",
+        connectionRef,
+      }),
+    ).resolves.toMatchObject({
+      status: "ok",
+      connectionId: "gmail-connection",
+      headers: { authorization: "Bearer gmail-access-token" },
+    });
+    expect(counts.recordUsed).toBe(1);
+
+    for (const destinationUrl of [
+      "https://gmail.googleapis.com/gmail/v1/users/another-user/labels",
+      "https://gmail.googleapis.com/calendar/v3/calendars",
+      "https://evil.gmail.googleapis.com/gmail/v1/users/me/labels",
+    ]) {
+      await expect(
+        resolver({
+          workspaceId: "ws_1",
+          subjectId: "subject-a",
+          serverId: "gmail",
+          destinationUrl,
+          connectionRef,
+        }),
+      ).resolves.toMatchObject({ status: "auth_needed", reason: "missing_connection" });
+    }
+    expect(counts.recordUsed).toBe(1);
   });
 
   test("subject refs require a concrete owner and reject a faulty cross-subject loader", async () => {
@@ -1410,6 +1748,106 @@ describe("buildConnectionTokenResolver", () => {
       );
       expect(capturedBody!.get("grant_type")).toBe("refresh_token");
       expect(capturedSignal).toBeInstanceOf(AbortSignal);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("provider credentials may request a JSON OAuth refresh body", async () => {
+    const originalFetch = globalThis.fetch;
+    let capturedBody: Record<string, unknown> | null = null;
+    let capturedContentType: string | null = null;
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      capturedContentType = new Headers(init?.headers).get("content-type");
+      return Response.json({
+        access_token: "AC2",
+        refresh_token: "RF2",
+        token_type: "Bearer",
+        expires_in: 3600,
+      });
+    }) as typeof fetch;
+    try {
+      const refreshed = await refreshOAuthConnectionCredential(
+        brokerCredential({
+          kind: "oauth2",
+          credential: {
+            access_token: "AC",
+            refresh_token: "RF",
+            token_endpoint: "https://auth.atlassian.com/oauth/token",
+            client_id: "client-id",
+            client_secret: "client-secret",
+            token_endpoint_auth_method: "client_secret_post",
+            token_request_encoding: "json",
+          },
+        }),
+        { providerDomain: "api.atlassian.com", kind: "oauth2" },
+        settings,
+        {
+          fetchImpl: globalThis.fetch,
+          dnsLookup: async () => [{ address: "93.184.216.34", family: 4 }],
+        },
+      );
+      expect(String(capturedContentType)).toBe("application/json");
+      expect(capturedBody as Record<string, unknown> | null).toEqual({
+        grant_type: "refresh_token",
+        refresh_token: "RF",
+        client_id: "client-id",
+        client_secret: "client-secret",
+      });
+      expect(refreshed.credential).toMatchObject({
+        access_token: "AC2",
+        refresh_token: "RF2",
+        token_request_encoding: "json",
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("Google-compatible refresh omits the unsupported resource parameter", async () => {
+    const originalFetch = globalThis.fetch;
+    let capturedBody: URLSearchParams | null = null;
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      capturedBody = new URLSearchParams(String(init?.body));
+      return Response.json({ access_token: "AC2", token_type: "Bearer", expires_in: 3600 });
+    }) as typeof fetch;
+    try {
+      const refreshed = await refreshOAuthConnectionCredential(
+        brokerCredential({
+          kind: "oauth2",
+          credential: {
+            access_token: "AC",
+            refresh_token: "RF",
+            token_type: "Bearer",
+            token_endpoint: "https://oauth2.googleapis.com/token",
+            client_id: "google-client-id",
+            client_secret: "google-client-secret",
+            token_endpoint_auth_method: "client_secret_post",
+            resource: "https://gmailmcp.googleapis.com/mcp/v1",
+            resource_parameter_supported: false,
+          },
+        }),
+        {
+          providerDomain: "gmailmcp.googleapis.com",
+          kind: "oauth2",
+          resource: "https://gmailmcp.googleapis.com/mcp/v1",
+        },
+        settings,
+        {
+          fetchImpl: globalThis.fetch,
+          dnsLookup: async () => [{ address: "142.250.74.106", family: 4 }],
+        },
+      );
+
+      expect(capturedBody!.get("resource")).toBeNull();
+      expect(capturedBody!.get("client_id")).toBe("google-client-id");
+      expect(capturedBody!.get("client_secret")).toBe("google-client-secret");
+      expect(refreshed.credential).toMatchObject({
+        access_token: "AC2",
+        resource: "https://gmailmcp.googleapis.com/mcp/v1",
+        resource_parameter_supported: false,
+      });
     } finally {
       globalThis.fetch = originalFetch;
     }

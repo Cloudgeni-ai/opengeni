@@ -26,6 +26,9 @@ import {
 } from "./interaction-revisions";
 import { safeDatabaseErrorFacts } from "./persistence-errors";
 import {
+  commitBrowserStateUploadInTransaction,
+  markBrowserStateUploadsDeletePendingInTransaction,
+  prepareBrowserStateUploadInTransaction,
   validateBrowserStateArtifactCommitInput,
   type BrowserStateArtifactCommitInput,
 } from "./browser-state-artifacts";
@@ -56,8 +59,6 @@ export class BrowserIdentityConflictError extends Error {
 export class BrowserIdentityStateError extends Error {
   readonly name = "BrowserIdentityStateError";
 }
-
-export type { BrowserStateArtifactCommitInput } from "./browser-state-artifacts";
 
 export type BrowserRevisionPublicationPreparation =
   | {
@@ -572,6 +573,7 @@ export async function dispatchBrowserRevisionPublication(
     expectedHeadGeneration: number;
     advanceDefault: boolean;
     actorSubjectId: string;
+    stateUpload?: { objectKey: string; cleanupAfter: Date };
   },
 ): Promise<BrowserRevisionPublicationDispatch> {
   const digest = browserRevisionPublicationRequestDigest(input);
@@ -634,6 +636,16 @@ export async function dispatchBrowserRevisionPublication(
               "Publication belongs to another controller generation",
             );
           }
+          if (input.stateUpload) {
+            await prepareBrowserStateUploadInTransaction(tx, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              operationId: input.operationId,
+              sourceBrowserSessionId: input.browserSessionId,
+              purpose: "revision_component",
+              ...input.stateUpload,
+            });
+          }
           return {
             kind: "dispatched",
             browserSessionId: input.browserSessionId,
@@ -642,6 +654,16 @@ export async function dispatchBrowserRevisionPublication(
           };
         }
 
+        if (input.stateUpload) {
+          await prepareBrowserStateUploadInTransaction(tx, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            operationId: input.operationId,
+            sourceBrowserSessionId: input.browserSessionId,
+            purpose: "revision_component",
+            ...input.stateUpload,
+          });
+        }
         const now = new Date();
         const [updated] = await tx
           .update(schema.interactionOperations)
@@ -781,6 +803,14 @@ export async function commitBrowserRevisionPublication(
             })
             .returning();
           if (!row) throw new Error("Browser state artifact insert was lost");
+          await commitBrowserStateUploadInTransaction(tx, {
+            workspaceId: input.workspaceId,
+            operationId: input.operationId,
+            sourceBrowserSessionId: input.browserSessionId,
+            purpose: "revision_component",
+            objectKey: artifact.objectKey,
+            artifactId: row.id,
+          });
           artifactRows.push(row);
         }
 
@@ -980,6 +1010,7 @@ export async function failBrowserRevisionPublication(
           )
           .returning({ operationId: schema.interactionOperations.operationId });
         if (!settled) throw new Error("BrowserRevision publication failure settlement was lost");
+        await markBrowserStateUploadsDeletePendingInTransaction(tx, input);
       }),
   );
 }
@@ -1041,7 +1072,7 @@ async function loadBrowserRevisionArtifactAuthority(
     revision,
     artifacts: components.map((component) => {
       const artifact = byArtifact.get(component.artifactId);
-      if (!artifact || artifact.state !== "available") {
+      if (!artifact || artifact.state !== "available" || artifact.encryptedDataKey === null) {
         throw new BrowserIdentityStateError("BrowserRevision artifact is unavailable");
       }
       return {

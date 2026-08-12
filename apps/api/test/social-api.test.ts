@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  assertSocialConnectionProvider,
   mapRedditListing,
   mapRedditThread,
   mapXTweets,
@@ -9,6 +10,18 @@ import {
   redditThingId,
   redditUrl,
 } from "../src/integrations/social-api";
+
+describe("provider-scoped social tools", () => {
+  test("accept the exact provider and reject the near-identical other account", () => {
+    expect(() => assertSocialConnectionProvider({ provider: "x" }, "x")).not.toThrow();
+    expect(() => assertSocialConnectionProvider({ provider: "reddit" }, "x")).toThrow(
+      "belongs to reddit, not the x integration",
+    );
+    expect(() => assertSocialConnectionProvider({ provider: "x" }, "reddit")).toThrow(
+      "belongs to x, not the reddit integration",
+    );
+  });
+});
 
 describe("mapXTweets", () => {
   test("joins expansions.users and public_metrics into normalized posts", () => {

@@ -441,6 +441,48 @@ function fleetDecisionEventPayload(): Record<string, unknown> {
 }
 
 describe("timeline renderer isolation", () => {
+  test("renders failed optimistic user messages with retry and remove actions", async () => {
+    let retries = 0;
+    let removals = 0;
+    const r = await renderComponent(
+      <MessageTimeline
+        items={[
+          {
+            kind: "user-message",
+            id: "optimistic-message",
+            text: "Retry this prompt",
+            resources: [],
+            tools: [],
+            occurredAt: new Date(0).toISOString(),
+            delivery: {
+              state: "failed",
+              error: "Gateway unavailable",
+              onRetry: () => {
+                retries += 1;
+              },
+              onRemove: () => {
+                removals += 1;
+              },
+            },
+          },
+        ]}
+      />,
+    );
+    await flush();
+    expect(r.container.textContent).toContain("Not sent");
+    const buttons = [...r.container.querySelectorAll("button")];
+    const retry = buttons.find((button) => button.textContent === "Retry");
+    const remove = buttons.find((button) => button.textContent === "Remove");
+    expect(retry).toBeDefined();
+    expect(remove).toBeDefined();
+    await act(async () => {
+      retry?.click();
+      remove?.click();
+    });
+    expect({ retries, removals }).toEqual({ retries: 1, removals: 1 });
+    await r.unmount();
+  });
+
   test("keeps neighboring groups visible and recovers when an undefined renderer is replaced", async () => {
     const items: TimelineItem[] = [
       {

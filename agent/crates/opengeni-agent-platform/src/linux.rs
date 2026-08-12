@@ -550,33 +550,64 @@ fn inject_pointer(
 /// character's keysym in turn.
 fn inject_key(
     conn: &x11rb::rust_connection::RustConnection,
-    root: x11rb::protocol::xproto::Window,
+    _root: x11rb::protocol::xproto::Window,
     k: &v1::KeyEvent,
 ) -> PlatformResult<()> {
-    // Text typing and single-key naming both resolve to keysyms; for v1 we map the
-    // common printable ASCII + a small set of named keys to keycodes by scanning
-    // the server keymap. A keysym we cannot resolve is skipped (not an error) so a
-    // best-effort type never hard-fails a session.
-    let keysyms: Vec<u32> = if k.is_text {
-        k.key.chars().map(|c| c as u32).collect()
-    } else {
-        named_key_to_keysym(&k.key).into_iter().collect()
-    };
+    if k.is_text {
+        // Text remains best-effort for the legacy X11 fallback. Reliable
+        // arbitrary UTF-8 entry uses the native clipboard write + paste path.
+        for keysym in k.key.chars().map(|character| character as u32) {
+            let Some(keycode) = keysym_to_keycode(conn, keysym) else {
+                continue;
+            };
+            match k.action() {
+                v1::KeyAction::Down => key_press(conn, keycode)?,
+                v1::KeyAction::Up => key_release(conn, keycode)?,
+                v1::KeyAction::Press | v1::KeyAction::Unspecified => {
+                    key_press(conn, keycode)?;
+                    key_release(conn, keycode)?;
+                }
+            }
+        }
+        return Ok(());
+    }
 
-    for keysym in keysyms {
-        let Some(keycode) = keysym_to_keycode(conn, keysym) else {
-            continue;
-        };
-        match k.action() {
-            v1::KeyAction::Down => key_press(conn, keycode)?,
-            v1::KeyAction::Up => key_release(conn, keycode)?,
-            v1::KeyAction::Press | v1::KeyAction::Unspecified => {
-                key_press(conn, keycode)?;
-                key_release(conn, keycode)?;
+    let keysyms = parse_named_key_chord(&k.key)?;
+    let keycodes = keysyms
+        .iter()
+        .map(|keysym| {
+            keysym_to_keycode(conn, *keysym).ok_or_else(|| {
+                PlatformError::Unsupported(format!(
+                    "X11 keymap does not expose named key/chord component {keysym:#x}"
+                ))
+            })
+        })
+        .collect::<PlatformResult<Vec<_>>>()?;
+    match k.action() {
+        v1::KeyAction::Down => {
+            for keycode in &keycodes {
+                key_press(conn, *keycode)?;
+            }
+        }
+        v1::KeyAction::Up => {
+            for keycode in keycodes.iter().rev() {
+                key_release(conn, *keycode)?;
+            }
+        }
+        v1::KeyAction::Press | v1::KeyAction::Unspecified => {
+            let (key, modifiers) = keycodes
+                .split_last()
+                .expect("validated named chord always contains one key");
+            for modifier in modifiers {
+                key_press(conn, *modifier)?;
+            }
+            key_press(conn, *key)?;
+            key_release(conn, *key)?;
+            for modifier in modifiers.iter().rev() {
+                key_release(conn, *modifier)?;
             }
         }
     }
-    let _ = root;
     Ok(())
 }
 
@@ -718,6 +749,52 @@ fn named_key_to_keysym(name: &str) -> Option<u32> {
         }
     };
     Some(sym)
+}
+
+fn parse_named_key_chord(name: &str) -> PlatformResult<Vec<u32>> {
+    let parts: Vec<&str> = name.split('+').map(str::trim).collect();
+    if parts.is_empty() || parts.iter().any(|part| part.is_empty()) {
+        return Err(PlatformError::Unsupported(
+            "X11 named key/chord contains an empty component".to_string(),
+        ));
+    }
+    let mut result = Vec::with_capacity(parts.len());
+    let mut seen_modifiers = BTreeSet::new();
+    for (index, part) in parts.iter().enumerate() {
+        if let Some(modifier) = modifier_keysym(part) {
+            if index + 1 == parts.len() || !seen_modifiers.insert(modifier) {
+                return Err(PlatformError::Unsupported(format!(
+                    "invalid or repeated X11 modifier in key chord `{name}`"
+                )));
+            }
+            result.push(modifier);
+            continue;
+        }
+        if index + 1 != parts.len() {
+            return Err(PlatformError::Unsupported(format!(
+                "X11 key chord `{name}` must end with exactly one non-modifier key"
+            )));
+        }
+        result.push(named_key_to_keysym(part).ok_or_else(|| {
+            PlatformError::Unsupported(format!("unknown X11 named key `{part}`"))
+        })?);
+    }
+    if result.is_empty() || result.len() == seen_modifiers.len() {
+        return Err(PlatformError::Unsupported(format!(
+            "X11 key chord `{name}` has modifiers but no key"
+        )));
+    }
+    Ok(result)
+}
+
+fn modifier_keysym(name: &str) -> Option<u32> {
+    match name.to_ascii_lowercase().as_str() {
+        "control" | "ctrl" => Some(0xffe3),
+        "shift" => Some(0xffe1),
+        "alt" | "option" => Some(0xffe9),
+        "meta" | "super" | "command" | "cmd" => Some(0xffeb),
+        _ => None,
+    }
 }
 
 // --- Window discovery + geometry + image conversion -------------------------
@@ -1003,6 +1080,12 @@ mod tests {
         assert_eq!(named_key_to_keysym("a"), Some(0x61));
         // A multi-char non-named string is not a single keysym.
         assert_eq!(named_key_to_keysym("hello"), None);
+        assert_eq!(
+            parse_named_key_chord("Control+c").unwrap(),
+            vec![0xffe3, 0x63]
+        );
+        assert!(parse_named_key_chord("Control+Control+c").is_err());
+        assert!(parse_named_key_chord("Control+").is_err());
     }
 
     #[test]

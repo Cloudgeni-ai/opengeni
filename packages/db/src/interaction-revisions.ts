@@ -1,5 +1,5 @@
 import { eq, sql } from "drizzle-orm";
-import { rawRows, type Database } from "./database";
+import { rawRows, type Database, withRlsContext } from "./database";
 import * as schema from "./schema";
 
 export async function advanceWorkspaceInteractionRevision(
@@ -31,10 +31,40 @@ export async function readWorkspaceInteractionRevision(
   db: Database,
   workspaceId: string,
 ): Promise<number> {
+  return (await readWorkspaceInteractionRevisionState(db, workspaceId)).revision;
+}
+
+export type WorkspaceInteractionRevisionState = {
+  revision: number;
+  updatedAt: Date | null;
+};
+
+/** Read the latest cursor while already inside the workspace RLS boundary. */
+export async function readWorkspaceInteractionRevisionState(
+  db: Database,
+  workspaceId: string,
+): Promise<WorkspaceInteractionRevisionState> {
   const [row] = await db
-    .select({ revision: schema.workspaceInteractionRevisions.revision })
+    .select({
+      revision: schema.workspaceInteractionRevisions.revision,
+      updatedAt: schema.workspaceInteractionRevisions.updatedAt,
+    })
     .from(schema.workspaceInteractionRevisions)
     .where(eq(schema.workspaceInteractionRevisions.workspaceId, workspaceId))
     .limit(1);
-  return row?.revision ?? 0;
+  return row
+    ? { revision: row.revision, updatedAt: row.updatedAt }
+    : { revision: 0, updatedAt: null };
+}
+
+/** Standalone tenant-scoped cursor read used by the workspace SSE projection. */
+export async function getWorkspaceInteractionRevisionState(
+  db: Database,
+  input: { accountId: string; workspaceId: string },
+): Promise<WorkspaceInteractionRevisionState> {
+  return await withRlsContext(
+    db,
+    input,
+    async (scopedDb) => await readWorkspaceInteractionRevisionState(scopedDb, input.workspaceId),
+  );
 }

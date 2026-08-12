@@ -9,13 +9,13 @@ import {
   type EmbeddedBrowserInteractionClientOverride,
   useEmbeddedBrowserInteraction,
 } from "../session-context";
-import { usePageLiveActivity } from "./internal";
+import { useInteractionInvalidation } from "./use-interaction-invalidation";
 
 export type UseBrowserSessionsOptions = EmbeddedBrowserInteractionClientOverride & {
   /** Current agent/session relevance. Workspace peers remain in `sessions`. */
   sessionId?: string | undefined;
   enabled?: boolean | undefined;
-  /** Temporary invalidation path until the interaction event stream lands. */
+  /** Polling fallback used only while the workspace invalidation stream is unavailable. */
   pollIntervalMs?: number | undefined;
 };
 
@@ -50,10 +50,14 @@ export type UseBrowserSessionsResult = {
 export function useBrowserSessions(
   options: UseBrowserSessionsOptions = {},
 ): UseBrowserSessionsResult {
-  const { client, workspaceId, registerSessionReconciler } = useEmbeddedBrowserInteraction(options);
+  const {
+    client,
+    workspaceId,
+    registerSessionReconciler,
+    workspaceInteractionEvent,
+    workspaceInteractionConnectionState,
+  } = useEmbeddedBrowserInteraction(options);
   const enabled = options.enabled ?? true;
-  const pageLive = usePageLiveActivity();
-  const pollIntervalMs = Math.max(1_000, options.pollIntervalMs ?? 3_000);
   const [state, setState] = useState<{
     workspaceId: string;
     revision: number;
@@ -137,15 +141,16 @@ export function useBrowserSessions(
     };
   }, [cancelLoad, enabled, load, workspaceId]);
 
-  useEffect(() => {
-    if (!enabled || !pageLive) return;
-    const timer = setInterval(() => {
-      // Let a slow list request finish. A poll must not repeatedly abort and
-      // restart the same read; an explicit Refresh may still replace it.
-      if (!requestRef.current.controller) void load(false);
-    }, pollIntervalMs);
-    return () => clearInterval(timer);
-  }, [enabled, load, pageLive, pollIntervalMs]);
+  useInteractionInvalidation({
+    workspaceId,
+    key: workspaceId,
+    enabled,
+    event: workspaceInteractionEvent,
+    connectionState: workspaceInteractionConnectionState,
+    knownRevision: visibleState.revision,
+    refresh,
+    fallbackPollIntervalMs: options.pollIntervalMs,
+  });
 
   useEffect(() => {
     if (!enabled || !options.sessionId) return;

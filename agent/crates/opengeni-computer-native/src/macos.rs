@@ -4,24 +4,30 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use image::{codecs::png::PngEncoder, ExtendedColorType, ImageEncoder as _};
+use image::{
+    codecs::{jpeg::JpegEncoder, png::PngEncoder},
+    ExtendedColorType, ImageEncoder as _,
+};
 use opengeni_agent_macos_ffi::{
-    accessibility_trusted, capture_display_rgba, capture_window_rgba, focus_and_inject_target,
-    focus_and_inject_window, focus_target, inject_batch, inject_display_batch,
-    input_monitoring_granted, launch_application, list_displays, list_targets, machine_locked,
-    probe_display, screen_capture_granted, DisplayInfo, InputEvent, KeyAction, MacAxAction,
-    MacAxActionValue, MacAxController, MacAxElementSelector, MacAxNode, MacAxValue, MacFfiError,
-    MacRect, MacTargetInfo, MacTargetKind, PointerAction, PointerButton,
+    accessibility_trusted, capture_display_rgba, capture_display_rgba_sized, capture_window_rgba,
+    capture_window_rgba_sized, focus_target, inject_batch, inject_display_batch,
+    inject_window_batch, input_monitoring_granted, launch_application, list_displays, list_targets,
+    machine_locked, probe_display, screen_capture_granted, start_display_frame_stream,
+    start_window_frame_stream, DisplayInfo, InputEvent, KeyAction, MacAxAction, MacAxActionValue,
+    MacAxController, MacAxElementSelector, MacAxNode, MacAxValue, MacFfiError, MacFrameStream,
+    MacRect, MacTargetInfo, MacTargetKind, MacWindowFrame, PointerAction, PointerButton, RgbaFrame,
 };
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
 use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
+use crate::clipboard::NativeClipboardController;
 use crate::tree::semantic_roots_equivalent;
 use crate::{
     ComputerAdapter, NativeAction, NativeActionCommand, NativeActionValue, NativeAdapterError,
-    NativeAdapterErrorCode, NativeAdapterResult, NativeCapabilities, NativeCapturedFrame,
+    NativeAdapterErrorCode, NativeAdapterResult, NativeCapabilities, NativeCaptureOptions,
+    NativeCapturedFrame, NativeClipboard, NativeClipboardAction, NativeFrameFormat,
     NativeKeyboardAction, NativeLocator, NativeNodeMetadata, NativeNodeValue, NativeObservation,
     NativePointerAction, NativePointerButton, NativeRect, NativeRedactedValue,
     NativeRedactionReason, NativeSemanticAction, NativeSemanticPlatform, NativeTarget,
@@ -74,6 +80,12 @@ struct WindowFrameFence {
     height: u32,
 }
 
+struct LiveCapture {
+    options: NativeCaptureOptions,
+    target_generation: String,
+    stream: Arc<MacFrameStream>,
+}
+
 /// macOS AX/ScreenCaptureKit adapter. Retained AX objects and observers live in
 /// the audited FFI controller; this layer owns public observation/frame fences.
 pub(crate) struct AxComputerAdapter {
@@ -81,9 +93,13 @@ pub(crate) struct AxComputerAdapter {
     sequence: AtomicU64,
     frame_sequence: AtomicU64,
     ax: StdMutex<Option<Arc<MacAxController>>>,
+    targets: RwLock<BTreeMap<String, TargetRecord>>,
     latest: RwLock<BTreeMap<String, StoredObservation>>,
     latest_screen_frames: RwLock<BTreeMap<String, ScreenFrameFence>>,
     latest_window_frames: RwLock<BTreeMap<String, WindowFrameFence>>,
+    live_captures: StdMutex<BTreeMap<String, LiveCapture>>,
+    live_capture_lifecycle: Mutex<()>,
+    clipboard: Option<NativeClipboardController>,
     /// macOS exposes one foreground Aqua input seat per login session. AX-only
     /// mutations stay parallel on their per-process workers, but anything that
     /// focuses/launches an app or emits CGEvent input must hold this queue.
@@ -111,9 +127,13 @@ impl AxComputerAdapter {
             sequence: AtomicU64::new(0),
             frame_sequence: AtomicU64::new(0),
             ax: StdMutex::new(ax),
+            targets: RwLock::new(BTreeMap::new()),
             latest: RwLock::new(BTreeMap::new()),
             latest_screen_frames: RwLock::new(BTreeMap::new()),
             latest_window_frames: RwLock::new(BTreeMap::new()),
+            live_captures: StdMutex::new(BTreeMap::new()),
+            live_capture_lifecycle: Mutex::new(()),
+            clipboard: NativeClipboardController::open().ok(),
             input_seat: Mutex::new(()),
         })
     }
@@ -194,16 +214,25 @@ impl AxComputerAdapter {
             .find(|record| record.target.id == target_id))
     }
 
-    async fn target_records() -> NativeAdapterResult<Vec<TargetRecord>> {
+    async fn refresh_target_records(&self) -> NativeAdapterResult<Vec<TargetRecord>> {
         let targets = tokio::task::spawn_blocking(list_targets)
             .await
             .map_err(|error| driver_failure(format!("macOS target task failed: {error}")))?
             .map_err(map_ffi_pre_dispatch)?;
-        Ok(targets.into_iter().map(target_record).collect())
+        let records: Vec<TargetRecord> = targets.into_iter().map(target_record).collect();
+        *self.targets.write().await = records
+            .iter()
+            .cloned()
+            .map(|record| (record.target.id.clone(), record))
+            .collect();
+        Ok(records)
     }
 
-    async fn load_target(target_id: &str) -> NativeAdapterResult<TargetRecord> {
-        Self::target_records()
+    async fn load_target(&self, target_id: &str) -> NativeAdapterResult<TargetRecord> {
+        if let Some(record) = self.targets.read().await.get(target_id).cloned() {
+            return Ok(record);
+        }
+        self.refresh_target_records()
             .await?
             .into_iter()
             .find(|record| record.target.id == target_id)
@@ -351,12 +380,27 @@ impl AxComputerAdapter {
     async fn capture_screen(
         &self,
         record: ScreenRecord,
+        options: Option<NativeCaptureOptions>,
     ) -> NativeAdapterResult<NativeCapturedFrame> {
         let display_id = record.display.id.clone();
-        let captured = tokio::task::spawn_blocking(move || capture_display_rgba(&display_id))
-            .await
-            .map_err(|error| driver_failure(format!("macOS capture task failed: {error}")))?
-            .map_err(map_ffi_pre_dispatch)?;
+        let captured = tokio::task::spawn_blocking(move || match options {
+            Some(options) => {
+                capture_display_rgba_sized(&display_id, options.max_width, options.max_height)
+            }
+            None => capture_display_rgba(&display_id),
+        })
+        .await
+        .map_err(|error| driver_failure(format!("macOS capture task failed: {error}")))?
+        .map_err(map_ffi_pre_dispatch)?;
+        self.finish_screen_capture(record, captured, options).await
+    }
+
+    async fn finish_screen_capture(
+        &self,
+        record: ScreenRecord,
+        captured: RgbaFrame,
+        options: Option<NativeCaptureOptions>,
+    ) -> NativeAdapterResult<NativeCapturedFrame> {
         let current = Self::load_screen(&record.target.id)?.ok_or_else(|| {
             NativeAdapterError::definite(
                 NativeAdapterErrorCode::TargetNotFound,
@@ -365,8 +409,8 @@ impl AxComputerAdapter {
             )
         })?;
         if current.target.target_generation != record.target.target_generation
-            || captured.width != record.display.width
-            || captured.height != record.display.height
+            || current.display.width != record.display.width
+            || current.display.height != record.display.height
         {
             return Err(NativeAdapterError::definite(
                 NativeAdapterErrorCode::FrameStale,
@@ -374,7 +418,8 @@ impl AxComputerAdapter {
                 true,
             ));
         }
-        let png = encode_png(&captured.rgba, captured.width, captured.height)?;
+        let (bytes, mime_type) =
+            encode_frame(&captured.rgba, captured.width, captured.height, options)?;
         let frame_id = self.next_frame_id();
         self.latest_screen_frames.write().await.insert(
             record.target.id.clone(),
@@ -390,13 +435,15 @@ impl AxComputerAdapter {
             record.target,
             captured.width,
             captured.height,
-            png,
+            mime_type,
+            bytes,
         ))
     }
 
     async fn capture_window(
         &self,
         record: TargetRecord,
+        options: Option<NativeCaptureOptions>,
     ) -> NativeAdapterResult<NativeCapturedFrame> {
         let window_id = record.native.window_id.ok_or_else(|| {
             NativeAdapterError::unsupported(
@@ -404,18 +451,28 @@ impl AxComputerAdapter {
             )
         })?;
         let process_id = record.native.process_id;
-        let captured =
-            tokio::task::spawn_blocking(move || capture_window_rgba(window_id, process_id))
-                .await
-                .map_err(|error| {
-                    driver_failure(format!("macOS window capture task failed: {error}"))
-                })?
-                .map_err(map_ffi_pre_dispatch)?;
-        let current = Self::load_target(&record.target.id).await?;
-        if current.target.target_generation != record.target.target_generation
-            || current.native.process_generation != record.native.process_generation
-            || current.native.window_id != Some(captured.window_id)
-        {
+        let captured = tokio::task::spawn_blocking(move || match options {
+            Some(options) => capture_window_rgba_sized(
+                window_id,
+                process_id,
+                options.max_width,
+                options.max_height,
+            ),
+            None => capture_window_rgba(window_id, process_id),
+        })
+        .await
+        .map_err(|error| driver_failure(format!("macOS window capture task failed: {error}")))?
+        .map_err(map_ffi_pre_dispatch)?;
+        self.finish_window_capture(record, captured, options).await
+    }
+
+    async fn finish_window_capture(
+        &self,
+        record: TargetRecord,
+        captured: MacWindowFrame,
+        options: Option<NativeCaptureOptions>,
+    ) -> NativeAdapterResult<NativeCapturedFrame> {
+        if record.native.window_id != Some(captured.window_id) {
             return Err(NativeAdapterError::definite(
                 NativeAdapterErrorCode::FrameStale,
                 "macOS window identity changed during capture",
@@ -433,10 +490,11 @@ impl AxComputerAdapter {
                 true,
             ));
         }
-        let png = encode_png(
+        let (bytes, mime_type) = encode_frame(
             &captured.frame.rgba,
             captured.frame.width,
             captured.frame.height,
+            options,
         )?;
         let sequence = self.frame_sequence.fetch_add(1, Ordering::Relaxed) + 1;
         let frame_id = format!("f_{}_{}", self.incarnation.simple(), sequence);
@@ -469,8 +527,32 @@ impl AxComputerAdapter {
             record.target,
             captured.frame.width,
             captured.frame.height,
-            png,
+            mime_type,
+            bytes,
         ))
+    }
+
+    fn live_capture(
+        &self,
+        target_id: &str,
+        options: NativeCaptureOptions,
+        target_generation: &str,
+    ) -> NativeAdapterResult<Arc<MacFrameStream>> {
+        let captures = self
+            .live_captures
+            .lock()
+            .map_err(|_| driver_failure("macOS live-capture registry lock is poisoned"))?;
+        let capture = captures
+            .get(target_id)
+            .ok_or_else(|| driver_failure("macOS live capture was not started for this target"))?;
+        if capture.options != options || capture.target_generation != target_generation {
+            return Err(NativeAdapterError::definite(
+                NativeAdapterErrorCode::FrameStale,
+                "macOS live capture configuration or target generation changed",
+                true,
+            ));
+        }
+        Ok(Arc::clone(&capture.stream))
     }
 
     fn next_frame_id(&self) -> String {
@@ -513,6 +595,14 @@ impl AxComputerAdapter {
                 validate_optional_end(*end_x, *end_y, frame.width, frame.height)?;
             }
             NativeAction::Keyboard { .. } | NativeAction::Launch { .. } => {}
+            NativeAction::Clipboard { operation, text } => {
+                validate_clipboard_payload(*operation, text.as_deref())?;
+                if self.clipboard.is_none() {
+                    return Err(NativeAdapterError::unsupported(
+                        "native text clipboard is unavailable on this macOS login seat",
+                    ));
+                }
+            }
             NativeAction::Semantic { .. } | NativeAction::Focus { .. } => {
                 return Err(NativeAdapterError::unsupported(
                     "semantic/focus actions cannot target the macOS screen",
@@ -526,7 +616,7 @@ impl AxComputerAdapter {
         &self,
         command: &NativeActionCommand,
     ) -> NativeAdapterResult<(TargetRecord, WindowFrameFence)> {
-        let record = Self::load_target(&command.target_id).await?;
+        let record = self.load_target(&command.target_id).await?;
         if record.target.kind != NativeTargetKind::Window || record.native.ax_window.is_none() {
             return Err(NativeAdapterError::unsupported(
                 "window-relative input requires one exact AX/SCK-correlated macOS window",
@@ -581,11 +671,27 @@ impl AxComputerAdapter {
     ) -> NativeAdapterResult<NativeObservation> {
         let _seat = self.input_seat.lock().await;
         let (record, frame) = self.validate_window_pointer(command).await?;
+        let current = self
+            .refresh_target_records()
+            .await?
+            .into_iter()
+            .find(|candidate| candidate.target.id == record.target.id)
+            .ok_or_else(|| {
+                NativeAdapterError::definite(
+                    NativeAdapterErrorCode::TargetStale,
+                    "macOS window disappeared before raw input",
+                    true,
+                )
+            })?;
+        if !current.target.focused {
+            return Err(NativeAdapterError::unsupported(
+                "raw macOS pointer input would foreground this window; use its background Accessibility actions or explicitly focus it first",
+            ));
+        }
         let inputs = pointer_inputs(&command.action)?;
         self.invalidate_frames().await;
-        let native = record.native.clone();
         tokio::task::spawn_blocking(move || {
-            focus_and_inject_window(&native, frame.bounds, frame.width, frame.height, &inputs)
+            inject_window_batch(&inputs, frame.bounds, frame.width, frame.height)
         })
         .await
         .map_err(|error| {
@@ -607,7 +713,7 @@ impl AxComputerAdapter {
         &self,
         command: &NativeActionCommand,
     ) -> NativeAdapterResult<()> {
-        let current = Self::load_target(&command.target_id).await?;
+        let current = self.load_target(&command.target_id).await?;
         if current.target.target_generation != command.expected_target_generation {
             return Err(NativeAdapterError::definite(
                 NativeAdapterErrorCode::TargetStale,
@@ -766,7 +872,7 @@ impl AxComputerAdapter {
         command: &NativeActionCommand,
     ) -> NativeAdapterResult<NativeObservation> {
         let _seat = self.input_seat.lock().await;
-        let record = Self::load_target(&command.target_id).await?;
+        let record = self.load_target(&command.target_id).await?;
         if record.target.target_generation != command.expected_target_generation
             || record.native.ax_window.is_none() && record.target.kind == NativeTargetKind::Window
         {
@@ -776,10 +882,26 @@ impl AxComputerAdapter {
                 true,
             ));
         }
-        let input = keyboard_input(&command.action)?;
+        let current = self
+            .refresh_target_records()
+            .await?
+            .into_iter()
+            .find(|candidate| candidate.target.id == record.target.id)
+            .ok_or_else(|| {
+                NativeAdapterError::definite(
+                    NativeAdapterErrorCode::TargetStale,
+                    "macOS target disappeared before raw input",
+                    true,
+                )
+            })?;
+        if !current.target.focused {
+            return Err(NativeAdapterError::unsupported(
+                "raw macOS keyboard input would foreground this target; use background Accessibility set_value/actions or explicitly focus it first",
+            ));
+        }
+        let input = keyboard_or_clipboard_input(&command.action)?;
         self.invalidate_frames().await;
-        let native = record.native.clone();
-        tokio::task::spawn_blocking(move || focus_and_inject_target(&native, &[input]))
+        tokio::task::spawn_blocking(move || inject_batch(&[input]))
             .await
             .map_err(|error| {
                 NativeAdapterError::outcome_unknown(format!(
@@ -795,6 +917,41 @@ impl AxComputerAdapter {
                 ))
             })
     }
+
+    async fn dispatch_clipboard_storage(
+        &self,
+        command: &NativeActionCommand,
+    ) -> Option<NativeAdapterResult<NativeObservation>> {
+        let NativeAction::Clipboard { operation, text } = &command.action else {
+            return None;
+        };
+        if !matches!(
+            operation,
+            NativeClipboardAction::Write | NativeClipboardAction::Clear
+        ) {
+            return None;
+        }
+        Some(
+            async {
+                self.validate(command).await?;
+                self.clipboard
+                    .as_ref()
+                    .ok_or_else(|| {
+                        NativeAdapterError::unsupported(
+                            "native text clipboard is unavailable on this macOS login seat",
+                        )
+                    })?
+                    .mutate(*operation, text.clone())
+                    .await?;
+                self.observe(&command.target_id).await.map_err(|error| {
+                    NativeAdapterError::outcome_unknown(format!(
+                        "native clipboard changed but target state could not be observed: {error}"
+                    ))
+                })
+            }
+            .await,
+        )
+    }
 }
 
 #[async_trait]
@@ -806,12 +963,14 @@ impl ComputerAdapter for AxComputerAdapter {
             accessibility: accessibility_trusted(),
             input_monitoring: input_monitoring_granted(),
             screen_capture: screen_capture_granted(),
+            clipboard: self.clipboard.is_some(),
         })
     }
 
     async fn targets(&self) -> NativeAdapterResult<Vec<NativeTarget>> {
         Self::ensure_unlocked()?;
-        let mut targets: Vec<NativeTarget> = Self::target_records()
+        let mut targets: Vec<NativeTarget> = self
+            .refresh_target_records()
             .await?
             .into_iter()
             .map(|record| record.target)
@@ -829,23 +988,201 @@ impl ComputerAdapter for AxComputerAdapter {
         if let Some(screen) = Self::load_screen(target_id)? {
             return Ok(self.screen_observation(screen.target).await);
         }
-        let record = Self::load_target(target_id).await?;
+        let record = self.load_target(target_id).await?;
         self.observe_target(record).await
     }
 
     async fn capture(&self, target_id: &str) -> NativeAdapterResult<NativeCapturedFrame> {
         Self::ensure_unlocked()?;
         if let Some(screen) = Self::load_screen(target_id)? {
-            return self.capture_screen(screen).await;
+            return self.capture_screen(screen, None).await;
         }
-        let record = Self::load_target(target_id).await?;
+        let record = self.load_target(target_id).await?;
         match record.target.kind {
-            NativeTargetKind::Window => self.capture_window(record).await,
+            NativeTargetKind::Window => self.capture_window(record, None).await,
             NativeTargetKind::App => Err(NativeAdapterError::unsupported(
                 "capture one exact macOS window target rather than an ambiguous application",
             )),
             NativeTargetKind::Screen => unreachable!(),
         }
+    }
+
+    async fn start_capture_stream(
+        &self,
+        target_id: &str,
+        options: NativeCaptureOptions,
+    ) -> NativeAdapterResult<()> {
+        Self::ensure_unlocked()?;
+        let _lifecycle = self.live_capture_lifecycle.lock().await;
+
+        let (target_generation, stream) =
+            if let Some(screen) = Self::load_screen(target_id)? {
+                let target_generation = screen.target.target_generation.clone();
+                {
+                    let captures = self.live_captures.lock().map_err(|_| {
+                        driver_failure("macOS live-capture registry lock is poisoned")
+                    })?;
+                    if captures.get(target_id).is_some_and(|capture| {
+                        capture.options == options && capture.target_generation == target_generation
+                    }) {
+                        return Ok(());
+                    }
+                }
+                let display_id = screen.display.id;
+                let stream = tokio::task::spawn_blocking(move || {
+                    start_display_frame_stream(&display_id, options.max_width, options.max_height)
+                })
+                .await
+                .map_err(|error| {
+                    driver_failure(format!("macOS live-display startup task failed: {error}"))
+                })?
+                .map_err(map_ffi_pre_dispatch)?;
+                (target_generation, Arc::new(stream))
+            } else {
+                let record = self.load_target(target_id).await?;
+                if record.target.kind != NativeTargetKind::Window {
+                    return Err(NativeAdapterError::unsupported(
+                        "live capture requires one exact macOS window or screen",
+                    ));
+                }
+                let window_id = record.native.window_id.ok_or_else(|| {
+                    NativeAdapterError::unsupported(
+                        "macOS window is not unambiguously correlated to ScreenCaptureKit",
+                    )
+                })?;
+                let process_id = record.native.process_id;
+                let target_generation = record.target.target_generation;
+                {
+                    let captures = self.live_captures.lock().map_err(|_| {
+                        driver_failure("macOS live-capture registry lock is poisoned")
+                    })?;
+                    if captures.get(target_id).is_some_and(|capture| {
+                        capture.options == options && capture.target_generation == target_generation
+                    }) {
+                        return Ok(());
+                    }
+                }
+                let stream = tokio::task::spawn_blocking(move || {
+                    start_window_frame_stream(
+                        window_id,
+                        process_id,
+                        options.max_width,
+                        options.max_height,
+                    )
+                })
+                .await
+                .map_err(|error| {
+                    driver_failure(format!("macOS live-window startup task failed: {error}"))
+                })?
+                .map_err(map_ffi_pre_dispatch)?;
+                (target_generation, Arc::new(stream))
+            };
+
+        let previous = self
+            .live_captures
+            .lock()
+            .map_err(|_| driver_failure("macOS live-capture registry lock is poisoned"))?
+            .insert(
+                target_id.to_string(),
+                LiveCapture {
+                    options,
+                    target_generation,
+                    stream,
+                },
+            );
+        if let Some(previous) = previous {
+            tokio::task::spawn_blocking(move || previous.stream.stop())
+                .await
+                .map_err(|error| {
+                    driver_failure(format!("macOS old live-capture shutdown failed: {error}"))
+                })?;
+        }
+        Ok(())
+    }
+
+    async fn capture_stream(
+        &self,
+        target_id: &str,
+        options: NativeCaptureOptions,
+    ) -> NativeAdapterResult<NativeCapturedFrame> {
+        Self::ensure_unlocked()?;
+        if let Some(screen) = Self::load_screen(target_id)? {
+            let stream = self.live_capture(target_id, options, &screen.target.target_generation)?;
+            let captured = tokio::task::spawn_blocking(move || stream.next_frame())
+                .await
+                .map_err(|error| {
+                    driver_failure(format!("macOS live-display frame task failed: {error}"))
+                })?
+                .map_err(map_ffi_pre_dispatch)?;
+            return self
+                .finish_screen_capture(screen, captured, Some(options))
+                .await;
+        }
+        let record = self.load_target(target_id).await?;
+        match record.target.kind {
+            NativeTargetKind::Window => {
+                let stream =
+                    self.live_capture(target_id, options, &record.target.target_generation)?;
+                let frame = tokio::task::spawn_blocking(move || stream.next_frame())
+                    .await
+                    .map_err(|error| {
+                        driver_failure(format!("macOS live-window frame task failed: {error}"))
+                    })?
+                    .map_err(map_ffi_pre_dispatch)?;
+                let window_id = record.native.window_id.ok_or_else(|| {
+                    NativeAdapterError::unsupported(
+                        "macOS window is not unambiguously correlated to ScreenCaptureKit",
+                    )
+                })?;
+                let bounds = record.native.bounds.ok_or_else(|| {
+                    driver_failure("macOS window has no stable live-capture bounds")
+                })?;
+                self.finish_window_capture(
+                    record,
+                    MacWindowFrame {
+                        window_id,
+                        bounds,
+                        frame,
+                    },
+                    Some(options),
+                )
+                .await
+            }
+            NativeTargetKind::App => Err(NativeAdapterError::unsupported(
+                "capture one exact macOS window target rather than an ambiguous application",
+            )),
+            NativeTargetKind::Screen => unreachable!(),
+        }
+    }
+
+    async fn stop_capture_stream(&self, target_id: &str) -> NativeAdapterResult<()> {
+        let _lifecycle = self.live_capture_lifecycle.lock().await;
+        let capture = self
+            .live_captures
+            .lock()
+            .map_err(|_| driver_failure("macOS live-capture registry lock is poisoned"))?
+            .remove(target_id);
+        if let Some(capture) = capture {
+            tokio::task::spawn_blocking(move || capture.stream.stop())
+                .await
+                .map_err(|error| {
+                    driver_failure(format!("macOS live-capture shutdown task failed: {error}"))
+                })?;
+        }
+        Ok(())
+    }
+
+    async fn clipboard(&self) -> NativeAdapterResult<NativeClipboard> {
+        Self::ensure_unlocked()?;
+        self.clipboard
+            .as_ref()
+            .ok_or_else(|| {
+                NativeAdapterError::unsupported(
+                    "native text clipboard is unavailable on this macOS login seat",
+                )
+            })?
+            .read()
+            .await
     }
 
     async fn validate(&self, command: &NativeActionCommand) -> NativeAdapterResult<()> {
@@ -861,8 +1198,16 @@ impl ComputerAdapter for AxComputerAdapter {
             NativeAction::Semantic { .. } | NativeAction::Focus { .. } => {
                 self.validate_observed_action(command).await
             }
-            NativeAction::Keyboard { .. } => {
-                let record = Self::load_target(&command.target_id).await?;
+            NativeAction::Keyboard { .. } | NativeAction::Clipboard { .. } => {
+                if let NativeAction::Clipboard { operation, text } = &command.action {
+                    validate_clipboard_payload(*operation, text.as_deref())?;
+                    if self.clipboard.is_none() {
+                        return Err(NativeAdapterError::unsupported(
+                            "native text clipboard is unavailable on this macOS login seat",
+                        ));
+                    }
+                }
+                let record = self.load_target(&command.target_id).await?;
                 if record.target.target_generation != command.expected_target_generation {
                     return Err(NativeAdapterError::definite(
                         NativeAdapterErrorCode::TargetStale,
@@ -883,6 +1228,9 @@ impl ComputerAdapter for AxComputerAdapter {
         command: &NativeActionCommand,
     ) -> NativeAdapterResult<NativeObservation> {
         Self::ensure_unlocked()?;
+        if let Some(result) = self.dispatch_clipboard_storage(command).await {
+            return result;
+        }
         if let Some(screen) = Self::load_screen(&command.target_id)? {
             // Screen pointer/keyboard input and activating application launch
             // all contend for the same physical Aqua seat.
@@ -909,8 +1257,9 @@ impl ComputerAdapter for AxComputerAdapter {
                     )
                     .map_err(map_ffi_mutation)?;
                 }
-                NativeAction::Keyboard { .. } => {
-                    inject_batch(&[keyboard_input(&command.action)?]).map_err(map_ffi_mutation)?;
+                NativeAction::Keyboard { .. } | NativeAction::Clipboard { .. } => {
+                    inject_batch(&[keyboard_or_clipboard_input(&command.action)?])
+                        .map_err(map_ffi_mutation)?;
                 }
                 NativeAction::Launch { application_id } => {
                     let application_id = application_id.clone();
@@ -929,7 +1278,9 @@ impl ComputerAdapter for AxComputerAdapter {
         }
         match &command.action {
             NativeAction::Pointer { .. } => self.dispatch_window_pointer(command).await,
-            NativeAction::Keyboard { .. } => self.dispatch_keyboard_target(command).await,
+            NativeAction::Keyboard { .. } | NativeAction::Clipboard { .. } => {
+                self.dispatch_keyboard_target(command).await
+            }
             NativeAction::Semantic { .. } | NativeAction::Focus { .. } => {
                 self.dispatch_semantic(command).await
             }
@@ -947,6 +1298,7 @@ struct MacCapabilityGrants {
     accessibility: bool,
     input_monitoring: bool,
     screen_capture: bool,
+    clipboard: bool,
 }
 
 fn capabilities_for_grants(grants: MacCapabilityGrants) -> NativeCapabilities {
@@ -962,6 +1314,7 @@ fn capabilities_for_grants(grants: MacCapabilityGrants) -> NativeCapabilities {
         semantic_actions: semantic,
         pointer_input: input,
         keyboard_input: input,
+        clipboard: grants.unlocked && grants.clipboard,
         background_actions: semantic,
         parallel_apps: semantic,
     }
@@ -1168,22 +1521,56 @@ fn pointer_inputs(action: &NativeAction) -> NativeAdapterResult<Vec<InputEvent>>
     })
 }
 
-fn keyboard_input(action: &NativeAction) -> NativeAdapterResult<InputEvent> {
-    let NativeAction::Keyboard { action, value } = action else {
-        return Err(invalid("expected keyboard action"));
-    };
-    Ok(match action {
-        NativeKeyboardAction::Type => InputEvent::Key {
-            text: Some(value.clone()),
-            named: None,
-            action: KeyAction::Press,
-        },
-        NativeKeyboardAction::Press => InputEvent::Key {
-            text: None,
-            named: Some(value.clone()),
-            action: KeyAction::Press,
-        },
-    })
+fn keyboard_or_clipboard_input(action: &NativeAction) -> NativeAdapterResult<InputEvent> {
+    match action {
+        NativeAction::Keyboard { action, value } => Ok(match action {
+            NativeKeyboardAction::Type => InputEvent::Key {
+                text: Some(value.clone()),
+                named: None,
+                action: KeyAction::Press,
+            },
+            NativeKeyboardAction::Press => InputEvent::Key {
+                text: None,
+                named: Some(value.clone()),
+                action: KeyAction::Press,
+            },
+        }),
+        NativeAction::Clipboard { operation, text } => {
+            validate_clipboard_payload(*operation, text.as_deref())?;
+            let named = match operation {
+                NativeClipboardAction::Copy => "Command+c",
+                NativeClipboardAction::Paste => "Command+v",
+                NativeClipboardAction::Write | NativeClipboardAction::Clear => {
+                    return Err(NativeAdapterError::unsupported(
+                        "clipboard storage mutations are not macOS key input",
+                    ));
+                }
+            };
+            Ok(InputEvent::Key {
+                text: None,
+                named: Some(named.to_string()),
+                action: KeyAction::Press,
+            })
+        }
+        _ => Err(invalid("expected keyboard or clipboard-transfer action")),
+    }
+}
+
+fn validate_clipboard_payload(
+    operation: NativeClipboardAction,
+    text: Option<&str>,
+) -> NativeAdapterResult<()> {
+    if (operation == NativeClipboardAction::Write) != text.is_some() {
+        return Err(invalid(
+            "native clipboard text is required exactly for write",
+        ));
+    }
+    if text.is_some_and(|value| value.len() > 1024 * 1024) {
+        return Err(invalid(
+            "native clipboard text exceeds its UTF-8 byte envelope",
+        ));
+    }
+    Ok(())
 }
 
 fn encode_png(rgba: &[u8], width: u32, height: u32) -> NativeAdapterResult<Vec<u8>> {
@@ -1194,11 +1581,33 @@ fn encode_png(rgba: &[u8], width: u32, height: u32) -> NativeAdapterResult<Vec<u
     Ok(png)
 }
 
+fn encode_frame(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    options: Option<NativeCaptureOptions>,
+) -> NativeAdapterResult<(Vec<u8>, String)> {
+    if options.is_none_or(|options| options.format == NativeFrameFormat::Png) {
+        return Ok((encode_png(rgba, width, height)?, "image/png".to_string()));
+    }
+    let quality = options.map_or(80, |options| options.quality);
+    let mut rgb = Vec::with_capacity(rgba.len() / 4 * 3);
+    for pixel in rgba.chunks_exact(4) {
+        rgb.extend_from_slice(&pixel[..3]);
+    }
+    let mut jpeg = Vec::new();
+    JpegEncoder::new_with_quality(&mut jpeg, quality)
+        .write_image(&rgb, width, height, ExtendedColorType::Rgb8)
+        .map_err(|error| driver_failure(format!("encode macOS live frame: {error}")))?;
+    Ok((jpeg, "image/jpeg".to_string()))
+}
+
 fn captured_frame(
     frame_id: String,
     target: NativeTarget,
     width: u32,
     height: u32,
+    mime_type: String,
     bytes: Vec<u8>,
 ) -> NativeCapturedFrame {
     NativeCapturedFrame {
@@ -1207,7 +1616,7 @@ fn captured_frame(
         target_generation: target.target_generation,
         width,
         height,
-        mime_type: "image/png".to_string(),
+        mime_type,
         sha256: hex::encode(Sha256::digest(&bytes)),
         bytes,
     }
@@ -1349,9 +1758,15 @@ mod capability_tests {
             accessibility: true,
             input_monitoring: true,
             screen_capture: true,
+            clipboard: true,
         };
         let complete = capabilities_for_grants(complete_grants);
-        assert!(complete.semantic_actions && complete.pointer_input && complete.window_capture);
+        assert!(
+            complete.semantic_actions
+                && complete.pointer_input
+                && complete.window_capture
+                && complete.clipboard
+        );
 
         let accessibility_revoked = capabilities_for_grants(MacCapabilityGrants {
             accessibility: false,
@@ -1382,6 +1797,11 @@ mod capability_tests {
             ..complete_grants
         });
         assert!(!locked.app_discovery && !locked.app_launch);
-        assert!(!locked.semantic_actions && !locked.pointer_input && !locked.window_capture);
+        assert!(
+            !locked.semantic_actions
+                && !locked.pointer_input
+                && !locked.window_capture
+                && !locked.clipboard
+        );
     }
 }

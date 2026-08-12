@@ -1,7 +1,7 @@
 # Embedding the OpenGeni Workbench
 
 This guide is for a host app that wants to drop the OpenGeni **session workspace**
-— the Changes / Files / Terminal / Desktop dock, with instant cold paint and the
+— the Changes / Files / Terminal / Browser / Computer dock, with instant cold paint and the
 machine-state chip — into its own UI. It is the frontend companion to the
 standalone SDK/proxy integration as well as the advanced in-process path in
 `docs/embedding.md`. It is the exact surface `apps/web` itself consumes (see
@@ -38,7 +38,9 @@ surface to a notice; it never crashes the dock.
 | Terminal | the interactive xterm PTY | `@xterm/xterm`, `@xterm/addon-fit`, `@xterm/addon-web-links` |
 | Files editor | in-browser code editing | `@uiw/react-codemirror` + the `@codemirror/lang-*` grammars you need |
 | Changes diff | the Pierre diff renderer | `@pierre/diffs` |
-| Desktop | the noVNC desktop viewer | `@novnc/novnc` |
+| Browser | browser-native tabs, semantic state, frames, and input | None |
+| Computer | semantic app/window/screen state, frames, and input | None |
+| Legacy `DesktopViewer` primitive | direct noVNC framebuffer embedding outside `SandboxWorkspace` | `@novnc/novnc` |
 
 The authoritative list is the `peerDependencies` block of the package manifest
 (`packages/react/package.json`).
@@ -169,7 +171,7 @@ being observed.
 | --- | --- |
 | `sessionId`, `events` | the session and its live event log (from `useSessionEvents`). |
 | `primary` | the pane shown beside the dock (your chat/timeline). |
-| `surfaces` | built-in surface allowlist: `"changes"`, `"files"`, `"terminal"`, `"desktop"`. Omit for all four. |
+| `surfaces` | built-in surface allowlist: `"changes"`, `"files"`, `"terminal"`, `"browser"`, `"desktop"` (`"desktop"` is the stable id of the Computer surface). Omit for all five. |
 | `onNotify` | host-routed `{ kind: "error" \| "info"; message }` — the package has no toast dependency, so you decide how errors surface. |
 | `leadingTabs` / `trailingTabs` | your own `WorkspaceTab[]` injected before / after the workbench tabs (this is how `apps/web` adds its Run and Debug tabs). |
 | `initialTab` | override the default landing tab. A built-in tab excluded by `surfaces` is ignored. Omit it and the workbench decides **Changes when the session has changes, else Files** from the authoritative source: instant capture stats while cold/offline, live Git while warm. The choice latches before real content paints, so later edits never steal the current tab. |

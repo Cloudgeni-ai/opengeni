@@ -156,9 +156,10 @@ async function main(): Promise<void> {
     const timeout =
       tier === "e2e" || path.includes("selfhosted-auth-callout") ? "360000" : "180000";
     const command = usesBrowserRunner(path)
-      ? ["bun", "scripts/run-browser-e2e.ts", explicitBunTestPath(path)]
+      ? ["bun", "--no-env-file", "scripts/run-browser-e2e.ts", explicitBunTestPath(path)]
       : [
           "bun",
+          "--no-env-file",
           "test",
           "--no-orphans",
           `--timeout=${timeout}`,

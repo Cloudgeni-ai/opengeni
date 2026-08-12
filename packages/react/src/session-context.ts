@@ -1,4 +1,8 @@
-import type { StreamConnectionState, WorkspaceControlEvent } from "@opengeni/sdk";
+import type {
+  StreamConnectionState,
+  WorkspaceControlEvent,
+  WorkspaceInteractionRevisionEvent,
+} from "@opengeni/sdk";
 import { createContext, useContext } from "react";
 import type {
   EmbeddedFileAttachmentClientLike,
@@ -7,6 +11,7 @@ import type {
   EmbeddedBrowserInteractionClientLike,
   EmbeddedComputerInteractionClientLike,
   EmbeddedInteractionClientLike,
+  EmbeddedInterventionClientLike,
   EmbeddedRealtimeSessionClientLike,
   EmbeddedSessionClientLike,
   EmbeddedSessionLineageClientLike,
@@ -20,6 +25,8 @@ export type OpenGeniContextValue = {
   workspaceId: string;
   workspaceControlEvent: WorkspaceControlEvent | null;
   workspaceControlConnectionState: StreamConnectionState | "idle" | "error";
+  workspaceInteractionEvent: WorkspaceInteractionRevisionEvent | null;
+  workspaceInteractionConnectionState: StreamConnectionState | "idle" | "error";
   registerSessionReconciler: (
     sessionId: string,
     key: string,
@@ -84,6 +91,11 @@ export type EmbeddedInteractionClientOverride = {
   workspaceId?: string | undefined;
 };
 
+export type EmbeddedInterventionClientOverride = {
+  client?: EmbeddedInterventionClientLike | undefined;
+  workspaceId?: string | undefined;
+};
+
 export type EmbeddedBrowserInteractionClientOverride = {
   client?: EmbeddedBrowserInteractionClientLike | undefined;
   workspaceId?: string | undefined;
@@ -132,6 +144,8 @@ function useEmbeddedClientRefinement<TClient extends object>(
     workspaceId,
     workspaceControlEvent: context?.workspaceControlEvent ?? null,
     workspaceControlConnectionState: context?.workspaceControlConnectionState ?? "idle",
+    workspaceInteractionEvent: context?.workspaceInteractionEvent ?? null,
+    workspaceInteractionConnectionState: context?.workspaceInteractionConnectionState ?? "idle",
     registerSessionReconciler: context?.registerSessionReconciler ?? NOOP_REGISTER_RECONCILER,
     reconcileSession: context?.reconcileSession ?? NOOP_RECONCILE_SESSION,
   };
@@ -158,12 +172,33 @@ export function useOpenGeni(override: ClientOverride = {}): OpenGeniContextValue
     workspaceId,
     workspaceControlEvent: context?.workspaceControlEvent ?? null,
     workspaceControlConnectionState: context?.workspaceControlConnectionState ?? "idle",
+    workspaceInteractionEvent: context?.workspaceInteractionEvent ?? null,
+    workspaceInteractionConnectionState: context?.workspaceInteractionConnectionState ?? "idle",
     registerSessionReconciler: context?.registerSessionReconciler ?? NOOP_REGISTER_RECONCILER,
     reconcileSession: context?.reconcileSession ?? NOOP_RECONCILE_SESSION,
   };
 }
 
 const BROWSER_INTERACTION_METHODS = [
+  "streamWorkspaceInteractionRevisions",
+  "listNetworkRoutes",
+  "getNetworkRoute",
+  "createNetworkRoute",
+  "updateNetworkRoute",
+  "listSiteAuthConnections",
+  "getSiteAuthConnection",
+  "createSiteAuthConnection",
+  "updateSiteAuthConnection",
+  "listAuthRuns",
+  "getAuthRun",
+  "startBrowserAuthRun",
+  "reportBrowserAuthRun",
+  "protectedBrowserAuthFill",
+  "verifyBrowserAuthRun",
+  "listInteractionInterventions",
+  "getInteractionIntervention",
+  "createInteractionIntervention",
+  "resolveInteractionIntervention",
   "listAttachedBrowsers",
   "getAttachedBrowser",
   "listBrowserIdentities",
@@ -172,6 +207,10 @@ const BROWSER_INTERACTION_METHODS = [
   "listBrowserRevisions",
   "listBrowserSessions",
   "getBrowserSession",
+  "readBrowserClipboard",
+  "listBrowserDownloads",
+  "getBrowserDownload",
+  "saveBrowserDownload",
   "createBrowserSession",
   "listBrowserTargets",
   "openBrowserTarget",
@@ -190,8 +229,14 @@ const BROWSER_INTERACTION_METHODS = [
 ] as const;
 
 const COMPUTER_INTERACTION_METHODS = [
+  "streamWorkspaceInteractionRevisions",
+  "listInteractionInterventions",
+  "getInteractionIntervention",
+  "createInteractionIntervention",
+  "resolveInteractionIntervention",
   "listComputerSessions",
   "getComputerSession",
+  "readComputerClipboard",
   "createComputerSession",
   "listComputerTargets",
   "observeComputerTarget",
@@ -201,6 +246,25 @@ const COMPUTER_INTERACTION_METHODS = [
   "heartbeatComputerSession",
   "endComputerSession",
 ] as const;
+
+const INTERVENTION_METHODS = [
+  "streamWorkspaceInteractionRevisions",
+  "listInteractionInterventions",
+  "getInteractionIntervention",
+  "createInteractionIntervention",
+  "resolveInteractionIntervention",
+] as const;
+
+/** Resolve only the workspace-wide Browser/Computer intervention surface. */
+export function useEmbeddedInterventions(
+  override: EmbeddedInterventionClientOverride = {},
+): EmbeddedClientContextValue<EmbeddedInterventionClientLike> {
+  return useEmbeddedClientRefinement(
+    override,
+    INTERVENTION_METHODS,
+    "interaction intervention hooks",
+  );
+}
 
 /** Resolve only BrowserSession methods for a standalone Browser embed. */
 export function useEmbeddedBrowserInteraction(

@@ -25,7 +25,7 @@ async function handle(request: {
   if (request.method === "targets") await new Promise((resolve) => setTimeout(resolve, 20));
   if (request.method === "observe" && request.targetId === "missing") {
     write({
-      protocolVersion: 1,
+      protocolVersion: 2,
       requestId: request.requestId,
       status: "error",
       error: {
@@ -39,7 +39,7 @@ async function handle(request: {
   }
   if (request.method === "observe" && request.targetId === "malformed") {
     write({
-      protocolVersion: 1,
+      protocolVersion: 2,
       requestId: request.requestId,
       status: "ok",
       result: { invalid: true },
@@ -49,7 +49,7 @@ async function handle(request: {
   if (request.method === "capture") {
     const attachment = Buffer.from("fixture-png");
     const response = {
-      protocolVersion: 1,
+      protocolVersion: 2,
       requestId: request.requestId,
       status: "ok",
       result: {
@@ -67,7 +67,7 @@ async function handle(request: {
     return;
   }
   write({
-    protocolVersion: 1,
+    protocolVersion: 2,
     requestId: request.requestId,
     status: "ok",
     result: result(request.method),
@@ -77,7 +77,7 @@ async function handle(request: {
 function result(method: string): unknown {
   if (method === "handshake") {
     return {
-      protocolVersion: 1,
+      protocolVersion: 2,
       helperVersion: "fixture-1",
       platform: "linux",
       capabilities: capabilities(),
@@ -85,6 +85,7 @@ function result(method: string): unknown {
   }
   if (method === "capabilities") return capabilities();
   if (method === "targets") return [target()];
+  if (method === "clipboard") return { text: "fixture clipboard", truncated: false };
   if (method === "validate") return null;
   if (method === "observe" || method === "dispatch") {
     return {
@@ -110,6 +111,7 @@ function capabilities() {
     semanticActions: true,
     pointerInput: true,
     keyboardInput: true,
+    clipboard: true,
     backgroundActions: true,
     parallelApps: true,
   };

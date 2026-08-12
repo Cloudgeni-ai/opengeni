@@ -2,12 +2,13 @@ import { createHash, randomUUID } from "node:crypto";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type {
   ComputerAction,
+  ComputerClipboard,
   ComputerSessionCapabilities,
   InteractionRect,
   InteractionSemanticNodeValue,
 } from "@opengeni/contracts";
 
-export const COMPUTER_NATIVE_PROTOCOL_VERSION = 1 as const;
+export const COMPUTER_NATIVE_PROTOCOL_VERSION = 2 as const;
 const MAX_REQUEST_BYTES = 2 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
 const MAX_ATTACHMENT_BYTES = 64 * 1024 * 1024;
@@ -56,6 +57,15 @@ export type NativeComputerFrame = {
   sha256: string;
   data: Uint8Array;
 };
+
+export type NativeComputerCaptureOptions = {
+  format: "png" | "jpeg";
+  quality: number;
+  maxWidth: number;
+  maxHeight: number;
+};
+
+export type NativeComputerClipboard = Pick<ComputerClipboard, "text" | "truncated">;
 
 export type NativeComputerHandshake = {
   protocolVersion: typeof COMPUTER_NATIVE_PROTOCOL_VERSION;
@@ -106,7 +116,10 @@ export interface ComputerNativeTransport {
   capabilities(): Promise<ComputerSessionCapabilities>;
   targets(): Promise<NativeComputerTarget[]>;
   observe(targetId: string): Promise<NativeComputerObservation>;
-  capture(targetId: string): Promise<NativeComputerFrame>;
+  capture(targetId: string, options?: NativeComputerCaptureOptions): Promise<NativeComputerFrame>;
+  startCapture(targetId: string, options: NativeComputerCaptureOptions): Promise<void>;
+  stopCapture(targetId: string): Promise<void>;
+  clipboard(): Promise<NativeComputerClipboard>;
   validate(command: NativeComputerActionCommand): Promise<void>;
   dispatch(command: NativeComputerActionCommand): Promise<NativeComputerObservation>;
   close(): Promise<void>;
@@ -203,13 +216,41 @@ export class ComputerNativeClient implements ComputerNativeTransport {
     );
   }
 
-  async capture(targetId: string): Promise<NativeComputerFrame> {
+  async capture(
+    targetId: string,
+    options?: NativeComputerCaptureOptions,
+  ): Promise<NativeComputerFrame> {
     return await this.request(
       "capture",
-      { targetId: boundedString(targetId, "targetId", 512) },
+      {
+        targetId: boundedString(targetId, "targetId", 512),
+        ...(options ? { options } : {}),
+      },
       parseFrame,
       this.captureTimeoutMs,
     );
+  }
+
+  async startCapture(targetId: string, options: NativeComputerCaptureOptions): Promise<void> {
+    await this.request(
+      "start_capture",
+      { targetId: boundedString(targetId, "targetId", 512), options },
+      parseNull,
+      this.captureTimeoutMs,
+    );
+  }
+
+  async stopCapture(targetId: string): Promise<void> {
+    await this.request(
+      "stop_capture",
+      { targetId: boundedString(targetId, "targetId", 512) },
+      parseNull,
+      this.requestTimeoutMs,
+    );
+  }
+
+  async clipboard(): Promise<NativeComputerClipboard> {
+    return await this.request("clipboard", {}, parseClipboard, this.requestTimeoutMs);
   }
 
   async validate(command: NativeComputerActionCommand): Promise<void> {
@@ -471,6 +512,7 @@ function parseCapabilities(value: unknown): ComputerSessionCapabilities {
     "semanticActions",
     "pointerInput",
     "keyboardInput",
+    "clipboard",
     "backgroundActions",
     "parallelApps",
   ] as const;
@@ -492,9 +534,28 @@ function emptyCapabilities(): ComputerSessionCapabilities {
     semanticActions: false,
     pointerInput: false,
     keyboardInput: false,
+    clipboard: false,
     backgroundActions: false,
     parallelApps: false,
   };
+}
+
+function parseClipboard(value: unknown): NativeComputerClipboard {
+  const input = record(value, "native clipboard");
+  if (input.text !== null && typeof input.text !== "string") {
+    throw new Error("native clipboard text is invalid");
+  }
+  if (typeof input.truncated !== "boolean" || (input.text === null && input.truncated)) {
+    throw new Error("native clipboard truncation state is invalid");
+  }
+  if (typeof input.text === "string" && Buffer.byteLength(input.text, "utf8") > 1024 * 1024) {
+    throw new Error("native clipboard text exceeds its byte envelope");
+  }
+  return { text: input.text, truncated: input.truncated };
+}
+
+function parseNull(value: unknown): void {
+  if (value !== null) throw new Error("native computer operation returned a non-null result");
 }
 
 function parseTargets(value: unknown): NativeComputerTarget[] {

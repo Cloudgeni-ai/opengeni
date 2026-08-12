@@ -13,6 +13,10 @@ const allowedHosts = process.env.OPENGENI_WEB_ALLOWED_HOSTS?.split(",")
 
 export default defineConfig({
   build: {
+    // The canonical post-build budget below computes gzip sizes for the exact
+    // initial/session graphs and every chunk. Avoid Vite recomputing compressed
+    // sizes for hundreds of lazy syntax assets before that bounded gate runs.
+    reportCompressedSize: false,
     // Vite's default 500 kB raw threshold misclassifies deliberately lazy
     // syntax/WASM assets. The post-build budget gate measures the recursive
     // initial graph and every chunk by gzip size; 800 kB remains a hard raw cap.
@@ -23,12 +27,11 @@ export default defineConfig({
         codeSplitting: {
           groups: [
             {
-              // Keep every Radix package in one chunk. entriesAware session
-              // merging otherwise splits Popper scopes across lazy route
-              // share-chunks and crashes /settings
-              // (`createPopperScope is not a function`).
-              name: "radix",
-              test: /(?:node_modules|\.bun)[\\/](?:@radix-ui(?:\+|\/)|radix-ui(?:@|\/))/,
+              // Keep Radix and Lucide's eager icon factory in one UI runtime.
+              // entriesAware route merging can otherwise split Popper scopes,
+              // or place an icon and its factory across a circular chunk.
+              name: "ui-runtime",
+              test: /(?:(?:node_modules|\.bun)[\\/](?:@radix-ui(?:\+|\/)|radix-ui(?:@|\/))|[\\/]lucide-react[\\/]dist[\\/]esm[\\/](?:(?:createLucideIcon|Icon|context|defaultAttributes)\.mjs|shared[\\/]))/,
               priority: 15,
             },
             {
@@ -62,6 +65,17 @@ export default defineConfig({
               entriesAware: true,
               entriesAwareMergeThreshold: 128 * 1024,
               priority: 3,
+            },
+            {
+              // Keep the capabilities service-card presentation behind its
+              // local React.lazy boundary. Rolldown otherwise coalesces this
+              // view-only module back into the route chunk, making every
+              // startup pay for account cards and setup dialogs before the
+              // preset inventory is visible.
+              name: "capabilities-services",
+              test: /src[\\/]components[\\/]capabilities[\\/]integration-control-center-view\.tsx$/,
+              includeDependenciesRecursively: false,
+              priority: 4,
             },
           ],
         },

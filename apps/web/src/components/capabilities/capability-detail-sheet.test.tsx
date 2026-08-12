@@ -2,12 +2,15 @@ import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
+import { CapabilityCatalogItem as CapabilityCatalogItemSchema } from "@opengeni/contracts";
 
 import type { ConnectionHealth } from "@/lib/capabilities";
 import type { CapabilityCatalogItem, ConnectionMetadata, SocialConnection } from "@/types";
+import { Sheet } from "@/components/ui/sheet";
 import {
   ConnectionStatus,
   DEFAULT_CONNECTION_OWNERSHIP,
+  DetailBody,
   OwnershipSelector,
   SocialConnectorControls,
 } from "./capability-detail-sheet";
@@ -159,19 +162,75 @@ describe("connection ownership UI", () => {
       await rendered.unmount();
     }
   });
+
+  test("official Gmail exposes only a personal connect action and explains isolation", async () => {
+    const gmail = CapabilityCatalogItemSchema.parse({
+      id: "registry:gmail",
+      kind: "mcp",
+      source: "registry",
+      name: "Gmail",
+      category: "integrations",
+      providerDomain: "gmailmcp.googleapis.com",
+      mcpUrl: "https://gmailmcp.googleapis.com/mcp/v1",
+      endpointUrl: "https://gmailmcp.googleapis.com/mcp/v1",
+      authKind: "oauth2",
+      runtime: { available: true, mcpServerId: "gmail-runtime", notes: null },
+      metadata: { connectionOwnership: "personal_only" },
+    });
+    const onAction = mock((_action: unknown) => {});
+    const rendered = await render(
+      <Sheet open>
+        <DetailBody
+          item={gmail}
+          health={{ state: "none" }}
+          logoSrc={null}
+          busy={false}
+          errorMessage={null}
+          canManageSocial={false}
+          onAction={onAction}
+        />
+      </Sheet>,
+    );
+    try {
+      expect(rendered.container.textContent).toContain(
+        "Other workspace members cannot discover or use",
+      );
+      expect(rendered.container.textContent).toContain("Each member connects their own");
+      expect(rendered.container.textContent).toContain(
+        "content added to a session follows that session's visibility",
+      );
+      expect(rendered.container.textContent).not.toContain("Connect for workspace");
+      const connect = [...rendered.container.querySelectorAll("button")].find((button) =>
+        button.textContent?.includes("Connect only for me"),
+      );
+      expect(connect).toBeDefined();
+      await act(async () => connect!.click());
+      expect(onAction).toHaveBeenCalledWith({ type: "oauth", item: gmail, ownership: "personal" });
+    } finally {
+      await rendered.unmount();
+    }
+  });
 });
 
-describe("first-party social connector UI", () => {
+describe("social provider integration UI", () => {
   const x = { id: "api:x", name: "X" } as CapabilityCatalogItem;
 
-  test("shows workspace automation semantics and emits reconnect/disconnect actions", async () => {
+  test("shows every workspace account and emits exact disconnect plus add/reconnect actions", async () => {
     const onAction = mock((_action: unknown) => {});
     const connected = socialConnection();
+    const needsReauth = socialConnection({
+      id: "55555555-5555-4555-8555-555555555555",
+      accountHandle: "opengeni_support",
+      accountName: "OpenGeni Support",
+      externalAccountId: "x-account-2",
+      status: "needs_reauth",
+      updatedAt: "2026-08-02T00:00:00.000Z",
+    });
     const rendered = await render(
       <SocialConnectorControls
         item={x}
         provider="x"
-        connections={[connected]}
+        connections={[needsReauth, connected]}
         ownership="workspace"
         onOwnershipChange={() => undefined}
         busy={false}
@@ -180,14 +239,18 @@ describe("first-party social connector UI", () => {
       />,
     );
     try {
-      expect(rendered.container.textContent).toContain("Connected as @opengeni");
+      expect(rendered.container.textContent).toContain("OpenGeni");
+      expect(rendered.container.textContent).toContain("OpenGeni Support");
+      expect(rendered.container.textContent).toContain("Needs reconnection");
       expect(rendered.container.textContent).toContain("Workspace shared");
       expect(rendered.container.textContent).toContain("scheduled automations");
       const buttons = [...rendered.container.querySelectorAll("button")];
       expect(buttons.map((button) => button.textContent?.trim())).toEqual([
-        "Reconnect X",
         "Disconnect",
+        "Disconnect",
+        "Reconnect or add X account",
       ]);
+      await act(async () => buttons[2]!.click());
       await act(async () => buttons[0]!.click());
       await act(async () => buttons[1]!.click());
       expect(onAction).toHaveBeenNthCalledWith(1, {
@@ -200,6 +263,11 @@ describe("first-party social connector UI", () => {
         type: "disconnect_social",
         item: x,
         connectionId: connected.id,
+      });
+      expect(onAction).toHaveBeenNthCalledWith(3, {
+        type: "disconnect_social",
+        item: x,
+        connectionId: needsReauth.id,
       });
     } finally {
       await rendered.unmount();

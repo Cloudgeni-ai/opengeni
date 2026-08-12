@@ -4,6 +4,7 @@ import {
   createDb,
   FORCE_RLS_TABLES,
   PROTECTED_NO_DIRECT_DML_TABLES,
+  RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
   RUNTIME_FULL_DML_TABLES,
   RUNTIME_READ_INSERT_TABLES,
   RUNTIME_READ_INSERT_UPDATE_TABLES,
@@ -54,6 +55,10 @@ try {
       declaredReadInsertTables: RUNTIME_READ_INSERT_TABLES.length,
       declaredReadInsertUpdateTables: RUNTIME_READ_INSERT_UPDATE_TABLES.length,
       declaredProtectedNoDirectDmlTables: PROTECTED_NO_DIRECT_DML_TABLES.length,
+      declaredTargetSchemaCapabilities: RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.length,
+      executableTargetSchemaCapabilities: posture.targetRoutines.filter(
+        (routine) => routine.execute && !routine.publicExecute && routine.securityDefiner,
+      ).length,
     }),
   );
 } finally {

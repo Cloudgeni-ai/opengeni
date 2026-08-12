@@ -2,7 +2,6 @@ import { describe, expect, test } from "bun:test";
 import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
-  FIRST_PARTY_IN_PROCESS_TOOL_NAMES,
   FIRST_PARTY_MCP_TOOL_NAMES,
   FIRST_PARTY_REMOTE_MCP_TOOL_NAMES,
   Permission,
@@ -10,6 +9,7 @@ import {
   type FirstPartyMcpToolName,
 } from "@opengeni/contracts";
 import { MemoryEventBus, testSettings } from "@opengeni/testing";
+import { INTERACTION_ATTEMPT_TOOL_NAMES } from "@opengeni/runtime";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { ApiRouteDeps } from "@opengeni/core";
@@ -28,6 +28,14 @@ const DEFAULT_AUTHORIZED_CONNECTOR_TOOLS = [
   "social_search_live",
   "social_mentions_live",
   "social_thread_fetch",
+  "x_accounts_list",
+  "x_search_live",
+  "x_mentions_live",
+  "x_thread_fetch",
+  "reddit_accounts_list",
+  "reddit_search_live",
+  "reddit_mentions_live",
+  "reddit_thread_fetch",
   "slack_bot_list_channels",
   "slack_bot_channel_history",
   "slack_bot_thread_replies",
@@ -37,6 +45,11 @@ const DEFAULT_AUTHORIZED_CONNECTOR_TOOLS = [
   "slack_bot_file_content",
   "slack_bot_delete_message",
 ] as const satisfies readonly FirstPartyMcpToolName[];
+const INTERACTION_ATTEMPT_TOOL_NAME_SET = new Set<string>(INTERACTION_ATTEMPT_TOOL_NAMES);
+
+function broadServerTools(tools: readonly FirstPartyMcpToolName[]): FirstPartyMcpToolName[] {
+  return tools.filter((tool) => !INTERACTION_ATTEMPT_TOOL_NAME_SET.has(tool));
+}
 
 function deps(): ApiRouteDeps {
   return {
@@ -85,14 +98,15 @@ function registeredToolNames(server: unknown): string[] {
 }
 
 describe("first-party MCP tool visibility policy", () => {
-  test("omission selects the complete safe default catalog when the grant authorizes every tool", () => {
+  test("omission splits the complete safe default catalog across broad and local adapters", () => {
     const server = buildOpenGeniMcpServer(deps(), grant([...Permission.options]), {
       workspaceMemoryEnabled: true,
     });
 
-    const inProcess = new Set(FIRST_PARTY_IN_PROCESS_TOOL_NAMES);
-    expect(registeredToolNames(server)).toEqual(
-      DEFAULT_FIRST_PARTY_MCP_TOOLS.filter((name) => !inProcess.has(name)).sort(),
+    const broad = registeredToolNames(server);
+    expect(broad).toEqual(broadServerTools(DEFAULT_FIRST_PARTY_MCP_TOOLS).sort());
+    expect([...broad, ...INTERACTION_ATTEMPT_TOOL_NAMES].sort()).toEqual(
+      [...DEFAULT_FIRST_PARTY_MCP_TOOLS].sort(),
     );
   });
 
@@ -133,16 +147,19 @@ describe("first-party MCP tool visibility policy", () => {
     expect(registeredToolNames(admitted)).toEqual(["session_create"]);
   });
 
-  test("the catalog and explicit authorization table cover every broad-server tool", () => {
+  test("the broad catalog excludes compatibility-only and local first-party tools", () => {
     const server = buildOpenGeniMcpServer(
       deps(),
       grant([...Permission.options], [...FIRST_PARTY_MCP_TOOL_NAMES]),
       { workspaceMemoryEnabled: true },
     );
 
-    expect(registeredToolNames(server)).toEqual([...FIRST_PARTY_REMOTE_MCP_TOOL_NAMES].sort());
-    expect(registeredToolNames(server)).not.toContain("files_get_download_url");
-    expect(registeredToolNames(server)).not.toContain("github_token");
+    const broad = registeredToolNames(server);
+    expect(broad).toEqual([...FIRST_PARTY_REMOTE_MCP_TOOL_NAMES].sort());
+    expect(broad).not.toContain("slack_bot_post_message");
+    expect(INTERACTION_ATTEMPT_TOOL_NAMES).not.toContain("slack_bot_post_message");
+    expect(broad).not.toContain("files_get_download_url");
+    expect(broad).not.toContain("github_token");
   });
 
   test("the download URL tool exists only on the dedicated files MCP server", () => {

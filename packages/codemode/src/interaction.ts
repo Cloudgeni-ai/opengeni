@@ -1,7 +1,11 @@
 import type {
   AttachedBrowserDevice,
+  AuthRun,
+  AuthRunListResponse,
+  AuthRunMutationResponse,
   BrowserAction,
   BrowserActionReceipt,
+  BrowserClipboard,
   BrowserDiagnosticBatch,
   BrowserDiagnosticKind,
   BrowserIdentity,
@@ -9,6 +13,8 @@ import type {
   BrowserIdentityMutationResponse,
   BrowserLocator,
   BrowserObservation,
+  BrowserPermission,
+  BrowserPermissionSetting,
   BrowserRevisionListResponse,
   BrowserSession,
   BrowserSessionMutationResponse,
@@ -16,14 +22,26 @@ import type {
   BrowserTargetListResponse,
   ComputerAction,
   ComputerActionReceipt,
+  ComputerClipboard,
   ComputerLocator,
   ComputerObservation,
   ComputerSession,
   ComputerSessionMutationResponse,
   ComputerTarget,
   ComputerTargetListResponse,
+  ExternalAuthRunRequest,
+  ExternalAuthRunResponse,
   InteractionPlacement,
+  ProtectedAuthFillRequest,
+  ProtectedAuthFillResponse,
   PublishBrowserRevisionResponse,
+  ReportAuthRunRequest,
+  RequestHumanInteractionToolInput,
+  RequestHumanInteractionToolOutput,
+  SiteAuthConnection,
+  SiteAuthConnectionListResponse,
+  StartAuthRunRequest,
+  VerifyAuthRunRequest,
 } from "@opengeni/contracts";
 import type { CodemodeCallOptions, CodemodeClient } from "./index";
 import { environmentCodemodeClient, type CodemodeClientProvider } from "./environment";
@@ -38,13 +56,17 @@ const PATH = {
   browserTabs: ["interaction", "browser", "tabs"],
   browserObserve: ["interaction", "browser", "observe"],
   browserAct: ["interaction", "browser", "act"],
+  browserClipboard: ["interaction", "browser", "clipboard"],
   browserDebug: ["interaction", "browser", "debug"],
+  browserAuth: ["interaction", "browser", "auth"],
+  requestHuman: ["interaction", "requestHuman"],
   browserIdentity: ["interaction", "browser", "identity"],
   browserPublish: ["interaction", "browser", "publish"],
   browserLifecycle: ["interaction", "browser", "lifecycle"],
   computerOpen: ["interaction", "computer", "open"],
   computerTargets: ["interaction", "computer", "targets"],
   computerObserve: ["interaction", "computer", "observe"],
+  computerClipboard: ["interaction", "computer", "clipboard"],
   computerAct: ["interaction", "computer", "act"],
   computerLifecycle: ["interaction", "computer", "lifecycle"],
 } as const;
@@ -96,12 +118,14 @@ export class OpenGeniCodemode {
   readonly browsers: CodemodeBrowserCollection;
   readonly computers: CodemodeComputerCollection;
   readonly artifacts: CodemodeArtifactCollection;
+  readonly auth: CodemodeAuth;
 
   constructor(client: CodemodeClient | CodemodeClientProvider = () => environmentCodemodeClient()) {
     const provider = codemodeClientProvider(client);
     this.browsers = new CodemodeBrowserCollection(provider);
     this.computers = new CodemodeComputerCollection(provider);
     this.artifacts = new CodemodeArtifactCollection(provider);
+    this.auth = new CodemodeAuth(provider);
   }
 
   async discover(
@@ -113,6 +137,13 @@ export class OpenGeniCodemode {
     callOptions: CodemodeCallOptions = {},
   ): Promise<InteractionDiscovery> {
     return await callStructured(this.browsers.client, PATH.discover, options, callOptions);
+  }
+
+  async requestHuman(
+    request: RequestHumanInteractionToolInput,
+    callOptions: CodemodeCallOptions = {},
+  ): Promise<RequestHumanInteractionToolOutput> {
+    return await callStructured(this.browsers.client, PATH.requestHuman, request, callOptions);
   }
 }
 
@@ -199,12 +230,16 @@ export class CodemodeBrowserIdentityCollection {
 
 export class CodemodeBrowser {
   readonly tabs: CodemodeBrowserTabCollection;
+  readonly auth: CodemodeBrowserAuth;
+  readonly clipboard: CodemodeBrowserClipboard;
 
   constructor(
     private readonly client: CodemodeClientProvider,
     readonly id: string,
   ) {
     this.tabs = new CodemodeBrowserTabCollection(client, id);
+    this.auth = new CodemodeBrowserAuth(client, id);
+    this.clipboard = new CodemodeBrowserClipboard(client, id, this.tabs);
   }
 
   async refresh(callOptions: CodemodeCallOptions = {}): Promise<BrowserSession> {
@@ -294,6 +329,103 @@ export class CodemodeBrowser {
       { browserSessionId: this.id, action },
       callOptions,
     );
+  }
+}
+
+export class CodemodeBrowserClipboard {
+  constructor(
+    private readonly client: CodemodeClientProvider,
+    private readonly browserSessionId: string,
+    private readonly tabs: CodemodeBrowserTabCollection,
+  ) {}
+
+  async read(callOptions: CodemodeCallOptions = {}): Promise<BrowserClipboard> {
+    return await callStructured(
+      this.client,
+      PATH.browserClipboard,
+      { browserSessionId: this.browserSessionId },
+      callOptions,
+    );
+  }
+
+  async write(
+    text: string,
+    options: BrowserActionFences & { targetId?: string | undefined } = {},
+    callOptions: CodemodeCallOptions = {},
+  ): Promise<BrowserActionReceipt> {
+    return await this.act({ type: "clipboard", operation: "write", text }, options, callOptions);
+  }
+
+  async clear(
+    options: BrowserActionFences & { targetId?: string | undefined } = {},
+    callOptions: CodemodeCallOptions = {},
+  ): Promise<BrowserActionReceipt> {
+    return await this.act({ type: "clipboard", operation: "clear" }, options, callOptions);
+  }
+
+  async copy(
+    options: BrowserActionFences & {
+      targetId?: string | undefined;
+      locator?: BrowserLocator | undefined;
+      content?: "selection" | "value" | "text" | undefined;
+    } = {},
+    callOptions: CodemodeCallOptions = {},
+  ): Promise<BrowserActionReceipt> {
+    const {
+      targetId,
+      expectedTargetGeneration,
+      expectedDocumentGeneration,
+      expectedFrameId,
+      ...copy
+    } = options;
+    return await this.act(
+      { type: "clipboard", operation: "copy", ...copy },
+      {
+        targetId,
+        expectedTargetGeneration,
+        expectedDocumentGeneration,
+        expectedFrameId,
+      },
+      callOptions,
+    );
+  }
+
+  async paste(
+    options: BrowserActionFences & {
+      targetId?: string | undefined;
+      locator?: BrowserLocator | undefined;
+      text?: string | undefined;
+    } = {},
+    callOptions: CodemodeCallOptions = {},
+  ): Promise<BrowserActionReceipt> {
+    const {
+      targetId,
+      expectedTargetGeneration,
+      expectedDocumentGeneration,
+      expectedFrameId,
+      ...paste
+    } = options;
+    return await this.act(
+      { type: "clipboard", operation: "paste", ...paste },
+      {
+        targetId,
+        expectedTargetGeneration,
+        expectedDocumentGeneration,
+        expectedFrameId,
+      },
+      callOptions,
+    );
+  }
+
+  private async act(
+    action: BrowserAction,
+    options: BrowserActionFences & { targetId?: string | undefined },
+    callOptions: CodemodeCallOptions,
+  ): Promise<BrowserActionReceipt> {
+    const { targetId, ...fences } = options;
+    return await this.tabs
+      .use(await this.tabs.resolveId(targetId, callOptions))
+      .act(action, fences, callOptions);
   }
 }
 
@@ -417,6 +549,47 @@ export class CodemodeBrowserTab {
     return await this.act({ type: "navigate", url }, {}, callOptions);
   }
 
+  async setPermission(
+    permission: BrowserPermission,
+    setting: BrowserPermissionSetting,
+    fences: BrowserActionFences = {},
+    callOptions: CodemodeCallOptions = {},
+  ): Promise<BrowserActionReceipt> {
+    return await this.act({ type: "permission", permission, setting }, fences, callOptions);
+  }
+
+  async requestHuman(
+    reason: string,
+    options: {
+      kind?: "manual_login" | "mfa" | "external_action" | "confirmation" | "other";
+      authRunId?: string | undefined;
+      expiresInSeconds?: number | undefined;
+    } = {},
+    callOptions: CodemodeCallOptions = {},
+  ): Promise<RequestHumanInteractionToolOutput> {
+    const observation = await this.observe(callOptions);
+    return await callStructured(
+      this.client,
+      PATH.requestHuman,
+      {
+        operation: "request",
+        resourceKind: "browser_session",
+        resourceId: this.browserSessionId,
+        targetId: this.id,
+        expectedControllerGeneration: observation.target.controllerGeneration,
+        expectedTargetGeneration: observation.target.targetGeneration,
+        expectedDocumentGeneration: observation.target.documentGeneration,
+        kind: options.kind ?? "other",
+        reason,
+        ...(options.authRunId ? { authRunId: options.authRunId } : {}),
+        ...(options.expiresInSeconds === undefined
+          ? {}
+          : { expiresInSeconds: options.expiresInSeconds }),
+      },
+      callOptions,
+    );
+  }
+
   getByRole(role: string, options: { name?: string; exact?: boolean } = {}) {
     return new CodemodeBrowserLocator(this, { kind: "role", role, ...options });
   }
@@ -492,6 +665,207 @@ export class CodemodeBrowserLocator {
   }
 }
 
+export class CodemodeAuth {
+  constructor(private readonly client: CodemodeClientProvider) {}
+
+  async listConnections(
+    options: { includeArchived?: boolean | undefined } = {},
+    callOptions: CodemodeCallOptions = {},
+  ): Promise<SiteAuthConnectionListResponse> {
+    const response = await callStructured<{
+      operation: "list_connections";
+      result: SiteAuthConnectionListResponse;
+    }>(this.client, PATH.browserAuth, { operation: "list_connections", ...options }, callOptions);
+    return response.result;
+  }
+
+  async getConnection(
+    siteAuthConnectionId: string,
+    callOptions: CodemodeCallOptions = {},
+  ): Promise<SiteAuthConnection> {
+    const response = await callStructured<{
+      operation: "get_connection";
+      result: SiteAuthConnection;
+    }>(
+      this.client,
+      PATH.browserAuth,
+      { operation: "get_connection", siteAuthConnectionId },
+      callOptions,
+    );
+    return response.result;
+  }
+
+  async listRuns(
+    options: {
+      browserSessionId?: string | undefined;
+      siteAuthConnectionId?: string | undefined;
+      includeSettled?: boolean | undefined;
+    } = {},
+    callOptions: CodemodeCallOptions = {},
+  ): Promise<AuthRunListResponse> {
+    const response = await callStructured<{ operation: "list_runs"; result: AuthRunListResponse }>(
+      this.client,
+      PATH.browserAuth,
+      { operation: "list_runs", ...options },
+      callOptions,
+    );
+    return response.result;
+  }
+
+  async getRun(authRunId: string, callOptions: CodemodeCallOptions = {}): Promise<AuthRun> {
+    const response = await callStructured<{ operation: "get_run"; result: AuthRun }>(
+      this.client,
+      PATH.browserAuth,
+      { operation: "get_run", authRunId },
+      callOptions,
+    );
+    return response.result;
+  }
+
+  use(browserSessionId: string, authRunId: string): CodemodeAuthRun {
+    return new CodemodeAuthRun(this.client, browserSessionId, authRunId);
+  }
+}
+
+export class CodemodeBrowserAuth {
+  constructor(
+    private readonly client: CodemodeClientProvider,
+    private readonly browserSessionId: string,
+  ) {}
+
+  async listRuns(
+    options: {
+      siteAuthConnectionId?: string | undefined;
+      includeSettled?: boolean | undefined;
+    } = {},
+    callOptions: CodemodeCallOptions = {},
+  ): Promise<AuthRunListResponse> {
+    const response = await callStructured<{ operation: "list_runs"; result: AuthRunListResponse }>(
+      this.client,
+      PATH.browserAuth,
+      { operation: "list_runs", browserSessionId: this.browserSessionId, ...options },
+      callOptions,
+    );
+    return response.result;
+  }
+
+  async start(
+    request: Omit<StartAuthRunRequest, "operationId">,
+    callOptions: CodemodeCallOptions = {},
+  ): Promise<CodemodeAuthRun> {
+    const response = await callStructured<{ operation: "start"; result: AuthRunMutationResponse }>(
+      this.client,
+      PATH.browserAuth,
+      { operation: "start", browserSessionId: this.browserSessionId, ...request },
+      callOptions,
+    );
+    return this.use(response.result.run.id);
+  }
+
+  use(authRunId: string): CodemodeAuthRun {
+    return new CodemodeAuthRun(this.client, this.browserSessionId, authRunId);
+  }
+}
+
+export class CodemodeAuthRun {
+  constructor(
+    private readonly client: CodemodeClientProvider,
+    readonly browserSessionId: string,
+    readonly id: string,
+  ) {}
+
+  async get(callOptions: CodemodeCallOptions = {}): Promise<AuthRun> {
+    const response = await callStructured<{ operation: "get_run"; result: AuthRun }>(
+      this.client,
+      PATH.browserAuth,
+      { operation: "get_run", authRunId: this.id },
+      callOptions,
+    );
+    if (response.result.browserSessionId !== this.browserSessionId) {
+      throw new Error("Auth run belongs to another BrowserSession");
+    }
+    return response.result;
+  }
+
+  async report(
+    request: Omit<ReportAuthRunRequest, "operationId">,
+    callOptions: CodemodeCallOptions = {},
+  ): Promise<AuthRunMutationResponse> {
+    const response = await callStructured<{ operation: "report"; result: AuthRunMutationResponse }>(
+      this.client,
+      PATH.browserAuth,
+      {
+        operation: "report",
+        browserSessionId: this.browserSessionId,
+        authRunId: this.id,
+        ...request,
+      },
+      callOptions,
+    );
+    return response.result;
+  }
+
+  async protectedFill(
+    request: Omit<ProtectedAuthFillRequest, "operationId">,
+    callOptions: CodemodeCallOptions = {},
+  ): Promise<ProtectedAuthFillResponse> {
+    const response = await callStructured<{
+      operation: "protected_fill";
+      result: ProtectedAuthFillResponse;
+    }>(
+      this.client,
+      PATH.browserAuth,
+      {
+        operation: "protected_fill",
+        browserSessionId: this.browserSessionId,
+        authRunId: this.id,
+        ...request,
+      },
+      callOptions,
+    );
+    return response.result;
+  }
+
+  async advanceExternal(
+    request: Omit<ExternalAuthRunRequest, "operationId">,
+    callOptions: CodemodeCallOptions = {},
+  ): Promise<ExternalAuthRunResponse> {
+    const response = await callStructured<{
+      operation: "advance_external";
+      result: ExternalAuthRunResponse;
+    }>(
+      this.client,
+      PATH.browserAuth,
+      {
+        operation: "advance_external",
+        browserSessionId: this.browserSessionId,
+        authRunId: this.id,
+        ...request,
+      },
+      callOptions,
+    );
+    return response.result;
+  }
+
+  async verify(
+    request: Omit<VerifyAuthRunRequest, "operationId">,
+    callOptions: CodemodeCallOptions = {},
+  ): Promise<AuthRunMutationResponse> {
+    const response = await callStructured<{ operation: "verify"; result: AuthRunMutationResponse }>(
+      this.client,
+      PATH.browserAuth,
+      {
+        operation: "verify",
+        browserSessionId: this.browserSessionId,
+        authRunId: this.id,
+        ...request,
+      },
+      callOptions,
+    );
+    return response.result;
+  }
+}
+
 export class CodemodeComputerCollection {
   constructor(private readonly client: CodemodeClientProvider) {}
 
@@ -525,6 +899,7 @@ export class CodemodeComputerCollection {
 export class CodemodeComputer {
   readonly targets: CodemodeComputerTargetCollection;
   readonly apps: CodemodeComputerTargetCollection;
+  readonly clipboard: CodemodeComputerClipboard;
 
   constructor(
     private readonly client: CodemodeClientProvider,
@@ -532,6 +907,7 @@ export class CodemodeComputer {
   ) {
     this.targets = new CodemodeComputerTargetCollection(client, id);
     this.apps = this.targets;
+    this.clipboard = new CodemodeComputerClipboard(client, id, this.targets);
   }
 
   async refresh(callOptions: CodemodeCallOptions = {}): Promise<ComputerSession> {
@@ -579,6 +955,61 @@ export class CodemodeComputer {
   }
 }
 
+export class CodemodeComputerClipboard {
+  constructor(
+    private readonly client: CodemodeClientProvider,
+    readonly computerSessionId: string,
+    private readonly targets: CodemodeComputerTargetCollection,
+  ) {}
+
+  async read(callOptions: CodemodeCallOptions = {}): Promise<ComputerClipboard> {
+    return await callStructured(
+      this.client,
+      PATH.computerClipboard,
+      { computerSessionId: this.computerSessionId },
+      callOptions,
+    );
+  }
+
+  async write(
+    text: string,
+    options: { targetId?: string | undefined } = {},
+    callOptions: CodemodeCallOptions = {},
+  ): Promise<ComputerActionReceipt> {
+    return await this.mutate({ type: "clipboard", operation: "write", text }, options, callOptions);
+  }
+
+  async clear(
+    options: { targetId?: string | undefined } = {},
+    callOptions: CodemodeCallOptions = {},
+  ): Promise<ComputerActionReceipt> {
+    return await this.mutate({ type: "clipboard", operation: "clear" }, options, callOptions);
+  }
+
+  async copy(
+    options: { targetId?: string | undefined } = {},
+    callOptions: CodemodeCallOptions = {},
+  ): Promise<ComputerActionReceipt> {
+    return await this.mutate({ type: "clipboard", operation: "copy" }, options, callOptions);
+  }
+
+  async paste(
+    options: { targetId?: string | undefined } = {},
+    callOptions: CodemodeCallOptions = {},
+  ): Promise<ComputerActionReceipt> {
+    return await this.mutate({ type: "clipboard", operation: "paste" }, options, callOptions);
+  }
+
+  private async mutate(
+    action: Extract<ComputerAction, { type: "clipboard" }>,
+    options: { targetId?: string | undefined },
+    callOptions: CodemodeCallOptions,
+  ): Promise<ComputerActionReceipt> {
+    const targetId = await this.targets.resolveSeatId(options.targetId, callOptions);
+    return await this.targets.use(targetId).act(action, {}, callOptions);
+  }
+}
+
 export class CodemodeComputerTargetCollection {
   constructor(
     private readonly client: CodemodeClientProvider,
@@ -617,6 +1048,17 @@ export class CodemodeComputerTargetCollection {
       throw new Error("Computer has no app, window, or screen targets");
     throw new Error("Computer target is ambiguous; select an exact app or window");
   }
+
+  async resolveSeatId(
+    targetId: string | undefined,
+    callOptions: CodemodeCallOptions,
+  ): Promise<string> {
+    if (targetId) return await this.resolveId(targetId, callOptions);
+    const listed = await this.list(callOptions);
+    const screens = listed.targets.filter((target) => target.kind === "screen");
+    if (screens.length === 1) return screens[0]!.id;
+    return await this.resolveId(undefined, callOptions);
+  }
 }
 
 export class CodemodeComputerTarget {
@@ -644,6 +1086,36 @@ export class CodemodeComputerTarget {
       this.client,
       PATH.computerAct,
       { computerSessionId: this.computerSessionId, targetId: this.id, action, ...fences },
+      callOptions,
+    );
+  }
+
+  async requestHuman(
+    reason: string,
+    options: {
+      kind?: "manual_login" | "mfa" | "external_action" | "confirmation" | "other";
+      expiresInSeconds?: number | undefined;
+    } = {},
+    callOptions: CodemodeCallOptions = {},
+  ): Promise<RequestHumanInteractionToolOutput> {
+    const observation = await this.observe(callOptions);
+    return await callStructured(
+      this.client,
+      PATH.requestHuman,
+      {
+        operation: "request",
+        resourceKind: "computer_session",
+        resourceId: this.computerSessionId,
+        targetId: this.id,
+        expectedControllerGeneration: observation.target.controllerGeneration,
+        expectedTargetGeneration: observation.target.targetGeneration,
+        expectedDocumentGeneration: null,
+        kind: options.kind ?? "other",
+        reason,
+        ...(options.expiresInSeconds === undefined
+          ? {}
+          : { expiresInSeconds: options.expiresInSeconds }),
+      },
       callOptions,
     );
   }

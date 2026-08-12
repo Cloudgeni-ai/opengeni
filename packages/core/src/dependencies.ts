@@ -66,7 +66,10 @@ export type SessionWorkflowClient = {
     agentRunUsageIdempotencyKey: string;
     triggerWorkflowId: string;
     initiator: TurnInitiator;
-    triggerType?: Extract<ScheduledTaskTriggerType, "manual" | "initial" | "retry" | "repair">;
+    triggerType?: Extract<
+      ScheduledTaskTriggerType,
+      "manual" | "initial" | "provider_event" | "retry" | "repair"
+    >;
   }) => Promise<void>;
   startRigVerification: (input: {
     workspaceId: string;
@@ -105,6 +108,8 @@ export type AppDependencies = {
   editableArtifactOfficeImports?: EditableArtifactOfficeImportPort;
   bus: EventBus;
   workflowClient: SessionWorkflowClient;
+  /** Injectable structural seam for replayable prompt fanout and wake work. */
+  schedulePromptPostCommit?: (task: () => Promise<void>) => void;
   /** Optional provider override for deterministic API/object-storage tests. */
   objectStorage?: ObjectStorageDependency;
   documentIndexer?: DocumentIndexClient;
@@ -137,6 +142,11 @@ export type AppDependencies = {
   slackFetch?: typeof fetch;
   /** Injectable Google OAuth/Drive transport for deterministic connector tests. */
   googleDriveFetch?: typeof fetch;
+  /** Injectable Fiken API transport for deterministic connector tests. */
+  fikenFetch?: typeof fetch;
+  /** Injectable provider-preset OAuth/API transport for deterministic integration tests. */
+  apiIntegrationOAuthFetch?: typeof fetch;
+  atlassianFetch?: typeof fetch;
   /** Injectable MCP OAuth setup deadline for deterministic stalled-provider tests. */
   oauthStartDeadlineMs?: number;
   /** Injectable MCP OAuth callback deadline for deterministic stalled-provider tests. */
@@ -183,7 +193,7 @@ export type ApiRouteDeps = AppDependencies & {
  */
 export type AcceptSessionUserMessageDependencies = Pick<
   AppDependencies,
-  "settings" | "db" | "bus" | "sessionAuthorization"
+  "settings" | "db" | "bus" | "sessionAuthorization" | "schedulePromptPostCommit"
 > & {
   workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
   objectStorage: ObjectStorageDependency;
