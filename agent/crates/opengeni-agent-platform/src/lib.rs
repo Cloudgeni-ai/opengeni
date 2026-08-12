@@ -59,7 +59,7 @@ pub use desktop::{
     fit_frame_to_budget, resolve_desktop, CapturedFrame, DesktopBackend, FittedFrame, NoDesktop,
 };
 #[cfg(target_os = "linux")]
-pub use desktop::{LinuxDesktop, LinuxWindow, LinuxWindowRect};
+pub use desktop::{LinuxDesktop, LinuxRgbaFrame, LinuxWindow, LinuxWindowRect};
 pub use error::{PlatformError, PlatformResult};
 pub use native::{assemble_git_response, spawn_contained, ContainedExec, NativePlatform};
 pub use pty::{spawn_pty, PtyProcess};
