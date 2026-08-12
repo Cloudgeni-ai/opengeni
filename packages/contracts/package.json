@@ -42,6 +42,10 @@
       "types": "./src/video-generation.ts",
       "default": "./src/video-generation.ts"
     },
+    "./codex-provider-account-authority": {
+      "types": "./src/codex-provider-account-authority.ts",
+      "default": "./src/codex-provider-account-authority.ts"
+    },
     "./editable-artifacts": {
       "types": "./src/editable-artifacts.ts",
       "default": "./src/editable-artifacts.ts"
