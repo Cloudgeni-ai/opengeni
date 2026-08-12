@@ -138,7 +138,7 @@ export async function closePendingSessionToolCallsInTransaction(
     eventOutput:
       row.eventOutput === null
         ? null
-        : fromPostgresLosslessJson(row.eventOutput, row.eventOutputCodecVersion).value,
+        : fromPostgresLosslessJson(row.eventOutput, row.eventOutputCodecVersion),
   }));
   if (pending.length === 0) return { sequence: input.sequence, events: [], closed: 0 };
 
@@ -310,10 +310,11 @@ export async function closePendingSessionToolCallsInTransaction(
                 },
               ],
             }
-          : (resolution.call.eventOutput ??
-            (resolution.existingResult?.item ?? resolution.call.resultItem)?.output ??
-            resolution.existingResult?.item ??
-            resolution.call.resultItem),
+          : resolution.call.eventOutput !== null
+            ? resolution.call.eventOutput.value
+            : ((resolution.existingResult?.item ?? resolution.call.resultItem)?.output ??
+              resolution.existingResult?.item ??
+              resolution.call.resultItem),
         recovery: {
           interrupted: resolution.interrupted,
           outcome: resolution.interrupted ? "unknown" : "durable_result_found",
