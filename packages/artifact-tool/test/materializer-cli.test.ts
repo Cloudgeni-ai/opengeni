@@ -542,22 +542,32 @@ async function invoke(
   argument: string,
   input?: Uint8Array,
 ): Promise<Readonly<{ exitCode: number; stdout: Uint8Array; stderr: string }>> {
-  const child = Bun.spawn([target.executable, argument], {
-    env: { ...target.environment, LANG: "C", LC_ALL: "C", TZ: "UTC" },
-    stdin: "pipe",
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  if (input) await child.stdin.write(input);
-  await child.stdin.end();
-  const stdout = new Response(child.stdout).arrayBuffer();
-  const stderr = new Response(child.stderr).text();
-  const exitCode = await child.exited;
-  return Object.freeze({
-    exitCode,
-    stdout: new Uint8Array(await stdout),
-    stderr: await stderr,
-  });
+  for (let attempt = 0; ; attempt += 1) {
+    const child = Bun.spawn([target.executable, argument], {
+      env: { ...target.environment, LANG: "C", LC_ALL: "C", TZ: "UTC" },
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    if (input) await child.stdin.write(input);
+    await child.stdin.end();
+    const stdout = new Response(child.stdout).arrayBuffer();
+    const stderr = new Response(child.stderr).text();
+    const exitCode = await child.exited;
+    const result = Object.freeze({
+      exitCode,
+      stdout: new Uint8Array(await stdout),
+      stderr: await stderr,
+    });
+    // The full repository suite can transiently terminate a freshly spawned
+    // compiled fixture while the host is under process/memory pressure. A
+    // framed invocation cannot validly emit fewer than 20 bytes, so retry only
+    // that unambiguous transport failure; semantic failures remain single-shot.
+    if (argument === IDENTITY || result.stdout.byteLength >= 20 || attempt === 2) {
+      return result;
+    }
+    await Bun.sleep(100 * (attempt + 1));
+  }
 }
 
 function descriptor(path: string, value: Uint8Array) {

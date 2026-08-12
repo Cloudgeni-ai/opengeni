@@ -290,35 +290,35 @@ async function writeContainerState(state: ContainerState): Promise<void> {
   }
 }
 
-type ContainerProbe = { available: true; id: string | null } | { available: false };
+type ContainerProbe =
+  | { available: true; id: string | null; status: string | null }
+  | { available: false };
 
 async function probeContainer(): Promise<ContainerProbe> {
-  let result: Awaited<ReturnType<typeof docker>> | null = null;
   for (let attempt = 0; attempt < 5; attempt += 1) {
-    result = await docker([
-      "ps",
-      "--no-trunc",
-      "--filter",
-      `name=^${CONTAINER}$`,
-      "--format",
-      "{{.ID}}",
-    ]).catch(() => null);
-    if (result) {
-      break;
+    try {
+      const result = await docker([
+        "inspect",
+        "--type",
+        "container",
+        "--format",
+        "{{.Id}}\t{{.State.Status}}",
+        CONTAINER,
+      ]);
+      const [id, status, ...extra] = result.stdout.trim().split("\t");
+      if (extra.length > 0 || !id || !/^[a-f0-9]{64}$/u.test(id) || !status) {
+        throw new Error("shared-pg: Docker returned an invalid container inspection");
+      }
+      return { available: true, id, status };
+    } catch (error) {
+      const stderr = String((error as { stderr?: unknown })?.stderr ?? "");
+      if (/no such (object|container)/iu.test(stderr)) {
+        return { available: true, id: null, status: null };
+      }
     }
     await Bun.sleep(100 * (attempt + 1));
   }
-  if (!result) {
-    return { available: false };
-  }
-  const ids = result.stdout
-    .split("\n")
-    .map((l) => l.trim())
-    .filter(Boolean);
-  if (ids.length > 1 || ids.some((id) => !/^[a-f0-9]{64}$/u.test(id))) {
-    throw new Error("shared-pg: Docker returned an ambiguous container generation");
-  }
-  return { available: true, id: ids[0] ?? null };
+  return { available: false };
 }
 
 async function waitForReady(url: string): Promise<void> {
@@ -420,15 +420,23 @@ async function ensureContainerAndAcquire(): Promise<ContainerHandle | null> {
     if (!probe.available) {
       return null;
     }
-    const startedContainer = probe.id === null;
     let generation = probe.id;
-    if (startedContainer) {
-      // Remove a stopped leftover of the same name, then start fresh. NOT --rm:
-      // the container must survive across the many test-file processes that
-      // share it; the last exact holder removes it explicitly.
+    if (generation && probe.status !== "running" && probe.status !== "restarting") {
+      const resumed =
+        probe.status === "paused"
+          ? await dockerOk(["unpause", generation])
+          : await dockerOk(["start", generation]);
+      if (!resumed) {
+        await dockerOk(["rm", "-f", "-v", generation]);
+        generation = null;
+      }
+    }
+    if (!generation) {
+      // Remove only an inspect-confirmed stopped leftover, then start fresh.
+      // NOT --rm: the container must survive across test-file waves and later
+      // commands so the fixed port is never rebound while its proxy tears down.
       // The postgres image declares an anonymous data volume. Remove it with
-      // the container or every test-file lifecycle leaks a full migrated
-      // cluster into the shared Docker filesystem.
+      // an unusable leftover so failed generations do not leak full clusters.
       await dockerOk(["rm", "-f", "-v", CONTAINER]);
       // ONE container is shared by every DB/API/worker integration test FILE in
       // the parallel `bun test` run. Each file opens its own connection pool (the
