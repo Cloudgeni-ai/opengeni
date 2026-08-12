@@ -18,6 +18,7 @@ import {
   getScheduledTask,
   ensureKnowledgeSourceSyncState,
   getScheduledTaskPersonalConnectionDelegations,
+  getScheduledTaskXaiProviderAccountAuthoritySnapshot,
   getRig,
   getVariableSet,
   markScheduledTaskRunFailedIfQueued,
@@ -129,6 +130,8 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         task.workspaceId,
         task.id,
       );
+      const taskXaiProviderAccountAuthoritySnapshot =
+        await getScheduledTaskXaiProviderAccountAuthoritySnapshot(db, task.workspaceId, task.id);
       // A scheduled bot selection was authorized when the task was written,
       // but connection status and tenant/role binding are mutable. Revalidate
       // before any session/model cost and never fall back to a personal Slack
@@ -300,6 +303,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
               rigId: frozenRigId,
               rigVersionId: frozenRigVersionId,
               personalConnectionDelegations: taskPersonalConnectionDelegations,
+              initialXaiProviderAccountAuthoritySnapshot: taskXaiProviderAccountAuthoritySnapshot,
               maxNestedAgentDepthOverride: task.agentConfig.maxNestedAgentDepth ?? null,
               // The durable agent config was privilege-checked when the task
               // was created/updated. Preserve that explicit policy if a broader
@@ -390,8 +394,16 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 task.id,
                 run.id,
               ),
-              lineage: { scheduledTaskId: task.id, scheduledTaskRunId: run.id },
+              lineage: {
+                scheduledTaskId: task.id,
+                scheduledTaskRunId: run.id,
+                ...(taskXaiProviderAccountAuthoritySnapshot.scope === "user" &&
+                task.createdBy.kind === "subject"
+                  ? { xaiAuthoritySubjectId: task.createdBy.subjectId }
+                  : {}),
+              },
               personalConnectionDelegations: taskPersonalConnectionDelegations,
+              xaiProviderAccountAuthoritySnapshot: taskXaiProviderAccountAuthoritySnapshot,
             },
             async (tx, wakeEventId) => {
               if (!wakeEventId) throw new Error("Scheduled delivery has no wake event");
@@ -508,8 +520,16 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 task.id,
                 run.id,
               ),
-              lineage: { scheduledTaskId: task.id, scheduledTaskRunId: run.id },
+              lineage: {
+                scheduledTaskId: task.id,
+                scheduledTaskRunId: run.id,
+                ...(taskXaiProviderAccountAuthoritySnapshot.scope === "user" &&
+                task.createdBy.kind === "subject"
+                  ? { xaiAuthoritySubjectId: task.createdBy.subjectId }
+                  : {}),
+              },
               personalConnectionDelegations: taskPersonalConnectionDelegations,
+              xaiProviderAccountAuthoritySnapshot: taskXaiProviderAccountAuthoritySnapshot,
             },
             async (tx, wakeEventId) => {
               if (task.runMode === "existing_session") {

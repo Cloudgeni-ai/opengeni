@@ -3,10 +3,14 @@ import { configuredProviders, resolveModelProvider } from "@opengeni/config";
 import { OpenAIChatCompletionsModel, type Model, type ModelProvider } from "@openai/agents";
 import OpenAI from "openai";
 import { CODEX_MODEL_ID_PREFIX } from "@opengeni/codex";
+import { XAI_SUBSCRIPTION_MODEL_ID_PREFIX } from "@opengeni/xai-subscription";
 
 import { AppendOnlyOpenAIResponsesModel } from "./append-only-responses-model";
 import { buildProviderClient } from "./model-provider-client";
-import { CodexSubscriptionUnavailableError } from "./model-provider-errors";
+import {
+  CodexSubscriptionUnavailableError,
+  XaiSubscriptionUnavailableError,
+} from "./model-provider-errors";
 
 export class OpenGeniResponsesModel extends AppendOnlyOpenAIResponsesModel {
   constructor(
@@ -103,6 +107,12 @@ export class MultiProviderModelProvider implements ModelProvider {
         ) {
           throw new CodexSubscriptionUnavailableError(modelName);
         }
+        if (
+          modelName.startsWith(XAI_SUBSCRIPTION_MODEL_ID_PREFIX) &&
+          resolved.provider.kind !== "xai-subscription"
+        ) {
+          throw new XaiSubscriptionUnavailableError(modelName);
+        }
         return resolved.model;
       }
       // A `codex/<slug>` id only resolves when the per-workspace worker overlay
@@ -118,6 +128,9 @@ export class MultiProviderModelProvider implements ModelProvider {
       // awareness of assertConfiguredModel at apps/api/src/domain/sessions.ts.
       if (modelName.startsWith(CODEX_MODEL_ID_PREFIX)) {
         throw new CodexSubscriptionUnavailableError(modelName);
+      }
+      if (modelName.startsWith(XAI_SUBSCRIPTION_MODEL_ID_PREFIX)) {
+        throw new XaiSubscriptionUnavailableError(modelName);
       }
     }
     // Preserve the legacy unlisted-model fallback, but bind it through the same

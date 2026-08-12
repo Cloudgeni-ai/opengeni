@@ -147,6 +147,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     }),
     modelProvidersJson: "[]",
     codexSubscriptionEnabled: false,
+    supergrokSubscriptionEnabled: false,
     codexConnectedAppsEnabled: false,
     codexToolSearchEnabled: false,
     lazyToolSearchEnabled: false,

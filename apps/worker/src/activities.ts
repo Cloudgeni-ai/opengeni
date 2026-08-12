@@ -27,6 +27,7 @@ export type {
   MaybeContinueGoalInput,
   MaybeContinueGoalResult,
   CodexCapacityWaitRef,
+  XaiCapacityWaitRef,
   GetCodexCapacityWaitInput,
   ReconcileCodexCapacityWaitInput,
   ReconcileCodexCapacityWaitResult,

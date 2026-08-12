@@ -180,6 +180,12 @@ secret manager; never commit it. The generated environments encryption key must
 remain stable across upgrades because it protects persisted subscription and
 workspace credentials.
 
+`OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED=true` additionally exposes the
+SuperGrok/xAI connected-subscription rail. Workspace scope is the default shared
+connection path; private user scope requires the exact managed-browser human.
+The same stable environments encryption key protects its OAuth material. See
+[`supergrok-subscription.md`](supergrok-subscription.md).
+
 Bootstrap a new machine in two phases. First install only the persistent
 dependencies and wait until they are healthy:
 

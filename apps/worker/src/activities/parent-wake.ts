@@ -4,6 +4,7 @@ import {
   getSession,
   getSessionGoal,
   getSessionParentPersonalConnectionDelegations,
+  getSessionParentXaiProviderAccountAuthority,
   addSessionSystemUpdateWithSourceMutation,
   claimPendingSessionSystemUpdateOutbox,
   claimPendingSessionWorkflowWakes,
@@ -63,6 +64,11 @@ export async function notifyParentOfChildIdle(
       workspaceId,
       childSessionId,
     );
+    const xaiAuthority = await getSessionParentXaiProviderAccountAuthority(
+      svc.db,
+      workspaceId,
+      childSessionId,
+    );
     const outbox = await getOrCreateSessionSystemUpdateOutbox(svc.db, {
       accountId: child.accountId,
       workspaceId,
@@ -74,8 +80,13 @@ export async function notifyParentOfChildIdle(
       dedupeKey: clientEventId,
       summary: childCompletionSummary(child, goal, "idle"),
       payload,
-      lineage: { childSessionId: child.id, parentSessionId: child.parentSessionId },
+      lineage: {
+        childSessionId: child.id,
+        parentSessionId: child.parentSessionId,
+        ...(xaiAuthority.subjectId ? { xaiAuthoritySubjectId: xaiAuthority.subjectId } : {}),
+      },
       personalConnectionDelegations,
+      xaiProviderAccountAuthoritySnapshot: xaiAuthority.snapshot,
     });
     if (outbox.status === "delivered") {
       return;
@@ -146,6 +157,7 @@ async function deliverParentSystemUpdateOutbox(
         payload: outbox.payload,
         lineage: outbox.lineage,
         personalConnectionDelegations: outbox.personalConnectionDelegations,
+        xaiProviderAccountAuthoritySnapshot: outbox.xaiProviderAccountAuthoritySnapshot,
       },
       async (tx) => {
         await markSessionSystemUpdateOutboxDeliveredInTransaction(tx, outbox);
