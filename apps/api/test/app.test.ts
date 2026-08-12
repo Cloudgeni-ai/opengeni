@@ -17,6 +17,7 @@ import {
   validateGitHubRepositorySelectionShapes,
   validateToolRefs,
   withDefaultEnabledCapabilityMcpTools,
+  workspaceActorContextExempt,
   workflowIdForSession,
 } from "../src/app";
 import type { AppDependencies } from "../src/app";
@@ -37,6 +38,7 @@ import {
 import { CODEX_APPS_MCP_URL } from "@opengeni/codex";
 import { configuredAllowedModels, type Settings } from "@opengeni/config";
 import { encryptEnvironmentValue, type Database } from "@opengeni/db";
+import { createSignedState } from "@opengeni/github";
 import { testSettings } from "@opengeni/testing";
 import { McpPayloadTooLargeError } from "@opengeni/runtime/mcp-network";
 import {
@@ -65,6 +67,70 @@ describe("API helpers", () => {
     expect(isApiContractProtectedMutation("POST", "/v1/workspaces/ws/mcp")).toBe(false);
     expect(isApiContractProtectedMutation("POST", "/v1/webhooks/stripe")).toBe(false);
     expect(isApiContractProtectedMutation("POST", "/v1/enrollments/device/poll")).toBe(false);
+  });
+
+  test("leaves only route-specific workspace protocols outside ordinary actor middleware", () => {
+    const workspace = "00000000-0000-4000-8000-000000000001";
+    expect(workspaceActorContextExempt("POST", `/v1/workspaces/${workspace}/mcp`)).toBe(true);
+    expect(workspaceActorContextExempt("GET", `/v1/workspaces/${workspace}/github/connect`)).toBe(
+      true,
+    );
+    expect(
+      workspaceActorContextExempt(
+        "GET",
+        `/v1/workspaces/${workspace}/github/installations/42/configure`,
+      ),
+    ).toBe(true);
+    expect(
+      workspaceActorContextExempt("GET", `/v1/workspaces/${workspace}/github/installations/select`),
+    ).toBe(true);
+    expect(
+      workspaceActorContextExempt("POST", `/v1/workspaces/${workspace}/github/installations`),
+    ).toBe(true);
+
+    expect(workspaceActorContextExempt("GET", `/v1/workspaces/${workspace}/github/app`)).toBe(
+      false,
+    );
+    expect(workspaceActorContextExempt("GET", `/v1/workspaces/${workspace}/sessions`)).toBe(false);
+    expect(workspaceActorContextExempt("POST", `/v1/workspaces/${workspace}/github/connect`)).toBe(
+      false,
+    );
+    expect(workspaceActorContextExempt("GET", `/v1/workspaces/${workspace}/not-mcp`)).toBe(false);
+  });
+
+  test("keeps signed-state GitHub connect public until its route-specific browser grant", async () => {
+    const accountId = "00000000-0000-4000-8000-000000000001";
+    const workspaceId = "00000000-0000-4000-8000-000000000002";
+    const githubStateSecret = "app-test-github-state-secret";
+    const app = createApp({
+      settings: testSettings({
+        productAccessMode: "configured",
+        githubAppId: "12345",
+        githubClientId: "test-client-id",
+        githubClientSecret: "test-client-secret",
+        githubAppSlug: "opengeni-test-app",
+        githubAppPrivateKey: "test-private-key",
+      }),
+      githubStateSecret,
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    });
+    const state = createSignedState(githubStateSecret, {
+      accountId,
+      workspaceId,
+      intent: "installation_authority",
+      browserGrantSubjectId: "configured-owner",
+      browserGrantExpiresAt: Math.floor(Date.now() / 1_000) + 600,
+    });
+
+    const response = await app.request(
+      `http://localhost/v1/workspaces/${workspaceId}/github/connect?state=${encodeURIComponent(state)}`,
+    );
+
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toStartWith("https://github.com/login/oauth/authorize?");
   });
   test("normalizes repository resources into sandbox mount paths", () => {
     const [resource] = normalizeResources([

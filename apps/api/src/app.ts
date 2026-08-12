@@ -528,38 +528,13 @@ export function createAppComposition(deps: AppDependencies): {
   });
 
   app.use("/v1/workspaces/:workspaceId/*", async (c, next) => {
-    const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, routeDeps, workspaceId);
-    if (grant.principalKind !== "agent_attempt") {
-      await withSessionRlsActorContext({ subjectId: grant.subjectId }, next);
+    if (workspaceActorContextExempt(c.req.method, new URL(c.req.url).pathname)) {
+      await next();
       return;
     }
-    const callerSessionId = grant.metadata?.sessionId;
-    if (typeof callerSessionId !== "string") {
-      throw new HTTPException(403, { message: "agent attempt authority is invalid" });
-    }
-    try {
-      const actor = await requireLiveAgentAttemptAuthorization(
-        routeDeps.db,
-        grant,
-        callerSessionId,
-      );
-      await withSessionRlsActorContext(
-        {
-          subjectId: actor.subjectId,
-          initiatingHumanSubjectId: actor.initiatingHumanSubjectId,
-        },
-        next,
-      );
-    } catch (error) {
-      if (error instanceof SessionAuthorizationDeniedError) {
-        throw new HTTPException(403, {
-          message: "agent attempt authority is invalid",
-          cause: error,
-        });
-      }
-      throw error;
-    }
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, routeDeps, workspaceId);
+    await withAccessGrantSessionRlsContext(routeDeps, grant, next);
   });
 
   app.all("/v1/workspaces/:workspaceId/mcp", async (c) => {
@@ -576,37 +551,39 @@ export function createAppComposition(deps: AppDependencies): {
       throw error;
     }
     const grant = await requireMcpAccessGrant(c, routeDeps, workspaceId);
-    const boundSessionId = grant.metadata?.sessionId;
-    if (typeof boundSessionId === "string") {
-      try {
-        await requireSessionAuthorization(routeDeps, grant, {
-          sessionId: boundSessionId,
-          operation: "session.first_party_mcp.call",
-          surface: "first_party_mcp",
-        });
-      } catch (error) {
-        if (error instanceof SessionAuthorizationDeniedError) {
-          throw new HTTPException(404, { message: "session not found" });
-        }
-        if (error instanceof SessionAuthorizationUnavailableError) {
-          throw new HTTPException(503, {
-            message: "session authorization is unavailable",
+    return await withAccessGrantSessionRlsContext(routeDeps, grant, async () => {
+      const boundSessionId = grant.metadata?.sessionId;
+      if (typeof boundSessionId === "string") {
+        try {
+          await requireSessionAuthorization(routeDeps, grant, {
+            sessionId: boundSessionId,
+            operation: "session.first_party_mcp.call",
+            surface: "first_party_mcp",
           });
+        } catch (error) {
+          if (error instanceof SessionAuthorizationDeniedError) {
+            throw new HTTPException(404, { message: "session not found" });
+          }
+          if (error instanceof SessionAuthorizationUnavailableError) {
+            throw new HTTPException(503, {
+              message: "session authorization is unavailable",
+            });
+          }
+          throw error;
         }
-        throw error;
       }
-    }
-    const workspace = await getWorkspace(routeDeps.db, workspaceId);
-    const workspaceMemoryEnabled = resolveWorkspaceMemoryEnabled(workspace?.settings);
-    const transport = new WebStandardStreamableHTTPServerTransport({
-      enableJsonResponse: true,
+      const workspace = await getWorkspace(routeDeps.db, workspaceId);
+      const workspaceMemoryEnabled = resolveWorkspaceMemoryEnabled(workspace?.settings);
+      const transport = new WebStandardStreamableHTTPServerTransport({
+        enableJsonResponse: true,
+      });
+      const mcp = buildOpenGeniMcpServer(routeDeps, grant, {
+        requestOrigin: new URL(c.req.url).origin,
+        workspaceMemoryEnabled,
+      });
+      await mcp.connect(transport);
+      return await transport.handleRequest(boundedRequest);
     });
-    const mcp = buildOpenGeniMcpServer(routeDeps, grant, {
-      requestOrigin: new URL(c.req.url).origin,
-      workspaceMemoryEnabled,
-    });
-    await mcp.connect(transport);
-    return await transport.handleRequest(boundedRequest);
   });
 
   app.get("/v1/workspaces/:workspaceId/codemode/catalog", async (c) => {
@@ -761,6 +738,55 @@ export function appendVary(current: string | null, value: string): string {
     values.push(value);
   }
   return values.join(", ");
+}
+
+const publicWorkspaceBrowserRoutePatterns = [
+  /^\/v1\/workspaces\/[^/]+\/github\/connect$/,
+  /^\/v1\/workspaces\/[^/]+\/github\/installations\/[^/]+\/configure$/,
+  /^\/v1\/workspaces\/[^/]+\/github\/installations\/select$/,
+] as const;
+
+export function workspaceActorContextExempt(method: string, pathname: string): boolean {
+  if (/^\/v1\/workspaces\/[^/]+\/mcp$/.test(pathname)) return true;
+  if (
+    method === "GET" &&
+    publicWorkspaceBrowserRoutePatterns.some((route) => route.test(pathname))
+  ) {
+    return true;
+  }
+  return method === "POST" && /^\/v1\/workspaces\/[^/]+\/github\/installations$/.test(pathname);
+}
+
+async function withAccessGrantSessionRlsContext<T>(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  fn: () => Promise<T>,
+): Promise<T> {
+  if (grant.principalKind !== "agent_attempt") {
+    return await withSessionRlsActorContext({ subjectId: grant.subjectId }, fn);
+  }
+  const callerSessionId = grant.metadata?.sessionId;
+  if (typeof callerSessionId !== "string") {
+    throw new HTTPException(403, { message: "agent attempt authority is invalid" });
+  }
+  try {
+    const actor = await requireLiveAgentAttemptAuthorization(deps.db, grant, callerSessionId);
+    return await withSessionRlsActorContext(
+      {
+        subjectId: actor.subjectId,
+        initiatingHumanSubjectId: actor.initiatingHumanSubjectId,
+      },
+      fn,
+    );
+  } catch (error) {
+    if (error instanceof SessionAuthorizationDeniedError) {
+      throw new HTTPException(403, {
+        message: "agent attempt authority is invalid",
+        cause: error,
+      });
+    }
+    throw error;
+  }
 }
 
 async function requireMcpAccessGrant(
