@@ -40,6 +40,9 @@ const runAttempt = 2;
 const recoveryRunId = 790;
 const recoveryRunAttempt = 3;
 const releaseHeadReleaseId = 7654321;
+const sourceCiRunId = 654321;
+const sourceCiRunAttempt = 1;
+const sourceCiCheckSuiteId = 876543;
 
 function recoveredSourceAdmissionExternalId(
   workflowRunId = recoveryRunId,
@@ -87,6 +90,41 @@ function releaseHeadRelease(sha = headSha) {
     html_url:
       `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}` +
       `/releases/tag/${tagName}`,
+  };
+}
+
+function sourceCiCheck(name: string, index: number, overrides: Record<string, unknown> = {}) {
+  const jobId = Number(overrides.id ?? 7000 + index);
+  return {
+    id: jobId,
+    name,
+    head_sha: mergeSha,
+    status: "completed",
+    conclusion: "success",
+    external_id: `source-ci-${jobId}`,
+    details_url:
+      `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}` +
+      `/actions/runs/${sourceCiRunId}/job/${jobId}`,
+    check_suite: { id: sourceCiCheckSuiteId },
+    app: RELEASE_AUTOMATION_CONTRACT.githubActionsApp,
+    ...overrides,
+  };
+}
+
+function sourceCiJob(name: string, index: number, overrides: Record<string, unknown> = {}) {
+  const jobId = Number(overrides.id ?? 7000 + index);
+  return {
+    id: jobId,
+    name,
+    status: "completed",
+    conclusion: "success",
+    html_url:
+      `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}` +
+      `/actions/runs/${sourceCiRunId}/job/${jobId}`,
+    check_run_url:
+      `${RELEASE_AUTOMATION_CONTRACT.apiUrl}/repos/${RELEASE_AUTOMATION_CONTRACT.repository}` +
+      `/check-runs/${jobId}`,
+    ...overrides,
   };
 }
 
@@ -2064,6 +2102,8 @@ function approvalFixture(
     sourceChecks?: Array<Record<string, unknown>>;
     historicalHeadChecks?: Array<Record<string, unknown>>;
     historicalSourceChecks?: Array<Record<string, unknown>>;
+    sourceRun?: Record<string, unknown>;
+    sourceAttemptJobs?: Array<Record<string, unknown>>;
     releaseHeadRefSha?: string | null;
     release?: Record<string, unknown> | null;
     reviewedBaseSha?: string;
@@ -2323,6 +2363,37 @@ function approvalFixture(
         ...review,
         user: options.reviewDetailReviewer ?? review.user,
       });
+    if (method === "GET" && url.pathname === `${prefix}/actions/runs/${sourceCiRunId}`)
+      return response(
+        options.sourceRun ?? {
+          id: sourceCiRunId,
+          run_attempt: sourceCiRunAttempt,
+          status: "completed",
+          conclusion: "success",
+          event: "push",
+          path: RELEASE_AUTOMATION_CONTRACT.ciWorkflowPath,
+          head_sha: mergeSha,
+          head_branch: RELEASE_AUTOMATION_CONTRACT.defaultBranch,
+          check_suite_id: sourceCiCheckSuiteId,
+          html_url:
+            `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}` +
+            `/actions/runs/${sourceCiRunId}`,
+          repository: { full_name: RELEASE_AUTOMATION_CONTRACT.repository },
+          head_repository: { full_name: RELEASE_AUTOMATION_CONTRACT.repository },
+        },
+      );
+    if (
+      method === "GET" &&
+      url.pathname === `${prefix}/actions/runs/${sourceCiRunId}/attempts/${sourceCiRunAttempt}/jobs`
+    )
+      return response({
+        total_count: (options.sourceAttemptJobs ?? []).length,
+        jobs:
+          options.sourceAttemptJobs ??
+          RELEASE_AUTOMATION_CONTRACT.checks.requiredSource.map((name, index) =>
+            sourceCiJob(name, index),
+          ),
+      });
     if (
       method === "GET" &&
       url.pathname ===
@@ -2382,8 +2453,8 @@ function approvalFixture(
       return response({
         check_runs: [
           ...(options.sourceChecks ??
-            RELEASE_AUTOMATION_CONTRACT.checks.requiredSource.map((name) =>
-              successfulCheck(name, mergeSha),
+            RELEASE_AUTOMATION_CONTRACT.checks.requiredSource.map((name, index) =>
+              sourceCiCheck(name, index),
             )),
           ...(url.searchParams.get("filter") === "all"
             ? (options.historicalSourceChecks ?? [])
@@ -2972,12 +3043,107 @@ describe("release approval provenance", () => {
         env: approvalEnv(),
         fetchImpl: approvalFixture({
           sourceChecks: RELEASE_AUTOMATION_CONTRACT.checks.requiredSource.map((name, index) => ({
-            ...success(name, mergeSha),
+            ...sourceCiCheck(name, index),
             conclusion: index === 0 ? "failure" : "success",
           })),
         }).fetchImpl,
       }),
-    ).rejects.toThrow("did not complete successfully");
+    ).rejects.toThrow("authoritative check run did not complete successfully");
+  });
+
+  test("accepts official failed-job retry history when the latest CI attempt succeeds", async () => {
+    const latestChecks = RELEASE_AUTOMATION_CONTRACT.checks.requiredSource.map((name, index) =>
+      sourceCiCheck(name, index, { id: 7100 + index }),
+    );
+    const historicalChecks = RELEASE_AUTOMATION_CONTRACT.checks.requiredSource.map((name, index) =>
+      sourceCiCheck(name, index, {
+        id: 7000 + index,
+        conclusion: index === 0 ? "failure" : "success",
+      }),
+    );
+    const fixture = approvalFixture({
+      sourceChecks: latestChecks,
+      historicalSourceChecks: historicalChecks,
+      sourceRun: {
+        id: sourceCiRunId,
+        run_attempt: sourceCiRunAttempt,
+        status: "completed",
+        conclusion: "success",
+        event: "push",
+        path: RELEASE_AUTOMATION_CONTRACT.ciWorkflowPath,
+        head_sha: mergeSha,
+        head_branch: RELEASE_AUTOMATION_CONTRACT.defaultBranch,
+        check_suite_id: sourceCiCheckSuiteId,
+        html_url:
+          `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}` +
+          `/actions/runs/${sourceCiRunId}`,
+        repository: { full_name: RELEASE_AUTOMATION_CONTRACT.repository },
+        head_repository: { full_name: RELEASE_AUTOMATION_CONTRACT.repository },
+      },
+      sourceAttemptJobs: RELEASE_AUTOMATION_CONTRACT.checks.requiredSource.map((name, index) =>
+        sourceCiJob(name, index, { id: 7100 + index }),
+      ),
+    });
+
+    const result = await verifyApprovedMerge({
+      env: approvalEnv(),
+      fetchImpl: fixture.fetchImpl,
+      logger: { log() {} },
+    });
+
+    expect(result.requiredSourceChecks).toEqual(
+      RELEASE_AUTOMATION_CONTRACT.checks.requiredSource.map((name, index) => ({
+        name,
+        appSlug: RELEASE_AUTOMATION_CONTRACT.githubActionsApp.slug,
+        appId: RELEASE_AUTOMATION_CONTRACT.githubActionsApp.id,
+        workflowRunId: sourceCiRunId,
+        workflowRunAttempt: sourceCiRunAttempt,
+        workflowJobId: 7100 + index,
+      })),
+    );
+  });
+
+  test("rejects failed latest CI attempts and source checks from another workflow run", async () => {
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: approvalFixture({
+          sourceRun: {
+            id: sourceCiRunId,
+            run_attempt: sourceCiRunAttempt,
+            status: "completed",
+            conclusion: "failure",
+            event: "push",
+            path: RELEASE_AUTOMATION_CONTRACT.ciWorkflowPath,
+            head_sha: mergeSha,
+            head_branch: RELEASE_AUTOMATION_CONTRACT.defaultBranch,
+            check_suite_id: sourceCiCheckSuiteId,
+            html_url:
+              `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}` +
+              `/actions/runs/${sourceCiRunId}`,
+            repository: { full_name: RELEASE_AUTOMATION_CONTRACT.repository },
+            head_repository: { full_name: RELEASE_AUTOMATION_CONTRACT.repository },
+          },
+        }).fetchImpl,
+      }),
+    ).rejects.toThrow("required source workflow did not complete successfully");
+
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: approvalFixture({
+          historicalSourceChecks: [
+            sourceCiCheck(RELEASE_AUTOMATION_CONTRACT.checks.requiredSource[0], 50, {
+              id: 8050,
+              details_url:
+                `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}` +
+                "/actions/runs/999999/job/8050",
+              check_suite: { id: 999999 },
+            }),
+          ],
+        }).fetchImpl,
+      }),
+    ).rejects.toThrow("required source checks do not share one workflow run");
   });
 
   test("requires the immutable reviewed-head evidence ref", async () => {
