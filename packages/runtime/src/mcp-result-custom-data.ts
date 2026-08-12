@@ -2,7 +2,7 @@ import {
   AttemptToolResult,
   type AttemptToolResult as AttemptToolResultValue,
 } from "@opengeni/contracts";
-import type { MCPServer } from "@openai/agents";
+import { UserError, type MCPServer } from "@openai/agents";
 import { randomUUID } from "node:crypto";
 
 export const OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY = "__opengeniMcpResultV1" as const;
@@ -26,6 +26,66 @@ function sdkModelOutputForServer(server: MCPServer, result: AttemptToolResultVal
     return JSON.stringify(result.structuredContent);
   }
   return result.content.length === 1 ? result.content[0] : result.content;
+}
+
+function cloneSdkMcpCustomDataContextValue<T>(value: T): T {
+  try {
+    return structuredClone(value);
+  } catch {
+    return value;
+  }
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function assertSdkJsonCompatible(value: unknown): void {
+  if (value == null) return;
+  const valueType = typeof value;
+  if (valueType === "string" || valueType === "boolean") return;
+  if (valueType === "number") {
+    if (!Number.isFinite(value)) {
+      throw new UserError("customDataExtractor must return JSON-compatible data.");
+    }
+    return;
+  }
+  if (
+    valueType === "undefined" ||
+    valueType === "function" ||
+    valueType === "symbol" ||
+    valueType === "bigint"
+  ) {
+    throw new UserError("customDataExtractor must return JSON-compatible data.");
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) assertSdkJsonCompatible(entry);
+    return;
+  }
+  if (!isPlainRecord(value)) {
+    throw new UserError("customDataExtractor must return JSON-compatible data.");
+  }
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== "string") {
+      throw new UserError("customDataExtractor must return JSON-compatible data.");
+    }
+    assertSdkJsonCompatible(value[key]);
+  }
+}
+
+function normalizeSdkToolOutputCustomData(value: unknown): Record<string, unknown> | undefined {
+  if (value == null) return undefined;
+  if (!isPlainRecord(value)) {
+    throw new UserError("customDataExtractor must return an object or null.");
+  }
+  if (Reflect.ownKeys(value).some((key) => typeof key !== "string")) {
+    throw new UserError("customDataExtractor must return an object with string keys.");
+  }
+  if (Object.keys(value).length === 0) return undefined;
+  assertSdkJsonCompatible(value);
+  return JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
 }
 
 /**
@@ -79,7 +139,7 @@ export class McpResultCustomDataBridge {
           ...(context.resultMeta === undefined ? {} : { _meta: context.resultMeta }),
         });
 
-      let innerCustomData: Record<string, unknown> | null | undefined;
+      let innerCustomData: Record<string, unknown> | undefined;
       const innerExtractor = this.input?.innerServer?.customDataExtractor;
       if (innerExtractor && this.input?.innerServer) {
         const {
@@ -94,19 +154,25 @@ export class McpResultCustomDataBridge {
           arguments: cleanArguments,
           serverName: this.input.innerServer.name,
           toolName: this.input.unprefixToolName?.(context.toolName) ?? context.toolName,
-          toolOutput: sdkModelOutputForServer(this.input.innerServer, result),
+          toolOutput: cloneSdkMcpCustomDataContextValue(
+            sdkModelOutputForServer(this.input.innerServer, result),
+          ),
           ...(result.structuredContent === undefined
             ? {}
-            : { structuredContent: result.structuredContent }),
+            : {
+                structuredContent: cloneSdkMcpCustomDataContextValue(result.structuredContent),
+              }),
           ...(result.isError === undefined ? {} : { isError: result.isError }),
-          ...(result._meta === undefined ? {} : { resultMeta: result._meta }),
+          ...(result._meta === undefined
+            ? {}
+            : { resultMeta: cloneSdkMcpCustomDataContextValue(result._meta) }),
         };
-        innerCustomData = await innerExtractor(innerContext);
+        innerCustomData = normalizeSdkToolOutputCustomData(await innerExtractor(innerContext));
       }
 
       return {
         [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: result,
-        ...(innerCustomData == null
+        ...(innerCustomData === undefined
           ? {}
           : { [OPENGENI_INNER_MCP_CUSTOM_DATA_KEY]: innerCustomData }),
       };

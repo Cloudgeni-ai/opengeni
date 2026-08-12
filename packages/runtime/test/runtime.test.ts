@@ -4842,6 +4842,133 @@ describe("runtime event normalization", () => {
     expect(innerToolOutputs).toEqual([JSON.stringify(fullResult.structuredContent)]);
   });
 
+  test("a prefixed inner extractor cannot mutate the retained MCP result", async () => {
+    const fullResult = {
+      content: [{ type: "text" as const, text: "immutable content" }],
+      structuredContent: { receipt: { id: "structured-1" } },
+      isError: false,
+      _meta: { trace: { id: "trace-1" } },
+    };
+    const inner: MCPServer = {
+      name: "mutating-inner",
+      cacheToolsList: false,
+      customDataExtractor: async (context) => {
+        (context.resultMeta!.trace as { id: string }).id = "mutated-trace";
+        (context.structuredContent!.receipt as { id: string }).id = "mutated-structured";
+        (context.toolOutput as { text: string }).text = "mutated content";
+        return { retained: true };
+      },
+      async connect() {},
+      async close() {},
+      async listTools() {
+        return [
+          {
+            name: "inspect",
+            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+          },
+        ];
+      },
+      async callTool() {
+        return fullResult.content;
+      },
+      async callToolResult() {
+        return fullResult;
+      },
+      async invalidateToolsCache() {},
+    };
+    const wrapped = new PrefixedMcpServer(inner, "mutating");
+    const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false });
+    const model = new ScriptedModel([
+      { output: [scriptedFunctionCall("mutating__inspect", {}, "mutating-call")] },
+      { outputText: "done" },
+    ]);
+    const agent = buildOpenGeniAgent(settings, [], {
+      model,
+      hostedWebSearch: false,
+      mcpServers: [wrapped],
+    });
+
+    const result = await runAgentStream(agent, "Inspect it", settings);
+    const streamed: any[] = [];
+    for await (const event of result.toStream()) streamed.push(event);
+    await result.completed;
+
+    const outputEvent = streamed.find(
+      (event) =>
+        event.type === "run_item_stream_event" && event.item?.type === "tool_call_output_item",
+    );
+    expect(outputEvent?.item.output).toEqual(fullResult);
+    expect(outputEvent?.item.customData).toEqual({
+      [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: fullResult,
+      [OPENGENI_INNER_MCP_CUSTOM_DATA_KEY]: { retained: true },
+    });
+  });
+
+  test("a prefixed inner extractor applies the SDK custom-data normalization boundary", async () => {
+    const extractorResults: unknown[] = [{}, { retained: true }, ["invalid"]];
+    const inner: MCPServer = {
+      name: "normalized-inner",
+      cacheToolsList: false,
+      customDataExtractor: async () => extractorResults.shift() as Record<string, unknown>,
+      async connect() {},
+      async close() {},
+      async listTools() {
+        return [
+          {
+            name: "inspect",
+            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+          },
+        ];
+      },
+      async callTool() {
+        return [{ type: "text" as const, text: "content" }];
+      },
+      async callToolResult() {
+        return { content: [{ type: "text" as const, text: "content" }] };
+      },
+      async invalidateToolsCache() {},
+    };
+    const wrapped = new PrefixedMcpServer(inner, "normalized");
+    const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false });
+
+    const runOnce = async (callId: string) => {
+      const model = new ScriptedModel([
+        { output: [scriptedFunctionCall("normalized__inspect", {}, callId)] },
+        { outputText: "done" },
+      ]);
+      const agent = buildOpenGeniAgent(settings, [], {
+        model,
+        hostedWebSearch: false,
+        mcpServers: [wrapped],
+      });
+      const result = await runAgentStream(agent, "Inspect it", settings);
+      const streamed: any[] = [];
+      for await (const event of result.toStream()) streamed.push(event);
+      await result.completed;
+      return streamed.find(
+        (event) =>
+          event.type === "run_item_stream_event" && event.item?.type === "tool_call_output_item",
+      );
+    };
+
+    const empty = await runOnce("normalized-empty");
+    expect(empty?.item.customData).toEqual({
+      [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: {
+        content: [{ type: "text", text: "content" }],
+      },
+    });
+    const retained = await runOnce("normalized-retained");
+    expect(retained?.item.customData).toEqual({
+      [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: {
+        content: [{ type: "text", text: "content" }],
+      },
+      [OPENGENI_INNER_MCP_CUSTOM_DATA_KEY]: { retained: true },
+    });
+    await expect(runOnce("normalized-invalid")).rejects.toThrow(
+      "customDataExtractor must return an object or null.",
+    );
+  });
+
   test("connects to real Streamable HTTP MCP servers with prefixes and allowed tool filtering", async () => {
     const mcp = startTestMcpServer();
     const prepared = await prepareAgentTools(
