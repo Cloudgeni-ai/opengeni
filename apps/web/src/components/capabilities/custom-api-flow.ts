@@ -1,7 +1,7 @@
 import type {
   ApiIntegrationInstallationSummary,
   ApiIntegrationPreview,
-  ApiIntegrationSource,
+  IntegrationSource,
   ConnectionMetadata,
   ConnectionOwnership,
   CreateConnectionRequest,
@@ -196,7 +196,7 @@ export function customApiFlowReducer(
   }
 }
 
-export function customApiSourceFromDraft(draft: CustomApiDraft): ApiIntegrationSource {
+export function customApiSourceFromDraft(draft: CustomApiDraft): IntegrationSource {
   if (draft.protocol === "openapi") {
     const url = normalizeCustomApiUrl(draft.openApiUrl || draft.url);
     const baseUrl = optionalCustomApiUrl(draft.baseUrl);
@@ -267,13 +267,13 @@ export function customApiProviderDomain(draft: CustomApiDraft): string {
       : source.kind === "openapi" || source.kind === "auto"
         ? source.url
         : (() => {
-            throw new Error("A provider preset is not a custom API source.");
+            throw new Error("A provider definition is not a custom API source.");
           })();
   return new URL(value).hostname.toLowerCase();
 }
 
 export function customApiAuthenticationMayBeRequired(
-  source: ApiIntegrationSource,
+  source: IntegrationSource,
   error: unknown,
 ): boolean {
   if (source.kind !== "graphql" && source.kind !== "auto") return false;

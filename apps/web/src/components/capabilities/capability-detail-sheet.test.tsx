@@ -6,6 +6,7 @@ import { CapabilityCatalogItem as CapabilityCatalogItemSchema } from "@opengeni/
 
 import type { ConnectionHealth } from "@/lib/capabilities";
 import type { CapabilityCatalogItem, ConnectionMetadata, SocialConnection } from "@/types";
+import { EnabledCapabilitiesSection } from "./capability-catalog-sections";
 import { Sheet } from "@/components/ui/sheet";
 import {
   ConnectionStatus,
@@ -87,6 +88,32 @@ function socialConnection(overrides: Partial<SocialConnection> = {}): SocialConn
     updatedAt: "2026-08-01T00:00:00.000Z",
     ...overrides,
   };
+}
+
+function installedCuratedSkill(): CapabilityCatalogItem {
+  return CapabilityCatalogItemSchema.parse({
+    id: "skill:terraform-style-guide",
+    kind: "skill",
+    source: "library",
+    name: "Terraform Style Guide",
+    description: "Reviewed Terraform conventions.",
+    category: "infrastructure",
+    enabled: true,
+    runtime: { available: true, notes: null },
+    lifecycle: {
+      status: "installed",
+      readiness: "ready",
+      detail: "installed",
+      managedBy: "workspace",
+    },
+    actions: ["configure", "update", "uninstall", "inspect"],
+    metadata: {
+      libraryId: "terraform-style-guide",
+      version: "1.0.0",
+      contentSha256: "a".repeat(64),
+      updateAvailable: true,
+    },
+  });
 }
 
 describe("connection ownership UI", () => {
@@ -205,7 +232,172 @@ describe("connection ownership UI", () => {
       );
       expect(connect).toBeDefined();
       await act(async () => connect!.click());
-      expect(onAction).toHaveBeenCalledWith({ type: "oauth", item: gmail, ownership: "personal" });
+      expect(onAction).toHaveBeenCalledWith({
+        type: "oauth",
+        item: gmail,
+        ownership: "personal",
+      });
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("an installed MCP exposes only the authoritative disconnect action", async () => {
+    const mcp = CapabilityCatalogItemSchema.parse({
+      id: "mcp:internal-tools",
+      kind: "mcp",
+      source: "manual",
+      name: "Internal Tools",
+      category: "custom",
+      endpointUrl: "https://mcp.example.com/sse",
+      enabled: true,
+      runtime: { available: true, mcpServerId: "internal-tools", notes: null },
+      lifecycle: {
+        status: "ready",
+        readiness: "ready",
+        detail: "enabled",
+        managedBy: "workspace",
+      },
+      actions: ["configure", "disconnect", "inspect"],
+    });
+    const onAction = mock((_action: unknown) => {});
+    const rendered = await render(
+      <Sheet open>
+        <DetailBody
+          item={mcp}
+          health={{ state: "none" }}
+          logoSrc={null}
+          busy={false}
+          errorMessage={null}
+          canManageSocial={false}
+          onAction={onAction}
+        />
+      </Sheet>,
+    );
+    try {
+      const disconnect = [...rendered.container.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Disconnect",
+      );
+      expect(disconnect).toBeDefined();
+      expect(rendered.container.textContent).not.toContain("Disable");
+      await act(async () => disconnect!.click());
+      expect(onAction).toHaveBeenCalledWith({ type: "disconnect", item: mcp });
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("non-MCP capabilities never expose the generic disconnect mutation", async () => {
+    const plugin = CapabilityCatalogItemSchema.parse({
+      id: "plugin:source-package",
+      kind: "plugin",
+      source: "manual",
+      name: "Source Package",
+      category: "developer-tools",
+      enabled: true,
+      runtime: { available: true, notes: null },
+      lifecycle: {
+        status: "installed",
+        readiness: "ready",
+        detail: "installed",
+        managedBy: "workspace",
+      },
+      actions: ["configure", "update", "uninstall", "inspect"],
+    });
+    const onAction = mock((_action: unknown) => {});
+    const rendered = await render(
+      <Sheet open>
+        <DetailBody
+          item={plugin}
+          health={{ state: "none" }}
+          logoSrc={null}
+          busy={false}
+          errorMessage={null}
+          canManageSocial={false}
+          onAction={onAction}
+        />
+      </Sheet>,
+    );
+    try {
+      expect(rendered.container.textContent).toContain(
+        "Manage this capability from its dedicated controls.",
+      );
+      expect(rendered.container.textContent).not.toContain("Disconnect");
+      expect(rendered.container.textContent).not.toContain("Disable");
+      expect(onAction).not.toHaveBeenCalled();
+    } finally {
+      await rendered.unmount();
+    }
+  });
+});
+
+describe("Skill installation authority UI", () => {
+  test("keeps Skill mutations disabled with administrator guidance for non-admin members", async () => {
+    const skill = installedCuratedSkill();
+    const onAction = mock((_action: unknown) => {});
+    const rendered = await render(
+      <Sheet open>
+        <DetailBody
+          item={skill}
+          health={{ state: "none" }}
+          logoSrc={null}
+          busy={false}
+          errorMessage={null}
+          canManageSocial={false}
+          canManageSkills={false}
+          onAction={onAction}
+        />
+      </Sheet>,
+    );
+    try {
+      const update = [...rendered.container.querySelectorAll("button")].find((button) =>
+        button.textContent?.includes("Update Skill"),
+      );
+      const remove = [...rendered.container.querySelectorAll("button")].find((button) =>
+        button.textContent?.includes("Remove Skill"),
+      );
+      expect(update?.disabled).toBe(true);
+      expect(remove?.disabled).toBe(true);
+      expect(rendered.container.textContent).toContain(
+        "Workspace administrator permission is required to install, update, or remove Skills.",
+      );
+      await act(async () => update!.click());
+      await act(async () => remove!.click());
+      expect(onAction).not.toHaveBeenCalled();
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("keeps read access while disabling the enabled-strip removal shortcut", async () => {
+    const skill = installedCuratedSkill();
+    const onOpen = mock((_item: CapabilityCatalogItem) => {});
+    const onDisable = mock((_item: CapabilityCatalogItem) => {});
+    const rendered = await render(
+      <EnabledCapabilitiesSection
+        items={[skill]}
+        busyId={null}
+        connectionHealth={() => ({ state: "none" })}
+        logoUrl={() => null}
+        canManageSkills={false}
+        onOpen={onOpen}
+        onDisable={onDisable}
+      />,
+    );
+    try {
+      const inspect = rendered.container.querySelector<HTMLButtonElement>(
+        '[data-capability-id="skill:terraform-style-guide"]',
+      );
+      const remove = [...rendered.container.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Remove",
+      );
+      expect(inspect?.disabled).toBe(false);
+      expect(remove?.disabled).toBe(true);
+      expect(remove?.title).toContain("Workspace administrator permission is required");
+      await act(async () => inspect!.click());
+      await act(async () => remove!.click());
+      expect(onOpen).toHaveBeenCalledWith(skill);
+      expect(onDisable).not.toHaveBeenCalled();
     } finally {
       await rendered.unmount();
     }

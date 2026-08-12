@@ -29,46 +29,33 @@ import {
   decryptedCapabilityHeaders,
   disableCapabilityInstallation,
   enableCapabilityInstallation,
-  enablePackInstallation,
   encryptVariableSetValue,
   getCapabilityCatalogItem,
   getCapabilityInstallation,
   getConnectionMetadata,
   getCodexAppsCredentialAuthorizationForRun,
   getWorkspaceGrant,
-  getPackInstallation,
   getStoredCapabilityHeaderCiphertext,
-  getVariableSet,
   listCapabilityCatalogItems,
   listCapabilityInstallations,
   listConnectionsMetadata,
   listEnabledMcpCapabilityServers,
   listInstalledApiIntegrations,
+  listInstalledSkills,
   listPackInstallations,
   listSocialConnections,
   mcpServerIdForCapability,
-  updatePackInstallationStatus,
   upsertCapabilityCatalogItem,
   type Database,
   type ApiIntegrationRuntime,
   type EnabledMcpCapabilityServer,
+  type InstalledSkillSummary,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 import { hasPermission } from "../access";
 import { isFikenConnection, preferredFikenConnection } from "./fiken";
-import {
-  getSkillLibraryEntry,
-  listSkillLibraryEntries,
-  type SkillLibraryEntry,
-} from "@opengeni/runtime/skill-library";
-import { validateVariableSetAttachment } from "./environments";
-import {
-  assertPackSandboxImageCompatible,
-  capabilityPackRequiresInstallationPlan,
-  listCapabilityPacks,
-  listWorkspaceCapabilityPacks,
-  resolveCapabilityPack,
-} from "./packs";
+import { listSkillLibraryEntries, type SkillLibraryEntry } from "@opengeni/runtime/skill-library";
+import { listCapabilityPacks, listWorkspaceCapabilityPacks } from "./packs";
 
 const officialMcpRegistryUrl = "https://registry.modelcontextprotocol.io";
 const firstPartyMcpServerIds = new Set(["opengeni", "files", "docs"]);
@@ -95,6 +82,7 @@ export async function buildCapabilityCatalog(input: {
     socialConnections,
     workspaceConnections,
     curatedLibrarySkills,
+    installedSkills,
     codexAppsCredentialId,
   ] = await Promise.all([
     listCapabilityCatalogItems(input.db, input.workspaceId),
@@ -104,12 +92,21 @@ export async function buildCapabilityCatalog(input: {
     listSocialConnections(input.db, input.workspaceId, 500, input.subjectId),
     listConnectionsMetadata(input.db, input.workspaceId, null),
     discoverCuratedSkillLibraryItems(),
+    listInstalledSkills(input.db, input.workspaceId),
     input.settings.codexConnectedAppsEnabled
       ? resolveCodexAppsCredentialIdForRun(input.db, input.workspaceId)
       : Promise.resolve(null),
   ]);
+  const catalogInstallations = capabilityInstallations.filter(
+    (installation) => installation.kind === "mcp",
+  );
   const capabilityInstallationById = new Map(
-    capabilityInstallations.map((installation) => [installation.capabilityId, installation]),
+    catalogInstallations.map((installation) => [installation.capabilityId, installation]),
+  );
+  const installedSkillById = new Map(
+    installedSkills
+      .filter((skill) => skill.owners.some((owner) => owner.kind === "direct"))
+      .map((skill) => [skill.capabilityId, skill]),
   );
   const activePackIds = new Set(
     packInstallations
@@ -125,68 +122,40 @@ export async function buildCapabilityCatalog(input: {
     ...providerIntegrationCatalogItems(socialConnections),
     fikenCatalogItem(workspaceConnections.filter(isFikenConnection)),
     ...curatedLibrarySkills,
+    ...installedSkills
+      .filter(
+        (skill) =>
+          skill.source !== "library" && skill.owners.some((owner) => owner.kind === "direct"),
+      )
+      .map(installedSkillCatalogItem),
   ];
   const codexApps = input.settings.codexConnectedAppsEnabled
     ? codexAppsCatalogItem(codexAppsCredentialId !== null)
     : null;
   const items = dedupeCatalogItems([
     ...builtIns,
-    ...persistedItems.filter((item) => !isReservedCodexAppsCatalogItem(item)),
+    ...persistedItems.filter(
+      (item) =>
+        item.kind !== "skill" &&
+        item.kind !== "api" &&
+        item.kind !== "plugin" &&
+        !isReservedCodexAppsCatalogItem(item),
+    ),
     // Keep the reserved, server-derived item authoritative over any stale
     // legacy catalog row with the same id.
     ...(codexApps ? [codexApps] : []),
   ])
     .map((item) => {
-      const runtimeItem = applyInstalledArtifactRuntime(item);
-      const projected = applyCapabilityEnablement(
-        runtimeItem,
-        capabilityInstallationById.get(runtimeItem.id),
-        activePackIds,
-      );
+      const projected =
+        item.kind === "skill"
+          ? applyInstalledSkillEnablement(item, installedSkillById.get(item.id))
+          : applyCapabilityEnablement(item, capabilityInstallationById.get(item.id), activePackIds);
       return applyCapabilityLifecycle(projected);
     })
     .sort(compareCatalogItems);
   return {
     items,
-    installations: capabilityInstallations,
-  };
-}
-
-function applyInstalledArtifactRuntime(item: CapabilityCatalogItem): CapabilityCatalogItem {
-  if (
-    item.kind === "api" &&
-    item.metadata.platformVersion === 2 &&
-    typeof item.metadata.pluginVersionId === "string" &&
-    typeof item.metadata.apiFacetId === "string" &&
-    typeof item.metadata.revisionId === "string" &&
-    typeof item.metadata.serverId === "string"
-  ) {
-    return {
-      ...item,
-      runtime: {
-        available: true,
-        mcpServerId: item.metadata.serverId,
-        transport: "local-adapter",
-        notes: "Available through an immutable workspace API Integration revision.",
-      },
-    };
-  }
-  if (
-    item.kind !== "skill" ||
-    item.metadata.platformVersion !== 2 ||
-    typeof item.metadata.pluginVersionId !== "string" ||
-    typeof item.metadata.facetId !== "string" ||
-    typeof item.metadata.sourceCommit !== "string" ||
-    typeof item.metadata.contentSha256 !== "string"
-  ) {
-    return item;
-  }
-  return {
-    ...item,
-    runtime: {
-      available: true,
-      notes: "Installed from an immutable workspace Skill artifact.",
-    },
+    installations: catalogInstallations,
   };
 }
 
@@ -204,7 +173,17 @@ export async function createCatalogItem(input: {
   }
   if (id.startsWith("skill:")) {
     throw new HTTPException(422, {
-      message: "skill ids are managed by the OpenGeni skill library or runtime adapters",
+      message: "Skills are installed through the Skill library or source import flow",
+    });
+  }
+  if (id.startsWith("api:")) {
+    throw new HTTPException(422, {
+      message: "API Integrations are installed from typed Integration Definitions",
+    });
+  }
+  if (id.startsWith("plugin:")) {
+    throw new HTTPException(422, {
+      message: "Plugins are installed through the Plugin Package flow",
     });
   }
   if (
@@ -266,6 +245,26 @@ export async function enableCapability(input: {
     input.settings,
     input.capabilityId,
   );
+  if (item.kind === "skill") {
+    throw new HTTPException(409, {
+      message: "Install Skills through the Skill library or source import flow",
+    });
+  }
+  if (item.kind === "api") {
+    throw new HTTPException(409, {
+      message: "Install API Integrations through the Integration Definitions flow",
+    });
+  }
+  if (item.kind === "plugin") {
+    throw new HTTPException(409, {
+      message: "Install Plugins through the Plugin Package flow",
+    });
+  }
+  if (item.kind === "pack") {
+    throw new HTTPException(409, {
+      message: "Install Packs through the Pack installation preview flow",
+    });
+  }
   if (item.kind === "mcp" && !item.runtime.available) {
     throw new HTTPException(422, {
       message: "MCP capabilities need a remote streamable HTTP endpoint before they can be enabled",
@@ -280,44 +279,6 @@ export async function enableCapability(input: {
   delete installationConfig.headersEncrypted;
   delete installationConfig.headerNames;
   delete installationConfig.connectionRef;
-  if (item.kind === "skill" && item.source === "library") {
-    const libraryId = stringMetadata(item.metadata.libraryId);
-    const catalogVersion = stringMetadata(item.metadata.version);
-    if (!libraryId || !catalogVersion) {
-      throw new HTTPException(422, {
-        message: `skill library metadata is incomplete for ${item.id}`,
-      });
-    }
-    const requestedVersion = input.payload.config.version;
-    if (requestedVersion !== undefined && typeof requestedVersion !== "string") {
-      throw new HTTPException(422, {
-        message: "skill activation config.version must be a string",
-      });
-    }
-    const normalizedVersion = requestedVersion?.trim() || catalogVersion;
-    if (normalizedVersion !== catalogVersion) {
-      throw new HTTPException(422, {
-        message: `skill ${libraryId} only supports immutable version ${catalogVersion}`,
-      });
-    }
-    const entry = getSkillLibraryEntry(libraryId, normalizedVersion);
-    if (!entry) {
-      throw new HTTPException(422, {
-        message: `skill library entry is unavailable: ${libraryId}@${normalizedVersion}`,
-      });
-    }
-    // Skill activation has a deliberately narrow config surface. In
-    // particular, no variable-set, connection, credential-header, MCP, or
-    // provider-routing input is persisted or consulted for a library skill.
-    installationConfig = { version: entry.version };
-    installationMetadata = {
-      libraryId: entry.id,
-      libraryVersion: entry.version,
-      contentSha256: entry.contentSha256,
-      sourceCommit: entry.sourceCommit,
-      provenance: entry.provenance,
-    };
-  }
   if (item.kind === "mcp") {
     const headers = await resolveMcpCredentialHeaders(input, item);
     const connectionRef = input.payload.connectionRef
@@ -339,87 +300,6 @@ export async function enableCapability(input: {
         Object.entries(headers).map(([name, value]) => [name, encryptVariableSetValue(key, value)]),
       );
     }
-  }
-  if (item.kind === "pack") {
-    const packId = packIdFromCapabilityId(item.id);
-    const pack = await resolveCapabilityPack(input.db, input.workspaceId, packId);
-    if (!pack) {
-      throw new HTTPException(404, { message: "pack not found" });
-    }
-    if (capabilityPackRequiresInstallationPlan(pack)) {
-      throw new HTTPException(409, {
-        message:
-          "This Pack uses component or Rig requirements. Preview and install it through the Pack installation flow.",
-      });
-    }
-    await assertPackSandboxImageCompatible(input.db, input.workspaceId, pack);
-    // The unified capability-enable path accepts an initial variableSet
-    // attachment (`payload.variableSetId`), mirroring POST /packs/:id/enable:
-    // a request-supplied id is validated as a fresh attachment, otherwise the
-    // attachment stored by a previous enable is preserved and re-validated.
-    const existing = await getPackInstallation(input.db, input.workspaceId, packId);
-    const storedVariableSetId =
-      typeof existing?.metadata.variableSetId === "string"
-        ? existing.metadata.variableSetId
-        : typeof existing?.metadata.environmentId === "string"
-          ? existing.metadata.environmentId
-          : undefined;
-    const requestedVariableSetId = input.payload.variableSetId;
-    const variableSetId = requestedVariableSetId ?? storedVariableSetId;
-    if (pack.variableSet?.required && !variableSetId) {
-      throw new HTTPException(422, {
-        message: `pack ${packId} requires an variableSet attachment; pass variableSetId`,
-      });
-    }
-    if (variableSetId) {
-      if (requestedVariableSetId) {
-        // A fresh attachment: validate it like the packs enable endpoint does.
-        // The grant holds workspace:admin here, which implies variable-sets:use,
-        // so the attachment authorization succeeds for this caller.
-        const variableSet = await validateVariableSetAttachment(
-          { settings: input.settings, db: input.db },
-          input.grant,
-          input.workspaceId,
-          requestedVariableSetId,
-        );
-        const missing = (pack.variableSet?.requiredVariables ?? []).filter(
-          (name) => !variableSet.variables.some((variable) => variable.name === name),
-        );
-        if (missing.length > 0) {
-          throw new HTTPException(422, {
-            message: `variable set is missing required variable(s): ${missing.join(", ")}`,
-          });
-        }
-      } else {
-        // The stored attachment was authorized at pack-enable time, but the
-        // variableSet may have been deleted or its variables changed since;
-        // re-validate it like the packs enable endpoint does.
-        const variableSet = await getVariableSet(input.db, input.workspaceId, variableSetId);
-        if (!variableSet) {
-          throw new HTTPException(422, {
-            message: `the stored variableSet attachment for pack ${packId} no longer exists; re-enable it with variableSetId`,
-          });
-        }
-        const missing = (pack.variableSet?.requiredVariables ?? []).filter(
-          (name) => !variableSet.variables.some((variable) => variable.name === name),
-        );
-        if (missing.length > 0) {
-          throw new HTTPException(422, {
-            message: `variable set is missing required variable(s): ${missing.join(", ")}`,
-          });
-        }
-      }
-    }
-    await enablePackInstallation(input.db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      packId,
-      metadata: {
-        ...input.payload.metadata,
-        packVersion: pack.version,
-        ...(variableSetId ? { variableSetId } : {}),
-      },
-    });
   }
   return await enableCapabilityInstallation(input.db, {
     accountId: input.accountId,
@@ -792,44 +672,33 @@ export async function disableCapability(input: {
     input.settings,
     input.capabilityId,
   );
-  if ((item.source === "built_in" || item.source === "configured") && item.kind !== "pack") {
+  if (item.kind === "skill") {
+    throw new HTTPException(409, {
+      message: "Uninstall Skills through the Skill uninstall preview flow",
+    });
+  }
+  if (item.kind === "api") {
+    throw new HTTPException(409, {
+      message: "Remove API Integrations through the Integration instance flow",
+    });
+  }
+  if (item.kind === "plugin") {
+    throw new HTTPException(409, {
+      message: "Remove Plugins through the Plugin Package flow",
+    });
+  }
+  if (item.kind === "pack") {
+    throw new HTTPException(409, {
+      message: "Uninstall Packs through the Pack uninstall preview flow",
+    });
+  }
+  if (item.source === "built_in" || item.source === "configured") {
     throw new HTTPException(409, {
       message:
         "built-in and configured capabilities are always available; remove them from configuration to disable them",
     });
   }
-  if (item.kind === "pack") {
-    const packInstallation = await getPackInstallation(
-      input.db,
-      input.workspaceId,
-      packIdFromCapabilityId(item.id),
-    );
-    if (
-      packInstallation &&
-      (packInstallation.manifestDigest !== null || packInstallation.manifestSnapshot !== null)
-    ) {
-      throw new HTTPException(409, {
-        message:
-          "This Pack owns explicit components. Uninstall it through the Pack uninstall preview flow.",
-      });
-    }
-    await updatePackInstallationStatus(
-      input.db,
-      input.workspaceId,
-      packIdFromCapabilityId(item.id),
-      "disabled",
-    ).catch(() => undefined);
-    if (!(await getCapabilityInstallation(input.db, input.workspaceId, item.id))) {
-      await enableCapabilityInstallation(input.db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        capabilityId: item.id,
-        kind: "pack",
-        metadata: {},
-        config: {},
-      });
-    }
-  } else if (!(await getCapabilityInstallation(input.db, input.workspaceId, item.id))) {
+  if (!(await getCapabilityInstallation(input.db, input.workspaceId, item.id))) {
     throw new HTTPException(409, {
       message: "capability is not currently enabled",
     });
@@ -1540,6 +1409,53 @@ function curatedSkillCatalogItem(entry: SkillLibraryEntry): CapabilityCatalogIte
   });
 }
 
+function installedSkillCatalogItem(skill: InstalledSkillSummary): CapabilityCatalogItem {
+  return CapabilityCatalogItem.parse({
+    id: skill.capabilityId,
+    kind: "skill",
+    source: skill.source === "library" ? "library" : "manual",
+    name: skill.name,
+    description: skill.description,
+    category: skill.category,
+    tags: skill.tags,
+    homepageUrl: skill.repositoryUrl,
+    installUrl: skill.sourceUrl,
+    provenance: skill.provenance,
+    tier: skill.source === "library" ? "verified" : "community",
+    runtime: {
+      available: true,
+      notes: "Available from an immutable Skill installation.",
+    },
+    metadata: {
+      version: skill.version,
+      contentSha256: skill.contentSha256,
+      sourceCommit: skill.sourceCommit,
+      sourcePath: skill.sourcePath,
+      sourceUrl: skill.sourceUrl,
+      repositoryUrl: skill.repositoryUrl,
+      provenance: skill.provenance,
+      license: skill.license,
+      installedSkill: installedSkillMetadata(skill),
+    },
+  });
+}
+
+function installedSkillMetadata(skill: InstalledSkillSummary): Record<string, unknown> {
+  return {
+    pluginKey: skill.pluginKey,
+    installationVersion: skill.installationVersion,
+    source: skill.source,
+    version: skill.version,
+    sourceCommit: skill.sourceCommit,
+    contentSha256: skill.contentSha256,
+    fileCount: skill.fileCount,
+    totalBytes: skill.totalBytes,
+    installedAt: skill.installedAt,
+    updatedAt: skill.updatedAt,
+    owners: skill.owners.map((owner) => ({ ...owner })),
+  };
+}
+
 function stringMetadata(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
@@ -1580,11 +1496,11 @@ export function applyCapabilityEnablement(
   installation: CapabilityInstallation | undefined,
   activePackIds: Set<string>,
 ): CapabilityCatalogItem {
+  if (item.kind === "skill" || item.kind === "api" || item.kind === "plugin") {
+    return { ...item, enabled: false, enabledReason: null, connectionRef: null };
+  }
   if (item.kind === "pack") {
-    // Pack enablement lives in pack_installations regardless of whether the
-    // pack is built in or registered from a workspace manifest.
-    const enabled =
-      activePackIds.has(packIdFromCapabilityId(item.id)) || installation?.status === "active";
+    const enabled = activePackIds.has(packIdFromCapabilityId(item.id));
     return {
       ...item,
       enabled,
@@ -1623,37 +1539,8 @@ export function applyCapabilityEnablement(
     // state explicitly above rather than becoming enabled by taxonomy.
     return { ...item, connectionRef: null };
   }
-  if (item.source === "library") {
-    const enabled =
-      installation?.status === "active" && skillLibraryInstallationRuntimeReady(item, installation);
-    return {
-      ...item,
-      enabled,
-      enabledReason: enabled ? "explicitly selected" : null,
-      connectionRef: null,
-    };
-  }
   const activeInstallation = installation?.status === "active";
   const enabled = !!activeInstallation && capabilityInstallationRuntimeReady(item, installation);
-  if (item.kind === "api" && item.metadata.platformVersion === 2) {
-    const connectionBound = installation?.metadata.connectionBound === true;
-    const providerDomain = stringMetadata(installation?.metadata.providerDomain);
-    const connectionKind = stringMetadata(installation?.metadata.connectionKind);
-    const connectionOwnership = stringMetadata(installation?.metadata.connectionOwnership);
-    return {
-      ...item,
-      enabled,
-      enabledReason: enabled ? "installed immutable Integration revision" : null,
-      connectionRef:
-        enabled && connectionBound && providerDomain && connectionKind
-          ? {
-              providerDomain,
-              kind: connectionKind,
-              ...(connectionOwnership === "subject" ? { subjectScope: "subject" as const } : {}),
-            }
-          : null,
-    };
-  }
   return {
     ...item,
     enabled,
@@ -1746,40 +1633,32 @@ function applyCapabilityLifecycle(item: CapabilityCatalogItem): CapabilityCatalo
   };
 }
 
-function skillLibraryInstallationRuntimeReady(
+function applyInstalledSkillEnablement(
   item: CapabilityCatalogItem,
-  installation: CapabilityInstallation,
-): boolean {
-  if (item.kind !== "skill" || item.source !== "library" || installation.kind !== "skill") {
-    return false;
+  installation: InstalledSkillSummary | undefined,
+): CapabilityCatalogItem {
+  if (!installation) {
+    return { ...item, enabled: false, enabledReason: null, connectionRef: null };
   }
-  const libraryId = stringMetadata(item.metadata.libraryId);
-  const version = stringMetadata(item.metadata.version);
-  const contentSha256 = stringMetadata(item.metadata.contentSha256);
-  const sourceCommit = stringMetadata(item.metadata.sourceCommit);
-  const provenance = stringMetadata(item.metadata.provenance);
-  if (!libraryId || !version || !contentSha256 || !sourceCommit || !provenance) {
-    return false;
-  }
-  const entry = getSkillLibraryEntry(libraryId, version);
-  if (
-    !entry ||
-    item.id !== `skill:${entry.id}` ||
-    installation.capabilityId !== `skill:${entry.id}` ||
-    contentSha256 !== entry.contentSha256 ||
-    sourceCommit !== entry.sourceCommit ||
-    provenance !== entry.provenance
-  ) {
-    return false;
-  }
-  return (
-    installation.config.version === entry.version &&
-    stringMetadata(installation.metadata.libraryId) === entry.id &&
-    stringMetadata(installation.metadata.libraryVersion) === entry.version &&
-    stringMetadata(installation.metadata.contentSha256) === entry.contentSha256 &&
-    stringMetadata(installation.metadata.sourceCommit) === entry.sourceCommit &&
-    stringMetadata(installation.metadata.provenance) === entry.provenance
-  );
+  const catalogVersion = stringMetadata(item.metadata.version);
+  const current =
+    catalogVersion === null ||
+    (catalogVersion === installation.version &&
+      stringMetadata(item.metadata.contentSha256) === installation.contentSha256 &&
+      stringMetadata(item.metadata.sourceCommit) === installation.sourceCommit);
+  return {
+    ...item,
+    enabled: true,
+    enabledReason: current
+      ? "explicitly installed"
+      : `version ${installation.version} installed; update available`,
+    connectionRef: null,
+    metadata: {
+      ...item.metadata,
+      installedSkill: installedSkillMetadata(installation),
+      updateAvailable: !current,
+    },
+  };
 }
 
 /**

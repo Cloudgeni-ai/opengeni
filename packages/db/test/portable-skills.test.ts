@@ -125,7 +125,8 @@ describe("portable Skill persistence", () => {
     const input = skillInput("release-operator");
     const installed = await installPortableSkill(client.db, input);
     const replay = await installPortableSkill(client.db, input);
-    expect(replay).toEqual(installed);
+    expect(installed.created).toBe(true);
+    expect(replay).toEqual({ ...installed, created: false });
     expect(await listInstalledPortableSkills(client.db, first.workspaceId)).toEqual([
       expect.objectContaining({
         capabilityId: input.capabilityId,

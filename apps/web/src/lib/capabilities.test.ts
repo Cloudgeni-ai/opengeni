@@ -262,12 +262,12 @@ describe("capabilityConnectPlan", () => {
     expect(capabilityAuthHint(x)).toBe("OAuth");
   });
 
-  test("non-MCP kinds just enable", () => {
+  test("non-MCP kinds require their dedicated lifecycle", () => {
     expect(capabilityConnectPlan(item({ kind: "skill" }))).toEqual({
-      mode: "enable",
+      mode: "dedicated",
     });
     expect(capabilityConnectPlan(item({ kind: "api", authKind: "api_key" }))).toEqual({
-      mode: "enable",
+      mode: "dedicated",
     });
   });
 
@@ -437,7 +437,9 @@ describe("first-party fiken capability state", () => {
     });
 
   test("health derives from the workspace fiken row without a connectionRef", () => {
-    expect(connectionHealth(fikenItem, [], false)).toEqual({ state: "unverified" });
+    expect(connectionHealth(fikenItem, [], false)).toEqual({
+      state: "unverified",
+    });
     expect(connectionHealth(fikenItem, [], true)).toEqual({ state: "none" });
     const active = fikenRow();
     expect(connectionHealth(fikenItem, [active], true)).toEqual({
@@ -479,7 +481,10 @@ describe("first-party fiken capability state", () => {
       status: "needs_reauth",
       updatedAt: "2026-08-05T00:00:00.000Z",
     });
-    const active = fikenRow({ id: "new", updatedAt: "2026-08-01T00:00:00.000Z" });
+    const active = fikenRow({
+      id: "new",
+      updatedAt: "2026-08-01T00:00:00.000Z",
+    });
     expect(fikenWorkspaceConnection([lapsed, active])?.id).toBe("new");
   });
 });
@@ -552,11 +557,11 @@ describe("isMissingCredentialsError", () => {
 });
 
 describe("capabilityFormError", () => {
-  test("requires a name for every kind", () => {
+  test("requires an MCP server name", () => {
     expect(capabilityFormError({ ...emptyCapabilityForm(), name: "" })).toBe("Give it a name.");
   });
 
-  test("only MCP servers require an endpoint URL", () => {
+  test("requires a valid MCP server URL", () => {
     expect(
       capabilityFormError({
         ...emptyCapabilityForm(),
@@ -579,25 +584,6 @@ describe("capabilityFormError", () => {
         kind: "mcp",
         name: "X",
         endpointUrl: "https://mcp.example.com",
-      }),
-    ).toBeNull();
-  });
-
-  test("non-MCP kinds never ask for a URL", () => {
-    expect(
-      capabilityFormError({
-        ...emptyCapabilityForm(),
-        kind: "skill",
-        name: "Summarize",
-        endpointUrl: "",
-      }),
-    ).toBeNull();
-    expect(
-      capabilityFormError({
-        ...emptyCapabilityForm(),
-        kind: "api",
-        name: "Weather",
-        endpointUrl: "",
       }),
     ).toBeNull();
   });

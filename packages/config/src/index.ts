@@ -130,7 +130,7 @@ export const DEFAULT_AGENT_INSTRUCTIONS = [
   "Repository resources are mounted under repos/<host>/<owner>/<repo> unless the session specifies another collision-free mount path.",
   "File resources are mounted under .opengeni/files/<file-id>/ unless the session specifies another mount path.",
   "Attached files are mounted read-only; copy them before modifying.",
-  "Bundled skills are under .agents/ and can include infrastructure, marketing, or other role-specific guidance.",
+  "Installed and selected Skills are indexed under .agents/ and may include role-specific guidance.",
   "Use Checkov, Terraform, Azure CLI, git provider CLIs, and repository tools when relevant; gh, glab, and az repos are pre-authenticated when the host brokers matching git credentials.",
   "When the Azure sandbox preparation profile is enabled and service-principal variables are present, the sandbox is pre-authenticated with normal Azure CLI before work starts.",
   "Treat code-changing work as GitOps work: create a focused branch/commit/PR when git provider credentials are available; otherwise report exact commands and blockers.",

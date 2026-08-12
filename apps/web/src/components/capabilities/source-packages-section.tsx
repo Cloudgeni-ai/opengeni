@@ -12,9 +12,8 @@ import {
   type SourceImportKind,
 } from "@/components/capabilities/source-import-flow";
 import type {
-  CapabilityCatalogItem,
-  CapabilityInstallation,
   ConnectionMetadata,
+  InstalledSkillSummary,
   PluginInstallationSummary,
   PluginUninstallPreview,
   SkillUninstallPreview,
@@ -43,8 +42,6 @@ const SourcePackagesSectionView = lazy(async () => {
 export function SourcePackagesSection({
   client,
   workspaceId,
-  items,
-  installations,
   connections,
   canManage,
   filter,
@@ -53,14 +50,13 @@ export function SourcePackagesSection({
 }: {
   client: OpenGeniCoreClient;
   workspaceId: string;
-  items: CapabilityCatalogItem[];
-  installations: CapabilityInstallation[];
   connections: ConnectionMetadata[] | null;
   canManage: boolean;
   filter: SourcePackageFilter;
   query: string;
   onChanged: () => void | Promise<void>;
 }) {
+  const [installedSkills, setInstalledSkills] = useState<InstalledSkillSummary[]>([]);
   const [plugins, setPlugins] = useState<PluginInstallationSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<Error | null>(null);
@@ -72,16 +68,17 @@ export function SourcePackagesSection({
     initialSourceImportState,
   );
 
-  const skills = useMemo(
-    () => workspaceImportedSkills(items, installations),
-    [installations, items],
-  );
+  const skills = useMemo(() => workspaceImportedSkills(installedSkills), [installedSkills]);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const response = await client.listInstalledPlugins(workspaceId);
-      setPlugins(response.plugins);
+      const [skillResponse, pluginResponse] = await Promise.all([
+        client.listInstalledSkills(workspaceId),
+        client.listInstalledPlugins(workspaceId),
+      ]);
+      setInstalledSkills(skillResponse.skills);
+      setPlugins(pluginResponse.plugins);
       setLoadError(null);
     } catch (error) {
       setLoadError(error instanceof Error ? error : new Error(String(error)));
@@ -197,9 +194,9 @@ export function SourcePackagesSection({
   }
 
   async function previewSkillRemoval(skill: InstalledSourceSkill) {
-    setBusyKey(`skill:${skill.item.id}`);
+    setBusyKey(`skill:${skill.capabilityId}`);
     try {
-      const preview = await client.previewSkillUninstall(workspaceId, skill.item.id);
+      const preview = await client.previewSkillUninstall(workspaceId, skill.capabilityId);
       if (!preview.installed || preview.installationVersion === null) {
         throw new Error("This Skill is no longer directly installed. Refresh and try again.");
       }
@@ -239,15 +236,15 @@ export function SourcePackagesSection({
     if (!removeTarget || removeTarget.preview.installationVersion === null) return false;
     const key =
       removeTarget.kind === "skill"
-        ? `skill:${removeTarget.skill.item.id}`
+        ? `skill:${removeTarget.skill.capabilityId}`
         : `plugin:${removeTarget.plugin.pluginKey}`;
     setBusyKey(key);
     try {
       if (removeTarget.kind === "skill") {
-        const result = await client.uninstallSkill(workspaceId, removeTarget.skill.item.id, {
+        const result = await client.uninstallSkill(workspaceId, removeTarget.skill.capabilityId, {
           expectedInstallationVersion: removeTarget.preview.installationVersion,
         });
-        toast.success(`${removeTarget.skill.item.name} direct installation removed`, {
+        toast.success(`${removeTarget.skill.name} direct installation removed`, {
           description:
             result.status === "retained_by_other_owners"
               ? "The runtime Skill remains available because another Plugin or Pack still owns it."

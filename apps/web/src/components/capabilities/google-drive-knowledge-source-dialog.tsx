@@ -21,15 +21,15 @@ import type {
   GoogleDriveKnowledgeSourceConfig,
   GoogleDriveReadPolicy,
   GoogleDriveSyncCadence,
-  IntegrationFeatureBindingSummary,
-  IntegrationFeatureDefinitionSummary,
+  IntegrationFacetBindingSummary,
+  IntegrationFacetDefinitionSummary,
 } from "@/types";
 
 type FolderCrumb = { id: string; name: string };
 
-export type GoogleDriveFeatureEntry = {
-  definition: IntegrationFeatureDefinitionSummary;
-  binding: IntegrationFeatureBindingSummary | null;
+export type GoogleDriveFacetEntry = {
+  definition: IntegrationFacetDefinitionSummary;
+  binding: IntegrationFacetBindingSummary | null;
 };
 
 export function GoogleDriveKnowledgeSourceDialog({
@@ -48,7 +48,7 @@ export function GoogleDriveKnowledgeSourceDialog({
   client: OpenGeniCoreClient;
   workspaceId: string;
   instance: ApiIntegrationInstallationSummary;
-  entry: GoogleDriveFeatureEntry | null;
+  entry: GoogleDriveFacetEntry | null;
   canManage: boolean;
   canManagePersonalDestination: boolean;
   canManageWorkspaceDestination: boolean;
@@ -81,11 +81,11 @@ export function GoogleDriveKnowledgeSourceDialog({
       if (!entry) return null;
       setBrowseBusy(true);
       try {
-        const response = await client.browseGoogleDriveIntegrationSource(
+        const response = await client.browseGoogleDriveFacetSource(
           workspaceId,
           instance.capabilityId,
           instance.instanceKey,
-          entry.definition.featureKey,
+          entry.definition.facetKey,
           {
             parentId: folder.id,
             ...(pageToken ? { pageToken } : {}),
@@ -221,11 +221,11 @@ export function GoogleDriveKnowledgeSourceDialog({
     setBusy(true);
     onBusyChange(true);
     try {
-      await client.saveGoogleDriveIntegrationSource(
+      await client.saveGoogleDriveFacetSource(
         workspaceId,
         instance.capabilityId,
         instance.instanceKey,
-        entry.definition.featureKey,
+        entry.definition.facetKey,
         {
           sources: selectedSources.map((source) => ({
             id: source.id,

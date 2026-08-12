@@ -7,8 +7,7 @@ import { fileURLToPath } from "node:url";
 type ProcessTarget = "api" | "worker" | "artifact-materializer" | "artifact-outbox";
 
 export const RUNTIME_SKILL_ASSET_DIRECTORY_NAMES = [
-  "bundled_hashicorp_terraform_skills",
-  "bundled_skill_library",
+  "curated_skill_library",
   "bundled_artifact_skills",
   "bundled_video_skills",
 ] as const;

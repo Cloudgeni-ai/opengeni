@@ -232,10 +232,10 @@ export function SourcePackagesView({
         <div className="grid gap-3 lg:grid-cols-2">
           {visibleSkills.map((skill) => (
             <SkillSourceCard
-              key={skill.item.id}
+              key={skill.capabilityId}
               skill={skill}
               canManage={canManage}
-              busy={busyKey === `skill:${skill.item.id}`}
+              busy={busyKey === `skill:${skill.capabilityId}`}
               onUpdate={() => onUpdateSkill(skill)}
               onRemove={() => onRemoveSkill(skill)}
             />
@@ -310,7 +310,7 @@ function SkillSourceCard({
     <article
       className="rounded-xl border border-border bg-surface/50 p-4"
       data-source-package-kind="skill"
-      data-source-package-id={skill.item.id}
+      data-source-package-id={skill.capabilityId}
     >
       <div className="flex min-w-0 items-start gap-3">
         <span className="grid size-10 shrink-0 place-items-center rounded-xl bg-brand/10 text-brand">
@@ -318,15 +318,13 @@ function SkillSourceCard({
         </span>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <h3 className="truncate text-sm font-semibold text-fg">{skill.item.name}</h3>
+            <h3 className="truncate text-sm font-semibold text-fg">{skill.name}</h3>
             <Badge variant="outline" className="text-2xs uppercase text-fg-subtle">
               Skill
             </Badge>
             <SourceStatus state="ready" />
           </div>
-          <p className="mt-1 line-clamp-2 text-xs leading-5 text-fg-muted">
-            {skill.item.description}
-          </p>
+          <p className="mt-1 line-clamp-2 text-xs leading-5 text-fg-muted">{skill.description}</p>
           <p className="mt-2 break-all font-mono text-2xs text-fg-subtle">
             {sourceHost(skill.sourceUrl)} · {skill.sourceCommit.slice(0, 12)} ·{" "}
             {skill.contentSha256.slice(0, 12)}
@@ -492,7 +490,7 @@ function RemoveImpact({ target }: { target: SourceRemoveTarget | null }) {
 function removeDialogTitle(target: SourceRemoveTarget | null): string {
   if (!target) return "Remove source package?";
   return target.kind === "skill"
-    ? `Remove direct Skill “${target.skill.item.name}”?`
+    ? `Remove direct Skill “${target.skill.name}”?`
     : `Remove Plugin “${target.plugin.name}”?`;
 }
 
@@ -505,13 +503,9 @@ function removeDialogDescription(target: SourceRemoveTarget | null): string {
 
 function sourceSkillMatches(skill: InstalledSourceSkill, query: string): boolean {
   if (!query) return true;
-  return [
-    skill.item.name,
-    skill.item.description,
-    skill.item.category,
-    ...skill.item.tags,
-    skill.sourceUrl,
-  ].some((value) => (value ?? "").toLowerCase().includes(query));
+  return [skill.name, skill.description, skill.category, ...skill.tags, skill.sourceUrl].some(
+    (value) => (value ?? "").toLowerCase().includes(query),
+  );
 }
 
 function sourcePluginMatches(plugin: PluginInstallationSummary, query: string): boolean {

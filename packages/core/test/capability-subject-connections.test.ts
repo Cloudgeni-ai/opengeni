@@ -308,8 +308,10 @@ describe("subject-owned capability connection references", () => {
       settings,
     });
     expect(connectedCatalog.items.find((item) => item.id === "api:x")).toMatchObject({
-      enabled: true,
-      enabledReason: "1 connected account; 1 account needs reconnection; 1 disconnected account",
+      // Connections own account state. The browseable Integration Definition
+      // must not become a second, generic enablement authority.
+      enabled: false,
+      enabledReason: null,
       lifecycle: { status: "needs_attention", readiness: "attention", managedBy: null },
       actions: ["repair", "connect", "disconnect", "inspect"],
       metadata: {

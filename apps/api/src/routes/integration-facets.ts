@@ -1,9 +1,9 @@
 import {
-  IntegrationFeatureMutationResult,
-  IntegrationFeatureRemovalResult,
-  IntegrationInstanceFeaturesResponse,
-  MutateIntegrationFeatureRequest,
-  UpsertIntegrationFeatureRequest,
+  IntegrationFacetMutationResult,
+  IntegrationFacetRemovalResult,
+  IntegrationInstanceFacetsResponse,
+  MutateIntegrationFacetRequest,
+  UpsertIntegrationFacetRequest,
 } from "@opengeni/contracts";
 import {
   hasPermission,
@@ -12,52 +12,52 @@ import {
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
-  configureIntegrationFeature,
-  IntegrationFeatureBindingOwnershipConflictError,
-  IntegrationFeatureBindingVersionConflictError,
-  IntegrationFeatureBindingVersionRequiredError,
-  IntegrationFeatureConfigError,
-  IntegrationFeatureConnectionError,
-  IntegrationFeatureNotFoundError,
-  IntegrationFeatureOperationIdempotencyError,
-  listIntegrationInstanceFeatures,
-  removeIntegrationFeature,
-  setIntegrationFeatureLifecycle,
+  configureIntegrationFacet,
+  IntegrationFacetBindingOwnershipConflictError,
+  IntegrationFacetBindingVersionConflictError,
+  IntegrationFacetBindingVersionRequiredError,
+  IntegrationFacetConfigError,
+  IntegrationFacetConnectionError,
+  IntegrationFacetNotFoundError,
+  IntegrationFacetOperationIdempotencyError,
+  listIntegrationInstanceFacets,
+  removeIntegrationFacet,
+  setIntegrationFacetLifecycle,
 } from "@opengeni/db";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 
 import {
-  browseGoogleDriveIntegrationSource,
-  saveGoogleDriveIntegrationSource,
+  browseGoogleDriveFacetSource,
+  saveGoogleDriveFacetSource,
 } from "../integrations/google-drive";
 
-export function registerIntegrationFeatureRoutes(app: Hono, deps: ApiRouteDeps): void {
+export function registerIntegrationFacetRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get(
-    "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey/browse",
+    "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey/browse",
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
       const grant = await requireAccessGrant(c, deps, workspaceId, "connections:read");
       try {
         return c.json(
-          await browseGoogleDriveIntegrationSource(deps, {
+          await browseGoogleDriveFacetSource(deps, {
             workspaceId,
             subjectId: grant.subjectId,
             capabilityId: decoded(c.req.param("capabilityId")),
             instanceKey: decoded(c.req.param("instanceKey")),
-            featureKey: decoded(c.req.param("featureKey")),
+            facetKey: decoded(c.req.param("facetKey")),
             parentId: c.req.query("parentId") ?? "root",
             ...(c.req.query("pageToken") ? { pageToken: c.req.query("pageToken") } : {}),
           }),
         );
       } catch (error) {
-        throw featureHttpError(error);
+        throw facetHttpError(error);
       }
     },
   );
 
   app.put(
-    "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey/source",
+    "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey/source",
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
       const authorization = await requireAccessGrantAuthorization(
@@ -69,14 +69,14 @@ export function registerIntegrationFeatureRoutes(app: Hono, deps: ApiRouteDeps):
       const { grant } = authorization;
       try {
         return c.json(
-          IntegrationFeatureMutationResult.parse(
-            await saveGoogleDriveIntegrationSource(deps, {
+          IntegrationFacetMutationResult.parse(
+            await saveGoogleDriveFacetSource(deps, {
               accountId: grant.accountId,
               workspaceId,
               subjectId: grant.subjectId,
               capabilityId: decoded(c.req.param("capabilityId")),
               instanceKey: decoded(c.req.param("instanceKey")),
-              featureKey: decoded(c.req.param("featureKey")),
+              facetKey: decoded(c.req.param("facetKey")),
               payload: await c.req.json(),
               canManageOrganizationDestination:
                 authorization.accountGrant?.permissions.includes("account:admin") === true,
@@ -88,20 +88,20 @@ export function registerIntegrationFeatureRoutes(app: Hono, deps: ApiRouteDeps):
           ),
         );
       } catch (error) {
-        throw featureHttpError(error);
+        throw facetHttpError(error);
       }
     },
   );
 
   app.get(
-    "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features",
+    "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets",
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
       const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
       try {
         return c.json(
-          IntegrationInstanceFeaturesResponse.parse(
-            await listIntegrationInstanceFeatures(
+          IntegrationInstanceFacetsResponse.parse(
+            await listIntegrationInstanceFacets(
               deps.db,
               workspaceId,
               grant.subjectId,
@@ -111,30 +111,30 @@ export function registerIntegrationFeatureRoutes(app: Hono, deps: ApiRouteDeps):
           ),
         );
       } catch (error) {
-        throw featureHttpError(error);
+        throw facetHttpError(error);
       }
     },
   );
 
   app.put(
-    "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey",
+    "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey",
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
       const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
-      const payload = UpsertIntegrationFeatureRequest.parse(await c.req.json());
+      const payload = UpsertIntegrationFacetRequest.parse(await c.req.json());
       const capabilityId = decoded(c.req.param("capabilityId"));
       const instanceKey = decoded(c.req.param("instanceKey"));
-      const featureKey = decoded(c.req.param("featureKey"));
+      const facetKey = decoded(c.req.param("facetKey"));
       try {
-        const instance = await listIntegrationInstanceFeatures(
+        const instance = await listIntegrationInstanceFacets(
           deps.db,
           workspaceId,
           grant.subjectId,
           capabilityId,
           instanceKey,
         );
-        const definition = instance.features.find(
-          (feature) => feature.definition.featureKey === featureKey,
+        const definition = instance.facets.find(
+          (facet) => facet.definition.facetKey === facetKey,
         )?.definition;
         if (
           definition?.kind === "knowledge_source" &&
@@ -146,14 +146,14 @@ export function registerIntegrationFeatureRoutes(app: Hono, deps: ApiRouteDeps):
           });
         }
         return c.json(
-          IntegrationFeatureMutationResult.parse(
-            await configureIntegrationFeature(deps.db, {
+          IntegrationFacetMutationResult.parse(
+            await configureIntegrationFacet(deps.db, {
               accountId: grant.accountId,
               workspaceId,
               subjectId: grant.subjectId,
               capabilityId,
               instanceKey,
-              featureKey,
+              facetKey,
               displayName: payload.displayName,
               config: payload.config,
               ...(payload.expectedVersion !== undefined
@@ -165,28 +165,28 @@ export function registerIntegrationFeatureRoutes(app: Hono, deps: ApiRouteDeps):
           payload.expectedVersion === undefined ? 201 : 200,
         );
       } catch (error) {
-        throw featureHttpError(error);
+        throw facetHttpError(error);
       }
     },
   );
 
   for (const action of ["pause", "resume"] as const) {
     app.post(
-      `/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey/${action}`,
+      `/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey/${action}`,
       async (c) => {
         const workspaceId = c.req.param("workspaceId");
         const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
-        const payload = MutateIntegrationFeatureRequest.parse(await c.req.json());
+        const payload = MutateIntegrationFacetRequest.parse(await c.req.json());
         try {
           return c.json(
-            IntegrationFeatureMutationResult.parse(
-              await setIntegrationFeatureLifecycle(deps.db, {
+            IntegrationFacetMutationResult.parse(
+              await setIntegrationFacetLifecycle(deps.db, {
                 accountId: grant.accountId,
                 workspaceId,
                 subjectId: grant.subjectId,
                 capabilityId: decoded(c.req.param("capabilityId")),
                 instanceKey: decoded(c.req.param("instanceKey")),
-                featureKey: decoded(c.req.param("featureKey")),
+                facetKey: decoded(c.req.param("facetKey")),
                 action,
                 expectedVersion: payload.expectedVersion,
                 idempotencyKey: payload.idempotencyKey,
@@ -194,35 +194,35 @@ export function registerIntegrationFeatureRoutes(app: Hono, deps: ApiRouteDeps):
             ),
           );
         } catch (error) {
-          throw featureHttpError(error);
+          throw facetHttpError(error);
         }
       },
     );
   }
 
   app.delete(
-    "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey",
+    "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey",
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
       const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
-      const payload = MutateIntegrationFeatureRequest.parse(await c.req.json());
+      const payload = MutateIntegrationFacetRequest.parse(await c.req.json());
       try {
         return c.json(
-          IntegrationFeatureRemovalResult.parse(
-            await removeIntegrationFeature(deps.db, {
+          IntegrationFacetRemovalResult.parse(
+            await removeIntegrationFacet(deps.db, {
               accountId: grant.accountId,
               workspaceId,
               subjectId: grant.subjectId,
               capabilityId: decoded(c.req.param("capabilityId")),
               instanceKey: decoded(c.req.param("instanceKey")),
-              featureKey: decoded(c.req.param("featureKey")),
+              facetKey: decoded(c.req.param("facetKey")),
               expectedVersion: payload.expectedVersion,
               idempotencyKey: payload.idempotencyKey,
             }),
           ),
         );
       } catch (error) {
-        throw featureHttpError(error);
+        throw facetHttpError(error);
       }
     },
   );
@@ -232,25 +232,25 @@ function decoded(value: string): string {
   return decodeURIComponent(value);
 }
 
-function featureHttpError(error: unknown): HTTPException {
+function facetHttpError(error: unknown): HTTPException {
   if (error instanceof HTTPException) return error;
-  if (error instanceof IntegrationFeatureNotFoundError) {
+  if (error instanceof IntegrationFacetNotFoundError) {
     return new HTTPException(404, { message: error.message });
   }
   if (
-    error instanceof IntegrationFeatureBindingVersionConflictError ||
-    error instanceof IntegrationFeatureBindingVersionRequiredError ||
-    error instanceof IntegrationFeatureBindingOwnershipConflictError ||
-    error instanceof IntegrationFeatureOperationIdempotencyError
+    error instanceof IntegrationFacetBindingVersionConflictError ||
+    error instanceof IntegrationFacetBindingVersionRequiredError ||
+    error instanceof IntegrationFacetBindingOwnershipConflictError ||
+    error instanceof IntegrationFacetOperationIdempotencyError
   ) {
     return new HTTPException(409, {
       message:
-        "The Integration feature changed, is shared, or reused an idempotency key. Refresh before retrying.",
+        "The Integration facet changed, is shared, or reused an idempotency key. Refresh before retrying.",
     });
   }
   if (
-    error instanceof IntegrationFeatureConfigError ||
-    error instanceof IntegrationFeatureConnectionError
+    error instanceof IntegrationFacetConfigError ||
+    error instanceof IntegrationFacetConnectionError
   ) {
     return new HTTPException(422, { message: error.message });
   }

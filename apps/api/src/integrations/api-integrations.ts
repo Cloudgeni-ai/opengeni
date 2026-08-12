@@ -6,10 +6,10 @@ import {
   discoverOpenApiAuth,
   fetchGraphqlIntrospection,
   fetchIntegrationSourceDocument,
-  filterOpenApiDocumentForPreset,
+  filterOpenApiDocumentForDefinition,
   googleDiscoveryToOpenApi,
+  integrationDefinitionById,
   parseOpenApiDocument,
-  providerPresetById,
   type IntegrationCredentialResolver,
   type IntegrationInvocationAuthority,
   type IntegrationTransport,
@@ -18,11 +18,11 @@ import {
 import {
   ApiIntegrationPreview,
   type ApiIntegrationAuthPreview,
-  type ApiIntegrationSource,
+  type IntegrationSource,
 } from "@opengeni/contracts";
 import type { StoredApiIntegrationRevision } from "@opengeni/db";
 
-const MAX_PROVIDER_PRESET_SOURCE_BYTES = 64 * 1024 * 1024;
+const MAX_CURATED_DEFINITION_SOURCE_BYTES = 64 * 1024 * 1024;
 
 export type ApiIntegrationConnectionDescriptor = {
   id: string;
@@ -41,14 +41,14 @@ export type ResolvedApiIntegrationPreview = {
 };
 
 export async function resolveApiIntegrationPreview(input: {
-  source: ApiIntegrationSource;
+  source: IntegrationSource;
   connection: ApiIntegrationConnectionDescriptor | null;
   transport: IntegrationTransport;
   credentialResolver?: IntegrationCredentialResolver;
   authority: IntegrationInvocationAuthority;
 }): Promise<ResolvedApiIntegrationPreview> {
-  if (input.source.kind === "preset") {
-    return await resolvePreset(input);
+  if (input.source.kind === "definition") {
+    return await resolveDefinition(input);
   }
   if (input.source.kind === "graphql") {
     return await resolveGraphql(input, input.source.endpoint, input.source.name);
@@ -77,52 +77,56 @@ export async function resolveApiIntegrationPreview(input: {
   }
 }
 
-async function resolvePreset(
+async function resolveDefinition(
   input: Parameters<typeof resolveApiIntegrationPreview>[0],
 ): Promise<ResolvedApiIntegrationPreview> {
-  if (input.source.kind !== "preset") throw new Error("Expected a provider preset source");
-  const preset = providerPresetById(input.source.presetId);
-  if (!preset) throw new Error(`Unknown Integration preset: ${input.source.presetId}`);
+  if (input.source.kind !== "definition") throw new Error("Expected a provider definition source");
+  const definition = integrationDefinitionById(input.source.definitionId);
+  if (!definition) throw new Error(`Unknown Integration definition: ${input.source.definitionId}`);
   const bytes = await fetchIntegrationSourceDocument(
     input.transport,
-    preset.sourceUrl,
-    MAX_PROVIDER_PRESET_SOURCE_BYTES,
+    definition.source.url,
+    MAX_CURATED_DEFINITION_SOURCE_BYTES,
   );
   let document: Record<string, unknown>;
-  if (preset.sourceFormat === "google-discovery") {
+  if (definition.source.kind === "google_discovery") {
     document = googleDiscoveryToOpenApi(JSON.parse(new TextDecoder().decode(bytes)));
   } else {
-    document = filterOpenApiDocumentForPreset(parseOpenApiDocument(bytes), preset);
+    document = filterOpenApiDocumentForDefinition(parseOpenApiDocument(bytes), definition);
   }
-  const identity = integrationIdentity("openapi", preset.id, preset.sourceUrl);
+  const identity = integrationInstallationIdentity("openapi", definition.id, definition.source.url);
   const revision = compileOpenApiRevision(document, {
-    integrationId: identity.integrationId,
-    sourceUrl: preset.sourceUrl,
-    ...(preset.baseUrl ? { baseUrl: preset.baseUrl } : {}),
-    provider: preset.family,
+    definitionId: definition.id,
+    sourceUrl: definition.source.url,
+    baseUrl: definition.baseUrl,
+    provider: definition.provider.id,
   });
   const baseUrl = firstOpenApiServerUrl(revision);
-  const providerDomain = new URL(baseUrl).hostname.toLowerCase();
+  const providerDomain = definition.provider.domain;
   const auth: ApiIntegrationAuthPreview = {
     kind: "oauth2",
     providerDomain,
-    scopes: [...preset.oauth.scopes],
+    scopes: [...definition.authentication.scopes],
   };
   return resolvedPreview({
     source: input.source,
-    presetId: preset.id,
+    definitionId: definition.id,
+    definitionProvenance: "curated",
     identity,
     revision,
-    provider: preset.family,
+    provider: definition.provider.id,
     providerDomain,
     baseUrl,
-    sourceUrl: preset.sourceUrl,
-    name: preset.name,
-    description: preset.summary,
+    sourceUrl: definition.source.url,
+    name: definition.name,
+    description: definition.summary,
     auth,
     connection: input.connection,
-    requiredScopes: [...preset.oauth.scopes],
-    authScheme: { kind: "oauth2", placement: preset.oauth.tokenPlacement },
+    requiredScopes: [...definition.authentication.scopes],
+    authScheme: {
+      kind: definition.authentication.kind,
+      placement: definition.authentication.tokenPlacement,
+    },
   });
 }
 
@@ -134,9 +138,13 @@ async function resolveOpenApi(
   const document = parseOpenApiDocument(
     await fetchIntegrationSourceDocument(input.transport, sourceUrl),
   );
-  const identity = integrationIdentity("openapi", new URL(sourceUrl).hostname, sourceUrl);
+  const identity = integrationInstallationIdentity(
+    "openapi",
+    new URL(sourceUrl).hostname,
+    sourceUrl,
+  );
   const revision = compileOpenApiRevision(document, {
-    integrationId: identity.integrationId,
+    definitionId: identity.sourceDerivedDefinitionId,
     sourceUrl,
     ...(baseUrl ? { baseUrl } : {}),
   });
@@ -146,7 +154,8 @@ async function resolveOpenApi(
   const auth = authPreview(discovered, providerDomain, input.connection);
   return resolvedPreview({
     source: input.source,
-    presetId: null,
+    definitionId: identity.sourceDerivedDefinitionId,
+    definitionProvenance: "workspace",
     identity,
     revision,
     provider: null,
@@ -168,7 +177,7 @@ async function resolveGraphql(
   name?: string,
 ): Promise<ResolvedApiIntegrationPreview> {
   const providerDomain = new URL(endpoint).hostname.toLowerCase();
-  const identity = integrationIdentity("graphql", providerDomain, endpoint);
+  const identity = integrationInstallationIdentity("graphql", providerDomain, endpoint);
   const introspection = await fetchGraphqlIntrospection({
     endpoint,
     transport: input.transport,
@@ -176,7 +185,7 @@ async function resolveGraphql(
     ...(input.credentialResolver ? { credentialResolver: input.credentialResolver } : {}),
   });
   const revision = compileGraphqlRevision(introspection, {
-    integrationId: identity.integrationId,
+    definitionId: identity.sourceDerivedDefinitionId,
     endpoint,
     sourceUrl: endpoint,
     ...(name ? { name } : {}),
@@ -186,7 +195,8 @@ async function resolveGraphql(
     : ({ kind: "none" } as const);
   return resolvedPreview({
     source: input.source,
-    presetId: null,
+    definitionId: identity.sourceDerivedDefinitionId,
+    definitionProvenance: "workspace",
     identity,
     revision,
     provider: null,
@@ -203,9 +213,10 @@ async function resolveGraphql(
 }
 
 function resolvedPreview(input: {
-  source: ApiIntegrationSource;
-  presetId: string | null;
-  identity: ReturnType<typeof integrationIdentity>;
+  source: IntegrationSource;
+  definitionId: string;
+  definitionProvenance: "curated" | "workspace";
+  identity: ReturnType<typeof integrationInstallationIdentity>;
   revision: StoredApiIntegrationRevision;
   provider: string | null;
   providerDomain: string;
@@ -230,9 +241,9 @@ function resolvedPreview(input: {
   return {
     preview: ApiIntegrationPreview.parse({
       source: input.source,
-      presetId: input.presetId,
+      definitionId: input.definitionId,
+      definitionProvenance: input.definitionProvenance,
       protocol: input.revision.protocol,
-      integrationId: input.identity.integrationId,
       capabilityId: input.identity.capabilityId,
       pluginKey: input.identity.pluginKey,
       serverId: input.identity.serverId,
@@ -265,7 +276,11 @@ function resolvedPreview(input: {
   };
 }
 
-function integrationIdentity(protocol: "openapi" | "graphql", label: string, locator: string) {
+function integrationInstallationIdentity(
+  protocol: "openapi" | "graphql",
+  label: string,
+  locator: string,
+) {
   const hash = createHash("sha256").update(`${protocol}\0${locator}`).digest("hex").slice(0, 12);
   const slug =
     label
@@ -274,7 +289,7 @@ function integrationIdentity(protocol: "openapi" | "graphql", label: string, loc
       .replace(/^-+|-+$/g, "")
       .slice(0, 48) || "integration";
   return {
-    integrationId: `${slug}-${hash}`,
+    sourceDerivedDefinitionId: `${slug}-${hash}`,
     pluginKey: `integration/${protocol}/${slug}-${hash}`,
     capabilityId: `api:${protocol}:${slug}-${hash}`,
     serverId: `api_${protocol}_${slug.replaceAll("-", "_").slice(0, 48)}_${hash}`,

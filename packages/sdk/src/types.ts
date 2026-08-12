@@ -4566,10 +4566,10 @@ export type CapabilityPackComponentReference =
     }
   | {
       key: string;
-      kind: "feature";
+      kind: "facet";
       capabilityId: string;
       instanceKey: string;
-      featureKey: string;
+      facetKey: string;
       bindingKey: string;
       configDigest: string;
       required: boolean;
@@ -4655,10 +4655,10 @@ export type RegisterCapabilityPackRequest = {
           }
         | {
             key: string;
-            kind: "feature";
+            kind: "facet";
             capabilityId: string;
             instanceKey: string;
-            featureKey: string;
+            facetKey: string;
             bindingKey: string;
             configDigest: string;
             required?: boolean | undefined;
@@ -4753,7 +4753,7 @@ export type PackComponentResolutionStatus = "ready" | "missing" | "mismatch";
 
 export type PackComponentResolution = {
   key: string;
-  kind: "plugin" | "skill" | "integration" | "feature" | "inline_skill";
+  kind: "plugin" | "skill" | "integration" | "facet" | "inline_skill";
   capabilityId: string;
   required: boolean;
   status: PackComponentResolutionStatus;
@@ -4808,7 +4808,7 @@ export type PackUninstallPreview = {
   installationVersion: number | null;
   components: Array<{
     key: string;
-    kind: "plugin" | "skill" | "integration" | "feature" | "inline_skill";
+    kind: "plugin" | "skill" | "integration" | "facet" | "inline_skill";
     capabilityId: string;
     retainedByOtherOwners: boolean;
   }>;
@@ -4965,7 +4965,7 @@ export type CapabilityCatalogResponse = {
 
 export type CreateCapabilityCatalogItemRequest = {
   id?: string | undefined;
-  kind: Exclude<CapabilityKind, "pack">;
+  kind: "mcp";
   source?: CapabilitySource | undefined;
   name: string;
   description?: string | undefined;
@@ -4988,14 +4988,6 @@ export type EnableCapabilityRequest = {
    * API (responses expose header names only).
    */
   headers?: Record<string, string> | undefined;
-  /**
-   * Initial variableSet attachment for kind=pack capabilities — mirrors the
-   * dedicated POST /packs/:id/enable body. Required to enable an
-   * variableSet.required pack through this unified path; ignored otherwise.
-   */
-  variableSetId?: string | undefined;
-  /** @deprecated use variableSetId */
-  environmentId?: string | undefined;
 };
 
 export type DiscoverMcpCapabilitiesResponse = {
@@ -5005,6 +4997,8 @@ export type DiscoverMcpCapabilitiesResponse = {
 };
 
 export type SkillImportSource = "github" | "skills_sh";
+
+export type SkillInstallationSource = "library" | "github" | "skills_sh" | "pack";
 
 export type PreviewSkillImportRequest = {
   url: string;
@@ -5041,6 +5035,12 @@ export type InstallSkillRequest = {
   expectedInstallationVersion?: number | undefined;
 };
 
+export type InstallLibrarySkillRequest = {
+  expectedVersion: string;
+  expectedContentSha256: string;
+  expectedInstallationVersion?: number | undefined;
+};
+
 export type InstalledSkill = {
   capabilityId: string;
   pluginId: string;
@@ -5049,7 +5049,8 @@ export type InstalledSkill = {
   pluginInstallationId: string;
   facetInstallationId: string;
   installationVersion: number;
-  source: SkillImportSource;
+  source: SkillInstallationSource;
+  version: string;
   sourceUrl: string;
   sourceCommit: string;
   contentSha256: string;
@@ -5061,6 +5062,34 @@ export type CapabilityComponentOwner = {
   kind: "direct" | "plugin" | "pack" | "migration";
   id: string;
   removable: boolean;
+};
+
+export type InstalledSkillSummary = {
+  capabilityId: string;
+  pluginKey: string;
+  installationVersion: number;
+  name: string;
+  description: string;
+  category: string;
+  tags: string[];
+  provenance: string;
+  source: SkillInstallationSource;
+  version: string;
+  sourceUrl: string;
+  repositoryUrl: string;
+  sourceCommit: string;
+  sourcePath: string;
+  contentSha256: string;
+  fileCount: number;
+  totalBytes: number;
+  license: string | null;
+  installedAt: string;
+  updatedAt: string;
+  owners: CapabilityComponentOwner[];
+};
+
+export type ListInstalledSkillsResponse = {
+  skills: InstalledSkillSummary[];
 };
 
 export type SkillUninstallPreview = {
@@ -5083,31 +5112,32 @@ export type UninstallSkillResult = {
 };
 
 export type ApiIntegrationProtocol = "openapi" | "graphql";
+export type IntegrationDefinitionProvenance = "curated" | "workspace";
 
-export type IntegrationFeatureKind =
+export type IntegrationFacetKind =
   | "tools"
   | "knowledge_source"
   | "inbound_trigger"
   | "delivery_destination"
   | "identity_link";
 
-export type IntegrationFeatureStatus = "active" | "paused" | "needs_attention" | "disabled";
+export type IntegrationFacetStatus = "active" | "paused" | "needs_attention" | "disabled";
 
-export type IntegrationFeatureDefinitionSummary = {
-  featureKey: string;
-  kind: Exclude<IntegrationFeatureKind, "tools">;
+export type IntegrationFacetDefinitionSummary = {
+  facetKey: string;
+  kind: Exclude<IntegrationFacetKind, "tools">;
   configSchema: Record<string, unknown>;
   capabilities: Record<string, unknown>;
 };
 
-export type IntegrationFeatureBindingSummary = {
+export type IntegrationFacetBindingSummary = {
   id: string;
-  featureKey: string;
-  kind: Exclude<IntegrationFeatureKind, "tools">;
+  facetKey: string;
+  kind: Exclude<IntegrationFacetKind, "tools">;
   bindingKey: string;
   displayName: string;
   connectionId: string | null;
-  status: IntegrationFeatureStatus;
+  status: IntegrationFacetStatus;
   config: Record<string, unknown>;
   version: number;
   hasCursor: boolean;
@@ -5117,75 +5147,80 @@ export type IntegrationFeatureBindingSummary = {
   updatedAt: string;
 };
 
-export type IntegrationInstanceFeaturesResponse = {
+export type IntegrationInstanceFacetsResponse = {
   capabilityId: string;
   instanceKey: string;
   providerDomain: string;
   connectionId: string | null;
-  features: {
-    definition: IntegrationFeatureDefinitionSummary;
-    binding: IntegrationFeatureBindingSummary | null;
+  facets: {
+    definition: IntegrationFacetDefinitionSummary;
+    binding: IntegrationFacetBindingSummary | null;
   }[];
 };
 
-export type UpsertIntegrationFeatureRequest = {
+export type UpsertIntegrationFacetRequest = {
   displayName: string;
   config?: Record<string, unknown> | undefined;
   expectedVersion?: number | undefined;
   idempotencyKey: string;
 };
 
-export type MutateIntegrationFeatureRequest = {
+export type MutateIntegrationFacetRequest = {
   expectedVersion: number;
   idempotencyKey: string;
 };
 
-export type IntegrationFeatureMutationResult = {
+export type IntegrationFacetMutationResult = {
   capabilityId: string;
   instanceKey: string;
-  featureKey: string;
+  facetKey: string;
   status: "configured" | "paused" | "active";
-  binding: IntegrationFeatureBindingSummary;
+  binding: IntegrationFacetBindingSummary;
 };
 
-export type IntegrationFeatureRemovalResult = {
+export type IntegrationFacetRemovalResult = {
   capabilityId: string;
   instanceKey: string;
-  featureKey: string;
+  facetKey: string;
   status: "not_configured" | "removed" | "retained_by_other_owners";
-  binding: IntegrationFeatureBindingSummary | null;
+  binding: IntegrationFacetBindingSummary | null;
   remainingOwners: CapabilityComponentOwner[];
 };
 
-export type ApiIntegrationPresetSummary = {
+export type IntegrationDefinitionSummary = {
   id: string;
   name: string;
   summary: string;
-  family: "google" | "microsoft";
   protocol: "openapi";
-  providerDomain: string;
-  scopes: string[];
-  features: IntegrationFeatureDefinitionSummary[];
+  provider: {
+    id: "google" | "microsoft";
+    domain: string;
+  };
+  authentication: {
+    kind: "oauth2";
+    scopes: string[];
+  };
+  facets: IntegrationFacetDefinitionSummary[];
 };
 
-export type ListApiIntegrationPresetsResponse = {
-  presets: ApiIntegrationPresetSummary[];
+export type ListIntegrationDefinitionsResponse = {
+  definitions: IntegrationDefinitionSummary[];
 };
 
-export type ApiIntegrationSource =
-  | { kind: "preset"; presetId: string }
+export type IntegrationSource =
+  | { kind: "definition"; definitionId: string }
   | { kind: "openapi"; url: string; baseUrl?: string | undefined }
   | { kind: "graphql"; endpoint: string; name?: string | undefined }
   | { kind: "auto"; url: string; baseUrl?: string | undefined };
 
 export type PreviewApiIntegrationRequest = {
-  source: ApiIntegrationSource;
+  source: IntegrationSource;
   connectionId?: string | undefined;
   ownership?: ConnectionOwnership | undefined;
 };
 
 export type ApiIntegrationOAuthStartRequest = {
-  presetId: string;
+  definitionId: string;
   ownership?: ConnectionOwnership | undefined;
   connectionId?: string | undefined;
   returnPath?: string | undefined;
@@ -5213,10 +5248,10 @@ export type ApiIntegrationToolPreview = {
 };
 
 export type ApiIntegrationPreview = {
-  source: ApiIntegrationSource;
-  presetId: string | null;
+  source: IntegrationSource;
+  definitionId: string;
+  definitionProvenance: IntegrationDefinitionProvenance;
   protocol: ApiIntegrationProtocol;
-  integrationId: string;
   capabilityId: string;
   pluginKey: string;
   serverId: string;
@@ -5236,7 +5271,7 @@ export type ApiIntegrationPreview = {
 };
 
 export type InstallApiIntegrationRequest = {
-  source: ApiIntegrationSource;
+  source: IntegrationSource;
   expectedRevisionId: string;
   expectedContentSha256: string;
   connectionId?: string | undefined;
@@ -5278,7 +5313,8 @@ export type ApiIntegrationInstallationSummary = {
   name: string;
   description: string | null;
   protocol: ApiIntegrationProtocol;
-  presetId: string | null;
+  definitionId: string;
+  definitionProvenance: IntegrationDefinitionProvenance;
   providerDomain: string;
   baseUrl: string;
   sourceUrl: string | null;
@@ -5325,7 +5361,7 @@ export type UninstallApiIntegrationResult = {
 
 export type PluginManifestComponent =
   | { key: string; kind: "skill"; url: string }
-  | { key: string; kind: "integration"; source: ApiIntegrationSource }
+  | { key: string; kind: "integration"; source: IntegrationSource }
   | { key: string; kind: "mcp"; serverId: string };
 
 export type PluginManifest = {

@@ -22,7 +22,7 @@ import {
   apiIntegrationRequiresConnection,
   registerApiIntegrationRoutes,
 } from "../src/routes/api-integrations";
-import { registerIntegrationFeatureRoutes } from "../src/routes/integration-features";
+import { registerIntegrationFacetRoutes } from "../src/routes/integration-facets";
 
 const delegationSecret = "api-integration-route-secret";
 let sourceVersion = "1.0.0";
@@ -153,7 +153,7 @@ beforeAll(async () => {
       },
     },
   );
-  registerIntegrationFeatureRoutes(app, {
+  registerIntegrationFacetRoutes(app, {
     db: client.db,
     settings: testSettings({
       productAccessMode: "managed",
@@ -201,18 +201,21 @@ describe("API Integration routes", () => {
     expect(apiIntegrationRequiresConnection({ kind: "oauth2" })).toBe(true);
   });
 
-  test("lists curated provider presets without deployment OAuth credentials", async () => {
+  test("lists curated provider definitions without deployment OAuth credentials", async () => {
     if (!available) return;
-    const response = await request("/integrations/presets");
+    const response = await request("/integrations/definitions");
     expect(response.status).toBe(200);
     const payload = await response.json();
-    expect(payload.presets).toHaveLength(6);
-    expect(payload.presets).toContainEqual(
+    expect(payload.definitions).toHaveLength(6);
+    expect(payload.definitions).toContainEqual(
       expect.objectContaining({
         id: "google-gmail",
         name: "Gmail",
-        family: "google",
-        providerDomain: "gmail.googleapis.com",
+        provider: {
+          id: "google",
+          domain: "gmail.googleapis.com",
+        },
+        authentication: expect.objectContaining({ kind: "oauth2" }),
       }),
     );
     expect(JSON.stringify(payload)).not.toContain("clientSecret");
@@ -292,7 +295,8 @@ describe("API Integration routes", () => {
           instanceId: installed.instanceId,
           instanceKey: installed.instanceKey,
           instanceVersion: installed.instanceVersion,
-          presetId: null,
+          definitionId: preview.definitionId,
+          definitionProvenance: "workspace",
           connected: true,
           requiresConnection: false,
           connectionId: optionalConnection.id,
@@ -483,25 +487,27 @@ describe("API Integration routes", () => {
     expect(removed.status).toBe(200);
   }, 60_000);
 
-  test("controls generic Integration features through the public lifecycle", async () => {
+  test("controls generic Integration facets through the public lifecycle", async () => {
     if (!available || !client) return;
     const connection = await createConnection(client.db, {
       accountId,
       workspaceId,
       providerDomain: "127.0.0.1",
       kind: "api_key",
-      credentialEncrypted: "route-feature-encrypted-bundle",
+      credentialEncrypted: "route-facet-encrypted-bundle",
       createdBySubjectId: subjectId,
     });
     const installed = await installApiIntegration(client.db, {
       accountId,
       workspaceId,
       subjectId,
-      capabilityId: "api:route-feature-control",
-      pluginKey: "integration/route-feature-control",
+      capabilityId: "api:route-facet-control",
+      pluginKey: "integration/route-facet-control",
       serverId: "route_feature_control",
-      name: "Route feature control",
-      description: "Exercises the generic feature HTTP lifecycle.",
+      name: "Route facet control",
+      description: "Exercises the generic facet HTTP lifecycle.",
+      definitionId: "route-facet-control",
+      definitionProvenance: "workspace",
       providerDomain: "127.0.0.1",
       protocol: "openapi",
       baseUrl: "https://127.0.0.1/v1/",
@@ -509,9 +515,9 @@ describe("API Integration routes", () => {
       authScheme: { kind: "api_key", carrier: "header", name: "Authorization" },
       connectionId: connection.id,
       instanceKey: "finance",
-      featureDefinitions: [
+      facetDefinitions: [
         {
-          featureKey: "inventory-source",
+          facetKey: "inventory-source",
           kind: "knowledge_source",
           configSchema: {
             type: "object",
@@ -528,10 +534,10 @@ describe("API Integration routes", () => {
       revision: {
         id: "openapi:333333333333333333333333",
         protocol: "openapi",
-        integrationId: "route-feature-control",
+        definitionId: "route-facet-control",
         contentSha256: "3".repeat(64),
         source: { url: "https://127.0.0.1/openapi.json" },
-        title: "Route feature control",
+        title: "Route facet control",
         tools: [
           {
             id: "list_items",
@@ -554,17 +560,17 @@ describe("API Integration routes", () => {
         },
       },
     });
-    const base = `/integrations/${encodeURIComponent(installed.capabilityId)}/instances/finance/features`;
+    const base = `/integrations/${encodeURIComponent(installed.capabilityId)}/instances/finance/facets`;
     const listed = await request(base);
     expect(listed.status).toBe(200);
     expect(await listed.json()).toMatchObject({
       capabilityId: installed.capabilityId,
       instanceKey: "finance",
       connectionId: connection.id,
-      features: [
+      facets: [
         {
           definition: {
-            featureKey: "inventory-source",
+            facetKey: "inventory-source",
             kind: "knowledge_source",
           },
           binding: null,
