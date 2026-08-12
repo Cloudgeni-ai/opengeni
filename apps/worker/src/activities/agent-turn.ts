@@ -2255,9 +2255,12 @@ export function structuredToolTransportForTurn(
   resolvedModel: { provider: { kind: RegistryProviderKind } } | null,
 ): boolean {
   if (!resolvedModel) return true;
-  return !["codex-subscription", "vercel-gateway-managed", "vercel-gateway-workspace"].includes(
-    resolvedModel.provider.kind,
-  );
+  return ![
+    "codex-subscription",
+    "xai-subscription",
+    "vercel-gateway-managed",
+    "vercel-gateway-workspace",
+  ].includes(resolvedModel.provider.kind);
 }
 
 /**

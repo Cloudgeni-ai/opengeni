@@ -4113,8 +4113,9 @@ describe("structuredToolTransportForTurn", () => {
   const resolved = (kind: RegistryProviderKind) =>
     ({ provider: { kind } }) as Parameters<typeof structuredToolTransportForTurn>[0];
 
-  test("keeps hosted tool types off Codex and both Gateway credential paths", () => {
+  test("keeps OpenAI-hosted tool types off connected subscriptions and Gateway paths", () => {
     expect(structuredToolTransportForTurn(resolved("codex-subscription"))).toBe(false);
+    expect(structuredToolTransportForTurn(resolved("xai-subscription"))).toBe(false);
     expect(structuredToolTransportForTurn(resolved("vercel-gateway-managed"))).toBe(false);
     expect(structuredToolTransportForTurn(resolved("vercel-gateway-workspace"))).toBe(false);
   });
@@ -4176,6 +4177,9 @@ describe("lazyToolTransportForTurn", () => {
   });
 
   test("contains Gateway and other providers behind generic dispatch", () => {
+    expect(lazyToolTransportForTurn(resolved("xai-subscription", "responses"))).toBe(
+      "generic_dispatch",
+    );
     expect(lazyToolTransportForTurn(resolved("vercel-gateway-managed", "responses"))).toBe(
       "generic_dispatch",
     );
