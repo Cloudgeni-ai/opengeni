@@ -78,6 +78,18 @@ describe("browser controller image build contract", () => {
     });
   }
 
+  test("desktop image installs the pinned Chrome artifact without a mutable apt index", async () => {
+    const dockerfile = await readFile(resolve(root, "docker/desktop.Dockerfile"), "utf8");
+
+    expect(dockerfile).toContain("FROM scratch AS chrome-assets");
+    expect(dockerfile).toContain(
+      "ADD --checksum=sha256:bfb6e6d345055eb481a50db423256fa2732ce010f785a56c327e213a638efdef https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_151.0.7922.108-1_amd64.deb /google-chrome-stable.deb",
+    );
+    expect(dockerfile).toContain("/tmp/google-chrome-stable.deb");
+    expect(dockerfile).not.toContain("google-chrome-stable=${OPENGENI_GOOGLE_CHROME_VERSION}");
+    expect(dockerfile).not.toContain("https://dl.google.com/linux/chrome/deb/ stable main");
+  });
+
   test("startup distinguishes a live setsid/env child from a completed browserd exec", async () => {
     const source = await readFile(resolve(root, startupScriptPath), "utf8");
     const startupLoop = source.indexOf("for _ in $(seq 1 100); do");

@@ -24,6 +24,10 @@ ADD --checksum=sha256:8d7b3a1d7b9024beef94e7fc7ce854030ee4d6def5f802b8e0e8824731
 ADD --checksum=sha256:a5005b353a1738dd3d239234841cfcc808a7ec9faaebfcede3528f9fab3ae058 https://github.com/lightpanda-io/browser/archive/refs/tags/0.3.5.tar.gz /lightpanda-0.3.5-source.tar.gz
 ADD --checksum=sha256:8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef https://raw.githubusercontent.com/lightpanda-io/browser/0.3.5/LICENSE /lightpanda-LICENSE
 
+FROM scratch AS chrome-assets
+
+ADD --checksum=sha256:bfb6e6d345055eb481a50db423256fa2732ce010f785a56c327e213a638efdef https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_151.0.7922.108-1_amd64.deb /google-chrome-stable.deb
+
 FROM rust:1.82-bookworm AS computer-native-build
 
 WORKDIR /src/agent
@@ -115,7 +119,6 @@ ARG WEBSOCKIFY_REF=v0.12.0
 ARG TTYD_VERSION=1.7.7
 ARG NODE_MAJOR=20
 ARG TARGETARCH
-ARG OPENGENI_GOOGLE_CHROME_VERSION=151.0.7922.108-1
 ARG OPENGENI_CHROMIUM_VERSION=151.0.7922.108-1~deb13u1
 
 # noninteractive + a fixed TZ on EVERY apt layer (mandatory — see header).
@@ -218,21 +221,16 @@ ARG OPENGENI_BROWSER_BIN_ARM64=/usr/lib/chromium/chromium
 COPY docker/desktop/opengeni-browser.sh            /usr/local/bin/opengeni-browser
 COPY docker/desktop/opengeni-browser.helper.desktop /usr/share/xfce4/helpers/opengeni-browser.desktop
 COPY docker/desktop/opengeni-browser.app.desktop    /usr/share/applications/opengeni-browser.desktop
+COPY --from=chrome-assets /google-chrome-stable.deb /tmp/google-chrome-stable.deb
 
 RUN set -eux; \
     export DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC; \
     arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
-    install -d -m 0755 /etc/apt/keyrings; \
-    curl -fsSL https://dl.google.com/linux/linux_signing_key.pub \
-        | gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg; \
-    chmod a+r /etc/apt/keyrings/google-chrome.gpg; \
     if [ "${arch}" = "amd64" ]; then \
-        echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main" \
-            > /etc/apt/sources.list.d/google-chrome.list; \
         for attempt in 1 2 3; do \
             rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/partial/*; \
             apt-get update && apt-get install -y --no-install-recommends \
-                "google-chrome-stable=${OPENGENI_GOOGLE_CHROME_VERSION}" && break; \
+                /tmp/google-chrome-stable.deb && break; \
             if [ "$attempt" = "3" ]; then exit 1; fi; sleep $((attempt * 5)); \
         done; \
         BROWSER_BIN="${OPENGENI_BROWSER_BIN_AMD64}"; \
@@ -245,6 +243,7 @@ RUN set -eux; \
         done; \
         BROWSER_BIN="${OPENGENI_BROWSER_BIN_ARM64}"; \
     fi; \
+    rm -f /tmp/google-chrome-stable.deb; \
     rm -rf /var/lib/apt/lists/*; \
     # Persist the resolved per-architecture engine. Docker ENV cannot retain a shell
     # variable chosen inside this RUN layer, so both launchers read this immutable file.
