@@ -1583,6 +1583,39 @@ describe("clean session control plane", () => {
       },
       eventOutput: pendingRichEventOutput,
     });
+    expect(
+      await registerPendingSessionToolCall(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn!.id,
+        executionGeneration: turn!.executionGeneration,
+        attemptId,
+        callId: "pending-null-call",
+        callType: "function_call",
+        callItem: {
+          type: "function_call",
+          callId: "pending-null-call",
+          name: "null_tool",
+          arguments: "{}",
+        },
+      }),
+    ).toEqual({ accepted: true, registered: true });
+    await recordPendingSessionToolCallResult(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn!.id,
+      executionGeneration: turn!.executionGeneration,
+      attemptId,
+      callId: "pending-null-call",
+      resultItem: {
+        type: "function_call_result",
+        callId: "pending-null-call",
+        output: null,
+      },
+      eventOutput: null,
+    });
     const pendingMixedResultItem = {
       type: "function_call_result",
       callId: "pending-mixed-call",
@@ -1727,6 +1760,14 @@ describe("clean session control plane", () => {
       output: pendingRichEventOutput,
       recovery: { interrupted: false, outcome: "durable_result_found" },
     });
+    const nullRecoveryOutput = recovery.events.find(
+      (event) =>
+        event.type === "agent.toolCall.output" &&
+        (event.payload as { id?: unknown }).id === "pending-null-call",
+    )?.payload as { output?: unknown } | undefined;
+    if (!nullRecoveryOutput) throw new Error("Missing recovered null tool output event");
+    expect(Object.hasOwn(nullRecoveryOutput, "output")).toBe(true);
+    expect(nullRecoveryOutput.output).toBeNull();
     expect(sessionEventPayloadTruncation(mixedRecoveryOutput)).toBeNull();
     const mixedRecoveryPreview = boundSessionEventPayload(mixedRecoveryOutput, {
       surface: "durable_audit",
