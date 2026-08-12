@@ -4,6 +4,7 @@ import {
   rawRows,
   type Database,
   rlsContextForWorkspace,
+  withWorkspaceSubjectRls,
   withWorkspaceSubjectSessionActivityRls,
 } from "./database";
 
@@ -32,6 +33,25 @@ export type TransitionSessionVisibilityResult = {
   revokedGrantCount: number;
 };
 
+export type ForkSessionContentInput = {
+  sourceWorkspaceId: string;
+  sourceSessionId: string;
+  actorSubjectId: string;
+  destinationWorkspaceId: string;
+  destinationVisibility: SessionTenancyVisibility;
+  operationKey: string;
+};
+
+export type ForkSessionContentResult = {
+  operationId: string;
+  sessionId: string;
+  workspaceId: string;
+  visibility: SessionTenancyVisibility;
+  authorityEpoch: number;
+  copiedHistoryItemCount: number;
+  replay: boolean;
+};
+
 export function canonicalSessionVisibilityTransitionHash(
   input: Pick<
     TransitionSessionVisibilityInput,
@@ -45,6 +65,24 @@ export function canonicalSessionVisibilityTransitionHash(
         sessionId: input.sessionId,
         targetVisibility: input.targetVisibility,
         expectedAuthorityEpoch: input.expectedAuthorityEpoch,
+      }),
+    )
+    .digest("hex");
+}
+
+export function canonicalSessionForkHash(
+  input: Pick<
+    ForkSessionContentInput,
+    "sourceSessionId" | "destinationWorkspaceId" | "destinationVisibility"
+  >,
+): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        version: 1,
+        sourceSessionId: input.sourceSessionId,
+        destinationWorkspaceId: input.destinationWorkspaceId,
+        destinationVisibility: input.destinationVisibility,
       }),
     )
     .digest("hex");
@@ -109,6 +147,50 @@ export async function transitionSessionVisibility(
       const result = rows[0];
       if (!result)
         throw new Error("Session visibility transition returned no result");
+      return result;
+    },
+  );
+}
+
+export async function forkSessionContent(
+  db: Database,
+  input: ForkSessionContentInput,
+): Promise<ForkSessionContentResult> {
+  if (!input.operationKey.trim())
+    throw new Error("operationKey must not be empty");
+  const { accountId } = await rlsContextForWorkspace(
+    db,
+    input.sourceWorkspaceId,
+  );
+  const requestHash = canonicalSessionForkHash(input);
+  return await withWorkspaceSubjectRls(
+    db,
+    input.sourceWorkspaceId,
+    input.actorSubjectId,
+    async (scopedDb) => {
+      const rows = await rawRows<ForkSessionContentResult>(
+        scopedDb,
+        sql`select
+          operation_id as "operationId",
+          session_id as "sessionId",
+          workspace_id as "workspaceId",
+          visibility,
+          authority_epoch as "authorityEpoch",
+          copied_history_item_count as "copiedHistoryItemCount",
+          replay
+        from fork_session_content(
+          ${accountId}::uuid,
+          ${input.sourceWorkspaceId}::uuid,
+          ${input.sourceSessionId}::uuid,
+          ${input.actorSubjectId},
+          ${input.destinationWorkspaceId}::uuid,
+          ${input.destinationVisibility},
+          ${input.operationKey},
+          ${requestHash}
+        )`,
+      );
+      const result = rows[0];
+      if (!result) throw new Error("Session fork returned no result");
       return result;
     },
   );
