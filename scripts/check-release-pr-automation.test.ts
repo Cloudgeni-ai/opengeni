@@ -2080,6 +2080,7 @@ function approvalFixture(
     mergeCommitSha?: string;
     pullHeadSha?: string;
     sourceTreeSha?: string;
+    controllerSha?: string;
     controllerTreeSha?: string;
     controllerRefSha?: string | null;
     controllerRelease?: Record<string, unknown> | null;
@@ -2087,6 +2088,8 @@ function approvalFixture(
     terminalMainSha?: string;
     sourceAncestorMainShas?: string[];
     sourceAncestorTotalCommitsByMainSha?: Record<string, number | null>;
+    controllerAncestorMainShas?: string[];
+    controllerAncestorTotalCommitsByMainSha?: Record<string, number | null>;
     reviewCommit?: string;
     reviewState?: string;
     reviewTime?: string;
@@ -2116,6 +2119,7 @@ function approvalFixture(
   const mergeMethod = options.mergeMethod ?? "merge";
   const pullHeadSha = options.pullHeadSha ?? headSha;
   const reviewedBaseSha = options.reviewedBaseSha ?? baseSha;
+  const retainedControllerSha = options.controllerSha ?? controllerSha;
   const pullCommitCount = mergeMethod === "single" ? 1 : 2;
   const sourceParents =
     mergeMethod === "merge"
@@ -2213,9 +2217,9 @@ function approvalFixture(
         tree: { sha: baseTreeSha },
         parents: [{ sha: "1".repeat(40) }],
       });
-    if (method === "GET" && url.pathname === `${prefix}/git/commits/${controllerSha}`)
+    if (method === "GET" && url.pathname === `${prefix}/git/commits/${retainedControllerSha}`)
       return response({
-        sha: controllerSha,
+        sha: retainedControllerSha,
         tree: { sha: options.controllerTreeSha ?? baseTreeSha },
         parents: [{ sha: "3".repeat(40) }],
       });
@@ -2356,6 +2360,41 @@ function approvalFixture(
             },
       );
     }
+    const controllerMainComparisonPrefix = `${prefix}/compare/${retainedControllerSha}...`;
+    if (
+      options.controllerSha !== undefined &&
+      method === "GET" &&
+      url.pathname.startsWith(controllerMainComparisonPrefix)
+    ) {
+      const observedMainSha = url.pathname.slice(controllerMainComparisonPrefix.length);
+      const retained = options.controllerAncestorMainShas?.includes(observedMainSha) ?? false;
+      return response(
+        retained
+          ? {
+              status: "ahead",
+              base_commit: { sha: retainedControllerSha },
+              merge_base_commit: { sha: retainedControllerSha },
+              ahead_by: 1,
+              behind_by: 0,
+              total_commits: Object.prototype.hasOwnProperty.call(
+                options.controllerAncestorTotalCommitsByMainSha ?? {},
+                observedMainSha,
+              )
+                ? options.controllerAncestorTotalCommitsByMainSha?.[observedMainSha]
+                : 1,
+              commits: [{ sha: observedMainSha, parents: [{ sha: retainedControllerSha }] }],
+            }
+          : {
+              status: "diverged",
+              base_commit: { sha: retainedControllerSha },
+              merge_base_commit: { sha: "6".repeat(40) },
+              ahead_by: 1,
+              behind_by: 1,
+              total_commits: 1,
+              commits: [{ sha: observedMainSha, parents: [{ sha: "6".repeat(40) }] }],
+            },
+      );
+    }
     if (method === "GET" && url.pathname === `${prefix}/pulls/${pullNumber}/reviews`)
       return response([review]);
     if (method === "GET" && url.pathname === `${prefix}/pulls/${pullNumber}/reviews/9001`)
@@ -2397,26 +2436,26 @@ function approvalFixture(
     if (
       method === "GET" &&
       url.pathname ===
-        `${prefix}/git/ref/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${controllerSha}`
+        `${prefix}/git/ref/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${retainedControllerSha}`
     ) {
       if (options.controllerRefSha === null)
         return response({ message: "missing controller ref" }, 404);
       return response({
-        ref: `refs/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${controllerSha}`,
+        ref: `refs/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${retainedControllerSha}`,
         object: {
           type: "commit",
-          sha: options.controllerRefSha ?? controllerSha,
+          sha: options.controllerRefSha ?? retainedControllerSha,
         },
       });
     }
     if (
       method === "GET" &&
       url.pathname ===
-        `${prefix}/releases/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${controllerSha}`
+        `${prefix}/releases/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${retainedControllerSha}`
     )
       return options.controllerRelease === null
         ? response({ message: "missing controller release" }, 404)
-        : response(options.controllerRelease ?? releaseHeadRelease(controllerSha));
+        : response(options.controllerRelease ?? releaseHeadRelease(retainedControllerSha));
     if (
       method === "GET" &&
       url.pathname ===
@@ -2483,18 +2522,71 @@ describe("release approval provenance", () => {
     ).rejects.toThrow("not running from the retained controller ref");
   });
 
-  test("rejects a retained controller that is not the exact reviewed base commit", async () => {
+  test("accepts a retained controller after the source on protected main ancestry", async () => {
+    const retainedControllerSha = "4".repeat(40);
+    const initialMainSha = "5".repeat(40);
+    const terminalMainSha = "6".repeat(40);
     const fixture = approvalFixture({
-      mergeMethod: "squash",
-      reviewedBaseSha: "9".repeat(40),
+      controllerSha: retainedControllerSha,
+      controllerTreeSha: "7".repeat(40),
+      initialMainSha,
+      terminalMainSha,
+      sourceAncestorMainShas: [retainedControllerSha, initialMainSha, terminalMainSha],
+      controllerAncestorMainShas: [initialMainSha, terminalMainSha],
     });
     await expect(
       verifyApprovedMerge({
-        env: approvalEnv(),
+        env: approvalEnv({
+          GITHUB_REF:
+            `refs/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}` + retainedControllerSha,
+          GITHUB_SHA: retainedControllerSha,
+          GITHUB_WORKFLOW_SHA: retainedControllerSha,
+          RELEASE_CONTROLLER_SHA: retainedControllerSha,
+        }),
         fetchImpl: fixture.fetchImpl,
         logger: { log() {} },
       }),
-    ).rejects.toThrow("release controller SHA differs from the exact reviewed base SHA");
+    ).resolves.toEqual(
+      expect.objectContaining({
+        controller: expect.objectContaining({
+          sha: retainedControllerSha,
+          treeSha: "7".repeat(40),
+        }),
+      }),
+    );
+  });
+
+  test("rejects a retained controller outside the admitted source to protected main chain", async () => {
+    const retainedControllerSha = "4".repeat(40);
+    const initialMainSha = "5".repeat(40);
+    const env = approvalEnv({
+      GITHUB_REF:
+        `refs/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}` + retainedControllerSha,
+      GITHUB_SHA: retainedControllerSha,
+      GITHUB_WORKFLOW_SHA: retainedControllerSha,
+      RELEASE_CONTROLLER_SHA: retainedControllerSha,
+    });
+    await expect(
+      verifyApprovedMerge({
+        env,
+        fetchImpl: approvalFixture({
+          controllerSha: retainedControllerSha,
+          initialMainSha,
+          sourceAncestorMainShas: [initialMainSha],
+        }).fetchImpl,
+      }),
+    ).rejects.toThrow("release controller is not ahead of the admitted source");
+
+    await expect(
+      verifyApprovedMerge({
+        env,
+        fetchImpl: approvalFixture({
+          controllerSha: retainedControllerSha,
+          initialMainSha,
+          sourceAncestorMainShas: [retainedControllerSha, initialMainSha],
+        }).fetchImpl,
+      }),
+    ).rejects.toThrow("initial release main is not ahead of the release controller");
   });
 
   test("requires immutable retained evidence for the workflow controller", async () => {
