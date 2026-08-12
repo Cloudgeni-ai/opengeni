@@ -9,45 +9,148 @@ export const OPENGENI_INNER_MCP_CUSTOM_DATA_KEY = "__opengeniInnerMcpCustomData"
 
 type McpCustomDataExtractor = NonNullable<MCPServer["customDataExtractor"]>;
 type McpCustomDataContext = Parameters<McpCustomDataExtractor>[0];
+type McpToolMetaResolver = NonNullable<MCPServer["toolMetaResolver"]>;
+type McpToolMetaContext = Parameters<McpToolMetaResolver>[0];
 
 function contentFromModelOutput(output: unknown): unknown[] {
   return Array.isArray(output) ? output : [output];
 }
 
 /**
- * Build the SDK-only bridge that retains the complete MCP result while leaving
- * the model-visible output on the SDK's existing content-based path.
+ * The Agents SDK custom-data callback receives only the standard MCP result
+ * fields. This bridge binds the original full result to the SDK invocation by
+ * temporarily adding one instance-private key to the parsed argument object.
+ * The key is removed before the MCP server sees the arguments and is consumed
+ * before an inner custom-data extractor runs, so neither boundary observes it.
  */
-export function createMcpResultCustomDataExtractor(input?: {
-  innerServer?: MCPServer;
-  unprefixToolName?: (toolName: string) => string;
-}): McpCustomDataExtractor {
-  const innerExtractor = input?.innerServer?.customDataExtractor;
-  return async (context) => {
-    const result = AttemptToolResult.parse({
-      content: contentFromModelOutput(context.toolOutput),
-      ...(context.structuredContent === undefined
-        ? {}
-        : { structuredContent: context.structuredContent }),
-      ...(typeof context.isError === "boolean" ? { isError: context.isError } : {}),
-      ...(context.resultMeta === undefined ? {} : { _meta: context.resultMeta }),
-    });
+export class McpResultCustomDataBridge {
+  private readonly argumentKey = `__opengeniMcpResultCall_${crypto.randomUUID()}`;
+  private readonly resultsByToken = new Map<string, AttemptToolResultValue>();
+  private nextToken = 0;
 
-    let innerCustomData: Record<string, unknown> | null | undefined;
-    if (innerExtractor && input?.innerServer) {
-      const innerContext: McpCustomDataContext = {
-        ...context,
-        serverName: input.innerServer.name,
-        toolName: input.unprefixToolName?.(context.toolName) ?? context.toolName,
-      };
-      innerCustomData = await innerExtractor(innerContext);
-    }
+  readonly toolMetaResolver: McpToolMetaResolver;
+  readonly customDataExtractor: McpCustomDataExtractor;
 
-    return {
-      [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: result,
-      ...(innerCustomData == null ? {} : { [OPENGENI_INNER_MCP_CUSTOM_DATA_KEY]: innerCustomData }),
+  constructor(
+    private readonly input?: {
+      innerServer?: MCPServer;
+      unprefixToolName?: (toolName: string) => string;
+    },
+  ) {
+    this.toolMetaResolver = async (context) => {
+      const innerMeta = await this.resolveInnerMeta(context);
+      const args = context.arguments;
+      if (!args || !Object.isExtensible(args)) return innerMeta;
+      const token = `${++this.nextToken}`;
+      Object.defineProperty(args, this.argumentKey, {
+        value: token,
+        enumerable: true,
+        configurable: true,
+        writable: false,
+      });
+      return innerMeta;
     };
-  };
+
+    this.customDataExtractor = async (context) => {
+      const { arguments: cleanArguments, token } = this.consumeArguments(context.arguments);
+      const bridgedResult = token ? this.resultsByToken.get(token) : undefined;
+      if (token) this.resultsByToken.delete(token);
+      const result =
+        bridgedResult ??
+        AttemptToolResult.parse({
+          content: contentFromModelOutput(context.toolOutput),
+          ...(context.structuredContent === undefined
+            ? {}
+            : { structuredContent: context.structuredContent }),
+          ...(typeof context.isError === "boolean" ? { isError: context.isError } : {}),
+          ...(context.resultMeta === undefined ? {} : { _meta: context.resultMeta }),
+        });
+
+      let innerCustomData: Record<string, unknown> | null | undefined;
+      const innerExtractor = this.input?.innerServer?.customDataExtractor;
+      if (innerExtractor && this.input?.innerServer) {
+        const {
+          resultMeta: _resultMeta,
+          structuredContent: _structuredContent,
+          isError: _isError,
+          ...baseContext
+        } = context;
+        const innerContext: McpCustomDataContext = {
+          ...baseContext,
+          arguments: cleanArguments,
+          serverName: this.input.innerServer.name,
+          toolName: this.input.unprefixToolName?.(context.toolName) ?? context.toolName,
+          ...(result.structuredContent === undefined
+            ? {}
+            : { structuredContent: result.structuredContent }),
+          ...(result.isError === undefined ? {} : { isError: result.isError }),
+          ...(result._meta === undefined ? {} : { resultMeta: result._meta }),
+        };
+        innerCustomData = await innerExtractor(innerContext);
+      }
+
+      return {
+        [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: result,
+        ...(innerCustomData == null
+          ? {}
+          : { [OPENGENI_INNER_MCP_CUSTOM_DATA_KEY]: innerCustomData }),
+      };
+    };
+  }
+
+  async captureResult(
+    args: Record<string, unknown> | null,
+    invoke: (cleanArgs: Record<string, unknown> | null) => Promise<unknown>,
+  ): Promise<AttemptToolResultValue> {
+    const token = this.takeToken(args);
+    try {
+      const result = AttemptToolResult.parse(await invoke(args));
+      if (token) this.resultsByToken.set(token, result);
+      return result;
+    } finally {
+      if (args && token) {
+        Object.defineProperty(args, this.argumentKey, {
+          value: token,
+          enumerable: true,
+          configurable: true,
+          writable: false,
+        });
+      }
+    }
+  }
+
+  private async resolveInnerMeta(
+    context: McpToolMetaContext,
+  ): Promise<Record<string, unknown> | null | undefined> {
+    const innerResolver = this.input?.innerServer?.toolMetaResolver;
+    if (!innerResolver || !this.input?.innerServer) return undefined;
+    return await innerResolver({
+      ...context,
+      serverName: this.input.innerServer.name,
+      toolName: this.input.unprefixToolName?.(context.toolName) ?? context.toolName,
+    });
+  }
+
+  private takeToken(args: Record<string, unknown> | null): string | null {
+    if (!args) return null;
+    const token = args[this.argumentKey];
+    if (typeof token !== "string") return null;
+    delete args[this.argumentKey];
+    return token;
+  }
+
+  private consumeArguments(args: Record<string, unknown> | null): {
+    arguments: Record<string, unknown> | null;
+    token: string | null;
+  } {
+    if (!args || typeof args[this.argumentKey] !== "string") {
+      return { arguments: args, token: null };
+    }
+    const token = args[this.argumentKey] as string;
+    const cleanArguments = { ...args };
+    delete cleanArguments[this.argumentKey];
+    return { arguments: cleanArguments, token };
+  }
 }
 
 export function mcpResultFromCustomData(customData: unknown): AttemptToolResultValue | null {

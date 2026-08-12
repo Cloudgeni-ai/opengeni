@@ -794,6 +794,12 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       callId,
       output: { type: "text", text: unsafeText },
     };
+    const eventOutput = {
+      content: [{ type: "text", text: unsafeText }],
+      structuredContent: { exactCommand },
+      isError: false,
+      vendorReceipt: { id: unsafeText },
+    };
     expect(
       await registerPendingSessionToolCall(app.db, {
         accountId: grant.accountId,
@@ -817,6 +823,7 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
         attemptId,
         callId,
         resultItem,
+        eventOutput,
       }),
     ).toEqual({ accepted: true, recorded: true });
     const [pending] = await withWorkspaceRls(app.db, workspaceId, (db) =>
@@ -826,14 +833,19 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
           callItemCodecVersion: schema.sessionPendingToolCalls.callItemCodecVersion,
           resultItem: schema.sessionPendingToolCalls.resultItem,
           resultItemCodecVersion: schema.sessionPendingToolCalls.resultItemCodecVersion,
+          eventOutput: schema.sessionPendingToolCalls.eventOutput,
+          eventOutputCodecVersion: schema.sessionPendingToolCalls.eventOutputCodecVersion,
         })
         .from(schema.sessionPendingToolCalls)
         .where(eq(schema.sessionPendingToolCalls.callId, callId)),
     );
+    if (!pending?.eventOutput) throw new Error("Pending tool event output was not retained");
     expect({
-      callItem: fromPostgresLosslessJson(pending!.callItem, pending!.callItemCodecVersion),
-      resultItem: fromPostgresLosslessJson(pending!.resultItem, pending!.resultItemCodecVersion),
-    }).toEqual({ callItem, resultItem });
+      callItem: fromPostgresLosslessJson(pending.callItem, pending.callItemCodecVersion),
+      resultItem: fromPostgresLosslessJson(pending.resultItem, pending.resultItemCodecVersion),
+      eventOutput: fromPostgresLosslessJson(pending.eventOutput, pending.eventOutputCodecVersion)
+        .value,
+    }).toEqual({ callItem, resultItem, eventOutput });
     const [rawPending] = await shared.admin<
       Array<{ callType: string | null; resultType: string | null }>
     >`
@@ -868,6 +880,12 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       }),
     );
     expect(settled.closed).toBe(1);
+    expect(settled.events).toContainEqual(
+      expect.objectContaining({
+        type: "agent.toolCall.output",
+        payload: expect.objectContaining({ id: callId, output: eventOutput }),
+      }),
+    );
     const settledHistory = await withWorkspaceRls(app.db, workspaceId, (db) =>
       db
         .select({
