@@ -29,6 +29,34 @@ const computerSessionId = randomUUID();
 const now = "2026-08-10T12:00:00.000Z";
 
 describe("interaction attempt tools", () => {
+  test("opens managed Chromium headed by default for supported human sign-in", async () => {
+    let createRequest: Record<string, unknown> | null = null;
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        listBrowserSessions: async () => ({ revision: 0, sessions: [] }),
+        createBrowserSession: async (_workspaceId, request) => {
+          createRequest = request as unknown as Record<string, unknown>;
+          return { session: { lifecycle: "starting" } } as never;
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_open"],
+      permissions: ["sessions:control"],
+    });
+
+    await definitions[0]!.execute(
+      { mode: "new", initialUrl: "https://accounts.google.com/" },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+
+    expect(createRequest).toMatchObject({
+      sessionId,
+      headless: false,
+      initialUrl: "https://accounts.google.com/",
+    });
+  });
+
   test("opens attached browsers headed and forwards the selected network route", async () => {
     let createRequest: Record<string, unknown> | null = null;
     const definitions = createInteractionAttemptToolDefinitions({

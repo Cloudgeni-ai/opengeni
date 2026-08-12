@@ -1977,6 +1977,7 @@ const browserActionVariants = [
       deltaX: z.number().finite().min(-1_000_000).max(1_000_000).optional(),
       deltaY: z.number().finite().min(-1_000_000).max(1_000_000).optional(),
       button: z.enum(["left", "right", "middle"]).optional(),
+      clickCount: z.union([z.literal(1), z.literal(2)]).optional(),
     })
     .strict()
     .superRefine((action, context) => {
@@ -2008,6 +2009,12 @@ const browserActionVariants = [
         context.addIssue({
           code: "custom",
           message: "pointer deltas require scroll",
+        });
+      }
+      if (action.action !== "click" && action.clickCount !== undefined) {
+        context.addIssue({
+          code: "custom",
+          message: "pointer clickCount requires click",
         });
       }
     }),

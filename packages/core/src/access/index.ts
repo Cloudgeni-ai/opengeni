@@ -20,6 +20,7 @@ import type { ManagedAuth } from "../managed-auth-type";
 import { getManagedSession } from "../managed-session";
 
 const bearerPrefix = "Bearer ";
+const accessContextByRequest = new WeakMap<Request, Promise<AccessContext | null>>();
 
 export type AccessDeps = {
   db: Database;
@@ -28,7 +29,12 @@ export type AccessDeps = {
 };
 
 export async function requireAccessContext(c: Context, deps: AccessDeps): Promise<AccessContext> {
-  const context = await resolveAccessContext(c, deps);
+  let pending = accessContextByRequest.get(c.req.raw);
+  if (!pending) {
+    pending = resolveAccessContext(c, deps);
+    accessContextByRequest.set(c.req.raw, pending);
+  }
+  const context = await pending;
   if (!context) {
     throw new HTTPException(401, { message: "authentication required" });
   }

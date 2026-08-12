@@ -192,7 +192,7 @@ import {
   observeBrowserRevisionPublication,
   observeLifecycleResult,
 } from "../interaction-metrics";
-import { withChannelA, type ChannelAOperation } from "../sandbox/channel-a";
+import { withChannelA, withChannelARead, type ChannelAOperation } from "../sandbox/channel-a";
 import { sanitizeFilename } from "./files";
 
 const BROWSER_DRIVER_ID = "opengeni.cdp.v1";
@@ -712,6 +712,11 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         if (!upload || upload.file.id !== save.fileId || upload.file.objectKey !== save.objectKey) {
           throw new InteractionResourceStateError("Browser download file authority is unavailable");
         }
+        const controllerRecord = await getBrowserSessionControlRecord(deps.db, {
+          accountId: grant.accountId,
+          workspaceId,
+          browserSessionId,
+        });
         if (upload.status === "pending") {
           if (save.state !== "prepared") {
             throw new InteractionResourceStateError(
@@ -723,6 +728,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
             contentType: save.contentType,
             sha256: save.download.sha256,
             expiresInSeconds: BROWSER_WORKSPACE_FILE_AUTHORITY_TTL_SECONDS,
+            audience: signedUrlAudienceForPlacement(controllerRecord.session.placement),
           });
           save = await prepareBrowserDownloadSave(deps.db, {
             ...identity,
@@ -788,6 +794,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         const get = await objectStorage.createGetUrl({
           key: upload.file.objectKey,
           expiresInSeconds: BROWSER_WORKSPACE_FILE_AUTHORITY_TTL_SECONDS,
+          audience: signedUrlAudienceForPlacement(controllerRecord.session.placement),
         });
         const sourceSession = await requireSourceSession(deps, workspaceId, save.sourceSessionId);
         await authorizeSourceSession(deps, grant, save.sourceSessionId, "session.control");
@@ -882,7 +889,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         browserSessionId,
         "session.control",
         "browser.control",
-        async ({ sessionClient, binding }) => {
+        async ({ sessionClient, binding, record }) => {
           const command = BrowserActionCommand.parse({
             protocolVersion: BROWSER_CONTROL_PROTOCOL_VERSION,
             operationId: request.operationId,
@@ -926,6 +933,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
                   const signed = await deps.objectStorage!.createGetUrl({
                     key: file!.objectKey,
                     expiresInSeconds: BROWSER_WORKSPACE_FILE_AUTHORITY_TTL_SECONDS,
+                    audience: signedUrlAudienceForPlacement(record.session.placement),
                   });
                   return {
                     fileId: file!.id,
@@ -1629,7 +1637,10 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         "browser.attach",
         async ({ client, sessionClient, record, binding, placement }) => {
           if (origin) await client.addAllowedOrigins([origin]);
-          await sessionClient.observe(request.targetId);
+          const targets = await sessionClient.listTargets();
+          if (!targets.some((target) => target.id === request.targetId)) {
+            throw new HTTPException(404, { message: "browser target does not exist" });
+          }
           const grantId = randomUUID();
           const expiresAt = new Date(Date.now() + request.expiresInSeconds * 1_000).toISOString();
           const rootSecret = browserAuthorityRoot(deps);
@@ -1823,6 +1834,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
               const signed = await objectStorage.createPutUrl({
                 key: objectKey,
                 contentType: BROWSER_STATE_ARTIFACT_CONTENT_TYPE,
+                audience: signedUrlAudienceForPlacement(activeRecord.session.placement),
               });
 
               let receipt;
@@ -2010,6 +2022,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
               const signed = await objectStorage.createPutUrl({
                 key: objectKey,
                 contentType: BROWSER_STATE_ARTIFACT_CONTENT_TYPE,
+                audience: signedUrlAudienceForPlacement(record.session.placement),
               });
               const client = await provisionController(deps, grant, record, placement, origin);
               let receipt: PlacementBrowserStateCaptureReceipt;
@@ -2521,7 +2534,13 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         },
       });
     }
-    return await withChannelA(
+    const runWithChannelA =
+      operation === "browser.read" ||
+      operation === "browser.control" ||
+      operation === "browser.attach"
+        ? withChannelARead
+        : withChannelA;
+    return await runWithChannelA(
       channelServices,
       {
         accountId: grant.accountId,
@@ -3157,6 +3176,7 @@ async function prepareBrowserArtifactRestore(
   try {
     const signed = await objectStorage.createGetUrl({
       key: artifact.objectKey,
+      audience: signedUrlAudienceForPlacement(placement),
     });
     return {
       objectKey: artifact.objectKey,
@@ -3217,6 +3237,10 @@ function sameInteractionPlacement(
         left.placementId === right.placementId
       );
   }
+}
+
+function signedUrlAudienceForPlacement(placement: InteractionPlacement): "public" | "sandbox" {
+  return placement.kind === "sandbox_group" ? "sandbox" : "public";
 }
 
 async function ensureInteractionHolder(

@@ -2033,13 +2033,15 @@ function mockScrollerLayout(
       tipTopInScroller = topInScroller;
     },
     tipBottomGap() {
-      const tip = findTip();
-      if (!tip) {
+      if (!findTip()) {
         throw new Error("expected tip element");
       }
-      const tipRect = tip.getBoundingClientRect();
-      const nodeRect = scroller.getBoundingClientRect();
-      return Math.abs(tipRect.bottom - (nodeRect.bottom - options.paddingBottom));
+      // The helper owns this synthetic layout. Derive both edges from that
+      // state so an unrelated test's process-global DOM rect stub cannot make
+      // a correctly parked camera appear one padding-width short of the tip.
+      const tipBottom = scrollerTop + tipTopInScroller - currentScrollTop + options.tipHeight;
+      const viewportBottom = scrollerTop + options.clientHeight - options.paddingBottom;
+      return Math.abs(tipBottom - viewportBottom);
     },
     restore() {
       Element.prototype.getBoundingClientRect = scrollerElementRect;

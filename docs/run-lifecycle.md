@@ -483,13 +483,13 @@ execution gets one explicit `interrupted / outcome unknown` closure.
 
 Claim, interruption, and event-writing settlement share one lock order:
 `workspace_inference_controls FOR SHARE` when the write is control-aware, then
-the actual `workspaces` row `FOR KEY SHARE`, UUID-ordered sessions `FOR UPDATE`,
+the actual `workspaces` row `FOR KEY SHARE`, UUID-ordered sessions `FOR NO KEY UPDATE`,
 UUID-ordered exact turns `FOR UPDATE`, and UUID-ordered exact attempts
 `FOR UPDATE`. Generic audit/title appends skip the control row but use the same
 workspace-key-share prefix. Event inserts also touch the workspace through their
 foreign keys, so acquiring it later would reintroduce a claim/preemption
-deadlock; key-share rather than update keeps unrelated sessions in one workspace
-concurrent. Start, requires-action, ordinary terminal, recoverable interruption,
+deadlock; the session lock excludes competing mutation while remaining compatible
+with FK key-share checks. Start, requires-action, ordinary terminal, recoverable interruption,
 supersession, and worker-death events commit
 with turn status, session status/pointer, and `lastSequence` in one transaction.
 Generic appends and operation-keyed Agent Message/Steer commands retry PostgreSQL
@@ -617,6 +617,15 @@ provider promise to settle. Timeout, missing marker, and transport failure remai
 non-proof. The queue/chrome projection renders this period as stopping previous
 work (or current work under Pause), never as a first-step wait or a completed
 direction change.
+
+Model-facing shell waits preserve that same cancellation boundary without
+making the model poll it. `exec_command` and `write_stdin` divide the requested
+wait window into provider calls of at most 250 ms, checking the turn fence
+between slices. A short command therefore returns its terminal result from the
+original tool call, while an explicitly short yield or a command still running
+after the requested window returns the retained session id. Empty internal
+polls use the exact process-control route and never create another model turn or
+workspace mutation admission.
 
 The direct receipt remains the preferred path. If its three Postgres attempts
 exhaust, `runAgentTurn` does not suppress the failure or infer a receipt from
@@ -956,6 +965,11 @@ wrong one is the classic mistake.
    history copy receives the deterministic bounded artifact receipt (or an
    explicit unavailable fact), never the provider object key or re-encoded
    base64 source.
+   Function-transport `view_image` also validates the declared data-URL type
+   against those supported magic bytes before constructing structured model
+   image content. Unsupported or mismatched bytes return a concise conversion
+   instruction as the tool result, so they cannot become a provider-level
+   invalid-image request.
    New generated images follow the same no-inline-byte rule but are permanent
    workspace files: native hosted base64 is retained before serialization and
    adapter tools return the same compact `generated_image` receipt. A later
@@ -1177,3 +1191,9 @@ types its wire protocol cannot represent. Historical `tool_search` and other
 tool call/output pairs are completed facts, not authorization to execute again.
 The projection is discarded after the request. Portable sessions may switch
 between supported providers; `remote_v2` sessions remain Codex-only.
+
+## Agent-loop request lifecycle observability
+
+Provider request lifecycle diagnostics are synchronous, bounded, and best-effort. The Codex transport reports `headers`, `first_byte`, and one semantic `terminal` phase with a monotonic elapsed duration; terminal outcomes are `completed`, `failed`, or `timed_out`. The worker maps these to `opengeni_model_request_phases_total{provider,phase,outcome}` and `opengeni_model_request_phase_duration_seconds{provider,phase}`. Provider ids come from the resolved provider registry; request ids, model bodies, credentials, session ids, and token content are not metric labels.
+
+The diagnostic observer runs before the existing awaited `agent.model.request` durable audit callback and cannot block or change it. Durable append/publish fencing and ordering therefore remain the source of audit truth. A Codex `response.completed`/`response.done` terminal is latched before downstream stream cleanup; if the consumer cancels after parsing that semantic terminal, the audit remains `completed` rather than producing a misleading trailing `failed`. Actual provider failure/incomplete/error, transport failure, timeout, or caller abort remains failed/timed out.

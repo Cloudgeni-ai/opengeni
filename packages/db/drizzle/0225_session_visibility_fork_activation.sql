@@ -15,6 +15,28 @@ ALTER TABLE "session_attempt_interruptions"
 ALTER TABLE "session_attempt_interruptions"
   VALIDATE CONSTRAINT "session_attempt_interruptions_kind_check";
 
+ALTER TABLE "sessions"
+  ADD COLUMN "owner_subject_id" text;
+
+UPDATE "sessions" session_row
+SET "owner_subject_id" = membership."subject_id"
+FROM "organization_memberships" membership
+WHERE session_row."owner_organization_membership_id" = membership."id"
+  AND session_row."account_id" = membership."account_id"
+  AND session_row."owner_subject_id" IS NULL;
+
+ALTER TABLE "sessions"
+  ADD CONSTRAINT "sessions_owner_subject_pair_check" CHECK (
+    ("owner_organization_membership_id" IS NULL) = ("owner_subject_id" IS NULL)
+  ) NOT VALID,
+  ADD CONSTRAINT "sessions_owner_subject_account_fk"
+    FOREIGN KEY ("account_id", "owner_subject_id")
+    REFERENCES "organization_memberships" ("account_id", "subject_id")
+    ON DELETE RESTRICT NOT VALID;
+ALTER TABLE "sessions"
+  VALIDATE CONSTRAINT "sessions_owner_subject_pair_check",
+  VALIDATE CONSTRAINT "sessions_owner_subject_account_fk";
+
 DROP POLICY IF EXISTS organization_tenancy_lifecycle ON "organization_memberships";
 CREATE POLICY organization_tenancy_lifecycle ON "organization_memberships"
   USING (
@@ -36,6 +58,434 @@ CREATE POLICY organization_tenancy_lifecycle ON "organization_user_resource_gran
     current_setting('opengeni.organization_tenancy_lifecycle', true)
       IN ('managed_human_provisioning', 'session_visibility_activation')
   );
+
+DO $session_visibility_write_fence$
+DECLARE
+  data_schema text := current_schema();
+  migration_owner text := current_user;
+BEGIN
+  EXECUTE format(
+    'CREATE TABLE IF NOT EXISTS %I.session_visibility_write_capabilities ('
+      || 'backend_pid integer NOT NULL, '
+      || 'transaction_id xid8 NOT NULL, '
+      || 'capability_id uuid NOT NULL, '
+      || 'PRIMARY KEY (backend_pid, transaction_id, capability_id)'
+      || ')',
+    data_schema
+  );
+  EXECUTE format(
+    'ALTER TABLE %I.session_visibility_write_capabilities '
+      || 'ENABLE ROW LEVEL SECURITY',
+    data_schema
+  );
+  EXECUTE format(
+    'ALTER TABLE %I.session_visibility_write_capabilities '
+      || 'FORCE ROW LEVEL SECURITY',
+    data_schema
+  );
+  EXECUTE format(
+    'DROP POLICY IF EXISTS session_visibility_capability_owner '
+      || 'ON %I.session_visibility_write_capabilities',
+    data_schema
+  );
+  EXECUTE format(
+    'CREATE POLICY session_visibility_capability_owner '
+      || 'ON %I.session_visibility_write_capabilities '
+      || 'FOR ALL USING (current_user = %L) WITH CHECK (current_user = %L)',
+    data_schema,
+    migration_owner,
+    migration_owner
+  );
+  EXECUTE format(
+    'REVOKE ALL ON %I.session_visibility_write_capabilities FROM PUBLIC',
+    data_schema
+  );
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
+    EXECUTE format(
+      'REVOKE ALL ON %I.session_visibility_write_capabilities FROM opengeni_app',
+      data_schema
+    );
+  END IF;
+
+  EXECUTE format($ddl$
+    CREATE OR REPLACE FUNCTION %1$I.guard_session_authority_write()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = %1$I, pg_catalog
+    AS $body$
+    DECLARE
+      resolved_owner_id uuid;
+      resolved_owner_subject_id text;
+      owner_provenance_supplied boolean :=
+        NEW.owner_organization_membership_id IS NOT NULL
+        OR NEW.owner_subject_id IS NOT NULL;
+      previous_lifecycle_marker text := pg_catalog.current_setting(
+        'opengeni.organization_tenancy_lifecycle', true
+      );
+    BEGIN
+      IF TG_OP = 'INSERT'
+        AND NEW.owner_organization_membership_id IS NULL
+        AND NEW.owner_subject_id IS NULL
+      THEN
+        IF NEW.parent_session_id IS NOT NULL THEN
+          SELECT parent.owner_organization_membership_id, parent.owner_subject_id
+          INTO resolved_owner_id, resolved_owner_subject_id
+          FROM sessions parent
+          WHERE parent.account_id = NEW.account_id
+            AND parent.workspace_id = NEW.workspace_id
+            AND parent.id = NEW.parent_session_id;
+        ELSIF NEW.created_by_kind = 'subject'
+          AND NEW.created_by_subject_id IS NOT NULL
+        THEN
+          PERFORM pg_catalog.set_config(
+            'opengeni.organization_tenancy_lifecycle',
+            'session_visibility_activation',
+            true
+          );
+          SELECT membership.id, membership.subject_id
+          INTO resolved_owner_id, resolved_owner_subject_id
+          FROM organization_memberships membership
+          WHERE membership.account_id = NEW.account_id
+            AND membership.subject_id = NEW.created_by_subject_id
+            AND membership.status = 'active'
+            AND EXISTS (
+              SELECT 1
+              FROM workspace_memberships workspace_membership
+              WHERE workspace_membership.account_id = NEW.account_id
+                AND workspace_membership.workspace_id = NEW.workspace_id
+                AND workspace_membership.subject_id = membership.subject_id
+            );
+        END IF;
+        NEW.owner_organization_membership_id := resolved_owner_id;
+        NEW.owner_subject_id := resolved_owner_subject_id;
+        PERFORM pg_catalog.set_config(
+          'opengeni.organization_tenancy_lifecycle',
+          CASE WHEN previous_lifecycle_marker IS NULL THEN '' ELSE previous_lifecycle_marker END,
+          true
+        );
+      END IF;
+
+      IF (NEW.owner_organization_membership_id IS NULL)
+          <> (NEW.owner_subject_id IS NULL)
+        OR (NEW.visibility = 'user_private'
+          AND NEW.owner_organization_membership_id IS NULL)
+      THEN
+        RAISE EXCEPTION 'session authority owner provenance is incomplete'
+          USING ERRCODE = '23514';
+      END IF;
+
+      IF TG_OP = 'UPDATE'
+        AND (
+          NEW.visibility IS DISTINCT FROM OLD.visibility
+          OR NEW.owner_organization_membership_id
+            IS DISTINCT FROM OLD.owner_organization_membership_id
+          OR NEW.owner_subject_id IS DISTINCT FROM OLD.owner_subject_id
+          OR NEW.authority_epoch IS DISTINCT FROM OLD.authority_epoch
+          OR NEW.forked_from_session_id IS DISTINCT FROM OLD.forked_from_session_id
+          OR NEW.forked_from_authority_epoch
+            IS DISTINCT FROM OLD.forked_from_authority_epoch
+          OR NEW.forked_from_visibility IS DISTINCT FROM OLD.forked_from_visibility
+          OR NEW.forked_at IS DISTINCT FROM OLD.forked_at
+          OR NEW.forked_by_organization_membership_id
+            IS DISTINCT FROM OLD.forked_by_organization_membership_id
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM session_visibility_write_capabilities capability
+          WHERE capability.backend_pid = pg_catalog.pg_backend_pid()
+            AND capability.transaction_id = pg_catalog.pg_current_xact_id()
+            AND capability.capability_id = nullif(
+              pg_catalog.current_setting(
+                'opengeni.session_visibility_write_capability', true
+              ),
+              ''
+            )::uuid
+        )
+      THEN
+        RAISE EXCEPTION 'session authority changes require the lifecycle capability'
+          USING ERRCODE = '42501';
+      END IF;
+
+      IF TG_OP = 'INSERT'
+        AND (
+          NEW.visibility <> 'workspace_shared'
+          OR NEW.authority_epoch <> 1
+          OR NEW.forked_from_session_id IS NOT NULL
+          OR NEW.forked_from_authority_epoch IS NOT NULL
+          OR NEW.forked_from_visibility IS NOT NULL
+          OR NEW.forked_at IS NOT NULL
+          OR NEW.forked_by_organization_membership_id IS NOT NULL
+          OR owner_provenance_supplied
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM session_visibility_write_capabilities capability
+          WHERE capability.backend_pid = pg_catalog.pg_backend_pid()
+            AND capability.transaction_id = pg_catalog.pg_current_xact_id()
+            AND capability.capability_id = nullif(
+              pg_catalog.current_setting(
+                'opengeni.session_visibility_write_capability', true
+              ),
+              ''
+            )::uuid
+        )
+      THEN
+        RAISE EXCEPTION 'non-default session authority requires the lifecycle capability'
+          USING ERRCODE = '42501';
+      END IF;
+      RETURN NEW;
+    EXCEPTION WHEN OTHERS THEN
+      PERFORM pg_catalog.set_config(
+        'opengeni.organization_tenancy_lifecycle',
+        CASE WHEN previous_lifecycle_marker IS NULL THEN '' ELSE previous_lifecycle_marker END,
+        true
+      );
+      RAISE;
+    END;
+    $body$;
+  $ddl$, data_schema);
+  EXECUTE format(
+    'DROP TRIGGER IF EXISTS sessions_authority_write_fence ON %I.sessions',
+    data_schema
+  );
+  EXECUTE format(
+    'CREATE TRIGGER sessions_authority_write_fence '
+      || 'BEFORE INSERT OR UPDATE ON %I.sessions '
+      || 'FOR EACH ROW EXECUTE FUNCTION %I.guard_session_authority_write()',
+    data_schema,
+    data_schema
+  );
+END
+$session_visibility_write_fence$;
+
+DO $session_visibility_rls$
+DECLARE
+  data_schema text := current_schema();
+  target record;
+  policy_expression text;
+  manual_table text;
+BEGIN
+  EXECUTE format($ddl$
+    CREATE OR REPLACE FUNCTION %1$I.session_private_actor_visible(
+      p_account_id uuid,
+      p_workspace_id uuid,
+      p_owner_organization_membership_id uuid,
+      p_owner_subject_id text
+    ) RETURNS boolean
+    LANGUAGE plpgsql
+    STABLE
+    SECURITY DEFINER
+    SET search_path = %1$I, pg_catalog
+    AS $body$
+    DECLARE
+      actor_subject_id text := nullif(
+        pg_catalog.current_setting('opengeni.subject_id', true), ''
+      );
+      initiating_human_subject_id text := nullif(
+        pg_catalog.current_setting('opengeni.initiating_human_subject_id', true), ''
+      );
+      previous_lifecycle_marker text := pg_catalog.current_setting(
+        'opengeni.organization_tenancy_lifecycle', true
+      );
+      visible boolean := false;
+    BEGIN
+      IF p_account_id IS NULL
+        OR p_workspace_id IS NULL
+        OR p_owner_organization_membership_id IS NULL
+        OR p_owner_subject_id IS NULL
+        OR (
+          actor_subject_id IS DISTINCT FROM p_owner_subject_id
+          AND initiating_human_subject_id IS DISTINCT FROM p_owner_subject_id
+        )
+      THEN
+        RETURN false;
+      END IF;
+      PERFORM pg_catalog.set_config(
+        'opengeni.organization_tenancy_lifecycle',
+        'session_visibility_activation',
+        true
+      );
+      SELECT EXISTS (
+        SELECT 1
+        FROM organization_memberships membership
+        WHERE membership.account_id = p_account_id
+          AND membership.id = p_owner_organization_membership_id
+          AND membership.subject_id = p_owner_subject_id
+          AND membership.status = 'active'
+          AND EXISTS (
+            SELECT 1
+            FROM workspace_memberships workspace_membership
+            WHERE workspace_membership.account_id = p_account_id
+              AND workspace_membership.workspace_id = p_workspace_id
+              AND workspace_membership.subject_id = p_owner_subject_id
+          )
+      ) INTO visible;
+      PERFORM pg_catalog.set_config(
+        'opengeni.organization_tenancy_lifecycle',
+        CASE WHEN previous_lifecycle_marker IS NULL THEN '' ELSE previous_lifecycle_marker END,
+        true
+      );
+      RETURN visible;
+    EXCEPTION WHEN OTHERS THEN
+      PERFORM pg_catalog.set_config(
+        'opengeni.organization_tenancy_lifecycle',
+        CASE WHEN previous_lifecycle_marker IS NULL THEN '' ELSE previous_lifecycle_marker END,
+        true
+      );
+      RAISE;
+    END;
+    $body$;
+  $ddl$, data_schema);
+  EXECUTE format(
+    'REVOKE ALL ON FUNCTION %I.session_private_actor_visible(uuid,uuid,uuid,text) FROM PUBLIC',
+    data_schema
+  );
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
+    EXECUTE format(
+      'GRANT EXECUTE ON FUNCTION %I.session_private_actor_visible(uuid,uuid,uuid,text) TO opengeni_app',
+      data_schema
+    );
+  END IF;
+
+  EXECUTE format($ddl$
+    CREATE OR REPLACE FUNCTION %1$I.session_reference_visible(
+      p_account_id uuid,
+      p_workspace_id uuid,
+      p_session_id uuid
+    ) RETURNS boolean
+    LANGUAGE sql
+    STABLE
+    SECURITY INVOKER
+    SET search_path = %1$I, pg_catalog
+    AS $body$
+      SELECT p_session_id IS NULL OR EXISTS (
+        SELECT 1
+        FROM sessions session_row
+        WHERE session_row.account_id = p_account_id
+          AND session_row.workspace_id = p_workspace_id
+          AND session_row.id = p_session_id
+      )
+    $body$;
+  $ddl$, data_schema);
+
+  EXECUTE format('DROP POLICY IF EXISTS session_visibility_isolation ON %I.sessions', data_schema);
+  EXECUTE format(
+    'CREATE POLICY session_visibility_isolation ON %1$I.sessions AS RESTRICTIVE '
+      || 'FOR ALL USING ('
+      || 'nullif(pg_catalog.current_setting(''opengeni.subject_id'', true), '''') IS NULL '
+      || 'OR visibility = ''workspace_shared'' '
+      || 'OR %1$I.session_private_actor_visible('
+      || 'account_id, workspace_id, owner_organization_membership_id, owner_subject_id)'
+      || ') WITH CHECK ('
+      || 'nullif(pg_catalog.current_setting(''opengeni.subject_id'', true), '''') IS NULL '
+      || 'OR visibility = ''workspace_shared'' '
+      || 'OR %1$I.session_private_actor_visible('
+      || 'account_id, workspace_id, owner_organization_membership_id, owner_subject_id)'
+      || ')',
+    data_schema
+  );
+
+  FOR target IN
+    SELECT
+      relation.relname AS table_name,
+      pg_catalog.string_agg(
+        pg_catalog.format(
+          '%1$I.session_reference_visible(account_id, workspace_id, %2$I)',
+          data_schema,
+          attribute.attname
+        ),
+        ' AND ' ORDER BY attribute.attname
+      ) AS expression
+    FROM pg_catalog.pg_constraint constraint_row
+    JOIN pg_catalog.pg_class relation
+      ON relation.oid = constraint_row.conrelid
+    JOIN pg_catalog.pg_namespace relation_namespace
+      ON relation_namespace.oid = relation.relnamespace
+    JOIN pg_catalog.pg_class referenced_relation
+      ON referenced_relation.oid = constraint_row.confrelid
+    JOIN pg_catalog.pg_namespace referenced_namespace
+      ON referenced_namespace.oid = referenced_relation.relnamespace
+    JOIN LATERAL pg_catalog.unnest(constraint_row.conkey)
+      WITH ORDINALITY source_key(attnum, ordinality) ON true
+    JOIN LATERAL pg_catalog.unnest(constraint_row.confkey)
+      WITH ORDINALITY referenced_key(attnum, ordinality)
+      ON referenced_key.ordinality = source_key.ordinality
+    JOIN pg_catalog.pg_attribute attribute
+      ON attribute.attrelid = relation.oid
+      AND attribute.attnum = source_key.attnum
+    JOIN pg_catalog.pg_attribute referenced_attribute
+      ON referenced_attribute.attrelid = referenced_relation.oid
+      AND referenced_attribute.attnum = referenced_key.attnum
+    WHERE constraint_row.contype = 'f'
+      AND relation_namespace.nspname = data_schema
+      AND referenced_namespace.nspname = data_schema
+      AND referenced_relation.relname = 'sessions'
+      AND referenced_attribute.attname = 'id'
+      AND relation.relname <> 'sessions'
+      AND relation.relrowsecurity
+      AND EXISTS (
+        SELECT 1 FROM pg_catalog.pg_attribute account_column
+        WHERE account_column.attrelid = relation.oid
+          AND account_column.attname = 'account_id'
+          AND NOT account_column.attisdropped
+      )
+      AND EXISTS (
+        SELECT 1 FROM pg_catalog.pg_attribute workspace_column
+        WHERE workspace_column.attrelid = relation.oid
+          AND workspace_column.attname = 'workspace_id'
+          AND NOT workspace_column.attisdropped
+      )
+    GROUP BY relation.relname
+  LOOP
+    EXECUTE format(
+      'DROP POLICY IF EXISTS session_visibility_isolation ON %I.%I',
+      data_schema,
+      target.table_name
+    );
+    EXECUTE format(
+      'CREATE POLICY session_visibility_isolation ON %I.%I AS RESTRICTIVE '
+        || 'FOR ALL USING (%s) WITH CHECK (%s)',
+      data_schema,
+      target.table_name,
+      target.expression,
+      target.expression
+    );
+  END LOOP;
+
+  FOREACH manual_table IN ARRAY ARRAY[
+    'connector_action_requests',
+    'memory_slack_publications',
+    'model_call_facts',
+    'session_attempt_codemode_calls',
+    'session_attempt_tool_catalogs',
+    'session_human_input_requests',
+    'usage_events'
+  ]
+  LOOP
+    IF pg_catalog.to_regclass(pg_catalog.format('%I.%I', data_schema, manual_table)) IS NULL THEN
+      CONTINUE;
+    END IF;
+    policy_expression := format(
+      '%I.session_reference_visible(account_id, workspace_id, session_id)',
+      data_schema
+    );
+    EXECUTE format(
+      'DROP POLICY IF EXISTS session_visibility_isolation ON %I.%I',
+      data_schema,
+      manual_table
+    );
+    EXECUTE format(
+      'CREATE POLICY session_visibility_isolation ON %I.%I AS RESTRICTIVE '
+        || 'FOR ALL USING (%s) WITH CHECK (%s)',
+      data_schema,
+      manual_table,
+      policy_expression,
+      policy_expression
+    );
+  END LOOP;
+END
+$session_visibility_rls$;
 
 DO $session_visibility_activation$
 DECLARE
@@ -82,6 +532,10 @@ BEGIN
       goal_count integer := 0;
       grant_count integer := 0;
       result_payload jsonb;
+      visibility_write_capability_id uuid := pg_catalog.gen_random_uuid();
+      previous_visibility_write_capability text := pg_catalog.current_setting(
+        'opengeni.session_visibility_write_capability', true
+      );
       previous_lifecycle_marker text := pg_catalog.current_setting(
         'opengeni.organization_tenancy_lifecycle', true
       );
@@ -159,6 +613,12 @@ BEGIN
         RAISE EXCEPTION 'session visibility transition is owner-only'
           USING ERRCODE = '42501';
       END IF;
+      IF session_row.owner_organization_membership_id IS NULL
+        OR session_row.owner_subject_id IS NULL
+      THEN
+        RAISE EXCEPTION 'legacy workspace session has no transferable owner authority'
+          USING ERRCODE = '42501';
+      END IF;
 
       INSERT INTO session_command_receipts (
         account_id, workspace_id, actor_type, actor_subject_id, action,
@@ -214,9 +674,6 @@ BEGIN
       END IF;
 
       new_owner_id := session_row.owner_organization_membership_id;
-      IF p_target_visibility = 'user_private' AND new_owner_id IS NULL THEN
-        new_owner_id := actor_membership.id;
-      END IF;
       IF session_row.visibility = p_target_visibility THEN
         new_epoch := session_row.authority_epoch;
       ELSE
@@ -236,7 +693,8 @@ BEGIN
         WHERE attempt.workspace_id = p_workspace_id
           AND attempt.session_id = p_session_id
           AND attempt.state IN ('claimed', 'running')
-        ON CONFLICT (operation_id, attempt_id) DO NOTHING;
+        ON CONFLICT ON CONSTRAINT session_attempt_interruptions_operation_attempt_uq
+        DO NOTHING;
         GET DIAGNOSTICS interruption_count = ROW_COUNT;
 
         UPDATE session_turns turn_row
@@ -249,7 +707,7 @@ BEGIN
         GET DIAGNOSTICS turn_count = ROW_COUNT;
 
         UPDATE session_system_updates update_row
-        SET state = 'cancelled', updated_at = pg_catalog.clock_timestamp()
+        SET state = 'cancelled'
         WHERE update_row.workspace_id = p_workspace_id
           AND update_row.session_id = p_session_id
           AND update_row.state = 'pending';
@@ -275,18 +733,42 @@ BEGIN
         GET DIAGNOSTICS grant_count = ROW_COUNT;
 
         event_sequence := session_row.last_sequence + 1;
-        UPDATE sessions
+        INSERT INTO session_visibility_write_capabilities (
+          backend_pid, transaction_id, capability_id
+        ) VALUES (
+          pg_catalog.pg_backend_pid(),
+          pg_catalog.pg_current_xact_id(),
+          visibility_write_capability_id
+        );
+        PERFORM pg_catalog.set_config(
+          'opengeni.session_visibility_write_capability',
+          visibility_write_capability_id::text,
+          true
+        );
+        UPDATE sessions transition_target
         SET visibility = p_target_visibility,
             owner_organization_membership_id = new_owner_id,
+            owner_subject_id = session_row.owner_subject_id,
             authority_epoch = new_epoch,
             initial_personal_connection_delegations = '[]'::jsonb,
             last_sequence = event_sequence,
             updated_at = pg_catalog.clock_timestamp()
-        WHERE id = p_session_id AND authority_epoch = session_row.authority_epoch;
+        WHERE transition_target.id = p_session_id
+          AND transition_target.authority_epoch = session_row.authority_epoch;
         IF NOT FOUND THEN
           RAISE EXCEPTION 'session visibility transition lost authority epoch CAS'
             USING ERRCODE = '40001';
         END IF;
+        DELETE FROM session_visibility_write_capabilities capability
+        WHERE capability.backend_pid = pg_catalog.pg_backend_pid()
+          AND capability.transaction_id = pg_catalog.pg_current_xact_id()
+          AND capability.capability_id = visibility_write_capability_id;
+        PERFORM pg_catalog.set_config(
+          'opengeni.session_visibility_write_capability',
+          CASE WHEN previous_visibility_write_capability IS NULL
+            THEN '' ELSE previous_visibility_write_capability END,
+          true
+        );
 
         INSERT INTO session_events (
           account_id, workspace_id, session_id, sequence, type, payload, occurred_at
@@ -347,6 +829,12 @@ BEGIN
       PERFORM pg_catalog.set_config(
         'opengeni.organization_tenancy_lifecycle',
         CASE WHEN previous_lifecycle_marker IS NULL THEN '' ELSE previous_lifecycle_marker END,
+        true
+      );
+      PERFORM pg_catalog.set_config(
+        'opengeni.session_visibility_write_capability',
+        CASE WHEN previous_visibility_write_capability IS NULL
+          THEN '' ELSE previous_visibility_write_capability END,
         true
       );
       RAISE;
@@ -420,6 +908,10 @@ BEGIN
       previous_gate_workspace_id text := pg_catalog.current_setting(
         'opengeni.session_activity_gate_workspace_id', true
       );
+      previous_visibility_marker text := pg_catalog.current_setting(
+        'opengeni.session_visibility_write_capability', true
+      );
+      visibility_write_capability_id uuid := pg_catalog.gen_random_uuid();
     BEGIN
       IF p_account_id IS NULL OR p_source_workspace_id IS NULL
         OR p_source_session_id IS NULL OR p_actor_subject_id IS NULL
@@ -655,6 +1147,18 @@ BEGIN
       destination_session_id := pg_catalog.gen_random_uuid();
       destination_owner_id := CASE WHEN p_destination_visibility = 'user_private'
         THEN actor_membership.id ELSE actor_membership.id END;
+      INSERT INTO session_visibility_write_capabilities (
+        backend_pid, transaction_id, capability_id
+      ) VALUES (
+        pg_catalog.pg_backend_pid(),
+        pg_catalog.pg_current_xact_id(),
+        visibility_write_capability_id
+      );
+      PERFORM pg_catalog.set_config(
+        'opengeni.session_visibility_write_capability',
+        visibility_write_capability_id::text,
+        true
+      );
       PERFORM pg_catalog.set_config('opengeni.session_activity_gate_state', 'open', true);
       PERFORM pg_catalog.set_config(
         'opengeni.session_activity_gate_workspace_id',
@@ -668,7 +1172,8 @@ BEGIN
         title, title_source, instructions, policy_role,
         resources, skills, tools, metadata,
         created_by_kind, created_by_subject_id, created_by_context,
-        owner_organization_membership_id, visibility, authority_epoch,
+        owner_organization_membership_id, owner_subject_id,
+        visibility, authority_epoch,
         forked_from_session_id, forked_from_authority_epoch,
         forked_from_visibility, forked_at,
         forked_by_organization_membership_id,
@@ -691,7 +1196,8 @@ BEGIN
         source_session.instructions, source_session.policy_role,
         destination_resources, '[]'::jsonb, '[]'::jsonb, '{}'::jsonb,
         'subject', p_actor_subject_id, '{"fork":true}'::jsonb,
-        destination_owner_id, p_destination_visibility, 1,
+        destination_owner_id, actor_membership.subject_id,
+        p_destination_visibility, 1,
         p_source_session_id, source_session.authority_epoch,
         source_session.visibility, pg_catalog.clock_timestamp(), actor_membership.id,
         source_session.model, source_session.sandbox_backend,
@@ -764,6 +1270,15 @@ BEGIN
         sessions_activity_update_commit_guard IMMEDIATE;
       PERFORM pg_catalog.set_config('opengeni.session_activity_gate_state', '', true);
       PERFORM pg_catalog.set_config('opengeni.session_activity_gate_workspace_id', '', true);
+      PERFORM pg_catalog.set_config(
+        'opengeni.session_visibility_write_capability',
+        CASE WHEN previous_visibility_marker IS NULL THEN '' ELSE previous_visibility_marker END,
+        true
+      );
+      DELETE FROM session_visibility_write_capabilities capability
+      WHERE capability.backend_pid = pg_catalog.pg_backend_pid()
+        AND capability.transaction_id = pg_catalog.pg_current_xact_id()
+        AND capability.capability_id = visibility_write_capability_id;
 
       PERFORM pg_catalog.set_config(
         'opengeni.workspace_id', p_source_workspace_id::text, true
@@ -817,6 +1332,11 @@ BEGIN
       PERFORM pg_catalog.set_config(
         'opengeni.session_activity_gate_workspace_id',
         CASE WHEN previous_gate_workspace_id IS NULL THEN '' ELSE previous_gate_workspace_id END,
+        true
+      );
+      PERFORM pg_catalog.set_config(
+        'opengeni.session_visibility_write_capability',
+        CASE WHEN previous_visibility_marker IS NULL THEN '' ELSE previous_visibility_marker END,
         true
       );
       RAISE;

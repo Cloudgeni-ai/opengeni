@@ -65,6 +65,12 @@ describe("first-party MCP tool-name contract", () => {
         firstPartyMcpTools: [...FIRST_PARTY_MCP_TOOL_NAMES],
       }).success,
     ).toBe(true);
+    expect(
+      CreateSessionRequest.parse({
+        initialMessage: "preserve stored Slack selection",
+        firstPartyMcpTools: ["slack_bot_post_message"],
+      }).firstPartyMcpTools,
+    ).toEqual(["slack_bot_post_message"]);
   });
 
   test("keeps every connector-wide tool outside the ordinary default selection", () => {

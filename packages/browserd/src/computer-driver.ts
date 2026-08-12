@@ -42,12 +42,14 @@ type TargetFrameStream = {
   subscriptions: Map<string, LatestComputerFrameSubscription>;
   sequence: number;
   stopped: boolean;
+  done: Promise<void> | null;
 };
 
 export type NativeComputerDriverOptions = {
   computerSessionId: string;
   controllerGeneration: string;
   client: ComputerNativeTransport;
+  clientFactory?: (() => Promise<ComputerNativeTransport>) | undefined;
   now?: () => Date;
 };
 
@@ -58,7 +60,9 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
   readonly capabilities: ComputerSessionCapabilities;
   private readonly computerSessionId: string;
   private readonly controllerGeneration: string;
-  private readonly client: ComputerNativeTransport;
+  private client: ComputerNativeTransport;
+  private readonly clientFactory: (() => Promise<ComputerNativeTransport>) | undefined;
+  private recovery: Promise<ComputerNativeTransport> | null = null;
   private readonly now: () => Date;
   private readonly frameStreams = new Map<string, TargetFrameStream>();
   private closed = false;
@@ -67,6 +71,7 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
     this.computerSessionId = options.computerSessionId;
     this.controllerGeneration = options.controllerGeneration;
     this.client = options.client;
+    this.clientFactory = options.clientFactory;
     this.now = options.now ?? (() => new Date());
     this.platform = options.client.handshake.platform;
     this.adapterId = `opengeni.native.${this.platform}.v1`;
@@ -76,7 +81,9 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
   async listTargets(): Promise<ComputerTargetValue[]> {
     this.assertOpen();
     try {
-      return (await this.client.targets()).map((target) => this.projectTarget(target));
+      return (await (await this.activeClient()).targets()).map((target) =>
+        this.projectTarget(target),
+      );
     } catch (error) {
       throw predispatchError(error);
     }
@@ -89,7 +96,7 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
   async observe(targetId: string): Promise<ComputerObservationValue> {
     this.assertOpen();
     try {
-      return this.projectObservation(await this.client.observe(targetId));
+      return this.projectObservation(await (await this.activeClient()).observe(targetId));
     } catch (error) {
       throw predispatchError(error);
     }
@@ -98,7 +105,7 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
   async validate(command: ComputerActionCommand): Promise<void> {
     this.assertOpen();
     try {
-      await this.client.validate(nativeCommand(command));
+      await (await this.activeClient()).validate(nativeCommand(command));
     } catch (error) {
       throw predispatchError(error);
     }
@@ -107,7 +114,9 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
   async dispatch(command: ComputerActionCommand): Promise<ComputerObservationValue> {
     this.assertOpen();
     try {
-      return this.projectObservation(await this.client.dispatch(nativeCommand(command)));
+      return this.projectObservation(
+        await (await this.activeClient()).dispatch(nativeCommand(command)),
+      );
     } catch (error) {
       if (error instanceof NativeComputerError && !error.dispatched) {
         throw new InteractionDefiniteDriverError(
@@ -123,7 +132,7 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
   async capture(targetId: string): Promise<ComputerImageFrame> {
     this.assertOpen();
     try {
-      return this.projectFrame(await this.client.capture(targetId), 0);
+      return this.projectFrame(await (await this.activeClient()).capture(targetId), 0);
     } catch (error) {
       throw predispatchError(error);
     }
@@ -135,7 +144,7 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
       return ComputerClipboard.parse({
         computerSessionId: this.computerSessionId,
         controllerGeneration: this.controllerGeneration,
-        ...(await this.client.clipboard()),
+        ...(await (await this.activeClient()).clipboard()),
         observedAt: this.now().toISOString(),
       });
     } catch (error) {
@@ -150,6 +159,10 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
     this.assertOpen();
     const normalized = normalizeComputerFrameStreamOptions(options);
     let stream = this.frameStreams.get(targetId);
+    if (stream?.stopped) {
+      await stream.done;
+      stream = this.frameStreams.get(targetId);
+    }
     let created = false;
     if (stream && !sameComputerFrameOptions(stream.options, normalized)) {
       throw new InteractionControllerError(
@@ -158,7 +171,13 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
       );
     }
     if (!stream) {
-      stream = { options: normalized, subscriptions: new Map(), sequence: 0, stopped: false };
+      stream = {
+        options: normalized,
+        subscriptions: new Map(),
+        sequence: 0,
+        stopped: false,
+        done: null,
+      };
       this.frameStreams.set(targetId, stream);
       created = true;
     }
@@ -174,7 +193,7 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
       this.releaseFrameSubscription(targetId, subscriptionId);
     });
     stream.subscriptions.set(subscriptionId, subscription);
-    if (created) void this.runFrameStream(targetId, stream);
+    if (created) stream.done = this.runFrameStream(targetId, stream);
     return subscription;
   }
 
@@ -187,6 +206,7 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
     });
     this.frameStreams.clear();
     await Promise.allSettled(subscriptions.map(async (subscription) => await subscription.close()));
+    await this.recovery?.catch(() => undefined);
     await this.client.close();
   }
 
@@ -216,42 +236,67 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
   }
 
   private async runFrameStream(targetId: string, stream: TargetFrameStream): Promise<void> {
-    let started = false;
+    const captureOptions: NativeComputerCaptureOptions = {
+      format: stream.options.format,
+      quality: stream.options.quality,
+      maxWidth: stream.options.maxWidth,
+      maxHeight: stream.options.maxHeight,
+    };
+    let recoveryAttempted = false;
     try {
-      const captureOptions: NativeComputerCaptureOptions = {
-        format: stream.options.format,
-        quality: stream.options.quality,
-        maxWidth: stream.options.maxWidth,
-        maxHeight: stream.options.maxHeight,
-      };
-      await this.client.startCapture(targetId, captureOptions);
-      started = true;
       while (!this.closed && !stream.stopped && stream.subscriptions.size > 0) {
-        const native = await this.client.capture(targetId, captureOptions);
-        stream.sequence += 1;
-        if (native.width > stream.options.maxWidth || native.height > stream.options.maxHeight) {
-          throw new InteractionControllerError(
-            "driver_failed",
-            "native frame did not honor the requested stream dimensions",
-          );
+        const client = await this.activeClient();
+        let started = false;
+        try {
+          await client.startCapture(targetId, captureOptions);
+          started = true;
+          while (!this.closed && !stream.stopped && stream.subscriptions.size > 0) {
+            const native = await client.capture(targetId, captureOptions);
+            stream.sequence += 1;
+            if (
+              native.width > stream.options.maxWidth ||
+              native.height > stream.options.maxHeight
+            ) {
+              throw new InteractionControllerError(
+                "driver_failed",
+                "native frame did not honor the requested stream dimensions",
+              );
+            }
+            const sequenced = this.projectFrame(native, stream.sequence);
+            for (const subscription of stream.subscriptions.values()) subscription.push(sequenced);
+            await delay(FRAME_INTERVAL_MS * stream.options.everyNthFrame);
+          }
+          return;
+        } catch (error) {
+          if (
+            !recoveryAttempted &&
+            !this.closed &&
+            !stream.stopped &&
+            stream.subscriptions.size > 0 &&
+            recoverableNativeFailure(error)
+          ) {
+            recoveryAttempted = true;
+            await this.recoverClient(client);
+            continue;
+          }
+          throw error;
+        } finally {
+          if (started) {
+            try {
+              await client.stopCapture(targetId);
+            } catch {
+              // Closing/replacing the helper is an equivalent teardown fence.
+            }
+          }
         }
-        const sequenced = this.projectFrame(native, stream.sequence);
-        for (const subscription of stream.subscriptions.values()) subscription.push(sequenced);
-        await delay(FRAME_INTERVAL_MS * stream.options.everyNthFrame);
       }
     } catch (error) {
+      stream.stopped = true;
       const failure = error instanceof Error ? error : new Error(String(error));
       for (const subscription of stream.subscriptions.values()) subscription.fail(failure);
     } finally {
-      if (started) {
-        try {
-          await this.client.stopCapture(targetId);
-        } catch {
-          // Closing the helper/controller is an equivalent teardown fence.
-        }
-      }
-      if (this.frameStreams.get(targetId) === stream) this.frameStreams.delete(targetId);
       stream.stopped = true;
+      if (this.frameStreams.get(targetId) === stream) this.frameStreams.delete(targetId);
     }
   }
 
@@ -282,6 +327,53 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
     if (this.closed)
       throw new InteractionControllerError("controller_lost", "computer driver closed");
   }
+
+  private async activeClient(): Promise<ComputerNativeTransport> {
+    if (this.recovery) await this.recovery;
+    this.assertOpen();
+    return this.client;
+  }
+
+  private async recoverClient(
+    failedClient: ComputerNativeTransport,
+  ): Promise<ComputerNativeTransport> {
+    if (this.client !== failedClient) return await this.activeClient();
+    if (this.recovery) return await this.recovery;
+    if (!this.clientFactory) {
+      throw new Error("native computer helper recovery is unavailable");
+    }
+    const recovery = (async () => {
+      await failedClient.close().catch(() => undefined);
+      const replacement = await this.clientFactory!();
+      if (
+        replacement.handshake.platform !== this.platform ||
+        replacement.handshake.protocolVersion !== failedClient.handshake.protocolVersion
+      ) {
+        await replacement.close().catch(() => undefined);
+        throw new Error("replacement native computer helper is incompatible");
+      }
+      if (this.closed) {
+        await replacement.close().catch(() => undefined);
+        throw new Error("computer driver closed during native helper recovery");
+      }
+      this.client = replacement;
+      return replacement;
+    })();
+    this.recovery = recovery;
+    try {
+      return await recovery;
+    } finally {
+      if (this.recovery === recovery) this.recovery = null;
+    }
+  }
+}
+
+function recoverableNativeFailure(error: unknown): boolean {
+  if (!(error instanceof NativeComputerError)) return false;
+  return (
+    error.retryable &&
+    (error.code === "timeout" || error.code === "driver_failed" || error.code === "unavailable")
+  );
 }
 
 function nativeCommand(command: ComputerActionCommand): NativeComputerActionCommand {

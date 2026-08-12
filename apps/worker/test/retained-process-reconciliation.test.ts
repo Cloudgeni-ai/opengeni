@@ -939,7 +939,7 @@ describe("retained-process terminal-owner reconciliation", () => {
     expect(candidatePlan).toContain('"Node Type":"Limit"');
     expect(candidatePlan).toContain('"Actual Rows":7');
     expect(candidatePlan).toMatch(
-      /session_turn_attempts_(?:workspace_id_uq|pkey|latest_session_idx)/,
+      /session_turn_attempts_(?:workspace_id_uq|pkey|latest_session_idx|authority_epoch_idx)/,
     );
     expect(candidatePlan).not.toContain('"Actual Loops":128');
     expect(JSON.stringify(plans.retainedInventory)).toContain(

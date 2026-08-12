@@ -8,6 +8,8 @@ import { isApiContractProtectedMutation } from "../src/app";
 import { requireAccessKey } from "../src/http/auth";
 import {
   registerSlackInteractionRoutes,
+  normalizedBlockActionInteraction,
+  slackDeliveryTextsCoalesce,
   slackEventInboxEntry,
   slackInteractionRoutePolicy,
   slackInvocationTaskText,
@@ -156,6 +158,48 @@ describe("Slack interaction signature boundary", () => {
 });
 
 describe("Slack event classification and safe projection", () => {
+  test("normalizes exactly one opaque OpenGeni block action", () => {
+    const normalized = normalizedBlockActionInteraction({
+      type: "block_actions",
+      team: { id: "T_ACTION" },
+      user: { id: "U_ACTION" },
+      channel: { id: "C_ACTION" },
+      message: { ts: "1710000000.000001", thread_ts: "1710000000.000000" },
+      actions: [
+        {
+          action_id: "opengeni.approval.approve",
+          action_ts: "1710000000.000002",
+          value: "9adcc1a7-9e79-4d3f-86e8-f1e65b4e76da",
+        },
+      ],
+    });
+    expect(normalized).toMatchObject({
+      slackTeamId: "T_ACTION",
+      slackUserId: "U_ACTION",
+      slackChannelId: "C_ACTION",
+      slackMessageTs: "1710000000.000001",
+      slackThreadTs: "1710000000.000000",
+      triggerKind: "block_action",
+      text: "opengeni.approval.approve:9adcc1a7-9e79-4d3f-86e8-f1e65b4e76da",
+    });
+    expect(normalized.providerEventId).toMatch(/^block:[0-9a-f]{64}$/);
+    expect(() =>
+      normalizedBlockActionInteraction({
+        type: "block_actions",
+        team: { id: "T_ACTION" },
+        user: { id: "U_ACTION" },
+        channel: { id: "C_ACTION" },
+        message: { ts: "1710000000.000001" },
+        actions: [
+          {
+            action_id: "third_party.action",
+            action_ts: "1710000000.000002",
+            value: "9adcc1a7-9e79-4d3f-86e8-f1e65b4e76da",
+          },
+        ],
+      }),
+    ).toThrow("invalid Slack block action");
+  });
   const bot = { botId: "B_OPEN_GENI", botUserId: "U_OPEN_GENI" };
   const envelope = (event: Record<string, unknown>, eventId = "Ev1") => ({
     type: "event_callback",
@@ -234,6 +278,38 @@ describe("Slack event classification and safe projection", () => {
         bot,
       )?.triggerKind,
     ).toBe("thread_reply");
+  });
+
+  test("accepts explicit file-only events with one bounded internal placeholder", () => {
+    expect(
+      slackEventInboxEntry(
+        envelope({
+          type: "app_mention",
+          user: "U1",
+          channel: "C1",
+          ts: "4.1",
+          files: [{ id: "F1", name: "diagram.png" }],
+        }),
+        bot,
+      ),
+    ).toMatchObject({
+      triggerKind: "app_mention",
+      text: "(file-only Slack invocation)",
+      slackMessageTs: "4.1",
+    });
+    expect(
+      slackEventInboxEntry(
+        envelope({
+          type: "message",
+          channel_type: "im",
+          user: "U1",
+          channel: "D1",
+          ts: "4.2",
+          files: [{ id: "F2", title: "screenshot.png" }],
+        }),
+        bot,
+      )?.triggerKind,
+    ).toBe("dm");
   });
 
   test("keeps a maximum-size mention plus context inside the Slack input budget", () => {
@@ -396,9 +472,23 @@ describe("Slack event classification and safe projection", () => {
   test("allows only bounded user-safe delivery events and freezes no-persistence instructions", () => {
     expect(SLACK_DELIVERY_EVENT_TYPES).not.toContain("agent.reasoning.delta" as never);
     expect(SLACK_DELIVERY_EVENT_TYPES).not.toContain("agent.toolCall.output" as never);
+    expect(SLACK_DELIVERY_EVENT_TYPES).toContain("session.requiresAction");
     expect(SLACK_TASK_INSTRUCTIONS).toContain("task-local only");
     expect(SLACK_TASK_INSTRUCTIONS).toContain("Do not write Slack context to Documents");
     expect(SLACK_TASK_INSTRUCTIONS).toContain("Never expose private reasoning");
+    expect(SLACK_TASK_INSTRUCTIONS).toContain(
+      "Execute direct, safe, sufficiently specified requests immediately",
+    );
+    expect(SLACK_TASK_INSTRUCTIONS).toContain("materially required information is missing");
+  });
+
+  test("coalesces only exact or boundary-safe terminal prefix shapes", () => {
+    expect(slackDeliveryTextsCoalesce("Final result", "Final result")).toBe(true);
+    expect(slackDeliveryTextsCoalesce("Final result", "Final result\n\nDetails")).toBe(true);
+    expect(slackDeliveryTextsCoalesce("Final result. Details", "Final result")).toBe(true);
+    expect(slackDeliveryTextsCoalesce("Final", "Finally different")).toBe(false);
+    expect(slackDeliveryTextsCoalesce("middle", "prefix middle suffix")).toBe(false);
+    expect(slackDeliveryTextsCoalesce("", "Final result")).toBe(false);
   });
 
   test("pins the exact reacted message before budgeting long surrounding context", () => {
@@ -441,6 +531,8 @@ describe("Slack event classification and safe projection", () => {
     expect(prompt).toContain(exactText);
     expect(prompt).toContain("[reacted message]");
     expect(prompt).toContain("Pinned deployment plan");
+    expect(prompt).toContain("Execute a direct, safe, sufficiently specified request immediately");
+    expect(prompt).toContain("Ask one concise clarifying question only when materially required");
     expect(prompt.indexOf("[reacted message]")).toBeLessThan(
       prompt.indexOf("Bounded surrounding thread context:"),
     );

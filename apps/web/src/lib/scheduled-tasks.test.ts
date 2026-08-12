@@ -4,6 +4,7 @@ import {
   agentConfigFromFormState,
   formStateFromScheduledTask,
   newScheduledTaskFormState,
+  recurringSessionTaskFormState,
   scheduleLabel,
   scheduledTaskStateLabel,
   summarizeLastRun,
@@ -161,5 +162,22 @@ describe("scheduled task Slack bot selection", () => {
     expect(calendarForm.targetSessionId).toBe(targetSessionId);
     expect(calendarForm.calendarTime).toBe("09:30");
     expect(calendarForm.timeZone).toBe("UTC");
+  });
+
+  test("prefills an explicit recurring editor without copying Slack content", () => {
+    const targetSessionId = "55555555-5555-4555-8555-555555555555";
+    const form = recurringSessionTaskFormState(targetSessionId, true);
+
+    expect(form).toMatchObject({
+      name: "Recurring Slack task",
+      scheduleType: "interval",
+      intervalMinutes: 60,
+      runMode: "existing_session",
+      targetSessionId,
+      overlapPolicy: "skip",
+      includeOpenGeniTool: true,
+      slackBotConnectionId: "",
+    });
+    expect(form.prompt).not.toContain("Slack message");
   });
 });

@@ -284,20 +284,6 @@ export function ComputerViewer({
     [act, actFromFrame],
   );
 
-  const pasteIntoRfb = useCallback(
-    (event: ClipboardEvent<HTMLDivElement>) => {
-      if (!rfbStream || computer.session?.capabilities?.clipboard !== true) return;
-      const text = event.clipboardData.getData("text/plain");
-      if (!text && !event.clipboardData.types.includes("text/plain")) return;
-      event.preventDefault();
-      event.stopPropagation();
-      void perform({ type: "clipboard", operation: "write", text }, null)
-        .then(() => perform({ type: "clipboard", operation: "paste" }, null))
-        .catch((cause) => notifyError(cause, "Could not paste into the computer."));
-    },
-    [computer.session?.capabilities?.clipboard, notifyError, perform, rfbStream],
-  );
-
   const copyFromRfb = useCallback(
     (event: ClipboardEvent<HTMLDivElement>) => {
       if (!rfbStream || computer.session?.capabilities?.clipboard !== true) return;
@@ -414,11 +400,7 @@ export function ComputerViewer({
           />
           <div className="flex min-h-0 flex-1">
             {rfbStream ? (
-              <div
-                className="relative min-h-0 flex-1 bg-black"
-                onPasteCapture={pasteIntoRfb}
-                onCopyCapture={copyFromRfb}
-              >
+              <div className="relative min-h-0 flex-1 bg-black" onCopyCapture={copyFromRfb}>
                 <DesktopViewer
                   capability={rfbCapability}
                   interactive

@@ -34,6 +34,7 @@ import {
   dbSql,
   getWorkspace,
   rlsContextForWorkspace,
+  withSessionRlsActorContext,
 } from "@opengeni/db";
 import { createObservability } from "@opengeni/observability";
 import { createObjectStorage } from "@opengeni/storage";
@@ -50,6 +51,7 @@ import {
   CodexCompactionV2ProviderLockedError,
   hasPermission,
   requireAccessGrant,
+  requireLiveAgentAttemptAuthorization,
   requirePermission,
   requireSessionAuthorization,
   SessionAuthorizationDeniedError,
@@ -100,6 +102,7 @@ import { registerSocialRoutes } from "./routes/social";
 import { registerWorkspaceRoutes } from "./routes/workspaces";
 import { registerWorkspaceInstructionPolicyRoutes } from "./routes/workspace-instruction-policies";
 import { registerCompanyProfileRoutes } from "./routes/company-profile";
+import { registerSlackTaskPolicyRoutes } from "./routes/slack-task-policy";
 import { registerWorkspaceStateRoutes } from "./routes/workspace-state";
 import { registerWorkspaceArtifactRoutes } from "./routes/workspace-artifacts";
 import { registerPreferenceRegistryRoutes } from "./routes/preference-registry";
@@ -524,6 +527,41 @@ export function createAppComposition(deps: AppDependencies): {
     );
   });
 
+  app.use("/v1/workspaces/:workspaceId/*", async (c, next) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, routeDeps, workspaceId);
+    if (grant.principalKind !== "agent_attempt") {
+      await withSessionRlsActorContext({ subjectId: grant.subjectId }, next);
+      return;
+    }
+    const callerSessionId = grant.metadata?.sessionId;
+    if (typeof callerSessionId !== "string") {
+      throw new HTTPException(403, { message: "agent attempt authority is invalid" });
+    }
+    try {
+      const actor = await requireLiveAgentAttemptAuthorization(
+        routeDeps.db,
+        grant,
+        callerSessionId,
+      );
+      await withSessionRlsActorContext(
+        {
+          subjectId: actor.subjectId,
+          initiatingHumanSubjectId: actor.initiatingHumanSubjectId,
+        },
+        next,
+      );
+    } catch (error) {
+      if (error instanceof SessionAuthorizationDeniedError) {
+        throw new HTTPException(403, {
+          message: "agent attempt authority is invalid",
+          cause: error,
+        });
+      }
+      throw error;
+    }
+  });
+
   app.all("/v1/workspaces/:workspaceId/mcp", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     let boundedRequest: Request;
@@ -638,6 +676,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerInsightsRoutes(app, routeDeps);
   registerWorkspaceInstructionPolicyRoutes(app, routeDeps);
   registerCompanyProfileRoutes(app, routeDeps);
+  registerSlackTaskPolicyRoutes(app, routeDeps);
   registerWorkspaceStateRoutes(app, routeDeps);
   registerMemorySlackPublicationRoutes(app, routeDeps);
   registerWorkspaceArtifactRoutes(app, routeDeps);

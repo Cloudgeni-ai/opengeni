@@ -1300,7 +1300,13 @@ export const slackInteractionInbox = pgTable(
     slackThreadTs: text("slack_thread_ts"),
     triggerKind: text("trigger_kind")
       .$type<
-        "app_mention" | "dm" | "reaction" | "slash_command" | "message_shortcut" | "thread_reply"
+        | "app_mention"
+        | "dm"
+        | "reaction"
+        | "slash_command"
+        | "message_shortcut"
+        | "thread_reply"
+        | "block_action"
       >()
       .notNull(),
     text: text("text").notNull(),
@@ -1354,6 +1360,7 @@ export const slackInteractions = pgTable(
     slackThreadTs: text("slack_thread_ts").notNull(),
     routeKey: text("route_key").notNull(),
     triggeringProviderEventId: text("triggering_provider_event_id").notNull(),
+    initiatingSlackUserId: text("initiating_slack_user_id"),
     owningSubjectId: text("owning_subject_id").notNull(),
     visibility: text("visibility").$type<"private" | "workspace">().notNull(),
     sessionReservationId: uuid("session_reservation_id").notNull().defaultRandom(),
@@ -1402,6 +1409,73 @@ export const slackInteractions = pgTable(
   }),
 );
 
+export const slackInteractionActionHandles = pgTable(
+  "slack_interaction_action_handles",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => connections.id, { onDelete: "cascade" }),
+    interactionId: uuid("interaction_id").notNull(),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    sessionEventSequence: integer("session_event_sequence").notNull(),
+    actionKind: text("action_kind")
+      .$type<
+        | "approval_approve"
+        | "approval_reject"
+        | "human_input_select"
+        | "human_input_skip"
+        | "session_status"
+        | "session_pause"
+        | "session_resume"
+        | "shared_result_publish"
+      >()
+      .notNull(),
+    actionKey: text("action_key").notNull(),
+    targetId: text("target_id"),
+    targetValue: text("target_value"),
+    authorizedSubjectId: text("authorized_subject_id").notNull(),
+    authorizedSlackUserId: text("authorized_slack_user_id").notNull(),
+    messageOperationId: uuid("message_operation_id").notNull(),
+    status: text("status").$type<"pending" | "completed" | "stale">().notNull().default("pending"),
+    result: text("result"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    interactionIdentity: foreignKey({
+      columns: [table.accountId, table.workspaceId, table.interactionId],
+      foreignColumns: [
+        slackInteractions.accountId,
+        slackInteractions.workspaceId,
+        slackInteractions.id,
+      ],
+      name: "slack_interaction_action_handles_interaction_fk",
+    }).onDelete("cascade"),
+    identity: uniqueIndex("slack_interaction_action_handles_identity_uq").on(
+      table.interactionId,
+      table.sessionEventSequence,
+      table.actionKey,
+    ),
+    pending: index("slack_interaction_action_handles_pending_idx").on(
+      table.workspaceId,
+      table.status,
+      table.expiresAt,
+      table.id,
+    ),
+  }),
+);
+
 export const slackInteractionProgressDeliveries = pgTable(
   "slack_interaction_progress_deliveries",
   {
@@ -1444,9 +1518,9 @@ export const slackInteractionProgressDeliveries = pgTable(
 );
 
 // Durable provider-operation identity for OpenGeni Slack bot posts. The
-// caller-supplied operation UUID is also Slack's client_msg_id; a bounded claim
-// serializes live attempts while an expired/released claim can safely retry the
-// same provider identity after response loss or process death.
+// server-owned durable operation UUID is also Slack's client_msg_id. `pending` is
+// safe to send, `provider_started` and `outcome_unknown` require provider read
+// reconciliation, and only `completed` may expose the provider result.
 export const slackBotPostOperations = pgTable(
   "slack_bot_post_operations",
   {
@@ -1465,9 +1539,12 @@ export const slackBotPostOperations = pgTable(
     targetKind: text("target_kind").$type<"channel" | "user">().notNull(),
     targetId: text("target_id").notNull(),
     requestDigest: text("request_digest").notNull(),
-    status: text("status").$type<"provider_started" | "completed">().notNull(),
+    status: text("status")
+      .$type<"pending" | "provider_started" | "outcome_unknown" | "completed">()
+      .notNull(),
     claimHolderId: uuid("claim_holder_id"),
     claimExpiresAt: timestamp("claim_expires_at", { withTimezone: true }),
+    claimMode: text("claim_mode").$type<"send" | "reconcile">(),
     attemptCount: integer("attempt_count").notNull().default(0),
     lastFailureCode: text("last_failure_code"),
     slackChannelId: text("slack_channel_id"),
@@ -1493,7 +1570,7 @@ export const slackBotPostOperations = pgTable(
     ),
     statusValid: check(
       "slack_bot_post_operations_status_check",
-      sql`${table.status} in ('provider_started', 'completed')`,
+      sql`${table.status} in ('pending', 'provider_started', 'outcome_unknown', 'completed')`,
     ),
     identityValid: check(
       "slack_bot_post_operations_identity_check",
@@ -1501,12 +1578,26 @@ export const slackBotPostOperations = pgTable(
         and length(${table.targetId}) between 1 and 64
         and ${table.requestDigest} ~ '^[0-9a-f]{64}$'
         and ${table.attemptCount} > 0
-        and ((${table.claimHolderId} is null) = (${table.claimExpiresAt} is null))`,
+        and (
+          (
+            ${table.claimHolderId} is null
+            and ${table.claimExpiresAt} is null
+            and ${table.claimMode} is null
+          )
+          or (
+            ${table.claimHolderId} is not null
+            and ${table.claimExpiresAt} is not null
+            and (
+              (${table.claimMode} = 'send' and ${table.status} in ('pending', 'provider_started'))
+              or (${table.claimMode} = 'reconcile' and ${table.status} = 'outcome_unknown')
+            )
+          )
+        )`,
     ),
     completionValid: check(
       "slack_bot_post_operations_completion_check",
       sql`(
-          ${table.status} = 'provider_started'
+          ${table.status} <> 'completed'
           and ${table.slackChannelId} is null
           and ${table.slackMessageTimestamp} is null
           and ${table.completedAt} is null
@@ -1518,6 +1609,46 @@ export const slackBotPostOperations = pgTable(
           and ${table.slackMessageTimestamp} is not null
           and ${table.completedAt} is not null
         )`,
+    ),
+  }),
+);
+
+export const slackBotUpdateOperations = pgTable(
+  "slack_bot_update_operations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => connections.id, { onDelete: "cascade" }),
+    operationId: uuid("operation_id").notNull(),
+    slackChannelId: text("slack_channel_id").notNull(),
+    slackMessageTimestamp: text("slack_message_timestamp").notNull(),
+    requestDigest: text("request_digest").notNull(),
+    status: text("status").$type<"provider_started" | "completed">().notNull(),
+    claimHolderId: uuid("claim_holder_id"),
+    claimExpiresAt: timestamp("claim_expires_at", { withTimezone: true }),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    lastFailureCode: text("last_failure_code"),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceOperation: uniqueIndex("slack_bot_update_operations_workspace_operation_uq").on(
+      table.workspaceId,
+      table.connectionId,
+      table.operationId,
+    ),
+    workspaceStatus: index("slack_bot_update_operations_workspace_status_idx").on(
+      table.workspaceId,
+      table.status,
+      table.updatedAt,
     ),
   }),
 );
@@ -2131,6 +2262,7 @@ export const sessions = pgTable(
     // explicitly workspace-shared and have no owner membership, so absent
     // fields can never manufacture user authority.
     ownerOrganizationMembershipId: uuid("owner_organization_membership_id"),
+    ownerSubjectId: text("owner_subject_id"),
     visibility: text("visibility").notNull().default("workspace_shared"),
     authorityEpoch: integer("authority_epoch").notNull().default(1),
     // Independent-copy provenance. A destination may use either visibility and
@@ -8639,6 +8771,7 @@ export const rigChanges = pgTable(
 export * from "./workspace-instruction-policies-schema";
 export * from "./company-profile-schema";
 export * from "./workspace-learning-policy-schema";
+export * from "./slack-task-policy-schema";
 export * from "./preference-registry-schema";
 export * from "./memory-governance-schema";
 export * from "./scoped-knowledge-schema";

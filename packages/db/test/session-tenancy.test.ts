@@ -1,8 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
+  canonicalSessionForkHash as rootCanonicalSessionForkHash,
+  canonicalSessionVisibilityTransitionHash as rootCanonicalSessionVisibilityTransitionHash,
+} from "@opengeni/db";
+import {
   canonicalSessionForkHash,
   canonicalSessionVisibilityTransitionHash,
-} from "../src/session-tenancy";
+} from "@opengeni/db/session-tenancy";
 
 describe("session tenancy domain", () => {
   test("hashes only the immutable transition command", () => {
@@ -12,6 +16,9 @@ describe("session tenancy domain", () => {
       expectedAuthorityEpoch: 7,
     };
     expect(canonicalSessionVisibilityTransitionHash(input)).toMatch(/^[0-9a-f]{64}$/);
+    expect(rootCanonicalSessionVisibilityTransitionHash).toBe(
+      canonicalSessionVisibilityTransitionHash,
+    );
     expect(canonicalSessionVisibilityTransitionHash(input)).toBe(
       canonicalSessionVisibilityTransitionHash({ ...input }),
     );
@@ -30,6 +37,7 @@ describe("session tenancy domain", () => {
       destinationVisibility: "workspace_shared" as const,
     };
     expect(canonicalSessionForkHash(input)).toMatch(/^[0-9a-f]{64}$/);
+    expect(rootCanonicalSessionForkHash).toBe(canonicalSessionForkHash);
     expect(canonicalSessionForkHash(input)).not.toBe(
       canonicalSessionForkHash({
         ...input,

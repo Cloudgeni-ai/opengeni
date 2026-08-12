@@ -693,6 +693,18 @@ BEGIN
     END IF;
     IF to_regprocedure(
       format(
+        '%I.slack_task_policy_update(uuid,text,uuid,uuid,jsonb,uuid,bigint,text,text)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.slack_task_policy_update(uuid, text, uuid, uuid, jsonb, uuid, bigint, text, text) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
         '%I.scoped_knowledge_apply_lifecycle(uuid,text,uuid,text,bigint,text,text,text,text,text,text)',
         ${literal(schema)}
       )
@@ -735,6 +747,58 @@ BEGIN
       );
       EXECUTE format(
         'GRANT EXECUTE ON FUNCTION %I.ensure_managed_human_personal_workspace(uuid, text, uuid) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    -- Migration 0225 creates these target-schema-local session visibility
+    -- capabilities before opengeni_app may exist. Re-converge their exact
+    -- EXECUTE grants for migrate-then-provision installs without granting
+    -- blanket execution on target-schema routines.
+    IF to_regprocedure(
+      format(
+        '%I.session_private_actor_visible(uuid,uuid,uuid,text)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.session_private_actor_visible(uuid, uuid, uuid, text) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.session_private_actor_visible(uuid, uuid, uuid, text) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
+        '%I.transition_session_visibility(uuid,uuid,uuid,text,text,integer,text,text)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.transition_session_visibility(uuid, uuid, uuid, text, text, integer, text, text) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.transition_session_visibility(uuid, uuid, uuid, text, text, integer, text, text) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
+        '%I.fork_session_content(uuid,uuid,uuid,text,uuid,text,text,text)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.fork_session_content(uuid, uuid, uuid, text, uuid, text, text, text) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.fork_session_content(uuid, uuid, uuid, text, uuid, text, text, text) TO %I',
         ${literal(schema)},
         ${literal(role)}
       );

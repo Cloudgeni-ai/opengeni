@@ -347,6 +347,7 @@ import {
   recordCreditMicros,
   recordModelCacheTokens,
   recordModelInputTokens,
+  recordModelRequestPhase,
   recordSessionEventAppendLatency,
   recordSessionEventPublishLatency,
   runtimeMetricsHooksForObservability,
@@ -5132,6 +5133,31 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 }, // latest wins; flushed once in finally
                 onRequestOpaqueArtifacts: ({ fingerprints }) => {
                   lastCodexRequestOpaqueArtifacts = fingerprints;
+                },
+                onModelRequestDiagnostic: (event) => {
+                  const phase =
+                    event.phase === "headers"
+                      ? "headers"
+                      : event.phase === "first_byte"
+                        ? "first_byte"
+                        : event.phase === "completed" ||
+                            event.phase === "failed" ||
+                            event.phase === "timed_out"
+                          ? "terminal"
+                          : null;
+                  if (!phase) return;
+                  recordModelRequestPhase(observability, {
+                    provider: "codex-subscription",
+                    phase,
+                    ...(event.phase === "completed"
+                      ? { outcome: "completed" as const }
+                      : event.phase === "failed"
+                        ? { outcome: "failed" as const }
+                        : event.phase === "timed_out"
+                          ? { outcome: "timed_out" as const }
+                          : {}),
+                    durationSeconds: event.durationMs / 1000,
+                  });
                 },
                 nextRequestId: () => `${dispatchId}:${++codexModelRequestSequence}`,
                 onModelRequestEvent: async (event) => {

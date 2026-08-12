@@ -236,6 +236,15 @@ describe("fail-closed change impact", () => {
     expect(tests.e2e).not.toContain("test/e2e/opstream-runner.e2e.ts");
   });
 
+  test("a changed E2E test stays out of the unit tier", () => {
+    const path = "test/e2e/slack-installation-binding.browser.e2e.ts";
+    const plan = createImpactPlan([path]);
+
+    expect(plan.mode).toBe("focused");
+    expect(plan.e2eTests).toContain(path);
+    expect(plan.unitTests).not.toContain(path);
+  });
+
   test("full plans exhaustively own discovered tests and buildable projects", () => {
     const plan = createImpactPlan([], { forceFull: true });
     const tests = discoverTestFiles();

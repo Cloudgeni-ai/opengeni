@@ -5,6 +5,7 @@ import {
   recordBatchFlush,
   recordContextCompaction,
   recordModelInputTokens,
+  recordModelRequestPhase,
   recordSessionEventAppendLatency,
   recordSessionEventPublishLatency,
   StreamTimingMetrics,
@@ -92,6 +93,40 @@ describe("StreamTimingMetrics — TTFT + inter-delta gaps", () => {
     expect(metrics).toMatch(
       /opengeni_stream_inter_delta_gap_seconds_count\{[^}]*class="reasoning"[^}]*\} 1\b/,
     );
+  });
+});
+
+describe("provider request lifecycle diagnostics", () => {
+  test("records bounded phase/outcome labels and monotonic duration", async () => {
+    const observability = worker();
+    recordModelRequestPhase(observability, {
+      provider: "codex-subscription",
+      phase: "headers",
+      durationSeconds: 0.12,
+    });
+    recordModelRequestPhase(observability, {
+      provider: "codex-subscription",
+      phase: "first_byte",
+      durationSeconds: 0.34,
+    });
+    recordModelRequestPhase(observability, {
+      provider: "codex-subscription",
+      phase: "terminal",
+      outcome: "completed",
+      durationSeconds: 1.2,
+    });
+
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_model_request_phases_total\{[^}]*outcome=""[^}]*phase="headers"[^}]*provider="codex-subscription"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_model_request_phases_total\{[^}]*outcome="completed"[^}]*phase="terminal"[^}]*provider="codex-subscription"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_model_request_phase_duration_seconds_count\{[^}]*phase="first_byte"[^}]*provider="codex-subscription"[^}]*\} 1\b/,
+    );
+    expect(metrics).not.toContain("requestId");
   });
 });
 

@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { eq, sql, type SQL } from "drizzle-orm";
 import type { PgDatabase, PgTransactionConfig } from "drizzle-orm/pg-core";
 import { drizzle } from "drizzle-orm/postgres-js";
@@ -49,6 +50,32 @@ export type RlsContext = {
   accountId: string;
   workspaceId?: string | null;
 };
+
+export type SessionRlsActorContext = {
+  subjectId: string;
+  initiatingHumanSubjectId?: string | null;
+};
+
+const sessionRlsActorContext = new AsyncLocalStorage<SessionRlsActorContext>();
+
+export async function withSessionRlsActorContext<T>(
+  actor: SessionRlsActorContext,
+  fn: () => Promise<T>,
+): Promise<T> {
+  if (!actor.subjectId.trim()) {
+    throw new Error("withSessionRlsActorContext: a non-empty subjectId is required");
+  }
+  if (
+    actor.initiatingHumanSubjectId !== undefined &&
+    actor.initiatingHumanSubjectId !== null &&
+    !actor.initiatingHumanSubjectId.trim()
+  ) {
+    throw new Error(
+      "withSessionRlsActorContext: initiatingHumanSubjectId must be null or non-empty",
+    );
+  }
+  return await sessionRlsActorContext.run(actor, fn);
+}
 
 type RlsContextSettings = {
   accountId: string;
@@ -330,6 +357,17 @@ export async function setRlsContext(db: Database, context: RlsContext): Promise<
   // fences can distinguish their partial writes without inspecting content.
   await db.execute(sql`select set_config('opengeni.lossless_content_writer', '1', true)`);
   await db.execute(sql`select set_config('opengeni.sandbox_recovery_protocol_v2', '1', true)`);
+  const sessionActor = sessionRlsActorContext.getStore();
+  if (sessionActor) {
+    await setSubjectRlsContext(db, sessionActor.subjectId);
+    await db.execute(
+      sql`select set_config(
+        'opengeni.initiating_human_subject_id',
+        ${sessionActor.initiatingHumanSubjectId ?? ""},
+        true
+      )`,
+    );
+  }
 }
 
 async function readRlsContextSettings(db: Database): Promise<RlsContextSettings> {

@@ -8,11 +8,13 @@ import {
   type SessionAuthorizationTarget,
 } from "@opengeni/contracts";
 import {
+  getSessionAuthorityProjection,
   getSession,
-  getSessionRootId,
   getSessionTurnForAttempt,
   getSlackInteractionSessionAccessForSession,
+  withSessionRlsActorContext,
   type Database,
+  type SessionRlsActorContext,
 } from "@opengeni/db";
 import type { AppDependencies } from "./dependencies";
 
@@ -46,6 +48,91 @@ export type ResolvedSessionAuthorization = {
   reauthorizeAfterMs: number | null;
 };
 
+type ResolvedSessionAuthorizationActor = {
+  actor: SessionAuthorizationActor;
+  callerParentSessionId: string | null;
+};
+
+type ResolvedSessionAuthorizationTarget = {
+  target: SessionAuthorizationTarget;
+  parentSessionId: string | null;
+};
+
+function grantHasAgentAttemptAuthority(grant: AccessGrant): boolean {
+  const hasAgentAttemptClaim =
+    grant.metadata?.["turnId"] !== undefined ||
+    grant.metadata?.["attemptId"] !== undefined ||
+    grant.metadata?.["executionGeneration"] !== undefined;
+  return grant.principalKind ? grant.principalKind === "agent_attempt" : hasAgentAttemptClaim;
+}
+
+/**
+ * Read-only access an immediate child may use against its parent. Upstream
+ * mutation is deliberately limited to `session.append`: letting a child Pause,
+ * Steer, or otherwise mutate its parent would let it influence siblings through
+ * the parent's recursive control and shared state.
+ */
+const AGENT_PARENT_READ_OPERATIONS = new Set<SessionAuthorizationOperation>([
+  "session.read",
+  "session.events.read",
+  "session.stream.read",
+  "session.turns.read",
+  "session.queue.read",
+  "session.composer.read",
+  "session.lineage.read",
+  "session.capture.read",
+  "session.files.read",
+  "session.git.read",
+  "session.terminal.read",
+  "session.viewer.read",
+  "session.goal.read",
+  "session.human_input.read",
+]);
+
+function enforceAgentSessionHierarchy(
+  actor: Extract<SessionAuthorizationActor, { kind: "agent_attempt" }>,
+  callerParentSessionId: string | null,
+  target: ResolvedSessionAuthorizationTarget,
+  operation: SessionAuthorizationOperation,
+): "target" | "root" {
+  if (target.target.sessionId === actor.callerSessionId) return "root";
+
+  // A manager may inspect and operate an immediate child. Existing permission
+  // and host-policy checks still apply; lineage never grants a capability.
+  if (target.parentSessionId === actor.callerSessionId) return "target";
+
+  // A child may report to and inspect its immediate parent, but cannot mutate
+  // the parent except through the canonical machine-input message boundary.
+  if (callerParentSessionId === target.target.sessionId) {
+    if (operation === "session.append" || AGENT_PARENT_READ_OPERATIONS.has(operation)) {
+      return "target";
+    }
+    throw new SessionAuthorizationDeniedError("forbidden");
+  }
+
+  // Siblings, skipped generations, other branches, and unrelated roots are
+  // never cross-session authority for a live agent attempt.
+  throw new SessionAuthorizationDeniedError("forbidden");
+}
+
+export function sessionRlsActorForAuthorization(
+  authorization: ResolvedSessionAuthorization,
+): SessionRlsActorContext {
+  return authorization.actor.kind === "agent_attempt"
+    ? {
+        subjectId: authorization.actor.subjectId,
+        initiatingHumanSubjectId: authorization.actor.initiatingHumanSubjectId,
+      }
+    : { subjectId: authorization.actor.subjectId };
+}
+
+export async function withResolvedSessionAuthorization<T>(
+  authorization: ResolvedSessionAuthorization,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return await withSessionRlsActorContext(sessionRlsActorForAuthorization(authorization), fn);
+}
+
 /**
  * Prove that a first-party request belongs to the exact currently active
  * attempt of the named caller session. Unlike the optional embedding-host ACL
@@ -56,7 +143,7 @@ export async function requireLiveAgentAttemptAuthorization(
   grant: AccessGrant,
   callerSessionId: string,
 ): Promise<Extract<SessionAuthorizationActor, { kind: "agent_attempt" }>> {
-  const actor = await resolveSessionAuthorizationActor(db, grant);
+  const { actor } = await resolveSessionAuthorizationActor(db, grant);
   if (actor.kind !== "agent_attempt" || actor.callerSessionId !== callerSessionId) {
     throw new SessionAuthorizationDeniedError("caller_stale");
   }
@@ -84,17 +171,52 @@ export async function requireSessionAuthorization(
   },
 ): Promise<ResolvedSessionAuthorization | null> {
   const port = deps.sessionAuthorization;
-  const slackAccess = await getSlackInteractionSessionAccessForSession(deps.db, {
-    accountId: grant.accountId,
-    workspaceId: grant.workspaceId,
-    sessionId: input.sessionId,
-  });
-  if (!port && slackAccess?.visibility !== "private") return null;
+  const isAgentAttempt = grantHasAgentAttemptAuthority(grant);
+  const [slackAccess, authority] = await Promise.all([
+    getSlackInteractionSessionAccessForSession(deps.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: input.sessionId,
+    }),
+    getSessionAuthorityProjection(deps.db, grant.workspaceId, input.sessionId),
+  ]);
 
-  const actor = await resolveSessionAuthorizationActor(deps.db, grant);
-  const target = slackAccess
-    ? { sessionId: input.sessionId, rootSessionId: slackAccess.rootSessionId }
-    : await resolveSessionAuthorizationTarget(deps.db, grant, input.sessionId);
+  // Preserve the standalone workspace-shared path. Private sessions continue
+  // through the durable actor and ownership checks even without a host port.
+  if (
+    !port &&
+    !isAgentAttempt &&
+    slackAccess?.visibility !== "private" &&
+    authority?.visibility !== "user_private"
+  ) {
+    return null;
+  }
+  if (!authority) throw new SessionAuthorizationDeniedError("not_found");
+
+  const [resolvedActor, resolvedTarget] = await Promise.all([
+    resolveSessionAuthorizationActor(deps.db, grant),
+    resolveSessionAuthorizationTarget(deps.db, grant, input.sessionId),
+  ]);
+  const actor = resolvedActor.actor;
+  const target = resolvedTarget.target;
+  const agentRelatedSessionAccess =
+    actor.kind === "agent_attempt"
+      ? enforceAgentSessionHierarchy(
+          actor,
+          resolvedActor.callerParentSessionId,
+          resolvedTarget,
+          input.operation,
+        )
+      : null;
+
+  if (authority.visibility === "user_private") {
+    const allowed =
+      authority.ownerSubjectId !== null &&
+      (actor.kind === "subject"
+        ? actor.subjectId === authority.ownerSubjectId
+        : actor.initiatingHumanSubjectId === authority.ownerSubjectId);
+    if (!allowed) throw new SessionAuthorizationDeniedError("forbidden");
+  }
   if (slackAccess?.visibility === "private") {
     const allowed =
       actor.kind === "subject"
@@ -102,7 +224,14 @@ export async function requireSessionAuthorization(
         : actor.callerRootSessionId === target.rootSessionId;
     if (!allowed) throw new SessionAuthorizationDeniedError("forbidden");
   }
-  if (!port) return null;
+  if (!port) {
+    return {
+      actor,
+      target,
+      relatedSessionAccess: agentRelatedSessionAccess ?? "root",
+      reauthorizeAfterMs: null,
+    };
+  }
 
   let rawDecision: unknown;
   try {
@@ -127,7 +256,10 @@ export async function requireSessionAuthorization(
   return {
     actor,
     target,
-    relatedSessionAccess: parsed.data.relatedSessionAccess ?? "target",
+    relatedSessionAccess:
+      agentRelatedSessionAccess === "target"
+        ? "target"
+        : (parsed.data.relatedSessionAccess ?? "target"),
     reauthorizeAfterMs: parsed.data.reauthorizeAfterMs ?? null,
   };
 }
@@ -139,8 +271,12 @@ export async function requireSessionAuthorizationListScope(
   surface: SessionAuthorizationSurface,
 ): Promise<SessionAuthorizationListScope | null> {
   const port = deps.sessionAuthorization;
+  const isAgentAttempt = grantHasAgentAttemptAuthority(grant);
+  if (!port && !isAgentAttempt) return null;
+  const { actor } = await resolveSessionAuthorizationActor(deps.db, grant);
+  // Standalone agents may retain compact workspace discovery, but only while
+  // the signed caller attempt is still the exact live attempt.
   if (!port) return null;
-  const actor = await resolveSessionAuthorizationActor(deps.db, grant);
   let rawScope: unknown;
   try {
     rawScope = await port.resolveListScope({
@@ -168,39 +304,34 @@ async function resolveSessionAuthorizationTarget(
   db: Database,
   grant: AccessGrant,
   sessionId: string,
-): Promise<SessionAuthorizationTarget> {
+): Promise<ResolvedSessionAuthorizationTarget> {
   const session = await getSession(db, grant.workspaceId, sessionId);
   if (!session || session.accountId !== grant.accountId) {
     throw new SessionAuthorizationDeniedError("not_found");
   }
-  let rootSessionId: string | null;
-  try {
-    rootSessionId = await getSessionRootId(db, grant.workspaceId, session.id);
-  } catch (error) {
-    throw new SessionAuthorizationUnavailableError({ cause: error });
-  }
-  if (!rootSessionId) {
-    throw new SessionAuthorizationDeniedError("not_found");
-  }
-  return { sessionId: session.id, rootSessionId };
+  return {
+    target: { sessionId: session.id, rootSessionId: session.rootSessionId },
+    parentSessionId: session.parentSessionId,
+  };
 }
-
 async function resolveSessionAuthorizationActor(
   db: Database,
   grant: AccessGrant,
-): Promise<SessionAuthorizationActor> {
+): Promise<ResolvedSessionAuthorizationActor> {
   const callerSessionId = grant.metadata?.["sessionId"];
   const turnId = grant.metadata?.["turnId"];
   const attemptId = grant.metadata?.["attemptId"];
   const executionGeneration = grant.metadata?.["executionGeneration"];
-  const hasAttemptClaim =
-    turnId !== undefined || attemptId !== undefined || executionGeneration !== undefined;
-  if (!hasAttemptClaim) {
-    return SessionAuthorizationActor.parse({
-      kind: "subject",
-      subjectId: grant.subjectId,
-      ...(grant.subjectLabel ? { subjectLabel: grant.subjectLabel } : {}),
-    });
+  const isAgentAttempt = grantHasAgentAttemptAuthority(grant);
+  if (!isAgentAttempt) {
+    return {
+      actor: SessionAuthorizationActor.parse({
+        kind: "subject",
+        subjectId: grant.subjectId,
+        ...(grant.subjectLabel ? { subjectLabel: grant.subjectLabel } : {}),
+      }),
+      callerParentSessionId: null,
+    };
   }
   if (
     typeof callerSessionId !== "string" ||
@@ -212,10 +343,9 @@ async function resolveSessionAuthorizationActor(
   ) {
     throw new SessionAuthorizationDeniedError("caller_stale");
   }
-  const [callerSession, turn, callerRootSessionId] = await Promise.all([
+  const [callerSession, turn] = await Promise.all([
     getSession(db, grant.workspaceId, callerSessionId),
     getSessionTurnForAttempt(db, grant.workspaceId, callerSessionId, attemptId),
-    getSessionRootId(db, grant.workspaceId, callerSessionId).catch(() => null),
   ]);
   if (
     !callerSession ||
@@ -223,23 +353,25 @@ async function resolveSessionAuthorizationActor(
     !turn ||
     turn.id !== turnId ||
     turn.executionGeneration !== executionGeneration ||
-    callerSession.activeTurnId !== turn.id ||
-    !callerRootSessionId
+    callerSession.activeTurnId !== turn.id
   ) {
     throw new SessionAuthorizationDeniedError("caller_stale");
   }
-  return SessionAuthorizationActor.parse({
-    kind: "agent_attempt",
-    subjectId: grant.subjectId,
-    callerSessionId,
-    callerRootSessionId,
-    turnId,
-    attemptId,
-    executionGeneration,
-    initiator: turn.initiator,
-    initiatorContext: turn.initiatorContext,
-    initiatingHumanSubjectId:
-      turn.initiatingHumanSubjectId ??
-      (turn.initiator.kind === "subject" ? turn.initiator.subjectId : null),
-  });
+  return {
+    actor: SessionAuthorizationActor.parse({
+      kind: "agent_attempt",
+      subjectId: grant.subjectId,
+      callerSessionId,
+      callerRootSessionId: callerSession.rootSessionId,
+      turnId,
+      attemptId,
+      executionGeneration,
+      initiator: turn.initiator,
+      initiatorContext: turn.initiatorContext,
+      initiatingHumanSubjectId:
+        turn.initiatingHumanSubjectId ??
+        (turn.initiator.kind === "subject" ? turn.initiator.subjectId : null),
+    }),
+    callerParentSessionId: callerSession.parentSessionId,
+  };
 }

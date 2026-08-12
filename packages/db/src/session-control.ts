@@ -200,7 +200,7 @@ export class SessionCommandIdempotencyError extends Error {
 
 export class AgentCommandAuthorityError extends Error {
   constructor(
-    readonly code: "CALLER_STALE" | "CALLER_INTERRUPTED" | "SELF_OR_ANCESTOR_PAUSE" | "SELF_STEER",
+    readonly code: "CALLER_STALE" | "CALLER_INTERRUPTED" | "TARGET_NOT_VERTICAL" | "SELF_STEER",
     message: string,
   ) {
     super(message);
@@ -232,10 +232,12 @@ export async function assertAgentCommandAuthorityInTransaction(
     attemptIds: [input.actor.attemptId],
   });
   const lockedSessions = authorityLocks.sessions;
-  if (!lockedSessions.some((row) => row.id === input.actor.sessionId)) {
+  const callerSession = lockedSessions.find((row) => row.id === input.actor.sessionId);
+  if (!callerSession) {
     throw new AgentCommandAuthorityError("CALLER_STALE", "The calling session no longer exists");
   }
-  if (!lockedSessions.some((row) => row.id === input.targetSessionId)) {
+  const targetSession = lockedSessions.find((row) => row.id === input.targetSessionId);
+  if (!targetSession) {
     throw new SessionControlInvariantError(`Target session not found: ${input.targetSessionId}`);
   }
   const rows = await db.execute<{
@@ -298,37 +300,21 @@ export async function assertAgentCommandAuthorityInTransaction(
   if (input.action === "steer" && input.targetSessionId === input.actor.sessionId) {
     throw new AgentCommandAuthorityError("SELF_STEER", "An agent cannot steer its own session");
   }
-  if (input.action !== "pause") return;
-  const ancestry = await db.execute<{
-    containsCaller: boolean;
-    invalid: boolean;
-  }>(sql`
-    with recursive caller_ancestry(id, parent_id, depth, path, cycle) as (
-      select session.id, session.parent_session_id, 0, array[session.id], false
-      from ${schema.sessions} session
-      where session.workspace_id = ${input.workspaceId}
-        and session.id = ${input.actor.sessionId}
-      union all
-      select parent.id, parent.parent_session_id, child.depth + 1,
-             child.path || parent.id, parent.id = any(child.path)
-      from caller_ancestry child
-      join ${schema.sessions} parent
-        on parent.workspace_id = ${input.workspaceId} and parent.id = child.parent_id
-      where child.depth < ${SESSION_ANCESTRY_LIMIT} and not child.cycle
-    )
-    select
-      coalesce(bool_or(id = ${input.targetSessionId}), false) as "containsCaller",
-      coalesce(bool_or(cycle), false) or coalesce(max(depth), 0) >= ${SESSION_ANCESTRY_LIMIT}
-        as invalid
-    from caller_ancestry
-  `);
-  if (ancestry[0]?.invalid) {
-    throw new SessionControlInvariantError("Caller ancestry is invalid");
-  }
-  if (ancestry[0]?.containsCaller) {
+  const targetsSelf = targetSession.id === callerSession.id;
+  const targetsDirectParent = callerSession.parentSessionId === targetSession.id;
+  const targetsDirectChild = targetSession.parentSessionId === callerSession.id;
+  const verticalTargetAllowed =
+    input.action === "goal"
+      ? targetsSelf
+      : input.action === "message"
+        ? targetsSelf || targetsDirectParent || targetsDirectChild
+        : targetsDirectChild;
+  if (!verticalTargetAllowed) {
     throw new AgentCommandAuthorityError(
-      "SELF_OR_ANCESTOR_PAUSE",
-      "An agent cannot pause its own session or an ancestor workstream",
+      "TARGET_NOT_VERTICAL",
+      input.action === "message"
+        ? "An agent may message only its own session, direct parent, or direct child"
+        : "An agent may control only a direct child session",
     );
   }
 }
@@ -430,7 +416,7 @@ export type SessionEventWriteLocks = {
  *
  *   workspace_inference_controls (when control-aware)
  *     -> actual workspaces row FOR KEY SHARE
- *     -> session rows FOR UPDATE, UUID ordered
+ *     -> session rows FOR NO KEY UPDATE, UUID ordered
  *     -> exact turn rows FOR UPDATE, UUID ordered
  *     -> exact attempt rows FOR UPDATE, UUID ordered
  *
@@ -438,6 +424,11 @@ export type SessionEventWriteLocks = {
  * stable for their FK, but they do not mutate the workspace. The old generic
  * `FOR UPDATE` lock serialized unrelated sessions and inverted the activity
  * path's session -> implicit workspace-FK edge.
+ *
+ * `FOR NO KEY UPDATE` is equally deliberate for sessions. Session primary and
+ * composite identity keys are immutable, so writers need to exclude only concurrent
+ * non-key mutation. Keeping FK `FOR KEY SHARE` checks compatible prevents the
+ * activity finalizer's workspace counter from participating in a lock cycle.
  *
  * Complex lifecycle transactions may acquire allocator/control locks before
  * this helper and may discover exact turn IDs only after locking the session.
@@ -478,7 +469,7 @@ export async function lockSessionEventWriteRows(
             ),
           )
           .orderBy(schema.sessions.id)
-          .for("update")
+          .for("no key update")
       : [];
 
   const turnIds = [...new Set(input.turnIds ?? [])].sort();

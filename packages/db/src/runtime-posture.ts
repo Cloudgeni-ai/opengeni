@@ -56,10 +56,24 @@ const MANAGED_HUMAN_PERSONAL_WORKSPACE_AUTHORITY_TABLES = [
   "organization_user_resource_authorities",
   "organization_user_resource_grants",
 ] as const;
+const SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE =
+  "session_private_actor_visible(uuid, uuid, uuid, text)";
+const TRANSITION_SESSION_VISIBILITY_ROUTINE =
+  "transition_session_visibility(uuid, uuid, uuid, text, text, integer, text, text)";
+const FORK_SESSION_CONTENT_ROUTINE =
+  "fork_session_content(uuid, uuid, uuid, text, uuid, text, text, text)";
+const SESSION_AUTHORITY_ROUTINES = new Set<string>([
+  FORK_SESSION_CONTENT_ROUTINE,
+  SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE,
+  TRANSITION_SESSION_VISIBILITY_ROUTINE,
+]);
 
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
+  FORK_SESSION_CONTENT_ROUTINE,
   KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE,
   MANAGED_HUMAN_PERSONAL_WORKSPACE_ROUTINE,
+  SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE,
+  TRANSITION_SESSION_VISIBILITY_ROUTINE,
 ] as const;
 
 /**
@@ -238,16 +252,23 @@ export const FORCE_RLS_TABLES = [
   "session_system_updates",
   "session_turn_attempts",
   "session_turns",
+  "session_visibility_write_capabilities",
   "session_workflow_wake_outbox",
   "sessions",
   "site_auth_connections",
   "slack_bot_delete_operations",
   "slack_bot_post_operations",
+  "slack_bot_update_operations",
   "slack_bot_user_links",
   "slack_installation_bindings",
+  "slack_interaction_action_handles",
   "slack_interaction_inbox",
   "slack_interaction_progress_deliveries",
   "slack_interactions",
+  "slack_shared_task_origins",
+  "slack_task_policy_activation_events",
+  "slack_task_policy_heads",
+  "slack_task_policy_revisions",
   "slack_user_link_access_request_operations",
   "slack_user_link_access_requests",
   "social_connections",
@@ -414,7 +435,9 @@ export const RUNTIME_FULL_DML_TABLES = [
   "sessions",
   "slack_bot_delete_operations",
   "slack_bot_post_operations",
+  "slack_bot_update_operations",
   "slack_bot_user_links",
+  "slack_interaction_action_handles",
   "slack_interaction_inbox",
   "slack_interaction_progress_deliveries",
   "slack_interactions",
@@ -456,6 +479,9 @@ export const RUNTIME_READ_ONLY_TABLES = [
   "preference_registry_events",
   "preference_registry_snapshots",
   "slack_installation_bindings",
+  "slack_task_policy_activation_events",
+  "slack_task_policy_heads",
+  "slack_task_policy_revisions",
   "workspace_instruction_policy_snapshots",
   "workspace_learning_policy_activation_events",
   "workspace_learning_policy_heads",
@@ -500,6 +526,7 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "preference_registry_revisions",
   "session_attempt_tool_catalogs",
   "session_spawn_denials",
+  "slack_shared_task_origins",
   "slack_user_link_access_request_operations",
   "temporal_schedule_cleanup_outbox",
   "workspace_artifact_events",
@@ -559,6 +586,7 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "organization_user_resource_authorities",
   "organization_user_resource_grants",
   "organization_user_retention_policies",
+  "session_visibility_write_capabilities",
 ] as const;
 
 export type RuntimeTableDmlPrivilege = "SELECT" | "INSERT" | "UPDATE" | "DELETE";
@@ -1181,6 +1209,13 @@ export function evaluateRuntimeDatabasePosture(
       } else if (authorityTables[0] && routine.owner !== authorityTables[0].owner) {
         violations.push(
           `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0].owner}`,
+        );
+      }
+    } else if (SESSION_AUTHORITY_ROUTINES.has(routine.name)) {
+      const authorityOwner = tableByName.get("sessions")?.owner ?? targetSchemaOwner;
+      if (authorityOwner && routine.owner !== authorityOwner) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match session authority owner ${authorityOwner}`,
         );
       }
     } else if (targetSchemaOwner && routine.owner !== targetSchemaOwner) {

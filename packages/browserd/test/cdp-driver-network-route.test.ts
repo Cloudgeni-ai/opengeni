@@ -159,7 +159,7 @@ test("installs route emulation on about:blank before the first external navigati
   try {
     const observation = await driver.start(destination);
     expect(observation.target.url).toBe(destination);
-    expect(runnerCalls[0]).toEqual(["open", "about:blank"]);
+    expect(runnerCalls[0]).toEqual(["open"]);
     await driver.selectTarget("target-1");
     expect((await driver.openTarget()).target.id).toBe("target-2");
     expect(cdpCalls.some((call) => call.method === "Target.activateTarget")).toBe(false);
