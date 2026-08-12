@@ -2671,6 +2671,7 @@ async function slackSharedResultPublicationBlocks(
   requesterAuthorized: boolean,
   messageOperationId: string,
 ): Promise<SlackMessageBlock[]> {
+  if (!safePayloadText(event.payload, "output").trim()) return [];
   if (!requesterAuthorized || !interaction.sessionId || !interaction.initiatingSlackUserId) {
     return [];
   }

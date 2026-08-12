@@ -4756,6 +4756,53 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       where id = ${publishHandle!.id}::uuid`;
     expect(settledPublish).toEqual({ status: "completed", result: "published" });
 
+    const emptyOutputSourceTs = "1731000002.500001";
+    allowed.slack.channelHistories.set(allowedChannel, {
+      messages: [
+        {
+          ts: emptyOutputSourceTs,
+          user: allowed.ownerSlackUserId,
+          text: `<@${allowed.botUserId}> keep fallback private`,
+        },
+      ],
+    });
+    await postEvent(allowed.app, {
+      teamId: allowed.teamId,
+      eventId: `E_SHARED_EMPTY_OUTPUT_${crypto.randomUUID()}`,
+      event: {
+        type: "app_mention",
+        user: allowed.ownerSlackUserId,
+        channel: allowedChannel,
+        ts: emptyOutputSourceTs,
+        text: `<@${allowed.botUserId}> keep fallback private`,
+      },
+    });
+    await drainAll(allowed.deps);
+    const emptyOutputRoute = (await interactions(allowed.owner.workspaceId)).find(
+      (candidate) => candidate.id !== allowedRoute.id,
+    )!;
+    const postsBeforeEmptyOutput = allowed.slack.posts.length;
+    await appendSessionEvents(client.db, allowed.owner.workspaceId, emptyOutputRoute.session_id, [
+      {
+        type: "agent.message.completed",
+        payload: { text: "Fallback-only private result" },
+      },
+      { type: "turn.completed", payload: { output: "   " } },
+    ]);
+    await drainAll(allowed.deps);
+    const [emptyOutputFinalPost] = allowed.slack.posts.slice(postsBeforeEmptyOutput);
+    expect(emptyOutputFinalPost).toMatchObject({
+      channel: `D_${allowed.ownerSlackUserId}`,
+      blocks: null,
+    });
+    expect(emptyOutputFinalPost!.text).toContain("Fallback-only private result");
+    const emptyOutputHandles = await shared!.admin<{ id: string }[]>`
+      select id from slack_interaction_action_handles
+      where workspace_id = ${allowed.owner.workspaceId}
+        and interaction_id = ${emptyOutputRoute.id}::uuid
+        and action_kind = 'shared_result_publish'`;
+    expect(emptyOutputHandles).toHaveLength(0);
+
     const staleSourceTs = "1731000003.000001";
     allowed.slack.channelHistories.set(allowedChannel, {
       messages: [
@@ -4779,7 +4826,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     });
     await drainAll(allowed.deps);
     const staleRoute = (await interactions(allowed.owner.workspaceId)).find(
-      (candidate) => candidate.id !== allowedRoute.id,
+      (candidate) => candidate.id !== allowedRoute.id && candidate.id !== emptyOutputRoute.id,
     )!;
     await appendSessionEvents(client.db, allowed.owner.workspaceId, staleRoute.session_id, [
       { type: "turn.completed", payload: { output: "This result must remain private." } },
