@@ -83,6 +83,7 @@ type ComputerVisualProbe = {
     previous: ComputerVisualFrame,
     timeoutMs?: number,
   ): Promise<ComputerVisualFrame>;
+  typeAscii?(value: string): void;
   close(): void;
 };
 
@@ -678,6 +679,24 @@ async function main(): Promise<void> {
       }
       checks.push("computer.clipboard-roundtrip-visible");
 
+      // Prove the exact human-viewer input plane as well as controller-side
+      // native actions. Direct RFB input must reach the linked Chromium DOM;
+      // otherwise a visually connected noVNC surface could still be inert.
+      if (computerProbe.typeAscii) {
+        const viewerMarker = `viewer${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
+        computerProbe.typeAscii(viewerMarker);
+        computerFrame = await computerProbe.nextChangedAfter(computerFrame);
+        const viewerObservation = await waitForSemanticValue(
+          () => browser!.observe(observation.target.id),
+          viewerMarker,
+          2_000,
+        );
+        if (!semanticContainsValue(viewerObservation.semantic, viewerMarker)) {
+          throw new Error("RFB keyboard input produced pixels without exact DOM state");
+        }
+        checks.push("computer.rfb-keyboard-exact-state");
+      }
+
       started = performance.now();
       computerProbe.close();
       computerProbe = await openComputerVisualProbe(
@@ -715,7 +734,13 @@ async function main(): Promise<void> {
     process.stderr.write(
       `${JSON.stringify({ measurements: Object.fromEntries([...raw].map(([metric, samples]) => [metric, measurement(samples)])) })}\n`,
     );
-    for (const [metric, samples] of raw) assertBudget(metric, samples);
+    const budgetFailures = [...raw].flatMap(([metric, samples]) => {
+      const failure = budgetFailure(metric, samples);
+      return failure ? [failure] : [];
+    });
+    if (budgetFailures.length > 0) {
+      throw new Error(`latency budgets exceeded: ${budgetFailures.join("; ")}`);
+    }
     checks.push("latency.budgets");
 
     const receipt: Receipt = {
@@ -763,7 +788,14 @@ async function openComputerVisualProbe(
   attachment: ComputerSessionAttachment,
 ): Promise<ComputerVisualProbe> {
   if (attachment.stream.kind === "direct_rfb") {
-    return await RfbAcceptanceProbe.open(attachment);
+    const rfb = await RfbAcceptanceProbe.open(attachment);
+    return {
+      first: (timeoutMs) => rfb.first(timeoutMs),
+      nextChangedAfter: (previous, timeoutMs) =>
+        rfb.nextChangedAfter(previous as RfbUpdate, timeoutMs),
+      typeAscii: (value) => rfb.typeAscii(value),
+      close: () => rfb.close(),
+    };
   }
   const encoded = await FrameProbe.computer(attachment);
   return {
@@ -871,14 +903,13 @@ function percentile(sorted: number[], fraction: number): number {
   return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * fraction) - 1))]!;
 }
 
-function assertBudget(metric: InteractionLatencyMetric, samples: number[]): void {
+function budgetFailure(metric: InteractionLatencyMetric, samples: number[]): string | null {
   const budget = INTERACTION_LATENCY_BUDGETS[metric];
   const observed = measurement(samples)[budget.statistic];
   if (observed > budget.limitMs) {
-    throw new Error(
-      `${metric} ${budget.statistic} ${observed.toFixed(1)}ms exceeds ${budget.limitMs}ms`,
-    );
+    return `${metric} ${budget.statistic} ${observed.toFixed(1)}ms exceeds ${budget.limitMs}ms`;
   }
+  return null;
 }
 
 function fixtureUrl(): string {
