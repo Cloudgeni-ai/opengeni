@@ -115,7 +115,9 @@ describe("release schema contract", () => {
       sourceContract.migrations.map((migration) => [migration.path, migration]),
     );
     expect(sourceContract.sha256).toBe(
-      migrations.has("0228_slack_task_policy.sql")
+      migrations.has("0234_xai_subscription_authority.sql")
+        ? "6c5f7b50a23c994d3f82705b079ce77d4abaff1dfd2e67b01ff7c798094e41f3"
+        : migrations.has("0228_slack_task_policy.sql")
         ? migrations.has("0226_personal_codex_authority_foundation.sql")
           ? "7b7fd3a19e1e2a9b5cf98b8ad8e5720f1e3c329ad42f9f012172b028c26e8363"
           : "bbedea10fef52aeaf32d6e16c27d1042a9f68483ba54c241f5184659e86b3c89"
@@ -155,7 +157,9 @@ describe("release schema contract", () => {
     );
     const contract = {
       ...sourceContract,
-      sha256: migrations.has("0228_slack_task_policy.sql")
+      sha256: migrations.has("0234_xai_subscription_authority.sql")
+        ? "6c5f7b50a23c994d3f82705b079ce77d4abaff1dfd2e67b01ff7c798094e41f3"
+        : migrations.has("0228_slack_task_policy.sql")
         ? migrations.has("0226_personal_codex_authority_foundation.sql")
           ? "7b7fd3a19e1e2a9b5cf98b8ad8e5720f1e3c329ad42f9f012172b028c26e8363"
           : "bbedea10fef52aeaf32d6e16c27d1042a9f68483ba54c241f5184659e86b3c89"
@@ -371,10 +375,13 @@ describe("release schema contract", () => {
         (migrations.has("0224_slack_post_outcome_reconciliation.sql") ? 1 : 0) +
         (migrations.has("0226_personal_codex_authority_foundation.sql") ? 1 : 0) +
         (migrations.has("0227_slack_native_actions.sql") ? 1 : 0) +
-        (migrations.has("0228_slack_task_policy.sql") ? 1 : 0),
+        (migrations.has("0228_slack_task_policy.sql") ? 1 : 0) +
+        (migrations.has("0234_xai_subscription_authority.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      migrations.has("0228_slack_task_policy.sql")
+      migrations.has("0234_xai_subscription_authority.sql")
+        ? "6c5f7b50a23c994d3f82705b079ce77d4abaff1dfd2e67b01ff7c798094e41f3"
+        : migrations.has("0228_slack_task_policy.sql")
         ? migrations.has("0226_personal_codex_authority_foundation.sql")
           ? "7b7fd3a19e1e2a9b5cf98b8ad8e5720f1e3c329ad42f9f012172b028c26e8363"
           : "bbedea10fef52aeaf32d6e16c27d1042a9f68483ba54c241f5184659e86b3c89"
@@ -407,7 +414,9 @@ describe("release schema contract", () => {
                         : "2d8e3211f1526419a8421c4388f7cf2297839318d7a7dbd194362d81c503c70a",
     );
     expect(contract.latestMigration).toBe(
-      migrations.has("0228_slack_task_policy.sql")
+      migrations.has("0234_xai_subscription_authority.sql")
+        ? "0234_xai_subscription_authority.sql"
+        : migrations.has("0228_slack_task_policy.sql")
         ? "0228_slack_task_policy.sql"
         : migrations.has("0227_slack_native_actions.sql")
           ? "0227_slack_native_actions.sql"
@@ -559,6 +568,12 @@ describe("release schema contract", () => {
       sha256: "34b72f6ab031596c90f2f35957c707aaf013c2f52aee8ca92a70fdb8ab9cb9ce",
       deploymentMode: "rolling",
     });
+    if (migrations.has("0234_xai_subscription_authority.sql")) {
+      expect(migrations.get("0234_xai_subscription_authority.sql")).toMatchObject({
+        sha256: "549850192f518b31d8e4feaec70b77c7a40c14242f60570087a68961f28588f3",
+        deploymentMode: "rolling",
+      });
+    }
     expect(migrations.get("0183_model_call_provider_cost_estimates.sql")).toMatchObject({
       sha256: "2cb087b69996c62e8836f2d65c9e2af3fb580fe1822d327600bf40e3a6977d64",
       deploymentMode: "rolling",
