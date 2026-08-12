@@ -1543,6 +1543,46 @@ describe("clean session control plane", () => {
       modelToolOutputTruncationTokens: 100,
       resultItem: pendingTextResultItem,
     });
+    const pendingRichEventOutput = {
+      content: [{ type: "text", text: "model-visible content" }],
+      structuredContent: { receiptId: "recovery-receipt-1" },
+      isError: false,
+      _meta: { providerTrace: "recovery-trace-1" },
+      vendorReceipt: { id: "vendor-recovery-1", committed: true },
+    };
+    expect(
+      await registerPendingSessionToolCall(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn!.id,
+        executionGeneration: turn!.executionGeneration,
+        attemptId,
+        callId: "pending-rich-call",
+        callType: "function_call",
+        callItem: {
+          type: "function_call",
+          callId: "pending-rich-call",
+          name: "rich_tool",
+          arguments: "{}",
+        },
+      }),
+    ).toEqual({ accepted: true, registered: true });
+    await recordPendingSessionToolCallResult(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn!.id,
+      executionGeneration: turn!.executionGeneration,
+      attemptId,
+      callId: "pending-rich-call",
+      resultItem: {
+        type: "function_call_result",
+        callId: "pending-rich-call",
+        output: { type: "text", text: "model-visible content" },
+      },
+      eventOutput: pendingRichEventOutput,
+    });
     const pendingMixedResultItem = {
       type: "function_call_result",
       callId: "pending-mixed-call",
@@ -1676,6 +1716,17 @@ describe("clean session control plane", () => {
     };
     expect(mixedRecoveryOutput.output).toEqual(mixedOutput);
     expect(mixedRecoveryOutput.recovery.outcome).toBe("durable_result_found");
+    expect(
+      recovery.events.find(
+        (event) =>
+          event.type === "agent.toolCall.output" &&
+          (event.payload as { id?: unknown }).id === "pending-rich-call",
+      )?.payload,
+    ).toMatchObject({
+      id: "pending-rich-call",
+      output: pendingRichEventOutput,
+      recovery: { interrupted: false, outcome: "durable_result_found" },
+    });
     expect(sessionEventPayloadTruncation(mixedRecoveryOutput)).toBeNull();
     const mixedRecoveryPreview = boundSessionEventPayload(mixedRecoveryOutput, {
       surface: "durable_audit",
