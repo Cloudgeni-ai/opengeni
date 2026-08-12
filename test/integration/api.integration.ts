@@ -5451,7 +5451,7 @@ describe("API component integration", () => {
     const refreshedContext = await defaultAccessContext(app);
 
     const authorityCheckedAt = new Date();
-    const authorityExpiresAt = new Date(Date.now() + 10 * 60_000);
+    const authorityExpiresAt = new Date(authorityCheckedAt.getTime() + 10 * 60_000);
     // One GitHub installation can be deliberately delegated into two OpenGeni
     // workspaces, but each workspace owns an independent exact allowlist and
     // an independent consumed owner-authority proof.
