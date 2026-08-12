@@ -502,7 +502,7 @@ describe("ComputerSession frame stream", () => {
 
   test("cannot publish a delayed frame from a detached socket after target switch", async () => {
     const sockets: FakeComputerSocket[] = [];
-    let release: ((value: ArrayBuffer) => void) | null = null;
+    let release!: (value: ArrayBuffer) => void;
     const delayed = new (class extends Blob {
       override arrayBuffer(): Promise<ArrayBuffer> {
         return new Promise((resolve) => {
@@ -534,7 +534,7 @@ describe("ComputerSession frame stream", () => {
     await dispatch(sockets[0]!, "message", { data: delayed });
     await hook.rerender({ targetId: "screen-1" });
     await flush(10);
-    release?.(frameMessage("window-1", 9).buffer as ArrayBuffer);
+    release(frameMessage("window-1", 9).buffer as ArrayBuffer);
     await flush(20);
     expect(hook.result.current.frame).toBeNull();
     expect(sockets[0]?.closed).toBe(true);

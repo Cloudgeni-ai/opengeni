@@ -884,6 +884,47 @@ describe("BrowserSession frame stream", () => {
     expect(hook.result.current.frame?.sequence).toBe(2);
     await hook.unmount();
   });
+
+  test("cannot publish a delayed frame from a detached socket after target switch", async () => {
+    const sockets: FakeBrowserSocket[] = [];
+    let release!: (value: ArrayBuffer) => void;
+    const delayed = new (class extends Blob {
+      override arrayBuffer(): Promise<ArrayBuffer> {
+        return new Promise((resolve) => {
+          release = resolve;
+        });
+      }
+    })();
+    const client = fakeClient({
+      attachBrowserSession: async (_workspaceId, _browserSessionId, request) =>
+        attachment(request.targetId),
+    });
+    const hook = await renderHook(
+      (props: { targetId: string }) =>
+        useBrowserFrameStream({
+          client,
+          workspaceId: WORKSPACE_ID,
+          browserSessionId: BROWSER_SESSION_ID,
+          targetId: props.targetId,
+          webSocketFactory: (url, protocols) => {
+            const socket = new FakeBrowserSocket(url, protocols);
+            sockets.push(socket);
+            return socket as unknown as BrowserFrameWebSocket;
+          },
+        }),
+      { targetId: "target-1" },
+    );
+    await flush(10);
+    await dispatch(sockets[0]!, "open");
+    await dispatch(sockets[0]!, "message", { data: delayed });
+    await hook.rerender({ targetId: "target-2" });
+    await flush(10);
+    release(frameMessage("target-1", 9).buffer as ArrayBuffer);
+    await flush(20);
+    expect(hook.result.current.frame).toBeNull();
+    expect(sockets[0]?.closed).toBe(true);
+    await hook.unmount();
+  });
 });
 
 describe("BrowserViewer", () => {
