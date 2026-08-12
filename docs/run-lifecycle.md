@@ -1191,3 +1191,9 @@ types its wire protocol cannot represent. Historical `tool_search` and other
 tool call/output pairs are completed facts, not authorization to execute again.
 The projection is discarded after the request. Portable sessions may switch
 between supported providers; `remote_v2` sessions remain Codex-only.
+
+## Agent-loop request lifecycle observability
+
+Provider request lifecycle diagnostics are synchronous, bounded, and best-effort. The Codex transport reports `headers`, `first_byte`, and one semantic `terminal` phase with a monotonic elapsed duration; terminal outcomes are `completed`, `failed`, or `timed_out`. The worker maps these to `opengeni_model_request_phases_total{provider,phase,outcome}` and `opengeni_model_request_phase_duration_seconds{provider,phase}`. Provider ids come from the resolved provider registry; request ids, model bodies, credentials, session ids, and token content are not metric labels.
+
+The diagnostic observer runs before the existing awaited `agent.model.request` durable audit callback and cannot block or change it. Durable append/publish fencing and ordering therefore remain the source of audit truth. A Codex `response.completed`/`response.done` terminal is latched before downstream stream cleanup; if the consumer cancels after parsing that semantic terminal, the audit remains `completed` rather than producing a misleading trailing `failed`. Actual provider failure/incomplete/error, transport failure, timeout, or caller abort remains failed/timed out.
