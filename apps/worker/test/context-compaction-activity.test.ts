@@ -1,6 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { MODEL_ATTACHMENT_REFS_FIELD } from "@opengeni/contracts";
 import {
+  ACTIVE_SESSION_HISTORY_MAX_JSON_BYTES,
+  ACTIVE_SESSION_HISTORY_MAX_JSON_NODES,
+  ACTIVE_SESSION_HISTORY_MAX_JSON_PROPERTIES,
+  ACTIVE_SESSION_HISTORY_MAX_ROWS,
   ActiveSessionHistoryLimitExceededError,
   ApprovalRunStateLimitExceededError,
   addSessionSystemUpdate,
@@ -85,6 +89,13 @@ describe("standalone context compaction execution", () => {
     await client?.close();
     await shared?.release();
   }, 60_000);
+
+  test("uses the production active-history materialization envelope", () => {
+    expect(ACTIVE_SESSION_HISTORY_MAX_JSON_BYTES).toBe(15 * 1024 * 1024);
+    expect(ACTIVE_SESSION_HISTORY_MAX_ROWS).toBe(8_192);
+    expect(ACTIVE_SESSION_HISTORY_MAX_JSON_NODES).toBe(131_072);
+    expect(ACTIVE_SESSION_HISTORY_MAX_JSON_PROPERTIES).toBe(65_536);
+  });
 
   test("rejects an oversized active UTF-8 JSON transcript before paged item decoding", async () => {
     const suffix = crypto.randomUUID();
