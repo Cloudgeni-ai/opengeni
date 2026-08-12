@@ -19,7 +19,6 @@ describe("0134 session realtime context projection migration", () => {
       {
         rlsEnabled: boolean;
         rlsForced: boolean;
-        policyCount: number;
         appSelect: boolean;
         appInsert: boolean;
         appUpdate: boolean;
@@ -29,7 +28,6 @@ describe("0134 session realtime context projection migration", () => {
       select
         c.relrowsecurity as "rlsEnabled",
         c.relforcerowsecurity as "rlsForced",
-        (select count(*)::int from pg_policy p where p.polrelid = c.oid) as "policyCount",
         has_table_privilege('opengeni_app', c.oid, 'select') as "appSelect",
         has_table_privilege('opengeni_app', c.oid, 'insert') as "appInsert",
         has_table_privilege('opengeni_app', c.oid, 'update') as "appUpdate",
@@ -41,12 +39,53 @@ describe("0134 session realtime context projection migration", () => {
     expect(row).toEqual({
       rlsEnabled: true,
       rlsForced: true,
-      policyCount: 1,
       appSelect: true,
       appInsert: true,
       appUpdate: true,
       appDelete: true,
     });
+
+    const policies = await shared.admin<
+      {
+        name: string;
+        permissive: boolean;
+        command: string;
+        publicOnly: boolean;
+        usingExpression: string;
+        checkExpression: string;
+      }[]
+    >`
+      select
+        policy.polname as name,
+        policy.polpermissive as permissive,
+        policy.polcmd as command,
+        policy.polroles = array[0::oid] as "publicOnly",
+        pg_get_expr(policy.polqual, policy.polrelid) as "usingExpression",
+        pg_get_expr(policy.polwithcheck, policy.polrelid) as "checkExpression"
+      from pg_policy policy
+      join pg_class relation on relation.oid = policy.polrelid
+      join pg_namespace namespace on namespace.oid = relation.relnamespace
+      where namespace.nspname = current_schema()
+        and relation.relname = 'session_realtime_context_projections'
+      order by policy.polname`;
+    expect(Array.from(policies)).toEqual([
+      {
+        name: "session_visibility_isolation",
+        permissive: false,
+        command: "*",
+        publicOnly: true,
+        usingExpression: "session_reference_visible(account_id, workspace_id, session_id)",
+        checkExpression: "session_reference_visible(account_id, workspace_id, session_id)",
+      },
+      {
+        name: "workspace_isolation",
+        permissive: true,
+        command: "*",
+        publicOnly: true,
+        usingExpression: "opengeni_private.workspace_rls_visible(account_id, workspace_id)",
+        checkExpression: "opengeni_private.workspace_rls_visible(account_id, workspace_id)",
+      },
+    ]);
   });
 
   test("installs the turn binding, pending-source index, and paired consumption marker", async () => {

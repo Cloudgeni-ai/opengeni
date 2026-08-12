@@ -124,10 +124,34 @@ function safePosture(): RuntimeDatabasePosture {
         references: false,
         trigger: false,
       },
+      {
+        name: "sessions",
+        owner: "opengeni_migrator",
+        rlsEnabled: false,
+        rlsForced: false,
+        rlsActive: false,
+        policyCount: 0,
+        artifactOutboxDispatcherPolicy: false,
+        artifactMaterializerPolicy: false,
+        select: false,
+        insert: false,
+        update: false,
+        delete: false,
+        truncate: false,
+        references: false,
+        trigger: false,
+      },
       ...knowledgeAuthorityTables(),
       ...canonicalHumanIdentityAuthorityTables(),
     ],
     targetRoutines: [
+      {
+        name: "fork_session_content(uuid, uuid, uuid, text, uuid, text, text, text)",
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+      },
       {
         name: "knowledge_source_sync_lock_authority(uuid, uuid, uuid)",
         owner: "opengeni_migrator",
@@ -154,6 +178,27 @@ function safePosture(): RuntimeDatabasePosture {
         publicExecute: false,
         securityDefiner: true,
       })),
+      {
+        name: "session_private_actor_visible(uuid, uuid, uuid, text)",
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+      },
+      {
+        name: "session_reference_visible(uuid, uuid, uuid)",
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: false,
+      },
+      {
+        name: "transition_session_visibility(uuid, uuid, uuid, text, text, integer, text, text)",
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+      },
     ],
     privateRoutines: [
       {
@@ -170,6 +215,11 @@ describe("runtime database posture evaluator", () => {
   test("freezes the unique, sorted current-ledger table privilege classes", () => {
     const hasOpe121SlackPublicationLedger = FORCE_RLS_TABLES.includes("memory_slack_publications");
     if (hasOpe121SlackPublicationLedger) {
+      const sessionVisibilityProtectedTableDelta = FORCE_RLS_TABLES.includes(
+        "session_visibility_write_capabilities",
+      )
+        ? 1
+        : 0;
       const hasCurrentMainActivityLedger = new Set<string>(FORCE_RLS_TABLES).has(
         "slack_user_link_access_request_operations",
       );
@@ -204,13 +254,18 @@ describe("runtime database posture evaluator", () => {
             [RUNTIME_DML_TABLES, 173],
           ] as const);
       for (const [tables, length] of contracts) {
-        expect(tables).toHaveLength(length);
+        const protectedTableDelta =
+          tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
+            ? sessionVisibilityProtectedTableDelta
+            : 0;
+        expect(tables).toHaveLength(length + protectedTableDelta);
         expect(new Set(tables).size).toBe(tables.length);
         expect([...tables].sort()).toEqual([...tables]);
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = hasCurrentMainActivityLedger ? 237 : 188;
+      const tableCount =
+        (hasCurrentMainActivityLedger ? 237 : 188) + sessionVisibilityProtectedTableDelta;
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount,
       );
@@ -280,14 +335,16 @@ describe("runtime database posture evaluator", () => {
       [RUNTIME_DML_TABLES, 202],
     ] as const;
     for (const [tables, length] of contracts) {
-      expect(tables).toHaveLength(length);
+      const protectedTableDelta =
+        tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES ? 1 : 0;
+      expect(tables).toHaveLength(length + protectedTableDelta);
       expect(new Set(tables).size).toBe(tables.length);
       expect([...tables].sort()).toEqual([...tables]);
     }
 
     expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-    expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(217);
-    expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(212);
+    expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(218);
+    expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(213);
     expect(RUNTIME_TABLE_PRIVILEGES.editable_artifact_session_links).toEqual([
       "SELECT",
       "INSERT",
@@ -356,7 +413,9 @@ describe("runtime database posture evaluator", () => {
   test("rejects knowledge authority routine and table owner mismatch", () => {
     const posture = safePosture();
 
-    posture.targetRoutines[0]!.owner = "another_owner";
+    posture.targetRoutines.find(
+      (routine) => routine.name === "knowledge_source_sync_lock_authority(uuid, uuid, uuid)",
+    )!.owner = "another_owner";
     expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
       "target-schema runtime capability knowledge_source_sync_lock_authority(uuid, uuid, uuid) owner another_owner does not match authority table owner opengeni_migrator",
     );
@@ -544,8 +603,11 @@ describe("runtime database posture evaluator", () => {
     );
 
     const invalid = safePosture();
-    invalid.targetRoutines[0] = {
-      ...invalid.targetRoutines[0]!,
+    const knowledgeRoutineIndex = invalid.targetRoutines.findIndex(
+      (routine) => routine.name === "knowledge_source_sync_lock_authority(uuid, uuid, uuid)",
+    );
+    invalid.targetRoutines[knowledgeRoutineIndex] = {
+      ...invalid.targetRoutines[knowledgeRoutineIndex]!,
       owner: "another_owner",
       execute: false,
       publicExecute: true,
