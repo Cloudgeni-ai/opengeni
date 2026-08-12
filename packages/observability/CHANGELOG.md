@@ -1,5 +1,15 @@
 # @opengeni/observability
 
+## 0.7.2
+
+### Patch Changes
+
+- Updated dependencies [1e78f58]
+- Updated dependencies [1e78f58]
+- Updated dependencies [746bbbe]
+- Updated dependencies [1e78f58]
+  - @opengeni/contracts@0.47.0
+
 ## 0.7.1
 
 ### Patch Changes
