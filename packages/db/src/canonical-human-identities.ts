@@ -152,6 +152,14 @@ export async function synchronizeCanonicalHumanLoginBindings(
   for (const account of accounts) {
     for (let attempt = 0; attempt < 4; attempt += 1) {
       const projection = await getCanonicalHumanIdentityProjection(db, authUserId);
+      if (projection.activeIdentity.status !== "active") {
+        return {
+          identityId: projection.activeIdentity.id,
+          identityRevision: projection.activeIdentity.identityRevision,
+          authRevision: projection.activeIdentity.authRevision,
+          identityStatus: projection.activeIdentity.status,
+        };
+      }
       const existing = projection.loginBindings.find(
         (binding) =>
           binding.providerId === account.providerId &&
@@ -187,6 +195,17 @@ export async function synchronizeCanonicalHumanLoginBindings(
         break;
       } catch (error) {
         if (error instanceof CanonicalHumanIdentityConflictError && attempt < 3) continue;
+        if (error instanceof CanonicalHumanIdentityAuthorityError) {
+          const currentProjection = await getCanonicalHumanIdentityProjection(db, authUserId);
+          if (currentProjection.activeIdentity.status !== "active") {
+            return {
+              identityId: currentProjection.activeIdentity.id,
+              identityRevision: currentProjection.activeIdentity.identityRevision,
+              authRevision: currentProjection.activeIdentity.authRevision,
+              identityStatus: currentProjection.activeIdentity.status,
+            };
+          }
+        }
         throw error;
       }
     }

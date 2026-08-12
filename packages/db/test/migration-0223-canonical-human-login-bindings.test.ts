@@ -6,6 +6,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import postgres from "postgres";
 import {
   applyCanonicalHumanIdentityOperation,
+  CanonicalHumanIdentityAuthorityError,
   ensureCanonicalHumanIdentityForAuthUser,
   getCanonicalHumanIdentityProjection,
   synchronizeCanonicalHumanLoginBindings,
@@ -305,6 +306,38 @@ describe("migration 0223 canonical human identities and login bindings", () => {
         allowRecovery: true,
       }),
     ).toBe(true);
+
+    const operationCountBeforeSynchronization = await shared.admin<{ count: number }[]>`
+      select count(*)::int as count
+      from canonical_human_identity_operations
+      where actor_auth_user_id = ${userId}
+    `;
+    const synchronizedRecovery = await synchronizeCanonicalHumanLoginBindings(client.db, userId);
+    expect(synchronizedRecovery).toEqual({
+      identityId: recovery.identity.activeIdentity.id,
+      identityRevision: recovery.identity.activeIdentity.identityRevision,
+      authRevision: recovery.identity.activeIdentity.authRevision,
+      identityStatus: "recovery_required",
+    });
+    expect(await getCanonicalHumanIdentityProjection(client.db, userId)).toEqual(recovery.identity);
+    const operationCountAfterSynchronization = await shared.admin<{ count: number }[]>`
+      select count(*)::int as count
+      from canonical_human_identity_operations
+      where actor_auth_user_id = ${userId}
+    `;
+    expect(operationCountAfterSynchronization).toEqual(operationCountBeforeSynchronization);
+    await expect(
+      applyCanonicalHumanIdentityOperation(client.db, {
+        operationId: crypto.randomUUID(),
+        authUserId: userId,
+        expectedIdentityRevision: recovery.identity.activeIdentity.identityRevision,
+        operationType: "link",
+        providerId: "password",
+        providerAccountId: userId,
+        reason: "Ordinary authentication must not complete recovery",
+      }),
+    ).rejects.toBeInstanceOf(CanonicalHumanIdentityAuthorityError);
+    expect(await getCanonicalHumanIdentityProjection(client.db, userId)).toEqual(recovery.identity);
 
     const restored = await applyCanonicalHumanIdentityOperation(client.db, {
       operationId: crypto.randomUUID(),

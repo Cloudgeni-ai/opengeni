@@ -645,6 +645,10 @@ BEGIN
       IF identity_row.status IN ('disputed', 'disabled') THEN
         RAISE EXCEPTION 'canonical human identity is not mutable' USING ERRCODE = '42501';
       END IF;
+      IF p_operation_type = 'link' AND identity_row.status = 'recovery_required' THEN
+        RAISE EXCEPTION 'canonical human identity requires explicit recovery completion'
+          USING ERRCODE = '42501';
+      END IF;
 
       IF p_operation_type = 'link' THEN
         IF NOT EXISTS (

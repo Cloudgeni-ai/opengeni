@@ -116,7 +116,7 @@ describe("release schema contract", () => {
     );
     expect(sourceContract.sha256).toBe(
       migrations.has("0223_canonical_human_login_bindings.sql")
-        ? "a1c3bdf1f934a222db3e3bc8124283da524d290d3bf2367830e0024a7e11c45e"
+        ? "289570ae46edf27dd798dfa39170d7429bece7c4bf97943b4cdcdee0a3049b7d"
         : migrations.has("0222_session_visibility_authority_epochs.sql")
           ? "257511509811c24cc2e60afca38362b9a065924101fcd1df52850b01fbe5fafa"
           : migrations.has("0221_sessions_channel_index.sql")
@@ -144,7 +144,7 @@ describe("release schema contract", () => {
     const contract = {
       ...sourceContract,
       sha256: migrations.has("0223_canonical_human_login_bindings.sql")
-        ? "a1c3bdf1f934a222db3e3bc8124283da524d290d3bf2367830e0024a7e11c45e"
+        ? "289570ae46edf27dd798dfa39170d7429bece7c4bf97943b4cdcdee0a3049b7d"
         : migrations.has("0222_session_visibility_authority_epochs.sql")
           ? "257511509811c24cc2e60afca38362b9a065924101fcd1df52850b01fbe5fafa"
           : migrations.has("0221_sessions_channel_index.sql")
@@ -346,7 +346,7 @@ describe("release schema contract", () => {
     );
     expect(contract.sha256).toBe(
       migrations.has("0223_canonical_human_login_bindings.sql")
-        ? "a1c3bdf1f934a222db3e3bc8124283da524d290d3bf2367830e0024a7e11c45e"
+        ? "289570ae46edf27dd798dfa39170d7429bece7c4bf97943b4cdcdee0a3049b7d"
         : migrations.has("0222_session_visibility_authority_epochs.sql")
           ? "257511509811c24cc2e60afca38362b9a065924101fcd1df52850b01fbe5fafa"
           : migrations.has("0221_sessions_channel_index.sql")
@@ -506,7 +506,7 @@ describe("release schema contract", () => {
     }
     if (migrations.has("0223_canonical_human_login_bindings.sql")) {
       expect(migrations.get("0223_canonical_human_login_bindings.sql")).toMatchObject({
-        sha256: "8e0264cf59fbea75a3e1d33bb521088785c3c328d5b6d7121011d9d9e22af6bc",
+        sha256: "c62984fc3016e0433e5dbc2049e14e11b343d9221b92b2e5dcc5238339579200",
         deploymentMode: "rolling",
       });
     }
