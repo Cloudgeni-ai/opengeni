@@ -64,6 +64,8 @@ import {
   ChannelAUnsupportedError,
   ChannelAUnavailableError,
   ChannelAValidationError,
+  BrowserControlRequestError,
+  BrowserControlTransportError,
   codemodeTokenFileFromEnvironment,
   withCodemodeTokenSession,
   withRunCredentialsSession,
@@ -104,12 +106,14 @@ export type ChannelAOperation =
   | "browser.suspend"
   | "browser.end"
   | "browser.read"
+  | "browser.action"
   | "browser.control"
   | "browser.download.save"
   | "browser.attach"
   | "computer.create"
   | "computer.end"
   | "computer.read"
+  | "computer.action"
   | "computer.control"
   | "computer.attach";
 
@@ -123,6 +127,11 @@ export type ChannelAContext = {
   waitSignal?: AbortSignal | undefined;
   /** Bounded route identity for metrics and safe operator diagnostics. */
   operation?: ChannelAOperation | undefined;
+  /** The callback is an interaction-controller read or an exactly-once action.
+   * A controller transport failure may therefore rebuild the exact fenced
+   * provider handle and replay the request. Tab/lifecycle mutations that lack
+   * a controller operation id must never opt into this recovery. */
+  retryControllerTransport?: boolean | undefined;
 };
 
 export type ChannelAOperationFailureReason =
@@ -372,6 +381,8 @@ type ChannelAReadRecoveryOptions = {
   maxFreshHandleRetries?: 1 | 2;
   /** Never start another provider attempt after the originating request ends. */
   waitSignal?: AbortSignal | undefined;
+  /** Additional callback-specific failure that is safe to replay. */
+  retryableError?: ((error: unknown) => boolean) | undefined;
 };
 
 /** Retry a side-effect-free Channel-A read only after the caller has discarded
@@ -392,7 +403,9 @@ export async function runChannelAReadWithFreshHandleRetry<T>(
     try {
       return await run();
     } catch (error) {
-      if (!(error instanceof ChannelAUnavailableError) || retries >= maxFreshHandleRetries) {
+      const retryable =
+        error instanceof ChannelAUnavailableError || options.retryableError?.(error) === true;
+      if (!retryable || retries >= maxFreshHandleRetries) {
         throw error;
       }
       options.waitSignal?.throwIfAborted();
@@ -406,7 +419,17 @@ export function shouldEvictChannelAHandleAfterError(
   error: unknown,
   cacheKind: EstablishedHandleCacheKind,
 ): boolean {
-  return error instanceof ChannelAUnavailableError && cacheKind === "read";
+  return (
+    cacheKind === "read" &&
+    (error instanceof ChannelAUnavailableError || isRetryableControllerTransport(error))
+  );
+}
+
+function isRetryableControllerTransport(error: unknown): boolean {
+  return (
+    error instanceof BrowserControlTransportError ||
+    (error instanceof BrowserControlRequestError && error.retryable)
+  );
 }
 
 function evictEstablishedHandle(key: string, cacheKind: EstablishedHandleCacheKind): void {
@@ -942,6 +965,9 @@ async function withChannelAOperation<T>(
           {
             maxFreshHandleRetries: session.sandboxBackend === "modal" ? 2 : 1,
             ...(ctx.waitSignal ? { waitSignal: ctx.waitSignal } : {}),
+            ...(ctx.retryControllerTransport
+              ? { retryableError: isRetryableControllerTransport }
+              : {}),
           },
         )
       : await runProviderOperation();

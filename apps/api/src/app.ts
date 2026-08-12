@@ -70,6 +70,10 @@ import {
   submitAndDispatchCodemodeCall,
 } from "./codemode";
 import { boundedMcpRequest, McpPayloadTooLargeError } from "@opengeni/runtime/mcp-network";
+import {
+  BrowserControlProtocolError,
+  BrowserControlTransportError,
+} from "@opengeni/runtime/sandbox";
 import { requireAccessKey } from "./http/auth";
 import { allowedCorsOrigin } from "./http/cors";
 import { registerCapabilityRoutes } from "./routes/capabilities";
@@ -735,6 +739,7 @@ export function createAppComposition(deps: AppDependencies): {
             ? (boundedPublicMessage(apiError.message) ?? "Request failed.")
             : publicErrorMessage(error, status),
         retryable: apiError?.retryable ?? retryableHttpStatus(status),
+        ...(mutationOutcomeUnknown(error, c.req.method) ? { outcomeUnknown: true } : {}),
         requestId,
         ...(apiError?.details ? { details: apiError.details } : {}),
       },
@@ -743,6 +748,14 @@ export function createAppComposition(deps: AppDependencies): {
   });
 
   return { app, routeDeps };
+}
+
+function mutationOutcomeUnknown(error: unknown, method: string): boolean {
+  if (method === "GET" || method === "HEAD" || method === "OPTIONS") return false;
+  const cause = error instanceof HTTPException ? error.cause : error;
+  return (
+    cause instanceof BrowserControlTransportError || cause instanceof BrowserControlProtocolError
+  );
 }
 
 export function appendVary(current: string | null, value: string): string {

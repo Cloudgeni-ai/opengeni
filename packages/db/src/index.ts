@@ -29801,6 +29801,7 @@ type LeaseRow = {
   rig_version_id: string | null;
   data_plane_url: string | null;
   terminal_data_plane_url: string | null;
+  controller_data_plane_url: string | null;
   lease_epoch: number | string;
   workspace_generation: number | string;
   archive_generation: number | string | null;
@@ -29853,6 +29854,9 @@ export interface LeaseSnapshot {
   // The cached ttyd pty-ws tunnel URL (7681), separate from dataPlaneUrl (the
   // 6080 desktop tunnel). Null until mintTerminalStream resolves + records it.
   terminalDataPlaneUrl: string | null;
+  /** Cached browserd controller tunnel (7682), fenced to this lease epoch and
+   * provider instance. Null until the first controller provisioning/resolution. */
+  controllerDataPlaneUrl: string | null;
   leaseEpoch: number;
   /** Monotonic filesystem mutation intent for the exact live workspace. */
   workspaceGeneration: number;
@@ -30117,6 +30121,7 @@ function mapLeaseRow(row: LeaseRow): LeaseSnapshot {
     rigVersionId: row.rig_version_id ?? null,
     dataPlaneUrl: row.data_plane_url,
     terminalDataPlaneUrl: row.terminal_data_plane_url ?? null,
+    controllerDataPlaneUrl: row.controller_data_plane_url ?? null,
     // Defensive coercion: integer returns a number, but coerce regardless so the
     // fence comparison stays exact even if the column type ever drifts to int8.
     leaseEpoch: Number(row.lease_epoch),
@@ -31568,6 +31573,7 @@ export async function failSandboxRematerialization(
             instance_id = null,
             data_plane_url = null,
             terminal_data_plane_url = null,
+            controller_data_plane_url = null,
             lease_epoch = lease_epoch + 1,
             reaper_hold_id = null,
             reaper_hold_until = null,
@@ -31855,6 +31861,7 @@ export async function commitWarmingToWarm(
             instance_id       = ${input.instanceId},
             data_plane_url    = ${input.dataPlaneUrl ?? null},
             terminal_data_plane_url = null,
+            controller_data_plane_url = null,
             resume_backend_id = ${input.resumeBackendId ?? null},
             resume_state      = ${resumeStateJson}::jsonb,
             lease_epoch       = lease_epoch + 1,
@@ -33803,6 +33810,7 @@ export async function markWarmLeaseInstanceLost(
             instance_id = null,
             data_plane_url = null,
             terminal_data_plane_url = null,
+            controller_data_plane_url = null,
             lease_epoch = lease_epoch + 1,
             reaper_hold_id = null,
             reaper_hold_until = null,
@@ -34123,6 +34131,7 @@ export async function failWarmingToCold(
             instance_id = null,
             data_plane_url = null,
             terminal_data_plane_url = null,
+            controller_data_plane_url = null,
             lease_epoch = lease_epoch + 1,
             reaper_hold_id = null,
             reaper_hold_until = null,
@@ -34750,6 +34759,7 @@ export async function reapStaleLeaseHolders(
             resume_backend_id = case when ${hasArchive} then coalesce(resume_backend_id, backend) else null end,
             resume_state = ${resetResumeState ? JSON.stringify(resetResumeState) : null}::jsonb,
             data_plane_url = null, terminal_data_plane_url = null,
+            controller_data_plane_url = null,
             provider_created_at = null, provider_deadline_at = null,
             rotation_requested_at = null, rotation_reason = null,
             archive_capture_id = null, archive_capture_operation_id = null,
@@ -34782,6 +34792,7 @@ export async function reapStaleLeaseHolders(
           viewer_holders = 0,
           data_plane_url = null,
           terminal_data_plane_url = null,
+          controller_data_plane_url = null,
           lease_epoch = lease_epoch + 1,
           reaper_hold_id = null,
           reaper_hold_until = null,
@@ -35259,6 +35270,7 @@ export async function confirmDrainCold(
           instance_id = null,
           data_plane_url = null,
           terminal_data_plane_url = null,
+          controller_data_plane_url = null,
           lease_epoch = lease_epoch + 1,
           reaper_hold_id = null,
           reaper_hold_until = null,
@@ -40660,6 +40672,40 @@ export async function recordLeaseTerminalDataPlaneUrl(
           updated_at              = now()
         where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
           and lease_epoch = ${input.expectedEpoch}
+          and liveness in ('warm', 'draining')
+        returning *
+      `);
+      return rows[0] ? mapLeaseRow(rows[0]) : null;
+    },
+  );
+}
+
+/** Record the browserd controller tunnel for one exact warm provider instance.
+ * Unlike desktop/terminal viewer URLs, this endpoint is an internal transport
+ * cache: controller bearer tokens still enforce per-resource authority. */
+export async function recordLeaseControllerDataPlaneUrl(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    expectedEpoch: number;
+    expectedInstanceId: string;
+    controllerDataPlaneUrl: string | null;
+  },
+): Promise<LeaseSnapshot | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb.execute<LeaseRow>(sql`
+        update sandbox_leases set
+          controller_data_plane_url = ${input.controllerDataPlaneUrl ?? null},
+          updated_at = now()
+        where workspace_id = ${input.workspaceId}
+          and sandbox_group_id = ${input.sandboxGroupId}
+          and lease_epoch = ${input.expectedEpoch}
+          and instance_id = ${input.expectedInstanceId}
           and liveness in ('warm', 'draining')
         returning *
       `);

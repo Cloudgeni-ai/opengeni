@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 import { resolveFirstPartyDelegationSecret, resolveStreamTokenSecret } from "@opengeni/config";
 import {
   BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX,
+  BROWSER_CONTROL_PORT,
   COMPUTER_CONTROL_WEBSOCKET_PROTOCOL,
-  COMPUTER_RFB_WEBSOCKET_PROTOCOL,
   ComputerActionCommand,
   ComputerActionRequest,
   ComputerSessionAttachment,
@@ -41,6 +41,8 @@ import {
   prepareComputerSessionCreate,
   prepareComputerSessionEnd,
   releaseLeaseHolder,
+  readLease,
+  recordLeaseControllerDataPlaneUrl,
   touchComputerSessionController,
   type ComputerSessionControlRecord,
   type LeaseSnapshot,
@@ -63,6 +65,7 @@ import {
   BrowserControlUnsupportedError,
   buildSelfhostedBackendSession,
   buildStreamUrl,
+  exposedPortEndpointFromUrl,
   mintStreamToken,
   NatsControlRpc,
   NatsOpStreamTransport,
@@ -224,6 +227,9 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
               tokenGeneration: record.tokenGeneration,
               ...tokens,
             });
+            await cacheComputerControllerPlacement(grant, workspaceId, placement).catch(
+              () => placement,
+            );
           } catch (error) {
             if (
               error instanceof BrowserControlTransportError ||
@@ -366,7 +372,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         workspaceId,
         computerSessionId,
         "session.control",
-        "computer.control",
+        "computer.action",
         async ({ sessionClient, binding }) =>
           await sessionClient.action(
             ComputerActionCommand.parse({
@@ -451,23 +457,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
               "computer frame relay authority is unavailable",
             );
           }
-          let useDirectRfb = false;
-          if (record.session.platform === "linux" && !placement.session.openComputerFrames) {
-            const target = (await sessionClient.listTargets()).find(
-              (candidate) => candidate.id === request.targetId,
-            );
-            if (!target) {
-              throw new HTTPException(404, { message: "computer target does not exist" });
-            }
-            if (target.kind !== "screen") {
-              throw new BrowserControlUnsupportedError(
-                "window-native frame streaming is unavailable on this Linux placement",
-              );
-            }
-            useDirectRfb = true;
-          }
           let relayed = null;
-          if (!useDirectRfb) {
             try {
               relayed = await client.openRelayedComputerFrameStream({
                 reference,
@@ -484,18 +474,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
               });
               throw error;
             }
-          }
-          const stream = useDirectRfb
-            ? {
-                kind: "direct_rfb" as const,
-                url: await client.computerRfbStreamUrl(reference, request.targetId),
-                protocols: [
-                  "binary",
-                  COMPUTER_RFB_WEBSOCKET_PROTOCOL,
-                  `${BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX}${token}`,
-                ],
-              }
-            : relayed
+          const stream = relayed
               ? await (async () => {
                   const relayToken = await mintStreamToken(relaySecret!, {
                     workspaceId,
@@ -750,6 +729,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
     }
     const runWithChannelA =
       operation === "computer.read" ||
+      operation === "computer.action" ||
       operation === "computer.control" ||
       operation === "computer.attach"
         ? withChannelARead
@@ -763,6 +743,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         subjectId: grant.subjectId,
         waitSignal,
         operation,
+        retryControllerTransport: operation === "computer.read" || operation === "computer.action",
       },
       async (handle) => {
         if (expectedPlacement?.kind === "sandbox_group") {
@@ -835,6 +816,67 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
     );
   }
 
+  function controllerOnlySession(url: string): BrowserControlPlacementSession {
+    const endpoint = exposedPortEndpointFromUrl(url);
+    return {
+      resolveExposedPort: async (port: number) => {
+        if (port !== BROWSER_CONTROL_PORT) {
+          throw new BrowserControlUnsupportedError(`cached controller cannot expose port ${port}`);
+        }
+        return endpoint;
+      },
+    };
+  }
+
+  async function cachedComputerPlacement(
+    record: ComputerSessionControlRecord,
+  ): Promise<ComputerPlacement | null> {
+    const binding = record.session.controller;
+    if (!binding || record.session.placement.kind !== "sandbox_group") return null;
+    const sandboxGroupId = record.session.placement.sandboxGroupId;
+    const lease = await readLease(deps.db, record.session.workspaceId, sandboxGroupId);
+    if (
+      !lease ||
+      (lease.liveness !== "warm" && lease.liveness !== "draining") ||
+      lease.instanceId !== binding.placementInstanceId ||
+      !lease.controllerDataPlaneUrl
+    ) {
+      return null;
+    }
+    return {
+      placement: record.session.placement,
+      placementInstanceId: binding.placementInstanceId,
+      session: controllerOnlySession(lease.controllerDataPlaneUrl),
+      lease,
+    };
+  }
+
+  async function cacheComputerControllerPlacement(
+    grant: AccessGrant,
+    workspaceId: string,
+    placement: ComputerPlacement,
+  ): Promise<ComputerPlacement> {
+    if (
+      placement.placement.kind !== "sandbox_group" ||
+      !placement.lease?.instanceId ||
+      !placement.session.resolveExposedPort
+    ) {
+      return placement;
+    }
+    const endpoint = await placement.session.resolveExposedPort(BROWSER_CONTROL_PORT);
+    const url = buildStreamUrl(endpoint);
+    const lease = await recordLeaseControllerDataPlaneUrl(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      sandboxGroupId: placement.placement.sandboxGroupId,
+      expectedEpoch: placement.lease.leaseEpoch,
+      expectedInstanceId: placement.lease.instanceId,
+      controllerDataPlaneUrl: url,
+    });
+    if (!lease) return placement;
+    return { ...placement, session: controllerOnlySession(url), lease };
+  }
+
   async function withActiveComputerController<T>(
     context: Context,
     grant: AccessGrant,
@@ -871,6 +913,73 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
       if (!admitted) {
         throw new ComputerSessionStateError("ComputerSession controller authority changed");
       }
+      const run = async (placement: ComputerPlacement): Promise<T> => {
+        // The active controller binding is the provisioning fence. Live
+        // input connects to it directly instead of re-ensuring the sidecar.
+        const client = connectController(grant, record, placement);
+        const tokens = deriveComputerSessionControllerTokens({
+          rootSecret: controllerAuthorityRoot(deps),
+          accountId: grant.accountId,
+          workspaceId,
+          placement: record.session.placement,
+          placementInstanceId: placement.placementInstanceId,
+          computerSessionId,
+          controllerGeneration: binding.controllerGeneration,
+          tokenGeneration: record.tokenGeneration,
+        });
+        const controller = {
+          client,
+          sessionClient: client.computerSessionClient({
+            reference: {
+              computerSessionId,
+              controllerGeneration: binding.controllerGeneration,
+            },
+            ...tokens,
+          }),
+          record,
+          binding,
+          placement,
+        };
+        let result: T;
+        try {
+          result = await callback(controller);
+        } catch (error) {
+          if (!recoverMissing || !isMissingComputerControllerSession(error)) throw error;
+          await client.createComputerSession({
+            computerSessionId,
+            controllerGeneration: binding.controllerGeneration,
+            tokenGeneration: record.tokenGeneration,
+            ...tokens,
+          });
+          result = await callback(controller);
+        }
+        return result;
+      };
+      const cached = await cachedComputerPlacement(record);
+      if (cached) {
+        try {
+          return await run(cached);
+        } catch (error) {
+          const safelyReplayable =
+            channelOperation === "computer.read" || channelOperation === "computer.action";
+          if (
+            !safelyReplayable ||
+            (!(error instanceof BrowserControlTransportError) &&
+              !(error instanceof BrowserControlRequestError && error.retryable))
+          ) {
+            throw error;
+          }
+          await recordLeaseControllerDataPlaneUrl(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            sandboxGroupId: cached.lease!.sandboxGroupId,
+            expectedEpoch: cached.lease!.leaseEpoch,
+            expectedInstanceId: cached.placementInstanceId,
+            controllerDataPlaneUrl: null,
+          }).catch(() => null);
+        }
+      }
+
       const sourceSession = await requireSourceSession(deps, workspaceId, record.sourceSessionId);
       return await withComputerPlacement(
         sourceSession,
@@ -879,54 +988,12 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         binding.placementInstanceId,
         channelOperation,
         context.req.raw.signal,
-        async (placement) => {
-          // The active controller binding is the provisioning fence. Live
-          // input connects to it directly instead of re-ensuring the sidecar.
-          const client = connectController(grant, record, placement);
-          const tokens = deriveComputerSessionControllerTokens({
-            rootSecret: controllerAuthorityRoot(deps),
-            accountId: grant.accountId,
-            workspaceId,
-            placement: record.session.placement,
-            placementInstanceId: placement.placementInstanceId,
-            computerSessionId,
-            controllerGeneration: binding.controllerGeneration,
-            tokenGeneration: record.tokenGeneration,
-          });
-          const controller = {
-            client,
-            sessionClient: client.computerSessionClient({
-              reference: {
-                computerSessionId,
-                controllerGeneration: binding.controllerGeneration,
-              },
-              ...tokens,
-            }),
-            record,
-            binding,
-            placement,
-          };
-          let result: T;
-          try {
-            result = await callback(controller);
-          } catch (error) {
-            if (!recoverMissing || !isMissingComputerControllerSession(error)) throw error;
-            await client.createComputerSession({
-              computerSessionId,
-              controllerGeneration: binding.controllerGeneration,
-              tokenGeneration: record.tokenGeneration,
-              ...tokens,
-            });
-            result = await callback(controller);
-          }
-          await touchComputerSessionController(deps.db, {
-            accountId: grant.accountId,
-            workspaceId,
-            computerSessionId,
-            controllerGeneration: binding.controllerGeneration,
-          }).catch(() => false);
-          return result;
-        },
+        async (placement) =>
+          await run(
+            await cacheComputerControllerPlacement(grant, workspaceId, placement).catch(
+              () => placement,
+            ),
+          ),
       );
     } catch (error) {
       throw computerRouteError(error);

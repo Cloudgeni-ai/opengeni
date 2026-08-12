@@ -16,6 +16,7 @@ import {
   BrowserControlClient,
   BrowserControlProtocolError,
   BrowserControlRequestError,
+  BrowserControlUnsupportedError,
   provisionBrowserControlClient,
   type BrowserControlPlacementSession,
 } from "../src/sandbox/browser-control-client";
@@ -32,6 +33,36 @@ afterEach(async () => {
 });
 
 describe("BrowserControlClient", () => {
+  test("uses a cached controller endpoint without requiring provider exec", async () => {
+    const server = Bun.serve({
+      port: 0,
+      fetch(request) {
+        expect(request.headers.get("authorization")).toBe(`Bearer ${adminToken}`);
+        return success({ origins: ["https://app.opengeni.test"] });
+      },
+    });
+    const session: BrowserControlPlacementSession = {
+      resolveExposedPort: async () => ({
+        host: "127.0.0.1",
+        port: server.port,
+        tls: false,
+        path: "/",
+        query: "",
+      }),
+    };
+    try {
+      const client = new BrowserControlClient(session, { adminToken });
+      expect(await client.addAllowedOrigins(["https://app.opengeni.test"])).toEqual([
+        "https://app.opengeni.test",
+      ]);
+      await expect(
+        provisionBrowserControlClient(session, { adminToken }),
+      ).rejects.toBeInstanceOf(BrowserControlUnsupportedError);
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("serializes bounded remote-provider launch authority without returning it", async () => {
     const browserSessionId = randomUUID();
     const controllerGeneration = "provider-controller-1";

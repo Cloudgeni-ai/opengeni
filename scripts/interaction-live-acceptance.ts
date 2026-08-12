@@ -1,0 +1,763 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
+import {
+  OpenGeniClient,
+  OpenGeniApiError,
+  browserFrameSocketUrl,
+  computerFrameSocketUrl,
+  decodeBrowserFrameMessage,
+  decodeComputerFrameMessage,
+  type BrowserActionRequest,
+  type BrowserFrame,
+  type BrowserSessionAttachment,
+  type ComputerFrame,
+  type ComputerSessionAttachment,
+  type InteractionPlacement,
+  type InteractionSemanticNode,
+} from "@opengeni/sdk";
+import {
+  decodeStreamFrame,
+  decodeStreamOpenAck,
+  encodeStreamClose,
+  encodeStreamOpen,
+  STREAM_CLOSE_REASON_NORMAL,
+  STREAM_KIND_BROWSER,
+  STREAM_KIND_COMPUTER,
+  STREAM_ROLE_CLIENT,
+} from "../packages/react/src/lib/relay-wire";
+import {
+  INTERACTION_LATENCY_BUDGETS,
+  type InteractionLatencyMetric,
+} from "./interaction-acceptance-contract";
+
+const RELAY_TAG_OPEN = 1;
+const RELAY_TAG_OPEN_ACK = 2;
+const RELAY_TAG_FRAME = 3;
+const RELAY_TAG_CLOSE = 4;
+const DEFAULT_TIMEOUT_MS = 20_000;
+
+type Args = {
+  apiUrl: string;
+  workspaceId: string | null;
+  sessionId: string;
+  iterations: number;
+  output: string;
+  includeComputer: boolean;
+};
+
+type Measurement = {
+  samples: number;
+  p50: number;
+  p95: number;
+  p99: number;
+  worst: number;
+};
+
+type Receipt = {
+  schemaVersion: "opengeni/interaction-live-acceptance/v1";
+  generatedAt: string;
+  apiUrl: string;
+  workspaceId: string;
+  sessionId: string;
+  browserSessionId: string;
+  computerSessionId: string | null;
+  placement: InteractionPlacement;
+  transport: {
+    browser: BrowserSessionAttachment["stream"]["kind"];
+    computer: ComputerSessionAttachment["stream"]["kind"] | null;
+  };
+  measurements: Partial<Record<InteractionLatencyMetric, Measurement>>;
+  checks: string[];
+  budgets: typeof INTERACTION_LATENCY_BUDGETS;
+};
+
+type FrameValue = BrowserFrame | ComputerFrame;
+
+class FrameProbe<TFrame extends FrameValue> {
+  private readonly queue: TFrame[] = [];
+  private readonly waiters: Array<{
+    predicate: (frame: TFrame) => boolean;
+    resolve: (frame: TFrame) => void;
+    reject: (error: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+  }> = [];
+  private processing = Promise.resolve();
+  private closed = false;
+
+  private constructor(
+    private readonly socket: WebSocket,
+    private readonly relayChannelId: string | null,
+    private readonly decode: (bytes: Uint8Array) => TFrame | Promise<TFrame>,
+  ) {}
+
+  static async browser(
+    attachment: BrowserSessionAttachment,
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+  ): Promise<FrameProbe<BrowserFrame>> {
+    const stream = attachment.stream;
+    const socket = new WebSocket(
+      stream.kind === "direct_websocket" ? browserFrameSocketUrl(attachment) : stream.url,
+      stream.kind === "direct_websocket" ? [...stream.protocols] : [],
+    );
+    socket.binaryType = "arraybuffer";
+    const probe = new FrameProbe(
+      socket,
+      stream.kind === "relay" ? stream.channel.channelId : null,
+      decodeBrowserFrameMessage,
+    );
+    await probe.open(
+      stream.kind === "relay"
+        ? {
+            channel: { ...stream.channel, kind: STREAM_KIND_BROWSER },
+            token: stream.token,
+          }
+        : null,
+      timeoutMs,
+    );
+    return probe;
+  }
+
+  static async computer(
+    attachment: ComputerSessionAttachment,
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+  ): Promise<FrameProbe<ComputerFrame>> {
+    const stream = attachment.stream;
+    if (stream.kind === "direct_rfb") {
+      throw new Error("Computer acceptance requires the encoded frame stream, not direct RFB");
+    }
+    const socket = new WebSocket(
+      stream.kind === "direct_websocket" ? computerFrameSocketUrl(attachment) : stream.url,
+      stream.kind === "direct_websocket" ? [...stream.protocols] : [],
+    );
+    socket.binaryType = "arraybuffer";
+    const probe = new FrameProbe(
+      socket,
+      stream.kind === "relay" ? stream.channel.channelId : null,
+      decodeComputerFrameMessage,
+    );
+    await probe.open(
+      stream.kind === "relay"
+        ? {
+            channel: { ...stream.channel, kind: STREAM_KIND_COMPUTER },
+            token: stream.token,
+          }
+        : null,
+      timeoutMs,
+    );
+    return probe;
+  }
+
+  async nextChangedAfter(previous: TFrame, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<TFrame> {
+    return await this.waitFor(
+      (frame) => frame.sequence > previous.sequence && !sameFrameImage(frame, previous),
+      timeoutMs,
+    );
+  }
+
+  async first(timeoutMs = DEFAULT_TIMEOUT_MS): Promise<TFrame> {
+    return await this.waitFor(() => true, timeoutMs);
+  }
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    if (this.relayChannelId && this.socket.readyState === WebSocket.OPEN) {
+      this.socket.send(
+        relayDatagram(
+          RELAY_TAG_CLOSE,
+          encodeStreamClose({
+            channelId: this.relayChannelId,
+            reason: STREAM_CLOSE_REASON_NORMAL,
+            message: "acceptance probe complete",
+          }),
+        ),
+      );
+    }
+    this.socket.close(1000, "acceptance probe complete");
+    const error = new Error("frame probe closed");
+    for (const waiter of this.waiters.splice(0)) {
+      clearTimeout(waiter.timer);
+      waiter.reject(error);
+    }
+  }
+
+  private async open(
+    relay: {
+      channel: {
+        channelId: string;
+        workspaceId: string;
+        agentId: string;
+        kind: number;
+        port: number;
+      };
+      token: string;
+    } | null,
+    timeoutMs: number,
+  ): Promise<void> {
+    await withTimeout(
+      new Promise<void>((resolve, reject) => {
+        let relayAccepted = relay === null;
+        const onError = () => reject(new Error("frame WebSocket failed to connect"));
+        const onClose = () => {
+          if (!this.closed) reject(new Error("frame WebSocket closed during connection"));
+        };
+        this.socket.addEventListener("error", onError, { once: true });
+        this.socket.addEventListener("close", onClose, { once: true });
+        this.socket.addEventListener("open", () => {
+          if (!relay) {
+            resolve();
+            return;
+          }
+          this.socket.send(
+            relayDatagram(
+              RELAY_TAG_OPEN,
+              encodeStreamOpen({
+                channel: relay.channel,
+                token: relay.token,
+                role: STREAM_ROLE_CLIENT,
+                resumeFromSeq: "0",
+              }),
+            ),
+          );
+        });
+        this.socket.addEventListener("message", (event) => {
+          this.processing = this.processing
+            .then(async () => {
+              const bytes = await messageBytes(event.data);
+              let frameBytes = bytes;
+              if (relay) {
+                const tag = bytes[0];
+                const body = bytes.subarray(1);
+                if (tag === RELAY_TAG_OPEN_ACK) {
+                  const ack = decodeStreamOpenAck(body);
+                  if (!ack.accepted) {
+                    throw new Error(ack.error?.message ?? "relay rejected frame stream");
+                  }
+                  relayAccepted = true;
+                  resolve();
+                  return;
+                }
+                if (tag === RELAY_TAG_CLOSE) throw new Error("relay frame source closed");
+                if (tag !== RELAY_TAG_FRAME || !relayAccepted) return;
+                frameBytes = decodeStreamFrame(body).data;
+              }
+              this.push(await this.decode(frameBytes));
+            })
+            .catch((cause) => {
+              const error = cause instanceof Error ? cause : new Error(String(cause));
+              reject(error);
+              for (const waiter of this.waiters.splice(0)) {
+                clearTimeout(waiter.timer);
+                waiter.reject(error);
+              }
+            });
+        });
+      }),
+      timeoutMs,
+      "frame stream connection",
+    );
+  }
+
+  private async waitFor(predicate: (frame: TFrame) => boolean, timeoutMs: number): Promise<TFrame> {
+    const queuedIndex = this.queue.findIndex(predicate);
+    if (queuedIndex >= 0) return this.queue.splice(queuedIndex, 1)[0]!;
+    if (this.closed) throw new Error("frame probe is closed");
+    return await new Promise<TFrame>((resolve, reject) => {
+      const waiter = {
+        predicate,
+        resolve,
+        reject,
+        timer: setTimeout(() => {
+          const index = this.waiters.indexOf(waiter);
+          if (index >= 0) this.waiters.splice(index, 1);
+          reject(new Error(`frame did not converge within ${timeoutMs}ms`));
+        }, timeoutMs),
+      };
+      this.waiters.push(waiter);
+    });
+  }
+
+  private push(frame: TFrame): void {
+    const index = this.waiters.findIndex((waiter) => waiter.predicate(frame));
+    if (index < 0) {
+      this.queue.push(frame);
+      if (this.queue.length > 4) this.queue.splice(0, this.queue.length - 4);
+      return;
+    }
+    const waiter = this.waiters.splice(index, 1)[0]!;
+    clearTimeout(waiter.timer);
+    waiter.resolve(frame);
+  }
+}
+
+async function main(): Promise<void> {
+  const args = parseArgs(process.argv.slice(2));
+  const client = new OpenGeniClient({ baseUrl: args.apiUrl });
+  const workspaceId = args.workspaceId ?? (await defaultWorkspace(args.apiUrl));
+  const checks: string[] = [];
+  const raw = new Map<InteractionLatencyMetric, number[]>();
+  const record = (metric: InteractionLatencyMetric, value: number) => {
+    const samples = raw.get(metric) ?? [];
+    samples.push(value);
+    raw.set(metric, samples);
+  };
+
+  const computerCreateOperationId = crypto.randomUUID();
+  const browserCreateOperationId = crypto.randomUUID();
+  const computerEndOperationId = crypto.randomUUID();
+  const browserEndOperationId = crypto.randomUUID();
+  let computer = args.includeComputer
+    ? await timedResource("computerCreate", raw, () =>
+        replayStableMutation(() =>
+          client.interaction.computers.open(workspaceId, {
+            operationId: computerCreateOperationId,
+            sessionId: args.sessionId,
+            name: "Interaction acceptance computer",
+          }),
+        ),
+      )
+    : null;
+  let browser: Awaited<ReturnType<typeof client.interaction.browsers.open>> | null = null;
+  let browserProbe: FrameProbe<BrowserFrame> | null = null;
+  let computerProbe: FrameProbe<ComputerFrame> | null = null;
+  let browserTransport: BrowserSessionAttachment["stream"]["kind"] | null = null;
+  let computerTransport: ComputerSessionAttachment["stream"]["kind"] | null = null;
+  let browserSessionId = "";
+  let computerSessionId: string | null = computer?.id ?? null;
+  try {
+    const computerSession = computer ? await computer.get() : null;
+    browser = await timedResource("browserCreate", raw, () =>
+      replayStableMutation(() =>
+        client.interaction.browsers.open(workspaceId, {
+          operationId: browserCreateOperationId,
+          sessionId: args.sessionId,
+          name: "Interaction acceptance browser",
+          initialUrl: fixtureUrl(),
+          headless: !computer,
+          ...(computerSession
+            ? {
+                linkedComputerSessionId: computerSession.id,
+                placement: computerSession.placement,
+              }
+            : {}),
+        }),
+      ),
+    );
+    const browserSession = await browser.get();
+    browserSessionId = browser.id;
+    if (browserSession.lifecycle !== "active" || !browserSession.controller) {
+      throw new Error("browser did not become active");
+    }
+    checks.push("browser.active");
+
+    let started = performance.now();
+    const targetList = await browser.tabs.list();
+    const target =
+      targetList.targets.find((candidate) => candidate.selected) ?? targetList.targets[0];
+    if (!target) throw new Error("browser opened without a target");
+    let observation = await browser.observe(target.id);
+    record("browserObserve", performance.now() - started);
+    if (observation.target.title !== "OpenGeni Interaction Acceptance") {
+      throw new Error(`browser fixture title is ${JSON.stringify(observation.target.title)}`);
+    }
+    checks.push("browser.semantic-observation");
+
+    started = performance.now();
+    const browserAttachment = await browser.attach({
+      targetId: target.id,
+      expiresInSeconds: 120,
+      stream: { format: "jpeg", quality: 72, maxWidth: 1_280, maxHeight: 720 },
+    });
+    browserTransport = browserAttachment.stream.kind;
+    browserProbe = await FrameProbe.browser(browserAttachment);
+    let browserFrame = await browserProbe.first();
+    record("browserFirstFrame", performance.now() - started);
+    checks.push("browser.first-frame");
+
+    for (let index = 0; index < args.iterations; index += 1) {
+      const value = `OPENGENI_VISIBLE_${index}_${crypto.randomUUID().slice(0, 8)}`;
+      const request: BrowserActionRequest = {
+        operationId: crypto.randomUUID(),
+        targetId: observation.target.id,
+        expectedTargetGeneration: observation.target.targetGeneration,
+        expectedDocumentGeneration: observation.target.documentGeneration,
+        expectedFrameId: observation.frameId,
+        action: {
+          type: "fill",
+          locator: { kind: "css", selector: "#acceptance-input" },
+          value,
+        },
+      };
+      started = performance.now();
+      const receipt = await browser.act(request);
+      const acknowledged = performance.now();
+      if (receipt.state !== "completed" || !receipt.observation) {
+        throw new Error(`browser action settled as ${receipt.state}`);
+      }
+      const nextFrame = await browserProbe.nextChangedAfter(browserFrame);
+      record("browserActionAcknowledged", acknowledged - started);
+      record("browserActionVisible", performance.now() - started);
+      browserFrame = nextFrame;
+      observation = receipt.observation;
+      if (index === 0) {
+        const replay = await browser.act(request);
+        if (
+          replay.operationId !== receipt.operationId ||
+          replay.dispatchedAt !== receipt.dispatchedAt ||
+          replay.settledAt !== receipt.settledAt
+        ) {
+          throw new Error("same operation id did not replay the durable browser receipt");
+        }
+        checks.push("browser.exactly-once-replay");
+      }
+    }
+
+    started = performance.now();
+    browserProbe.close();
+    browserProbe = await FrameProbe.browser(
+      await browser.attach({
+        targetId: observation.target.id,
+        expiresInSeconds: 120,
+        stream: {
+          format: "jpeg",
+          quality: 72,
+          maxWidth: 1_280,
+          maxHeight: 720,
+        },
+      }),
+    );
+    browserFrame = await browserProbe.first();
+    record("browserReconnect", performance.now() - started);
+    if (browserFrame.browserSessionId !== browser.id)
+      throw new Error("browser reconnect crossed sessions");
+    checks.push("browser.reconnect");
+
+    if (computer) {
+      const targets = await computer.targets.list();
+      const computerTarget =
+        targets.targets.find((candidate) => candidate.kind === "window" && candidate.focused) ??
+        targets.targets.find((candidate) => candidate.kind === "app" && candidate.focused) ??
+        targets.targets[0];
+      const frameTarget =
+        targets.targets.find((candidate) => candidate.kind === "screen") ?? computerTarget;
+      if (!computerTarget || !frameTarget) throw new Error("computer opened without a target");
+      started = performance.now();
+      const computerObservation = await computer.observe(computerTarget.id);
+      record("computerObserve", performance.now() - started);
+      const inputNode = findSemanticNode(computerObservation.semantic, (node) => {
+        return (
+          node.role === "entry" &&
+          node.name === "Acceptance input" &&
+          node.actions.includes("focus")
+        );
+      });
+      const focusReceipt = await computer.act({
+        operationId: crypto.randomUUID(),
+        targetId: computerObservation.target.id,
+        expectedTargetGeneration: computerObservation.target.targetGeneration,
+        expectedObservationId: computerObservation.observationId,
+        expectedFrameId: computerObservation.frameId,
+        action: {
+          type: "semantic",
+          locator: { kind: "ref", ref: inputNode.ref },
+          action: "focus",
+        },
+      });
+      if (focusReceipt.state !== "completed") {
+        throw new Error(
+          `computer semantic focus settled as ${focusReceipt.state}: ${JSON.stringify(focusReceipt.error)}`,
+        );
+      }
+      const controlObservation = await computer.observe(frameTarget.id);
+      checks.push("computer.semantic-observation", "computer.semantic-focus");
+
+      started = performance.now();
+      const computerAttachment = await computer.attach({
+        targetId: frameTarget.id,
+        expiresInSeconds: 120,
+        stream: {
+          format: "jpeg",
+          quality: 72,
+          maxWidth: 1_280,
+          maxHeight: 720,
+        },
+      });
+      computerTransport = computerAttachment.stream.kind;
+      computerProbe = await FrameProbe.computer(computerAttachment);
+      let computerFrame = await computerProbe.first();
+      record("computerFirstFrame", performance.now() - started);
+      checks.push("computer.first-frame");
+
+      const marker = `NATIVE_${crypto.randomUUID().slice(0, 8)}`;
+      started = performance.now();
+      const computerReceipt = await computer.act({
+        operationId: crypto.randomUUID(),
+        targetId: controlObservation.target.id,
+        expectedTargetGeneration: controlObservation.target.targetGeneration,
+        expectedObservationId: controlObservation.observationId,
+        expectedFrameId: controlObservation.frameId,
+        action: { type: "keyboard", action: "type", value: marker },
+      });
+      const computerAcknowledged = performance.now();
+      if (computerReceipt.state !== "completed") {
+        throw new Error(
+          `computer keyboard action settled as ${computerReceipt.state}: ${JSON.stringify(computerReceipt.error)}`,
+        );
+      }
+      computerFrame = await computerProbe.nextChangedAfter(computerFrame);
+      record("computerActionAcknowledged", computerAcknowledged - started);
+      record("computerActionVisible", performance.now() - started);
+      if (computerFrame.computerSessionId !== computer.id) {
+        throw new Error("computer frame crossed sessions");
+      }
+      checks.push("computer.keyboard-visible");
+
+      started = performance.now();
+      computerProbe.close();
+      computerProbe = await FrameProbe.computer(
+        await computer.attach({
+          targetId: frameTarget.id,
+          expiresInSeconds: 120,
+          stream: {
+            format: "jpeg",
+            quality: 72,
+            maxWidth: 1_280,
+            maxHeight: 720,
+          },
+        }),
+      );
+      await computerProbe.first();
+      record("computerReconnect", performance.now() - started);
+      checks.push("computer.reconnect");
+    }
+
+    browserProbe.close();
+    browserProbe = null;
+    computerProbe?.close();
+    computerProbe = null;
+    started = performance.now();
+    await replayStableMutation(() => browser!.end({ operationId: browserEndOperationId }));
+    record("resourceEnd", performance.now() - started);
+    browser = null;
+    if (computer) {
+      started = performance.now();
+      await replayStableMutation(() => computer!.end({ operationId: computerEndOperationId }));
+      record("resourceEnd", performance.now() - started);
+      computer = null;
+    }
+
+    for (const [metric, samples] of raw) assertBudget(metric, samples);
+    checks.push("latency.budgets");
+
+    const receipt: Receipt = {
+      schemaVersion: "opengeni/interaction-live-acceptance/v1",
+      generatedAt: new Date().toISOString(),
+      apiUrl: args.apiUrl,
+      workspaceId,
+      sessionId: args.sessionId,
+      browserSessionId,
+      computerSessionId,
+      placement: browserSession.placement,
+      transport: { browser: browserTransport!, computer: computerTransport },
+      measurements: Object.fromEntries(
+        [...raw].map(([metric, samples]) => [metric, measurement(samples)]),
+      ),
+      checks,
+      budgets: INTERACTION_LATENCY_BUDGETS,
+    };
+    await mkdir(dirname(args.output), { recursive: true });
+    await writeFile(args.output, `${JSON.stringify(receipt, null, 2)}\n`, {
+      mode: 0o600,
+    });
+    process.stdout.write(`${JSON.stringify({ status: "passed", output: args.output, receipt })}\n`);
+  } finally {
+    browserProbe?.close();
+    computerProbe?.close();
+    if (browser) {
+      const started = performance.now();
+      await replayStableMutation(() => browser!.end({ operationId: browserEndOperationId })).catch(
+        () => undefined,
+      );
+      record("resourceEnd", performance.now() - started);
+    }
+    if (computer) {
+      const started = performance.now();
+      await replayStableMutation(() =>
+        computer!.end({ operationId: computerEndOperationId }),
+      ).catch(() => undefined);
+      record("resourceEnd", performance.now() - started);
+    }
+  }
+}
+
+async function replayStableMutation<T>(operation: () => Promise<T>): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (!(error instanceof OpenGeniApiError) || !error.retryable || attempt === 2) throw error;
+      await Bun.sleep(100 * 2 ** attempt);
+    }
+  }
+  throw lastError;
+}
+
+function parseArgs(argv: string[]): Args {
+  const values = new Map<string, string>();
+  for (let index = 0; index < argv.length; index += 1) {
+    const flag = argv[index];
+    const value = argv[index + 1];
+    if (!flag?.startsWith("--") || !value || value.startsWith("--")) {
+      throw new Error(`invalid argument near ${flag ?? "<end>"}`);
+    }
+    if (values.has(flag)) throw new Error(`${flag} may be supplied only once`);
+    values.set(flag, value);
+    index += 1;
+  }
+  const allowed = new Set([
+    "--api-url",
+    "--workspace-id",
+    "--session-id",
+    "--iterations",
+    "--output",
+    "--include-computer",
+  ]);
+  for (const flag of values.keys()) if (!allowed.has(flag)) throw new Error(`unknown flag ${flag}`);
+  const apiUrl = values.get("--api-url") ?? "http://127.0.0.1:8200";
+  const sessionId = values.get("--session-id");
+  if (!sessionId) throw new Error("--session-id is required");
+  const iterations = Number(values.get("--iterations") ?? "12");
+  if (!Number.isSafeInteger(iterations) || iterations < 1 || iterations > 1_000) {
+    throw new Error("--iterations must be an integer from 1 to 1000");
+  }
+  const includeComputer = values.get("--include-computer") ?? "true";
+  if (includeComputer !== "true" && includeComputer !== "false") {
+    throw new Error("--include-computer must be true or false");
+  }
+  return {
+    apiUrl: new URL(apiUrl).origin,
+    workspaceId: values.get("--workspace-id") ?? null,
+    sessionId,
+    iterations,
+    output: resolve(
+      values.get("--output") ?? `.agent/evidence/interaction-live-${Date.now()}.json`,
+    ),
+    includeComputer: includeComputer === "true",
+  };
+}
+
+async function defaultWorkspace(apiUrl: string): Promise<string> {
+  const response = await fetch(new URL("/v1/access/me", apiUrl));
+  if (!response.ok) throw new Error(`access discovery returned ${response.status}`);
+  const value = (await response.json()) as { defaultWorkspaceId?: unknown };
+  if (typeof value.defaultWorkspaceId !== "string" || !value.defaultWorkspaceId) {
+    throw new Error("access discovery did not return a default workspace");
+  }
+  return value.defaultWorkspaceId;
+}
+
+async function timedResource<T>(
+  metric: "browserCreate" | "computerCreate",
+  raw: Map<InteractionLatencyMetric, number[]>,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const started = performance.now();
+  const result = await operation();
+  const samples = raw.get(metric) ?? [];
+  samples.push(performance.now() - started);
+  raw.set(metric, samples);
+  return result;
+}
+
+function measurement(samples: number[]): Measurement {
+  if (samples.length === 0) throw new Error("cannot summarize zero latency samples");
+  const sorted = [...samples].sort((left, right) => left - right);
+  return {
+    samples: sorted.length,
+    p50: percentile(sorted, 0.5),
+    p95: percentile(sorted, 0.95),
+    p99: percentile(sorted, 0.99),
+    worst: sorted.at(-1)!,
+  };
+}
+
+function percentile(sorted: number[], fraction: number): number {
+  return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * fraction) - 1))]!;
+}
+
+function assertBudget(metric: InteractionLatencyMetric, samples: number[]): void {
+  const budget = INTERACTION_LATENCY_BUDGETS[metric];
+  const observed = measurement(samples)[budget.statistic];
+  if (observed > budget.limitMs) {
+    throw new Error(
+      `${metric} ${budget.statistic} ${observed.toFixed(1)}ms exceeds ${budget.limitMs}ms`,
+    );
+  }
+}
+
+function fixtureUrl(): string {
+  const html = `<!doctype html><meta charset="utf-8"><title>OpenGeni Interaction Acceptance</title><style>body{font:24px system-ui;background:#10151d;color:#fff;padding:48px}input{font:24px;padding:16px;width:720px}#state{margin-top:24px}</style><h1>Interaction acceptance</h1><input id="acceptance-input" aria-label="Acceptance input" autofocus><div id="state">ready</div><script>const input=document.querySelector("#acceptance-input");const state=document.querySelector("#state");input.addEventListener("input",()=>{state.textContent=input.value;let hash=0;for(const char of input.value)hash=(Math.imul(hash,31)+char.charCodeAt(0))>>>0;document.body.style.background="hsl("+(hash%360)+" 58% 24%)"});</script>`;
+  return `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
+}
+
+function findSemanticNode(
+  semantic: { kind: string; roots?: InteractionSemanticNode[] } | null,
+  predicate: (node: InteractionSemanticNode) => boolean,
+): InteractionSemanticNode {
+  const pending = semantic?.kind === "snapshot" ? [...(semantic.roots ?? [])] : [];
+  while (pending.length > 0) {
+    const node = pending.shift()!;
+    if (predicate(node)) return node;
+    pending.unshift(...(node.children ?? []));
+  }
+  throw new Error("computer semantic observation did not expose the acceptance input");
+}
+
+function relayDatagram(tag: number, body: Uint8Array): ArrayBuffer {
+  const message = new Uint8Array(body.length + 1);
+  message[0] = tag;
+  message.set(body, 1);
+  return message.buffer as ArrayBuffer;
+}
+
+function sameFrameImage(left: FrameValue, right: FrameValue): boolean {
+  if (left.data.byteLength !== right.data.byteLength) return false;
+  for (let index = 0; index < left.data.byteLength; index += 1) {
+    if (left.data[index] !== right.data[index]) return false;
+  }
+  return true;
+}
+
+async function messageBytes(value: unknown): Promise<Uint8Array> {
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  if (ArrayBuffer.isView(value)) {
+    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice();
+  }
+  if (typeof Blob !== "undefined" && value instanceof Blob) {
+    return new Uint8Array(await value.arrayBuffer());
+  }
+  throw new Error("frame stream returned a non-binary message");
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`${label} timed out after ${timeoutMs}ms`)),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+if (import.meta.main) {
+  await main();
+}

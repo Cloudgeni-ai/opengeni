@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   buildStreamUrl,
+  exposedPortEndpointFromUrl,
   exposeStreamPort,
   StreamPortUnavailableError,
   verifyStreamToken,
@@ -87,6 +88,18 @@ describe("buildStreamUrl — provider URL assembly (urlForExposedPort parity)", 
     expect(buildStreamUrl({ host: "h", port: 6080, tls: true, path: "stream" })).toBe(
       "wss://h:6080/stream",
     );
+  });
+});
+
+describe("exposedPortEndpointFromUrl", () => {
+  test("round-trips the provider endpoint shape", () => {
+    const url = "wss://controller.example:9443/path?token=abc%20123";
+    expect(buildStreamUrl(exposedPortEndpointFromUrl(url))).toBe(url);
+  });
+
+  test("rejects non-WebSocket and credential-bearing URLs", () => {
+    expect(() => exposedPortEndpointFromUrl("https://controller.example/")).toThrow();
+    expect(() => exposedPortEndpointFromUrl("wss://user:secret@controller.example/")).toThrow();
   });
 });
 

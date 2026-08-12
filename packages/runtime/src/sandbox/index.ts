@@ -310,6 +310,7 @@ export {
 export {
   exposeStreamPort,
   buildStreamUrl,
+  exposedPortEndpointFromUrl,
   StreamPortUnavailableError,
   type ExposedPortEndpoint,
   type ExposeStreamPortInput,

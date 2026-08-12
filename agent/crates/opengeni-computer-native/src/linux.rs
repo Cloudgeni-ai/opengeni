@@ -66,10 +66,16 @@ struct StoredObservation {
     objects: BTreeMap<String, ObjectRecord>,
 }
 
+#[derive(Clone)]
 struct TargetRecord {
     key: String,
     target: NativeTarget,
     x11_window: Option<LinuxWindow>,
+}
+
+#[derive(Clone)]
+struct TargetLocator {
+    application_root: ObjectRefOwned,
 }
 
 #[derive(Clone)]
@@ -90,6 +96,7 @@ pub(crate) struct AtspiComputerAdapter {
     sequence: AtomicU64,
     frame_sequence: AtomicU64,
     latest: RwLock<BTreeMap<String, StoredObservation>>,
+    target_locators: RwLock<BTreeMap<String, TargetLocator>>,
     desktop: Option<LinuxDesktop>,
     clipboard: Option<NativeClipboardController>,
     latest_screen_frame: RwLock<Option<String>>,
@@ -118,6 +125,7 @@ impl AtspiComputerAdapter {
             sequence: AtomicU64::new(0),
             frame_sequence: AtomicU64::new(0),
             latest: RwLock::new(BTreeMap::new()),
+            target_locators: RwLock::new(BTreeMap::new()),
             desktop: LinuxDesktop::open_default().ok(),
             clipboard: NativeClipboardController::open().ok(),
             latest_screen_frame: RwLock::new(None),
@@ -379,10 +387,22 @@ impl AtspiComputerAdapter {
         &self,
         target_id: &str,
     ) -> NativeAdapterResult<(TargetRecord, Vec<CacheItem>)> {
+        if let Some(locator) = self.target_locators.read().await.get(target_id).cloned() {
+            if let Ok(items) = self.application_cache(&locator.application_root).await {
+                if let Some(target) = self
+                    .target_records(&items)
+                    .await?
+                    .into_iter()
+                    .find(|record| record.target.id == target_id)
+                {
+                    return Ok((target, items));
+                }
+            }
+        }
         let items = self.cache_items().await?;
-        let target = self
-            .target_records(&items)
-            .await?
+        let records = self.target_records(&items).await?;
+        self.replace_target_locators(&records, &items).await?;
+        let target = records
             .into_iter()
             .find(|record| record.target.id == target_id)
             .ok_or_else(|| {
@@ -393,6 +413,42 @@ impl AtspiComputerAdapter {
                 )
             })?;
         Ok((target, items))
+    }
+
+    async fn replace_target_locators(
+        &self,
+        records: &[TargetRecord],
+        items: &[CacheItem],
+    ) -> NativeAdapterResult<()> {
+        let mut by_key = BTreeMap::new();
+        for item in items {
+            by_key.insert(object_key(&item.object)?, item);
+        }
+        let mut locators = BTreeMap::new();
+        for record in records {
+            let mut key = record.key.clone();
+            let mut visited = BTreeSet::new();
+            while visited.insert(key.clone()) {
+                let Some(item) = by_key.get(&key) else {
+                    break;
+                };
+                if item.role == Role::Application {
+                    locators.insert(
+                        record.target.id.clone(),
+                        TargetLocator {
+                            application_root: item.object.clone(),
+                        },
+                    );
+                    break;
+                }
+                if item.parent.is_null() {
+                    break;
+                }
+                key = object_key(&item.parent)?;
+            }
+        }
+        *self.target_locators.write().await = locators;
+        Ok(())
     }
 
     async fn observe_target(
@@ -1287,12 +1343,10 @@ impl ComputerAdapter for AtspiComputerAdapter {
 
     async fn targets(&self) -> NativeAdapterResult<Vec<NativeTarget>> {
         let items = self.cache_items().await?;
-        let mut targets: Vec<NativeTarget> = self
-            .target_records(&items)
-            .await?
-            .into_iter()
-            .map(|record| record.target)
-            .collect();
+        let records = self.target_records(&items).await?;
+        self.replace_target_locators(&records, &items).await?;
+        let mut targets: Vec<NativeTarget> =
+            records.into_iter().map(|record| record.target).collect();
         if let Some(screen) = self.screen_target() {
             targets.push(screen);
         }

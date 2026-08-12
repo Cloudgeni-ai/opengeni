@@ -6306,6 +6306,11 @@ export const sandboxLeases = pgTable(
     // data_plane_url.
     terminalDataPlaneUrl: text("terminal_data_plane_url"),
 
+    // Cached browserd HTTP/WebSocket tunnel (7682). Controller requests use
+    // this epoch-fenced endpoint directly after the first provider resolution;
+    // provider-handle coordination remains limited to lifecycle/provisioning.
+    controllerDataPlaneUrl: text("controller_data_plane_url"),
+
     // integer (NOT bigint): the lease-epoch spike proved a raw int8 read returns a
     // JS STRING from postgres-js, breaking the strict epoch-fence comparison (it
     // was always-true → every turn fenced); int4 returns a JS number, the fix.

@@ -626,6 +626,7 @@ export const ErrorEnvelope = z.object({
     code: ErrorCode,
     message: z.string(),
     retryable: z.boolean(),
+    outcomeUnknown: z.boolean().optional(),
     requestId: z.string().optional(),
     details: z.record(z.string(), z.unknown()).optional(),
   }),

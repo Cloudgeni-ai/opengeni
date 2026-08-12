@@ -104,6 +104,7 @@ describe("contracts", () => {
           code: "upstream_unavailable",
           message: "OpenGeni is temporarily unavailable — retry.",
           retryable: true,
+          outcomeUnknown: true,
           requestId: "edge-503-safe",
         },
       }),
@@ -113,6 +114,7 @@ describe("contracts", () => {
         code: "upstream_unavailable",
         message: "OpenGeni is temporarily unavailable — retry.",
         retryable: true,
+        outcomeUnknown: true,
         requestId: "edge-503-safe",
       },
     });

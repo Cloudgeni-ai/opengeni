@@ -335,7 +335,7 @@ export async function provisionBrowserControlClient(
   session: BrowserControlPlacementSession,
   input: ProvisionBrowserControlClientInput,
 ): Promise<ProvisionBrowserControlClientResult> {
-  requirePlacementRequestSurface(session);
+  requirePlacementProvisioningSurface(session);
   const adminToken = requireToken(input.adminToken, "browser controller admin token");
   if (session.ensureBrowserControl) {
     if (!input.nativeAuthority) {
@@ -890,6 +890,12 @@ export class BrowserControlClient {
           error instanceof RangeError
         ) {
           throw error;
+        }
+        if (!this.session.exec && !this.session.execCommand) {
+          throw new BrowserControlTransportError(
+            "cached browser controller endpoint is temporarily unavailable",
+            { cause: error },
+          );
         }
         // Port discovery or its transport can fail transiently. The existing
         // idempotent operation journal makes the private exec fallback safe even
@@ -1898,7 +1904,7 @@ function sha256(value: unknown, label: string): string {
   return value;
 }
 
-function requirePlacementRequestSurface(session: BrowserControlPlacementSession): void {
+function requirePlacementProvisioningSurface(session: BrowserControlPlacementSession): void {
   const hasPrivateWrite =
     typeof session.writePlacementPrivate === "function" ||
     typeof session.writeFile === "function" ||
@@ -1910,6 +1916,22 @@ function requirePlacementRequestSurface(session: BrowserControlPlacementSession)
   ) {
     throw new BrowserControlUnsupportedError(
       "browser placement requires exec and a private file transport",
+    );
+  }
+}
+
+function requirePlacementRequestSurface(session: BrowserControlPlacementSession): void {
+  const hasExec = typeof session.exec === "function" || typeof session.execCommand === "function";
+  const hasPrivateWrite =
+    typeof session.writePlacementPrivate === "function" ||
+    typeof session.writeFile === "function" ||
+    (hasExec && typeof session.writeStdin === "function");
+  if (
+    typeof session.resolveExposedPort !== "function" &&
+    (!hasExec || !hasPrivateWrite)
+  ) {
+    throw new BrowserControlUnsupportedError(
+      "browser placement requires a controller endpoint or exec and a private file transport",
     );
   }
 }
