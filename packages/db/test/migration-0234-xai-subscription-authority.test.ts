@@ -13,6 +13,7 @@ import {
   createXaiSubscriptionCredential,
   disconnectXaiSubscriptionCredential,
   getXaiCapacityWaiter,
+  getXaiRotationSettings,
   getXaiSessionAccountPin,
   listXaiSubscriptionAccountsMetadata,
   materializeXaiCredentialForRun,
@@ -23,6 +24,7 @@ import {
   setXaiSessionAccountPin,
   settleXaiCapacityWaiter,
   updateXaiQuotaMetadata,
+  updateXaiRotationSettings,
   wakeXaiCapacityWaiters,
   withSessionActivityRlsContext,
   type DbClient,
@@ -31,7 +33,7 @@ import { FORCE_RLS_TABLES, RUNTIME_FULL_DML_TABLES } from "../src/runtime-postur
 
 const migrationPath = join(
   dirname(fileURLToPath(import.meta.url)),
-  "../drizzle/0231_xai_subscription_authority.sql",
+  "../drizzle/0234_xai_subscription_authority.sql",
 );
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const externalAdminUrl = process.env.OPENGENI_XAI_POSTGRES_ADMIN_URL?.trim();
@@ -178,11 +180,11 @@ beforeAll(async () => {
       release: async () => await admin.end(),
     };
   } else {
-    shared = await acquireSharedTestDatabase("migration-0231-xai-authority");
+    shared = await acquireSharedTestDatabase("migration-0234-xai-authority");
   }
   if (!shared && requireRealDatabase) {
     throw new Error(
-      "[migration-0231-xai-authority] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
+      "[migration-0234-xai-authority] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
     );
   }
   if (shared) client = createDb(shared.appUrl, { max: 12 });
@@ -193,7 +195,7 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
-describe("migration 0231 xAI subscription authority", () => {
+describe("migration 0234 xAI subscription authority", () => {
   test("is rolling, identifier-free, FORCE-RLS, and preserves the Codex boundary", () => {
     expect(migration.split(/\r?\n/u, 1)[0]).toBe("-- deployment-mode: rolling");
     for (const table of xaiTables) {
@@ -577,6 +579,99 @@ describe("migration 0231 xAI subscription authority", () => {
         authoritySnapshot: workspaceSnapshot,
       }),
     ).rejects.toThrow("xAI logical turn authority snapshot is unavailable");
+  }, 180_000);
+
+  test("keeps the active pool credential fixed while rotation is disabled", async () => {
+    if (!shared || !client) return;
+    const fixture = await seedWorkspace();
+    const [subjectId] = fixture.subjects;
+    const accounts = await Promise.all(
+      ["active", "standby"].map(
+        async (label) =>
+          await createXaiSubscriptionCredential(client!.db, {
+            ...fixture,
+            subjectId: subjectId!,
+            secret: { version: 1, accessToken: `${label}-secret` },
+            encryptionKey,
+            providerAccountId: `${label}-${crypto.randomUUID()}`,
+            label,
+          }),
+      ),
+    );
+    const firstTurn = await seedSessionTurn(fixture);
+    const firstLease = await acquireXaiCredentialLease(client.db, {
+      ...fixture,
+      subjectId: subjectId!,
+      turnId: firstTurn.turnId,
+      holderId: "holder:rotation-bootstrap",
+      authoritySnapshot: workspaceSnapshot,
+    });
+    expect(firstLease.credentialId).not.toBeNull();
+    expect(
+      await releaseXaiCredentialLease(client.db, {
+        workspaceId: fixture.workspaceId,
+        subjectId: subjectId!,
+        turnId: firstTurn.turnId,
+        holderId: "holder:rotation-bootstrap",
+        generation: 1,
+      }),
+    ).toBe(true);
+
+    const settings = await getXaiRotationSettings(client.db, {
+      workspaceId: fixture.workspaceId,
+      subjectId: subjectId!,
+      authoritySnapshot: workspaceSnapshot,
+    });
+    expect(settings?.activeCredentialId).toBe(firstLease.credentialId);
+    const disabled = await updateXaiRotationSettings(client.db, {
+      workspaceId: fixture.workspaceId,
+      subjectId: subjectId!,
+      authoritySnapshot: workspaceSnapshot,
+      expectedVersion: settings!.version,
+      rotationEnabled: false,
+    });
+    expect(disabled.rotationEnabled).toBe(false);
+
+    const fixedTurn = await seedSessionTurn(fixture);
+    const fixedLease = await acquireXaiCredentialLease(client.db, {
+      ...fixture,
+      subjectId: subjectId!,
+      turnId: fixedTurn.turnId,
+      holderId: "holder:rotation-disabled",
+      authoritySnapshot: workspaceSnapshot,
+    });
+    expect(fixedLease.credentialId).toBe(firstLease.credentialId);
+    expect(fixedLease.credentialId).not.toBe(
+      accounts.find((account) => account.account.id !== firstLease.credentialId)?.account.id,
+    );
+    expect(
+      await releaseXaiCredentialLease(client.db, {
+        workspaceId: fixture.workspaceId,
+        subjectId: subjectId!,
+        turnId: fixedTurn.turnId,
+        holderId: "holder:rotation-disabled",
+        generation: 1,
+      }),
+    ).toBe(true);
+
+    await updateXaiQuotaMetadata(client.db, {
+      workspaceId: fixture.workspaceId,
+      subjectId: subjectId!,
+      credentialId: firstLease.credentialId!,
+      quotaUsedPercent: 100,
+      quotaResetAt: null,
+      quotaCheckedAt: new Date(),
+      exhaustedUntil: new Date(Date.now() + 60_000),
+    });
+    const unavailableTurn = await seedSessionTurn(fixture);
+    const unavailable = await acquireXaiCredentialLease(client.db, {
+      ...fixture,
+      subjectId: subjectId!,
+      turnId: unavailableTurn.turnId,
+      holderId: "holder:rotation-disabled-unavailable",
+      authoritySnapshot: workspaceSnapshot,
+    });
+    expect(unavailable).toMatchObject({ credentialId: null, reused: false });
   }, 180_000);
 
   test("persists pool-scoped capacity waiters and immutable accepted-work snapshots", async () => {
