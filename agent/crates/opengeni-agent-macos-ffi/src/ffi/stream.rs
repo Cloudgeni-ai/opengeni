@@ -89,6 +89,15 @@ struct OutputIvars {
     slot: Arc<FrameSlot>,
 }
 
+struct PixelBufferUnlock<'a>(&'a objc2_core_video::CVPixelBuffer, CVPixelBufferLockFlags);
+
+impl Drop for PixelBufferUnlock<'_> {
+    fn drop(&mut self) {
+        // SAFETY: this guard exists only after the matching lock succeeded.
+        let _ = unsafe { CVPixelBufferUnlockBaseAddress(self.0, self.1) };
+    }
+}
+
 define_class!(
     // SAFETY: NSObject has no subclassing requirements. The sole ivar is an
     // Arc containing synchronized Rust state and this class does not implement Drop.
@@ -190,7 +199,7 @@ impl CaptureStream {
         let (stop_tx, stop_rx) = mpsc::channel();
         let worker = thread::Builder::new()
             .name("opengeni-sck-stream".to_string())
-            .spawn(move || run_stream(source, max_size, worker_slot, ready_tx, stop_rx))
+            .spawn(move || run_stream(source, max_size, &worker_slot, &ready_tx, &stop_rx))
             .map_err(|error| MacFfiError::Ffi(format!("start capture worker: {error}")))?;
 
         match ready_rx.recv_timeout(DISCOVERY_TIMEOUT) {
@@ -266,11 +275,11 @@ impl Drop for CaptureStream {
 fn run_stream(
     source: CaptureSource,
     max_size: (u32, u32),
-    slot: Arc<FrameSlot>,
-    ready: mpsc::Sender<Result<(), String>>,
-    stop: mpsc::Receiver<()>,
+    slot: &Arc<FrameSlot>,
+    ready: &mpsc::Sender<Result<(), String>>,
+    stop: &mpsc::Receiver<()>,
 ) {
-    let runtime = match discover_runtime(source, max_size, Arc::clone(&slot)) {
+    let runtime = match discover_runtime(source, max_size, Arc::clone(slot)) {
         Ok(runtime) => runtime.0,
         Err(error) => {
             let _ = ready.send(Err(error));
@@ -512,14 +521,7 @@ fn sample_to_rgba(sample: &CMSampleBuffer) -> Result<Option<RgbaFrame>, String> 
     if unsafe { CVPixelBufferLockBaseAddress(&buffer, flags) } != kCVReturnSuccess {
         return Err("could not lock ScreenCaptureKit pixel buffer".to_string());
     }
-    struct Unlock<'a>(&'a objc2_core_video::CVPixelBuffer, CVPixelBufferLockFlags);
-    impl Drop for Unlock<'_> {
-        fn drop(&mut self) {
-            // SAFETY: this guard exists only after the matching lock succeeded.
-            let _ = unsafe { CVPixelBufferUnlockBaseAddress(self.0, self.1) };
-        }
-    }
-    let _unlock = Unlock(&buffer, flags);
+    let _unlock = PixelBufferUnlock(&buffer, flags);
     let width = CVPixelBufferGetWidth(&buffer);
     let height = CVPixelBufferGetHeight(&buffer);
     let row_bytes = CVPixelBufferGetBytesPerRow(&buffer);

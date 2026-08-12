@@ -119,7 +119,7 @@ pub async fn run(
             Event::Source(socket.next().await)
         };
         let message = match event {
-            Event::Relay(Ok(Some(RelayMessage::Close(_)))) => return Ok(()),
+            Event::Relay(Ok(Some(RelayMessage::Close(_)))) | Event::Source(None) => return Ok(()),
             Event::Relay(Ok(Some(_))) => continue,
             // A transport drop is still recovered by the established outbound
             // reconnect path on the next local frame. Avoid polling the dead
@@ -131,7 +131,6 @@ pub async fn run(
             Event::Source(Some(message)) => message.map_err(|error| {
                 StreamError::Transport(format!("browser frame socket: {error}"))
             })?,
-            Event::Source(None) => return Ok(()),
         };
         match message {
             Message::Binary(frame) => {

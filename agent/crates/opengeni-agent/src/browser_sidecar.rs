@@ -147,23 +147,7 @@ impl BrowserSidecarManager {
         // handler, then the manager's second SIGINT kills it mid-cleanup and
         // leaves its browser daemon/profile lock behind.
         command.process_group(0);
-        for (environment, name) in [
-            (AGENT_BROWSER_BINARY_ENV, companion_name("agent-browser")),
-            (LIGHTPANDA_BINARY_ENV, companion_name("lightpanda")),
-            (
-                COMPUTER_NATIVE_BINARY_ENV,
-                companion_name("opengeni-computer-native"),
-            ),
-        ] {
-            // Explicit operator overrides remain authoritative. Release and
-            // local app bundles need no configuration: companions installed
-            // beside browserd are forwarded privately to the child.
-            if std::env::var_os(environment).is_none() {
-                if let Some(path) = discover_companion_binary(&self.binary, &name) {
-                    command.env(environment, path);
-                }
-            }
-        }
+        configure_companion_binaries(&mut command, &self.binary);
         let mut child = command
             .spawn()
             .map_err(|error| PlatformError::from_io("start browser controller sidecar", &error))?;
@@ -223,6 +207,26 @@ impl BrowserSidecarManager {
             token_digest: blake3::hash(admin_token.as_bytes()),
             allowed_origins: allowed_origins.to_vec(),
         })
+    }
+}
+
+fn configure_companion_binaries(command: &mut Command, browserd_binary: &Path) {
+    for (environment, name) in [
+        (AGENT_BROWSER_BINARY_ENV, companion_name("agent-browser")),
+        (LIGHTPANDA_BINARY_ENV, companion_name("lightpanda")),
+        (
+            COMPUTER_NATIVE_BINARY_ENV,
+            companion_name("opengeni-computer-native"),
+        ),
+    ] {
+        // Explicit operator overrides remain authoritative. Release and local
+        // app bundles need no configuration: companions installed beside
+        // browserd are forwarded privately to the child.
+        if std::env::var_os(environment).is_none() {
+            if let Some(path) = discover_companion_binary(browserd_binary, &name) {
+                command.env(environment, path);
+            }
+        }
     }
 }
 
@@ -459,11 +463,12 @@ async fn stop_with_startup_diagnostic(
     if rendered.is_empty() {
         error
     } else {
-        append_platform_error(error, format!("browserd: {rendered}"))
+        let diagnostic = format!("browserd: {rendered}");
+        append_platform_error(error, &diagnostic)
     }
 }
 
-fn append_platform_error(error: PlatformError, diagnostic: String) -> PlatformError {
+fn append_platform_error(error: PlatformError, diagnostic: &str) -> PlatformError {
     match error {
         PlatformError::Unsupported(message) => {
             PlatformError::Unsupported(format!("{message}; {diagnostic}"))
@@ -481,7 +486,7 @@ fn append_platform_error(error: PlatformError, diagnostic: String) -> PlatformEr
             message,
             mut detail,
         } => {
-            detail.insert("browserd_stderr".to_string(), diagnostic.clone());
+            detail.insert("browserd_stderr".to_string(), diagnostic.to_string());
             PlatformError::Os {
                 message: format!("{message}; {diagnostic}"),
                 detail,
@@ -732,6 +737,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn sidecar_authority_is_owner_only_idempotent_and_generation_fenced() {
         use std::os::unix::fs::PermissionsExt as _;
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
