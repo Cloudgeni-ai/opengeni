@@ -12,7 +12,7 @@ import {
 
 const migrationPath = join(
   dirname(fileURLToPath(import.meta.url)),
-  "../drizzle/0221_session_visibility_authority_epochs.sql",
+  "../drizzle/0222_session_visibility_authority_epochs.sql",
 );
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
@@ -36,10 +36,10 @@ async function expectSqlState(action: () => Promise<unknown>, state: string): Pr
 
 beforeAll(async () => {
   migration = await readFile(migrationPath, "utf8");
-  shared = await acquireSharedTestDatabase("migration-0221-session-visibility-authority-epochs");
+  shared = await acquireSharedTestDatabase("migration-0222-session-visibility-authority-epochs");
   if (!shared && requireRealDatabase) {
     throw new Error(
-      "[migration-0221-session-visibility-authority-epochs] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
+      "[migration-0222-session-visibility-authority-epochs] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
     );
   }
   if (!shared) return;
@@ -108,7 +108,7 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
-describe("migration 0221 session visibility authority epochs", () => {
+describe("migration 0222 session visibility authority epochs", () => {
   test("keeps migration order, total constraints, trigger posture, and no authority bypass", () => {
     if (!shared) return;
     expect(migration.split(/\r?\n/u, 1)[0]).toBe("-- deployment-mode: rolling");

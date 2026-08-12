@@ -75,7 +75,7 @@ have explicit defaults:
 - owner membership is null; and
 - every fork-provenance field is null.
 
-Migration `0221_session_visibility_authority_epochs.sql` extends this
+Migration `0222_session_visibility_authority_epochs.sql` extends this
 compatibility boundary to accepted attempts. It backfills an immutable
 authority snapshot on existing attempts and fills omitted legacy-writer
 inserts from the exact workspace and session rows under lock. Accepted
@@ -120,7 +120,7 @@ the access path.
 Managed-human membership and personal-workspace lifecycle metadata now use the
 narrow provisioning seam described above. Resource authority/grant dual-write,
 new-session owner/visibility writes, and all read-path changes remain future
-work; old writers remain accepted. Migration 0221 separately delivers the
+work; old writers remain accepted. Migration 0222 separately delivers the
 accepted-attempt authority snapshot and stale activity-write fence described in
 the Legacy behavior section.
 
@@ -146,7 +146,7 @@ back to user authority.
 Add exact organization+subject+workspace RLS policies and narrowly scoped
 security-definer lifecycle functions. Switch one subsystem at a time to
 authority ids and immutable accepted-work delegations. Accepted-attempt epoch
-fencing is delivered by migration 0221; remaining activation work includes
+fencing is delivered by migration 0222; remaining activation work includes
 session visibility mutation, visibility-aware reads, sharing/fork copying,
 cancellation, cache/pin stripping, and owner-only grants before enabling
 personal attachment to shared sessions.

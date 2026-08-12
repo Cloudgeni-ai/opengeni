@@ -318,6 +318,8 @@ const SettingsSchema = z.object({
   slackSigningSecret: z.string().optional(),
   googleDriveClientId: z.string().optional(),
   googleDriveClientSecret: z.string().optional(),
+  fikenClientId: z.string().optional(),
+  fikenClientSecret: z.string().optional(),
   googleDriveWorkspaceEventsEnabled: EnvBoolean.optional(),
   atlassianClientId: z.string().optional(),
   atlassianClientSecret: z.string().optional(),
@@ -1892,6 +1894,8 @@ export function getSettings(): Settings {
     slackSigningSecret: optional("OPENGENI_SLACK_SIGNING_SECRET"),
     googleDriveClientId: optional("OPENGENI_GOOGLE_DRIVE_CLIENT_ID"),
     googleDriveClientSecret: optional("OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET"),
+    fikenClientId: optional("OPENGENI_FIKEN_OAUTH_CLIENT_ID"),
+    fikenClientSecret: optional("OPENGENI_FIKEN_OAUTH_CLIENT_SECRET"),
     googleDriveWorkspaceEventsEnabled: optional("OPENGENI_GOOGLE_DRIVE_WORKSPACE_EVENTS_ENABLED"),
     atlassianClientId: optional("OPENGENI_ATLASSIAN_CLIENT_ID"),
     atlassianClientSecret: optional("OPENGENI_ATLASSIAN_CLIENT_SECRET"),
@@ -4618,6 +4622,31 @@ function validateSettings(settings: Settings): void {
     throw new Error(
       "OPENGENI_GOOGLE_DRIVE_CLIENT_ID and OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET must be configured together",
     );
+  }
+  if (Boolean(settings.fikenClientId) !== Boolean(settings.fikenClientSecret)) {
+    throw new Error(
+      "OPENGENI_FIKEN_OAUTH_CLIENT_ID and OPENGENI_FIKEN_OAUTH_CLIENT_SECRET must be configured together",
+    );
+  }
+  if (settings.fikenClientId) {
+    if (!settings.publicBaseUrl) {
+      throw new Error(
+        "OPENGENI_PUBLIC_BASE_URL is required when the Fiken OAuth integration is configured",
+      );
+    }
+    if (
+      !settings.publicBaseUrl.startsWith("https://") &&
+      !["local", "test"].includes(settings.environment)
+    ) {
+      throw new Error(
+        "OPENGENI_PUBLIC_BASE_URL must use https when the Fiken OAuth integration is configured outside local/test",
+      );
+    }
+    if (!settings.integrationsStateSecret) {
+      throw new Error(
+        "OPENGENI_INTEGRATIONS_STATE_SECRET is required when the Fiken OAuth integration is configured",
+      );
+    }
   }
   if (settings.googleDriveClientId) {
     if (!settings.publicBaseUrl) {

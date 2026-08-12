@@ -473,7 +473,7 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
                   </Button>
                 </div>
                 <PermissionGroupPicker
-                  groups={apiKeyPermissionGroups}
+                  groups={apiKeyPermissionGroups()}
                   selected={selectedPermissions}
                   delegable={delegablePermissions}
                   onToggle={togglePermission}
@@ -988,7 +988,7 @@ function MembersSectionContent({
               {canManage && editing === member.subjectId ? (
                 <div className="grid gap-3 border-t border-border pt-2">
                   <PermissionGroupPicker
-                    groups={workspaceMemberPermissionGroups}
+                    groups={workspaceMemberPermissionGroups()}
                     selected={editPermissions}
                     onToggle={toggleEditPermission}
                   />

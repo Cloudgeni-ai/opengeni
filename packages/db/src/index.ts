@@ -102,6 +102,7 @@ import type {
   VariableSetVariableMetadata,
   WorkspaceMember,
   WorkspaceRegisteredPack,
+  Channel,
   Rig,
   RigProviderImage,
   RigProviderImages,
@@ -237,7 +238,9 @@ import {
 export { LOSSLESS_TEXT_PREFIX } from "./lossless-json";
 import { seedNewSessionDraftInTransaction } from "./new-session-drafts";
 import {
+  nestedPostgresSqlState,
   runIdempotentPersistenceTransaction,
+  safeDatabaseErrorFacts,
   type IdempotentPersistenceTransactionOptions,
 } from "./persistence-errors";
 import {
@@ -13621,6 +13624,213 @@ export async function deleteRigIfNoActiveSessions(
   });
 }
 
+// --- Channels ---------------------------------------------------------------
+// Workspace-shared rail organization for root sessions. Pure metadata: filing
+// a session into a channel never affects execution, authority, or history.
+
+export class ChannelNameConflictError extends Error {
+  constructor(name: string) {
+    super(`channel name is already in use: ${name}`);
+    this.name = "ChannelNameConflictError";
+  }
+}
+
+export class ChannelNotFoundError extends Error {
+  constructor(channelId: string) {
+    super(`unknown channelId: ${channelId}`);
+    this.name = "ChannelNotFoundError";
+  }
+}
+
+function isChannelNameUniqueViolation(error: unknown): boolean {
+  return (
+    nestedPostgresSqlState(error) === "23505" &&
+    safeDatabaseErrorFacts(error).constraint === "channels_workspace_name_idx"
+  );
+}
+
+/**
+ * A write raced a concurrent channel delete: the sessions.channel_id FK
+ * rejected the row after the workspace-scoped existence check passed. Mapped
+ * to the same typed not-found error the pre-check throws, so callers keep
+ * one 422 path instead of a driver-level 500.
+ */
+function isSessionChannelFkViolation(error: unknown): boolean {
+  return (
+    nestedPostgresSqlState(error) === "23503" &&
+    safeDatabaseErrorFacts(error).constraint === "sessions_channel_id_fkey"
+  );
+}
+
+function mapChannel(row: typeof schema.channels.$inferSelect): Channel {
+  return {
+    id: row.id,
+    accountId: row.accountId,
+    workspaceId: row.workspaceId,
+    name: row.name,
+    description: row.description ?? null,
+    createdBy: row.createdBy ?? null,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+export async function createChannel(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    name: string;
+    description?: string | null;
+    createdBy?: string | null;
+  },
+): Promise<Channel> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      try {
+        const [row] = await scopedDb
+          .insert(schema.channels)
+          .values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            name: input.name,
+            description: input.description ?? null,
+            createdBy: input.createdBy ?? null,
+          })
+          .returning();
+        if (!row) {
+          throw new Error("Failed to create channel");
+        }
+        return mapChannel(row);
+      } catch (error) {
+        if (isChannelNameUniqueViolation(error)) {
+          throw new ChannelNameConflictError(input.name);
+        }
+        throw error;
+      }
+    },
+  );
+}
+
+export async function listChannels(db: Database, workspaceId: string): Promise<Channel[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select()
+      .from(schema.channels)
+      .where(eq(schema.channels.workspaceId, workspaceId))
+      .orderBy(asc(schema.channels.name), asc(schema.channels.id));
+    return rows.map(mapChannel);
+  });
+}
+
+export async function getChannel(
+  db: Database,
+  workspaceId: string,
+  channelId: string,
+): Promise<Channel | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.channels)
+      .where(and(eq(schema.channels.workspaceId, workspaceId), eq(schema.channels.id, channelId)))
+      .limit(1);
+    return row ? mapChannel(row) : null;
+  });
+}
+
+export async function updateChannel(
+  db: Database,
+  workspaceId: string,
+  channelId: string,
+  input: { name?: string | undefined; description?: string | null | undefined },
+): Promise<Channel | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    try {
+      const [row] = await scopedDb
+        .update(schema.channels)
+        .set({
+          ...(input.name !== undefined ? { name: input.name } : {}),
+          ...(input.description !== undefined ? { description: input.description } : {}),
+          updatedAt: new Date(),
+        })
+        .where(and(eq(schema.channels.workspaceId, workspaceId), eq(schema.channels.id, channelId)))
+        .returning();
+      return row ? mapChannel(row) : null;
+    } catch (error) {
+      if (isChannelNameUniqueViolation(error)) {
+        throw new ChannelNameConflictError(input.name ?? "");
+      }
+      throw error;
+    }
+  });
+}
+
+export async function deleteChannel(
+  db: Database,
+  workspaceId: string,
+  channelId: string,
+): Promise<boolean> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .delete(schema.channels)
+      .where(and(eq(schema.channels.workspaceId, workspaceId), eq(schema.channels.id, channelId)))
+      .returning({ id: schema.channels.id });
+    return rows.length > 0;
+  });
+}
+
+// Re-files one session (rail organization only). Resolves the target channel
+// workspace-scoped so a foreign channel id can never be attached; null moves
+// the session back to the unfiled inbox. Deliberately does not bump
+// updatedAt: filing is organization, not activity, and must not reorder the
+// rail's recency buckets.
+export async function setSessionChannel(
+  db: Database,
+  input: { workspaceId: string; sessionId: string; channelId: string | null },
+): Promise<boolean> {
+  // Session-row writers require the activity-gated handle (migration 0214's
+  // commit gate); filing is organizational but it is still a sessions UPDATE.
+  return await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scopedDb) => {
+    if (input.channelId !== null) {
+      const [channel] = await scopedDb
+        .select({ id: schema.channels.id })
+        .from(schema.channels)
+        .where(
+          and(
+            eq(schema.channels.workspaceId, input.workspaceId),
+            eq(schema.channels.id, input.channelId),
+          ),
+        )
+        .limit(1);
+      if (!channel) {
+        throw new ChannelNotFoundError(input.channelId);
+      }
+    }
+    try {
+      const rows = await scopedDb
+        .update(schema.sessions)
+        .set({ channelId: input.channelId })
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, input.workspaceId),
+            eq(schema.sessions.id, input.sessionId),
+          ),
+        )
+        .returning({ id: schema.sessions.id });
+      return rows.length > 0;
+    } catch (error) {
+      // The channel passed the existence check above but was deleted before
+      // the UPDATE committed.
+      if (input.channelId !== null && isSessionChannelFkViolation(error)) {
+        throw new ChannelNotFoundError(input.channelId);
+      }
+      throw error;
+    }
+  });
+}
+
 export async function countRigs(db: Database, workspaceId: string): Promise<number> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [{ count } = { count: 0 }] = await scopedDb
@@ -20742,6 +20952,7 @@ export type SessionCreateInput = {
   variableSetId?: string | null;
   rigId?: string | null;
   rigVersionId?: string | null;
+  channelId?: string | null;
   firstPartyMcpPermissions?: Permission[] | null;
   firstPartyMcpTools?: FirstPartyMcpToolName[];
   instructions?: string | null;
@@ -21151,59 +21362,71 @@ async function createSessionInTransaction(
       ? input.createdByActor.turnId
       : null
     : null;
-  const [inserted] = await tx
-    .insert(schema.sessions)
-    .values(
-      withLosslessContentWriteVersion(
-        {
-          id,
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          initialMessage: input.initialMessage,
-          initialTurnInstructions: input.initialTurnInstructions ?? null,
-          resources: input.resources,
-          skills: input.skills ?? [],
-          tools: input.tools ?? [],
-          toolPolicy: input.toolPolicy ?? {
-            mode: "explicit",
-            inheritedFromSessionId: input.parentSessionId ?? null,
+  let insertedRows: (typeof schema.sessions.$inferSelect)[];
+  try {
+    insertedRows = await tx
+      .insert(schema.sessions)
+      .values(
+        withLosslessContentWriteVersion(
+          {
+            id,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            initialMessage: input.initialMessage,
+            initialTurnInstructions: input.initialTurnInstructions ?? null,
+            resources: input.resources,
+            skills: input.skills ?? [],
+            tools: input.tools ?? [],
+            toolPolicy: input.toolPolicy ?? {
+              mode: "explicit",
+              inheritedFromSessionId: input.parentSessionId ?? null,
+            },
+            metadata: input.metadata,
+            ...creatorColumns(frozenCreator),
+            model: input.model,
+            sandboxBackend: input.sandboxBackend,
+            sandboxOs: input.sandboxOs ?? "linux",
+            sandboxGroupId: input.sandboxGroupId ?? id,
+            variableSetId: input.variableSetId ?? null,
+            rigId: input.rigId ?? null,
+            rigVersionId: input.rigVersionId ?? null,
+            channelId: input.channelId ?? null,
+            firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
+            firstPartyMcpTools: input.firstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+            initialPersonalConnectionDelegations: input.personalConnectionDelegations ?? [],
+            instructions: input.instructions ?? null,
+            policyRole: input.policyRole ?? null,
+            parentSessionId: input.parentSessionId ?? null,
+            parentTurnId,
+            createIdempotencyKey,
+            rootSessionId: decision.rootSessionId,
+            nestedAgentDepth: decision.nestedAgentDepth,
+            maxNestedAgentDepthOverride: decision.maxNestedAgentDepthOverride,
+            effectiveMaxNestedAgentDepth: decision.effectiveMaxNestedAgentDepth,
+            nestedAgentDepthPolicySource: decision.nestedAgentDepthPolicySource,
+            nestedAgentDepthPolicySessionId: decision.nestedAgentDepthPolicySessionId,
+            // Freeze once at create from the effective create model + workspace
+            // default. Later workspace setting changes never move existing sessions.
+            codexCompactionMode: isCodexBilledModel(input.model)
+              ? resolveWorkspaceCodexCompactionDefault(workspace.settings)
+              : "portable",
+            status: "queued",
           },
-          metadata: input.metadata,
-          ...creatorColumns(frozenCreator),
-          model: input.model,
-          sandboxBackend: input.sandboxBackend,
-          sandboxOs: input.sandboxOs ?? "linux",
-          sandboxGroupId: input.sandboxGroupId ?? id,
-          variableSetId: input.variableSetId ?? null,
-          rigId: input.rigId ?? null,
-          rigVersionId: input.rigVersionId ?? null,
-          firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
-          firstPartyMcpTools: input.firstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
-          initialPersonalConnectionDelegations: input.personalConnectionDelegations ?? [],
-          instructions: input.instructions ?? null,
-          policyRole: input.policyRole ?? null,
-          parentSessionId: input.parentSessionId ?? null,
-          parentTurnId,
-          createIdempotencyKey,
-          rootSessionId: decision.rootSessionId,
-          nestedAgentDepth: decision.nestedAgentDepth,
-          maxNestedAgentDepthOverride: decision.maxNestedAgentDepthOverride,
-          effectiveMaxNestedAgentDepth: decision.effectiveMaxNestedAgentDepth,
-          nestedAgentDepthPolicySource: decision.nestedAgentDepthPolicySource,
-          nestedAgentDepthPolicySessionId: decision.nestedAgentDepthPolicySessionId,
-          // Freeze once at create from the effective create model + workspace
-          // default. Later workspace setting changes never move existing sessions.
-          codexCompactionMode: isCodexBilledModel(input.model)
-            ? resolveWorkspaceCodexCompactionDefault(workspace.settings)
-            : "portable",
-          status: "queued",
-        },
-        "initialMessage",
-        "initialMessageCodecVersion",
-      ),
-    )
-    .onConflictDoNothing()
-    .returning();
+          "initialMessage",
+          "initialMessageCodecVersion",
+        ),
+      )
+      .onConflictDoNothing()
+      .returning();
+  } catch (error) {
+    // The caller validated the channel workspace-scoped, but a concurrent
+    // channel delete can still race the insert; keep the typed 422 path.
+    if (input.channelId && isSessionChannelFkViolation(error)) {
+      throw new ChannelNotFoundError(input.channelId);
+    }
+    throw error;
+  }
+  const [inserted] = insertedRows;
   if (!inserted) {
     if (createIdempotencyKey) {
       const existing = await existingSessionForCreateKey(
@@ -25126,7 +25349,7 @@ async function lockTurnAttemptWriteFenceTx(
       authorityOwnerOrganizationMembershipId: attempt.authorityOwnerOrganizationMembershipId,
     });
   } catch {
-    // The 0221 insert trigger keeps old writers rolling-safe, but no missing
+    // The 0222 insert trigger keeps old writers rolling-safe, but no missing
     // or partial tuple may cross an accepted-attempt write fence.
     return { allowed: false, reason: "attempt_changed", ...base };
   }
@@ -25731,10 +25954,10 @@ export async function getActiveSessionHistoryItems(
  * deterministically before a Postgres driver decodes it instead of using the
  * pod OOM killer as admission.
  */
-export const ACTIVE_SESSION_HISTORY_MAX_JSON_BYTES = 3 * 1024 * 1024;
-export const ACTIVE_SESSION_HISTORY_MAX_ROWS = 4_096;
-export const ACTIVE_SESSION_HISTORY_MAX_JSON_NODES = 65_536;
-export const ACTIVE_SESSION_HISTORY_MAX_JSON_PROPERTIES = 32_768;
+export const ACTIVE_SESSION_HISTORY_MAX_JSON_BYTES = 15 * 1024 * 1024;
+export const ACTIVE_SESSION_HISTORY_MAX_ROWS = 8_192;
+export const ACTIVE_SESSION_HISTORY_MAX_JSON_NODES = 131_072;
+export const ACTIVE_SESSION_HISTORY_MAX_JSON_PROPERTIES = 65_536;
 
 export type ActiveSessionHistoryLimitKind =
   | "json_bytes"
@@ -51811,6 +52034,7 @@ function mapSession(
     // rig-less session; frozen at create so a later promote never moves them.
     rigId: row.rigId ?? null,
     rigVersionId: row.rigVersionId ?? null,
+    channelId: row.channelId ?? null,
     firstPartyMcpPermissions: (row.firstPartyMcpPermissions as Permission[] | null) ?? null,
     firstPartyMcpTools: row.firstPartyMcpTools as FirstPartyMcpToolName[],
     mcpServers,

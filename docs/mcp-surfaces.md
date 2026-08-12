@@ -27,7 +27,7 @@ the setting is off.
 
 `CreateSessionRequest.firstPartyMcpTools` is an exact allowlist over the exported
 `FIRST_PARTY_MCP_TOOL_NAMES` catalog. Omission selects the safe default catalog,
-which excludes connector-wide `social_*` and `slack_bot_*` tools; those require
+which excludes connector-wide `social_*`, `slack_bot_*`, `fiken_*`, and `atlassian_*` tools; those require
 explicit selection plus their normal connection permission. Explicit `[]` means
 no tools from the broad server. Unknown names fail validation. This field does
 not grant authority: every catalog entry also has an explicit registration-time

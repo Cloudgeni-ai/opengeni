@@ -3,7 +3,7 @@
 // and supports ArrowUp/Down + Enter keyboard navigation. Each row is a status
 // dot + single-line truncated title + relative time (visible at rest). The
 // active session (from the URL) is highlighted with an accent bar.
-import { useSessionLineage, useWorkspaceSessions } from "@opengeni/react";
+import { useChannels, useSessionLineage, useWorkspaceSessions } from "@opengeni/react";
 import {
   OpenGeniApiError,
   OpenGeniSessionListCursorError,
@@ -13,6 +13,8 @@ import { Link, useRouterState } from "@tanstack/react-router";
 import {
   ChevronRightIcon,
   EllipsisIcon,
+  HashIcon,
+  InboxIcon,
   LocateFixedIcon,
   MessagesSquareIcon,
   PencilIcon,
@@ -20,6 +22,7 @@ import {
   PlusIcon,
   SearchIcon,
 } from "lucide-react";
+import { toast } from "sonner";
 import {
   useCallback,
   useEffect,
@@ -43,8 +46,11 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { ChannelCreateDialog } from "@/components/rail/channel-create-dialog";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useAppContext } from "@/context";
 import {
@@ -80,6 +86,7 @@ import {
 } from "@/lib/session-pins";
 import {
   buildPinnedRailSections,
+  channelRailSections,
   groupSessionsForRail,
   mergeSessionForRail,
   relativeTimeLabel,
@@ -87,11 +94,12 @@ import {
   visibleTreeRows,
   type SessionTreeNode,
 } from "@/lib/sessions-group";
+import { creatorHue, creatorInitials } from "@/lib/creator-initials";
 import { sessionDescendantCountAria, sessionDescendantCountText } from "@/lib/session-tree-count";
 import { requestCreateComposerFocus } from "@/lib/create-composer-focus";
 import { NEW_SESSION_SHORTCUT, shortcutLabel } from "@/lib/keyboard-shortcuts";
 import { cn } from "@/lib/utils";
-import type { Session } from "@/types";
+import type { Channel, Session } from "@/types";
 
 /** True when the browser should own navigation (new tab / window / modified click). */
 function isModifiedNavigationClick(
@@ -131,6 +139,7 @@ type PinFn = (
   pinned: boolean,
   restoreFocusTo?: PinFocusTarget,
 ) => Promise<Session | null>;
+type MoveToChannelFn = (session: Session, channelId: string | null) => Promise<void>;
 type PinOverride = { session: Session; operation: number };
 type PendingPinFocus = {
   sessionId: string;
@@ -172,6 +181,15 @@ export function SessionList() {
     pinsOnly: true,
     pollIntervalMs: 15_000,
   });
+  // Workspace-shared channels. When at least one exists, the ordinary rail
+  // groups roots by channel instead of recency buckets; a workspace without
+  // channels keeps today's rail unchanged. The list is tiny and churn is rare,
+  // so it polls gently.
+  const channelsQuery = useChannels({ pollIntervalMs: 60_000 });
+  const channels = channelsQuery.channels;
+  const { create: requestCreateChannel, moveSession: requestMoveSession } = channelsQuery;
+  const [channelDialogOpen, setChannelDialogOpen] = useState(false);
+  const [channelNameDraft, setChannelNameDraft] = useState("");
   const { sessions, nextCursor, loading, error, refresh } = rootPage;
   const {
     pinned: globalPinned,
@@ -462,6 +480,33 @@ export function SessionList() {
   );
   const forest = railSections.ordinary;
   const pinnedNodes = railSections.pinned;
+  const channelMode = hierarchyMode && channels.length > 0;
+  const channelSections = useMemo(
+    () => (channelMode ? channelRailSections(forest, channels) : []),
+    [channelMode, forest, channels],
+  );
+  const submitCreateChannel = useCallback(async () => {
+    const name = channelNameDraft.trim();
+    if (!name) return;
+    const created = await requestCreateChannel({ name });
+    if (created) {
+      setChannelDialogOpen(false);
+      setChannelNameDraft("");
+    } else {
+      toast.error("Couldn't create the channel. The name may already be in use.");
+    }
+  }, [channelNameDraft, requestCreateChannel]);
+  const onMoveToChannel = useCallback(
+    async (session: Session, channelId: string | null) => {
+      const moved = await requestMoveSession(session.id, channelId);
+      if (moved) {
+        await refreshSessionPages();
+      } else {
+        toast.error("Couldn't move the workstream.");
+      }
+    },
+    [requestMoveSession, refreshSessionPages],
+  );
   const nodesById = useMemo(() => {
     const result = new Map<string, SessionTreeNode>();
     const visit = (node: SessionTreeNode): void => {
@@ -593,15 +638,17 @@ export function SessionList() {
 
   const visibleRows = useMemo(() => {
     const seen = new Set<string>();
-    return [
-      ...visibleTreeRows(pinnedNodes, expanded),
-      ...visibleForestRows(forest, expanded),
-    ].filter(({ node }) => {
+    // Channel mode replaces the ordinary recency forest with channel sections;
+    // the flattened order must match the rendered order or arrow keys drift.
+    const ordinaryRows = channelMode
+      ? channelSections.flatMap((section) => visibleTreeRows(section.sessions, expanded))
+      : visibleForestRows(forest, expanded);
+    return [...visibleTreeRows(pinnedNodes, expanded), ...ordinaryRows].filter(({ node }) => {
       if (seen.has(node.session.id)) return false;
       seen.add(node.session.id);
       return true;
     });
-  }, [expanded, forest, pinnedNodes]);
+  }, [channelMode, channelSections, expanded, forest, pinnedNodes]);
   const flat = useMemo<Session[]>(() => visibleRows.map((row) => row.node.session), [visibleRows]);
 
   useLayoutEffect(() => {
@@ -1020,7 +1067,11 @@ export function SessionList() {
         <p className="sr-only" aria-live="polite" aria-atomic="true">
           {announcement}
         </p>
-        {loading && allSessions.length === 0 ? (
+        {(loading && allSessions.length === 0) ||
+        (hierarchyMode && channelsQuery.loading && channels.length === 0) ? (
+          // The second clause holds the skeleton until the initial channels
+          // read resolves, so a channel-using workspace paints channel
+          // sections directly instead of flashing the recency layout first.
           <SessionListSkeleton />
         ) : error && allSessions.length === 0 ? (
           <div role="alert" className="px-2 py-3 text-xs text-fg-subtle">
@@ -1064,6 +1115,8 @@ export function SessionList() {
                   onLoadMoreChildren={loadChildPage}
                   onRename={context.updateSessionTitle}
                   onPin={onPin}
+                  channels={channels}
+                  onMoveToChannel={onMoveToChannel}
                 />
                 {pinnedTruncated ? (
                   <p className="px-2 pb-2 text-[11px] text-fg-subtle" role="status">
@@ -1072,41 +1125,82 @@ export function SessionList() {
                 ) : null}
               </>
             ) : null}
-            {forest.running.length > 0 ? (
-              <SessionGroup
-                label="Active"
-                nodes={forest.running}
-                flat={flat}
-                activeSessionId={activeSessionId}
-                focusIndex={focusIndex}
-                onFocusSession={setFocusedSessionId}
-                expanded={expanded}
-                onToggleExpand={toggleExpand}
-                onRevealActivePath={revealActivePath}
-                childPages={childPages}
-                onLoadMoreChildren={loadChildPage}
-                onRename={context.updateSessionTitle}
-                onPin={onPin}
-              />
+            {channelMode ? (
+              channelSections.map((section) => (
+                <SessionGroup
+                  key={section.key}
+                  label={section.name}
+                  sectionId={`channel-${section.key}`}
+                  channelHeader
+                  nodes={section.sessions}
+                  flat={flat}
+                  activeSessionId={activeSessionId}
+                  focusIndex={focusIndex}
+                  onFocusSession={setFocusedSessionId}
+                  expanded={expanded}
+                  onToggleExpand={toggleExpand}
+                  onRevealActivePath={revealActivePath}
+                  childPages={childPages}
+                  onLoadMoreChildren={loadChildPage}
+                  onRename={context.updateSessionTitle}
+                  onPin={onPin}
+                  channels={channels}
+                  onMoveToChannel={onMoveToChannel}
+                />
+              ))
+            ) : (
+              <>
+                {forest.running.length > 0 ? (
+                  <SessionGroup
+                    label="Active"
+                    nodes={forest.running}
+                    flat={flat}
+                    activeSessionId={activeSessionId}
+                    focusIndex={focusIndex}
+                    onFocusSession={setFocusedSessionId}
+                    expanded={expanded}
+                    onToggleExpand={toggleExpand}
+                    onRevealActivePath={revealActivePath}
+                    childPages={childPages}
+                    onLoadMoreChildren={loadChildPage}
+                    onRename={context.updateSessionTitle}
+                    onPin={onPin}
+                    channels={channels}
+                    onMoveToChannel={onMoveToChannel}
+                  />
+                ) : null}
+                {forest.grouped.map((bucket) => (
+                  <SessionGroup
+                    key={bucket.group}
+                    label={bucket.label}
+                    nodes={bucket.sessions}
+                    flat={flat}
+                    activeSessionId={activeSessionId}
+                    focusIndex={focusIndex}
+                    onFocusSession={setFocusedSessionId}
+                    expanded={expanded}
+                    onToggleExpand={toggleExpand}
+                    onRevealActivePath={revealActivePath}
+                    childPages={childPages}
+                    onLoadMoreChildren={loadChildPage}
+                    onRename={context.updateSessionTitle}
+                    onPin={onPin}
+                    channels={channels}
+                    onMoveToChannel={onMoveToChannel}
+                  />
+                ))}
+              </>
+            )}
+            {hierarchyMode ? (
+              <button
+                type="button"
+                onClick={() => setChannelDialogOpen(true)}
+                className="flex h-8 w-full items-center gap-1.5 rounded-md px-2.5 text-left text-xs font-medium text-fg-subtle hover:bg-surface-2 hover:text-fg pointer-coarse:min-h-11"
+              >
+                <PlusIcon className="size-3.5" />
+                New channel
+              </button>
             ) : null}
-            {forest.grouped.map((bucket) => (
-              <SessionGroup
-                key={bucket.group}
-                label={bucket.label}
-                nodes={bucket.sessions}
-                flat={flat}
-                activeSessionId={activeSessionId}
-                focusIndex={focusIndex}
-                onFocusSession={setFocusedSessionId}
-                expanded={expanded}
-                onToggleExpand={toggleExpand}
-                onRevealActivePath={revealActivePath}
-                childPages={childPages}
-                onLoadMoreChildren={loadChildPage}
-                onRename={context.updateSessionTitle}
-                onPin={onPin}
-              />
-            ))}
             {continuationCursor ? (
               <div className="px-2 py-2 text-center">
                 <button
@@ -1131,12 +1225,31 @@ export function SessionList() {
           </>
         )}
       </div>
+      <ChannelCreateDialog
+        open={channelDialogOpen}
+        name={channelNameDraft}
+        busy={channelsQuery.mutating}
+        onNameChange={setChannelNameDraft}
+        onOpenChange={(open) => {
+          setChannelDialogOpen(open);
+          if (!open) setChannelNameDraft("");
+        }}
+        onSubmit={() => void submitCreateChannel()}
+      />
     </div>
   );
 }
 
 function SessionGroup(props: {
   label: string;
+  /**
+   * Stable DOM id suffix. Required for channel sections: labels are
+   * user-controlled, so slugging them can collide with each other and with
+   * the fixed groups ("Pinned", the synthetic "inbox").
+   */
+  sectionId?: string;
+  /** Channel-styled header: "# name" instead of the uppercase recency label. */
+  channelHeader?: boolean;
   nodes: SessionTreeNode[];
   flat: Session[];
   activeSessionId: string | null;
@@ -1149,14 +1262,23 @@ function SessionGroup(props: {
   onLoadMoreChildren: (sessionId: string, cursor?: string) => Promise<void>;
   onRename: RenameFn;
   onPin: PinFn;
+  channels: Channel[];
+  onMoveToChannel: MoveToChannelFn;
 }) {
   return (
     <div role="group" aria-label={props.label} className="mb-1.5 min-w-0">
       <p
-        id={`session-group-${props.label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`}
-        className="px-2 pb-0.5 pt-2 text-2xs font-medium uppercase tracking-wider text-fg-muted"
+        id={`session-group-${props.sectionId ?? props.label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`}
+        className={
+          props.channelHeader
+            ? "flex min-w-0 items-center gap-1 px-2 pb-0.5 pt-2 text-xs font-semibold text-fg-muted"
+            : "px-2 pb-0.5 pt-2 text-2xs font-medium uppercase tracking-wider text-fg-muted"
+        }
       >
-        {props.label}
+        {props.channelHeader ? (
+          <HashIcon aria-hidden="true" className="size-3 shrink-0 text-fg-subtle" />
+        ) : null}
+        <span className="truncate">{props.label}</span>
       </p>
       <div
         role="list"
@@ -1179,6 +1301,8 @@ function SessionGroup(props: {
             onLoadMoreChildren={props.onLoadMoreChildren}
             onRename={props.onRename}
             onPin={props.onPin}
+            channels={props.channels}
+            onMoveToChannel={props.onMoveToChannel}
           />
         ))}
       </div>
@@ -1212,6 +1336,8 @@ function SessionTreeRow(props: {
   onLoadMoreChildren: (sessionId: string, cursor?: string) => Promise<void>;
   onRename: RenameFn;
   onPin: PinFn;
+  channels: Channel[];
+  onMoveToChannel: MoveToChannelFn;
 }) {
   const { node } = props;
   const index = props.flat.indexOf(node.session);
@@ -1255,6 +1381,8 @@ function SessionTreeRow(props: {
         onFocus={() => props.onFocusSession(node.session.id)}
         onRename={props.onRename}
         onPin={props.onPin}
+        channels={props.channels}
+        onMoveToChannel={props.onMoveToChannel}
       />
       {hasVisibleChildRegion ? (
         <div role="list" aria-label={`Spawned sessions from ${title}`}>
@@ -1283,6 +1411,8 @@ function SessionTreeRow(props: {
                   onLoadMoreChildren={props.onLoadMoreChildren}
                   onRename={props.onRename}
                   onPin={props.onPin}
+                  channels={props.channels}
+                  onMoveToChannel={props.onMoveToChannel}
                 />
               ))
             : null}
@@ -1401,10 +1531,16 @@ function SessionRow(props: {
   onFocus: () => void;
   onRename: RenameFn;
   onPin: PinFn;
+  channels: Channel[];
+  onMoveToChannel: MoveToChannelFn;
 }) {
   const rail = useRail();
   const title =
     props.session.title?.trim() || props.session.initialMessage?.trim() || "Untitled session";
+  // Creator monogram: who started this workstream, at a glance. Human subjects
+  // only — service/system creators stay unadorned.
+  const initials = creatorInitials(props.session.createdBy);
+  const creatorLabel = props.session.createdBy.label?.trim() || props.session.createdBy.subjectId;
   const rename = useInlineRename(props.session, props.onRename);
   const contextPinSelection = useRef(false);
   const hasChildren = props.hasChildren;
@@ -1540,6 +1676,18 @@ function SessionRow(props: {
                 <span aria-label={childCountAria}>{childCountText}</span>
               </span>
             ) : null}
+            {initials ? (
+              <span
+                aria-hidden="true"
+                title={creatorLabel}
+                className="flex size-4 shrink-0 items-center justify-center rounded-full text-[8px] font-semibold leading-none text-white/90"
+                style={{
+                  background: `oklch(0.45 0.11 ${creatorHue(props.session.createdBy.subjectId)})`,
+                }}
+              >
+                {initials}
+              </span>
+            ) : null}
             {/* Relative time is visible at rest (the list is grouped by recency),
                 and steps aside on hover/focus so the rename overflow can slot in.
                 On coarse pointers there is no hover, so the time stays visible. */}
@@ -1553,6 +1701,8 @@ function SessionRow(props: {
             session={props.session}
             onRename={rename.startEditing}
             onPin={props.onPin}
+            channels={props.channels}
+            onMoveToChannel={props.onMoveToChannel}
           />
         </div>
       </ContextMenuTrigger>
@@ -1620,12 +1770,19 @@ function RowActionsMenu({
   session,
   onRename,
   onPin,
+  channels,
+  onMoveToChannel,
 }: {
   session: Session;
   onRename: () => void;
   onPin: PinFn;
+  channels: Channel[];
+  onMoveToChannel: MoveToChannelFn;
 }) {
   const pinSelection = useRef(false);
+  // Filing is a root-session concept: the rail groups a whole tree by its
+  // root's channel, so children offer no move affordance.
+  const canMove = channels.length > 0 && session.parentSessionId === null;
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -1677,6 +1834,38 @@ function RowActionsMenu({
           <PinIcon className={session.pinned ? "size-4 fill-current" : "size-4"} />
           {session.pinned ? "Unpin" : "Pin"}
         </DropdownMenuItem>
+        {canMove ? (
+          // Flat section, deliberately not a Radix submenu: the Sub primitives
+          // are otherwise unused in the shell graph and pulling them in
+          // re-clusters ~470 KB of shared chunks into the startup bundle.
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel className="text-2xs font-medium uppercase tracking-wider text-fg-subtle">
+              Move to channel
+            </DropdownMenuLabel>
+            {channels.map((channel) => (
+              <DropdownMenuItem
+                key={channel.id}
+                className="pointer-coarse:min-h-11"
+                disabled={session.channelId === channel.id}
+                onSelect={() => void onMoveToChannel(session, channel.id)}
+                onClick={(event) => event.stopPropagation()}
+              >
+                <HashIcon className="size-4" />
+                <span className="truncate">{channel.name}</span>
+              </DropdownMenuItem>
+            ))}
+            <DropdownMenuItem
+              className="pointer-coarse:min-h-11"
+              disabled={session.channelId === null}
+              onSelect={() => void onMoveToChannel(session, null)}
+              onClick={(event) => event.stopPropagation()}
+            >
+              <InboxIcon className="size-4" />
+              Inbox
+            </DropdownMenuItem>
+          </>
+        ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
   );

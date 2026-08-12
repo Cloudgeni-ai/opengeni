@@ -547,6 +547,31 @@ export function CapabilitiesRoute({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId]);
 
+  const fikenOAuthHandled = useRef(false);
+  useEffect(() => {
+    if (fikenOAuthHandled.current) return;
+    const params = new URLSearchParams(window.location.search);
+    const outcome = params.get("fiken");
+    if (!outcome) return;
+    fikenOAuthHandled.current = true;
+    const reason = params.get("reason");
+    window.history.replaceState(null, "", window.location.pathname);
+    if (outcome === "connected") {
+      void refresh();
+      toast.success("Fiken connected");
+    } else {
+      toast.error("Couldn't connect Fiken", {
+        description:
+          reason === "provider_denied"
+            ? "The Fiken authorization was declined."
+            : reason === "no_api_company"
+              ? "The Fiken account has API access to no company. Order API module access in Fiken first."
+              : "Try again, or connect with a personal API token instead.",
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceId]);
+
   const slackUserLinkHandled = useRef(false);
   useEffect(() => {
     if (!slackLinkToken || slackUserLinkHandled.current) return;
@@ -801,6 +826,44 @@ export function CapabilitiesRoute({
       if (action.type === "disconnect_social") {
         await client.disconnectSocialConnection(workspaceId, action.connectionId);
         await refresh();
+        toast.success(`Disconnected ${item.name}`);
+        setSelected(null);
+        return;
+      }
+
+      // First-party Fiken connect / token replacement. The install route
+      // verifies the token against Fiken before storing it, so a bad paste
+      // fails here with a specific message instead of at first tool use.
+      if (action.type === "fiken_api_token") {
+        await client.installFikenConnection(workspaceId, {
+          apiToken: action.apiToken,
+          ...(action.connectionId ? { connectionId: action.connectionId } : {}),
+        });
+        await refresh();
+        onRuntimeChanged();
+        toast.success(`Connected ${item.name}`);
+        setSelected(null);
+        return;
+      }
+
+      // Full-page redirect into Fiken's consent screen; the API callback
+      // stores the workspace connection and returns to this page with a
+      // `fiken` query param handled by the return effect below.
+      if (action.type === "fiken_oauth") {
+        const response = await client.startFikenOAuth(workspaceId, {
+          ...(action.connectionId ? { connectionId: action.connectionId } : {}),
+        });
+        if (!response.authorizationUrl) {
+          throw new Error("Fiken did not return an authorization link.");
+        }
+        window.location.assign(response.authorizationUrl);
+        return;
+      }
+
+      if (action.type === "fiken_disconnect") {
+        await client.deleteConnection(workspaceId, action.connectionId);
+        await refresh();
+        onRuntimeChanged();
         toast.success(`Disconnected ${item.name}`);
         setSelected(null);
         return;

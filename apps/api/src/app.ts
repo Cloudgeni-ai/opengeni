@@ -92,6 +92,7 @@ import { registerInteractionResourceRoutes } from "./routes/interaction-resource
 import { registerPackRoutes } from "./routes/packs";
 import { registerPluginRoutes } from "./routes/plugins";
 import { registerSkillRoutes } from "./routes/skills";
+import { registerChannelRoutes } from "./routes/channels";
 import { registerRigRoutes } from "./routes/rigs";
 import { registerScheduledTaskRoutes } from "./routes/scheduled-tasks";
 import { registerSessionRoutes } from "./routes/sessions";
@@ -650,6 +651,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerEnrollmentRoutes(app, routeDeps);
   registerMachineRoutes(app, routeDeps);
   registerEnvironmentRoutes(app, routeDeps);
+  registerChannelRoutes(app, routeDeps);
   registerRigRoutes(app, routeDeps);
   registerPackRoutes(app, routeDeps);
   registerPluginRoutes(app, routeDeps);
@@ -1570,6 +1572,18 @@ const routeLabelPatterns: Array<{
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/connections\/slack-bot\/install$/,
     label: "/v1/workspaces/:workspaceId/connections/slack-bot/install",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/connections\/fiken\/install$/,
+    label: "/v1/workspaces/:workspaceId/connections/fiken/install",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/connections\/fiken\/oauth\/start$/,
+    label: "/v1/workspaces/:workspaceId/connections/fiken/oauth/start",
+  },
+  {
+    pattern: /^\/v1\/integrations\/fiken\/callback$/,
+    label: "/v1/integrations/fiken/callback",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/connections\/[^/]+$/,

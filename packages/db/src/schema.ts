@@ -2058,6 +2058,32 @@ export const codexCredentialLeases = pgTable(
   }),
 );
 
+// Workspace-shared channels organize root sessions ("workstreams") by work
+// type in the rail. Pure organizational metadata: filing a session into a
+// channel never affects execution, authority, memory, or history.
+export const channels = pgTable(
+  "channels",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    description: text("description"),
+    // Attribution string: 'user:<subject>' | 'session:<id>' | 'system'.
+    createdBy: text("created_by"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    // The migration owns the case-insensitive lower(name) uniqueness.
+    workspaceIdentity: uniqueIndex("channels_workspace_id_uq").on(table.workspaceId, table.id),
+  }),
+);
+
 export const sessions = pgTable(
   "sessions",
   {
@@ -2163,6 +2189,10 @@ export const sessions = pgTable(
     // file (forward-reference pattern, same as activeSandboxId). Consumed in M3.
     rigId: uuid("rig_id"),
     rigVersionId: uuid("rig_version_id"),
+    // Workspace channel this session is filed under (rail organization only;
+    // the rail groups a tree by its ROOT session's channel). Null = unfiled
+    // (inbox). ON DELETE SET NULL detaches sessions when a channel is removed.
+    channelId: uuid("channel_id").references(() => channels.id, { onDelete: "set null" }),
     // Non-default first-party MCP token permissions (manager-style sessions);
     // null means the fixed worker default set in @opengeni/runtime.
     firstPartyMcpPermissions: jsonb("first_party_mcp_permissions").$type<string[]>(),
@@ -4214,7 +4244,7 @@ export const sessionTurnAttempts = pgTable(
     // Immutable generic session-tenancy authority admitted with this exact
     // attempt. A later visibility/ownership epoch change fences the attempt;
     // these are snapshots, never live lookups or mutable metadata.
-    // Pre-0221 SQL writers may omit these columns; the migration-owned BEFORE
+    // Pre-0222 SQL writers may omit these columns; the migration-owned BEFORE
     // INSERT trigger fills them from the exact session row. Current claim
     // writers pass both explicitly, so no client-side default may bypass the
     // trigger and manufacture stale authority.

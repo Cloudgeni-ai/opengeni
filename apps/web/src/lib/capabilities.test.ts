@@ -17,6 +17,7 @@ import {
   curatedSkillProvenance,
   domainFromUrl,
   emptyCapabilityForm,
+  fikenWorkspaceConnection,
   filterCapabilityCatalogItems,
   isMissingCredentialsError,
   normalizeProviderDomain,
@@ -270,6 +271,18 @@ describe("capabilityConnectPlan", () => {
     });
   });
 
+  test("first-party Fiken uses the verified paste-a-token connector", () => {
+    const fiken = item({
+      id: "api:fiken",
+      kind: "api",
+      surfaceType: "first_party_fiken",
+      authKind: "api_key",
+      providerDomain: "fiken.no",
+    });
+    expect(capabilityConnectPlan(fiken)).toEqual({ mode: "fiken_api_token" });
+    expect(capabilityAuthHint(fiken)).toBe("API key");
+  });
+
   test("OAuth-capable MCP connects via oauth with its mcp url", () => {
     const plan = capabilityConnectPlan(
       item({
@@ -404,6 +417,70 @@ describe("capabilityConnectPlan", () => {
     );
     if (plan.mode !== "oauth") throw new Error("expected oauth");
     expect(plan.providerDomain).toBe("mcp.notion.com");
+  });
+});
+
+describe("first-party fiken capability state", () => {
+  const fikenItem = item({
+    id: "api:fiken",
+    kind: "api",
+    surfaceType: "first_party_fiken",
+    providerDomain: "fiken.no",
+  });
+  const fikenRow = (overrides: Partial<ConnectionMetadata> = {}) =>
+    connection({
+      providerDomain: "fiken.no",
+      kind: "api_key",
+      subjectId: null,
+      metadata: { credentialRole: "fiken_api_token" },
+      ...overrides,
+    });
+
+  test("health derives from the workspace fiken row without a connectionRef", () => {
+    expect(connectionHealth(fikenItem, [], false)).toEqual({ state: "unverified" });
+    expect(connectionHealth(fikenItem, [], true)).toEqual({ state: "none" });
+    const active = fikenRow();
+    expect(connectionHealth(fikenItem, [active], true)).toEqual({
+      state: "connected",
+      connection: active,
+    });
+    const lapsed = fikenRow({ status: "needs_reauth" });
+    expect(connectionHealth(fikenItem, [lapsed], true)).toEqual({
+      state: "attention",
+      connection: lapsed,
+    });
+  });
+
+  test("accepts the OAuth lane's oauth2 rows like the server predicate", () => {
+    const oauth = fikenRow({ kind: "oauth2" });
+    expect(connectionHealth(fikenItem, [oauth], true)).toEqual({
+      state: "connected",
+      connection: oauth,
+    });
+  });
+
+  test("ignores personal, foreign-domain, and unroled rows", () => {
+    expect(
+      connectionHealth(
+        fikenItem,
+        [
+          fikenRow({ subjectId: "subject-a" }),
+          fikenRow({ providerDomain: "linear.app" }),
+          fikenRow({ metadata: {} }),
+        ],
+        true,
+      ),
+    ).toEqual({ state: "none" });
+  });
+
+  test("prefers the usable row, newest first", () => {
+    const lapsed = fikenRow({
+      id: "old",
+      status: "needs_reauth",
+      updatedAt: "2026-08-05T00:00:00.000Z",
+    });
+    const active = fikenRow({ id: "new", updatedAt: "2026-08-01T00:00:00.000Z" });
+    expect(fikenWorkspaceConnection([lapsed, active])?.id).toBe("new");
   });
 });
 

@@ -62,6 +62,12 @@ export type SessionClientLike = Pick<
   | "deleteEnvironment"
   | "setEnvironmentVariable"
   | "deleteEnvironmentVariable"
+  // Channels (rail organization)
+  | "listChannels"
+  | "createChannel"
+  | "updateChannel"
+  | "deleteChannel"
+  | "updateSessionChannel"
   // Rigs
   | "listRigs"
   | "createRig"

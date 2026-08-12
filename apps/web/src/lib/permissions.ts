@@ -88,7 +88,16 @@ export function buildApiKeyPermissionGroups(): PermissionGroup[] {
   return groups.sort((a, b) => rank(a.label) - rank(b.label));
 }
 
-export const apiKeyPermissionGroups = buildApiKeyPermissionGroups();
+// Lazy on purpose: this module lands in a shared chunk, and an eager
+// module-scope `Permission.options` read crashes the whole chunk with a TDZ
+// error whenever the bundler's chunk graph puts the contracts enum later in
+// the evaluation order (adding a new lazy route re-clusters chunks and did
+// exactly that). Computing on first use is immune to chunk-order changes.
+let cachedApiKeyPermissionGroups: PermissionGroup[] | null = null;
+export function apiKeyPermissionGroups(): PermissionGroup[] {
+  cachedApiKeyPermissionGroups ??= buildApiKeyPermissionGroups();
+  return cachedApiKeyPermissionGroups;
+}
 
 // Mirrors the API's ensureDelegablePermissions: a workspace:admin grant can
 // delegate everything, any other grant only its own permissions.
@@ -142,7 +151,12 @@ export function buildSessionMcpPermissionGroups(): PermissionGroup[] {
     .filter((group) => group.permissions.length > 0);
 }
 
-export const sessionMcpPermissionGroups = buildSessionMcpPermissionGroups();
+// Lazy for the same chunk-evaluation-order reason as apiKeyPermissionGroups.
+let cachedSessionMcpPermissionGroups: PermissionGroup[] | null = null;
+export function sessionMcpPermissionGroups(): PermissionGroup[] {
+  cachedSessionMcpPermissionGroups ??= buildSessionMcpPermissionGroups();
+  return cachedSessionMcpPermissionGroups;
+}
 
 /**
  * Groups offered when editing a workspace member's permissions. Workspace
@@ -167,7 +181,12 @@ export function buildWorkspaceMemberPermissionGroups(): PermissionGroup[] {
     .filter((group) => group.permissions.length > 0);
 }
 
-export const workspaceMemberPermissionGroups = buildWorkspaceMemberPermissionGroups();
+// Lazy for the same chunk-evaluation-order reason as apiKeyPermissionGroups.
+let cachedWorkspaceMemberPermissionGroups: PermissionGroup[] | null = null;
+export function workspaceMemberPermissionGroups(): PermissionGroup[] {
+  cachedWorkspaceMemberPermissionGroups ??= buildWorkspaceMemberPermissionGroups();
+  return cachedWorkspaceMemberPermissionGroups;
+}
 
 /**
  * The default permission set for a newly-added workspace member: full

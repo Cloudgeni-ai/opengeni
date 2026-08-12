@@ -167,6 +167,9 @@ import type {
   OpenGeniSlackBotInstallRequest,
   OpenGeniSlackBotInstallStart,
   SlackReactionChannelListResponse,
+  FikenInstallRequest,
+  FikenOAuthStartRequest,
+  FikenOAuthStartResponse,
   CreateConnectionRequest,
   CreateDocumentBaseRequest,
   CreateFileUploadRequest,
@@ -250,6 +253,7 @@ import type {
   Session,
   SessionListResponse,
   AgentTopologyPageResponse,
+  UpdateSessionChannelRequest,
   UpdateSessionPinRequest,
   UninstallPackRequest,
   UninstallPackResult,
@@ -348,6 +352,9 @@ import type {
   VariableSet,
   VariableSetSecret,
   VariableSetVariableMetadata,
+  Channel,
+  CreateChannelRequest,
+  UpdateChannelRequest,
   Rig,
   RigVersion,
   RigChange,
@@ -3920,6 +3927,55 @@ export class OpenGeniClient {
     );
   }
 
+  // --- Channels --------------------------------------------------------------
+  // Workspace-shared rail organization for root sessions. sessions:read gates
+  // list; sessions:create gates create / update / delete; sessions:control
+  // gates re-filing a session.
+
+  async listChannels(workspaceId: string): Promise<Channel[]> {
+    return await this.requestJson<Channel[]>("GET", `/v1/workspaces/${workspaceId}/channels`);
+  }
+
+  async createChannel(workspaceId: string, request: CreateChannelRequest): Promise<Channel> {
+    return await this.requestJson<Channel>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/channels`,
+      request,
+    );
+  }
+
+  async updateChannel(
+    workspaceId: string,
+    channelId: string,
+    request: UpdateChannelRequest,
+  ): Promise<Channel> {
+    return await this.requestJson<Channel>(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/channels/${channelId}`,
+      request,
+    );
+  }
+
+  async deleteChannel(workspaceId: string, channelId: string): Promise<void> {
+    await this.requestJson<unknown>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/channels/${channelId}`,
+    );
+  }
+
+  /** Re-file a session into a channel (null = back to the unfiled inbox). */
+  async updateSessionChannel(
+    workspaceId: string,
+    sessionId: string,
+    request: UpdateSessionChannelRequest,
+  ): Promise<Session> {
+    return await this.requestJson<Session>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/channel`,
+      request,
+    );
+  }
+
   // --- Rigs ------------------------------------------------------------------
   // Workspace-scoped, versioned sandbox machine definitions. rigs:use gates read
   // + proposeRigChange; rigs:manage gates create / update / delete / activate.
@@ -5190,6 +5246,34 @@ export class OpenGeniClient {
       request,
     );
     return response.connection;
+  }
+
+  /**
+   * Verify a pasted Fiken personal API token and store it as the
+   * workspace-shared Fiken connection (or rewrite an existing one in place).
+   */
+  async installFikenConnection(
+    workspaceId: string,
+    request: FikenInstallRequest,
+  ): Promise<ConnectionMetadata> {
+    const response = await this.requestJson<ConnectionResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/connections/fiken/install`,
+      request,
+    );
+    return response.connection;
+  }
+
+  /** Start the Fiken OAuth flow for the workspace-shared Fiken connection. */
+  async startFikenOAuth(
+    workspaceId: string,
+    request: FikenOAuthStartRequest = {},
+  ): Promise<FikenOAuthStartResponse> {
+    return await this.requestJson<FikenOAuthStartResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/connections/fiken/oauth/start`,
+      request,
+    );
   }
 
   /** Start the public Slack installation flow for the workspace-shared OpenGeni bot. */

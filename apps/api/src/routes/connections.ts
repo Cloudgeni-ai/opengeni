@@ -12,6 +12,12 @@ import {
   ApiIntegrationOAuthStartRequest,
   ConnectionResponse,
   CreateConnectionRequest,
+  FIKEN_CREDENTIAL_LABEL,
+  FIKEN_CREDENTIAL_ROLE,
+  FIKEN_PROVIDER_DOMAIN,
+  FikenInstallRequest,
+  FikenOAuthStartRequest,
+  FikenOAuthStartResponse,
   IntegrationClientMetadata,
   ListSlackInstallationBindingsResponse,
   ListConnectionsResponse,
@@ -34,13 +40,17 @@ import {
   GoogleDriveOAuthStartResponse,
 } from "@opengeni/contracts/google-drive";
 import {
+  fikenConnectionMetadata,
   hasPermission,
+  hasReservedFikenMetadata,
   hasReservedOpenGeniSlackBotMetadata,
+  isFikenConnection,
   isOpenGeniSlackBotConnection,
   openGeniSlackBotMetadata,
   requireAccessGrant,
   requireAccessGrantAuthorization,
   requireEnvironmentEncryption,
+  resolveFikenDefaultCompanySlug,
 } from "@opengeni/core";
 import {
   consumeIntegrationOAuthStateNonce,
@@ -97,6 +107,12 @@ import {
   verifyOpenGeniSlackBotCredential,
 } from "../integrations/slack-bot";
 import {
+  completeFikenOAuthCallback,
+  fikenCredentialBundle,
+  startFikenOAuth,
+  verifyFikenApiToken,
+} from "../integrations/fiken";
+import {
   OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
   OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
   OPENGENI_SLACK_BOT_REQUESTED_SCOPES,
@@ -152,6 +168,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
     const payload = CreateConnectionRequest.parse(await c.req.json());
     assertNotReservedSlackBotMetadata(payload.metadata);
+    assertNotReservedFikenMetadata(payload.metadata);
     assertNotReservedApiIntegrationOAuthMetadata(payload.metadata);
     const key = requireEnvironmentEncryption(settings);
     const subjectId = createConnectionSubjectId(payload, grant.subjectId);
@@ -304,6 +321,120 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         302,
       );
     }
+  });
+
+  // Verified paste-a-token install for the first-party Fiken connector. The
+  // token is validated against Fiken (and its accessible companies discovered)
+  // before it enters encrypted storage. Workspace-owned only.
+  app.post("/v1/workspaces/:workspaceId/connections/fiken/install", async (c) => {
+    assertIntegrationsEnabled();
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
+    const payload = FikenInstallRequest.parse(await c.req.json());
+    const key = requireEnvironmentEncryption(settings);
+    const existing = payload.connectionId
+      ? await getConnectionMetadata(db, workspaceId, payload.connectionId, null)
+      : null;
+    if (payload.connectionId && !existing) {
+      throw new HTTPException(404, { message: "connection not found" });
+    }
+    if (existing && !isFikenConnection(existing)) {
+      throw new HTTPException(422, { message: "connectionId is not a Fiken connection" });
+    }
+    const verified = await verifyFikenApiToken(payload.apiToken, deps.fikenFetch ?? fetch);
+    const previousDefault = existing
+      ? (fikenConnectionMetadata(existing.metadata)?.defaultCompanySlug ?? null)
+      : null;
+    const defaultCompanySlug = resolveFikenDefaultCompanySlug({
+      requested: payload.defaultCompanySlug ?? null,
+      previous: previousDefault,
+      companies: verified.companies,
+    });
+    if (payload.defaultCompanySlug && defaultCompanySlug !== payload.defaultCompanySlug) {
+      throw new HTTPException(422, {
+        message: `defaultCompanySlug is not among the companies this token can access: ${verified.companies
+          .map((company) => company.slug)
+          .join(", ")}`,
+      });
+    }
+    const metadata = {
+      credentialRole: FIKEN_CREDENTIAL_ROLE,
+      credentialLabel: FIKEN_CREDENTIAL_LABEL,
+      companies: verified.companies,
+      defaultCompanySlug,
+      verifiedAt: new Date().toISOString(),
+    };
+    const credentialEncrypted = encryptCredentialBundle(
+      key,
+      fikenCredentialBundle(payload.apiToken),
+    );
+    if (existing) {
+      // Rewrites the whole credential identity: a token pasted over an OAuth
+      // row must also flip kind and clear the OAuth expiry, or the broker
+      // keeps treating the api_key bundle as a refreshable oauth2 credential.
+      const updated = await updateConnection(db, {
+        workspaceId,
+        connectionId: existing.id,
+        visibleToSubjectId: null,
+        expectedVersion: existing.version,
+        kind: "api_key",
+        status: "active",
+        credentialEncrypted,
+        grantedScopes: [],
+        expiresAt: null,
+        metadata,
+        updatedBySubjectId: grant.subjectId,
+      });
+      if (!updated) {
+        throw new HTTPException(409, { message: "the Fiken connection changed; retry" });
+      }
+      return c.json(ConnectionResponse.parse({ connection: updated }));
+    }
+    const connection = await createConnection(db, {
+      accountId: grant.accountId,
+      workspaceId,
+      subjectId: null,
+      providerDomain: FIKEN_PROVIDER_DOMAIN,
+      kind: "api_key",
+      credentialEncrypted,
+      grantedScopes: [],
+      expiresAt: null,
+      metadata,
+      createdBySubjectId: grant.subjectId,
+    });
+    return c.json(ConnectionResponse.parse({ connection }), 201);
+  });
+
+  // Fiken OAuth (registered app) start. Both Fiken lanes produce the same
+  // workspace-owned connection shape; this one refreshes through the broker.
+  app.post("/v1/workspaces/:workspaceId/connections/fiken/oauth/start", async (c) => {
+    assertIntegrationsEnabled();
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
+    const payload = FikenOAuthStartRequest.parse(await c.req.json());
+    requireEnvironmentEncryption(settings);
+    return c.json(
+      FikenOAuthStartResponse.parse(
+        await startFikenOAuth(deps, {
+          accountId: grant.accountId,
+          workspaceId,
+          subjectId: grant.subjectId,
+          requestUrl: c.req.url,
+          payload,
+        }),
+      ),
+    );
+  });
+
+  app.get("/v1/integrations/fiken/callback", async (c) => {
+    assertIntegrationsEnabled();
+    const result = await completeFikenOAuthCallback(deps, {
+      ...(c.req.query("code") ? { code: c.req.query("code") } : {}),
+      ...(c.req.query("state") ? { state: c.req.query("state") } : {}),
+      ...(c.req.query("error") ? { error: c.req.query("error") } : {}),
+      requestUrl: c.req.url,
+    });
+    return c.redirect(result.redirectTo, 302);
   });
 
   app.post("/v1/workspaces/:workspaceId/connections/google-drive/install", async (c) => {
@@ -532,6 +663,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const { grant } = authorization;
     const payload = UpdateConnectionRequest.parse(await c.req.json());
     assertNotReservedSlackBotMetadata(payload.metadata);
+    assertNotReservedFikenMetadata(payload.metadata);
     assertNotReservedApiIntegrationOAuthMetadata(payload.metadata);
     const existing = await getConnectionMetadata(
       db,
@@ -1131,6 +1263,14 @@ function assertNotReservedSlackBotMetadata(metadata: Record<string, unknown> | u
   if (hasReservedOpenGeniSlackBotMetadata(metadata)) {
     throw new HTTPException(422, {
       message: "OpenGeni Slack bot metadata is reserved for the dedicated connection flow",
+    });
+  }
+}
+
+function assertNotReservedFikenMetadata(metadata: Record<string, unknown> | undefined): void {
+  if (hasReservedFikenMetadata(metadata)) {
+    throw new HTTPException(422, {
+      message: "Fiken connection metadata is reserved for the verified Fiken connect flows",
     });
   }
 }

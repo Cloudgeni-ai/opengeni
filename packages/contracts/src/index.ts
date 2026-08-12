@@ -890,6 +890,16 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "slack_bot_file_content",
   "slack_bot_post_message",
   "slack_bot_delete_message",
+  "fiken_companies_list",
+  "fiken_contacts_list",
+  "fiken_contact_create",
+  "fiken_products_list",
+  "fiken_invoices_list",
+  "fiken_invoice_get",
+  "fiken_invoice_draft_create",
+  "fiken_bank_accounts_list",
+  "fiken_purchases_list",
+  "fiken_sales_list",
   "atlassian_sources_list",
   "atlassian_search",
   "atlassian_get",
@@ -968,6 +978,7 @@ export const DEFAULT_FIRST_PARTY_MCP_TOOLS = FIRST_PARTY_MCP_TOOL_NAMES.filter(
     !name.startsWith("x_") &&
     !name.startsWith("reddit_") &&
     !name.startsWith("slack_bot_") &&
+    !name.startsWith("fiken_") &&
     !name.startsWith("atlassian_"),
 ) satisfies readonly FirstPartyMcpToolName[];
 
@@ -5045,6 +5056,7 @@ export const SessionAuthorizationOperation = z.enum([
   "session.human_input.read",
   "session.human_input.write",
   "session.title.write",
+  "session.channel.write",
   "session.mcp.approval_policy.write",
   "session.tool_policy.write",
   "session.goal.read",
@@ -6309,6 +6321,40 @@ export const UpdateRigRequest = z.object({
 });
 export type UpdateRigRequest = z.infer<typeof UpdateRigRequest>;
 
+// Workspace-shared channels organize root sessions ("workstreams") by work
+// type in the rail. Pure organizational metadata: filing a session into a
+// channel never affects execution, authority, memory, or history.
+export const Channel = z.object({
+  id: z.string().uuid(),
+  accountId: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  name: z.string(),
+  description: z.string().nullable(),
+  createdBy: z.string().nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type Channel = z.infer<typeof Channel>;
+
+export const CreateChannelRequest = z.object({
+  name: z.string().trim().min(1).max(80),
+  description: z.string().max(2000).optional(),
+});
+export type CreateChannelRequest = z.infer<typeof CreateChannelRequest>;
+
+export const UpdateChannelRequest = z.object({
+  name: z.string().trim().min(1).max(80).optional(),
+  description: z.string().max(2000).nullable().optional(),
+});
+export type UpdateChannelRequest = z.infer<typeof UpdateChannelRequest>;
+
+// Re-files one session (rail organization only). null moves it back to the
+// unfiled inbox.
+export const UpdateSessionChannelRequest = z.object({
+  channelId: z.string().uuid().nullable(),
+});
+export type UpdateSessionChannelRequest = z.infer<typeof UpdateSessionChannelRequest>;
+
 // setup_append: the exact command that already worked (+ an optional note).
 export const RigSetupAppendPayload = z.object({
   command: z.string().min(1).max(8192),
@@ -7340,6 +7386,48 @@ export const OpenGeniSlackBotConnectionMetadata = z
   })
   .passthrough();
 export type OpenGeniSlackBotConnectionMetadata = z.infer<typeof OpenGeniSlackBotConnectionMetadata>;
+
+export const FIKEN_PROVIDER_DOMAIN = "fiken.no" as const;
+export const FIKEN_CREDENTIAL_ROLE = "fiken_api_token" as const;
+export const FIKEN_CREDENTIAL_LABEL = "Fiken API token" as const;
+
+export const FikenCompanySummary = z.object({
+  slug: z.string().min(1).max(128),
+  name: z.string().min(1).max(256),
+  organizationNumber: z.string().max(64).nullable(),
+});
+export type FikenCompanySummary = z.infer<typeof FikenCompanySummary>;
+
+export const FikenConnectionMetadata = z
+  .object({
+    credentialRole: z.literal(FIKEN_CREDENTIAL_ROLE),
+    credentialLabel: z.literal(FIKEN_CREDENTIAL_LABEL),
+    companies: z.array(FikenCompanySummary).max(100),
+    defaultCompanySlug: z.string().min(1).max(128).nullable(),
+    verifiedAt: z.string().datetime({ offset: true }),
+  })
+  .passthrough();
+export type FikenConnectionMetadata = z.infer<typeof FikenConnectionMetadata>;
+
+export const FikenInstallRequest = z.object({
+  apiToken: z.string().min(16).max(512),
+  defaultCompanySlug: z.string().min(1).max(128).optional(),
+  /** Existing Fiken connection to rewrite in place (reconnect). */
+  connectionId: z.string().uuid().optional(),
+});
+export type FikenInstallRequest = z.infer<typeof FikenInstallRequest>;
+
+export const FikenOAuthStartRequest = z.object({
+  /** Existing Fiken connection to re-authorize in place (reconnect). */
+  connectionId: z.string().uuid().optional(),
+});
+export type FikenOAuthStartRequest = z.infer<typeof FikenOAuthStartRequest>;
+
+export const FikenOAuthStartResponse = z.object({
+  authorizationUrl: z.string().url(),
+  expiresAt: z.string().datetime({ offset: true }),
+});
+export type FikenOAuthStartResponse = z.infer<typeof FikenOAuthStartResponse>;
 
 export const ConnectionMetadata = z.object({
   id: z.string().uuid(),
@@ -8548,6 +8636,9 @@ export const Session = z.object({
   // Both null ⇒ a rig-less session (byte-for-byte today's behavior).
   rigId: z.string().uuid().nullable().default(null),
   rigVersionId: z.string().uuid().nullable().default(null),
+  // Workspace channel this session is filed under (rail organization only;
+  // a session tree is grouped by its ROOT session's channel). Null = unfiled.
+  channelId: z.string().uuid().nullable().default(null),
   // Non-default first-party MCP token permissions (manager-style sessions);
   // null means the fixed worker default set.
   firstPartyMcpPermissions: z.array(Permission).nullable(),
@@ -10954,6 +11045,10 @@ export const CreateSessionRequest = withVariableSetIdAlias({
   // null ⇒ explicitly create a rig-less session; UUID ⇒ bind that exact rig.
   // An id that does not name a rig in the workspace is a 422.
   rigId: z.string().uuid().nullable().optional(),
+  // The workspace channel to file this session under (rail organization only).
+  // Omitted/null ⇒ unfiled (inbox). An id that does not name a channel in the
+  // workspace is a 422.
+  channelId: z.string().uuid().nullable().optional(),
   goal: GoalSpec.optional(),
   clientEventId: SessionOperationKey.optional(),
   // Workspace-scoped CREATE idempotency key: collapses concurrent/retried
