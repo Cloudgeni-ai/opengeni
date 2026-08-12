@@ -116,9 +116,9 @@ describe("release schema contract", () => {
     );
     expect(sourceContract.sha256).toBe(
       migrations.has("0224_slack_post_outcome_reconciliation.sql")
-        ? "62873a0e1e8a8eaca66ee979988bdb6c50377e6d7faf77cd03a631817ee7ba00"
-        : migrations.has("0222_session_visibility_authority_epochs.sql")
-          ? "257511509811c24cc2e60afca38362b9a065924101fcd1df52850b01fbe5fafa"
+        ? "8c742400ca1e21ddc4fe1db810d58af7dca037df360406fc71dbd85205eb5a64"
+        : migrations.has("0223_sessions_channel_fk_validate.sql")
+          ? "6bc5dfdf4468f6be4adc5ea7c6ed98397ee865c21a0175106320159b15588a6c"
           : migrations.has("0221_sessions_channel_index.sql")
             ? "e7beb14a48c19cdc2d185fd27b77052a66e9d2e52fe321bc3e2fc14bba8d8712"
             : migrations.has("0220_memory_slack_append_only_cascade.sql")
@@ -144,9 +144,9 @@ describe("release schema contract", () => {
     const contract = {
       ...sourceContract,
       sha256: migrations.has("0224_slack_post_outcome_reconciliation.sql")
-        ? "62873a0e1e8a8eaca66ee979988bdb6c50377e6d7faf77cd03a631817ee7ba00"
-        : migrations.has("0222_session_visibility_authority_epochs.sql")
-          ? "257511509811c24cc2e60afca38362b9a065924101fcd1df52850b01fbe5fafa"
+        ? "8c742400ca1e21ddc4fe1db810d58af7dca037df360406fc71dbd85205eb5a64"
+        : migrations.has("0223_sessions_channel_fk_validate.sql")
+          ? "6bc5dfdf4468f6be4adc5ea7c6ed98397ee865c21a0175106320159b15588a6c"
           : migrations.has("0221_sessions_channel_index.sql")
             ? "e7beb14a48c19cdc2d185fd27b77052a66e9d2e52fe321bc3e2fc14bba8d8712"
             : migrations.has("0220_memory_slack_append_only_cascade.sql")
@@ -342,13 +342,15 @@ describe("release schema contract", () => {
         (migrations.has("0220_session_channels.sql") ? 1 : 0) +
         (migrations.has("0221_sessions_channel_index.sql") ? 1 : 0) +
         (migrations.has("0222_session_visibility_authority_epochs.sql") ? 1 : 0) +
+        (migrations.has("0222_sessions_channel_fk.sql") ? 1 : 0) +
+        (migrations.has("0223_sessions_channel_fk_validate.sql") ? 1 : 0) +
         (migrations.has("0224_slack_post_outcome_reconciliation.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
       migrations.has("0224_slack_post_outcome_reconciliation.sql")
-        ? "62873a0e1e8a8eaca66ee979988bdb6c50377e6d7faf77cd03a631817ee7ba00"
-        : migrations.has("0222_session_visibility_authority_epochs.sql")
-          ? "257511509811c24cc2e60afca38362b9a065924101fcd1df52850b01fbe5fafa"
+        ? "8c742400ca1e21ddc4fe1db810d58af7dca037df360406fc71dbd85205eb5a64"
+        : migrations.has("0223_sessions_channel_fk_validate.sql")
+          ? "6bc5dfdf4468f6be4adc5ea7c6ed98397ee865c21a0175106320159b15588a6c"
           : migrations.has("0221_sessions_channel_index.sql")
             ? "e7beb14a48c19cdc2d185fd27b77052a66e9d2e52fe321bc3e2fc14bba8d8712"
             : migrations.has("0220_memory_slack_append_only_cascade.sql")
@@ -368,8 +370,8 @@ describe("release schema contract", () => {
     expect(contract.latestMigration).toBe(
       migrations.has("0224_slack_post_outcome_reconciliation.sql")
         ? "0224_slack_post_outcome_reconciliation.sql"
-        : migrations.has("0222_session_visibility_authority_epochs.sql")
-          ? "0222_session_visibility_authority_epochs.sql"
+        : migrations.has("0223_sessions_channel_fk_validate.sql")
+          ? "0223_sessions_channel_fk_validate.sql"
           : migrations.has("0221_sessions_channel_index.sql")
             ? "0221_sessions_channel_index.sql"
             : migrations.has("0220_memory_slack_append_only_cascade.sql")
