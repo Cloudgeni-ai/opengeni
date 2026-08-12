@@ -310,6 +310,26 @@ function compactSerializedRunItem(item: unknown): boolean {
 }
 
 /**
+ * Release OpenGeni's duplicate full-result marker from the live SDK run item
+ * after its normalized event has crossed the durable append boundary. The SDK
+ * output and any inner extractor custom data remain available for subsequent
+ * model calls and approval resume.
+ */
+export function releaseMcpResultCustomDataFromSdkEvent(event: unknown): boolean {
+  if (!event || typeof event !== "object" || Array.isArray(event)) return false;
+  if ((event as { type?: unknown }).type !== "run_item_stream_event") return false;
+  const item = (event as { item?: unknown }).item;
+  if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+  const runItem = item as { type?: unknown; customData?: unknown };
+  if (runItem.type !== "tool_call_output_item") return false;
+  if (!stripMcpResultMarkerFromCustomData(runItem.customData)) return false;
+  if (isPlainRecord(runItem.customData) && Object.keys(runItem.customData).length === 0) {
+    delete runItem.customData;
+  }
+  return true;
+}
+
+/**
  * Remove only OpenGeni's redundant full-result marker from an approval
  * RunState after the worker has durably recorded the exact event output. The
  * SDK's model-visible output, protocol raw item, and any inner custom data stay

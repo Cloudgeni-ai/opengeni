@@ -103,6 +103,7 @@ import {
   serializeHumanInputRequests,
   serializeInteractionInterventionRequests,
   refreshCodemodeTokenFile,
+  releaseMcpResultCustomDataFromSdkEvent,
   withStructuredViewImageFunctionResults,
   sandboxCommandExitCode,
   sandboxArtifactRuntimeDoctorHooks,
@@ -4737,6 +4738,69 @@ describe("runtime event normalization", () => {
     expect(secondRequest).toContain("structuredOnly");
     expect(secondRequest).toContain("providerTrace");
     expect(secondRequest).toContain("vendor-receipt-1");
+  });
+
+  test("releases only the live MCP audit marker after durable event capture", async () => {
+    const fullResult = {
+      content: [{ type: "text" as const, text: "release after durable capture" }],
+      structuredContent: { receiptId: "release-receipt-1" },
+      isError: false,
+      _meta: { providerTrace: "release-trace-1" },
+    };
+    const inner: MCPServer = {
+      name: "release-inner",
+      cacheToolsList: false,
+      customDataExtractor: async () => ({ innerReceipt: "retain-inner-1" }),
+      async connect() {},
+      async close() {},
+      async listTools() {
+        return [
+          {
+            name: "inspect",
+            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+          },
+        ];
+      },
+      async callTool() {
+        return fullResult.content;
+      },
+      async callToolResult() {
+        return fullResult;
+      },
+      async invalidateToolsCache() {},
+    };
+    const wrapped = new PrefixedMcpServer(inner, "release");
+    const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false });
+    const model = new ScriptedModel([
+      { output: [scriptedFunctionCall("release__inspect", {}, "release-call")] },
+      { outputText: "done" },
+    ]);
+    const agent = buildOpenGeniAgent(settings, [], {
+      model,
+      hostedWebSearch: false,
+      mcpServers: [wrapped],
+    });
+
+    const result = await runAgentStream(agent, "Inspect it", settings);
+    const streamed: any[] = [];
+    for await (const event of result.toStream()) streamed.push(event);
+    await result.completed;
+
+    const outputEvent = streamed.find(
+      (event) =>
+        event.type === "run_item_stream_event" && event.item?.type === "tool_call_output_item",
+    );
+    const [durable] = normalizeSdkEvent(outputEvent);
+    expect((durable!.payload as { output?: unknown }).output).toEqual(fullResult);
+    expect(result.state.toString()).toContain(OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY);
+
+    expect(releaseMcpResultCustomDataFromSdkEvent(outputEvent)).toBe(true);
+    expect(outputEvent.item.customData).toEqual({
+      [OPENGENI_INNER_MCP_CUSTOM_DATA_KEY]: { innerReceipt: "retain-inner-1" },
+    });
+    expect(result.state.toString()).not.toContain(OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY);
+    expect(result.state.toString()).toContain("retain-inner-1");
+    expect(releaseMcpResultCustomDataFromSdkEvent(outputEvent)).toBe(false);
   });
 
   test("nested prefixed servers preserve one exact result marker and the innermost custom data", async () => {

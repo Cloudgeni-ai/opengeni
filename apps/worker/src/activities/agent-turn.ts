@@ -116,6 +116,7 @@ import {
   normalizeSdkEvent,
   normalizeProtocolJsonValue,
   compactMcpResultCustomDataRunState,
+  releaseMcpResultCustomDataFromSdkEvent,
   projectHistoryForProvider,
   restoreGenericDispatchHistoryItems,
   sanitizeHistoryItemsForModel,
@@ -8563,6 +8564,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               streamTiming.onEvent(event.type);
               await batcher.push(event);
             }
+            // Structural tool-output events await their durable append before
+            // push returns. The complete result is now retained in the event
+            // row and pending-call recovery receipt, so release only our
+            // duplicate live SDK marker before a long turn accumulates it.
+            releaseMcpResultCustomDataFromSdkEvent(durableSdkEvent);
             if (stableToolCallIdsToClear) {
               const cleared = await clearDurablePendingSessionToolCalls(db, {
                 accountId: input.accountId,
