@@ -320,7 +320,7 @@ async function assertAttemptAuthority(
           session.first_party_mcp_permissions IS NULL
           OR session.first_party_mcp_permissions @> '["artifacts:publish"]'::jsonb
         )
-      FOR UPDATE OF session
+      FOR NO KEY UPDATE OF session
     ), locked_turn AS MATERIALIZED (
       SELECT turn.id, turn.account_id, turn.workspace_id, turn.session_id,
         turn.active_attempt_id, turn.execution_generation, turn.initiator_subject_id

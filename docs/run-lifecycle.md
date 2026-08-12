@@ -483,13 +483,13 @@ execution gets one explicit `interrupted / outcome unknown` closure.
 
 Claim, interruption, and event-writing settlement share one lock order:
 `workspace_inference_controls FOR SHARE` when the write is control-aware, then
-the actual `workspaces` row `FOR KEY SHARE`, UUID-ordered sessions `FOR UPDATE`,
+the actual `workspaces` row `FOR KEY SHARE`, UUID-ordered sessions `FOR NO KEY UPDATE`,
 UUID-ordered exact turns `FOR UPDATE`, and UUID-ordered exact attempts
 `FOR UPDATE`. Generic audit/title appends skip the control row but use the same
 workspace-key-share prefix. Event inserts also touch the workspace through their
 foreign keys, so acquiring it later would reintroduce a claim/preemption
-deadlock; key-share rather than update keeps unrelated sessions in one workspace
-concurrent. Start, requires-action, ordinary terminal, recoverable interruption,
+deadlock; the session lock excludes competing mutation while remaining compatible
+with FK key-share checks. Start, requires-action, ordinary terminal, recoverable interruption,
 supersession, and worker-death events commit
 with turn status, session status/pointer, and `lastSequence` in one transaction.
 Generic appends and operation-keyed Agent Message/Steer commands retry PostgreSQL
