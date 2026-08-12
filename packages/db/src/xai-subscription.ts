@@ -687,7 +687,9 @@ export async function acquireXaiCredentialLease(
         );
         const selected = input.pinnedCredentialId
           ? eligible.find((candidate) => candidate.id === input.pinnedCredentialId)
-          : eligible[0];
+          : settings.rotationEnabled || settings.activeCredentialId === null
+            ? eligible[0]
+            : eligible.find((candidate) => candidate.id === settings.activeCredentialId);
         if (!selected) {
           return {
             credentialId: null,
