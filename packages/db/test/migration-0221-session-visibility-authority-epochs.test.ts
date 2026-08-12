@@ -235,13 +235,14 @@ describe("migration 0221 session visibility authority epochs", () => {
   test("rejects every partial or invalid tuple, including CHECK-UNKNOWN shapes", async () => {
     if (!admin) return;
     const cases = [
-      `authority_epoch = null, authority_visibility = 'workspace_shared', authority_owner_organization_membership_id = null`,
-      `authority_epoch = 10, authority_visibility = null, authority_owner_organization_membership_id = null`,
-      `authority_epoch = null, authority_visibility = null, authority_owner_organization_membership_id = '${crypto.randomUUID()}'`,
-      `authority_epoch = 10, authority_visibility = 'invalid', authority_owner_organization_membership_id = null`,
-      `authority_epoch = 10, authority_visibility = 'user_private', authority_owner_organization_membership_id = null`,
+      { values: "null, 'workspace_shared', null", state: "23502" },
+      { values: "10, null, null", state: "23502" },
+      { values: `null, null, '${crypto.randomUUID()}'`, state: "23502" },
+      { values: "10, 'invalid', null", state: "23514" },
+      { values: "10, 'user_private', null", state: "23514" },
+      { values: `10, 'workspace_shared', '${crypto.randomUUID()}'`, state: "23503" },
     ];
-    for (const assignment of cases) {
+    for (const { values, state } of cases) {
       await expectSqlState(
         () =>
           admin!.unsafe(`
@@ -250,10 +251,10 @@ describe("migration 0221 session visibility authority epochs", () => {
               authority_epoch, authority_visibility, authority_owner_organization_membership_id
             ) values (
               '${crypto.randomUUID()}', '${legacy.accountId}', '${legacy.workspaceId}', '${legacy.sessionId}', 'claimed',
-              ${assignment}
+              ${values}
             )
           `),
-        assignment.includes("authority_owner_organization_membership_id = '") ? "23503" : "23514",
+        state,
       );
     }
   });
