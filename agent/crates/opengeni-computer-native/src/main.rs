@@ -28,20 +28,19 @@ async fn run_background_browser() -> Result<(), Box<dyn std::error::Error>> {
     );
     let app = application_bundle(&executable)
         .ok_or("background browser executable is not inside a macOS application bundle")?;
-    let status = tokio::process::Command::new("/usr/bin/open")
-        // `-j` launches hidden, `-g` refuses foreground activation, and `-W`
-        // keeps this exact helper alive for agent-browser's process/DevTools
-        // lifecycle fence. A short-lived `open` wrapper makes agent-browser
-        // correctly assume Chrome died and retry, producing the window storm.
-        .args(["-g", "-j", "-n", "-W", "-a"])
-        .arg(app)
-        .arg("--args")
-        .args(std::env::args_os().skip(1))
-        .status()
-        .await?;
-    if !status.success() {
-        return Err(format!("LaunchServices browser process exited with {status}").into());
-    }
+    let app = app.to_path_buf();
+    let arguments = std::env::args_os()
+        .skip(1)
+        .map(|argument| {
+            argument.into_string().map_err(|_| {
+                "background browser argument is not valid UTF-8".to_string()
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    tokio::task::spawn_blocking(move || {
+        opengeni_agent_macos_ffi::run_background_application(&app, &arguments)
+    })
+    .await??;
     Ok(())
 }
 

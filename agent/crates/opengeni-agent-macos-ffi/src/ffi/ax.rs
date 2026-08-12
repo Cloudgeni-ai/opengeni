@@ -39,7 +39,7 @@ use objc2_app_kit::{
     NSApplicationActivationOptions, NSApplicationActivationPolicy, NSRunningApplication,
     NSWorkspace, NSWorkspaceOpenConfiguration,
 };
-use objc2_foundation::NSError;
+use objc2_foundation::{NSArray, NSError, NSString, NSURL};
 
 use super::{ax_element::AxElement, ShareableWindow};
 use crate::{
@@ -1113,6 +1113,107 @@ pub(super) fn launch_application(application_id: &str) -> Result<(), MacFfiError
                 .to_string(),
         )),
     }
+}
+
+pub(super) fn run_background_application(
+    application_bundle: &str,
+    arguments: &[String],
+) -> Result<(), MacFfiError> {
+    if application_bundle.trim().is_empty() {
+        return Err(MacFfiError::Invalid(
+            "application bundle path is empty".to_string(),
+        ));
+    }
+    if arguments.len() > 256 || arguments.iter().any(|value| value.contains('\0')) {
+        return Err(MacFfiError::Invalid(
+            "background application arguments are invalid".to_string(),
+        ));
+    }
+
+    let workspace = NSWorkspace::sharedWorkspace();
+    let prior_frontmost = workspace.frontmostApplication();
+    let bundle_path = NSString::from_str(application_bundle);
+    let bundle_url = NSURL::fileURLWithPath(&bundle_path);
+    let native_arguments = arguments
+        .iter()
+        .map(|argument| NSString::from_str(argument))
+        .collect::<Vec<_>>();
+    let native_arguments = NSArray::from_retained_slice(&native_arguments);
+    let configuration = NSWorkspaceOpenConfiguration::configuration();
+    configuration.setActivates(false);
+    configuration.setAddsToRecentItems(false);
+    configuration.setCreatesNewApplicationInstance(true);
+    configuration.setArguments(&native_arguments);
+
+    let (tx, rx) = mpsc::channel::<Result<i32, String>>();
+    let completion = RcBlock::new(
+        move |application: *mut NSRunningApplication, error: *mut NSError| {
+            if !application.is_null() {
+                let application: &NSRunningApplication = unsafe { &*application };
+                let _ = tx.send(Ok(application.processIdentifier()));
+            } else if error.is_null() {
+                let _ = tx.send(Err("LaunchServices returned no application".to_string()));
+            } else {
+                let error: &NSError = unsafe { &*error };
+                let _ = tx.send(Err(format!("{error}")));
+            }
+        },
+    );
+    workspace.openApplicationAtURL_configuration_completionHandler(
+        &bundle_url,
+        &configuration,
+        Some(&*completion),
+    );
+    let process_id = match rx.recv_timeout(Duration::from_secs(15)) {
+        Ok(Ok(process_id)) if process_id > 0 => process_id,
+        Ok(Ok(_)) => {
+            return Err(MacFfiError::OutcomeUnknown(
+                "LaunchServices returned an invalid process identifier".to_string(),
+            ));
+        }
+        Ok(Err(message)) => {
+            return Err(MacFfiError::OutcomeUnknown(format!(
+                "LaunchServices rejected background application launch: {message}"
+            )));
+        }
+        Err(_) => {
+            return Err(MacFfiError::OutcomeUnknown(
+                "LaunchServices did not settle within 15 seconds after accepting the background application"
+                    .to_string(),
+            ));
+        }
+    };
+    let application = NSRunningApplication::runningApplicationWithProcessIdentifier(process_id)
+        .ok_or_else(|| {
+            MacFfiError::OutcomeUnknown(
+                "launched background application disappeared before supervision".to_string(),
+            )
+        })?;
+
+    // Chrome can create and activate its first native window after
+    // LaunchServices has already completed. Keep the exact new process hidden
+    // across that bounded startup phase and restore only the app that owned the
+    // foreground before launch. Later explicit ComputerSession focus is not
+    // intercepted, so users can deliberately reveal this managed browser.
+    let conceal_until = Instant::now() + Duration::from_secs(5);
+    while !application.isTerminated() {
+        if Instant::now() < conceal_until {
+            let _ = application.hide();
+            if application.isActive() {
+                if let Some(prior) = prior_frontmost.as_ref().filter(|prior| {
+                    !prior.isTerminated() && prior.processIdentifier() != process_id
+                }) {
+                    #[allow(deprecated)]
+                    let options = NSApplicationActivationOptions::ActivateIgnoringOtherApps;
+                    let _ = prior.activateWithOptions(options);
+                }
+            }
+            thread::sleep(Duration::from_millis(20));
+        } else {
+            thread::sleep(Duration::from_millis(250));
+        }
+    }
+    Ok(())
 }
 
 fn target_root(

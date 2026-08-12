@@ -355,6 +355,13 @@ pub(super) fn launch_application(application_id: &str) -> Result<(), MacFfiError
     ax::launch_application(application_id)
 }
 
+pub(super) fn run_background_application(
+    application_bundle: &str,
+    arguments: &[String],
+) -> Result<(), MacFfiError> {
+    ax::run_background_application(application_bundle, arguments)
+}
+
 /// Capture the main display as pixel-sized RGBA via a one-shot `SCScreenshotManager`.
 pub(super) fn capture_rgba() -> Result<RgbaFrame, MacFfiError> {
     capture_display_rgba(CGMainDisplayID())

@@ -359,10 +359,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
 
   async start(url?: string): Promise<BrowserObservationValue> {
     const deferNavigation = url !== undefined && url !== "about:blank";
-    // `agent-browser open <url>` both supplies Chromium's launch URL and opens
-    // the URL through its daemon. On a cold profile that produces two tabs.
-    // Start the private browser once, then perform the one intended navigation
-    // through our target-scoped CDP authority.
+    // Resolving the daemon's private CDP endpoint is itself the cold-start
+    // primitive. Calling `agent-browser open` first makes the CLI perform one
+    // complete launch/lifecycle reconciliation and `get cdp-url` immediately
+    // perform another. Apart from adding seconds on headed macOS, the first
+    // command can also manufacture a redundant tab. Connect once, reuse the
+    // launch-created page, and perform the one intended navigation through our
+    // target-scoped CDP authority.
     const launchUrl = this.targetLifecycle === "runner" ? undefined : url;
     this.started = true;
     let connection: BrowserCdpConnection;
@@ -376,13 +379,20 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       );
       launched = { targetId: created.targetId, url: launchUrl ?? "about:blank" };
     } else {
-      launched = await this.runner.run<{
-        url?: unknown;
-        targetId?: unknown;
-      }>(launchUrl === undefined ? ["open"] : ["open", launchUrl], {
-        timeoutMs: BROWSER_START_TIMEOUT_MS,
-      });
       connection = await this.ensureConnection();
+      let page = visiblePageTargets(await this.targetInfos(connection))[0];
+      if (!page) {
+        const created = await connection.send<{ targetId?: unknown }>(
+          "Target.createTarget",
+          { url: "about:blank", background: true },
+          { timeoutMs: BROWSER_START_TIMEOUT_MS },
+        );
+        if (typeof created.targetId !== "string") {
+          throw new Error("managed browser did not return its initial page target");
+        }
+        page = await this.waitForCreatedTargetInfo(connection, created.targetId);
+      }
+      launched = { targetId: page.targetId, url: page.url };
     }
     const targets = await this.targetInfos(connection);
     const launchedUrl = typeof launched.url === "string" ? launched.url : url;

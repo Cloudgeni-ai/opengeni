@@ -817,6 +817,39 @@ pub fn launch_application(application_id: &str) -> Result<(), MacFfiError> {
     }
 }
 
+/// Runs one new macOS application instance without allowing its startup to
+/// steal the user's foreground application.
+///
+/// The call remains blocked for the launched application's lifetime. This is
+/// intentional: browser supervisors use the helper process as their exact
+/// lifecycle fence. The new application is hidden during its bounded startup
+/// window, while a later explicit [`focus_target`] remains free to reveal it.
+///
+/// # Errors
+///
+/// Returns [`MacFfiError`] if the bundle path or arguments are invalid,
+/// LaunchServices rejects the launch, or the launched process cannot be
+/// resolved.
+pub fn run_background_application(
+    application_bundle: &std::path::Path,
+    arguments: &[String],
+) -> Result<(), MacFfiError> {
+    #[cfg(target_os = "macos")]
+    {
+        let bundle = application_bundle.to_str().ok_or_else(|| {
+            MacFfiError::Invalid("application bundle path is not valid UTF-8".to_string())
+        })?;
+        ffi::run_background_application(bundle, arguments)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (application_bundle, arguments);
+        Err(MacFfiError::Unsupported(
+            "background application launch is only available on macOS".to_string(),
+        ))
+    }
+}
+
 /// Injects one computer-use input event via CGEvent.
 ///
 /// The caller is responsible for gating on Accessibility and Input Monitoring;
