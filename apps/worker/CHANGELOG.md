@@ -1,5 +1,32 @@
 # @opengeni/worker-bundle
 
+## 0.19.0
+
+### Minor Changes
+
+- 1e78f58: Replace provider presets and nullable integration identities with immutable Integration Definitions. Curated and workspace-authored integrations now share one definition-based contract, provenance model, OAuth callback, SDK route, runtime projection, and maintenance migration with no legacy API alias or fallback authority.
+- 1e78f58: Replace implicit optional Skill bundles and parallel Pack/session materialization paths with one explicit, provenance-bearing runtime Skill activation model. Curated Skills now require workspace installation, Pack ownership, or exact session selection; native artifact and video Skills remain available only with their matching executable tool surfaces.
+
+### Patch Changes
+
+- Updated dependencies [1e78f58]
+- Updated dependencies [1e78f58]
+- Updated dependencies [746bbbe]
+- Updated dependencies [1e78f58]
+- Updated dependencies [1e78f58]
+  - @opengeni/capabilities@0.2.0
+  - @opengeni/config@0.15.0
+  - @opengeni/contracts@0.47.0
+  - @opengeni/db@0.34.0
+  - @opengeni/core@0.26.0
+  - @opengeni/runtime@0.21.0
+  - @opengeni/documents@0.5.35
+  - @opengeni/github@0.4.53
+  - @opengeni/storage@0.2.90
+  - @opengeni/codemode@0.3.2
+  - @opengeni/events@0.3.106
+  - @opengeni/observability@0.7.2
+
 ## 0.18.1
 
 ### Patch Changes
