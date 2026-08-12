@@ -479,16 +479,15 @@ async function ensureContainerAndAcquire(): Promise<ContainerHandle | null> {
     if (!generation) {
       throw new Error("shared-pg: running container has no generation id");
     }
+    await waitForReady(`${ADMIN_BASE_URL}/postgres`);
+    // A killed test process can leave Docker's independently-running container
+    // alive after `docker run` but before cluster bootstrap. Repair the
+    // cluster-global role on EVERY acquisition, not only the fresh-start branch;
+    // otherwise the running container looks healthy while every FORCE-RLS clone
+    // fails with `role opengeni_app does not exist`.
+    const admin = postgres(`${ADMIN_BASE_URL}/postgres`, { max: 1 });
     try {
-      await waitForReady(`${ADMIN_BASE_URL}/postgres`);
-      // A killed test process can leave Docker's independently-running
-      // container alive after `docker run` but before cluster bootstrap. Repair
-      // the cluster-global role on EVERY acquisition, not only the fresh-start
-      // branch; otherwise the running container looks healthy while every
-      // FORCE-RLS clone fails with `role opengeni_app does not exist`.
-      const admin = postgres(`${ADMIN_BASE_URL}/postgres`, { max: 1 });
-      try {
-        await admin.unsafe(`
+      await admin.unsafe(`
           DO $$ BEGIN
             IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='opengeni_app') THEN
               CREATE ROLE opengeni_app WITH LOGIN NOSUPERUSER NOBYPASSRLS
@@ -498,15 +497,8 @@ async function ensureContainerAndAcquire(): Promise<ContainerHandle | null> {
                 NOCREATEROLE NOCREATEDB NOREPLICATION NOINHERIT PASSWORD '${APP_PASSWORD}';
             END IF;
           END $$;`);
-      } finally {
-        await admin.end().catch(() => undefined);
-      }
-    } catch (err) {
-      // Preserve a newly started cluster after bootstrap failure. The next
-      // acquisition can repair its partial template in place. Removing it here
-      // makes concurrent waiters repeatedly kill/recreate the same fixed-port
-      // container, which turns one transient failure into a suite-wide outage.
-      throw err;
+    } finally {
+      await admin.end().catch(() => undefined);
     }
     // Build the once-per-container migrated template (idempotent; self-heals a
     // crashed partial). Inside the lock so exactly one process pays the
