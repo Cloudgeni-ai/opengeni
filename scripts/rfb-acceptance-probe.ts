@@ -10,6 +10,21 @@ export type RfbUpdate = {
   fingerprint: string;
 };
 
+export type RfbProbeDiagnostics = {
+  state: string;
+  bufferedBytes: number;
+  width: number;
+  height: number;
+  websocketMessages: number;
+  websocketBytes: number;
+  framebufferUpdates: number;
+  pixelUpdates: number;
+  emptyUpdates: number;
+  framebufferRequests: number;
+  lastRectangleCount: number | null;
+  lastMessageAt: string | null;
+};
+
 type Waiter = {
   predicate: (frame: RfbUpdate) => boolean;
   resolve: (frame: RfbUpdate) => void;
@@ -23,7 +38,8 @@ type Waiter = {
  * through the exact authenticated URL/protocols handed to noVNC.
  */
 export class RfbAcceptanceProbe {
-  private buffer = new Uint8Array();
+  private buffer = new Uint8Array(64 * 1024);
+  private bufferedLength = 0;
   private state:
     | "protocol"
     | "security_types"
@@ -40,6 +56,14 @@ export class RfbAcceptanceProbe {
   private failure: Error | null = null;
   private connectResolve: (() => void) | null = null;
   private connectReject: ((error: Error) => void) | null = null;
+  private websocketMessages = 0;
+  private websocketBytes = 0;
+  private framebufferUpdates = 0;
+  private pixelUpdates = 0;
+  private emptyUpdates = 0;
+  private framebufferRequests = 0;
+  private lastRectangleCount: number | null = null;
+  private lastMessageAt: string | null = null;
 
   private constructor(private readonly socket: WebSocket) {}
 
@@ -69,11 +93,43 @@ export class RfbAcceptanceProbe {
     );
   }
 
+  /** Sends the exact ASCII key path used by noVNC for live human typing. */
+  typeAscii(value: string): void {
+    if (this.state !== "normal" || this.closed || this.failure) {
+      throw new Error("RFB input requires an active normal connection");
+    }
+    for (const character of value) {
+      const keysym = character.codePointAt(0);
+      if (keysym === undefined || keysym > 0x7f) {
+        throw new Error("RFB acceptance input is intentionally ASCII-only");
+      }
+      this.sendKey(keysym, true);
+      this.sendKey(keysym, false);
+    }
+  }
+
   close(): void {
     if (this.closed) return;
     this.closed = true;
     this.socket.close(1000, "acceptance probe complete");
     this.rejectAll(new Error("RFB acceptance probe closed"));
+  }
+
+  diagnostics(): RfbProbeDiagnostics {
+    return {
+      state: this.state,
+      bufferedBytes: this.bufferedLength,
+      width: this.width,
+      height: this.height,
+      websocketMessages: this.websocketMessages,
+      websocketBytes: this.websocketBytes,
+      framebufferUpdates: this.framebufferUpdates,
+      pixelUpdates: this.pixelUpdates,
+      emptyUpdates: this.emptyUpdates,
+      framebufferRequests: this.framebufferRequests,
+      lastRectangleCount: this.lastRectangleCount,
+      lastMessageAt: this.lastMessageAt,
+    };
   }
 
   private async connect(timeoutMs: number): Promise<void> {
@@ -93,7 +149,7 @@ export class RfbAcceptanceProbe {
               new Error(
                 `RFB WebSocket closed unexpectedly during ${this.state} ` +
                   `(code ${event.code}, reason ${JSON.stringify(event.reason)}, ` +
-                  `${this.buffer.byteLength} buffered bytes)`,
+                  `${this.bufferedLength} buffered bytes)`,
               ),
             );
           }
@@ -108,10 +164,12 @@ export class RfbAcceptanceProbe {
     try {
       const incoming = await messageBytes(value);
       if (this.closed) return;
-      const merged = new Uint8Array(this.buffer.byteLength + incoming.byteLength);
-      merged.set(this.buffer);
-      merged.set(incoming, this.buffer.byteLength);
-      this.buffer = merged;
+      this.websocketMessages += 1;
+      this.websocketBytes += incoming.byteLength;
+      this.lastMessageAt = new Date().toISOString();
+      this.ensureCapacity(this.bufferedLength + incoming.byteLength);
+      this.buffer.set(incoming, this.bufferedLength);
+      this.bufferedLength += incoming.byteLength;
       this.drain();
     } catch (cause) {
       this.fail(cause);
@@ -121,7 +179,7 @@ export class RfbAcceptanceProbe {
   private drain(): void {
     while (!this.closed && !this.failure) {
       if (this.state === "protocol") {
-        if (this.buffer.byteLength < 12) return;
+        if (this.bufferedLength < 12) return;
         const versionBytes = this.consume(12);
         const version = new TextDecoder("latin1").decode(versionBytes);
         if (!/^RFB 003\.00[378]\n$/.test(version)) {
@@ -132,20 +190,20 @@ export class RfbAcceptanceProbe {
         continue;
       }
       if (this.state === "security_types") {
-        if (this.buffer.byteLength < 1) return;
+        if (this.bufferedLength < 1) return;
         const count = this.buffer[0]!;
         if (count === 0) {
-          if (this.buffer.byteLength < 5) return;
+          if (this.bufferedLength < 5) return;
           const reasonLength = new DataView(
             this.buffer.buffer,
             this.buffer.byteOffset + 1,
             4,
           ).getUint32(0, false);
-          if (this.buffer.byteLength < 5 + reasonLength) return;
+          if (this.bufferedLength < 5 + reasonLength) return;
           const reason = new TextDecoder().decode(this.buffer.subarray(5, 5 + reasonLength));
           throw new Error(`RFB server rejected security negotiation: ${reason}`);
         }
-        if (this.buffer.byteLength < 1 + count) return;
+        if (this.bufferedLength < 1 + count) return;
         const types = this.consume(1 + count).subarray(1);
         if (!types.includes(1)) throw new Error("RFB server does not offer no-auth security");
         this.socket.send(Uint8Array.of(1));
@@ -153,7 +211,7 @@ export class RfbAcceptanceProbe {
         continue;
       }
       if (this.state === "security_result") {
-        if (this.buffer.byteLength < 4) return;
+        if (this.bufferedLength < 4) return;
         const status = new DataView(
           this.buffer.buffer,
           this.buffer.byteOffset,
@@ -166,10 +224,10 @@ export class RfbAcceptanceProbe {
         continue;
       }
       if (this.state === "server_init") {
-        if (this.buffer.byteLength < 24) return;
+        if (this.bufferedLength < 24) return;
         const view = new DataView(this.buffer.buffer, this.buffer.byteOffset, 24);
         const nameLength = view.getUint32(20, false);
-        if (this.buffer.byteLength < 24 + nameLength) return;
+        if (this.bufferedLength < 24 + nameLength) return;
         this.width = view.getUint16(0, false);
         this.height = view.getUint16(2, false);
         const bitsPerPixel = view.getUint8(4);
@@ -191,7 +249,7 @@ export class RfbAcceptanceProbe {
   }
 
   private drainServerMessage(): boolean {
-    if (this.buffer.byteLength < 1) return false;
+    if (this.bufferedLength < 1) return false;
     const type = this.buffer[0]!;
     if (type === 0) return this.drainFramebufferUpdate();
     if (type === 2) {
@@ -199,13 +257,13 @@ export class RfbAcceptanceProbe {
       return true;
     }
     if (type === 3) {
-      if (this.buffer.byteLength < 8) return false;
+      if (this.bufferedLength < 8) return false;
       const length = new DataView(
         this.buffer.buffer,
         this.buffer.byteOffset + 4,
         4,
       ).getUint32(0, false);
-      if (this.buffer.byteLength < 8 + length) return false;
+      if (this.bufferedLength < 8 + length) return false;
       this.consume(8 + length);
       return true;
     }
@@ -213,7 +271,7 @@ export class RfbAcceptanceProbe {
   }
 
   private drainFramebufferUpdate(): boolean {
-    if (this.buffer.byteLength < 4) return false;
+    if (this.bufferedLength < 4) return false;
     const rectangleCount = new DataView(
       this.buffer.buffer,
       this.buffer.byteOffset + 2,
@@ -223,7 +281,7 @@ export class RfbAcceptanceProbe {
     let hash = 0x811c9dc5;
     let hasPixels = false;
     for (let index = 0; index < rectangleCount; index += 1) {
-      if (this.buffer.byteLength < offset + 12) return false;
+      if (this.bufferedLength < offset + 12) return false;
       const header = new DataView(
         this.buffer.buffer,
         this.buffer.byteOffset + offset,
@@ -238,7 +296,7 @@ export class RfbAcceptanceProbe {
       offset += 12;
       if (encoding === RAW_ENCODING) {
         const size = width * height * this.bytesPerPixel;
-        if (!Number.isSafeInteger(size) || size < 0 || this.buffer.byteLength < offset + size) {
+        if (!Number.isSafeInteger(size) || size < 0 || this.bufferedLength < offset + size) {
           return false;
         }
         for (let cursor = offset; cursor < offset + size; cursor += 1) {
@@ -256,14 +314,19 @@ export class RfbAcceptanceProbe {
       if (encoding === LAST_RECT_ENCODING) break;
       throw new Error(`RFB server ignored raw-only encoding request: ${encoding}`);
     }
-    this.consume(offset);
+    this.framebufferUpdates += 1;
+    this.lastRectangleCount = rectangleCount;
+    this.discard(offset);
     this.requestFramebuffer(true);
     if (hasPixels) {
+      this.pixelUpdates += 1;
       this.sequence += 1;
       this.push({
         sequence: this.sequence,
         fingerprint: hash.toString(16).padStart(8, "0"),
       });
+    } else {
+      this.emptyUpdates += 1;
     }
     return true;
   }
@@ -286,12 +349,40 @@ export class RfbAcceptanceProbe {
     view.setUint16(6, this.width, false);
     view.setUint16(8, this.height, false);
     this.socket.send(message);
+    this.framebufferRequests += 1;
+  }
+
+  private sendKey(keysym: number, down: boolean): void {
+    const message = new Uint8Array(8);
+    const view = new DataView(message.buffer);
+    view.setUint8(0, 4);
+    view.setUint8(1, down ? 1 : 0);
+    view.setUint32(4, keysym, false);
+    this.socket.send(message);
   }
 
   private consume(length: number): Uint8Array {
     const value = this.buffer.slice(0, length);
-    this.buffer = this.buffer.slice(length);
+    this.discard(length);
     return value;
+  }
+
+  private discard(length: number): void {
+    if (length < 0 || length > this.bufferedLength) {
+      throw new Error("RFB parser attempted to consume outside its buffer");
+    }
+    const remaining = this.bufferedLength - length;
+    if (remaining > 0) this.buffer.copyWithin(0, length, this.bufferedLength);
+    this.bufferedLength = remaining;
+  }
+
+  private ensureCapacity(required: number): void {
+    if (required <= this.buffer.byteLength) return;
+    let capacity = this.buffer.byteLength;
+    while (capacity < required) capacity *= 2;
+    const grown = new Uint8Array(capacity);
+    grown.set(this.buffer.subarray(0, this.bufferedLength));
+    this.buffer = grown;
   }
 
   private waitFor(
@@ -310,7 +401,11 @@ export class RfbAcceptanceProbe {
         timer: setTimeout(() => {
           const index = this.waiters.indexOf(waiter);
           if (index >= 0) this.waiters.splice(index, 1);
-          reject(new Error(`RFB pixels did not converge within ${timeoutMs}ms`));
+          reject(
+            new Error(
+              `RFB pixels did not converge within ${timeoutMs}ms: ${JSON.stringify(this.diagnostics())}`,
+            ),
+          );
         }, timeoutMs),
       };
       this.waiters.push(waiter);

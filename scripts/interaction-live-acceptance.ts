@@ -555,7 +555,10 @@ async function main(): Promise<void> {
       record("computerFirstFrame", performance.now() - started);
       checks.push("computer.first-frame");
 
-      const marker = `NATIVE_${crypto.randomUUID().slice(0, 8)}`;
+      // The native X11 adapter types keysyms directly; lowercase alphanumeric
+      // input proves exact text without conflating the assertion with Shift or
+      // keyboard-layout translation.
+      const marker = `native${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
       started = performance.now();
       const computerReceipt = await computer.act({
         operationId: crypto.randomUUID(),
@@ -580,7 +583,31 @@ async function main(): Promise<void> {
       ) {
         throw new Error("computer frame crossed sessions");
       }
-      checks.push("computer.keyboard-visible");
+      observation = await browser.observe(observation.target.id);
+      const copiedKeyboardValue = await browser.act({
+        operationId: crypto.randomUUID(),
+        targetId: observation.target.id,
+        expectedTargetGeneration: observation.target.targetGeneration,
+        expectedDocumentGeneration: observation.target.documentGeneration,
+        expectedFrameId: observation.frameId,
+        action: {
+          type: "clipboard",
+          operation: "copy",
+          locator: { kind: "css", selector: "#acceptance-input" },
+          content: "value",
+        },
+      });
+      if (copiedKeyboardValue.state !== "completed" || !copiedKeyboardValue.observation) {
+        throw new Error(`browser value copy settled as ${copiedKeyboardValue.state}`);
+      }
+      observation = copiedKeyboardValue.observation;
+      const exactKeyboardValue = await browser.clipboard.read();
+      if (!exactKeyboardValue.text.includes(marker)) {
+        throw new Error(
+          `computer keyboard receipt and pixels completed without exact DOM state: ${JSON.stringify(exactKeyboardValue.text)}`,
+        );
+      }
+      checks.push("computer.keyboard-visible", "computer.keyboard-exact-state");
 
       const clipboardMarker = `NATIVE_PASTE_${crypto.randomUUID().slice(0, 8)}_Ω`;
       let currentObservation = computerReceipt.observation ?? controlObservation;

@@ -119,7 +119,6 @@ type ComputerRfbSocketData = {
   targetId: string;
   rfbPort: number;
   upstream: Socket | null;
-  upstreamPaused: boolean;
   pending: Uint8Array[];
   pendingBytes: number;
   expiryTimer: ReturnType<typeof setTimeout> | null;
@@ -194,9 +193,6 @@ export class BrowserControlServer {
         },
         message: (socket, message) => {
           this.onSocketMessage(socket, message);
-        },
-        drain: (socket) => {
-          this.onSocketDrain(socket);
         },
         close: (socket) => {
           this.onSocketClose(socket);
@@ -1187,7 +1183,6 @@ export class BrowserControlServer {
         targetId: boundedTargetId,
         rfbPort,
         upstream: null,
-        upstreamPaused: false,
         pending: [],
         pendingBytes: 0,
         expiryTimer: null,
@@ -1294,13 +1289,15 @@ export class BrowserControlServer {
     });
     upstream.on("data", (chunk) => {
       if (data.closed) return;
-      if (socket.send(chunk, false) < 0) {
-        // Bun accepted the message into its bounded websocket queue but is
-        // applying backpressure. Stop reading from the TCP producer until the
-        // browser drains that queue; closing here truncates otherwise-valid
-        // full-frame RFB updates.
-        upstream.pause();
-        data.upstreamPaused = true;
+      if (socket.send(chunk, false) === 0) {
+        // x11vnc is request-driven and a raw 1440x900 response is bounded well
+        // below the websocket queue limit. Bun's negative result means it
+        // accepted the message under backpressure; pausing the producer there
+        // can deadlock in the middle of one framebuffer rectangle because Bun
+        // does not guarantee another drain callback for this bridge. A zero
+        // result means bytes were actually dropped, so fail rather than expose
+        // a silently truncated RFB stream.
+        socket.close(1011, "RFB stream dropped output");
       }
     });
     upstream.once("error", () => {
@@ -1309,15 +1306,6 @@ export class BrowserControlServer {
     upstream.once("close", () => {
       if (!data.closed) socket.close(1000, "RFB stream closed");
     });
-  }
-
-  private onSocketDrain(socket: BrowserSocket): void {
-    const data = socket.data;
-    if (data.kind !== "computer_rfb" || data.closed || !data.upstreamPaused) return;
-    const upstream = data.upstream;
-    if (!upstream || upstream.destroyed) return;
-    data.upstreamPaused = false;
-    upstream.resume();
   }
 
   private onSocketClose(socket: BrowserSocket): void {
@@ -1329,7 +1317,6 @@ export class BrowserControlServer {
     if (socket.data.kind === "computer_rfb") {
       socket.data.upstream?.destroy();
       socket.data.upstream = null;
-      socket.data.upstreamPaused = false;
       socket.data.pending = [];
       socket.data.pendingBytes = 0;
     } else {
