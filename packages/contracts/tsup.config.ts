@@ -24,6 +24,7 @@ export default defineConfig({
     "src/presentation-artifact-query.ts",
     "src/codex-provider-account-authority.ts",
     "src/video-generation.ts",
+    "src/xai-provider-account-authority.ts",
   ],
   format: ["esm"],
   target: "es2022",
