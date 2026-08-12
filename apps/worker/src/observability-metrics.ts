@@ -806,6 +806,39 @@ export function recordCreditMicros(
   });
 }
 
+const MODEL_REQUEST_PHASE_BUCKETS = [
+  0.005, 0.01, 0.025, 0.05, 0.1, 0.2, 0.35, 0.5, 1, 2, 5, 10, 30, 60, 300,
+];
+
+/**
+ * Record provider lifecycle diagnostics from the synchronous transport observer.
+ * Provider ids come from the resolved provider registry; phase/outcome are closed
+ * enums. This function never performs I/O outside the in-memory metrics registry.
+ */
+export function recordModelRequestPhase(
+  observability: Observability,
+  input: {
+    provider: string;
+    phase: "headers" | "first_byte" | "terminal";
+    outcome?: "completed" | "failed" | "timed_out";
+    durationSeconds: number;
+  },
+): void {
+  const outcome = input.outcome ?? "";
+  observability.incrementCounter({
+    name: "opengeni_model_request_phases_total",
+    help: "Provider model-request lifecycle phases by bounded phase and outcome.",
+    labels: { provider: input.provider, phase: input.phase, outcome },
+  });
+  observability.observeHistogram({
+    name: "opengeni_model_request_phase_duration_seconds",
+    help: "Monotonic seconds from provider dispatch to a model-request lifecycle phase.",
+    buckets: MODEL_REQUEST_PHASE_BUCKETS,
+    labels: { provider: input.provider, phase: input.phase },
+    value: Math.max(0, input.durationSeconds),
+  });
+}
+
 // ── Streaming SLIs ────────────────────────────────────────────────────────────
 // Instruments the token-streaming pipeline so "streaming is sluggish" is a number,
 // not a vibe. Split across the three attributable stages so an operator can tell
