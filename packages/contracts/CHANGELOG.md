@@ -1,5 +1,12 @@
 # @opengeni/contracts
 
+## 0.45.0
+
+### Minor Changes
+
+- d2def0c: Add the complete browser-native and semantic computer interaction system across managed sandboxes, Connected Machines, attached Chrome, and external browser placements. Ship durable browser identities, authentication repair, network routing, downloads/uploads, shared causal control, public SDK and React workbench surfaces, and one exact MCP/Codemode execution catalog with native Connected Machine access.
+- 733c22f: Add the organization-tenancy foundation contracts and inert database scaffolding for organization memberships, user-owned resource authority and grants, personal retention, and generic session visibility, fork provenance, and authority epochs.
+
 ## 0.44.1
 
 ### Patch Changes

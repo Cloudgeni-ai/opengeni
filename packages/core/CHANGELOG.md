@@ -1,5 +1,26 @@
 # @opengeni/core
 
+## 0.25.0
+
+### Minor Changes
+
+- d2def0c: Add the complete browser-native and semantic computer interaction system across managed sandboxes, Connected Machines, attached Chrome, and external browser placements. Ship durable browser identities, authentication repair, network routing, downloads/uploads, shared causal control, public SDK and React workbench surfaces, and one exact MCP/Codemode execution catalog with native Connected Machine access.
+
+### Patch Changes
+
+- Updated dependencies [d2def0c]
+- Updated dependencies [314c7ba]
+- Updated dependencies [d241d13]
+- Updated dependencies [733c22f]
+  - @opengeni/config@0.14.0
+  - @opengeni/contracts@0.45.0
+  - @opengeni/db@0.32.0
+  - @opengeni/observability@0.7.0
+  - @opengeni/runtime@0.20.0
+  - @opengeni/documents@0.5.33
+  - @opengeni/storage@0.2.88
+  - @opengeni/events@0.3.104
+
 ## 0.24.1
 
 ### Patch Changes
