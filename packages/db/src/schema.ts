@@ -1312,6 +1312,7 @@ export const slackInteractionInbox = pgTable(
       >()
       .notNull(),
     text: text("text").notNull(),
+    hasFiles: boolean("has_files").notNull().default(false),
     status: text("status")
       .$type<"pending" | "processing" | "processed" | "failed">()
       .notNull()

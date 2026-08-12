@@ -163,6 +163,7 @@ export type NormalizedSlackInteraction = {
   slackThreadTs: string | null;
   triggerKind: SlackInteractionTriggerKind;
   text: string;
+  hasFiles: boolean;
 };
 
 export function slackInteractionRoutePolicy(
@@ -266,6 +267,7 @@ export function slackEventInboxEntry(
     slackThreadTs: threadTimestamp,
     triggerKind,
     text,
+    hasFiles,
   };
 }
 
@@ -316,6 +318,7 @@ export function slackReactionInboxEntry(
     // Store only the exact emoji name before authorization/content fetch. The
     // provider message and bounded thread are projected at durable claim time.
     text: reaction,
+    hasFiles: false,
   };
 }
 
@@ -447,6 +450,7 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
       slackThreadTs: threadTs,
       triggerKind: "message_shortcut",
       text,
+      hasFiles: false,
     });
     return c.json({ ok: true });
   });
@@ -993,10 +997,7 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     omissionCodes: [],
     omittedCount: 0,
   };
-  if (
-    entry.triggerKind === "app_mention" ||
-    (entry.triggerKind === "dm" && entry.text === "(file-only Slack invocation)")
-  ) {
+  if (entry.triggerKind === "app_mention" || entry.hasFiles) {
     const prepared = await prepareSlackInvocationEntry(
       deps,
       client,
@@ -1222,17 +1223,26 @@ async function prepareSlackInvocationEntry(
         limit: MAX_SLACK_CHANNEL_CONTEXT_MESSAGES,
         ...(authorizeRead ? { authorizeRead } : {}),
       });
-  const exactMessage = context.messages.find(
-    (message) => message.timestamp === entry.slackMessageTs,
-  );
+  let exactMessage = context.messages.find((message) => message.timestamp === entry.slackMessageTs);
+  if (!exactMessage && entry.hasFiles && entry.slackThreadTs) {
+    const exact = await client.threadReplies({
+      channelId: entry.slackChannelId,
+      threadTimestamp: entry.slackThreadTs,
+      oldest: entry.slackMessageTs,
+      latest: entry.slackMessageTs,
+      inclusive: true,
+      limit: 1,
+      ...(authorizeRead ? { authorizeRead } : {}),
+    });
+    exactMessage = exact.messages.find((message) => message.timestamp === entry.slackMessageTs);
+  }
   const attachments = exactMessage
     ? await prepareSlackMessageAttachments(deps, client, entry, exactMessage.files)
     : {
         resources: [],
         attachments: [],
-        omissionCodes:
-          entry.text === "(file-only Slack invocation)" ? ["attachment_unavailable"] : [],
-        omittedCount: entry.text === "(file-only Slack invocation)" ? 1 : 0,
+        omissionCodes: entry.hasFiles ? ["attachment_unavailable"] : [],
+        omittedCount: entry.hasFiles ? 1 : 0,
       };
   const baseText =
     entry.triggerKind === "app_mention"
@@ -3208,6 +3218,7 @@ function normalizedFormInteraction(
     slackThreadTs: null,
     triggerKind,
     text,
+    hasFiles: false,
   };
 }
 
@@ -3267,6 +3278,7 @@ export function normalizedBlockActionInteraction(
     slackThreadTs: threadTs,
     triggerKind: "block_action",
     text: `${actionId}:${handleId}`,
+    hasFiles: false,
   };
 }
 
