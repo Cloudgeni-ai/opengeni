@@ -173,15 +173,18 @@ export class LinuxVirtualComputerEnvironmentAllocator implements ComputerEnviron
       }
       sessionEnvironment.DBUS_SESSION_BUS_ADDRESS = busAddress;
 
-      let windowManager: ChildProcess | null = null;
       if (this.windowManagerBinary) {
-        windowManager = spawn(this.windowManagerBinary, ["--replace", "--compositor=off"], {
+        const windowManager = spawn(this.windowManagerBinary, ["--replace", "--compositor=off"], {
           detached: true,
           env: sessionEnvironment,
           stdio: ["ignore", "ignore", "pipe"],
         });
         processes.push(windowManager);
         drain(windowManager.stderr);
+        // XFWM must be ready before the first client maps. Otherwise a late
+        // manager/client race can steal focus after the linked browser opens,
+        // making an acknowledged native keyboard action hit the wrong window.
+        await assertStillRunning(windowManager, "virtual window manager");
       }
 
       // A freshly-created isolated seat must be visibly and immediately useful.
@@ -212,6 +215,7 @@ export class LinuxVirtualComputerEnvironmentAllocator implements ComputerEnviron
       );
       processes.push(terminal);
       drain(terminal.stderr);
+      await assertStillRunning(terminal, "virtual desktop terminal");
 
       // Human screen control must not poll full PNG screenshots. Give every
       // isolated Linux seat its own loopback-only RFB server; browserd exposes
@@ -253,13 +257,7 @@ export class LinuxVirtualComputerEnvironmentAllocator implements ComputerEnviron
       );
       processes.push(rfb);
       drain(rfb.stderr);
-      await Promise.all([
-        ...(windowManager
-          ? [assertStillRunning(windowManager, "virtual window manager")]
-          : []),
-        assertStillRunning(terminal, "virtual desktop terminal"),
-        waitForLoopbackPort(rfbPort, rfb, "virtual RFB server"),
-      ]);
+      await waitForLoopbackPort(rfbPort, rfb, "virtual RFB server");
 
       let closed = false;
       return {
