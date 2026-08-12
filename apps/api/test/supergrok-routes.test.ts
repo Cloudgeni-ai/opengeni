@@ -7,6 +7,7 @@ import {
   ensureManagedAccessForUser,
   type DbClient,
 } from "@opengeni/db";
+import { synchronizeCanonicalHumanLoginBindings } from "@opengeni/db/canonical-human-identities";
 import {
   acquireSharedTestDatabase,
   testSettings,
@@ -149,10 +150,28 @@ beforeAll(async () => {
   } as ApiRouteDeps);
 
   const managedUserId = `supergrok-managed-${crypto.randomUUID()}`;
+  const managedSessionId = `managed-session-${managedUserId}`;
+  const managedEmail = `${managedUserId}@example.test`;
   managedSubjectId = `user:${managedUserId}`;
+  await shared.admin`
+    insert into auth_users (id, name, email, email_verified)
+    values (${managedUserId}, 'Private Owner', ${managedEmail}, true)`;
+  await shared.admin`
+    insert into auth_identities (id, user_id, provider_id, account_id)
+    values (${crypto.randomUUID()}, ${managedUserId}, 'credential', ${managedUserId})`;
+  const managedIdentity = await synchronizeCanonicalHumanLoginBindings(client.db, managedUserId);
+  await shared.admin`
+    insert into auth_sessions (
+      id, user_id, token, expires_at,
+      identity_id, identity_revision, auth_revision
+    ) values (
+      ${managedSessionId}, ${managedUserId}, ${crypto.randomUUID()}, now() + interval '1 hour',
+      ${managedIdentity.identityId}, ${managedIdentity.identityRevision},
+      ${managedIdentity.authRevision}
+    )`;
   const managedAccess = await ensureManagedAccessForUser(client.db, {
     userId: managedUserId,
-    email: "private-owner@example.com",
+    email: managedEmail,
     name: "Private Owner",
   });
   managedAccountId = managedAccess.defaultAccountId!;
@@ -163,13 +182,13 @@ beforeAll(async () => {
         headers: new Headers(),
         response: {
           session: {
-            id: `managed-session-${managedUserId}`,
+            id: managedSessionId,
             userId: managedUserId,
             expiresAt: new Date(Date.now() + 3_600_000),
           },
           user: {
             id: managedUserId,
-            email: "private-owner@example.com",
+            email: managedEmail,
             name: "Private Owner",
           },
         },
