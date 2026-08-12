@@ -7885,6 +7885,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             let stableToolCallIdsToClear: string[] | null = null;
             let completedCurrentToolBatch = false;
             let retainedScreenshotMetadata: RetainedArtifactMetadata | null = null;
+            let normalizedSdkEvents: ReturnType<typeof normalizeSdkEvent> | null = null;
             const generatedImage = generatedImageFromSdkEvent(next.value);
             if (isCompletedGeneratedImageSdkEvent(next.value) && !generatedImage) {
               throw new Error(
@@ -8057,6 +8058,30 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   retainedScreenshotMetadata,
                 );
               }
+              normalizedSdkEvents = normalizeSdkEvent(
+                durableSdkEvent as typeof next.value,
+                retainedScreenshotMetadata
+                  ? {
+                      toolOutputOverride: retainedScreenshotMetadata,
+                      retainedOutputEvidence: retainedScreenshotMetadata.available
+                        ? retainedScreenshotMetadata
+                        : {
+                            available: false,
+                            reason: retainedScreenshotMetadata.reason,
+                          },
+                    }
+                  : {},
+              );
+              const normalizedToolOutput = normalizedSdkEvents.find(
+                (event) =>
+                  event.type === "agent.toolCall.output" &&
+                  (event.payload as { id?: unknown }).id === completedToolCall.callId,
+              )?.payload as { output?: unknown } | undefined;
+              if (!normalizedToolOutput || !Object.hasOwn(normalizedToolOutput, "output")) {
+                throw new Error(
+                  `Completed SDK tool call ${completedToolCall.callId} produced no durable output projection`,
+                );
+              }
               const durableResultItem = retainedScreenshotMetadata
                 ? (compactRetainedScreenshotHistory(
                     [completedToolCall.resultItem],
@@ -8078,6 +8103,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 callId: completedToolCall.callId,
                 modelToolOutputTruncationTokens: modelRunSettings.modelToolOutputTruncationTokens,
                 resultItem: durableResultItem as Record<string, unknown>,
+                eventOutput: normalizedToolOutput.output,
                 ...(videoGenerationAcceptancesByCallId.has(completedToolCall.callId)
                   ? {
                       videoGenerationAcceptance: videoGenerationAcceptancesByCallId.get(
@@ -8132,20 +8158,22 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 completedCurrentToolBatch = currentBatchIsStable;
               }
             }
-            const normalized = normalizeSdkEvent(
-              durableSdkEvent as typeof next.value,
-              retainedScreenshotMetadata
-                ? {
-                    toolOutputOverride: retainedScreenshotMetadata,
-                    retainedOutputEvidence: retainedScreenshotMetadata.available
-                      ? retainedScreenshotMetadata
-                      : {
-                          available: false,
-                          reason: retainedScreenshotMetadata.reason,
-                        },
-                  }
-                : {},
-            );
+            const normalized =
+              normalizedSdkEvents ??
+              normalizeSdkEvent(
+                durableSdkEvent as typeof next.value,
+                retainedScreenshotMetadata
+                  ? {
+                      toolOutputOverride: retainedScreenshotMetadata,
+                      retainedOutputEvidence: retainedScreenshotMetadata.available
+                        ? retainedScreenshotMetadata
+                        : {
+                            available: false,
+                            reason: retainedScreenshotMetadata.reason,
+                          },
+                    }
+                  : {},
+              );
             for (const event of normalized) {
               streamTiming.onEvent(event.type);
               await batcher.push(event);

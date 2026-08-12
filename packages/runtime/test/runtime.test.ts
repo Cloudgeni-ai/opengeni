@@ -4591,13 +4591,24 @@ describe("runtime event normalization", () => {
       structuredContent: { receiptId: "receipt-1", structuredOnly: true },
       isError: false,
       _meta: { providerTrace: "trace-1" },
+      vendorReceipt: { id: "vendor-receipt-1", committed: true },
     };
-    const innerContexts: Array<{ serverName: string; toolName: string }> = [];
+    const innerContexts: Array<{
+      serverName: string;
+      toolName: string;
+      arguments: Record<string, unknown> | null;
+      resultMeta: Record<string, unknown> | undefined;
+    }> = [];
     const inner: MCPServer = {
       name: "rich-inner",
       cacheToolsList: false,
       customDataExtractor: async (context) => {
-        innerContexts.push({ serverName: context.serverName, toolName: context.toolName });
+        innerContexts.push({
+          serverName: context.serverName,
+          toolName: context.toolName,
+          arguments: context.arguments,
+          resultMeta: context.resultMeta,
+        });
         return { innerReceipt: "inner-1" };
       },
       async connect() {},
@@ -4647,7 +4658,14 @@ describe("runtime event normalization", () => {
       [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: fullResult,
       [OPENGENI_INNER_MCP_CUSTOM_DATA_KEY]: { innerReceipt: "inner-1" },
     });
-    expect(innerContexts).toEqual([{ serverName: "rich-inner", toolName: "inspect" }]);
+    expect(innerContexts).toEqual([
+      {
+        serverName: "rich-inner",
+        toolName: "inspect",
+        arguments: {},
+        resultMeta: { providerTrace: "trace-1" },
+      },
+    ]);
 
     const [durable] = normalizeSdkEvent(outputEvent);
     expect((durable!.payload as { output?: unknown }).output).toEqual(fullResult);
@@ -4656,6 +4674,7 @@ describe("runtime event normalization", () => {
     expect(secondRequest).toContain("model-visible content");
     expect(secondRequest).not.toContain("structuredOnly");
     expect(secondRequest).not.toContain("providerTrace");
+    expect(secondRequest).not.toContain("vendor-receipt-1");
   });
 
   test("connects to real Streamable HTTP MCP servers with prefixes and allowed tool filtering", async () => {
