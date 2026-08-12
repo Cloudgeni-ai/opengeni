@@ -78,6 +78,19 @@ pub struct LinuxDesktop {
     composite: Option<Arc<Mutex<CompositeState>>>,
 }
 
+/// One unencoded X11 capture. Computer live-view encoding consumes this
+/// directly so a frame is never PNG-encoded only to be decoded and encoded as
+/// JPEG again. The ordinary desktop relay continues to use [`CapturedFrame`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinuxRgbaFrame {
+    /// Tightly packed RGBA8 pixels.
+    pub rgba: Vec<u8>,
+    /// Capture width in pixels.
+    pub width: u32,
+    /// Capture height in pixels.
+    pub height: u32,
+}
+
 #[derive(Debug)]
 struct CompositeState {
     connection: x11rb::rust_connection::RustConnection,
@@ -182,6 +195,29 @@ impl LinuxDesktop {
             .map_err(|error| PlatformError::os(format!("X11 window capture task join: {error}")))?
     }
 
+    /// Captures the complete screen as tightly packed RGBA8 without an
+    /// intermediate image encode. Intended for a placement-local live encoder.
+    pub async fn capture_rgba(&self) -> PlatformResult<LinuxRgbaFrame> {
+        let this = self.clone();
+        tokio::task::spawn_blocking(move || this.capture_rgba_blocking())
+            .await
+            .map_err(|error| PlatformError::os(format!("X11 RGBA capture task join: {error}")))?
+    }
+
+    /// Captures one XComposite-backed window as RGBA8, including while it is
+    /// occluded, without an intermediate PNG encode.
+    pub async fn capture_window_rgba(
+        &self,
+        window_id: u32,
+    ) -> PlatformResult<LinuxRgbaFrame> {
+        let this = self.clone();
+        tokio::task::spawn_blocking(move || this.capture_window_rgba_blocking(window_id))
+            .await
+            .map_err(|error| {
+                PlatformError::os(format!("X11 window RGBA capture task join: {error}"))
+            })?
+    }
+
     /// Raises one exact client window and injects a bounded input batch against
     /// the root-relative geometry that was correlated before dispatch.
     ///
@@ -266,9 +302,13 @@ impl LinuxDesktop {
     /// Captures the root window via `GetImage` and PNG-encodes it. Runs on the
     /// blocking pool (x11rb is synchronous).
     fn capture_blocking(&self) -> PlatformResult<CapturedFrame> {
+        encode_captured_png(self.capture_rgba_blocking()?)
+    }
+
+    fn capture_rgba_blocking(&self) -> PlatformResult<LinuxRgbaFrame> {
         let (conn, screen) = self.connect()?;
         let (width, height) = screen_geometry(&conn, &screen);
-        capture_drawable(&conn, screen.root, width, height)
+        capture_drawable_rgba(&conn, screen.root, width, height)
     }
 
     fn windows_blocking(&self) -> PlatformResult<Vec<LinuxWindow>> {
@@ -310,6 +350,10 @@ impl LinuxDesktop {
     }
 
     fn capture_window_blocking(&self, window_id: u32) -> PlatformResult<CapturedFrame> {
+        encode_captured_png(self.capture_window_rgba_blocking(window_id)?)
+    }
+
+    fn capture_window_rgba_blocking(&self, window_id: u32) -> PlatformResult<LinuxRgbaFrame> {
         let mut composite = self.composite()?;
         ensure_redirected(&mut composite, window_id)?;
         let geometry = composite
@@ -337,7 +381,7 @@ impl LinuxDesktop {
         })?;
         let result = (|| {
             name_window_pixmap(&mut composite, window_id, pixmap)?;
-            capture_drawable(
+            capture_drawable_rgba(
                 &composite.connection,
                 pixmap,
                 u32::from(geometry.width),
@@ -927,12 +971,12 @@ fn string_property(
     Some(value)
 }
 
-fn capture_drawable(
+fn capture_drawable_rgba(
     conn: &x11rb::rust_connection::RustConnection,
     drawable: u32,
     width: u32,
     height: u32,
-) -> PlatformResult<CapturedFrame> {
+) -> PlatformResult<LinuxRgbaFrame> {
     let w = u16::try_from(width).unwrap_or(u16::MAX);
     let h = u16::try_from(height).unwrap_or(u16::MAX);
     let image = conn
@@ -941,8 +985,20 @@ fn capture_drawable(
         .reply()
         .map_err(|error| PlatformError::os(format!("read X11 drawable image: {error}")))?;
     let rgba = zpixmap_to_rgba(&image.data, width, height, image.depth);
-    let png = encode_png(&rgba, width, height)?;
-    Ok(CapturedFrame { png, width, height })
+    Ok(LinuxRgbaFrame {
+        rgba,
+        width,
+        height,
+    })
+}
+
+fn encode_captured_png(frame: LinuxRgbaFrame) -> PlatformResult<CapturedFrame> {
+    let png = encode_png(&frame.rgba, frame.width, frame.height)?;
+    Ok(CapturedFrame {
+        png,
+        width: frame.width,
+        height: frame.height,
+    })
 }
 
 /// Reports the screen geometry, preferring `RANDR`'s current mode (accurate under

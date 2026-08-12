@@ -200,6 +200,24 @@ function relayAttachment(targetId: string): ComputerSessionAttachment {
   };
 }
 
+function rfbAttachment(targetId: string): ComputerSessionAttachment {
+  return {
+    computerSessionId: COMPUTER_SESSION_ID,
+    controllerGeneration: "controller-1",
+    targetId,
+    stream: {
+      kind: "direct_rfb",
+      url: "wss://computer.example.test/v1/rfb",
+      protocols: [
+        "binary",
+        "opengeni.computer.rfb.v1",
+        "opengeni.auth.super-secret",
+      ],
+    },
+    expiresAt: new Date(Date.now() + 120_000).toISOString(),
+  };
+}
+
 class FakeComputerSocket {
   binaryType = "blob";
   readyState = 0;
@@ -367,6 +385,33 @@ describe("ComputerSession React resources", () => {
 });
 
 describe("ComputerSession frame stream", () => {
+  test("hands a direct RFB attachment to the viewer without opening a frame socket", async () => {
+    let sockets = 0;
+    const client = fakeClient({
+      attachComputerSession: async (_workspaceId, _computerSessionId, request) =>
+        rfbAttachment(request.targetId),
+    });
+    const hook = await renderHook(
+      () =>
+        useComputerFrameStream({
+          client,
+          workspaceId: WORKSPACE_ID,
+          computerSessionId: COMPUTER_SESSION_ID,
+          targetId: "screen-1",
+          webSocketFactory: () => {
+            sockets += 1;
+            throw new Error("direct RFB must not use the frame WebSocket client");
+          },
+        }),
+      undefined,
+    );
+    await flush(20);
+    expect(hook.result.current.state).toBe("live");
+    expect(hook.result.current.attachment?.stream.kind).toBe("direct_rfb");
+    expect(sockets).toBe(0);
+    await hook.unmount();
+  });
+
   test("keeps grants out of URLs, authenticates frames, and clears on target switch", async () => {
     const sockets: FakeComputerSocket[] = [];
     const client = fakeClient({
@@ -452,6 +497,47 @@ describe("ComputerSession frame stream", () => {
     });
     await flush(10);
     expect(hook.result.current.frame?.sequence).toBe(1);
+    await hook.unmount();
+  });
+
+  test("cannot publish a delayed frame from a detached socket after target switch", async () => {
+    const sockets: FakeComputerSocket[] = [];
+    let release: ((value: ArrayBuffer) => void) | null = null;
+    const delayed = new (class extends Blob {
+      override arrayBuffer(): Promise<ArrayBuffer> {
+        return new Promise((resolve) => {
+          release = resolve;
+        });
+      }
+    })();
+    const client = fakeClient({
+      attachComputerSession: async (_workspaceId, _computerSessionId, request) =>
+        attachment(request.targetId),
+    });
+    const hook = await renderHook(
+      (props: { targetId: string }) =>
+        useComputerFrameStream({
+          client,
+          workspaceId: WORKSPACE_ID,
+          computerSessionId: COMPUTER_SESSION_ID,
+          targetId: props.targetId,
+          webSocketFactory: (url, protocols) => {
+            const socket = new FakeComputerSocket(url, protocols);
+            sockets.push(socket);
+            return socket as unknown as ComputerFrameWebSocket;
+          },
+        }),
+      { targetId: "window-1" },
+    );
+    await flush(10);
+    await dispatch(sockets[0]!, "open");
+    await dispatch(sockets[0]!, "message", { data: delayed });
+    await hook.rerender({ targetId: "screen-1" });
+    await flush(10);
+    release?.(frameMessage("window-1", 9).buffer as ArrayBuffer);
+    await flush(20);
+    expect(hook.result.current.frame).toBeNull();
+    expect(sockets[0]?.closed).toBe(true);
     await hook.unmount();
   });
 });

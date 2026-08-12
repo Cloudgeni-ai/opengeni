@@ -4,6 +4,7 @@ import {
   BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX,
   BROWSER_CONTROL_PORT,
   COMPUTER_CONTROL_WEBSOCKET_PROTOCOL,
+  COMPUTER_RFB_WEBSOCKET_PROTOCOL,
   ComputerActionCommand,
   ComputerActionRequest,
   ComputerSessionAttachment,
@@ -454,6 +455,16 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
             controllerGeneration: binding.controllerGeneration,
           };
           await client.createComputerViewGrant(reference, { grantId, token, expiresAt });
+          const target = (await sessionClient.listTargets()).find(
+            (candidate) => candidate.id === request.targetId,
+          );
+          if (!target) {
+            throw new BrowserControlRequestError(404, {
+              code: "target_not_found",
+              message: "computer target does not exist",
+              retryable: false,
+            });
+          }
           const relaySecret = placement.session.openComputerFrames
             ? resolveStreamTokenSecret(deps.settings)
             : null;
@@ -463,45 +474,57 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
             );
           }
           let relayed = null;
-            try {
-              relayed = await client.openRelayedComputerFrameStream({
-                reference,
-                targetId: request.targetId,
-                viewToken: token,
-                expiresAt,
-                ...(request.stream ? { stream: request.stream } : {}),
-              });
-            } catch (error) {
-              console.error("computer frame relay open failed", {
-                computerSessionId,
-                targetId: request.targetId,
-                failure: error instanceof Error ? error.message : String(error),
-              });
-              throw error;
-            }
+          try {
+            relayed = await client.openRelayedComputerFrameStream({
+              reference,
+              targetId: request.targetId,
+              viewToken: token,
+              expiresAt,
+              ...(request.stream ? { stream: request.stream } : {}),
+            });
+          } catch (error) {
+            console.error("computer frame relay open failed", {
+              computerSessionId,
+              targetId: request.targetId,
+              failure: error instanceof Error ? error.message : String(error),
+            });
+            throw error;
+          }
           const stream = relayed
-              ? await (async () => {
-                  const relayToken = await mintStreamToken(relaySecret!, {
-                    workspaceId,
-                    sessionId: record.sourceSessionId,
-                    viewerId: grantId,
-                    leaseEpoch: record.tokenGeneration,
+            ? await (async () => {
+                const relayToken = await mintStreamToken(relaySecret!, {
+                  workspaceId,
+                  sessionId: record.sourceSessionId,
+                  viewerId: grantId,
+                  leaseEpoch: record.tokenGeneration,
+                  port: relayed.channel.port,
+                  ttlSeconds: request.expiresInSeconds,
+                });
+                return {
+                  kind: "relay" as const,
+                  url: buildStreamUrl(relayed.endpoint),
+                  token: relayToken,
+                  channel: {
+                    channelId: relayed.channel.channelId,
+                    workspaceId: relayed.channel.workspaceId,
+                    agentId: relayed.channel.agentId,
+                    kind: 4 as const,
                     port: relayed.channel.port,
-                    ttlSeconds: request.expiresInSeconds,
-                  });
-                  return {
-                    kind: "relay" as const,
-                    url: buildStreamUrl(relayed.endpoint),
-                    token: relayToken,
-                    channel: {
-                      channelId: relayed.channel.channelId,
-                      workspaceId: relayed.channel.workspaceId,
-                      agentId: relayed.channel.agentId,
-                      kind: 4 as const,
-                      port: relayed.channel.port,
-                    },
-                  };
-                })()
+                  },
+                };
+              })()
+            : record.session.placement.kind === "sandbox_group" &&
+                record.session.platform === "linux" &&
+                target.kind === "screen"
+              ? {
+                  kind: "direct_rfb" as const,
+                  url: await client.computerRfbStreamUrl(reference, request.targetId),
+                  protocols: [
+                    "binary",
+                    COMPUTER_RFB_WEBSOCKET_PROTOCOL,
+                    `${BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX}${token}`,
+                  ],
+                }
               : {
                   kind: "direct_websocket" as const,
                   url: await client.computerFrameStreamUrl(reference, request.targetId),

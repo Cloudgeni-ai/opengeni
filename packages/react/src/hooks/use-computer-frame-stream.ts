@@ -106,6 +106,12 @@ export function useComputerFrameStream(
 
     let disposed = false;
     let socket: ComputerFrameWebSocket | null = null;
+    let socketHandlers: {
+      open: () => void;
+      message: (event: MessageEvent) => void;
+      error: () => void;
+      close: () => void;
+    } | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let expiryTimer: ReturnType<typeof setTimeout> | null = null;
     let failures = 0;
@@ -115,10 +121,14 @@ export function useComputerFrameStream(
     let attachmentExpiresAt = 0;
     let lastRelaySequence: string | null = null;
     let relayAccepted = false;
+    let pendingFrame: { bytes: Uint8Array; source: ComputerFrameWebSocket } | null = null;
+    let decodingFrame = false;
     const attachmentAbort = new AbortController();
 
     const clearSocket = (terminateProducer = false) => {
       if (!socket) return;
+      const current = socket;
+      const handlers = socketHandlers;
       if (terminateProducer && activeStream?.kind === "relay" && socket.readyState === 1) {
         try {
           socket.send(
@@ -135,14 +145,18 @@ export function useComputerFrameStream(
           // OPEN can race a transport close. Local teardown must still finish.
         }
       }
-      socket.removeEventListener("open", onOpen);
-      socket.removeEventListener("message", onMessage);
-      socket.removeEventListener("error", onError);
-      socket.removeEventListener("close", onClose);
-      if (socket.readyState === 0 || socket.readyState === 1) {
-        socket.close(1000, "viewer detached");
+      if (handlers) {
+        current.removeEventListener("open", handlers.open);
+        current.removeEventListener("message", handlers.message);
+        current.removeEventListener("error", handlers.error);
+        current.removeEventListener("close", handlers.close);
+      }
+      if (current.readyState === 0 || current.readyState === 1) {
+        current.close(1000, "viewer detached");
       }
       socket = null;
+      socketHandlers = null;
+      pendingFrame = null;
     };
 
     const scheduleReconnect = () => {
@@ -165,8 +179,8 @@ export function useComputerFrameStream(
       if (reconnectAutomatically) scheduleReconnect();
     };
 
-    const onOpen = () => {
-      if (disposed) return;
+    const onOpen = (source: ComputerFrameWebSocket) => {
+      if (disposed || source !== socket) return;
       if (activeStream?.kind === "relay") {
         const body = encodeStreamOpen({
           channel: { ...activeStream.channel, kind: STREAM_KIND_COMPUTER },
@@ -176,7 +190,7 @@ export function useComputerFrameStream(
             lastRelaySequence === null ? "0" : (BigInt(lastRelaySequence) + 1n).toString(),
         });
         try {
-          socket?.send(relayDatagram(RELAY_TAG_OPEN, body));
+          source.send(relayDatagram(RELAY_TAG_OPEN, body));
         } catch (error) {
           fail(error);
         }
@@ -185,11 +199,49 @@ export function useComputerFrameStream(
       setResult((current) => ({ ...current, state: "live", error: null }));
     };
 
-    const onMessage = (event: MessageEvent) => {
+    const drainLatestFrame = async () => {
+      if (decodingFrame) return;
+      decodingFrame = true;
+      try {
+        while (!disposed && pendingFrame) {
+          const pending = pendingFrame;
+          pendingFrame = null;
+          const { bytes, source } = pending;
+          const frame = await decodeComputerFrameMessage(bytes);
+          if (disposed || source !== socket) continue;
+          if (frame.computerSessionId !== computerSessionId || frame.targetId !== targetId) {
+            throw new Error("computer frame belongs to another resource");
+          }
+          if (!controllerGeneration || frame.controllerGeneration !== controllerGeneration) {
+            throw new Error("computer frame belongs to a stale controller");
+          }
+          const key = `${computerSessionId}:${targetId}:${frame.controllerGeneration}:${frame.targetGeneration}`;
+          if (latestRef.current.key === key && frame.sequence <= latestRef.current.sequence) continue;
+          latestRef.current = { key, sequence: frame.sequence };
+          // A real decoded frame—not merely a socket handshake—is the recovery
+          // boundary. Resetting on `open` caused a dead producer to reconnect
+          // forever and continuously spawn fresh relay/SCK work.
+          failures = 0;
+          setResult((current) => ({
+            ...current,
+            state: "live",
+            frame,
+            error: null,
+          }));
+        }
+      } catch (cause) {
+        fail(cause);
+      } finally {
+        decodingFrame = false;
+        if (!disposed && pendingFrame) void drainLatestFrame();
+      }
+    };
+
+    const onMessage = (source: ComputerFrameWebSocket, event: MessageEvent) => {
       void (async () => {
         try {
           const bytes = await messageBytes(event.data);
-          if (disposed) return;
+          if (disposed || source !== socket) return;
           let frameBytes = bytes;
           if (activeStream?.kind === "relay") {
             if (bytes.length < 1) throw new Error("computer relay returned an empty message");
@@ -223,37 +275,24 @@ export function useComputerFrameStream(
             lastRelaySequence = relayFrame.seq;
             frameBytes = relayFrame.data;
           }
-          const frame = await decodeComputerFrameMessage(frameBytes);
-          if (disposed) return;
-          if (frame.computerSessionId !== computerSessionId || frame.targetId !== targetId) {
-            throw new Error("computer frame belongs to another resource");
-          }
-          if (!controllerGeneration || frame.controllerGeneration !== controllerGeneration) {
-            throw new Error("computer frame belongs to a stale controller");
-          }
-          const key = `${computerSessionId}:${targetId}:${frame.controllerGeneration}:${frame.targetGeneration}`;
-          if (latestRef.current.key === key && frame.sequence <= latestRef.current.sequence) return;
-          latestRef.current = { key, sequence: frame.sequence };
-          // A real decoded frame—not merely a socket handshake—is the recovery
-          // boundary. Resetting on `open` caused a dead producer to reconnect
-          // forever and continuously spawn fresh relay/SCK work.
-          failures = 0;
-          setResult((current) => ({
-            ...current,
-            state: "live",
-            frame,
-            error: null,
-          }));
+          // Digest verification can take longer than an inter-frame interval on
+          // low-power clients. Keep exactly one pending encoded frame and replace
+          // it with newer input while a decode is in flight; never build latency.
+          pendingFrame = { bytes: frameBytes, source };
+          void drainLatestFrame();
         } catch (cause) {
           fail(cause);
         }
       })();
     };
 
-    const onError = () => fail(new Error("Computer view lost connection."));
+    const onError = (source: ComputerFrameWebSocket) => {
+      if (source !== socket) return;
+      fail(new Error("Computer view lost connection."));
+    };
 
-    const onClose = () => {
-      if (disposed) return;
+    const onClose = (source: ComputerFrameWebSocket) => {
+      if (disposed || source !== socket) return;
       clearSocket();
       scheduleReconnect();
     };
@@ -277,17 +316,24 @@ export function useComputerFrameStream(
       }));
       const createSocket =
         factoryRef.current ?? ((url: string, protocols: string[]) => new WebSocket(url, protocols));
-      socket = createSocket(
+      const openedSocket = createSocket(
         activeStream.kind === "relay"
           ? activeStream.url
           : computerFrameSocketUrl(activeAttachment, streamRef.current),
         activeStream.kind === "direct_websocket" ? [...activeStream.protocols] : [],
       );
-      socket.binaryType = "arraybuffer";
-      socket.addEventListener("open", onOpen);
-      socket.addEventListener("message", onMessage);
-      socket.addEventListener("error", onError);
-      socket.addEventListener("close", onClose);
+      socket = openedSocket;
+      socketHandlers = {
+        open: () => onOpen(openedSocket),
+        message: (event) => onMessage(openedSocket, event),
+        error: () => onError(openedSocket),
+        close: () => onClose(openedSocket),
+      };
+      openedSocket.binaryType = "arraybuffer";
+      openedSocket.addEventListener("open", socketHandlers.open);
+      openedSocket.addEventListener("message", socketHandlers.message);
+      openedSocket.addEventListener("error", socketHandlers.error);
+      openedSocket.addEventListener("close", socketHandlers.close);
     };
 
     const attach = async () => {
@@ -356,6 +402,7 @@ export function useComputerFrameStream(
     void attach();
     return () => {
       disposed = true;
+      pendingFrame = null;
       attachmentAbort.abort();
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (expiryTimer) clearTimeout(expiryTimer);

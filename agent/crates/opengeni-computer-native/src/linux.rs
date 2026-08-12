@@ -19,7 +19,7 @@ use atspi::{
 use futures::stream::{self, StreamExt as _};
 use image::{codecs::jpeg::JpegEncoder, ExtendedColorType, ImageEncoder as _};
 use opengeni_agent_platform::{
-    DesktopBackend as _, LinuxDesktop, LinuxWindow, LinuxWindowRect, PlatformError,
+    DesktopBackend as _, LinuxDesktop, LinuxRgbaFrame, LinuxWindow, LinuxWindowRect, PlatformError,
 };
 use opengeni_agent_proto::v1;
 use serde_json::json;
@@ -1090,7 +1090,7 @@ impl AtspiComputerAdapter {
         let desktop = self.desktop.as_ref().ok_or_else(|| {
             NativeAdapterError::unavailable("Linux X11 window capture is unavailable", true)
         })?;
-        let window = record.x11_window.ok_or_else(|| {
+        let window = record.x11_window.clone().ok_or_else(|| {
             NativeAdapterError::definite(
                 NativeAdapterErrorCode::TargetNotFound,
                 "AT-SPI window could not be correlated to one unambiguous X11 client window",
@@ -1103,6 +1103,60 @@ impl AtspiComputerAdapter {
                 format!("capture Linux X11 window: {error}"),
                 true,
             )
+        })?;
+        self.finish_window_capture(
+            record,
+            window,
+            captured.width,
+            captured.height,
+            "image/png",
+            captured.png,
+        )
+        .await
+    }
+
+    async fn capture_window_live_target(
+        &self,
+        record: TargetRecord,
+        options: crate::NativeCaptureOptions,
+    ) -> NativeAdapterResult<NativeCapturedFrame> {
+        let desktop = self.desktop.as_ref().ok_or_else(|| {
+            NativeAdapterError::unavailable("Linux X11 window capture is unavailable", true)
+        })?;
+        let window = record.x11_window.clone().ok_or_else(|| {
+            NativeAdapterError::definite(
+                NativeAdapterErrorCode::TargetNotFound,
+                "AT-SPI window could not be correlated to one unambiguous X11 client window",
+                true,
+            )
+        })?;
+        let captured = desktop
+            .capture_window_rgba(window.id)
+            .await
+            .map_err(|error| {
+                NativeAdapterError::definite(
+                    NativeAdapterErrorCode::DriverFailed,
+                    format!("capture Linux X11 live window: {error}"),
+                    true,
+                )
+            })?;
+        validate_live_frame_bounds(captured.width, captured.height, options)?;
+        let (width, height, bytes) = encode_live_jpeg(captured, options.quality)?;
+        self.finish_window_capture(record, window, width, height, "image/jpeg", bytes)
+            .await
+    }
+
+    async fn finish_window_capture(
+        &self,
+        record: TargetRecord,
+        window: LinuxWindow,
+        width: u32,
+        height: u32,
+        mime_type: &str,
+        bytes: Vec<u8>,
+    ) -> NativeAdapterResult<NativeCapturedFrame> {
+        let desktop = self.desktop.as_ref().ok_or_else(|| {
+            NativeAdapterError::unavailable("Linux X11 window capture is unavailable", true)
         })?;
         let current = desktop
             .windows()
@@ -1130,7 +1184,7 @@ impl AtspiComputerAdapter {
                 true,
             ));
         }
-        if captured.width != current.bounds.width || captured.height != current.bounds.height {
+        if width != current.bounds.width || height != current.bounds.height {
             return Err(NativeAdapterError::definite(
                 NativeAdapterErrorCode::FrameStale,
                 "X11 window resized during capture",
@@ -1148,8 +1202,8 @@ impl AtspiComputerAdapter {
                 frame_id: frame_id.clone(),
                 target_generation: record.target.target_generation.clone(),
                 window: current,
-                width: captured.width,
-                height: captured.height,
+                width,
+                height,
             },
         );
         while frames.len() > MAX_WINDOW_FRAME_FENCES {
@@ -1167,11 +1221,11 @@ impl AtspiComputerAdapter {
             frame_id,
             target_id: record.target.id,
             target_generation: record.target.target_generation,
-            width: captured.width,
-            height: captured.height,
-            mime_type: "image/png".to_string(),
-            sha256: hex::encode(Sha256::digest(&captured.png)),
-            bytes: captured.png,
+            width,
+            height,
+            mime_type: mime_type.to_string(),
+            sha256: hex::encode(Sha256::digest(&bytes)),
+            bytes,
         })
     }
 
@@ -1425,40 +1479,42 @@ impl ComputerAdapter for AtspiComputerAdapter {
         target_id: &str,
         options: crate::NativeCaptureOptions,
     ) -> NativeAdapterResult<NativeCapturedFrame> {
-        let mut frame = self.capture(target_id).await?;
-        if frame.width > options.max_width || frame.height > options.max_height {
-            return Err(NativeAdapterError::definite(
-                NativeAdapterErrorCode::InvalidAction,
-                "Linux live-frame bounds are smaller than the native target",
-                false,
-            ));
-        }
         if options.format == crate::NativeFrameFormat::Png {
+            let frame = self.capture(target_id).await?;
+            validate_live_frame_bounds(frame.width, frame.height, options)?;
             return Ok(frame);
         }
-        let rgb = image::load_from_memory(&frame.bytes)
-            .map_err(|error| {
-                NativeAdapterError::definite(
-                    NativeAdapterErrorCode::DriverFailed,
-                    format!("decode Linux live frame: {error}"),
-                    true,
-                )
-            })?
-            .to_rgb8();
-        let mut jpeg = Vec::new();
-        JpegEncoder::new_with_quality(&mut jpeg, options.quality)
-            .write_image(&rgb, frame.width, frame.height, ExtendedColorType::Rgb8)
-            .map_err(|error| {
-                NativeAdapterError::definite(
-                    NativeAdapterErrorCode::DriverFailed,
-                    format!("encode Linux live frame: {error}"),
-                    true,
-                )
-            })?;
-        frame.mime_type = "image/jpeg".to_string();
-        frame.sha256 = hex::encode(Sha256::digest(&jpeg));
-        frame.bytes = jpeg;
-        Ok(frame)
+        if let Some(target) = self.screen_target() {
+            if target.id == target_id {
+                let desktop = self.desktop.as_ref().ok_or_else(|| {
+                    NativeAdapterError::unavailable("Linux X11 screen capture is unavailable", true)
+                })?;
+                let captured = desktop.capture_rgba().await.map_err(|error| {
+                    NativeAdapterError::definite(
+                        NativeAdapterErrorCode::DriverFailed,
+                        format!("capture Linux X11 live screen: {error}"),
+                        true,
+                    )
+                })?;
+                validate_live_frame_bounds(captured.width, captured.height, options)?;
+                let (width, height, bytes) = encode_live_jpeg(captured, options.quality)?;
+                let sequence = self.frame_sequence.fetch_add(1, Ordering::Relaxed) + 1;
+                let frame_id = format!("f_{}_{}", self.incarnation.simple(), sequence);
+                *self.latest_screen_frame.write().await = Some(frame_id.clone());
+                return Ok(NativeCapturedFrame {
+                    frame_id,
+                    target_id: target.id,
+                    target_generation: target.target_generation,
+                    width,
+                    height,
+                    mime_type: "image/jpeg".to_string(),
+                    sha256: hex::encode(Sha256::digest(&bytes)),
+                    bytes,
+                });
+            }
+        }
+        let (record, _) = self.load_target(target_id).await?;
+        self.capture_window_live_target(record, options).await
     }
 
     async fn clipboard(&self) -> NativeAdapterResult<NativeClipboard> {
@@ -1650,6 +1706,42 @@ impl ComputerAdapter for AtspiComputerAdapter {
                 ))
             })
     }
+}
+
+fn validate_live_frame_bounds(
+    width: u32,
+    height: u32,
+    options: crate::NativeCaptureOptions,
+) -> NativeAdapterResult<()> {
+    if width > options.max_width || height > options.max_height {
+        return Err(NativeAdapterError::definite(
+            NativeAdapterErrorCode::InvalidAction,
+            "Linux live-frame bounds are smaller than the native target",
+            false,
+        ));
+    }
+    Ok(())
+}
+
+fn encode_live_jpeg(
+    frame: LinuxRgbaFrame,
+    quality: u8,
+) -> NativeAdapterResult<(u32, u32, Vec<u8>)> {
+    let mut rgb = Vec::with_capacity(frame.rgba.len() / 4 * 3);
+    for pixel in frame.rgba.chunks_exact(4) {
+        rgb.extend_from_slice(&pixel[..3]);
+    }
+    let mut jpeg = Vec::new();
+    JpegEncoder::new_with_quality(&mut jpeg, quality)
+        .write_image(&rgb, frame.width, frame.height, ExtendedColorType::Rgb8)
+        .map_err(|error| {
+            NativeAdapterError::definite(
+                NativeAdapterErrorCode::DriverFailed,
+                format!("encode Linux live frame: {error}"),
+                true,
+            )
+        })?;
+    Ok((frame.width, frame.height, jpeg))
 }
 
 fn descendant_keys(root: &str, items: &[CacheItem]) -> NativeAdapterResult<BTreeSet<String>> {

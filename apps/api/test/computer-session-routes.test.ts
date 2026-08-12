@@ -24,6 +24,7 @@ describe("ComputerSession route discipline", () => {
     expect(source).not.toContain("/computer-sessions/:computerSessionId/suspend");
     expect(source).not.toContain("/computer-sessions/:computerSessionId/resume");
     expect(source).toContain('kind: "direct_websocket"');
+    expect(source).toContain('kind: "direct_rfb"');
     expect(source).toContain('kind: "relay"');
     expect(source).toContain("openRelayedComputerFrameStream");
     expect(source).toContain("COMPUTER_CONTROL_WEBSOCKET_PROTOCOL");
@@ -37,6 +38,11 @@ describe("ComputerSession route discipline", () => {
     );
     expect(attachment).toContain("requestOrigin(context, deps.settings.corsAllowOriginRegex)");
     expect(attachment).toContain("client.addAllowedOrigins([origin])");
+    expect(attachment).toContain("sessionClient.listTargets()");
+    expect(attachment).toContain('target.kind === "screen"');
+    expect(attachment).toContain('record.session.platform === "linux"');
+    expect(attachment).toContain("client.computerRfbStreamUrl");
+    expect(attachment).toContain("COMPUTER_RFB_WEBSOCKET_PROTOCOL");
     expect(await readFile(appUrl, "utf8")).toContain(
       "registerComputerSessionRoutes(app, routeDeps)",
     );

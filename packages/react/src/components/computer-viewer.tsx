@@ -776,43 +776,71 @@ function ComputerViewport(props: {
   const readClipboardRef = useRef(props.onReadClipboard);
   const errorRef = useRef(props.onError);
   const actionTailRef = useRef<Promise<void>>(Promise.resolve());
+  const queuedFrameRef = useRef<ComputerFrame | null>(null);
+  const decodingFrameRef = useRef(false);
+  const mountedRef = useRef(true);
   actionRef.current = props.onAction;
   readClipboardRef.current = props.onReadClipboard;
   errorRef.current = props.onError;
   const rawInputEnabled =
     !props.backgroundActions || props.target?.kind === "screen" || props.target?.focused === true;
 
-  useEffect(() => {
-    const frame = props.frame;
-    const canvas = canvasRef.current;
-    if (!frame || !canvas) return;
-    let cancelled = false;
-    let objectUrl: string | null = null;
+  const paintQueuedFrames = useCallback(() => {
+    if (decodingFrameRef.current) return;
+    decodingFrameRef.current = true;
     void (async () => {
       try {
-        const blob = new Blob([frame.data.slice().buffer], { type: frame.mediaType });
-        if (typeof createImageBitmap === "function") {
-          const bitmap = await createImageBitmap(blob);
-          if (cancelled) {
-            bitmap.close();
-            return;
+        while (mountedRef.current) {
+          const frame = queuedFrameRef.current;
+          queuedFrameRef.current = null;
+          if (!frame) break;
+          let objectUrl: string | null = null;
+          try {
+            const blob = new Blob([frame.data.slice().buffer], { type: frame.mediaType });
+            if (typeof createImageBitmap === "function") {
+              const bitmap = await createImageBitmap(blob);
+              try {
+                const canvas = canvasRef.current;
+                if (mountedRef.current && canvas) {
+                  paintCanvas(canvas, bitmap, frame.width, frame.height);
+                }
+              } finally {
+                bitmap.close();
+              }
+              continue;
+            }
+            objectUrl = URL.createObjectURL(blob);
+            const image = await loadImage(objectUrl);
+            const canvas = canvasRef.current;
+            if (mountedRef.current && canvas) {
+              paintCanvas(canvas, image, frame.width, frame.height);
+            }
+          } catch (cause) {
+            if (mountedRef.current) errorRef.current(cause);
+          } finally {
+            if (objectUrl) URL.revokeObjectURL(objectUrl);
           }
-          paintCanvas(canvas, bitmap, frame.width, frame.height);
-          bitmap.close();
-          return;
         }
-        objectUrl = URL.createObjectURL(blob);
-        const image = await loadImage(objectUrl);
-        if (!cancelled) paintCanvas(canvas, image, frame.width, frame.height);
-      } catch (cause) {
-        if (!cancelled) errorRef.current(cause);
+      } finally {
+        decodingFrameRef.current = false;
+        if (mountedRef.current && queuedFrameRef.current) paintQueuedFrames();
       }
     })();
+  }, []);
+
+  useEffect(() => {
+    mountedRef.current = true;
     return () => {
-      cancelled = true;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      mountedRef.current = false;
+      queuedFrameRef.current = null;
     };
-  }, [props.frame]);
+  }, []);
+
+  useEffect(() => {
+    if (!props.frame) return;
+    queuedFrameRef.current = props.frame;
+    paintQueuedFrames();
+  }, [paintQueuedFrames, props.frame]);
 
   useEffect(
     () => () => {
