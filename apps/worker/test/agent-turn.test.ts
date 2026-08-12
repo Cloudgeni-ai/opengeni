@@ -689,6 +689,7 @@ describe("accepted turn execution identity", () => {
     expect(turnExecutionPolicyBillingIdentity(base)).toEqual({
       externallyBilled: true,
       codexSubscription: false,
+      xaiSubscription: false,
     });
     expect(
       turnExecutionPolicyBillingIdentity({
@@ -699,14 +700,36 @@ describe("accepted turn execution identity", () => {
         credentialSource: { kind: "connected_subscription", provider: "codex" },
         billing: { upstreamPayer: "connected_subscription", metering: "external" },
       }),
-    ).toEqual({ externallyBilled: true, codexSubscription: true });
+    ).toEqual({
+      externallyBilled: true,
+      codexSubscription: true,
+      xaiSubscription: false,
+    });
+    expect(
+      turnExecutionPolicyBillingIdentity({
+        ...base,
+        productModelId: "supergrok/grok-4.5",
+        providerId: "supergrok-subscription",
+        upstreamModelId: "grok-4.5",
+        credentialSource: { kind: "connected_subscription", provider: "xai" },
+        billing: { upstreamPayer: "connected_subscription", metering: "external" },
+      }),
+    ).toEqual({
+      externallyBilled: true,
+      codexSubscription: false,
+      xaiSubscription: true,
+    });
     expect(
       turnExecutionPolicyBillingIdentity({
         ...base,
         credentialSource: { kind: "deployment", mechanism: "api_key" },
         billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
       }),
-    ).toEqual({ externallyBilled: false, codexSubscription: false });
+    ).toEqual({
+      externallyBilled: false,
+      codexSubscription: false,
+      xaiSubscription: false,
+    });
   });
 
   test("classifies only legacy user/API turns as explicit policy requests", () => {

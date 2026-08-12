@@ -499,6 +499,7 @@ export function shouldPublishToolAuthNeededForTurn(
 export function turnExecutionPolicyBillingIdentity(policy: TurnExecutionPolicyV1): {
   externallyBilled: boolean;
   codexSubscription: boolean;
+  xaiSubscription: boolean;
 } {
   return {
     externallyBilled: policy.billing.metering === "external",
@@ -506,6 +507,10 @@ export function turnExecutionPolicyBillingIdentity(policy: TurnExecutionPolicyV1
       policy.providerId === "codex-subscription" &&
       policy.credentialSource.kind === "connected_subscription" &&
       policy.credentialSource.provider === "codex",
+    xaiSubscription:
+      policy.providerId === "supergrok-subscription" &&
+      policy.credentialSource.kind === "connected_subscription" &&
+      policy.credentialSource.provider === "xai",
   };
 }
 
