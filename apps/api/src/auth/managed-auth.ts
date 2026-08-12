@@ -2,11 +2,17 @@ import type { Settings } from "@opengeni/config";
 import { type ManagedAuth } from "@opengeni/core";
 import type { Database } from "@opengeni/db";
 import { ensureManagedAccessForUser } from "@opengeni/db";
-import { synchronizeCanonicalHumanLoginBindings } from "@opengeni/db/canonical-human-identities";
+import {
+  ensureCanonicalHumanIdentityForAuthUser,
+  getCanonicalHumanIdentityProjection,
+  synchronizeCanonicalHumanLoginBindings,
+} from "@opengeni/db/canonical-human-identities";
 import { betterAuth } from "better-auth";
 import { createEmailVerificationToken } from "better-auth/api";
 import { Pool } from "pg";
 import { Resend } from "resend";
+
+import { decideCanonicalHumanSessionAdmission } from "./canonical-human-session-admission";
 
 // `ManagedAuth` (the Better Auth `Auth<any>` alias) is owned by @opengeni/core
 // (`managed-auth-type.ts`) — `dependencies.ts`/`access` reference it as a
@@ -162,19 +168,70 @@ export function createManagedAuth(settings: Settings, db: Database): ManagedAuth
       session: {
         create: {
           before: async (session) => {
-            const authority = await synchronizeCanonicalHumanLoginBindings(db, session.userId);
-            if (
-              authority.identityStatus === "disputed" ||
-              authority.identityStatus === "disabled"
-            ) {
+            await ensureCanonicalHumanIdentityForAuthUser(db, session.userId);
+            const preflightProjection = await getCanonicalHumanIdentityProjection(
+              db,
+              session.userId,
+            );
+            const preflight = decideCanonicalHumanSessionAdmission({
+              intent: "binding_synchronization",
+              identity: preflightProjection.activeIdentity,
+              binding: null,
+            });
+            if (!preflight.allowed) {
+              const recoveryBinding = preflightProjection.loginBindings.find(
+                (binding) => binding.status === "recovery_pending",
+              );
+              const recoveryAdmission = decideCanonicalHumanSessionAdmission({
+                intent: "recovery_completion",
+                identity: preflightProjection.activeIdentity,
+                binding: recoveryBinding
+                  ? {
+                      id: recoveryBinding.id,
+                      identityId: preflightProjection.activeIdentity.id,
+                      status: recoveryBinding.status,
+                    }
+                  : null,
+              });
+              if (!recoveryAdmission.allowed) {
+                return false;
+              }
+              return {
+                data: {
+                  ...session,
+                  identityId: preflightProjection.activeIdentity.id,
+                  identityRevision: preflightProjection.activeIdentity.identityRevision,
+                  authRevision: preflightProjection.activeIdentity.authRevision,
+                },
+              };
+            }
+
+            await synchronizeCanonicalHumanLoginBindings(db, session.userId);
+            const projection = await getCanonicalHumanIdentityProjection(db, session.userId);
+            const activeBinding = projection.loginBindings.find(
+              (binding) => binding.id === projection.activeIdentity.activeLoginBindingId,
+            );
+            const admission = decideCanonicalHumanSessionAdmission({
+              intent: "ordinary_session",
+              identity: projection.activeIdentity,
+              binding: activeBinding
+                ? {
+                    id: activeBinding.id,
+                    identityId: projection.activeIdentity.id,
+                    status: activeBinding.status,
+                  }
+                : null,
+            });
+            if (!admission.allowed) {
               return false;
             }
+
             return {
               data: {
                 ...session,
-                identityId: authority.identityId,
-                identityRevision: authority.identityRevision,
-                authRevision: authority.authRevision,
+                identityId: projection.activeIdentity.id,
+                identityRevision: projection.activeIdentity.identityRevision,
+                authRevision: projection.activeIdentity.authRevision,
               },
             };
           },
