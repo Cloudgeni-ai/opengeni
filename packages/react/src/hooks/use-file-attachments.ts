@@ -1,5 +1,15 @@
 import type { FileAsset, FileResourceRef } from "@opengeni/sdk";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type Dispatch,
+  type SetStateAction,
+} from "react";
+import type { EmbeddedFileAttachmentClientLike } from "../client";
+import { fileResourceIdentity } from "../lib/resource-identity";
 import {
   useEmbeddedFileAttachments,
   type EmbeddedFileAttachmentClientOverride,
@@ -24,8 +34,16 @@ export type FileAttachment = {
   status: "uploading" | "ready" | "failed";
   /** The SDK `FileAsset` once the upload finishes. */
   file?: FileAsset | undefined;
+  /** Exact durable resource identity, including an optional custom mount. */
+  resource?: FileResourceRef | undefined;
+  /** True when this entry was reconstructed from durable resource authority. */
+  restored?: boolean | undefined;
+  /** Metadata hydration state for a durable reference that has no local File. */
+  metadataStatus?: "loading" | "failed" | undefined;
   /** Object-URL for an inline preview; minted for `image/*` files only. */
   previewUrl?: string | undefined;
+  /** A local or signed image URL failed to load; render the typed icon instead. */
+  previewFailed?: boolean | undefined;
   error?: string | undefined;
 };
 
@@ -48,8 +66,18 @@ export type UseFileAttachmentsResult = {
   addFiles: (files: Iterable<File>) => void;
   /** Clipboard path — applies `pasteFilter` (default `image/*`) then uploads. */
   addFromPaste: (event: { clipboardData: DataTransfer | null }) => void;
-  /** Restore already-ready server assets without recreating browser-local bytes. */
-  restoreReadyFiles: (files: Iterable<FileAsset>) => void;
+  /**
+   * Replace finalized attachments with already-revalidated server assets.
+   * Optional resources preserve custom mount identities; omitted resources use
+   * each file's canonical default mount.
+   */
+  restoreReadyFiles: (files: Iterable<FileAsset>, resources?: Iterable<FileResourceRef>) => void;
+  /**
+   * Reconstruct durable file references when only ResourceRef authority is
+   * available. Metadata and image previews hydrate opportunistically when the
+   * host exposes `getFile` / `createFileDownloadUrl`.
+   */
+  restoreResources?: ((resources: Iterable<FileResourceRef>) => void) | undefined;
   /**
    * Re-run the upload for a `failed` attachment, in place (same id, same
    * source file). No-op for an id that isn't a known failed upload.
@@ -57,12 +85,14 @@ export type UseFileAttachmentsResult = {
   retry: (id: string) => void;
   /** Remove one attachment; revokes its object-URL. */
   remove: (id: string) => void;
+  /** Drop a failed preview URL while preserving the underlying attachment. */
+  failPreview?: ((id: string) => void) | undefined;
   /**
    * Remove only finalized files whose durable ids were accepted by a send.
    * Attachments added while that request was in flight remain queued for the
    * next message.
    */
-  removeReadyFiles: (fileIds: Iterable<string>) => void;
+  removeReadyFiles: (resources: Iterable<string | FileResourceRef>) => void;
   /** Remove all attachments and revoke every object-URL. */
   clear: () => void;
 };
@@ -84,6 +114,8 @@ export function useFileAttachments(
   const { client, workspaceId } = useEmbeddedFileAttachments(options);
   const pasteFilter = options.pasteFilter ?? isImage;
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
+  const committedAttachments = useRef<FileAttachment[]>([]);
+  const fileMetadata = useRef<Map<string, FileAsset>>(new Map());
   // Keep the source File per attachment id so a failed upload can be retried
   // in place. Cleared on remove/clear so it never outlives its attachment.
   const sources = useRef<Map<string, File>>(new Map());
@@ -91,6 +123,10 @@ export function useFileAttachments(
   // state update when its component unmounts in the same batch that minted the
   // preview. The registry remains available to cleanup even before a render.
   const previewUrls = useRef<Map<string, string>>(new Map());
+  const restoreGeneration = useRef(0);
+  useLayoutEffect(() => {
+    committedAttachments.current = attachments;
+  }, [attachments]);
   const revokePreview = useCallback((id: string) => {
     const previewUrl = previewUrls.current.get(id);
     if (!previewUrl) return;
@@ -125,7 +161,9 @@ export function useFileAttachments(
     if (previous.client === client && previous.workspaceId === workspaceId) return;
     previousScope.current = { client, workspaceId };
     scopeGeneration.current += 1;
+    restoreGeneration.current += 1;
     sources.current.clear();
+    fileMetadata.current.clear();
     revokeAllPreviews();
     setAttachments([]);
   }, [client, revokeAllPreviews, workspaceId]);
@@ -133,7 +171,9 @@ export function useFileAttachments(
   useEffect(
     () => () => {
       scopeGeneration.current += 1;
+      restoreGeneration.current += 1;
       sources.current.clear();
+      fileMetadata.current.clear();
       revokeAllPreviews();
     },
     [revokeAllPreviews],
@@ -157,6 +197,7 @@ export function useFileAttachments(
           // Drop the source File immediately; restored/ready attachments must
           // never retain browser-local byte authority.
           sources.current.delete(id);
+          fileMetadata.current.set(asset.id, asset);
           setAttachments((current) =>
             current.map((attachment) =>
               attachment.id === id
@@ -164,6 +205,7 @@ export function useFileAttachments(
                     ...attachment,
                     status: "ready",
                     file: asset,
+                    resource: { kind: "file", fileId: asset.id },
                     name: asset.filename,
                     contentType: asset.contentType,
                     sizeBytes: asset.sizeBytes,
@@ -248,24 +290,37 @@ export function useFileAttachments(
   );
 
   const restoreReadyFiles = useCallback(
-    (files: Iterable<FileAsset>) => {
-      const incoming = new Map<string, FileAsset>();
+    (files: Iterable<FileAsset>, resources?: Iterable<FileResourceRef>) => {
+      const incomingFiles = new Map<string, FileAsset>();
       for (const file of files) {
         if (file.status === "ready" && file.workspaceId === workspaceId) {
-          incoming.set(file.id, file);
+          incomingFiles.set(file.id, file);
         }
       }
+      const incomingResources = resources
+        ? dedupeFileResources(resources).filter((resource) => incomingFiles.has(resource.fileId))
+        : [...incomingFiles.keys()].map((fileId): FileResourceRef => ({ kind: "file", fileId }));
+      for (const file of incomingFiles.values()) fileMetadata.current.set(file.id, file);
+      const existingReady = new Map(
+        committedAttachments.current.flatMap((attachment) =>
+          attachment.status === "ready" && attachment.resource
+            ? ([[fileResourceIdentity(attachment.resource), attachment]] as const)
+            : [],
+        ),
+      );
+      const generation = ++restoreGeneration.current;
       setAttachments((current) => {
         const unresolved = current.filter((attachment) => attachment.status !== "ready");
-        const existingReady = new Map(
+        const currentReady = new Map(
           current.flatMap((attachment) =>
-            attachment.status === "ready" && attachment.file
-              ? ([[attachment.file.id, attachment]] as const)
+            attachment.status === "ready" && attachment.resource
+              ? ([[fileResourceIdentity(attachment.resource), attachment]] as const)
               : [],
           ),
         );
-        const restored = [...incoming.values()].map((file): FileAttachment => {
-          const existing = existingReady.get(file.id);
+        const restored = incomingResources.map((resource): FileAttachment => {
+          const file = incomingFiles.get(resource.fileId)!;
+          const existing = currentReady.get(fileResourceIdentity(resource));
           return existing
             ? {
                 ...existing,
@@ -274,15 +329,19 @@ export function useFileAttachments(
                 sizeBytes: file.sizeBytes,
                 status: "ready",
                 file,
+                resource,
                 error: undefined,
+                metadataStatus: undefined,
               }
             : {
-                id: `restored:${file.id}`,
+                id: restoredAttachmentId(resource),
                 name: file.filename,
                 contentType: file.contentType,
                 sizeBytes: file.sizeBytes,
                 status: "ready",
                 file,
+                resource,
+                restored: true,
                 // No source File and no object URL: server metadata is the
                 // only authority restored across page/device boundaries.
               };
@@ -292,8 +351,202 @@ export function useFileAttachments(
         // those unresolved entries while replacing the ready set exactly.
         return [...unresolved, ...restored];
       });
+      const resourcesByFile = groupPreviewResources(
+        incomingResources.filter((resource) => {
+          const existing = existingReady.get(fileResourceIdentity(resource));
+          return (
+            !existing ||
+            (existing.restored === true && !existing.previewUrl && !existing.previewFailed)
+          );
+        }),
+      );
+      for (const [fileId, previewResources] of resourcesByFile) {
+        hydrateRemotePreview({
+          client,
+          workspaceId,
+          file: incomingFiles.get(fileId)!,
+          resources: previewResources,
+          generation,
+          restoreGeneration,
+          setAttachments,
+        });
+      }
     },
-    [workspaceId],
+    [client, workspaceId],
+  );
+
+  const restoreResources = useCallback(
+    (resources: Iterable<FileResourceRef>) => {
+      const getFile = optionalGetFile(client);
+      const incoming = dedupeFileResources(resources);
+      const incomingKeys = new Set(incoming.map(fileResourceIdentity));
+      const snapshot = committedAttachments.current;
+      const localKeys = new Set(
+        snapshot.flatMap((attachment) =>
+          attachment.restored !== true && attachment.resource
+            ? [fileResourceIdentity(attachment.resource)]
+            : [],
+        ),
+      );
+      const generation = ++restoreGeneration.current;
+      setAttachments((current) => {
+        const existingByKey = new Map(
+          current.flatMap((attachment) =>
+            attachment.resource
+              ? ([[fileResourceIdentity(attachment.resource), attachment]] as const)
+              : [],
+          ),
+        );
+        const local = current.filter((attachment) => attachment.restored !== true);
+        const currentLocalKeys = new Set(
+          local.flatMap((attachment) =>
+            attachment.resource ? [fileResourceIdentity(attachment.resource)] : [],
+          ),
+        );
+        const restored = incoming.flatMap((resource): FileAttachment[] => {
+          const key = fileResourceIdentity(resource);
+          if (currentLocalKeys.has(key)) return [];
+          const existing = existingByKey.get(key);
+          const file = existing?.file ?? fileMetadata.current.get(resource.fileId);
+          if (file) {
+            return [
+              {
+                ...existing,
+                id: existing?.id ?? restoredAttachmentId(resource),
+                name: file.filename,
+                contentType: file.contentType,
+                sizeBytes: file.sizeBytes,
+                status: "ready",
+                file,
+                resource,
+                restored: true,
+                metadataStatus: undefined,
+              },
+            ];
+          }
+          return [
+            existing
+              ? { ...existing, resource, restored: true, metadataStatus: "loading" }
+              : {
+                  id: restoredAttachmentId(resource),
+                  name: resource.fileId,
+                  contentType: "application/octet-stream",
+                  sizeBytes: 0,
+                  status: "ready",
+                  resource,
+                  restored: true,
+                  metadataStatus: "loading",
+                },
+          ];
+        });
+        return [
+          ...local,
+          ...restored.filter((attachment) =>
+            attachment.resource
+              ? incomingKeys.has(fileResourceIdentity(attachment.resource))
+              : false,
+          ),
+        ];
+      });
+
+      const missingFileIds = [
+        ...new Set(
+          incoming
+            .filter(
+              (resource) =>
+                !localKeys.has(fileResourceIdentity(resource)) &&
+                !fileMetadata.current.has(resource.fileId),
+            )
+            .map((resource) => resource.fileId),
+        ),
+      ];
+      hydrateCachedPreviews({
+        client,
+        workspaceId,
+        resources: incoming.filter(
+          (resource) =>
+            !localKeys.has(fileResourceIdentity(resource)) &&
+            fileMetadata.current.has(resource.fileId) &&
+            !snapshot.some(
+              (attachment) =>
+                attachment.resource &&
+                fileResourceIdentity(attachment.resource) === fileResourceIdentity(resource) &&
+                (attachment.previewUrl !== undefined || attachment.previewFailed === true),
+            ),
+        ),
+        fileMetadata: fileMetadata.current,
+        generation,
+        restoreGeneration,
+        setAttachments,
+      });
+
+      if (!getFile || missingFileIds.length === 0) {
+        if (!getFile && missingFileIds.length > 0) {
+          setAttachments((current) =>
+            current.map((attachment) =>
+              attachment.restored === true &&
+              attachment.metadataStatus === "loading" &&
+              missingFileIds.includes(attachment.resource?.fileId ?? "")
+                ? { ...attachment, metadataStatus: "failed" }
+                : attachment,
+            ),
+          );
+        }
+        return;
+      }
+      void Promise.allSettled(missingFileIds.map((fileId) => getFile(workspaceId, fileId))).then(
+        (settled) => {
+          if (restoreGeneration.current !== generation) return;
+          const hydrated = new Map<string, FileAsset>();
+          const failed = new Set<string>();
+          settled.forEach((result, index) => {
+            const fileId = missingFileIds[index];
+            if (!fileId) return;
+            if (
+              result.status === "fulfilled" &&
+              result.value.id === fileId &&
+              result.value.workspaceId === workspaceId &&
+              result.value.status === "ready"
+            ) {
+              hydrated.set(fileId, result.value);
+              fileMetadata.current.set(fileId, result.value);
+            } else {
+              failed.add(fileId);
+            }
+          });
+          setAttachments((current) =>
+            current.map((attachment) => {
+              if (attachment.restored !== true || !attachment.resource) return attachment;
+              const file = hydrated.get(attachment.resource.fileId);
+              if (file) {
+                return {
+                  ...attachment,
+                  name: file.filename,
+                  contentType: file.contentType,
+                  sizeBytes: file.sizeBytes,
+                  file,
+                  metadataStatus: undefined,
+                  error: undefined,
+                };
+              }
+              return failed.has(attachment.resource.fileId)
+                ? { ...attachment, metadataStatus: "failed" }
+                : attachment;
+            }),
+          );
+          hydrateCachedPreviews({
+            client,
+            workspaceId,
+            resources: incoming.filter((resource) => hydrated.has(resource.fileId)),
+            fileMetadata: hydrated,
+            generation,
+            restoreGeneration,
+            setAttachments,
+          });
+        },
+      );
+    },
+    [client, workspaceId],
   );
 
   const remove = useCallback(
@@ -305,15 +558,34 @@ export function useFileAttachments(
     [revokePreview],
   );
 
-  const removeReadyFiles = useCallback((fileIds: Iterable<string>) => {
-    const accepted = new Set(fileIds);
-    if (accepted.size === 0) return;
+  const failPreview = useCallback(
+    (id: string) => {
+      revokePreview(id);
+      setAttachments((current) =>
+        current.map((attachment) =>
+          attachment.id === id
+            ? { ...attachment, previewUrl: undefined, previewFailed: true }
+            : attachment,
+        ),
+      );
+    },
+    [revokePreview],
+  );
+
+  const removeReadyFiles = useCallback((resources: Iterable<string | FileResourceRef>) => {
+    const acceptedFileIds = new Set<string>();
+    const acceptedResourceKeys = new Set<string>();
+    for (const resource of resources) {
+      if (typeof resource === "string") acceptedFileIds.add(resource);
+      else acceptedResourceKeys.add(fileResourceIdentity(resource));
+    }
+    if (acceptedFileIds.size === 0 && acceptedResourceKeys.size === 0) return;
     setAttachments((current) =>
       current.filter((attachment) => {
+        if (attachment.status !== "ready" || !attachment.resource) return true;
         return !(
-          attachment.status === "ready" &&
-          attachment.file !== undefined &&
-          accepted.has(attachment.file.id)
+          acceptedFileIds.has(attachment.resource.fileId) ||
+          acceptedResourceKeys.has(fileResourceIdentity(attachment.resource))
         );
       }),
     );
@@ -328,18 +600,139 @@ export function useFileAttachments(
   return {
     attachments,
     readyResources: attachments.flatMap((attachment): FileResourceRef[] =>
-      attachment.status === "ready" && attachment.file
-        ? [{ kind: "file", fileId: attachment.file.id }]
-        : [],
+      attachment.status === "ready" && attachment.resource ? [attachment.resource] : [],
     ),
     uploading: attachments.some((attachment) => attachment.status === "uploading"),
     hasUnresolved: attachments.some((attachment) => attachment.status !== "ready"),
     addFiles,
     addFromPaste,
     restoreReadyFiles,
+    restoreResources,
     retry,
     remove,
+    failPreview,
     removeReadyFiles,
     clear,
   };
+}
+
+function dedupeFileResources(resources: Iterable<FileResourceRef>): FileResourceRef[] {
+  const seen = new Set<string>();
+  return [...resources].filter((resource) => {
+    const key = fileResourceIdentity(resource);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function restoredAttachmentId(resource: FileResourceRef): string {
+  return `restored:${resource.fileId}:${resource.mountPath ?? "default"}`;
+}
+
+function groupPreviewResources(
+  resources: Iterable<FileResourceRef>,
+): Map<string, FileResourceRef[]> {
+  const grouped = new Map<string, FileResourceRef[]>();
+  for (const resource of resources) {
+    const current = grouped.get(resource.fileId) ?? [];
+    current.push(resource);
+    grouped.set(resource.fileId, current);
+  }
+  return grouped;
+}
+
+function hydrateCachedPreviews({
+  client,
+  workspaceId,
+  resources,
+  fileMetadata,
+  generation,
+  restoreGeneration,
+  setAttachments,
+}: {
+  client: EmbeddedFileAttachmentClientLike;
+  workspaceId: string;
+  resources: Iterable<FileResourceRef>;
+  fileMetadata: ReadonlyMap<string, FileAsset>;
+  generation: number;
+  restoreGeneration: { current: number };
+  setAttachments: Dispatch<SetStateAction<FileAttachment[]>>;
+}): void {
+  for (const [fileId, previewResources] of groupPreviewResources(resources)) {
+    const file = fileMetadata.get(fileId);
+    if (!file) continue;
+    hydrateRemotePreview({
+      client,
+      workspaceId,
+      file,
+      resources: previewResources,
+      generation,
+      restoreGeneration,
+      setAttachments,
+    });
+  }
+}
+
+function hydrateRemotePreview({
+  client,
+  workspaceId,
+  file,
+  resources,
+  generation,
+  restoreGeneration,
+  setAttachments,
+}: {
+  client: EmbeddedFileAttachmentClientLike;
+  workspaceId: string;
+  file: FileAsset;
+  resources: FileResourceRef[];
+  generation: number;
+  restoreGeneration: { current: number };
+  setAttachments: Dispatch<SetStateAction<FileAttachment[]>>;
+}): void {
+  const createFileDownloadUrl = optionalCreateFileDownloadUrl(client);
+  if (!file.contentType.startsWith("image/") || !createFileDownloadUrl) return;
+  const keys = new Set(resources.map(fileResourceIdentity));
+  void createFileDownloadUrl(workspaceId, file.id)
+    .then((signed) => {
+      if (restoreGeneration.current !== generation) return;
+      setAttachments((current) =>
+        current.map((attachment) =>
+          attachment.restored === true &&
+          attachment.resource &&
+          keys.has(fileResourceIdentity(attachment.resource))
+            ? { ...attachment, previewUrl: signed.url, previewFailed: undefined }
+            : attachment,
+        ),
+      );
+    })
+    .catch(() => {
+      if (restoreGeneration.current !== generation) return;
+      setAttachments((current) =>
+        current.map((attachment) =>
+          attachment.restored === true &&
+          attachment.resource &&
+          keys.has(fileResourceIdentity(attachment.resource))
+            ? { ...attachment, previewFailed: true }
+            : attachment,
+        ),
+      );
+    });
+}
+
+function optionalGetFile(
+  client: EmbeddedFileAttachmentClientLike,
+): NonNullable<EmbeddedFileAttachmentClientLike["getFile"]> | undefined {
+  if (!("getFile" in client) || typeof client.getFile !== "function") return undefined;
+  return client.getFile.bind(client);
+}
+
+function optionalCreateFileDownloadUrl(
+  client: EmbeddedFileAttachmentClientLike,
+): NonNullable<EmbeddedFileAttachmentClientLike["createFileDownloadUrl"]> | undefined {
+  if (!("createFileDownloadUrl" in client) || typeof client.createFileDownloadUrl !== "function") {
+    return undefined;
+  }
+  return client.createFileDownloadUrl.bind(client);
 }

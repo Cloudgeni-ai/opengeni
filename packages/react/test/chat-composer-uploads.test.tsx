@@ -87,6 +87,8 @@ function readyChip(name: string): FileAttachment {
   };
 }
 
+const RESTORED_FILE_ID = "00000000-0000-4000-8000-000000000123";
+
 async function mount(node: React.ReactElement): Promise<HTMLElement> {
   const container = document.createElement("div");
   document.body.appendChild(container);
@@ -183,6 +185,78 @@ describe("ChatComposer attachments", () => {
       (b) => b.getAttribute("aria-label") === "Remove screenshot.png",
     );
     expect(remove).toBeTruthy();
+  });
+
+  test("one logical file has one card and one remove action across durable and live state", async () => {
+    const removedAttachments: string[] = [];
+    const removedResources: number[] = [];
+    const attachment: FileAttachment = {
+      ...readyChip("restored-image.png"),
+      id: "live-restored-image",
+      file: {
+        id: RESTORED_FILE_ID,
+        workspaceId: "00000000-0000-4000-8000-000000000001",
+        status: "ready",
+        filename: "restored-image.png",
+        safeFilename: "restored-image.png",
+        contentType: "image/png",
+        sizeBytes: 2048,
+        sha256: null,
+        bucket: "files",
+        objectKey: "restored-image.png",
+        createdAt: "2026-08-12T00:00:00.000Z",
+        updatedAt: "2026-08-12T00:00:00.000Z",
+      },
+      previewUrl: "blob:restored-image",
+    };
+    const container = await mount(
+      <ChatComposer
+        composer={makeComposer({
+          restoredResources: [
+            { kind: "repository", uri: "https://example.com/repo.git", ref: "main" },
+            { kind: "file", fileId: RESTORED_FILE_ID },
+          ],
+          removeRestoredResource: (index) => removedResources.push(index),
+        })}
+        attachments={makeAttachments({
+          attachments: [attachment],
+          readyResources: [{ kind: "file", fileId: RESTORED_FILE_ID }],
+          remove: (id) => removedAttachments.push(id),
+        })}
+      />,
+    );
+
+    expect(container.textContent ?? "").toContain("example.com/repo.git");
+    expect(container.textContent ?? "").not.toContain(`File ${RESTORED_FILE_ID.slice(0, 8)}`);
+    expect(container.querySelectorAll('img[src="blob:restored-image"]')).toHaveLength(1);
+    expect(container.querySelectorAll('[aria-label="Remove restored-image.png"]')).toHaveLength(1);
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[aria-label="Remove restored-image.png"]')
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    expect(removedAttachments).toEqual(["live-restored-image"]);
+    expect(removedResources).toEqual([1]);
+  });
+
+  test("a non-durable composer does not clear attachments owned by its external draft hook", async () => {
+    const restoredCalls: unknown[][] = [];
+    const container = await mount(
+      <ChatComposer
+        composer={makeComposer({ draftPersistence: "disabled", restoredResources: [] })}
+        attachments={makeAttachments({
+          attachments: [readyChip("pre-session.png")],
+          restoreResources: (resources) => restoredCalls.push([...resources]),
+        })}
+      />,
+    );
+    await act(async () => await Promise.resolve());
+
+    expect(restoredCalls).toEqual([]);
+    expect(container.querySelectorAll('[aria-label="Remove pre-session.png"]')).toHaveLength(1);
   });
 
   test("a managed-credit rejection is actionable and keeps the ready attachment visible", async () => {
