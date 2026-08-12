@@ -102,6 +102,7 @@ CREATE TABLE "xai_subscription_credentials" (
   "version" integer NOT NULL DEFAULT 1,
   "allocator_enabled" boolean NOT NULL DEFAULT true,
   "allocator_version" integer NOT NULL DEFAULT 1,
+  "allocator_updated_at" timestamptz,
   "quota_used_percent" integer,
   "quota_reset_at" timestamptz,
   "quota_checked_at" timestamptz,
@@ -307,6 +308,8 @@ CREATE TABLE "xai_capacity_waiters" (
   "account_id" uuid NOT NULL REFERENCES "managed_accounts"("id") ON DELETE CASCADE,
   "workspace_id" uuid NOT NULL REFERENCES "workspaces"("id") ON DELETE CASCADE,
   "session_id" uuid NOT NULL,
+  "goal_id" uuid,
+  "goal_version" integer,
   "blocked_turn_id" uuid NOT NULL,
   "blocked_turn_generation" integer NOT NULL,
   "workflow_id" text NOT NULL,
@@ -330,6 +333,9 @@ CREATE TABLE "xai_capacity_waiters" (
   CONSTRAINT "xai_capacity_waiters_turn_fk"
     FOREIGN KEY ("workspace_id", "blocked_turn_id")
     REFERENCES "session_turns"("workspace_id", "id") ON DELETE CASCADE,
+  CONSTRAINT "xai_capacity_waiters_goal_fk"
+    FOREIGN KEY ("workspace_id", "goal_id")
+    REFERENCES "session_goals"("workspace_id", "id") ON DELETE CASCADE,
   CONSTRAINT "xai_capacity_waiters_owner_membership_fk"
     FOREIGN KEY ("owner_organization_membership_id", "account_id")
     REFERENCES "organization_memberships"("id", "account_id") ON DELETE RESTRICT,
@@ -345,6 +351,10 @@ CREATE TABLE "xai_capacity_waiters" (
     AND "wake_revision" > 0 AND "observed_wake_revision" >= 0
     AND "observed_wake_revision" <= "wake_revision"
   ),
+  CONSTRAINT "xai_capacity_waiters_goal_fence_chk" CHECK (
+    ("goal_id" IS NULL AND "goal_version" IS NULL)
+    OR ("goal_id" IS NOT NULL AND "goal_version" > 0)
+  ),
   CONSTRAINT "xai_capacity_waiters_workflow_chk" CHECK (
     length(btrim("workflow_id")) BETWEEN 1 AND 1024
     AND length(btrim("last_wake_reason")) BETWEEN 1 AND 256
@@ -357,6 +367,8 @@ CREATE UNIQUE INDEX "xai_capacity_waiters_workspace_session_uq"
   ) NULLS NOT DISTINCT;
 CREATE INDEX "xai_capacity_waiters_pending_idx"
   ON "xai_capacity_waiters" ("workspace_id", "status", "next_check_at");
+CREATE INDEX "xai_capacity_waiters_wake_repair_idx"
+  ON "xai_capacity_waiters" ("status", "wake_revision", "observed_wake_revision");
 
 DO $xai_authority_functions$
 DECLARE
@@ -890,7 +902,14 @@ BEGIN
     CREATE OR REPLACE FUNCTION %1$I.prevent_xai_snapshot_mutation()
     RETURNS trigger LANGUAGE plpgsql AS $body$
     BEGIN
-      IF NEW.xai_provider_account_authority_snapshot
+      IF TG_TABLE_NAME = 'sessions' THEN
+        IF NEW.initial_xai_provider_account_authority_snapshot
+          IS DISTINCT FROM OLD.initial_xai_provider_account_authority_snapshot
+        THEN
+          RAISE EXCEPTION 'session initial xAI provider-account authority snapshot is immutable'
+            USING ERRCODE = '23514';
+        END IF;
+      ELSIF NEW.xai_provider_account_authority_snapshot
         IS DISTINCT FROM OLD.xai_provider_account_authority_snapshot
       THEN
         RAISE EXCEPTION '%% xAI provider-account authority snapshot is immutable', TG_TABLE_NAME
@@ -909,6 +928,14 @@ ALTER TABLE "session_turns"
   ADD CONSTRAINT "session_turns_xai_authority_snapshot_chk" CHECK (
     xai_provider_account_authority_snapshot_v1_valid(
       "xai_provider_account_authority_snapshot"
+    )
+  );
+ALTER TABLE "sessions"
+  ADD COLUMN "initial_xai_provider_account_authority_snapshot" jsonb
+    NOT NULL DEFAULT '{"version":1,"scope":"workspace"}'::jsonb,
+  ADD CONSTRAINT "sessions_initial_xai_authority_snapshot_chk" CHECK (
+    xai_provider_account_authority_snapshot_v1_valid(
+      "initial_xai_provider_account_authority_snapshot"
     )
   );
 ALTER TABLE "scheduled_tasks"
@@ -938,6 +965,9 @@ ALTER TABLE "session_system_update_outbox"
 
 CREATE TRIGGER session_turns_xai_authority_snapshot_immutable_trg
 BEFORE UPDATE OF xai_provider_account_authority_snapshot ON "session_turns"
+FOR EACH ROW EXECUTE FUNCTION prevent_xai_snapshot_mutation();
+CREATE TRIGGER sessions_initial_xai_authority_snapshot_immutable_trg
+BEFORE UPDATE OF initial_xai_provider_account_authority_snapshot ON "sessions"
 FOR EACH ROW EXECUTE FUNCTION prevent_xai_snapshot_mutation();
 CREATE TRIGGER scheduled_tasks_xai_authority_snapshot_immutable_trg
 BEFORE UPDATE OF xai_provider_account_authority_snapshot ON "scheduled_tasks"
@@ -1099,6 +1129,8 @@ COMMENT ON COLUMN "xai_subscription_credentials"."connected_by_subject_id" IS
   'Connection audit attribution only; never ownership or executable authority.';
 COMMENT ON COLUMN "session_turns"."xai_provider_account_authority_snapshot" IS
   'Immutable identifier-free xAI provider-account authority snapshot for the accepted logical turn.';
+COMMENT ON COLUMN "sessions"."initial_xai_provider_account_authority_snapshot" IS
+  'Immutable create-time xAI provider-account authority staging snapshot copied to the first turn.';
 COMMENT ON COLUMN "scheduled_tasks"."xai_provider_account_authority_snapshot" IS
   'Immutable identifier-free xAI provider-account authority snapshot for accepted schedule work.';
 COMMENT ON COLUMN "session_system_updates"."xai_provider_account_authority_snapshot" IS

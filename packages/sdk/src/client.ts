@@ -2372,7 +2372,10 @@ export class OpenGeniClient {
     );
     assertApiContractResponse(response);
     if (!response.ok) {
-      throw await apiErrorFromResponse(response, { method: "GET", correlationId });
+      throw await apiErrorFromResponse(response, {
+        method: "GET",
+        correlationId,
+      });
     }
     if (!response.body) {
       throw new OpenGeniApiError(response.status, "SSE response did not include a readable body");
@@ -5043,7 +5046,10 @@ export class OpenGeniClient {
     capabilityId: string,
     instanceKey: string,
     featureKey: string,
-    options: { parentId?: string | undefined; pageToken?: string | undefined } = {},
+    options: {
+      parentId?: string | undefined;
+      pageToken?: string | undefined;
+    } = {},
   ): Promise<GoogleDriveBrowseResponse> {
     const query = new URLSearchParams();
     if (options.parentId) query.set("parentId", options.parentId);
@@ -5785,6 +5791,7 @@ export class OpenGeniClient {
     return await this.requestJson<{ activated: boolean; accountId: string }>(
       "POST",
       `/v1/workspaces/${workspaceId}/supergrok/accounts/${accountId}/activate`,
+      {},
     );
   }
 
@@ -5827,10 +5834,10 @@ export class OpenGeniClient {
     workspaceId: string,
     accountId: string,
   ): Promise<{ disconnected: boolean; newActiveId: string | null }> {
-    return await this.requestJson<{ disconnected: boolean; newActiveId: string | null }>(
-      "DELETE",
-      `/v1/workspaces/${workspaceId}/supergrok/accounts/${accountId}`,
-    );
+    return await this.requestJson<{
+      disconnected: boolean;
+      newActiveId: string | null;
+    }>("DELETE", `/v1/workspaces/${workspaceId}/supergrok/accounts/${accountId}`, {});
   }
 
   /** Contract-checked JSON transport shared by opt-in typed SDK clients. */

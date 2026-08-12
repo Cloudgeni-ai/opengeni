@@ -120,6 +120,20 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     contract: "canonical",
     requiresControlRevalidation: true,
   },
+  "packages/db/src/index.ts#armXaiCapacityWait": {
+    inserts: 1,
+    contract: "canonical",
+    requiresControlRevalidation: true,
+  },
+  "packages/db/src/index.ts#supersedeXaiCapacityWaitInTransaction": {
+    inserts: 1,
+    contract: "owned_suffix",
+  },
+  "packages/db/src/index.ts#reconcileXaiCapacityWait": {
+    inserts: 1,
+    contract: "canonical",
+    requiresControlRevalidation: true,
+  },
   "packages/db/src/index.ts#applyContextCompaction": {
     inserts: 1,
     contract: "turn_attempt_fence",
@@ -288,6 +302,7 @@ const callerOwnedControlWriters = new Set([
 const expectedOwnedSuffixCallers: Record<string, string[]> = {
   cancelSessionSubtreeInTransaction: ["mutateSessionControlInTransaction"],
   supersedeCodexCapacityWaitInTransaction: ["reconcileCodexCapacityWait"],
+  supersedeXaiCapacityWaitInTransaction: ["reconcileXaiCapacityWait"],
   supersedeSessionCurrentDirectionInTransaction: [
     "steerAgentSessionInTransaction",
     "steerQueuedTurnInTransaction",
@@ -295,6 +310,7 @@ const expectedOwnedSuffixCallers: Record<string, string[]> = {
   ],
   closePendingSessionToolCallsInTransaction: [
     "armCodexCapacityWait",
+    "armXaiCapacityWait",
     "cancelSessionSubtreeInTransaction",
     "supersedeSessionCurrentDirectionInTransaction",
     "settleSessionAttemptInterruptions",

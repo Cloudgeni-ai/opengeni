@@ -235,7 +235,11 @@ async function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
     function done(error?: unknown) {
       clearTimeout(timer);
       signal.removeEventListener("abort", onAbort);
-      error === undefined ? resolve() : reject(error);
+      if (error === undefined) {
+        resolve();
+      } else {
+        reject(error);
+      }
     }
     signal.addEventListener("abort", onAbort, { once: true });
   });

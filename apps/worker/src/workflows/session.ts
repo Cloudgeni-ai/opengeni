@@ -288,7 +288,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     }
   }
 
-  async function waitForCodexCapacity(
+  async function waitForProviderCapacity(
     initial: activities.CodexCapacityWaitRef,
     entryBaseline?: { wakeups: number; capacityWakeups: number },
   ): Promise<void> {
@@ -329,13 +329,17 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
               ? "signal"
               : "timer";
       }
-      const result = await activity.reconcileCodexCapacityWait({
+      const reconcileInput = {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
         waiterId: current.waiterId,
         generation: current.generation,
         cause,
+      };
+      const result = await activity.reconcileCodexCapacityWait({
+        ...reconcileInput,
+        ...(current.provider ? { provider: current.provider } : {}),
       });
       if (result.action !== "waiting") {
         return;
@@ -467,7 +471,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       return;
     }
     if (peek.kind === "capacity-wait") {
-      await waitForCodexCapacity(peek.ref);
+      await waitForProviderCapacity(peek.ref);
       continue;
     }
     if (peek.kind === "approval-wait") {
@@ -706,7 +710,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
           sessionId,
         });
         if (capacityWait) {
-          await waitForCodexCapacity(capacityWait, capacityWaitEntryBaseline);
+          await waitForProviderCapacity(capacityWait, capacityWaitEntryBaseline);
           return true;
         }
       }
@@ -778,7 +782,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     }
 
     if (outcome.result.capacityWait) {
-      await waitForCodexCapacity(outcome.result.capacityWait, capacityWaitEntryBaseline);
+      await waitForProviderCapacity(outcome.result.capacityWait, capacityWaitEntryBaseline);
       return true;
     }
 

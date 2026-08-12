@@ -12,6 +12,10 @@ import {
   type CodexRequestContext,
 } from "@opengeni/codex";
 import {
+  XAI_SUBSCRIPTION_TRANSPORT_ERROR_HEADER,
+  XaiSubscriptionReloginRequired,
+} from "@opengeni/xai-subscription";
+import {
   ActiveSessionHistoryLimitExceededError,
   ApprovalRunStateLimitExceededError,
   interruptedToolCallResult,
@@ -42,6 +46,7 @@ import {
   assertPhysicalToolQuiescenceForCancellation,
   assertSessionAttemptQuiescenceRecoveryDurable,
   classifyContextWindowOverflowError,
+  classifyXaiCredentialFailure,
   credentialSubjectIdForTurnInitiator,
   classifyMcpTransportTimeoutError,
   clearAttemptCredentialsWithSettledFence,
@@ -4054,6 +4059,37 @@ describe("transient provider error classifier", () => {
     expect(providerRecoveryCountFromMetadata({})).toBe(0);
     expect(providerRecoveryCountFromMetadata({ providerRecoveryCount: 3 })).toBe(3);
     expect(providerRecoveryCountFromMetadata({ providerRecoveryCount: -1 })).toBe(0);
+  });
+
+  test("classifies only definitive marked SuperGrok account refusals for rotation", () => {
+    const marked = (status: number, headers: HeadersInit = {}) =>
+      Object.assign(new Error(`xAI request failed (${status})`), {
+        status,
+        headers: new Headers({
+          ...Object.fromEntries(new Headers(headers).entries()),
+          [XAI_SUBSCRIPTION_TRANSPORT_ERROR_HEADER]: "1",
+        }),
+      });
+    expect(classifyXaiCredentialFailure(new XaiSubscriptionReloginRequired())).toEqual({
+      kind: "auth",
+      cooldownMs: null,
+    });
+    expect(classifyXaiCredentialFailure(marked(401))).toEqual({
+      kind: "auth",
+      cooldownMs: null,
+    });
+    expect(classifyXaiCredentialFailure(marked(403))).toEqual({
+      kind: "forbidden",
+      cooldownMs: null,
+    });
+    expect(classifyXaiCredentialFailure(marked(429, { "retry-after": "12" }))).toEqual({
+      kind: "rate_limit",
+      cooldownMs: 12_000,
+    });
+    expect(classifyXaiCredentialFailure(marked(503))).toBeNull();
+    expect(
+      classifyXaiCredentialFailure(Object.assign(new Error("unrelated 401"), { status: 401 })),
+    ).toBeNull();
   });
 
   test("recognizes SDK statusCode when status is not present", () => {

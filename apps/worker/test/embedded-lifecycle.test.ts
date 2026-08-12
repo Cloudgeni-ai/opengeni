@@ -5,7 +5,7 @@ import { join, resolve as resolvePath } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createObservability } from "@opengeni/observability";
 import { testSettings } from "@opengeni/testing";
-import type { Database } from "@opengeni/db";
+import { RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES, type Database } from "@opengeni/db";
 import {
   createOpenGeniWorker,
   resolveOpenGeniWorkflowDefinition,
@@ -378,22 +378,13 @@ describe("embedded worker lifecycle contract", () => {
           can_trigger: false,
         })),
       ],
-      [
-        {
-          name: "knowledge_source_sync_lock_authority(uuid, uuid, uuid)",
-          owner: "opengeni_migrator",
-          can_execute: true,
-          public_execute: false,
-          security_definer: true,
-        },
-        {
-          name: "ensure_managed_human_personal_workspace(uuid, text, uuid)",
-          owner: "opengeni_migrator",
-          can_execute: true,
-          public_execute: false,
-          security_definer: true,
-        },
-      ],
+      RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.map((name) => ({
+        name,
+        owner: "opengeni_migrator",
+        can_execute: true,
+        public_execute: false,
+        security_definer: name !== "xai_provider_account_authority_snapshot_v1_valid(jsonb)",
+      })),
       [
         {
           name: "workspace_rls_visible(uuid, uuid)",
@@ -428,8 +419,7 @@ describe("embedded worker lifecycle contract", () => {
       protectedNoDirectDmlTables: [],
     })();
     expect((catalogResults[6] as Array<{ name: string }>).map((routine) => routine.name)).toEqual([
-      "knowledge_source_sync_lock_authority(uuid, uuid, uuid)",
-      "ensure_managed_human_personal_workspace(uuid, text, uuid)",
+      ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
     ]);
     expect(catalogQueries).toBe(catalogResults.length);
     expect(directExecutions).toBe(0);

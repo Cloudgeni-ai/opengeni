@@ -8,25 +8,28 @@ import { sql } from "drizzle-orm";
 import postgres from "postgres";
 import {
   acquireXaiCredentialLease,
-  armXaiCapacityWaiter,
+  armXaiCapacityWait,
   createDb,
   createXaiSubscriptionCredential,
   disconnectXaiSubscriptionCredential,
-  getXaiCapacityWaiter,
+  getXaiCapacityWaitForSession,
   getXaiRotationSettings,
   getXaiSessionAccountPin,
   listXaiSubscriptionAccountsMetadata,
+  lockSessionEventWriteRows,
+  lockWorkspaceInferenceControl,
   materializeXaiCredentialForRun,
   nestedPostgresSqlState,
-  observeXaiCapacityWaiter,
+  reconcileXaiCapacityWait,
   recordXaiSessionLastAccount,
   releaseXaiCredentialLease,
   setXaiSessionAccountPin,
-  settleXaiCapacityWaiter,
+  supersedeSessionCurrentDirectionInTransaction,
   updateXaiQuotaMetadata,
   updateXaiRotationSettings,
   wakeXaiCapacityWaiters,
   withSessionActivityRlsContext,
+  withWorkspaceSubjectSessionActivityRls,
   type DbClient,
 } from "../src";
 import { FORCE_RLS_TABLES, RUNTIME_FULL_DML_TABLES } from "../src/runtime-posture";
@@ -128,10 +131,16 @@ async function seedSessionTurn(
   fixture: WorkspaceFixture,
   authoritySnapshot: XaiProviderAccountAuthoritySnapshotV1 = workspaceSnapshot,
   executionGeneration = 1,
-): Promise<{ sessionId: string; turnId: string }> {
+): Promise<{
+  sessionId: string;
+  turnId: string;
+  attemptId: string;
+  workflowId: string;
+}> {
   if (!shared) throw new Error("test database unavailable");
   const sessionId = crypto.randomUUID();
   const turnId = crypto.randomUUID();
+  const attemptId = crypto.randomUUID();
   const workflowId = `xai-${sessionId}`;
   await withSessionActivityRlsContext(
     client!.db,
@@ -153,17 +162,28 @@ async function seedSessionTurn(
           id, account_id, workspace_id, session_id, trigger_event_id,
           temporal_workflow_id, status, source, position, prompt, model,
           reasoning_effort, sandbox_backend, execution_generation,
-          xai_provider_account_authority_snapshot
+          active_attempt_id, xai_provider_account_authority_snapshot
         ) values (
           ${turnId}, ${fixture.accountId}, ${fixture.workspaceId}, ${sessionId},
           ${crypto.randomUUID()}, ${workflowId}, 'running', 'user', 1,
           'xAI persistence fixture', 'test-model', 'medium', 'none',
-          ${executionGeneration}, ${JSON.stringify(authoritySnapshot)}::jsonb
+          ${executionGeneration}, ${attemptId}, ${JSON.stringify(authoritySnapshot)}::jsonb
+        )`);
+      await tx.execute(sql`
+        insert into session_turn_attempts (
+          id, account_id, workspace_id, session_id, turn_id,
+          execution_generation, state, temporal_workflow_id,
+          temporal_workflow_run_id, temporal_activity_id,
+          verified_control_revision, mcp_approval_policies
+        ) values (
+          ${attemptId}, ${fixture.accountId}, ${fixture.workspaceId}, ${sessionId}, ${turnId},
+          ${executionGeneration}, 'running', ${workflowId}, ${`run-${attemptId}`},
+          ${`activity-${attemptId}`}, 0, '{}'::jsonb
         )`);
       await tx.execute(sql`update sessions set active_turn_id = ${turnId} where id = ${sessionId}`);
     },
   );
-  return { sessionId, turnId };
+  return { sessionId, turnId, attemptId, workflowId };
 }
 
 beforeAll(async () => {
@@ -321,7 +341,10 @@ describe("migration 0234 xAI subscription authority", () => {
       authoritySnapshot: userAccount.authoritySnapshot,
       encryptionKey,
     });
-    expect(materialized.secret).toEqual({ version: 1, refreshToken: "alice-refresh-secret" });
+    expect(materialized.secret).toEqual({
+      version: 1,
+      refreshToken: "alice-refresh-secret",
+    });
     await expect(
       materializeXaiCredentialForRun(client.db, {
         workspaceId: fixture.workspaceId,
@@ -546,7 +569,10 @@ describe("migration 0234 xAI subscription authority", () => {
         sessionId: thirdTurn.sessionId,
         authoritySnapshot: workspaceSnapshot,
       }),
-    ).toMatchObject({ pinnedCredentialId: firstLease.credentialId, pinSource: "manual" });
+    ).toMatchObject({
+      pinnedCredentialId: firstLease.credentialId,
+      pinSource: "manual",
+    });
     const pinnedLease = await acquireXaiCredentialLease(client.db, {
       ...fixture,
       subjectId: subjectId!,
@@ -674,30 +700,206 @@ describe("migration 0234 xAI subscription authority", () => {
     expect(unavailable).toMatchObject({ credentialId: null, reused: false });
   }, 180_000);
 
+  test("releasing an exact lease durably wakes a blocked turn in the same authority pool", async () => {
+    if (!shared || !client) return;
+    const fixture = await seedWorkspace();
+    const [subjectId] = fixture.subjects;
+    const account = await createXaiSubscriptionCredential(client.db, {
+      ...fixture,
+      subjectId: subjectId!,
+      secret: {
+        version: 1,
+        accessToken: "lease-wake-token",
+        refreshToken: "lease-wake-refresh",
+      },
+      encryptionKey,
+      providerAccountId: `lease-wake-${crypto.randomUUID()}`,
+    });
+    const holderTurn = await seedSessionTurn(fixture);
+    const lease = await acquireXaiCredentialLease(client.db, {
+      ...fixture,
+      subjectId: subjectId!,
+      turnId: holderTurn.turnId,
+      holderId: "holder:lease-wake",
+      authoritySnapshot: workspaceSnapshot,
+    });
+    expect(lease).toMatchObject({
+      credentialId: account.account.id,
+      generation: 1,
+      reused: false,
+    });
+
+    const blockedTurn = await seedSessionTurn(fixture);
+    const unavailable = await acquireXaiCredentialLease(client.db, {
+      ...fixture,
+      subjectId: subjectId!,
+      turnId: blockedTurn.turnId,
+      holderId: "holder:lease-wake-blocked",
+      authoritySnapshot: workspaceSnapshot,
+    });
+    expect(unavailable.credentialId).toBeNull();
+    const armed = await armXaiCapacityWait(client.db, {
+      ...fixture,
+      subjectId: subjectId!,
+      sessionId: blockedTurn.sessionId,
+      turnId: blockedTurn.turnId,
+      attemptId: blockedTurn.attemptId,
+      workflowId: blockedTurn.workflowId,
+      authoritySnapshot: workspaceSnapshot,
+      earliestResetAt: null,
+      failurePayload: {
+        error: "the only SuperGrok account is leased by another turn",
+        code: "xai_capacity_unavailable",
+      },
+    });
+    expect(armed.action).toBe("waiting");
+    if (armed.action !== "waiting") throw new Error("xAI capacity waiter did not arm");
+
+    expect(
+      await releaseXaiCredentialLease(client.db, {
+        workspaceId: fixture.workspaceId,
+        subjectId: subjectId!,
+        turnId: holderTurn.turnId,
+        holderId: "holder:lease-wake",
+        generation: lease.generation!,
+      }),
+    ).toBe(true);
+    expect(
+      await getXaiCapacityWaitForSession(client.db, fixture.workspaceId, blockedTurn.sessionId),
+    ).toMatchObject({
+      id: armed.waiter.id,
+      wakeRevision: 2,
+      observedWakeRevision: 1,
+      lastWakeReason: "xai_credential_lease_released",
+    });
+    const [wake] = await shared.admin<
+      { wake_revision: string; reason: string; temporal_workflow_id: string }[]
+    >`
+      select wake_revision, reason, temporal_workflow_id
+      from session_workflow_wake_outbox
+      where workspace_id = ${fixture.workspaceId}
+        and session_id = ${blockedTurn.sessionId}`;
+    expect(wake).toMatchObject({
+      wake_revision: "1",
+      reason: "xai_capacity",
+      temporal_workflow_id: blockedTurn.workflowId,
+    });
+    expect(
+      await reconcileXaiCapacityWait(client.db, {
+        accountId: fixture.accountId,
+        workspaceId: fixture.workspaceId,
+        sessionId: blockedTurn.sessionId,
+        waiterId: armed.waiter.id,
+        generation: armed.waiter.generation,
+      }),
+    ).toMatchObject({ action: "resumed", waiter: { status: "resumed" } });
+  }, 180_000);
+
+  test("steering a capacity-blocked turn supersedes its xAI waiter atomically", async () => {
+    if (!shared || !client) return;
+    const fixture = await seedWorkspace();
+    const [subjectId] = fixture.subjects;
+    const turn = await seedSessionTurn(fixture);
+    const armed = await armXaiCapacityWait(client.db, {
+      ...fixture,
+      subjectId: subjectId!,
+      sessionId: turn.sessionId,
+      turnId: turn.turnId,
+      attemptId: turn.attemptId,
+      workflowId: turn.workflowId,
+      authoritySnapshot: workspaceSnapshot,
+      earliestResetAt: null,
+      failurePayload: {
+        error: "all connected SuperGrok subscriptions are unavailable",
+        code: "xai_capacity_unavailable",
+      },
+    });
+    expect(armed.action).toBe("waiting");
+    if (armed.action !== "waiting") throw new Error("xAI capacity waiter did not arm");
+
+    await withWorkspaceSubjectSessionActivityRls(
+      client.db,
+      fixture.workspaceId,
+      subjectId!,
+      async (tx) => {
+        const control = await lockWorkspaceInferenceControl(tx, fixture.workspaceId, "update");
+        const locks = await lockSessionEventWriteRows(tx, {
+          workspaceId: fixture.workspaceId,
+          controlLock: "already_locked",
+          sessionIds: [turn.sessionId],
+        });
+        const session = locks.sessions[0];
+        if (!session) throw new Error("capacity-blocked session is missing");
+        const controlRevision = Number(control.revision);
+        if (!Number.isSafeInteger(controlRevision)) {
+          throw new Error("workspace control revision is outside the safe integer range");
+        }
+        expect(
+          await supersedeSessionCurrentDirectionInTransaction(tx, {
+            accountId: fixture.accountId,
+            workspaceId: fixture.workspaceId,
+            sessionId: turn.sessionId,
+            activeTurnId: session.activeTurnId,
+            actor: { type: "human", subjectId: subjectId! },
+            operationId: crypto.randomUUID(),
+            controlRevision,
+            lastSequence: session.lastSequence,
+          }),
+        ).toMatchObject({
+          interruptionCount: 0,
+          liveCurrentTurnId: null,
+          replacedTurn: { id: turn.turnId, status: "waiting_capacity" },
+        });
+      },
+    );
+
+    const [settled] = await shared.admin<
+      { waiter_status: string; last_wake_reason: string; turn_status: string }[]
+    >`
+      select waiter.status as waiter_status,
+        waiter.last_wake_reason,
+        turn.status as turn_status
+      from xai_capacity_waiters waiter
+      join session_turns turn
+        on turn.workspace_id = waiter.workspace_id
+       and turn.id = waiter.blocked_turn_id
+      where waiter.id = ${armed.waiter.id}`;
+    expect(settled).toEqual({
+      waiter_status: "superseded",
+      last_wake_reason: "steer",
+      turn_status: "superseded",
+    });
+  }, 180_000);
+
   test("persists pool-scoped capacity waiters and immutable accepted-work snapshots", async () => {
     if (!shared || !client) return;
     const fixture = await seedWorkspace();
     const [subjectId] = fixture.subjects;
     const turn = await seedSessionTurn(fixture, workspaceSnapshot, 3);
-    const waiter = await armXaiCapacityWaiter(client.db, {
+    const armed = await armXaiCapacityWait(client.db, {
       ...fixture,
       subjectId: subjectId!,
       sessionId: turn.sessionId,
-      blockedTurnId: turn.turnId,
-      blockedTurnGeneration: 3,
-      workflowId: `workflow:${turn.sessionId}`,
+      turnId: turn.turnId,
+      attemptId: turn.attemptId,
+      workflowId: turn.workflowId,
       authoritySnapshot: workspaceSnapshot,
       earliestResetAt: new Date(Date.now() + 30_000),
-      nextCheckAt: new Date(Date.now() + 5_000),
+      failurePayload: {
+        error: "all connected SuperGrok subscriptions are unavailable",
+        code: "xai_capacity_unavailable",
+      },
     });
-    expect(waiter).toMatchObject({ status: "waiting", generation: 1, wakeRevision: 1 });
+    expect(armed.action).toBe("waiting");
+    if (armed.action !== "waiting") throw new Error("xAI capacity waiter did not arm");
+    const waiter = armed.waiter;
+    expect(waiter).toMatchObject({
+      status: "waiting",
+      generation: 1,
+      wakeRevision: 1,
+    });
     expect(
-      await getXaiCapacityWaiter(client.db, {
-        workspaceId: fixture.workspaceId,
-        subjectId: subjectId!,
-        sessionId: turn.sessionId,
-        authoritySnapshot: workspaceSnapshot,
-      }),
+      await getXaiCapacityWaitForSession(client.db, fixture.workspaceId, turn.sessionId),
     ).toMatchObject({ id: waiter.id, generation: 1 });
     expect(
       await wakeXaiCapacityWaiters(client.db, {
@@ -707,59 +909,71 @@ describe("migration 0234 xAI subscription authority", () => {
         reason: "quota_reset_observed",
       }),
     ).toBe(1);
-    const woken = await getXaiCapacityWaiter(client.db, {
-      workspaceId: fixture.workspaceId,
-      subjectId: subjectId!,
-      sessionId: turn.sessionId,
-      authoritySnapshot: workspaceSnapshot,
-    });
+    const woken = await getXaiCapacityWaitForSession(
+      client.db,
+      fixture.workspaceId,
+      turn.sessionId,
+    );
     expect(woken?.wakeRevision).toBe(2);
+    const stillWaiting = await reconcileXaiCapacityWait(client.db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: turn.sessionId,
+      waiterId: waiter.id,
+      generation: waiter.generation,
+    });
+    expect(stillWaiting).toMatchObject({
+      action: "waiting",
+      waiter: { observedWakeRevision: 2 },
+    });
+
+    await createXaiSubscriptionCredential(client.db, {
+      ...fixture,
+      subjectId: subjectId!,
+      secret: {
+        version: 1,
+        accessToken: "capacity-token",
+        refreshToken: "capacity-refresh",
+      },
+      encryptionKey,
+      providerAccountId: `capacity-${crypto.randomUUID()}`,
+    });
+    const resumed = await reconcileXaiCapacityWait(client.db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: turn.sessionId,
+      waiterId: waiter.id,
+      generation: waiter.generation,
+    });
+    expect(resumed).toMatchObject({
+      action: "resumed",
+      waiter: { status: "resumed", lastWakeReason: "capacity_available" },
+    });
     expect(
-      await observeXaiCapacityWaiter(client.db, {
-        workspaceId: fixture.workspaceId,
-        subjectId: subjectId!,
-        waiterId: waiter.id,
-        generation: 1,
-        observedWakeRevision: 2,
-        authoritySnapshot: workspaceSnapshot,
-      }),
-    ).toMatchObject({ observedWakeRevision: 2 });
-    expect(
-      await settleXaiCapacityWaiter(client.db, {
-        workspaceId: fixture.workspaceId,
-        subjectId: subjectId!,
-        waiterId: waiter.id,
-        generation: 1,
-        status: "resumed",
-        reason: "credential_available",
-        authoritySnapshot: workspaceSnapshot,
-      }),
-    ).toMatchObject({ status: "resumed", lastWakeReason: "credential_available" });
-    expect(
-      await settleXaiCapacityWaiter(client.db, {
-        workspaceId: fixture.workspaceId,
-        subjectId: subjectId!,
-        waiterId: waiter.id,
-        generation: 1,
-        status: "superseded",
-        reason: "stale",
-        authoritySnapshot: workspaceSnapshot,
-      }),
+      await getXaiCapacityWaitForSession(client.db, fixture.workspaceId, turn.sessionId),
     ).toBeNull();
 
-    await expect(
-      armXaiCapacityWaiter(client.db, {
+    const mismatched = await seedSessionTurn(fixture, workspaceSnapshot, 4);
+    expect(
+      await armXaiCapacityWait(client.db, {
         ...fixture,
         subjectId: subjectId!,
-        sessionId: turn.sessionId,
-        blockedTurnId: turn.turnId,
-        blockedTurnGeneration: 3,
-        workflowId: `workflow:${turn.sessionId}`,
-        authoritySnapshot: { version: 1, scope: "user", authorityGeneration: 1 },
+        sessionId: mismatched.sessionId,
+        turnId: mismatched.turnId,
+        attemptId: mismatched.attemptId,
+        workflowId: mismatched.workflowId,
+        authoritySnapshot: {
+          version: 1,
+          scope: "user",
+          authorityGeneration: 1,
+        },
         earliestResetAt: null,
-        nextCheckAt: new Date(),
+        failurePayload: {
+          error: "authority mismatch",
+          code: "xai_capacity_unavailable",
+        },
       }),
-    ).rejects.toThrow("xAI logical turn authority snapshot is unavailable");
+    ).toEqual({ action: "stale", waiter: null, events: [] });
 
     await expectSqlState(
       () =>
@@ -773,7 +987,11 @@ describe("migration 0234 xAI subscription authority", () => {
 
     const source = await seedSessionTurn(fixture);
     const target = await seedSessionTurn(fixture);
-    const outboxSnapshot = { version: 1, scope: "user", authorityGeneration: 7 } as const;
+    const outboxSnapshot = {
+      version: 1,
+      scope: "user",
+      authorityGeneration: 7,
+    } as const;
     await shared.admin`
       insert into session_system_update_outbox (
         account_id, workspace_id, source_session_id, target_session_id,
@@ -868,7 +1086,13 @@ describe("migration 0234 xAI subscription authority", () => {
     }
 
     const authorityRows = await shared.admin<
-      { name: string; select: boolean; insert: boolean; update: boolean; delete: boolean }[]
+      {
+        name: string;
+        select: boolean;
+        insert: boolean;
+        update: boolean;
+        delete: boolean;
+      }[]
     >`
       select c.relname as name,
         has_table_privilege('opengeni_app', c.oid, 'SELECT') as select,
@@ -884,7 +1108,12 @@ describe("migration 0234 xAI subscription authority", () => {
       order by c.relname`;
     expect(authorityRows).toHaveLength(2);
     for (const row of authorityRows) {
-      expect(row).toMatchObject({ select: false, insert: false, update: false, delete: false });
+      expect(row).toMatchObject({
+        select: false,
+        insert: false,
+        update: false,
+        delete: false,
+      });
     }
 
     const routines = await shared.admin<
@@ -928,7 +1157,12 @@ describe("migration 0234 xAI subscription authority", () => {
     }
 
     const [claim] = await shared.admin<
-      { appExecute: boolean; publicExecute: boolean; securityDefiner: boolean; config: string[] }[]
+      {
+        appExecute: boolean;
+        publicExecute: boolean;
+        securityDefiner: boolean;
+        config: string[];
+      }[]
     >`
       select has_function_privilege(
           'opengeni_app',

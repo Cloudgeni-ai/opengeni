@@ -2218,6 +2218,7 @@ export const xaiSubscriptionCredentials = pgTable(
     version: integer("version").notNull().default(1),
     allocatorEnabled: boolean("allocator_enabled").notNull().default(true),
     allocatorVersion: integer("allocator_version").notNull().default(1),
+    allocatorUpdatedAt: timestamp("allocator_updated_at", { withTimezone: true }),
     quotaUsedPercent: integer("quota_used_percent"),
     quotaResetAt: timestamp("quota_reset_at", { withTimezone: true }),
     quotaCheckedAt: timestamp("quota_checked_at", { withTimezone: true }),
@@ -2523,6 +2524,12 @@ export const sessions = pgTable(
       .$type<McpPersonalConnectionDelegation[]>()
       .notNull()
       .default([]),
+    initialXaiProviderAccountAuthoritySnapshot: jsonb(
+      "initial_xai_provider_account_authority_snapshot",
+    )
+      .$type<XaiProviderAccountAuthoritySnapshotV1>()
+      .notNull()
+      .default(WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1),
     // Durable tool-policy origin. Migration 0136 removes the old null/legacy
     // representation so every session has one explicit policy mode.
     toolPolicy: jsonb("tool_policy").$type<SessionToolPolicy>().notNull(),
@@ -5711,6 +5718,8 @@ export const xaiCapacityWaiters = pgTable(
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
     sessionId: uuid("session_id").notNull(),
+    goalId: uuid("goal_id"),
+    goalVersion: integer("goal_version"),
     blockedTurnId: uuid("blocked_turn_id").notNull(),
     blockedTurnGeneration: integer("blocked_turn_generation").notNull(),
     workflowId: text("workflow_id").notNull(),
@@ -5727,7 +5736,7 @@ export const xaiCapacityWaiters = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    // Migration 0231 adds NULLS NOT DISTINCT so workspace scope is also a
+    // Migration 0234 uses NULLS NOT DISTINCT so workspace scope is also a
     // singleton; Drizzle 0.45 cannot encode that PostgreSQL index modifier.
     workspaceSessionPool: uniqueIndex("xai_capacity_waiters_workspace_session_uq").on(
       table.workspaceId,
@@ -5739,6 +5748,11 @@ export const xaiCapacityWaiters = pgTable(
       table.workspaceId,
       table.status,
       table.nextCheckAt,
+    ),
+    wakeRepair: index("xai_capacity_waiters_wake_repair_idx").on(
+      table.status,
+      table.wakeRevision,
+      table.observedWakeRevision,
     ),
     scopeValid: check(
       "xai_capacity_waiters_authority_scope_chk",
@@ -5756,6 +5770,11 @@ export const xaiCapacityWaiters = pgTable(
         and ${table.wakeRevision} > 0
         and ${table.observedWakeRevision} >= 0
         and ${table.observedWakeRevision} <= ${table.wakeRevision}`,
+    ),
+    goalFenceValid: check(
+      "xai_capacity_waiters_goal_fence_chk",
+      sql`(${table.goalId} is null and ${table.goalVersion} is null)
+        or (${table.goalId} is not null and ${table.goalVersion} > 0)`,
     ),
   }),
 );
