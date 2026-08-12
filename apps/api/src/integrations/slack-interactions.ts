@@ -2109,18 +2109,35 @@ async function validatedSlackRequester(
   deps: ApiRouteDeps,
   interaction: Pick<
     SlackInteraction,
-    "workspaceId" | "connectionId" | "initiatingSlackUserId" | "owningSubjectId"
+    "accountId" | "workspaceId" | "connectionId" | "initiatingSlackUserId" | "owningSubjectId"
   >,
 ) {
-  if (!interaction.initiatingSlackUserId) return { authorized: false, mention: "" };
-  const link = await getSlackBotUserLink(
-    deps.db,
-    interaction.workspaceId,
-    interaction.connectionId,
-    interaction.initiatingSlackUserId,
-  );
+  if (!interaction.initiatingSlackUserId) {
+    return { authorized: false, canSchedule: false, mention: "" };
+  }
+  const [link, grant] = await Promise.all([
+    getSlackBotUserLink(
+      deps.db,
+      interaction.workspaceId,
+      interaction.connectionId,
+      interaction.initiatingSlackUserId,
+    ),
+    getWorkspaceGrant(deps.db, interaction.owningSubjectId, interaction.workspaceId, {
+      principalKind: "human_session",
+    }),
+  ]);
   const authorized = link?.subjectId === interaction.owningSubjectId;
-  return { authorized, mention: authorized ? slackRequesterMention(interaction) : "" };
+  const canSchedule =
+    authorized &&
+    grant?.accountId === interaction.accountId &&
+    hasPermission(grant.permissions, "sessions:read") &&
+    hasPermission(grant.permissions, "sessions:control") &&
+    hasPermission(grant.permissions, "scheduled_tasks:manage");
+  return {
+    authorized,
+    canSchedule,
+    mention: authorized ? slackRequesterMention(interaction) : "",
+  };
 }
 
 async function controlActionBlocks(
@@ -2547,6 +2564,9 @@ async function deliverSlackSessionEvents(
     } else if (event.type === "turn.completed") {
       const output = safePayloadText(event.payload, "output") || latestAssistantText;
       const normalizedOutput = output.trim();
+      const recurringLink = requester.canSchedule
+        ? `\n\n${makeRecurringText(deps, interaction.workspaceId, interaction.sessionId)}`
+        : "";
       const existingProgress = progressEvidence.find(
         (delivery) =>
           slackDeliveryTextsCoalesce(boundedOutput(delivery.text).trim(), normalizedOutput) &&
@@ -2578,15 +2598,22 @@ async function deliverSlackSessionEvents(
             ),
             channelId: posted.slackChannelId,
             timestamp: posted.slackMessageTimestamp,
-            text: `${requester.mention}${boundedOutput(existingProgress.text)}`,
+            text: boundedOutputWithSuffix(
+              `${requester.mention}${existingProgress.text}`,
+              recurringLink,
+            ),
           });
         }
       } else {
+        const finalSuffix = `\n\nReply in this thread to continue.${recurringLink}`;
         await postDelivery(
           client,
           interaction,
           event,
-          `${requester.mention}${output || "OpenGeni finished this task."}\n\nReply in this thread to continue.`,
+          boundedOutputWithSuffix(
+            `${requester.mention}${output || "OpenGeni finished this task."}`,
+            finalSuffix,
+          ),
           "final",
         );
       }
@@ -2841,6 +2868,14 @@ function openSessionText(deps: ApiRouteDeps, workspaceId: string, sessionId: str
   return `<${url}|Open in OpenGeni>`;
 }
 
+function makeRecurringText(deps: ApiRouteDeps, workspaceId: string, sessionId: string) {
+  const base = deps.settings.webBaseUrl ?? deps.settings.publicBaseUrl;
+  if (!base) throw new Error("Slack recurring action requires an absolute web base URL");
+  const url = new URL(`/workspaces/${workspaceId}/schedules`, base);
+  url.searchParams.set("sourceSessionId", sessionId);
+  return `<${url.toString()}|Make recurring>`;
+}
+
 function linkUrl(deps: ApiRouteDeps, entry: SlackInteractionInboxEntry) {
   const base = deps.settings.webBaseUrl ?? deps.settings.publicBaseUrl;
   const signingSecret = deps.settings.slackSigningSecret;
@@ -3008,6 +3043,13 @@ function boundedOutput(value: string) {
   return value.length <= MAX_SLACK_TEXT_CHARS
     ? value
     : `${value.slice(0, MAX_SLACK_TEXT_CHARS - 20)}\n… output truncated`;
+}
+
+function boundedOutputWithSuffix(value: string, suffix: string) {
+  const maxValueChars = Math.max(0, MAX_SLACK_TEXT_CHARS - suffix.length);
+  if (value.length <= maxValueChars) return `${value}${suffix}`;
+  const truncation = "\n… output truncated";
+  return `${value.slice(0, Math.max(0, maxValueChars - truncation.length))}${truncation}${suffix}`;
 }
 
 function safePayloadText(payload: unknown, field: string) {

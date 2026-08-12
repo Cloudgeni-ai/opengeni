@@ -256,6 +256,14 @@ const workspaceCapabilitiesRoute = createRoute({
 const workspaceSchedulesRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "schedules",
+  validateSearch: (search: Record<string, unknown>): { sourceSessionId?: string } => ({
+    ...(typeof search.sourceSessionId === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+      search.sourceSessionId,
+    )
+      ? { sourceSessionId: search.sourceSessionId }
+      : {}),
+  }),
   component: Schedules,
 });
 const workspaceDocumentsRoute = createRoute({
@@ -492,7 +500,8 @@ function Capabilities() {
 
 function Schedules() {
   const { workspaceId } = workspaceSchedulesRoute.useParams();
-  return <LazySchedulesRoute workspaceId={workspaceId} />;
+  const { sourceSessionId } = workspaceSchedulesRoute.useSearch();
+  return <LazySchedulesRoute workspaceId={workspaceId} sourceSessionId={sourceSessionId} />;
 }
 
 function Documents() {

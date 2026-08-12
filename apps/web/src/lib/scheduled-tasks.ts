@@ -68,6 +68,27 @@ export function newScheduledTaskFormState(
   };
 }
 
+/**
+ * Explicit editor defaults for a Slack-originated "Make recurring" launch.
+ * The source session remains the authority for prior conversation context; no
+ * Slack text is copied into the URL or silently persisted as a new prompt.
+ */
+export function recurringSessionTaskFormState(
+  sessionId: string,
+  includeOpenGeniTool: boolean,
+): ScheduledTaskFormState {
+  return {
+    ...newScheduledTaskFormState(includeOpenGeniTool),
+    name: "Recurring Slack task",
+    prompt: "Continue this task using the current session context and report the result.",
+    scheduleType: "interval",
+    intervalMinutes: 60,
+    runMode: "existing_session",
+    targetSessionId: sessionId,
+    overlapPolicy: "skip",
+  };
+}
+
 export function formStateFromScheduledTask(task: ScheduledTask): ScheduledTaskFormState {
   const schedule = task.schedule;
   const base = newScheduledTaskFormState(
