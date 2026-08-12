@@ -3264,6 +3264,8 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         (resource) => resource.mountPath,
       ),
     ).toEqual(["attachments/slack/03-followup.png"]);
+    expect(acceptedEvents[1]!.payload.text).toContain("attachments/slack/03-followup.png");
+    expect(acceptedEvents[1]!.payload.text).not.toContain("attachments/slack/01-followup.png");
     expect(objectStore.objects.size).toBe(3);
   });
 
@@ -3483,6 +3485,77 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         and id = ${route!.session_id}`;
     expect(session!.resources.map((resource) => resource.mountPath)).toEqual([
       "attachments/slack/01-incident.png",
+    ]);
+    expect(session!.initial_message).toContain("(file-only Slack invocation)");
+    expect(session!.initial_message).toContain("Imported invocation attachments");
+    expect(objectStore.objects.size).toBe(1);
+    expect(value.slack.calls.filter((call) => call.method === "files.info")).toHaveLength(1);
+  });
+
+  test("file-only Slack DMs import the exact authorized image", async () => {
+    if (!available) return;
+    const value = await fixture();
+    const channelId = "D_FILE_ONLY";
+    const messageTimestamp = "1722000000.000002";
+    const objectStore = reactionObjectStorage();
+    Reflect.set(value.deps, "objectStorage", objectStore.storage);
+    value.slack.privateFiles.set("F_DM_FILE_ONLY", {
+      channelId,
+      filename: "private-incident.png",
+      contentType: "image/png",
+      bytes: fixturePng(),
+    });
+    value.slack.channelHistories.set(channelId, {
+      messages: [
+        {
+          ts: messageTimestamp,
+          user: value.ownerSlackUserId,
+          text: "",
+          files: [
+            {
+              id: "F_DM_FILE_ONLY",
+              name: "private-incident.png",
+              title: "Private incident",
+            },
+          ],
+        },
+      ],
+    });
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_DM_FILE_ONLY_${crypto.randomUUID()}`,
+          event: {
+            type: "message",
+            channel_type: "im",
+            user: value.ownerSlackUserId,
+            channel: channelId,
+            ts: messageTimestamp,
+            files: [
+              {
+                id: "F_DM_FILE_ONLY",
+                name: "private-incident.png",
+                title: "Private incident",
+              },
+            ],
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+
+    const [route] = await interactions(value.owner.workspaceId);
+    const [session] = await shared!.admin<
+      { resources: Array<{ kind: string; mountPath: string }>; initial_message: string }[]
+    >`
+      select resources, initial_message
+      from sessions
+      where workspace_id = ${value.owner.workspaceId}
+        and id = ${route!.session_id}`;
+    expect(route).toMatchObject({ visibility: "private" });
+    expect(session!.resources.map((resource) => resource.mountPath)).toEqual([
+      "attachments/slack/01-private-incident.png",
     ]);
     expect(session!.initial_message).toContain("(file-only Slack invocation)");
     expect(session!.initial_message).toContain("Imported invocation attachments");

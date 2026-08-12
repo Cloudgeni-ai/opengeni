@@ -960,7 +960,10 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     omissionCodes: [],
     omittedCount: 0,
   };
-  if (entry.triggerKind === "app_mention") {
+  if (
+    entry.triggerKind === "app_mention" ||
+    (entry.triggerKind === "dm" && entry.text === "(file-only Slack invocation)")
+  ) {
     const prepared = await prepareSlackInvocationEntry(deps, client, entry);
     preparedEntry = prepared.entry;
     preparedAttachments = prepared.attachments;
@@ -973,7 +976,13 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
       existing.sessionId,
       preparedAttachments,
     );
-    await continueSlackSession(deps, grant, existing, preparedEntry, remounted.resources);
+    await continueSlackSession(
+      deps,
+      grant,
+      existing,
+      slackInvocationPreparedEntry(preparedEntry, remounted),
+      remounted.resources,
+    );
     return;
   }
   if (!hasPermission(grant.permissions, "sessions:create")) {
@@ -999,7 +1008,13 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
       interaction.sessionId,
       preparedAttachments,
     );
-    await continueSlackSession(deps, grant, interaction, preparedEntry, remounted.resources);
+    await continueSlackSession(
+      deps,
+      grant,
+      interaction,
+      slackInvocationPreparedEntry(preparedEntry, remounted),
+      remounted.resources,
+    );
     return;
   }
   const preferredModel = await getLatestSessionModelForSubject(
@@ -1011,7 +1026,7 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
   try {
     session = await createSessionForRequest(deps, grant, entry.workspaceId, {
       requestedSessionId: interaction.sessionReservationId,
-      initialMessage: preparedEntry.text,
+      initialMessage: slackInvocationPreparedEntry(preparedEntry, preparedAttachments).text,
       turnInstructions: SLACK_TASK_INSTRUCTIONS,
       firstPartyMcpTools: [...SLACK_TASK_FIRST_PARTY_MCP_TOOLS],
       resources: preparedAttachments.resources,
@@ -1095,15 +1110,22 @@ async function prepareSlackInvocationEntry(
           kind: entry.slackThreadTs ? "thread" : "channel",
         })
       : entry.text;
+  return {
+    entry: { ...entry, text: baseText },
+    attachments,
+  };
+}
+
+function slackInvocationPreparedEntry(
+  entry: SlackInteractionInboxEntry,
+  attachments: PreparedSlackReactionTask,
+): SlackInteractionInboxEntry {
   const manifest = slackAttachmentManifest(
     attachments,
     "Imported invocation attachments",
     "invocation",
   );
-  return {
-    entry: { ...entry, text: manifest ? `${baseText}\n\n${manifest}` : baseText },
-    attachments,
-  };
+  return manifest ? { ...entry, text: `${entry.text}\n\n${manifest}` } : entry;
 }
 
 export function slackInvocationTaskText(
