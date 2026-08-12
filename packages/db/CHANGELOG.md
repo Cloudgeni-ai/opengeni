@@ -1,5 +1,18 @@
 # @opengeni/db
 
+## 0.32.0
+
+### Minor Changes
+
+- 733c22f: Add the organization-tenancy foundation contracts and inert database scaffolding for organization memberships, user-owned resource authority and grants, personal retention, and generic session visibility, fork provenance, and authority epochs.
+
+### Patch Changes
+
+- Updated dependencies [733c22f]
+  - @opengeni/contracts@0.45.0
+  - @opengeni/codemode@0.2.3
+  - @opengeni/config@0.13.3
+
 ## 0.31.1
 
 ### Patch Changes

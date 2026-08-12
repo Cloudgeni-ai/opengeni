@@ -1,5 +1,11 @@
 # @opengeni/react
 
+## 0.52.2
+
+### Patch Changes
+
+- @opengeni/sdk@0.52.2
+
 ## 0.52.1
 
 ### Patch Changes
