@@ -1413,7 +1413,11 @@ describe("runtime event normalization", () => {
   });
 
   test("codex view_image function results use structured image content, not tokenized data-URL text", async () => {
-    const dataUrl = "data:image/png;base64,aGk=";
+    const pngBytes = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+      "base64",
+    );
+    const dataUrl = `data:image/png;base64,${pngBytes.toString("base64")}`;
     const tool = {
       type: "function",
       name: "view_image",
@@ -1433,6 +1437,18 @@ describe("runtime event normalization", () => {
     expect(await (wrappedError as any).invoke(undefined, "{}", undefined)).toBe(
       "image path `/tmp/missing.png` was not found",
     );
+
+    for (const invalidDataUrl of [
+      `data:image/bmp;base64,${Buffer.from("BM-invalid").toString("base64")}`,
+      `data:image/png;base64,${Buffer.from("BM-mislabeled").toString("base64")}`,
+    ]) {
+      const [wrappedInvalid] = withStructuredViewImageFunctionResults([
+        { ...tool, invoke: async () => invalidDataUrl } as any,
+      ]);
+      const result = await (wrappedInvalid as any).invoke(undefined, "{}", undefined);
+      expect(result).toContain("Convert the file to PNG, JPEG, or WebP");
+      expect(result).not.toContain("base64");
+    }
   });
 
   test("view_image crosses the retention hook before returning to SDK history", async () => {
@@ -1448,7 +1464,15 @@ describe("runtime event normalization", () => {
       createEditor: () => ({}),
       viewImage: async () => ({
         type: "image",
-        image: { data: Uint8Array.from([1, 2, 3]), mediaType: "image/png" },
+        image: {
+          data: Uint8Array.from(
+            Buffer.from(
+              "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+              "base64",
+            ),
+          ),
+          mediaType: "image/png",
+        },
       }),
     });
     const viewImage = bound.tools().find((tool: { name?: string }) => tool.name === "view_image");
@@ -1462,9 +1486,9 @@ describe("runtime event normalization", () => {
         output,
       },
     ]);
-    expect(output).toEqual({
+    expect(output).toMatchObject({
       type: "image",
-      image: { url: "data:image/png;base64,AQID" },
+      image: { url: expect.stringMatching(/^data:image\/png;base64,/) },
     });
   });
 
