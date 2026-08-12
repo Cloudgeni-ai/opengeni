@@ -117,6 +117,7 @@ import {
   type ResolveConnectionCredentialResult,
   type ConnectorActionPolicyHooks,
 } from "../src/index";
+import { McpResultCustomDataBridge } from "../src/mcp-result-custom-data";
 
 import { Manifest } from "@openai/agents/sandbox";
 import { createAttemptToolEnvironment } from "@opengeni/codemode";
@@ -4738,6 +4739,19 @@ describe("runtime event normalization", () => {
     expect(secondRequest).toContain("structuredOnly");
     expect(secondRequest).toContain("providerTrace");
     expect(secondRequest).toContain("vendor-receipt-1");
+  });
+
+  test("rejects MCP result values the Agents SDK custom-data boundary would rewrite", async () => {
+    const bridge = new McpResultCustomDataBridge();
+
+    await expect(
+      bridge.captureResult(null, async () => ({
+        content: [{ type: "text" as const, text: "negative zero" }],
+        structuredContent: { exactValue: -0 },
+      })),
+    ).rejects.toThrow(
+      'Protocol JSON value at $.mcpResult["structuredContent"]["exactValue"] must be a finite number other than negative zero',
+    );
   });
 
   test("releases only the live MCP audit marker after durable event capture", async () => {

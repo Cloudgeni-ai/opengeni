@@ -4,6 +4,7 @@ import {
 } from "@opengeni/contracts";
 import { UserError, type MCPServer } from "@openai/agents";
 import { randomUUID } from "node:crypto";
+import { normalizeProtocolJsonValue } from "./protocol-json";
 
 export const OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY = "__opengeniMcpResultV1" as const;
 export const OPENGENI_INNER_MCP_CUSTOM_DATA_KEY = "__opengeniInnerMcpCustomData" as const;
@@ -90,6 +91,10 @@ function normalizeSdkToolOutputCustomData(value: unknown): Record<string, unknow
   return JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
 }
 
+function normalizeMcpResult(value: unknown): AttemptToolResultValue {
+  return normalizeProtocolJsonValue(AttemptToolResult.parse(value), "$.mcpResult");
+}
+
 /**
  * The Agents SDK custom-data callback receives only the standard MCP result
  * fields. This bridge binds the original full result to the SDK invocation by
@@ -132,7 +137,7 @@ export class McpResultCustomDataBridge {
       if (token) this.resultsByToken.delete(token);
       const result =
         bridgedResult ??
-        AttemptToolResult.parse({
+        normalizeMcpResult({
           content: contentFromModelOutput(context.toolOutput),
           ...(context.structuredContent === undefined
             ? {}
@@ -206,9 +211,7 @@ export class McpResultCustomDataBridge {
     const token = this.takeToken(args);
     try {
       const invoked = await invoke(args);
-      const result = AttemptToolResult.parse(
-        isSdkResultProjection(invoked) ? invoked.content : invoked,
-      );
+      const result = normalizeMcpResult(isSdkResultProjection(invoked) ? invoked.content : invoked);
       if (token) this.resultsByToken.set(token, result);
       if (token && this.input?.sdkModelOutput === "result") {
         // The prefixed server historically exposed the complete MCP result as
