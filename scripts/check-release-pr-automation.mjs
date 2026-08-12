@@ -2008,7 +2008,12 @@ export async function verifyApprovedMerge(options = {}) {
     api.get(repositoryPath(`/git/ref/tags/${controllerTag}`)),
     api.get(repositoryPath(`/releases/tags/${controllerTag}`)),
   ]);
-  await assertReleaseMainRef(api, initialMain, context.sourceSha, "initial release main");
+  const initialMainSha = await assertReleaseMainRef(
+    api,
+    initialMain,
+    context.sourceSha,
+    "initial release main",
+  );
   const controller = assertCommit(
     controllerValue,
     context.controllerSha,
@@ -2050,10 +2055,23 @@ export async function verifyApprovedMerge(options = {}) {
     "pull-request timeline",
   );
   assertProviderMergeEvent(timeline, context.sourceSha, pullIdentity);
-  invariant(
-    context.controllerSha === pullIdentity.baseSha,
-    "release controller SHA differs from the exact reviewed base SHA",
-  );
+  const controllerIsReviewedBase = context.controllerSha === pullIdentity.baseSha;
+  if (!controllerIsReviewedBase) {
+    await assertSourceAncestorOfCurrentMain(
+      api,
+      context.sourceSha,
+      context.controllerSha,
+      "release controller",
+      "admitted source",
+    );
+    await assertSourceAncestorOfCurrentMain(
+      api,
+      context.controllerSha,
+      initialMainSha,
+      "initial release main",
+      "release controller",
+    );
+  }
   const [base, head] = await Promise.all([
     api
       .get(repositoryPath(`/git/commits/${pullIdentity.baseSha}`))
@@ -2062,10 +2080,12 @@ export async function verifyApprovedMerge(options = {}) {
       .get(repositoryPath(`/git/commits/${pullIdentity.headSha}`))
       .then((value) => assertCommit(value, pullIdentity.headSha, "reviewed head commit")),
   ]);
-  invariant(
-    controller.treeSha === base.treeSha,
-    "release controller tree differs from the exact reviewed base tree",
-  );
+  if (controllerIsReviewedBase) {
+    invariant(
+      controller.treeSha === base.treeSha,
+      "release controller tree differs from the exact reviewed base tree",
+    );
+  }
   invariant(
     source.treeSha === head.treeSha,
     "release source tree differs from the exact reviewed head",
@@ -2191,7 +2211,21 @@ export async function verifyApprovedMerge(options = {}) {
     context.sourceSha,
   );
   const terminalMain = await api.get(repositoryPath("/git/ref/heads/main"));
-  await assertReleaseMainRef(api, terminalMain, context.sourceSha, "terminal release main");
+  const terminalMainSha = await assertReleaseMainRef(
+    api,
+    terminalMain,
+    context.sourceSha,
+    "terminal release main",
+  );
+  if (!controllerIsReviewedBase) {
+    await assertSourceAncestorOfCurrentMain(
+      api,
+      context.controllerSha,
+      terminalMainSha,
+      "terminal release main",
+      "release controller",
+    );
+  }
 
   const provenance = {
     version: 2,
