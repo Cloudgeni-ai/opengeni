@@ -1,10 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import AxeBuilder from "@axe-core/playwright";
 import { existsSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { mkdir, readdir, readFile } from "node:fs/promises";
 import { chromium, type Browser, type Page } from "playwright";
 
-import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { freePort, runCommand, startProcess, type StartedProcess } from "@opengeni/testing";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const workspaceId = "00000000-0000-4000-8000-000000000017";
@@ -49,12 +49,25 @@ describe("capabilities browser e2e", () => {
       mkdir(evidenceDir, { recursive: true }),
       mkdir(mobbinEvidenceDir, { recursive: true }),
     ]);
+    const webEnv = {
+      NODE_ENV: "production",
+      VITE_API_BASE_URL: "http://127.0.0.1:9",
+    };
+    const build = await runCommand(["bun", "run", "build"], {
+      cwd: `${repoRoot}/apps/web`,
+      env: webEnv,
+      timeoutMs: 120_000,
+    });
+    if (build.exitCode !== 0) {
+      throw new Error(`Production web build failed:\n${build.stdout}\n${build.stderr}`);
+    }
+    await expectNoCapabilitiesChunkCycle(`${repoRoot}/apps/web/dist/assets`);
     web = await startProcess(
       [
         "bun",
         "run",
         "vite",
-        "dev",
+        "preview",
         "--port",
         String(webPort),
         "--strictPort",
@@ -63,7 +76,7 @@ describe("capabilities browser e2e", () => {
       ],
       {
         cwd: `${repoRoot}/apps/web`,
-        env: { VITE_API_BASE_URL: "http://127.0.0.1:9" },
+        env: webEnv,
         ready: async () =>
           (
             await fetch(webBaseUrl, {
@@ -77,7 +90,7 @@ describe("capabilities browser e2e", () => {
       ? "/usr/local/bin/chromium"
       : undefined;
     browser = await chromium.launch(executablePath ? { executablePath } : undefined);
-  }, 90_000);
+  }, 180_000);
 
   afterAll(async () => {
     await Promise.allSettled([browser?.close(), web?.stop()]);
@@ -588,7 +601,65 @@ async function expectFocused(locator: import("playwright").Locator): Promise<voi
 
 async function expectText(locator: import("playwright").Locator, expected: string): Promise<void> {
   await locator.waitFor({ state: "visible", timeout: 15_000 });
-  expect((await locator.textContent()) ?? "").toContain(expected);
+  const deadline = Date.now() + 15_000;
+  let text = "";
+  while (Date.now() < deadline) {
+    text = (await locator.textContent()) ?? "";
+    if (text.includes(expected)) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  expect(text).toContain(expected);
+}
+
+async function expectNoCapabilitiesChunkCycle(assetsDir: string): Promise<void> {
+  const assets = (await readdir(assetsDir)).filter((asset) => asset.endsWith(".js"));
+  const graph = new Map<string, string[]>();
+  await Promise.all(
+    assets.map(async (asset) => {
+      const source = await readFile(`${assetsDir}/${asset}`, "utf8");
+      const imports = [...source.matchAll(/(?:\bfrom|\bimport)["']\.\/([^"']+\.js)["']/g)].map(
+        (match) => match[1]!,
+      );
+      graph.set(asset, imports);
+    }),
+  );
+
+  const active = new Set<string>();
+  const complete = new Set<string>();
+  const path: string[] = [];
+
+  function visit(asset: string): string[] | null {
+    if (active.has(asset)) {
+      const cycle = [...path.slice(path.indexOf(asset)), asset];
+      return cycle.some(
+        (member) =>
+          member.startsWith("capabilities-services-") ||
+          member.startsWith("integration-control-center-view-"),
+      )
+        ? cycle
+        : null;
+    }
+    if (complete.has(asset)) return null;
+    active.add(asset);
+    path.push(asset);
+    for (const dependency of graph.get(asset) ?? []) {
+      const cycle = visit(dependency);
+      if (cycle) return cycle;
+    }
+    path.pop();
+    active.delete(asset);
+    complete.add(asset);
+    return null;
+  }
+
+  for (const asset of assets) {
+    const cycle = visit(asset);
+    if (cycle) {
+      throw new Error(
+        `Capabilities production chunks contain a static import cycle: ${cycle.join(" -> ")}`,
+      );
+    }
+  }
 }
 
 async function installCapabilityApi(

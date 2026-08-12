@@ -265,7 +265,9 @@ import {
   lockWorkspaceInferenceControl,
   registerInternalUpdateWakeInTransaction,
   SESSION_DISCOVERY_CONTROL_TITLE_MAX_CHARS,
+  assertSessionAuthoritySnapshot,
   registerSessionTurnAttemptClaim,
+  sessionAuthoritySnapshotMatchesSession,
   reserveSessionCommandReceipt,
   serializeEffectiveSessionControl,
   type SessionDiscoveryControl,
@@ -25381,6 +25383,22 @@ async function lockTurnAttemptWriteFenceTx(
   ) {
     return { allowed: false, reason: "attempt_changed", ...base };
   }
+  let authoritySnapshot;
+  try {
+    authoritySnapshot = assertSessionAuthoritySnapshot({
+      attemptId: input.attemptId,
+      authorityEpoch: attempt.authorityEpoch,
+      authorityVisibility: attempt.authorityVisibility,
+      authorityOwnerOrganizationMembershipId: attempt.authorityOwnerOrganizationMembershipId,
+    });
+  } catch {
+    // The 0222 insert trigger keeps old writers rolling-safe, but no missing
+    // or partial tuple may cross an accepted-attempt write fence.
+    return { allowed: false, reason: "attempt_changed", ...base };
+  }
+  if (!sessionAuthoritySnapshotMatchesSession(authoritySnapshot, session)) {
+    return { allowed: false, reason: "attempt_changed", ...base };
+  }
   const [interruption] = await tx
     .select({ id: schema.sessionAttemptInterruptions.id })
     .from(schema.sessionAttemptInterruptions)
@@ -44468,6 +44486,9 @@ export async function claimSessionWorkForAttempt(
             temporalWorkflowRunId: input.workflowRunId,
             temporalActivityId: input.dispatchId,
             verifiedControlRevision: Number(workspaceControl.revision),
+            authorityEpoch: session.authorityEpoch,
+            authorityVisibility: session.visibility as "user_private" | "workspace_shared",
+            authorityOwnerOrganizationMembershipId: session.ownerOrganizationMembershipId ?? null,
             mcpApprovalPolicies,
             connectorActionPolicies: connectorPolicyRows,
           });

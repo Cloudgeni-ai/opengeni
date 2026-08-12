@@ -552,6 +552,15 @@ describe("canonical queue commands", () => {
           activeAttemptId: attemptId,
         })
         .returning();
+      const [sessionAuthority] = await db
+        .select({
+          authorityEpoch: schema.sessions.authorityEpoch,
+          authorityVisibility: schema.sessions.visibility,
+          authorityOwnerOrganizationMembershipId: schema.sessions.ownerOrganizationMembershipId,
+        })
+        .from(schema.sessions)
+        .where(eq(schema.sessions.id, value.session.id));
+      if (!sessionAuthority) throw new Error("Queue test session authority snapshot missing");
       await db.insert(schema.sessionTurnAttempts).values({
         id: attemptId,
         accountId: value.grant.accountId,
@@ -564,6 +573,10 @@ describe("canonical queue commands", () => {
         temporalWorkflowRunId: `run-${attemptId}`,
         temporalActivityId: `activity-${attemptId}`,
         verifiedControlRevision: 0,
+        authorityEpoch: sessionAuthority.authorityEpoch,
+        authorityVisibility: sessionAuthority.authorityVisibility,
+        authorityOwnerOrganizationMembershipId:
+          sessionAuthority.authorityOwnerOrganizationMembershipId,
         mcpApprovalPolicies: {},
       });
       await db

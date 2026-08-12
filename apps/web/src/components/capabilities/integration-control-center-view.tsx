@@ -45,8 +45,6 @@ import type {
   ConnectionOwnership,
 } from "@/types";
 
-export { SourcePackagesSectionView } from "@/components/capabilities/source-packages-view";
-
 export type IntegrationRemoveTarget = {
   instance: ApiIntegrationInstallationSummary;
   removesDefinition: boolean;

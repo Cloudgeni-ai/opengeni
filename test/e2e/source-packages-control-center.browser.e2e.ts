@@ -787,5 +787,12 @@ async function expectHidden(locator: import("playwright").Locator): Promise<void
 
 async function expectText(locator: import("playwright").Locator, expected: string): Promise<void> {
   await expectVisible(locator);
-  expect((await locator.textContent()) ?? "").toContain(expected);
+  const deadline = Date.now() + 15_000;
+  let text = "";
+  while (Date.now() < deadline) {
+    text = (await locator.textContent()) ?? "";
+    if (text.includes(expected)) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  expect(text).toContain(expected);
 }
