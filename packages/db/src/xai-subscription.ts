@@ -124,17 +124,13 @@ export async function createXaiSubscriptionCredential(
   assertSecret(input.secret);
   const scope = input.scope ?? "workspace";
   const encrypted = encryptEnvironmentValue(input.encryptionKey, JSON.stringify(input.secret));
-  return await withWorkspaceSubjectRls(
-    db,
-    input.workspaceId,
-    input.subjectId,
-    async (scopedDb) => {
-      const rows = await rawRows<{
-        credential_id: string;
-        authority_generation: number | string | null;
-      }>(
-        scopedDb,
-        sql`select * from create_xai_subscription_credential(
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scopedDb) => {
+    const rows = await rawRows<{
+      credential_id: string;
+      authority_generation: number | string | null;
+    }>(
+      scopedDb,
+      sql`select * from create_xai_subscription_credential(
           ${input.accountId}::uuid,
           ${input.workspaceId}::uuid,
           ${input.subjectId},
@@ -146,26 +142,25 @@ export async function createXaiSubscriptionCredential(
           ${input.planType ?? null},
           ${input.expiresAt ?? null}
         )`,
-      );
-      const created = rows[0];
-      if (!created) throw new Error("xAI credential lifecycle returned no row");
-      const [row] = await scopedDb
-        .select()
-        .from(schema.xaiSubscriptionCredentials)
-        .where(eq(schema.xaiSubscriptionCredentials.id, created.credential_id))
-        .limit(1);
-      if (!row) throw new Error("xAI credential lifecycle result is not visible");
-      const authoritySnapshot =
-        scope === "workspace"
-          ? WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1
-          : XaiProviderAccountAuthoritySnapshotV1.parse({
-              version: 1,
-              scope: "user",
-              authorityGeneration: Number(created.authority_generation),
-            });
-      return { account: metadataFromRow(row), authoritySnapshot };
-    },
-  );
+    );
+    const created = rows[0];
+    if (!created) throw new Error("xAI credential lifecycle returned no row");
+    const [row] = await scopedDb
+      .select()
+      .from(schema.xaiSubscriptionCredentials)
+      .where(eq(schema.xaiSubscriptionCredentials.id, created.credential_id))
+      .limit(1);
+    if (!row) throw new Error("xAI credential lifecycle result is not visible");
+    const authoritySnapshot =
+      scope === "workspace"
+        ? WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1
+        : XaiProviderAccountAuthoritySnapshotV1.parse({
+            version: 1,
+            scope: "user",
+            authorityGeneration: Number(created.authority_generation),
+          });
+    return { account: metadataFromRow(row), authoritySnapshot };
+  });
 }
 
 export async function upsertXaiSubscriptionCredential(
@@ -190,6 +185,7 @@ export async function upsertXaiSubscriptionCredential(
   if (!input.authoritySnapshot) {
     throw new Error("Existing xAI credentials require their frozen authority snapshot");
   }
+  const credentialId = input.credentialId;
   assertSecret(input.secret);
   const snapshot = XaiProviderAccountAuthoritySnapshotV1.parse(input.authoritySnapshot);
   const encrypted = encryptEnvironmentValue(input.encryptionKey, JSON.stringify(input.secret));
@@ -197,7 +193,7 @@ export async function upsertXaiSubscriptionCredential(
     const authorized = await rawRows<{ id: string }>(
       scopedDb,
       sql`select id from revalidate_xai_subscription_authority(
-        ${input.workspaceId}::uuid, ${input.subjectId}, ${input.credentialId}::uuid,
+        ${input.workspaceId}::uuid, ${input.subjectId}, ${credentialId}::uuid,
         ${JSON.stringify(snapshot)}::jsonb
       )`,
     );
@@ -217,7 +213,7 @@ export async function upsertXaiSubscriptionCredential(
         version: sql`${schema.xaiSubscriptionCredentials.version} + 1`,
         updatedAt: new Date(),
       })
-      .where(eq(schema.xaiSubscriptionCredentials.id, input.credentialId))
+      .where(eq(schema.xaiSubscriptionCredentials.id, credentialId))
       .returning();
     if (!row) throw new Error("xAI credential update lost its authority fence");
     return { account: metadataFromRow(row), authoritySnapshot: snapshot };
@@ -336,22 +332,17 @@ export async function disconnectXaiSubscriptionCredential(
   },
 ): Promise<boolean> {
   const snapshot = XaiProviderAccountAuthoritySnapshotV1.parse(input.authoritySnapshot);
-  return await withWorkspaceSubjectRls(
-    db,
-    input.workspaceId,
-    input.subjectId,
-    async (scopedDb) => {
-      const rows = await rawRows<{ disconnected: boolean }>(
-        scopedDb,
-        sql`select disconnect_xai_subscription_credential(
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scopedDb) => {
+    const rows = await rawRows<{ disconnected: boolean }>(
+      scopedDb,
+      sql`select disconnect_xai_subscription_credential(
           ${input.accountId}::uuid, ${input.workspaceId}::uuid,
           ${input.subjectId}, ${input.credentialId}::uuid,
           ${JSON.stringify(snapshot)}::jsonb
         ) as disconnected`,
-      );
-      return rows[0]?.disconnected === true;
-    },
-  );
+    );
+    return rows[0]?.disconnected === true;
+  });
 }
 
 export async function materializeXaiCredentialForRun(
