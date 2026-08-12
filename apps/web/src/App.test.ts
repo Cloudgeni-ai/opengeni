@@ -652,7 +652,10 @@ describe("api key permission options", () => {
   test("groups offer every contracts Permission exactly once", () => {
     const offered = buildApiKeyPermissionGroups().flatMap((group) => group.permissions);
     expect(offered.length).toBe(new Set(offered).size);
-    expect([...offered].sort()).toEqual([...Permission.options].sort());
+    expect([...offered].sort()).toEqual(
+      Permission.options.filter((permission) => permission !== "sessions:turn_instructions").sort(),
+    );
+    expect(offered).not.toContain("sessions:turn_instructions");
   });
 
   test("groups have no catch-all bucket and keep workspace first, admin last", () => {
@@ -696,8 +699,14 @@ describe("api key permission options", () => {
   test("workspace:admin does not manufacture plaintext-read delegation", () => {
     const wildcardOnly = delegableApiKeyPermissions(["workspace:admin"]);
     expect(wildcardOnly.has("secrets:read")).toBe(false);
+    expect(wildcardOnly.has("sessions:turn_instructions")).toBe(false);
     expect(wildcardOnly).toEqual(
-      new Set(Permission.options.filter((permission) => permission !== "secrets:read")),
+      new Set(
+        Permission.options.filter(
+          (permission) =>
+            permission !== "secrets:read" && permission !== "sessions:turn_instructions",
+        ),
+      ),
     );
 
     expect(
@@ -724,6 +733,7 @@ describe("api key permission options", () => {
     expect(hasWorkspacePermission(context, "workspace", "variable-sets:list")).toBe(true);
     expect(hasWorkspacePermission(context, "workspace", "secrets:list")).toBe(true);
     expect(hasWorkspacePermission(context, "workspace", "secrets:read")).toBe(false);
+    expect(hasWorkspacePermission(context, "workspace", "sessions:turn_instructions")).toBe(false);
     context.workspaceGrants[0]!.permissions.push("secrets:read");
     expect(hasWorkspacePermission(context, "workspace", "secrets:read")).toBe(true);
   });

@@ -5,6 +5,7 @@ import {
   bootstrapWorkspace,
   claimSessionRealtimeConnectionInTransaction,
   completeSessionRealtimeConnectionInTransaction,
+  createApiKey,
   createDb,
   createSession,
   encryptEnvironmentValue,
@@ -154,6 +155,7 @@ async function fixture() {
     exp: Math.floor(Date.now() / 1_000) + 3_600,
   });
   return {
+    accountId: grant.accountId,
     workspaceId: grant.workspaceId!,
     sessionId: session.id,
     subjectId,
@@ -162,6 +164,13 @@ async function fixture() {
       "content-type": "application/json",
     },
   };
+}
+
+async function sha256Hex(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
 }
 
 describe("session realtime lifecycle HTTP routes (real PostgreSQL)", () => {
@@ -714,6 +723,60 @@ describe("session realtime lifecycle HTTP routes (real PostgreSQL)", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({
       accepted: [{ replay: false, entry: { kind: "user_transcript" } }],
+    });
+
+    const hostKey = `ogk_${crypto.randomUUID().replaceAll("-", "")}${crypto
+      .randomUUID()
+      .replaceAll("-", "")}`;
+    await createApiKey(client.db, {
+      accountId: value.accountId,
+      workspaceId: value.workspaceId,
+      name: "Realtime host turn instructions",
+      prefix: hostKey.slice(0, 14),
+      keyHash: await sha256Hex(hostKey),
+      permissions: ["sessions:turn_instructions"],
+    });
+    const hiddenOperationId = crypto.randomUUID();
+    const hiddenRequest = {
+      browserInstanceId: proof.browserInstanceId,
+      ownerKey: proof.ownerKey,
+      expectedVersion: started.mode.version,
+      connectionId: claimed.connection.id,
+      connectionEpoch: 1,
+      entries: [
+        {
+          operationId: hiddenOperationId,
+          kind: "user_transcript",
+          text: "finalized API voice input with host context",
+          payload: { turnId: "api-user-turn-2" },
+          turnInstructions: "trusted organization profile revision 42",
+        },
+      ],
+    };
+    const denied = await app.request(`${base}/${started.mode.id}/sync`, {
+      method: "POST",
+      headers: value.headers,
+      body: JSON.stringify(hiddenRequest),
+    });
+    expect(denied.status).toBe(403);
+    expect(await denied.text()).toContain("trusted host turn-instructions authority required");
+
+    const accepted = await app.request(`${base}/${started.mode.id}/sync`, {
+      method: "POST",
+      headers: {
+        ...value.headers,
+        "x-opengeni-turn-instructions-key": hostKey,
+      },
+      body: JSON.stringify(hiddenRequest),
+    });
+    expect(accepted.status).toBe(200);
+    expect(await accepted.json()).toMatchObject({
+      accepted: [
+        {
+          replay: false,
+          entry: { operationId: hiddenOperationId, kind: "user_transcript" },
+        },
+      ],
     });
   });
 });

@@ -10,6 +10,8 @@
     "sandbox-reaper-hold.ts",
     "sandbox-reaper-hold.test.ts",
     "reconcile-cold-lost-sandbox-blockers.ts",
-    "reconcile-cold-lost-sandbox-blockers.test.ts"
+    "reconcile-cold-lost-sandbox-blockers.test.ts",
+    "provision-turn-instructions-key.ts",
+    "provision-turn-instructions-key.test.ts"
   ]
 }

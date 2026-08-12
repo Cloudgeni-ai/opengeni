@@ -7,6 +7,7 @@ import {
   CodexRealtimeWebrtcRequest,
   GatewayRealtimeConnectRequest,
   ClientSessionEvent,
+  CreateSessionRequest,
   CompactSessionContextRequest,
   DeleteSessionQueueItemRequest,
   EditSessionQueueItemRequest,
@@ -170,6 +171,7 @@ import {
   hasPermission,
   requireAccessGrant,
   requirePermission,
+  requireTurnInstructionsAuthority,
   requireSessionAuthorization,
   requireSessionAuthorizationListScope,
   SESSION_AUTHORIZATION_DEFAULT_REAUTHORIZE_MS,
@@ -429,6 +431,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         },
         422,
       );
+    }
+    const parsedForAuthority = CreateSessionRequest.safeParse(payload);
+    if (parsedForAuthority.success && parsedForAuthority.data.turnInstructions !== undefined) {
+      await requireTurnInstructionsAuthority(c, deps, grant);
     }
     let session: Session;
     try {
@@ -1135,6 +1141,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       );
       if (!parsed.success) {
         throw new HTTPException(422, { message: "invalid realtime ledger sync request" });
+      }
+      if (parsed.data.entries?.some((entry) => entry.turnInstructions !== undefined)) {
+        await requireTurnInstructionsAuthority(c, deps, grant);
       }
       try {
         const result = await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) =>
@@ -1986,6 +1995,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
     const payload = parseSteerSessionAdmission(await c.req.json().catch(() => null));
+    if (payload.turnInstructions !== undefined) {
+      await requireTurnInstructionsAuthority(c, deps, grant);
+    }
     const result = await acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
       text: payload.text,
       annotations: payload.annotations,
@@ -2029,6 +2041,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       }
     }
     if (event.type === "user.message") {
+      if (event.payload.turnInstructions !== undefined) {
+        await requireTurnInstructionsAuthority(c, deps, grant);
+      }
       const { accepted } = await acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
         text: event.payload.text,
         annotations: event.payload.annotations,

@@ -40,7 +40,12 @@ import {
 import { boundWorkspaceControlHttpPage } from "@opengeni/events";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { hasPermission, requireAccessContext, requireAccessGrant } from "@opengeni/core";
+import {
+  hasPermission,
+  requireAccessContext,
+  requireAccessGrant,
+  requireDelegablePermissions,
+} from "@opengeni/core";
 import { requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
@@ -388,6 +393,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "members:manage");
     const payload = AddWorkspaceMemberRequest.parse(await c.req.json());
+    requireDelegablePermissions(grant.permissions, payload.permissions);
     const email = payload.email.trim();
     // Email invites for not-yet-registered users are deferred: an unknown email
     // resolves to null, which resolveMemberSubjectId turns into a 404.
@@ -413,6 +419,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "members:manage");
     const subjectId = decodeURIComponent(c.req.param("subjectId"));
     const payload = UpdateWorkspaceMemberRequest.parse(await c.req.json());
+    requireDelegablePermissions(grant.permissions, payload.permissions);
     const existing = await listWorkspaceMembers(deps.db, workspaceId);
     const current = existing.find((member) => member.subjectId === subjectId);
     if (!current) {

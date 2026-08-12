@@ -8,6 +8,7 @@ import type { AccessGrant } from "@opengeni/contracts";
 import { signDelegatedAccessToken } from "@opengeni/contracts";
 import {
   bootstrapWorkspace,
+  createApiKey,
   createDb,
   getSession,
   listSessionTurns,
@@ -70,6 +71,158 @@ afterAll(async () => {
 }, 60_000);
 
 describe("delegated service initiator API", () => {
+  test("requires distinct host authority for create, Send, and Steer turn instructions", async () => {
+    const suffix = crypto.randomUUID();
+    const subjectId = `user:turn-instructions-${suffix}`;
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "turn-instructions-authority-test",
+      accountExternalId: `account-${suffix}`,
+      accountName: "Turn instructions authority test",
+      workspaceExternalSource: "turn-instructions-authority-test",
+      workspaceExternalId: `workspace-${suffix}`,
+      workspaceName: "Turn instructions authority test",
+      subjectId,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const primaryToken = await signDelegatedAccessToken(DELEGATION_SECRET, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      subjectId,
+      permissions: ["sessions:create", "sessions:read", "sessions:control"],
+      principalKind: "human_session",
+      exp: Math.floor(Date.now() / 1_000) + 3_600,
+    });
+    const primaryHeaders = {
+      authorization: `Bearer ${primaryToken}`,
+      "content-type": "application/json",
+    };
+    const hostToken = randomApiKeyToken();
+    await createApiKey(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      name: "Embedding host turn instructions",
+      prefix: hostToken.slice(0, 14),
+      keyHash: await sha256Hex(hostToken),
+      permissions: ["sessions:turn_instructions"],
+    });
+    const trustedHeaders = {
+      ...primaryHeaders,
+      "x-opengeni-turn-instructions-key": hostToken,
+    };
+    const createBody = {
+      initialMessage: "Create with exact host context",
+      turnInstructions: "organization profile revision 7",
+      resources: [],
+      tools: [],
+      metadata: {},
+      sandboxBackend: "none",
+      idempotencyKey: `turn-instructions-create:${suffix}`,
+    };
+
+    const deniedCreate = await app.request(`http://x/v1/workspaces/${grant.workspaceId}/sessions`, {
+      method: "POST",
+      headers: primaryHeaders,
+      body: JSON.stringify(createBody),
+    });
+    expect(deniedCreate.status).toBe(403);
+    expect(await deniedCreate.text()).toContain(
+      "trusted host turn-instructions authority required",
+    );
+
+    const createdResponse = await app.request(
+      `http://x/v1/workspaces/${grant.workspaceId}/sessions`,
+      { method: "POST", headers: trustedHeaders, body: JSON.stringify(createBody) },
+    );
+    expect(createdResponse.status).toBe(202);
+    const created = (await createdResponse.json()) as { id: string };
+    expect((await listSessionTurns(client.db, grant.workspaceId!, created.id))[0]).toMatchObject({
+      turnInstructions: "organization profile revision 7",
+    });
+
+    const sendBody = {
+      type: "user.message",
+      clientEventId: crypto.randomUUID(),
+      payload: {
+        text: "Use the refreshed host context",
+        turnInstructions: "organization profile revision 8",
+      },
+    };
+    const deniedSend = await app.request(
+      `http://x/v1/workspaces/${grant.workspaceId}/sessions/${created.id}/events`,
+      { method: "POST", headers: primaryHeaders, body: JSON.stringify(sendBody) },
+    );
+    expect(deniedSend.status).toBe(403);
+    expect(await deniedSend.text()).toContain("trusted host turn-instructions authority required");
+
+    const acceptedSend = await app.request(
+      `http://x/v1/workspaces/${grant.workspaceId}/sessions/${created.id}/events`,
+      { method: "POST", headers: trustedHeaders, body: JSON.stringify(sendBody) },
+    );
+    expect(acceptedSend.status).toBe(202);
+    expect(
+      (await listSessionTurns(client.db, grant.workspaceId!, created.id)).at(-1),
+    ).toMatchObject({
+      turnInstructions: "organization profile revision 8",
+    });
+
+    const steerBody = {
+      text: "Replace direction with the newest host context",
+      turnInstructions: "organization profile revision 9",
+      clientEventId: crypto.randomUUID(),
+    };
+    const deniedSteer = await app.request(
+      `http://x/v1/workspaces/${grant.workspaceId}/sessions/${created.id}/steer`,
+      { method: "POST", headers: primaryHeaders, body: JSON.stringify(steerBody) },
+    );
+    expect(deniedSteer.status).toBe(403);
+    expect(await deniedSteer.text()).toContain("trusted host turn-instructions authority required");
+
+    const acceptedSteer = await app.request(
+      `http://x/v1/workspaces/${grant.workspaceId}/sessions/${created.id}/steer`,
+      { method: "POST", headers: trustedHeaders, body: JSON.stringify(steerBody) },
+    );
+    expect(acceptedSteer.status).toBe(202);
+    expect(
+      (await listSessionTurns(client.db, grant.workspaceId!, created.id)).at(-1),
+    ).toMatchObject({
+      turnInstructions: "organization profile revision 9",
+    });
+
+    const selfAuthorizingToken = randomApiKeyToken();
+    await createApiKey(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      name: "Primary browser-facing key",
+      prefix: selfAuthorizingToken.slice(0, 14),
+      keyHash: await sha256Hex(selfAuthorizingToken),
+      permissions: [
+        "sessions:create",
+        "sessions:read",
+        "sessions:control",
+        "sessions:turn_instructions",
+      ],
+    });
+    const selfAuthorized = await app.request(
+      `http://x/v1/workspaces/${grant.workspaceId}/sessions`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${selfAuthorizingToken}`,
+          "content-type": "application/json",
+          "x-opengeni-turn-instructions-key": selfAuthorizingToken,
+        },
+        body: JSON.stringify({
+          ...createBody,
+          idempotencyKey: `turn-instructions-self-authorize:${suffix}`,
+        }),
+      },
+    );
+    expect(selfAuthorized.status).toBe(403);
+    expect(await selfAuthorized.text()).toContain(
+      "trusted host turn-instructions authority required",
+    );
+  });
+
   test("uses signed service provenance for create and Send without changing grant authority", async () => {
     const suffix = crypto.randomUUID();
     const access = await bootstrapWorkspace(client.db, {
@@ -259,3 +412,14 @@ describe("delegated service initiator API", () => {
     });
   });
 });
+
+async function sha256Hex(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function randomApiKeyToken(): string {
+  return `ogk_${crypto.randomUUID().replaceAll("-", "")}${crypto.randomUUID().replaceAll("-", "")}`;
+}

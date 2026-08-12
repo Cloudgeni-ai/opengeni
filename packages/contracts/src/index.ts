@@ -683,6 +683,11 @@ export const Permission = z.enum([
   "sessions:create",
   "sessions:read",
   "sessions:control",
+  // Secondary server-to-server authority for hidden exact-turn instructions.
+  // Deliberately literal-only: workspace:admin and ordinary session control
+  // must never manufacture it, and it is absent from default human/session
+  // grants. HTTP embedding hosts prove it with the dedicated secondary key.
+  "sessions:turn_instructions",
   // sandbox workspace (sandbox contract §C.3 / crosscut PART 1.2). stream:view is a
   // REAL, distinct permission — strictly BROADER than sessions:read — because the
   // pixel plane (Channel B) exposes raw pixels: a viewer can see content the
@@ -12548,6 +12553,8 @@ export type WorkspaceModelCatalogResponse = z.infer<typeof WorkspaceModelCatalog
  */
 export const OPENGENI_API_CONTRACT_REVISION = "2026-08-social-provider-tools-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
+/** Server-only secondary API-key header for hidden exact-turn instructions. */
+export const OPENGENI_TURN_INSTRUCTIONS_KEY_HEADER = "x-opengeni-turn-instructions-key" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
 

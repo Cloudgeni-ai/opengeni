@@ -2323,6 +2323,7 @@ export const KNOWN_PERMISSIONS = [
   "sessions:create",
   "sessions:read",
   "sessions:control",
+  "sessions:turn_instructions",
   // sandbox workspace (mirror of @opengeni/contracts Permission). stream:view is
   // strictly broader than sessions:read (un-redacted pixels); stream:control is
   // the never-granted-v1 raw-input plane; stream:acknowledge is the secret-leak
@@ -2886,6 +2887,8 @@ export type ClientAuthConfig =
 // parity suite. The SDK has no runtime dependency on the Zod contracts package.
 export const OPENGENI_API_CONTRACT_REVISION = "2026-08-social-provider-tools-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
+/** Server-only secondary API-key header for hidden exact-turn instructions. */
+export const OPENGENI_TURN_INSTRUCTIONS_KEY_HEADER = "x-opengeni-turn-instructions-key" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
 

@@ -2,9 +2,8 @@ import { CreateApiKeyRequest, CreateApiKeyResponse, Permission } from "@opengeni
 import { createApiKey, listApiKeys, revokeApiKey } from "@opengeni/db";
 import { zValidator } from "@hono/zod-validator";
 import type { Hono } from "hono";
-import { HTTPException } from "hono/http-exception";
 import type { ApiRouteDeps } from "@opengeni/core";
-import { requireAccessGrant } from "@opengeni/core";
+import { requireAccessGrant, requireDelegablePermissions } from "@opengeni/core";
 import { requireLimit } from "@opengeni/core";
 
 export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
@@ -23,7 +22,7 @@ export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
       const body = c.req.valid("json");
       const permissions: Permission[] =
         body.permissions.length > 0 ? (body.permissions as Permission[]) : ["workspace:read"];
-      ensureDelegablePermissions(grant.permissions, permissions);
+      requireDelegablePermissions(grant.permissions, permissions);
       await requireLimit(deps, {
         accountId: grant.accountId,
         workspaceId,
@@ -50,24 +49,6 @@ export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
     await requireAccessGrant(c, deps, workspaceId, "api_keys:manage");
     return c.json(await revokeApiKey(deps.db, workspaceId, c.req.param("apiKeyId")));
   });
-}
-
-function ensureDelegablePermissions(grantPermissions: Permission[], requested: Permission[]): void {
-  if (grantPermissions.includes("workspace:admin")) {
-    const highTrustMissing = requested.filter(
-      (permission) => permission === "secrets:read" && !grantPermissions.includes("secrets:read"),
-    );
-    if (highTrustMissing.length === 0) return;
-    throw new HTTPException(403, {
-      message: `cannot delegate missing literal permissions: ${highTrustMissing.join(", ")}`,
-    });
-  }
-  const missing = requested.filter((permission) => !grantPermissions.includes(permission));
-  if (missing.length > 0) {
-    throw new HTTPException(403, {
-      message: `cannot delegate missing permissions: ${missing.join(", ")}`,
-    });
-  }
 }
 
 function generateApiKeyToken(): string {

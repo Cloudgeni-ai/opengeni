@@ -81,7 +81,13 @@ block) always substituted in.
   copied to a delegation turn, and used from the latest accepted user transcript
   for an end-of-call tail turn. It does not carry into the next unrelated turn.
   Use it for submit-time route, selection, or viewport context that must not be
-  reconstructed later.
+  reconstructed later. Public HTTP admission requires a distinct server-held
+  workspace API key with the literal `sessions:turn_instructions` permission in
+  `x-opengeni-turn-instructions-key`; `workspace:admin` does not imply or
+  delegate that authority, and the secondary key must differ from the primary
+  request API key. Do not expose this header or key to a browser. Trusted
+  in-process OpenGeni producers use the core transition directly and do not
+  traverse this embedding-host boundary.
 - **Preallocated session identity** (`CreateSessionRequest.requestedSessionId`) — an optional UUID an embedding host may persist in its own projection before calling OpenGeni. OpenGeni creates that exact session and rejects collisions with `409`, so the initial worker claim cannot outrun the host link. Pair retries with the same workspace-scoped `idempotencyKey`; a replay that changes the UUID is rejected. The UUID is identity/correlation only and grants no access.
 
 Do not stuff persona or host context into `initialMessage`/message text: those

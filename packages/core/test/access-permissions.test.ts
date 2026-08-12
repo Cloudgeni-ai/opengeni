@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import type { AccessGrant } from "@opengeni/contracts";
-import { hasLiteralPermission, hasPermission, requireLiteralPermission } from "../src/access";
+import {
+  hasLiteralPermission,
+  hasPermission,
+  requireDelegablePermissions,
+  requireLiteralPermission,
+} from "../src/access";
 
 const grant = (permissions: AccessGrant["permissions"]): AccessGrant => ({
   accountId: "11111111-1111-4111-8111-111111111111",
@@ -14,9 +19,14 @@ describe("literal high-trust permissions", () => {
     const admin = grant(["workspace:admin"]);
     expect(hasPermission(admin.permissions, "variable-sets:read")).toBe(true);
     expect(hasPermission(admin.permissions, "secrets:read")).toBe(false);
+    expect(hasPermission(admin.permissions, "sessions:turn_instructions")).toBe(false);
     expect(hasLiteralPermission(admin.permissions, "secrets:read")).toBe(false);
+    expect(hasLiteralPermission(admin.permissions, "sessions:turn_instructions")).toBe(false);
     expect(() => requireLiteralPermission(admin, "secrets:read")).toThrow(
       "missing literal permission: secrets:read",
+    );
+    expect(() => requireLiteralPermission(admin, "sessions:turn_instructions")).toThrow(
+      "missing literal permission: sessions:turn_instructions",
     );
   });
 
@@ -24,6 +34,17 @@ describe("literal high-trust permissions", () => {
     const explicit = grant(["workspace:admin", "secrets:read"]);
     expect(hasLiteralPermission(explicit.permissions, "secrets:read")).toBe(true);
     expect(() => requireLiteralPermission(explicit, "secrets:read")).not.toThrow();
+  });
+
+  test("host turn-instructions authority is explicit and cannot be wildcard-delegated", () => {
+    const explicit = grant(["workspace:admin", "sessions:turn_instructions"]);
+    expect(hasPermission(explicit.permissions, "sessions:turn_instructions")).toBe(true);
+    expect(() =>
+      requireDelegablePermissions(["workspace:admin"], ["sessions:turn_instructions"]),
+    ).toThrow("cannot delegate missing literal permissions: sessions:turn_instructions");
+    expect(() =>
+      requireDelegablePermissions(explicit.permissions, ["sessions:turn_instructions"]),
+    ).not.toThrow();
   });
 
   test("legacy scopes imply granular metadata and write scopes but never plaintext", () => {

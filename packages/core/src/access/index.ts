@@ -1,5 +1,6 @@
 import { resolveFirstPartyDelegationSecret, type Settings } from "@opengeni/config";
 import {
+  OPENGENI_TURN_INSTRUCTIONS_KEY_HEADER,
   verifyDelegatedAccessToken,
   type AccountGrant,
   type AccessContext,
@@ -162,9 +163,11 @@ export function hasLiteralPermission(permissions: Permission[], permission: Perm
   return permissions.includes(permission);
 }
 
+const literalOnlyPermissions = new Set<Permission>(["secrets:read", "sessions:turn_instructions"]);
+
 export function hasPermission(permissions: Permission[], permission: Permission): boolean {
-  if (permission === "secrets:read") {
-    return permissions.includes("secrets:read");
+  if (literalOnlyPermissions.has(permission)) {
+    return permissions.includes(permission);
   }
   const aliases: Partial<Record<Permission, Permission[]>> = {
     "variable-sets:use": ["environments:use" as Permission],
@@ -195,6 +198,66 @@ export function hasPermission(permissions: Permission[], permission: Permission)
     (aliases[permission]?.some((alias) => permissions.includes(alias)) ?? false) ||
     permissions.includes("workspace:admin")
   );
+}
+
+/**
+ * Require every requested permission to be delegable by the caller. Ordinary
+ * workspace administrators retain their wildcard, but literal-only authorities
+ * can be delegated only when the caller itself holds the exact permission.
+ */
+export function requireDelegablePermissions(
+  grantPermissions: Permission[],
+  requested: Permission[],
+): void {
+  if (grantPermissions.includes("workspace:admin")) {
+    const highTrustMissing = requested.filter(
+      (permission) =>
+        literalOnlyPermissions.has(permission) && !grantPermissions.includes(permission),
+    );
+    if (highTrustMissing.length === 0) return;
+    throw new HTTPException(403, {
+      message: `cannot delegate missing literal permissions: ${highTrustMissing.join(", ")}`,
+    });
+  }
+  const missing = requested.filter((permission) => !grantPermissions.includes(permission));
+  if (missing.length > 0) {
+    throw new HTTPException(403, {
+      message: `cannot delegate missing permissions: ${missing.join(", ")}`,
+    });
+  }
+}
+
+/**
+ * Authorize hidden exact-turn instructions with a second workspace API key.
+ * The primary grant remains the caller/session identity; the secondary key is
+ * authority only. Requiring a distinct key prevents a browser-held primary API
+ * key from self-authorizing by copying itself into the host-only header.
+ */
+export async function requireTurnInstructionsAuthority(
+  c: Context,
+  deps: AccessDeps,
+  primaryGrant: AccessGrant,
+): Promise<void> {
+  const token = c.req.header(OPENGENI_TURN_INSTRUCTIONS_KEY_HEADER)?.trim();
+  if (!token || token.length > 2_048) {
+    throw turnInstructionsAuthorityError();
+  }
+  const apiKey = await findActiveApiKeyByHash(deps.db, await sha256Hex(token));
+  if (
+    !apiKey ||
+    apiKey.accountId !== primaryGrant.accountId ||
+    apiKey.workspaceId !== primaryGrant.workspaceId ||
+    !apiKey.permissions.includes("sessions:turn_instructions") ||
+    (primaryGrant.principalKind === "api_key" && primaryGrant.subjectId === `api_key:${apiKey.id}`)
+  ) {
+    throw turnInstructionsAuthorityError();
+  }
+}
+
+function turnInstructionsAuthorityError(): HTTPException {
+  return new HTTPException(403, {
+    message: "trusted host turn-instructions authority required",
+  });
 }
 
 async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<AccessContext | null> {

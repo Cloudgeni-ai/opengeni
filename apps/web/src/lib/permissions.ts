@@ -8,6 +8,7 @@ const permissionGroupAssignments: Record<Permission, string> = {
   "sessions:create": "Sessions",
   "sessions:read": "Sessions",
   "sessions:control": "Sessions",
+  "sessions:turn_instructions": "Sessions",
   "stream:view": "Sessions",
   "stream:control": "Sessions",
   "stream:acknowledge": "Sessions",
@@ -68,11 +69,14 @@ const permissionGroupOrder = [
 
 export type PermissionGroup = { label: string; permissions: Permission[] };
 
+const operatorOnlyPermissions = new Set<Permission>(["sessions:turn_instructions"]);
+
 // Derived from the contracts Permission enum so pickers can never drift from
 // the API again: every enum value lands in exactly one group.
 export function buildApiKeyPermissionGroups(): PermissionGroup[] {
   const groups: PermissionGroup[] = [];
   for (const permission of Permission.options) {
+    if (operatorOnlyPermissions.has(permission)) continue;
     const label = permissionGroupAssignments[permission] ?? "Other";
     const group = groups.find((candidate) => candidate.label === label);
     if (group) {
@@ -105,7 +109,9 @@ export function delegableApiKeyPermissions(grantPermissions: readonly string[]):
   if (grantPermissions.includes("workspace:admin")) {
     return new Set<string>(
       Permission.options.filter(
-        (permission) => permission !== "secrets:read" || grantPermissions.includes("secrets:read"),
+        (permission) =>
+          !operatorOnlyPermissions.has(permission) &&
+          (permission !== "secrets:read" || grantPermissions.includes("secrets:read")),
       ),
     );
   }
@@ -241,7 +247,9 @@ export function hasWorkspacePermission(
     grant &&
     (grant.permissions.includes(permission) ||
       legacyAliases[permission]?.some((alias) => grant.permissions.includes(alias)) ||
-      (permission !== "secrets:read" && grant.permissions.includes("workspace:admin"))),
+      (permission !== "secrets:read" &&
+        permission !== "sessions:turn_instructions" &&
+        grant.permissions.includes("workspace:admin"))),
   );
 }
 

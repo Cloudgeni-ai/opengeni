@@ -531,6 +531,16 @@ Invalid calls ledger one deterministic outbound error; a
 transient admission failure commits neither call nor turn. There is no
 child/fork session or after-commit admission worker.
 
+Public HTTP callers may attach hidden exact-turn instructions only with a
+second workspace API key in `x-opengeni-turn-instructions-key`. The secondary
+key must belong to the same account/workspace as the primary caller, carry the
+literal-only `sessions:turn_instructions` permission, and differ from the
+primary API key itself. Ordinary `workspace:admin`, member management, API-key
+management, and first-party session permissions cannot manufacture this
+authority. Embedding hosts keep the credential server-side; browsers never
+receive it. Trusted in-process OpenGeni producers call the core transitions
+directly and do not cross this HTTP boundary.
+
 ---
 
 ## 5. The runtime spine — session → turn → run
