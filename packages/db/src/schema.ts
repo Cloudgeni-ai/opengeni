@@ -4241,6 +4241,16 @@ export const sessionTurnAttempts = pgTable(
     verifiedControlRevision: bigint("verified_control_revision", {
       mode: "number",
     }).notNull(),
+    // Immutable generic session-tenancy authority admitted with this exact
+    // attempt. A later visibility/ownership epoch change fences the attempt;
+    // these are snapshots, never live lookups or mutable metadata.
+    // Pre-0222 SQL writers may omit these columns; the migration-owned BEFORE
+    // INSERT trigger fills them from the exact session row. Current claim
+    // writers pass both explicitly, so no client-side default may bypass the
+    // trigger and manufacture stale authority.
+    authorityEpoch: integer("authority_epoch").notNull(),
+    authorityVisibility: text("authority_visibility").notNull(),
+    authorityOwnerOrganizationMembershipId: uuid("authority_owner_organization_membership_id"),
     // Immutable policy snapshot captured under the session lock at claim.
     mcpApprovalPolicies: jsonb("mcp_approval_policies")
       .$type<Record<string, SessionMcpApprovalPolicy>>()
@@ -4298,6 +4308,11 @@ export const sessionTurnAttempts = pgTable(
       table.startedAt.desc(),
       table.id.desc(),
     ),
+    authorityEpoch: index("session_turn_attempts_authority_epoch_idx").on(
+      table.workspaceId,
+      table.sessionId,
+      table.authorityEpoch,
+    ),
     dispatch: uniqueIndex("session_turn_attempts_dispatch_uq").on(
       table.workspaceId,
       table.temporalWorkflowRunId,
@@ -4323,6 +4338,28 @@ export const sessionTurnAttempts = pgTable(
       sql`(${table.state} = 'closed' and ${table.outcome} is not null and ${table.closedAt} is not null)
         or (${table.state} <> 'closed' and ${table.outcome} is null and ${table.closedAt} is null)`,
     ),
+    authorityEpochValid: check(
+      "session_turn_attempts_authority_epoch_check",
+      sql`${table.authorityEpoch} is not null
+        and ${table.authorityVisibility} is not null
+        and ${table.authorityEpoch} > 0`,
+    ),
+    authorityVisibilityValid: check(
+      "session_turn_attempts_authority_visibility_check",
+      sql`${table.authorityEpoch} is not null
+        and ${table.authorityVisibility} is not null
+        and ${table.authorityVisibility} in ('user_private', 'workspace_shared')`,
+    ),
+    authorityOwnerShape: check(
+      "session_turn_attempts_authority_owner_shape_check",
+      sql`${table.authorityVisibility} <> 'user_private'
+        or ${table.authorityOwnerOrganizationMembershipId} is not null`,
+    ),
+    authorityOwner: foreignKey({
+      name: "session_turn_attempts_authority_owner_fk",
+      columns: [table.authorityOwnerOrganizationMembershipId, table.accountId],
+      foreignColumns: [organizationMemberships.id, organizationMemberships.accountId],
+    }).onDelete("restrict"),
   }),
 );
 

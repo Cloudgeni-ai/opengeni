@@ -1405,6 +1405,7 @@ export const SESSION_EVENT_TYPES = [
   "terminal.pty.output.delta",
   "terminal.pty.exited",
   "session.title_set",
+  "session.visibility.changed",
   "session.mcp.approval_policy.updated",
   "session.tool_policy.updated",
   // Multi-account Codex (P1): the session's inference account changed.
