@@ -3682,7 +3682,7 @@ describe("API component integration", () => {
       workspaceId,
       `pack:${packId}`,
     );
-    expect(capabilityInstallationAfterDelete).toBeUndefined();
+    expect(capabilityInstallationAfterDelete).toBeNull();
   });
 
   test("installs image Packs through explicit Rigs and shares identical inline Skills", async () => {
