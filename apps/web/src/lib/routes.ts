@@ -23,6 +23,11 @@ export function workspaceMemoryPath(workspaceId: string): string {
   return `${workspacePath(workspaceId)}/memory`;
 }
 
+/** "For you" — the priority feed of workstreams ranked by agent-time lost. */
+export function workspacePriorityPath(workspaceId: string): string {
+  return `${workspacePath(workspaceId)}/priority`;
+}
+
 /** Workspace Insights — usage, spend, live ops (preview surface). */
 export function workspaceInsightsPath(workspaceId: string): string {
   return `${workspacePath(workspaceId)}/insights`;

@@ -53,6 +53,7 @@ import {
   encryptVariableSetValue,
   getAnySessionInGroup,
   getEnrollment,
+  getChannel,
   getRig,
   getWorkspaceDefaultRigId,
   listDistinctVariableSetIdsInGroup,
@@ -575,6 +576,9 @@ export async function createAndStartSessionWithOutcome(input: {
   // rig promote never moves an existing session's version.
   rigId?: string | null;
   rigVersionId?: string | null;
+  // The workspace channel the session is filed under (rail organization only;
+  // resolved workspace-scoped by the caller). Null/omitted ⇒ unfiled (inbox).
+  channelId?: string | null;
   goal?: GoalSpec | null;
   // Per-session agent persona/system instructions (org-visible metadata, not a
   // secret). Persisted on the session row and composed system-level AFTER the
@@ -668,6 +672,7 @@ export async function createAndStartSessionWithOutcome(input: {
       variableSetId: input.variableSet?.id ?? null,
       rigId: input.rigId ?? null,
       rigVersionId: input.rigVersionId ?? null,
+      channelId: input.channelId ?? null,
       firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
       firstPartyMcpTools: input.firstPartyMcpTools,
       instructions: input.instructions ?? null,
@@ -728,6 +733,7 @@ export async function createAndStartSessionWithOutcome(input: {
       variableSetId: input.variableSet?.id ?? null,
       rigId: input.rigId ?? null,
       rigVersionId: input.rigVersionId ?? null,
+      channelId: input.channelId ?? null,
       firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
       firstPartyMcpTools: input.firstPartyMcpTools,
       instructions: input.instructions ?? null,
@@ -1434,6 +1440,18 @@ export async function createSessionForRequestWithOutcome(
       frozenRigVersionId = rig.activeVersion.id;
     }
   }
+  // CHANNEL FILING. Pure rail organization: a UUID files the session into that
+  // workspace channel, omission/null leaves it unfiled (inbox). Resolved
+  // workspace-scoped so a foreign channel id can never attach; an explicit
+  // unknown channelId is a caller error → 422.
+  let channelId: string | null = null;
+  if (payload.channelId) {
+    const channel = await getChannel(db, workspaceId, payload.channelId);
+    if (!channel) {
+      throw new HTTPException(422, { message: `unknown channelId: ${payload.channelId}` });
+    }
+    channelId = channel.id;
+  }
   // A spawned worker is causally part of the exact turn that created it. Omitted
   // execution policy fields therefore inherit that calling turn rather than the
   // deployment defaults. This is especially important for Codex subscription
@@ -1829,6 +1847,7 @@ export async function createSessionForRequestWithOutcome(
       // Frozen rig binding (M3): both null for a rig-less session (today's path).
       rigId: frozenRigId,
       rigVersionId: frozenRigVersionId,
+      channelId,
       goal: payload.goal ?? null,
       // Per-session persona instructions (already trimmed/validated by the
       // contracts schema). Persisted on the row; composed system-level at turn

@@ -87,7 +87,7 @@ export function emptySessionDraft(): SessionDraft {
     goalSuccessCriteria: "",
     goalMaxAutoContinuations: "",
     customMcpPermissions: false,
-    mcpPermissions: new Set(sessionMcpPermissionGroups.flatMap((group) => group.permissions)),
+    mcpPermissions: new Set(sessionMcpPermissionGroups().flatMap((group) => group.permissions)),
     firstPartyMcpTools: new Set(FIRST_PARTY_MCP_TOOL_NAMES),
   };
 }
