@@ -48,9 +48,18 @@ const KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_TABLES = [
   "knowledge_sources",
   "knowledge_source_objects",
 ] as const;
+const MANAGED_HUMAN_PERSONAL_WORKSPACE_ROUTINE =
+  "ensure_managed_human_personal_workspace(uuid, text, uuid)";
+const MANAGED_HUMAN_PERSONAL_WORKSPACE_AUTHORITY_TABLES = [
+  "organization_memberships",
+  "organization_user_retention_policies",
+  "organization_user_resource_authorities",
+  "organization_user_resource_grants",
+] as const;
 
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE,
+  MANAGED_HUMAN_PERSONAL_WORKSPACE_ROUTINE,
 ] as const;
 
 /**
@@ -898,14 +907,16 @@ export async function inspectRuntimeDatabasePosture(
             p.prosecdef as security_definer
           from pg_proc p
           join pg_namespace n on n.oid = p.pronamespace
-          where p.oid = to_regprocedure(
-            format(
-              '%I.knowledge_source_sync_lock_authority(uuid,uuid,uuid)',
-              ${targetSchema}::text
-            )
-          )
-            and n.nspname = ${targetSchema}
+          where n.nspname = ${targetSchema}
             and p.prokind in ('f', 'p')
+            and (p.proname || '(' || pg_catalog.oidvectortypes(p.proargtypes) || ')') = any(
+              array[
+                ${sql.join(
+                  RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.map((name) => sql`${name}`),
+                  sql`, `,
+                )}
+              ]::text[]
+            )
           order by p.proname, pg_catalog.oidvectortypes(p.proargtypes)
         `),
       ).map((row) => ({
@@ -1153,6 +1164,20 @@ export function evaluateRuntimeDatabasePosture(
             `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
           );
         }
+      }
+    } else if (routine.name === MANAGED_HUMAN_PERSONAL_WORKSPACE_ROUTINE) {
+      const authorityTables = MANAGED_HUMAN_PERSONAL_WORKSPACE_AUTHORITY_TABLES.filter(
+        (tableName) => tableByName.has(tableName),
+      ).map((tableName) => tableByName.get(tableName)!);
+      const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+      if (authorityOwners.size > 1) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
+        );
+      } else if (authorityTables[0] && routine.owner !== authorityTables[0].owner) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0].owner}`,
+        );
       }
     } else if (targetSchemaOwner && routine.owner !== targetSchemaOwner) {
       violations.push(

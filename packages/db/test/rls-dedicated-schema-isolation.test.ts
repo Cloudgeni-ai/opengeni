@@ -297,6 +297,13 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
     expect(posture.ownedRelations).toEqual([]);
     expect(posture.targetRoutines).toEqual([
       {
+        name: "ensure_managed_human_personal_workspace(uuid, text, uuid)",
+        owner: "postgres",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+      },
+      {
         name: "knowledge_source_sync_lock_authority(uuid, uuid, uuid)",
         owner: "postgres",
         execute: true,

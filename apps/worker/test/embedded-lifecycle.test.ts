@@ -386,6 +386,13 @@ describe("embedded worker lifecycle contract", () => {
           public_execute: false,
           security_definer: true,
         },
+        {
+          name: "ensure_managed_human_personal_workspace(uuid, text, uuid)",
+          owner: "opengeni_migrator",
+          can_execute: true,
+          public_execute: false,
+          security_definer: true,
+        },
       ],
       [
         {
@@ -420,6 +427,10 @@ describe("embedded worker lifecycle contract", () => {
       tablePrivileges: {},
       protectedNoDirectDmlTables: [],
     })();
+    expect((catalogResults[6] as Array<{ name: string }>).map((routine) => routine.name)).toEqual([
+      "knowledge_source_sync_lock_authority(uuid, uuid, uuid)",
+      "ensure_managed_human_personal_workspace(uuid, text, uuid)",
+    ]);
     expect(catalogQueries).toBe(catalogResults.length);
     expect(directExecutions).toBe(0);
 
