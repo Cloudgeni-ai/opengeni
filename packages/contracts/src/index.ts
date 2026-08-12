@@ -12690,6 +12690,7 @@ export function evaluateWorkspaceModelPolicy(
 }
 
 export * from "./codex-fleet-policy";
+export * from "./xai-provider-account-authority";
 export * from "./workspace-instruction-policies";
 export * from "./company-profile";
 export * from "./workspace-learning-policy";

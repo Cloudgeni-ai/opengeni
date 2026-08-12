@@ -23,6 +23,7 @@ export default defineConfig({
     "src/presentation-artifact-commands.ts",
     "src/presentation-artifact-query.ts",
     "src/video-generation.ts",
+    "src/xai-provider-account-authority.ts",
   ],
   format: ["esm"],
   target: "es2022",
