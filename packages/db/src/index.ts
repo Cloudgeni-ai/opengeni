@@ -25126,7 +25126,7 @@ async function lockTurnAttemptWriteFenceTx(
       authorityOwnerOrganizationMembershipId: attempt.authorityOwnerOrganizationMembershipId,
     });
   } catch {
-    // The 0220 insert trigger keeps old writers rolling-safe, but no missing
+    // The 0221 insert trigger keeps old writers rolling-safe, but no missing
     // or partial tuple may cross an accepted-attempt write fence.
     return { allowed: false, reason: "attempt_changed", ...base };
   }
