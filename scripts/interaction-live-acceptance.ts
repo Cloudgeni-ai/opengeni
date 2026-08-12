@@ -29,6 +29,10 @@ import {
   INTERACTION_LATENCY_BUDGETS,
   type InteractionLatencyMetric,
 } from "./interaction-acceptance-contract";
+import {
+  RfbAcceptanceProbe,
+  type RfbUpdate,
+} from "./rfb-acceptance-probe";
 
 const RELAY_TAG_OPEN = 1;
 const RELAY_TAG_OPEN_ACK = 2;
@@ -72,6 +76,15 @@ type Receipt = {
 };
 
 type FrameValue = BrowserFrame | ComputerFrame;
+type ComputerVisualFrame = ComputerFrame | RfbUpdate;
+type ComputerVisualProbe = {
+  first(timeoutMs?: number): Promise<ComputerVisualFrame>;
+  nextChangedAfter(
+    previous: ComputerVisualFrame,
+    timeoutMs?: number,
+  ): Promise<ComputerVisualFrame>;
+  close(): void;
+};
 
 class FrameProbe<TFrame extends FrameValue> {
   private readonly queue: TFrame[] = [];
@@ -319,7 +332,7 @@ async function main(): Promise<void> {
     : null;
   let browser: Awaited<ReturnType<typeof client.interaction.browsers.open>> | null = null;
   let browserProbe: FrameProbe<BrowserFrame> | null = null;
-  let computerProbe: FrameProbe<ComputerFrame> | null = null;
+  let computerProbe: ComputerVisualProbe | null = null;
   let browserTransport: BrowserSessionAttachment["stream"]["kind"] | null = null;
   let computerTransport: ComputerSessionAttachment["stream"]["kind"] | null = null;
   let browserSessionId = "";
@@ -537,7 +550,7 @@ async function main(): Promise<void> {
         },
       });
       computerTransport = computerAttachment.stream.kind;
-      computerProbe = await FrameProbe.computer(computerAttachment);
+      computerProbe = await openComputerVisualProbe(computerAttachment);
       let computerFrame = await computerProbe.first();
       record("computerFirstFrame", performance.now() - started);
       checks.push("computer.first-frame");
@@ -561,7 +574,10 @@ async function main(): Promise<void> {
       computerFrame = await computerProbe.nextChangedAfter(computerFrame);
       record("computerActionAcknowledged", computerAcknowledged - started);
       record("computerActionVisible", performance.now() - started);
-      if (computerFrame.computerSessionId !== computer.id) {
+      if (
+        "computerSessionId" in computerFrame &&
+        computerFrame.computerSessionId !== computer.id
+      ) {
         throw new Error("computer frame crossed sessions");
       }
       checks.push("computer.keyboard-visible");
@@ -637,7 +653,7 @@ async function main(): Promise<void> {
 
       started = performance.now();
       computerProbe.close();
-      computerProbe = await FrameProbe.computer(
+      computerProbe = await openComputerVisualProbe(
         await computer.attach({
           targetId: frameTarget.id,
           expiresInSeconds: 120,
@@ -714,6 +730,21 @@ async function main(): Promise<void> {
       record("resourceEnd", performance.now() - started);
     }
   }
+}
+
+async function openComputerVisualProbe(
+  attachment: ComputerSessionAttachment,
+): Promise<ComputerVisualProbe> {
+  if (attachment.stream.kind === "direct_rfb") {
+    return await RfbAcceptanceProbe.open(attachment);
+  }
+  const encoded = await FrameProbe.computer(attachment);
+  return {
+    first: (timeoutMs) => encoded.first(timeoutMs),
+    nextChangedAfter: (previous, timeoutMs) =>
+      encoded.nextChangedAfter(previous as ComputerFrame, timeoutMs),
+    close: () => encoded.close(),
+  };
 }
 
 async function replayStableMutation<T>(operation: () => Promise<T>): Promise<T> {
