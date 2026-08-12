@@ -7860,7 +7860,7 @@ export type CapabilityInstallation = z.infer<typeof CapabilityInstallation>;
 
 export const CreateCapabilityCatalogItemRequest = z.object({
   id: z.string().min(1).optional(),
-  kind: CapabilityKind.exclude(["pack"]),
+  kind: z.literal("mcp"),
   source: CapabilitySource.default("manual"),
   name: z.string().min(1),
   description: z.string().min(1).optional(),
@@ -7874,7 +7874,7 @@ export const CreateCapabilityCatalogItemRequest = z.object({
 });
 export type CreateCapabilityCatalogItemRequest = z.infer<typeof CreateCapabilityCatalogItemRequest>;
 
-export const EnableCapabilityRequest = withVariableSetIdAlias({
+export const EnableCapabilityRequest = z.object({
   config: z.record(z.string(), z.unknown()).default({}),
   metadata: z.record(z.string(), z.unknown()).default({}),
   connectionRef: McpServerConnectionRef.optional(),
@@ -7885,14 +7885,6 @@ export const EnableCapabilityRequest = withVariableSetIdAlias({
    * and never returned by the API — responses expose header names only.
    */
   headers: z.record(z.string(), z.string()).default({}),
-  /**
-   * Initial variableSet attachment for kind=pack capabilities. Mirrors the
-   * dedicated POST /packs/:id/enable body: required to enable an
-   * variableSet.required pack through the unified capability-enable path,
-   * optional otherwise. Ignored by non-pack capabilities.
-   */
-  variableSetId: z.string().uuid().optional(),
-  environmentId: z.string().uuid().optional(),
 });
 export type EnableCapabilityRequest = z.infer<typeof EnableCapabilityRequest>;
 
@@ -7911,6 +7903,9 @@ export type DiscoverMcpCapabilitiesResponse = z.infer<typeof DiscoverMcpCapabili
 
 export const SkillImportSource = z.enum(["github", "skills_sh"]);
 export type SkillImportSource = z.infer<typeof SkillImportSource>;
+
+export const SkillInstallationSource = z.enum(["library", "github", "skills_sh", "pack"]);
+export type SkillInstallationSource = z.infer<typeof SkillInstallationSource>;
 
 export const PreviewSkillImportRequest = z.object({
   url: z.string().url().max(2048),
@@ -7951,6 +7946,15 @@ export const InstallSkillRequest = z.object({
 });
 export type InstallSkillRequest = z.infer<typeof InstallSkillRequest>;
 
+export const InstallLibrarySkillRequest = z
+  .object({
+    expectedVersion: z.string().min(1).max(96),
+    expectedContentSha256: z.string().regex(/^[0-9a-f]{64}$/),
+    expectedInstallationVersion: z.number().int().positive().optional(),
+  })
+  .strict();
+export type InstallLibrarySkillRequest = z.infer<typeof InstallLibrarySkillRequest>;
+
 export const InstalledSkill = z.object({
   capabilityId: z.string().min(1),
   pluginId: z.string().uuid(),
@@ -7959,7 +7963,8 @@ export const InstalledSkill = z.object({
   pluginInstallationId: z.string().uuid(),
   facetInstallationId: z.string().uuid(),
   installationVersion: z.number().int().positive(),
-  source: SkillImportSource,
+  source: SkillInstallationSource,
+  version: z.string().min(1).max(96),
   sourceUrl: z.string().url(),
   sourceCommit: z.string().regex(/^[0-9a-f]{40,64}$/),
   contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
@@ -7974,6 +7979,38 @@ export const CapabilityComponentOwner = z.object({
   removable: z.boolean(),
 });
 export type CapabilityComponentOwner = z.infer<typeof CapabilityComponentOwner>;
+
+export const InstalledSkillSummary = z
+  .object({
+    capabilityId: z.string().min(1),
+    pluginKey: z.string().min(1).max(200),
+    installationVersion: z.number().int().positive(),
+    name: z.string().min(1).max(200),
+    description: z.string().max(4000),
+    category: z.string().min(1).max(100),
+    tags: z.array(z.string().min(1).max(100)).max(64),
+    provenance: z.string().min(1).max(4000),
+    source: SkillInstallationSource,
+    version: z.string().min(1).max(96),
+    sourceUrl: z.string().url().max(2048),
+    repositoryUrl: z.string().url().max(2048),
+    sourceCommit: z.string().regex(/^[0-9a-f]{40,64}$/),
+    sourcePath: z.string().min(1).max(1024),
+    contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
+    fileCount: z.number().int().positive().max(128),
+    totalBytes: z.number().int().positive().max(1048576),
+    license: z.string().min(1).max(200).nullable(),
+    installedAt: z.string().datetime({ offset: true }),
+    updatedAt: z.string().datetime({ offset: true }),
+    owners: z.array(CapabilityComponentOwner).min(1),
+  })
+  .strict();
+export type InstalledSkillSummary = z.infer<typeof InstalledSkillSummary>;
+
+export const ListInstalledSkillsResponse = z
+  .object({ skills: z.array(InstalledSkillSummary).max(1000) })
+  .strict();
+export type ListInstalledSkillsResponse = z.infer<typeof ListInstalledSkillsResponse>;
 
 export const SkillUninstallPreview = z.object({
   capabilityId: z.string().min(1),

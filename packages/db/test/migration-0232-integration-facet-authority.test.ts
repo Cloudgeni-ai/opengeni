@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 const migration = await Bun.file(
-  new URL("../drizzle/0225_integration_facet_authority_cutover.sql", import.meta.url),
+  new URL("../drizzle/0232_integration_facet_authority_cutover.sql", import.meta.url),
 ).text();
 
 describe("Integration Facet authority maintenance cutover", () => {

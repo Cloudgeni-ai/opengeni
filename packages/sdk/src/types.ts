@@ -4965,7 +4965,7 @@ export type CapabilityCatalogResponse = {
 
 export type CreateCapabilityCatalogItemRequest = {
   id?: string | undefined;
-  kind: Exclude<CapabilityKind, "pack">;
+  kind: "mcp";
   source?: CapabilitySource | undefined;
   name: string;
   description?: string | undefined;
@@ -4988,14 +4988,6 @@ export type EnableCapabilityRequest = {
    * API (responses expose header names only).
    */
   headers?: Record<string, string> | undefined;
-  /**
-   * Initial variableSet attachment for kind=pack capabilities — mirrors the
-   * dedicated POST /packs/:id/enable body. Required to enable an
-   * variableSet.required pack through this unified path; ignored otherwise.
-   */
-  variableSetId?: string | undefined;
-  /** @deprecated use variableSetId */
-  environmentId?: string | undefined;
 };
 
 export type DiscoverMcpCapabilitiesResponse = {
@@ -5005,6 +4997,8 @@ export type DiscoverMcpCapabilitiesResponse = {
 };
 
 export type SkillImportSource = "github" | "skills_sh";
+
+export type SkillInstallationSource = "library" | "github" | "skills_sh" | "pack";
 
 export type PreviewSkillImportRequest = {
   url: string;
@@ -5041,6 +5035,12 @@ export type InstallSkillRequest = {
   expectedInstallationVersion?: number | undefined;
 };
 
+export type InstallLibrarySkillRequest = {
+  expectedVersion: string;
+  expectedContentSha256: string;
+  expectedInstallationVersion?: number | undefined;
+};
+
 export type InstalledSkill = {
   capabilityId: string;
   pluginId: string;
@@ -5049,7 +5049,8 @@ export type InstalledSkill = {
   pluginInstallationId: string;
   facetInstallationId: string;
   installationVersion: number;
-  source: SkillImportSource;
+  source: SkillInstallationSource;
+  version: string;
   sourceUrl: string;
   sourceCommit: string;
   contentSha256: string;
@@ -5061,6 +5062,34 @@ export type CapabilityComponentOwner = {
   kind: "direct" | "plugin" | "pack" | "migration";
   id: string;
   removable: boolean;
+};
+
+export type InstalledSkillSummary = {
+  capabilityId: string;
+  pluginKey: string;
+  installationVersion: number;
+  name: string;
+  description: string;
+  category: string;
+  tags: string[];
+  provenance: string;
+  source: SkillInstallationSource;
+  version: string;
+  sourceUrl: string;
+  repositoryUrl: string;
+  sourceCommit: string;
+  sourcePath: string;
+  contentSha256: string;
+  fileCount: number;
+  totalBytes: number;
+  license: string | null;
+  installedAt: string;
+  updatedAt: string;
+  owners: CapabilityComponentOwner[];
+};
+
+export type ListInstalledSkillsResponse = {
+  skills: InstalledSkillSummary[];
 };
 
 export type SkillUninstallPreview = {

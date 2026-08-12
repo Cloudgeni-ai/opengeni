@@ -14,11 +14,11 @@ import {
 } from "../src";
 import { migrate } from "../src/migrate";
 
-const migrationName = "0223_integration_definition_identity_cutover.sql";
+const migrationName = "0231_integration_definition_identity_cutover.sql";
 
 describe("Integration Definition identity migration replay", () => {
   test("upgrades old curated/workspace definitions and OAuth metadata without fallback", async () => {
-    const shared = await acquireSharedTestDatabase("migration-0223-definition-identity");
+    const shared = await acquireSharedTestDatabase("migration-0231-definition-identity");
     if (!shared) return;
     let app = createDb(shared.appUrl);
     try {

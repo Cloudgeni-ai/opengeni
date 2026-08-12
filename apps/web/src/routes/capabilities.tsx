@@ -130,13 +130,13 @@ const MemorySlackPublicationCard = lazy(async () => {
 import type {
   AccessContext,
   CapabilityCatalogItem,
-  CapabilityInstallation,
   CapabilityPack,
   ConnectorDocumentDestinationAuthority,
   ConnectionMetadata,
   ConnectionOwnership,
   PackInstallationPreview,
   PackUninstallPreview,
+  SkillUninstallPreview,
   SlackInstallationBinding,
   SocialConnection,
 } from "@/types";
@@ -353,7 +353,6 @@ export function CapabilitiesRoute({
   );
 
   const [items, setItems] = useState<CapabilityCatalogItem[]>([]);
-  const [installations, setInstallations] = useState<CapabilityInstallation[]>([]);
   // null = connections have not loaded (or the load failed, e.g. the grant lacks
   // connections:read); an array = loaded, even when empty. Health must not treat a
   // failed load as "every connection was deleted".
@@ -391,6 +390,10 @@ export function CapabilitiesRoute({
   const [sheetError, setSheetError] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   const [managedApp, setManagedApp] = useState<"google-drive" | "atlassian" | "slack" | null>(null);
+  const [skillRemoval, setSkillRemoval] = useState<{
+    item: CapabilityCatalogItem;
+    preview: SkillUninstallPreview;
+  } | null>(null);
 
   // Public MCP registry search (only offered when the catalog has no matches).
   const [registryBusy, setRegistryBusy] = useState(false);
@@ -486,6 +489,11 @@ export function CapabilitiesRoute({
   const canManageApiIntegrationInstances = canManageApiIntegrations(
     context.accessContext,
     workspaceId,
+  );
+  const canManageSkills = hasWorkspacePermission(
+    context.accessContext,
+    workspaceId,
+    "workspace:admin",
   );
   const slackAppStatus = visibleSlackBotConnection
     ? visibleSlackBotConnection.status === "active"
@@ -633,7 +641,6 @@ export function CapabilitiesRoute({
         client.listSlackInstallationBindings(workspaceId).catch(() => null),
       ]);
       setItems(catalog.items);
-      setInstallations(catalog.installations);
       // Don't clobber previously-loaded connections with null on a failed refetch
       // (that would flip healthy items to "unverified" until the next reload); a
       // first-load failure leaves the prior null = "not loaded", which is correct.
@@ -800,7 +807,51 @@ export function CapabilitiesRoute({
       // authKind/mcpUrl/providerDomain); connect calls use the persisted id.
       const plan = capabilityConnectPlan(item);
 
-      if (action.type === "disable") {
+      if (action.type === "install_skill") {
+        if (!canManageSkills) {
+          throw new Error("Workspace administrator permission is required to install Skills.");
+        }
+        const libraryId = metadataString(item.metadata.libraryId);
+        const expectedVersion = metadataString(item.metadata.version);
+        const expectedContentSha256 = metadataString(item.metadata.contentSha256);
+        if (!libraryId || !expectedVersion || !expectedContentSha256) {
+          throw new Error(
+            "This Skill is missing its reviewed library identity. Refresh and try again.",
+          );
+        }
+        const installationVersion = installedSkillVersion(item);
+        await client.installLibrarySkill(workspaceId, libraryId, {
+          expectedVersion,
+          expectedContentSha256,
+          ...(installationVersion !== null
+            ? { expectedInstallationVersion: installationVersion }
+            : {}),
+        });
+        await refresh();
+        onRuntimeChanged();
+        toast.success(item.enabled ? `Updated ${item.name}` : `Installed ${item.name}`, {
+          description: `Pinned to reviewed Skill version ${expectedVersion}.`,
+        });
+        setSelected(null);
+        return;
+      }
+
+      if (action.type === "remove_skill") {
+        if (!canManageSkills) {
+          throw new Error("Workspace administrator permission is required to remove Skills.");
+        }
+        const preview = await client.previewSkillUninstall(workspaceId, item.id);
+        if (!preview.installed || preview.installationVersion === null || !preview.directOwner) {
+          throw new Error("This Skill is no longer directly installed. Refresh and try again.");
+        }
+        setSkillRemoval({ item, preview });
+        return;
+      }
+
+      if (action.type === "disconnect") {
+        if (item.kind !== "mcp" || !item.actions.includes("disconnect")) {
+          throw new Error(`${item.name} must be managed through its dedicated controls.`);
+        }
         await client.disableCapability(workspaceId, item.id);
         await refresh();
         onRuntimeChanged();
@@ -939,6 +990,9 @@ export function CapabilitiesRoute({
         return;
       }
 
+      if (item.kind !== "mcp") {
+        throw new Error(`${item.name} must be installed through its dedicated controls.`);
+      }
       const persisted = await persistIfRegistry(item, selected.registry);
 
       if (action.type === "oauth" && plan.mode === "oauth") {
@@ -1011,6 +1065,33 @@ export function CapabilitiesRoute({
           : copy.description,
       );
       toast.error(copy.title, { description: copy.description });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function removeSelectedSkill(): Promise<boolean> {
+    if (!skillRemoval || skillRemoval.preview.installationVersion === null) return false;
+    setBusyId(skillRemoval.item.id);
+    try {
+      const result = await client.uninstallSkill(workspaceId, skillRemoval.item.id, {
+        expectedInstallationVersion: skillRemoval.preview.installationVersion,
+      });
+      await refresh();
+      onRuntimeChanged();
+      toast.success(`Removed ${skillRemoval.item.name}`, {
+        description:
+          result.status === "retained_by_other_owners"
+            ? "Another Plugin or Pack still owns this Skill, so it remains available."
+            : "The Skill is no longer active in this workspace.",
+      });
+      setSkillRemoval(null);
+      setSelected(null);
+      return true;
+    } catch (error) {
+      const copy = capabilityErrorToast(error, "Couldn't remove Skill");
+      toast.error(copy.title, { description: copy.description });
+      return false;
     } finally {
       setBusyId(null);
     }
@@ -1173,7 +1254,6 @@ export function CapabilitiesRoute({
       ]);
       freshItems = catalog.items;
       setItems(catalog.items);
-      setInstallations(catalog.installations);
       // Don't clobber previously-loaded connections with null on a failed refetch
       // (that would flip healthy items to "unverified" until the next reload).
       if (conns !== null) setConnections(conns);
@@ -1249,14 +1329,28 @@ export function CapabilitiesRoute({
     }
   }
 
-  // --- Enabled-strip disable (no sheet needed) -------------------------------
-  async function disableFromStrip(item: CapabilityCatalogItem) {
+  // --- Enabled-strip removal/disconnect (no sheet needed) --------------------
+  async function removeFromStrip(item: CapabilityCatalogItem) {
     setBusyId(item.id);
     try {
+      if (item.kind === "skill") {
+        if (!canManageSkills) {
+          throw new Error("Workspace administrator permission is required to remove Skills.");
+        }
+        const preview = await client.previewSkillUninstall(workspaceId, item.id);
+        if (!preview.installed || preview.installationVersion === null || !preview.directOwner) {
+          throw new Error("This Skill is no longer directly installed. Refresh and try again.");
+        }
+        setSkillRemoval({ item, preview });
+        return;
+      }
+      if (item.kind !== "mcp" || !item.actions.includes("disconnect")) {
+        throw new Error(`${item.name} must be managed through its dedicated controls.`);
+      }
       await client.disableCapability(workspaceId, item.id);
       await refresh();
       onRuntimeChanged();
-      toast.success(`Disabled ${item.name}`);
+      toast.success(`Disconnected ${item.name}`);
     } catch (error) {
       const copy = capabilityErrorToast(error, "Couldn't disable");
       toast.error(copy.title, { description: copy.description });
@@ -1924,8 +2018,9 @@ export function CapabilitiesRoute({
                 connectionHealth(item, connections ?? [], connectionsLoaded)
               }
               logoUrl={logoUrl}
+              canManageSkills={canManageSkills}
               onOpen={openItem}
-              onDisable={(item) => void disableFromStrip(item)}
+              onDisable={(item) => void removeFromStrip(item)}
             />
           ) : null}
 
@@ -1933,8 +2028,6 @@ export function CapabilitiesRoute({
             <SourcePackagesSection
               client={client}
               workspaceId={workspaceId}
-              items={items}
-              installations={installations}
               connections={connections}
               canManage={canManageApiIntegrationInstances}
               filter={filter}
@@ -2013,8 +2106,29 @@ export function CapabilitiesRoute({
         errorMessage={sheetError}
         socialConnections={selectedSocialConnections}
         canManageSocial={canManageSocial}
+        canManageSkills={canManageSkills}
         onAction={handleAction}
       />
+
+      <ConfirmDialog
+        open={skillRemoval !== null}
+        onOpenChange={(open) => {
+          if (!open) setSkillRemoval(null);
+        }}
+        title={skillRemoval ? `Remove Skill “${skillRemoval.item.name}”?` : "Remove Skill?"}
+        description="This removes only the direct workspace installation. Plugin and Pack ownership is preserved, and no Connection or credential is deleted."
+        confirmLabel="Remove Skill"
+        cancelAutoFocus
+        onConfirm={removeSelectedSkill}
+      >
+        {skillRemoval ? (
+          <div className="rounded-lg border border-border bg-bg/50 p-3 text-xs leading-5 text-fg-muted">
+            {skillRemoval.preview.removesRuntimeSkill
+              ? "No other owner retains this Skill, so its reviewed instructions will stop loading for new agent runs."
+              : `${skillRemoval.preview.remainingOwners.length} other owner${skillRemoval.preview.remainingOwners.length === 1 ? "" : "s"} will retain this Skill after the direct installation is removed.`}
+          </div>
+        ) : null}
+      </ConfirmDialog>
 
       <AddCustomDialog
         open={addOpen}
@@ -2024,6 +2138,19 @@ export function CapabilitiesRoute({
       />
     </div>
   );
+}
+
+function metadataString(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function installedSkillVersion(item: CapabilityCatalogItem): number | null {
+  const installedSkill = item.metadata.installedSkill;
+  if (!installedSkill || typeof installedSkill !== "object" || Array.isArray(installedSkill)) {
+    return null;
+  }
+  const value = (installedSkill as Record<string, unknown>).installationVersion;
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null;
 }
 
 const APP_LOGO_URLS = {

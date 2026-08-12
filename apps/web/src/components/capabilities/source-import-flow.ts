@@ -1,7 +1,7 @@
 import type {
   CapabilityCatalogItem,
-  CapabilityInstallation,
   ConnectionMetadata,
+  InstalledSkillSummary,
   PluginComponentPreview,
   PluginInstallationSummary,
   PluginPreview,
@@ -12,13 +12,7 @@ export type SourceImportKind = "skill" | "plugin";
 export type SourceImportIntent = "create" | "update";
 export type SourceImportPhase = "source" | "previewing" | "review" | "installing";
 
-export type InstalledSourceSkill = {
-  item: CapabilityCatalogItem;
-  installation: CapabilityInstallation;
-  sourceUrl: string;
-  sourceCommit: string;
-  contentSha256: string;
-};
+export type InstalledSourceSkill = InstalledSkillSummary;
 
 export type SourceImportState = {
   open: boolean;
@@ -167,37 +161,25 @@ export function sourceImportReducer(
 }
 
 export function workspaceImportedSkills(
-  items: readonly CapabilityCatalogItem[],
-  installations: readonly CapabilityInstallation[],
+  skills: readonly InstalledSkillSummary[],
 ): InstalledSourceSkill[] {
-  const installationByCapabilityId = new Map(
-    installations.map((installation) => [installation.capabilityId, installation]),
+  return skills.filter(
+    (skill) =>
+      (skill.source === "github" || skill.source === "skills_sh") &&
+      skill.owners.some((owner) => owner.kind === "direct"),
   );
-  return items.flatMap((item) => {
-    if (!isWorkspaceImportedSkill(item)) return [];
-    const installation = installationByCapabilityId.get(item.id);
-    const sourceUrl = stringValue(item.metadata.sourceUrl) ?? item.installUrl;
-    const sourceCommit = stringValue(item.metadata.sourceCommit);
-    const contentSha256 = stringValue(item.metadata.contentSha256);
-    if (
-      !installation ||
-      installation.status !== "active" ||
-      !sourceUrl ||
-      !sourceCommit ||
-      !contentSha256
-    ) {
-      return [];
-    }
-    return [{ item, installation, sourceUrl, sourceCommit, contentSha256 }];
-  });
 }
 
 export function isWorkspaceImportedSkill(item: CapabilityCatalogItem): boolean {
+  const installedSkill = item.metadata.installedSkill;
+  if (!installedSkill || typeof installedSkill !== "object" || Array.isArray(installedSkill)) {
+    return false;
+  }
+  const source = (installedSkill as Record<string, unknown>).source;
   return (
     item.kind === "skill" &&
     item.source === "manual" &&
-    item.metadata.platformVersion === 2 &&
-    item.metadata.provenance === "workspace_import"
+    (source === "github" || source === "skills_sh")
   );
 }
 

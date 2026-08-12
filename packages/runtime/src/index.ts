@@ -266,6 +266,7 @@ export {
   PORTABLE_SKILL_MAX_FILES,
   PORTABLE_SKILL_MAX_TOTAL_BYTES,
   parsePortableSkillFrontmatter,
+  skillLibraryRepositoryUrl,
   skillArtifactContentSha256,
   type PortableSkillArtifact,
   type SkillLibraryEntry,

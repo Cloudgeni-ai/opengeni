@@ -334,6 +334,16 @@ export function loadSkillLibrarySkill(
   };
 }
 
+/** Return the immutable repository origin for a reviewed library source URL. */
+export function skillLibraryRepositoryUrl(sourceUrl: string): string {
+  const url = new URL(sourceUrl);
+  const segments = url.pathname.split("/").filter(Boolean);
+  if (url.hostname === "github.com" && segments.length >= 2) {
+    return `${url.origin}/${segments[0]}/${segments[1]}`;
+  }
+  return sourceUrl;
+}
+
 /**
  * Read a curated artifact and calculate its canonical whole-artifact digest.
  *

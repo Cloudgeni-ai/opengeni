@@ -596,101 +596,6 @@ export async function installApiIntegration(
           );
         }
 
-        const compatibilityMetadata = {
-          platformVersion: 2,
-          protocol: input.protocol,
-          provider: input.provider ?? null,
-          providerDomain: input.providerDomain,
-          pluginId: plugin.id,
-          pluginVersionId: pluginVersion.id,
-          integrationFacetId: integrationFacet.id,
-          apiFacetId: apiFacet.id,
-          revisionId: input.revision.id,
-          contentSha256: input.revision.contentSha256,
-          baseServerId: input.serverId,
-          multiInstance: true,
-          provenance: "workspace_import",
-        };
-        await tx
-          .insert(schema.capabilityCatalogItems)
-          .values({
-            id: input.capabilityId,
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            kind: "api",
-            source: "manual",
-            name: input.name,
-            description: input.description ?? null,
-            category: input.category ?? "integrations",
-            tags: normalizedStrings(input.tags ?? ["integration", input.protocol], 64),
-            homepageUrl: input.sourceUrl ?? input.baseUrl,
-            endpointUrl: input.baseUrl,
-            authModel: objectValue(input.authScheme ?? {}).kind
-              ? String(objectValue(input.authScheme ?? {}).kind)
-              : null,
-            providerDomain: input.providerDomain,
-            surfaceType: "api",
-            authKind: connection ? connection.kind : "none",
-            provenance: "workspace_import",
-            tier: "community",
-            metadata: compatibilityMetadata,
-            updatedAt: now,
-          })
-          .onConflictDoUpdate({
-            target: [schema.capabilityCatalogItems.workspaceId, schema.capabilityCatalogItems.id],
-            set: {
-              name: input.name,
-              description: input.description ?? null,
-              tags: normalizedStrings(input.tags ?? ["integration", input.protocol], 64),
-              homepageUrl: input.sourceUrl ?? input.baseUrl,
-              endpointUrl: input.baseUrl,
-              authModel: objectValue(input.authScheme ?? {}).kind
-                ? String(objectValue(input.authScheme ?? {}).kind)
-                : null,
-              providerDomain: input.providerDomain,
-              surfaceType: "api",
-              authKind: connection ? connection.kind : "none",
-              metadata: compatibilityMetadata,
-              updatedAt: now,
-            },
-          });
-        await tx
-          .insert(schema.capabilityInstallations)
-          .values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            capabilityId: input.capabilityId,
-            kind: "api",
-            status: "active",
-            config: { baseServerId: input.serverId, multiInstance: true },
-            metadata: {
-              ...compatibilityMetadata,
-              pluginInstallationId: pluginInstallation.id,
-              integrationFacetInstallationId: integrationFacetInstallation.id,
-              apiFacetInstallationId: apiFacetInstallation.id,
-            },
-            enabledAt: now,
-            updatedAt: now,
-          })
-          .onConflictDoUpdate({
-            target: [
-              schema.capabilityInstallations.workspaceId,
-              schema.capabilityInstallations.capabilityId,
-            ],
-            set: {
-              status: "active",
-              config: { baseServerId: input.serverId, multiInstance: true },
-              metadata: {
-                ...compatibilityMetadata,
-                pluginInstallationId: pluginInstallation.id,
-                integrationFacetInstallationId: integrationFacetInstallation.id,
-                apiFacetInstallationId: apiFacetInstallation.id,
-              },
-              enabledAt: now,
-              updatedAt: now,
-            },
-          });
-
         return {
           capabilityId: input.capabilityId,
           pluginId: plugin.id,
@@ -1112,15 +1017,6 @@ export async function uninstallApiIntegration(
             updatedAt: now,
           })
           .where(eq(schema.capabilityPluginInstallations.id, context.pluginInstallationId));
-        await tx
-          .update(schema.capabilityInstallations)
-          .set({ status: "disabled", updatedAt: now })
-          .where(
-            and(
-              eq(schema.capabilityInstallations.workspaceId, input.workspaceId),
-              eq(schema.capabilityInstallations.capabilityId, input.capabilityId),
-            ),
-          );
         return {
           capabilityId: input.capabilityId,
           instanceKey: input.instanceKey,

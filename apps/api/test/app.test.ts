@@ -1443,7 +1443,7 @@ describe("curated skill catalog enablement", () => {
     expect(item.enabledReason).toBeNull();
   });
 
-  test("an active installation enables it without exposing a connection", () => {
+  test("a complete generic installation cannot enable a normalized Skill", () => {
     const item = applyCapabilityEnablement(
       librarySkill(),
       {
@@ -1460,8 +1460,8 @@ describe("curated skill catalog enablement", () => {
       },
       new Set(),
     );
-    expect(item.enabled).toBe(true);
-    expect(item.enabledReason).toBe("explicitly selected");
+    expect(item.enabled).toBe(false);
+    expect(item.enabledReason).toBeNull();
     expect(item.connectionRef).toBeNull();
   });
 

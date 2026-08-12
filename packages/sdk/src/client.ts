@@ -161,7 +161,9 @@ import type {
   CreateApiKeyResponse,
   CreateCapabilityCatalogItemRequest,
   InstallSkillRequest,
+  InstallLibrarySkillRequest,
   InstalledSkill,
+  ListInstalledSkillsResponse,
   CreateCheckoutRequest,
   CreateCheckoutResponse,
   OpenGeniSlackBotInstallRequest,
@@ -5192,6 +5194,27 @@ export class OpenGeniClient {
     return await this.requestJson<InstalledSkill>(
       "POST",
       `/v1/workspaces/${workspaceId}/skills/install`,
+      request,
+    );
+  }
+
+  /** List Skills from the authoritative Plugin/Skill-Facet installation ledger. */
+  async listInstalledSkills(workspaceId: string): Promise<ListInstalledSkillsResponse> {
+    return await this.requestJson<ListInstalledSkillsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/skills`,
+    );
+  }
+
+  /** Install one exact reviewed curated-library Skill through the Skill domain. */
+  async installLibrarySkill(
+    workspaceId: string,
+    libraryId: string,
+    request: InstallLibrarySkillRequest,
+  ): Promise<InstalledSkill> {
+    return await this.requestJson<InstalledSkill>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/skills/library/${encodeURIComponent(libraryId)}/install`,
       request,
     );
   }

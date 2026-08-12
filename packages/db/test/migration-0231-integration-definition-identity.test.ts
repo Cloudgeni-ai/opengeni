@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 const migration = await Bun.file(
-  new URL("../drizzle/0223_integration_definition_identity_cutover.sql", import.meta.url),
+  new URL("../drizzle/0231_integration_definition_identity_cutover.sql", import.meta.url),
 ).text();
 
 describe("Integration Definition identity maintenance cutover", () => {

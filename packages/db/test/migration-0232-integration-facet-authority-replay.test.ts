@@ -20,11 +20,11 @@ import {
 } from "../src";
 import { migrate } from "../src/migrate";
 
-const migrationName = "0225_integration_facet_authority_cutover.sql";
+const migrationName = "0232_integration_facet_authority_cutover.sql";
 
 describe("Integration Facet authority migration replay", () => {
   test("upgrades physical, Pack, owner, and receipt identity without fallback", async () => {
-    const shared = await acquireSharedTestDatabase("migration-0225-facet-authority");
+    const shared = await acquireSharedTestDatabase("migration-0232-facet-authority");
     if (!shared) return;
     let app = createDb(shared.appUrl);
     try {

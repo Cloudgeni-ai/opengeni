@@ -8024,6 +8024,7 @@ export const capabilityCatalogItems = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    kindAuthority: check("capability_catalog_items_kind_authority_chk", sql`${table.kind} = 'mcp'`),
     workspaceCapability: uniqueIndex("capability_catalog_items_workspace_capability_idx").on(
       table.workspaceId,
       table.id,
@@ -8070,6 +8071,7 @@ export const capabilityInstallations = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    kindAuthority: check("capability_installations_kind_authority_chk", sql`${table.kind} = 'mcp'`),
     workspaceCapability: uniqueIndex("capability_installations_workspace_capability_idx").on(
       table.workspaceId,
       table.capabilityId,
@@ -8082,9 +8084,9 @@ export const capabilityInstallations = pgTable(
   }),
 );
 
-// --- Capabilities platform v2 ------------------------------------------------
-// Expand-only normalized state. The v1 catalog/installations remain intact
-// while adapters shadow-read and migrate exact owners into this model.
+// --- Capabilities platform ---------------------------------------------------
+// Authoritative Plugin, immutable Version, Facet, installation, and ownership
+// state. The generic catalog/installations ledger is reserved for MCP.
 
 export const capabilityPlugins = pgTable(
   "capability_plugins",

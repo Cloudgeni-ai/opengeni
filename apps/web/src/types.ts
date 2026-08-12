@@ -24,6 +24,7 @@ export type {
   IntegrationFacetBindingSummary,
   IntegrationFacetDefinitionSummary,
   IntegrationInstanceFacetsResponse,
+  InstalledSkillSummary,
   ApiKey,
   BillingBalance,
   BillingEntitlementsResponse,

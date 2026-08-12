@@ -272,40 +272,6 @@ export async function finalizePackInstallationOperation(
           )
           .returning();
         if (!installation) throw new Error("Pack installation was not found during finalize");
-        await tx
-          .insert(schema.capabilityInstallations)
-          .values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            capabilityId: `pack:${input.packId}`,
-            kind: "pack",
-            status: "active",
-            config: {},
-            metadata: {
-              platformVersion: 2,
-              packInstallationId: input.packInstallationId,
-              manifestDigest: installation.manifestDigest,
-            },
-            enabledAt: now,
-            updatedAt: now,
-          })
-          .onConflictDoUpdate({
-            target: [
-              schema.capabilityInstallations.workspaceId,
-              schema.capabilityInstallations.capabilityId,
-            ],
-            set: {
-              status: "active",
-              config: {},
-              metadata: {
-                platformVersion: 2,
-                packInstallationId: input.packInstallationId,
-                manifestDigest: installation.manifestDigest,
-              },
-              enabledAt: now,
-              updatedAt: now,
-            },
-          });
         const [completed] = await tx
           .update(schema.capabilityOperations)
           .set({
@@ -615,15 +581,6 @@ export async function finalizePackUninstallOperation(
               eq(schema.packInstallations.workspaceId, input.workspaceId),
               eq(schema.packInstallations.id, input.packInstallationId),
               eq(schema.packInstallations.packId, input.packId),
-            ),
-          );
-        await tx
-          .update(schema.capabilityInstallations)
-          .set({ status: "disabled", updatedAt: now })
-          .where(
-            and(
-              eq(schema.capabilityInstallations.workspaceId, input.workspaceId),
-              eq(schema.capabilityInstallations.capabilityId, `pack:${input.packId}`),
             ),
           );
         const [completed] = await tx

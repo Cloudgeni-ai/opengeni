@@ -9,7 +9,7 @@ Capability Packs are role-oriented bundles that compose existing OpenGeni primit
 - a Variable Set requirement;
 - scheduled-task templates and task metadata.
 
-The built-in `marketing-social-daily-analysis` Pack connects social accounts, attaches marketing knowledge, and creates an ordinary scheduled agent run. It has no component or Rig plan, so it remains compatible with the simple legacy enable route.
+The built-in `marketing-social-daily-analysis` Pack connects social accounts, attaches marketing knowledge, and creates an ordinary scheduled agent run. It has no component or Rig plan, so it remains compatible with the dedicated simple Pack enable route.
 
 ## Product model
 
@@ -145,9 +145,14 @@ DELETE /v1/workspaces/:workspaceId/packs/:packId/installation
 
 The body contains `expectedInstallationVersion` and a UUID `idempotencyKey`. Uninstall removes only Pack owner edges, cleans up truly orphaned component installations and Facet bindings, deletes the Pack's component ledger rows, and marks the installation disabled. An active v2 Pack cannot be disabled through the generic capability route or unregistered until this lifecycle completes.
 
-### Legacy enable compatibility
+### Simple Pack compatibility
 
-`POST /packs/:packId/enable` and generic capability Enable remain available only for simple Packs that have no `components`, inline `skills`, `rig`, `sandboxImage`, or `sandboxProviderImages`. This preserves existing built-in and metadata/task-template Packs without allowing new composed Packs to bypass review.
+`POST /packs/:packId/enable` remains available only for simple Packs that have
+no `components`, inline `skills`, `rig`, `sandboxImage`, or
+`sandboxProviderImages`. Generic capability Enable no longer handles Packs;
+all Pack lifecycle state belongs to `pack_installations`. This preserves
+existing built-in and metadata/task-template Packs without allowing composed
+Packs to bypass review.
 
 Pre-v2 active installation rows have no `manifestSnapshot` and no `manifestDigest`. The worker retains their old direct Pack Skill/image behavior for rollback compatibility. Any v2 install/update freezes the manifest and moves the Pack to component/Rig runtime; the two models are never combined for one installation.
 

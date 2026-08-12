@@ -7,7 +7,7 @@ The catalog merges:
 - built-in and workspace-registered Packs
 - immutable, reviewed curated skill-library entries (`source: "library"`)
 - external MCP servers managed through `OPENGENI_MCP_SERVERS`
-- local catalog items added through the API or web app
+- manual remote MCP entries added through the API or web app
 - reviewed integrations.sh snapshot imports stored as global `source: "registry"` catalog rows
 - public remote MCP servers discovered from the official MCP Registry
 
@@ -65,7 +65,11 @@ The probe runs with those headers, and on success the values are stored encrypte
 
 Registry entries that declare required headers are tagged `requires-credentials` and cannot be enabled until the declared headers are supplied.
 
-The current compatibility table still records existing catalog installations, but product actions route to the owning type-specific domain. A Skill is installed, an Integration is connected/configured, and a Pack is installed/configured; clients must not infer one universal Enable action from catalog membership.
+The generic `capability_catalog_items` and `capability_installations` tables are
+MCP-only. Skills, Plugins, Integration Definitions, and Packs are projected
+from their dedicated authoritative ledgers, and their mutations use their
+type-specific preview/install/configure/uninstall flows. Clients must not infer
+one universal Enable action from catalog membership.
 
 ### Protocol-neutral API Integrations
 
@@ -135,10 +139,10 @@ token when the provider omits a replacement, and CAS-update or duplicate-safe
 create the normal encrypted Connection. Emulator-backed tests are merge proof;
 provider-live consent remains a separately labeled operational check.
 
-The normalized v2 rows store the protocol-compiled revision, tools, integration
-and API facets, facet installations, and owners under FORCE RLS. Compatibility
-catalog/install rows are dual-written while existing clients migrate, but they
-are not runtime authority. At turn start, active installations are projected as
+The normalized rows store the protocol-compiled revision, tools, Integration
+and API Facets, Facet installations, and owners under FORCE RLS. They are the
+only Integration Definition installation authority; generic API catalog and
+installation projections are not written. At turn start, active installations are projected as
 ordinary MCP servers and backed by an in-process local adapter. This preserves
 the existing bounded lazy tool search, exact session policy, child and schedule
 inheritance, approval/action policy, frozen Connection resolver, cancellation,
@@ -308,19 +312,22 @@ The default sandbox carries no Terraform, Checkov, social-marketing, or other do
 
 - `id` is stable (`skill:azure-verified-modules` in the catalog).
 - `metadata.libraryId`, `metadata.version`, `metadata.contentSha256`, `metadata.sourceCommit`, `metadata.sourceUrl`, `metadata.provenance`, `metadata.license`, `metadata.documentationUrl`, `metadata.compatibility`, and `metadata.upgrade` make provenance inspectable. `contentSha256` is a canonical whole-artifact digest over sorted normalized relative paths and the exact bytes of every recursively materialized regular file, not only `SKILL.md`.
-- Entries are immutable. A changed artifact is a new version and hash; enabling an unsupported `config.version` returns `422` rather than silently selecting another revision.
-- Enabling a library skill stores only the canonical exact version/hash metadata. It does not attach a variable set, credentials, MCP servers, tools, cloud permissions, tenant access, or Azure/OpenAI model routing. The skill contributes guidance files to the normal `.agents/` skill index only.
+- Entries are immutable. A changed artifact is a new version and hash; install requires the exact reviewed version and whole-artifact hash and returns `409` if the reviewed artifact changed.
+- Installing a library Skill stores the exact files plus canonical version/hash/provenance in the normalized Plugin/Skill-Facet ledger. It does not attach a Variable Set, credentials, MCP servers, tools, cloud permissions, tenant access, or model routing. The Skill contributes guidance files to the normal `.agents/` Skill index only.
 - Active library skills are resolved by the worker at turn start. A missing entry, unavailable artifact, or hash mismatch fails closed; it never substitutes a different version.
 
-Enable the exact catalog version (the `config.version` field is optional when the catalog has one current immutable version):
+Install the exact reviewed catalog version and hash:
 
 ```bash
-curl -X POST "http://127.0.0.1:8000/v1/workspaces/$WORKSPACE_ID/capabilities/skill%3Aazure-verified-modules/enable" \
+curl -X POST "http://127.0.0.1:8000/v1/workspaces/$WORKSPACE_ID/skills/library/azure-verified-modules/install" \
   -H 'content-type: application/json' \
-  -d '{"config":{"version":"1.0.0"},"metadata":{"enabledBy":"operator"}}'
+  -d '{"expectedVersion":"1.0.0","expectedContentSha256":"<reviewed-sha256>"}'
 ```
 
-The resulting catalog row reports an installed/ready lifecycle (and retains `enabled: true` with `enabledReason: "explicitly selected"` for compatibility). Uninstalling the selection removes the curated skill from subsequent turns.
+The resulting catalog row reports an installed lifecycle. Updating requires the
+previewed installation version, and uninstall removes only the direct owner;
+the Skill remains active when a Plugin or Pack still owns the same exact
+artifact.
 
 ### Skill source precedence
 
@@ -338,7 +345,16 @@ Self-hosted/Connected Machine deployments may omit the curated artifact from the
 
 ### Compatibility and migration
 
-Skill-library selection is currently workspace-scoped through the capability installation. Existing session rows do not contain a per-session library pin, so resumed and newly created sessions use the workspace's active exact-pinned library installations plus their Pack/session/repository sources. This deliberately removes the former seven deployment-default domain Skills rather than silently retaining methodology a workspace never selected. A future per-session pin migration can preserve historical library context for long-lived sessions if product requirements call for that stronger continuation guarantee; it must use the same immutable id/version/hash records and must not broaden authorization.
+Skill-library installation is workspace-scoped through the authoritative
+Plugin/Skill-Facet installation. Existing session rows do not contain a
+per-session library pin, so resumed and newly created sessions use the
+workspace's active exact-pinned Skill installations plus their
+Pack/session/repository sources. This deliberately removes the former
+deployment-default domain Skills rather than silently retaining methodology a
+workspace never selected. A future per-session pin migration can preserve
+historical library context for long-lived sessions if product requirements call
+for that stronger continuation guarantee; it must use the same immutable
+id/version/hash records and must not broaden authorization.
 
 ### Remote Skill imports
 
@@ -356,18 +372,21 @@ version; omission is rejected and a stale version returns `409`, so two
 administrators cannot silently overwrite each other's accepted source
 revision.
 
-The normalized v2 persistence model stores the immutable Plugin version, Skill
+The authoritative persistence model stores the immutable Plugin version, Skill
 facet, exact text files, workspace installation, and component owners under
 FORCE RLS. Runtime materialization revalidates the stored artifact and digest
 before adding it to the same lazy `.agents/` Skill index as other active
 workspace components, session, repository, and native artifact Skills. Uninstall is previewed and
 optimistic-concurrency fenced: removing the direct owner retains the Skill when
 a Plugin or Pack still owns it, and only the final owner removes it from later
-turns. The compatibility catalog/install rows are dual-written during the
-rolling migration; they are a projection, not the artifact authority.
+turns. Migration `0233_skill_and_integration_authority_cutover.sql` preserves
+exact active curated selections in this ledger, deletes every generic Skill
+projection, and constrains the generic catalog/install tables to MCP rows.
 
 The owning endpoints are:
 
+- `GET /v1/workspaces/:workspaceId/skills`
+- `POST /v1/workspaces/:workspaceId/skills/library/:libraryId/install`
 - `POST /v1/workspaces/:workspaceId/skills/preview`
 - `POST /v1/workspaces/:workspaceId/skills/install`
 - `GET /v1/workspaces/:workspaceId/skills/:capabilityId/uninstall-preview`

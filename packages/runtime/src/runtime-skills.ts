@@ -421,7 +421,7 @@ function compareRuntimeSkillName(left: string, right: string): number {
 function runtimeSkillDescription(skill: RuntimeSkillArtifact): string {
   const explicit = skill.description?.trim();
   if (explicit) return explicit;
-  const markdown = skill.files.find((file) => file.path === "SKILL.md")?.content ?? "";
+  const markdown = skill.files.find((skillFile) => skillFile.path === "SKILL.md")?.content ?? "";
   return skillFrontmatterDescription(markdown) ?? "No description provided.";
 }
 
