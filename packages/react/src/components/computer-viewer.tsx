@@ -1092,7 +1092,7 @@ function ComputerViewport(props: {
       <canvas
         ref={canvasRef}
         className={cn(
-          "absolute inset-0 m-auto max-h-full max-w-full touch-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent",
+          "absolute inset-0 m-auto max-h-full max-w-full touch-none focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent",
           !showCanvas && "invisible",
           !rawInputEnabled && "cursor-default",
         )}
@@ -1294,7 +1294,7 @@ function ComputerSemanticControl(props: {
             value={value}
             disabled={props.mutating}
             onChange={(event) => setValue(event.currentTarget.value)}
-            className="min-w-0 flex-1 rounded-og-sm border border-og-border bg-og-surface-1 px-1.5 py-1 text-og-control text-og-fg outline-none focus:border-og-accent"
+            className="min-w-0 flex-1 rounded-og-sm border border-og-border bg-og-surface-1 px-1.5 py-1 text-og-control text-og-fg outline-hidden focus:border-og-accent"
             aria-label={`Set ${node.name || node.identifier || node.role}`}
           />
           <button

@@ -1177,7 +1177,7 @@ function BrowserProfileMenu(props: {
                   onInput={(event) => setName(event.currentTarget.value)}
                   maxLength={200}
                   placeholder="Work"
-                  className="h-8 min-w-0 flex-1 rounded-og-sm border border-og-border bg-og-bg px-2 text-og-control text-og-fg placeholder:text-og-subtle focus:border-og-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent"
+                  className="h-8 min-w-0 flex-1 rounded-og-sm border border-og-border bg-og-bg px-2 text-og-control text-og-fg placeholder:text-og-subtle focus:border-og-accent focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent"
                 />
                 <button
                   type="submit"
@@ -1323,7 +1323,7 @@ function BrowserAddressBar(props: {
             focusedRef.current = false;
           }}
           disabled={!props.target}
-          className="min-w-0 flex-1 bg-transparent text-og-control text-og-fg placeholder:text-og-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent disabled:opacity-50"
+          className="min-w-0 flex-1 bg-transparent text-og-control text-og-fg placeholder:text-og-subtle focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent disabled:opacity-50"
           aria-label="Address"
           spellCheck={false}
           placeholder="Search or enter address"
@@ -1647,7 +1647,7 @@ function BrowserViewport(props: {
       <canvas
         ref={canvasRef}
         className={cn(
-          "absolute inset-0 m-auto max-h-full max-w-full touch-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent",
+          "absolute inset-0 m-auto max-h-full max-w-full touch-none focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent",
           !showCanvas && "invisible",
         )}
         onPointerDown={pointerDown}

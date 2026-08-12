@@ -32,8 +32,9 @@ const execFileAsync = promisify(execFile);
 // inside that container. Per-database isolation preserves the previous
 // per-container data isolation (separate schema + rows) while collapsing the
 // concurrent-container count from ~15 to 1. A lock-guarded holder set tracks
-// exact acquisitions against the current container id; the last holder removes
-// only that exact generation.
+// exact acquisitions against the current container id. The container stays up
+// for the test command (and can be reused by the next command); removing and
+// immediately rebinding its fixed port is racy on Docker Desktop/OrbStack.
 //
 // Tests connect as the NON-superuser `opengeni_app` login role (so FORCE RLS is
 // genuinely enforced, exactly as before), with a separate superuser `admin`
@@ -484,9 +485,10 @@ async function ensureContainerAndAcquire(): Promise<ContainerHandle | null> {
         await admin.end().catch(() => undefined);
       }
     } catch (err) {
-      if (startedContainer && generation) {
-        await dockerOk(["rm", "-f", "-v", generation]);
-      }
+      // Preserve a newly started cluster after bootstrap failure. The next
+      // acquisition can repair its partial template in place. Removing it here
+      // makes concurrent waiters repeatedly kill/recreate the same fixed-port
+      // container, which turns one transient failure into a suite-wide outage.
       throw err;
     }
     // Build the once-per-container migrated template (idempotent; self-heals a
@@ -514,25 +516,12 @@ async function releaseContainer(handle: ContainerHandle): Promise<void> {
       return;
     }
     delete state.holders[handle.token];
-    if (Object.keys(state.holders).length > 0) {
-      await writeContainerState(state);
-      return;
-    }
-
-    const probe = await probeContainer();
-    if (!probe.available) {
-      await writeContainerState(state);
-      return;
-    }
-    if (probe.id !== handle.generation) {
-      await rm(CONTAINER_STATE_FILE, { force: true });
-      return;
-    }
-    if (!(await dockerOk(["rm", "-f", "-v", handle.generation]))) {
-      await writeContainerState(state);
-      return;
-    }
-    await rm(CONTAINER_STATE_FILE, { force: true });
+    // Keep the exact generation warm even when the holder set becomes empty.
+    // A later file/command can safely reuse its immutable fingerprinted
+    // template. Eager removal made the next `docker run -p 61440:5432` race the
+    // desktop runtime's asynchronous port-proxy teardown, causing every later
+    // PostgreSQL test to report the database unavailable.
+    await writeContainerState(state);
   });
 }
 

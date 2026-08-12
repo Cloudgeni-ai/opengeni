@@ -95,7 +95,7 @@ export function MachineDetail({
               data-remove-machine
               aria-label={`Remove machine ${machine.name}`}
               onClick={() => onRemove(machine)}
-              className="inline-flex min-h-9 items-center gap-1.5 rounded-og-sm border border-og-status-failed/40 px-2.5 py-1 font-medium text-og-xs text-og-status-failed transition-colors hover:bg-og-status-failed/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-status-failed/50 pointer-coarse:min-h-11"
+              className="inline-flex min-h-9 items-center gap-1.5 rounded-og-sm border border-og-status-failed/40 px-2.5 py-1 font-medium text-og-xs text-og-status-failed transition-colors hover:bg-og-status-failed/10 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-status-failed/50 pointer-coarse:min-h-11"
             >
               <Trash2Icon className="size-3.5" aria-hidden />
               <span className="hidden sm:inline">Remove machine</span>
