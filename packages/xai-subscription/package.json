@@ -1,12 +1,12 @@
 {
-  "name": "@opengeni/config",
-  "version": "0.14.0",
-  "description": "OpenGeni runtime configuration: settings resolution, deployment knobs, and config validation shared across the server packages.",
+  "name": "@opengeni/xai-subscription",
+  "version": "0.1.0",
+  "description": "SuperGrok/xAI connected-subscription auth and transport. Pure HTTP, request context, quota/model metadata, and media helpers; no database dependency.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Cloudgeni-ai/opengeni.git",
-    "directory": "packages/config"
+    "directory": "packages/xai-subscription"
   },
   "files": [
     "dist",
@@ -21,6 +21,10 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
+    },
+    "./constants": {
+      "types": "./src/constants.ts",
+      "default": "./src/constants.ts"
     }
   },
   "publishConfig": {
@@ -33,10 +37,7 @@
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {
-    "@opengeni/codex": "workspace:*",
-    "@opengeni/contracts": "workspace:*",
-    "@opengeni/xai-subscription": "workspace:*",
-    "zod": "^4.2.1"
+    "@opengeni/network": "workspace:*"
   },
   "devDependencies": {
     "tsup": "^8.5.0",

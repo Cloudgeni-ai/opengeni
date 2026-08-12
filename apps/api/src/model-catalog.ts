@@ -2,6 +2,7 @@ import {
   configuredModels,
   configuredProviders,
   withCodexCatalogProvider,
+  withXaiSubscriptionCatalogProvider,
   withWorkspaceGatewayCatalogProvider,
   type ConfiguredModel,
   type Settings,
@@ -37,13 +38,17 @@ export const MODEL_CREDENTIAL_READINESS_OBSERVATION_MAX_AGE_MS = 5 * 60_000;
 export function projectClientModel(model: ConfiguredModel): ClientModel {
   const source =
     model.credentialSource.kind === "connected_subscription"
-      ? "codex"
+      ? model.credentialSource.provider === "xai"
+        ? "supergrok"
+        : "codex"
       : model.credentialSource.kind === "workspace_connection"
         ? "workspace_gateway"
         : "opengeni";
   const publicProvider =
     source === "codex"
       ? { provider: "codex", providerLabel: "Codex" }
+      : source === "supergrok"
+        ? { provider: "supergrok", providerLabel: "SuperGrok" }
       : source === "workspace_gateway"
         ? { provider: "workspace-gateway", providerLabel: "Your Gateway" }
         : { provider: "opengeni", providerLabel: "OpenGeni" };
@@ -131,6 +136,7 @@ function credentialReadinessFor(input: {
   model: ConfiguredModel;
   provider: ReturnType<typeof configuredProviders>[number] | undefined;
   codexSubscriptionActive: boolean;
+  xaiSubscriptionActive: boolean;
   workspaceGatewayConnectionActive: boolean;
   observation: ModelCredentialReadinessObservation | undefined;
   nowMs: number;
@@ -138,7 +144,11 @@ function credentialReadinessFor(input: {
 }): ModelCredentialReadinessV1 {
   const source = input.model.credentialSource;
   if (source.kind === "connected_subscription") {
-    return input.codexSubscriptionActive
+    const active =
+      source.provider === "xai"
+        ? input.xaiSubscriptionActive
+        : input.codexSubscriptionActive;
+    return active
       ? { status: "ready", reason: null, basis: "connection", checkedAt: null }
       : {
           status: "not_ready",
@@ -309,6 +319,7 @@ export function buildWorkspaceModelCatalog(input: {
   settings: Settings;
   policy: WorkspaceModelPolicyContract | null;
   codexSubscriptionActive: boolean;
+  xaiSubscriptionActive?: boolean;
   workspaceGatewayConnectionActive?: boolean;
   credentialReadinessObservations?:
     | Readonly<Record<string, ModelCredentialReadinessObservation>>
@@ -320,7 +331,10 @@ export function buildWorkspaceModelCatalog(input: {
   const codexSettings = input.settings.codexSubscriptionEnabled
     ? withCodexCatalogProvider(input.settings)
     : input.settings;
-  const catalogSettings = withWorkspaceGatewayCatalogProvider(codexSettings);
+  const xaiSettings = input.settings.supergrokSubscriptionEnabled
+    ? withXaiSubscriptionCatalogProvider(codexSettings)
+    : codexSettings;
+  const catalogSettings = withWorkspaceGatewayCatalogProvider(xaiSettings);
   const providers = new Map(
     configuredProviders(catalogSettings).map((provider) => [provider.id, provider]),
   );
@@ -341,6 +355,7 @@ export function buildWorkspaceModelCatalog(input: {
       model,
       provider,
       codexSubscriptionActive: input.codexSubscriptionActive,
+      xaiSubscriptionActive: input.xaiSubscriptionActive === true,
       workspaceGatewayConnectionActive: input.workspaceGatewayConnectionActive === true,
       observation: input.credentialReadinessObservations?.[model.definitionVersion],
       nowMs,

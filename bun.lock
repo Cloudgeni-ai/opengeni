@@ -320,6 +320,7 @@
       "dependencies": {
         "@opengeni/codex": "workspace:*",
         "@opengeni/contracts": "workspace:*",
+        "@opengeni/xai-subscription": "workspace:*",
         "zod": "^4.2.1",
       },
       "devDependencies": {
@@ -591,6 +592,7 @@
         "@opengeni/contracts": "workspace:*",
         "@opengeni/network": "workspace:*",
         "@opengeni/sdk": "workspace:*",
+        "@opengeni/xai-subscription": "workspace:*",
         "debug": "4.4.3",
         "modal": "0.9.0",
         "openai": "6.47.0",
@@ -655,6 +657,17 @@
         "zod": "^4.2.1",
       },
       "devDependencies": {
+        "typescript": "7.0.2",
+      },
+    },
+    "packages/xai-subscription": {
+      "name": "@opengeni/xai-subscription",
+      "version": "0.1.0",
+      "dependencies": {
+        "@opengeni/network": "workspace:*",
+      },
+      "devDependencies": {
+        "tsup": "^8.5.0",
         "typescript": "7.0.2",
       },
     },
@@ -1325,6 +1338,8 @@
     "@opengeni/testing": ["@opengeni/testing@workspace:packages/testing"],
 
     "@opengeni/worker-bundle": ["@opengeni/worker-bundle@workspace:apps/worker"],
+
+    "@opengeni/xai-subscription": ["@opengeni/xai-subscription@workspace:packages/xai-subscription"],
 
     "@opentelemetry/api": ["@opentelemetry/api@1.9.1", "", {}, "sha512-gLyJlPHPZYdAk1JENA9LeHejZe1Ti77/pTeFm/nMXmQH/HFZlcS/O2XJB+L8fkbrNSqhdtlvjBVjxwUYanNH5Q=="],
 

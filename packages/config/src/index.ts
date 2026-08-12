@@ -28,6 +28,16 @@ import {
   CODEX_PROVIDER_BASE_URL,
   CODEX_PROVIDER_ID,
 } from "@opengeni/codex/constants";
+import {
+  XAI_SUBSCRIPTION_FALLBACK_MODEL_SLUGS,
+  XAI_SUBSCRIPTION_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
+  XAI_SUBSCRIPTION_MODEL_CONTEXT_WINDOW_TOKENS,
+  XAI_SUBSCRIPTION_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
+  XAI_SUBSCRIPTION_MODEL_ID_PREFIX,
+  XAI_SUBSCRIPTION_PROVIDER_ID,
+  XAI_SUBSCRIPTION_PROXY_BASE_URL,
+  type XaiSubscriptionModelMetadata,
+} from "@opengeni/xai-subscription";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 
@@ -511,6 +521,9 @@ const SettingsSchema = z.object({
   // subscription is injected as a synthetic "codex-subscription" registry
   // provider whose models route through the ChatGPT backend (@opengeni/codex).
   codexSubscriptionEnabled: EnvBoolean.default(false), // OPENGENI_CODEX_SUBSCRIPTION_ENABLED
+  // SuperGrok/xAI connected subscription. This is a workspace-scoped OAuth
+  // account pool and a distinct rail from the existing xai/* API-key provider.
+  supergrokSubscriptionEnabled: EnvBoolean.default(false), // OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED
   // Expose the connected apps attached to a Codex subscription through the
   // synthetic codex_apps MCP server. Independent from subscription routing so
   // operators can use Codex models without exposing ChatGPT connectors.
@@ -1408,7 +1421,7 @@ export type ModelExecutionLimitsV1 = {
 
 export type CredentialSourceV1 =
   | { kind: "deployment"; mechanism: "api_key" | "azure_ad_bearer" }
-  | { kind: "connected_subscription"; provider: "codex" }
+  | { kind: "connected_subscription"; provider: "codex" | "xai" }
   | { kind: "workspace_connection"; mechanism: "api_key" };
 
 export type BillingAttributionV1 = {
@@ -1428,12 +1441,13 @@ export type ModelProviderApi = z.infer<typeof ModelProviderApi>;
 
 /**
  * Registry provider kind. "api-key" providers carry their own static key/headers;
- * "codex-subscription" providers authenticate per-request with a ChatGPT/Codex
- * subscription token resolved at call time (no static key) — see @opengeni/codex.
+ * connected-subscription providers resolve a workspace account token at call
+ * time and never carry a static key in the registry definition.
  */
 export const RegistryProviderKind = z.enum([
   "api-key",
   "codex-subscription",
+  "xai-subscription",
   "vercel-gateway-managed",
   "vercel-gateway-workspace",
 ]);
@@ -1972,6 +1986,7 @@ export function getSettings(): Settings {
     modelPricingJson: optional("OPENGENI_MODEL_PRICING_JSON"),
     modelProvidersJson: optional("OPENGENI_MODEL_PROVIDERS_JSON"),
     codexSubscriptionEnabled: optional("OPENGENI_CODEX_SUBSCRIPTION_ENABLED"),
+    supergrokSubscriptionEnabled: optional("OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED"),
     codexConnectedAppsEnabled: optional("OPENGENI_CODEX_CONNECTED_APPS_ENABLED"),
     codexToolSearchEnabled: optional("OPENGENI_CODEX_TOOL_SEARCH_ENABLED"),
     lazyToolSearchEnabled: optional("OPENGENI_LAZY_TOOL_SEARCH_ENABLED"),
@@ -2839,6 +2854,9 @@ function registryCredentialSource(provider: RegistryProvider): CredentialSourceV
   if (provider.kind === "codex-subscription") {
     return { kind: "connected_subscription", provider: "codex" };
   }
+  if (provider.kind === "xai-subscription") {
+    return { kind: "connected_subscription", provider: "xai" };
+  }
   if (provider.kind === "vercel-gateway-workspace") {
     return { kind: "workspace_connection", mechanism: "api_key" };
   }
@@ -2846,7 +2864,7 @@ function registryCredentialSource(provider: RegistryProvider): CredentialSourceV
 }
 
 function registryBilling(provider: RegistryProvider): BillingAttributionV1 {
-  if (provider.kind === "codex-subscription") {
+  if (provider.kind === "codex-subscription" || provider.kind === "xai-subscription") {
     return { upstreamPayer: "connected_subscription", metering: "external" };
   }
   if (provider.kind === "vercel-gateway-workspace") {
@@ -3067,6 +3085,59 @@ export function withCodexCatalogProvider(settings: Settings): Settings {
 }
 
 /**
+ * Static SuperGrok product catalogue plus optional live `/models-v2` limits.
+ * The overlay never contains a concrete account id or bearer; selection and
+ * per-turn credential freeze remain worker/DB responsibilities.
+ */
+export function withXaiSubscriptionCatalogProvider(
+  settings: Settings,
+  liveModels: readonly XaiSubscriptionModelMetadata[] = [],
+): Settings {
+  const providers = parseModelProvidersJson(settings.modelProvidersJson);
+  if (providers.some((provider) => provider.id === XAI_SUBSCRIPTION_PROVIDER_ID)) {
+    return settings;
+  }
+  const liveBySlug = new Map(liveModels.map((model) => [model.slug, model]));
+  const slugs = uniqueValues([
+    ...XAI_SUBSCRIPTION_FALLBACK_MODEL_SLUGS,
+    ...liveModels.filter((model) => model.apiBackend === "responses").map((model) => model.slug),
+  ]);
+  const provider: RegistryProvider = {
+    kind: "xai-subscription",
+    id: XAI_SUBSCRIPTION_PROVIDER_ID,
+    label: "SuperGrok (xAI subscription)",
+    api: "responses",
+    baseUrl: XAI_SUBSCRIPTION_PROXY_BASE_URL,
+    models: slugs.map((slug) => {
+      const live = liveBySlug.get(slug);
+      const capabilities = legacyModelCapabilities(settings, {
+        reasoningEffort: true,
+        hostedWebSearch: true,
+      });
+      capabilities.hostedTools.xSearch = { upstream: "supported", runnable: true };
+      capabilities.hostedTools.imageGeneration = { upstream: "supported", runnable: true };
+      return {
+        id: `${XAI_SUBSCRIPTION_MODEL_ID_PREFIX}${slug}`,
+        upstreamModelId: slug,
+        label: live?.name ?? productLabelForModelId(slug),
+        reasoningEffort: true,
+        hostedWebSearch: true,
+        capabilities,
+        contextWindowTokens:
+          live?.contextWindowTokens ?? XAI_SUBSCRIPTION_MODEL_CONTEXT_WINDOW_TOKENS,
+        effectiveContextWindowTokens:
+          live?.effectiveContextWindowTokens ??
+          XAI_SUBSCRIPTION_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
+        autoCompactTokenLimit:
+          live?.autoCompactTokenLimit ?? XAI_SUBSCRIPTION_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
+        toolOutputTruncationTokens: settings.modelToolOutputTruncationTokens,
+      };
+    }),
+  };
+  return { ...settings, modelProvidersJson: JSON.stringify([...providers, provider]) };
+}
+
+/**
  * The provider identity a model id resolves to, for workspace model-policy
  * evaluation — MUST agree with the real router (resolveTurnModel /
  * MultiProviderModelProvider) on every case:
@@ -3083,6 +3154,9 @@ export function policyProviderIdForModel(settings: Settings, modelId: string): s
   const canonicalModelId = canonicalizeConfiguredModelId(settings, modelId);
   if (canonicalModelId.startsWith(CODEX_MODEL_ID_PREFIX)) {
     return CODEX_PROVIDER_ID;
+  }
+  if (canonicalModelId.startsWith(XAI_SUBSCRIPTION_MODEL_ID_PREFIX)) {
+    return XAI_SUBSCRIPTION_PROVIDER_ID;
   }
   if (canonicalModelId.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX)) {
     return WORKSPACE_GATEWAY_PROVIDER_ID;
@@ -3204,6 +3278,7 @@ export function configuredModels(settings: Settings): ConfiguredModel[] {
   );
   const isRegistryNamespaced = (id: string): boolean =>
     id.startsWith(CODEX_MODEL_ID_PREFIX) ||
+    id.startsWith(XAI_SUBSCRIPTION_MODEL_ID_PREFIX) ||
     registryAliases.has(id) ||
     (id.includes("/") && registryOwnedIds.has(id));
   const builtinProvider = providerById.get(builtinId);
@@ -3369,6 +3444,12 @@ export type ResolveTurnExecutionPolicyV1Input = {
 function settingsForTurnExecutionPolicy(settings: Settings, modelId: string): Settings {
   if (settings.codexSubscriptionEnabled && modelId.startsWith(CODEX_MODEL_ID_PREFIX)) {
     return withCodexCatalogProvider(settings);
+  }
+  if (
+    settings.supergrokSubscriptionEnabled &&
+    modelId.startsWith(XAI_SUBSCRIPTION_MODEL_ID_PREFIX)
+  ) {
+    return withXaiSubscriptionCatalogProvider(settings);
   }
   if (modelId.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX)) {
     return withWorkspaceGatewayCatalogProvider(settings);
@@ -5021,10 +5102,11 @@ function validateSettings(settings: Settings): void {
   for (const provider of registryProviders) {
     if (
       provider.kind === "vercel-gateway-managed" ||
-      provider.kind === "vercel-gateway-workspace"
+      provider.kind === "vercel-gateway-workspace" ||
+      provider.kind === "xai-subscription"
     ) {
       throw new Error(
-        `OPENGENI_MODEL_PROVIDERS_JSON provider kind ${provider.kind} is reserved for the reviewed AI Gateway broker`,
+        `OPENGENI_MODEL_PROVIDERS_JSON provider kind ${provider.kind} is reserved for a reviewed OpenGeni credential broker`,
       );
     }
     if (provider.id === builtinId) {

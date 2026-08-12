@@ -4,6 +4,7 @@ import {
   configuredAllowedReasoningEfforts,
   configuredModels,
   withCodexCatalogProvider,
+  withXaiSubscriptionCatalogProvider,
 } from "@opengeni/config";
 import {
   ClientConfig,
@@ -465,9 +466,12 @@ export function createAppComposition(deps: AppDependencies): {
 
   app.get("/v1/config/client", async (c) => {
     c.header("cache-control", "no-store");
-    const catalogSettings = deps.settings.codexSubscriptionEnabled
+    const codexCatalogSettings = deps.settings.codexSubscriptionEnabled
       ? withCodexCatalogProvider(deps.settings)
       : deps.settings;
+    const catalogSettings = deps.settings.supergrokSubscriptionEnabled
+      ? withXaiSubscriptionCatalogProvider(codexCatalogSettings)
+      : codexCatalogSettings;
     return c.json(
       ClientConfig.parse({
         deploymentRevision: deps.settings.deploymentRevision,

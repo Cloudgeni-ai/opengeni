@@ -1,6 +1,10 @@
 import type { ResolvedModelProvider, Settings } from "@opengeni/config";
 import OpenAI from "openai";
 import { CODEX_RESPONSE_SDK_OUTER_TIMEOUT_MS, codexSubscriptionFetch } from "@opengeni/codex";
+import {
+  XAI_RESPONSE_SDK_OUTER_TIMEOUT_MS,
+  xaiSubscriptionFetch,
+} from "@opengeni/xai-subscription";
 
 import type { RuntimeMetricsHooks } from "./metrics";
 import { WorkspaceGatewayUnavailableError } from "./model-provider-errors";
@@ -100,6 +104,26 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
           },
           { modelRequestPolicy: modelRequestPolicyForProvider(provider) },
         )
+      : provider.kind === "xai-subscription"
+        ? // SuperGrok subscription uses one workspace-scoped request context.
+          // The cached client contains no credential: xaiSubscriptionFetch
+          // resolves the exact frozen account token at request time, stamps the
+          // Grok CLI proxy headers, and owns the sole definitive 401 refresh.
+          new ReplayableJsonOpenAI(
+            {
+              apiKey: provider.apiKey ?? "supergrok-subscription",
+              ...(provider.baseUrl ? { baseURL: provider.baseUrl } : {}),
+              // Never let the SDK replay a request that may have reached the
+              // provider. The subscription transport retries only a definitive
+              // pre-acceptance authentication failure (401).
+              maxRetries: 0,
+              timeout: XAI_RESPONSE_SDK_OUTER_TIMEOUT_MS,
+              fetch: xaiSubscriptionFetch(
+                instrumentedModelFetch(provider.id, globalThis.fetch),
+              ),
+            },
+            { modelRequestPolicy: modelRequestPolicyForProvider(provider) },
+          )
       : // ResolvedModelProvider.apiKey is already the resolved key (configuredProviders
         // ran resolveProviderApiKey at config time, collapsing apiKey/apiKeyEnv), so it
         // is passed straight through here rather than re-resolved.
