@@ -118,33 +118,31 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
               // pre-acceptance authentication failure (401).
               maxRetries: 0,
               timeout: XAI_RESPONSE_SDK_OUTER_TIMEOUT_MS,
-              fetch: xaiSubscriptionFetch(
-                instrumentedModelFetch(provider.id, globalThis.fetch),
-              ),
+              fetch: xaiSubscriptionFetch(instrumentedModelFetch(provider.id, globalThis.fetch)),
             },
             { modelRequestPolicy: modelRequestPolicyForProvider(provider) },
           )
-      : // ResolvedModelProvider.apiKey is already the resolved key (configuredProviders
-        // ran resolveProviderApiKey at config time, collapsing apiKey/apiKeyEnv), so it
-        // is passed straight through here rather than re-resolved.
-        new ReplayableJsonOpenAI(
-          {
-            ...(provider.apiKey ? { apiKey: provider.apiKey } : {}),
-            ...(provider.baseUrl ? { baseURL: provider.baseUrl } : {}),
-            // Gateway routing is deliberately fail-closed. Avoid SDK replay after
-            // a request may have reached the one pinned endpoint.
-            maxRetries: gatewayProvider ? 0 : settings.openaiMaxRetries,
-            ...(provider.defaultQuery ? { defaultQuery: provider.defaultQuery } : {}),
-            ...(provider.defaultHeaders ? { defaultHeaders: provider.defaultHeaders } : {}),
-            fetch: gatewayProvider
-              ? vercelGatewayRoutingFetch(
-                  provider.kind as "vercel-gateway-managed" | "vercel-gateway-workspace",
-                  instrumentedModelFetch(provider.id, globalThis.fetch),
-                )
-              : instrumentedModelFetch(provider.id, globalThis.fetch),
-          },
-          { modelRequestPolicy: modelRequestPolicyForProvider(provider) },
-        );
+        : // ResolvedModelProvider.apiKey is already the resolved key (configuredProviders
+          // ran resolveProviderApiKey at config time, collapsing apiKey/apiKeyEnv), so it
+          // is passed straight through here rather than re-resolved.
+          new ReplayableJsonOpenAI(
+            {
+              ...(provider.apiKey ? { apiKey: provider.apiKey } : {}),
+              ...(provider.baseUrl ? { baseURL: provider.baseUrl } : {}),
+              // Gateway routing is deliberately fail-closed. Avoid SDK replay after
+              // a request may have reached the one pinned endpoint.
+              maxRetries: gatewayProvider ? 0 : settings.openaiMaxRetries,
+              ...(provider.defaultQuery ? { defaultQuery: provider.defaultQuery } : {}),
+              ...(provider.defaultHeaders ? { defaultHeaders: provider.defaultHeaders } : {}),
+              fetch: gatewayProvider
+                ? vercelGatewayRoutingFetch(
+                    provider.kind as "vercel-gateway-managed" | "vercel-gateway-workspace",
+                    instrumentedModelFetch(provider.id, globalThis.fetch),
+                  )
+                : instrumentedModelFetch(provider.id, globalThis.fetch),
+            },
+            { modelRequestPolicy: modelRequestPolicyForProvider(provider) },
+          );
   if (!workspaceGateway) {
     providerClientCache.set(provider.id, client);
   }

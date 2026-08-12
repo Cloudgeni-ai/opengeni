@@ -1,20 +1,15 @@
 import { randomUUID } from "node:crypto";
 
-import {
-  XAI_CLIENT_MODE,
-  XAI_CLIENT_VERSION,
-  XAI_TOKEN_AUTH_HEADER_VALUE,
-} from "./constants";
+import { XAI_CLIENT_MODE, XAI_CLIENT_VERSION, XAI_TOKEN_AUTH_HEADER_VALUE } from "./constants";
 import { normalizeXaiResponseEventJson, normalizeXaiSubscriptionRequestBody } from "./normalize";
-import {
-  type XaiFinalContextUsage,
-  xaiSubscriptionRequestStorage,
-} from "./request-context";
+import { type XaiFinalContextUsage, xaiSubscriptionRequestStorage } from "./request-context";
 
-export type XaiFetchLike = (
-  input: string | URL | Request,
-  init?: RequestInit,
-) => Promise<Response>;
+export type XaiFetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
+const REPLAYABLE_REQUEST_BODY_FACTORY = Symbol.for("opengeni.replayable-request-body-factory");
+type ReplayableRequestInit = RequestInit & {
+  [REPLAYABLE_REQUEST_BODY_FACTORY]?: () => ReadableStream<Uint8Array>;
+};
 
 export const XAI_SUBSCRIPTION_TRANSPORT_ERROR_HEADER =
   "x-opengeni-xai-subscription-transport-error";
@@ -46,7 +41,10 @@ export function xaiSubscriptionFetch(base: XaiFetchLike): XaiFetchLike {
     originalHeaders.delete(XAI_SUBSCRIPTION_REQUEST_ID_HEADER);
     originalHeaders.delete(XAI_SUBSCRIPTION_REQUEST_MODEL_HEADER);
 
-    const body = await requestBodyText(input, init);
+    const replayableBodyFactory = (init as ReplayableRequestInit | undefined)?.[
+      REPLAYABLE_REQUEST_BODY_FACTORY
+    ];
+    const body = await requestBodyText(input, init, replayableBodyFactory);
     const parsed = body ? (JSON.parse(body) as unknown) : {};
     const normalizedBody = normalized
       ? (parsed as Record<string, unknown>)
@@ -94,9 +92,11 @@ export function xaiSubscriptionFetch(base: XaiFetchLike): XaiFetchLike {
 async function requestBodyText(
   input: string | URL | Request,
   init: RequestInit | undefined,
+  replayableBodyFactory: (() => ReadableStream<Uint8Array>) | undefined,
 ): Promise<string> {
   if (typeof init?.body === "string") return init.body;
   if (input instanceof Request) return await input.clone().text();
+  if (replayableBodyFactory) return await new Response(replayableBodyFactory()).text();
   if (init?.body === undefined || init.body === null) return "";
   throw new Error("SuperGrok subscription request body must be replayable JSON text");
 }
@@ -107,7 +107,8 @@ async function normalizeResponse(
 ): Promise<Response> {
   if (!response.ok) {
     const bytes = new Uint8Array(await response.arrayBuffer());
-    const bounded = bytes.byteLength > MAX_ERROR_BODY_BYTES ? bytes.slice(0, MAX_ERROR_BODY_BYTES) : bytes;
+    const bounded =
+      bytes.byteLength > MAX_ERROR_BODY_BYTES ? bytes.slice(0, MAX_ERROR_BODY_BYTES) : bytes;
     const headers = new Headers(response.headers);
     headers.set(XAI_SUBSCRIPTION_TRANSPORT_ERROR_HEADER, "1");
     return new Response(bounded, {
@@ -120,7 +121,10 @@ async function normalizeResponse(
   const contentType = response.headers.get("content-type") ?? "";
   if (!contentType.includes("text/event-stream")) {
     const value = await response.json();
-    const normalized = normalizeXaiResponseEventJson({ type: "response.completed", response: value });
+    const normalized = normalizeXaiResponseEventJson({
+      type: "response.completed",
+      response: value,
+    });
     emitContextUsage(normalized.value, normalized.finalContextTokens, onFinalContextUsage);
     const responseValue =
       normalized.value && typeof normalized.value === "object" && !Array.isArray(normalized.value)
@@ -142,9 +146,11 @@ async function normalizeResponse(
       pending += decoder.decode(chunk.value, { stream: !chunk.done });
       const parts = pending.split("\n\n");
       pending = parts.pop() ?? "";
-      for (const part of parts) controller.enqueue(encoder.encode(`${normalizeSseEvent(part, onFinalContextUsage)}\n\n`));
+      for (const part of parts)
+        controller.enqueue(encoder.encode(`${normalizeSseEvent(part, onFinalContextUsage)}\n\n`));
       if (chunk.done) {
-        if (pending) controller.enqueue(encoder.encode(normalizeSseEvent(pending, onFinalContextUsage)));
+        if (pending)
+          controller.enqueue(encoder.encode(normalizeSseEvent(pending, onFinalContextUsage)));
         controller.close();
       }
     },

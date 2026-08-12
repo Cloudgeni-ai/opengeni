@@ -25,6 +25,7 @@ import {
   XAI_SUBSCRIPTION_PROVIDER_ID,
   XAI_SUBSCRIPTION_PROXY_BASE_URL,
   xaiSubscriptionRequestStorage,
+  xaiSubscriptionFetch,
   type XaiSubscriptionRequestContext,
 } from "@opengeni/xai-subscription";
 import { testSettings } from "@opengeni/testing";
@@ -1193,14 +1194,14 @@ describe("buildModelInstance — chat vs responses Model selection per provider 
         apiKey: "placeholder",
         baseURL: XAI_SUBSCRIPTION_PROXY_BASE_URL,
         maxRetries: 0,
-        fetch: (async (_input, init) => {
+        fetch: xaiSubscriptionFetch(async (_input, init) => {
           capturedBody = JSON.parse(await requestBodyText(init?.body)) as Record<string, unknown>;
           capturedHeaders = new Headers(init?.headers);
           return new Response(
             'data: {"type":"response.completed","response":{"id":"r1","status":"completed","output":[],"usage":{"total_tokens":1,"context_details":{"input_tokens":1,"output_tokens":0}}}}\n\n',
             { status: 200, headers: { "content-type": "text/event-stream" } },
           );
-        }) as typeof fetch,
+        }),
       },
       { modelRequestPolicy: modelRequestPolicyForProvider(provider) },
     );
@@ -1843,9 +1844,9 @@ describe("MultiProviderModelProvider — routes a model NAME to its provider (th
       const resolved = resolveTurnModel(settings, XAI_TURN_MODEL)!;
       expect(resolved.provider.kind).toBe("xai-subscription");
       expect(resolved.client.baseURL).toBe(XAI_SUBSCRIPTION_PROXY_BASE_URL);
-      expect(await new MultiProviderModelProvider(settings).getModel(XAI_TURN_MODEL)).toBeInstanceOf(
-        OpenAIResponsesModel,
-      );
+      expect(
+        await new MultiProviderModelProvider(settings).getModel(XAI_TURN_MODEL),
+      ).toBeInstanceOf(OpenAIResponsesModel);
     }
   });
 

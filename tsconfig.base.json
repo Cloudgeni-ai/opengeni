@@ -52,9 +52,7 @@
       "@opengeni/codex": ["./packages/codex/src/index.ts"],
       "@opengeni/codex/realtime-v3": ["./packages/codex/src/realtime-v3.ts"],
       "@opengeni/xai-subscription": ["./packages/xai-subscription/src/index.ts"],
-      "@opengeni/xai-subscription/constants": [
-        "./packages/xai-subscription/src/constants.ts"
-      ],
+      "@opengeni/xai-subscription/constants": ["./packages/xai-subscription/src/constants.ts"],
       "@opengeni/codemode": ["./packages/codemode/src/index.ts"],
       "@opengeni/browserd": ["./packages/browserd/src/index.ts"],
       "@opengeni/config": ["./packages/config/src/index.ts"],

@@ -29,9 +29,7 @@ describe("workspace model catalog availability", () => {
       codexSubscriptionActive: false,
       xaiSubscriptionActive: true,
     });
-    expect(
-      available.models.find((model) => model.id === "supergrok/grok-4.5"),
-    ).toMatchObject({
+    expect(available.models.find((model) => model.id === "supergrok/grok-4.5")).toMatchObject({
       credentialReadiness: { status: "ready", basis: "connection" },
       availability: { status: "unknown", selectable: true },
     });

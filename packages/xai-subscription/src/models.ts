@@ -58,14 +58,16 @@ export function parseXaiSubscriptionModelMetadata(
     meta.totalContextTokens,
   );
   if (!slug || contextWindowTokens === null) return null;
-  const effectivePercent = firstPositiveInteger(
-    object.effectiveContextWindowPercent,
-    object.effective_context_window_percent,
-  ) ?? XAI_SUBSCRIPTION_EFFECTIVE_CONTEXT_PERCENT;
-  const autoCompactPercent = firstPositiveInteger(
-    object.autoCompactThresholdPercent,
-    object.auto_compact_threshold_percent,
-  ) ?? XAI_SUBSCRIPTION_AUTO_COMPACTION_PERCENT;
+  const effectivePercent =
+    firstPositiveInteger(
+      object.effectiveContextWindowPercent,
+      object.effective_context_window_percent,
+    ) ?? XAI_SUBSCRIPTION_EFFECTIVE_CONTEXT_PERCENT;
+  const autoCompactPercent =
+    firstPositiveInteger(
+      object.autoCompactThresholdPercent,
+      object.auto_compact_threshold_percent,
+    ) ?? XAI_SUBSCRIPTION_AUTO_COMPACTION_PERCENT;
   const backend = firstString(object.apiBackend, object.api_backend);
   return {
     slug,
@@ -77,8 +79,7 @@ export function parseXaiSubscriptionModelMetadata(
       object.maxCompletionTokens,
       object.max_completion_tokens,
     ),
-    apiBackend:
-      backend === "chat_completions" || backend === "messages" ? backend : "responses",
+    apiBackend: backend === "chat_completions" || backend === "messages" ? backend : "responses",
   };
 }
 

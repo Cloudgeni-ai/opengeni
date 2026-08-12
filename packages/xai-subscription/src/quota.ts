@@ -37,9 +37,7 @@ export async function fetchXaiSubscriptionQuota(input: {
   const currentPeriod = record(config?.currentPeriod ?? config?.current_period);
   const monthlyLimit = cents(config?.monthlyLimit ?? config?.monthly_limit);
   const used = cents(config?.used);
-  const directPercent = finitePercent(
-    config?.creditUsagePercent ?? config?.credit_usage_percent,
-  );
+  const directPercent = finitePercent(config?.creditUsagePercent ?? config?.credit_usage_percent);
   const derivedPercent =
     monthlyLimit !== null && monthlyLimit > 0 && used !== null
       ? Math.max(0, Math.min(100, (used / monthlyLimit) * 100))
@@ -58,9 +56,7 @@ export async function fetchXaiSubscriptionQuota(input: {
     onDemandCapCents: cents(config?.onDemandCap ?? config?.on_demand_cap),
     onDemandUsedCents: cents(config?.onDemandUsed ?? config?.on_demand_used),
     onDemandEnabled: booleanOrNull(body.onDemandEnabled ?? body.on_demand_enabled),
-    unifiedBilling: booleanOrNull(
-      config?.isUnifiedBillingUser ?? config?.is_unified_billing_user,
-    ),
+    unifiedBilling: booleanOrNull(config?.isUnifiedBillingUser ?? config?.is_unified_billing_user),
     subscriptionTier: stringOrNull(body.subscriptionTier ?? body.subscription_tier),
     checkedAt: new Date(),
   };

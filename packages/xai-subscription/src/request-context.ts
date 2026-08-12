@@ -28,5 +28,4 @@ export type XaiSubscriptionRequestContext = {
   nextRequestId?: () => string;
 };
 
-export const xaiSubscriptionRequestStorage =
-  new AsyncLocalStorage<XaiSubscriptionRequestContext>();
+export const xaiSubscriptionRequestStorage = new AsyncLocalStorage<XaiSubscriptionRequestContext>();

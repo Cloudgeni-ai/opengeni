@@ -55,9 +55,10 @@ function appendHostedTool(
   tools.push(options === true ? { type } : { type, ...options });
 }
 
-export function normalizeXaiResponseEventJson(
-  value: unknown,
-): { value: unknown; finalContextTokens: number | null } {
+export function normalizeXaiResponseEventJson(value: unknown): {
+  value: unknown;
+  finalContextTokens: number | null;
+} {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return { value, finalContextTokens: null };
   }

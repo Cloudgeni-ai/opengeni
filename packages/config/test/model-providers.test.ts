@@ -694,9 +694,7 @@ describe("configuredModels", () => {
       ...base,
       openaiModel: "supergrok/grok-4.5",
     });
-    const matches = configuredModels(settings).filter(
-      (model) => model.id === "supergrok/grok-4.5",
-    );
+    const matches = configuredModels(settings).filter((model) => model.id === "supergrok/grok-4.5");
     expect(matches).toHaveLength(1);
     expect(matches[0]!.providerId).toBe("supergrok-subscription");
   });
@@ -1720,9 +1718,7 @@ function withEnv<T>(env: NodeJS.ProcessEnv, fn: () => T): T {
 describe("policyProviderIdForModel", () => {
   test("supergrok/ id attributes to the subscription provider even on base settings", () => {
     const settings = withEnv({ OPENGENI_OPENAI_API_KEY: "sk-test" }, () => getSettings());
-    expect(policyProviderIdForModel(settings, "supergrok/grok-4.5")).toBe(
-      "supergrok-subscription",
-    );
+    expect(policyProviderIdForModel(settings, "supergrok/grok-4.5")).toBe("supergrok-subscription");
   });
   // The attribution the workspace model policy evaluates MUST agree with the
   // real router on every path — especially the two that historically leaked:

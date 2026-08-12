@@ -112,7 +112,10 @@ describe("xAI media", () => {
         urls.push(url);
         if (url.endsWith("/videos/generations")) return Response.json({ request_id: "video-1" });
         if (url.endsWith("/videos/video-1")) {
-          return Response.json({ status: "done", video: { url: "https://media.example/video.mp4" } });
+          return Response.json({
+            status: "done",
+            video: { url: "https://media.example/video.mp4" },
+          });
         }
         return new Response("video-bytes", { headers: { "content-type": "video/mp4" } });
       },

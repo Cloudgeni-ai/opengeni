@@ -49,9 +49,9 @@ export function projectClientModel(model: ConfiguredModel): ClientModel {
       ? { provider: "codex", providerLabel: "Codex" }
       : source === "supergrok"
         ? { provider: "supergrok", providerLabel: "SuperGrok" }
-      : source === "workspace_gateway"
-        ? { provider: "workspace-gateway", providerLabel: "Your Gateway" }
-        : { provider: "opengeni", providerLabel: "OpenGeni" };
+        : source === "workspace_gateway"
+          ? { provider: "workspace-gateway", providerLabel: "Your Gateway" }
+          : { provider: "opengeni", providerLabel: "OpenGeni" };
   return ClientModel.parse({
     id: model.id,
     label: model.label,
@@ -145,9 +145,7 @@ function credentialReadinessFor(input: {
   const source = input.model.credentialSource;
   if (source.kind === "connected_subscription") {
     const active =
-      source.provider === "xai"
-        ? input.xaiSubscriptionActive
-        : input.codexSubscriptionActive;
+      source.provider === "xai" ? input.xaiSubscriptionActive : input.codexSubscriptionActive;
     return active
       ? { status: "ready", reason: null, basis: "connection", checkedAt: null }
       : {

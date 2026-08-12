@@ -81,10 +81,7 @@ function positiveSeconds(value: unknown, fallback: number): number {
 
 function requireNonEmptyString(value: unknown, field: string): string {
   if (typeof value !== "string" || value.length === 0) {
-    throw new XaiSubscriptionError(
-      "invalid_response",
-      `xAI OAuth response is missing ${field}`,
-    );
+    throw new XaiSubscriptionError("invalid_response", `xAI OAuth response is missing ${field}`);
   }
   return value;
 }
@@ -106,10 +103,7 @@ function validateVerificationUri(uri: string): string {
       label: "xAI device verification",
     });
   } catch {
-    throw new XaiSubscriptionError(
-      "invalid_response",
-      "xAI returned an invalid verification URL",
-    );
+    throw new XaiSubscriptionError("invalid_response", "xAI returned an invalid verification URL");
   }
 }
 
@@ -137,9 +131,7 @@ async function boundedFetchJson(
   return fetched.value;
 }
 
-export async function requestXaiDeviceCode(
-  options: XaiOAuthOptions = {},
-): Promise<XaiDeviceCode> {
+export async function requestXaiDeviceCode(options: XaiOAuthOptions = {}): Promise<XaiDeviceCode> {
   const { response, body } = await boundedFetchJson(
     "device code request",
     options.deviceAuthorizationUrl ?? XAI_DEVICE_AUTHORIZATION_URL,
@@ -269,7 +261,10 @@ export async function refreshXaiToken(
   };
 }
 
-function parseTokenResponse(body: Record<string, unknown>, requireRefresh: boolean): XaiOAuthTokens {
+function parseTokenResponse(
+  body: Record<string, unknown>,
+  requireRefresh: boolean,
+): XaiOAuthTokens {
   const accessToken = requireNonEmptyString(body.access_token, "access_token");
   const refreshToken = nullableString(body.refresh_token);
   if (requireRefresh && !refreshToken) {

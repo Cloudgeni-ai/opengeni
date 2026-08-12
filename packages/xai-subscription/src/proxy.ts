@@ -1,8 +1,4 @@
-import {
-  OAUTH_MAX_RESPONSE_BYTES,
-  pinnedFetch,
-  readResponseJsonBounded,
-} from "@opengeni/network";
+import { OAUTH_MAX_RESPONSE_BYTES, pinnedFetch, readResponseJsonBounded } from "@opengeni/network";
 
 import { runBoundedXaiOperation } from "./bounded-operation";
 import {
