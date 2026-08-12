@@ -12,10 +12,12 @@ import {
   fenceCodexResetRedemptionSend,
   recordCodexAccountUsage,
   setInitialActiveCodexCredential,
+  synchronizeCanonicalHumanLoginBindings,
   upsertCodexSubscriptionCredential,
   type DbClient,
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
+import { sql } from "drizzle-orm";
 import {
   acquireSharedTestDatabase,
   freePort,
@@ -267,6 +269,40 @@ beforeAll(async () => {
       email: `codex-quota-owner-${RUN_ID}@example.com`,
     },
   });
+  await client.db.execute(sql`
+    insert into auth_users (id, name, email, email_verified)
+    values (
+      ${OWNER_USER_ID},
+      'Codex quota Owner',
+      ${`codex-quota-owner-${RUN_ID}@example.com`},
+      true
+    )
+  `);
+  await client.db.execute(sql`
+    insert into auth_identities (id, user_id, provider_id, account_id)
+    values (${crypto.randomUUID()}, ${OWNER_USER_ID}, 'credential', ${OWNER_USER_ID})
+  `);
+  const identity = await synchronizeCanonicalHumanLoginBindings(client.db, OWNER_USER_ID);
+  for (const [suffix, token] of [
+    ["initial", OWNER_COOKIE_VALUE],
+    ["rotated", ROTATED_OWNER_COOKIE_VALUE],
+    ["final", FINAL_OWNER_COOKIE_VALUE],
+  ] as const) {
+    await client.db.execute(sql`
+      insert into auth_sessions (
+        id, user_id, token, expires_at,
+        identity_id, identity_revision, auth_revision
+      ) values (
+        ${`codex-quota-browser-session-${suffix}-${RUN_ID}`},
+        ${OWNER_USER_ID},
+        ${token},
+        now() + interval '1 hour',
+        ${identity.identityId},
+        ${identity.identityRevision},
+        ${identity.authRevision}
+      )
+    `);
+  }
   const sessionForHeaders = (headers: Headers) => {
     const cookie = headers.get("cookie") ?? "";
     if (cookie.includes(FINAL_OWNER_COOKIE_VALUE)) return ownerSession("final");
