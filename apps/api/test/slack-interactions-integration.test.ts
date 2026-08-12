@@ -1071,6 +1071,12 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     const reactedTimestamp = "1706000000.000002";
     const value = await fixture({
       grantedScopes: [...OPENGENI_SLACK_BOT_REQUESTED_SCOPES],
+      ownerPermissions: [
+        "sessions:create",
+        "sessions:read",
+        "sessions:control",
+        "scheduled_tasks:manage",
+      ],
       slackReactionSummon: {
         enabled: true,
         emoji: "genie",
@@ -1189,9 +1195,10 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(await drainSlackInteractionsOnce(value.deps)).toBe(false);
     const completionPosts = value.slack.posts.slice(postsBeforeCompletion);
     expect(completionPosts).toHaveLength(1);
-    expect(completionPosts[0]!.text).toBe(
-      "The requested Slack check is complete.\n\nNo rollback is required.\n\nReply in this thread to continue.",
+    expect(completionPosts[0]!.text).toMatch(
+      /^The requested Slack check is complete\.\n\nNo rollback is required\.\n\nReply in this thread to continue\.\n\n<https:\/\/app\.example\.test\/workspaces\/[^/]+\/schedules\?sourceSessionId=[0-9a-f-]+\|Make recurring>$/u,
     );
+    expect(completionPosts[0]!.text).not.toContain("Compare the logs");
     expect(completionPosts[0]!.text).not.toContain("Open in OpenGeni");
     expect(completionPosts[0]!.text).not.toContain("/sessions/");
 

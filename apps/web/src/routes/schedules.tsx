@@ -43,6 +43,7 @@ import {
   agentConfigFromFormState,
   formStateFromScheduledTask,
   newScheduledTaskFormState,
+  recurringSessionTaskFormState,
   scheduleFromFormState,
   scheduleLabel,
   scheduledTaskStateLabel,
@@ -52,7 +53,13 @@ import {
 import { cn } from "@/lib/utils";
 import type { ConnectionMetadata, ScheduledTask, ScheduledTaskRun, Session } from "@/types";
 
-export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
+export function SchedulesRoute({
+  workspaceId,
+  sourceSessionId,
+}: {
+  workspaceId: string;
+  sourceSessionId?: string;
+}) {
   const context = useAppContext();
   const navigate = useNavigate();
   const client = context.client;
@@ -66,7 +73,8 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
   // error with retry instead of a false "No runs yet".
   const [runErrors, setRunErrors] = useState<Record<string, boolean>>({});
   const [reloadingRunsFor, setReloadingRunsFor] = useState<string | null>(null);
-  const [open, setOpen] = useState(false);
+  const [recurringSourceSessionId, setRecurringSourceSessionId] = useState(sourceSessionId ?? null);
+  const [open, setOpen] = useState(Boolean(sourceSessionId));
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [historyTaskId, setHistoryTaskId] = useState<string | null>(null);
   const [busyTaskId, setBusyTaskId] = useState<string | null>(null);
@@ -88,15 +96,23 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const [next, connections, targetSessions] = await Promise.all([
+      const [next, connections, targetSessions, exactSourceSession] = await Promise.all([
         client.listScheduledTasks(workspaceId),
         client.listConnections(workspaceId).catch(() => []),
         canTargetSessions
           ? client.listSessions(workspaceId, { limit: 100 }).catch(() => [])
           : Promise.resolve([]),
+        canTargetSessions && sourceSessionId
+          ? client.getSession(workspaceId, sourceSessionId, { fresh: true }).catch(() => null)
+          : Promise.resolve(null),
       ]);
       setTasks(next);
-      setSessions(targetSessions.filter((session) => session.status !== "cancelled"));
+      setSessions(
+        [
+          ...(exactSourceSession ? [exactSourceSession] : []),
+          ...targetSessions.filter((session) => session.id !== exactSourceSession?.id),
+        ].filter((session) => session.status !== "cancelled"),
+      );
       setSlackBotConnections(activeOpenGeniSlackBotConnections(connections));
       setLoadError(null);
       // Track each task's run-history load outcome separately: a failed history
@@ -123,11 +139,23 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
     } finally {
       setLoading(false);
     }
-  }, [canTargetSessions, client, workspaceId]);
+  }, [canTargetSessions, client, sourceSessionId, workspaceId]);
 
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  function clearRecurringLaunch() {
+    setRecurringSourceSessionId(null);
+    if (sourceSessionId) {
+      void navigate({
+        to: "/workspaces/$workspaceId/schedules",
+        params: { workspaceId },
+        search: {},
+        replace: true,
+      });
+    }
+  }
 
   // Retry a single task's run history after a failed load, without reloading
   // the whole list.
@@ -171,6 +199,7 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
         }),
       });
       setOpen(false);
+      clearRecurringLaunch();
       await refresh();
       toast.success("Scheduled task created");
     } catch (error) {
@@ -301,6 +330,7 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
               size="sm"
               className="h-9 pointer-coarse:min-h-10"
               onClick={() => {
+                clearRecurringLaunch();
                 setOpen((value) => !value);
                 setEditingTaskId(null);
               }}
@@ -313,18 +343,30 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
       />
 
       {open ? (
-        <ScheduledTaskForm
-          key="new"
-          workspaceId={workspaceId}
-          initialState={newScheduledTaskFormState(canAttachOpenGeniTool, context.currentResources)}
-          submitLabel="Create scheduled task"
-          busy={busyTaskId === "new"}
-          canAttachOpenGeniTool={canAttachOpenGeniTool}
-          canTargetSessions={canTargetSessions}
-          sessions={sessions}
-          slackBotConnections={slackBotConnections}
-          onSubmit={(form) => void createTask(form)}
-        />
+        <>
+          {recurringSourceSessionId ? (
+            <Notice>
+              Review the cadence and prompt below. Nothing becomes recurring until you create the
+              schedule; each run will continue the exact authorized session.
+            </Notice>
+          ) : null}
+          <ScheduledTaskForm
+            key={recurringSourceSessionId ?? "new"}
+            workspaceId={workspaceId}
+            initialState={
+              recurringSourceSessionId
+                ? recurringSessionTaskFormState(recurringSourceSessionId, canAttachOpenGeniTool)
+                : newScheduledTaskFormState(canAttachOpenGeniTool, context.currentResources)
+            }
+            submitLabel="Create scheduled task"
+            busy={busyTaskId === "new"}
+            canAttachOpenGeniTool={canAttachOpenGeniTool}
+            canTargetSessions={canTargetSessions}
+            sessions={sessions}
+            slackBotConnections={slackBotConnections}
+            onSubmit={(form) => void createTask(form)}
+          />
+        </>
       ) : null}
 
       <div className="mt-4 grid gap-2">
@@ -349,6 +391,7 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
                 type="button"
                 size="sm"
                 onClick={() => {
+                  clearRecurringLaunch();
                   setOpen(true);
                   setEditingTaskId(null);
                 }}
