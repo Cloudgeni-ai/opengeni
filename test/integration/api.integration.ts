@@ -3675,14 +3675,14 @@ describe("API component integration", () => {
     expect(missing.status).toBe(404);
     const installationAfterDelete = await getPackInstallation(dbClient.db, workspaceId, packId);
     expect(installationAfterDelete?.status).toBe("disabled");
-    // The capability installation row is disabled too, so a future
-    // re-registration does not inherit stale enablement.
+    // Pack lifecycle is dedicated. The MCP-only generic installation ledger
+    // must not retain a shadow Pack row after uninstall.
     const capabilityInstallationAfterDelete = await getCapabilityInstallation(
       dbClient.db,
       workspaceId,
       `pack:${packId}`,
     );
-    expect(capabilityInstallationAfterDelete?.status).toBe("disabled");
+    expect(capabilityInstallationAfterDelete).toBeUndefined();
   });
 
   test("installs image Packs through explicit Rigs and shares identical inline Skills", async () => {
