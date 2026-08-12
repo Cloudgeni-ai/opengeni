@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::future::Future;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -13,6 +14,10 @@ use atspi::proxy::selection::SelectionProxy;
 use atspi::proxy::text::TextProxy;
 use atspi::proxy::value::ValueProxy;
 use atspi::{
+    events::{
+        CacheEvents, DocumentEvents, FocusEvents, KeyboardEvents, MouseEvents, ObjectEvents,
+        TerminalEvents, WindowEvents,
+    },
     AccessibilityConnection, CacheItem, CoordType, Interface, InterfaceSet, LegacyCacheItem,
     ObjectRefOwned, Role, ScrollType, State,
 };
@@ -44,6 +49,7 @@ const NATIVE_CALL_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_CACHE_ITEMS: usize = 50_000;
 const MAX_ENRICH_CONCURRENCY: usize = 32;
 const MAX_DETAILED_ENRICHMENT_NODES: usize = 64;
+const MAX_APPLICATION_SNAPSHOTS: usize = 128;
 const MAX_WINDOW_FRAME_FENCES: usize = 512;
 const MUTATION_SETTLE_DELAYS: [Duration; 4] = [
     Duration::ZERO,
@@ -51,6 +57,29 @@ const MUTATION_SETTLE_DELAYS: [Duration; 4] = [
     Duration::from_millis(32),
     Duration::from_millis(64),
 ];
+
+async fn register_semantic_events(connection: &AccessibilityConnection) -> bool {
+    // A reused application snapshot is safe only while every event family that
+    // can change its semantic tree, focus, text, or window topology is active.
+    // Registration is all-or-nothing: a partial listener falls back to fresh
+    // AT-SPI snapshots rather than risking stale controls.
+    let cache = connection.register_event::<CacheEvents>().await;
+    let document = connection.register_event::<DocumentEvents>().await;
+    let focus = connection.register_event::<FocusEvents>().await;
+    let keyboard = connection.register_event::<KeyboardEvents>().await;
+    let mouse = connection.register_event::<MouseEvents>().await;
+    let object = connection.register_event::<ObjectEvents>().await;
+    let terminal = connection.register_event::<TerminalEvents>().await;
+    let window = connection.register_event::<WindowEvents>().await;
+    cache.is_ok()
+        && document.is_ok()
+        && focus.is_ok()
+        && keyboard.is_ok()
+        && mouse.is_ok()
+        && object.is_ok()
+        && terminal.is_ok()
+        && window.is_ok()
+}
 
 #[derive(Clone)]
 struct ObjectRecord {
@@ -64,6 +93,12 @@ struct StoredObservation {
     target_generation: String,
     snapshot: SemanticSnapshotIndex,
     objects: BTreeMap<String, ObjectRecord>,
+}
+
+#[derive(Clone)]
+struct CachedApplicationSnapshot {
+    generation: u64,
+    items: Vec<CacheItem>,
 }
 
 #[derive(Clone)]
@@ -102,6 +137,9 @@ pub(crate) struct AtspiComputerAdapter {
     clipboard: Option<NativeClipboardController>,
     latest_screen_frame: RwLock<Option<String>>,
     latest_window_frames: RwLock<BTreeMap<String, WindowFrameFence>>,
+    semantic_generation: Arc<AtomicU64>,
+    application_snapshots: RwLock<BTreeMap<String, CachedApplicationSnapshot>>,
+    semantic_event_cache: Arc<AtomicBool>,
 }
 
 impl AtspiComputerAdapter {
@@ -120,6 +158,23 @@ impl AtspiComputerAdapter {
                     true,
                 )
             })?;
+        let semantic_generation = Arc::new(AtomicU64::new(0));
+        let semantic_event_cache =
+            Arc::new(AtomicBool::new(register_semantic_events(&connection).await));
+        if semantic_event_cache.load(Ordering::Acquire) {
+            let event_connection = connection.clone();
+            let event_generation = Arc::clone(&semantic_generation);
+            let event_cache_enabled = Arc::clone(&semantic_event_cache);
+            tokio::spawn(async move {
+                let events = event_connection.event_stream();
+                futures::pin_mut!(events);
+                while events.next().await.is_some() {
+                    event_generation.fetch_add(1, Ordering::AcqRel);
+                }
+                event_cache_enabled.store(false, Ordering::Release);
+                event_generation.fetch_add(1, Ordering::AcqRel);
+            });
+        }
         Ok(Self {
             connection,
             incarnation: Uuid::new_v4(),
@@ -131,6 +186,9 @@ impl AtspiComputerAdapter {
             clipboard: NativeClipboardController::open().ok(),
             latest_screen_frame: RwLock::new(None),
             latest_window_frames: RwLock::new(BTreeMap::new()),
+            semantic_generation,
+            application_snapshots: RwLock::new(BTreeMap::new()),
+            semantic_event_cache,
         })
     }
 
@@ -202,6 +260,17 @@ impl AtspiComputerAdapter {
         &self,
         root: &ObjectRefOwned,
     ) -> NativeAdapterResult<Vec<CacheItem>> {
+        let cache_key = object_key(root)?;
+        let start_generation = self.semantic_generation.load(Ordering::Acquire);
+        if self.semantic_event_cache.load(Ordering::Acquire) {
+            let snapshots = self.application_snapshots.read().await;
+            if let Some(snapshot) = snapshots
+                .get(&cache_key)
+                .filter(|snapshot| snapshot.generation == start_generation)
+            {
+                return Ok(snapshot.items.clone());
+            }
+        }
         let proxy = CacheProxy::builder(self.connection.connection())
             .destination(root.name().ok_or_else(null_object)?.clone())
             .map_err(|error| driver_error("construct application cache destination", error))?
@@ -219,10 +288,31 @@ impl AtspiComputerAdapter {
             },
             Err(error) => Err(error),
         };
-        match cached {
+        let items = match cached {
             Ok(items) if !items.is_empty() && cache_snapshot_complete(&items) => Ok(items),
             Ok(_) | Err(_) => self.crawl_application(root).await,
+        }?;
+        if self.semantic_event_cache.load(Ordering::Acquire)
+            && self.semantic_generation.load(Ordering::Acquire) == start_generation
+        {
+            let mut snapshots = self.application_snapshots.write().await;
+            snapshots.retain(|_, snapshot| snapshot.generation == start_generation);
+            if snapshots.len() >= MAX_APPLICATION_SNAPSHOTS && !snapshots.contains_key(&cache_key) {
+                snapshots.clear();
+            }
+            snapshots.insert(
+                cache_key,
+                CachedApplicationSnapshot {
+                    generation: start_generation,
+                    items: items.clone(),
+                },
+            );
         }
+        Ok(items)
+    }
+
+    fn invalidate_semantic_cache(&self) {
+        self.semantic_generation.fetch_add(1, Ordering::AcqRel);
     }
 
     async fn crawl_application(
@@ -321,11 +411,9 @@ impl AtspiComputerAdapter {
             .collect();
         let enriched = stream::iter(candidates.into_iter().map(|item| async move {
             let key = object_key(&item.object)?;
-            let (identifier, bounds, process_id) = futures::join!(
-                self.accessible_identifier(&item.object),
-                self.component_bounds(&item.object, item.ifaces),
-                self.process_id(&item.object),
-            );
+            let identifier = self.accessible_identifier(&item.object).await;
+            let bounds = self.component_bounds(&item.object, item.ifaces).await;
+            let process_id = self.process_id(&item.object).await;
             let kind = if item.role == Role::Application {
                 NativeTargetKind::App
             } else {
@@ -430,17 +518,10 @@ impl AtspiComputerAdapter {
             .unwrap_or_else(|| item.role.to_string());
         record.target.focused =
             item.states.contains(State::Focused) || item.states.contains(State::Active);
-        let (bounds, windows) =
-            futures::join!(self.component_bounds(&item.object, item.ifaces), async {
-                if record.target.kind == NativeTargetKind::Window {
-                    self.desktop.as_ref()?.windows().await.ok()
-                } else {
-                    Some(Vec::new())
-                }
-            },);
-        record.target.bounds = bounds;
+        record.target.bounds = self.component_bounds(&item.object, item.ifaces).await;
         if record.target.kind == NativeTargetKind::Window {
-            record.x11_window = correlate_x11_window(&record.target, &windows?);
+            let windows = self.desktop.as_ref()?.windows().await.ok()?;
+            record.x11_window = correlate_x11_window(&record.target, &windows);
             if record.x11_window.is_none() {
                 return None;
             }
@@ -576,40 +657,26 @@ impl AtspiComputerAdapter {
             || item.ifaces.contains(Interface::Value)
             || item.states.contains(State::Focusable)
             || is_target_role(item.role);
-        // These are independent typed AT-SPI reads for one node. Running them
-        // serially adds one full D-Bus round trip per field to every semantic
-        // observation; join them while retaining the same coherent cache item
-        // and exact failure/absence semantics.
-        let (identifier, description, bounds, value) = futures::join!(
-            async {
-                if detailed && interactive {
-                    self.accessible_identifier(&item.object).await
-                } else {
-                    None
-                }
-            },
-            async {
-                if detailed && interactive {
-                    self.accessible_description(&item.object).await
-                } else {
-                    None
-                }
-            },
-            async {
-                if detailed && interactive {
-                    self.component_bounds(&item.object, item.ifaces).await
-                } else {
-                    None
-                }
-            },
-            async {
-                if detailed {
-                    self.node_value(&item).await
-                } else {
-                    None
-                }
-            },
-        );
+        let identifier = if detailed && interactive {
+            self.accessible_identifier(&item.object).await
+        } else {
+            None
+        };
+        let description = if detailed && interactive {
+            self.accessible_description(&item.object).await
+        } else {
+            None
+        };
+        let bounds = if detailed && interactive {
+            self.component_bounds(&item.object, item.ifaces).await
+        } else {
+            None
+        };
+        let value = if detailed {
+            self.node_value(&item).await
+        } else {
+            None
+        };
         let states = item.states.iter().map(|state| state.to_string()).collect();
         let actions = normalized_actions(&item);
         let interfaces: Vec<String> = item
@@ -1634,6 +1701,10 @@ impl ComputerAdapter for AtspiComputerAdapter {
         &self,
         command: &NativeActionCommand,
     ) -> NativeAdapterResult<NativeObservation> {
+        // Do not wait for the accessibility bus to deliver our own mutation
+        // event before the settlement observation. External mutations are
+        // invalidated by the registered AT-SPI event stream above.
+        self.invalidate_semantic_cache();
         if let Some(result) = self.dispatch_clipboard_storage(command).await {
             return result;
         }
