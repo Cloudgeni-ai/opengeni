@@ -480,7 +480,9 @@ describe("migration 0218 organization tenancy foundation", () => {
         has_table_privilege('opengeni_app', c.oid, 'DELETE') as "appDelete"
       from pg_class c
       join pg_namespace n on n.oid = c.relnamespace
-      left join pg_policy p on p.polrelid = c.oid
+      left join pg_policy p
+        on p.polrelid = c.oid
+        and p.polname = ${currentLedgerTenancyLifecyclePolicy}
       where n.nspname = current_schema()
         and c.relname = any(${shared.admin.array([...tenancyTables])})
       group by c.relname, c.relrowsecurity, c.relforcerowsecurity, c.oid
@@ -489,7 +491,9 @@ describe("migration 0218 organization tenancy foundation", () => {
     // This shared database contains the complete current migration ledger, not
     // an isolated replay stopped at 0218. Therefore the live catalog must
     // assert 0219's lifecycle policy while the static checks above preserve
-    // 0218's historical deny-all contract.
+    // 0218's historical deny-all contract. Later migrations may add separate,
+    // narrowly scoped owner-only policies; their own migration tests own those
+    // contracts, while the direct app privilege checks below remain deny-all.
     expect([...policyRows]).toEqual(
       [...tenancyTables].sort().map((tableName) => ({
         tableName,
