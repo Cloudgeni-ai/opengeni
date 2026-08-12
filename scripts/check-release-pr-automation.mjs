@@ -164,13 +164,17 @@ function assertRepository(value) {
 }
 
 function assertMainRef(value, expectedSha, label = "default branch") {
+  const actualSha = directMainRefSha(value, label);
+  invariant(actualSha === expectedSha, `${label} differs from the admitted base SHA`);
+}
+
+function directMainRefSha(value, label = "default branch") {
   invariant(
     value?.ref === `refs/heads/${RELEASE_AUTOMATION_CONTRACT.defaultBranch}`,
     `${label} ref changed`,
   );
   invariant(value?.object?.type === "commit", `${label} is not a direct commit ref`);
-  const actualSha = assertSha(value.object.sha, `${label} SHA`);
-  invariant(actualSha === expectedSha, `${label} differs from the admitted base SHA`);
+  return assertSha(value.object.sha, `${label} SHA`);
 }
 
 function releaseHeadTagName(headSha) {
@@ -868,19 +872,31 @@ function assertRecoveryReleasePull(pull, context, expected) {
   return { ...identity, headRef, headRepository };
 }
 
-async function assertSourceAncestorOfCurrentMain(api, sourceSha, currentMainSha) {
+async function assertSourceAncestorOfCurrentMain(
+  api,
+  sourceSha,
+  currentMainSha,
+  label = "current main",
+  sourceLabel = "merged source",
+) {
   if (sourceSha === currentMainSha) return;
   const comparison = await api.get(repositoryPath(`/compare/${sourceSha}...${currentMainSha}`));
-  invariant(comparison?.status === "ahead", "current main is not ahead of the merged source");
+  invariant(comparison?.status === "ahead", `${label} is not ahead of the ${sourceLabel}`);
   invariant(
     comparison?.base_commit?.sha === sourceSha && comparison?.merge_base_commit?.sha === sourceSha,
-    "current main does not retain the merged source as its exact ancestor",
+    `${label} does not retain the ${sourceLabel} as its exact ancestor`,
   );
-  invariant(comparison?.behind_by === 0, "current main is behind the merged source");
+  invariant(comparison?.behind_by === 0, `${label} is behind the ${sourceLabel}`);
   invariant(
     Number.isSafeInteger(comparison?.ahead_by) && comparison.ahead_by > 0,
-    "current main ancestry distance is invalid",
+    `${label} ancestry distance is invalid`,
   );
+}
+
+async function assertReleaseMainRef(api, value, sourceSha, label) {
+  const currentMainSha = directMainRefSha(value, label);
+  await assertSourceAncestorOfCurrentMain(api, sourceSha, currentMainSha, label, "admitted source");
+  return currentMainSha;
 }
 
 async function readOptionalReleaseHeadEvidence(api, headSha) {
@@ -1845,7 +1861,7 @@ export async function verifyApprovedMerge(options = {}) {
     api.get(repositoryPath(`/git/ref/tags/${controllerTag}`)),
     api.get(repositoryPath(`/releases/tags/${controllerTag}`)),
   ]);
-  assertMainRef(initialMain, context.sourceSha, "initial release main");
+  await assertReleaseMainRef(api, initialMain, context.sourceSha, "initial release main");
   const controller = assertCommit(
     controllerValue,
     context.controllerSha,
@@ -2025,7 +2041,7 @@ export async function verifyApprovedMerge(options = {}) {
     assertSuccessfulCheck(sourceChecks, name, context.sourceSha),
   );
   const terminalMain = await api.get(repositoryPath("/git/ref/heads/main"));
-  assertMainRef(terminalMain, context.sourceSha, "terminal release main");
+  await assertReleaseMainRef(api, terminalMain, context.sourceSha, "terminal release main");
 
   const provenance = {
     version: 2,

@@ -1273,7 +1273,10 @@ describe("release head retention recovery", () => {
   });
 
   test("creates a clean absent retained pair after every pre-mutation gate and replays idempotently", async () => {
-    const fixture = recoverySealFixture({ releaseHeadRef: null, release: null });
+    const fixture = recoverySealFixture({
+      releaseHeadRef: null,
+      release: null,
+    });
     const options = {
       env: recoverySealEnv(),
       fetchImpl: fixture.fetchImpl,
@@ -1874,7 +1877,10 @@ test("exact-head retention accepts concurrent creation of the same immutable evi
 
   expect(result.releaseHead.sha).toBe(headSha);
   expect(result.releaseController.sha).toBe(baseSha);
-  expect(result.releaseHeadRelease).toMatchObject({ immutable: true, tagName: expect.any(String) });
+  expect(result.releaseHeadRelease).toMatchObject({
+    immutable: true,
+    tagName: expect.any(String),
+  });
   expect(result.releaseControllerRelease).toMatchObject({
     immutable: true,
     tagName: expect.any(String),
@@ -2036,7 +2042,9 @@ function approvalFixture(
     controllerTreeSha?: string;
     controllerRefSha?: string | null;
     controllerRelease?: Record<string, unknown> | null;
+    initialMainSha?: string;
     terminalMainSha?: string;
+    sourceAncestorMainShas?: string[];
     reviewCommit?: string;
     reviewState?: string;
     reviewTime?: string;
@@ -2076,7 +2084,11 @@ function approvalFixture(
     (options.authorId === RELEASE_AUTOMATION_CONTRACT.releaseApprover.id ||
     (options.reviewState === "COMMENTED" && options.authorId === undefined)
       ? RELEASE_AUTOMATION_CONTRACT.releaseApprover
-      : { login: "release-bot", id: options.authorId ?? 41898282, type: "Bot" });
+      : {
+          login: "release-bot",
+          id: options.authorId ?? 41898282,
+          type: "Bot",
+        });
   const merger =
     options.merger ??
     (options.reviewState === "COMMENTED"
@@ -2136,7 +2148,13 @@ function approvalFixture(
     requests.push({ method, path: url.pathname, query: url.searchParams });
     if (method === "GET" && url.pathname === `${prefix}/git/ref/heads/main`) {
       mainReads += 1;
-      return response(mainRef(mainReads === 1 ? mergeSha : (options.terminalMainSha ?? mergeSha)));
+      return response(
+        mainRef(
+          mainReads === 1
+            ? (options.initialMainSha ?? mergeSha)
+            : (options.terminalMainSha ?? mergeSha),
+        ),
+      );
     }
     if (method === "GET" && url.pathname === prefix) return response(repository());
     if (method === "GET" && url.pathname === `${prefix}/git/commits/${mergeSha}`)
@@ -2263,6 +2281,32 @@ function approvalFixture(
         commits,
       });
     }
+    const sourceMainComparisonPrefix = `${prefix}/compare/${mergeSha}...`;
+    if (method === "GET" && url.pathname.startsWith(sourceMainComparisonPrefix)) {
+      const observedMainSha = url.pathname.slice(sourceMainComparisonPrefix.length);
+      const retained = options.sourceAncestorMainShas?.includes(observedMainSha) ?? false;
+      return response(
+        retained
+          ? {
+              status: "ahead",
+              base_commit: { sha: mergeSha },
+              merge_base_commit: { sha: mergeSha },
+              ahead_by: 1,
+              behind_by: 0,
+              total_commits: 1,
+              commits: [{ sha: observedMainSha, parents: [{ sha: mergeSha }] }],
+            }
+          : {
+              status: "diverged",
+              base_commit: { sha: mergeSha },
+              merge_base_commit: { sha: "6".repeat(40) },
+              ahead_by: 1,
+              behind_by: 1,
+              total_commits: 1,
+              commits: [{ sha: observedMainSha, parents: [{ sha: "6".repeat(40) }] }],
+            },
+      );
+    }
     if (method === "GET" && url.pathname === `${prefix}/pulls/${pullNumber}/reviews`)
       return response([review]);
     if (method === "GET" && url.pathname === `${prefix}/pulls/${pullNumber}/reviews/9001`)
@@ -2384,7 +2428,10 @@ describe("release approval provenance", () => {
     ).rejects.toThrow("GitHub API GET");
 
     const mutable = approvalFixture({
-      controllerRelease: { ...releaseHeadRelease(controllerSha), immutable: false },
+      controllerRelease: {
+        ...releaseHeadRelease(controllerSha),
+        immutable: false,
+      },
     });
     await expect(
       verifyApprovedMerge({
@@ -2459,6 +2506,48 @@ describe("release approval provenance", () => {
       ...RELEASE_AUTOMATION_CONTRACT.checks.requiredSource,
     ]);
     expect(fixture.requests.every((request) => request.method === "GET")).toBe(true);
+  });
+
+  test("accepts an exact release source retained as a strict ancestor across both main fences", async () => {
+    const initialMainSha = "4".repeat(40);
+    const terminalMainSha = "5".repeat(40);
+    const fixture = approvalFixture({
+      initialMainSha,
+      terminalMainSha,
+      sourceAncestorMainShas: [initialMainSha, terminalMainSha],
+    });
+
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: fixture.fetchImpl,
+        logger: { log() {} },
+      }),
+    ).resolves.toEqual(expect.objectContaining({ sourceSha: mergeSha }));
+    expect(
+      fixture.requests.filter((request) =>
+        request.path.startsWith(
+          `/repos/${RELEASE_AUTOMATION_CONTRACT.repository}/compare/${mergeSha}...`,
+        ),
+      ),
+    ).toHaveLength(2);
+  });
+
+  test("rejects diverged main at either release-source fence", async () => {
+    const movedMain = "4".repeat(40);
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: approvalFixture({ initialMainSha: movedMain }).fetchImpl,
+      }),
+    ).rejects.toThrow("initial release main is not ahead of the admitted source");
+
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: approvalFixture({ terminalMainSha: movedMain }).fetchImpl,
+      }),
+    ).rejects.toThrow("terminal release main is not ahead of the admitted source");
   });
 
   test("accepts the provider-bound structured single-maintainer admin PASS", async () => {
@@ -2788,7 +2877,7 @@ describe("release approval provenance", () => {
         env: approvalEnv(),
         fetchImpl: approvalFixture({ terminalMainSha: "7".repeat(40) }).fetchImpl,
       }),
-    ).rejects.toThrow("terminal release main differs");
+    ).rejects.toThrow("terminal release main is not ahead of the admitted source");
   });
 
   test("rejects duplicate, failed, or foreign source-admission and source checks", async () => {
@@ -3484,7 +3573,9 @@ describe("workflow contracts", () => {
       "images",
     ]);
     expect(aggregate.if).toBe("${{ always() }}");
-    expect(aggregate.permissions ?? ci.permissions).toEqual({ contents: "read" });
+    expect(aggregate.permissions ?? ci.permissions).toEqual({
+      contents: "read",
+    });
     expect(aggregate.steps.some((step: any) => step.env?.GITHUB_TOKEN)).toBe(false);
     expect(
       aggregate.steps.find(
