@@ -1036,6 +1036,7 @@ async function openBrowser(
   context: AttemptToolExecutionContext,
 ): Promise<z.input<typeof BrowserOpenOutput>> {
   let session: z.infer<typeof BrowserSession>;
+  let created = false;
   if (value.browserSessionId) {
     session = await transport.getBrowserSession(workspaceId, value.browserSessionId);
   } else {
@@ -1044,6 +1045,7 @@ async function openBrowser(
     if (reusable) {
       session = reusable;
     } else {
+      created = true;
       session = (
         await transport.createBrowserSession(workspaceId, {
           operationId: context.operationId,
@@ -1075,11 +1077,23 @@ async function openBrowser(
   }
   if (session.lifecycle !== "active") return { session, targets: [] };
   let targets = (await transport.listBrowserTargets(workspaceId, session.id)).targets;
-  if (value.initialUrl && !targets.some((target) => target.url === value.initialUrl)) {
+  if (
+    value.initialUrl &&
+    !created &&
+    !targets.some((target) => sameBrowserUrl(target.url, value.initialUrl!))
+  ) {
     await transport.openBrowserTarget(workspaceId, session.id, { url: value.initialUrl });
     targets = (await transport.listBrowserTargets(workspaceId, session.id)).targets;
   }
   return { session, targets };
+}
+
+function sameBrowserUrl(left: string, right: string): boolean {
+  try {
+    return new URL(left).href === new URL(right).href;
+  } catch {
+    return left === right;
+  }
 }
 
 async function openComputer(

@@ -1402,6 +1402,22 @@ describe("BrowserViewer", () => {
         "textarea[aria-label='Browser keyboard input']",
       );
       expect(keyboard).not.toBeNull();
+      const canvas = rendered.container.querySelector<HTMLCanvasElement>(
+        "canvas[aria-label='Interactive browser page']",
+      );
+      expect(canvas).not.toBeNull();
+      const focusPointer = new MouseEvent("pointerdown", {
+        bubbles: true,
+        cancelable: true,
+        button: 0,
+        clientX: 10,
+        clientY: 10,
+      });
+      await actRun(() => {
+        canvas!.dispatchEvent(focusPointer);
+      });
+      expect(focusPointer.defaultPrevented).toBe(true);
+      expect(document.activeElement).toBe(keyboard);
       const paste = new ClipboardEvent("paste", { bubbles: true, cancelable: true });
       Object.defineProperty(paste, "clipboardData", {
         value: { getData: (kind: string) => (kind === "text/plain" ? "local paste" : "") },

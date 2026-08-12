@@ -32500,6 +32500,14 @@ export async function reapStaleLeaseHolders(
         const reapedDirect = reaped.filter(
           (row: { lease_id: string; kind: string }) => row.kind === "direct",
         ).length;
+        // Interaction resources own their placement until their durable
+        // lifecycle ends. A browser/computer controller is not a web page: it
+        // must survive a hidden tab, a closed laptop, a long login/MFA pause,
+        // and agent-only use. The previous timestamp branch treated the React
+        // viewer's heartbeat as controller liveness and falsely destroyed
+        // healthy browserd sessions after a few minutes of UI inactivity.
+        // Provider loss and workspace force-drain have their own authoritative
+        // settlement paths; this sweep only removes orphaned holders.
         const staleInteractionRows =
           input.interactionHolderTtlMs && input.interactionHolderTtlMs > 0
             ? await rawRows<{ id: string; workspace_id: string }>(
@@ -32509,10 +32517,7 @@ export async function reapStaleLeaseHolders(
                 from sandbox_lease_holders holder
                 where holder.workspace_id = ${input.workspaceId}
                   and holder.kind = 'interaction'
-                  and (
-                    holder.last_heartbeat_at < now()
-                      - (${String(input.interactionHolderTtlMs)} || ' milliseconds')::interval
-                    or not (
+                  and not (
                       exists (
                         select 1 from browser_sessions browser
                         join sandbox_leases lease on lease.id = holder.lease_id
@@ -32535,7 +32540,6 @@ export async function reapStaleLeaseHolders(
                             'starting', 'active', 'suspending', 'restoring', 'ending'
                           )
                       )
-                    )
                   )
                 for update of holder skip locked
               `,
@@ -32835,6 +32839,12 @@ export async function reapStaleLeaseHoldersGlobal(
     idleGraceMs: number;
   },
 ): Promise<ReapDrainable[]> {
+  // Interaction holders represent durable BrowserSession/ComputerSession
+  // ownership, not a viewer presence lease. The installed legacy SQL function
+  // conflates its TTL with the React viewer heartbeat, so passing a positive
+  // value can destroy a healthy controller whenever its panel is hidden. End,
+  // loss and force-drain paths release these holders authoritatively; disable
+  // timestamp reaping until the global function is lifecycle-only as well.
   const rows = await db.transaction(async (txRaw) => {
     const tx = txRaw as unknown as Database;
     await tx.execute(sql`select set_config('opengeni.sandbox_recovery_protocol_v2', '1', true)`);
@@ -32850,7 +32860,7 @@ export async function reapStaleLeaseHoldersGlobal(
         from opengeni_private.reap_sandbox_leases(
           ${input.viewerHolderTtlMs},
           ${input.turnHolderTtlMs ?? 0},
-          ${input.interactionHolderTtlMs ?? input.viewerHolderTtlMs},
+          ${0},
           ${input.idleGraceMs}
         )
       `,
@@ -46290,6 +46300,14 @@ export async function settleSessionAttemptInterruptions(
             : interruptions.some((interruption) => interruption.kind === "maintenance")
               ? "maintenance"
               : "session_pause";
+      if (terminalCancel || steer) {
+        await cancelTurnInteractionInterventionsInTransaction(tx as unknown as Database, {
+          accountId: session.accountId,
+          workspaceId,
+          sessionId,
+          turnId: turn.id,
+        });
+      }
       let sequence = session.lastSequence;
       const closedTools = await closePendingSessionToolCallsInTransaction(
         tx as unknown as Database,

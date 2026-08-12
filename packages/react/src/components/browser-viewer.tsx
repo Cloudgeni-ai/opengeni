@@ -328,7 +328,11 @@ export function BrowserViewer({
     stream: { format: "jpeg", quality: 76, maxWidth: 1_920, maxHeight: 1_200 },
     ...(webSocketFactory ? { webSocketFactory } : {}),
   });
-  const displayedFrame = frameMatchesObservation(frames.frame, browser.observation)
+  const displayedFrame = frameMatchesSelectedTarget(
+    frames.frame,
+    browser.session,
+    browser.selectedTarget,
+  )
     ? frames.frame
     : null;
   const supportsLiveFrames = browser.session?.capabilities.liveFrames === true;
@@ -629,7 +633,7 @@ export function BrowserViewer({
           <BrowserTabs
             targets={browser.targets}
             selectedTargetId={browser.selectedTarget?.id ?? null}
-            mutating={browser.mutating || savingProfile}
+            mutating={savingProfile}
             tabControl={browser.session?.capabilities.tabs === true}
             onSelect={(targetId) =>
               void browser
@@ -1351,7 +1355,6 @@ function BrowserViewport(props: {
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const composingRef = useRef(false);
   const pointerStartRef = useRef<PointerStart | null>(null);
-  const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastClickRef = useRef<{
     at: number;
     x: number;
@@ -1375,47 +1378,75 @@ function BrowserViewport(props: {
   const readClipboardRef = useRef(props.onReadClipboard);
   const errorRef = useRef(props.onError);
   const actionTailRef = useRef<Promise<void>>(Promise.resolve());
+  const queuedFrameRef = useRef<BrowserFrame | null>(null);
+  const decodingFrameRef = useRef(false);
+  const mountedRef = useRef(true);
   actionRef.current = props.onAction;
   readClipboardRef.current = props.onReadClipboard;
   errorRef.current = props.onError;
 
-  useEffect(() => {
-    const frame = props.frame;
-    const canvas = canvasRef.current;
-    if (!frame || !canvas) return;
-    let cancelled = false;
-    let objectUrl: string | null = null;
+  const paintQueuedFrames = useCallback(() => {
+    if (decodingFrameRef.current) return;
+    decodingFrameRef.current = true;
     void (async () => {
       try {
-        const blob = new Blob([frame.data.slice().buffer], {
-          type: frame.mediaType,
-        });
-        if (typeof createImageBitmap === "function") {
-          const bitmap = await createImageBitmap(blob);
-          if (cancelled) {
-            bitmap.close();
-            return;
+        while (mountedRef.current) {
+          const frame = queuedFrameRef.current;
+          queuedFrameRef.current = null;
+          if (!frame) break;
+
+          let objectUrl: string | null = null;
+          try {
+            const blob = new Blob([frame.data.slice().buffer], {
+              type: frame.mediaType,
+            });
+            if (typeof createImageBitmap === "function") {
+              const bitmap = await createImageBitmap(blob);
+              try {
+                const canvas = canvasRef.current;
+                if (mountedRef.current && canvas) {
+                  paintCanvas(canvas, bitmap, frame.width, frame.height);
+                }
+              } finally {
+                bitmap.close();
+              }
+              continue;
+            }
+            objectUrl = URL.createObjectURL(blob);
+            const image = await loadImage(objectUrl);
+            const canvas = canvasRef.current;
+            if (mountedRef.current && canvas) {
+              paintCanvas(canvas, image, frame.width, frame.height);
+            }
+          } catch (cause) {
+            if (mountedRef.current) errorRef.current(cause);
+          } finally {
+            if (objectUrl) URL.revokeObjectURL(objectUrl);
           }
-          paintCanvas(canvas, bitmap, frame.width, frame.height);
-          bitmap.close();
-          return;
         }
-        objectUrl = URL.createObjectURL(blob);
-        const image = await loadImage(objectUrl);
-        if (!cancelled) paintCanvas(canvas, image, frame.width, frame.height);
-      } catch (cause) {
-        if (!cancelled) errorRef.current(cause);
+      } finally {
+        decodingFrameRef.current = false;
+        if (mountedRef.current && queuedFrameRef.current) paintQueuedFrames();
       }
     })();
+  }, []);
+
+  useEffect(() => {
+    mountedRef.current = true;
     return () => {
-      cancelled = true;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      mountedRef.current = false;
+      queuedFrameRef.current = null;
     };
-  }, [props.frame]);
+  }, []);
+
+  useEffect(() => {
+    if (!props.frame) return;
+    queuedFrameRef.current = props.frame;
+    paintQueuedFrames();
+  }, [paintQueuedFrames, props.frame]);
 
   useEffect(
     () => () => {
-      if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
       if (wheelRef.current?.timer) clearTimeout(wheelRef.current.timer);
       if (pendingTextRef.current?.timer) clearTimeout(pendingTextRef.current.timer);
     },
@@ -1454,16 +1485,16 @@ function BrowserViewport(props: {
   }, [enqueue]);
 
   const flushPendingClick = useCallback(() => {
-    const pending = lastClickRef.current;
-    if (!pending) return;
-    if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
-    clickTimerRef.current = null;
     lastClickRef.current = null;
-    enqueue({ type: "pointer", action: "click", x: pending.x, y: pending.y }, pending.frame);
-  }, [enqueue]);
+  }, []);
 
   const pointerDown = (event: PointerEvent<HTMLCanvasElement>) => {
-    if (!props.frame || props.mutating || event.button !== 0) return;
+    if (!props.frame || event.button !== 0) return;
+    // Keep the hidden keyboard sink focused after the browser performs the
+    // pointerdown default action for the canvas. Without preventing that
+    // default, Chrome immediately moves focus back to the document and all
+    // subsequent typing/paste is silently lost.
+    event.preventDefault();
     flushPendingText();
     pointerStartRef.current = {
       x: event.clientX,
@@ -1505,18 +1536,18 @@ function BrowserViewport(props: {
       Math.hypot(previous.x - to.x, previous.y - to.y) < 6 &&
       sameFrameFence(previous.frame, start.frame)
     ) {
-      if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
-      clickTimerRef.current = null;
       lastClickRef.current = null;
-      enqueue({ type: "pointer", action: "double_click", x: to.x, y: to.y }, start.frame);
+      // The first click was already dispatched immediately. Tell CDP this is
+      // the continuation (clickCount=2), so the page receives a true dblclick
+      // without making every ordinary click wait for the double-click window.
+      enqueue(
+        { type: "pointer", action: "click", clickCount: 2, x: to.x, y: to.y },
+        start.frame,
+      );
       return;
     }
     lastClickRef.current = { at: now, x: to.x, y: to.y, frame: start.frame };
-    clickTimerRef.current = setTimeout(() => {
-      clickTimerRef.current = null;
-      lastClickRef.current = null;
-      enqueue({ type: "pointer", action: "click", x: to.x, y: to.y }, start.frame);
-    }, 280);
+    enqueue({ type: "pointer", action: "click", x: to.x, y: to.y }, start.frame);
   };
 
   const contextMenu = (event: MouseEvent<HTMLCanvasElement>) => {
@@ -2395,19 +2426,22 @@ function semanticNodes(roots: readonly InteractionSemanticNode[]): InteractionSe
   return result;
 }
 
-function frameMatchesObservation(
+function frameMatchesSelectedTarget(
   frame: BrowserFrame | null,
-  observation: BrowserObservation | null,
+  session: BrowserSession | null,
+  target: BrowserTarget | null,
 ): frame is BrowserFrame {
+  // The stream hook already validates the frame against the authenticated
+  // attachment's controller generation. The separately-polled BrowserSession
+  // can briefly carry the previous generation while an attachment is issued;
+  // comparing against it here discarded valid frames and left the viewer on
+  // "Connecting" indefinitely.
   return Boolean(
     frame &&
-    observation &&
-    frame.browserSessionId === observation.browserSessionId &&
-    frame.controllerGeneration === observation.target.controllerGeneration &&
-    frame.targetId === observation.target.id &&
-    frame.targetGeneration === observation.target.targetGeneration &&
-    frame.documentGeneration === observation.target.documentGeneration &&
-    frame.frameId === observation.frameId,
+    session &&
+    target &&
+    frame.browserSessionId === session.id &&
+    frame.targetId === target.id,
   );
 }
 

@@ -32,6 +32,7 @@ import {
   withLosslessContentWriteVersion,
 } from "./lossless-json";
 import { closePendingSessionToolCallsInTransaction } from "./session-tool-call-settlement";
+import { cancelTurnInteractionInterventionsInTransaction } from "./browser-auth";
 import {
   assertAgentCommandAuthorityInTransaction,
   autoResumeSessionBranchInTransaction,
@@ -344,6 +345,12 @@ export async function supersedeSessionCurrentDirectionInTransaction(
   }
 
   const now = new Date();
+  await cancelTurnInteractionInterventionsInTransaction(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    turnId: current.id,
+  });
   const closedTools = await closePendingSessionToolCallsInTransaction(db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,

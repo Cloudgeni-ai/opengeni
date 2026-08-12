@@ -392,7 +392,7 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
       if (!fence) {
         throw new Error("The browser page is not ready for input.");
       }
-      return await runMutation(browserSessionId, async () => {
+      try {
         const receipt = await client.actInBrowser(workspaceId, browserSessionId, {
           operationId,
           ...fence,
@@ -415,9 +415,15 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
           );
         }
         return receipt;
-      });
+      } catch (cause) {
+        const error = cause instanceof Error ? cause : new Error(String(cause));
+        setState((current) =>
+          current.browserSessionId === browserSessionId ? { ...current, error } : current,
+        );
+        throw error;
+      }
     },
-    [browserSessionId, client, runMutation, workspaceId],
+    [browserSessionId, client, workspaceId],
   );
 
   const act = useCallback(

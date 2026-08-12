@@ -62,7 +62,12 @@ import type { AgentBrowserJsonCommand } from "./runner";
 const DEFAULT_ACTION_TIMEOUT_MS = 30_000;
 const BROWSER_START_TIMEOUT_MS = 30_000;
 const TARGET_CREATION_SETTLE_TIMEOUT_MS = 5_000;
-const FRAME_FALLBACK_INTERVAL_MS = 750;
+// A screenshot stream is the compatibility floor for every Chromium build.
+// Keep it interactive even when Page.startScreencast is unavailable or a
+// background target never produces screencast events.
+const FRAME_FALLBACK_INTERVAL_MS = 100;
+const FRAME_CAPTURE_TIMEOUT_MS = 2_000;
+const FRAME_CAPTURE_FAILURE_LIMIT = 3;
 const GRACEFUL_BROWSER_CLOSE_TIMEOUT_MS = 30_000;
 const NETWORK_IDLE_MS = 500;
 const PROTECTED_AUTH_AUTO_ADVANCE_TIMEOUT_MS = 3_000;
@@ -168,6 +173,7 @@ type TargetScreencast = {
   lastFrameAt: number;
   captureDeviceScaleFactor: number | null;
   fallbackAbort: AbortController;
+  capturePromise: Promise<void> | null;
   subscriptions: Map<string, LatestBrowserFrameSubscription>;
   unsubscribe: () => void;
 };
@@ -352,8 +358,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   async start(url?: string): Promise<BrowserObservationValue> {
-    const deferNavigation = this.emulation !== null && url !== undefined && url !== "about:blank";
-    const launchUrl = this.emulation !== null ? "about:blank" : url;
+    const deferNavigation = url !== undefined && url !== "about:blank";
+    // `agent-browser open <url>` both supplies Chromium's launch URL and opens
+    // the URL through its daemon. On a cold profile that produces two tabs.
+    // Start the private browser once, then perform the one intended navigation
+    // through our target-scoped CDP authority.
+    const launchUrl = this.targetLifecycle === "runner" ? undefined : url;
     this.started = true;
     let connection: BrowserCdpConnection;
     let launched: { url?: unknown; targetId?: unknown };
@@ -632,6 +642,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     targetId: string,
     options: BrowserFrameStreamOptions = {},
   ): Promise<BrowserFrameSubscription> {
+    frameStreamDiagnostic("browser.frame.subscribe.begin", {
+      browserSessionId: this.browserSessionId,
+      targetId,
+    });
     if (!this.frameStreaming) {
       throw new InteractionDefiniteDriverError(
         "unsupported",
@@ -646,36 +660,18 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
       let created = false;
       if (!screencast) {
-        const connection = await this.ensureConnection();
-        const unsubscribe = connection.on(
-          "Page.screencastFrame",
-          (event) => this.acceptScreencastFrame(state, event),
-          state.sessionId,
-        );
         screencast = {
           options: normalized,
           sequence: 0,
           lastFrameAt: 0,
           captureDeviceScaleFactor: null,
           fallbackAbort: new AbortController(),
+          capturePromise: null,
           subscriptions: new Map(),
-          unsubscribe,
+          unsubscribe: () => undefined,
         };
         state.screencast = screencast;
         created = true;
-        try {
-          await this.sendTarget(state, "Page.startScreencast", {
-            format: normalized.format,
-            ...(normalized.format === "jpeg" ? { quality: normalized.quality } : {}),
-            maxWidth: normalized.maxWidth,
-            maxHeight: normalized.maxHeight,
-            everyNthFrame: normalized.everyNthFrame,
-          });
-        } catch (error) {
-          unsubscribe();
-          state.screencast = null;
-          throw error;
-        }
       }
       if (screencast.subscriptions.size >= 32) {
         throw new Error("browser target frame-subscriber bound was reached");
@@ -685,18 +681,34 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         async () => await this.releaseFrameSubscription(targetId, subscriptionId),
       );
       screencast.subscriptions.set(subscriptionId, subscription);
-      return { screencast, subscription, created };
+      return { state, screencast, subscription, created };
+    });
+    frameStreamDiagnostic("browser.frame.subscribe.configured", {
+      browserSessionId: this.browserSessionId,
+      targetId,
+      created: configured.created,
     });
     try {
       // Chromium does not emit Page.screencastFrame for a background tab in a
       // headed browser. Seed every subscriber from the same target-scoped CDP
       // surface so attachment readiness never depends on focusing Chrome.
       await this.captureFallbackFrame(targetId, configured.screencast);
+      frameStreamDiagnostic("browser.frame.subscribe.seeded", {
+        browserSessionId: this.browserSessionId,
+        targetId,
+        sequence: configured.screencast.sequence,
+      });
     } catch (error) {
       await configured.subscription.close().catch(() => undefined);
       throw error;
     }
-    if (configured.created) this.pollFallbackFrames(targetId, configured.screencast);
+    if (configured.created) {
+      // Page.startScreencast can wedge every later target command when a headed
+      // Chromium tab is not foregrounded. A continuously sampled, target-scoped
+      // Page.captureScreenshot stream works for background tabs and keeps Browser
+      // independent from the shared desktop's focus.
+      this.pollFallbackFrames(targetId, configured.screencast);
+    }
     return configured.subscription;
   }
 
@@ -1663,14 +1675,17 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     return parseFrameTree(response.frameTree);
   }
 
-  private async layoutMetrics(state: TargetState): Promise<{
+  private async layoutMetrics(
+    state: TargetState,
+    timeoutMs?: number,
+  ): Promise<{
     viewport: { x: number; y: number; width: number; height: number };
     content: { width: number; height: number };
   }> {
     const response = await this.sendTarget<{
       cssVisualViewport?: unknown;
       cssContentSize?: unknown;
-    }>(state, "Page.getLayoutMetrics");
+    }>(state, "Page.getLayoutMetrics", {}, timeoutMs ? { timeoutMs } : undefined);
     const viewport = dimensionsRecord(response.cssVisualViewport, true);
     const content = dimensionsRecord(response.cssContentSize, false);
     return { viewport, content };
@@ -1708,51 +1723,16 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     };
   }
 
-  private acceptScreencastFrame(state: TargetState, event: CdpEvent): void {
-    const screencast = state.screencast;
-    if (!screencast) return;
-    const acknowledgementId = finitePositiveNumber(event.params.sessionId);
-    if (acknowledgementId !== null) {
-      void this.sendTarget(state, "Page.screencastFrameAck", {
-        sessionId: acknowledgementId,
-      }).catch((error: unknown) => {
-        this.failScreencast(state, transportError(error));
-      });
-    }
-    if (state.protectedAuthActive) return;
-    try {
-      const metadata = isRecord(event.params.metadata) ? event.params.metadata : {};
-      const data = decodeBoundedBase64Image(event.params.data);
-      const sourceWidth = boundedImageDimension(metadata.deviceWidth);
-      boundedImageDimension(metadata.deviceHeight);
-      const dimensions = imageDimensions(data, screencast.options.format);
-      const frame = this.imageFrame({
-        state,
-        sequence: ++screencast.sequence,
-        format: screencast.options.format,
-        data,
-        width: dimensions.width,
-        height: dimensions.height,
-        // CDP reports the source screen in DIP and pageScaleFactor maps CSS to
-        // DIP; maxWidth/maxHeight may then downscale the encoded pixels.
-        deviceScaleFactor: finiteScale(
-          (dimensions.width / sourceWidth) * (numberField(metadata, "pageScaleFactor") ?? 1),
-        ),
-        scrollX: numberField(metadata, "scrollOffsetX") ?? 0,
-        scrollY: numberField(metadata, "scrollOffsetY") ?? 0,
-      });
-      screencast.lastFrameAt = Date.now();
-      for (const subscription of screencast.subscriptions.values()) subscription.push(frame);
-    } catch (error) {
-      this.failScreencast(state, transportError(error));
-    }
-  }
-
   private async captureFallbackFrame(targetId: string, expected: TargetScreencast): Promise<void> {
-    await this.withTarget(targetId, async (state) => {
+    if (expected.capturePromise) return await expected.capturePromise;
+    const capture = (async () => {
+      // Frame sampling is deliberately outside TargetState.tail. Media is
+      // latest-only and must never queue ahead of clicks, typing, navigation,
+      // observations, or tab control.
+      const state = this.states.get(targetId);
+      if (!state) throw new Error("browser target does not exist");
       if (state.screencast !== expected || this.protectedAuthQuiet(state)) return;
-      await this.refreshFrame(state);
-      const metrics = await this.layoutMetrics(state);
+      const metrics = await this.layoutMetrics(state, FRAME_CAPTURE_TIMEOUT_MS);
       const viewport = metrics.viewport;
       const estimatedDeviceScaleFactor = expected.captureDeviceScaleFactor ?? 1;
       let scale = Math.min(
@@ -1779,6 +1759,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
               scale,
             },
           },
+          { timeoutMs: FRAME_CAPTURE_TIMEOUT_MS },
         );
         data = decodeBoundedBase64Image(response.data);
         dimensions = imageDimensions(data, expected.options.format);
@@ -1814,11 +1795,18 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       });
       expected.lastFrameAt = Date.now();
       for (const subscription of expected.subscriptions.values()) subscription.push(frame);
-    });
+    })();
+    expected.capturePromise = capture;
+    try {
+      await capture;
+    } finally {
+      if (expected.capturePromise === capture) expected.capturePromise = null;
+    }
   }
 
   private pollFallbackFrames(targetId: string, expected: TargetScreencast): void {
     void (async () => {
+      let consecutiveFailures = 0;
       while (!expected.fallbackAbort.signal.aborted) {
         await delay(FRAME_FALLBACK_INTERVAL_MS);
         if (expected.fallbackAbort.signal.aborted) return;
@@ -1827,7 +1815,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         if (Date.now() - expected.lastFrameAt < FRAME_FALLBACK_INTERVAL_MS) continue;
         try {
           await this.captureFallbackFrame(targetId, expected);
+          consecutiveFailures = 0;
         } catch (error) {
+          consecutiveFailures += 1;
+          if (consecutiveFailures < FRAME_CAPTURE_FAILURE_LIMIT) continue;
           const current = this.states.get(targetId);
           if (current?.screencast === expected) {
             this.failScreencast(current, transportError(error));
@@ -1859,7 +1850,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       screencast.unsubscribe();
       screencast.fallbackAbort.abort();
       state.screencast = null;
-      await this.sendTarget(state, "Page.stopScreencast");
     });
     state.tail = release.then(
       () => undefined,
@@ -2711,7 +2701,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         return;
       case "click":
       case "double_click": {
-        await this.clickPoint(state, start, button, action.action === "click" ? 1 : 2);
+        if (action.action === "click" && action.clickCount === 2) {
+          await this.clickPoint(state, start, button, 2, 2);
+        } else {
+          await this.clickPoint(state, start, button, action.action === "click" ? 1 : 2);
+        }
         return;
       }
       case "scroll":
@@ -2767,13 +2761,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     point: { x: number; y: number },
     button: "left" | "right" | "middle",
     count: 1 | 2,
+    firstCount: 1 | 2 = 1,
   ): Promise<void> {
     await this.sendActionTarget(state, "Input.dispatchMouseEvent", {
       type: "mouseMoved",
       x: point.x,
       y: point.y,
     });
-    for (let clickCount = 1; clickCount <= count; clickCount += 1) {
+    for (let clickCount = firstCount; clickCount <= count; clickCount += 1) {
       await this.sendActionTarget(state, "Input.dispatchMouseEvent", {
         type: "mousePressed",
         x: point.x,
@@ -2981,10 +2976,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     state: TargetState,
     method: string,
     params: Readonly<Record<string, unknown>> = {},
+    options?: { timeoutMs?: number; signal?: AbortSignal },
   ): Promise<T> {
     const connection = await this.ensureConnection();
     return await connection.send<T>(method, params, {
       sessionId: state.sessionId,
+      ...options,
     });
   }
 
@@ -3236,6 +3233,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private timestamp(): string {
     return this.now().toISOString();
   }
+}
+
+function frameStreamDiagnostic(event: string, fields: Readonly<Record<string, unknown>>): void {
+  console.info(JSON.stringify({ event, ...fields, at: new Date().toISOString() }));
 }
 
 function normalizeTargetInfo(value: unknown): TargetInfo {
@@ -3666,17 +3667,6 @@ function dimensionsRecord(
 function numberField(value: Record<string, unknown>, key: string): number | null {
   const candidate = value[key];
   return typeof candidate === "number" && Number.isFinite(candidate) ? candidate : null;
-}
-
-function boundedImageDimension(value: unknown): number {
-  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
-    throw new Error("browser frame has invalid dimensions");
-  }
-  return Math.round(value);
-}
-
-function finitePositiveNumber(value: unknown): number | null {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
 function finiteScale(value: number): number {

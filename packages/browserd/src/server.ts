@@ -1318,6 +1318,14 @@ export class BrowserControlServer {
   private async pumpBrowserFrames(socket: BrowserSocket): Promise<void> {
     const data = socket.data;
     if (data.kind !== "browser") return;
+    console.info(
+      JSON.stringify({
+        event: "browser.frame.socket.open",
+        browserSessionId: data.reference.browserSessionId,
+        targetId: data.targetId,
+        at: new Date().toISOString(),
+      }),
+    );
     try {
       const subscription = await this.supervisor.subscribeFrames(
         data.reference,
@@ -1329,14 +1337,37 @@ export class BrowserControlServer {
         return;
       }
       data.subscription = subscription;
+      let sent = 0;
       for await (const frame of subscription) {
         if (data.closed) break;
         if (socket.send(encodeBrowserFrameMessage(frame), false) < 0) {
           socket.close(1013, "frame consumer is too slow");
           break;
         }
+        sent += 1;
+        if (sent === 1) {
+          console.info(
+            JSON.stringify({
+              event: "browser.frame.socket.first_sent",
+              browserSessionId: data.reference.browserSessionId,
+              targetId: data.targetId,
+              sequence: frame.sequence,
+              bytes: frame.data.byteLength,
+              at: new Date().toISOString(),
+            }),
+          );
+        }
       }
     } catch (error) {
+      console.error(
+        JSON.stringify({
+          event: "browser.frame.socket.failed",
+          browserSessionId: data.reference.browserSessionId,
+          targetId: data.targetId,
+          error: error instanceof Error ? error.message : String(error),
+          at: new Date().toISOString(),
+        }),
+      );
       if (!data.closed) socket.close(1011, frameStreamCloseReason(error));
     } finally {
       await data.subscription?.close();

@@ -182,6 +182,36 @@ export class LinuxVirtualComputerEnvironmentAllocator implements ComputerEnviron
         await assertStillRunning(windowManager, "virtual window manager");
       }
 
+      // A freshly-created isolated seat must be visibly and immediately useful.
+      // XFWM alone paints a valid but featureless black root window, which is
+      // indistinguishable from a broken framebuffer to both humans and agents.
+      // Keep the managed image lean while giving every ComputerSession one
+      // real, focused, AT-SPI-visible application and an ordinary shell.
+      const terminal = spawn(
+        "xterm",
+        [
+          "-geometry",
+          "112x34+28+28",
+          "-title",
+          "OpenGeni Sandbox",
+          "-bg",
+          "#101318",
+          "-fg",
+          "#e7eaf0",
+          "-bd",
+          "#2d3440",
+        ],
+        {
+          detached: true,
+          env: sessionEnvironment,
+          cwd: context.baseEnvironment.HOME ?? "/workspace",
+          stdio: ["ignore", "ignore", "pipe"],
+        },
+      );
+      processes.push(terminal);
+      drain(terminal.stderr);
+      await assertStillRunning(terminal, "virtual desktop terminal");
+
       // Human screen control must not poll full PNG screenshots. Give every
       // isolated Linux seat its own loopback-only RFB server; browserd exposes
       // it through the same short-lived authenticated WebSocket boundary as the

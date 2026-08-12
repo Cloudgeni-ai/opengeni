@@ -795,6 +795,7 @@ export type BrowserAction =
       deltaX?: number | undefined;
       deltaY?: number | undefined;
       button?: "left" | "right" | "middle" | undefined;
+      clickCount?: 1 | 2 | undefined;
     }
   | {
       type: "handle_dialog";
