@@ -50,6 +50,7 @@ describe("object storage adapters", () => {
           OPENGENI_OBJECT_STORAGE_BACKEND: "s3-compatible",
           OPENGENI_OBJECT_STORAGE_ENDPOINT: "https://storage.example.com",
           OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT: `http://127.0.0.1:${internal.port}`,
+          OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT: "https://sandbox-storage.example.com",
           OPENGENI_OBJECT_STORAGE_BUCKET: "test-bucket",
           OPENGENI_OBJECT_STORAGE_FORCE_PATH_STYLE: "true",
           OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID: "test",
@@ -62,8 +63,19 @@ describe("object storage adapters", () => {
         contentType: "image/png",
       });
       const get = await storage.createGetUrl({ key: "files/file-id/original/image.png" });
+      const sandboxPut = await storage.createPutUrl({
+        key: "files/file-id/original/image.png",
+        contentType: "image/png",
+        audience: "sandbox",
+      });
+      const sandboxGet = await storage.createGetUrl({
+        key: "files/file-id/original/image.png",
+        audience: "sandbox",
+      });
       expect(new URL(put.url).host).toBe("storage.example.com");
       expect(new URL(get.url).host).toBe("storage.example.com");
+      expect(new URL(sandboxPut.url).host).toBe("sandbox-storage.example.com");
+      expect(new URL(sandboxGet.url).host).toBe("sandbox-storage.example.com");
 
       const head = await storage.headFile({
         id: "33333333-3333-4333-8333-333333333333",

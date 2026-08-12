@@ -24,18 +24,20 @@ describe("managed browser profile cryptography", () => {
   });
 
   test.skipIf(process.platform !== "darwin")(
-    "preserves the managed browser executable startup handshake",
+    "launches a managed browser through the lifecycle-preserving background helper",
     async () => {
       const root = await mkdtemp("/tmp/og-runner-background-");
       const browserPath = join(root, "Fixture Browser.app", "Contents", "MacOS", "Fixture Browser");
+      const helperPath = join(root, "opengeni-computer-native");
       const binaryPath = join(root, "fixture-agent-browser");
       await mkdir(join(root, "Fixture Browser.app", "Contents", "MacOS"), {
         recursive: true,
       });
       await writeFile(browserPath, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+      await writeFile(helperPath, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
       await writeFile(
         binaryPath,
-        `#!/usr/bin/env bun\nconsole.log(JSON.stringify({ success: true, data: { executable: process.env.AGENT_BROWSER_EXECUTABLE_PATH }, error: null }));\n`,
+        `#!/usr/bin/env bun\nconsole.log(JSON.stringify({ success: true, data: { executable: process.env.AGENT_BROWSER_EXECUTABLE_PATH, backgroundExecutable: process.env.OPENGENI_BACKGROUND_BROWSER_EXECUTABLE }, error: null }));\n`,
         { mode: 0o700 },
       );
       const runner = await AgentBrowserJsonRunner.create({
@@ -47,6 +49,7 @@ describe("managed browser profile cryptography", () => {
         screenshotDirectory: join(root, "screenshots"),
         headed: true,
         browserExecutablePath: browserPath,
+        browserLaunchHelperPath: helperPath,
         binary: {
           path: binaryPath,
           name: "agent-browser-darwin-arm64",
@@ -55,8 +58,14 @@ describe("managed browser profile cryptography", () => {
         },
       });
       try {
-        const result = await runner.run<{ executable: string }>(["open", "about:blank"]);
-        expect(result.executable).toBe(browserPath);
+        const result = await runner.run<{ executable: string; backgroundExecutable: string }>([
+          "open",
+          "about:blank",
+        ]);
+        expect(result).toEqual({
+          executable: helperPath,
+          backgroundExecutable: browserPath,
+        });
       } finally {
         await rm(root, { recursive: true, force: true });
       }

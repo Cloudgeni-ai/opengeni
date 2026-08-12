@@ -71,6 +71,10 @@ export interface DesktopRfbLike {
     type: "connect" | "disconnect" | "securityfailure",
     cb: (e?: unknown) => void,
   ) => void;
+  /** Send clipboard text over the already-open RFB connection. */
+  clipboardPasteFrom?(text: string): void;
+  /** Send one RFB key event. A missing `down` emits a complete key press. */
+  sendKey?(keysym: number, code: string, down?: boolean): void;
   disconnect(): void;
 }
 

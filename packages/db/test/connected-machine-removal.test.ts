@@ -220,7 +220,7 @@ describe("connected machine removal lifecycle", () => {
     );
   }, 60_000);
 
-  test("blocks removal when the machine is a session's durable home sandbox", async () => {
+  test("detaches idle sessions to no compute when removing their connected machine", async () => {
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();
     const enrollment = await createEnrollment(db, {
@@ -254,25 +254,35 @@ describe("connected machine removal lifecycle", () => {
     });
     expect(routed.swapped).toBe(true);
 
-    const blocked = await removeEnrollment(db, {
+    const removed = await removeEnrollment(db, {
       accountId,
       workspaceId,
       enrollmentId: enrollment.id,
-      operationKey: "machine-home-blocked",
+      operationKey: "machine-home-detached",
     });
-    expect(blocked).toMatchObject({
-      outcome: "blocked",
-      removed: false,
-      code: "machine_home",
+    expect(removed).toMatchObject({
+      outcome: "removed",
+      removed: true,
+      code: null,
       dependentSessions: [{ id: session.id, title: "Machine home session" }],
     });
-    const [pointer] = await admin<{ active_sandbox_id: string | null; active_epoch: number }[]>`
-      select active_sandbox_id, active_epoch from sessions where id = ${session.id}`;
+    const [pointer] = await admin<
+      {
+        active_sandbox_id: string | null;
+        active_epoch: number;
+        sandbox_backend: string;
+        sandbox_group_id: string;
+      }[]
+    >`
+      select active_sandbox_id, active_epoch, sandbox_backend, sandbox_group_id
+      from sessions where id = ${session.id}`;
     expect(pointer).toEqual({
-      active_sandbox_id: machine.id,
-      active_epoch: routed.pointer!.activeEpoch,
+      active_sandbox_id: null,
+      active_epoch: routed.pointer!.activeEpoch + 1,
+      sandbox_backend: "none",
+      sandbox_group_id: session.id,
     });
-    expect((await getEnrollment(db, workspaceId, enrollment.id))?.status).toBe("active");
+    expect((await getEnrollment(db, workspaceId, enrollment.id))?.status).toBe("revoked");
   }, 60_000);
 
   test("fences idempotency keys by enrollment with omitted and equal revisions", async () => {
@@ -351,7 +361,7 @@ describe("connected machine removal lifecycle", () => {
     expect(replay).toEqual(equalRemoval);
   }, 60_000);
 
-  test("blocks active routing and live leases, rejects stale revisions, and serializes concurrent removal", async () => {
+  test("blocks active work and live leases, detaches idle routes, rejects stale revisions, and serializes concurrent removal", async () => {
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();
     const routedEnrollment = await createEnrollment(db, {
@@ -401,29 +411,6 @@ describe("connected machine removal lifecycle", () => {
       expectedEpoch: secondSession.activeEpoch,
     });
     expect(secondRouted.swapped).toBe(true);
-    const routeBlocked = await removeEnrollment(db, {
-      accountId,
-      workspaceId,
-      enrollmentId: routedEnrollment.id,
-      operationKey: "route-blocked",
-    });
-    expect(routeBlocked).toMatchObject({
-      outcome: "blocked",
-      code: "active_route",
-      dependentSessions: [
-        { id: session.id, title: null },
-        { id: secondSession.id, title: "Second routed session" },
-      ],
-    });
-    expect(
-      await removeEnrollment(db, {
-        accountId,
-        workspaceId,
-        enrollmentId: routedEnrollment.id,
-        operationKey: "route-blocked",
-      }),
-    ).toEqual(routeBlocked);
-
     const activeTurnId = crypto.randomUUID();
     await admin`
       update sessions
@@ -476,38 +463,26 @@ describe("connected machine removal lifecycle", () => {
       select id, status, active_turn_id, queue_version, queue_head_position,
              queue_tail_position, last_sequence
       from sessions where id = ${session.id}`;
-    const movedFirst = await setActiveSandbox(db, {
-      accountId,
-      workspaceId,
-      sessionId: session.id,
-      targetSandboxId: null,
-      expectedEpoch: routed.pointer!.activeEpoch,
-    });
-    const movedSecond = await setActiveSandbox(db, {
-      accountId,
-      workspaceId,
-      sessionId: secondSession.id,
-      targetSandboxId: null,
-      expectedEpoch: secondRouted.pointer!.activeEpoch,
-    });
-    expect(movedFirst.swapped).toBe(true);
-    expect(movedSecond.swapped).toBe(true);
-    const removedAfterMoves = await removeEnrollment(db, {
+    const removedAfterTurn = await removeEnrollment(db, {
       accountId,
       workspaceId,
       enrollmentId: routedEnrollment.id,
-      operationKey: "route-remove-after-moves",
+      operationKey: "route-remove-after-turn",
     });
-    expect(removedAfterMoves).toMatchObject({
+    expect(removedAfterTurn).toMatchObject({
       outcome: "removed",
       removed: true,
-      dependentSessions: [],
+      dependentSessions: [
+        { id: session.id, title: null },
+        { id: secondSession.id, title: "Second routed session" },
+      ],
     });
     const movedSessions = await admin<
       {
         id: string;
         active_sandbox_id: string | null;
         active_epoch: number;
+        sandbox_backend: string;
         status: string;
         active_turn_id: string | null;
         queue_version: number;
@@ -516,13 +491,14 @@ describe("connected machine removal lifecycle", () => {
         last_sequence: number;
       }[]
     >`
-      select id, active_sandbox_id, active_epoch, status, active_turn_id,
+      select id, active_sandbox_id, active_epoch, sandbox_backend, status, active_turn_id,
              queue_version, queue_head_position, queue_tail_position, last_sequence
       from sessions where id in (${session.id}, ${secondSession.id}) order by created_at, id`;
     expect(movedSessions.map((row) => [row.id, row.active_sandbox_id, row.active_epoch])).toEqual([
-      [session.id, null, movedFirst.pointer!.activeEpoch],
-      [secondSession.id, null, movedSecond.pointer!.activeEpoch],
+      [session.id, null, routed.pointer!.activeEpoch + 1],
+      [secondSession.id, null, secondRouted.pointer!.activeEpoch + 1],
     ]);
+    expect(movedSessions.map((row) => row.sandbox_backend)).toEqual(["modal", "modal"]);
     expect(movedSessions[0]).toMatchObject(beforeMove!);
 
     const leasedEnrollment = await createEnrollment(db, {

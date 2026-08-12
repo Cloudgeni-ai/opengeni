@@ -1006,7 +1006,7 @@ describe("durable BrowserSession lifecycle", () => {
     ).toBeNull();
   });
 
-  test("heartbeats resource and placement holder atomically, then exposes controller loss", async () => {
+  test("heartbeats resource and placement holder without inferring loss from viewer inactivity", async () => {
     if (!available) return;
     const scope = await fixture();
     const holderId = `browser-session:pending`;
@@ -1078,13 +1078,12 @@ describe("durable BrowserSession lifecycle", () => {
       interactionHolderTtlMs: 90_000,
       idleGraceMs: 45_000,
     });
-    expect(reaped.reapedInteractions).toBe(1);
+    expect(reaped.reapedInteractions).toBe(0);
     expect(
       await getBrowserSession(client.db, { ...scope, browserSessionId: prepared.session.id }),
     ).toMatchObject({
-      lifecycle: "lost",
-      controller: null,
-      failureCode: "controller_heartbeat_expired",
+      lifecycle: "active",
+      failureCode: null,
     });
   }, 60_000);
 });

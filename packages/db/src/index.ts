@@ -33027,6 +33027,14 @@ export async function reapStaleLeaseHolders(
         const reapedDirect = reaped.filter(
           (row: { lease_id: string; kind: string }) => row.kind === "direct",
         ).length;
+        // Interaction resources own their placement until their durable
+        // lifecycle ends. A browser/computer controller is not a web page: it
+        // must survive a hidden tab, a closed laptop, a long login/MFA pause,
+        // and agent-only use. The previous timestamp branch treated the React
+        // viewer's heartbeat as controller liveness and falsely destroyed
+        // healthy browserd sessions after a few minutes of UI inactivity.
+        // Provider loss and workspace force-drain have their own authoritative
+        // settlement paths; this sweep only removes orphaned holders.
         const staleInteractionRows =
           input.interactionHolderTtlMs && input.interactionHolderTtlMs > 0
             ? await rawRows<{ id: string; workspace_id: string }>(
@@ -33036,10 +33044,7 @@ export async function reapStaleLeaseHolders(
                 from sandbox_lease_holders holder
                 where holder.workspace_id = ${input.workspaceId}
                   and holder.kind = 'interaction'
-                  and (
-                    holder.last_heartbeat_at < now()
-                      - (${String(input.interactionHolderTtlMs)} || ' milliseconds')::interval
-                    or not (
+                  and not (
                       exists (
                         select 1 from browser_sessions browser
                         join sandbox_leases lease on lease.id = holder.lease_id
@@ -33062,7 +33067,6 @@ export async function reapStaleLeaseHolders(
                             'starting', 'active', 'suspending', 'restoring', 'ending'
                           )
                       )
-                    )
                   )
                 for update of holder skip locked
               `,
@@ -33362,6 +33366,12 @@ export async function reapStaleLeaseHoldersGlobal(
     idleGraceMs: number;
   },
 ): Promise<ReapDrainable[]> {
+  // Interaction holders represent durable BrowserSession/ComputerSession
+  // ownership, not a viewer presence lease. The installed legacy SQL function
+  // conflates its TTL with the React viewer heartbeat, so passing a positive
+  // value can destroy a healthy controller whenever its panel is hidden. End,
+  // loss and force-drain paths release these holders authoritatively; disable
+  // timestamp reaping until the global function is lifecycle-only as well.
   const rows = await db.transaction(async (txRaw) => {
     const tx = txRaw as unknown as Database;
     await tx.execute(sql`select set_config('opengeni.sandbox_recovery_protocol_v2', '1', true)`);
@@ -33377,7 +33387,7 @@ export async function reapStaleLeaseHoldersGlobal(
         from opengeni_private.reap_sandbox_leases(
           ${input.viewerHolderTtlMs},
           ${input.turnHolderTtlMs ?? 0},
-          ${input.interactionHolderTtlMs ?? input.viewerHolderTtlMs},
+          ${0},
           ${input.idleGraceMs}
         )
       `,
@@ -39458,11 +39468,12 @@ function machineRemovalResultFromStored(value: unknown): MachineRemovalResult {
 }
 
 /**
- * Remove one connected-machine enrollment without touching the durable identity
- * or any session/route/archive evidence. The enrollment row is the lifecycle
- * truth: status -> revoked rejects future auth-callout/heartbeat/reconnect
- * attempts, while a fresh device-flow re-enrollment can reactivate the same
- * public-key identity with a new credential family.
+ * Remove one connected-machine enrollment without deleting durable identity,
+ * conversation, or audit evidence. Idle sessions using the machine are detached
+ * to `none`; active work and recovery fences still block removal. The enrollment
+ * row is the lifecycle truth: status -> revoked rejects future auth-callout/
+ * heartbeat/reconnect attempts, while a fresh device-flow re-enrollment can
+ * reactivate the same public-key identity with a new credential family.
  *
  * The operation key is scoped to the workspace and is receipt-backed. A retry
  * with the same key and request fingerprint replays the exact committed result;
@@ -39485,7 +39496,7 @@ export async function removeEnrollment(
     throw new Error("machine removal operation key must be 1-200 characters");
   }
   const requestFingerprint = machineRemovalFingerprint(input.enrollmentId, input.expectedUpdatedAt);
-  return await withRlsContext(
+  return await withSessionActivityRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
@@ -39694,44 +39705,6 @@ export async function removeEnrollment(
           return result;
         }
 
-        const machineHome = activePointers.find(
-          (pointer: { sandbox_backend: string }) => pointer.sandbox_backend === "selfhosted",
-        );
-        if (machineHome) {
-          const result: MachineRemovalResult = {
-            ...baseResult,
-            outcome: "blocked",
-            removed: false,
-            code: "machine_home",
-            message: `Machine is the durable home sandbox for session ${machineHome.title?.trim() || machineHome.session_id}.`,
-            action:
-              "Keep the machine enrolled until that session has a supported managed-home migration or is no longer needed.",
-          };
-          await scopedDb.insert(schema.machineRemovalOperations).values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            enrollmentId: enrollment.id,
-            operationKey,
-            requestFingerprint,
-            outcome: result.outcome,
-            result,
-          });
-          await scopedDb.insert(schema.auditEvents).values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            subjectId: input.subjectId ?? null,
-            action: "connected_machine.removal_blocked",
-            targetType: "enrollment",
-            targetId: enrollment.id,
-            metadata: {
-              code: result.code,
-              sessionId: machineHome.session_id,
-              message: result.message,
-            },
-          });
-          return result;
-        }
-
         const [activeGroup] = await scopedDb.execute<{
           session_id: string;
           title: string | null;
@@ -39740,6 +39713,7 @@ export async function removeEnrollment(
           from sessions
           where workspace_id = ${input.workspaceId}
             and sandbox_group_id = ${machine.id}
+            and active_turn_id is not null
             and status not in ('completed', 'failed', 'cancelled')
           order by created_at asc, id asc
           limit 1
@@ -39850,40 +39824,51 @@ export async function removeEnrollment(
           return result;
         }
 
-        if (dependentSessions.length > 0) {
-          const count = dependentSessions.length;
-          const result: MachineRemovalResult = {
-            ...baseResult,
-            outcome: "blocked",
-            removed: false,
-            code: "active_route",
-            message: `Machine is still selected by ${count} ${count === 1 ? "session" : "sessions"}.`,
-            action:
-              "Review the affected sessions, then explicitly move them to their default managed sandbox and remove the machine.",
-          };
-          await scopedDb.insert(schema.machineRemovalOperations).values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            enrollmentId: enrollment.id,
-            operationKey,
-            requestFingerprint,
-            outcome: result.outcome,
-            result,
+        // An idle conversation is not data living on the machine. Detach it
+        // atomically and make a machine-primary session explicitly compute-less;
+        // its durable messages/history remain intact. A managed sandbox can be
+        // selected later without inventing a fake migration of machine files.
+        const detached = await scopedDb.execute<{
+          session_id: string;
+          title: string | null;
+        }>(sql`
+          update sessions
+          set active_sandbox_id = null,
+              active_epoch = active_epoch + 1,
+              sandbox_backend = case
+                when sandbox_backend = 'selfhosted' then 'none'
+                else sandbox_backend
+              end,
+              updated_at = now()
+          where workspace_id = ${input.workspaceId}
+            and (
+              active_sandbox_id = ${machine.id}
+              or (sandbox_group_id = ${machine.id} and sandbox_backend = 'selfhosted')
+            )
+          returning id as session_id, title
+        `);
+        const dependentIds = new Set(dependentSessions.map((session) => session.id));
+        for (const session of detached) {
+          if (dependentIds.has(session.session_id)) continue;
+          dependentIds.add(session.session_id);
+          dependentSessions.push({
+            id: session.session_id,
+            title: session.title?.trim() || null,
           });
+        }
+        if (detached.length > 0) {
           await scopedDb.insert(schema.auditEvents).values({
             accountId: input.accountId,
             workspaceId: input.workspaceId,
             subjectId: input.subjectId ?? null,
-            action: "connected_machine.removal_blocked",
+            action: "connected_machine.sessions_detached",
             targetType: "enrollment",
             targetId: enrollment.id,
             metadata: {
-              code: result.code,
-              sessionIds: dependentSessions.map((session) => session.id),
-              message: result.message,
+              sessionIds: detached.map((session: { session_id: string }) => session.session_id),
+              replacementBackend: "none",
             },
           });
-          return result;
         }
       }
 
@@ -46817,6 +46802,14 @@ export async function settleSessionAttemptInterruptions(
             : interruptions.some((interruption) => interruption.kind === "maintenance")
               ? "maintenance"
               : "session_pause";
+      if (terminalCancel || steer) {
+        await cancelTurnInteractionInterventionsInTransaction(tx as unknown as Database, {
+          accountId: session.accountId,
+          workspaceId,
+          sessionId,
+          turnId: turn.id,
+        });
+      }
       let sequence = session.lastSequence;
       const closedTools = await closePendingSessionToolCallsInTransaction(
         tx as unknown as Database,

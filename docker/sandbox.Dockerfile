@@ -181,6 +181,7 @@ RUN set -eux; \
         xauth \
         x11-utils \
         x11-xserver-utils \
+        xterm \
         xkb-data \
         x11-xkb-utils \
         dbus-x11 \

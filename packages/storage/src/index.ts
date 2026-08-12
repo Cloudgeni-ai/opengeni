@@ -52,10 +52,14 @@ export type ObjectStorage = {
     contentType: string;
     sha256?: string | null;
     expiresInSeconds?: number;
+    /** Select the network endpoint embedded in the signed URL. */
+    audience?: "public" | "sandbox";
   }) => Promise<{ url: string; requiredHeaders: Record<string, string>; expiresAt: Date }>;
   createGetUrl: (args: {
     key: string;
     expiresInSeconds?: number;
+    /** Select the network endpoint embedded in the signed URL. */
+    audience?: "public" | "sandbox";
   }) => Promise<{ url: string; expiresAt: Date }>;
   headFile: (file: FileAsset) => Promise<ObjectHead>;
   /** Check provider existence without downloading object bytes. */
@@ -163,6 +167,12 @@ function createS3CompatibleObjectStorage(settings: Settings): ObjectStorage | nu
     ...sharedClientConfig,
     ...(settings.objectStorageEndpoint ? { endpoint: settings.objectStorageEndpoint } : {}),
   });
+  const sandboxPresignClient = settings.objectStorageSandboxEndpoint
+    ? new S3Client({
+        ...sharedClientConfig,
+        endpoint: settings.objectStorageSandboxEndpoint,
+      })
+    : presignClient;
   const requestClient = settings.objectStorageInternalEndpoint
     ? new S3Client({
         ...sharedClientConfig,
@@ -185,7 +195,13 @@ function createS3CompatibleObjectStorage(settings: Settings): ObjectStorage | nu
         Metadata: args.sha256 ? { sha256: args.sha256 } : undefined,
       });
       return {
-        url: await getSignedUrl(presignClient, command, { expiresIn }),
+        url: await getSignedUrl(
+          args.audience === "sandbox" ? sandboxPresignClient : presignClient,
+          command,
+          {
+            expiresIn,
+          },
+        ),
         requiredHeaders,
         expiresAt: new Date(Date.now() + expiresIn * 1000),
       };
@@ -194,7 +210,7 @@ function createS3CompatibleObjectStorage(settings: Settings): ObjectStorage | nu
       const expiresIn = args.expiresInSeconds ?? DOWNLOAD_URL_TTL_SECONDS;
       return {
         url: await getSignedUrl(
-          presignClient,
+          args.audience === "sandbox" ? sandboxPresignClient : presignClient,
           new GetObjectCommand({
             Bucket: settings.objectStorageBucket,
             Key: args.key,

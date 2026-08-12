@@ -475,7 +475,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "open"],
     title: "Open or reuse browser",
     description:
-      "Open a managed BrowserSession on the current agent placement, reuse a relevant live session by default, or attach to an explicit workspace BrowserSession. Returns exact session and tab state.",
+      "Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, or attach to an explicit workspace BrowserSession. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control. Returns exact session and tab state.",
     input: BrowserOpenInput,
     output: BrowserOpenOutput,
     readOnly: false,
@@ -712,7 +712,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "requestHuman"],
     title: "Request human interaction",
     description:
-      "Pause the current agent turn for a person to act in one exact browser tab or computer target. Use operation=wait for an intervention already returned by browser_auth; otherwise provide the exact observed resource generations and a concise reason. The same tool call resumes with the settled intervention and a fresh observation.",
+      "Pause the current agent turn for a person to act in one exact browser tab or computer target. Browser login/MFA handoffs must target a headed BrowserSession (headless=false); never hand a headless automation browser to a person because identity providers may reject it. Use operation=wait for an intervention already returned by browser_auth; otherwise provide the exact observed resource generations and a concise reason. The same tool call resumes with the settled intervention and a fresh observation.",
     input: RequestHumanInteractionToolInput,
     output: RequestHumanInteractionToolOutput,
     readOnly: false,
@@ -1036,25 +1036,34 @@ async function openBrowser(
   context: AttemptToolExecutionContext,
 ): Promise<z.input<typeof BrowserOpenOutput>> {
   let session: z.infer<typeof BrowserSession>;
+  let created = false;
   if (value.browserSessionId) {
     session = await transport.getBrowserSession(workspaceId, value.browserSessionId);
   } else {
     const listed = await transport.listBrowserSessions(workspaceId);
-    const reusable = value.mode === "new" ? null : newestRelevant(listed.sessions, sourceSessionId);
+    // The agent-facing browser is human-capable by default. A headless session
+    // is a deliberately narrower execution mode and must never be silently
+    // reused for an omitted/default headed request: OAuth providers such as
+    // Google reject that automation-shaped login surface.
+    const requestedHeadless = value.headless ?? false;
+    const reusable =
+      value.mode === "new"
+        ? null
+        : newestRelevant(
+            listed.sessions.filter((candidate) => candidate.headless === requestedHeadless),
+            sourceSessionId,
+          );
     if (reusable) {
       session = reusable;
     } else {
+      created = true;
       session = (
         await transport.createBrowserSession(workspaceId, {
           operationId: context.operationId,
           sessionId: sourceSessionId,
           ...(value.name ? { name: value.name } : {}),
           ...(value.initialUrl ? { initialUrl: value.initialUrl } : {}),
-          ...(value.headless !== undefined
-            ? { headless: value.headless }
-            : value.placement?.kind === "attached_device"
-              ? { headless: false }
-              : {}),
+          headless: requestedHeadless,
           ...(value.placement ? { placement: value.placement } : {}),
           ...(value.identityId ? { identityId: value.identityId } : {}),
           ...(value.baseRevisionId ? { baseRevisionId: value.baseRevisionId } : {}),
@@ -1075,11 +1084,23 @@ async function openBrowser(
   }
   if (session.lifecycle !== "active") return { session, targets: [] };
   let targets = (await transport.listBrowserTargets(workspaceId, session.id)).targets;
-  if (value.initialUrl && !targets.some((target) => target.url === value.initialUrl)) {
+  if (
+    value.initialUrl &&
+    !created &&
+    !targets.some((target) => sameBrowserUrl(target.url, value.initialUrl!))
+  ) {
     await transport.openBrowserTarget(workspaceId, session.id, { url: value.initialUrl });
     targets = (await transport.listBrowserTargets(workspaceId, session.id)).targets;
   }
   return { session, targets };
+}
+
+function sameBrowserUrl(left: string, right: string): boolean {
+  try {
+    return new URL(left).href === new URL(right).href;
+  } catch {
+    return left === right;
+  }
 }
 
 async function openComputer(

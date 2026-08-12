@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 const scriptPath = new URL("./dev-stack.sh", import.meta.url);
 const sandboxDockerfilePath = new URL("../docker/sandbox.Dockerfile", import.meta.url);
+const envExamplePath = new URL("../.env.example", import.meta.url);
 
 describe("local artifact runtime stack contract", () => {
   test("script is valid shell and uses the strict current-host runtime producer", async () => {
@@ -73,6 +74,21 @@ describe("local artifact runtime stack contract", () => {
     expect(source).toContain("export OPENGENI_MODAL_TOKEN_ID OPENGENI_MODAL_TOKEN_SECRET");
     expect(source).not.toContain("printf 'OPENGENI_MODAL_TOKEN_ID=%s");
     expect(source).not.toContain("printf 'OPENGENI_MODAL_TOKEN_SECRET=%s");
+  });
+
+  test("makes local Connected Machines self-initializing", async () => {
+    const [source, envExample] = await Promise.all([
+      Bun.file(scriptPath).text(),
+      Bun.file(envExamplePath).text(),
+    ]);
+
+    expect(envExample).toContain("OPENGENI_SANDBOX_SELFHOSTED_ENABLED=true");
+    expect(source).toContain('if [ -z "${OPENGENI_SANDBOX_SELFHOSTED_ENABLED:-}" ]; then');
+    expect(source).toContain("OPENGENI_SANDBOX_SELFHOSTED_ENABLED=true");
+    expect(source).toContain("OPENGENI_ENROLLMENT_SIGNING_SECRET");
+    expect(source).toContain("OPENGENI_STREAM_TOKEN_SECRET");
+    expect(source).toContain("OPENGENI_SELFHOSTED_NATS_URL");
+    expect(source).toContain("OPENGENI_SELFHOSTED_RELAY_URL");
   });
 
   test("unsandboxed execution is explicitly local, loopback, and visible in runtime env", async () => {
