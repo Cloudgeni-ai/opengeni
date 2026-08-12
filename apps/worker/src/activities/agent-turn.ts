@@ -115,6 +115,7 @@ import {
   normalizeModelCallUsage,
   normalizeSdkEvent,
   normalizeProtocolJsonValue,
+  compactMcpResultCustomDataRunState,
   projectHistoryForProvider,
   restoreGenericDispatchHistoryItems,
   sanitizeHistoryItemsForModel,
@@ -3837,6 +3838,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         compactRetainedScreenshotRunState(serialized, retainedScreenshotReceiptsByCallId),
         generatedImageReceiptsByProviderItemId,
       );
+    const compactApprovalRunState = (serialized: string): string =>
+      compactMcpResultCustomDataRunState(compactMediaRunState(serialized));
     // Explicit image-producing tools cross the durable session-media boundary.
     // Incidental frames returned by click/scroll actions remain unretained; an
     // intentional computer_screenshot or view_image result must never be lost
@@ -8789,7 +8792,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               sessionStatus: "requires_action",
               activeTurnId,
               runState: {
-                serializedRunState: compactMediaRunState(stream.state.toString()),
+                serializedRunState: compactApprovalRunState(stream.state.toString()),
                 pendingApprovals,
                 humanInputRequests: humanInputRequests.map(
                   ({ isNew: _isNew, ...request }) => request,

@@ -8,6 +8,8 @@ import { randomUUID } from "node:crypto";
 export const OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY = "__opengeniMcpResultV1" as const;
 export const OPENGENI_INNER_MCP_CUSTOM_DATA_KEY = "__opengeniInnerMcpCustomData" as const;
 
+const SDK_RESULT_PROJECTION = Symbol("opengeni.sdkMcpResultProjection");
+
 type McpCustomDataExtractor = NonNullable<MCPServer["customDataExtractor"]>;
 type McpCustomDataContext = Parameters<McpCustomDataExtractor>[0];
 type McpToolMetaResolver = NonNullable<MCPServer["toolMetaResolver"]>;
@@ -61,7 +63,7 @@ function assertSdkJsonCompatible(value: unknown): void {
     throw new UserError("customDataExtractor must return JSON-compatible data.");
   }
   if (Array.isArray(value)) {
-    for (const entry of value) assertSdkJsonCompatible(entry);
+    value.forEach((entry) => assertSdkJsonCompatible(entry));
     return;
   }
   if (!isPlainRecord(value)) {
@@ -167,7 +169,25 @@ export class McpResultCustomDataBridge {
             ? {}
             : { resultMeta: cloneSdkMcpCustomDataContextValue(result._meta) }),
         };
-        innerCustomData = normalizeSdkToolOutputCustomData(await innerExtractor(innerContext));
+        const normalizedInnerCustomData = normalizeSdkToolOutputCustomData(
+          await innerExtractor(innerContext),
+        );
+        if (
+          normalizedInnerCustomData &&
+          Object.hasOwn(normalizedInnerCustomData, OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY)
+        ) {
+          // A PrefixedMcpServer may itself be wrapped by another prefixed
+          // server. The outer bridge already retains the exact result, so do
+          // not nest another copy of OpenGeni's private marker. Preserve only
+          // the actual extractor payload carried through the inner bridge.
+          const nestedInnerCustomData =
+            normalizedInnerCustomData[OPENGENI_INNER_MCP_CUSTOM_DATA_KEY];
+          innerCustomData = isPlainRecord(nestedInnerCustomData)
+            ? nestedInnerCustomData
+            : undefined;
+        } else {
+          innerCustomData = normalizedInnerCustomData;
+        }
       }
 
       return {
@@ -185,13 +205,25 @@ export class McpResultCustomDataBridge {
   ): Promise<unknown> {
     const token = this.takeToken(args);
     try {
-      const result = AttemptToolResult.parse(await invoke(args));
+      const invoked = await invoke(args);
+      const result = AttemptToolResult.parse(
+        isSdkResultProjection(invoked) ? invoked.content : invoked,
+      );
       if (token) this.resultsByToken.set(token, result);
       if (token && this.input?.sdkModelOutput === "result") {
         // The prefixed server historically exposed the complete MCP result as
         // model output. Keep that shape while the SDK reads the standard result
-        // fields and the bridge retains the exact audit copy out of band.
-        return { ...result, content: result };
+        // fields and the bridge retains the exact audit copy out of band. Mark
+        // the compatibility projection privately so another prefixed wrapper
+        // can recover the raw result before parsing it at its own boundary.
+        const projected = { ...result, content: result } as Record<PropertyKey, unknown>;
+        Object.defineProperty(projected, SDK_RESULT_PROJECTION, {
+          value: true,
+          enumerable: false,
+          configurable: false,
+          writable: false,
+        });
+        return projected;
       }
       return result;
     } finally {
@@ -238,6 +270,86 @@ export class McpResultCustomDataBridge {
     delete cleanArguments[this.argumentKey];
     return { arguments: cleanArguments, token };
   }
+}
+
+function isSdkResultProjection(
+  value: unknown,
+): value is Record<PropertyKey, unknown> & { content: unknown } {
+  return Boolean(
+    value &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    (value as Record<PropertyKey, unknown>)[SDK_RESULT_PROJECTION] === true,
+  );
+}
+
+export function unwrapSdkMcpResultProjection(value: unknown): unknown {
+  return isSdkResultProjection(value) ? value.content : value;
+}
+
+function stripMcpResultMarkerFromCustomData(customData: unknown): boolean {
+  if (!isPlainRecord(customData)) return false;
+  let changed = false;
+  if (Object.hasOwn(customData, OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY)) {
+    delete customData[OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY];
+    changed = true;
+  }
+  const inner = customData[OPENGENI_INNER_MCP_CUSTOM_DATA_KEY];
+  if (stripMcpResultMarkerFromCustomData(inner)) changed = true;
+  return changed;
+}
+
+function compactSerializedRunItem(item: unknown): boolean {
+  if (!isPlainRecord(item) || item.type !== "tool_call_output_item") return false;
+  const customData = item.customData;
+  if (!stripMcpResultMarkerFromCustomData(customData)) return false;
+  if (isPlainRecord(customData) && Object.keys(customData).length === 0) {
+    delete item.customData;
+  }
+  return true;
+}
+
+/**
+ * Remove only OpenGeni's redundant full-result marker from an approval
+ * RunState after the worker has durably recorded the exact event output. The
+ * SDK's model-visible output, protocol raw item, and any inner custom data stay
+ * intact, so approval resume behavior is unchanged without triplicating a
+ * near-limit MCP result inside the 3 MiB approval-state envelope.
+ */
+export function compactMcpResultCustomDataRunState(serialized: string): string {
+  let parsed: Record<string, unknown>;
+  try {
+    const value: unknown = JSON.parse(serialized);
+    if (!isPlainRecord(value)) return serialized;
+    parsed = value;
+  } catch {
+    return serialized;
+  }
+
+  let changed = false;
+  const compactItems = (items: unknown): void => {
+    if (!Array.isArray(items)) return;
+    for (const item of items) {
+      if (compactSerializedRunItem(item)) changed = true;
+    }
+  };
+  compactItems(parsed.generatedItems);
+  if (isPlainRecord(parsed.lastProcessedResponse)) {
+    compactItems(parsed.lastProcessedResponse.newItems);
+  }
+
+  if (isPlainRecord(parsed.pendingAgentToolRuns)) {
+    for (const [key, nested] of Object.entries(parsed.pendingAgentToolRuns)) {
+      if (typeof nested !== "string") continue;
+      const compacted = compactMcpResultCustomDataRunState(nested);
+      if (compacted !== nested) {
+        parsed.pendingAgentToolRuns[key] = compacted;
+        changed = true;
+      }
+    }
+  }
+
+  return changed ? JSON.stringify(parsed) : serialized;
 }
 
 export function mcpResultFromCustomData(customData: unknown): AttemptToolResultValue | null {

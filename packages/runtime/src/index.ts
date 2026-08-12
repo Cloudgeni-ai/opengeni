@@ -77,7 +77,7 @@ import {
   type LazyToolTransport,
 } from "./lazy-tool-transport";
 import { GmailRestMcpServer, isOfficialGmailMcpConfig } from "./gmail-rest-mcp";
-import { McpResultCustomDataBridge } from "./mcp-result-custom-data";
+import { McpResultCustomDataBridge, unwrapSdkMcpResultProjection } from "./mcp-result-custom-data";
 export {
   GMAIL_REST_API_BASE,
   GMAIL_REST_MCP_TOOLS,
@@ -370,6 +370,7 @@ export {
   serializeInteractionInterventionRequests,
 } from "./run-events";
 export {
+  compactMcpResultCustomDataRunState,
   OPENGENI_INNER_MCP_CUSTOM_DATA_KEY,
   OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY,
   mcpResultFromCustomData,
@@ -4970,9 +4971,10 @@ export class PrefixedMcpServer implements MCPServer {
       throw new Error(`MCP tool ${unprefixed} is not allowed for server ${this.registryId}`);
     }
     try {
-      const output = this.inner.callToolResult
+      const projectedOutput = this.inner.callToolResult
         ? await this.inner.callToolResult(unprefixed, args, meta, options)
         : mcpContentAsResult(await this.inner.callTool(unprefixed, args, meta, options));
+      const output = unwrapSdkMcpResultProjection(projectedOutput);
       assertMcpPayloadWithinBytes(output, MCP_MAX_TOOL_RESULT_BYTES, "MCP tool result");
       return AttemptToolResult.parse(output);
     } catch (error) {
