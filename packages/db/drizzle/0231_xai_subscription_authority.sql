@@ -174,7 +174,8 @@ CREATE UNIQUE INDEX "xai_subscription_credentials_provider_identity_uq"
   ON "xai_subscription_credentials" (
     "workspace_id", "authority_scope", "owner_organization_membership_id",
     "provider_account_id"
-  ) WHERE "provider_account_id" IS NOT NULL;
+  ) NULLS NOT DISTINCT
+  WHERE "provider_account_id" IS NOT NULL;
 CREATE INDEX "xai_subscription_credentials_workspace_status_idx"
   ON "xai_subscription_credentials" ("workspace_id", "status", "allocator_enabled");
 
@@ -211,7 +212,7 @@ CREATE TABLE "xai_rotation_settings" (
 CREATE UNIQUE INDEX "xai_rotation_settings_workspace_pool_uq"
   ON "xai_rotation_settings" (
     "workspace_id", "authority_scope", "owner_organization_membership_id"
-  );
+  ) NULLS NOT DISTINCT;
 
 CREATE TABLE "xai_credential_leases" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -296,7 +297,10 @@ CREATE TABLE "xai_session_account_pins" (
   CONSTRAINT "xai_session_account_pins_version_chk" CHECK ("version" > 0)
 );
 CREATE UNIQUE INDEX "xai_session_account_pins_workspace_session_uq"
-  ON "xai_session_account_pins" ("workspace_id", "session_id");
+  ON "xai_session_account_pins" (
+    "workspace_id", "session_id", "authority_scope",
+    "owner_organization_membership_id"
+  ) NULLS NOT DISTINCT;
 
 CREATE TABLE "xai_capacity_waiters" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -347,7 +351,10 @@ CREATE TABLE "xai_capacity_waiters" (
   )
 );
 CREATE UNIQUE INDEX "xai_capacity_waiters_workspace_session_uq"
-  ON "xai_capacity_waiters" ("workspace_id", "session_id");
+  ON "xai_capacity_waiters" (
+    "workspace_id", "session_id", "authority_scope",
+    "owner_organization_membership_id"
+  ) NULLS NOT DISTINCT;
 CREATE INDEX "xai_capacity_waiters_pending_idx"
   ON "xai_capacity_waiters" ("workspace_id", "status", "next_check_at");
 
@@ -391,6 +398,10 @@ BEGIN
     AS $body$
     DECLARE exact_count integer;
     BEGIN
+      IF p_account_id IS DISTINCT FROM NULLIF(current_setting('opengeni.account_id', true), '')::uuid
+        OR p_workspace_id IS DISTINCT FROM NULLIF(current_setting('opengeni.workspace_id', true), '')::uuid
+        OR p_subject_id IS DISTINCT FROM NULLIF(current_setting('opengeni.subject_id', true), '')
+      THEN RETURN false; END IF;
       IF p_authority_scope = 'workspace' THEN
         RETURN p_owner_membership_id IS NULL
           AND p_authority_id IS NULL
@@ -449,6 +460,10 @@ BEGIN
     AS $body$
     DECLARE exact_count integer;
     BEGIN
+      IF p_account_id IS DISTINCT FROM NULLIF(current_setting('opengeni.account_id', true), '')::uuid
+        OR p_workspace_id IS DISTINCT FROM NULLIF(current_setting('opengeni.workspace_id', true), '')::uuid
+        OR p_subject_id IS DISTINCT FROM NULLIF(current_setting('opengeni.subject_id', true), '')
+      THEN RETURN false; END IF;
       IF p_authority_scope = 'workspace' THEN
         RETURN p_owner_membership_id IS NULL;
       END IF;
@@ -515,6 +530,15 @@ BEGIN
       END IF;
       IF NOT opengeni_private.workspace_rls_visible(p_account_id, p_workspace_id) THEN
         RAISE EXCEPTION 'xAI credential workspace authority denied' USING ERRCODE = '42501';
+      END IF;
+      IF NOT EXISTS (
+        SELECT 1
+        FROM workspace_memberships workspace_grant
+        WHERE workspace_grant.account_id = p_account_id
+          AND workspace_grant.workspace_id = p_workspace_id
+          AND workspace_grant.subject_id = p_subject_id
+      ) THEN
+        RAISE EXCEPTION 'active workspace grant required' USING ERRCODE = '42501';
       END IF;
 
       IF p_authority_scope = 'workspace' THEN
@@ -661,6 +685,9 @@ BEGIN
       WHERE credential.workspace_id = p_workspace_id
         AND credential.id = p_credential_id
         AND credential.status = 'active'
+        AND credential.account_id = NULLIF(current_setting('opengeni.account_id', true), '')::uuid
+        AND p_workspace_id = NULLIF(current_setting('opengeni.workspace_id', true), '')::uuid
+        AND p_subject_id = NULLIF(current_setting('opengeni.subject_id', true), '')
         AND xai_provider_account_authority_snapshot_v1_valid(p_snapshot)
         AND (
           (p_snapshot ->> 'scope' = 'workspace'
@@ -743,6 +770,13 @@ BEGIN
   $ddl$, data_schema);
 END
 $xai_authority_functions$;
+
+REVOKE ALL ON FUNCTION xai_provider_account_authority_snapshot_v1_valid(jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION xai_subscription_authority_live(
+  uuid, uuid, text, uuid, text, uuid, uuid, bigint
+) FROM PUBLIC;
+REVOKE ALL ON FUNCTION xai_subscription_pool_visible(uuid, uuid, text, text, uuid)
+  FROM PUBLIC;
 
 -- Exact-subject RLS for user pools. Workspace scope preserves the default
 -- shared behavior for any caller with the ordinary workspace grant.
@@ -911,44 +945,111 @@ FOR EACH ROW EXECUTE FUNCTION prevent_xai_snapshot_mutation();
 CREATE TRIGGER session_system_updates_xai_authority_snapshot_immutable_trg
 BEFORE UPDATE OF xai_provider_account_authority_snapshot ON "session_system_updates"
 FOR EACH ROW EXECUTE FUNCTION prevent_xai_snapshot_mutation();
-CREATE TRIGGER session_system_update_outbox_xai_authority_snapshot_immutable_trg
+CREATE TRIGGER system_update_outbox_xai_snapshot_immutable_trg
 BEFORE UPDATE OF xai_provider_account_authority_snapshot ON "session_system_update_outbox"
 FOR EACH ROW EXECUTE FUNCTION prevent_xai_snapshot_mutation();
 
 -- Preserve the immutable snapshot through the existing global child-result
--- outbox claim without changing any producer or runtime implementation.
+-- outbox claim without changing any producer or runtime implementation. PR
+-- #1361 may land before this migration and append its Codex snapshot first, so
+-- preserve that column when it is present instead of replacing its boundary.
 DROP FUNCTION opengeni_private.claim_session_system_update_outbox(integer);
-CREATE FUNCTION opengeni_private.claim_session_system_update_outbox(p_limit integer)
-RETURNS TABLE (
-  id uuid, account_id uuid, workspace_id uuid, source_session_id uuid,
-  target_session_id uuid, dedupe_key text, kind text, classification text,
-  source_id text, summary text, summary_codec_version integer,
-  payload jsonb, payload_codec_version integer, lineage jsonb,
-  personal_connection_delegations jsonb,
-  xai_provider_account_authority_snapshot jsonb
-)
-LANGUAGE plpgsql SECURITY DEFINER
-AS $function$
+DO $xai_outbox_claim$
+DECLARE
+  data_schema text := current_schema();
+  has_codex_snapshot boolean;
 BEGIN
-  RETURN QUERY
-    WITH claimed AS (
-      SELECT o.id FROM session_system_update_outbox o
-      WHERE o.status = 'pending'
-      ORDER BY o.created_at, o.id
-      FOR UPDATE SKIP LOCKED
-      LIMIT greatest(1, least(coalesce(p_limit, 100), 100))
-    )
-    UPDATE session_system_update_outbox o
-    SET attempts = o.attempts + 1, updated_at = now()
-    FROM claimed c WHERE o.id = c.id
-    RETURNING o.id, o.account_id, o.workspace_id, o.source_session_id,
-      o.target_session_id, o.dedupe_key, o.kind, o.classification,
-      o.source_id, o.summary, o.summary_codec_version,
-      o.payload, o.payload_codec_version, o.lineage,
-      o.personal_connection_delegations,
-      o.xai_provider_account_authority_snapshot;
+  SELECT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = data_schema
+      AND table_name = 'session_system_update_outbox'
+      AND column_name = 'codex_provider_account_authority_snapshot'
+  ) INTO has_codex_snapshot;
+
+  IF has_codex_snapshot THEN
+    EXECUTE $ddl$
+      CREATE FUNCTION opengeni_private.claim_session_system_update_outbox(p_limit integer)
+      RETURNS TABLE (
+        id uuid, account_id uuid, workspace_id uuid, source_session_id uuid,
+        target_session_id uuid, dedupe_key text, kind text, classification text,
+        source_id text, summary text, summary_codec_version integer,
+        payload jsonb, payload_codec_version integer, lineage jsonb,
+        personal_connection_delegations jsonb,
+        codex_provider_account_authority_snapshot jsonb,
+        xai_provider_account_authority_snapshot jsonb
+      )
+      LANGUAGE plpgsql SECURITY DEFINER
+      AS $function$
+      BEGIN
+        RETURN QUERY
+          WITH claimed AS (
+            SELECT o.id FROM session_system_update_outbox o
+            WHERE o.status = 'pending'
+            ORDER BY o.created_at, o.id
+            FOR UPDATE SKIP LOCKED
+            LIMIT greatest(1, least(coalesce(p_limit, 100), 100))
+          )
+          UPDATE session_system_update_outbox o
+          SET attempts = o.attempts + 1, updated_at = now()
+          FROM claimed c WHERE o.id = c.id
+          RETURNING o.id, o.account_id, o.workspace_id, o.source_session_id,
+            o.target_session_id, o.dedupe_key, o.kind, o.classification,
+            o.source_id, o.summary, o.summary_codec_version,
+            o.payload, o.payload_codec_version, o.lineage,
+            o.personal_connection_delegations,
+            o.codex_provider_account_authority_snapshot,
+            o.xai_provider_account_authority_snapshot;
+      END
+      $function$
+    $ddl$;
+  ELSE
+    EXECUTE $ddl$
+      CREATE FUNCTION opengeni_private.claim_session_system_update_outbox(p_limit integer)
+      RETURNS TABLE (
+        id uuid, account_id uuid, workspace_id uuid, source_session_id uuid,
+        target_session_id uuid, dedupe_key text, kind text, classification text,
+        source_id text, summary text, summary_codec_version integer,
+        payload jsonb, payload_codec_version integer, lineage jsonb,
+        personal_connection_delegations jsonb,
+        xai_provider_account_authority_snapshot jsonb
+      )
+      LANGUAGE plpgsql SECURITY DEFINER
+      AS $function$
+      BEGIN
+        RETURN QUERY
+          WITH claimed AS (
+            SELECT o.id FROM session_system_update_outbox o
+            WHERE o.status = 'pending'
+            ORDER BY o.created_at, o.id
+            FOR UPDATE SKIP LOCKED
+            LIMIT greatest(1, least(coalesce(p_limit, 100), 100))
+          )
+          UPDATE session_system_update_outbox o
+          SET attempts = o.attempts + 1, updated_at = now()
+          FROM claimed c WHERE o.id = c.id
+          RETURNING o.id, o.account_id, o.workspace_id, o.source_session_id,
+            o.target_session_id, o.dedupe_key, o.kind, o.classification,
+            o.source_id, o.summary, o.summary_codec_version,
+            o.payload, o.payload_codec_version, o.lineage,
+            o.personal_connection_delegations,
+            o.xai_provider_account_authority_snapshot;
+      END
+      $function$
+    $ddl$;
+  END IF;
 END
-$function$;
+$xai_outbox_claim$;
+
+DO $xai_outbox_search_path$
+DECLARE data_schema text := current_schema();
+BEGIN
+  EXECUTE format(
+    'ALTER FUNCTION opengeni_private.claim_session_system_update_outbox(integer) SET search_path = pg_catalog, %I',
+    data_schema
+  );
+END
+$xai_outbox_search_path$;
 
 REVOKE ALL ON FUNCTION create_xai_subscription_credential(
   uuid, uuid, text, text, text, text, text, text, text, timestamptz
@@ -971,6 +1072,13 @@ BEGIN
     GRANT EXECUTE ON FUNCTION create_xai_subscription_credential(
       uuid, uuid, text, text, text, text, text, text, text, timestamptz
     ) TO opengeni_app;
+    GRANT EXECUTE ON FUNCTION xai_provider_account_authority_snapshot_v1_valid(jsonb)
+      TO opengeni_app;
+    GRANT EXECUTE ON FUNCTION xai_subscription_authority_live(
+      uuid, uuid, text, uuid, text, uuid, uuid, bigint
+    ) TO opengeni_app;
+    GRANT EXECUTE ON FUNCTION xai_subscription_pool_visible(uuid, uuid, text, text, uuid)
+      TO opengeni_app;
     GRANT EXECUTE ON FUNCTION resolve_xai_authority_pool(uuid, uuid, text, jsonb)
       TO opengeni_app;
     GRANT EXECUTE ON FUNCTION revalidate_xai_subscription_authority(
