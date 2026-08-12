@@ -631,9 +631,11 @@ export function assertSessionAuthoritySnapshot(input: {
   }
   return {
     authorityEpoch: input.authorityEpoch as number,
-    authorityVisibility: input.authorityVisibility as SessionAuthoritySnapshot["authorityVisibility"],
-    authorityOwnerOrganizationMembershipId:
-      input.authorityOwnerOrganizationMembershipId as string | null,
+    authorityVisibility:
+      input.authorityVisibility as SessionAuthoritySnapshot["authorityVisibility"],
+    authorityOwnerOrganizationMembershipId: input.authorityOwnerOrganizationMembershipId as
+      | string
+      | null,
   };
 }
 
@@ -653,8 +655,14 @@ export function sessionAuthoritySnapshotMatchesSession(
 }
 
 export function sessionAuthoritySnapshotsEqual(
-  left: Pick<SessionAuthoritySnapshot, "authorityEpoch" | "authorityVisibility" | "authorityOwnerOrganizationMembershipId">,
-  right: Pick<SessionAuthoritySnapshot, "authorityEpoch" | "authorityVisibility" | "authorityOwnerOrganizationMembershipId">,
+  left: Pick<
+    SessionAuthoritySnapshot,
+    "authorityEpoch" | "authorityVisibility" | "authorityOwnerOrganizationMembershipId"
+  >,
+  right: Pick<
+    SessionAuthoritySnapshot,
+    "authorityEpoch" | "authorityVisibility" | "authorityOwnerOrganizationMembershipId"
+  >,
 ): boolean {
   return (
     left.authorityEpoch === right.authorityEpoch &&

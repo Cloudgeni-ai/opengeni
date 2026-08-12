@@ -4214,19 +4214,13 @@ export const sessionTurnAttempts = pgTable(
     // Immutable generic session-tenancy authority admitted with this exact
     // attempt. A later visibility/ownership epoch change fences the attempt;
     // these are snapshots, never live lookups or mutable metadata.
-    // Runtime insert types remain compatible with pre-0221 writers that omit
-    // these columns; the migration-owned BEFORE INSERT trigger fills them from
-    // the exact session row. Current claim writers still pass both explicitly.
-    // `$defaultFn` is Drizzle-only and creates no SQL DEFAULT fallback.
-    authorityEpoch: integer("authority_epoch")
-      .notNull()
-      .$defaultFn(() => 1),
-    authorityVisibility: text("authority_visibility")
-      .notNull()
-      .$defaultFn(() => "workspace_shared"),
-    authorityOwnerOrganizationMembershipId: uuid(
-      "authority_owner_organization_membership_id",
-    ),
+    // Pre-0221 SQL writers may omit these columns; the migration-owned BEFORE
+    // INSERT trigger fills them from the exact session row. Current claim
+    // writers pass both explicitly, so no client-side default may bypass the
+    // trigger and manufacture stale authority.
+    authorityEpoch: integer("authority_epoch").notNull(),
+    authorityVisibility: text("authority_visibility").notNull(),
+    authorityOwnerOrganizationMembershipId: uuid("authority_owner_organization_membership_id"),
     // Immutable policy snapshot captured under the session lock at claim.
     mcpApprovalPolicies: jsonb("mcp_approval_policies")
       .$type<Record<string, SessionMcpApprovalPolicy>>()

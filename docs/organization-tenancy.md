@@ -75,6 +75,16 @@ have explicit defaults:
 - owner membership is null; and
 - every fork-provenance field is null.
 
+Migration `0221_session_visibility_authority_epochs.sql` extends this
+compatibility boundary to accepted attempts. It backfills an immutable
+authority snapshot on existing attempts and fills omitted legacy-writer
+inserts from the exact workspace and session rows under lock. Accepted
+attempts now retain epoch, visibility, and owner-membership provenance, and
+activity writes fail closed when that snapshot is stale. Create-time
+visibility mutation, visibility-aware read authorization, and independent fork
+copying remain future activation work; this migration does not activate those
+runtime paths.
+
 Null owner/authority/grant fields are non-authority. Contract parsing likewise
 defaults omitted resource scope to `workspace`; `user` scope requires one
 complete opaque delegation.
@@ -110,7 +120,9 @@ the access path.
 Managed-human membership and personal-workspace lifecycle metadata now use the
 narrow provisioning seam described above. Resource authority/grant dual-write,
 new-session owner/visibility writes, and all read-path changes remain future
-work; old writers remain accepted.
+work; old writers remain accepted. Migration 0221 separately delivers the
+accepted-attempt authority snapshot and stale activity-write fence described in
+the Legacy behavior section.
 
 ### C. Backfill
 
@@ -133,10 +145,11 @@ back to user authority.
 
 Add exact organization+subject+workspace RLS policies and narrowly scoped
 security-definer lifecycle functions. Switch one subsystem at a time to
-authority ids and immutable accepted-work delegations. Implement session
-visibility, sharing/fork copying, epoch fencing, cancellation, cache/pin
-stripping, and owner-only grants before enabling personal attachment to shared
-sessions.
+authority ids and immutable accepted-work delegations. Accepted-attempt epoch
+fencing is delivered by migration 0221; remaining activation work includes
+session visibility mutation, visibility-aware reads, sharing/fork copying,
+cancellation, cache/pin stripping, and owner-only grants before enabling
+personal attachment to shared sessions.
 
 ### F. Retire
 
@@ -151,7 +164,9 @@ rewritten in the same release that first activates user authority.
 - user-resource authority/grant writes, discovery, or sharing;
 - resource CRUD or discovery changes;
 - session sharing/fork runtime;
-- turn/task cancellation or authority-epoch claim checks;
+- turn/task cancellation;
+- session visibility mutation, visibility-aware reads, or independent fork
+  runtime;
 - Connected Machine, rig, variable-set, connection, Codex, or Document
   materialization changes;
 - retention deletion workers;

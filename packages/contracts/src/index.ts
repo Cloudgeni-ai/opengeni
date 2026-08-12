@@ -10930,10 +10930,6 @@ export const CreateSessionRequest = withVariableSetIdAlias({
   // suppresses those defaults (the first-party OpenGeni server remains added).
   tools: z.array(ToolRef).default([]),
   metadata: z.record(z.string(), z.unknown()).default({}),
-  // Public vocabulary; persistence maps this to user_private/workspace_shared.
-  // Child creation may only inherit or narrow this value at the trusted core
-  // boundary; omission preserves legacy workspace-shared behavior.
-  visibility: SessionVisibility.optional(),
   model: z.string().min(1).optional(),
   reasoningEffort: ReasoningEffort.optional(),
   latencyMode: LatencyMode.optional(),

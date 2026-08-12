@@ -36,10 +36,10 @@ async function expectSqlState(action: () => Promise<unknown>, state: string): Pr
 
 beforeAll(async () => {
   migration = await readFile(migrationPath, "utf8");
-  shared = await acquireSharedTestDatabase("migration-0220-session-visibility-authority-epochs");
+  shared = await acquireSharedTestDatabase("migration-0221-session-visibility-authority-epochs");
   if (!shared && requireRealDatabase) {
     throw new Error(
-      "[migration-0220-session-visibility-authority-epochs] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
+      "[migration-0221-session-visibility-authority-epochs] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
     );
   }
   if (!shared) return;
@@ -129,9 +129,7 @@ describe("migration 0221 session visibility authority epochs", () => {
     expect(triggerStart).toBeGreaterThanOrEqual(0);
     expect(workspaceLock).toBeGreaterThan(triggerStart);
     expect(sessionLock).toBeGreaterThan(workspaceLock);
-    expect(migration.indexOf('UPDATE "session_turn_attempts" attempts')).toBeLessThan(
-      triggerStart,
-    );
+    expect(migration.indexOf('UPDATE "session_turn_attempts" attempts')).toBeLessThan(triggerStart);
   });
 
   test("backfills legacy attempts and fills omitted old-writer inserts exactly", async () => {
@@ -166,6 +164,41 @@ describe("migration 0221 session visibility authority epochs", () => {
       `select authority_epoch as "authorityEpoch", authority_visibility as "authorityVisibility", authority_owner_organization_membership_id as "ownerMembershipId" from ${table("session_turn_attempts")} where id = '${insertedId}'`,
     );
     expect(filled).toEqual(backfilled);
+
+    const privateMembershipId = crypto.randomUUID();
+    const privateSessionId = crypto.randomUUID();
+    const privateAttemptId = crypto.randomUUID();
+    await admin.unsafe(`
+      insert into ${table("organization_memberships")} (id, account_id)
+      values ('${privateMembershipId}', '${legacy.accountId}');
+      insert into ${table("sessions")} (
+        id, account_id, workspace_id, authority_epoch, visibility,
+        owner_organization_membership_id
+      ) values (
+        '${privateSessionId}', '${legacy.accountId}', '${legacy.workspaceId}', 37,
+        'user_private', '${privateMembershipId}'
+      );
+      insert into ${table("session_turn_attempts")} (
+        id, account_id, workspace_id, session_id, state
+      ) values (
+        '${privateAttemptId}', '${legacy.accountId}', '${legacy.workspaceId}',
+        '${privateSessionId}', 'claimed'
+      );
+    `);
+    const [privateFilled] = await admin.unsafe<
+      Array<{
+        authorityEpoch: number;
+        authorityVisibility: string;
+        ownerMembershipId: string | null;
+      }>
+    >(
+      `select authority_epoch as "authorityEpoch", authority_visibility as "authorityVisibility", authority_owner_organization_membership_id as "ownerMembershipId" from ${table("session_turn_attempts")} where id = '${privateAttemptId}'`,
+    );
+    expect(privateFilled).toEqual({
+      authorityEpoch: 37,
+      authorityVisibility: "user_private",
+      ownerMembershipId: privateMembershipId,
+    });
   });
 
   test("preserves shared provenance and private owner shape", async () => {
@@ -190,7 +223,9 @@ describe("migration 0221 session visibility authority epochs", () => {
         insert into ${table("session_turn_attempts")} (id, account_id, workspace_id, session_id, state)
         values ('${attemptId}', '${legacy.accountId}', '${legacy.workspaceId}', '${sessionId}', 'claimed')
       `);
-      const [row] = await admin.unsafe<Array<{ authorityEpoch: number; ownerMembershipId: string }>>(
+      const [row] = await admin.unsafe<
+        Array<{ authorityEpoch: number; ownerMembershipId: string }>
+      >(
         `select authority_epoch as "authorityEpoch", authority_owner_organization_membership_id as "ownerMembershipId" from ${table("session_turn_attempts")} where id = '${attemptId}'`,
       );
       expect(row).toEqual({ authorityEpoch: epoch, ownerMembershipId: membershipId });
@@ -295,9 +330,9 @@ describe("migration 0221 session visibility authority epochs", () => {
       }),
     ).toBe(false);
     expect(sessionAuthoritySnapshotsEqual(workspace, { ...workspace })).toBe(true);
-    expect(
-      sessionAuthoritySnapshotsEqual(workspace, { ...workspace, authorityEpoch: 8 }),
-    ).toBe(false);
+    expect(sessionAuthoritySnapshotsEqual(workspace, { ...workspace, authorityEpoch: 8 })).toBe(
+      false,
+    );
     expect(
       sessionAuthoritySnapshotsEqual(workspace, {
         ...workspace,
