@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test as bunTest } from "bun:test";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { copyFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -542,32 +543,35 @@ async function invoke(
   argument: string,
   input?: Uint8Array,
 ): Promise<Readonly<{ exitCode: number; stdout: Uint8Array; stderr: string }>> {
-  for (let attempt = 0; ; attempt += 1) {
-    const child = Bun.spawn([target.executable, argument], {
+  return new Promise((resolve, reject) => {
+    // Use the same Node subprocess/stream implementation as the production
+    // worker launcher. Bun's Response wrapper around Bun.spawn stdout can
+    // resolve a partial pipe under full-suite process pressure, making a valid
+    // frame appear truncated even though the executable completed normally.
+    const child = spawn(target.executable, [argument], {
       env: { ...target.environment, LANG: "C", LC_ALL: "C", TZ: "UTC" },
-      stdin: "pipe",
-      stdout: "pipe",
-      stderr: "pipe",
+      stdio: ["pipe", "pipe", "pipe"],
     });
-    if (input) await child.stdin.write(input);
-    await child.stdin.end();
-    const stdout = new Response(child.stdout).arrayBuffer();
-    const stderr = new Response(child.stderr).text();
-    const exitCode = await child.exited;
-    const result = Object.freeze({
-      exitCode,
-      stdout: new Uint8Array(await stdout),
-      stderr: await stderr,
+    const stdout: Uint8Array[] = [];
+    const stderr: Uint8Array[] = [];
+    child.stdout.on("data", (chunk: Uint8Array) => stdout.push(chunk));
+    child.stderr.on("data", (chunk: Uint8Array) => stderr.push(chunk));
+    child.once("error", reject);
+    child.once("close", (code, signal) => {
+      if (signal) {
+        reject(new Error(`materializer fixture terminated by ${signal}`));
+        return;
+      }
+      resolve(
+        Object.freeze({
+          exitCode: code ?? -1,
+          stdout: new Uint8Array(Buffer.concat(stdout)),
+          stderr: Buffer.concat(stderr).toString("utf8"),
+        }),
+      );
     });
-    // The full repository suite can transiently terminate a freshly spawned
-    // compiled fixture while the host is under process/memory pressure. A
-    // framed invocation cannot validly emit fewer than 20 bytes, so retry only
-    // that unambiguous transport failure; semantic failures remain single-shot.
-    if (argument === IDENTITY || result.stdout.byteLength >= 20 || attempt === 2) {
-      return result;
-    }
-    await Bun.sleep(100 * (attempt + 1));
-  }
+    child.stdin.end(input ? Buffer.from(input) : undefined);
+  });
 }
 
 function descriptor(path: string, value: Uint8Array) {

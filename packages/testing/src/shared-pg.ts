@@ -416,19 +416,28 @@ async function ensureTemplateBuilt(): Promise<void> {
  */
 async function ensureContainerAndAcquire(): Promise<ContainerHandle | null> {
   return withLock(async () => {
-    const probe = await probeContainer();
-    if (!probe.available) {
-      return null;
-    }
-    let generation = probe.id;
-    if (generation && probe.status !== "running" && probe.status !== "restarting") {
-      const resumed =
-        probe.status === "paused"
-          ? await dockerOk(["unpause", generation])
-          : await dockerOk(["start", generation]);
-      if (!resumed) {
-        await dockerOk(["rm", "-f", "-v", generation]);
-        generation = null;
+    const priorState = await readContainerState();
+    // A warm fixture's data plane is the authoritative fast path. Docker
+    // Desktop/OrbStack's control API can briefly stop answering under a heavily
+    // parallel suite even while PostgreSQL remains completely healthy. The
+    // fingerprinted immutable template proves this is our exact fixture, so a
+    // transient `docker inspect` outage must not turn into skipped DB tests.
+    let generation = priorState && (await templateReady()) ? priorState.generation : null;
+    if (!generation) {
+      const probe = await probeContainer();
+      if (!probe.available) {
+        return null;
+      }
+      generation = probe.id;
+      if (generation && probe.status !== "running" && probe.status !== "restarting") {
+        const resumed =
+          probe.status === "paused"
+            ? await dockerOk(["unpause", generation])
+            : await dockerOk(["start", generation]);
+        if (!resumed) {
+          await dockerOk(["rm", "-f", "-v", generation]);
+          generation = null;
+        }
       }
     }
     if (!generation) {
@@ -503,8 +512,8 @@ async function ensureContainerAndAcquire(): Promise<ContainerHandle | null> {
     // crashed partial). Inside the lock so exactly one process pays the
     // migration; every acquire after that just clones from it.
     await ensureTemplateBuilt();
-    const prior = await readContainerState();
-    const holders = prior?.generation === generation ? prior.holders : {};
+    const latestState = await readContainerState();
+    const holders = latestState?.generation === generation ? latestState.holders : {};
     for (const [token, holder] of Object.entries(holders)) {
       if (!processIsAlive(holder.pid)) {
         delete holders[token];
