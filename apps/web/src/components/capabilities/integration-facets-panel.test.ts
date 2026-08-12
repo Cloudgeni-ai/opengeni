@@ -1,19 +1,16 @@
 import { describe, expect, test } from "bun:test";
 
-import type {
-  IntegrationFeatureBindingSummary,
-  IntegrationFeatureDefinitionSummary,
-} from "@/types";
+import type { IntegrationFacetBindingSummary, IntegrationFacetDefinitionSummary } from "@/types";
 
 import {
-  featureConfigFromForm,
-  featureFields,
-  featureFormState,
-  unsupportedRequiredFeatureFields,
-} from "./integration-features-panel";
+  facetConfigFromForm,
+  facetFields,
+  facetFormState,
+  unsupportedRequiredFacetFields,
+} from "./integration-facets-panel";
 
-const driveDefinition: IntegrationFeatureDefinitionSummary = {
-  featureKey: "drive-content",
+const driveDefinition: IntegrationFacetDefinitionSummary = {
+  facetKey: "drive-content",
   kind: "knowledge_source",
   configSchema: {
     type: "object",
@@ -30,9 +27,9 @@ const driveDefinition: IntegrationFeatureDefinitionSummary = {
   capabilities: { provider: "google-drive", connectionRequired: true },
 };
 
-describe("Integration feature schema forms", () => {
+describe("Integration facet schema forms", () => {
   test("turns the bounded adapter schema into human-editable primitive fields", () => {
-    expect(featureFields(driveDefinition)).toEqual([
+    expect(facetFields(driveDefinition)).toEqual([
       {
         key: "sourceId",
         label: "Source Id",
@@ -67,7 +64,7 @@ describe("Integration feature schema forms", () => {
   });
 
   test("starts required enums safely and emits typed config without empty optional strings", () => {
-    const state = featureFormState(driveDefinition, null);
+    const state = facetFormState(driveDefinition, null);
     expect(state).toEqual({
       sourceId: "",
       sourceKind: "my_drive",
@@ -75,7 +72,7 @@ describe("Integration feature schema forms", () => {
       lookaheadDays: "",
     });
     expect(
-      featureConfigFromForm(driveDefinition, {
+      facetConfigFromForm(driveDefinition, {
         ...state,
         sourceId: "folder:finance",
         sourceKind: "folder",
@@ -91,9 +88,9 @@ describe("Integration feature schema forms", () => {
   });
 
   test("rehydrates one exact binding without exposing cursor contents", () => {
-    const binding: IntegrationFeatureBindingSummary = {
+    const binding: IntegrationFacetBindingSummary = {
       id: "00000000-0000-4000-8000-000000000701",
-      featureKey: "drive-content",
+      facetKey: "drive-content",
       kind: "knowledge_source",
       bindingKey: "finance",
       displayName: "Finance source",
@@ -111,7 +108,7 @@ describe("Integration feature schema forms", () => {
       createdAt: "2026-08-10T00:00:00.000Z",
       updatedAt: "2026-08-11T00:00:00.000Z",
     };
-    expect(featureFormState(driveDefinition, binding)).toEqual({
+    expect(facetFormState(driveDefinition, binding)).toEqual({
       sourceId: "shared-drive:finance",
       sourceKind: "shared_drive",
       includeDescendants: true,
@@ -121,8 +118,8 @@ describe("Integration feature schema forms", () => {
   });
 
   test("refuses required nested configuration that the generic editor cannot represent", () => {
-    const richDriveDefinition: IntegrationFeatureDefinitionSummary = {
-      featureKey: "drive-content",
+    const richDriveDefinition: IntegrationFacetDefinitionSummary = {
+      facetKey: "drive-content",
       kind: "knowledge_source",
       configSchema: {
         type: "object",
@@ -137,9 +134,6 @@ describe("Integration feature schema forms", () => {
       capabilities: { provider: "microsoft-onedrive", connectionRequired: true },
     };
 
-    expect(unsupportedRequiredFeatureFields(richDriveDefinition)).toEqual([
-      "sources",
-      "destination",
-    ]);
+    expect(unsupportedRequiredFacetFields(richDriveDefinition)).toEqual(["sources", "destination"]);
   });
 });

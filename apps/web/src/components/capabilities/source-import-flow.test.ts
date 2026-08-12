@@ -2,8 +2,8 @@ import { describe, expect, test } from "bun:test";
 
 import type {
   CapabilityCatalogItem,
-  CapabilityInstallation,
   ConnectionMetadata,
+  InstalledSkillSummary,
   PluginPreview,
 } from "@/types";
 import {
@@ -166,18 +166,23 @@ describe("source import flow", () => {
   });
 
   test("projects only executable workspace-imported Skills with OCC metadata", () => {
+    const skill = importedSkill();
     const item = importedSkillItem();
-    const installation = importedSkillInstallation();
     expect(isWorkspaceImportedSkill(item)).toBe(true);
-    expect(workspaceImportedSkills([item], [installation])).toEqual([
+    expect(workspaceImportedSkills([skill])).toEqual([
       expect.objectContaining({
+        capabilityId: item.id,
         sourceUrl: item.installUrl,
         sourceCommit: "a".repeat(40),
         contentSha256: "b".repeat(64),
-        installation,
+        installationVersion: 2,
       }),
     ]);
-    expect(workspaceImportedSkills([item], [{ ...installation, status: "disabled" }])).toEqual([]);
+    expect(
+      workspaceImportedSkills([
+        { ...skill, owners: [{ kind: "plugin", id: "plugin-owner", removable: true }] },
+      ]),
+    ).toEqual([]);
   });
 });
 
@@ -246,25 +251,39 @@ function importedSkillItem(): CapabilityCatalogItem {
     enabledReason: "enabled",
     connectionRef: null,
     metadata: {
-      platformVersion: 2,
       provenance: "workspace_import",
       sourceCommit: "a".repeat(40),
       contentSha256: "b".repeat(64),
+      installedSkill: {
+        source: "github",
+        installationVersion: 2,
+      },
     },
   };
 }
 
-function importedSkillInstallation(): CapabilityInstallation {
+function importedSkill(): InstalledSkillSummary {
   return {
-    id: "00000000-0000-4000-8000-000000000020",
-    accountId: "00000000-0000-4000-8000-000000000010",
-    workspaceId: "00000000-0000-4000-8000-000000000011",
     capabilityId: "skill:release-operator-abc123",
-    kind: "skill",
-    status: "active",
-    config: { sourceCommit: "a".repeat(40) },
-    metadata: {},
-    enabledAt: "2026-08-11T00:00:00.000Z",
+    pluginKey: "skill/github/acme/skills/release-operator",
+    installationVersion: 2,
+    name: "release-operator",
+    description: "Release safely",
+    category: "skills",
+    tags: ["skill", "imported"],
+    provenance: "workspace",
+    source: "github",
+    version: "a".repeat(40),
+    sourceUrl: "https://github.com/acme/skills/tree/aaaaaaaa/release-operator",
+    repositoryUrl: "https://github.com/acme/skills",
+    sourceCommit: "a".repeat(40),
+    sourcePath: "release-operator",
+    contentSha256: "b".repeat(64),
+    fileCount: 1,
+    totalBytes: 128,
+    license: null,
+    installedAt: "2026-08-11T00:00:00.000Z",
     updatedAt: "2026-08-11T00:00:00.000Z",
+    owners: [{ kind: "direct", id: "skill:release-operator-abc123", removable: true }],
   };
 }

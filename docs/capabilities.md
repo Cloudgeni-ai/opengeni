@@ -7,7 +7,7 @@ The catalog merges:
 - built-in and workspace-registered Packs
 - immutable, reviewed curated skill-library entries (`source: "library"`)
 - external MCP servers managed through `OPENGENI_MCP_SERVERS`
-- local catalog items added through the API or web app
+- manual remote MCP entries added through the API or web app
 - reviewed integrations.sh snapshot imports stored as global `source: "registry"` catalog rows
 - public remote MCP servers discovered from the official MCP Registry
 
@@ -65,14 +65,18 @@ The probe runs with those headers, and on success the values are stored encrypte
 
 Registry entries that declare required headers are tagged `requires-credentials` and cannot be enabled until the declared headers are supplied.
 
-The current compatibility table still records existing catalog installations, but product actions route to the owning type-specific domain. A Skill is installed, an Integration is connected/configured, and a Pack is installed/configured; clients must not infer one universal Enable action from catalog membership.
+The generic `capability_catalog_items` and `capability_installations` tables are
+MCP-only. Skills, Plugins, Integration Definitions, and Packs are projected
+from their dedicated authoritative ledgers, and their mutations use their
+type-specific preview/install/configure/uninstall flows. Clients must not infer
+one universal Enable action from catalog membership.
 
 ### Protocol-neutral API Integrations
 
 OpenAPI 3.0/3.1 and GraphQL endpoints use an immutable preview-before-install
-flow. Provider presets currently cover Google Drive/Gmail and Microsoft Outlook
-Mail/Calendar/Contacts/OneDrive source definitions; a general OpenAPI URL,
-GraphQL endpoint, or auto-detected URL uses the same contracts. Preview performs
+flow. Curated Integration Definitions cover Google Drive/Gmail and Microsoft
+Outlook Mail/Calendar/Contacts/OneDrive; a general OpenAPI URL, GraphQL endpoint,
+or auto-detected URL creates a workspace Definition through the same contracts. Preview performs
 bounded, pinned source discovery, compiles stable tool identities and safety
 metadata, reports the required authentication without returning credentials,
 and returns the exact revision id and SHA-256. Install re-fetches the source and
@@ -116,13 +120,12 @@ remote MCP transport. Duplicate destinations, forbidden transport headers,
 cookie injection, control characters, and oversized values are rejected before
 the request URL or headers are mutated.
 
-Google and Microsoft presets use a dedicated signed PKCE flow:
+Curated Google and Microsoft Definitions use one signed PKCE flow:
 
 - `POST /v1/workspaces/:workspaceId/integrations/oauth/start`
-- Google: `GET /v1/integrations/google-drive/callback`
-- Microsoft: `GET /v1/integrations/provider-oauth/callback`
+- `GET /v1/integrations/provider-oauth/callback`
 
-The start request names the preset and ownership and may name an existing
+The start request names the Integration Definition and ownership and may name an existing
 Connection for reconnect/incremental consent. Google can reuse the deployment's
 Google Drive OAuth app; Microsoft and alternate Google clients are selected
 from `OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON` by authorization-server URL.
@@ -131,15 +134,15 @@ state before dispatching either the legacy read-only Drive connector or a named
 provider instance. A Google Web application client must include its client
 secret; a public client may explicitly use `tokenEndpointAuthMethod: "none"`.
 Callbacks consume single-use state, recheck `connections:write`, verify the
-provider principal, require every preset scope, preserve an existing refresh
+provider principal, require every Definition scope, preserve an existing refresh
 token when the provider omits a replacement, and CAS-update or duplicate-safe
 create the normal encrypted Connection. Emulator-backed tests are merge proof;
 provider-live consent remains a separately labeled operational check.
 
-The normalized v2 rows store the protocol-compiled revision, tools, integration
-and API facets, facet installations, and owners under FORCE RLS. Compatibility
-catalog/install rows are dual-written while existing clients migrate, but they
-are not runtime authority. At turn start, active installations are projected as
+The normalized rows store the protocol-compiled revision, tools, Integration
+and API Facets, Facet installations, and owners under FORCE RLS. They are the
+only Integration Definition installation authority; generic API catalog and
+installation projections are not written. At turn start, active installations are projected as
 ordinary MCP servers and backed by an in-process local adapter. This preserves
 the existing bounded lazy tool search, exact session policy, child and schedule
 inheritance, approval/action policy, frozen Connection resolver, cancellation,
@@ -153,19 +156,19 @@ disabled and provider response bodies remain bounded.
 
 The owning endpoints are:
 
-- `GET /v1/workspaces/:workspaceId/integrations/presets`
+- `GET /v1/workspaces/:workspaceId/integrations/definitions`
 - `GET /v1/workspaces/:workspaceId/integrations`
 - `POST /v1/workspaces/:workspaceId/integrations/preview`
 - `POST /v1/workspaces/:workspaceId/integrations/install`
 - `GET /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/uninstall-preview`
 - `DELETE /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey`
-- `GET /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features`
-- `GET /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey/browse`
-- `PUT /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey/source`
-- `PUT /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey`
-- `POST /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey/pause`
-- `POST /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey/resume`
-- `DELETE /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey`
+- `GET /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets`
+- `GET /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey/browse`
+- `PUT /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey/source`
+- `PUT /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey`
+- `POST /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey/pause`
+- `POST /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey/resume`
+- `DELETE /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey`
 
 One immutable Integration definition may have many active instances. Each
 instance has a stable `instanceKey`, human-editable display name, collision-free
@@ -175,7 +178,7 @@ resource-scoped configurations without copying the schema or overwriting a
 sibling. Reconnect and uninstall operate on the exact instance; the underlying
 Connection and shared definition survive unless separately removed.
 
-Provider adapters may also publish immutable generic feature definitions for
+Provider adapters may also publish immutable generic facet definitions for
 Knowledge Sources, Inbound Triggers, Delivery Destinations, and Identity Links.
 Google Drive and OneDrive expose drive-content Knowledge Sources; Gmail and
 Outlook expose mail or calendar trigger/delivery facets and connected-account
@@ -196,7 +199,7 @@ plus a bound document destination. Browse and save resolve the exact named
 Integration instance before loading its Connection. Save re-reads every source
 from Google, rejects stale client labels/types/drive identities, binds the
 organization/workspace/personal destination authority, and writes only the
-feature binding. The generic feature `PUT` rejects this provider-owned facet;
+facet binding. The generic facet `PUT` rejects this provider-owned facet;
 only the provider-specific `/source` route may persist its config, so a
 schema-valid payload cannot bypass Google metadata checks or forge destination
 authority. A sibling Google Drive instance—whether it uses another Google
@@ -205,8 +208,8 @@ fallback and is not mutated. Generic browser editing refuses required object or
 array fields unless a provider-specific flow owns them, so OneDrive and future
 rich schemas cannot be submitted as silently incomplete primitive config.
 
-The preset inventory returns only safe public metadata (id, label, provider
-family/domain, protocol, summary, requested scope names, and immutable feature
+The Definition inventory returns only safe public metadata (id, label, provider
+family/domain, protocol, summary, requested scope names, and immutable facet
 schemas/capability facts). Deployment OAuth client identifiers, secrets, and
 provider cursors never cross this boundary. `/capabilities`
 renders that inventory as one service card per immutable definition and one
@@ -305,23 +308,26 @@ status, and timestamps. The SDK mirrors these as `listInstalledPlugins`,
 
 ## Curated skill library
 
-The default sandbox carries no Terraform, Checkov, social-marketing, or other domain methodology guidance. Those Skills live in the immutable curated library under `packages/runtime/src/bundled_skill_library/` and are discoverable but uninstalled until explicitly selected. The initial reviewed set is Checkov, Refactor Module, Social Media Marketing, Terraform Search and Import, Terraform Stacks, Terraform Style Guide, Terraform Test, and Azure Verified Modules.
+The default sandbox carries no Terraform, Checkov, social-marketing, or other domain methodology guidance. Those Skills live in the immutable curated library under `packages/runtime/src/curated_skill_library/` and are discoverable but uninstalled until explicitly installed through the normal Skill lifecycle, selected for an exact session, or acquired through a Pack. The initial reviewed set is Checkov, Refactor Module, Social Media Marketing, Terraform Search and Import, Terraform Stacks, Terraform Style Guide, Terraform Test, and Azure Verified Modules.
 
 - `id` is stable (`skill:azure-verified-modules` in the catalog).
 - `metadata.libraryId`, `metadata.version`, `metadata.contentSha256`, `metadata.sourceCommit`, `metadata.sourceUrl`, `metadata.provenance`, `metadata.license`, `metadata.documentationUrl`, `metadata.compatibility`, and `metadata.upgrade` make provenance inspectable. `contentSha256` is a canonical whole-artifact digest over sorted normalized relative paths and the exact bytes of every recursively materialized regular file, not only `SKILL.md`.
-- Entries are immutable. A changed artifact is a new version and hash; enabling an unsupported `config.version` returns `422` rather than silently selecting another revision.
-- Enabling a library skill stores only the canonical exact version/hash metadata. It does not attach a variable set, credentials, MCP servers, tools, cloud permissions, tenant access, or Azure/OpenAI model routing. The skill contributes guidance files to the normal `.agents/` skill index only.
+- Entries are immutable. A changed artifact is a new version and hash; install requires the exact reviewed version and whole-artifact hash and returns `409` if the reviewed artifact changed.
+- Installing a library Skill stores the exact files plus canonical version/hash/provenance in the normalized Plugin/Skill-Facet ledger. It does not attach a Variable Set, credentials, MCP servers, tools, cloud permissions, tenant access, or model routing. The Skill contributes guidance files to the normal `.agents/` Skill index only.
 - Active library skills are resolved by the worker at turn start. A missing entry, unavailable artifact, or hash mismatch fails closed; it never substitutes a different version.
 
-Enable the exact catalog version (the `config.version` field is optional when the catalog has one current immutable version):
+Install the exact reviewed catalog version and hash:
 
 ```bash
-curl -X POST "http://127.0.0.1:8000/v1/workspaces/$WORKSPACE_ID/capabilities/skill%3Aazure-verified-modules/enable" \
+curl -X POST "http://127.0.0.1:8000/v1/workspaces/$WORKSPACE_ID/skills/library/azure-verified-modules/install" \
   -H 'content-type: application/json' \
-  -d '{"config":{"version":"1.0.0"},"metadata":{"enabledBy":"operator"}}'
+  -d '{"expectedVersion":"1.0.0","expectedContentSha256":"<reviewed-sha256>"}'
 ```
 
-The resulting catalog row reports an installed/ready lifecycle (and retains `enabled: true` with `enabledReason: "explicitly selected"` for compatibility). Uninstalling the selection removes the curated skill from subsequent turns.
+The resulting catalog row reports an installed lifecycle. Updating requires the
+previewed installation version, and uninstall removes only the direct owner;
+the Skill remains active when a Plugin or Pack still owns the same exact
+artifact.
 
 ### Skill source precedence
 
@@ -339,7 +345,16 @@ Self-hosted/Connected Machine deployments may omit the curated artifact from the
 
 ### Compatibility and migration
 
-Skill-library selection is currently workspace-scoped through the capability installation. Existing session rows do not contain a per-session library pin, so resumed and newly created sessions use the workspace's active exact-pinned library installations plus their Pack/session/repository sources. This deliberately removes the former seven deployment-default domain Skills rather than silently retaining methodology a workspace never selected. A future per-session pin migration can preserve historical library context for long-lived sessions if product requirements call for that stronger continuation guarantee; it must use the same immutable id/version/hash records and must not broaden authorization.
+Skill-library installation is workspace-scoped through the authoritative
+Plugin/Skill-Facet installation. Existing session rows do not contain a
+per-session library pin, so resumed and newly created sessions use the
+workspace's active exact-pinned Skill installations plus their
+Pack/session/repository sources. This deliberately removes the former
+deployment-default domain Skills rather than silently retaining methodology a
+workspace never selected. A future per-session pin migration can preserve
+historical library context for long-lived sessions if product requirements call
+for that stronger continuation guarantee; it must use the same immutable
+id/version/hash records and must not broaden authorization.
 
 ### Remote Skill imports
 
@@ -357,18 +372,21 @@ version; omission is rejected and a stale version returns `409`, so two
 administrators cannot silently overwrite each other's accepted source
 revision.
 
-The normalized v2 persistence model stores the immutable Plugin version, Skill
+The authoritative persistence model stores the immutable Plugin version, Skill
 facet, exact text files, workspace installation, and component owners under
 FORCE RLS. Runtime materialization revalidates the stored artifact and digest
 before adding it to the same lazy `.agents/` Skill index as other active
 workspace components, session, repository, and native artifact Skills. Uninstall is previewed and
 optimistic-concurrency fenced: removing the direct owner retains the Skill when
 a Plugin or Pack still owns it, and only the final owner removes it from later
-turns. The compatibility catalog/install rows are dual-written during the
-rolling migration; they are a projection, not the artifact authority.
+turns. Migration `0233_skill_and_integration_authority_cutover.sql` preserves
+exact active curated selections in this ledger, deletes every generic Skill
+projection, and constrains the generic catalog/install tables to MCP rows.
 
 The owning endpoints are:
 
+- `GET /v1/workspaces/:workspaceId/skills`
+- `POST /v1/workspaces/:workspaceId/skills/library/:libraryId/install`
 - `POST /v1/workspaces/:workspaceId/skills/preview`
 - `POST /v1/workspaces/:workspaceId/skills/install`
 - `GET /v1/workspaces/:workspaceId/skills/:capabilityId/uninstall-preview`

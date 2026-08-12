@@ -1,4 +1,4 @@
-// Packs compose pinned Plugins, Skills, Integrations, feature bindings, and an
+// Packs compose pinned Plugins, Skills, Integrations, Facet bindings, and an
 // explicit Rig requirement. Every mutation is review-fenced: the UI shows the
 // exact component/Rig plan before install and the shared-owner outcome before
 // uninstall. Legacy inline Skills and sandboxImage fields are disclosed as

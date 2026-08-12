@@ -6972,10 +6972,10 @@ export const CapabilityPackComponentReference = z.discriminatedUnion("kind", [
   z
     .object({
       key: CapabilityPackComponentKey,
-      kind: z.literal("feature"),
+      kind: z.literal("facet"),
       capabilityId: z.string().min(1).max(512),
       instanceKey: CapabilityPackInstanceKey,
-      featureKey: z.string().min(1).max(200),
+      facetKey: z.string().min(1).max(200),
       bindingKey: CapabilityPackInstanceKey,
       configDigest: z.string().regex(/^[0-9a-f]{64}$/),
       required: z.boolean().default(true),
@@ -7184,7 +7184,7 @@ export type PackComponentResolutionStatus = z.infer<typeof PackComponentResoluti
 export const PackComponentResolution = z
   .object({
     key: CapabilityPackComponentKey,
-    kind: z.enum(["plugin", "skill", "integration", "feature", "inline_skill"]),
+    kind: z.enum(["plugin", "skill", "integration", "facet", "inline_skill"]),
     capabilityId: z.string().min(1).max(512),
     required: z.boolean(),
     status: PackComponentResolutionStatus,
@@ -7260,7 +7260,7 @@ export const PackUninstallPreview = z
         z
           .object({
             key: CapabilityPackComponentKey,
-            kind: z.enum(["plugin", "skill", "integration", "feature", "inline_skill"]),
+            kind: z.enum(["plugin", "skill", "integration", "facet", "inline_skill"]),
             capabilityId: z.string().min(1).max(512),
             retainedByOtherOwners: z.boolean(),
           })
@@ -7860,7 +7860,7 @@ export type CapabilityInstallation = z.infer<typeof CapabilityInstallation>;
 
 export const CreateCapabilityCatalogItemRequest = z.object({
   id: z.string().min(1).optional(),
-  kind: CapabilityKind.exclude(["pack"]),
+  kind: z.literal("mcp"),
   source: CapabilitySource.default("manual"),
   name: z.string().min(1),
   description: z.string().min(1).optional(),
@@ -7874,7 +7874,7 @@ export const CreateCapabilityCatalogItemRequest = z.object({
 });
 export type CreateCapabilityCatalogItemRequest = z.infer<typeof CreateCapabilityCatalogItemRequest>;
 
-export const EnableCapabilityRequest = withVariableSetIdAlias({
+export const EnableCapabilityRequest = z.object({
   config: z.record(z.string(), z.unknown()).default({}),
   metadata: z.record(z.string(), z.unknown()).default({}),
   connectionRef: McpServerConnectionRef.optional(),
@@ -7885,14 +7885,6 @@ export const EnableCapabilityRequest = withVariableSetIdAlias({
    * and never returned by the API — responses expose header names only.
    */
   headers: z.record(z.string(), z.string()).default({}),
-  /**
-   * Initial variableSet attachment for kind=pack capabilities. Mirrors the
-   * dedicated POST /packs/:id/enable body: required to enable an
-   * variableSet.required pack through the unified capability-enable path,
-   * optional otherwise. Ignored by non-pack capabilities.
-   */
-  variableSetId: z.string().uuid().optional(),
-  environmentId: z.string().uuid().optional(),
 });
 export type EnableCapabilityRequest = z.infer<typeof EnableCapabilityRequest>;
 
@@ -7911,6 +7903,9 @@ export type DiscoverMcpCapabilitiesResponse = z.infer<typeof DiscoverMcpCapabili
 
 export const SkillImportSource = z.enum(["github", "skills_sh"]);
 export type SkillImportSource = z.infer<typeof SkillImportSource>;
+
+export const SkillInstallationSource = z.enum(["library", "github", "skills_sh", "pack"]);
+export type SkillInstallationSource = z.infer<typeof SkillInstallationSource>;
 
 export const PreviewSkillImportRequest = z.object({
   url: z.string().url().max(2048),
@@ -7951,6 +7946,15 @@ export const InstallSkillRequest = z.object({
 });
 export type InstallSkillRequest = z.infer<typeof InstallSkillRequest>;
 
+export const InstallLibrarySkillRequest = z
+  .object({
+    expectedVersion: z.string().min(1).max(96),
+    expectedContentSha256: z.string().regex(/^[0-9a-f]{64}$/),
+    expectedInstallationVersion: z.number().int().positive().optional(),
+  })
+  .strict();
+export type InstallLibrarySkillRequest = z.infer<typeof InstallLibrarySkillRequest>;
+
 export const InstalledSkill = z.object({
   capabilityId: z.string().min(1),
   pluginId: z.string().uuid(),
@@ -7959,7 +7963,8 @@ export const InstalledSkill = z.object({
   pluginInstallationId: z.string().uuid(),
   facetInstallationId: z.string().uuid(),
   installationVersion: z.number().int().positive(),
-  source: SkillImportSource,
+  source: SkillInstallationSource,
+  version: z.string().min(1).max(96),
   sourceUrl: z.string().url(),
   sourceCommit: z.string().regex(/^[0-9a-f]{40,64}$/),
   contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
@@ -7974,6 +7979,38 @@ export const CapabilityComponentOwner = z.object({
   removable: z.boolean(),
 });
 export type CapabilityComponentOwner = z.infer<typeof CapabilityComponentOwner>;
+
+export const InstalledSkillSummary = z
+  .object({
+    capabilityId: z.string().min(1),
+    pluginKey: z.string().min(1).max(200),
+    installationVersion: z.number().int().positive(),
+    name: z.string().min(1).max(200),
+    description: z.string().max(4000),
+    category: z.string().min(1).max(100),
+    tags: z.array(z.string().min(1).max(100)).max(64),
+    provenance: z.string().min(1).max(4000),
+    source: SkillInstallationSource,
+    version: z.string().min(1).max(96),
+    sourceUrl: z.string().url().max(2048),
+    repositoryUrl: z.string().url().max(2048),
+    sourceCommit: z.string().regex(/^[0-9a-f]{40,64}$/),
+    sourcePath: z.string().min(1).max(1024),
+    contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
+    fileCount: z.number().int().positive().max(128),
+    totalBytes: z.number().int().positive().max(1048576),
+    license: z.string().min(1).max(200).nullable(),
+    installedAt: z.string().datetime({ offset: true }),
+    updatedAt: z.string().datetime({ offset: true }),
+    owners: z.array(CapabilityComponentOwner).min(1),
+  })
+  .strict();
+export type InstalledSkillSummary = z.infer<typeof InstalledSkillSummary>;
+
+export const ListInstalledSkillsResponse = z
+  .object({ skills: z.array(InstalledSkillSummary).max(1000) })
+  .strict();
+export type ListInstalledSkillsResponse = z.infer<typeof ListInstalledSkillsResponse>;
 
 export const SkillUninstallPreview = z.object({
   capabilityId: z.string().min(1),
@@ -8000,26 +8037,29 @@ export type UninstallSkillResult = z.infer<typeof UninstallSkillResult>;
 export const ApiIntegrationProtocol = z.enum(["openapi", "graphql"]);
 export type ApiIntegrationProtocol = z.infer<typeof ApiIntegrationProtocol>;
 
-export const IntegrationFeatureKey = z
+export const IntegrationDefinitionProvenance = z.enum(["curated", "workspace"]);
+export type IntegrationDefinitionProvenance = z.infer<typeof IntegrationDefinitionProvenance>;
+
+export const IntegrationFacetKey = z
   .string()
   .min(1)
   .max(200)
   .regex(/^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$/);
-export type IntegrationFeatureKey = z.infer<typeof IntegrationFeatureKey>;
+export type IntegrationFacetKey = z.infer<typeof IntegrationFacetKey>;
 
-export const IntegrationFeatureKind = z.enum([
+export const IntegrationFacetKind = z.enum([
   "tools",
   "knowledge_source",
   "inbound_trigger",
   "delivery_destination",
   "identity_link",
 ]);
-export type IntegrationFeatureKind = z.infer<typeof IntegrationFeatureKind>;
+export type IntegrationFacetKind = z.infer<typeof IntegrationFacetKind>;
 
-export const IntegrationFeatureStatus = z.enum(["active", "paused", "needs_attention", "disabled"]);
-export type IntegrationFeatureStatus = z.infer<typeof IntegrationFeatureStatus>;
+export const IntegrationFacetStatus = z.enum(["active", "paused", "needs_attention", "disabled"]);
+export type IntegrationFacetStatus = z.infer<typeof IntegrationFacetStatus>;
 
-const IntegrationFeatureJsonObject = z.record(z.string(), z.unknown()).superRefine((value, ctx) => {
+const IntegrationFacetJsonObject = z.record(z.string(), z.unknown()).superRefine((value, ctx) => {
   let serialized: string;
   try {
     serialized = JSON.stringify(value);
@@ -8032,36 +8072,43 @@ const IntegrationFeatureJsonObject = z.record(z.string(), z.unknown()).superRefi
   }
 });
 
-export const IntegrationFeatureDefinitionSummary = z
+export const IntegrationFacetDefinitionSummary = z
   .object({
-    featureKey: IntegrationFeatureKey,
-    kind: IntegrationFeatureKind.exclude(["tools"]),
-    configSchema: IntegrationFeatureJsonObject,
-    capabilities: IntegrationFeatureJsonObject,
+    facetKey: IntegrationFacetKey,
+    kind: IntegrationFacetKind.exclude(["tools"]),
+    configSchema: IntegrationFacetJsonObject,
+    capabilities: IntegrationFacetJsonObject,
   })
   .strict();
-export type IntegrationFeatureDefinitionSummary = z.infer<
-  typeof IntegrationFeatureDefinitionSummary
->;
+export type IntegrationFacetDefinitionSummary = z.infer<typeof IntegrationFacetDefinitionSummary>;
 
-export const ApiIntegrationPresetSummary = z
+export const IntegrationDefinitionSummary = z
   .object({
     id: z.string().min(1).max(128),
     name: z.string().min(1).max(200),
     summary: z.string().min(1).max(1000),
-    family: z.enum(["google", "microsoft"]),
     protocol: z.literal("openapi"),
-    providerDomain: z.string().min(1).max(253),
-    scopes: z.array(z.string().min(1).max(1024)).max(256),
-    features: z.array(IntegrationFeatureDefinitionSummary).max(128),
+    provider: z
+      .object({
+        id: z.enum(["google", "microsoft"]),
+        domain: z.string().min(1).max(253),
+      })
+      .strict(),
+    authentication: z
+      .object({
+        kind: z.literal("oauth2"),
+        scopes: z.array(z.string().min(1).max(1024)).max(256),
+      })
+      .strict(),
+    facets: z.array(IntegrationFacetDefinitionSummary).max(128),
   })
   .strict();
-export type ApiIntegrationPresetSummary = z.infer<typeof ApiIntegrationPresetSummary>;
+export type IntegrationDefinitionSummary = z.infer<typeof IntegrationDefinitionSummary>;
 
-export const ListApiIntegrationPresetsResponse = z
-  .object({ presets: z.array(ApiIntegrationPresetSummary).max(128) })
+export const ListIntegrationDefinitionsResponse = z
+  .object({ definitions: z.array(IntegrationDefinitionSummary).max(128) })
   .strict();
-export type ListApiIntegrationPresetsResponse = z.infer<typeof ListApiIntegrationPresetsResponse>;
+export type ListIntegrationDefinitionsResponse = z.infer<typeof ListIntegrationDefinitionsResponse>;
 
 export const IntegrationInstanceKey = z
   .string()
@@ -8070,16 +8117,16 @@ export const IntegrationInstanceKey = z
   .regex(/^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$/);
 export type IntegrationInstanceKey = z.infer<typeof IntegrationInstanceKey>;
 
-export const IntegrationFeatureBindingSummary = z
+export const IntegrationFacetBindingSummary = z
   .object({
     id: z.string().uuid(),
-    featureKey: IntegrationFeatureKey,
-    kind: IntegrationFeatureKind.exclude(["tools"]),
+    facetKey: IntegrationFacetKey,
+    kind: IntegrationFacetKind.exclude(["tools"]),
     bindingKey: IntegrationInstanceKey,
     displayName: z.string().min(1).max(200),
     connectionId: z.string().uuid().nullable(),
-    status: IntegrationFeatureStatus,
-    config: IntegrationFeatureJsonObject,
+    status: IntegrationFacetStatus,
+    config: IntegrationFacetJsonObject,
     version: z.number().int().positive(),
     hasCursor: z.boolean(),
     lastSuccessAt: z.string().datetime({ offset: true }).nullable(),
@@ -8088,73 +8135,71 @@ export const IntegrationFeatureBindingSummary = z
     updatedAt: z.string().datetime({ offset: true }),
   })
   .strict();
-export type IntegrationFeatureBindingSummary = z.infer<typeof IntegrationFeatureBindingSummary>;
+export type IntegrationFacetBindingSummary = z.infer<typeof IntegrationFacetBindingSummary>;
 
-export const IntegrationInstanceFeaturesResponse = z
+export const IntegrationInstanceFacetsResponse = z
   .object({
     capabilityId: z.string().min(1).max(512),
     instanceKey: IntegrationInstanceKey,
     providerDomain: z.string().min(1).max(253),
     connectionId: z.string().uuid().nullable(),
-    features: z
+    facets: z
       .array(
         z
           .object({
-            definition: IntegrationFeatureDefinitionSummary,
-            binding: IntegrationFeatureBindingSummary.nullable(),
+            definition: IntegrationFacetDefinitionSummary,
+            binding: IntegrationFacetBindingSummary.nullable(),
           })
           .strict(),
       )
       .max(128),
   })
   .strict();
-export type IntegrationInstanceFeaturesResponse = z.infer<
-  typeof IntegrationInstanceFeaturesResponse
->;
+export type IntegrationInstanceFacetsResponse = z.infer<typeof IntegrationInstanceFacetsResponse>;
 
-export const UpsertIntegrationFeatureRequest = z
+export const UpsertIntegrationFacetRequest = z
   .object({
     displayName: z.string().min(1).max(200),
-    config: IntegrationFeatureJsonObject.default({}),
+    config: IntegrationFacetJsonObject.default({}),
     expectedVersion: z.number().int().positive().optional(),
     idempotencyKey: z.string().uuid(),
   })
   .strict();
-export type UpsertIntegrationFeatureRequest = z.infer<typeof UpsertIntegrationFeatureRequest>;
+export type UpsertIntegrationFacetRequest = z.infer<typeof UpsertIntegrationFacetRequest>;
 
-export const MutateIntegrationFeatureRequest = z
+export const MutateIntegrationFacetRequest = z
   .object({
     expectedVersion: z.number().int().positive(),
     idempotencyKey: z.string().uuid(),
   })
   .strict();
-export type MutateIntegrationFeatureRequest = z.infer<typeof MutateIntegrationFeatureRequest>;
+export type MutateIntegrationFacetRequest = z.infer<typeof MutateIntegrationFacetRequest>;
 
-export const IntegrationFeatureMutationResult = z
+export const IntegrationFacetMutationResult = z
   .object({
     capabilityId: z.string().min(1).max(512),
     instanceKey: IntegrationInstanceKey,
-    featureKey: IntegrationFeatureKey,
+    facetKey: IntegrationFacetKey,
     status: z.enum(["configured", "paused", "active"]),
-    binding: IntegrationFeatureBindingSummary,
+    binding: IntegrationFacetBindingSummary,
   })
   .strict();
-export type IntegrationFeatureMutationResult = z.infer<typeof IntegrationFeatureMutationResult>;
+export type IntegrationFacetMutationResult = z.infer<typeof IntegrationFacetMutationResult>;
 
-export const IntegrationFeatureRemovalResult = z
+export const IntegrationFacetRemovalResult = z
   .object({
     capabilityId: z.string().min(1).max(512),
     instanceKey: IntegrationInstanceKey,
-    featureKey: IntegrationFeatureKey,
+    facetKey: IntegrationFacetKey,
     status: z.enum(["not_configured", "removed", "retained_by_other_owners"]),
-    binding: IntegrationFeatureBindingSummary.nullable(),
+    binding: IntegrationFacetBindingSummary.nullable(),
     remainingOwners: z.array(CapabilityComponentOwner),
   })
   .strict();
-export type IntegrationFeatureRemovalResult = z.infer<typeof IntegrationFeatureRemovalResult>;
+export type IntegrationFacetRemovalResult = z.infer<typeof IntegrationFacetRemovalResult>;
 
-export const ApiIntegrationSource = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("preset"), presetId: z.string().min(1).max(128) }).strict(),
+export const IntegrationSource = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("definition"), definitionId: z.string().min(1).max(128) }).strict(),
   z
     .object({
       kind: z.literal("openapi"),
@@ -8177,11 +8222,11 @@ export const ApiIntegrationSource = z.discriminatedUnion("kind", [
     })
     .strict(),
 ]);
-export type ApiIntegrationSource = z.infer<typeof ApiIntegrationSource>;
+export type IntegrationSource = z.infer<typeof IntegrationSource>;
 
 export const PreviewApiIntegrationRequest = z
   .object({
-    source: ApiIntegrationSource,
+    source: IntegrationSource,
     connectionId: z.string().uuid().optional(),
     ownership: ConnectionOwnership.optional(),
   })
@@ -8190,7 +8235,7 @@ export type PreviewApiIntegrationRequest = z.infer<typeof PreviewApiIntegrationR
 
 export const ApiIntegrationOAuthStartRequest = z
   .object({
-    presetId: z.string().min(1).max(128),
+    definitionId: z.string().min(1).max(128),
     ownership: ConnectionOwnership.optional(),
     connectionId: z.string().uuid().optional(),
     returnPath: z.string().min(1).max(2048).optional(),
@@ -8207,7 +8252,7 @@ export const ApiIntegrationOAuthConnectionMetadata = z
     providerPrincipalId: z.string().min(1).max(512),
     providerEmail: z.string().min(1).max(512).nullable(),
     providerDisplayName: z.string().min(1).max(512).nullable(),
-    authorizedPresetIds: z.array(z.string().min(1).max(128)).min(1).max(32),
+    authorizedDefinitionIds: z.array(z.string().min(1).max(128)).min(1).max(32),
     verifiedAt: z.string().datetime({ offset: true }),
   })
   .passthrough();
@@ -8257,10 +8302,10 @@ export type ApiIntegrationToolPreview = z.infer<typeof ApiIntegrationToolPreview
 
 export const ApiIntegrationPreview = z
   .object({
-    source: ApiIntegrationSource,
-    presetId: z.string().min(1).max(128).nullable(),
+    source: IntegrationSource,
+    definitionId: z.string().min(1).max(200),
+    definitionProvenance: IntegrationDefinitionProvenance,
     protocol: ApiIntegrationProtocol,
-    integrationId: z.string().min(1).max(200),
     capabilityId: z.string().min(1).max(512),
     pluginKey: z.string().min(1).max(200),
     serverId: SessionMcpServerId,
@@ -8283,7 +8328,7 @@ export type ApiIntegrationPreview = z.infer<typeof ApiIntegrationPreview>;
 
 export const InstallApiIntegrationRequest = z
   .object({
-    source: ApiIntegrationSource,
+    source: IntegrationSource,
     expectedRevisionId: z.string().min(1).max(96),
     expectedContentSha256: z.string().regex(/^[0-9a-f]{64}$/),
     connectionId: z.string().uuid().optional(),
@@ -8331,7 +8376,8 @@ export const ApiIntegrationInstallationSummary = z
     name: z.string().min(1),
     description: z.string().nullable(),
     protocol: ApiIntegrationProtocol,
-    presetId: z.string().min(1).max(128).nullable(),
+    definitionId: z.string().min(1).max(200),
+    definitionProvenance: IntegrationDefinitionProvenance,
     providerDomain: z.string().min(1),
     baseUrl: z.string().url(),
     sourceUrl: z.string().url().nullable(),
@@ -8417,7 +8463,7 @@ export const PluginManifest = z
             .object({
               key: PluginComponentKey,
               kind: z.literal("integration"),
-              source: ApiIntegrationSource,
+              source: IntegrationSource,
             })
             .strict(),
           z

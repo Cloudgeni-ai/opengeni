@@ -17,14 +17,12 @@ test("production process bundles retain every runtime skill asset directory", as
     await copyRuntimeSkillAssets(repositoryRoot, outdir);
 
     expect(RUNTIME_SKILL_ASSET_DIRECTORY_NAMES).toEqual([
-      "bundled_hashicorp_terraform_skills",
-      "bundled_skill_library",
+      "curated_skill_library",
       "bundled_artifact_skills",
       "bundled_video_skills",
     ]);
     for (const [directoryName, skillName] of [
-      ["bundled_hashicorp_terraform_skills", "checkov"],
-      ["bundled_skill_library", "azure-verified-modules"],
+      ["curated_skill_library", "azure-verified-modules"],
       ["bundled_artifact_skills", "opengeni-spreadsheets"],
       ["bundled_video_skills", "opengeni-video-generation"],
     ] as const) {

@@ -1,4 +1,11 @@
-import { ExternalLinkIcon, Loader2Icon, PlugIcon, RefreshCwIcon, TrashIcon } from "lucide-react";
+import {
+  ExternalLinkIcon,
+  Loader2Icon,
+  PlugIcon,
+  RefreshCwIcon,
+  SparklesIcon,
+  TrashIcon,
+} from "lucide-react";
 import {
   useEffect,
   useLayoutEffect,
@@ -39,6 +46,8 @@ import type { CapabilityCatalogItem, ConnectionOwnership, SocialConnection } fro
 
 export type ConnectAction =
   | { type: "enable"; item: CapabilityCatalogItem }
+  | { type: "install_skill"; item: CapabilityCatalogItem }
+  | { type: "remove_skill"; item: CapabilityCatalogItem }
   | {
       type: "social_oauth";
       item: CapabilityCatalogItem;
@@ -58,10 +67,18 @@ export type ConnectAction =
       apiToken: string;
       connectionId: string | null;
     }
-  | { type: "fiken_disconnect"; item: CapabilityCatalogItem; connectionId: string }
+  | {
+      type: "fiken_disconnect";
+      item: CapabilityCatalogItem;
+      connectionId: string;
+    }
   // OAuth against the registered Fiken app; connectionId re-authorizes an
   // existing row in place.
-  | { type: "fiken_oauth"; item: CapabilityCatalogItem; connectionId: string | null }
+  | {
+      type: "fiken_oauth";
+      item: CapabilityCatalogItem;
+      connectionId: string | null;
+    }
   | {
       type: "oauth";
       item: CapabilityCatalogItem;
@@ -88,7 +105,7 @@ export type ConnectAction =
       ownership: ConnectionOwnership;
       headers: Record<string, string>;
     }
-  | { type: "disable"; item: CapabilityCatalogItem };
+  | { type: "disconnect"; item: CapabilityCatalogItem };
 
 export const DEFAULT_CONNECTION_OWNERSHIP: ConnectionOwnership = "workspace";
 
@@ -104,6 +121,7 @@ export function CapabilityDetailSheet({
   errorMessage,
   socialConnections,
   canManageSocial = false,
+  canManageSkills = false,
   onAction,
 }: {
   item: CapabilityCatalogItem | null;
@@ -117,6 +135,7 @@ export function CapabilityDetailSheet({
   errorMessage: string | null;
   socialConnections?: SocialConnection[];
   canManageSocial?: boolean;
+  canManageSkills?: boolean;
   onAction: (action: ConnectAction) => void;
 }) {
   const localRestoreFocusRef = useRef<HTMLElement | null>(null);
@@ -182,6 +201,7 @@ export function CapabilityDetailSheet({
             errorMessage={errorMessage}
             socialConnections={socialConnections}
             canManageSocial={canManageSocial}
+            canManageSkills={canManageSkills}
             onAction={onAction}
           />
         ) : null}
@@ -198,6 +218,7 @@ export function DetailBody({
   errorMessage,
   socialConnections,
   canManageSocial,
+  canManageSkills = false,
   onAction,
 }: {
   item: CapabilityCatalogItem;
@@ -207,6 +228,7 @@ export function DetailBody({
   errorMessage: string | null;
   socialConnections?: SocialConnection[];
   canManageSocial: boolean;
+  canManageSkills?: boolean;
   onAction: (action: ConnectAction) => void;
 }) {
   const plan = useMemo(() => capabilityConnectPlan(item), [item]);
@@ -222,7 +244,7 @@ export function DetailBody({
     [item.id, personalOnly],
   );
 
-  const canDisable = item.enabled && item.source !== "built_in" && item.source !== "configured";
+  const canDisconnect = item.enabled && item.kind === "mcp" && item.actions.includes("disconnect");
   const keyPageUrl = item.installUrl ?? item.homepageUrl;
   // Repair is driven by the installation's OWN connectionRef.kind, not the catalog
   // plan — on catalog/registry drift an enabled item can carry a live connectionRef
@@ -310,6 +332,13 @@ export function DetailBody({
                   : "This surface cannot be enabled from the capability catalog; its authorization is managed by the workspace Codex subscription."}
               </p>
             </div>
+          ) : item.kind === "skill" ? (
+            <SkillControls
+              item={item}
+              busy={busy}
+              canManage={canManageSkills}
+              onAction={onAction}
+            />
           ) : plan.mode === "social_oauth" ? (
             <SocialConnectorControls
               item={item}
@@ -382,19 +411,21 @@ export function DetailBody({
                   </Button>
                 )
               ) : null}
-              {canDisable ? (
+              {canDisconnect ? (
                 <Button
                   type="button"
                   variant="outline"
                   className="w-full text-status-failed hover:bg-status-failed/10 hover:text-status-failed pointer-coarse:min-h-11"
                   disabled={busy}
-                  onClick={() => onAction({ type: "disable", item })}
+                  onClick={() => onAction({ type: "disconnect", item })}
                 >
                   {busy && !reconnect ? <Loader2Icon className="animate-spin" /> : <TrashIcon />}
-                  Disable
+                  Disconnect
                 </Button>
               ) : (
-                <p className="text-center text-xs text-fg-subtle">Built in — always available.</p>
+                <p className="text-center text-xs text-fg-subtle">
+                  Manage this capability from its dedicated controls.
+                </p>
               )}
             </div>
           ) : plan.mode === "api_key" ? (
@@ -455,7 +486,7 @@ export function DetailBody({
                   : `You'll authorize ${item.name} for your personal use, then return here.`}
               </p>
             </div>
-          ) : (
+          ) : item.kind === "mcp" ? (
             <Button
               type="button"
               className="w-full"
@@ -470,9 +501,69 @@ export function DetailBody({
               {busy ? <Loader2Icon className="animate-spin" /> : <PlugIcon />}
               Enable
             </Button>
+          ) : (
+            <p className="text-center text-xs text-fg-subtle">
+              Install or connect this capability from its dedicated controls.
+            </p>
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+function SkillControls({
+  item,
+  busy,
+  canManage,
+  onAction,
+}: {
+  item: CapabilityCatalogItem;
+  busy: boolean;
+  canManage: boolean;
+  onAction: (action: ConnectAction) => void;
+}) {
+  const updateAvailable = item.metadata.updateAvailable === true;
+  return (
+    <div className="space-y-3">
+      {item.enabled ? (
+        <div className="flex items-center gap-2 text-sm text-status-idle">
+          <span className="size-2 rounded-full bg-status-idle" />
+          {updateAvailable ? "Installed · update available" : "Installed"}
+        </div>
+      ) : null}
+      {!item.enabled || updateAvailable ? (
+        <Button
+          type="button"
+          className="w-full"
+          disabled={busy || !canManage || !item.runtime.available}
+          onClick={() => onAction({ type: "install_skill", item })}
+        >
+          {busy ? <Loader2Icon className="animate-spin" /> : <SparklesIcon />}
+          {item.enabled ? "Update Skill" : "Install Skill"}
+        </Button>
+      ) : null}
+      {item.enabled ? (
+        <Button
+          type="button"
+          variant="outline"
+          className="w-full text-status-failed hover:bg-status-failed/10 hover:text-status-failed pointer-coarse:min-h-11"
+          disabled={busy || !canManage}
+          onClick={() => onAction({ type: "remove_skill", item })}
+        >
+          {busy ? <Loader2Icon className="animate-spin" /> : <TrashIcon />}
+          Remove Skill
+        </Button>
+      ) : null}
+      {!canManage ? (
+        <p className="text-center text-xs text-fg-muted">
+          Workspace administrator permission is required to install, update, or remove Skills.
+        </p>
+      ) : null}
+      <p className="text-center text-xs text-fg-subtle">
+        Skills add reviewed instructions only. They never grant credentials or connect provider
+        accounts.
+      </p>
     </div>
   );
 }
@@ -555,7 +646,11 @@ export function SocialConnectorControls({
                   disabled={busy || !canConnect}
                   aria-label={`Disconnect @${connection.accountHandle}`}
                   onClick={() =>
-                    onAction({ type: "disconnect_social", item, connectionId: connection.id })
+                    onAction({
+                      type: "disconnect_social",
+                      item,
+                      connectionId: connection.id,
+                    })
                   }
                 >
                   <TrashIcon />
@@ -648,7 +743,13 @@ export function FikenConnectorControls({
       type="button"
       className="w-full"
       disabled={busy}
-      onClick={() => onAction({ type: "fiken_oauth", item, connectionId: connection?.id ?? null })}
+      onClick={() =>
+        onAction({
+          type: "fiken_oauth",
+          item,
+          connectionId: connection?.id ?? null,
+        })
+      }
     >
       {busy ? <Loader2Icon className="animate-spin" /> : icon}
       {label}
@@ -691,7 +792,13 @@ export function FikenConnectorControls({
           variant="outline"
           className="w-full text-status-failed hover:bg-status-failed/10 hover:text-status-failed pointer-coarse:min-h-11"
           disabled={busy}
-          onClick={() => onAction({ type: "fiken_disconnect", item, connectionId: connection.id })}
+          onClick={() =>
+            onAction({
+              type: "fiken_disconnect",
+              item,
+              connectionId: connection.id,
+            })
+          }
         >
           {busy ? <Loader2Icon className="animate-spin" /> : <TrashIcon />}
           Disconnect

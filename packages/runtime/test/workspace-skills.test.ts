@@ -103,7 +103,7 @@ description: Prepare a safe release.
     ).rejects.toThrow('Workspace skill "release" conflicts with a configured OpenGeni skill');
   });
 
-  test("lets bundled OpenGeni skills deterministically shadow workspace copies", async () => {
+  test("lets native tool-bound Skills deterministically shadow workspace copies", async () => {
     const session = fakeSession({
       ".agents/skills/opengeni-documents/SKILL.md":
         "---\nname: opengeni-documents\ndescription: Repository copy.\n---\n",
@@ -132,20 +132,34 @@ description: Prepare a safe release.
       files: [{ path: "SKILL.md", content: "# Release\n" }],
     };
     expect(() =>
-      buildAgentCapabilities(testSettings(), [], {
-        sessionSkills: [release, { ...release, files: [...release.files] }],
-      }),
+      buildAgentCapabilities(testSettings(), [
+        sessionActivation(release, "one"),
+        sessionActivation({ ...release, files: [...release.files] }, "two"),
+      ]),
     ).not.toThrow();
     expect(() =>
-      buildAgentCapabilities(testSettings(), [], {
-        sessionSkills: [
-          release,
+      buildAgentCapabilities(testSettings(), [
+        sessionActivation(release, "one"),
+        sessionActivation(
           { name: "release", files: [{ path: "SKILL.md", content: "# Different\n" }] },
-        ],
-      }),
-    ).toThrow('Conflicting skill definitions for "release"');
+          "two",
+        ),
+      ]),
+    ).toThrow('Conflicting Skill definitions for "release"');
   });
 });
+
+function sessionActivation(
+  artifact: { name: string; files: Array<{ path: string; content: string }> },
+  id: string,
+) {
+  return {
+    source: "session" as const,
+    id: `session:${id}`,
+    artifact,
+    reason: "attached to session",
+  };
+}
 
 function fakeSession(files: Record<string, string>): SandboxSessionLike {
   const normalizedFiles = new Map(

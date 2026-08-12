@@ -11,9 +11,8 @@ import {
 } from "./source-import-flow";
 import { SourcePackagesView } from "./source-packages-view";
 import type {
-  CapabilityCatalogItem,
-  CapabilityInstallation,
   ConnectionMetadata,
+  InstalledSkillSummary,
   PluginInstallationSummary,
   PluginPreview,
 } from "@/types";
@@ -171,68 +170,30 @@ function button(container: ParentNode, label: string): HTMLButtonElement {
 }
 
 function installedSkill(): InstalledSourceSkill {
-  const item: CapabilityCatalogItem = {
-    id: "skill:release-operator-abc123",
-    kind: "skill",
-    source: "manual",
+  const skill: InstalledSkillSummary = {
+    capabilityId: "skill:release-operator-abc123",
+    pluginKey: "skill/github/acme/skills/release-operator",
+    installationVersion: 2,
     name: "release-operator",
     description: "Release safely",
     category: "skills",
     tags: ["skill", "imported"],
-    homepageUrl: "https://github.com/acme/skills",
-    endpointUrl: null,
-    installUrl: "https://github.com/acme/skills/tree/aaaaaaaa/release-operator",
-    authModel: null,
-    providerDomain: null,
-    surfaceType: null,
-    transport: null,
-    mcpUrl: null,
-    authKind: null,
-    credentialFacts: [],
-    tier: "community",
     provenance: "workspace_import",
-    logoAssetPath: null,
-    importBatchId: null,
-    stale: false,
-    staleAt: null,
-    tools: [],
-    runtime: { available: true, notes: null },
-    lifecycle: {
-      status: "installed",
-      readiness: "ready",
-      detail: "enabled",
-      managedBy: "workspace",
-    },
-    actions: ["configure", "update", "uninstall", "inspect"],
-    enabled: true,
-    enabledReason: "enabled",
-    connectionRef: null,
-    metadata: {
-      platformVersion: 2,
-      provenance: "workspace_import",
-      sourceCommit: "a".repeat(40),
-      contentSha256: "b".repeat(64),
-    },
-  };
-  const installation: CapabilityInstallation = {
-    id: "00000000-0000-4000-8000-000000000020",
-    accountId: "00000000-0000-4000-8000-000000000010",
-    workspaceId: "00000000-0000-4000-8000-000000000011",
-    capabilityId: item.id,
-    kind: "skill",
-    status: "active",
-    config: {},
-    metadata: {},
-    enabledAt: "2026-08-11T00:00:00.000Z",
-    updatedAt: "2026-08-11T00:00:00.000Z",
-  };
-  return {
-    item,
-    installation,
-    sourceUrl: item.installUrl!,
+    source: "github",
+    version: "a".repeat(40),
+    sourceUrl: "https://github.com/acme/skills/tree/aaaaaaaa/release-operator",
+    repositoryUrl: "https://github.com/acme/skills",
     sourceCommit: "a".repeat(40),
+    sourcePath: "release-operator",
     contentSha256: "b".repeat(64),
+    fileCount: 1,
+    totalBytes: 128,
+    license: null,
+    installedAt: "2026-08-11T00:00:00.000Z",
+    updatedAt: "2026-08-11T00:00:00.000Z",
+    owners: [{ kind: "direct", id: "skill:release-operator-abc123", removable: true }],
   };
+  return skill;
 }
 
 function installedPlugin(): PluginInstallationSummary {

@@ -1,6 +1,8 @@
 import {
+  InstallLibrarySkillRequest,
   InstallSkillRequest,
   InstalledSkill,
+  ListInstalledSkillsResponse,
   PreviewSkillImportRequest,
   SkillImportPreview,
   SkillUninstallPreview,
@@ -18,10 +20,13 @@ import {
 import {
   getPortableSkillUninstallPreview,
   installPortableSkill,
+  listInstalledSkills,
   PortableSkillInstallationVersionConflictError,
   PortableSkillInstallationVersionRequiredError,
   uninstallPortableSkill,
 } from "@opengeni/db";
+import { loadSkillLibrarySkill, skillLibraryRepositoryUrl } from "@opengeni/runtime/skill-library";
+import { createHash } from "node:crypto";
 import { HTTPException } from "hono/http-exception";
 import type { Hono } from "hono";
 
@@ -37,6 +42,78 @@ export function registerSkillRoutes(
   overrides: SkillRouteOverrides = {},
 ): void {
   const github = overrides.github ?? createGitHubSkillSourceClient(deps.settings);
+
+  app.get("/v1/workspaces/:workspaceId/skills", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    return c.json(
+      ListInstalledSkillsResponse.parse({
+        skills: await listInstalledSkills(deps.db, workspaceId),
+      }),
+    );
+  });
+
+  app.post("/v1/workspaces/:workspaceId/skills/library/:libraryId/install", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const libraryId = decodeURIComponent(c.req.param("libraryId"));
+    const payload = InstallLibrarySkillRequest.parse(await c.req.json());
+    let loaded: ReturnType<typeof loadSkillLibrarySkill>;
+    try {
+      loaded = loadSkillLibrarySkill(libraryId, payload.expectedVersion);
+    } catch {
+      throw new HTTPException(404, { message: "Skill library entry not found" });
+    }
+    if (loaded.entry.contentSha256 !== payload.expectedContentSha256) {
+      throw new HTTPException(409, {
+        message:
+          "The curated Skill changed after review. Review the current version before installing.",
+      });
+    }
+    const files = loaded.skill.files.map((file) => {
+      const bytes = new TextEncoder().encode(file.content);
+      return {
+        path: file.path,
+        content: file.content,
+        byteSize: bytes.byteLength,
+        contentSha256: createHash("sha256").update(bytes).digest("hex"),
+      };
+    });
+    try {
+      const installed = await installPortableSkill(deps.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+        capabilityId: `skill:${loaded.entry.id}`,
+        pluginKey: `skill/library/${loaded.entry.id}`,
+        source: "library",
+        version: loaded.entry.version,
+        sourceUrl: loaded.entry.sourceUrl,
+        repositoryUrl: skillLibraryRepositoryUrl(loaded.entry.sourceUrl),
+        sourceCommit: loaded.entry.sourceCommit,
+        sourcePath: loaded.entry.relativePath,
+        name: loaded.entry.name,
+        description: loaded.entry.description,
+        category: loaded.entry.category,
+        tags: [...loaded.entry.tags],
+        provenance: "platform",
+        sourceProvenance: loaded.entry.provenance,
+        contentSha256: loaded.entry.contentSha256,
+        totalBytes: files.reduce((total, file) => total + file.byteSize, 0),
+        license: loaded.entry.license,
+        files,
+        ...(payload.expectedInstallationVersion !== undefined
+          ? { expectedInstallationVersion: payload.expectedInstallationVersion }
+          : {}),
+      });
+      return c.json(
+        InstalledSkill.parse({ ...installed, status: "installed" }),
+        installed.created ? 201 : 200,
+      );
+    } catch (error) {
+      throw portableSkillMutationHttpError(error);
+    }
+  });
 
   app.post("/v1/workspaces/:workspaceId/skills/preview", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -84,6 +161,7 @@ export function registerSkillRoutes(
         source: resolved.preview.source,
         sourceUrl: resolved.preview.sourceUrl,
         repositoryUrl: resolved.preview.repositoryUrl,
+        version: resolved.preview.sourceCommit,
         sourceCommit: resolved.preview.sourceCommit,
         sourcePath: resolved.preview.sourcePath,
         name: resolved.preview.name,
@@ -106,18 +184,10 @@ export function registerSkillRoutes(
       });
       return c.json(
         InstalledSkill.parse({ ...installed, status: "installed" }),
-        payload.expectedInstallationVersion === undefined ? 201 : 200,
+        installed.created ? 201 : 200,
       );
     } catch (error) {
-      if (error instanceof PortableSkillInstallationVersionRequiredError) {
-        throw new HTTPException(400, { message: error.message });
-      }
-      if (error instanceof PortableSkillInstallationVersionConflictError) {
-        throw new HTTPException(409, {
-          message: "The Skill changed after preview. Review the current installation again.",
-        });
-      }
-      throw error;
+      throw portableSkillMutationHttpError(error);
     }
   });
 
@@ -157,6 +227,18 @@ export function registerSkillRoutes(
       throw error;
     }
   });
+}
+
+function portableSkillMutationHttpError(error: unknown): Error {
+  if (error instanceof PortableSkillInstallationVersionRequiredError) {
+    return new HTTPException(400, { message: error.message });
+  }
+  if (error instanceof PortableSkillInstallationVersionConflictError) {
+    return new HTTPException(409, {
+      message: "The Skill changed after review. Review the current installation again.",
+    });
+  }
+  return error instanceof Error ? error : new Error(String(error));
 }
 
 async function resolveForRoute(

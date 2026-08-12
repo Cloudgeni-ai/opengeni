@@ -50,7 +50,7 @@ export interface GraphqlOperationBinding {
 export type GraphqlRevision = IntegrationRevision<GraphqlOperationBinding, "graphql">;
 
 export interface CompileGraphqlOptions {
-  readonly integrationId: string;
+  readonly definitionId: string;
   readonly endpoint: string;
   readonly name?: string;
   readonly sourceUrl?: string;
@@ -170,13 +170,13 @@ export function compileGraphqlRevision(
   return {
     id,
     protocol: "graphql",
-    integrationId: options.integrationId,
+    definitionId: options.definitionId,
     contentSha256,
     source: {
       url: options.sourceUrl ?? endpoint,
       ...(options.provider ? { provider: options.provider } : {}),
     },
-    title: options.name?.trim() || options.integrationId,
+    title: options.name?.trim() || options.definitionId,
     tools,
     bindings,
   };
@@ -243,7 +243,7 @@ export class GraphqlMcpServer implements MCPServer {
   readonly name: string;
 
   constructor(private readonly options: GraphqlServerOptions) {
-    this.name = `graphql:${stableToolId(options.revision.integrationId)}`;
+    this.name = `graphql:${stableToolId(options.revision.definitionId)}`;
   }
 
   async connect(): Promise<void> {}
@@ -330,7 +330,7 @@ export async function invokeGraphqlOperation(
   const request = { query, variables, operationName: binding.operationName };
   const firstCredential = await resolveGraphqlCredential(
     options,
-    options.revision.integrationId,
+    options.revision.definitionId,
     options.revision.id,
     toolId,
     false,
@@ -339,7 +339,7 @@ export async function invokeGraphqlOperation(
   if (response.status === 401 && options.credentialResolver && options.authority.connectionRef) {
     const refreshed = await resolveGraphqlCredential(
       options,
-      options.revision.integrationId,
+      options.revision.definitionId,
       options.revision.id,
       toolId,
       true,
@@ -391,7 +391,7 @@ export async function invokeGraphqlOperation(
 
 async function resolveGraphqlCredential(
   options: Omit<GraphqlServerOptions, "revision"> | GraphqlServerOptions,
-  integrationId: string,
+  definitionId: string,
   revisionId: string,
   operationKey: string,
   forceRefresh: boolean,
@@ -400,7 +400,7 @@ async function resolveGraphqlCredential(
   const credential = await options.credentialResolver.resolve({
     ...options.authority,
     protocol: "graphql",
-    integrationId,
+    definitionId,
     revisionId,
     operationKey,
     destinationUrl: graphqlEndpoint(options).toString(),
