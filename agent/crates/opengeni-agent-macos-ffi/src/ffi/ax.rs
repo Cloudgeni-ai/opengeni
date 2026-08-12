@@ -1183,12 +1183,11 @@ pub(super) fn run_background_application(
             ));
         }
     };
-    let application = NSRunningApplication::runningApplicationWithProcessIdentifier(process_id)
-        .ok_or_else(|| {
-            MacFfiError::OutcomeUnknown(
-                "launched background application disappeared before supervision".to_string(),
-            )
-        })?;
+    NSRunningApplication::runningApplicationWithProcessIdentifier(process_id).ok_or_else(|| {
+        MacFfiError::OutcomeUnknown(
+            "launched background application disappeared before supervision".to_string(),
+        )
+    })?;
 
     // Chrome can create and activate its first native window after
     // LaunchServices has already completed. Keep the exact new process hidden
@@ -1196,7 +1195,9 @@ pub(super) fn run_background_application(
     // foreground before launch. Later explicit ComputerSession focus is not
     // intercepted, so users can deliberately reveal this managed browser.
     let conceal_until = Instant::now() + Duration::from_secs(5);
-    while !application.isTerminated() {
+    while let Some(application) =
+        NSRunningApplication::runningApplicationWithProcessIdentifier(process_id)
+    {
         if Instant::now() < conceal_until {
             let _ = application.hide();
             if application.isActive() {
