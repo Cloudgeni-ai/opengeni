@@ -6,8 +6,9 @@ import {
 } from "./exec-banner";
 import { RoutingMutationOutcomeUnknownError } from "./routing/routing-session";
 
-const TURN_EXEC_YIELD_MS = 250;
-const TURN_WRITE_YIELD_MS = 250;
+const TURN_PROVIDER_YIELD_SLICE_MS = 250;
+const TURN_DEFAULT_MODEL_WAIT_MS = 10_000;
+const TURN_MAX_MODEL_WAIT_MS = 30_000;
 const SHELL_HELPER_YIELD_MS = 1_000;
 const SHELL_GRACEFUL_POLLS = 2;
 const SHELL_POLL_MS = 100;
@@ -222,6 +223,12 @@ function cappedYield(value: unknown, cap: number): number {
     : cap;
 }
 
+function modelWaitMs(value: unknown): number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0
+    ? Math.min(value, TURN_MAX_MODEL_WAIT_MS)
+    : TURN_DEFAULT_MODEL_WAIT_MS;
+}
+
 function execOutput(raw: string): string {
   const marker = "\nOutput:\n";
   const index = raw.indexOf(marker);
@@ -328,6 +335,10 @@ function nativeCommandResult(result: unknown): NativeCommandResult {
 
 function completedCommandBanner(exitCode: number, output: string): string {
   return `Process exited with code ${exitCode}\n\nOutput:\n${output}`;
+}
+
+function runningCommandBanner(sessionId: number, output: string): string {
+  return `Process running with session ID ${sessionId}\n\nOutput:\n${output}`;
 }
 
 function appendBoundedOutput(current: string, chunk: string, maxOutputTokens: number): string {
@@ -772,7 +783,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
         tty: useRemoteOpCancellation ? args.tty : interactive,
         yield_time_ms: useRemoteOpCancellation
           ? args.yieldTimeMs
-          : cappedYield(args.yieldTimeMs, TURN_EXEC_YIELD_MS),
+          : cappedYield(args.yieldTimeMs, TURN_PROVIDER_YIELD_SLICE_MS),
         ...(args.maxOutputTokens !== undefined ? { max_output_tokens: args.maxOutputTokens } : {}),
       });
       const pendingStart = useRemoteOpCancellation
@@ -894,7 +905,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
           JSON.stringify({
             session_id: sessionId,
             chars: "",
-            yield_time_ms: TURN_WRITE_YIELD_MS,
+            yield_time_ms: TURN_PROVIDER_YIELD_SLICE_MS,
             max_output_tokens: maxOutputTokens,
           }),
           undefined,
@@ -986,7 +997,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                   // mode keeps the process marker plus TERM/KILL escalation, and
                   // the short yield exposes the provider session promptly.
                   tty: interactive,
-                  yield_time_ms: cappedYield(parsed.yield_time_ms, TURN_EXEC_YIELD_MS),
+                  yield_time_ms: cappedYield(parsed.yield_time_ms, TURN_PROVIDER_YIELD_SLICE_MS),
                 });
             const pendingStart = useRemoteOpCancellation
               ? null
@@ -999,6 +1010,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                     ? cancellationSession.cancelPendingExecCommand.bind(cancellationSession)
                     : null,
                 });
+            const startedAt = performance.now();
             let output: Awaited<ReturnType<FunctionToolInvoke>>;
             try {
               output = await runWithToolCallCorrelation(
@@ -1046,7 +1058,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
             }
             const sessionId = useRemoteOpCancellation ? null : parseExecBannerSessionId(output);
             if (sessionId !== null) {
-              this.shellSessions.set(sessionId, {
+              const state: ActiveShellSession = {
                 sessionId,
                 markerPath,
                 token,
@@ -1058,6 +1070,16 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                 identity: null,
                 identityValidated: false,
                 cancellation: null,
+              };
+              this.shellSessions.set(sessionId, state);
+              pendingStart?.settle();
+              return await this.awaitModelFacingShellResult({
+                state,
+                initialOutput: output,
+                startedAt,
+                waitMs: modelWaitMs(parsed.yield_time_ms),
+                maxOutputTokens:
+                  typeof parsed.max_output_tokens === "number" ? parsed.max_output_tokens : 20_000,
               });
             }
             pendingStart?.settle();
@@ -1071,6 +1093,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
         ...tool,
         invoke: (runContext, input, details) =>
           this.track(async () => {
+            const startedAt = performance.now();
             const parsed = parsedObject(input);
             const sessionId =
               parsed &&
@@ -1081,7 +1104,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
             const cappedInput = parsed
               ? JSON.stringify({
                   ...parsed,
-                  yield_time_ms: cappedYield(parsed.yield_time_ms, TURN_WRITE_YIELD_MS),
+                  yield_time_ms: cappedYield(parsed.yield_time_ms, TURN_PROVIDER_YIELD_SLICE_MS),
                 })
               : input;
             const directProcessSession =
@@ -1091,7 +1114,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                 ? await directProcessSession.writeStdinForProcessMutation({
                     sessionId,
                     ...(typeof parsed?.chars === "string" ? { chars: parsed.chars } : {}),
-                    yieldTimeMs: cappedYield(parsed?.yield_time_ms, TURN_WRITE_YIELD_MS),
+                    yieldTimeMs: cappedYield(parsed?.yield_time_ms, TURN_PROVIDER_YIELD_SLICE_MS),
                     ...(typeof parsed?.max_output_tokens === "number"
                       ? { maxOutputTokens: parsed.max_output_tokens }
                       : {}),
@@ -1124,7 +1147,19 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                 this.shellSessions.delete(sessionId);
               }
             }
-            return output;
+            const state = sessionId === null ? null : this.shellSessions.get(sessionId);
+            return state && typeof output === "string"
+              ? await this.awaitModelFacingShellResult({
+                  state,
+                  initialOutput: output,
+                  startedAt,
+                  waitMs: modelWaitMs(parsed?.yield_time_ms),
+                  maxOutputTokens:
+                    typeof parsed?.max_output_tokens === "number"
+                      ? parsed.max_output_tokens
+                      : 20_000,
+                })
+              : output;
           }),
       };
     }
@@ -1134,6 +1169,81 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       invoke: (runContext, input, details) =>
         this.track(async () => await tool.invoke(runContext, input, details)),
     };
+  }
+
+  private async awaitModelFacingShellResult(input: {
+    state: ActiveShellSession;
+    initialOutput: string;
+    startedAt: number;
+    waitMs: number;
+    maxOutputTokens: number;
+  }): Promise<string> {
+    const { state, startedAt, waitMs, maxOutputTokens } = input;
+    if (isExecSessionLostBanner(input.initialOutput, state.sessionId)) {
+      this.shellSessions.delete(state.sessionId);
+      return input.initialOutput;
+    }
+    const initialExitCode = parseExecBannerExitCode(input.initialOutput);
+    if (initialExitCode !== null) {
+      this.shellSessions.delete(state.sessionId);
+      return input.initialOutput;
+    }
+    if (parseExecBannerSessionId(input.initialOutput) !== state.sessionId) {
+      return input.initialOutput;
+    }
+
+    let output = appendBoundedOutput("", execOutput(input.initialOutput), maxOutputTokens);
+    while (performance.now() - startedAt < waitMs) {
+      if (this.cancelled) throw cancellationError(this.reason);
+      if (!state.writeInvoke && !state.processSession?.writeStdinForProcessControl) break;
+      const remainingMs = waitMs - (performance.now() - startedAt);
+      if (remainingMs <= 0) break;
+      const yieldTimeMs = Math.min(TURN_PROVIDER_YIELD_SLICE_MS, Math.ceil(remainingMs));
+      let next: unknown;
+      try {
+        next = state.processSession?.writeStdinForProcessControl
+          ? await state.processSession.writeStdinForProcessControl({
+              sessionId: state.sessionId,
+              chars: "",
+              yieldTimeMs,
+              maxOutputTokens,
+            })
+          : await state.writeInvoke!(
+              state.runContext,
+              JSON.stringify({
+                session_id: state.sessionId,
+                chars: "",
+                yield_time_ms: yieldTimeMs,
+                max_output_tokens: maxOutputTokens,
+              }),
+              undefined,
+            );
+      } catch {
+        // The initial provider operation already returned a valid retained
+        // process. A failed eager observation is not evidence that it stopped
+        // and must not turn a successful exec into an outcome-unknown failure.
+        break;
+      }
+      if (this.cancelled) throw cancellationError(this.reason);
+      if (typeof next !== "string") break;
+      if (isExecSessionLostBanner(next, state.sessionId)) {
+        this.shellSessions.delete(state.sessionId);
+        return next;
+      }
+      const nextOutput = execOutput(next);
+      if (nextOutput) output = appendBoundedOutput(output, nextOutput, maxOutputTokens);
+      const exitCode = parseExecBannerExitCode(next);
+      if (exitCode !== null) {
+        this.shellSessions.delete(state.sessionId);
+        return completedCommandBanner(exitCode, output);
+      }
+      if (parseExecBannerSessionId(next) !== state.sessionId) break;
+
+      // A conforming provider blocks for the requested slice. Avoid a hot loop
+      // when an adapter returns a running receipt immediately.
+      await delay(Math.min(SHELL_POLL_MS, Math.max(0, remainingMs)));
+    }
+    return runningCommandBanner(state.sessionId, output);
   }
 
   private wrapApplyPatchTool(tool: ApplyPatchTool): ApplyPatchTool {

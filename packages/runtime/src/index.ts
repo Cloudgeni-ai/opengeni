@@ -217,6 +217,7 @@ import {
 } from "./model-provider";
 import { workspaceSkills, type WorkspaceSkillSearchPath } from "./workspace-skills";
 import { appendWorkspaceGovernance } from "./workspace-governance";
+import { decodeValidatedViewImageDataUrl } from "./view-image-validation";
 import {
   baseModelInputFilterForSettings,
   boundModelToolOutputsFilterForSettings,
@@ -2728,9 +2729,15 @@ export function withStructuredViewImageFunctionResults(tools: Tool<unknown>[]): 
                 typeof (output as { text?: unknown }).text === "string"
               ? (output as { text: string }).text
               : null;
-        return dataUrl?.startsWith("data:image/")
-          ? { type: "image" as const, image: { url: dataUrl } }
-          : output;
+        if (!dataUrl?.startsWith("data:image/")) return output;
+        const validated = decodeValidatedViewImageDataUrl(dataUrl);
+        const declaredMediaType = validated?.declaredMediaType ?? "unknown";
+        const canonicalDeclaredMediaType =
+          declaredMediaType === "image/jpg" ? "image/jpeg" : declaredMediaType;
+        if (!validated || canonicalDeclaredMediaType !== validated.actualMediaType) {
+          return `view_image returned unsupported or invalid image bytes (${declaredMediaType}). Convert the file to PNG, JPEG, or WebP and call view_image again.`;
+        }
+        return { type: "image" as const, image: { url: dataUrl } };
       },
     };
   });

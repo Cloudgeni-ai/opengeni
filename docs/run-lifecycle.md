@@ -618,6 +618,15 @@ non-proof. The queue/chrome projection renders this period as stopping previous
 work (or current work under Pause), never as a first-step wait or a completed
 direction change.
 
+Model-facing shell waits preserve that same cancellation boundary without
+making the model poll it. `exec_command` and `write_stdin` divide the requested
+wait window into provider calls of at most 250 ms, checking the turn fence
+between slices. A short command therefore returns its terminal result from the
+original tool call, while an explicitly short yield or a command still running
+after the requested window returns the retained session id. Empty internal
+polls use the exact process-control route and never create another model turn or
+workspace mutation admission.
+
 The direct receipt remains the preferred path. If its three Postgres attempts
 exhaust, `runAgentTurn` does not suppress the failure or infer a receipt from
 Temporal terminal state. It instead retries delivery of one immutable physical
@@ -956,6 +965,11 @@ wrong one is the classic mistake.
    history copy receives the deterministic bounded artifact receipt (or an
    explicit unavailable fact), never the provider object key or re-encoded
    base64 source.
+   Function-transport `view_image` also validates the declared data-URL type
+   against those supported magic bytes before constructing structured model
+   image content. Unsupported or mismatched bytes return a concise conversion
+   instruction as the tool result, so they cannot become a provider-level
+   invalid-image request.
    New generated images follow the same no-inline-byte rule but are permanent
    workspace files: native hosted base64 is retained before serialization and
    adapter tools return the same compact `generated_image` receipt. A later

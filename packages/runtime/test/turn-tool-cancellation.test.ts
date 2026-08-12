@@ -65,6 +65,53 @@ async function pendingAfterMicrotasks(promise: Promise<unknown>): Promise<boolea
 }
 
 describe("turn sandbox-tool physical cancellation fence", () => {
+  test("waits internally for a short command instead of returning a pollable session", async () => {
+    const controller = createTurnToolCancellationController();
+    const writes: Array<Record<string, unknown>> = [];
+    const exec = functionTool("exec_command", async () => running(6, "starting\n"));
+    const write = functionTool("write_stdin", async (_context, rawInput) => {
+      writes.push(JSON.parse(rawInput) as Record<string, unknown>);
+      return exited(0, "finished\n");
+    });
+    const [wrappedExec] = controller.wrapTools([exec, write]) as Array<
+      Extract<Tool<unknown>, { type: "function" }>
+    >;
+
+    const output = await wrappedExec!.invoke(runContext, JSON.stringify({ cmd: "quick-task" }));
+
+    expect(output).toContain("Process exited with code 0");
+    expect(output).toContain("starting\nfinished");
+    expect(writes).toEqual([
+      {
+        session_id: 6,
+        chars: "",
+        yield_time_ms: 250,
+        max_output_tokens: 20_000,
+      },
+    ]);
+  });
+
+  test("an explicit short yield still returns a controllable running process", async () => {
+    const controller = createTurnToolCancellationController();
+    let writes = 0;
+    const exec = functionTool("exec_command", async () => running(16, "ready\n"));
+    const write = functionTool("write_stdin", async () => {
+      writes += 1;
+      return running(16);
+    });
+    const [wrappedExec] = controller.wrapTools([exec, write]) as Array<
+      Extract<Tool<unknown>, { type: "function" }>
+    >;
+
+    const output = await wrappedExec!.invoke(
+      runContext,
+      JSON.stringify({ cmd: "long-task", yield_time_ms: 0 }),
+    );
+
+    expect(output).toContain("Process running with session ID 16");
+    expect(writes).toBe(0);
+  });
+
   test.skipIf(Bun.which("setsid") === null)(
     "promotes a provider shell into an isolated process group before user code",
     async () => {
@@ -162,11 +209,11 @@ describe("turn sandbox-tool physical cancellation fence", () => {
 
     const output = await wrapped[0]!.invoke(
       runContext,
-      JSON.stringify({ cmd: "sleep 60", tty: false, yield_time_ms: 30_000 }),
+      JSON.stringify({ cmd: "sleep 60", tty: false, yield_time_ms: 0 }),
     );
     expect(output).toContain("Process running with session ID 7");
     expect(execInput?.tty).toBe(false);
-    expect(execInput?.yield_time_ms).toBe(250);
+    expect(execInput?.yield_time_ms).toBe(0);
     expect(String(execInput?.cmd)).toContain("sleep 60");
     expect(String(execInput?.cmd)).toContain("/tmp/opengeni-turn-shell/");
 
@@ -220,11 +267,11 @@ describe("turn sandbox-tool physical cancellation fence", () => {
 
     const output = await wrapped[0]!.invoke(
       runContext,
-      JSON.stringify({ cmd: "sleep 60", tty: true, yield_time_ms: 30_000 }),
+      JSON.stringify({ cmd: "sleep 60", tty: true, yield_time_ms: 0 }),
     );
     expect(output).toContain("Process running with session ID 8");
     expect(execInput?.tty).toBe(true);
-    expect(execInput?.yield_time_ms).toBe(250);
+    expect(execInput?.yield_time_ms).toBe(0);
 
     abort.abort(new Error("steered"));
     await controller.waitForQuiescence();
@@ -259,7 +306,7 @@ describe("turn sandbox-tool physical cancellation fence", () => {
       Extract<Tool<unknown>, { type: "function" }>
     >;
 
-    await wrappedExec!.invoke(runContext, JSON.stringify({ cmd: "sleep 60" }));
+    await wrappedExec!.invoke(runContext, JSON.stringify({ cmd: "sleep 60", yield_time_ms: 0 }));
     expect(
       await wrappedWrite!.invoke(
         runContext,
@@ -331,7 +378,7 @@ describe("turn sandbox-tool physical cancellation fence", () => {
       Extract<Tool<unknown>, { type: "function" }>
     >;
 
-    await wrappedExec!.invoke(runContext, JSON.stringify({ cmd: "sleep 60" }));
+    await wrappedExec!.invoke(runContext, JSON.stringify({ cmd: "sleep 60", yield_time_ms: 0 }));
     abort.abort(new Error("steered"));
     await controller.waitForQuiescence();
 
@@ -399,7 +446,7 @@ describe("turn sandbox-tool physical cancellation fence", () => {
       Extract<Tool<unknown>, { type: "function" }>
     >;
 
-    await wrappedExec!.invoke(runContext, JSON.stringify({ cmd: "sleep 60" }));
+    await wrappedExec!.invoke(runContext, JSON.stringify({ cmd: "sleep 60", yield_time_ms: 0 }));
     const startedAt = performance.now();
     abort.abort(new Error("steered"));
     await controller.waitForQuiescence();
@@ -430,7 +477,7 @@ describe("turn sandbox-tool physical cancellation fence", () => {
       Extract<Tool<unknown>, { type: "function" }>
     >;
 
-    await wrappedExec!.invoke(runContext, JSON.stringify({ cmd: "sleep 60" }));
+    await wrappedExec!.invoke(runContext, JSON.stringify({ cmd: "sleep 60", yield_time_ms: 0 }));
     abort.abort(new Error("steered"));
     await controller.waitForQuiescence();
 
@@ -487,7 +534,7 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     >;
 
     await expect(
-      wrappedExec!.invoke(runContext, JSON.stringify({ cmd: "sleep 60" })),
+      wrappedExec!.invoke(runContext, JSON.stringify({ cmd: "sleep 60", yield_time_ms: 0 })),
     ).rejects.toBeInstanceOf(RoutingMutationOutcomeUnknownError);
     controller.cancel(new Error("turn finalized"));
     await controller.waitForQuiescence();
@@ -558,7 +605,7 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     >;
 
     const error = await wrappedExec!
-      .invoke(runContext, JSON.stringify({ cmd: "sleep 60" }))
+      .invoke(runContext, JSON.stringify({ cmd: "sleep 60", yield_time_ms: 0 }))
       .catch((caught) => caught);
     expect(error).toBeInstanceOf(RoutingMutationOutcomeUnknownError);
     expect((error as RoutingMutationOutcomeUnknownError).retainedProcess).toEqual({
@@ -616,11 +663,11 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     expect(
       await wrappedExec!.invoke(
         runContext,
-        JSON.stringify({ cmd: "sleep 60", tty: false, yield_time_ms: 10_000 }),
+        JSON.stringify({ cmd: "sleep 60", tty: false, yield_time_ms: 0 }),
       ),
     ).toContain("Process running with session ID 41");
     expect(resolves).toBe(1);
-    expect(wrappedInput?.yield_time_ms).toBe(250);
+    expect(wrappedInput?.yield_time_ms).toBe(0);
     expect(String(wrappedInput?.cmd)).toContain("/tmp/opengeni-turn-shell/");
 
     await wrappedWrite!.invoke(runContext, JSON.stringify({ session_id: 41, chars: "" }));
@@ -790,7 +837,7 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     }) as Array<Extract<Tool<unknown>, { type: "function" }>>;
 
     const invocation = wrapped[0]!
-      .invoke(runContext, JSON.stringify({ cmd: "sleep 60" }))
+      .invoke(runContext, JSON.stringify({ cmd: "sleep 60", yield_time_ms: 0 }))
       .catch((error) => error);
     await started;
     abort.abort(new Error("steered"));
@@ -857,7 +904,7 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     }) as Array<Extract<Tool<unknown>, { type: "function" }>>;
 
     const invocation = wrapped[0]!
-      .invoke(runContext, JSON.stringify({ cmd: "sleep 60" }))
+      .invoke(runContext, JSON.stringify({ cmd: "sleep 60", yield_time_ms: 0 }))
       .catch((error) => error);
     await started;
     abort.abort(new Error("steered"));
@@ -885,7 +932,10 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     const ordinaryTools = ordinaryController.wrapTools([ordinaryExec, ordinaryWrite]) as Array<
       Extract<Tool<unknown>, { type: "function" }>
     >;
-    await ordinaryTools[0]!.invoke(runContext, JSON.stringify({ cmd: "sleep 60" }));
+    await ordinaryTools[0]!.invoke(
+      runContext,
+      JSON.stringify({ cmd: "sleep 60", yield_time_ms: 0 }),
+    );
     await ordinaryTools[1]!.invoke(runContext, JSON.stringify({ session_id: 17, chars: "" }));
     ordinaryController.cancel(new Error("steered"));
     await ordinaryController.waitForQuiescence();
@@ -907,7 +957,10 @@ describe("turn sandbox-tool physical cancellation fence", () => {
       finalizerExec,
       finalizerWrite,
     ]) as Array<Extract<Tool<unknown>, { type: "function" }>>;
-    await wrappedFinalizerExec!.invoke(runContext, JSON.stringify({ cmd: "sleep 60" }));
+    await wrappedFinalizerExec!.invoke(
+      runContext,
+      JSON.stringify({ cmd: "sleep 60", yield_time_ms: 0 }),
+    );
     finalizerAbort.abort(new Error("steered"));
     await finalizerController.waitForQuiescence();
     expect(finalizerWrites).toBe(1);
@@ -934,7 +987,7 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     const [wrappedExec, wrappedWrite] = controller.wrapTools([exec, write]) as Array<
       Extract<Tool<unknown>, { type: "function" }>
     >;
-    await wrappedExec!.invoke(runContext, JSON.stringify({ cmd: "sleep 60" }));
+    await wrappedExec!.invoke(runContext, JSON.stringify({ cmd: "sleep 60", yield_time_ms: 0 }));
     expect(
       await wrappedWrite!.invoke(runContext, JSON.stringify({ session_id: 19, chars: "" })),
     ).toBe("write_stdin failed: session not found");
@@ -987,14 +1040,18 @@ describe("turn sandbox-tool physical cancellation fence", () => {
       Extract<Tool<unknown>, { type: "function" }>
     >;
 
-    const invocation = wrapped!.invoke(runContext, JSON.stringify({ cmd: "sleep 60" }), {
-      toolCall: {
-        type: "function_call",
-        callId: "call.machine/1",
-        name: "exec_command",
-        arguments: "{}",
+    const invocation = wrapped!.invoke(
+      runContext,
+      JSON.stringify({ cmd: "sleep 60", yield_time_ms: 0 }),
+      {
+        toolCall: {
+          type: "function_call",
+          callId: "call.machine/1",
+          name: "exec_command",
+          arguments: "{}",
+        },
       },
-    });
+    );
     await started;
     abort.abort(new Error("steered"));
     await controller.waitForQuiescence();
@@ -1337,7 +1394,7 @@ describe("turn sandbox-tool cancellation against a real local process", () => {
       runContext,
       JSON.stringify({
         cmd: `trap '' INT TERM; sleep 3; printf zombie > '${zombiePath}'`,
-        yield_time_ms: 10_000,
+        yield_time_ms: 0,
       }),
     );
     expect(output).toContain("Process running with session ID");
@@ -1396,7 +1453,7 @@ describe("turn sandbox-tool cancellation against a real local process", () => {
       runContext,
       JSON.stringify({
         cmd: `trap '' INT TERM; sleep 3; printf zombie > '${zombiePath}'`,
-        yield_time_ms: 10_000,
+        yield_time_ms: 0,
       }),
     );
     const providerSessionId = parseExecResponseBanner(String(output));
