@@ -211,8 +211,11 @@ describe("API Integration routes", () => {
       expect.objectContaining({
         id: "google-gmail",
         name: "Gmail",
-        family: "google",
-        providerDomain: "gmail.googleapis.com",
+        provider: {
+          id: "google",
+          domain: "gmail.googleapis.com",
+        },
+        authentication: expect.objectContaining({ kind: "oauth2" }),
       }),
     );
     expect(JSON.stringify(payload)).not.toContain("clientSecret");
