@@ -6,6 +6,7 @@ import {
   bootstrapWorkspace,
   createDb,
   createSession,
+  lockSessionEventWriteRows,
   mutateSessionControlInTransaction,
   retrySessionActivityRls,
   withRlsContext,
@@ -90,6 +91,21 @@ async function readSessionState(workspaceId: string, sessionId: string) {
     where workspace_id = ${workspaceId} and id = ${sessionId}`;
   if (!row) throw new Error(`Session missing: ${sessionId}`);
   return row;
+}
+
+async function waitForBackendResolution(backendPid: number): Promise<"blocked" | "completed"> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const [activity] = await shared.admin<
+      Array<{ state: string | null; waitEventType: string | null }>
+    >`
+      select state, wait_event_type as "waitEventType"
+      from pg_stat_activity
+      where pid = ${backendPid}`;
+    if (!activity || activity.state === "idle") return "completed";
+    if (activity.waitEventType === "Lock") return "blocked";
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Backend ${backendPid} neither completed nor reached a lock wait`);
 }
 
 function quoteIdentifier(value: string): string {
@@ -530,6 +546,107 @@ describe("session activity commit gate", () => {
     expect(await readCounter(grant.workspaceId!)).toBe(counterBefore + 1n);
     expect(after).toMatchObject({ status: "running", pendingXid: null });
     expect(BigInt(after.revision)).toBe(counterBefore + 1n);
+  });
+
+  test("a canonical parent lock remains compatible with child activity finalization", async () => {
+    const grant = await createWorkspace();
+    const parent = await createTestSession(grant, "concurrent-finalizer-parent");
+    const child = await createTestSession(grant, "concurrent-finalizer-child", parent.id);
+    const sessions = [parent, child];
+    const counterBefore = await readCounter(grant.workspaceId!);
+    let firstBackendPid = 0;
+    let markFirstReady!: () => void;
+    const firstReady = new Promise<void>((resolve) => {
+      markFirstReady = resolve;
+    });
+    let releaseFirst!: () => void;
+    const firstReleased = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const firstWriter = withWorkspaceSessionActivityRls(
+      client.db,
+      grant.workspaceId!,
+      async (db) => {
+        await db.execute(sql`set local statement_timeout = '10s'`);
+        const [backend] = await db.execute<{ pid: number }>(
+          sql`select pg_backend_pid()::integer as pid`,
+        );
+        firstBackendPid = backend!.pid;
+        await db
+          .update(schema.sessions)
+          .set({ status: "running", updatedAt: new Date() })
+          .where(eq(schema.sessions.id, child.id));
+        markFirstReady();
+        await firstReleased;
+      },
+    );
+
+    await firstReady;
+    let markParentLocked!: () => void;
+    const parentLocked = new Promise<void>((resolve) => {
+      markParentLocked = resolve;
+    });
+    let releaseSecond!: () => void;
+    const secondReleased = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    const secondWriter = withWorkspaceSessionActivityRls(
+      client.db,
+      grant.workspaceId!,
+      async (db) => {
+        await db.execute(sql`set local statement_timeout = '10s'`);
+        await lockSessionEventWriteRows(db, {
+          workspaceId: grant.workspaceId!,
+          controlLock: "none",
+          sessionIds: [parent.id],
+        });
+        await db
+          .update(schema.sessions)
+          .set({ status: "running", updatedAt: new Date() })
+          .where(eq(schema.sessions.id, parent.id));
+        markParentLocked();
+        await secondReleased;
+      },
+    );
+
+    await parentLocked;
+    releaseFirst();
+    const resolution = await waitForBackendResolution(firstBackendPid).catch((error: unknown) =>
+      error instanceof Error ? error : new Error(String(error)),
+    );
+    if (resolution instanceof Error) {
+      releaseSecond();
+      await Promise.allSettled([firstWriter, secondWriter]);
+      throw resolution;
+    }
+    if (resolution === "blocked") {
+      releaseSecond();
+      const outcomes = await Promise.allSettled([firstWriter, secondWriter]);
+      for (const outcome of outcomes) {
+        if (outcome.status === "rejected") throw outcome.reason;
+      }
+      throw new Error("Child finalization blocked behind the canonical parent session lock");
+    }
+    await firstWriter;
+    releaseSecond();
+    const outcomes = await Promise.allSettled([secondWriter]);
+    for (const outcome of outcomes) {
+      if (outcome.status === "rejected") throw outcome.reason;
+    }
+
+    const counterAfter = await readCounter(grant.workspaceId!);
+    const committed = await Promise.all(
+      sessions.map((session) => readSessionState(grant.workspaceId!, session.id)),
+    );
+    expect(counterAfter).toBe(counterBefore + BigInt(sessions.length));
+    expect(committed.every((session) => session.pendingXid === null)).toBe(true);
+    expect(
+      committed
+        .map((session) => BigInt(session.revision))
+        .sort((left, right) => (left < right ? -1 : left > right ? 1 : 0)),
+    ).toEqual(
+      Array.from({ length: sessions.length }, (_, index) => counterBefore + BigInt(index + 1)),
+    );
   });
 
   test("a concurrent parent control transaction retries a transient fault atomically", async () => {

@@ -430,7 +430,7 @@ export type SessionEventWriteLocks = {
  *
  *   workspace_inference_controls (when control-aware)
  *     -> actual workspaces row FOR KEY SHARE
- *     -> session rows FOR UPDATE, UUID ordered
+ *     -> session rows FOR NO KEY UPDATE, UUID ordered
  *     -> exact turn rows FOR UPDATE, UUID ordered
  *     -> exact attempt rows FOR UPDATE, UUID ordered
  *
@@ -438,6 +438,11 @@ export type SessionEventWriteLocks = {
  * stable for their FK, but they do not mutate the workspace. The old generic
  * `FOR UPDATE` lock serialized unrelated sessions and inverted the activity
  * path's session -> implicit workspace-FK edge.
+ *
+ * `FOR NO KEY UPDATE` is equally deliberate for sessions. Session primary and
+ * composite identity keys are immutable, so writers need to exclude only concurrent
+ * non-key mutation. Keeping FK `FOR KEY SHARE` checks compatible prevents the
+ * activity finalizer's workspace counter from participating in a lock cycle.
  *
  * Complex lifecycle transactions may acquire allocator/control locks before
  * this helper and may discover exact turn IDs only after locking the session.
@@ -478,7 +483,7 @@ export async function lockSessionEventWriteRows(
             ),
           )
           .orderBy(schema.sessions.id)
-          .for("update")
+          .for("no key update")
       : [];
 
   const turnIds = [...new Set(input.turnIds ?? [])].sort();

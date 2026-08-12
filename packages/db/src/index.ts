@@ -26833,7 +26833,7 @@ export async function clearSessionContext(
               eq(schema.sessions.id, input.sessionId),
             ),
           )
-          .for("update")
+          .for("no key update")
           .limit(1);
         if (!session) throw new Error(`Session not found: ${input.sessionId}`);
         if (
@@ -26946,7 +26946,7 @@ export async function requestSessionCompaction(
       })
       .from(schema.sessions)
       .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
-      .for("update")
+      .for("no key update")
       .limit(1);
     if (!session) throw new Error(`Session not found: ${sessionId}`);
     await scopedDb
@@ -39077,7 +39077,7 @@ export async function removeEnrollment(
           where workspace_id = ${input.workspaceId}
             and active_sandbox_id = ${machine.id}
           order by created_at asc, id asc
-          for update
+          for no key update
         `);
         dependentSessions.push(
           ...activePointers.map((pointer: { session_id: string; title: string | null }) => ({
@@ -39173,7 +39173,7 @@ export async function removeEnrollment(
             and status not in ('completed', 'failed', 'cancelled')
           order by created_at asc, id asc
           limit 1
-          for update
+          for no key update
         `);
         if (activeGroup) {
           const result: MachineRemovalResult = {
@@ -42240,7 +42240,7 @@ export async function setSessionGoalStatus(
       .select()
       .from(schema.sessions)
       .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
-      .for("update")
+      .for("no key update")
       .limit(1);
     if (!session) throw new Error(`Session not found: ${sessionId}`);
     const [existing] = await scopedDb
@@ -42553,7 +42553,7 @@ export async function evaluateGoalContinuation(
               eq(schema.sessions.id, input.sessionId),
             ),
           )
-          .for("update")
+          .for("no key update")
           .limit(1);
         const [row] = await tx
           .select()
@@ -43808,7 +43808,7 @@ export async function enqueueSessionTurn(
               eq(schema.sessions.id, input.sessionId),
             ),
           )
-          .for("update")
+          .for("no key update")
           .limit(1);
         if (!lockedSession) {
           throw new Error(`Session not found: ${input.sessionId}`);
@@ -50058,7 +50058,7 @@ export async function enqueueSessionWorkflowWakeIfRunnable(
               eq(schema.sessions.id, input.sessionId),
             ),
           )
-          .for("update")
+          .for("no key update")
           .limit(1);
         if (!workspace || !session) throw new Error(`Session not found: ${input.sessionId}`);
         const realtimeActive = await sessionRealtimeIsActiveInTransaction(
