@@ -4607,7 +4607,7 @@ describe("runtime event normalization", () => {
     );
   });
 
-  test("PrefixedMcpServer exposes content through callTool and the complete result through callToolResult", async () => {
+  test("PrefixedMcpServer preserves the complete legacy callTool result and callToolResult", async () => {
     const fullResult = {
       content: [{ type: "text" as const, text: "model-visible content" }],
       structuredContent: { receiptId: "receipt-1" },
@@ -4638,11 +4638,11 @@ describe("runtime event normalization", () => {
     };
     const wrapped = new PrefixedMcpServer(inner, "rich");
 
-    expect(await wrapped.callTool("rich__inspect", {})).toEqual(fullResult.content);
+    expect(await wrapped.callTool("rich__inspect", {})).toEqual(fullResult);
     expect(await wrapped.callToolResult("rich__inspect", {})).toEqual(fullResult);
   });
 
-  test("the Agents SDK keeps MCP content model-visible and retains the complete result as custom data", async () => {
+  test("the Agents SDK preserves prefixed MCP model output and retains the audit result as custom data", async () => {
     const fullResult = {
       content: [{ type: "text" as const, text: "model-visible content" }],
       structuredContent: { receiptId: "receipt-1", structuredOnly: true },
@@ -4710,7 +4710,7 @@ describe("runtime event normalization", () => {
       (event) =>
         event.type === "run_item_stream_event" && event.item?.type === "tool_call_output_item",
     );
-    expect(outputEvent?.item.output).toEqual(fullResult.content[0]);
+    expect(outputEvent?.item.output).toEqual(fullResult);
     expect(outputEvent?.item.customData).toEqual({
       [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: fullResult,
       [OPENGENI_INNER_MCP_CUSTOM_DATA_KEY]: { innerReceipt: "inner-1" },
@@ -4729,9 +4729,60 @@ describe("runtime event normalization", () => {
 
     const secondRequest = JSON.stringify(model.requests[1]?.input);
     expect(secondRequest).toContain("model-visible content");
-    expect(secondRequest).not.toContain("structuredOnly");
-    expect(secondRequest).not.toContain("providerTrace");
-    expect(secondRequest).not.toContain("vendor-receipt-1");
+    expect(secondRequest).toContain("structuredOnly");
+    expect(secondRequest).toContain("providerTrace");
+    expect(secondRequest).toContain("vendor-receipt-1");
+  });
+
+  test("the Agents SDK preserves structured-content-only prefixed MCP model output", async () => {
+    const fullResult = {
+      content: [],
+      structuredContent: { structuredOnly: true },
+      isError: false,
+      _meta: { providerTrace: "structured-only-trace" },
+    };
+    const inner: MCPServer = {
+      name: "structured-only-inner",
+      cacheToolsList: false,
+      async connect() {},
+      async close() {},
+      async listTools() {
+        return [
+          {
+            name: "inspect",
+            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+          },
+        ];
+      },
+      async callTool() {
+        return fullResult.content;
+      },
+      async callToolResult() {
+        return fullResult;
+      },
+      async invalidateToolsCache() {},
+    };
+    const wrapped = new PrefixedMcpServer(inner, "structured_only");
+    const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false });
+    const model = new ScriptedModel([
+      { output: [scriptedFunctionCall("structured_only__inspect", {}, "structured-call")] },
+      { outputText: "done" },
+    ]);
+    const agent = buildOpenGeniAgent(settings, [], {
+      model,
+      hostedWebSearch: false,
+      mcpServers: [wrapped],
+    });
+
+    const result = await runAgentStream(agent, "Inspect it", settings);
+    for await (const _event of result.toStream()) {
+      // Consume the stream so the second model request is available.
+    }
+    await result.completed;
+
+    const secondRequest = JSON.stringify(model.requests[1]?.input);
+    expect(secondRequest).toContain("structuredOnly");
+    expect(secondRequest).toContain("structured-only-trace");
   });
 
   test("connects to real Streamable HTTP MCP servers with prefixes and allowed tool filtering", async () => {
