@@ -81,14 +81,16 @@ export class LinuxVirtualComputerEnvironmentAllocator implements ComputerEnviron
       dataDirectory,
       temporaryDirectory,
     ];
-    for (const directory of directories) {
-      await rm(directory, { recursive: true, force: true });
-      await mkdir(directory, {
-        recursive: directory !== runtimeDirectory,
-        mode: 0o700,
-      });
-      await chmod(directory, 0o700);
-    }
+    await Promise.all(
+      directories.map(async (directory) => {
+        await rm(directory, { recursive: true, force: true });
+        await mkdir(directory, {
+          recursive: directory !== runtimeDirectory,
+          mode: 0o700,
+        });
+        await chmod(directory, 0o700);
+      }),
+    );
 
     const processes: ChildProcess[] = [];
     try {
@@ -171,15 +173,15 @@ export class LinuxVirtualComputerEnvironmentAllocator implements ComputerEnviron
       }
       sessionEnvironment.DBUS_SESSION_BUS_ADDRESS = busAddress;
 
+      let windowManager: ChildProcess | null = null;
       if (this.windowManagerBinary) {
-        const windowManager = spawn(this.windowManagerBinary, ["--replace", "--compositor=off"], {
+        windowManager = spawn(this.windowManagerBinary, ["--replace", "--compositor=off"], {
           detached: true,
           env: sessionEnvironment,
           stdio: ["ignore", "ignore", "pipe"],
         });
         processes.push(windowManager);
         drain(windowManager.stderr);
-        await assertStillRunning(windowManager, "virtual window manager");
       }
 
       // A freshly-created isolated seat must be visibly and immediately useful.
@@ -210,7 +212,6 @@ export class LinuxVirtualComputerEnvironmentAllocator implements ComputerEnviron
       );
       processes.push(terminal);
       drain(terminal.stderr);
-      await assertStillRunning(terminal, "virtual desktop terminal");
 
       // Human screen control must not poll full PNG screenshots. Give every
       // isolated Linux seat its own loopback-only RFB server; browserd exposes
@@ -252,7 +253,13 @@ export class LinuxVirtualComputerEnvironmentAllocator implements ComputerEnviron
       );
       processes.push(rfb);
       drain(rfb.stderr);
-      await waitForLoopbackPort(rfbPort, rfb, "virtual RFB server");
+      await Promise.all([
+        ...(windowManager
+          ? [assertStillRunning(windowManager, "virtual window manager")]
+          : []),
+        assertStillRunning(terminal, "virtual desktop terminal"),
+        waitForLoopbackPort(rfbPort, rfb, "virtual RFB server"),
+      ]);
 
       let closed = false;
       return {

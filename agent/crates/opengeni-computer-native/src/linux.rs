@@ -321,9 +321,11 @@ impl AtspiComputerAdapter {
             .collect();
         let enriched = stream::iter(candidates.into_iter().map(|item| async move {
             let key = object_key(&item.object)?;
-            let identifier = self.accessible_identifier(&item.object).await;
-            let bounds = self.component_bounds(&item.object, item.ifaces).await;
-            let process_id = self.process_id(&item.object).await;
+            let (identifier, bounds, process_id) = futures::join!(
+                self.accessible_identifier(&item.object),
+                self.component_bounds(&item.object, item.ifaces),
+                self.process_id(&item.object),
+            );
             let kind = if item.role == Role::Application {
                 NativeTargetKind::App
             } else {
@@ -428,10 +430,17 @@ impl AtspiComputerAdapter {
             .unwrap_or_else(|| item.role.to_string());
         record.target.focused =
             item.states.contains(State::Focused) || item.states.contains(State::Active);
-        record.target.bounds = self.component_bounds(&item.object, item.ifaces).await;
+        let (bounds, windows) =
+            futures::join!(self.component_bounds(&item.object, item.ifaces), async {
+                if record.target.kind == NativeTargetKind::Window {
+                    self.desktop.as_ref()?.windows().await.ok()
+                } else {
+                    Some(Vec::new())
+                }
+            },);
+        record.target.bounds = bounds;
         if record.target.kind == NativeTargetKind::Window {
-            let windows = self.desktop.as_ref()?.windows().await.ok()?;
-            record.x11_window = correlate_x11_window(&record.target, &windows);
+            record.x11_window = correlate_x11_window(&record.target, &windows?);
             if record.x11_window.is_none() {
                 return None;
             }
@@ -567,26 +576,40 @@ impl AtspiComputerAdapter {
             || item.ifaces.contains(Interface::Value)
             || item.states.contains(State::Focusable)
             || is_target_role(item.role);
-        let identifier = if detailed && interactive {
-            self.accessible_identifier(&item.object).await
-        } else {
-            None
-        };
-        let description = if detailed && interactive {
-            self.accessible_description(&item.object).await
-        } else {
-            None
-        };
-        let bounds = if detailed && interactive {
-            self.component_bounds(&item.object, item.ifaces).await
-        } else {
-            None
-        };
-        let value = if detailed {
-            self.node_value(&item).await
-        } else {
-            None
-        };
+        // These are independent typed AT-SPI reads for one node. Running them
+        // serially adds one full D-Bus round trip per field to every semantic
+        // observation; join them while retaining the same coherent cache item
+        // and exact failure/absence semantics.
+        let (identifier, description, bounds, value) = futures::join!(
+            async {
+                if detailed && interactive {
+                    self.accessible_identifier(&item.object).await
+                } else {
+                    None
+                }
+            },
+            async {
+                if detailed && interactive {
+                    self.accessible_description(&item.object).await
+                } else {
+                    None
+                }
+            },
+            async {
+                if detailed && interactive {
+                    self.component_bounds(&item.object, item.ifaces).await
+                } else {
+                    None
+                }
+            },
+            async {
+                if detailed {
+                    self.node_value(&item).await
+                } else {
+                    None
+                }
+            },
+        );
         let states = item.states.iter().map(|state| state.to_string()).collect();
         let actions = normalized_actions(&item);
         let interfaces: Vec<String> = item
