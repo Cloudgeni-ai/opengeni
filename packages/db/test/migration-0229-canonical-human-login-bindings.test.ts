@@ -16,7 +16,7 @@ import { createDb, nestedPostgresSqlState, type DbClient } from "../src";
 
 const migrationPath = join(
   dirname(fileURLToPath(import.meta.url)),
-  "../drizzle/0223_canonical_human_login_bindings.sql",
+  "../drizzle/0229_canonical_human_login_bindings.sql",
 );
 const posturePath = join(dirname(fileURLToPath(import.meta.url)), "../src/runtime-posture.ts");
 const provisionerPath = join(dirname(fileURLToPath(import.meta.url)), "../src/provision-roles.ts");
@@ -42,11 +42,11 @@ beforeAll(async () => {
       release: async () => await admin.end(),
     };
   } else {
-    shared = await acquireSharedTestDatabase("migration-0223-canonical-human-identities");
+    shared = await acquireSharedTestDatabase("migration-0229-canonical-human-identities");
   }
   if (!shared && requireRealDatabase) {
     throw new Error(
-      "[migration-0223-canonical-human-identities] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
+      "[migration-0229-canonical-human-identities] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
     );
   }
   if (shared) client = createDb(shared.appUrl, { max: 8 });
@@ -115,7 +115,7 @@ async function expectSqlState(action: () => Promise<unknown>, state: string): Pr
   expect(nestedPostgresSqlState(failure)).toBe(state);
 }
 
-describe("migration 0223 canonical human identities and login bindings", () => {
+describe("migration 0229 canonical human identities and login bindings", () => {
   test("pins the rolling lifecycle, no-direct-DML posture, and metadata-minimal projection", async () => {
     const [migration, posture, provisioner] = await Promise.all([
       readFile(migrationPath, "utf8"),
