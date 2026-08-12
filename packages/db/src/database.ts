@@ -330,6 +330,7 @@ export async function setRlsContext(db: Database, context: RlsContext): Promise<
   // fences can distinguish their partial writes without inspecting content.
   await db.execute(sql`select set_config('opengeni.lossless_content_writer', '1', true)`);
   await db.execute(sql`select set_config('opengeni.sandbox_recovery_protocol_v2', '1', true)`);
+  await db.execute(sql`select set_config('opengeni.pending_tool_event_output_v1', '1', true)`);
 }
 
 async function readRlsContextSettings(db: Database): Promise<RlsContextSettings> {
