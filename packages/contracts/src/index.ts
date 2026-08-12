@@ -12,6 +12,7 @@ import { ClientResumableVoiceInputConfig } from "./transcription-recordings";
 import { MediaGenerationResult } from "./video-generation";
 
 export * from "./slack-bot-scopes";
+export * from "./slack-task-policy";
 export * from "./atlassian";
 export * from "./connector-destinations";
 export * from "./memory-slack-delivery";

@@ -329,6 +329,7 @@ export * from "./new-session-drafts";
 export * from "./workspace-instruction-policies";
 export * from "./company-profile";
 export * from "./workspace-learning-policy";
+export * from "./slack-task-policy";
 export * from "./preference-registry";
 export * from "./memory-governance";
 export * from "./memory-slack-delivery";
@@ -8045,7 +8046,8 @@ export type SlackInteractionActionKind =
   | "human_input_skip"
   | "session_status"
   | "session_pause"
-  | "session_resume";
+  | "session_resume"
+  | "shared_result_publish";
 
 export type SlackInteractionActionHandle = {
   id: string;
