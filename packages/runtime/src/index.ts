@@ -217,6 +217,7 @@ import {
 } from "./model-provider";
 import { workspaceSkills, type WorkspaceSkillSearchPath } from "./workspace-skills";
 import { appendWorkspaceGovernance } from "./workspace-governance";
+import { decodeValidatedViewImageDataUrl } from "./view-image-validation";
 import {
   baseModelInputFilterForSettings,
   boundModelToolOutputsFilterForSettings,
@@ -2729,48 +2730,17 @@ export function withStructuredViewImageFunctionResults(tools: Tool<unknown>[]): 
               ? (output as { text: string }).text
               : null;
         if (!dataUrl?.startsWith("data:image/")) return output;
-        const match = /^data:([^;,]+);base64,([A-Za-z0-9+/]*={0,2})$/.exec(dataUrl);
-        const declaredMediaType = match?.[1]?.toLowerCase() ?? "unknown";
-        const bytes = match ? Uint8Array.from(Buffer.from(match[2]!, "base64")) : null;
-        const actualMediaType = bytes ? supportedViewImageMediaType(bytes) : null;
+        const validated = decodeValidatedViewImageDataUrl(dataUrl);
+        const declaredMediaType = validated?.declaredMediaType ?? "unknown";
         const canonicalDeclaredMediaType =
           declaredMediaType === "image/jpg" ? "image/jpeg" : declaredMediaType;
-        if (!actualMediaType || canonicalDeclaredMediaType !== actualMediaType) {
+        if (!validated || canonicalDeclaredMediaType !== validated.actualMediaType) {
           return `view_image returned unsupported or invalid image bytes (${declaredMediaType}). Convert the file to PNG, JPEG, or WebP and call view_image again.`;
         }
         return { type: "image" as const, image: { url: dataUrl } };
       },
     };
   });
-}
-
-function supportedViewImageMediaType(bytes: Uint8Array): string | null {
-  if (
-    bytes[0] === 0x89 &&
-    bytes[1] === 0x50 &&
-    bytes[2] === 0x4e &&
-    bytes[3] === 0x47 &&
-    bytes[4] === 0x0d &&
-    bytes[5] === 0x0a &&
-    bytes[6] === 0x1a &&
-    bytes[7] === 0x0a
-  ) {
-    return "image/png";
-  }
-  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";
-  if (
-    bytes[0] === 0x52 &&
-    bytes[1] === 0x49 &&
-    bytes[2] === 0x46 &&
-    bytes[3] === 0x46 &&
-    bytes[8] === 0x57 &&
-    bytes[9] === 0x45 &&
-    bytes[10] === 0x42 &&
-    bytes[11] === 0x50
-  ) {
-    return "image/webp";
-  }
-  return null;
 }
 
 /** Remove filesystem tools whose successful output necessarily contains pixels. */
