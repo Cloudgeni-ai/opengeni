@@ -11,9 +11,7 @@ describe("session tenancy domain", () => {
       targetVisibility: "user_private" as const,
       expectedAuthorityEpoch: 7,
     };
-    expect(canonicalSessionVisibilityTransitionHash(input)).toMatch(
-      /^[0-9a-f]{64}$/,
-    );
+    expect(canonicalSessionVisibilityTransitionHash(input)).toMatch(/^[0-9a-f]{64}$/);
     expect(canonicalSessionVisibilityTransitionHash(input)).toBe(
       canonicalSessionVisibilityTransitionHash({ ...input }),
     );

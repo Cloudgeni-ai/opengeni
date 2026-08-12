@@ -92,14 +92,10 @@ export async function transitionSessionVisibility(
   db: Database,
   input: TransitionSessionVisibilityInput,
 ): Promise<TransitionSessionVisibilityResult> {
-  if (
-    !Number.isSafeInteger(input.expectedAuthorityEpoch) ||
-    input.expectedAuthorityEpoch < 1
-  ) {
+  if (!Number.isSafeInteger(input.expectedAuthorityEpoch) || input.expectedAuthorityEpoch < 1) {
     throw new Error("expectedAuthorityEpoch must be a positive safe integer");
   }
-  if (!input.operationKey.trim())
-    throw new Error("operationKey must not be empty");
+  if (!input.operationKey.trim()) throw new Error("operationKey must not be empty");
   const requestHash = canonicalSessionVisibilityTransitionHash(input);
   const { accountId } = await rlsContextForWorkspace(db, input.workspaceId);
   return await withWorkspaceSubjectSessionActivityRls(
@@ -145,8 +141,7 @@ export async function transitionSessionVisibility(
         )`,
       );
       const result = rows[0];
-      if (!result)
-        throw new Error("Session visibility transition returned no result");
+      if (!result) throw new Error("Session visibility transition returned no result");
       return result;
     },
   );
@@ -156,12 +151,8 @@ export async function forkSessionContent(
   db: Database,
   input: ForkSessionContentInput,
 ): Promise<ForkSessionContentResult> {
-  if (!input.operationKey.trim())
-    throw new Error("operationKey must not be empty");
-  const { accountId } = await rlsContextForWorkspace(
-    db,
-    input.sourceWorkspaceId,
-  );
+  if (!input.operationKey.trim()) throw new Error("operationKey must not be empty");
+  const { accountId } = await rlsContextForWorkspace(db, input.sourceWorkspaceId);
   const requestHash = canonicalSessionForkHash(input);
   return await withWorkspaceSubjectRls(
     db,
