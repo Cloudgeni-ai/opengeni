@@ -122,7 +122,6 @@ import {
   type SerializedTool,
   type Tool,
 } from "@openai/agents";
-import { localDirLazySkillSource } from "@openai/agents/sandbox/local";
 import {
   Capabilities,
   Manifest,
@@ -133,18 +132,13 @@ import {
   filesystem,
   gitRepo,
   inContainerMountStrategy,
-  localDir,
   s3Mount,
   shell,
   skills,
-  type Dir,
-  type Entry,
-  type LocalDirLazySkillSource,
   type SandboxClient,
   type SandboxSessionLike,
   type SandboxSessionState,
   type SandboxRunConfig,
-  type SkillIndexEntry,
 } from "@openai/agents/sandbox";
 import { ModalCloudBucketMountStrategy } from "@openai/agents-extensions/sandbox/modal";
 import OpenAI from "openai";
@@ -154,10 +148,8 @@ import {
   CODEX_ORIGINATOR,
   codexAppsSanitizingFetch,
 } from "@opengeni/codex";
-import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
-import { dirname, isAbsolute, join, posix as posixPath, relative } from "node:path";
-import { fileURLToPath } from "node:url";
+import { dirname, isAbsolute, join, posix as posixPath } from "node:path";
 
 import { sanitizeHistoryItemsForModel } from "./history-sanitizer";
 import { installCodexToolSearch } from "./codex-tool-search";
@@ -216,6 +208,24 @@ import {
   resolveTurnModel,
 } from "./model-provider";
 import { workspaceSkills, type WorkspaceSkillSearchPath } from "./workspace-skills";
+import {
+  composeRuntimeSkills,
+  type EffectiveSkillSelection,
+  type RuntimeSkillActivation,
+  type RuntimeSkillComposition,
+} from "./runtime-skills";
+export {
+  composeRuntimeSkills,
+  type EffectiveSkillSelection,
+  type InstalledSkillActivation,
+  type NativeToolSkillSet,
+  type PackSkillActivation,
+  type RuntimeSkillActivation,
+  type RuntimeSkillArtifact,
+  type RuntimeSkillArtifactFile,
+  type RuntimeSkillComposition,
+  type SessionSkillActivation,
+} from "./runtime-skills";
 import { appendWorkspaceGovernance } from "./workspace-governance";
 import { decodeValidatedViewImageDataUrl } from "./view-image-validation";
 import {
@@ -256,6 +266,7 @@ export {
   PORTABLE_SKILL_MAX_FILES,
   PORTABLE_SKILL_MAX_TOTAL_BYTES,
   parsePortableSkillFrontmatter,
+  skillArtifactContentSha256,
   type PortableSkillArtifact,
   type SkillLibraryEntry,
   type SkillLibraryFile,
@@ -1282,15 +1293,6 @@ export type GitCredentialBindingSeed = {
 export type GitCredentialTokenWriterSession = SandboxSessionLike;
 export type CodemodeTokenWriterSession = SandboxSessionLike;
 
-export type EffectiveSkillSelection = Readonly<{
-  id: string;
-  name: string;
-  source: "bundled" | "imported" | "library" | "pack" | "session";
-  version: string | null;
-  contentSha256: string | null;
-  reason: string;
-}>;
-
 const agentSkillSelections = new WeakMap<object, readonly EffectiveSkillSelection[]>();
 const emptySkillSelections: readonly EffectiveSkillSelection[] = Object.freeze([]);
 
@@ -1454,7 +1456,7 @@ export type BuildAgentOptions = {
   activeSandboxBackend?: Settings["sandboxBackend"];
   fileResourceDownloads?: SandboxFileDownload[];
   mcpServers?: MCPServer[];
-  /** Exact prepared tool authority used to admit tool-dependent bundled skills. */
+  /** Exact prepared tool authority used to admit tool-bound native Skills. */
   attemptToolCatalog?: AttemptToolCatalog;
   /** Exact broker-resolved connection identity frozen during MCP preparation. */
   resolvedMcpConnectionIds?: ReadonlyMap<string, string>;
@@ -1539,20 +1541,13 @@ export type BuildAgentOptions = {
   // Host context for this exact accepted turn. Composed system-level after the
   // durable session persona and omitted from all later turns.
   turnInstructions?: string;
-  // Skills delivered by enabled capability packs. They join the bundled
-  // skills in the sandbox skill index (mounted under .agents/) so
-  // skills/<name> references resolve like any other indexed skill.
-  packSkills?: PackSkill[];
-  // Inline skills fixed onto this session at creation. They use the SDK's lazy
-  // skill source and are materialized only when the model loads one.
-  sessionSkills?: PackSkill[];
-  // Explicitly selected, immutable curated-library skill content. These are
-  // separate from packSkills so repository-local/pack compatibility does not
-  // turn a curated entry into a mutable override.
-  skillLibrarySkills?: PackSkill[];
-  // Secret-free provenance for effective-configuration inspection. The worker
-  // resolves exact ids/versions/hashes before constructing the agent.
-  skillLibrarySelections?: EffectiveSkillSelection[];
+  /**
+   * Exact Skill activations admitted for this turn. Optional/domain Skills
+   * enter only through an explicit installation, Pack owner, or session
+   * selection; native tool-bound Skills are derived separately from the exact
+   * executable tool catalog.
+   */
+  skillActivations?: readonly RuntimeSkillActivation[];
   /**
    * Internal per-attempt cancellation boundary. The worker supplies Temporal's
    * signal so an in-flight shell process is interrupted immediately instead of
@@ -1565,19 +1560,6 @@ export type BuildAgentOptions = {
    * attempt-quiesced receipt.
    */
   onToolCancellationFence?: (fence: TurnToolCancellationFence) => void;
-};
-
-export type PackSkillFile = {
-  // Relative POSIX path inside the skill directory, e.g. "SKILL.md" or
-  // "references/runbook.md".
-  path: string;
-  content: string;
-};
-
-export type PackSkill = {
-  name: string;
-  description?: string | null | undefined;
-  files: PackSkillFile[];
 };
 
 /**
@@ -2193,6 +2175,10 @@ export function buildOpenGeniAgent(
     return agent;
   }
 
+  const skillComposition = composeRuntimeSkills(options.skillActivations ?? [], {
+    editableArtifacts: editableArtifactToolsAvailable,
+    videoGeneration: Boolean(options.videoGeneration),
+  });
   const runAs = sandboxRunAs(settings);
   const agent = new SandboxAgent({
     ...baseConfig,
@@ -2203,11 +2189,7 @@ export function buildOpenGeniAgent(
       options.fileResourceDownloads,
     ),
     ...(runAs ? { runAs } : {}),
-    capabilities: buildAgentCapabilities(settings, options.packSkills ?? [], {
-      ...(options.skillLibrarySkills?.length
-        ? { skillLibrarySkills: options.skillLibrarySkills }
-        : {}),
-      ...(options.sessionSkills?.length ? { sessionSkills: options.sessionSkills } : {}),
+    capabilities: buildAgentCapabilitiesFromComposition(settings, skillComposition, {
       ...(editableArtifactToolsAvailable ? { editableArtifactToolsAvailable: true } : {}),
       ...(options.videoGeneration ? { videoGenerationAvailable: true } : {}),
       ...repositoryWorkspaceSkillPathsOption(resources),
@@ -2232,19 +2214,7 @@ export function buildOpenGeniAgent(
         : {}),
     }),
   });
-  agentSkillSelections.set(
-    agent,
-    Object.freeze(
-      effectiveSkillSelections(
-        options.skillLibrarySelections ?? [],
-        options.skillLibrarySkills ?? [],
-        options.packSkills ?? [],
-        options.sessionSkills ?? [],
-        editableArtifactToolsAvailable,
-        Boolean(options.videoGeneration),
-      ).map((selection) => Object.freeze(selection)),
-    ),
-  );
+  agentSkillSelections.set(agent, skillComposition.selections);
   if (options.genesisTitleHint) {
     agentsNeedingGenesisTitleDirective.add(agent);
   }
@@ -2752,10 +2722,8 @@ function withoutImageInputTools(tools: Tool<unknown>[]): Tool<unknown>[] {
 
 export function buildAgentCapabilities(
   settings: Settings,
-  packSkills: PackSkill[],
+  skillActivations: readonly RuntimeSkillActivation[] = [],
   options: {
-    skillLibrarySkills?: PackSkill[];
-    sessionSkills?: PackSkill[];
     editableArtifactToolsAvailable?: boolean;
     videoGenerationAvailable?: boolean;
     workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];
@@ -2769,6 +2737,32 @@ export function buildAgentCapabilities(
     turnCancellationSignal?: AbortSignal;
     onToolCancellationFence?: (fence: TurnToolCancellationFence) => void;
   } = {},
+): ReturnType<typeof Capabilities.default> {
+  return buildAgentCapabilitiesFromComposition(
+    settings,
+    composeRuntimeSkills(skillActivations, {
+      editableArtifacts: options.editableArtifactToolsAvailable === true,
+      videoGeneration: options.videoGenerationAvailable === true,
+    }),
+    options,
+  );
+}
+
+function buildAgentCapabilitiesFromComposition(
+  settings: Settings,
+  skillComposition: RuntimeSkillComposition,
+  options: {
+    editableArtifactToolsAvailable?: boolean;
+    videoGenerationAvailable?: boolean;
+    workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];
+    structuredToolTransport?: boolean;
+    supportsImageInput?: boolean;
+    computerToolMode?: ComputerToolMode;
+    onComputerUseReady?: (session: SandboxSessionLike) => Promise<void>;
+    onRetainableSessionImageOutput?: RetainableSessionImageOutputHook;
+    turnCancellationSignal?: AbortSignal;
+    onToolCancellationFence?: (fence: TurnToolCancellationFence) => void;
+  },
 ): ReturnType<typeof Capabilities.default> {
   const toolCancellation =
     options.turnCancellationSignal || options.onToolCancellationFence
@@ -2812,40 +2806,17 @@ export function buildAgentCapabilities(
       ...(toolCancellation ? {} : { configureTools: withExecOpCorrelation }),
     }),
   ];
-  const sessionSkills = sessionSkillsForMaterialization(
-    packSkills,
-    options.skillLibrarySkills ?? [],
-    options.sessionSkills ?? [],
-    options.editableArtifactToolsAvailable === true,
-    options.videoGenerationAvailable === true,
-  );
   caps.push(
     skills({
-      lazyFrom: lazySkillSourceWithPackSkills(
-        [...packSkills, ...sessionSkills],
-        options.skillLibrarySkills ?? [],
-        options.editableArtifactToolsAvailable === true,
-        options.videoGenerationAvailable === true,
-      ),
+      lazyFrom: skillComposition.lazySource,
     }),
   );
   if (options.workspaceSkillPaths?.length) {
-    const bundledWorkspaceSkillNames = [
-      ...bundledSkillDirNames(bundledSkillsDir()),
-      ...(options.editableArtifactToolsAvailable
-        ? bundledSkillDirNames(bundledArtifactSkillsDir())
-        : []),
-      ...(options.videoGenerationAvailable ? bundledSkillDirNames(bundledVideoSkillsDir()) : []),
-    ];
     caps.push(
       workspaceSkills(
         options.workspaceSkillPaths,
-        [
-          ...(options.skillLibrarySkills ?? []).map((skill) => skill.name),
-          ...packSkills.map((skill) => skill.name),
-          ...sessionSkills.map((skill) => skill.name),
-        ],
-        bundledWorkspaceSkillNames,
+        skillComposition.configuredNames,
+        skillComposition.nativeToolNames,
       ),
     );
   }
@@ -8603,420 +8574,6 @@ export async function runAzureCliLoginHook(
     });
     throw error;
   }
-}
-
-// Since @openai/agents 0.11.0 local sandbox sources (including the lazy
-// bundled-skills source) must stay within the SDK process working directory:
-// reads outside it require manifest.extraPathGrants, and remote sandbox
-// clients such as Modal reject manifests that carry extra path grants. The
-// packaged skills live inside the runtime package — outside the worker's cwd
-// in production — so stage a copy under the working directory once per
-// process instead of granting the packaged path.
-let stagedBundledSkillsDir: string | null = null;
-let stagedBundledArtifactSkillsDir: string | null = null;
-let stagedBundledVideoSkillsDir: string | null = null;
-
-function packagedBundledSkillsDir(directoryName: string): string {
-  const moduleDir = dirname(fileURLToPath(import.meta.url));
-  return (
-    [
-      join(moduleDir, "assets", "runtime", directoryName),
-      join(moduleDir, directoryName),
-      join(moduleDir, "..", "src", directoryName),
-    ].find((candidate) => existsSync(candidate)) ?? join(moduleDir, directoryName)
-  );
-}
-
-function bundledSkillsDir(): string {
-  const packaged = packagedBundledSkillsDir("bundled_hashicorp_terraform_skills");
-  if (isPathWithin(process.cwd(), packaged)) return packaged;
-  if (!stagedBundledSkillsDir) {
-    stagedBundledSkillsDir = stageBundledSkills(
-      packaged,
-      join(process.cwd(), ".opengeni", "bundled_hashicorp_terraform_skills"),
-    );
-  }
-  return stagedBundledSkillsDir;
-}
-
-function bundledArtifactSkillsDir(): string {
-  const packaged = packagedBundledSkillsDir("bundled_artifact_skills");
-  if (isPathWithin(process.cwd(), packaged)) return packaged;
-  if (!stagedBundledArtifactSkillsDir) {
-    stagedBundledArtifactSkillsDir = stageBundledSkills(
-      packaged,
-      join(process.cwd(), ".opengeni", "bundled_artifact_skills"),
-    );
-  }
-  return stagedBundledArtifactSkillsDir;
-}
-
-function bundledVideoSkillsDir(): string {
-  const packaged = packagedBundledSkillsDir("bundled_video_skills");
-  if (isPathWithin(process.cwd(), packaged)) return packaged;
-  if (!stagedBundledVideoSkillsDir) {
-    stagedBundledVideoSkillsDir = stageBundledSkills(
-      packaged,
-      join(process.cwd(), ".opengeni", "bundled_video_skills"),
-    );
-  }
-  return stagedBundledVideoSkillsDir;
-}
-
-function stageBundledSkills(packaged: string, target: string): string {
-  const tmp = `${target}.tmp-${process.pid}`;
-  rmSync(tmp, { recursive: true, force: true });
-  mkdirSync(dirname(tmp), { recursive: true });
-  cpSync(packaged, tmp, { recursive: true });
-  rmSync(target, { recursive: true, force: true });
-  try {
-    renameSync(tmp, target);
-  } catch (error) {
-    // Another process staged the same content between our rm and rename.
-    rmSync(tmp, { recursive: true, force: true });
-    if (!existsSync(target)) {
-      throw error;
-    }
-  }
-  return target;
-}
-
-function isPathWithin(root: string, candidate: string): boolean {
-  const relativePath = relative(root, candidate);
-  return relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath));
-}
-
-/**
- * The skill source fed to the SDK Skills capability. Domain guidance is never
- * mounted by deployment default: only explicitly selected library, Pack, and
- * session skills join native artifact skills in one lazy index. Pack content
- * shadows selected library content with the same name, case-insensitively.
- */
-export function lazySkillSourceWithPackSkills(
-  packSkills: PackSkill[],
-  skillLibrarySkills: PackSkill[] = [],
-  editableArtifactToolsAvailable = false,
-  videoGenerationAvailable = false,
-): LocalDirLazySkillSource {
-  const bundledDir = bundledSkillsDir();
-  const bundled = localDirLazySkillSource({ src: bundledDir });
-  if (
-    packSkills.length === 0 &&
-    skillLibrarySkills.length === 0 &&
-    !editableArtifactToolsAvailable &&
-    !videoGenerationAvailable
-  ) {
-    return bundled;
-  }
-  const children: Record<string, Entry> = {};
-  let artifactBundled: LocalDirLazySkillSource | null = null;
-  if (editableArtifactToolsAvailable) {
-    const artifactDir = bundledArtifactSkillsDir();
-    artifactBundled = localDirLazySkillSource({ src: artifactDir });
-    for (const name of bundledSkillDirNames(artifactDir)) {
-      children[name] = localDir({ src: join(artifactDir, name) });
-    }
-  }
-  let videoBundled: LocalDirLazySkillSource | null = null;
-  if (videoGenerationAvailable) {
-    const videoDir = bundledVideoSkillsDir();
-    videoBundled = localDirLazySkillSource({ src: videoDir });
-    for (const name of bundledSkillDirNames(videoDir)) {
-      children[name] = localDir({ src: join(videoDir, name) });
-    }
-  }
-  const libraryIndex: SkillIndexEntry[] = [];
-  const libraryNameKeys = new Set<string>();
-  for (const skill of skillLibrarySkills) {
-    assertSafePackSkillName(skill.name);
-    const key = skill.name.toLowerCase();
-    if (libraryNameKeys.has(key)) {
-      throw new Error(`Duplicate curated skill name: ${skill.name}`);
-    }
-    libraryNameKeys.add(key);
-    removeSkillChildByNameKey(children, key);
-    children[skill.name] = packSkillDirEntry(skill);
-    libraryIndex.push({
-      name: skill.name,
-      description: packSkillDescription(skill),
-      path: skill.name,
-    });
-  }
-  const packIndex: SkillIndexEntry[] = [];
-  const packNameKeys = new Set<string>();
-  for (const skill of packSkills) {
-    assertSafePackSkillName(skill.name);
-    if (packNameKeys.has(skill.name.toLowerCase())) {
-      throw new Error(`Duplicate pack skill name: ${skill.name}`);
-    }
-    packNameKeys.add(skill.name.toLowerCase());
-    removeSkillChildByNameKey(children, skill.name.toLowerCase());
-    children[skill.name] = packSkillDirEntry(skill);
-    packIndex.push({
-      name: skill.name,
-      description: packSkillDescription(skill),
-      path: skill.name,
-    });
-  }
-  return {
-    source: dir({ children }),
-    getIndex: (manifest, skillsPath) => [
-      ...(artifactBundled?.getIndex?.(manifest, skillsPath) ?? []).filter(
-        (entry) =>
-          !packNameKeys.has((entry.path ?? entry.name).toLowerCase()) &&
-          !libraryNameKeys.has((entry.path ?? entry.name).toLowerCase()),
-      ),
-      ...(videoBundled?.getIndex?.(manifest, skillsPath) ?? []).filter(
-        (entry) =>
-          !packNameKeys.has((entry.path ?? entry.name).toLowerCase()) &&
-          !libraryNameKeys.has((entry.path ?? entry.name).toLowerCase()),
-      ),
-      ...libraryIndex.filter(
-        (entry) => !packNameKeys.has((entry.path ?? entry.name).toLowerCase()),
-      ),
-      ...packIndex,
-    ],
-  };
-}
-
-function effectiveSkillSelections(
-  librarySelections: readonly EffectiveSkillSelection[],
-  librarySkills: readonly PackSkill[],
-  packSkills: readonly PackSkill[],
-  sessionSkills: readonly PackSkill[],
-  editableArtifactToolsAvailable = false,
-  videoGenerationAvailable = false,
-): readonly EffectiveSkillSelection[] {
-  const defaultSkillNames = [
-    ...bundledSkillDirNames(bundledSkillsDir()),
-    ...(editableArtifactToolsAvailable ? bundledSkillDirNames(bundledArtifactSkillsDir()) : []),
-    ...(videoGenerationAvailable ? bundledSkillDirNames(bundledVideoSkillsDir()) : []),
-  ];
-  const defaultSelections = defaultSkillNames.map((name) => ({
-    id: `bundled:${name}`,
-    name,
-    source: "bundled" as const,
-    version: null,
-    contentSha256: null,
-    reason: "native artifact capability",
-  }));
-  const libraryNameKeys = new Set(librarySkills.map((skill) => skill.name.toLowerCase()));
-  const packNameKeys = new Set(packSkills.map((skill) => skill.name.toLowerCase()));
-  const effectiveSessionSkills = sessionSkillsForMaterialization(
-    packSkills,
-    librarySkills,
-    sessionSkills,
-    editableArtifactToolsAvailable,
-    videoGenerationAvailable,
-  );
-  const sessionNameKeys = new Set(effectiveSessionSkills.map((skill) => skill.name.toLowerCase()));
-  const selected = librarySelections.filter((selection) =>
-    libraryNameKeys.has(selection.name.toLowerCase()),
-  );
-  return [
-    ...defaultSelections.filter(
-      (selection) =>
-        !libraryNameKeys.has(selection.name.toLowerCase()) &&
-        !packNameKeys.has(selection.name.toLowerCase()) &&
-        !sessionNameKeys.has(selection.name.toLowerCase()),
-    ),
-    ...selected.filter(
-      (selection) =>
-        !packNameKeys.has(selection.name.toLowerCase()) &&
-        !sessionNameKeys.has(selection.name.toLowerCase()),
-    ),
-    ...packSkills.map((skill) => ({
-      id: `pack:${skill.name}`,
-      name: skill.name,
-      source: "pack" as const,
-      version: null,
-      contentSha256: null,
-      reason: "enabled capability pack",
-    })),
-    ...effectiveSessionSkills.map((skill) => ({
-      id: `session:${skill.name}`,
-      name: skill.name,
-      source: "session" as const,
-      version: null,
-      contentSha256: null,
-      reason: "attached to session",
-    })),
-  ];
-}
-
-function sessionSkillsForMaterialization(
-  packSkills: readonly PackSkill[],
-  librarySkills: readonly PackSkill[],
-  sessionSkills: readonly PackSkill[],
-  editableArtifactToolsAvailable = false,
-  videoGenerationAvailable = false,
-): PackSkill[] {
-  const configured = new Map<string, PackSkill>();
-  for (const skill of [...librarySkills, ...packSkills]) {
-    configured.set(skill.name.toLowerCase(), skill);
-  }
-  const bundledNames = new Set(
-    [
-      ...bundledSkillDirNames(bundledSkillsDir()),
-      ...(editableArtifactToolsAvailable ? bundledSkillDirNames(bundledArtifactSkillsDir()) : []),
-      ...(videoGenerationAvailable ? bundledSkillDirNames(bundledVideoSkillsDir()) : []),
-    ].map((name) => name.toLowerCase()),
-  );
-  const selected = new Map<string, PackSkill>();
-  for (const skill of sessionSkills) {
-    assertSafePackSkillName(skill.name);
-    const key = skill.name.toLowerCase();
-    if (bundledNames.has(key)) {
-      throw new Error(`Session skill "${skill.name}" conflicts with a bundled skill`);
-    }
-    const existing = selected.get(key) ?? configured.get(key);
-    if (existing) {
-      if (skillFingerprint(existing) !== skillFingerprint(skill)) {
-        throw new Error(`Conflicting skill definitions for "${skill.name}"`);
-      }
-      continue;
-    }
-    selected.set(key, skill);
-  }
-  return [...selected.values()];
-}
-
-function skillFingerprint(skill: PackSkill): string {
-  return JSON.stringify(
-    [...skill.files]
-      .sort((left, right) => left.path.localeCompare(right.path))
-      .map(({ path, content }) => ({ path, content })),
-  );
-}
-
-function removeSkillChildByNameKey(children: Record<string, Entry>, nameKey: string): void {
-  for (const name of Object.keys(children)) {
-    if (name.toLowerCase() === nameKey) {
-      delete children[name];
-    }
-  }
-}
-
-function bundledSkillDirNames(root: string): string[] {
-  return readdirSync(root, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory() && existsSync(join(root, entry.name, "SKILL.md")))
-    .map((entry) => entry.name)
-    .sort();
-}
-
-type PackSkillDirNode = {
-  dirs: Map<string, PackSkillDirNode>;
-  files: Map<string, string>;
-};
-
-function packSkillDirEntry(skill: PackSkill): Dir {
-  const root: PackSkillDirNode = { dirs: new Map(), files: new Map() };
-  for (const skillFile of skill.files) {
-    const segments = packSkillPathSegments(skill.name, skillFile.path);
-    let node = root;
-    for (const segment of segments.slice(0, -1)) {
-      if (node.files.has(segment)) {
-        throw new Error(`Pack skill ${skill.name} uses ${segment} as both a file and a directory`);
-      }
-      let next = node.dirs.get(segment);
-      if (!next) {
-        next = { dirs: new Map(), files: new Map() };
-        node.dirs.set(segment, next);
-      }
-      node = next;
-    }
-    const filename = segments[segments.length - 1]!;
-    if (node.dirs.has(filename) || node.files.has(filename)) {
-      throw new Error(`Duplicate pack skill file path in ${skill.name}: ${skillFile.path}`);
-    }
-    node.files.set(filename, skillFile.content);
-  }
-  if (!root.files.has("SKILL.md")) {
-    throw new Error(`Pack skill ${skill.name} is missing a top-level SKILL.md file`);
-  }
-  return packSkillDirFromNode(root);
-}
-
-function packSkillDirFromNode(node: PackSkillDirNode): Dir {
-  const children: Record<string, Entry> = {};
-  for (const [name, child] of node.dirs) {
-    children[name] = packSkillDirFromNode(child);
-  }
-  for (const [name, content] of node.files) {
-    children[name] = file({ content });
-  }
-  return dir({ children });
-}
-
-function assertSafePackSkillName(name: string): void {
-  if (packSkillPathSegments(name, name).length !== 1) {
-    throw new Error(`Invalid pack skill name: ${name}`);
-  }
-}
-
-function packSkillPathSegments(skillName: string, path: string): string[] {
-  const segments = path.split("/");
-  if (
-    path.startsWith("/") ||
-    path.includes("\\") ||
-    segments.some((segment) => segment.length === 0 || segment === "." || segment === "..")
-  ) {
-    throw new Error(`Invalid pack skill file path for ${skillName}: ${path}`);
-  }
-  return segments;
-}
-
-function packSkillDescription(skill: PackSkill): string {
-  const explicit = skill.description?.trim();
-  if (explicit) {
-    return explicit;
-  }
-  const markdown = skill.files.find((skillFile) => skillFile.path === "SKILL.md")?.content ?? "";
-  return skillFrontmatterDescription(markdown) ?? "No description provided.";
-}
-
-function skillFrontmatterDescription(markdown: string): string | null {
-  const lines = markdown.split(/\r?\n/);
-  if (lines[0]?.trim() !== "---") {
-    return null;
-  }
-  const end = lines.findIndex((line, index) => index > 0 && line.trim() === "---");
-  if (end === -1) {
-    return null;
-  }
-  const collected: string[] = [];
-  let inDescription = false;
-  for (const line of lines.slice(1, end)) {
-    const match = line.match(/^description:\s*(.*)$/);
-    if (match) {
-      const inline = match[1]!.trim();
-      if (inline && inline !== ">-" && inline !== ">" && inline !== "|" && inline !== "|-") {
-        return unquoteFrontmatterValue(inline);
-      }
-      inDescription = true;
-      continue;
-    }
-    if (inDescription) {
-      if (/^\s+\S/.test(line)) {
-        collected.push(line.trim());
-        continue;
-      }
-      break;
-    }
-  }
-  const blockValue = collected.join(" ").trim();
-  return blockValue ? blockValue : null;
-}
-
-function unquoteFrontmatterValue(value: string): string {
-  if (
-    value.length >= 2 &&
-    value[0] === value[value.length - 1] &&
-    (value[0] === '"' || value[0] === "'")
-  ) {
-    return value.slice(1, -1);
-  }
-  return value;
 }
 
 function isAsyncIterable<T>(source: Iterable<T> | AsyncIterable<T>): source is AsyncIterable<T> {

@@ -59,7 +59,7 @@ import {
   GENESIS_TITLE_DIRECTIVE,
   hasCanonicalEditableArtifactToolSurface,
   oneShotGenesisTitleInputFilter,
-  lazySkillSourceWithPackSkills,
+  composeRuntimeSkills,
   effectiveSkillSelectionsForAgent,
   listSkillLibraryEntries,
   loadSkillLibrarySkill,
@@ -7328,7 +7328,7 @@ function editableArtifactAttemptToolCatalog() {
   }).catalog;
 }
 
-describe("pack skills in the sandbox skill index", () => {
+describe("runtime Skill activation", () => {
   const infraSkill = {
     name: "infra-ops",
     files: [
@@ -7346,18 +7346,19 @@ describe("pack skills in the sandbox skill index", () => {
     environment: {},
   });
 
-  test("without explicit selections the skill index retains bundled guidance", () => {
-    const source = lazySkillSourceWithPackSkills([]);
-    expect((source.source as { type: string }).type).toBe("local_dir");
+  test("without explicit activation the domain Skill index is empty", () => {
+    const source = composeRuntimeSkills([]).lazySource;
+    expect((source.source as { type: string }).type).toBe("dir");
     const index = source.getIndex?.(emptyManifest, ".agents") ?? [];
-    expect(index.map((entry) => entry.name)).toContain("checkov");
-    expect(index.map((entry) => entry.name)).not.toContain("infra-ops");
-    expect(index.map((entry) => entry.name)).not.toContain("azure-verified-modules");
-    expect(index.map((entry) => entry.name)).not.toContain("opengeni-spreadsheets");
+    expect(index).toEqual([]);
   });
 
   test("artifact skills join the index when their canonical tool surface is available", () => {
-    const source = lazySkillSourceWithPackSkills([], [], true);
+    const composition = composeRuntimeSkills([], {
+      editableArtifacts: true,
+      videoGeneration: false,
+    });
+    const source = composition.lazySource;
     const index = source.getIndex?.(emptyManifest, ".agents") ?? [];
     expect(index.map((entry) => entry.name)).toEqual(
       expect.arrayContaining([
@@ -7368,6 +7369,13 @@ describe("pack skills in the sandbox skill index", () => {
     );
     const sourceDir = source.source as { type: string; children: Record<string, any> };
     expect(sourceDir.children["opengeni-spreadsheets"].type).toBe("local_dir");
+    expect(composition.selections).toContainEqual(
+      expect.objectContaining({
+        id: "native-tool:opengeni-spreadsheets",
+        name: "opengeni-spreadsheets",
+        source: "native_tool",
+      }),
+    );
   });
 
   test("artifact skills follow the exact tool catalog, independently of local runtime support", () => {
@@ -7449,16 +7457,7 @@ describe("pack skills in the sandbox skill index", () => {
     );
     expect(entry).toBeDefined();
     const loaded = loadSkillLibrarySkill("azure-verified-modules", entry?.version);
-    const source = lazySkillSourceWithPackSkills(
-      [],
-      [
-        {
-          name: loaded.skill.name,
-          description: loaded.skill.description,
-          files: loaded.skill.files.map((file) => ({ path: file.path, content: file.content })),
-        },
-      ],
-    );
+    const source = composeRuntimeSkills([installedActivation(loaded)]).lazySource;
     const sourceDir = source.source as { type: string; children: Record<string, any> };
     expect(sourceDir.children[loaded.skill.name].type).toBe("dir");
     expect(sourceDir.children[loaded.skill.name].children["SKILL.md"].content).toContain(
@@ -7470,7 +7469,7 @@ describe("pack skills in the sandbox skill index", () => {
   });
 
   test("pack skills join the explicit skill index", () => {
-    const source = lazySkillSourceWithPackSkills([infraSkill]);
+    const source = composeRuntimeSkills([packActivation(infraSkill)]).lazySource;
     const sourceDir = source.source as {
       type: string;
       children: Record<string, any>;
@@ -7484,7 +7483,6 @@ describe("pack skills in the sandbox skill index", () => {
     );
     const index = source.getIndex?.(emptyManifest, ".agents") ?? [];
     const names = index.map((entry) => entry.name);
-    expect(names).not.toContain("checkov");
     expect(names).toContain("infra-ops");
     const infra = index.find((entry) => entry.name === "infra-ops");
     expect(infra?.description).toBe("Operate workspace infrastructure.");
@@ -7492,18 +7490,18 @@ describe("pack skills in the sandbox skill index", () => {
   });
 
   test("an explicit pack skill description wins over SKILL.md frontmatter", () => {
-    const source = lazySkillSourceWithPackSkills([
-      { ...infraSkill, description: "Explicit description." },
-    ]);
+    const source = composeRuntimeSkills([
+      packActivation({ ...infraSkill, description: "Explicit description." }),
+    ]).lazySource;
     const index = source.getIndex?.(emptyManifest, ".agents") ?? [];
     expect(index.find((entry) => entry.name === "infra-ops")?.description).toBe(
       "Explicit description.",
     );
   });
 
-  test("a Pack may explicitly contribute a former deployment-default skill", () => {
-    const source = lazySkillSourceWithPackSkills([
-      {
+  test("a Pack may explicitly contribute Checkov like any other Skill", () => {
+    const source = composeRuntimeSkills([
+      packActivation({
         name: "checkov",
         files: [
           {
@@ -7511,8 +7509,8 @@ describe("pack skills in the sandbox skill index", () => {
             content: "---\ndescription: Pack-provided checkov.\n---\n",
           },
         ],
-      },
-    ]);
+      }),
+    ]).lazySource;
     const sourceDir = source.source as {
       type: string;
       children: Record<string, any>;
@@ -7524,70 +7522,85 @@ describe("pack skills in the sandbox skill index", () => {
     expect(checkovEntries[0]?.description).toBe("Pack-provided checkov.");
   });
 
-  test("a pack skill has precedence over an explicitly selected curated skill", () => {
+  test("a Pack owner wins only when it owns the identical installed artifact", () => {
     const loaded = loadSkillLibrarySkill("azure-verified-modules");
-    const source = lazySkillSourceWithPackSkills(
-      [
-        {
-          name: loaded.skill.name,
-          description: "Pack override.",
-          files: [{ path: "SKILL.md", content: "# Pack override\n" }],
-        },
-      ],
-      [
-        {
-          name: loaded.skill.name,
-          description: loaded.skill.description,
-          files: loaded.skill.files.map((file) => ({ path: file.path, content: file.content })),
-        },
-      ],
-    );
+    const artifact = runtimeArtifact(loaded.skill);
+    const composition = composeRuntimeSkills([
+      installedActivation(loaded),
+      {
+        source: "pack",
+        id: `pack:solution:${artifact.name}`,
+        artifact,
+        reason: "owned by solution Pack",
+      },
+    ]);
+    const source = composition.lazySource;
     const entries = (source.getIndex?.(emptyManifest, ".agents") ?? []).filter(
       (entry) => entry.name === loaded.skill.name,
     );
     expect(entries).toHaveLength(1);
-    expect(entries[0]?.description).toBe("Pack override.");
+    expect(composition.selections).toContainEqual(
+      expect.objectContaining({
+        id: `pack:solution:${artifact.name}`,
+        source: "pack",
+        contentSha256: loaded.entry.contentSha256,
+      }),
+    );
   });
 
-  test("rejects unsafe pack skill content instead of mounting it", () => {
+  test("rejects divergent duplicate Skills instead of using source precedence to hide drift", () => {
+    const loaded = loadSkillLibrarySkill("azure-verified-modules");
     expect(() =>
-      lazySkillSourceWithPackSkills([
-        {
+      composeRuntimeSkills([
+        installedActivation(loaded),
+        packActivation({
+          name: loaded.skill.name,
+          description: "Divergent Pack override.",
+          files: [{ path: "SKILL.md", content: "# Divergent Pack override\n" }],
+        }),
+      ]),
+    ).toThrow(`Conflicting Skill definitions for "${loaded.skill.name}"`);
+  });
+
+  test("rejects unsafe activated Skill content instead of mounting it", () => {
+    expect(() =>
+      composeRuntimeSkills([
+        packActivation({
           name: "bad",
           files: [
             { path: "SKILL.md", content: "x" },
             { path: "../escape.md", content: "x" },
           ],
-        },
+        }),
       ]),
-    ).toThrow("Invalid pack skill file path");
+    ).toThrow("Invalid Skill file path");
     expect(() =>
-      lazySkillSourceWithPackSkills([
-        {
+      composeRuntimeSkills([
+        packActivation({
           name: "no-entry",
           files: [{ path: "references/only.md", content: "x" }],
-        },
+        }),
       ]),
     ).toThrow("missing a top-level SKILL.md");
     expect(() =>
-      lazySkillSourceWithPackSkills([
-        { name: "dup", files: [{ path: "SKILL.md", content: "a" }] },
-        { name: "dup", files: [{ path: "SKILL.md", content: "b" }] },
+      composeRuntimeSkills([
+        packActivation({ name: "dup", files: [{ path: "SKILL.md", content: "a" }] }),
+        packActivation({ name: "dup", files: [{ path: "SKILL.md", content: "b" }] }),
       ]),
-    ).toThrow("Duplicate pack skill name");
+    ).toThrow('Conflicting Skill definitions for "dup"');
     expect(() =>
-      lazySkillSourceWithPackSkills([
-        {
+      composeRuntimeSkills([
+        packActivation({
           name: "bad/name",
           files: [{ path: "SKILL.md", content: "x" }],
-        },
+        }),
       ]),
-    ).toThrow("Invalid pack skill name");
+    ).toThrow("Invalid Skill name");
   });
 
-  test("buildOpenGeniAgent feeds pack skills through the SDK skills capability", () => {
+  test("buildOpenGeniAgent feeds explicit activations through the SDK Skills capability", () => {
     const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), [], {
-      packSkills: [infraSkill],
+      skillActivations: [packActivation(infraSkill)],
     });
     const capabilities = (agent as any).capabilities as Array<{
       type: string;
@@ -7600,8 +7613,8 @@ describe("pack skills in the sandbox skill index", () => {
     expect(skillsCapability?.lazyFrom?.source.type).toBe("dir");
     const index = skillsCapability?.lazyFrom?.getIndex?.(emptyManifest, ".agents") ?? [];
     expect(index.map((entry) => entry.name)).toContain("infra-ops");
-    // Without explicit skills, the capability retains an empty in-memory
-    // source so repository and later session skills can still compose.
+    // Without explicit Skills, the capability retains an empty in-memory
+    // source so repository discovery can still compose.
     const plainAgent = buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), []);
     const plainCapability = (
       (plainAgent as any).capabilities as Array<{
@@ -7609,40 +7622,83 @@ describe("pack skills in the sandbox skill index", () => {
         lazyFrom?: { source: { type: string } };
       }>
     ).find((capability) => capability.type === "skills");
-    expect(plainCapability?.lazyFrom?.source.type).toBe("local_dir");
+    expect(plainCapability?.lazyFrom?.source.type).toBe("dir");
   });
 
   test("buildOpenGeniAgent exposes secret-free curated skill provenance", () => {
     const loaded = loadSkillLibrarySkill("azure-verified-modules");
     const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), [], {
-      skillLibrarySkills: [
-        {
-          name: loaded.skill.name,
-          description: loaded.skill.description,
-          files: loaded.skill.files.map((file) => ({ path: file.path, content: file.content })),
-        },
-      ],
-      skillLibrarySelections: [
-        {
-          id: loaded.entry.id,
-          name: loaded.entry.name,
-          source: "library",
-          version: loaded.entry.version,
-          contentSha256: loaded.entry.contentSha256,
-          reason: "enabled workspace capability installation",
-        },
-      ],
+      skillActivations: [installedActivation(loaded)],
     });
     expect(effectiveSkillSelectionsForAgent(agent)).toContainEqual({
-      id: loaded.entry.id,
+      id: `skill:${loaded.entry.id}`,
       name: loaded.entry.name,
-      source: "library",
+      source: "installation",
       version: loaded.entry.version,
       contentSha256: loaded.entry.contentSha256,
       reason: "enabled workspace capability installation",
     });
   });
+
+  test("installed artifact identity is verified before materialization", () => {
+    const loaded = loadSkillLibrarySkill("azure-verified-modules");
+    expect(() =>
+      composeRuntimeSkills([{ ...installedActivation(loaded), contentSha256: "0".repeat(64) }]),
+    ).toThrow("Installed Skill artifact hash mismatch");
+  });
+
+  test("higher-precedence ownership cannot hide an invalid installed artifact", () => {
+    const loaded = loadSkillLibrarySkill("azure-verified-modules");
+    const artifact = runtimeArtifact(loaded.skill);
+    expect(() =>
+      composeRuntimeSkills([
+        { ...installedActivation(loaded), contentSha256: "0".repeat(64) },
+        {
+          source: "session",
+          id: `session:${artifact.name}`,
+          artifact,
+          reason: "selected for the exact session",
+        },
+      ]),
+    ).toThrow("Installed Skill artifact hash mismatch");
+  });
 });
+
+function runtimeArtifact(skill: {
+  name: string;
+  description: string;
+  files: readonly { path: string; content: string }[];
+}) {
+  return {
+    name: skill.name,
+    description: skill.description,
+    files: skill.files.map((file) => ({ path: file.path, content: file.content })),
+  };
+}
+
+function installedActivation(loaded: ReturnType<typeof loadSkillLibrarySkill>) {
+  return {
+    source: "installation" as const,
+    id: `skill:${loaded.entry.id}`,
+    artifact: runtimeArtifact(loaded.skill),
+    version: loaded.entry.version,
+    contentSha256: loaded.entry.contentSha256,
+    reason: "enabled workspace capability installation",
+  };
+}
+
+function packActivation(artifact: {
+  name: string;
+  description?: string | null;
+  files: readonly { path: string; content: string }[];
+}) {
+  return {
+    source: "pack" as const,
+    id: `pack:test:${artifact.name}`,
+    artifact,
+    reason: "owned by test Pack",
+  };
+}
 
 describe("curated skill-library artifact integrity", () => {
   function withArtifact(run: (root: string) => void): void {

@@ -11,8 +11,9 @@ import {
   buildPortableSkillArtifact,
   isSkillLibraryEntryId,
   loadSkillLibrarySkill,
-  type EffectiveSkillSelection,
-  type PackSkill,
+  type InstalledSkillActivation,
+  type PackSkillActivation,
+  type RuntimeSkillArtifact,
 } from "@opengeni/runtime";
 export {
   resolveRigProviderImageSelection,
@@ -29,18 +30,17 @@ export {
 export type WorkspacePackRuntime = {
   sandboxImage: string | null;
   sandboxProviderImages: CapabilityPack["sandboxProviderImages"] | null;
-  skills: PackSkill[];
+  skillActivations: PackSkillActivation[];
 };
 
 const emptyPackRuntime: WorkspacePackRuntime = {
   sandboxImage: null,
   sandboxProviderImages: null,
-  skills: [],
+  skillActivations: [],
 };
 
-export type WorkspaceSkillLibraryRuntime = {
-  skillLibrarySkills: PackSkill[];
-  skillLibrarySelections: EffectiveSkillSelection[];
+export type WorkspaceInstalledSkillRuntime = {
+  activations: InstalledSkillActivation[];
 };
 
 type SkillLibraryInstallationMetadata = {
@@ -96,10 +96,10 @@ export function packInstallationUsesLegacyRuntime(
  * only secret-free exact identity metadata, and the runtime loader verifies
  * the pinned artifact hash before any content is materialized.
  */
-export async function resolveWorkspaceSkillLibraryRuntime(
+export async function resolveWorkspaceInstalledSkillRuntime(
   db: Database,
   workspaceId: string,
-): Promise<WorkspaceSkillLibraryRuntime> {
+): Promise<WorkspaceInstalledSkillRuntime> {
   const installations = await listCapabilityInstallations(db, workspaceId);
   const activeSkills = installations
     .filter(
@@ -110,8 +110,7 @@ export async function resolveWorkspaceSkillLibraryRuntime(
         isSkillLibraryEntryId(installation.capabilityId.slice("skill:".length)),
     )
     .sort((a, b) => a.capabilityId.localeCompare(b.capabilityId));
-  const skillLibrarySkills: PackSkill[] = [];
-  const skillLibrarySelections: EffectiveSkillSelection[] = [];
+  const activations: InstalledSkillActivation[] = [];
   for (const installation of activeSkills) {
     const metadata = parseSkillLibraryInstallationMetadata(
       installation.metadata,
@@ -141,15 +140,14 @@ export async function resolveWorkspaceSkillLibraryRuntime(
         `Skill installation provenance mismatch for ${metadata.libraryId}@${metadata.libraryVersion}; re-enable the skill from the current catalog`,
       );
     }
-    skillLibrarySkills.push({
-      name: loaded.skill.name,
-      description: loaded.skill.description,
-      files: loaded.skill.files.map((file) => ({ path: file.path, content: file.content })),
-    });
-    skillLibrarySelections.push({
-      id: loaded.entry.id,
-      name: loaded.entry.name,
-      source: "library",
+    activations.push({
+      source: "installation",
+      id: installation.capabilityId,
+      artifact: {
+        name: loaded.skill.name,
+        description: loaded.skill.description,
+        files: loaded.skill.files.map((file) => ({ path: file.path, content: file.content })),
+      },
       version: loaded.entry.version,
       contentSha256: loaded.entry.contentSha256,
       reason: "enabled workspace capability installation",
@@ -167,21 +165,20 @@ export async function resolveWorkspaceSkillLibraryRuntime(
         `Imported Skill artifact verification failed for ${imported.capabilityId}; reinstall it from the pinned source`,
       );
     }
-    skillLibrarySkills.push({
-      name: artifact.name,
-      description: artifact.description,
-      files: artifact.files.map((file) => ({ path: file.path, content: file.content })),
-    });
-    skillLibrarySelections.push({
+    activations.push({
+      source: "installation",
       id: imported.capabilityId,
-      name: artifact.name,
-      source: "imported",
+      artifact: {
+        name: artifact.name,
+        description: artifact.description,
+        files: artifact.files.map((file) => ({ path: file.path, content: file.content })),
+      },
       version: imported.sourceCommit,
       contentSha256: artifact.contentSha256,
       reason: `installed from ${imported.sourceUrl}`,
     });
   }
-  return { skillLibrarySkills, skillLibrarySelections };
+  return { activations };
 }
 
 function parseSkillLibraryInstallationMetadata(
@@ -223,7 +220,7 @@ export function workspacePackRuntimeFromPacks(packs: CapabilityPack[]): Workspac
       `Multiple enabled packs declare a sandbox image (${ids}). Only one enabled pack per workspace may declare sandboxImage; disable the others and retry.`,
     );
   }
-  const skills: PackSkill[] = [];
+  const skillActivations: PackSkillActivation[] = [];
   // Keyed case-insensitively to match the per-pack uniqueness rule in the
   // CapabilityPack contract (and case-insensitive filesystems).
   const skillOwners = new Map<string, string>();
@@ -237,17 +234,23 @@ export function workspacePackRuntimeFromPacks(packs: CapabilityPack[]): Workspac
         );
       }
       skillOwners.set(key, pack.id);
-      skills.push({
+      const artifact: RuntimeSkillArtifact = {
         name: skill.name,
         description: skill.description ?? null,
         files: skill.files.map((file) => ({ path: file.path, content: file.content })),
+      };
+      skillActivations.push({
+        source: "pack",
+        id: `pack:${pack.id}:${skill.name}`,
+        artifact,
+        reason: `active legacy Pack ${pack.id}`,
       });
     }
   }
   return {
     sandboxImage: imagePacks[0]?.sandboxImage?.trim() ?? null,
     sandboxProviderImages: imagePacks[0]?.sandboxProviderImages ?? null,
-    skills,
+    skillActivations,
   };
 }
 

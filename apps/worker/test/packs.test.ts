@@ -50,12 +50,12 @@ describe("workspace pack runtime resolution", () => {
     expect(workspacePackRuntimeFromPacks([])).toEqual({
       sandboxImage: null,
       sandboxProviderImages: null,
-      skills: [],
+      skillActivations: [],
     });
     expect(workspacePackRuntimeFromPacks([pack({ id: "plain" })])).toEqual({
       sandboxImage: null,
       sandboxProviderImages: null,
-      skills: [],
+      skillActivations: [],
     });
   });
 
@@ -73,11 +73,16 @@ describe("workspace pack runtime resolution", () => {
       "ghcr.io/example/infra-sandbox@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     );
     expect(runtime.sandboxProviderImages).toBeNull();
-    expect(runtime.skills).toEqual([
+    expect(runtime.skillActivations).toEqual([
       {
-        name: "infra-ops",
-        description: null,
-        files: infraSkill.files,
+        source: "pack",
+        id: "pack:infra-runtime:infra-ops",
+        artifact: {
+          name: "infra-ops",
+          description: null,
+          files: infraSkill.files,
+        },
+        reason: "active legacy Pack infra-runtime",
       },
     ]);
   });
@@ -117,7 +122,9 @@ describe("workspace pack runtime resolution", () => {
         skills: [{ ...infraSkill, description: "Operate workspace infrastructure." }],
       }),
     ]);
-    expect(runtime.skills[0]?.description).toBe("Operate workspace infrastructure.");
+    expect(runtime.skillActivations[0]?.artifact.description).toBe(
+      "Operate workspace infrastructure.",
+    );
   });
 });
 
