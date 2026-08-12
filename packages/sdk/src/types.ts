@@ -2538,7 +2538,7 @@ export type ModelCapabilitiesV1 = {
 
 export type ModelCredentialSourceV1 =
   | { kind: "deployment"; mechanism: "api_key" | "azure_ad_bearer" }
-  | { kind: "connected_subscription"; provider: "codex" }
+  | { kind: "connected_subscription"; provider: "codex" | "xai" }
   | { kind: "workspace_connection"; mechanism: "api_key" };
 
 export type ModelBillingAttributionV1 = {
@@ -2578,7 +2578,7 @@ export type ClientModel = {
   provider: string;
   providerLabel: string;
   api: "responses" | "chat";
-  source?: "opengeni" | "codex" | "workspace_gateway" | undefined;
+  source?: "opengeni" | "codex" | "supergrok" | "workspace_gateway" | undefined;
   contextWindowTokens?: number | undefined;
   schemaVersion?: 1 | undefined;
   aliases?: string[] | undefined;
@@ -2859,6 +2859,89 @@ export type CodexConnectPoll =
       accountId?: string;
       isActive?: boolean;
     };
+
+/** Explicit authority of one connected SuperGrok/xAI subscription account. */
+export type SuperGrokAccountScope = "workspace" | "user";
+
+/** Metadata-only connected SuperGrok account. Secret OAuth material never crosses the API. */
+export type SuperGrokAccount = {
+  id: string;
+  scope: SuperGrokAccountScope;
+  subject: string;
+  email?: string | null;
+  label?: string | null;
+  status: "active" | "needs_relogin" | "error";
+  active: boolean;
+  expiresAt?: string | null;
+  lastRefreshAt?: string | null;
+  lastError?: string | null;
+  allocatorEnabled: boolean;
+  allocatorVersion: number;
+  allocatorUpdatedAt?: string | null;
+  exhaustedUntil?: string | null;
+  quota?: {
+    usedPercent: number | null;
+    periodStart: string | null;
+    periodEnd: string | null;
+    subscriptionTier: string | null;
+    checkedAt: string | null;
+  } | null;
+};
+
+export type SuperGrokRotationSettings = {
+  rotationEnabled: boolean;
+  rotationStrategy: "sharded";
+  activeCredentialId: string | null;
+};
+
+/** GET /supergrok/accounts — visible accounts plus the workspace active pointer. */
+export type SuperGrokAccountsResponse = {
+  accounts: SuperGrokAccount[];
+  activeAccountId: string | null;
+  settings: SuperGrokRotationSettings;
+};
+
+export type SuperGrokConnectionStatus = {
+  connected: boolean;
+  valid?: boolean;
+  accountCount?: number;
+  models?: ClientModel[];
+  activeAccount?: {
+    id: string;
+    label?: string | null;
+    subject?: string | null;
+    scope: SuperGrokAccountScope;
+  } | null;
+};
+
+/** Workspace is the deliberately simple/default connection authority. */
+export type SuperGrokConnectStart = {
+  userCode: string;
+  verificationUri: string;
+  verificationUriComplete?: string | null;
+  intervalSeconds: number;
+  expiresInSeconds: number;
+  scope: SuperGrokAccountScope;
+  state: string;
+};
+
+export type SuperGrokConnectPoll =
+  | { status: "pending" | "slow_down"; intervalSeconds?: number }
+  | { status: "expired" | "denied" }
+  | {
+      status: "connected";
+      accountId: string;
+      scope: SuperGrokAccountScope;
+      isActive: boolean;
+      email?: string | null;
+    };
+
+export type SuperGrokAllocatorUpdate = {
+  allocatorEnabled: boolean;
+  allocatorVersion: number;
+  allocatorUpdatedAt: string | null;
+  changed: boolean;
+};
 
 /** Remaining usage/limits for one account. `usage` is the normalized P2 payload. */
 export type CodexUsage = {
