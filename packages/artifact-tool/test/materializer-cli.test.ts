@@ -562,11 +562,21 @@ async function invoke(
         reject(new Error(`materializer fixture terminated by ${signal}`));
         return;
       }
+      const stdoutBytes = new Uint8Array(Buffer.concat(stdout));
+      const stderrText = Buffer.concat(stderr).toString("utf8");
+      if (argument !== IDENTITY && stdoutBytes.byteLength < 20) {
+        reject(
+          new Error(
+            `materializer fixture returned ${stdoutBytes.byteLength} bytes (exit ${String(code)}): ${stderrText}`,
+          ),
+        );
+        return;
+      }
       resolve(
         Object.freeze({
           exitCode: code ?? -1,
-          stdout: new Uint8Array(Buffer.concat(stdout)),
-          stderr: Buffer.concat(stderr).toString("utf8"),
+          stdout: stdoutBytes,
+          stderr: stderrText,
         }),
       );
     });
