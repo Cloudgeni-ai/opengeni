@@ -528,11 +528,17 @@ export function createAppComposition(deps: AppDependencies): {
   });
 
   app.use("/v1/workspaces/:workspaceId/*", async (c, next) => {
+    const workspaceId = c.req.param("workspaceId");
+    if (workspaceRequestRequiresCodexAccountPrevalidation(c.req.raw)) {
+      const grant = await requireAccessGrant(c, routeDeps, workspaceId);
+      await validateCodexAccountTarget(c.req.raw);
+      await withAccessGrantSessionRlsContext(routeDeps, grant, next);
+      return;
+    }
     if (workspaceActorContextExempt(c.req.method, new URL(c.req.url).pathname)) {
       await next();
       return;
     }
-    const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, routeDeps, workspaceId);
     await withAccessGrantSessionRlsContext(routeDeps, grant, next);
   });
@@ -755,6 +761,25 @@ export function workspaceActorContextExempt(method: string, pathname: string): b
     return true;
   }
   return method === "POST" && /^\/v1\/workspaces\/[^/]+\/github\/installations$/.test(pathname);
+}
+
+function workspaceRequestRequiresCodexAccountPrevalidation(request: Request): boolean {
+  return (
+    request.method === "POST" &&
+    /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/codex-account$/.test(new URL(request.url).pathname)
+  );
+}
+
+async function validateCodexAccountTarget(request: Request): Promise<void> {
+  const body = (await request
+    .clone()
+    .json()
+    .catch(() => null)) as { target?: unknown } | null;
+  if (typeof body?.target !== "string" || body.target.length === 0) {
+    throw new HTTPException(400, {
+      message: 'target is required ("auto" or an account id)',
+    });
+  }
 }
 
 async function withAccessGrantSessionRlsContext<T>(

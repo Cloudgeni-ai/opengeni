@@ -58,6 +58,7 @@ const MANAGED_HUMAN_PERSONAL_WORKSPACE_AUTHORITY_TABLES = [
 ] as const;
 const SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE =
   "session_private_actor_visible(uuid, uuid, uuid, text)";
+const SESSION_REFERENCE_VISIBLE_ROUTINE = "session_reference_visible(uuid, uuid, uuid)";
 const TRANSITION_SESSION_VISIBILITY_ROUTINE =
   "transition_session_visibility(uuid, uuid, uuid, text, text, integer, text, text)";
 const FORK_SESSION_CONTENT_ROUTINE =
@@ -65,6 +66,7 @@ const FORK_SESSION_CONTENT_ROUTINE =
 const SESSION_AUTHORITY_ROUTINES = new Set<string>([
   FORK_SESSION_CONTENT_ROUTINE,
   SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE,
+  SESSION_REFERENCE_VISIBLE_ROUTINE,
   TRANSITION_SESSION_VISIBILITY_ROUTINE,
 ]);
 
@@ -73,6 +75,7 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE,
   MANAGED_HUMAN_PERSONAL_WORKSPACE_ROUTINE,
   SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE,
+  SESSION_REFERENCE_VISIBLE_ROUTINE,
   TRANSITION_SESSION_VISIBILITY_ROUTINE,
 ] as const;
 
@@ -1171,7 +1174,13 @@ export function evaluateRuntimeDatabasePosture(
       continue;
     }
     const routine = matches[0]!;
-    if (!routine.securityDefiner) {
+    if (routine.name === SESSION_REFERENCE_VISIBLE_ROUTINE) {
+      if (routine.securityDefiner) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} must be SECURITY INVOKER`,
+        );
+      }
+    } else if (!routine.securityDefiner) {
       violations.push(`target-schema runtime capability ${routine.name} is not SECURITY DEFINER`);
     }
     if (routine.name === KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE) {

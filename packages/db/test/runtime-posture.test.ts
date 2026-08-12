@@ -148,6 +148,13 @@ function safePosture(): RuntimeDatabasePosture {
         securityDefiner: true,
       },
       {
+        name: "session_reference_visible(uuid, uuid, uuid)",
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: false,
+      },
+      {
         name: "transition_session_visibility(uuid, uuid, uuid, text, text, integer, text, text)",
         owner: "opengeni_migrator",
         execute: true,

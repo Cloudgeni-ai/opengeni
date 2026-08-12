@@ -10,6 +10,34 @@ DECLARE
   target_table text;
   policy_expression text;
 BEGIN
+  IF pg_catalog.to_regprocedure(
+    pg_catalog.format('%I.session_private_actor_visible(uuid,uuid,uuid,text)', data_schema)
+  ) IS NULL OR pg_catalog.to_regprocedure(
+    pg_catalog.format('%I.session_reference_visible(uuid,uuid,uuid)', data_schema)
+  ) IS NULL THEN
+    RAISE EXCEPTION 'session visibility helper chain is missing'
+      USING ERRCODE = '42883';
+  END IF;
+
+  EXECUTE pg_catalog.format(
+    'REVOKE ALL ON FUNCTION %I.session_private_actor_visible(uuid,uuid,uuid,text) FROM PUBLIC',
+    data_schema
+  );
+  EXECUTE pg_catalog.format(
+    'REVOKE ALL ON FUNCTION %I.session_reference_visible(uuid,uuid,uuid) FROM PUBLIC',
+    data_schema
+  );
+  IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'opengeni_app') THEN
+    EXECUTE pg_catalog.format(
+      'GRANT EXECUTE ON FUNCTION %I.session_private_actor_visible(uuid,uuid,uuid,text) TO opengeni_app',
+      data_schema
+    );
+    EXECUTE pg_catalog.format(
+      'GRANT EXECUTE ON FUNCTION %I.session_reference_visible(uuid,uuid,uuid) TO opengeni_app',
+      data_schema
+    );
+  END IF;
+
   FOREACH target_table IN ARRAY ARRAY[
     'slack_interaction_action_handles',
     'slack_shared_task_origins'

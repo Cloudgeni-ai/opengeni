@@ -325,6 +325,13 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
         securityDefiner: true,
       },
       {
+        name: "session_reference_visible(uuid, uuid, uuid)",
+        owner: "postgres",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: false,
+      },
+      {
         name: "transition_session_visibility(uuid, uuid, uuid, text, text, integer, text, text)",
         owner: "postgres",
         execute: true,

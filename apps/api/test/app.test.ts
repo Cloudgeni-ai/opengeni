@@ -130,7 +130,9 @@ describe("API helpers", () => {
     );
 
     expect(response.status).toBe(302);
-    expect(response.headers.get("location")).toStartWith("https://github.com/login/oauth/authorize?");
+    expect(response.headers.get("location")).toStartWith(
+      "https://github.com/login/oauth/authorize?",
+    );
   });
   test("normalizes repository resources into sandbox mount paths", () => {
     const [resource] = normalizeResources([

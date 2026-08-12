@@ -2888,6 +2888,16 @@ async function createRlsAppRole(
   await db.execute(
     dbSql.raw(`GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO "${role}"`),
   );
+  await db.execute(
+    dbSql.raw(
+      `GRANT EXECUTE ON FUNCTION public.session_private_actor_visible(uuid, uuid, uuid, text) TO "${role}"`,
+    ),
+  );
+  await db.execute(
+    dbSql.raw(
+      `GRANT EXECUTE ON FUNCTION public.session_reference_visible(uuid, uuid, uuid) TO "${role}"`,
+    ),
+  );
   // Match the runtime role's exact target-schema-local capability. This public
   // SECURITY DEFINER function is intentionally excluded from the broad private
   // helper grant and remains unavailable to PUBLIC.

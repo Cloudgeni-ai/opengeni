@@ -773,6 +773,22 @@ BEGIN
     END IF;
     IF to_regprocedure(
       format(
+        '%I.session_reference_visible(uuid,uuid,uuid)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.session_reference_visible(uuid, uuid, uuid) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.session_reference_visible(uuid, uuid, uuid) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
         '%I.transition_session_visibility(uuid,uuid,uuid,text,text,integer,text,text)',
         ${literal(schema)}
       )
