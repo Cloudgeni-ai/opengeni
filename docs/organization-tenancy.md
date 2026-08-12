@@ -61,6 +61,32 @@ access on the personal workspace, and malformed subjects fail closed. The app
 role still has zero direct SELECT/INSERT/UPDATE/DELETE privileges on all four
 organization-tenancy tables.
 
+## Canonical human identity and login bindings
+
+Migration `0223_canonical_human_login_bindings.sql` adds a separate,
+organization-independent identity authority. One Better Auth user converges on
+one canonical human identity, and that identity may have multiple verified
+provider/account login bindings. A canonical identity or login binding never
+implies an organization membership, workspace grant, personal-workspace
+pointer, user-resource authority, or sharing grant.
+
+Binding link, unlink, and recovery operations require identity-revision CAS and
+write immutable idempotency/audit receipts. Accepted authority changes advance
+a monotonic authentication revision and delete existing Better Auth sessions
+in the same transaction. Provider-account collisions place both identities in
+a deterministic disputed state; removing or losing the last active factor
+enters recovery-required state. Ordinary access denies recovery-required,
+disputed, disabled, stale-revision, and missing sessions. Identity recovery
+routes may accept only an exactly revision-stamped recovery-required session.
+
+The canonical identity projection exposes only identity and login-binding
+metadata. It intentionally omits organization, workspace, membership, and
+resource identifiers, so identity discovery cannot become a cross-organization
+discovery path. Organization membership remains independently authoritative:
+the same human may have separate memberships in multiple organizations, and
+each membership and its resources retain their existing organization-local
+foreign-key and access constraints.
+
 ## Legacy behavior
 
 Existing resources retain their current workspace foreign keys and RLS. Slice

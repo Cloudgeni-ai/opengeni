@@ -239,6 +239,26 @@ dual-write, backfill, validation, and subsystem-by-subsystem cutover. See
 [`organization-tenancy.md`](organization-tenancy.md) and the accepted
 [ADR](design/organization-tenancy-slice-a-2026-08-11.md).
 
+Migration 0223 adds organization-independent canonical human identity and
+verified login-binding authority. Each Better Auth user converges on one
+canonical identity, while multiple provider/account bindings can authenticate
+that human without implying organization membership, workspace access, or
+resource authority. Identity and binding mutations use revision CAS, immutable
+operation receipts, advisory locking for provider-account collisions, and a
+monotonic authentication revision; accepted authority changes invalidate
+existing Better Auth sessions in the same transaction. Lost-factor and
+collision states fail closed, and only recovery-authorized identity routes may
+accept a session stamped with a recovery-required revision. The four authority
+tables are FORCE RLS and expose no direct application-role DML; target-schema-
+local, PUBLIC-revoked SECURITY DEFINER routines are the only runtime path. The
+public identity projection intentionally contains no organization, workspace,
+membership, or resource identifiers. Canonical: migration
+`0223_canonical_human_login_bindings.sql`,
+`packages/contracts/src/canonical-human-identities.ts`,
+`packages/db/src/canonical-human-identities.ts`,
+`packages/core/src/canonical-human-identities.ts`, and
+`apps/api/src/routes/canonical-human-identities.ts`.
+
 > Canonical: [`run-lifecycle.md`](run-lifecycle.md), `packages/db/src/schema.ts`.
 
 ### 3.6 Workspace is the access boundary + three access modes
