@@ -36,7 +36,7 @@ export type SourceRemoveTarget =
     };
 
 const SourcePackagesSectionView = lazy(async () => {
-  const module = await import("@/components/capabilities/integration-control-center-view");
+  const module = await import("@/components/capabilities/source-packages-view");
   return { default: module.SourcePackagesSectionView };
 });
 
