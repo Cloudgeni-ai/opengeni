@@ -551,6 +551,7 @@ function admissionFixture(
         commits: [{ sha: headSha }],
         behind_by: pullMergeBaseSha === pullBaseSha ? 0 : 4,
         ahead_by: 1,
+        total_commits: 1,
       });
     if (url.pathname === `${prefix}/pulls/${pullNumber}/files`)
       return response([{ filename: "package.json", status: "modified" }]);
@@ -1015,6 +1016,7 @@ function recoverySealFixture(
         },
         behind_by: options.currentMainContainsSource === false ? 1 : 0,
         ahead_by: 1,
+        total_commits: 1,
       });
     if (url.pathname === `${prefix}/compare/${baseSha}...${headSha}`)
       return response({
@@ -1023,6 +1025,7 @@ function recoverySealFixture(
         merge_base_commit: { sha: baseSha },
         behind_by: 0,
         ahead_by: 1,
+        total_commits: 1,
         commits: [{ sha: headSha }],
       });
     if (url.pathname === `${prefix}/pulls/${pullNumber}/files`)
@@ -2045,6 +2048,7 @@ function approvalFixture(
     initialMainSha?: string;
     terminalMainSha?: string;
     sourceAncestorMainShas?: string[];
+    sourceAncestorTotalCommitsByMainSha?: Record<string, number | null>;
     reviewCommit?: string;
     reviewState?: string;
     reviewTime?: string;
@@ -2293,7 +2297,12 @@ function approvalFixture(
               merge_base_commit: { sha: mergeSha },
               ahead_by: 1,
               behind_by: 0,
-              total_commits: 1,
+              total_commits: Object.prototype.hasOwnProperty.call(
+                options.sourceAncestorTotalCommitsByMainSha ?? {},
+                observedMainSha,
+              )
+                ? options.sourceAncestorTotalCommitsByMainSha?.[observedMainSha]
+                : 1,
               commits: [{ sha: observedMainSha, parents: [{ sha: mergeSha }] }],
             }
           : {
@@ -2548,6 +2557,32 @@ describe("release approval provenance", () => {
         fetchImpl: approvalFixture({ terminalMainSha: movedMain }).fetchImpl,
       }),
     ).rejects.toThrow("terminal release main is not ahead of the admitted source");
+  });
+
+  test("rejects incomplete ancestry comparison at either release-source fence", async () => {
+    const initialMainSha = "4".repeat(40);
+    const terminalMainSha = "5".repeat(40);
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: approvalFixture({
+          initialMainSha,
+          sourceAncestorMainShas: [initialMainSha],
+          sourceAncestorTotalCommitsByMainSha: { [initialMainSha]: null },
+        }).fetchImpl,
+      }),
+    ).rejects.toThrow("initial release main ancestry comparison is incomplete");
+
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: approvalFixture({
+          terminalMainSha,
+          sourceAncestorMainShas: [terminalMainSha],
+          sourceAncestorTotalCommitsByMainSha: { [terminalMainSha]: 2 },
+        }).fetchImpl,
+      }),
+    ).rejects.toThrow("terminal release main ancestry comparison is incomplete");
   });
 
   test("accepts the provider-bound structured single-maintainer admin PASS", async () => {

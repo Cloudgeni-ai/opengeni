@@ -891,6 +891,10 @@ async function assertSourceAncestorOfCurrentMain(
     Number.isSafeInteger(comparison?.ahead_by) && comparison.ahead_by > 0,
     `${label} ancestry distance is invalid`,
   );
+  invariant(
+    comparison?.total_commits === comparison.ahead_by,
+    `${label} ancestry comparison is incomplete`,
+  );
 }
 
 async function assertReleaseMainRef(api, value, sourceSha, label) {
