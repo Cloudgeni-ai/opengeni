@@ -10,6 +10,9 @@ ALTER TABLE session_pending_tool_calls
   ADD COLUMN IF NOT EXISTS event_output_codec_version integer;
 
 ALTER TABLE session_pending_tool_calls
+  DROP CONSTRAINT IF EXISTS session_pending_tool_calls_event_output_codec_version_chk;
+
+ALTER TABLE session_pending_tool_calls
   ADD CONSTRAINT session_pending_tool_calls_event_output_codec_version_chk
   CHECK (
     (event_output IS NULL AND event_output_codec_version IS NULL)
@@ -40,6 +43,9 @@ BEGIN
   RETURN OLD;
 END;
 $$;
+
+DROP TRIGGER IF EXISTS session_pending_tool_calls_event_output_delete_guard
+  ON session_pending_tool_calls;
 
 CREATE TRIGGER session_pending_tool_calls_event_output_delete_guard
 BEFORE DELETE ON session_pending_tool_calls
