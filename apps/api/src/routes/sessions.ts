@@ -47,6 +47,7 @@ import {
   SteerSessionQueueItemRequest,
   SteerSessionMessageRequest,
   TerminalExecRequest,
+  UpdateSessionChannelRequest,
   UpdateSessionPinRequest,
   UpdateSessionGoalRequest,
   UpdateSessionMcpApprovalPolicyRequest,
@@ -100,6 +101,8 @@ import {
   requestSessionCompaction,
   setSessionCodexPinInTransaction,
   withSessionCodexCapacityMutation,
+  setSessionChannel,
+  ChannelNotFoundError,
   setSessionPin,
   SessionPinVersionConflictError,
   SessionPinAccessError,
@@ -1282,6 +1285,43 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       ),
     );
     return c.json({ pinned: target === "auto" ? "auto" : target });
+  });
+
+  // Re-file the session into a workspace channel (rail organization only;
+  // null = back to the unfiled inbox). Shared, workspace-visible state, so it
+  // requires sessions:control like rename. Returns the refreshed session.
+  app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/channel", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const sessionId = c.req.param("sessionId");
+    await assertSessionExists(db, workspaceId, sessionId);
+    const payload = UpdateSessionChannelRequest.parse(await c.req.json());
+    try {
+      const updated = await setSessionChannel(db, {
+        workspaceId,
+        sessionId,
+        channelId: payload.channelId,
+      });
+      if (!updated) {
+        throw new HTTPException(404, { message: "session not found" });
+      }
+    } catch (error) {
+      if (error instanceof ChannelNotFoundError) {
+        throw new HTTPException(422, { message: error.message });
+      }
+      throw error;
+    }
+    const session = await getSessionForSubject(
+      db,
+      workspaceId,
+      sessionId,
+      grant.subjectId,
+      relatedSessionAccessFor(c),
+    );
+    if (!session) {
+      throw new HTTPException(404, { message: "session not found" });
+    }
+    return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
   });
 
   // Manual rename. A user-set title is permanent: the db write is
@@ -3162,6 +3202,7 @@ export function sessionAuthorizationOperationForHttp(
     return null;
   }
   if (suffix === "/pin" && verb === "PUT") return "session.pin.write";
+  if (suffix === "/channel" && verb === "PUT") return "session.channel.write";
   if (suffix === "/tool-policy" && verb === "PUT") return "session.tool_policy.write";
   if (/^\/mcp-servers\/[^/]+\/approval-policy$/.test(suffix) && verb === "PATCH") {
     return "session.mcp.approval_policy.write";
@@ -3494,6 +3535,11 @@ function optionalEventSequence(raw: string | undefined): number | undefined {
 
 /** Stable, value-free JSON errors for only the create-session boundary. */
 export function sessionCreateErrorResponse(c: Context, error: unknown): Response {
+  if (error instanceof ChannelNotFoundError) {
+    // Covers the create-vs-channel-delete race the pre-validation cannot: the
+    // insert's FK rejection surfaces as the same 422 an unknown id gets.
+    return c.json({ code: "SESSION_CREATE_REJECTED", message: error.message }, 422);
+  }
   if (error instanceof SessionSpawnDeniedError) {
     return c.json(
       sessionSpawnDenialEnvelope(error),

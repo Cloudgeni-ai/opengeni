@@ -175,6 +175,8 @@ export type {
   UseEnvironmentsOptions,
   UseEnvironmentsResult,
 } from "./hooks/use-environments";
+export { useChannels } from "./hooks/use-channels";
+export type { UseChannelsOptions, UseChannelsResult } from "./hooks/use-channels";
 export { useRigs, useRig, useRigVersions, useRigChanges } from "./hooks/use-rigs";
 export type {
   UseRigsOptions,

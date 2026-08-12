@@ -4,10 +4,10 @@ import { readFile } from "node:fs/promises";
 import postgres from "postgres";
 import { migrate } from "../src/migrate";
 
-const migrationName = "0221_slack_post_outcome_reconciliation.sql";
+const migrationName = "0222_slack_post_outcome_reconciliation.sql";
 const migrationUrl = new URL(`../drizzle/${migrationName}`, import.meta.url);
 
-describe("migration 0221 Slack post outcome reconciliation", () => {
+describe("migration 0222 Slack post outcome reconciliation", () => {
   test("is a rolling old-writer fence with validated states and claim modes", async () => {
     const source = await readFile(migrationUrl, "utf8");
     expect(source.startsWith("-- deployment-mode: rolling\n")).toBe(true);
@@ -21,9 +21,12 @@ describe("migration 0221 Slack post outcome reconciliation", () => {
   });
 
   test("backfills live claims, blocks old unknown reclaims, and preserves FORCE RLS", async () => {
-    const blank = await acquireBlankTestDatabase("migration-0221-slack-post");
+    const blank = await acquireBlankTestDatabase("migration-0222-slack-post");
     if (!blank) return;
-    const sql = postgres(blank.databaseUrl, { max: 1, onnotice: () => undefined });
+    const sql = postgres(blank.databaseUrl, {
+      max: 1,
+      onnotice: () => undefined,
+    });
     try {
       await sql.unsafe(`
         create table schema_migrations (
@@ -105,8 +108,16 @@ describe("migration 0221 Slack post outcome reconciliation", () => {
         order by operation_id`;
       expect([...upgraded]).toEqual(
         [
-          { operationId: activeOperationId, claimMode: "send", status: "provider_started" },
-          { operationId: releasedOperationId, claimMode: null, status: "provider_started" },
+          {
+            operationId: activeOperationId,
+            claimMode: "send",
+            status: "provider_started",
+          },
+          {
+            operationId: releasedOperationId,
+            claimMode: null,
+            status: "provider_started",
+          },
         ].sort((left, right) => left.operationId.localeCompare(right.operationId)),
       );
 
@@ -190,7 +201,11 @@ describe("migration 0221 Slack post outcome reconciliation", () => {
              and tgname = 'slack_bot_post_operations_claim_mode_fence'
              and not tgisinternal) as "triggerCount"
         from pg_class where oid = 'slack_bot_post_operations'::regclass`;
-      expect(posture).toEqual({ forced: true, policyCount: 1, triggerCount: 1 });
+      expect(posture).toEqual({
+        forced: true,
+        policyCount: 1,
+        triggerCount: 1,
+      });
 
       await sql.begin(async (tx) => {
         await tx.unsafe("set local role opengeni_app");

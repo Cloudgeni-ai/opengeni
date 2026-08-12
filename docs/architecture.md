@@ -153,9 +153,9 @@ exact materialized file. Provider ids, object keys, signed URLs, and base64 do
 not enter the model-facing prefix. See
 [`image-generation.md`](image-generation.md).
 
-Serving workers fail closed before decoding an active transcript above 3 MiB,
-4,096 rows, 65,536 JSON nodes, or 32,768 object properties. Approval `RunState`
-uses the same byte/node/property envelope. Oversized state is never silently
+Serving workers fail closed before decoding an active transcript above 15 MiB,
+8,192 rows, 131,072 JSON nodes, or 65,536 object properties. Approval `RunState`
+retains its distinct 3 MiB / 65,536-node / 32,768-property envelope. Oversized state is never silently
 trimmed or compacted inside a serving worker; repair and forensic work belongs
 in a bounded non-serving execution class.
 

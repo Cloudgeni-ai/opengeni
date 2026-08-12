@@ -34,6 +34,7 @@ export type {
   CapabilityKind,
   CapabilityPack,
   CapabilitySource,
+  Channel,
   ClientConfig,
   ConnectionKind,
   ConnectionMetadata,

@@ -220,6 +220,8 @@ Each internal server-owned post requires one durable `operationId` UUID reserved
 
 An outcome-unknown retry performs a bounded read of the exact channel or DM and, for a reply, the exact parent thread. It completes only when one message has the exact durable `client_msg_id`, exact text, and exact thread placement. Paging and eventual visibility are bounded; a mismatch, duplicate exact identity, exhausted bound, or response that omits a trustworthy `client_msg_id` remains outcome-unknown and fails closed. Legacy released `provider_started` rows receive the same conservative treatment.
 
+Rolling migration `0222_slack_post_outcome_reconciliation.sql` installs the post-operation claim modes, validated state/identity constraints, old-writer trigger fence, and conservative backfill required by this reconciliation path. It follows the independently published session-channel migrations at `0220` and `0221`; do not reuse either ordinal or rename the published ledger.
+
 Each deletion also requires an `operationId` UUID. OpenGeni durably binds it to the tenant, initiating subject or scheduler principal, exact connection, `slack_bot_delete_message` tool, channel, timestamp, and protected request digest before `chat.delete`. Completed retries replay the stored result. Concurrent retries observe the live claim. If the process or response is lost after provider admission, the row becomes outcome-unknown and the retry first reconciles the exact Slack message through `chat.getPermalink`: an absent message completes as already deleted, while a still-present message permits one new delete attempt. OpenGeni never blindly sends `chat.delete` twice.
 
 ## Scheduled tasks

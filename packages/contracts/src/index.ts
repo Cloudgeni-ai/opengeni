@@ -5047,6 +5047,7 @@ export const SessionAuthorizationOperation = z.enum([
   "session.human_input.read",
   "session.human_input.write",
   "session.title.write",
+  "session.channel.write",
   "session.mcp.approval_policy.write",
   "session.tool_policy.write",
   "session.goal.read",
@@ -6308,6 +6309,40 @@ export const UpdateRigRequest = z.object({
   description: z.string().max(2000).nullable().optional(),
 });
 export type UpdateRigRequest = z.infer<typeof UpdateRigRequest>;
+
+// Workspace-shared channels organize root sessions ("workstreams") by work
+// type in the rail. Pure organizational metadata: filing a session into a
+// channel never affects execution, authority, memory, or history.
+export const Channel = z.object({
+  id: z.string().uuid(),
+  accountId: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  name: z.string(),
+  description: z.string().nullable(),
+  createdBy: z.string().nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type Channel = z.infer<typeof Channel>;
+
+export const CreateChannelRequest = z.object({
+  name: z.string().trim().min(1).max(80),
+  description: z.string().max(2000).optional(),
+});
+export type CreateChannelRequest = z.infer<typeof CreateChannelRequest>;
+
+export const UpdateChannelRequest = z.object({
+  name: z.string().trim().min(1).max(80).optional(),
+  description: z.string().max(2000).nullable().optional(),
+});
+export type UpdateChannelRequest = z.infer<typeof UpdateChannelRequest>;
+
+// Re-files one session (rail organization only). null moves it back to the
+// unfiled inbox.
+export const UpdateSessionChannelRequest = z.object({
+  channelId: z.string().uuid().nullable(),
+});
+export type UpdateSessionChannelRequest = z.infer<typeof UpdateSessionChannelRequest>;
 
 // setup_append: the exact command that already worked (+ an optional note).
 export const RigSetupAppendPayload = z.object({
@@ -8588,6 +8623,9 @@ export const Session = z.object({
   // Both null ⇒ a rig-less session (byte-for-byte today's behavior).
   rigId: z.string().uuid().nullable().default(null),
   rigVersionId: z.string().uuid().nullable().default(null),
+  // Workspace channel this session is filed under (rail organization only;
+  // a session tree is grouped by its ROOT session's channel). Null = unfiled.
+  channelId: z.string().uuid().nullable().default(null),
   // Non-default first-party MCP token permissions (manager-style sessions);
   // null means the fixed worker default set.
   firstPartyMcpPermissions: z.array(Permission).nullable(),
@@ -10993,6 +11031,10 @@ export const CreateSessionRequest = withVariableSetIdAlias({
   // null ⇒ explicitly create a rig-less session; UUID ⇒ bind that exact rig.
   // An id that does not name a rig in the workspace is a 422.
   rigId: z.string().uuid().nullable().optional(),
+  // The workspace channel to file this session under (rail organization only).
+  // Omitted/null ⇒ unfiled (inbox). An id that does not name a channel in the
+  // workspace is a 422.
+  channelId: z.string().uuid().nullable().optional(),
   goal: GoalSpec.optional(),
   clientEventId: SessionOperationKey.optional(),
   // Workspace-scoped CREATE idempotency key: collapses concurrent/retried

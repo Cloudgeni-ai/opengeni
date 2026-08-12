@@ -527,8 +527,12 @@ jobs:
         with:
           name: ci-impact-plan
 
-      - name: Install pinned Chromium runtime
-        run: bun x playwright install --with-deps chromium
+      # Firefox is included because the impact plan can select the artifact
+      # browser E2E tests (artifact-spreadsheet-*.browser.e2e.ts), which
+      # launch Firefox; a Chromium-only install fails those shards on any
+      # web-broad candidate.
+      - name: Install pinned browser runtimes
+        run: bun x playwright install --with-deps chromium firefox
 
       - name: Run exactly the impacted E2E tests
         run: >-

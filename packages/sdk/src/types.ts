@@ -1045,6 +1045,8 @@ export type Session = {
   // rig-less session. Frozen at create; a later rig promote never moves them.
   rigId: string | null;
   rigVersionId: string | null;
+  /** Workspace channel the session is filed under; null = unfiled (inbox). */
+  channelId: string | null;
   firstPartyMcpPermissions: string[] | null;
   firstPartyMcpTools: FirstPartyMcpToolName[];
   mcpServers: SessionMcpServerMetadata[];
@@ -3819,6 +3821,36 @@ export type RigVersion = {
 export type RigVerificationHealth = {
   checkHealth: "passing" | "failing" | "unknown";
   lastVerifiedAt: string | null;
+};
+
+/**
+ * Workspace-shared channel organizing root sessions ("workstreams") by work
+ * type in the rail. Pure organizational metadata.
+ */
+export type Channel = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  name: string;
+  description: string | null;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CreateChannelRequest = {
+  name: string;
+  description?: string;
+};
+
+export type UpdateChannelRequest = {
+  name?: string;
+  description?: string | null;
+};
+
+/** Re-files one session; null moves it back to the unfiled inbox. */
+export type UpdateSessionChannelRequest = {
+  channelId: string | null;
 };
 
 export type Rig = {

@@ -20,13 +20,18 @@ const budgets = {
   // catalog now includes governed Slack publication, read-only Atlassian, and
   // typed capabilities plus Browser/Computer resource contracts. The direct
   // session graph includes the small shared interaction-invalidation chunk;
-  // live media renderers and browser/computer controls remain lazy. Keep tight
-  // headroom above the measured production graph.
-  initialRaw: 1400 * kib,
-  initialGzip: 390 * kib,
-  initialFileGzip: 76 * kib,
-  initialFiles: 16,
-  directSessionRaw: 1960 * kib,
+  // live media renderers and browser/computer controls remain lazy. Workspace
+  // channels and the "For you" rail entry add always-loaded rail code and one
+  // more shared-chunk boundary in both graphs. Keep tight headroom above the
+  // measured production graph.
+  initialRaw: 1448 * kib,
+  initialGzip: 400 * kib,
+  // 77 KiB: the largest shared chunk sits 22 bytes over 76 KiB under CI's
+  // bun chunking with the channels/For-you rail code; the graph totals above
+  // still bound the aggregate.
+  initialFileGzip: 77 * kib,
+  initialFiles: 17,
+  directSessionRaw: 1990 * kib,
   directSessionGzip: 552 * kib,
   directSessionFiles: 19,
   lazyChunkRaw: 800 * kib,
