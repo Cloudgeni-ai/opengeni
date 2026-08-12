@@ -115,7 +115,9 @@ describe("release schema contract", () => {
       sourceContract.migrations.map((migration) => [migration.path, migration]),
     );
     expect(sourceContract.sha256).toBe(
-      migrations.has("0227_slack_native_actions.sql")
+      migrations.has("0228_slack_task_policy.sql")
+        ? "bbedea10fef52aeaf32d6e16c27d1042a9f68483ba54c241f5184659e86b3c89"
+        : migrations.has("0227_slack_native_actions.sql")
         ? "32e38ffe1fce657245e30bf413e594f84d967ef68ff9bc4cbd8e08e2bb5ebffc"
         : migrations.has("0224_slack_post_outcome_reconciliation.sql")
           ? "8c742400ca1e21ddc4fe1db810d58af7dca037df360406fc71dbd85205eb5a64"
@@ -145,7 +147,9 @@ describe("release schema contract", () => {
     );
     const contract = {
       ...sourceContract,
-      sha256: migrations.has("0227_slack_native_actions.sql")
+      sha256: migrations.has("0228_slack_task_policy.sql")
+        ? "bbedea10fef52aeaf32d6e16c27d1042a9f68483ba54c241f5184659e86b3c89"
+        : migrations.has("0227_slack_native_actions.sql")
         ? "32e38ffe1fce657245e30bf413e594f84d967ef68ff9bc4cbd8e08e2bb5ebffc"
         : migrations.has("0224_slack_post_outcome_reconciliation.sql")
           ? "8c742400ca1e21ddc4fe1db810d58af7dca037df360406fc71dbd85205eb5a64"
@@ -349,10 +353,13 @@ describe("release schema contract", () => {
         (migrations.has("0222_sessions_channel_fk.sql") ? 1 : 0) +
         (migrations.has("0223_sessions_channel_fk_validate.sql") ? 1 : 0) +
         (migrations.has("0224_slack_post_outcome_reconciliation.sql") ? 1 : 0) +
-        (migrations.has("0227_slack_native_actions.sql") ? 1 : 0),
+        (migrations.has("0227_slack_native_actions.sql") ? 1 : 0) +
+        (migrations.has("0228_slack_task_policy.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      migrations.has("0227_slack_native_actions.sql")
+      migrations.has("0228_slack_task_policy.sql")
+        ? "bbedea10fef52aeaf32d6e16c27d1042a9f68483ba54c241f5184659e86b3c89"
+        : migrations.has("0227_slack_native_actions.sql")
         ? "32e38ffe1fce657245e30bf413e594f84d967ef68ff9bc4cbd8e08e2bb5ebffc"
         : migrations.has("0224_slack_post_outcome_reconciliation.sql")
           ? "8c742400ca1e21ddc4fe1db810d58af7dca037df360406fc71dbd85205eb5a64"
@@ -375,7 +382,9 @@ describe("release schema contract", () => {
                     : "2d8e3211f1526419a8421c4388f7cf2297839318d7a7dbd194362d81c503c70a",
     );
     expect(contract.latestMigration).toBe(
-      migrations.has("0227_slack_native_actions.sql")
+      migrations.has("0228_slack_task_policy.sql")
+        ? "0228_slack_task_policy.sql"
+        : migrations.has("0227_slack_native_actions.sql")
         ? "0227_slack_native_actions.sql"
         : migrations.has("0224_slack_post_outcome_reconciliation.sql")
           ? "0224_slack_post_outcome_reconciliation.sql"
