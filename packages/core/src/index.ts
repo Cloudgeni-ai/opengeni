@@ -71,6 +71,7 @@ export * from "./domain/durable-learning-slack-publication";
 export * from "./domain/slack-publication-secret-safety";
 export * from "./domain/company-profile-durable-learning-adapter";
 export * from "./domain/slack-bot";
+export * from "./domain/fiken";
 export * from "./domain/workspace-members";
 export * from "./domain/video-generation";
 export * from "./domain/video-generation-capabilities";

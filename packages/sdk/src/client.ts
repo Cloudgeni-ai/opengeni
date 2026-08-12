@@ -167,6 +167,9 @@ import type {
   OpenGeniSlackBotInstallRequest,
   OpenGeniSlackBotInstallStart,
   SlackReactionChannelListResponse,
+  FikenInstallRequest,
+  FikenOAuthStartRequest,
+  FikenOAuthStartResponse,
   CreateConnectionRequest,
   CreateDocumentBaseRequest,
   CreateFileUploadRequest,
@@ -5190,6 +5193,34 @@ export class OpenGeniClient {
       request,
     );
     return response.connection;
+  }
+
+  /**
+   * Verify a pasted Fiken personal API token and store it as the
+   * workspace-shared Fiken connection (or rewrite an existing one in place).
+   */
+  async installFikenConnection(
+    workspaceId: string,
+    request: FikenInstallRequest,
+  ): Promise<ConnectionMetadata> {
+    const response = await this.requestJson<ConnectionResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/connections/fiken/install`,
+      request,
+    );
+    return response.connection;
+  }
+
+  /** Start the Fiken OAuth flow for the workspace-shared Fiken connection. */
+  async startFikenOAuth(
+    workspaceId: string,
+    request: FikenOAuthStartRequest = {},
+  ): Promise<FikenOAuthStartResponse> {
+    return await this.requestJson<FikenOAuthStartResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/connections/fiken/oauth/start`,
+      request,
+    );
   }
 
   /** Start the public Slack installation flow for the workspace-shared OpenGeni bot. */

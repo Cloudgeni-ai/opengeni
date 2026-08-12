@@ -640,6 +640,23 @@ export type OpenGeniSlackBotInstallRequest = {
   connectionId?: string | undefined;
 };
 
+export type FikenInstallRequest = {
+  apiToken: string;
+  defaultCompanySlug?: string | undefined;
+  /** Existing Fiken connection to rewrite in place (reconnect). */
+  connectionId?: string | undefined;
+};
+
+export type FikenOAuthStartRequest = {
+  /** Existing Fiken connection to re-authorize in place (reconnect). */
+  connectionId?: string | undefined;
+};
+
+export type FikenOAuthStartResponse = {
+  authorizationUrl: string;
+  expiresAt: string;
+};
+
 export type OpenGeniSlackBotInstallStart = {
   authorizationUrl: string;
   expiresAt: string;
@@ -2446,6 +2463,16 @@ export type FirstPartyMcpToolName =
   | "slack_bot_file_content"
   | "slack_bot_post_message"
   | "slack_bot_delete_message"
+  | "fiken_companies_list"
+  | "fiken_contacts_list"
+  | "fiken_contact_create"
+  | "fiken_products_list"
+  | "fiken_invoices_list"
+  | "fiken_invoice_get"
+  | "fiken_invoice_draft_create"
+  | "fiken_bank_accounts_list"
+  | "fiken_purchases_list"
+  | "fiken_sales_list"
   | "atlassian_sources_list"
   | "atlassian_search"
   | "atlassian_get"

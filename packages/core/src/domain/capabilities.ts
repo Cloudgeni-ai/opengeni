@@ -5,10 +5,13 @@ import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config"
 import {
   CapabilityCatalogItem,
   capabilityCatalogItemIsTrustedForExposure,
+  FIKEN_PROVIDER_DOMAIN,
+  FIRST_PARTY_MCP_TOOL_NAMES,
   type AccessGrant,
   type CapabilityAction,
   type CapabilityCatalogResponse,
   type CapabilityInstallation,
+  type ConnectionMetadata,
   type CreateCapabilityCatalogItemRequest,
   type EnableCapabilityRequest,
   type McpServerConnectionRef,
@@ -52,6 +55,7 @@ import {
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 import { hasPermission } from "../access";
+import { isFikenConnection, preferredFikenConnection } from "./fiken";
 import {
   getSkillLibraryEntry,
   listSkillLibraryEntries,
@@ -89,6 +93,7 @@ export async function buildCapabilityCatalog(input: {
     packInstallations,
     workspacePacks,
     socialConnections,
+    workspaceConnections,
     curatedLibrarySkills,
     codexAppsCredentialId,
   ] = await Promise.all([
@@ -97,6 +102,7 @@ export async function buildCapabilityCatalog(input: {
     listPackInstallations(input.db, input.workspaceId),
     listWorkspaceCapabilityPacks(input.db, input.workspaceId),
     listSocialConnections(input.db, input.workspaceId, 500, input.subjectId),
+    listConnectionsMetadata(input.db, input.workspaceId, null),
     discoverCuratedSkillLibraryItems(),
     input.settings.codexConnectedAppsEnabled
       ? resolveCodexAppsCredentialIdForRun(input.db, input.workspaceId)
@@ -117,6 +123,7 @@ export async function buildCapabilityCatalog(input: {
     ),
     ...configuredMcpCatalogItems(input.settings),
     ...providerIntegrationCatalogItems(socialConnections),
+    fikenCatalogItem(workspaceConnections.filter(isFikenConnection)),
     ...curatedLibrarySkills,
   ];
   const codexApps = input.settings.codexConnectedAppsEnabled
@@ -1332,6 +1339,51 @@ const SOCIAL_PROVIDER_TOOL_NAMES = {
   ],
 } as const;
 
+/**
+ * The first-party Fiken accounting connector tile. Enablement is derived from
+ * the workspace-shared verified Fiken connection (either lane), mirroring how
+ * the social provider tiles derive theirs from social connections.
+ */
+function fikenCatalogItem(fikenConnections: ConnectionMetadata[]): CapabilityCatalogItem {
+  const fikenConnection = preferredFikenConnection(fikenConnections);
+  const fikenEnabled =
+    fikenConnection?.status === "active" || fikenConnection?.status === "needs_reauth";
+  return CapabilityCatalogItem.parse({
+    id: "api:fiken",
+    kind: "api",
+    source: "built_in",
+    name: "Fiken",
+    description:
+      "Connect Fiken accounting for contacts, products, invoices, invoice drafts, purchases, sales, and bank accounts.",
+    category: "finance",
+    tags: ["api", "fiken", "accounting", "invoicing", "norway"],
+    homepageUrl: "https://fiken.no",
+    authModel: "personal_api_token",
+    providerDomain: FIKEN_PROVIDER_DOMAIN,
+    surfaceType: "first_party_fiken",
+    authKind: "api_key",
+    tools: [{ kind: "mcp", id: "opengeni" }],
+    runtime: {
+      available: true,
+      mcpServerId: "opengeni",
+      notes: "Fiken access is provided through OpenGeni's first-party fiken tools.",
+    },
+    enabled: fikenEnabled,
+    enabledReason: fikenEnabled
+      ? fikenConnection.status === "active"
+        ? "workspace Fiken connection active"
+        : "workspace Fiken connection needs reconnection"
+      : null,
+    metadata: {
+      connectorMode: "first_party_fiken",
+      ownership: "workspace",
+      // Derived from the contracts catalog so a new fiken_* tool cannot be
+      // registered without also appearing on the capability tile.
+      firstPartyMcpTools: FIRST_PARTY_MCP_TOOL_NAMES.filter((name) => name.startsWith("fiken_")),
+    },
+  });
+}
+
 function providerIntegrationCatalogItems(
   socialConnections: SocialConnection[],
 ): CapabilityCatalogItem[] {
@@ -1543,6 +1595,12 @@ export function applyCapabilityEnablement(
     // Provider-integration state is derived from every authoritative visible
     // social Connection while the catalog is built. The catalog summary never
     // publishes a personal connection UUID or collapses many accounts to one.
+    return { ...item, connectionRef: null };
+  }
+  if (item.surfaceType === "first_party_fiken") {
+    // Fiken connector state is derived from the authoritative workspace
+    // connection row while the catalog is built; browseable never means an
+    // account is already connected.
     return { ...item, connectionRef: null };
   }
   if (item.surfaceType === "codex_apps") {
