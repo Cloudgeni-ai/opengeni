@@ -680,6 +680,67 @@ BEGIN
         )
     $body$;
   $ddl$, data_schema);
+
+  EXECUTE format($ddl$
+    CREATE OR REPLACE FUNCTION %1$I.disconnect_xai_subscription_credential(
+      p_account_id uuid,
+      p_workspace_id uuid,
+      p_subject_id text,
+      p_credential_id uuid,
+      p_snapshot jsonb
+    ) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path = %1$I, pg_catalog
+    AS $body$
+    DECLARE
+      credential_row record;
+    BEGIN
+      IF p_account_id IS DISTINCT FROM NULLIF(current_setting('opengeni.account_id', true), '')::uuid
+        OR p_workspace_id IS DISTINCT FROM NULLIF(current_setting('opengeni.workspace_id', true), '')::uuid
+        OR p_subject_id IS DISTINCT FROM NULLIF(current_setting('opengeni.subject_id', true), '')
+      THEN
+        RAISE EXCEPTION 'xAI credential lifecycle authority denied' USING ERRCODE = '42501';
+      END IF;
+
+      SELECT credential.* INTO credential_row
+      FROM revalidate_xai_subscription_authority(
+        p_workspace_id, p_subject_id, p_credential_id, p_snapshot
+      ) authorized
+      INNER JOIN xai_subscription_credentials credential ON credential.id = authorized.id
+      FOR UPDATE OF credential;
+      IF credential_row.id IS NULL THEN RETURN false; END IF;
+
+      INSERT INTO opengeni_private.xai_subscription_runtime_capabilities (
+        backend_pid, transaction_id, capability_kind
+      ) VALUES (pg_catalog.pg_backend_pid(), pg_catalog.pg_current_xact_id(), 'lifecycle')
+      ON CONFLICT DO NOTHING;
+
+      DELETE FROM xai_subscription_credentials WHERE id = credential_row.id;
+      IF credential_row.authority_scope = 'user' THEN
+        UPDATE organization_user_resource_authorities
+        SET status = 'revoked', revoked_at = now(), updated_at = now()
+        WHERE id = credential_row.organization_user_resource_authority_id
+          AND account_id = credential_row.account_id
+          AND organization_membership_id = credential_row.owner_organization_membership_id
+          AND resource_kind = 'xai_subscription'
+          AND resource_id = credential_row.id
+          AND generation = credential_row.organization_user_resource_authority_generation;
+      END IF;
+
+      DELETE FROM opengeni_private.xai_subscription_runtime_capabilities
+      WHERE backend_pid = pg_catalog.pg_backend_pid()
+        AND transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
+        AND capability_kind = 'lifecycle';
+      RETURN true;
+    EXCEPTION WHEN OTHERS THEN
+      DELETE FROM opengeni_private.xai_subscription_runtime_capabilities
+      WHERE backend_pid = pg_catalog.pg_backend_pid()
+        AND transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
+        AND capability_kind = 'lifecycle';
+      RAISE;
+    END
+    $body$;
+  $ddl$, data_schema);
 END
 $xai_authority_functions$;
 
@@ -895,6 +956,8 @@ REVOKE ALL ON FUNCTION create_xai_subscription_credential(
 REVOKE ALL ON FUNCTION resolve_xai_authority_pool(uuid, uuid, text, jsonb) FROM PUBLIC;
 REVOKE ALL ON FUNCTION revalidate_xai_subscription_authority(uuid, text, uuid, jsonb)
   FROM PUBLIC;
+REVOKE ALL ON FUNCTION disconnect_xai_subscription_credential(uuid, uuid, text, uuid, jsonb)
+  FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.claim_session_system_update_outbox(integer)
   FROM PUBLIC;
 
@@ -912,6 +975,9 @@ BEGIN
       TO opengeni_app;
     GRANT EXECUTE ON FUNCTION revalidate_xai_subscription_authority(
       uuid, text, uuid, jsonb
+    ) TO opengeni_app;
+    GRANT EXECUTE ON FUNCTION disconnect_xai_subscription_credential(
+      uuid, uuid, text, uuid, jsonb
     ) TO opengeni_app;
     GRANT EXECUTE ON FUNCTION opengeni_private.claim_session_system_update_outbox(integer)
       TO opengeni_app;
