@@ -8,6 +8,7 @@ import { isApiContractProtectedMutation } from "../src/app";
 import { requireAccessKey } from "../src/http/auth";
 import {
   registerSlackInteractionRoutes,
+  normalizedBlockActionInteraction,
   slackEventInboxEntry,
   slackInteractionRoutePolicy,
   slackInvocationTaskText,
@@ -156,6 +157,48 @@ describe("Slack interaction signature boundary", () => {
 });
 
 describe("Slack event classification and safe projection", () => {
+  test("normalizes exactly one opaque OpenGeni block action", () => {
+    const normalized = normalizedBlockActionInteraction({
+      type: "block_actions",
+      team: { id: "T_ACTION" },
+      user: { id: "U_ACTION" },
+      channel: { id: "C_ACTION" },
+      message: { ts: "1710000000.000001", thread_ts: "1710000000.000000" },
+      actions: [
+        {
+          action_id: "opengeni.approval.approve",
+          action_ts: "1710000000.000002",
+          value: "9adcc1a7-9e79-4d3f-86e8-f1e65b4e76da",
+        },
+      ],
+    });
+    expect(normalized).toMatchObject({
+      slackTeamId: "T_ACTION",
+      slackUserId: "U_ACTION",
+      slackChannelId: "C_ACTION",
+      slackMessageTs: "1710000000.000001",
+      slackThreadTs: "1710000000.000000",
+      triggerKind: "block_action",
+      text: "opengeni.approval.approve:9adcc1a7-9e79-4d3f-86e8-f1e65b4e76da",
+    });
+    expect(normalized.providerEventId).toMatch(/^block:[0-9a-f]{64}$/);
+    expect(() =>
+      normalizedBlockActionInteraction({
+        type: "block_actions",
+        team: { id: "T_ACTION" },
+        user: { id: "U_ACTION" },
+        channel: { id: "C_ACTION" },
+        message: { ts: "1710000000.000001" },
+        actions: [
+          {
+            action_id: "third_party.action",
+            action_ts: "1710000000.000002",
+            value: "9adcc1a7-9e79-4d3f-86e8-f1e65b4e76da",
+          },
+        ],
+      }),
+    ).toThrow("invalid Slack block action");
+  });
   const bot = { botId: "B_OPEN_GENI", botUserId: "U_OPEN_GENI" };
   const envelope = (event: Record<string, unknown>, eventId = "Ev1") => ({
     type: "event_callback",
@@ -396,6 +439,7 @@ describe("Slack event classification and safe projection", () => {
   test("allows only bounded user-safe delivery events and freezes no-persistence instructions", () => {
     expect(SLACK_DELIVERY_EVENT_TYPES).not.toContain("agent.reasoning.delta" as never);
     expect(SLACK_DELIVERY_EVENT_TYPES).not.toContain("agent.toolCall.output" as never);
+    expect(SLACK_DELIVERY_EVENT_TYPES).toContain("session.requiresAction");
     expect(SLACK_TASK_INSTRUCTIONS).toContain("task-local only");
     expect(SLACK_TASK_INSTRUCTIONS).toContain("Do not write Slack context to Documents");
     expect(SLACK_TASK_INSTRUCTIONS).toContain("Never expose private reasoning");

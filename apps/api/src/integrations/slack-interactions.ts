@@ -1,5 +1,6 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import {
+  approvalIdentifier,
   ApproveSlackUserLinkAccessRequest,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   hasOpenGeniSlackReactionScope,
@@ -18,6 +19,7 @@ import {
 } from "@opengeni/contracts";
 import {
   acceptSessionHumanInputResponse,
+  acceptSessionApprovalDecision,
   approveSlackUserLinkAccessRequest,
   advanceSlackInteractionDelivery,
   bindSlackInteractionSession,
@@ -33,8 +35,13 @@ import {
   getConnectionMetadata,
   getOrCreateSlackInteraction,
   getLatestSessionModelForSubject,
+  getSession,
+  getSessionHumanInputRequest,
+  getSlackBotPostOperation,
   getSlackBotUserLink,
+  getSlackInteractionActionHandle,
   getSlackInteractionByClientEventId,
+  getSlackInteractionById,
   getSlackInteractionByRoute,
   getSessionEventByClientEventId,
   getWorkspace,
@@ -45,17 +52,21 @@ import {
   listPendingSlackUserLinkAccessRequests,
   rekeySlackInteractionRoute,
   reopenSlackInteractionDelivery,
+  reserveSlackInteractionActionHandles,
   releaseSlackInteractionDelivery,
   releaseSlackInteractionInbox,
   requestSlackUserLinkWorkspaceAccess,
   resolveSlackInstallationRoute,
   saveSlackInteractionInboxReactionCheckpoint,
   settleSlackInteractionInbox,
+  settleSlackInteractionActionHandles,
   denySlackUserLinkAccessRequest,
   prepareSlackUserLinkAccessRequest,
   SlackUserLinkAccessPersistenceError,
   type SlackInstallationRoute,
   type SlackInteraction,
+  type SlackInteractionActionHandle,
+  type SlackInteractionActionKind,
   type SlackInteractionInboxEntry,
   type SlackInteractionTriggerKind,
 } from "@opengeni/db";
@@ -74,6 +85,7 @@ import { HTTPException } from "hono/http-exception";
 import {
   createOpenGeniSlackBotInteractionClient,
   type OpenGeniSlackBotClient,
+  type SlackMessageBlock,
   SlackBotProviderError,
 } from "./slack-bot";
 
@@ -82,6 +94,7 @@ export const SLACK_SIGNATURE_REPLAY_WINDOW_SECONDS = 300;
 export const SLACK_DELIVERY_EVENT_TYPES = [
   "agent.message.completed",
   "session.humanInput.requested",
+  "session.requiresAction",
   "turn.completed",
   "turn.failed",
   "turn.cancelled",
@@ -100,6 +113,9 @@ const INBOX_LEASE_MS = 30_000;
 const DELIVERY_LEASE_MS = 30_000;
 const MAX_DELIVERY_ATTEMPTS = 8;
 const MAX_DELIVERY_RETRY_MS = 5 * 60_000;
+const SLACK_ACTION_TTL_MS = 7 * 24 * 60 * 60_000;
+const MAX_SLACK_APPROVALS_PER_CARD = 8;
+const MAX_SLACK_ACTIONS_PER_CARD = 20;
 export const SLACK_TASK_INSTRUCTIONS = [
   "This turn originated from Slack. Slack message and thread context is task-local only.",
   "Do not write Slack context to Documents, Knowledge, Memory, preferences, Workspace Charter, instructions, or policy unless a separate explicit authorized user action requests it.",
@@ -370,6 +386,15 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
     const signed = await readSignedSlackRequest(c, deps);
     const form = new URLSearchParams(signed.rawBody);
     const payload = parseJsonObject(form.get("payload") ?? "");
+    if (payload.type === "block_actions") {
+      const entry = normalizedBlockActionInteraction(payload);
+      const installation = await resolveSlackInstallationRoute(deps.db, entry.slackTeamId);
+      if (!installation) {
+        throw new HTTPException(403, { message: "Slack installation unavailable" });
+      }
+      await enqueueNormalizedSlackInteraction(deps, installation, entry);
+      return c.json({ ok: true });
+    }
     if (payload.type !== "message_action") {
       throw new HTTPException(400, {
         message: "unsupported Slack interaction",
@@ -828,6 +853,10 @@ export function startSlackInteractionPump(
 }
 
 async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractionInboxEntry) {
+  if (entry.triggerKind === "block_action") {
+    await processSlackBlockAction(deps, entry);
+    return;
+  }
   if (entry.triggerKind === "reaction") {
     await processSlackReactionInboxEntry(deps, entry);
     return;
@@ -932,6 +961,7 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     slackThreadTs: entry.slackThreadTs ?? entry.slackMessageTs,
     routeKey,
     triggeringProviderEventId: entry.providerEventId,
+    initiatingSlackUserId: entry.slackUserId,
     owningSubjectId: grant.subjectId,
     visibility: routePolicy.visibility,
   });
@@ -1097,8 +1127,17 @@ async function acknowledgeSlackSession(
     throw new Error("Slack acknowledgement requires a bound session");
   }
   const directMessageShortcut = isDirectMessageShortcut(entry);
+  const operationId = deterministicUuid(`slack-ack:${interaction.id}`);
+  const text = directMessageShortcut
+    ? `OpenGeni started a private task from the selected DM message. ${openSessionText(deps, entry.workspaceId, interaction.sessionId)} Reply in this bot-DM thread to continue, or reply \`stop\` to stop. The source DM was not opened to the bot or made workspace-visible.`
+    : `OpenGeni started this task. ${openSessionText(deps, entry.workspaceId, interaction.sessionId)} Reply in this thread to continue, or reply \`stop\` to stop. Start a new top-level DM or invoke /opengeni again for a new session.`;
+  const controls = await controlActionBlocks(deps, interaction, {
+    messageOperationId: operationId,
+    sessionEventSequence: 0,
+    state: "active",
+  });
   const ack = await client.postMessage({
-    operationId: deterministicUuid(`slack-ack:${interaction.id}`),
+    operationId,
     ...(directMessageShortcut
       ? { userId: entry.slackUserId }
       : {
@@ -1107,9 +1146,15 @@ async function acknowledgeSlackSession(
             ? {}
             : { threadTimestamp: entry.slackThreadTs ?? entry.slackMessageTs }),
         }),
-    text: directMessageShortcut
-      ? `OpenGeni started a private task from the selected DM message. ${openSessionText(deps, entry.workspaceId, interaction.sessionId)} Reply in this bot-DM thread to continue, or reply \`stop\` to stop. The source DM was not opened to the bot or made workspace-visible.`
-      : `OpenGeni started this task. ${openSessionText(deps, entry.workspaceId, interaction.sessionId)} Reply in this thread to continue, or reply \`stop\` to stop. Start a new top-level DM or invoke /opengeni again for a new session.`,
+    text,
+    ...(controls.length > 0
+      ? {
+          blocks: [
+            { type: "section", text: { type: "mrkdwn", text } },
+            ...controls,
+          ] as SlackMessageBlock[],
+        }
+      : {}),
   });
   if (entry.triggerKind === "slash_command" || directMessageShortcut) {
     const rekeyed = await rekeySlackInteractionRoute(deps.db, {
@@ -1262,6 +1307,7 @@ async function processSlackReactionInboxEntry(
     slackThreadTs: context.threadTimestamp,
     routeKey,
     triggeringProviderEventId: entry.providerEventId,
+    initiatingSlackUserId: entry.slackUserId,
     owningSubjectId: grant.subjectId,
     visibility: "workspace",
   });
@@ -1533,6 +1579,581 @@ async function continueSlackSession(
   });
 }
 
+const SLACK_ACTION_ID_BY_KIND: Record<SlackInteractionActionKind, string> = {
+  approval_approve: "opengeni.approval.approve",
+  approval_reject: "opengeni.approval.reject",
+  human_input_select: "opengeni.human_input.select",
+  human_input_skip: "opengeni.human_input.skip",
+  session_status: "opengeni.session.status",
+  session_pause: "opengeni.session.pause",
+  session_resume: "opengeni.session.resume",
+};
+
+async function processSlackBlockAction(deps: ApiRouteDeps, entry: SlackInteractionInboxEntry) {
+  const separator = entry.text.lastIndexOf(":");
+  const actionId = separator > 0 ? entry.text.slice(0, separator) : "";
+  const handleId = separator > 0 ? entry.text.slice(separator + 1) : "";
+  const route = await resolveSlackInstallationRoute(deps.db, entry.slackTeamId);
+  if (
+    !route ||
+    route.accountId !== entry.accountId ||
+    route.workspaceId !== entry.workspaceId ||
+    route.connectionId !== entry.connectionId
+  ) {
+    throw new SlackInteractionPermanentError("slack_action_installation_changed");
+  }
+  const handle = await getSlackInteractionActionHandle(deps.db, {
+    accountId: entry.accountId,
+    workspaceId: entry.workspaceId,
+    handleId,
+  });
+  if (!handle || SLACK_ACTION_ID_BY_KIND[handle.actionKind] !== actionId) {
+    throw new SlackInteractionPermanentError("slack_action_handle_invalid");
+  }
+  if (handle.status !== "pending") return;
+  if (handle.expiresAt.getTime() <= Date.now()) {
+    await settleSlackInteractionActionHandles(deps.db, {
+      accountId: entry.accountId,
+      workspaceId: entry.workspaceId,
+      handleId: handle.id,
+      result: "expired",
+      stale: true,
+    });
+    return;
+  }
+  if (handle.authorizedSlackUserId !== entry.slackUserId) {
+    throw new SlackInteractionPermanentError("slack_action_user_mismatch");
+  }
+  const [interaction, link, post] = await Promise.all([
+    getSlackInteractionById(deps.db, {
+      accountId: entry.accountId,
+      workspaceId: entry.workspaceId,
+      interactionId: handle.interactionId,
+    }),
+    getSlackBotUserLink(deps.db, entry.workspaceId, entry.connectionId, entry.slackUserId),
+    getSlackBotPostOperation(
+      deps.db,
+      entry.workspaceId,
+      entry.connectionId,
+      handle.messageOperationId,
+    ),
+  ]);
+  if (
+    !interaction ||
+    interaction.connectionId !== entry.connectionId ||
+    interaction.slackTeamId !== entry.slackTeamId ||
+    interaction.sessionId !== handle.sessionId ||
+    interaction.owningSubjectId !== handle.authorizedSubjectId ||
+    interaction.initiatingSlackUserId !== handle.authorizedSlackUserId ||
+    !link ||
+    link.subjectId !== handle.authorizedSubjectId ||
+    !post ||
+    post.status !== "completed" ||
+    post.slackChannelId !== entry.slackChannelId ||
+    post.slackMessageTimestamp !== entry.slackMessageTs
+  ) {
+    throw new SlackInteractionPermanentError("slack_action_authority_changed");
+  }
+  const grant = await getWorkspaceGrant(deps.db, link.subjectId, entry.workspaceId, {
+    principalKind: "human_session",
+  });
+  if (
+    !grant ||
+    grant.accountId !== entry.accountId ||
+    !hasPermission(grant.permissions, "sessions:control")
+  ) {
+    throw new SlackInteractionPermanentError("sessions_control_denied");
+  }
+  const client = await createOpenGeniSlackBotInteractionClient(deps, {
+    accountId: entry.accountId,
+    workspaceId: entry.workspaceId,
+    connectionId: entry.connectionId,
+    subjectId: grant.subjectId,
+    sessionId: handle.sessionId,
+  });
+  const outcome = await executeSlackAction(deps, grant, interaction, handle);
+  await client.updateMessage({
+    operationId: deterministicUuid(`slack-action-update:${handle.id}:${outcome.result}`),
+    channelId: entry.slackChannelId,
+    timestamp: entry.slackMessageTs,
+    text: outcome.text,
+    blocks: [{ type: "section", text: { type: "mrkdwn", text: outcome.text } }],
+  });
+  await settleSlackInteractionActionHandles(deps.db, {
+    accountId: entry.accountId,
+    workspaceId: entry.workspaceId,
+    handleId: handle.id,
+    result: outcome.result,
+    ...(outcome.stale ? { stale: true } : {}),
+  });
+  if (outcome.controlState) {
+    await postSlackControlCard(
+      deps,
+      client,
+      interaction,
+      outcome.controlState,
+      entry.providerEventId,
+    );
+  }
+}
+
+async function executeSlackAction(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  interaction: SlackInteraction,
+  handle: SlackInteractionActionHandle,
+): Promise<{
+  result: string;
+  text: string;
+  stale?: boolean;
+  controlState?: "active" | "paused";
+}> {
+  const mention = slackRequesterMention(interaction);
+  if (handle.actionKind === "approval_approve" || handle.actionKind === "approval_reject") {
+    if (!handle.targetId) throw new SlackInteractionPermanentError("slack_action_target_invalid");
+    const decision = handle.actionKind === "approval_approve" ? "approve" : "reject";
+    const accepted = await acceptSessionApprovalDecision(deps.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: handle.sessionId,
+      subjectId: grant.subjectId,
+      payload: { approvalId: handle.targetId, decision },
+      clientEventId: `slack-action:${handle.id}`,
+    });
+    if (accepted.action === "conflict") {
+      return {
+        result: "stale",
+        stale: true,
+        text: `${mention}This approval is no longer pending.`,
+      };
+    }
+    await publishDurableSessionEvents(
+      deps.bus,
+      grant.workspaceId,
+      handle.sessionId,
+      accepted.events,
+    );
+    await deps.workflowClient.signalApprovalDecision({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: handle.sessionId,
+      eventId: accepted.event.id,
+      workflowId: `session-${handle.sessionId}`,
+      workflowWakeRevision: accepted.workflowWakeRevision,
+    });
+    return {
+      result: decision === "approve" ? "approved" : "rejected",
+      text: `${mention}${decision === "approve" ? "Approved once" : "Rejected"}. OpenGeni will continue from the durable task state.`,
+    };
+  }
+  if (handle.actionKind === "human_input_select" || handle.actionKind === "human_input_skip") {
+    if (!handle.targetId) throw new SlackInteractionPermanentError("slack_action_target_invalid");
+    const request = await getSessionHumanInputRequest(
+      deps.db,
+      grant.workspaceId,
+      handle.sessionId,
+      handle.targetId,
+    );
+    if (!request || request.status !== "pending") {
+      return {
+        result: "stale",
+        stale: true,
+        text: `${mention}This question is no longer pending.`,
+      };
+    }
+    let response:
+      | { outcome: "skipped" }
+      | {
+          outcome: "answered";
+          answers: Array<{ questionId: string; values: string[] }>;
+        };
+    if (handle.actionKind === "human_input_skip") {
+      if (!request.allowSkip) {
+        throw new SlackInteractionPermanentError("slack_action_skip_not_allowed");
+      }
+      response = { outcome: "skipped" };
+    } else {
+      let selected: unknown;
+      try {
+        selected = JSON.parse(handle.targetValue ?? "");
+      } catch {
+        throw new SlackInteractionPermanentError("slack_action_target_invalid");
+      }
+      if (
+        !Array.isArray(selected) ||
+        selected.length !== 2 ||
+        typeof selected[0] !== "string" ||
+        typeof selected[1] !== "string"
+      ) {
+        throw new SlackInteractionPermanentError("slack_action_target_invalid");
+      }
+      response = {
+        outcome: "answered",
+        answers: [{ questionId: selected[0], values: [selected[1]] }],
+      };
+    }
+    const accepted = await acceptSessionHumanInputResponse(deps.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: handle.sessionId,
+      requestId: handle.targetId,
+      response,
+      respondedBy: grant.subjectId,
+      clientEventId: `slack-action:${handle.id}`,
+    });
+    if (accepted.action !== "accepted") {
+      return {
+        result: "stale",
+        stale: true,
+        text: `${mention}This question is no longer pending.`,
+      };
+    }
+    await publishDurableSessionEvents(
+      deps.bus,
+      grant.workspaceId,
+      handle.sessionId,
+      accepted.events,
+    );
+    if (accepted.workflowWakeRevision !== null) {
+      await deps.workflowClient.signalApprovalDecision({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: handle.sessionId,
+        eventId: accepted.events[0]?.id ?? handle.targetId,
+        workflowId: `session-${handle.sessionId}`,
+        workflowWakeRevision: accepted.workflowWakeRevision,
+      });
+    }
+    return {
+      result: response.outcome === "skipped" ? "skipped" : "answered",
+      text: `${mention}${response.outcome === "skipped" ? "Skipped the question" : "Answer submitted"}. OpenGeni will continue.`,
+    };
+  }
+  if (handle.actionKind === "session_pause" || handle.actionKind === "session_resume") {
+    const action = handle.actionKind === "session_pause" ? "pause" : "resume";
+    await controlHumanSessionWorkstream(
+      deps,
+      {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        subjectId: grant.subjectId,
+        sessionId: handle.sessionId,
+      },
+      {
+        action,
+        clientEventId: deterministicUuid(`slack-action:${handle.id}`),
+        reason: `${action === "pause" ? "Paused" : "Resumed"} from the originating Slack thread`,
+      },
+    );
+    return {
+      result: action === "pause" ? "paused" : "resumed",
+      text: `${mention}OpenGeni task ${action === "pause" ? "paused" : "resumed"}.`,
+      controlState: action === "pause" ? "paused" : "active",
+    };
+  }
+  const session = await getSession(deps.db, grant.workspaceId, handle.sessionId);
+  if (!session) throw new SlackInteractionPermanentError("slack_action_session_missing");
+  return {
+    result: "status",
+    text: `${mention}OpenGeni task status: *${session.status.replaceAll("_", " ")}*.`,
+    ...(session.status === "cancelled" || session.status === "failed"
+      ? {}
+      : { controlState: "active" as const }),
+  };
+}
+
+function slackRequesterMention(interaction: Pick<SlackInteraction, "initiatingSlackUserId">) {
+  return interaction.initiatingSlackUserId &&
+    /^[UW][A-Z0-9]{1,63}$/.test(interaction.initiatingSlackUserId)
+    ? `<@${interaction.initiatingSlackUserId}> `
+    : "";
+}
+
+async function validatedSlackRequester(
+  deps: ApiRouteDeps,
+  interaction: Pick<
+    SlackInteraction,
+    "workspaceId" | "connectionId" | "initiatingSlackUserId" | "owningSubjectId"
+  >,
+) {
+  if (!interaction.initiatingSlackUserId) return { authorized: false, mention: "" };
+  const link = await getSlackBotUserLink(
+    deps.db,
+    interaction.workspaceId,
+    interaction.connectionId,
+    interaction.initiatingSlackUserId,
+  );
+  const authorized = link?.subjectId === interaction.owningSubjectId;
+  return { authorized, mention: authorized ? slackRequesterMention(interaction) : "" };
+}
+
+async function controlActionBlocks(
+  deps: ApiRouteDeps,
+  interaction: SlackInteraction,
+  input: {
+    messageOperationId: string;
+    sessionEventSequence: number;
+    state: "active" | "paused";
+  },
+): Promise<SlackMessageBlock[]> {
+  if (!interaction.sessionId || !interaction.initiatingSlackUserId) return [];
+  const kinds: SlackInteractionActionKind[] = [
+    "session_status",
+    input.state === "paused" ? "session_resume" : "session_pause",
+  ];
+  const handles = await reserveSlackInteractionActionHandles(deps.db, {
+    interaction,
+    sessionEventSequence: input.sessionEventSequence,
+    messageOperationId: input.messageOperationId,
+    expiresAt: new Date(Date.now() + SLACK_ACTION_TTL_MS),
+    actions: kinds.map((actionKind) => ({
+      actionKind,
+      actionKey: `${input.messageOperationId}:${actionKind}`,
+    })),
+  });
+  const pending = handles.filter((handle) => handle.status === "pending");
+  if (pending.length === 0) return [];
+  return [
+    {
+      type: "actions",
+      block_id: `opengeni_controls_${input.messageOperationId}`,
+      elements: pending.map((handle) => ({
+        type: "button" as const,
+        action_id: SLACK_ACTION_ID_BY_KIND[handle.actionKind],
+        value: handle.id,
+        text: {
+          type: "plain_text" as const,
+          text:
+            handle.actionKind === "session_status"
+              ? "Status"
+              : handle.actionKind === "session_pause"
+                ? "Stop"
+                : "Resume",
+          emoji: true,
+        },
+        ...(handle.actionKind === "session_pause" ? { style: "danger" as const } : {}),
+      })),
+    },
+  ];
+}
+
+async function postSlackControlCard(
+  deps: ApiRouteDeps,
+  client: OpenGeniSlackBotClient,
+  interaction: SlackInteraction,
+  state: "active" | "paused",
+  providerEventId: string,
+) {
+  if (!interaction.sessionId) return;
+  const operationId = deterministicUuid(
+    `slack-control:${interaction.id}:${providerEventId}:${state}`,
+  );
+  const text = `${slackRequesterMention(interaction)}OpenGeni task controls.`;
+  const controls = await controlActionBlocks(deps, interaction, {
+    messageOperationId: operationId,
+    sessionEventSequence: 0,
+    state,
+  });
+  await client.postMessage({
+    operationId,
+    channelId: interaction.slackChannelId,
+    threadTimestamp: interaction.slackThreadTs,
+    text,
+    blocks: [{ type: "section", text: { type: "mrkdwn", text } }, ...controls],
+  });
+}
+
+type SlackApprovalSummary = { id: string; name: string };
+
+function slackApprovalSummaries(payload: unknown): SlackApprovalSummary[] {
+  const approvals = record(payload)?.approvals;
+  if (!Array.isArray(approvals)) return [];
+  return approvals
+    .map((approval) => {
+      const value = record(approval);
+      const rawItem = record(value?.rawItem);
+      const id = approvalIdentifier(approval);
+      const name = boundedString(value?.name ?? value?.toolName ?? rawItem?.name, 256);
+      return id ? { id, name: name ?? "OpenGeni action" } : null;
+    })
+    .filter((approval): approval is SlackApprovalSummary => approval !== null)
+    .slice(0, MAX_SLACK_APPROVALS_PER_CARD);
+}
+
+async function slackApprovalCard(
+  deps: ApiRouteDeps,
+  interaction: SlackInteraction,
+  event: SessionEvent,
+  mention: string,
+  requesterAuthorized: boolean,
+): Promise<{ text: string; blocks?: SlackMessageBlock[]; operationId: string }> {
+  const operationId = deterministicUuid(
+    `slack-delivery:${interaction.id}:${event.sequence}:approval`,
+  );
+  const approvals = slackApprovalSummaries(event.payload);
+  const fallback = approvals.length
+    ? `${mention}OpenGeni needs approval for ${approvals.map((approval) => approval.name).join(", ")}.`
+    : `${mention}OpenGeni needs approval. Open the task to review it.`;
+  if (
+    !requesterAuthorized ||
+    !interaction.sessionId ||
+    !interaction.initiatingSlackUserId ||
+    approvals.length === 0
+  ) {
+    return { text: fallback, operationId };
+  }
+  const specs = approvals
+    .flatMap((approval) => [
+      {
+        actionKind: "approval_approve" as const,
+        actionKey: `approval:${approval.id}:approve`,
+        targetId: approval.id,
+      },
+      {
+        actionKind: "approval_reject" as const,
+        actionKey: `approval:${approval.id}:reject`,
+        targetId: approval.id,
+      },
+    ])
+    .slice(0, MAX_SLACK_ACTIONS_PER_CARD);
+  const handles = await reserveSlackInteractionActionHandles(deps.db, {
+    interaction,
+    sessionEventSequence: event.sequence,
+    messageOperationId: operationId,
+    expiresAt: new Date(Date.now() + SLACK_ACTION_TTL_MS),
+    actions: specs,
+  });
+  const byKey = new Map(handles.map((handle) => [handle.actionKey, handle]));
+  const blocks: SlackMessageBlock[] = [];
+  for (const approval of approvals) {
+    const approve = byKey.get(`approval:${approval.id}:approve`);
+    const reject = byKey.get(`approval:${approval.id}:reject`);
+    blocks.push({
+      type: "section",
+      text: { type: "mrkdwn", text: `*Approval required*\n${approval.name}` },
+    });
+    if (approve?.status === "pending" && reject?.status === "pending") {
+      blocks.push({
+        type: "actions",
+        block_id: `opengeni_approval_${event.sequence}_${blocks.length}`,
+        elements: [
+          {
+            type: "button",
+            action_id: SLACK_ACTION_ID_BY_KIND.approval_approve,
+            value: approve.id,
+            text: { type: "plain_text", text: "Approve once", emoji: true },
+            style: "primary",
+          },
+          {
+            type: "button",
+            action_id: SLACK_ACTION_ID_BY_KIND.approval_reject,
+            value: reject.id,
+            text: { type: "plain_text", text: "Reject", emoji: true },
+            style: "danger",
+          },
+        ],
+      });
+    }
+  }
+  return {
+    text: fallback,
+    blocks: [
+      {
+        type: "section",
+        text: { type: "mrkdwn", text: `${mention}OpenGeni needs your approval.` },
+      },
+      ...blocks,
+    ],
+    operationId,
+  };
+}
+
+async function slackHumanInputCard(
+  deps: ApiRouteDeps,
+  interaction: SlackInteraction,
+  event: SessionEvent,
+  mention: string,
+  requesterAuthorized: boolean,
+) {
+  if (!interaction.sessionId) return null;
+  const requestId = boundedString(record(record(event.payload)?.request)?.id, 64);
+  if (!requestId) return null;
+  const request = await getSessionHumanInputRequest(
+    deps.db,
+    interaction.workspaceId,
+    interaction.sessionId,
+    requestId,
+  );
+  if (!request || request.status !== "pending") return null;
+  const operationId = deterministicUuid(
+    `slack-delivery:${interaction.id}:${event.sequence}:human-input`,
+  );
+  const text = `${mention}OpenGeni needs your input:\n${formatQuestions(request.questions)}\nReply in this thread${request.allowSkip ? " or choose Skip" : ""}.`;
+  if (!requesterAuthorized || !interaction.initiatingSlackUserId) return { text, operationId };
+  const question = request.questions.length === 1 ? request.questions[0] : null;
+  const canUseButtons =
+    question?.kind === "single_select" &&
+    question.options.length > 0 &&
+    question.options.length <= 5;
+  const actions: Array<{
+    actionKind: SlackInteractionActionKind;
+    actionKey: string;
+    targetId: string;
+    targetValue?: string;
+  }> = [];
+  if (canUseButtons && question) {
+    for (const option of question.options) {
+      actions.push({
+        actionKind: "human_input_select",
+        actionKey: `human:${request.id}:${question.id}:${option.id}`,
+        targetId: request.id,
+        targetValue: JSON.stringify([question.id, option.id]),
+      });
+    }
+  }
+  if (request.allowSkip) {
+    actions.push({
+      actionKind: "human_input_skip",
+      actionKey: `human:${request.id}:skip`,
+      targetId: request.id,
+    });
+  }
+  if (actions.length === 0) return { text, operationId };
+  const handles = await reserveSlackInteractionActionHandles(deps.db, {
+    interaction,
+    sessionEventSequence: event.sequence,
+    messageOperationId: operationId,
+    expiresAt: request.expiresAt
+      ? new Date(Math.min(new Date(request.expiresAt).getTime(), Date.now() + SLACK_ACTION_TTL_MS))
+      : new Date(Date.now() + SLACK_ACTION_TTL_MS),
+    actions,
+  });
+  const pending = handles.filter((handle) => handle.status === "pending");
+  const blocks: SlackMessageBlock[] = [{ type: "section", text: { type: "mrkdwn", text } }];
+  if (pending.length > 0) {
+    blocks.push({
+      type: "actions",
+      block_id: `opengeni_human_${event.sequence}`,
+      elements: pending.map((handle) => {
+        const option = question?.options.find(
+          (candidate) => handle.targetValue === JSON.stringify([question.id, candidate.id]),
+        );
+        return {
+          type: "button" as const,
+          action_id: SLACK_ACTION_ID_BY_KIND[handle.actionKind],
+          value: handle.id,
+          text: {
+            type: "plain_text" as const,
+            text: handle.actionKind === "human_input_skip" ? "Skip" : (option?.label ?? "Choose"),
+            emoji: true,
+          },
+        };
+      }),
+    });
+  }
+  return { text, blocks, operationId };
+}
+
 async function deliverSlackSessionEvents(
   deps: ApiRouteDeps,
   interaction: SlackInteraction,
@@ -1559,6 +2180,7 @@ async function deliverSlackSessionEvents(
     subjectId: interaction.owningSubjectId,
     sessionId: interaction.sessionId,
   });
+  const requester = await validatedSlackRequester(deps, interaction);
   let lastSequence = interaction.lastDeliveredSessionEventSequence;
   let terminal: Exclude<SlackInteraction["terminalDeliveryState"], "open"> | null = null;
   let latestAssistantText = "";
@@ -1643,21 +2265,40 @@ async function deliverSlackSessionEvents(
           );
         }
       }
-    } else if (event.type === "session.humanInput.requested") {
-      const requests = await listSessionHumanInputRequests(
-        deps.db,
-        interaction.workspaceId,
-        interaction.sessionId,
-        { status: "pending", limit: 1 },
+    } else if (event.type === "session.requiresAction") {
+      const card = await slackApprovalCard(
+        deps,
+        interaction,
+        event,
+        requester.mention,
+        requester.authorized,
       );
-      const request = requests[0];
-      if (request) {
+      await postDelivery(
+        client,
+        interaction,
+        event,
+        card.text,
+        "approval",
+        card.operationId,
+        card.blocks,
+      );
+    } else if (event.type === "session.humanInput.requested") {
+      const card = await slackHumanInputCard(
+        deps,
+        interaction,
+        event,
+        requester.mention,
+        requester.authorized,
+      );
+      if (card) {
         await postDelivery(
           client,
           interaction,
           event,
-          `OpenGeni needs your input:\n${formatQuestions(request.questions)}\nReply in this thread.`,
+          card.text,
           "human-input",
+          card.operationId,
+          card.blocks,
         );
       }
     } else if (event.type === "turn.completed") {
@@ -1684,12 +2325,28 @@ async function deliverSlackSessionEvents(
           "progress",
           existingProgress.operationId,
         );
+        const posted = await getSlackBotPostOperation(
+          deps.db,
+          interaction.workspaceId,
+          interaction.connectionId,
+          existingProgress.operationId,
+        );
+        if (posted?.slackChannelId && posted.slackMessageTimestamp) {
+          await client.updateMessage({
+            operationId: deterministicUuid(
+              `slack-terminal-update:${interaction.id}:${event.sequence}`,
+            ),
+            channelId: posted.slackChannelId,
+            timestamp: posted.slackMessageTimestamp,
+            text: `${requester.mention}${boundedOutput(existingProgress.text)}`,
+          });
+        }
       } else {
         await postDelivery(
           client,
           interaction,
           event,
-          `${output || "OpenGeni finished this task."}\n\nReply in this thread to continue.`,
+          `${requester.mention}${output || "OpenGeni finished this task."}\n\nReply in this thread to continue.`,
           "final",
         );
       }
@@ -1699,12 +2356,18 @@ async function deliverSlackSessionEvents(
         client,
         interaction,
         event,
-        "OpenGeni could not complete this task. Reply in this thread to retry or ask for details.",
+        `${requester.mention}OpenGeni could not complete this task. Reply in this thread to retry or ask for details.`,
         "failed",
       );
       terminal = "failed";
     } else if (event.type === "turn.cancelled") {
-      await postDelivery(client, interaction, event, "OpenGeni stopped this task.", "cancelled");
+      await postDelivery(
+        client,
+        interaction,
+        event,
+        `${requester.mention}OpenGeni stopped this task.`,
+        "cancelled",
+      );
       terminal = "cancelled";
     }
   }
@@ -1735,12 +2398,14 @@ async function postDelivery(
   text: string,
   kind: string,
   operationId = deterministicUuid(`slack-delivery:${interaction.id}:${event.sequence}:${kind}`),
+  blocks?: SlackMessageBlock[],
 ) {
   await client.postMessage({
     operationId,
     channelId: interaction.slackChannelId,
     threadTimestamp: interaction.slackThreadTs,
     text: boundedOutput(text),
+    ...(blocks ? { blocks } : {}),
   });
 }
 
@@ -1807,6 +2472,64 @@ function normalizedFormInteraction(
     slackThreadTs: null,
     triggerKind,
     text,
+  };
+}
+
+const SLACK_BLOCK_ACTION_IDS = new Set([
+  "opengeni.approval.approve",
+  "opengeni.approval.reject",
+  "opengeni.human_input.select",
+  "opengeni.human_input.skip",
+  "opengeni.session.status",
+  "opengeni.session.pause",
+  "opengeni.session.resume",
+]);
+
+export function normalizedBlockActionInteraction(
+  payload: Record<string, unknown>,
+): NormalizedSlackInteraction {
+  const team = record(payload.team);
+  const user = record(payload.user);
+  const channel = record(payload.channel);
+  const container = record(payload.container);
+  const message = record(payload.message);
+  const action = Array.isArray(payload.actions) ? record(payload.actions[0]) : null;
+  const teamId = boundedString(team?.id, 64);
+  const userId = boundedString(user?.id, 64);
+  const channelId = boundedString(channel?.id, 64) ?? boundedString(container?.channel_id, 64);
+  const messageTs = boundedString(message?.ts, 64) ?? boundedString(container?.message_ts, 64);
+  const threadTs = boundedString(message?.thread_ts, 64);
+  const actionTs = boundedString(action?.action_ts, 64) ?? boundedString(payload.action_ts, 64);
+  const actionId = boundedString(action?.action_id, 128);
+  const handleId = boundedString(action?.value, 64);
+  if (
+    !teamId ||
+    !userId ||
+    !channelId ||
+    !messageTs ||
+    !actionTs ||
+    !actionId ||
+    !SLACK_BLOCK_ACTION_IDS.has(actionId) ||
+    !handleId ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(handleId) ||
+    !Array.isArray(payload.actions) ||
+    payload.actions.length !== 1
+  ) {
+    throw new HTTPException(400, { message: "invalid Slack block action" });
+  }
+  const identity = createHash("sha256")
+    .update([teamId, userId, channelId, messageTs, actionTs, actionId, handleId].join("\n"))
+    .digest("hex");
+  return {
+    providerEventId: `block:${identity}`,
+    providerMessageId: `block:${identity}`,
+    slackTeamId: teamId,
+    slackUserId: userId,
+    slackChannelId: channelId,
+    slackMessageTs: messageTs,
+    slackThreadTs: threadTs,
+    triggerKind: "block_action",
+    text: `${actionId}:${handleId}`,
   };
 }
 

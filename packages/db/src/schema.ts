@@ -1300,7 +1300,13 @@ export const slackInteractionInbox = pgTable(
     slackThreadTs: text("slack_thread_ts"),
     triggerKind: text("trigger_kind")
       .$type<
-        "app_mention" | "dm" | "reaction" | "slash_command" | "message_shortcut" | "thread_reply"
+        | "app_mention"
+        | "dm"
+        | "reaction"
+        | "slash_command"
+        | "message_shortcut"
+        | "thread_reply"
+        | "block_action"
       >()
       .notNull(),
     text: text("text").notNull(),
@@ -1354,6 +1360,7 @@ export const slackInteractions = pgTable(
     slackThreadTs: text("slack_thread_ts").notNull(),
     routeKey: text("route_key").notNull(),
     triggeringProviderEventId: text("triggering_provider_event_id").notNull(),
+    initiatingSlackUserId: text("initiating_slack_user_id"),
     owningSubjectId: text("owning_subject_id").notNull(),
     visibility: text("visibility").$type<"private" | "workspace">().notNull(),
     sessionReservationId: uuid("session_reservation_id").notNull().defaultRandom(),
@@ -1397,6 +1404,72 @@ export const slackInteractions = pgTable(
       table.terminalDeliveryState,
       table.deliveryRetryAt,
       table.updatedAt,
+      table.id,
+    ),
+  }),
+);
+
+export const slackInteractionActionHandles = pgTable(
+  "slack_interaction_action_handles",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => connections.id, { onDelete: "cascade" }),
+    interactionId: uuid("interaction_id").notNull(),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    sessionEventSequence: integer("session_event_sequence").notNull(),
+    actionKind: text("action_kind")
+      .$type<
+        | "approval_approve"
+        | "approval_reject"
+        | "human_input_select"
+        | "human_input_skip"
+        | "session_status"
+        | "session_pause"
+        | "session_resume"
+      >()
+      .notNull(),
+    actionKey: text("action_key").notNull(),
+    targetId: text("target_id"),
+    targetValue: text("target_value"),
+    authorizedSubjectId: text("authorized_subject_id").notNull(),
+    authorizedSlackUserId: text("authorized_slack_user_id").notNull(),
+    messageOperationId: uuid("message_operation_id").notNull(),
+    status: text("status").$type<"pending" | "completed" | "stale">().notNull().default("pending"),
+    result: text("result"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    interactionIdentity: foreignKey({
+      columns: [table.accountId, table.workspaceId, table.interactionId],
+      foreignColumns: [
+        slackInteractions.accountId,
+        slackInteractions.workspaceId,
+        slackInteractions.id,
+      ],
+      name: "slack_interaction_action_handles_interaction_fk",
+    }).onDelete("cascade"),
+    identity: uniqueIndex("slack_interaction_action_handles_identity_uq").on(
+      table.interactionId,
+      table.sessionEventSequence,
+      table.actionKey,
+    ),
+    pending: index("slack_interaction_action_handles_pending_idx").on(
+      table.workspaceId,
+      table.status,
+      table.expiresAt,
       table.id,
     ),
   }),
@@ -1518,6 +1591,46 @@ export const slackBotPostOperations = pgTable(
           and ${table.slackMessageTimestamp} is not null
           and ${table.completedAt} is not null
         )`,
+    ),
+  }),
+);
+
+export const slackBotUpdateOperations = pgTable(
+  "slack_bot_update_operations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => connections.id, { onDelete: "cascade" }),
+    operationId: uuid("operation_id").notNull(),
+    slackChannelId: text("slack_channel_id").notNull(),
+    slackMessageTimestamp: text("slack_message_timestamp").notNull(),
+    requestDigest: text("request_digest").notNull(),
+    status: text("status").$type<"provider_started" | "completed">().notNull(),
+    claimHolderId: uuid("claim_holder_id"),
+    claimExpiresAt: timestamp("claim_expires_at", { withTimezone: true }),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    lastFailureCode: text("last_failure_code"),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceOperation: uniqueIndex("slack_bot_update_operations_workspace_operation_uq").on(
+      table.workspaceId,
+      table.connectionId,
+      table.operationId,
+    ),
+    workspaceStatus: index("slack_bot_update_operations_workspace_status_idx").on(
+      table.workspaceId,
+      table.status,
+      table.updatedAt,
     ),
   }),
 );

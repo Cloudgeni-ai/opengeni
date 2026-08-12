@@ -461,6 +461,14 @@ function fakeSlack(
         ts: committed.timestamp,
       });
     }
+    if (method === "chat.update") {
+      const channel = params.get("channel");
+      const timestamp = params.get("ts");
+      if (!channel || !timestamp) {
+        return Response.json({ ok: false, error: "invalid_arguments" });
+      }
+      return Response.json({ ok: true, channel, ts: timestamp });
+    }
     if (method === "chat.delete") {
       const channel = params.get("channel");
       const timestamp = params.get("ts");
@@ -2592,6 +2600,61 @@ describe("OpenGeni Slack bot connection", () => {
     );
     expect(operationAudits.some((audit) => audit.metadata.outcome === "ambiguous")).toBe(true);
     expect(JSON.stringify(operationAudits)).not.toContain("idempotent fixture text");
+  });
+
+  test("updates one exact bot message through a durable operation identity", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack();
+    const connected = await connectBot(workspace, slack.fetch);
+    const resolved = await resolveSlackBotConnectionForTool({
+      db: client.db,
+      grant: {
+        ...workspace,
+        subjectId: "subject-a",
+        permissions: ["connections:read"],
+        metadata: {},
+      },
+      sessionId: null,
+      requestedConnectionId: connected.body.connection.id,
+    });
+    const bot = createOpenGeniSlackBotClient(
+      { db: client.db, settings, slackFetch: slack.fetch },
+      resolved,
+    );
+    const posted = await bot.postMessage({
+      operationId: crypto.randomUUID(),
+      channelId: "C_MEMBER",
+      text: "Approval pending",
+    });
+    const update = {
+      operationId: crypto.randomUUID(),
+      channelId: posted.channelId,
+      timestamp: posted.timestamp,
+      text: "Approved once",
+      blocks: [
+        { type: "section" as const, text: { type: "mrkdwn" as const, text: "Approved once" } },
+      ],
+    };
+    const first = await bot.updateMessage(update);
+    expect(await bot.updateMessage(update)).toEqual(first);
+    expect(slack.calls.filter((call) => call.method === "chat.update")).toHaveLength(1);
+    await expect(bot.updateMessage({ ...update, text: "Rejected" })).rejects.toThrow(
+      "already bound",
+    );
+    const [operation] = await shared!.admin<
+      Array<{ status: string; attempt_count: number; slack_message_timestamp: string }>
+    >`
+      select status, attempt_count, slack_message_timestamp
+      from slack_bot_update_operations
+      where workspace_id = ${workspace.workspaceId}
+        and connection_id = ${connected.body.connection.id}
+        and operation_id = ${update.operationId}`;
+    expect(operation).toEqual({
+      status: "completed",
+      attempt_count: 1,
+      slack_message_timestamp: posted.timestamp,
+    });
   });
 
   test("cancels Memory delivery when an eligible channel becomes Slack Connect before posting", async () => {

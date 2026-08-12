@@ -20,14 +20,17 @@ import {
   buildConnectionTokenResolver,
   claimSlackBotDeleteOperation,
   claimSlackBotPostOperation,
+  claimSlackBotUpdateOperation,
   completeSlackBotDeleteOperation,
   completeSlackBotPostOperation,
+  completeSlackBotUpdateOperation,
   getSession,
   listConnectionsMetadata,
   markSlackBotDeleteOperationProviderStarted,
   recordAuditEvent,
   releaseSlackBotDeleteOperationClaim,
   releaseSlackBotPostOperationClaim,
+  releaseSlackBotUpdateOperationClaim,
   setConnectionStatus,
   type Database,
 } from "@opengeni/db";
@@ -64,7 +67,10 @@ const MAX_FILE_CURSOR_LENGTH = 1_024;
 const SLACK_FILE_CURSOR_VERSION = "files-v1";
 const MAX_PROJECTED_TEXT = 4_000;
 const SLACK_POST_CLAIM_LEASE_MS = 30_000;
+const SLACK_UPDATE_CLAIM_LEASE_MS = 30_000;
 const SLACK_DELETE_CLAIM_LEASE_MS = 30_000;
+const MAX_SLACK_BLOCKS = 50;
+const MAX_SLACK_BLOCK_BYTES = 32 * 1024;
 
 type SlackPayload = Record<string, unknown> & { ok?: unknown; error?: unknown };
 
@@ -145,6 +151,25 @@ export type SlackBotReceipt = {
   clientMessageId?: string;
 };
 
+export type SlackMessageBlock =
+  | {
+      type: "section";
+      block_id?: string;
+      text: { type: "mrkdwn" | "plain_text"; text: string; emoji?: boolean };
+    }
+  | {
+      type: "actions";
+      block_id: string;
+      elements: Array<{
+        type: "button";
+        action_id: string;
+        value: string;
+        text: { type: "plain_text"; text: string; emoji?: boolean };
+        style?: "primary" | "danger";
+      }>;
+    }
+  | { type: "divider" };
+
 type SlackBotOperation =
   | "channels.list"
   | "channel_history.read"
@@ -154,6 +179,7 @@ type SlackBotOperation =
   | "file.info"
   | "file.content.read"
   | "message.post"
+  | "message.update"
   | "message.delete";
 
 type SlackBotContext = {
@@ -659,6 +685,7 @@ export class OpenGeniSlackBotClient {
     userId?: string;
     threadTimestamp?: string;
     text: string;
+    blocks?: SlackMessageBlock[];
     requireActiveNonSharedChannel?: boolean;
   }) {
     const operation = "message.post" as const;
@@ -681,12 +708,14 @@ export class OpenGeniSlackBotClient {
       }
       const targetKind = input.userId ? "user" : "channel";
       const targetId = input.userId ?? input.channelId!;
+      const blocks = validateSlackMessageBlocks(input.blocks);
       const requestDigest = this.postRequestDigest({
         operationId: input.operationId,
         targetKind,
         targetId,
         ...(input.threadTimestamp ? { threadTimestamp: input.threadTimestamp } : {}),
         text: input.text,
+        ...(blocks ? { blocks } : {}),
       });
       const claim = await claimSlackBotPostOperation(this.db, {
         accountId: this.context.accountId,
@@ -722,6 +751,7 @@ export class OpenGeniSlackBotClient {
       const posted = await this.call(headers, "chat.postMessage", {
         channel: channelId,
         text: input.text,
+        ...(blocks ? { blocks: JSON.stringify(blocks) } : {}),
         client_msg_id: input.operationId,
         ...(input.threadTimestamp ? { thread_ts: input.threadTimestamp } : {}),
       });
@@ -751,6 +781,104 @@ export class OpenGeniSlackBotClient {
       const failureCode = safeFailureCode(error);
       if (claimAcquired) {
         await releaseSlackBotPostOperationClaim(this.db, {
+          accountId: this.context.accountId,
+          workspaceId: this.context.workspaceId,
+          connectionId: this.connection.id,
+          operationId: input.operationId,
+          claimHolderId,
+          failureCode,
+        }).catch(() => undefined);
+      }
+      await this.recordAudit(
+        operation,
+        providerCallStarted && slackMutationOutcomeMayBeAmbiguous(error) ? "ambiguous" : "failed",
+        failureCode,
+        input.operationId,
+      );
+      throw error;
+    }
+  }
+
+  async updateMessage(input: {
+    operationId: string;
+    channelId: string;
+    timestamp: string;
+    text: string;
+    blocks?: SlackMessageBlock[];
+  }): Promise<{ channelId: string; timestamp: string; receipt: SlackBotReceipt }> {
+    const operation = "message.update" as const;
+    const claimHolderId = crypto.randomUUID();
+    let claimAcquired = false;
+    let providerCallStarted = false;
+    const blocks = validateSlackMessageBlocks(input.blocks);
+    try {
+      const headers = await this.headersFor(operation);
+      await this.requireMemberChannel(headers, input.channelId);
+      const requestDigest = this.updateRequestDigest({ ...input, ...(blocks ? { blocks } : {}) });
+      const claim = await claimSlackBotUpdateOperation(this.db, {
+        accountId: this.context.accountId,
+        workspaceId: this.context.workspaceId,
+        connectionId: this.connection.id,
+        operationId: input.operationId,
+        slackChannelId: input.channelId,
+        slackMessageTimestamp: input.timestamp,
+        requestDigest,
+        claimHolderId,
+        claimLeaseMs: SLACK_UPDATE_CLAIM_LEASE_MS,
+      });
+      if (claim.kind === "connection_not_found") {
+        throw new Error("OpenGeni Slack bot connection no longer exists");
+      }
+      if (claim.kind === "conflict") {
+        throw new Error("operationId is already bound to a different Slack update request");
+      }
+      if (claim.kind === "in_progress") {
+        throw new Error(
+          "Slack update operation is already in progress; retry the same operationId",
+        );
+      }
+      if (claim.kind === "completed") {
+        return {
+          channelId: claim.operation.slackChannelId,
+          timestamp: claim.operation.slackMessageTimestamp,
+          receipt: this.receipt(operation, input.operationId),
+        };
+      }
+      claimAcquired = true;
+      providerCallStarted = true;
+      const updated = await this.call(headers, "chat.update", {
+        channel: input.channelId,
+        ts: input.timestamp,
+        text: input.text,
+        ...(blocks ? { blocks: JSON.stringify(blocks) } : {}),
+      });
+      const slackChannelId = requiredSlackString(updated.channel, "channel");
+      const slackMessageTimestamp = requiredSlackString(updated.ts, "ts");
+      if (slackChannelId !== input.channelId || slackMessageTimestamp !== input.timestamp) {
+        throw new SlackBotProviderError("message_update_identity_mismatch");
+      }
+      const completed = await completeSlackBotUpdateOperation(this.db, {
+        accountId: this.context.accountId,
+        workspaceId: this.context.workspaceId,
+        connectionId: this.connection.id,
+        operationId: input.operationId,
+        claimHolderId,
+        subjectId: this.context.subjectId,
+        auditMetadata: this.auditMetadata(operation, "succeeded", undefined, input.operationId),
+      });
+      if (completed !== "completed") {
+        throw new Error("Slack update completion lost its durable operation claim");
+      }
+      claimAcquired = false;
+      return {
+        channelId: slackChannelId,
+        timestamp: slackMessageTimestamp,
+        receipt: this.receipt(operation, input.operationId),
+      };
+    } catch (error) {
+      const failureCode = safeFailureCode(error);
+      if (claimAcquired) {
+        await releaseSlackBotUpdateOperationClaim(this.db, {
           accountId: this.context.accountId,
           workspaceId: this.context.workspaceId,
           connectionId: this.connection.id,
@@ -1184,6 +1312,7 @@ export class OpenGeniSlackBotClient {
     targetId: string;
     threadTimestamp?: string;
     text: string;
+    blocks?: SlackMessageBlock[];
   }): string {
     const key = environmentsEncryptionKeyBytes(this.settings);
     if (!key) throw new Error("connection encryption is not configured");
@@ -1196,6 +1325,30 @@ export class OpenGeniSlackBotClient {
           targetId: input.targetId,
           threadTimestamp: input.threadTimestamp ?? null,
           text: input.text,
+          blocks: input.blocks ?? null,
+        }),
+      )
+      .digest("hex");
+  }
+
+  private updateRequestDigest(input: {
+    operationId: string;
+    channelId: string;
+    timestamp: string;
+    text: string;
+    blocks?: SlackMessageBlock[];
+  }): string {
+    const key = environmentsEncryptionKeyBytes(this.settings);
+    if (!key) throw new Error("connection encryption is not configured");
+    return createHmac("sha256", key)
+      .update(
+        JSON.stringify({
+          operationId: input.operationId,
+          connectionId: this.connection.id,
+          channelId: input.channelId,
+          timestamp: input.timestamp,
+          text: input.text,
+          blocks: input.blocks ?? null,
         }),
       )
       .digest("hex");
@@ -2104,9 +2257,24 @@ function slackMethodForOperation(operation: SlackBotOperation): string {
       return "files.info";
     case "message.post":
       return "chat.postMessage";
+    case "message.update":
+      return "chat.update";
     case "message.delete":
       return "chat.delete";
   }
+}
+
+function validateSlackMessageBlocks(
+  blocks: SlackMessageBlock[] | undefined,
+): SlackMessageBlock[] | undefined {
+  if (blocks === undefined) return undefined;
+  if (blocks.length < 1 || blocks.length > MAX_SLACK_BLOCKS) {
+    throw new RangeError("Slack message blocks exceed the supported count");
+  }
+  if (Buffer.byteLength(JSON.stringify(blocks), "utf8") > MAX_SLACK_BLOCK_BYTES) {
+    throw new RangeError("Slack message blocks exceed the supported byte size");
+  }
+  return blocks;
 }
 
 function boundedInt(value: number | undefined, max: number, fallback: number): number {

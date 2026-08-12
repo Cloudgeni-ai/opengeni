@@ -87,6 +87,7 @@ afterAll(async () => {
 type SlackPost = {
   channel: string;
   text: string;
+  blocks: unknown[] | null;
   threadTimestamp: string | null;
   clientMessageId: string | null;
   timestamp: string;
@@ -270,6 +271,7 @@ function fakeSlack(
       const post = {
         channel: form.get("channel") ?? "",
         text: form.get("text") ?? "",
+        blocks: form.has("blocks") ? (JSON.parse(form.get("blocks")!) as unknown[]) : null,
         threadTimestamp: form.get("thread_ts"),
         clientMessageId,
         timestamp,
@@ -309,6 +311,17 @@ function fakeSlack(
         channel: form.get("channel"),
         ts: timestamp,
       });
+    }
+    if (method === "chat.update") {
+      const channel = form.get("channel") ?? "";
+      const timestamp = form.get("ts") ?? "";
+      const post = posts.find(
+        (candidate) => candidate.channel === channel && candidate.timestamp === timestamp,
+      );
+      if (!post) return Response.json({ ok: false, error: "message_not_found" });
+      post.text = form.get("text") ?? "";
+      post.blocks = form.has("blocks") ? (JSON.parse(form.get("blocks")!) as unknown[]) : null;
+      return Response.json({ ok: true, channel, ts: timestamp });
     }
     return Response.json({ ok: false, error: `unexpected_${method}` });
   };
@@ -3129,6 +3142,88 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       }),
     );
   });
+
+  test("requester-bound native controls update the exact Slack message and settle sibling handles", async () => {
+    if (!available) return;
+    const value = await fixture();
+    const channelId = "D_NATIVE_ACTION";
+    const rootTimestamp = "1760000000.000001";
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_NATIVE_ACTION_${crypto.randomUUID()}`,
+          event: {
+            type: "message",
+            channel_type: "im",
+            user: value.ownerSlackUserId,
+            channel: channelId,
+            ts: rootTimestamp,
+            text: "Start a task with native Slack controls",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+
+    const acknowledgement = value.slack.posts.at(-1)!;
+    expect(acknowledgement.blocks).not.toBeNull();
+    const [statusHandle] = await shared!.admin<{ id: string }[]>`
+      select id
+      from slack_interaction_action_handles
+      where workspace_id = ${value.owner.workspaceId}
+        and action_kind = 'session_status'
+        and status = 'pending'`;
+    expect(statusHandle?.id).toBeTruthy();
+
+    const payload = JSON.stringify({
+      type: "block_actions",
+      team: { id: value.teamId },
+      user: { id: value.ownerSlackUserId },
+      channel: { id: channelId },
+      message: { ts: acknowledgement.timestamp, thread_ts: rootTimestamp },
+      actions: [
+        {
+          action_id: "opengeni.session.status",
+          action_ts: "1760000000.000002",
+          value: statusHandle!.id,
+        },
+      ],
+    });
+    const response = await value.app.request(
+      signedRequest(
+        "/v1/integrations/slack/interactions",
+        new URLSearchParams({ payload }).toString(),
+        "application/x-www-form-urlencoded",
+      ),
+    );
+    expect(response.status).toBe(200);
+    await drainAll(value.deps);
+
+    expect(acknowledgement.text).toContain("OpenGeni task status:");
+    expect(value.slack.posts).toHaveLength(2);
+    expect(value.slack.posts[1]).toMatchObject({
+      channel: channelId,
+      threadTimestamp: rootTimestamp,
+      text: expect.stringContaining("OpenGeni task controls"),
+    });
+    const handles = await shared!.admin<
+      { action_kind: string; status: string; result: string | null }[]
+    >`
+      select action_kind, status, result
+      from slack_interaction_action_handles
+      where workspace_id = ${value.owner.workspaceId}
+        and message_operation_id = (
+          select message_operation_id
+          from slack_interaction_action_handles
+          where id = ${statusHandle!.id}::uuid
+        )
+      order by action_kind`;
+    expect(handles).toEqual([
+      { action_kind: "session_pause", status: "stale", result: "superseded" },
+      { action_kind: "session_status", status: "completed", result: "status" },
+    ]);
+  }, 60_000);
 
   test("slash commands and explicit message shortcuts each create one durable session surface", async () => {
     if (!available) return;
