@@ -123,7 +123,10 @@ voice ends, the browser first seals and durably drains every already-parsed V3
 event. The same end transaction then selects only finalized transcript after the
 latest delegation fence, excludes a late user `turn.done` already represented by
 that delegation, renders a bounded Codex-style XML tail, and submits it through
-the canonical ordinary `Steer` path. The associated
+the canonical ordinary `Steer` path. A trusted embedding host may attach bounded
+per-entry `turnInstructions`; OpenGeni persists them privately for exact replay
+and gives the tail turn the latest accepted user-transcript guidance, falling
+back to the latest tail entry only when no user transcript exists. The associated
 `session_realtime_context_projections` row is idempotency/audit provenance for
 that durable tail turn; workers perform no hidden next-turn injection. An empty
 tail creates no turn. A later voice call receives both bounded durable session
@@ -137,6 +140,9 @@ A provider `delegation.created` uses the same execution path as a human change
 of direction. After exact owner, active connection epoch, and provider-start
 proof, one transaction ledgers the call and invokes canonical prompt `Steer` on
 that same session with a service initiator and immutable realtime provenance.
+Trusted `turnInstructions` on that delegation are stored in a private,
+non-projected ledger column, copied only to the exact ordinary turn, and included
+in immutable replay validation together with the linked turn value.
 Idle work queues normally; active work is superseded/interrupted; queued work is
 reordered by the existing Steer semantics. The call row links one-to-one to the
 turn for terminal result/error projection. Invalid calls receive a deterministic

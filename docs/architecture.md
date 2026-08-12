@@ -488,7 +488,11 @@ the previous delegation and records a transcript fence. On end, after the
 browser seals and durably drains parsed V3 events, the lifecycle transaction
 selects only the finalized tail after the latest fence, excludes a late user
 turn already covered by the delegation, and submits one bounded Codex-style XML
-wrapper through canonical ordinary `Steer`. The linked
+wrapper through canonical ordinary `Steer`. A trusted embedding host may attach
+bounded `turnInstructions` to finalized transcript entries; the ledger retains
+that context privately for exact replay, and the tail turn receives the latest
+accepted user-transcript guidance (or the latest tail-entry guidance when no
+user transcript exists). The linked
 `session_realtime_context_projections` row is idempotency/audit provenance for
 that durable turn, not hidden worker context. Empty tails create neither row nor
 turn. Later realtime calls receive bounded ordinary durable history plus bounded
@@ -502,7 +506,10 @@ explicit silence instruction. Canonical:
 Native provider delegation remains in that same session. Exact owner, connection
 epoch, and provider-start proof gate one transaction that accepts the provider
 call ledger row and invokes the canonical prompt `Steer` transaction with a
-service initiator and immutable realtime provenance. This is exactly ordinary
+service initiator and immutable realtime provenance. Trusted per-entry
+`turnInstructions` are stored in a private, non-projected ledger column and
+copied to that exact delegation turn; replay rejects either changed entry
+guidance or a mismatched linked turn. This is exactly ordinary
 Steer: it supersedes current direction when needed, moves the replacement to the
 queue head, emits canonical events/audit, and creates the durable workflow wake.
 The call's one-to-one `turn_id` is the terminal result/error projection seam;

@@ -4936,8 +4936,26 @@ export const SessionRealtimeInboundEntry = z
     delegationItemId: z.string().max(1024).nullable().optional(),
     text: z.string().max(131_072).nullable().optional(),
     payload: z.record(z.string(), z.unknown()).optional(),
+    // Trusted host context for the exact ordinary turn materialized from this
+    // provider entry. Persisted privately for replay and worker execution;
+    // never projected in SessionRealtimeLedgerEntry or timeline events.
+    turnInstructions: z.string().trim().min(1).max(32768).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((entry, context) => {
+    if (
+      entry.turnInstructions !== undefined &&
+      entry.kind !== "delegation_call" &&
+      entry.kind !== "user_transcript" &&
+      entry.kind !== "assistant_transcript"
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["turnInstructions"],
+        message: "turnInstructions require a delegation or finalized transcript entry",
+      });
+    }
+  });
 export type SessionRealtimeInboundEntry = z.infer<typeof SessionRealtimeInboundEntry>;
 
 export const SyncSessionRealtimeLedgerRequest = SessionRealtimeOwnerProof.extend({

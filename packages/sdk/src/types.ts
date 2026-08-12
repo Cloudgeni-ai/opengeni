@@ -125,6 +125,8 @@ export type SessionRealtimeInboundEntry = {
   delegationItemId?: string | null | undefined;
   text?: string | null | undefined;
   payload?: Record<string, unknown> | undefined;
+  /** Hidden host context for the exact backend turn derived from this entry. */
+  turnInstructions?: string | undefined;
 };
 
 export type SyncSessionRealtimeLedgerRequest = {

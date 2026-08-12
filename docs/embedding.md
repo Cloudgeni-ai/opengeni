@@ -72,11 +72,16 @@ block) always substituted in.
 - **Workspace `agentInstructions`** (`Workspace.agentInstructions`, set at workspace create/update) — the white-label persona for _every_ session in a workspace. Use it for stable, tenant-wide branding/behavior. It may embed the `{{core}}` marker to place the non-bypassable CORE; if it omits the marker, CORE is appended.
 - **Per-session `instructions`** (`CreateSessionRequest.instructions`) — an optional, per-_session_ refinement layered after the workspace persona. Use it to deliver a **per-agent-type prompt** (reviewer vs. planner vs. fixer) when many personas share one workspace, without minting a workspace per persona. It is org-visible metadata (returned on the session record, exposed like `title`/`goal`), **never** a timeline event, so internal prompt content does not leak to shared-session readers and carries full system-level authority.
 - **Per-turn `turnInstructions`** (`CreateSessionRequest.turnInstructions`,
-  `SendMessageInput.turnInstructions`) — optional host context for one exact
-  accepted turn. OpenGeni stores it separately from the visible prompt and keeps
-  it attached through queueing, steering, retry, approval resume, and worker
-  recovery. It does not carry into the next turn. Use it for submit-time route,
-  selection, or viewport context that must not be reconstructed later.
+  `SendMessageInput.turnInstructions`, and trusted realtime
+  `SessionRealtimeInboundEntry.turnInstructions`) — optional host context for
+  one exact accepted turn. OpenGeni stores it separately from the visible
+  prompt and keeps it attached through queueing, steering, retry, approval
+  resume, and worker recovery. Realtime entry guidance is private admission
+  state: it is omitted from realtime-ledger responses and timeline events,
+  copied to a delegation turn, and used from the latest accepted user transcript
+  for an end-of-call tail turn. It does not carry into the next unrelated turn.
+  Use it for submit-time route, selection, or viewport context that must not be
+  reconstructed later.
 - **Preallocated session identity** (`CreateSessionRequest.requestedSessionId`) — an optional UUID an embedding host may persist in its own projection before calling OpenGeni. OpenGeni creates that exact session and rejects collisions with `409`, so the initial worker claim cannot outrun the host link. Pair retries with the same workspace-scoped `idempotencyKey`; a replay that changes the UUID is rejected. The UUID is identity/correlation only and grants no access.
 
 Do not stuff persona or host context into `initialMessage`/message text: those

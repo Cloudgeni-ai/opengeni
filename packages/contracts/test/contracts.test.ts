@@ -51,6 +51,7 @@ import {
   Session,
   SessionGoal,
   SessionMcpServerMetadata,
+  SessionRealtimeInboundEntry,
   SteerSessionMessageRequest,
   SubmitHumanInputResponseRequest,
   TerminalPtyExitedPayload,
@@ -1049,6 +1050,37 @@ describe("contracts", () => {
       turnInstructions: "  Current host context: record 42 is selected.  ",
     });
     expect(payload.turnInstructions).toBe("Current host context: record 42 is selected.");
+  });
+
+  test("accepts hidden realtime turn instructions only for turn-bearing entries", () => {
+    const operationId = "00000000-0000-4000-8000-000000000011";
+    expect(
+      SessionRealtimeInboundEntry.parse({
+        operationId,
+        kind: "delegation_call",
+        turnInstructions: "  Current host context: record 42 is selected.  ",
+      }),
+    ).toMatchObject({
+      turnInstructions: "Current host context: record 42 is selected.",
+    });
+    expect(
+      SessionRealtimeInboundEntry.parse({
+        operationId,
+        kind: "user_transcript",
+        turnInstructions: "Current host context: record 43 is selected.",
+      }),
+    ).toMatchObject({
+      turnInstructions: "Current host context: record 43 is selected.",
+    });
+    for (const kind of ["interruption", "error"] as const) {
+      expect(
+        SessionRealtimeInboundEntry.safeParse({
+          operationId,
+          kind,
+          turnInstructions: "Host-only context must not ride this entry.",
+        }).success,
+      ).toBe(false);
+    }
   });
 
   test("accepts client config payloads", () => {

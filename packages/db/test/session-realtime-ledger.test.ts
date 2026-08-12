@@ -765,6 +765,87 @@ describe("session realtime ledger", () => {
     ).toBe(false);
   });
 
+  test("keeps trusted turn instructions private and exact across delegation replay", async () => {
+    const value = await fixture();
+    const first = await claimInitial(value);
+    await complete(value, first.claimed.connection);
+    await proveProviderStarted(value, first.claimed.connection);
+    const instruction = "Current host context: organization profile revision 42.";
+    const baseInput = delegationSyncInput(value, first.claimed.connection);
+    const input = {
+      ...baseInput,
+      entries: [{ ...baseInput.entries[0]!, turnInstructions: `  ${instruction}  ` }],
+    };
+
+    const admitted = await transaction(value.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(tx, input),
+    );
+    const publicEntry = admitted.accepted[0]?.entry;
+    const turnId = publicEntry?.turnId;
+    if (!publicEntry || !turnId) throw new Error("Realtime delegation turn was not linked");
+    expect(publicEntry).not.toHaveProperty("turnInstructions");
+    expect(JSON.stringify(admitted)).not.toContain(instruction);
+
+    const stored = await transaction(value.owner.workspaceId, async (tx) => {
+      const [entry] = await tx
+        .select({ turnInstructions: schema.sessionRealtimeEntries.turnInstructions })
+        .from(schema.sessionRealtimeEntries)
+        .where(eq(schema.sessionRealtimeEntries.id, publicEntry.id));
+      const [turn] = await tx
+        .select({
+          triggerEventId: schema.sessionTurns.triggerEventId,
+          turnInstructions: schema.sessionTurns.turnInstructions,
+        })
+        .from(schema.sessionTurns)
+        .where(eq(schema.sessionTurns.id, turnId));
+      const [event] = turn
+        ? await tx
+            .select({ payload: schema.sessionEvents.payload })
+            .from(schema.sessionEvents)
+            .where(eq(schema.sessionEvents.id, turn.triggerEventId))
+        : [];
+      return { entry, turn, event };
+    });
+    expect(stored).toMatchObject({
+      entry: { turnInstructions: instruction },
+      turn: { turnInstructions: instruction },
+    });
+    expect(stored.event?.payload).not.toHaveProperty("turnInstructions");
+
+    const replay = await transaction(value.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(tx, input),
+    );
+    expect(replay.accepted[0]).toMatchObject({ replay: true, entry: { id: publicEntry.id } });
+    expect(replay.accepted[0]!.entry).not.toHaveProperty("turnInstructions");
+    await expectConflict(
+      transaction(value.owner.workspaceId, (tx) =>
+        syncSessionRealtimeLedgerInTransaction(tx, {
+          ...input,
+          entries: [
+            {
+              ...input.entries[0]!,
+              turnInstructions: "Current host context: organization profile revision 43.",
+            },
+          ],
+        }),
+      ),
+      "REALTIME_DELEGATION_CHANGED",
+    );
+
+    await transaction(value.owner.workspaceId, (tx) =>
+      tx
+        .update(schema.sessionTurns)
+        .set({ turnInstructions: "corrupted linked turn guidance" })
+        .where(eq(schema.sessionTurns.id, turnId)),
+    );
+    await expectConflict(
+      transaction(value.owner.workspaceId, (tx) =>
+        syncSessionRealtimeLedgerInTransaction(tx, input),
+      ),
+      "REALTIME_DELEGATION_CHANGED",
+    );
+  });
+
   test("rejects changed immutable input and outbound collisions on every operation replay", async () => {
     const value = await fixture();
     const first = await claimInitial(value);
@@ -782,6 +863,7 @@ describe("session realtime ledger", () => {
           providerEventId: "immutable-transcript-1",
           text: "immutable finalized transcript",
           payload: { turnId: "immutable-turn-1", nested: { z: 1, a: 2 } },
+          turnInstructions: "immutable transcript host context",
         },
       ],
     };
@@ -793,6 +875,19 @@ describe("session realtime ledger", () => {
         syncSessionRealtimeLedgerInTransaction(tx, {
           ...exact,
           entries: [{ ...exact.entries[0]!, text: "changed transcript" }],
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "REALTIME_ENTRY_CHANGED" });
+    await expect(
+      transaction(value.owner.workspaceId, (tx) =>
+        syncSessionRealtimeLedgerInTransaction(tx, {
+          ...exact,
+          entries: [
+            {
+              ...exact.entries[0]!,
+              turnInstructions: "changed transcript host context",
+            },
+          ],
         }),
       ),
     ).rejects.toMatchObject({ code: "REALTIME_ENTRY_CHANGED" });

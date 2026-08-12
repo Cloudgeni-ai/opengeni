@@ -2859,6 +2859,10 @@ export const sessionRealtimeEntries = pgTable(
     textCodecVersion: losslessCodecVersion("text_codec_version"),
     payload: losslessJsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
     payloadCodecVersion: losslessCodecVersion("payload_codec_version"),
+    // Hidden host context for an exact ordinary turn derived from a trusted
+    // provider-in delegation or finalized transcript. This never appears in
+    // the public realtime ledger projection.
+    turnInstructions: text("turn_instructions"),
     clientAckedAt: timestamp("client_acked_at", { withTimezone: true }),
     providerAckedAt: timestamp("provider_acked_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -2933,6 +2937,16 @@ export const sessionRealtimeEntries = pgTable(
       sql`(${table.kind} = 'user_transcript' and ${table.role} = 'user' and ${table.text} is not null)
         or (${table.kind} = 'assistant_transcript' and ${table.role} = 'assistant' and ${table.text} is not null)
         or (${table.kind} not in ('user_transcript', 'assistant_transcript') and ${table.role} is null)`,
+    ),
+    turnInstructionsValid: check(
+      "session_realtime_entries_turn_instructions_check",
+      sql`${table.turnInstructions} is null
+        or (
+          ${table.direction} = 'provider_in'
+          and ${table.kind} in ('delegation_call', 'user_transcript', 'assistant_transcript')
+          and ${table.turnInstructions} = btrim(${table.turnInstructions})
+          and char_length(${table.turnInstructions}) between 1 and 32768
+        )`,
     ),
   }),
 );

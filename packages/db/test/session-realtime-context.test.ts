@@ -85,6 +85,7 @@ function transcript(
   role: "user" | "assistant",
   text: string,
   payload: Record<string, unknown> = {},
+  turnInstructions?: string,
 ): SessionRealtimeInboundEntryInput {
   return {
     operationId: crypto.randomUUID(),
@@ -92,6 +93,7 @@ function transcript(
     role,
     text,
     payload: { turnId: crypto.randomUUID(), ...payload },
+    ...(turnInstructions === undefined ? {} : { turnInstructions }),
   };
 }
 
@@ -249,9 +251,12 @@ describe("session realtime transcript tail and continuity", () => {
 
   test("ending with transcript tail immediately creates one canonical Steer turn", async () => {
     const value = await fixture();
+    const userTurnInstructions = "Current host context: organization profile revision 42.";
+    const assistantTurnInstructions =
+      "Current host context: organization profile revision 43 must not replace the user snapshot.";
     const mode = await runMode(value, [
-      transcript("user", "Please remember the final constraint"),
-      transcript("assistant", "I will."),
+      transcript("user", "Please remember the final constraint", {}, userTurnInstructions),
+      transcript("assistant", "I will.", {}, assistantTurnInstructions),
     ]);
     const replay = await transaction(value.workspaceId, (tx) =>
       endSessionRealtimeInTransaction(tx, {
@@ -294,6 +299,7 @@ describe("session realtime transcript tail and continuity", () => {
     expect(facts.turns).toHaveLength(1);
     expect(facts.turns[0]).toMatchObject({
       id: facts.projections[0]?.turnId,
+      turnInstructions: userTurnInstructions,
       status: "queued",
       metadata: {
         delivery: "steer",
@@ -307,6 +313,43 @@ describe("session realtime transcript tail and continuity", () => {
         context: facts.projections[0]?.context,
       },
     });
+    expect(facts.userEvent?.payload).not.toHaveProperty("turnInstructions");
+    expect(JSON.stringify(facts.userEvent?.payload)).not.toContain(userTurnInstructions);
+  });
+
+  test("does not inherit assistant guidance when a later user transcript has none", async () => {
+    const value = await fixture();
+    await runMode(value, [
+      transcript(
+        "assistant",
+        "One status update.",
+        {},
+        "Current host context: assistant-only revision 7.",
+      ),
+      transcript("user", "Thanks, that is all."),
+    ]);
+    const [turn] = await transaction(value.workspaceId, (tx) =>
+      tx
+        .select({ turnInstructions: schema.sessionTurns.turnInstructions })
+        .from(schema.sessionTurns)
+        .where(eq(schema.sessionTurns.sessionId, value.session.id))
+        .orderBy(asc(schema.sessionTurns.createdAt)),
+    );
+    expect(turn?.turnInstructions).toBeNull();
+  });
+
+  test("falls back to latest tail-entry guidance when no user transcript exists", async () => {
+    const value = await fixture();
+    const instruction = "Current host context: assistant-only tail revision 8.";
+    await runMode(value, [transcript("assistant", "One final status update.", {}, instruction)]);
+    const [turn] = await transaction(value.workspaceId, (tx) =>
+      tx
+        .select({ turnInstructions: schema.sessionTurns.turnInstructions })
+        .from(schema.sessionTurns)
+        .where(eq(schema.sessionTurns.sessionId, value.session.id))
+        .orderBy(asc(schema.sessionTurns.createdAt)),
+    );
+    expect(turn?.turnInstructions).toBe(instruction);
   });
 
   test("flushes only finalized transcript after the latest delegation fence", async () => {
