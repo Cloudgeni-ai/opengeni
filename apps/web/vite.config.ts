@@ -67,13 +67,10 @@ export default defineConfig({
               priority: 3,
             },
             {
-              // Keep the capabilities service-card presentation behind its
-              // local React.lazy boundary. Rolldown otherwise coalesces this
-              // view-only module back into the route chunk, making every
-              // startup pay for account cards and setup dialogs before the
-              // preset inventory is visible.
-              name: "capabilities-services",
-              test: /src[\\/]components[\\/]capabilities[\\/]integration-control-center-view\.tsx$/,
+              // Keep schema parsing from being folded into a larger shared
+              // startup chunk when a lazy route changes its import boundary.
+              name: "schema-runtime",
+              test: /(?:node_modules|\.bun)[\\/]zod(?:@|[\\/])/,
               includeDependenciesRecursively: false,
               priority: 4,
             },
