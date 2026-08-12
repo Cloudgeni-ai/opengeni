@@ -3,6 +3,7 @@ import {
   type AttemptToolResult as AttemptToolResultValue,
 } from "@opengeni/contracts";
 import type { MCPServer } from "@openai/agents";
+import { randomUUID } from "node:crypto";
 
 export const OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY = "__opengeniMcpResultV1" as const;
 export const OPENGENI_INNER_MCP_CUSTOM_DATA_KEY = "__opengeniInnerMcpCustomData" as const;
@@ -16,6 +17,17 @@ function contentFromModelOutput(output: unknown): unknown[] {
   return Array.isArray(output) ? output : [output];
 }
 
+function sdkModelOutputForServer(server: MCPServer, result: AttemptToolResultValue): unknown {
+  if (
+    server.useStructuredContent === true &&
+    result.isError !== true &&
+    result.structuredContent !== undefined
+  ) {
+    return JSON.stringify(result.structuredContent);
+  }
+  return result.content.length === 1 ? result.content[0] : result.content;
+}
+
 /**
  * The Agents SDK custom-data callback receives only the standard MCP result
  * fields. This bridge binds the original full result to the SDK invocation by
@@ -24,7 +36,7 @@ function contentFromModelOutput(output: unknown): unknown[] {
  * before an inner custom-data extractor runs, so neither boundary observes it.
  */
 export class McpResultCustomDataBridge {
-  private readonly argumentKey = `__opengeniMcpResultCall_${crypto.randomUUID()}`;
+  private readonly argumentKey = `__opengeniMcpResultCall_${randomUUID()}`;
   private readonly resultsByToken = new Map<string, AttemptToolResultValue>();
   private nextToken = 0;
 
@@ -74,6 +86,7 @@ export class McpResultCustomDataBridge {
           resultMeta: _resultMeta,
           structuredContent: _structuredContent,
           isError: _isError,
+          toolOutput: _toolOutput,
           ...baseContext
         } = context;
         const innerContext: McpCustomDataContext = {
@@ -81,6 +94,7 @@ export class McpResultCustomDataBridge {
           arguments: cleanArguments,
           serverName: this.input.innerServer.name,
           toolName: this.input.unprefixToolName?.(context.toolName) ?? context.toolName,
+          toolOutput: sdkModelOutputForServer(this.input.innerServer, result),
           ...(result.structuredContent === undefined
             ? {}
             : { structuredContent: result.structuredContent }),

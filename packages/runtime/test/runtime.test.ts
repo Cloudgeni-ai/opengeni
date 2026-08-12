@@ -4655,6 +4655,7 @@ describe("runtime event normalization", () => {
       toolName: string;
       arguments: Record<string, unknown> | null;
       resultMeta: Record<string, unknown> | undefined;
+      toolOutput: unknown;
     }> = [];
     const inner: MCPServer = {
       name: "rich-inner",
@@ -4665,6 +4666,7 @@ describe("runtime event normalization", () => {
           toolName: context.toolName,
           arguments: context.arguments,
           resultMeta: context.resultMeta,
+          toolOutput: context.toolOutput,
         });
         return { innerReceipt: "inner-1" };
       },
@@ -4721,6 +4723,7 @@ describe("runtime event normalization", () => {
         toolName: "inspect",
         arguments: {},
         resultMeta: { providerTrace: "trace-1" },
+        toolOutput: fullResult.content[0],
       },
     ]);
 
@@ -4783,6 +4786,60 @@ describe("runtime event normalization", () => {
     const secondRequest = JSON.stringify(model.requests[1]?.input);
     expect(secondRequest).toContain("structuredOnly");
     expect(secondRequest).toContain("structured-only-trace");
+  });
+
+  test("a prefixed server forwards the inner SDK structured-content projection to its extractor", async () => {
+    const fullResult = {
+      content: [{ type: "text" as const, text: "fallback content" }],
+      structuredContent: { receiptId: "structured-receipt-1" },
+      isError: false,
+    };
+    const innerToolOutputs: unknown[] = [];
+    const inner: MCPServer = {
+      name: "structured-inner",
+      cacheToolsList: false,
+      useStructuredContent: true,
+      customDataExtractor: async (context) => {
+        innerToolOutputs.push(context.toolOutput);
+        return { retained: true };
+      },
+      async connect() {},
+      async close() {},
+      async listTools() {
+        return [
+          {
+            name: "inspect",
+            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+          },
+        ];
+      },
+      async callTool() {
+        return fullResult.content;
+      },
+      async callToolResult() {
+        return fullResult;
+      },
+      async invalidateToolsCache() {},
+    };
+    const wrapped = new PrefixedMcpServer(inner, "structured");
+    const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false });
+    const model = new ScriptedModel([
+      { output: [scriptedFunctionCall("structured__inspect", {}, "structured-inner-call")] },
+      { outputText: "done" },
+    ]);
+    const agent = buildOpenGeniAgent(settings, [], {
+      model,
+      hostedWebSearch: false,
+      mcpServers: [wrapped],
+    });
+
+    const result = await runAgentStream(agent, "Inspect it", settings);
+    for await (const _event of result.toStream()) {
+      // Consume the stream so the custom-data extractor runs.
+    }
+    await result.completed;
+
+    expect(innerToolOutputs).toEqual([JSON.stringify(fullResult.structuredContent)]);
   });
 
   test("connects to real Streamable HTTP MCP servers with prefixes and allowed tool filtering", async () => {
