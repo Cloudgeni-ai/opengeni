@@ -240,7 +240,7 @@ describe("migration 0221 session visibility authority epochs", () => {
       { values: `null, null, '${crypto.randomUUID()}'`, state: "23502" },
       { values: "10, 'invalid', null", state: "23514" },
       { values: "10, 'user_private', null", state: "23514" },
-      { values: `10, 'workspace_shared', '${crypto.randomUUID()}'`, state: "23503" },
+      { values: `10, 'user_private', '${crypto.randomUUID()}'`, state: "23503" },
     ];
     for (const { values, state } of cases) {
       await expectSqlState(
