@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, test } from "bun:test";
 import { stableJson, type CapabilityPack } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import postgres from "postgres";
 
 import {
   adoptPackComponentReferences,
@@ -24,8 +25,13 @@ const migrationName = "0232_integration_facet_authority_cutover.sql";
 
 describe("Integration Facet authority migration replay", () => {
   test("upgrades physical, Pack, owner, and receipt identity without fallback", async () => {
-    const shared = await acquireSharedTestDatabase("migration-0232-facet-authority");
-    if (!shared) return;
+    const shared = await acquireFacetAuthorityDatabase();
+    if (!shared) {
+      if (process.env.OPENGENI_REQUIRE_REAL_DB === "1") {
+        throw new Error("[migration-0232-facet-authority] PostgreSQL is required but unavailable");
+      }
+      return;
+    }
     let app = createDb(shared.appUrl);
     try {
       const grant = (
@@ -110,23 +116,52 @@ describe("Integration Facet authority migration replay", () => {
       await app.close();
 
       const oldPack = featureEraPack(pack);
+      expect(oldPack.id).toBe(pack.id);
       const oldPackDigest = sha256(stableJson(oldPack));
+      const [currentInstallation] = await shared.admin<
+        Array<{ packId: string; snapshotId: string | null }>
+      >`
+        select
+          pack_id as "packId",
+          manifest_snapshot ->> 'id' as "snapshotId"
+        from pack_installations
+        where id = ${installation.id}
+      `;
+      expect(currentInstallation).toEqual({ packId: pack.id, snapshotId: pack.id });
+      const [candidateSnapshot] = await shared.admin<Array<{ snapshotId: string | null }>>`
+        select (${shared.admin.json(oldPack)}::jsonb) ->> 'id' as "snapshotId"
+      `;
+      expect(candidateSnapshot?.snapshotId).toBe(pack.id);
       await shared.admin`
         update workspace_packs
-        set manifest = ${JSON.stringify(oldPack)}::jsonb
+        set manifest = ${shared.admin.json(oldPack)}::jsonb
         where workspace_id = ${grant.workspaceId} and pack_id = ${pack.id}
       `;
       await shared.admin`
         update pack_installations
-        set manifest_snapshot = ${JSON.stringify(oldPack)}::jsonb,
+        set manifest_snapshot = ${shared.admin.json(oldPack)}::jsonb,
             manifest_digest = ${oldPackDigest}
         where id = ${installation.id}
       `;
+      const [historicalInstallation] = await shared.admin<
+        Array<{ packId: string; snapshotId: string | null }>
+      >`
+        select
+          pack_id as "packId",
+          manifest_snapshot ->> 'id' as "snapshotId"
+        from pack_installations
+        where id = ${installation.id}
+      `;
+      expect(historicalInstallation).toEqual({ packId: pack.id, snapshotId: pack.id });
       await shared.admin`
         update capability_installations
         set metadata = jsonb_set(metadata, '{manifestDigest}', to_jsonb(${oldPackDigest}::text), true)
         where workspace_id = ${grant.workspaceId}
           and capability_id = ${`pack:${pack.id}`}
+      `;
+      await shared.admin`
+        alter table pack_installation_components
+          drop constraint pack_installation_components_kind_chk
       `;
       await shared.admin`
         update pack_installation_components
@@ -136,6 +171,7 @@ describe("Integration Facet authority migration replay", () => {
             )
         where pack_installation_id = ${installation.id}
       `;
+      await restoreFeatureEraPackComponentKindAuthority(shared.admin);
       await shared.admin`
         update integration_facet_binding_owners
         set owner_id = 'feature:' || substr(owner_id, length('facet:') + 1)
@@ -146,9 +182,10 @@ describe("Integration Facet authority migration replay", () => {
         update capability_operations
         set result = (result - 'facetKey' - 'binding') || jsonb_build_object(
           'featureKey', result -> 'facetKey',
-          'binding', (result -> 'binding' - 'facetKey') || jsonb_build_object(
+          'binding', ((result -> 'binding') - 'facetKey') || jsonb_build_object(
             'featureKey', result -> 'binding' -> 'facetKey'
           )
+        )
         where workspace_id = ${grant.workspaceId}
           and target_kind = 'facet_binding'
       `;
@@ -176,7 +213,7 @@ describe("Integration Facet authority migration replay", () => {
           ${pack.id},
           'completed',
           'completed',
-          ${JSON.stringify({ status: "installed", packId: pack.id, manifestDigest: oldPackDigest })}::jsonb,
+          ${shared.admin.json({ status: "installed", packId: pack.id, manifestDigest: oldPackDigest })}::jsonb,
           ${grant.subjectId},
           now()
         )
@@ -280,7 +317,7 @@ describe("Integration Facet authority migration replay", () => {
         capabilityId: integration.capabilityId,
         instanceKey: installed.instanceKey,
         facetKey: "mail-inbox",
-        displayName: "Finance inbox updated",
+        displayName: "Finance inbox",
         config: facetConfig,
         expectedVersion: configured.binding.version,
         idempotencyKey: postCutoverReceiptKey,
@@ -302,6 +339,27 @@ describe("Integration Facet authority migration replay", () => {
     }
   }, 180_000);
 });
+
+async function acquireFacetAuthorityDatabase(): Promise<SharedTestDatabase | null> {
+  const adminUrl = process.env.OPENGENI_FACET_AUTHORITY_TEST_POSTGRES_ADMIN_URL;
+  const appUrl = process.env.OPENGENI_FACET_AUTHORITY_TEST_POSTGRES_APP_URL;
+  if ((adminUrl && !appUrl) || (!adminUrl && appUrl)) {
+    throw new Error(
+      "OPENGENI_FACET_AUTHORITY_TEST_POSTGRES_ADMIN_URL and OPENGENI_FACET_AUTHORITY_TEST_POSTGRES_APP_URL must be set together",
+    );
+  }
+  if (!adminUrl || !appUrl) {
+    return await acquireSharedTestDatabase("migration-0232-facet-authority");
+  }
+  await migrate(adminUrl);
+  const admin = postgres(adminUrl, { max: 4 });
+  return {
+    admin,
+    adminUrl,
+    appUrl,
+    release: async () => await admin.end().catch(() => undefined),
+  };
+}
 
 function integrationInput(input: {
   accountId: string;
@@ -374,20 +432,37 @@ function integrationInput(input: {
   };
 }
 
-function featureEraPack(pack: CapabilityPack): Record<string, unknown> {
-  return {
-    ...pack,
-    components: pack.components.map((component) =>
-      component.kind === "facet"
-        ? {
-            ...component,
-            kind: "feature",
-            featureKey: component.facetKey,
-            facetKey: undefined,
-          }
-        : component,
-    ),
-  };
+function featureEraPack(pack: CapabilityPack): FeatureEraPack {
+  return JSON.parse(
+    stableJson({
+      ...pack,
+      components: pack.components.map((component) => {
+        if (component.kind !== "facet") return component;
+        const { facetKey, ...rest } = component;
+        return {
+          ...rest,
+          kind: "feature",
+          featureKey: facetKey,
+        };
+      }),
+    }),
+  ) as FeatureEraPack;
+}
+
+type FeatureEraPack = Record<string, postgres.JSONValue | undefined> & {
+  id: string;
+  components: postgres.JSONValue[];
+};
+
+async function restoreFeatureEraPackComponentKindAuthority(
+  admin: SharedTestDatabase["admin"],
+): Promise<void> {
+  await admin.unsafe(`
+    ALTER TABLE pack_installation_components
+      ADD CONSTRAINT pack_installation_components_kind_chk CHECK (
+        kind IN ('plugin', 'skill', 'integration', 'feature', 'inline_skill')
+      );
+  `);
 }
 
 async function downgradePhysicalFacetAuthority(admin: SharedTestDatabase["admin"]): Promise<void> {

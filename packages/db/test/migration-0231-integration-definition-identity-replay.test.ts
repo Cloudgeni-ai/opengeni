@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 
 import { describe, expect, test } from "bun:test";
 import { stableJson } from "@opengeni/contracts";
-import { acquireSharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import postgres from "postgres";
 
 import {
   bootstrapWorkspace,
@@ -18,8 +19,15 @@ const migrationName = "0231_integration_definition_identity_cutover.sql";
 
 describe("Integration Definition identity migration replay", () => {
   test("upgrades old curated/workspace definitions and OAuth metadata without fallback", async () => {
-    const shared = await acquireSharedTestDatabase("migration-0231-definition-identity");
-    if (!shared) return;
+    const shared = await acquireDefinitionIdentityDatabase();
+    if (!shared) {
+      if (process.env.OPENGENI_REQUIRE_REAL_DB === "1") {
+        throw new Error(
+          "[migration-0231-definition-identity] PostgreSQL is required but unavailable",
+        );
+      }
+      return;
+    }
     let app = createDb(shared.appUrl);
     try {
       const grant = (
@@ -88,7 +96,7 @@ describe("Integration Definition identity migration replay", () => {
         Array<{
           id: string;
           pluginKey: string;
-          manifest: Record<string, unknown>;
+          manifest: Record<string, postgres.JSONValue | undefined>;
         }>
       >`
         select
@@ -116,7 +124,7 @@ describe("Integration Definition identity migration replay", () => {
           }
           await shared.admin`
             update capability_plugin_versions
-            set manifest = ${JSON.stringify(oldManifest)}::jsonb,
+            set manifest = ${shared.admin.json(oldManifest)}::jsonb,
                 manifest_digest = ${sha256(stableJson(oldManifest))}
             where id = ${version.id}
           `;
@@ -124,7 +132,7 @@ describe("Integration Definition identity migration replay", () => {
             update integration_spec_revisions revision
             set spec = (revision.spec - 'definitionId') || jsonb_build_object(
               'integrationId',
-              ${definitionId}
+              ${definitionId}::text
             )
             from capability_facets facet
             join capability_api_facets api on api.facet_id = facet.id
@@ -222,6 +230,27 @@ describe("Integration Definition identity migration replay", () => {
     }
   }, 180_000);
 });
+
+async function acquireDefinitionIdentityDatabase(): Promise<SharedTestDatabase | null> {
+  const adminUrl = process.env.OPENGENI_DEFINITION_IDENTITY_TEST_POSTGRES_ADMIN_URL;
+  const appUrl = process.env.OPENGENI_DEFINITION_IDENTITY_TEST_POSTGRES_APP_URL;
+  if ((adminUrl && !appUrl) || (!adminUrl && appUrl)) {
+    throw new Error(
+      "OPENGENI_DEFINITION_IDENTITY_TEST_POSTGRES_ADMIN_URL and OPENGENI_DEFINITION_IDENTITY_TEST_POSTGRES_APP_URL must be set together",
+    );
+  }
+  if (!adminUrl || !appUrl) {
+    return await acquireSharedTestDatabase("migration-0231-definition-identity");
+  }
+  await migrate(adminUrl);
+  const admin = postgres(adminUrl, { max: 4 });
+  return {
+    admin,
+    adminUrl,
+    appUrl,
+    release: async () => await admin.end().catch(() => undefined),
+  };
+}
 
 function integrationInput(input: {
   accountId: string;

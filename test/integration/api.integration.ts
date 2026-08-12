@@ -3599,7 +3599,7 @@ describe("API component integration", () => {
       body: JSON.stringify({ environmentId: environment.id }),
       headers: { "content-type": "application/json" },
     });
-    expect(enabled.status).toBe(200);
+    expect(enabled.status).toBe(201);
     const installation = (await enabled.json()) as {
       status: string;
       metadata: Record<string, unknown>;
