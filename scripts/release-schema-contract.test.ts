@@ -116,7 +116,7 @@ describe("release schema contract", () => {
     );
     expect(sourceContract.sha256).toBe(
       migrations.has("0223_sessions_channel_fk_validate.sql")
-        ? "50aaa2d50bd94121d10fa8978bdb2b6bf1f1ebec1c58ebe902291d8c85b1e452"
+        ? "6bc5dfdf4468f6be4adc5ea7c6ed98397ee865c21a0175106320159b15588a6c"
         : migrations.has("0221_sessions_channel_index.sql")
           ? "e7beb14a48c19cdc2d185fd27b77052a66e9d2e52fe321bc3e2fc14bba8d8712"
           : migrations.has("0220_memory_slack_append_only_cascade.sql")
@@ -142,7 +142,7 @@ describe("release schema contract", () => {
     const contract = {
       ...sourceContract,
       sha256: migrations.has("0223_sessions_channel_fk_validate.sql")
-        ? "50aaa2d50bd94121d10fa8978bdb2b6bf1f1ebec1c58ebe902291d8c85b1e452"
+        ? "6bc5dfdf4468f6be4adc5ea7c6ed98397ee865c21a0175106320159b15588a6c"
         : migrations.has("0221_sessions_channel_index.sql")
           ? "e7beb14a48c19cdc2d185fd27b77052a66e9d2e52fe321bc3e2fc14bba8d8712"
           : migrations.has("0220_memory_slack_append_only_cascade.sql")
@@ -343,7 +343,7 @@ describe("release schema contract", () => {
     );
     expect(contract.sha256).toBe(
       migrations.has("0223_sessions_channel_fk_validate.sql")
-        ? "50aaa2d50bd94121d10fa8978bdb2b6bf1f1ebec1c58ebe902291d8c85b1e452"
+        ? "6bc5dfdf4468f6be4adc5ea7c6ed98397ee865c21a0175106320159b15588a6c"
         : migrations.has("0221_sessions_channel_index.sql")
           ? "e7beb14a48c19cdc2d185fd27b77052a66e9d2e52fe321bc3e2fc14bba8d8712"
           : migrations.has("0220_memory_slack_append_only_cascade.sql")

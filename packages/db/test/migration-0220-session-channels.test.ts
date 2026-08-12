@@ -53,6 +53,8 @@ describe("migration 0220 session channels", () => {
     expect(addForeignKey).toContain("local_column.attname = 'channel_id'");
     expect(addForeignKey).toContain("referenced_column.attname = 'id'");
     expect(addForeignKey).toContain("constraint_row.confdeltype = 'n'");
+    expect(addForeignKey).toContain("constraint_row.confupdtype = 'a'");
+    expect(addForeignKey).toContain("constraint_row.confmatchtype = 's'");
     expect(addForeignKey).not.toContain("VALIDATE CONSTRAINT");
     const validateForeignKey = await readFile(
       migrationPath.replace("0220_session_channels.sql", "0223_sessions_channel_fk_validate.sql"),
@@ -63,6 +65,9 @@ describe("migration 0220 session channels", () => {
     expect(validateForeignKey).toContain("local_column.attname = 'channel_id'");
     expect(validateForeignKey).toContain("referenced_column.attname = 'id'");
     expect(validateForeignKey).toContain("constraint_row.confdeltype = 'n'");
+    expect(validateForeignKey).toContain("constraint_row.confupdtype = 'a'");
+    expect(validateForeignKey).toContain("constraint_row.confmatchtype = 's'");
+    expect(validateForeignKey).toContain("validated_exact_count <> 1");
     expect(validateForeignKey).toContain("SET LOCAL statement_timeout = '10min'");
 
     const blank = await acquireBlankTestDatabase("migration-0220");
@@ -186,6 +191,108 @@ describe("migration 0220 session channels", () => {
         "0222_sessions_channel_fk.sql",
         "0223_sessions_channel_fk_validate.sql",
       ]);
+    } finally {
+      await sql.end();
+      await blank.release();
+    }
+  }, 180_000);
+
+  test("fails validation when 0222 is receipted but the exact foreign key is absent", async () => {
+    const blank = await acquireBlankTestDatabase("migration-0220-missing-fk");
+    if (!blank) {
+      if (requireRealDatabase) {
+        throw new Error(
+          "OPENGENI_REQUIRE_REAL_DB=1 but the migration 0220 PostgreSQL harness is unavailable",
+        );
+      }
+      return;
+    }
+    const sql = postgres(blank.databaseUrl, { max: 1 });
+    try {
+      await sql.unsafe(`
+        create table schema_migrations (
+          name text primary key,
+          applied_at timestamptz not null default now()
+        )
+      `);
+      await sql`
+        insert into schema_migrations (name)
+        values
+          ('0222_sessions_channel_fk.sql'),
+          ('0223_sessions_channel_fk_validate.sql')`;
+      await migrate(blank.databaseUrl);
+      await sql`
+        delete from schema_migrations
+        where name = '0223_sessions_channel_fk_validate.sql'`;
+
+      await expect(migrate(blank.databaseUrl)).rejects.toThrow(
+        "expected exactly one compatible sessions channel foreign key",
+      );
+
+      const [receipt] = await sql<Array<{ recorded: boolean }>>`
+        select exists (
+          select 1
+          from schema_migrations
+          where name = '0223_sessions_channel_fk_validate.sql'
+        ) as recorded`;
+      expect(receipt?.recorded).toBe(false);
+    } finally {
+      await sql.end();
+      await blank.release();
+    }
+  }, 180_000);
+
+  test("fails closed when the expected name has drifted foreign key semantics", async () => {
+    const blank = await acquireBlankTestDatabase("migration-0220-drifted-fk");
+    if (!blank) {
+      if (requireRealDatabase) {
+        throw new Error(
+          "OPENGENI_REQUIRE_REAL_DB=1 but the migration 0220 PostgreSQL harness is unavailable",
+        );
+      }
+      return;
+    }
+    const sql = postgres(blank.databaseUrl, { max: 1 });
+    try {
+      await sql.unsafe(`
+        create table schema_migrations (
+          name text primary key,
+          applied_at timestamptz not null default now()
+        )
+      `);
+      await sql`
+        insert into schema_migrations (name)
+        values
+          ('0222_sessions_channel_fk.sql'),
+          ('0223_sessions_channel_fk_validate.sql')`;
+      await migrate(blank.databaseUrl);
+      await sql.unsafe(`
+        alter table "sessions"
+          add constraint "sessions_channel_id_fk"
+          foreign key ("channel_id")
+          references "channels"("id")
+          on update cascade
+          on delete set null
+      `);
+      await sql`
+        delete from schema_migrations
+        where name in (
+          '0222_sessions_channel_fk.sql',
+          '0223_sessions_channel_fk_validate.sql'
+        )`;
+
+      await expect(migrate(blank.databaseUrl)).rejects.toThrow(
+        "sessions channel foreign key name is occupied by an incompatible constraint",
+      );
+
+      const receipts = await sql<Array<{ name: string }>>`
+        select name
+        from schema_migrations
+        where name in (
+          '0222_sessions_channel_fk.sql',
+          '0223_sessions_channel_fk_validate.sql'
+        )`;
+      expect(receipts).toHaveLength(0);
     } finally {
       await sql.end();
       await blank.release();
