@@ -1,9 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import type {
-  IntegrationFacetBindingSummary,
-  IntegrationFacetDefinitionSummary,
-} from "@/types";
+import type { IntegrationFacetBindingSummary, IntegrationFacetDefinitionSummary } from "@/types";
 
 import {
   facetConfigFromForm,
@@ -137,9 +134,6 @@ describe("Integration facet schema forms", () => {
       capabilities: { provider: "microsoft-onedrive", connectionRequired: true },
     };
 
-    expect(unsupportedRequiredFacetFields(richDriveDefinition)).toEqual([
-      "sources",
-      "destination",
-    ]);
+    expect(unsupportedRequiredFacetFields(richDriveDefinition)).toEqual(["sources", "destination"]);
   });
 });

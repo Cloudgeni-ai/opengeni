@@ -3065,15 +3065,15 @@ describe("API component integration", () => {
       bus: new MemoryEventBus(),
       workflowClient: new FakeWorkflowClient(),
     });
-    const capabilityId = `custom-skill:test-${crypto.randomUUID()}`;
+    const capabilityId = `custom-mcp:test-${crypto.randomUUID()}`;
     const workspaceId = await defaultWorkspaceId(app);
     const created = await app.request(workspacePath(workspaceId, "/capabilities"), {
       method: "POST",
       body: JSON.stringify({
         id: capabilityId,
-        kind: "skill",
+        kind: "mcp",
         source: "manual",
-        name: "Test Skill",
+        name: "Test MCP",
         category: "test",
       }),
       headers: { "content-type": "application/json" },
@@ -3573,7 +3573,7 @@ describe("API component integration", () => {
     expect(enabledMissingVariable.status).toBe(422);
     expect(await enabledMissingVariable.text()).toContain("CLOUD_TOKEN");
 
-    const capabilityEnableWithoutAttachment = await app.request(
+    const genericPackEnable = await app.request(
       workspacePath(workspaceId, `/capabilities/${encodeURIComponent(`pack:${packId}`)}/enable`),
       {
         method: "POST",
@@ -3581,7 +3581,8 @@ describe("API component integration", () => {
         headers: { "content-type": "application/json" },
       },
     );
-    expect(capabilityEnableWithoutAttachment.status).toBe(422);
+    expect(genericPackEnable.status).toBe(409);
+    expect(await genericPackEnable.text()).toContain("Pack installation preview flow");
 
     const setVariable = await app.request(
       workspacePath(workspaceId, `/environments/${environment.id}/variables/CLOUD_TOKEN`),
@@ -3592,41 +3593,6 @@ describe("API component integration", () => {
       },
     );
     expect(setVariable.status).toBeLessThan(300);
-
-    // Env-on-enable through the unified capability path: an environment.required
-    // pack with no prior attachment enables when an environmentId is supplied
-    // (no 422), and the initial attachment is persisted — mirroring what the
-    // dedicated /packs/:id/enable endpoint does.
-    const capabilityEnableWithEnvironment = await app.request(
-      workspacePath(workspaceId, `/capabilities/${encodeURIComponent(`pack:${packId}`)}/enable`),
-      {
-        method: "POST",
-        body: JSON.stringify({ environmentId: environment.id }),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(capabilityEnableWithEnvironment.status).toBe(201);
-    const capabilityInstallation = (await capabilityEnableWithEnvironment.json()) as {
-      status: string;
-    };
-    expect(capabilityInstallation.status).toBe("active");
-    // The attachment is persisted on the pack installation (mirroring the
-    // dedicated /packs/:id/enable endpoint), which the catalog reads for
-    // enablement; the returned capability installation is the pack:{id} row.
-    const storedAfterUnifiedEnable = await getPackInstallation(dbClient.db, workspaceId, packId);
-    expect(storedAfterUnifiedEnable?.status).toBe("active");
-    expect(storedAfterUnifiedEnable?.metadata.variableSetId).toBe(environment.id);
-
-    // A bogus environmentId on the unified path is rejected up front.
-    const capabilityEnableUnknownEnvironment = await app.request(
-      workspacePath(workspaceId, `/capabilities/${encodeURIComponent(`pack:${packId}`)}/enable`),
-      {
-        method: "POST",
-        body: JSON.stringify({ environmentId: crypto.randomUUID() }),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(capabilityEnableUnknownEnvironment.status).toBe(422);
 
     const enabled = await app.request(workspacePath(workspaceId, `/packs/${packId}/enable`), {
       method: "POST",
@@ -3658,8 +3624,8 @@ describe("API component integration", () => {
       enabled: true,
     });
 
-    // Re-enabling through the generic capabilities path keeps the stored
-    // environment attachment instead of overwriting it.
+    // Pack lifecycle remains owned by the dedicated Pack route even after the
+    // Pack is active; the generic capability path cannot mutate the install.
     const capabilityEnable = await app.request(
       workspacePath(workspaceId, `/capabilities/${encodeURIComponent(`pack:${packId}`)}/enable`),
       {
@@ -3668,7 +3634,8 @@ describe("API component integration", () => {
         headers: { "content-type": "application/json" },
       },
     );
-    expect(capabilityEnable.status).toBe(201);
+    expect(capabilityEnable.status).toBe(409);
+    expect(await capabilityEnable.text()).toContain("Pack installation preview flow");
     const installationAfterCapabilityEnable = await getPackInstallation(
       dbClient.db,
       workspaceId,
@@ -3682,7 +3649,7 @@ describe("API component integration", () => {
     );
     expect(deletedBuiltIn.status).toBe(409);
 
-    // Once the required variable disappears, the generic enable path
+    // Once the required variable disappears, the dedicated Pack enable path
     // re-validates the stored attachment and refuses.
     const removeVariable = await app.request(
       workspacePath(workspaceId, `/environments/${environment.id}/variables/CLOUD_TOKEN`),
@@ -3690,7 +3657,7 @@ describe("API component integration", () => {
     );
     expect(removeVariable.status).toBeLessThan(300);
     const capabilityEnableMissingVariable = await app.request(
-      workspacePath(workspaceId, `/capabilities/${encodeURIComponent(`pack:${packId}`)}/enable`),
+      workspacePath(workspaceId, `/packs/${packId}/enable`),
       {
         method: "POST",
         body: JSON.stringify({}),

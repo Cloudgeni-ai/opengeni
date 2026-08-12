@@ -143,7 +143,10 @@ export async function listIntegrationInstanceFacets(
       .leftJoin(
         schema.integrationFacetBindings,
         and(
-          eq(schema.integrationFacetBindings.facetDefinitionId, schema.integrationFacetDefinitions.id),
+          eq(
+            schema.integrationFacetBindings.facetDefinitionId,
+            schema.integrationFacetDefinitions.id,
+          ),
           eq(
             schema.integrationFacetBindings.integrationFacetInstallationId,
             context.integrationFacetInstallationId,

@@ -9,7 +9,7 @@ import { freePort, runCommand, startProcess, type StartedProcess } from "@openge
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const workspaceId = "00000000-0000-4000-8000-000000000017";
 const accountId = "00000000-0000-4000-8000-000000000018";
-const capabilityId = "skill:browser-focus";
+const capabilityId = "mcp:browser-focus";
 const mobbinCapabilityId = "mcp:integrations-sh:mobbin-com-browser-fixture";
 const mobbinConnectionId = "00000000-0000-4000-8000-000000000120";
 const driveCapabilityId = "api:openapi:google-drive-browser-fixture";
@@ -123,7 +123,7 @@ describe("capabilities browser e2e", () => {
       expect(await browseOpener.count()).toBe(0);
 
       await page.keyboard.press("Tab");
-      await expectFocused(page.getByRole("button", { name: "Disable" }));
+      await expectFocused(page.getByRole("button", { name: "Disconnect" }));
 
       await page.screenshot({ path: `${evidenceDir}success-desktop-1440x900.png`, fullPage: true });
     } finally {
@@ -189,7 +189,7 @@ describe("capabilities browser e2e", () => {
       await expectFocused(errorOpener);
       expect(state.enableCalls).toBe(1);
 
-      const disable = page.getByRole("button", { name: "Disable" });
+      const disable = page.getByRole("button", { name: "Disconnect" });
       expect(await disable.count()).toBe(0);
       const browseBox = await errorOpener.boundingBox();
       expect(browseBox?.width ?? 0).toBeGreaterThan(0);
@@ -220,7 +220,7 @@ describe("capabilities browser e2e", () => {
       await enabledControl.click();
       const dialog = page.getByRole("dialog");
       await expectVisible(dialog);
-      const disable = dialog.getByRole("button", { name: "Disable" });
+      const disable = dialog.getByRole("button", { name: "Disconnect" });
       const disableBox = await disable.boundingBox();
       expect(disableBox?.height ?? 0).toBeGreaterThanOrEqual(44);
       expect(await dialog.getAttribute("aria-describedby")).not.toBeNull();
@@ -757,6 +757,9 @@ async function installCapabilityApi(
     if (url.pathname === `/v1/workspaces/${workspaceId}/integrations`) {
       return json({ integrations: "driveSaves" in state ? [driveInstallation()] : [] });
     }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/skills`) {
+      return json({ skills: [] });
+    }
     if (url.pathname === `/v1/workspaces/${workspaceId}/plugins`) {
       return json({ plugins: [] });
     }
@@ -840,7 +843,7 @@ async function installCapabilityApi(
         accountId,
         workspaceId,
         capabilityId,
-        kind: "skill",
+        kind: "mcp",
         status: "active",
         config: {},
         metadata: {},
@@ -932,6 +935,9 @@ async function installLargeCatalogApi(page: Page, catalogDelayMs: number): Promi
     if (url.pathname === `/v1/workspaces/${workspaceId}/integrations`) {
       return json({ integrations: [] });
     }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/skills`) {
+      return json({ skills: [] });
+    }
     if (url.pathname === `/v1/workspaces/${workspaceId}/plugins`) {
       return json({ plugins: [] });
     }
@@ -978,20 +984,20 @@ function capability(enabled: boolean) {
     id: capabilityId,
     accountId,
     workspaceId,
-    kind: "skill",
-    source: "library",
+    kind: "mcp",
+    source: "manual",
     name: "Example capability",
     description: "A browser-only capability used to verify focus restoration.",
-    category: "skills",
+    category: "integrations",
     tags: ["browser", "focus"],
     homepageUrl: "https://example.com/capability",
-    endpointUrl: null,
+    endpointUrl: "https://example.com/mcp",
     installUrl: null,
     authModel: null,
-    providerDomain: null,
-    surfaceType: "skill",
-    transport: null,
-    mcpUrl: null,
+    providerDomain: "example.com",
+    surfaceType: "mcp",
+    transport: "streamable-http",
+    mcpUrl: "https://example.com/mcp",
     authKind: "none",
     credentialFacts: [],
     tier: "verified",
@@ -1001,7 +1007,19 @@ function capability(enabled: boolean) {
     stale: false,
     staleAt: null,
     tools: [],
-    runtime: { available: true, notes: null },
+    runtime: {
+      available: true,
+      mcpServerId: "browser-focus",
+      transport: "streamable-http",
+      notes: null,
+    },
+    lifecycle: {
+      status: enabled ? "ready" : "available",
+      readiness: enabled ? "ready" : "setup_required",
+      detail: enabled ? "enabled" : "available",
+      managedBy: "workspace",
+    },
+    actions: enabled ? ["configure", "disconnect", "inspect"] : ["install", "inspect"],
     enabled,
     enabledReason: enabled ? "explicit" : null,
     connectionRef: null,
@@ -1046,10 +1064,31 @@ function mobbinCapability(mode: MobbinUiState["mode"]) {
       notes: "Requires a connected OAuth credential.",
       catalogTrust: { state: "trusted", reason: "verified_probe" },
     },
+    lifecycle: {
+      status:
+        mode === "disconnected"
+          ? "available"
+          : mode === "connected"
+            ? "connected"
+            : "needs_attention",
+      readiness:
+        mode === "disconnected" ? "setup_required" : mode === "connected" ? "ready" : "attention",
+      detail:
+        mode === "disconnected"
+          ? "OAuth connection required"
+          : mode === "connected"
+            ? "connected"
+            : "authorization revoked",
+      managedBy: "workspace",
+    },
+    actions:
+      mode === "disconnected"
+        ? ["connect", "inspect"]
+        : ["configure", "repair", "disconnect", "inspect"],
     enabled,
     enabledReason: enabled ? "explicit" : null,
     connectionRef: enabled
-      ? { connectionId: mobbinConnectionId, providerDomain: "mobbin.com", kind: "oauth2" }
+      ? { providerDomain: "mobbin.com", kind: "oauth2", subjectScope: "subject" }
       : null,
     metadata: {
       registry: "integrations.sh",

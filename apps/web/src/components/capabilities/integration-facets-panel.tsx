@@ -246,9 +246,7 @@ export function IntegrationFacetsPanel({
         );
       }
       await load();
-      toast.success(
-        `${facetTitle(entry.definition)} ${action === "pause" ? "paused" : "resumed"}`,
-      );
+      toast.success(`${facetTitle(entry.definition)} ${action === "pause" ? "paused" : "resumed"}`);
     } catch (lifecycleError) {
       toast.error(`Couldn't ${action} this facet`, {
         description:
@@ -384,9 +382,7 @@ export function IntegrationFacetsPanel({
       <ConfirmDialog
         open={removeTarget !== null}
         onOpenChange={(next) => !next && setRemoveTarget(null)}
-        title={
-          removeTarget ? `Remove ${facetTitle(removeTarget.definition)}?` : "Remove facet?"
-        }
+        title={removeTarget ? `Remove ${facetTitle(removeTarget.definition)}?` : "Remove facet?"}
         description={`This removes only this facet from ${instance.displayName}. The account, Connection, tools, and sibling facets remain intact.`}
         confirmLabel="Remove facet"
         destructive
@@ -665,9 +661,7 @@ function FacetField({
   );
 }
 
-export function facetFields(
-  definition: IntegrationFacetDefinitionSummary,
-): FacetFieldDefinition[] {
+export function facetFields(definition: IntegrationFacetDefinitionSummary): FacetFieldDefinition[] {
   const schema = definition.configSchema;
   const properties = objectValue(schema.properties);
   const required = new Set(

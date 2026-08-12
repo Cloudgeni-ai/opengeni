@@ -25,7 +25,7 @@ import {
   PortableSkillInstallationVersionRequiredError,
   uninstallPortableSkill,
 } from "@opengeni/db";
-import { loadSkillLibrarySkill, skillLibraryRepositoryUrl } from "@opengeni/runtime";
+import { loadSkillLibrarySkill, skillLibraryRepositoryUrl } from "@opengeni/runtime/skill-library";
 import { createHash } from "node:crypto";
 import { HTTPException } from "hono/http-exception";
 import type { Hono } from "hono";
