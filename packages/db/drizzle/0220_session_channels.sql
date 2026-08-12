@@ -48,7 +48,7 @@ $grants$;
 -- inbox). The single-column ON DELETE SET NULL follows the variable_set_id
 -- precedent; workspace scoping is enforced by RLS plus the application
 -- create/update boundary, which resolves the channel workspace-scoped.
--- The supporting sessions index is built CONCURRENTLY in migration 0219 —
+-- The supporting sessions index is built CONCURRENTLY in migration 0221 —
 -- a plain CREATE INDEX here would hold the ADD COLUMN's ACCESS EXCLUSIVE
 -- lock on the live sessions table for a full-table scan.
 SET LOCAL lock_timeout = '5s';

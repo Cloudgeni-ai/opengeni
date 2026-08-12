@@ -8,11 +8,11 @@ import { migrate } from "../src/migrate";
 
 const migrationPath = join(
   dirname(fileURLToPath(import.meta.url)),
-  "../drizzle/0218_session_channels.sql",
+  "../drizzle/0220_session_channels.sql",
 );
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
-describe("migration 0218 session channels", () => {
+describe("migration 0220 session channels", () => {
   test("creates the FORCE-RLS channels table and the detachable session filing column", async () => {
     const migration = await readFile(migrationPath, "utf8");
     expect(migration.split(/\r?\n/, 1)[0]).toBe("-- deployment-mode: rolling");
@@ -29,11 +29,11 @@ describe("migration 0218 session channels", () => {
     // Rolling safety: the sessions DDL is guarded by a bounded lock wait, and
     // the sessions index is NOT built here — a plain CREATE INDEX would hold
     // the ADD COLUMN's ACCESS EXCLUSIVE lock for a full-table scan. It lives
-    // in 0219 as a concurrent-index migration.
+    // in 0221 as a concurrent-index migration.
     expect(migration).toContain("SET LOCAL lock_timeout");
     expect(migration).not.toContain('CREATE INDEX "sessions_');
     const followUp = await readFile(
-      migrationPath.replace("0218_session_channels.sql", "0219_sessions_channel_index.sql"),
+      migrationPath.replace("0220_session_channels.sql", "0221_sessions_channel_index.sql"),
       "utf8",
     );
     expect(followUp.split(/\r?\n/, 2)).toEqual([
@@ -44,11 +44,11 @@ describe("migration 0218 session channels", () => {
       'CREATE INDEX CONCURRENTLY IF NOT EXISTS "sessions_workspace_channel_idx"',
     );
 
-    const blank = await acquireBlankTestDatabase("migration-0218");
+    const blank = await acquireBlankTestDatabase("migration-0220");
     if (!blank) {
       if (requireRealDatabase) {
         throw new Error(
-          "OPENGENI_REQUIRE_REAL_DB=1 but the migration 0218 PostgreSQL harness is unavailable",
+          "OPENGENI_REQUIRE_REAL_DB=1 but the migration 0220 PostgreSQL harness is unavailable",
         );
       }
       return;
