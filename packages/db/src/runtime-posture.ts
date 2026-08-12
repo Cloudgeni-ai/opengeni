@@ -58,6 +58,12 @@ const MANAGED_HUMAN_PERSONAL_WORKSPACE_AUTHORITY_TABLES = [
 ] as const;
 const XAI_CREATE_CREDENTIAL_ROUTINE =
   "create_xai_subscription_credential(uuid, uuid, text, text, text, text, text, text, text, timestamp with time zone)";
+const XAI_DISCONNECT_CREDENTIAL_ROUTINE =
+  "disconnect_xai_subscription_credential(uuid, uuid, text, uuid, jsonb)";
+const XAI_SNAPSHOT_VALIDATOR_ROUTINE = "xai_provider_account_authority_snapshot_v1_valid(jsonb)";
+const XAI_AUTHORITY_LIVE_ROUTINE =
+  "xai_subscription_authority_live(uuid, uuid, text, uuid, text, uuid, uuid, bigint)";
+const XAI_POOL_VISIBLE_ROUTINE = "xai_subscription_pool_visible(uuid, uuid, text, text, uuid)";
 const XAI_RESOLVE_POOL_ROUTINE = "resolve_xai_authority_pool(uuid, uuid, text, jsonb)";
 const XAI_REVALIDATE_CREDENTIAL_ROUTINE =
   "revalidate_xai_subscription_authority(uuid, text, uuid, jsonb)";
@@ -69,11 +75,15 @@ const XAI_AUTHORITY_TABLES = [
 ] as const;
 
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
+  XAI_AUTHORITY_LIVE_ROUTINE,
   XAI_CREATE_CREDENTIAL_ROUTINE,
+  XAI_DISCONNECT_CREDENTIAL_ROUTINE,
   KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE,
   MANAGED_HUMAN_PERSONAL_WORKSPACE_ROUTINE,
+  XAI_POOL_VISIBLE_ROUTINE,
   XAI_RESOLVE_POOL_ROUTINE,
   XAI_REVALIDATE_CREDENTIAL_ROUTINE,
+  XAI_SNAPSHOT_VALIDATOR_ROUTINE,
 ] as const;
 
 /**
@@ -1179,7 +1189,7 @@ export function evaluateRuntimeDatabasePosture(
       continue;
     }
     const routine = matches[0]!;
-    if (!routine.securityDefiner) {
+    if (!routine.securityDefiner && routine.name !== XAI_SNAPSHOT_VALIDATOR_ROUTINE) {
       violations.push(`target-schema runtime capability ${routine.name} is not SECURITY DEFINER`);
     }
     if (routine.name === KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE) {
@@ -1219,8 +1229,15 @@ export function evaluateRuntimeDatabasePosture(
           `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0].owner}`,
         );
       }
+    } else if (routine.name === XAI_SNAPSHOT_VALIDATOR_ROUTINE) {
+      // The immutable SQL validator is invoker-rights and reads no table. Its
+      // exact ACL is posture-checked above; it does not participate in the
+      // SECURITY DEFINER same-owner authority graph.
     } else if (
       routine.name === XAI_CREATE_CREDENTIAL_ROUTINE ||
+      routine.name === XAI_DISCONNECT_CREDENTIAL_ROUTINE ||
+      routine.name === XAI_AUTHORITY_LIVE_ROUTINE ||
+      routine.name === XAI_POOL_VISIBLE_ROUTINE ||
       routine.name === XAI_RESOLVE_POOL_ROUTINE ||
       routine.name === XAI_REVALIDATE_CREDENTIAL_ROUTINE
     ) {

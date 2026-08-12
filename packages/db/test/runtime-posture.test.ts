@@ -129,7 +129,21 @@ function safePosture(): RuntimeDatabasePosture {
     ],
     targetRoutines: [
       {
+        name: "xai_subscription_authority_live(uuid, uuid, text, uuid, text, uuid, uuid, bigint)",
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+      },
+      {
         name: "create_xai_subscription_credential(uuid, uuid, text, text, text, text, text, text, text, timestamp with time zone)",
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+      },
+      {
+        name: "disconnect_xai_subscription_credential(uuid, uuid, text, uuid, jsonb)",
         owner: "opengeni_migrator",
         execute: true,
         publicExecute: false,
@@ -143,11 +157,25 @@ function safePosture(): RuntimeDatabasePosture {
         securityDefiner: true,
       },
       {
+        name: "xai_subscription_pool_visible(uuid, uuid, text, text, uuid)",
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+      },
+      {
         name: "resolve_xai_authority_pool(uuid, uuid, text, jsonb)",
         owner: "opengeni_migrator",
         execute: true,
         publicExecute: false,
         securityDefiner: true,
+      },
+      {
+        name: "xai_provider_account_authority_snapshot_v1_valid(jsonb)",
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: false,
       },
       {
         name: "revalidate_xai_subscription_authority(uuid, text, uuid, jsonb)",
@@ -194,7 +222,7 @@ describe("runtime database posture evaluator", () => {
             [FORCE_RLS_TABLES, 227],
             [NON_RLS_RUNTIME_TABLES, 11],
             [RUNTIME_FULL_DML_TABLES, 138],
-            [RUNTIME_READ_ONLY_TABLES, 14],
+            [RUNTIME_READ_ONLY_TABLES, 17],
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 42],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 29],

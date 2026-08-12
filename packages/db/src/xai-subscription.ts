@@ -3,7 +3,7 @@ import {
   XaiProviderAccountAuthoritySnapshotV1,
   type XaiProviderAccountAuthoritySnapshotV1 as XaiAuthoritySnapshot,
 } from "@opengeni/contracts";
-import { and, asc, eq, isNull, sql } from "drizzle-orm";
+import { and, asc, eq, gt, isNull, lte, sql } from "drizzle-orm";
 import type { Database } from "./database";
 import { rawRows, withWorkspaceSubjectRls } from "./database";
 import { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
@@ -58,6 +58,59 @@ export type XaiCredentialLeaseResult = {
 
 export const XAI_CREDENTIAL_LEASE_TTL_MS = 5 * 60_000;
 
+type XaiCredentialMetadataRow = Pick<
+  typeof schema.xaiSubscriptionCredentials.$inferSelect,
+  | "id"
+  | "authorityScope"
+  | "label"
+  | "accountEmail"
+  | "planType"
+  | "status"
+  | "allocatorEnabled"
+  | "version"
+  | "allocatorVersion"
+  | "expiresAt"
+  | "lastRefreshAt"
+  | "lastError"
+  | "quotaUsedPercent"
+  | "quotaResetAt"
+  | "quotaCheckedAt"
+  | "exhaustedUntil"
+  | "selectionCount"
+  | "lastSelectedAt"
+  | "connectedBySubjectId"
+>;
+
+const xaiCredentialMetadataColumns = {
+  id: schema.xaiSubscriptionCredentials.id,
+  authorityScope: schema.xaiSubscriptionCredentials.authorityScope,
+  label: schema.xaiSubscriptionCredentials.label,
+  accountEmail: schema.xaiSubscriptionCredentials.accountEmail,
+  planType: schema.xaiSubscriptionCredentials.planType,
+  status: schema.xaiSubscriptionCredentials.status,
+  allocatorEnabled: schema.xaiSubscriptionCredentials.allocatorEnabled,
+  version: schema.xaiSubscriptionCredentials.version,
+  allocatorVersion: schema.xaiSubscriptionCredentials.allocatorVersion,
+  expiresAt: schema.xaiSubscriptionCredentials.expiresAt,
+  lastRefreshAt: schema.xaiSubscriptionCredentials.lastRefreshAt,
+  lastError: schema.xaiSubscriptionCredentials.lastError,
+  quotaUsedPercent: schema.xaiSubscriptionCredentials.quotaUsedPercent,
+  quotaResetAt: schema.xaiSubscriptionCredentials.quotaResetAt,
+  quotaCheckedAt: schema.xaiSubscriptionCredentials.quotaCheckedAt,
+  exhaustedUntil: schema.xaiSubscriptionCredentials.exhaustedUntil,
+  selectionCount: schema.xaiSubscriptionCredentials.selectionCount,
+  lastSelectedAt: schema.xaiSubscriptionCredentials.lastSelectedAt,
+  connectedBySubjectId: schema.xaiSubscriptionCredentials.connectedBySubjectId,
+} as const;
+
+const xaiCredentialAllocationColumns = {
+  ...xaiCredentialMetadataColumns,
+  accountId: schema.xaiSubscriptionCredentials.accountId,
+  workspaceId: schema.xaiSubscriptionCredentials.workspaceId,
+  ownerOrganizationMembershipId: schema.xaiSubscriptionCredentials.ownerOrganizationMembershipId,
+  createdAt: schema.xaiSubscriptionCredentials.createdAt,
+} as const;
+
 function assertSecret(secret: XaiCredentialSecretV1): void {
   if (secret.version !== 1) throw new Error("Unsupported xAI credential secret version");
   const values = [secret.accessToken, secret.refreshToken, secret.sessionToken, secret.cookie];
@@ -79,9 +132,7 @@ function parseSecret(value: string): XaiCredentialSecretV1 {
   return secret;
 }
 
-function metadataFromRow(
-  row: typeof schema.xaiSubscriptionCredentials.$inferSelect,
-): XaiSubscriptionAccountMetadata {
+function metadataFromRow(row: XaiCredentialMetadataRow): XaiSubscriptionAccountMetadata {
   return {
     id: row.id,
     scope: row.authorityScope as XaiAccountAuthorityScope,
@@ -103,6 +154,92 @@ function metadataFromRow(
     lastSelectedAt: row.lastSelectedAt,
     connectedBySubjectId: row.connectedBySubjectId,
   };
+}
+
+async function resolveXaiPoolOwnerMembershipId(
+  db: Database,
+  input: {
+    workspaceId: string;
+    subjectId: string;
+    authoritySnapshot: XaiAuthoritySnapshot;
+  },
+): Promise<string | null> {
+  if (input.authoritySnapshot.scope === "workspace") return null;
+  const rows = await rawRows<{ membership_id: string }>(
+    db,
+    sql`select organization_membership_id as membership_id
+      from resolve_xai_authority_pool(
+        current_setting('opengeni.account_id')::uuid,
+        ${input.workspaceId}::uuid,
+        ${input.subjectId},
+        ${JSON.stringify(input.authoritySnapshot)}::jsonb
+      )`,
+  );
+  const ownerMembershipId = rows[0]?.membership_id ?? null;
+  if (!ownerMembershipId) {
+    throw new Error("xAI user authority pool is no longer active");
+  }
+  return ownerMembershipId;
+}
+
+async function assertXaiTurnAuthoritySnapshot(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    turnId: string;
+    sessionId?: string;
+    executionGeneration?: number;
+    authoritySnapshot: XaiAuthoritySnapshot;
+  },
+): Promise<void> {
+  const rows = await rawRows<{ id: string }>(
+    db,
+    sql`select id
+      from session_turns
+      where account_id = ${input.accountId}::uuid
+        and workspace_id = ${input.workspaceId}::uuid
+        and id = ${input.turnId}::uuid
+        ${input.sessionId ? sql`and session_id = ${input.sessionId}::uuid` : sql``}
+        ${input.executionGeneration !== undefined ? sql`and execution_generation = ${input.executionGeneration}` : sql``}
+        and xai_provider_account_authority_snapshot =
+          ${JSON.stringify(input.authoritySnapshot)}::jsonb
+      for share`,
+  );
+  if (!rows[0]) {
+    throw new Error("xAI logical turn authority snapshot is unavailable");
+  }
+}
+
+async function assertXaiCredentialInPool(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    credentialId: string;
+    authorityScope: XaiAccountAuthorityScope;
+    ownerMembershipId: string | null;
+  },
+): Promise<void> {
+  const [row] = await db
+    .select({ id: schema.xaiSubscriptionCredentials.id })
+    .from(schema.xaiSubscriptionCredentials)
+    .where(
+      and(
+        eq(schema.xaiSubscriptionCredentials.accountId, input.accountId),
+        eq(schema.xaiSubscriptionCredentials.workspaceId, input.workspaceId),
+        eq(schema.xaiSubscriptionCredentials.id, input.credentialId),
+        eq(schema.xaiSubscriptionCredentials.authorityScope, input.authorityScope),
+        input.ownerMembershipId === null
+          ? isNull(schema.xaiSubscriptionCredentials.ownerOrganizationMembershipId)
+          : eq(
+              schema.xaiSubscriptionCredentials.ownerOrganizationMembershipId,
+              input.ownerMembershipId,
+            ),
+      ),
+    )
+    .limit(1);
+  if (!row) throw new Error("xAI credential is outside the authorized account pool");
 }
 
 export async function createXaiSubscriptionCredential(
@@ -146,7 +283,7 @@ export async function createXaiSubscriptionCredential(
     const created = rows[0];
     if (!created) throw new Error("xAI credential lifecycle returned no row");
     const [row] = await scopedDb
-      .select()
+      .select(xaiCredentialMetadataColumns)
       .from(schema.xaiSubscriptionCredentials)
       .where(eq(schema.xaiSubscriptionCredentials.id, created.credential_id))
       .limit(1);
@@ -214,7 +351,7 @@ export async function upsertXaiSubscriptionCredential(
         updatedAt: new Date(),
       })
       .where(eq(schema.xaiSubscriptionCredentials.id, credentialId))
-      .returning();
+      .returning(xaiCredentialMetadataColumns);
     if (!row) throw new Error("xAI credential update lost its authority fence");
     return { account: metadataFromRow(row), authoritySnapshot: snapshot };
   });
@@ -226,7 +363,7 @@ export async function listXaiSubscriptionAccountsMetadata(
 ): Promise<XaiSubscriptionAccountMetadata[]> {
   return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scopedDb) => {
     const rows = await scopedDb
-      .select()
+      .select(xaiCredentialMetadataColumns)
       .from(schema.xaiSubscriptionCredentials)
       .where(eq(schema.xaiSubscriptionCredentials.workspaceId, input.workspaceId))
       .orderBy(
@@ -243,7 +380,7 @@ export async function getXaiSubscriptionAccountMetadata(
 ): Promise<XaiSubscriptionAccountMetadata | null> {
   return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scopedDb) => {
     const [row] = await scopedDb
-      .select()
+      .select(xaiCredentialMetadataColumns)
       .from(schema.xaiSubscriptionCredentials)
       .where(
         and(
@@ -288,7 +425,7 @@ export async function updateXaiSubscriptionAccountSettings(
           eq(schema.xaiSubscriptionCredentials.version, input.expectedVersion),
         ),
       )
-      .returning();
+      .returning(xaiCredentialMetadataColumns);
     if (!row) throw new Error("xAI subscription account settings changed");
     return metadataFromRow(row);
   });
@@ -368,7 +505,10 @@ export async function materializeXaiCredentialForRun(
     );
     if (!rows[0]) throw new Error("xAI provider-account authority is no longer active");
     const [row] = await scopedDb
-      .select()
+      .select({
+        ...xaiCredentialMetadataColumns,
+        credentialEncrypted: schema.xaiSubscriptionCredentials.credentialEncrypted,
+      })
       .from(schema.xaiSubscriptionCredentials)
       .where(
         and(
@@ -403,28 +543,31 @@ export async function acquireXaiCredentialLease(
 ): Promise<XaiCredentialLeaseResult> {
   const snapshot = XaiProviderAccountAuthoritySnapshotV1.parse(input.authoritySnapshot);
   const now = input.now ?? new Date();
-  const leasedUntil = new Date(now.getTime() + (input.leaseTtlMs ?? XAI_CREDENTIAL_LEASE_TTL_MS));
+  const leaseTtlMs = input.leaseTtlMs ?? XAI_CREDENTIAL_LEASE_TTL_MS;
+  if (!Number.isFinite(leaseTtlMs) || leaseTtlMs <= 0) {
+    throw new Error("xAI credential lease TTL must be positive");
+  }
+  if (!input.holderId.trim()) {
+    throw new Error("xAI credential lease holder id is required");
+  }
+  const leasedUntil = new Date(now.getTime() + leaseTtlMs);
   return await withWorkspaceSubjectRls(
     db,
     input.workspaceId,
     input.subjectId,
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
-        const ownerRows =
-          snapshot.scope === "user"
-            ? await rawRows<{ membership_id: string }>(
-                tx,
-                sql`select organization_membership_id as membership_id
-                from resolve_xai_authority_pool(
-                  ${input.accountId}::uuid, ${input.workspaceId}::uuid,
-                  ${input.subjectId}, ${JSON.stringify(snapshot)}::jsonb
-                )`,
-              )
-            : [];
-        const ownerMembershipId = ownerRows[0]?.membership_id ?? null;
-        if (snapshot.scope === "user" && !ownerMembershipId) {
-          throw new Error("xAI user authority pool is no longer active");
-        }
+        await assertXaiTurnAuthoritySnapshot(tx, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          turnId: input.turnId,
+          authoritySnapshot: snapshot,
+        });
+        const ownerMembershipId = await resolveXaiPoolOwnerMembershipId(tx, {
+          workspaceId: input.workspaceId,
+          subjectId: input.subjectId,
+          authoritySnapshot: snapshot,
+        });
 
         await tx
           .insert(schema.xaiRotationSettings)
@@ -451,6 +594,15 @@ export async function acquireXaiCredentialLease(
           .limit(1);
         if (!settings) throw new Error("xAI rotation settings are unavailable");
 
+        await tx
+          .delete(schema.xaiCredentialLeases)
+          .where(
+            and(
+              eq(schema.xaiCredentialLeases.workspaceId, input.workspaceId),
+              lte(schema.xaiCredentialLeases.leasedUntil, now),
+            ),
+          );
+
         const [existing] = await tx
           .select()
           .from(schema.xaiCredentialLeases)
@@ -458,6 +610,7 @@ export async function acquireXaiCredentialLease(
             and(
               eq(schema.xaiCredentialLeases.workspaceId, input.workspaceId),
               eq(schema.xaiCredentialLeases.turnId, input.turnId),
+              gt(schema.xaiCredentialLeases.leasedUntil, now),
             ),
           )
           .for("update")
@@ -477,7 +630,7 @@ export async function acquireXaiCredentialLease(
             .where(eq(schema.xaiCredentialLeases.id, existing.id))
             .returning();
           const accounts = await tx
-            .select()
+            .select(xaiCredentialMetadataColumns)
             .from(schema.xaiSubscriptionCredentials)
             .where(eq(schema.xaiSubscriptionCredentials.workspaceId, input.workspaceId));
           return {
@@ -491,7 +644,7 @@ export async function acquireXaiCredentialLease(
         }
 
         const candidates = await tx
-          .select()
+          .select(xaiCredentialAllocationColumns)
           .from(schema.xaiSubscriptionCredentials)
           .where(
             and(
@@ -512,12 +665,25 @@ export async function acquireXaiCredentialLease(
             asc(schema.xaiSubscriptionCredentials.createdAt),
             asc(schema.xaiSubscriptionCredentials.id),
           );
+        const activeLeaseRows = await tx
+          .select({ credentialId: schema.xaiCredentialLeases.credentialId })
+          .from(schema.xaiCredentialLeases)
+          .where(
+            and(
+              eq(schema.xaiCredentialLeases.workspaceId, input.workspaceId),
+              gt(schema.xaiCredentialLeases.leasedUntil, now),
+            ),
+          );
+        const activelyLeasedCredentialIds = new Set(
+          activeLeaseRows.map((lease) => lease.credentialId),
+        );
         const eligible = candidates.filter(
           (candidate) =>
             candidate.status === "active" &&
             candidate.allocatorEnabled &&
             (!candidate.expiresAt || candidate.expiresAt > now) &&
-            (!candidate.exhaustedUntil || candidate.exhaustedUntil <= now),
+            (!candidate.exhaustedUntil || candidate.exhaustedUntil <= now) &&
+            !activelyLeasedCredentialIds.has(candidate.id),
         );
         const selected = input.pinnedCredentialId
           ? eligible.find((candidate) => candidate.id === input.pinnedCredentialId)
@@ -610,6 +776,11 @@ export async function getXaiRotationSettings(
 ): Promise<typeof schema.xaiRotationSettings.$inferSelect | null> {
   const snapshot = XaiProviderAccountAuthoritySnapshotV1.parse(input.authoritySnapshot);
   return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scopedDb) => {
+    const ownerMembershipId = await resolveXaiPoolOwnerMembershipId(scopedDb, {
+      workspaceId: input.workspaceId,
+      subjectId: input.subjectId,
+      authoritySnapshot: snapshot,
+    });
     const rows = await scopedDb
       .select()
       .from(schema.xaiRotationSettings)
@@ -617,11 +788,11 @@ export async function getXaiRotationSettings(
         and(
           eq(schema.xaiRotationSettings.workspaceId, input.workspaceId),
           eq(schema.xaiRotationSettings.authorityScope, snapshot.scope),
+          ownerMembershipId === null
+            ? isNull(schema.xaiRotationSettings.ownerOrganizationMembershipId)
+            : eq(schema.xaiRotationSettings.ownerOrganizationMembershipId, ownerMembershipId),
         ),
       );
-    if (snapshot.scope === "workspace") {
-      return rows.find((row) => row.ownerOrganizationMembershipId === null) ?? null;
-    }
     return rows[0] ?? null;
   });
 }
@@ -675,20 +846,19 @@ export async function setXaiSessionAccountPin(
 ): Promise<typeof schema.xaiSessionAccountPins.$inferSelect> {
   const snapshot = XaiProviderAccountAuthoritySnapshotV1.parse(input.authoritySnapshot);
   return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scopedDb) => {
-    const ownerRows =
-      snapshot.scope === "user"
-        ? await rawRows<{ membership_id: string }>(
-            scopedDb,
-            sql`select organization_membership_id as membership_id
-              from resolve_xai_authority_pool(
-                ${input.accountId}::uuid, ${input.workspaceId}::uuid,
-                ${input.subjectId}, ${JSON.stringify(snapshot)}::jsonb
-              )`,
-          )
-        : [];
-    const ownerMembershipId = ownerRows[0]?.membership_id ?? null;
-    if (snapshot.scope === "user" && !ownerMembershipId) {
-      throw new Error("xAI user authority pool is no longer active");
+    const ownerMembershipId = await resolveXaiPoolOwnerMembershipId(scopedDb, {
+      workspaceId: input.workspaceId,
+      subjectId: input.subjectId,
+      authoritySnapshot: snapshot,
+    });
+    if (input.credentialId) {
+      await assertXaiCredentialInPool(scopedDb, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        credentialId: input.credentialId,
+        authorityScope: snapshot.scope,
+        ownerMembershipId,
+      });
     }
     const [current] = await scopedDb
       .select()
@@ -697,6 +867,10 @@ export async function setXaiSessionAccountPin(
         and(
           eq(schema.xaiSessionAccountPins.workspaceId, input.workspaceId),
           eq(schema.xaiSessionAccountPins.sessionId, input.sessionId),
+          eq(schema.xaiSessionAccountPins.authorityScope, snapshot.scope),
+          ownerMembershipId === null
+            ? isNull(schema.xaiSessionAccountPins.ownerOrganizationMembershipId)
+            : eq(schema.xaiSessionAccountPins.ownerOrganizationMembershipId, ownerMembershipId),
         ),
       )
       .limit(1);
@@ -719,10 +893,13 @@ export async function setXaiSessionAccountPin(
         pinSource: input.credentialId ? input.pinSource : null,
       })
       .onConflictDoUpdate({
-        target: [schema.xaiSessionAccountPins.workspaceId, schema.xaiSessionAccountPins.sessionId],
+        target: [
+          schema.xaiSessionAccountPins.workspaceId,
+          schema.xaiSessionAccountPins.sessionId,
+          schema.xaiSessionAccountPins.authorityScope,
+          schema.xaiSessionAccountPins.ownerOrganizationMembershipId,
+        ],
         set: {
-          authorityScope: snapshot.scope,
-          ownerOrganizationMembershipId: ownerMembershipId,
           pinnedCredentialId: input.credentialId,
           pinSource: input.credentialId ? input.pinSource : null,
           version: sql`${schema.xaiSessionAccountPins.version} + 1`,
@@ -736,9 +913,20 @@ export async function setXaiSessionAccountPin(
 
 export async function getXaiSessionAccountPin(
   db: Database,
-  input: { workspaceId: string; subjectId: string; sessionId: string },
+  input: {
+    workspaceId: string;
+    subjectId: string;
+    sessionId: string;
+    authoritySnapshot: XaiAuthoritySnapshot;
+  },
 ): Promise<typeof schema.xaiSessionAccountPins.$inferSelect | null> {
+  const snapshot = XaiProviderAccountAuthoritySnapshotV1.parse(input.authoritySnapshot);
   return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scopedDb) => {
+    const ownerMembershipId = await resolveXaiPoolOwnerMembershipId(scopedDb, {
+      workspaceId: input.workspaceId,
+      subjectId: input.subjectId,
+      authoritySnapshot: snapshot,
+    });
     const [row] = await scopedDb
       .select()
       .from(schema.xaiSessionAccountPins)
@@ -746,6 +934,10 @@ export async function getXaiSessionAccountPin(
         and(
           eq(schema.xaiSessionAccountPins.workspaceId, input.workspaceId),
           eq(schema.xaiSessionAccountPins.sessionId, input.sessionId),
+          eq(schema.xaiSessionAccountPins.authorityScope, snapshot.scope),
+          ownerMembershipId === null
+            ? isNull(schema.xaiSessionAccountPins.ownerOrganizationMembershipId)
+            : eq(schema.xaiSessionAccountPins.ownerOrganizationMembershipId, ownerMembershipId),
         ),
       )
       .limit(1);
@@ -764,23 +956,43 @@ export async function recordXaiSessionLastAccount(
     credentialId: string;
   },
 ): Promise<typeof schema.xaiSessionAccountPins.$inferSelect> {
-  const current = await getXaiSessionAccountPin(db, input);
-  if (!current) {
-    return await setXaiSessionAccountPin(db, {
-      ...input,
-      credentialId: null,
-      pinSource: null,
-    }).then(async () => await recordXaiSessionLastAccount(db, input));
-  }
+  const snapshot = XaiProviderAccountAuthoritySnapshotV1.parse(input.authoritySnapshot);
   return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scopedDb) => {
+    const ownerMembershipId = await resolveXaiPoolOwnerMembershipId(scopedDb, {
+      workspaceId: input.workspaceId,
+      subjectId: input.subjectId,
+      authoritySnapshot: snapshot,
+    });
+    await assertXaiCredentialInPool(scopedDb, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      credentialId: input.credentialId,
+      authorityScope: snapshot.scope,
+      ownerMembershipId,
+    });
     const [row] = await scopedDb
-      .update(schema.xaiSessionAccountPins)
-      .set({
+      .insert(schema.xaiSessionAccountPins)
+      .values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        authorityScope: snapshot.scope,
+        ownerOrganizationMembershipId: ownerMembershipId,
         lastCredentialId: input.credentialId,
-        version: sql`${schema.xaiSessionAccountPins.version} + 1`,
-        updatedAt: new Date(),
       })
-      .where(eq(schema.xaiSessionAccountPins.id, current.id))
+      .onConflictDoUpdate({
+        target: [
+          schema.xaiSessionAccountPins.workspaceId,
+          schema.xaiSessionAccountPins.sessionId,
+          schema.xaiSessionAccountPins.authorityScope,
+          schema.xaiSessionAccountPins.ownerOrganizationMembershipId,
+        ],
+        set: {
+          lastCredentialId: input.credentialId,
+          version: sql`${schema.xaiSessionAccountPins.version} + 1`,
+          updatedAt: new Date(),
+        },
+      })
       .returning();
     return row!;
   });
@@ -836,18 +1048,19 @@ export async function armXaiCapacityWaiter(
 ): Promise<typeof schema.xaiCapacityWaiters.$inferSelect> {
   const snapshot = XaiProviderAccountAuthoritySnapshotV1.parse(input.authoritySnapshot);
   return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scopedDb) => {
-    const ownerRows =
-      snapshot.scope === "user"
-        ? await rawRows<{ membership_id: string }>(
-            scopedDb,
-            sql`select organization_membership_id as membership_id
-              from resolve_xai_authority_pool(
-                ${input.accountId}::uuid, ${input.workspaceId}::uuid,
-                ${input.subjectId}, ${JSON.stringify(snapshot)}::jsonb
-              )`,
-          )
-        : [];
-    const ownerMembershipId = ownerRows[0]?.membership_id ?? null;
+    await assertXaiTurnAuthoritySnapshot(scopedDb, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.blockedTurnId,
+      executionGeneration: input.blockedTurnGeneration,
+      authoritySnapshot: snapshot,
+    });
+    const ownerMembershipId = await resolveXaiPoolOwnerMembershipId(scopedDb, {
+      workspaceId: input.workspaceId,
+      subjectId: input.subjectId,
+      authoritySnapshot: snapshot,
+    });
     const [row] = await scopedDb
       .insert(schema.xaiCapacityWaiters)
       .values({
@@ -863,13 +1076,16 @@ export async function armXaiCapacityWaiter(
         nextCheckAt: input.nextCheckAt,
       })
       .onConflictDoUpdate({
-        target: [schema.xaiCapacityWaiters.workspaceId, schema.xaiCapacityWaiters.sessionId],
+        target: [
+          schema.xaiCapacityWaiters.workspaceId,
+          schema.xaiCapacityWaiters.sessionId,
+          schema.xaiCapacityWaiters.authorityScope,
+          schema.xaiCapacityWaiters.ownerOrganizationMembershipId,
+        ],
         set: {
           blockedTurnId: input.blockedTurnId,
           blockedTurnGeneration: input.blockedTurnGeneration,
           workflowId: input.workflowId,
-          authorityScope: snapshot.scope,
-          ownerOrganizationMembershipId: ownerMembershipId,
           status: "waiting",
           generation: sql`${schema.xaiCapacityWaiters.generation} + 1`,
           earliestResetAt: input.earliestResetAt,
@@ -886,10 +1102,22 @@ export async function armXaiCapacityWaiter(
 
 export async function wakeXaiCapacityWaiters(
   db: Database,
-  input: { workspaceId: string; subjectId: string; reason: string; now?: Date },
+  input: {
+    workspaceId: string;
+    subjectId: string;
+    authoritySnapshot: XaiAuthoritySnapshot;
+    reason: string;
+    now?: Date;
+  },
 ): Promise<number> {
+  const snapshot = XaiProviderAccountAuthoritySnapshotV1.parse(input.authoritySnapshot);
   const now = input.now ?? new Date();
   return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scopedDb) => {
+    const ownerMembershipId = await resolveXaiPoolOwnerMembershipId(scopedDb, {
+      workspaceId: input.workspaceId,
+      subjectId: input.subjectId,
+      authoritySnapshot: snapshot,
+    });
     const rows = await scopedDb
       .update(schema.xaiCapacityWaiters)
       .set({
@@ -902,6 +1130,10 @@ export async function wakeXaiCapacityWaiters(
         and(
           eq(schema.xaiCapacityWaiters.workspaceId, input.workspaceId),
           eq(schema.xaiCapacityWaiters.status, "waiting"),
+          eq(schema.xaiCapacityWaiters.authorityScope, snapshot.scope),
+          ownerMembershipId === null
+            ? isNull(schema.xaiCapacityWaiters.ownerOrganizationMembershipId)
+            : eq(schema.xaiCapacityWaiters.ownerOrganizationMembershipId, ownerMembershipId),
         ),
       )
       .returning({ id: schema.xaiCapacityWaiters.id });
@@ -911,9 +1143,20 @@ export async function wakeXaiCapacityWaiters(
 
 export async function getXaiCapacityWaiter(
   db: Database,
-  input: { workspaceId: string; subjectId: string; sessionId: string },
+  input: {
+    workspaceId: string;
+    subjectId: string;
+    sessionId: string;
+    authoritySnapshot: XaiAuthoritySnapshot;
+  },
 ): Promise<typeof schema.xaiCapacityWaiters.$inferSelect | null> {
+  const snapshot = XaiProviderAccountAuthoritySnapshotV1.parse(input.authoritySnapshot);
   return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scopedDb) => {
+    const ownerMembershipId = await resolveXaiPoolOwnerMembershipId(scopedDb, {
+      workspaceId: input.workspaceId,
+      subjectId: input.subjectId,
+      authoritySnapshot: snapshot,
+    });
     const [row] = await scopedDb
       .select()
       .from(schema.xaiCapacityWaiters)
@@ -921,6 +1164,10 @@ export async function getXaiCapacityWaiter(
         and(
           eq(schema.xaiCapacityWaiters.workspaceId, input.workspaceId),
           eq(schema.xaiCapacityWaiters.sessionId, input.sessionId),
+          eq(schema.xaiCapacityWaiters.authorityScope, snapshot.scope),
+          ownerMembershipId === null
+            ? isNull(schema.xaiCapacityWaiters.ownerOrganizationMembershipId)
+            : eq(schema.xaiCapacityWaiters.ownerOrganizationMembershipId, ownerMembershipId),
         ),
       )
       .limit(1);
@@ -936,9 +1183,16 @@ export async function observeXaiCapacityWaiter(
     waiterId: string;
     generation: number;
     observedWakeRevision: number;
+    authoritySnapshot: XaiAuthoritySnapshot;
   },
 ): Promise<typeof schema.xaiCapacityWaiters.$inferSelect | null> {
+  const snapshot = XaiProviderAccountAuthoritySnapshotV1.parse(input.authoritySnapshot);
   return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scopedDb) => {
+    const ownerMembershipId = await resolveXaiPoolOwnerMembershipId(scopedDb, {
+      workspaceId: input.workspaceId,
+      subjectId: input.subjectId,
+      authoritySnapshot: snapshot,
+    });
     const [row] = await scopedDb
       .update(schema.xaiCapacityWaiters)
       .set({
@@ -951,6 +1205,10 @@ export async function observeXaiCapacityWaiter(
           eq(schema.xaiCapacityWaiters.workspaceId, input.workspaceId),
           eq(schema.xaiCapacityWaiters.generation, input.generation),
           eq(schema.xaiCapacityWaiters.status, "waiting"),
+          eq(schema.xaiCapacityWaiters.authorityScope, snapshot.scope),
+          ownerMembershipId === null
+            ? isNull(schema.xaiCapacityWaiters.ownerOrganizationMembershipId)
+            : eq(schema.xaiCapacityWaiters.ownerOrganizationMembershipId, ownerMembershipId),
         ),
       )
       .returning();
@@ -967,9 +1225,16 @@ export async function settleXaiCapacityWaiter(
     generation: number;
     status: "resumed" | "superseded";
     reason: string;
+    authoritySnapshot: XaiAuthoritySnapshot;
   },
 ): Promise<typeof schema.xaiCapacityWaiters.$inferSelect | null> {
+  const snapshot = XaiProviderAccountAuthoritySnapshotV1.parse(input.authoritySnapshot);
   return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scopedDb) => {
+    const ownerMembershipId = await resolveXaiPoolOwnerMembershipId(scopedDb, {
+      workspaceId: input.workspaceId,
+      subjectId: input.subjectId,
+      authoritySnapshot: snapshot,
+    });
     const [row] = await scopedDb
       .update(schema.xaiCapacityWaiters)
       .set({
@@ -984,6 +1249,10 @@ export async function settleXaiCapacityWaiter(
           eq(schema.xaiCapacityWaiters.workspaceId, input.workspaceId),
           eq(schema.xaiCapacityWaiters.generation, input.generation),
           eq(schema.xaiCapacityWaiters.status, "waiting"),
+          eq(schema.xaiCapacityWaiters.authorityScope, snapshot.scope),
+          ownerMembershipId === null
+            ? isNull(schema.xaiCapacityWaiters.ownerOrganizationMembershipId)
+            : eq(schema.xaiCapacityWaiters.ownerOrganizationMembershipId, ownerMembershipId),
         ),
       )
       .returning();

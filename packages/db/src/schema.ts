@@ -2370,10 +2370,7 @@ export const xaiCredentialLeases = pgTable(
       sql`(${table.authorityScope} = 'workspace' and ${table.ownerOrganizationMembershipId} is null)
         or (${table.authorityScope} = 'user' and ${table.ownerOrganizationMembershipId} is not null)`,
     ),
-    generationValid: check(
-      "xai_credential_leases_generation_chk",
-      sql`${table.generation} > 0`,
-    ),
+    generationValid: check("xai_credential_leases_generation_chk", sql`${table.generation} > 0`),
   }),
 );
 
@@ -5679,9 +5676,13 @@ export const xaiSessionAccountPins = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    workspaceSession: uniqueIndex("xai_session_account_pins_workspace_session_uq").on(
+    // Migration 0231 adds NULLS NOT DISTINCT so workspace scope is also a
+    // singleton; Drizzle 0.45 cannot encode that PostgreSQL index modifier.
+    workspaceSessionPool: uniqueIndex("xai_session_account_pins_workspace_session_uq").on(
       table.workspaceId,
       table.sessionId,
+      table.authorityScope,
+      table.ownerOrganizationMembershipId,
     ),
     scopeValid: check(
       "xai_session_account_pins_authority_scope_chk",
@@ -5726,9 +5727,13 @@ export const xaiCapacityWaiters = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    workspaceSession: uniqueIndex("xai_capacity_waiters_workspace_session_uq").on(
+    // Migration 0231 adds NULLS NOT DISTINCT so workspace scope is also a
+    // singleton; Drizzle 0.45 cannot encode that PostgreSQL index modifier.
+    workspaceSessionPool: uniqueIndex("xai_capacity_waiters_workspace_session_uq").on(
       table.workspaceId,
       table.sessionId,
+      table.authorityScope,
+      table.ownerOrganizationMembershipId,
     ),
     pending: index("xai_capacity_waiters_pending_idx").on(
       table.workspaceId,
