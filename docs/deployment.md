@@ -603,11 +603,11 @@ Release approval is bound to GitHub's native PR author, reviewer, merge actor,
 review state, reviewed head, and submission time:
 
 - a `github-actions[bot]`-authored Version PR requires a native pre-merge
-  `APPROVED` review from the configured human maintainer;
+  `APPROVED` review from a configured human release maintainer;
 - the structured `COMMENTED` admin-PASS form is valid only for a
   single-maintainer PR whose author, exact-head reviewer, and merge actor are
-  that same human; it is never a substitute for approving a bot-authored
-  Version PR;
+  the same configured human; it is never a substitute for approving a
+  bot-authored Version PR;
 - a candidate-head update invalidates a head-bound verdict. For the structured
   admin-PASS form, changing the explicitly selected `reviewedBaseSha` also
   requires replacement evidence on the same candidate head. Ordinary protected

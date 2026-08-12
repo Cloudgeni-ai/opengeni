@@ -38,6 +38,7 @@ import {
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
+import type { ObjectHead, ObjectStorage } from "@opengeni/storage";
 import { Hono } from "hono";
 import {
   createSlackUserLinkToken,
@@ -117,6 +118,13 @@ type SlackPostPause = {
   release: () => void;
 };
 
+type SlackPrivateFileFixture = {
+  channelId: string;
+  filename: string;
+  contentType: "image/png" | "image/jpeg" | "image/webp";
+  bytes: Uint8Array;
+};
+
 function fakeSlack(
   deniedChannels: Set<string> = new Set(),
   options: {
@@ -127,6 +135,7 @@ function fakeSlack(
   const posts: SlackPost[] = [];
   const calls: SlackCall[] = [];
   const reactionContexts = new Map<string, SlackReactionContext>();
+  const privateFiles = new Map<string, SlackPrivateFileFixture>();
   const channelHistories = new Map<string, SlackReactionContextPage>();
   const reactionContextHits: string[] = [];
   const failuresByText = new Map<
@@ -141,7 +150,6 @@ function fakeSlack(
     string,
     { error?: string; status?: number; retryAfterSeconds?: number }
   >();
-  const acceptedByClientMessageId = new Map<string, SlackPost>();
   const failedAfterAccept = new Set<string>();
   const postPauses = new Map<
     string,
@@ -173,6 +181,13 @@ function fakeSlack(
     const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
     const method = url.pathname.replace(/^\/api\//, "");
     const form = new URLSearchParams(String(init?.body ?? ""));
+    if (url.hostname === "files.slack.com") {
+      const fileId = url.pathname.split("/").filter(Boolean).at(-2) ?? "";
+      const file = privateFiles.get(fileId);
+      return file
+        ? new Response(file.bytes, { headers: { "content-type": file.contentType } })
+        : new Response(null, { status: 404 });
+    }
     calls.push({
       method,
       channel: form.get("channel"),
@@ -214,7 +229,11 @@ function fakeSlack(
       const channel = form.get("channel") ?? "";
       const timestamp = form.get("ts") ?? "";
       const key = `${channel}:${timestamp}`;
-      const rootContext = reactionContexts.get(key);
+      const matchingPosts = posts.filter(
+        (post) => post.channel === channel && post.threadTimestamp === timestamp,
+      );
+      const rootContext =
+        reactionContexts.get(key) ?? (matchingPosts.length > 0 ? { messages: [] } : undefined);
       const cursor = form.get("cursor");
       const context = cursor ? rootContext?.pages?.[cursor] : rootContext;
       if (!context) return Response.json({ ok: false, error: "message_not_found" });
@@ -230,7 +249,16 @@ function fakeSlack(
       }
       return Response.json({
         ok: true,
-        messages: context.messages,
+        messages: [
+          ...context.messages,
+          ...matchingPosts.map((post) => ({
+            ts: post.timestamp,
+            bot_id: "B_OPEN_GENI",
+            text: post.text,
+            thread_ts: post.threadTimestamp,
+            client_msg_id: post.clientMessageId,
+          })),
+        ],
         response_metadata: { next_cursor: context.nextCursor ?? "" },
       });
     }
@@ -248,7 +276,17 @@ function fakeSlack(
       }
       return Response.json({
         ok: true,
-        messages: context.messages,
+        messages: [
+          ...context.messages,
+          ...posts
+            .filter((post) => post.channel === channel && post.threadTimestamp === null)
+            .map((post) => ({
+              ts: post.timestamp,
+              bot_id: "B_OPEN_GENI",
+              text: post.text,
+              client_msg_id: post.clientMessageId,
+            })),
+        ],
         response_metadata: { next_cursor: context.nextCursor ?? "" },
       });
     }
@@ -256,16 +294,49 @@ function fakeSlack(
       const user = form.get("users") ?? "";
       return Response.json({ ok: true, channel: { id: `D_${user}` } });
     }
-    if (method === "chat.postMessage") {
-      const clientMessageId = form.get("client_msg_id");
-      const accepted = clientMessageId ? acceptedByClientMessageId.get(clientMessageId) : null;
-      if (accepted) {
+    if (method === "files.info") {
+      const fileId = form.get("file") ?? "";
+      const privateFile = privateFiles.get(fileId);
+      if (privateFile) {
         return Response.json({
           ok: true,
-          channel: accepted.channel,
-          ts: accepted.timestamp,
+          file: {
+            id: fileId,
+            name: privateFile.filename,
+            mimetype: privateFile.contentType,
+            size: privateFile.bytes.byteLength,
+            channels: [privateFile.channelId],
+            url_private_download: `https://files.slack.com/files-pri/${fileId}/download`,
+          },
         });
       }
+      for (const [key, root] of reactionContexts) {
+        const channel = key.split(":", 1)[0]!;
+        for (const page of [root, ...Object.values(root.pages ?? {})]) {
+          for (const message of page.messages) {
+            const file = Array.isArray(message.files)
+              ? (message.files as Array<Record<string, unknown>>).find(
+                  (candidate) => candidate.id === fileId,
+                )
+              : undefined;
+            if (!file) continue;
+            return Response.json({
+              ok: true,
+              file: {
+                ...file,
+                id: fileId,
+                mimetype: file.mimetype ?? "application/octet-stream",
+                size: file.size ?? 1,
+                channels: [channel],
+              },
+            });
+          }
+        }
+      }
+      return Response.json({ ok: false, error: "file_not_found" });
+    }
+    if (method === "chat.postMessage") {
+      const clientMessageId = form.get("client_msg_id");
       const timestamp = `1800000000.${String(nextTimestamp++).padStart(6, "0")}`;
       const post = {
         channel: form.get("channel") ?? "",
@@ -281,7 +352,6 @@ function fakeSlack(
         await gate.released;
         postPauses.delete(fragment);
       }
-      posts.push(post);
       const configuredFailure =
         postFailuresByChannel.get(post.channel) ??
         [...failuresByText.entries()].find(([fragment]) => post.text.includes(fragment))?.[1];
@@ -299,7 +369,7 @@ function fakeSlack(
           },
         );
       }
-      if (clientMessageId) acceptedByClientMessageId.set(clientMessageId, post);
+      posts.push(post);
       if (options.failAfterAcceptTexts?.has(post.text) && !failedAfterAccept.has(post.text)) {
         failedAfterAccept.add(post.text);
         throw new TypeError("simulated Slack response loss after provider acceptance");
@@ -317,6 +387,7 @@ function fakeSlack(
     posts,
     calls,
     reactionContexts,
+    privateFiles,
     channelHistories,
     reactionContextHits,
     failuresByText,
@@ -560,6 +631,50 @@ async function drainAll(deps: ApiRouteDeps, limit = 50) {
   while (count < limit && (await drainSlackInteractionsOnce(deps))) count += 1;
   if (count === limit) throw new Error("Slack interaction drain did not become idle");
   return count;
+}
+
+function reactionObjectStorage() {
+  const objects = new Map<string, { bytes: Uint8Array; head: ObjectHead }>();
+  const storage = {
+    bucket: "slack-reaction-test",
+    backend: "s3-compatible",
+    maxSinglePutSizeBytes: 5_000_000_000,
+    async headObject(key: string) {
+      return objects.get(key)?.head ?? null;
+    },
+    async putObjectIfAbsent(input: {
+      key: string;
+      contentType: string;
+      body: Uint8Array;
+      sha256: string;
+    }) {
+      if (objects.has(input.key)) return false;
+      objects.set(input.key, {
+        bytes: input.body,
+        head: {
+          ContentLength: input.body.byteLength,
+          ContentType: input.contentType,
+          Metadata: { sha256: input.sha256 },
+          VersionToken: "v1",
+        },
+      });
+      return true;
+    },
+  } as ObjectStorage;
+  return { storage, objects };
+}
+
+function fixturePng(): Uint8Array {
+  return new Uint8Array([
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 73, 69, 78, 68, 0, 0, 0, 0,
+  ]);
+}
+
+function fixtureWebp(): Uint8Array {
+  return new Uint8Array([
+    82, 73, 70, 70, 14, 0, 0, 0, 87, 69, 66, 80, 86, 80, 56, 76, 2, 0, 0, 0, 47, 0,
+  ]);
 }
 
 async function waitForBlockedAppQueries(blockerPid: number, expected: number) {
@@ -1027,7 +1142,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       visibility: "workspace",
     });
     expect(value.slack.calls.filter((call) => call.method === "conversations.info")).toHaveLength(
-      2,
+      3,
     );
     expect(value.slack.posts).toHaveLength(1);
     expect(value.slack.posts[0]).toMatchObject({
@@ -1035,7 +1150,10 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       threadTimestamp: rootTimestamp,
     });
     expect(value.slack.posts[0]!.text).toContain("started from the :genie: reaction");
-    expect(value.slack.posts[0]!.text).toContain("Open in OpenGeni:");
+    expect(value.slack.posts[0]!.text).toMatch(
+      /<https:\/\/app\.example\.test\/workspaces\/[^|]+\|Open in OpenGeni>/u,
+    );
+    expect(value.slack.posts[0]!.text.match(/Open in OpenGeni/gu) ?? []).toHaveLength(1);
 
     const postsBeforeCompletion = value.slack.posts.length;
     await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
@@ -1049,7 +1167,9 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       },
       {
         type: "turn.completed",
-        payload: { output: "The requested Slack check is complete." },
+        payload: {
+          output: "The requested Slack check is complete.\n\nNo rollback is required.",
+        },
       },
     ]);
     expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
@@ -1057,9 +1177,10 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     const completionPosts = value.slack.posts.slice(postsBeforeCompletion);
     expect(completionPosts).toHaveLength(1);
     expect(completionPosts[0]!.text).toBe(
-      "The requested Slack check is complete.\n\nReply in this thread to continue.",
+      "The requested Slack check is complete.\n\nNo rollback is required.\n\nReply in this thread to continue.",
     );
-    expect(completionPosts[0]!.text).not.toContain("Open in OpenGeni:");
+    expect(completionPosts[0]!.text).not.toContain("Open in OpenGeni");
+    expect(completionPosts[0]!.text).not.toContain("/sessions/");
 
     const [session] = await shared!.admin<
       {
@@ -1077,7 +1198,10 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(session!.initial_message).toContain("[reacted message]");
     expect(session!.initial_message).toContain("Compare the logs and propose the safest rollback.");
     expect(session!.initial_message).toContain("Deployment log");
-    expect(session!.initial_message).toContain("If the intended action is ambiguous");
+    expect(session!.initial_message).toContain(
+      "Execute a direct, safe, sufficiently specified request immediately",
+    );
+    expect(session!.initial_message).toContain("Ask one concise clarifying question only when");
     expect(session!.initial_message).toContain("Do not infer permission to ingest or persist");
     expect(session!.initial_message).toContain("bounded Slack context limit");
     const [persistence] = await shared!.admin<{ documents: number; memories: number }[]>`
@@ -1085,6 +1209,15 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         (select count(*)::int from documents where workspace_id = ${value.owner.workspaceId}) as documents,
         (select count(*)::int from knowledge_memories where workspace_id = ${value.owner.workspaceId}) as memories`;
     expect(persistence).toEqual({ documents: 0, memories: 0 });
+    const postPrincipals = await shared!.admin<{ subject_id: string }[]>`
+      select subject_id
+      from audit_events
+      where workspace_id = ${value.owner.workspaceId}
+        and action = 'slack_bot.message.post'
+      order by occurred_at, id`;
+    expect(new Set(postPrincipals.map((row) => row.subject_id))).toEqual(
+      new Set(["service:slack-interaction"]),
+    );
   });
 
   test("distinct same-owner reactions concurrently create one route with one durable message per Slack event", async () => {
@@ -2556,7 +2689,10 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       channel: "D_PRIVATE",
       threadTimestamp: "1710000000.000001",
     });
-    expect(value.slack.posts[0]!.text).toContain("Open in OpenGeni:");
+    expect(value.slack.posts[0]!.text).toMatch(
+      /<https:\/\/app\.example\.test\/workspaces\/[^|]+\|Open in OpenGeni>/u,
+    );
+    expect(value.slack.posts[0]!.text.match(/Open in OpenGeni/gu) ?? []).toHaveLength(1);
     expect(value.slack.posts[0]!.text).toContain("Reply in this thread to continue");
     const [sessionPolicy] = await shared!.admin<{ first_party_mcp_tools: string[] }[]>`
       select first_party_mcp_tools
@@ -2961,6 +3097,161 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       where workspace_id = ${value.owner.workspaceId}
         and id = ${route!.session_id}`;
     expect(session!.model).toBe("gpt-5.6-terra");
+  });
+
+  test("imports only exact reacted-message images in Slack order with refs-only durable history", async () => {
+    if (!available) return;
+    const channelId = "C_REACTION_IMAGES";
+    const rootTimestamp = "1706050000.000001";
+    const reactedTimestamp = "1706050000.000002";
+    const value = await fixture({
+      grantedScopes: [...OPENGENI_SLACK_BOT_REQUESTED_SCOPES],
+      slackReactionSummon: {
+        enabled: true,
+        emoji: "genie",
+        channelPolicy: { mode: "allowlist", channelIds: [channelId] },
+      },
+    });
+    const objectStore = reactionObjectStorage();
+    Reflect.set(value.deps, "objectStorage", objectStore.storage);
+    value.slack.privateFiles.set("F_REPLY_PNG", {
+      channelId,
+      filename: "reply-chart.png",
+      contentType: "image/png",
+      bytes: fixturePng(),
+    });
+    value.slack.privateFiles.set("F_REPLY_WEBP", {
+      channelId,
+      filename: "reply-photo.webp",
+      contentType: "image/webp",
+      bytes: fixtureWebp(),
+    });
+    value.slack.privateFiles.set("F_PARENT", {
+      channelId,
+      filename: "parent-only.png",
+      contentType: "image/png",
+      bytes: fixturePng(),
+    });
+    value.slack.reactionContexts.set(`${channelId}:${reactedTimestamp}`, {
+      messages: [
+        {
+          ts: rootTimestamp,
+          user: "U_THREAD_ROOT",
+          text: "Parent context only.",
+          files: [{ id: "F_PARENT", name: "parent-only.png", title: "Parent only" }],
+        },
+        {
+          ts: reactedTimestamp,
+          thread_ts: rootTimestamp,
+          user: value.ownerSlackUserId,
+          text: "Compare these two images directly.",
+          files: [
+            { id: "F_REPLY_PNG", name: "reply-chart.png", title: "Reply chart" },
+            { id: "F_REPLY_WEBP", name: "reply-photo.webp", title: "Reply photo" },
+            { id: "F_REPLY_TEXT", name: "notes.txt", title: "Unsupported notes" },
+          ],
+        },
+      ],
+    });
+
+    expect(
+      (
+        await postEvent(
+          value.app,
+          reactionEvent({
+            teamId: value.teamId,
+            eventId: `E_REACTION_IMAGES_${crypto.randomUUID()}`,
+            userId: value.ownerSlackUserId,
+            channelId,
+            timestamp: reactedTimestamp,
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+
+    const [route] = await interactions(value.owner.workspaceId);
+    const [session] = await shared!.admin<
+      {
+        resources: Array<{ kind: string; fileId: string; mountPath: string }>;
+        initial_message: string;
+      }[]
+    >`
+      select resources, initial_message
+      from sessions
+      where workspace_id = ${value.owner.workspaceId}
+        and id = ${route!.session_id}`;
+    expect(session!.resources.map((resource) => resource.mountPath)).toEqual([
+      "attachments/slack/01-reply-chart.png",
+      "attachments/slack/02-reply-photo.webp",
+    ]);
+    expect(session!.initial_message).toContain("Imported reacted-message attachments");
+    expect(session!.initial_message).toContain("Some reacted-message attachments were omitted");
+    expect(session!.initial_message).not.toContain("parent-only.png");
+    expect(value.slack.calls.filter((call) => call.method === "files.info")).toHaveLength(3);
+    expect(objectStore.objects.size).toBe(2);
+    const [acceptedEvent] = await shared!.admin<{ payload: Record<string, unknown> }[]>`
+      select payload
+      from session_events
+      where workspace_id = ${value.owner.workspaceId}
+        and session_id = ${route!.session_id}
+        and type = 'user.message'
+      order by sequence
+      limit 1`;
+    expect(acceptedEvent!.payload.resources).toEqual(session!.resources);
+    const durable = JSON.stringify({ session, acceptedEvent });
+    expect(durable).not.toContain("files.slack.com");
+    expect(durable).not.toContain(Buffer.from(fixturePng()).toString("base64"));
+    expect(durable).not.toContain("slack-reactions/");
+
+    const followupTimestamp = "1706050000.000003";
+    value.slack.privateFiles.set("F_FOLLOWUP", {
+      channelId,
+      filename: "followup.png",
+      contentType: "image/png",
+      bytes: fixturePng(),
+    });
+    value.slack.reactionContexts.set(`${channelId}:${followupTimestamp}`, {
+      messages: [
+        { ts: rootTimestamp, user: "U_THREAD_ROOT", text: "Parent context only." },
+        {
+          ts: followupTimestamp,
+          thread_ts: rootTimestamp,
+          user: value.ownerSlackUserId,
+          text: "Also inspect this follow-up image.",
+          files: [{ id: "F_FOLLOWUP", name: "followup.png", title: "Follow-up" }],
+        },
+      ],
+    });
+    expect(
+      (
+        await postEvent(
+          value.app,
+          reactionEvent({
+            teamId: value.teamId,
+            eventId: `E_REACTION_IMAGES_FOLLOWUP_${crypto.randomUUID()}`,
+            userId: value.ownerSlackUserId,
+            channelId,
+            timestamp: followupTimestamp,
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+    const acceptedEvents = await shared!.admin<{ payload: Record<string, unknown> }[]>`
+      select payload
+      from session_events
+      where workspace_id = ${value.owner.workspaceId}
+        and session_id = ${route!.session_id}
+        and type = 'user.message'
+      order by sequence`;
+    expect(acceptedEvents).toHaveLength(2);
+    expect(
+      (acceptedEvents[1]!.payload.resources as Array<{ mountPath: string }>).map(
+        (resource) => resource.mountPath,
+      ),
+    ).toEqual(["attachments/slack/03-followup.png"]);
+    expect(objectStore.objects.size).toBe(3);
   });
 
   test("permanent session admission failures are visible in Slack and retain a useful code", async () => {
@@ -4080,6 +4371,31 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       "Progress 1",
       "Progress 2",
     ]);
+    const deferredProgress = await shared!.admin<
+      { session_event_sequence: number; slot: number; status: string }[]
+    >`
+      select delivery.session_event_sequence, delivery.slot, operation.status
+      from slack_interaction_progress_deliveries delivery
+      join slack_bot_post_operations operation
+        on operation.workspace_id = ${value.owner.workspaceId}
+       and operation.operation_id = delivery.operation_id
+      where delivery.interaction_id = ${route!.id}
+      order by delivery.slot`;
+    expect(deferredProgress.map((progress) => progress.status)).toEqual([
+      "completed",
+      "outcome_unknown",
+    ]);
+    expect(deferredProgress[1]!.slot).toBe(deferredProgress[0]!.slot + 1);
+    const [deferredCursor] = await shared!.admin<
+      { last_delivered_session_event_sequence: number; progress_count: number }[]
+    >`
+      select last_delivered_session_event_sequence, progress_count
+      from slack_interactions
+      where id = ${route!.id}`;
+    expect(deferredCursor?.last_delivered_session_event_sequence).toBeLessThan(
+      deferredProgress[0]!.session_event_sequence,
+    );
+    expect(deferredCursor?.progress_count).toBe(2);
 
     const restartedDeps = {
       ...value.deps,
@@ -4141,7 +4457,8 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(delivered.filter((post) => post.text.startsWith("Progress"))).toHaveLength(3);
     expect(delivered.some((post) => post.text === "Progress 4")).toBe(false);
     expect(delivered.at(-1)?.text).toContain("Final bounded result");
-    expect(delivered.at(-1)?.text).not.toContain("Open in OpenGeni:");
+    expect(delivered.at(-1)?.text).not.toContain("Open in OpenGeni");
+    expect(delivered.at(-1)?.text).not.toContain("/sessions/");
     expect(delivered.every((post) => post.threadTimestamp === "1740000000.000001")).toBe(true);
     const progressLedger = await shared!.admin<
       { session_event_sequence: number; slot: number; operation_id: string }[]
@@ -4200,17 +4517,17 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       "Production-shaped final result",
     ]);
 
-    // The terminal settlement writes a second identical assistant event plus
+    // The terminal settlement writes a superset assistant shape plus
     // turn.completed atomically. Two replicas converge on the already-used
-    // progress operation instead of posting a second result.
+    // same-turn progress operation instead of posting a second result.
     await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
       {
         type: "agent.message.completed",
-        payload: { text: "Production-shaped final result" },
+        payload: { text: "Production-shaped final result\n\nAdditional final detail" },
       },
       {
         type: "turn.completed",
-        payload: { output: "Production-shaped final result" },
+        payload: { output: "Production-shaped final result\n\nAdditional final detail" },
       },
     ]);
     const replicaDeps = {
@@ -4228,7 +4545,8 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     const resultPosts = value.slack.posts.slice(postsBeforeResult);
     expect(resultPosts).toHaveLength(1);
     expect(resultPosts[0]!.text).toBe("Production-shaped final result");
-    expect(resultPosts[0]!.text).not.toContain("Open in OpenGeni:");
+    expect(resultPosts[0]!.text).not.toContain("Open in OpenGeni");
+    expect(resultPosts[0]!.text).not.toContain("/sessions/");
     expect((await interactions(value.owner.workspaceId))[0]).toMatchObject({
       terminal_delivery_state: "completed",
     });
@@ -4265,7 +4583,8 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(await drainSlackInteractionsOnce(value.deps)).toBe(false);
     expect(
       value.slack.posts.filter((post) => post.text.includes("Permanent delivery result")),
-    ).toHaveLength(1);
+    ).toHaveLength(0);
+    expect(value.slack.calls.filter((call) => call.method === "chat.postMessage")).toHaveLength(2);
     const [delivery] = await shared!.admin<
       {
         terminal_delivery_state: string;
@@ -4324,7 +4643,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(deferred!.delivery_last_error_code).toBe("http_429");
     expect(
       value.slack.posts.filter((post) => post.text.includes("Rate limited result")),
-    ).toHaveLength(1);
+    ).toHaveLength(0);
 
     value.slack.failuresByText.delete("Rate limited result");
     await shared!.admin`
@@ -4333,7 +4652,8 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(await drainSlackInteractionsOnce(value.deps)).toBe(false);
     expect(
       value.slack.posts.filter((post) => post.text.includes("Rate limited result")),
-    ).toHaveLength(2);
+    ).toHaveLength(1);
+    expect(value.slack.calls.filter((call) => call.method === "chat.postMessage")).toHaveLength(3);
     expect((await interactions(value.owner.workspaceId))[0]).toMatchObject({
       terminal_delivery_state: "completed",
     });

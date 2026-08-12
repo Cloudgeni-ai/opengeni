@@ -43,7 +43,6 @@ const DEFAULT_AUTHORIZED_CONNECTOR_TOOLS = [
   "slack_bot_list_files",
   "slack_bot_file_info",
   "slack_bot_file_content",
-  "slack_bot_post_message",
   "slack_bot_delete_message",
 ] as const satisfies readonly FirstPartyMcpToolName[];
 const INTERACTION_ATTEMPT_TOOL_NAME_SET = new Set<string>(INTERACTION_ATTEMPT_TOOL_NAMES);
@@ -148,7 +147,7 @@ describe("first-party MCP tool visibility policy", () => {
     expect(registeredToolNames(admitted)).toEqual(["session_create"]);
   });
 
-  test("the broad and local adapters exactly cover the selected first-party catalog", () => {
+  test("the broad catalog excludes compatibility-only and local first-party tools", () => {
     const server = buildOpenGeniMcpServer(
       deps(),
       grant([...Permission.options], [...FIRST_PARTY_MCP_TOOL_NAMES]),
@@ -157,9 +156,8 @@ describe("first-party MCP tool visibility policy", () => {
 
     const broad = registeredToolNames(server);
     expect(broad).toEqual([...FIRST_PARTY_REMOTE_MCP_TOOL_NAMES].sort());
-    expect([...broad, ...INTERACTION_ATTEMPT_TOOL_NAMES].sort()).toEqual(
-      [...FIRST_PARTY_MCP_TOOL_NAMES].sort(),
-    );
+    expect(broad).not.toContain("slack_bot_post_message");
+    expect(INTERACTION_ATTEMPT_TOOL_NAMES).not.toContain("slack_bot_post_message");
     expect(broad).not.toContain("files_get_download_url");
     expect(broad).not.toContain("github_token");
   });
@@ -180,26 +178,30 @@ describe("first-party MCP tool visibility policy", () => {
     expect(registeredToolNames(files)).toEqual(["files_get_download_url"]);
   });
 
-  test("Slack write schemas expose threaded posting and bot-owned deletion", async () => {
+  test("generic MCP omits Slack posting without a trusted logical-delivery identity", async () => {
+    let databaseTouches = 0;
+    const routeDeps = deps();
+    routeDeps.db = new Proxy(
+      {},
+      {
+        get() {
+          databaseTouches += 1;
+          throw new Error("generic Slack posting must not resolve a connection");
+        },
+      },
+    ) as ApiRouteDeps["db"];
     const server = buildOpenGeniMcpServer(
-      deps(),
+      routeDeps,
       grant(["connections:read"], ["slack_bot_post_message", "slack_bot_delete_message"]),
     );
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    const client = new Client({ name: "slack-write-schema-test", version: "1" });
+    const client = new Client({ name: "slack-write-boundary-test", version: "1" });
     await server.connect(serverTransport);
     await client.connect(clientTransport);
     try {
       const tools = (await client.listTools()).tools;
-      const post = tools.find((tool) => tool.name === "slack_bot_post_message");
+      expect(tools.map((tool) => tool.name)).not.toContain("slack_bot_post_message");
       const remove = tools.find((tool) => tool.name === "slack_bot_delete_message");
-      expect(post?.inputSchema).toMatchObject({
-        required: expect.arrayContaining(["operationId", "text"]),
-        properties: {
-          channelId: { type: "string" },
-          threadTimestamp: { type: "string" },
-        },
-      });
       expect(remove?.inputSchema).toMatchObject({
         required: expect.arrayContaining(["operationId", "channelId", "timestamp"]),
         properties: {
@@ -208,6 +210,15 @@ describe("first-party MCP tool visibility policy", () => {
           timestamp: { type: "string" },
         },
       });
+      for (const operationId of [crypto.randomUUID(), crypto.randomUUID()]) {
+        const result = await client.callTool({
+          name: "slack_bot_post_message",
+          arguments: { operationId, channelId: "C123", text: "do not send" },
+        });
+        expect(result).toMatchObject({ isError: true });
+        expect(JSON.stringify(result)).toMatch(/not found|unknown/i);
+      }
+      expect(databaseTouches).toBe(0);
     } finally {
       await Promise.all([client.close(), server.close()]);
     }

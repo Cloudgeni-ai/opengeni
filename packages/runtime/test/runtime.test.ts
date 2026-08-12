@@ -1413,7 +1413,19 @@ describe("runtime event normalization", () => {
   });
 
   test("codex view_image function results use structured image content, not tokenized data-URL text", async () => {
-    const dataUrl = "data:image/png;base64,aGk=";
+    const pngBytes = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+      "base64",
+    );
+    const jpegBytes = Buffer.from(
+      "/9j/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAABgj/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCdABykX//Z",
+      "base64",
+    );
+    const webpBytes = Buffer.from(
+      "UklGRjwAAABXRUJQVlA4IDAAAADQAQCdASoBAAEAAUAmJaACdLoB+AADsAD+8ut//NgVzXPv9//S4P0uD9Lg/9KQAAA=",
+      "base64",
+    );
+    const dataUrl = `data:image/png;base64,${pngBytes.toString("base64")}`;
     const tool = {
       type: "function",
       name: "view_image",
@@ -1425,6 +1437,21 @@ describe("runtime event normalization", () => {
       image: { url: dataUrl },
     });
 
+    for (const [mediaType, bytes] of [
+      ["image/jpeg", jpegBytes],
+      ["image/jpg", jpegBytes],
+      ["image/webp", webpBytes],
+    ] as const) {
+      const validDataUrl = `data:${mediaType};base64,${bytes.toString("base64")}`;
+      const [wrappedValid] = withStructuredViewImageFunctionResults([
+        { ...tool, invoke: async () => validDataUrl } as any,
+      ]);
+      expect(await (wrappedValid as any).invoke(undefined, "{}", undefined)).toEqual({
+        type: "image",
+        image: { url: validDataUrl },
+      });
+    }
+
     const errorTool = {
       ...tool,
       invoke: async () => "image path `/tmp/missing.png` was not found",
@@ -1433,6 +1460,28 @@ describe("runtime event normalization", () => {
     expect(await (wrappedError as any).invoke(undefined, "{}", undefined)).toBe(
       "image path `/tmp/missing.png` was not found",
     );
+
+    for (const invalidDataUrl of [
+      `data:image/bmp;base64,${Buffer.from("BM-invalid").toString("base64")}`,
+      `data:image/png;base64,${Buffer.from("BM-mislabeled").toString("base64")}`,
+      `data:image/png;base64,${jpegBytes.toString("base64")}`,
+      `data:image/png;base64,${pngBytes.subarray(0, 8).toString("base64")}`,
+      `data:image/png;base64,${Buffer.concat([pngBytes, Buffer.from("trailing")]).toString("base64")}`,
+      `data:image/jpeg;base64,${jpegBytes.subarray(0, -2).toString("base64")}`,
+      `data:image/webp;base64,${webpBytes.subarray(0, -1).toString("base64")}`,
+      `data:image/webp;base64,${Buffer.from([0x52, 0x49, 0x46, 0x46, 0x16, 0, 0, 0, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38, 0x58, 0x0a, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 2, 0, 0]).toString("base64")}`,
+      "data:image/png;base64,AAAAA===",
+    ]) {
+      const [wrappedInvalid] = withStructuredViewImageFunctionResults([
+        { ...tool, invoke: async () => invalidDataUrl } as any,
+      ]);
+      const result = await (wrappedInvalid as any).invoke(undefined, "{}", undefined);
+      expect(result).toContain("Convert the file to PNG, JPEG, or WebP");
+      expect(result).not.toContain("base64");
+      if (invalidDataUrl.startsWith("data:image/png;base64,")) {
+        expect(result).toContain("(image/png)");
+      }
+    }
   });
 
   test("view_image crosses the retention hook before returning to SDK history", async () => {
@@ -1448,7 +1497,15 @@ describe("runtime event normalization", () => {
       createEditor: () => ({}),
       viewImage: async () => ({
         type: "image",
-        image: { data: Uint8Array.from([1, 2, 3]), mediaType: "image/png" },
+        image: {
+          data: Uint8Array.from(
+            Buffer.from(
+              "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+              "base64",
+            ),
+          ),
+          mediaType: "image/png",
+        },
       }),
     });
     const viewImage = bound.tools().find((tool: { name?: string }) => tool.name === "view_image");
@@ -1462,9 +1519,9 @@ describe("runtime event normalization", () => {
         output,
       },
     ]);
-    expect(output).toEqual({
+    expect(output).toMatchObject({
       type: "image",
-      image: { url: "data:image/png;base64,AQID" },
+      image: { url: expect.stringMatching(/^data:image\/png;base64,/) },
     });
   });
 

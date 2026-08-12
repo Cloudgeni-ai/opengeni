@@ -581,7 +581,8 @@ export function createImpactPlan(
   }
 
   const affected = transitiveDependents(graph, direct);
-  const unit = new Set(changedTests);
+  const unitTestSet = new Set(tests.unit);
+  const unit = new Set([...changedTests].filter((path) => unitTestSet.has(path)));
   for (const path of tests.unit) {
     const pkg = workspaceForPath(graph, path);
     if (pkg && affected.has(pkg.name)) unit.add(path);

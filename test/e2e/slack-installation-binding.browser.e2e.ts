@@ -79,7 +79,7 @@ describe("Slack installation binding browser acceptance", () => {
       await installApiFixture(page, state);
       const capabilitiesUrl = `${webBaseUrl}/workspaces/${workspaceId}/capabilities`;
 
-      await page.goto(capabilitiesUrl, { waitUntil: "networkidle" });
+      await page.goto(capabilitiesUrl, { waitUntil: "domcontentloaded" });
       let settings = await openSlackSettings(page);
       await openConnectionDetails(settings);
       await expectText(settings, "Slack Binding Team · T_BINDING_BROWSER");
@@ -92,7 +92,7 @@ describe("Slack installation binding browser acceptance", () => {
 
       state.bindingState = "quarantined";
       state.connectionStatus = "needs_reauth";
-      await page.goto(capabilitiesUrl, { waitUntil: "networkidle" });
+      await page.goto(capabilitiesUrl, { waitUntil: "domcontentloaded" });
       settings = await openSlackSettings(page);
       await openConnectionDetails(settings);
       await expectText(settings, "quarantined · version 3");
@@ -100,7 +100,7 @@ describe("Slack installation binding browser acceptance", () => {
       expect(await settings.getByRole("button", { name: "Reconnect" }).isDisabled()).toBe(true);
 
       state.bindingState = null;
-      await page.goto(capabilitiesUrl, { waitUntil: "networkidle" });
+      await page.goto(capabilitiesUrl, { waitUntil: "domcontentloaded" });
       settings = await openSlackSettings(page);
       await openConnectionDetails(settings);
       await expectText(settings, "No verified installation binding is available");

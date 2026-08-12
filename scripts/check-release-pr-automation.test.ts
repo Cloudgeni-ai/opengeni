@@ -2046,6 +2046,8 @@ function approvalFixture(
     reviewer?: Record<string, unknown>;
     reviewDetailReviewer?: Record<string, unknown>;
     reviewerLoginSnapshot?: string;
+    author?: Record<string, unknown>;
+    merger?: Record<string, unknown>;
     headChecks?: Array<Record<string, unknown>>;
     sourceChecks?: Array<Record<string, unknown>>;
     historicalHeadChecks?: Array<Record<string, unknown>>;
@@ -2070,14 +2072,16 @@ function approvalFixture(
         ? [{ sha: rebasedFirstSha }]
         : [{ sha: baseSha }];
   const author =
-    options.authorId === RELEASE_AUTOMATION_CONTRACT.releaseApprover.id ||
+    options.author ??
+    (options.authorId === RELEASE_AUTOMATION_CONTRACT.releaseApprover.id ||
     (options.reviewState === "COMMENTED" && options.authorId === undefined)
       ? RELEASE_AUTOMATION_CONTRACT.releaseApprover
-      : { login: "release-bot", id: options.authorId ?? 41898282, type: "Bot" };
+      : { login: "release-bot", id: options.authorId ?? 41898282, type: "Bot" });
   const merger =
-    options.reviewState === "COMMENTED"
+    options.merger ??
+    (options.reviewState === "COMMENTED"
       ? RELEASE_AUTOMATION_CONTRACT.releaseApprover
-      : { login: "merge-maintainer", id: 1234567, type: "User" };
+      : { login: "merge-maintainer", id: 1234567, type: "User" });
   const artifact = {
     version: 3,
     kind: "opengeni-exact-head-release-review",
@@ -2461,6 +2465,37 @@ describe("release approval provenance", () => {
     const fixture = approvalFixture({
       mergeMethod: "single",
       reviewState: "COMMENTED",
+    });
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: fixture.fetchImpl,
+        logger: { log() {} },
+      }),
+    ).resolves.toEqual(
+      expect.objectContaining({
+        mergeMethod: "single-commit-squash-or-rebase",
+        review: expect.objectContaining({
+          type: "single-maintainer-admin-pass",
+        }),
+      }),
+    );
+  });
+
+  test("accepts a configured secondary maintainer's provider-bound admin PASS", async () => {
+    const secondaryMaintainer = RELEASE_AUTOMATION_CONTRACT.releaseApprovers[1];
+    expect(secondaryMaintainer).toEqual({
+      login: "davletd",
+      id: 2204825,
+      type: "User",
+    });
+    const fixture = approvalFixture({
+      mergeMethod: "single",
+      reviewState: "COMMENTED",
+      author: secondaryMaintainer,
+      merger: secondaryMaintainer,
+      reviewer: secondaryMaintainer,
+      reviewerLoginSnapshot: secondaryMaintainer.login,
     });
     await expect(
       verifyApprovedMerge({

@@ -10,6 +10,7 @@ import {
   SlackUserLinkAccessMutationRequest,
   SlackUserLinkAccessRequest,
   type AccessGrant,
+  type FileResourceRef,
   type FirstPartyMcpToolName,
   type HumanInputQuestion,
   type SessionEvent,
@@ -36,6 +37,7 @@ import {
   getSlackBotUserLink,
   getSlackInteractionByClientEventId,
   getSlackInteractionByRoute,
+  getSession,
   getSessionEventByClientEventId,
   getWorkspace,
   getWorkspaceGrant,
@@ -73,9 +75,11 @@ import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import {
   createOpenGeniSlackBotInteractionClient,
+  SLACK_REACTION_IMAGE_MAX_BYTES,
   type OpenGeniSlackBotClient,
   SlackBotProviderError,
 } from "./slack-bot";
+import { importSlackReactionImage, type ImportedSlackReactionImage } from "../slack-reaction-files";
 
 export const SLACK_INTERACTION_MAX_BODY_BYTES = 256 * 1024;
 export const SLACK_SIGNATURE_REPLAY_WINDOW_SECONDS = 300;
@@ -94,14 +98,19 @@ const MAX_SLACK_INVOCATION_CONTEXT_MESSAGES = 15;
 const MAX_SLACK_CHANNEL_CONTEXT_MESSAGES = 5;
 const MAX_SLACK_REACTION_CONTEXT_MESSAGES = 15;
 const MAX_SLACK_REACTION_FILE_SUMMARY_CHARS = 1_500;
+const MAX_SLACK_REACTION_IMAGES = 4;
+const MAX_SLACK_REACTION_IMAGE_AGGREGATE_BYTES = 16 * 1024 * 1024;
 const MAX_PROGRESS_MESSAGES = 3;
 const SLACK_USER_LINK_TTL_MS = 15 * 60_000;
 const INBOX_LEASE_MS = 30_000;
 const DELIVERY_LEASE_MS = 30_000;
 const MAX_DELIVERY_ATTEMPTS = 8;
 const MAX_DELIVERY_RETRY_MS = 5 * 60_000;
+const SLACK_INTERACTION_BOT_SUBJECT_ID = "service:slack-interaction";
 export const SLACK_TASK_INSTRUCTIONS = [
   "This turn originated from Slack. Slack message and thread context is task-local only.",
+  "Execute direct, safe, sufficiently specified requests immediately.",
+  "Ask one concise clarifying question only when materially required information is missing or the requested action is risky, irreversible, or authorization-sensitive.",
   "Do not write Slack context to Documents, Knowledge, Memory, preferences, Workspace Charter, instructions, or policy unless a separate explicit authorized user action requests it.",
   "Never expose private reasoning, credentials, secrets, raw logs, or unbounded output.",
   "Keep user-visible output concise, bounded, and safe to send back to Slack.",
@@ -852,7 +861,7 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     accountId: entry.accountId,
     workspaceId: entry.workspaceId,
     connectionId: entry.connectionId,
-    subjectId: link?.subjectId ?? "service:slack-interaction",
+    subjectId: SLACK_INTERACTION_BOT_SUBJECT_ID,
     ...(existing?.sessionId ? { sessionId: existing.sessionId } : {}),
   });
   if (routePolicy.requiresChannelAccess) {
@@ -906,7 +915,7 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
         accountId: entry.accountId,
         workspaceId: entry.workspaceId,
         connectionId: entry.connectionId,
-        subjectId: grant.subjectId,
+        subjectId: SLACK_INTERACTION_BOT_SUBJECT_ID,
         sessionId: eventSessionId,
       });
       await acknowledgeSlackSession(deps, boundClient, boundInteraction, entry);
@@ -982,7 +991,7 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     accountId: entry.accountId,
     workspaceId: entry.workspaceId,
     connectionId: entry.connectionId,
-    subjectId: grant.subjectId,
+    subjectId: SLACK_INTERACTION_BOT_SUBJECT_ID,
     sessionId: session.id,
   });
   await acknowledgeSlackSession(deps, boundClient, bound, entry);
@@ -1196,7 +1205,7 @@ async function processSlackReactionInboxEntry(
         accountId: entry.accountId,
         workspaceId: entry.workspaceId,
         connectionId: entry.connectionId,
-        subjectId: grant.subjectId,
+        subjectId: SLACK_INTERACTION_BOT_SUBJECT_ID,
         sessionId: eventSessionId,
       });
       await acknowledgeSlackReactionSession(deps, client, boundInteraction, settings.emoji);
@@ -1208,7 +1217,7 @@ async function processSlackReactionInboxEntry(
     accountId: entry.accountId,
     workspaceId: entry.workspaceId,
     connectionId: entry.connectionId,
-    subjectId: grant.subjectId,
+    subjectId: SLACK_INTERACTION_BOT_SUBJECT_ID,
   });
   const context = await client.reactionMessageContext({
     channelId: entry.slackChannelId,
@@ -1237,11 +1246,7 @@ async function processSlackReactionInboxEntry(
       if (!saved) throw new Error("Slack reaction inbox checkpoint claim was lost");
     },
   });
-  const preparedEntry: SlackInteractionInboxEntry = {
-    ...entry,
-    slackThreadTs: context.threadTimestamp,
-    text: slackReactionTaskText(context),
-  };
+  const preparedTask = await prepareSlackReactionTask(deps, client, entry, context);
   const routeKey = slackRouteKey(entry.slackChannelId, context.threadTimestamp);
   const existing = await getSlackInteractionByRoute(
     deps.db,
@@ -1250,7 +1255,19 @@ async function processSlackReactionInboxEntry(
     routeKey,
   );
   if (existing?.sessionId) {
-    await continueSlackReactionSession(deps, grant, existing, preparedEntry);
+    const appendedTask = await remountSlackReactionTaskForSession(
+      deps,
+      entry.workspaceId,
+      existing.sessionId,
+      preparedTask,
+    );
+    await continueSlackReactionSession(
+      deps,
+      grant,
+      existing,
+      slackReactionPreparedEntry(entry, context, appendedTask),
+      appendedTask.resources,
+    );
     return;
   }
   const { interaction } = await getOrCreateSlackInteraction(deps.db, {
@@ -1266,7 +1283,19 @@ async function processSlackReactionInboxEntry(
     visibility: "workspace",
   });
   if (interaction.sessionId) {
-    await continueSlackReactionSession(deps, grant, interaction, preparedEntry);
+    const appendedTask = await remountSlackReactionTaskForSession(
+      deps,
+      entry.workspaceId,
+      interaction.sessionId,
+      preparedTask,
+    );
+    await continueSlackReactionSession(
+      deps,
+      grant,
+      interaction,
+      slackReactionPreparedEntry(entry, context, appendedTask),
+      appendedTask.resources,
+    );
     return;
   }
   if (interaction.owningSubjectId !== grant.subjectId) {
@@ -1282,6 +1311,7 @@ async function processSlackReactionInboxEntry(
     entry.workspaceId,
     grant.subjectId,
   );
+  const preparedEntry = slackReactionPreparedEntry(entry, context, preparedTask);
   let session: Awaited<ReturnType<typeof createSessionForRequest>>;
   try {
     session = await createSessionForRequest(deps, grant, entry.workspaceId, {
@@ -1291,6 +1321,7 @@ async function processSlackReactionInboxEntry(
       // The exact reacted message and bounded containing thread are already in
       // the prompt; do not expose general Slack history tools for this trigger.
       firstPartyMcpTools: [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+      resources: preparedTask.resources,
       ...(preferredModel ? { model: preferredModel } : {}),
       // Every reaction entry converging on this route must use the same create
       // key. This closes the same-owner multi-event race while the owner check
@@ -1303,7 +1334,7 @@ async function processSlackReactionInboxEntry(
     // by that operation. Replay this exact Slack event through the normal
     // per-message idempotency boundary: the create winner is recognized as the
     // initial event, while every distinct loser appends one durable task.
-    await acceptSlackReactionTask(deps, grant, session.id, preparedEntry);
+    await acceptSlackReactionTask(deps, grant, session.id, preparedEntry, preparedTask.resources);
   } catch (error) {
     if (error instanceof HTTPException) {
       await client.postMessage({
@@ -1345,7 +1376,67 @@ type SlackReactionMessageContext = Awaited<
   ReturnType<OpenGeniSlackBotClient["reactionMessageContext"]>
 >;
 
-export function slackReactionTaskText(context: SlackReactionMessageContext) {
+type PreparedSlackReactionTask = Readonly<{
+  resources: FileResourceRef[];
+  attachments: ImportedSlackReactionImage[];
+  omissionCodes: string[];
+  omittedCount: number;
+}>;
+
+function slackReactionPreparedEntry(
+  entry: SlackInteractionInboxEntry,
+  context: SlackReactionMessageContext,
+  prepared: PreparedSlackReactionTask,
+): SlackInteractionInboxEntry {
+  return {
+    ...entry,
+    slackThreadTs: context.threadTimestamp,
+    text: slackReactionTaskText(context, prepared),
+  };
+}
+
+async function remountSlackReactionTaskForSession(
+  deps: ApiRouteDeps,
+  workspaceId: string,
+  sessionId: string,
+  prepared: PreparedSlackReactionTask,
+): Promise<PreparedSlackReactionTask> {
+  if (prepared.attachments.length === 0) return prepared;
+  const session = await getSession(deps.db, workspaceId, sessionId);
+  if (!session) throw new SlackInteractionPermanentError("session_not_found");
+  const initialOrdinal = session.resources.reduce((maximum, resource) => {
+    if (resource.kind !== "file" || !resource.mountPath) return maximum;
+    const match = /^attachments\/slack\/(\d{2})-/u.exec(resource.mountPath);
+    return match ? Math.max(maximum, Number(match[1])) : maximum;
+  }, 0);
+  const attachments = prepared.attachments.map((attachment, index) => {
+    const basename = attachment.resource.mountPath?.replace(/^attachments\/slack\/\d{2}-/u, "");
+    const ordinal = initialOrdinal + index + 1;
+    if (ordinal > 99 || !basename) {
+      throw new SlackInteractionPermanentError("slack_attachment_mount_exhausted");
+    }
+    const resource = Object.freeze({
+      ...attachment.resource,
+      mountPath: `attachments/slack/${String(ordinal).padStart(2, "0")}-${basename}`,
+    });
+    return Object.freeze({ ...attachment, resource });
+  });
+  return {
+    ...prepared,
+    attachments,
+    resources: attachments.map((attachment) => attachment.resource),
+  };
+}
+
+export function slackReactionTaskText(
+  context: SlackReactionMessageContext,
+  prepared: PreparedSlackReactionTask = {
+    resources: [],
+    attachments: [],
+    omissionCodes: [],
+    omittedCount: 0,
+  },
+) {
   const reactedLine = slackReactionMessageLine(context.reactedMessage, true);
   const surroundingLines = context.messages
     .slice(0, MAX_SLACK_REACTION_CONTEXT_MESSAGES)
@@ -1356,7 +1447,8 @@ export function slackReactionTaskText(context: SlackReactionMessageContext) {
   let prompt = [
     "A linked, authorized Slack user explicitly summoned OpenGeni by reacting to one message.",
     "Use only the exact reacted message and bounded containing-thread context below.",
-    "If the intended action is ambiguous, ask a concise clarifying question in the originating thread before taking action.",
+    "Execute a direct, safe, sufficiently specified request immediately.",
+    "Ask one concise clarifying question only when materially required information is missing or the requested action is risky, irreversible, or authorization-sensitive.",
     "Do not infer permission to ingest or persist this Slack content into Knowledge, Memory, preferences, policy, instructions, or the Workspace Charter.",
     "",
     "Exact reacted message:",
@@ -1373,7 +1465,149 @@ export function slackReactionTaskText(context: SlackReactionMessageContext) {
     }
     prompt = candidate;
   }
+  const attachmentManifest = slackReactionAttachmentManifest(prepared);
+  if (attachmentManifest) {
+    const candidate = `${prompt}\n\n${attachmentManifest}`;
+    if (candidate.length + 1 + truncationNotice.length <= MAX_SLACK_INPUT_CHARS) {
+      prompt = candidate;
+    } else {
+      truncated = true;
+    }
+  }
   return truncated ? `${prompt}\n${truncationNotice}` : prompt;
+}
+
+async function prepareSlackReactionTask(
+  deps: ApiRouteDeps,
+  client: OpenGeniSlackBotClient,
+  entry: SlackInteractionInboxEntry,
+  context: SlackReactionMessageContext,
+): Promise<PreparedSlackReactionTask> {
+  const exactFiles = context.reactedMessage.files;
+  if (exactFiles.length === 0) {
+    return { resources: [], attachments: [], omissionCodes: [], omittedCount: 0 };
+  }
+  const selected = exactFiles.slice(0, MAX_SLACK_REACTION_IMAGES);
+  const omissionCodes: string[] = [];
+  let omittedCount = Math.max(0, exactFiles.length - selected.length);
+  if (omittedCount > 0) omissionCodes.push("attachment_limit");
+
+  // Complete every provider authorization/file-share preflight before any
+  // download or workspace mutation. A revocation or exact-channel failure
+  // therefore leaves zero imported objects even when it affects a later file.
+  const prepared = await client.prepareReactionImageDownloads({
+    channelId: entry.slackChannelId,
+    files: selected.map((file) => ({
+      id: file.id,
+      name: file.name,
+      title: file.title,
+    })),
+  });
+  const downloaded: Awaited<ReturnType<OpenGeniSlackBotClient["downloadReactionImage"]>>[] = [];
+  let aggregateBytes = 0;
+  for (const image of prepared) {
+    try {
+      const value = await client.downloadReactionImage(image);
+      if (
+        value.bytes.byteLength > SLACK_REACTION_IMAGE_MAX_BYTES ||
+        aggregateBytes + value.bytes.byteLength > MAX_SLACK_REACTION_IMAGE_AGGREGATE_BYTES
+      ) {
+        omittedCount += 1;
+        omissionCodes.push("attachment_size_limit");
+        continue;
+      }
+      aggregateBytes += value.bytes.byteLength;
+      downloaded.push(value);
+    } catch (error) {
+      if (slackReactionAuthorizationFailure(error)) throw error;
+      omittedCount += 1;
+      omissionCodes.push(slackReactionOmissionCode(error));
+    }
+  }
+
+  if (!deps.objectStorage) {
+    return {
+      resources: [],
+      attachments: [],
+      omissionCodes: [...omissionCodes, "storage_unavailable"],
+      omittedCount: omittedCount + downloaded.length,
+    };
+  }
+  const attachments: ImportedSlackReactionImage[] = [];
+  for (const image of downloaded) {
+    try {
+      attachments.push(
+        await importSlackReactionImage(
+          { db: deps.db, objectStorage: deps.objectStorage },
+          {
+            accountId: entry.accountId,
+            workspaceId: entry.workspaceId,
+            connectionId: entry.connectionId,
+            slackTeamId: entry.slackTeamId,
+            slackChannelId: entry.slackChannelId,
+            slackMessageTs: entry.slackMessageTs,
+          },
+          image,
+          attachments.length + 1,
+        ),
+      );
+    } catch {
+      omittedCount += 1;
+      omissionCodes.push("storage_failed");
+    }
+  }
+  return {
+    resources: attachments.map((attachment) => attachment.resource),
+    attachments,
+    omissionCodes,
+    omittedCount,
+  };
+}
+
+function slackReactionAttachmentManifest(prepared: PreparedSlackReactionTask): string {
+  const lines = prepared.attachments.map(
+    (attachment, index) =>
+      `${index + 1}. ${attachment.resource.mountPath} (${attachment.contentType}, ${attachment.sizeBytes} bytes)`,
+  );
+  const omission =
+    prepared.omittedCount > 0
+      ? `Some reacted-message attachments were omitted (${prepared.omittedCount}; ${
+          [...new Set(prepared.omissionCodes)].slice(0, 4).join(", ") || "unavailable"
+        }). Continue with the available attachments and text.`
+      : "";
+  if (lines.length === 0) return omission;
+  return [
+    "Imported reacted-message attachments (Slack order; aligned to attached resources):",
+    ...lines,
+    ...(omission ? [omission] : []),
+  ].join("\n");
+}
+
+function slackReactionAuthorizationFailure(error: unknown): boolean {
+  if (!(error instanceof SlackBotProviderError)) return true;
+  return new Set([
+    "account_inactive",
+    "channel_not_found",
+    "file_not_found",
+    "file_not_shared_to_channel",
+    "http_401",
+    "http_403",
+    "invalid_auth",
+    "missing_scope",
+    "not_authed",
+    "not_in_channel",
+    "slack_connect_unsupported",
+    "token_revoked",
+  ]).has(error.code);
+}
+
+function slackReactionOmissionCode(error: unknown): string {
+  if (!(error instanceof SlackBotProviderError)) return "attachment_unavailable";
+  if (error.code === "unsupported_file_type" || error.code === "file_content_type_mismatch") {
+    return "unsupported_image";
+  }
+  if (error.code.includes("size")) return "attachment_size_limit";
+  return "attachment_unavailable";
 }
 
 function slackReactionMessageLine(
@@ -1414,6 +1648,7 @@ async function continueSlackReactionSession(
   grant: AccessGrant,
   interaction: SlackInteraction,
   entry: SlackInteractionInboxEntry,
+  resources: FileResourceRef[],
 ) {
   if (
     !interaction.sessionId ||
@@ -1422,7 +1657,7 @@ async function continueSlackReactionSession(
     throw new SlackInteractionPermanentError("session_owner_mismatch");
   }
   await reopenSlackInteractionDelivery(deps.db, interaction);
-  await acceptSlackReactionTask(deps, grant, interaction.sessionId, entry);
+  await acceptSlackReactionTask(deps, grant, interaction.sessionId, entry, resources);
 }
 
 async function acceptSlackReactionTask(
@@ -1430,6 +1665,7 @@ async function acceptSlackReactionTask(
   grant: AccessGrant,
   sessionId: string,
   entry: SlackInteractionInboxEntry,
+  resources: FileResourceRef[],
 ) {
   const clientEventId = `slack:${entry.providerEventId}`;
   const existing = await getSessionEventByClientEventId(
@@ -1447,6 +1683,7 @@ async function acceptSlackReactionTask(
   await acceptSessionUserMessage(deps, grant, entry.workspaceId, sessionId, {
     text: entry.text,
     turnInstructions: SLACK_TASK_INSTRUCTIONS,
+    resources,
     clientEventId,
   });
 }
@@ -1556,7 +1793,7 @@ async function deliverSlackSessionEvents(
     accountId: interaction.accountId,
     workspaceId: interaction.workspaceId,
     connectionId: interaction.connectionId,
-    subjectId: interaction.owningSubjectId,
+    subjectId: SLACK_INTERACTION_BOT_SUBJECT_ID,
     sessionId: interaction.sessionId,
   });
   let lastSequence = interaction.lastDeliveredSessionEventSequence;
@@ -1599,10 +1836,17 @@ async function deliverSlackSessionEvents(
         .find(Boolean) ||
       "";
     if (!terminalText) continue;
+    let matchedTerminalSuffix = false;
     for (const candidate of candidates) {
       const assistantText = safePayloadText(candidate.payload, "text").trim();
-      if (assistantText === terminalText) {
+      if (slackDeliveryTextsCoalesce(assistantText, terminalText)) {
         terminalAssistantSequences.add(candidate.sequence);
+        matchedTerminalSuffix = true;
+      } else if (matchedTerminalSuffix) {
+        // Coalesce only the contiguous terminal-shaped suffix. An earlier
+        // distinct progress update in the same turn remains independently
+        // deliverable even when a later SDK projection repeats the result.
+        break;
       }
     }
   }
@@ -1665,11 +1909,8 @@ async function deliverSlackSessionEvents(
       const normalizedOutput = output.trim();
       const existingProgress = progressEvidence.find(
         (delivery) =>
-          boundedOutput(delivery.text).trim() === normalizedOutput &&
-          (event.turnId
-            ? event.turnId === delivery.turnId
-            : delivery.sessionEventSequence === interaction.lastDeliveredSessionEventSequence ||
-              terminalAssistantSequences.has(delivery.sessionEventSequence)),
+          slackDeliveryTextsCoalesce(boundedOutput(delivery.text).trim(), normalizedOutput) &&
+          slackTerminalProgressSameTurn(event, delivery, interaction, terminalAssistantSequences),
       );
       if (existingProgress && normalizedOutput) {
         // The assistant text may already have been accepted by Slack before a
@@ -1726,6 +1967,34 @@ async function deliverSlackSessionEvents(
       claimHolderId,
     });
   }
+}
+
+export function slackDeliveryTextsCoalesce(left: string, right: string): boolean {
+  const normalizedLeft = left.trim();
+  const normalizedRight = right.trim();
+  if (!normalizedLeft || !normalizedRight) return false;
+  if (normalizedLeft === normalizedRight) return true;
+  const [shorter, longer] =
+    normalizedLeft.length < normalizedRight.length
+      ? [normalizedLeft, normalizedRight]
+      : [normalizedRight, normalizedLeft];
+  if (!longer.startsWith(shorter)) return false;
+  const boundary = longer.slice(shorter.length, shorter.length + 1);
+  return boundary.length === 0 || /[\s.,;:!?()[\]{}\-–—]/u.test(boundary);
+}
+
+function slackTerminalProgressSameTurn(
+  event: SessionEvent,
+  delivery: { turnId: string | null; sessionEventSequence: number },
+  interaction: SlackInteraction,
+  samePageTerminalSequences: ReadonlySet<number>,
+): boolean {
+  if (event.turnId && delivery.turnId) return event.turnId === delivery.turnId;
+  if (event.turnId || delivery.turnId) return false;
+  return (
+    delivery.sessionEventSequence === interaction.lastDeliveredSessionEventSequence ||
+    samePageTerminalSequences.has(delivery.sessionEventSequence)
+  );
 }
 
 async function postDelivery(
@@ -1845,9 +2114,9 @@ function formatQuestions(questions: HumanInputQuestion[]) {
 
 function openSessionText(deps: ApiRouteDeps, workspaceId: string, sessionId: string) {
   const base = deps.settings.webBaseUrl ?? deps.settings.publicBaseUrl;
-  return base
-    ? `Open in OpenGeni: ${new URL(`/workspaces/${workspaceId}/sessions/${sessionId}`, base).toString()}`
-    : "Open this session in OpenGeni";
+  if (!base) throw new Error("Slack session acknowledgement requires an absolute web base URL");
+  const url = new URL(`/workspaces/${workspaceId}/sessions/${sessionId}`, base).toString();
+  return `<${url}|Open in OpenGeni>`;
 }
 
 function linkUrl(deps: ApiRouteDeps, entry: SlackInteractionInboxEntry) {
