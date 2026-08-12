@@ -53,6 +53,7 @@ const MAX_TOKEN_GENERATION = Number.MAX_SAFE_INTEGER;
 const MAX_ALLOWED_ORIGINS = 64;
 const MAX_VIEW_GRANTS_PER_SESSION = 64;
 const MAX_VIEW_GRANT_TTL_MS = 10 * 60_000;
+const MAX_RFB_INPUT_BUFFER_BYTES = 1024 * 1024;
 
 type ViewGrant = {
   id: string;
@@ -1255,10 +1256,19 @@ export class BrowserControlServer {
     }
     const bytes = new Uint8Array(message.buffer, message.byteOffset, message.byteLength);
     if (data.upstream && !data.upstream.destroyed) {
+      // net.Socket.write() accepts data even after returning false; without an
+      // explicit bound a malicious/buggy viewer can therefore grow Node's TCP
+      // write queue without limit while x11vnc is stalled. Ordinary RFB input is
+      // tiny (pointer/key events and bounded clipboard payloads), so one shared
+      // 1 MiB envelope covers both pre-connect and connected buffering.
+      if (data.upstream.writableLength + bytes.byteLength > MAX_RFB_INPUT_BUFFER_BYTES) {
+        socket.close(1009, "RFB input buffer exceeded");
+        return;
+      }
       data.upstream.write(bytes);
       return;
     }
-    if (data.pendingBytes + bytes.byteLength > 1024 * 1024) {
+    if (data.pendingBytes + bytes.byteLength > MAX_RFB_INPUT_BUFFER_BYTES) {
       socket.close(1009, "RFB input buffer exceeded");
       return;
     }

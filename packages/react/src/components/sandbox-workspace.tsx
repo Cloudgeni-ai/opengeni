@@ -782,7 +782,15 @@ export function useSandboxWorkspaceTabs(
               client={client}
               workspaceId={workspaceId}
               sessionId={sessionId}
-              enabled={workspaceVisible && resolvedActiveTab === WORKBENCH_TAB_BROWSER}
+              // WorkspaceDock mounts a heavy surface only after its first visit,
+              // then keeps it mounted behind `hidden` when another tab is
+              // selected. Keep that already-visited surface enabled while the
+              // dock itself remains open: tearing down its controller + media
+              // socket on every Browser↔Computer tab switch turned an ordinary
+              // click into a multi-second cold reconnect. This does not eagerly
+              // start BrowserViewer—the lazy panel is still unmounted until the
+              // user/agent first visits it.
+              enabled={workspaceVisible}
               onNotify={onNotify}
               {...(desktopEnabled ? { createLinkedComputer } : {})}
               {...(onOpenComputerSession ? { onOpenComputer: onOpenComputerSession } : {})}
@@ -807,7 +815,11 @@ export function useSandboxWorkspaceTabs(
               client={client}
               workspaceId={workspaceId}
               sessionId={sessionId}
-              enabled={workspaceVisible && resolvedActiveTab === WORKBENCH_TAB_DESKTOP}
+              // Same visited-surface lifetime as Browser above. A live noVNC
+              // connection survives tab switches and ResizeObserver re-fits its
+              // canvas when this hidden panel becomes visible again, making the
+              // second and later Computer opens local-machine fast.
+              enabled={workspaceVisible}
               onNotify={onNotify}
               requestedComputerSessionId={requestedComputerSessionId}
               requestedComputerRequestId={requestedComputerRequestId}
