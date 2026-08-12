@@ -235,18 +235,13 @@ impl CaptureStream {
                 "ScreenCaptureKit stream stopped".to_string(),
             ));
         }
-        let frame = state
-            .frame
-            .clone()
-            .ok_or_else(|| {
-                if timeout.timed_out() {
-                    MacFfiError::TimedOut(
-                        "ScreenCaptureKit produced no initial live frame".to_string(),
-                    )
-                } else {
-                    MacFfiError::Ffi("ScreenCaptureKit published no frame".to_string())
-                }
-            })?;
+        let frame = state.frame.clone().ok_or_else(|| {
+            if timeout.timed_out() {
+                MacFfiError::TimedOut("ScreenCaptureKit produced no initial live frame".to_string())
+            } else {
+                MacFfiError::Ffi("ScreenCaptureKit published no frame".to_string())
+            }
+        })?;
         // ScreenCaptureKit updates this latest-only slot asynchronously. Once
         // the initial frame exists, consumers must never wait for a changed
         // frame: a static window is healthy and the caller owns its own cadence.

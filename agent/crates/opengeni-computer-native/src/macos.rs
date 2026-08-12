@@ -11,12 +11,11 @@ use image::{
 use opengeni_agent_macos_ffi::{
     accessibility_trusted, capture_display_rgba, capture_display_rgba_sized, capture_window_rgba,
     capture_window_rgba_sized, focus_target, inject_batch, inject_display_batch,
-    inject_window_batch, input_monitoring_granted, launch_application,
-    list_displays, list_targets, machine_locked, probe_display, screen_capture_granted,
-    start_display_frame_stream, start_window_frame_stream, DisplayInfo, InputEvent, KeyAction,
-    MacAxAction, MacAxActionValue, MacAxController, MacAxElementSelector, MacAxNode, MacAxValue,
-    MacFfiError, MacFrameStream, MacRect, MacTargetInfo, MacTargetKind, MacWindowFrame,
-    PointerAction, PointerButton, RgbaFrame,
+    inject_window_batch, input_monitoring_granted, launch_application, list_displays, list_targets,
+    machine_locked, probe_display, screen_capture_granted, start_display_frame_stream,
+    start_window_frame_stream, DisplayInfo, InputEvent, KeyAction, MacAxAction, MacAxActionValue,
+    MacAxController, MacAxElementSelector, MacAxNode, MacAxValue, MacFfiError, MacFrameStream,
+    MacRect, MacTargetInfo, MacTargetKind, MacWindowFrame, PointerAction, PointerButton, RgbaFrame,
 };
 use serde_json::json;
 use sha2::{Digest as _, Sha256};

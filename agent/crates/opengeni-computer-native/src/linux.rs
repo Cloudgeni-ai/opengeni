@@ -1616,9 +1616,9 @@ fn cache_snapshot_complete(items: &[CacheItem]) -> bool {
     items.iter().all(|item| {
         item.children >= 0
             && usize::try_from(item.children).is_ok_and(|expected| {
-                object_key(&item.object)
-                    .ok()
-                    .is_some_and(|key| observed_children.get(&key).copied().unwrap_or(0) == expected)
+                object_key(&item.object).ok().is_some_and(|key| {
+                    observed_children.get(&key).copied().unwrap_or(0) == expected
+                })
             })
     })
 }

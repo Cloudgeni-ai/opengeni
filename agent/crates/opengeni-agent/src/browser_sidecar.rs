@@ -96,7 +96,10 @@ impl BrowserSidecarManager {
     pub async fn shutdown(&self) {
         let sidecars = {
             let mut sidecars = self.sidecars.lock().await;
-            sidecars.drain().map(|(_, sidecar)| sidecar).collect::<Vec<_>>()
+            sidecars
+                .drain()
+                .map(|(_, sidecar)| sidecar)
+                .collect::<Vec<_>>()
         };
         for sidecar in sidecars {
             stop_sidecar(sidecar).await;
