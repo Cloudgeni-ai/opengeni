@@ -5,6 +5,19 @@ import {
   verifySourceAdmission,
 } from "./check-source-admission.mjs";
 
+const releaseApprovers = Object.freeze([
+  Object.freeze({
+    login: "jorgensandhaug",
+    id: 55702375,
+    type: "User",
+  }),
+  Object.freeze({
+    login: "davletd",
+    id: 2204825,
+    type: "User",
+  }),
+]);
+
 export const RELEASE_AUTOMATION_CONTRACT = Object.freeze({
   apiUrl: "https://api.github.com",
   serverUrl: "https://github.com",
@@ -24,11 +37,10 @@ export const RELEASE_AUTOMATION_CONTRACT = Object.freeze({
     id: 41898282,
     type: "Bot",
   }),
-  releaseApprover: Object.freeze({
-    login: "jorgensandhaug",
-    id: 55702375,
-    type: "User",
-  }),
+  releaseApprovers,
+  // Retained for fixture and downstream compatibility; authorization uses
+  // releaseApprovers and never assumes this primary entry is the only one.
+  releaseApprover: releaseApprovers[0],
   githubActionsApp: Object.freeze({
     slug: "github-actions",
     id: 15368,
@@ -1665,14 +1677,14 @@ function assertProviderMergeEvent(events, sourceSha, pullIdentity) {
   );
 }
 
-function exactHeadReviewArtifact(baseSha, headSha) {
+function exactHeadReviewArtifact(baseSha, headSha, releaseApprover) {
   return {
     version: 3,
     kind: "opengeni-exact-head-release-review",
     repository: RELEASE_AUTOMATION_CONTRACT.repository,
     reviewedBaseSha: baseSha,
     reviewedHeadSha: headSha,
-    reviewerLogin: RELEASE_AUTOMATION_CONTRACT.releaseApprover.login,
+    reviewerLogin: releaseApprover.login,
     reviewProfile: "exact-head-maintainer-v1",
     verdict: "PASS",
   };
@@ -1903,19 +1915,30 @@ export async function verifyApprovedMerge(options = {}) {
     "pull-request reviews",
   );
   const decisions = reviews
-    .filter(
-      (review) =>
-        hasStableIdentity(review?.user, RELEASE_AUTOMATION_CONTRACT.releaseApprover) &&
-        review.commit_id === pullIdentity.headSha &&
-        (decisiveReviewStates.has(review.state) ||
-          (review.state === "COMMENTED" &&
-            review.body?.startsWith("<!-- opengeni-exact-head-release-review:v3 -->"))),
-    )
-    .map((review) => ({
-      id: assertPositiveInteger(review.id, "trusted review ID"),
-      review,
-      submittedAt: assertTimestamp(review.submitted_at, "trusted review timestamp"),
-    }))
+    .flatMap((review) => {
+      const releaseApprover = RELEASE_AUTOMATION_CONTRACT.releaseApprovers.find((candidate) =>
+        hasStableIdentity(review?.user, candidate),
+      );
+      if (
+        releaseApprover === undefined ||
+        review.commit_id !== pullIdentity.headSha ||
+        (!decisiveReviewStates.has(review.state) &&
+          !(
+            review.state === "COMMENTED" &&
+            review.body?.startsWith("<!-- opengeni-exact-head-release-review:v3 -->")
+          ))
+      ) {
+        return [];
+      }
+      return [
+        {
+          id: assertPositiveInteger(review.id, "trusted review ID"),
+          releaseApprover,
+          review,
+          submittedAt: assertTimestamp(review.submitted_at, "trusted review timestamp"),
+        },
+      ];
+    })
     .sort((left, right) => left.submittedAt - right.submittedAt || left.id - right.id);
   invariant(decisions.length > 0, "trusted reviewer did not review the exact PR head");
   const decision = decisions.at(-1);
@@ -1923,11 +1946,7 @@ export async function verifyApprovedMerge(options = {}) {
     decision.submittedAt <= pullIdentity.mergedAt,
     "trusted approval was not submitted before merge",
   );
-  assertIdentity(
-    decision.review.user,
-    RELEASE_AUTOMATION_CONTRACT.releaseApprover,
-    "trusted reviewer",
-  );
+  assertIdentity(decision.review.user, decision.releaseApprover, "trusted reviewer");
   const reviewUrl =
     `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}` +
     `/pull/${pullNumber}#pullrequestreview-${decision.id}`;
@@ -1940,7 +1959,7 @@ export async function verifyApprovedMerge(options = {}) {
   );
   invariant(
     !pull.requested_reviewers.some((candidate) =>
-      hasStableIdentity(candidate, RELEASE_AUTOMATION_CONTRACT.releaseApprover),
+      hasStableIdentity(candidate, decision.releaseApprover),
     ),
     "trusted review is no longer effective because review was re-requested",
   );
@@ -1949,7 +1968,7 @@ export async function verifyApprovedMerge(options = {}) {
   let reviewEvidenceSha256;
   if (decision.review.state === "APPROVED") {
     invariant(
-      pullIdentity.author.id !== RELEASE_AUTOMATION_CONTRACT.releaseApprover.id,
+      pullIdentity.author.id !== decision.releaseApprover.id,
       "trusted reviewer authored the independently approved pull request",
     );
     reviewType = "independent-approval";
@@ -1959,15 +1978,15 @@ export async function verifyApprovedMerge(options = {}) {
       pullRequestNumber: pullNumber,
       reviewedBaseSha: pullIdentity.baseSha,
       reviewedHeadSha: pullIdentity.headSha,
-      reviewerLogin: RELEASE_AUTOMATION_CONTRACT.releaseApprover.login,
+      reviewerLogin: decision.releaseApprover.login,
       reviewId: decision.id,
       verdict: "APPROVED",
     });
   } else {
     invariant(
       decision.review.state === "COMMENTED" &&
-        pullIdentity.author.id === RELEASE_AUTOMATION_CONTRACT.releaseApprover.id &&
-        pullIdentity.merger.id === RELEASE_AUTOMATION_CONTRACT.releaseApprover.id &&
+        pullIdentity.author.id === decision.releaseApprover.id &&
+        pullIdentity.merger.id === decision.releaseApprover.id &&
         pullIdentity.author.type === "User" &&
         pullIdentity.merger.type === "User",
       "trusted review is neither independent approval nor a provider-bound single-maintainer admin PASS",
@@ -1975,7 +1994,7 @@ export async function verifyApprovedMerge(options = {}) {
     reviewType = "single-maintainer-admin-pass";
     reviewEvidenceSha256 = verifyAdminPassBody(
       decision.review.body ?? "",
-      exactHeadReviewArtifact(pullIdentity.baseSha, pullIdentity.headSha),
+      exactHeadReviewArtifact(pullIdentity.baseSha, pullIdentity.headSha, decision.releaseApprover),
     );
   }
 
