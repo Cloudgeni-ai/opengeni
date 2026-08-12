@@ -1,5 +1,18 @@
 # @opengeni/codemode
 
+## 0.3.0
+
+### Minor Changes
+
+- d2def0c: Add the complete browser-native and semantic computer interaction system across managed sandboxes, Connected Machines, attached Chrome, and external browser placements. Ship durable browser identities, authentication repair, network routing, downloads/uploads, shared causal control, public SDK and React workbench surfaces, and one exact MCP/Codemode execution catalog with native Connected Machine access.
+
+### Patch Changes
+
+- Updated dependencies [d2def0c]
+- Updated dependencies [5215c0e]
+- Updated dependencies [733c22f]
+  - @opengeni/contracts@0.45.0
+
 ## 0.2.2
 
 ### Patch Changes
