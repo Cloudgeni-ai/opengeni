@@ -23,6 +23,7 @@ import {
   getWorkspaceGrant,
   grantWorkspaceAccess,
   saveSlackBotUserLink,
+  updateSlackTaskPolicy,
   updateWorkspaceSettings,
   type DbClient,
 } from "@opengeni/db";
@@ -131,6 +132,11 @@ function fakeSlack(
   options: {
     failAfterAcceptTexts?: Set<string>;
     sharedChannels?: Set<string>;
+    mpimChannels?: Set<string>;
+    installationTeamId?: string;
+    externalTeamId?: string;
+    externalUserIds?: Set<string>;
+    guestUserIds?: Set<string>;
   } = {},
 ) {
   const posts: SlackPost[] = [];
@@ -213,6 +219,8 @@ function fakeSlack(
           },
         );
       }
+      const isShared = options.sharedChannels?.has(channel) ?? false;
+      const externalTeamId = options.externalTeamId ?? "T_EXTERNAL";
       return Response.json({
         ok: true,
         channel: {
@@ -221,8 +229,33 @@ function fakeSlack(
           is_member: !deniedChannels.has(channel),
           is_im: channel.startsWith("D"),
           is_private: channel.startsWith("D") || channel.startsWith("G"),
-          is_shared: options.sharedChannels?.has(channel) ?? false,
-          is_ext_shared: options.sharedChannels?.has(channel) ?? false,
+          is_mpim: options.mpimChannels?.has(channel) ?? false,
+          is_shared: isShared,
+          is_ext_shared: isShared,
+          is_org_shared: false,
+          is_pending_ext_shared: false,
+          context_team_id: options.installationTeamId,
+          connected_team_ids: isShared ? [externalTeamId] : [],
+          shared_team_ids: isShared
+            ? [options.installationTeamId, externalTeamId].filter(Boolean)
+            : options.installationTeamId
+              ? [options.installationTeamId]
+              : [],
+        },
+      });
+    }
+    if (method === "users.info") {
+      const userId = form.get("user") ?? "";
+      const external = options.externalUserIds?.has(userId) ?? false;
+      const guest = options.guestUserIds?.has(userId) ?? false;
+      return Response.json({
+        ok: true,
+        user: {
+          id: userId,
+          team_id: external ? (options.externalTeamId ?? "T_EXTERNAL") : options.installationTeamId,
+          is_external: external,
+          is_restricted: guest,
+          is_ultra_restricted: false,
         },
       });
     }
@@ -433,6 +466,9 @@ async function fixture(
     grantedScopes?: string[];
     ownerPermissions?: Permission[];
     sharedChannels?: string[];
+    mpimChannels?: string[];
+    externalOwnerTeamId?: string;
+    guestOwner?: boolean;
     slackReactionSummon?: WorkspaceSlackReactionSummonSettings;
   } = {},
 ) {
@@ -540,6 +576,11 @@ async function fixture(
   const slack = fakeSlack(new Set(options.deniedChannels ?? []), {
     failAfterAcceptTexts: new Set(options.failAfterAcceptTexts ?? []),
     sharedChannels: new Set(options.sharedChannels ?? []),
+    mpimChannels: new Set(options.mpimChannels ?? []),
+    installationTeamId: teamId,
+    externalTeamId: options.externalOwnerTeamId ?? "T_EXTERNAL",
+    externalUserIds: new Set(options.externalOwnerTeamId ? [ownerSlackUserId] : []),
+    guestUserIds: new Set(options.guestOwner ? [ownerSlackUserId] : []),
   });
   const wakes: Array<{ sessionId: string }> = [];
   const noop = async () => undefined;
@@ -4569,6 +4610,235 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       where workspace_id = ${value.owner.workspaceId}
       order by created_at, id`;
     expect(inbox.map((row) => row.status)).toEqual(["processed", "failed"]);
+  });
+
+  test("shared conversations fail closed by default and exact policy hands work off privately", async () => {
+    if (!available) return;
+    const deniedChannel = "C_SHARED_DENIED";
+    const denied = await fixture({
+      sharedChannels: [deniedChannel],
+      externalOwnerTeamId: "T_PARTNER_DENIED",
+    });
+    expect(
+      (
+        await postEvent(denied.app, {
+          teamId: denied.teamId,
+          eventId: `E_SHARED_DENIED_${crypto.randomUUID()}`,
+          event: {
+            type: "app_mention",
+            user: denied.ownerSlackUserId,
+            channel: deniedChannel,
+            ts: "1731000000.000001",
+            text: `<@${denied.botUserId}> do not expose this`,
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(denied.deps);
+    expect(denied.slack.posts).toHaveLength(1);
+    expect(denied.slack.posts[0]).toMatchObject({ channel: `D_${denied.ownerSlackUserId}` });
+    expect(denied.slack.posts[0]!.text).toContain("No conversation content was read or retained");
+    expect(denied.slack.calls.some((call) => call.method === "conversations.history")).toBe(false);
+    expect(await interactions(denied.owner.workspaceId)).toHaveLength(0);
+
+    const allowedChannel = "C_SHARED_ALLOWED";
+    const partnerTeamId = "T_PARTNER_ALLOWED";
+    const allowed = await fixture({
+      sharedChannels: [allowedChannel],
+      externalOwnerTeamId: partnerTeamId,
+    });
+    const policyUpdate = await updateSlackTaskPolicy(client.db, {
+      accountId: allowed.owner.accountId,
+      workspaceId: allowed.owner.workspaceId,
+      policy: {
+        allowedTeamIds: [allowed.teamId, partnerTeamId],
+        allowedConversationIds: [allowedChannel],
+        allowGuestInitiators: false,
+        allowExternalInitiators: true,
+        allowMpim: false,
+        sharedConversationMode: "private_handoff",
+        resultPublicationMode: "approval_required",
+      },
+      expectedCurrentRevisionId: null,
+      expectedActivationVersion: 0,
+      actorSubjectId: allowed.owner.subjectId,
+      principalKind: "human_session",
+      reason: "Allow this exact partner channel with private delivery",
+    });
+    allowed.slack.channelHistories.set(allowedChannel, {
+      messages: [
+        {
+          ts: "1731000001.000001",
+          user: allowed.ownerSlackUserId,
+          text: `<@${allowed.botUserId}> investigate privately`,
+        },
+      ],
+    });
+    expect(
+      (
+        await postEvent(allowed.app, {
+          teamId: allowed.teamId,
+          eventId: `E_SHARED_ALLOWED_${crypto.randomUUID()}`,
+          event: {
+            type: "app_mention",
+            user: allowed.ownerSlackUserId,
+            channel: allowedChannel,
+            ts: "1731000001.000001",
+            text: `<@${allowed.botUserId}> investigate privately`,
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(allowed.deps);
+    const allowedRoutes = await interactions(allowed.owner.workspaceId);
+    expect(allowedRoutes).toHaveLength(1);
+    expect(allowedRoutes[0]).toMatchObject({ visibility: "private" });
+    expect(allowed.slack.posts.at(-1)).toMatchObject({
+      channel: `D_${allowed.ownerSlackUserId}`,
+      threadTimestamp: null,
+    });
+    expect(allowed.slack.posts.at(-1)!.text).toContain("Results stay private");
+    expect(allowed.slack.posts.some((post) => post.channel === allowedChannel)).toBe(false);
+
+    const allowedRoute = allowedRoutes[0]!;
+    const postsBeforeResult = allowed.slack.posts.length;
+    await appendSessionEvents(client.db, allowed.owner.workspaceId, allowedRoute.session_id, [
+      {
+        type: "turn.completed",
+        payload: { output: "Partner-safe result for the shared thread." },
+      },
+    ]);
+    expect(await drainSlackInteractionsOnce(allowed.deps)).toBe(true);
+    const [finalPost] = allowed.slack.posts.slice(postsBeforeResult);
+    expect(finalPost).toBeDefined();
+    expect(finalPost!.channel).toBe(`D_${allowed.ownerSlackUserId}`);
+    expect(finalPost!.blocks).not.toBeNull();
+    const [publishHandle] = await shared!.admin<{ id: string }[]>`
+      select id from slack_interaction_action_handles
+      where workspace_id = ${allowed.owner.workspaceId}
+        and interaction_id = ${allowedRoute.id}::uuid
+        and action_kind = 'shared_result_publish'
+        and status = 'pending'`;
+    expect(publishHandle?.id).toBeTruthy();
+    const publicationPayload = JSON.stringify({
+      type: "block_actions",
+      team: { id: allowed.teamId },
+      user: { id: allowed.ownerSlackUserId },
+      channel: { id: finalPost!.channel },
+      message: { ts: finalPost!.timestamp, thread_ts: finalPost!.threadTimestamp },
+      actions: [
+        {
+          action_id: "opengeni.shared_result.publish",
+          action_ts: "1731000002.000001",
+          value: publishHandle!.id,
+        },
+      ],
+    });
+    expect(
+      (
+        await allowed.app.request(
+          signedRequest(
+            "/v1/integrations/slack/interactions",
+            new URLSearchParams({ payload: publicationPayload }).toString(),
+            "application/x-www-form-urlencoded",
+          ),
+        )
+      ).status,
+    ).toBe(200);
+    await drainAll(allowed.deps);
+    expect(allowed.slack.posts.at(-1)).toMatchObject({
+      channel: allowedChannel,
+      threadTimestamp: "1731000001.000001",
+      text: expect.stringContaining("Partner-safe result for the shared thread."),
+    });
+    const [settledPublish] = await shared!.admin<{ status: string; result: string }[]>`
+      select status, result from slack_interaction_action_handles
+      where id = ${publishHandle!.id}::uuid`;
+    expect(settledPublish).toEqual({ status: "completed", result: "published" });
+
+    const staleSourceTs = "1731000003.000001";
+    allowed.slack.channelHistories.set(allowedChannel, {
+      messages: [
+        {
+          ts: staleSourceTs,
+          user: allowed.ownerSlackUserId,
+          text: `<@${allowed.botUserId}> prepare another result`,
+        },
+      ],
+    });
+    await postEvent(allowed.app, {
+      teamId: allowed.teamId,
+      eventId: `E_SHARED_STALE_${crypto.randomUUID()}`,
+      event: {
+        type: "app_mention",
+        user: allowed.ownerSlackUserId,
+        channel: allowedChannel,
+        ts: staleSourceTs,
+        text: `<@${allowed.botUserId}> prepare another result`,
+      },
+    });
+    await drainAll(allowed.deps);
+    const staleRoute = (await interactions(allowed.owner.workspaceId)).find(
+      (candidate) => candidate.id !== allowedRoute.id,
+    )!;
+    await appendSessionEvents(client.db, allowed.owner.workspaceId, staleRoute.session_id, [
+      { type: "turn.completed", payload: { output: "This result must remain private." } },
+    ]);
+    await drainAll(allowed.deps);
+    const staleFinalPost = allowed.slack.posts.at(-1)!;
+    const [staleHandle] = await shared!.admin<{ id: string }[]>`
+      select id from slack_interaction_action_handles
+      where workspace_id = ${allowed.owner.workspaceId}
+        and interaction_id = ${staleRoute.id}::uuid
+        and action_kind = 'shared_result_publish'
+        and status = 'pending'`;
+    expect(staleHandle?.id).toBeTruthy();
+    await updateSlackTaskPolicy(client.db, {
+      accountId: allowed.owner.accountId,
+      workspaceId: allowed.owner.workspaceId,
+      policy: {
+        ...policyUpdate.revision.policy,
+        sharedConversationMode: "deny",
+        resultPublicationMode: "never",
+      },
+      expectedCurrentRevisionId: policyUpdate.revision.id,
+      expectedActivationVersion: policyUpdate.head.activationVersion,
+      actorSubjectId: allowed.owner.subjectId,
+      principalKind: "human_session",
+      reason: "Revoke shared publication before the requester acts",
+    });
+    const sharedPostsBeforeStaleClick = allowed.slack.posts.filter(
+      (post) => post.channel === allowedChannel,
+    ).length;
+    const stalePayload = JSON.stringify({
+      type: "block_actions",
+      team: { id: allowed.teamId },
+      user: { id: allowed.ownerSlackUserId },
+      channel: { id: staleFinalPost.channel },
+      message: { ts: staleFinalPost.timestamp, thread_ts: staleFinalPost.threadTimestamp },
+      actions: [
+        {
+          action_id: "opengeni.shared_result.publish",
+          action_ts: "1731000004.000001",
+          value: staleHandle!.id,
+        },
+      ],
+    });
+    await allowed.app.request(
+      signedRequest(
+        "/v1/integrations/slack/interactions",
+        new URLSearchParams({ payload: stalePayload }).toString(),
+        "application/x-www-form-urlencoded",
+      ),
+    );
+    await drainAll(allowed.deps);
+    expect(allowed.slack.posts.filter((post) => post.channel === allowedChannel)).toHaveLength(
+      sharedPostsBeforeStaleClick,
+    );
+    const [staleSettlement] = await shared!.admin<{ status: string; result: string }[]>`
+      select status, result from slack_interaction_action_handles
+      where id = ${staleHandle!.id}::uuid`;
+    expect(staleSettlement).toEqual({ status: "stale", result: "stale" });
   });
 
   test("caps durable progress globally across pages, response loss, retries, restarts, and replica claims", async () => {

@@ -1436,6 +1436,7 @@ export const slackInteractionActionHandles = pgTable(
         | "session_status"
         | "session_pause"
         | "session_resume"
+        | "shared_result_publish"
       >()
       .notNull(),
     actionKey: text("action_key").notNull(),
@@ -8769,6 +8770,7 @@ export const rigChanges = pgTable(
 export * from "./workspace-instruction-policies-schema";
 export * from "./company-profile-schema";
 export * from "./workspace-learning-policy-schema";
+export * from "./slack-task-policy-schema";
 export * from "./preference-registry-schema";
 export * from "./memory-governance-schema";
 export * from "./scoped-knowledge-schema";

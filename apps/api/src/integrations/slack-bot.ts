@@ -453,15 +453,36 @@ export class OpenGeniSlackBotClient {
     return await this.requireMemberChannel(headers, channelId);
   }
 
+  async slackTaskPolicyFacts(channelId: string, userId: string) {
+    return await this.withAudit("channel_history.read", async (headers) => {
+      const conversation = await this.requireMemberChannel(headers, channelId);
+      const governed =
+        conversation.isShared ||
+        conversation.isExternallyShared ||
+        conversation.isOrgShared ||
+        conversation.isPendingExternallyShared ||
+        conversation.isMpim;
+      if (!governed) return { conversation, initiator: null };
+      const payload = await this.call(headers, "users.info", { user: userId });
+      const initiator = projectSlackTaskPolicyUser(payload.user, this.metadata.slackTeamId);
+      if (!initiator || initiator.id !== userId) {
+        throw new SlackBotProviderError("slack_task_initiator_unavailable");
+      }
+      return { conversation, initiator };
+    });
+  }
+
   async channelHistory(input: {
     channelId: string;
     limit?: number;
     cursor?: string;
     latest?: string;
     inclusive?: boolean;
+    authorizeRead?: () => Promise<void>;
   }) {
     return await this.withAudit("channel_history.read", async (headers) => {
       const info = await this.requireMemberChannel(headers, input.channelId);
+      await input.authorizeRead?.();
       const payload = await this.call(headers, "conversations.history", {
         channel: input.channelId,
         limit: String(boundedInt(input.limit, MAX_HISTORY_PAGE, 50)),
@@ -482,9 +503,11 @@ export class OpenGeniSlackBotClient {
     threadTimestamp: string;
     limit?: number;
     cursor?: string;
+    authorizeRead?: () => Promise<void>;
   }) {
     return await this.withAudit("thread_replies.read", async (headers) => {
       const info = await this.requireMemberChannel(headers, input.channelId);
+      await input.authorizeRead?.();
       const payload = await this.call(headers, "conversations.replies", {
         channel: input.channelId,
         ts: input.threadTimestamp,
@@ -1832,10 +1855,15 @@ function projectChannel(value: unknown) {
     isPrivate: channel.is_private === true,
     isMember: channel.is_member === true,
     isDirectMessage: channel.is_im === true,
+    isMpim: channel.is_mpim === true,
     isArchived: channel.is_archived === true,
     isShared: channel.is_shared === true,
     isExternallyShared: channel.is_ext_shared === true,
     isOrgShared: channel.is_org_shared === true,
+    isPendingExternallyShared: channel.is_pending_ext_shared === true,
+    contextTeamId: nullableBoundedSlackString(channel.context_team_id, 128),
+    connectedTeamIds: slackStringArrayOrNull(channel.connected_team_ids, 128),
+    sharedTeamIds: slackStringArrayOrNull(channel.shared_team_ids, 128),
     topic: boundedSlackString(slackRecord(channel.topic)?.value, 1_024),
     purpose: boundedSlackString(slackRecord(channel.purpose)?.value, 1_024),
     numMembers:
@@ -1843,6 +1871,45 @@ function projectChannel(value: unknown) {
         ? channel.num_members
         : null,
   };
+}
+
+function projectSlackTaskPolicyUser(value: unknown, installationTeamId: string) {
+  const user = slackRecord(value);
+  const id = slackString(user?.id);
+  const teamId = nullableBoundedSlackString(user?.team_id ?? user?.team, 128);
+  if (!user || !id) return null;
+  const guestFactsPresent =
+    typeof user.is_restricted === "boolean" && typeof user.is_ultra_restricted === "boolean";
+  const explicitExternal = typeof user.is_external === "boolean" ? user.is_external : null;
+  return {
+    id,
+    teamId,
+    isGuest: guestFactsPresent
+      ? user.is_restricted === true || user.is_ultra_restricted === true
+      : null,
+    isExternal:
+      explicitExternal !== null
+        ? explicitExternal
+        : teamId === null
+          ? null
+          : teamId !== installationTeamId,
+  };
+}
+
+function nullableBoundedSlackString(value: unknown, maxLength: number): string | null {
+  const bounded = boundedSlackString(value, maxLength);
+  return bounded || null;
+}
+
+function slackStringArrayOrNull(value: unknown, maxLength: number): string[] | null {
+  if (!Array.isArray(value)) return null;
+  const result: string[] = [];
+  for (const item of value) {
+    const bounded = boundedSlackString(item, maxLength);
+    if (!bounded) return null;
+    result.push(bounded);
+  }
+  return [...new Set(result)].sort();
 }
 
 function projectMessage(value: unknown) {
