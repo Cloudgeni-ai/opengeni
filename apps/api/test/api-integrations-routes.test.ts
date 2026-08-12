@@ -201,13 +201,13 @@ describe("API Integration routes", () => {
     expect(apiIntegrationRequiresConnection({ kind: "oauth2" })).toBe(true);
   });
 
-  test("lists curated provider presets without deployment OAuth credentials", async () => {
+  test("lists curated provider definitions without deployment OAuth credentials", async () => {
     if (!available) return;
-    const response = await request("/integrations/presets");
+    const response = await request("/integrations/definitions");
     expect(response.status).toBe(200);
     const payload = await response.json();
-    expect(payload.presets).toHaveLength(6);
-    expect(payload.presets).toContainEqual(
+    expect(payload.definitions).toHaveLength(6);
+    expect(payload.definitions).toContainEqual(
       expect.objectContaining({
         id: "google-gmail",
         name: "Gmail",
@@ -292,7 +292,8 @@ describe("API Integration routes", () => {
           instanceId: installed.instanceId,
           instanceKey: installed.instanceKey,
           instanceVersion: installed.instanceVersion,
-          presetId: null,
+          definitionId: preview.definitionId,
+          definitionProvenance: "workspace",
           connected: true,
           requiresConnection: false,
           connectionId: optionalConnection.id,
@@ -502,6 +503,8 @@ describe("API Integration routes", () => {
       serverId: "route_feature_control",
       name: "Route feature control",
       description: "Exercises the generic feature HTTP lifecycle.",
+      definitionId: "route-feature-control",
+      definitionProvenance: "workspace",
       providerDomain: "127.0.0.1",
       protocol: "openapi",
       baseUrl: "https://127.0.0.1/v1/",
@@ -528,7 +531,7 @@ describe("API Integration routes", () => {
       revision: {
         id: "openapi:333333333333333333333333",
         protocol: "openapi",
-        integrationId: "route-feature-control",
+        definitionId: "route-feature-control",
         contentSha256: "3".repeat(64),
         source: { url: "https://127.0.0.1/openapi.json" },
         title: "Route feature control",

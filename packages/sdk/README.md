@@ -538,13 +538,13 @@ Every public endpoint group has typed methods:
 | Packs | `listPacks`, `registerPack`, `getPack`, `enablePack`, `deletePack`, `listPackInstallations` |
 | Capabilities | `listCapabilities`, `createCapability`, `enableCapability`, `disableCapability`, `discoverMcpCapabilities` |
 | Plugin packages | `previewPlugin`, `installPlugin`, `previewPluginUninstall`, `uninstallPlugin` |
-| API Integrations | `listApiIntegrationPresets`, `listApiIntegrations`, `previewApiIntegration`, `startApiIntegrationOAuth`, `installApiIntegration`, `previewApiIntegrationUninstall`, `uninstallApiIntegration`, `listIntegrationFeatures`, `configureIntegrationFeature`, `pauseIntegrationFeature`, `resumeIntegrationFeature`, `removeIntegrationFeature`, `browseGoogleDriveIntegrationSource`, `saveGoogleDriveIntegrationSource` |
+| API Integrations | `listIntegrationDefinitions`, `listApiIntegrations`, `previewApiIntegration`, `startApiIntegrationOAuth`, `installApiIntegration`, `previewApiIntegrationUninstall`, `uninstallApiIntegration`, `listIntegrationFeatures`, `configureIntegrationFeature`, `pauseIntegrationFeature`, `resumeIntegrationFeature`, `removeIntegrationFeature`, `browseGoogleDriveIntegrationSource`, `saveGoogleDriveIntegrationSource` |
 | Remote Skills | `previewSkillImport`, `installSkill`, `previewSkillUninstall`, `uninstallSkill` |
 | GitHub | `getGitHubApp`, `githubConnectUrl`, `listGitHubRepositories`, `syncGitHubRepositories`, `createGitHubAppManifest` |
 | API keys | `listApiKeys`, `createApiKey`, `deleteApiKey` |
 | Billing | `getBilling`, `getBillingUsage`, `getBillingEntitlements`, `createBillingCheckout` |
 
-`listApiIntegrationPresets` returns safe curated-provider metadata without any
+`listIntegrationDefinitions` returns safe Integration Definition metadata without any
 deployment OAuth client credentials. API Integrations are multi-instance:
 `installApiIntegration` may supply a
 stable `instanceKey`, display name, and exact Connection. The returned

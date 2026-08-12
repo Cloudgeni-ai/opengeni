@@ -13,7 +13,7 @@ import {
 const revision: ApiIntegrationRuntime["revision"] = {
   id: "openapi:111111111111111111111111",
   protocol: "openapi",
-  integrationId: "inventory",
+  definitionId: "inventory",
   contentSha256: "1".repeat(64),
   source: { url: "https://inventory.example.com/openapi.json" },
   title: "Inventory API",
@@ -49,6 +49,8 @@ function runtime(overrides: Partial<ApiIntegrationRuntime> = {}): ApiIntegration
     name: "Inventory API",
     description: "Read inventory.",
     protocol: "openapi",
+    definitionId: "inventory",
+    definitionProvenance: "workspace",
     baseUrl: "https://inventory.example.com/v1/",
     sourceUrl: "https://inventory.example.com/openapi.json",
     providerDomain: "inventory.example.com",

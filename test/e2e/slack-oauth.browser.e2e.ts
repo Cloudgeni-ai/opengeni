@@ -380,8 +380,8 @@ async function installSlackCapabilityApi(page: Page, state: SlackUiState): Promi
       return json({ packs: [], installations: [] });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/plugins`) return json({ plugins: [] });
-    if (url.pathname === `/v1/workspaces/${workspaceId}/integrations/presets`) {
-      return json({ presets: [] });
+    if (url.pathname === `/v1/workspaces/${workspaceId}/integrations/definitions`) {
+      return json({ definitions: [] });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/integrations`) {
       return json({ integrations: [] });

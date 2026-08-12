@@ -2,14 +2,14 @@ import { describe, expect, test } from "bun:test";
 import { buildSchema, introspectionFromSchema } from "graphql";
 
 import {
-  GOOGLE_GMAIL_PRESET,
-  MICROSOFT_OUTLOOK_MAIL_PRESET,
+  GOOGLE_GMAIL_INTEGRATION_DEFINITION,
+  MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION,
   applyCredentialPlacements,
   compileGraphqlRevision,
   compileOpenApiRevision,
   directIntegrationTransport,
   extractMcpToolManifest,
-  filterOpenApiDocumentForPreset,
+  filterOpenApiDocumentForDefinition,
   googleDiscoveryToOpenApi,
   IntegrationInvocationError,
   invokeGraphqlOperation,
@@ -59,7 +59,7 @@ describe("OpenAPI compiler and local MCP invocation", () => {
   };
 
   test("compiles deterministic safety metadata and invokes through destination-bound auth", async () => {
-    const revision = compileOpenApiRevision(document, { integrationId: "widgets" });
+    const revision = compileOpenApiRevision(document, { definitionId: "widgets" });
     expect(revision.tools).toEqual([
       expect.objectContaining({ id: "widgets_get", safety: "read", approvalMode: "never" }),
       expect.objectContaining({
@@ -111,7 +111,7 @@ describe("OpenAPI compiler and local MCP invocation", () => {
   });
 
   test("does not replay a mutation after an ambiguous provider authorization failure", async () => {
-    const revision = compileOpenApiRevision(document, { integrationId: "widgets" });
+    const revision = compileOpenApiRevision(document, { definitionId: "widgets" });
     let calls = 0;
     const credentialResolutions: boolean[] = [];
     const invocation = invokeOpenApiOperation(
@@ -149,7 +149,7 @@ describe("OpenAPI compiler and local MCP invocation", () => {
   });
 
   test("refreshes and retries a read exactly once after a provider 401", async () => {
-    const revision = compileOpenApiRevision(document, { integrationId: "widgets" });
+    const revision = compileOpenApiRevision(document, { definitionId: "widgets" });
     const credentialResolutions: boolean[] = [];
     const authorizations: string[] = [];
     const result = await invokeOpenApiOperation(
@@ -251,7 +251,7 @@ describe("GraphQL compiler and invocation", () => {
 
   test("compiles queries and mutations with approval-safe defaults", async () => {
     const revision = compileGraphqlRevision(introspection, {
-      integrationId: "widgets-graphql",
+      definitionId: "widgets-graphql",
       endpoint: "https://graphql.example.com/api",
     });
     expect(revision.tools).toEqual([
@@ -331,7 +331,7 @@ describe("provider adapters and MCP manifest", () => {
       },
     });
     const revision = compileOpenApiRevision(openapi, {
-      integrationId: GOOGLE_GMAIL_PRESET.id,
+      definitionId: GOOGLE_GMAIL_INTEGRATION_DEFINITION.id,
       provider: "google",
     });
     expect(revision.tools).toEqual([
@@ -340,7 +340,7 @@ describe("provider adapters and MCP manifest", () => {
   });
 
   test("filters the Microsoft Graph mega-spec to the selected workload", () => {
-    const filtered = filterOpenApiDocumentForPreset(
+    const filtered = filterOpenApiDocumentForDefinition(
       {
         openapi: "3.1.0",
         info: { title: "Graph", version: "v1" },
@@ -350,13 +350,17 @@ describe("provider adapters and MCP manifest", () => {
           "/me/drive": { get: {} },
         },
       },
-      MICROSOFT_OUTLOOK_MAIL_PRESET,
+      MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION,
     );
     expect(Object.keys(filtered.paths as Record<string, unknown>)).toEqual([
       "/me/messages",
       "/me/messages/{id}",
     ]);
     expect(filtered.servers).toEqual([{ url: "https://graph.microsoft.com/v1.0" }]);
+    expect(MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION.provider).toEqual({
+      id: "microsoft",
+      domain: "graph.microsoft.com",
+    });
   });
 
   test("projects malformed MCP entries out and deterministically resolves name collisions", () => {

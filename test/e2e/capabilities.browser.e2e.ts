@@ -12,7 +12,7 @@ const accountId = "00000000-0000-4000-8000-000000000018";
 const capabilityId = "skill:browser-focus";
 const mobbinCapabilityId = "mcp:integrations-sh:mobbin-com-browser-fixture";
 const mobbinConnectionId = "00000000-0000-4000-8000-000000000120";
-const driveCapabilityId = "api:preset:google-drive-browser-fixture";
+const driveCapabilityId = "api:openapi:google-drive-browser-fixture";
 const driveConnectionId = "00000000-0000-4000-8000-000000000130";
 const driveInstanceId = "00000000-0000-4000-8000-000000000131";
 const evidenceDir = new URL("../../.agent/evidence/capabilities-focus/", import.meta.url).pathname;
@@ -751,8 +751,8 @@ async function installCapabilityApi(
               : [],
       });
     }
-    if (url.pathname === `/v1/workspaces/${workspaceId}/integrations/presets`) {
-      return json({ presets: "driveSaves" in state ? [drivePreset()] : [] });
+    if (url.pathname === `/v1/workspaces/${workspaceId}/integrations/definitions`) {
+      return json({ definitions: "driveSaves" in state ? [driveDefinition()] : [] });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/integrations`) {
       return json({ integrations: "driveSaves" in state ? [driveInstallation()] : [] });
@@ -926,8 +926,8 @@ async function installLargeCatalogApi(page: Page, catalogDelayMs: number): Promi
       return json({ connections: [] });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/social/connections`) return json([]);
-    if (url.pathname === `/v1/workspaces/${workspaceId}/integrations/presets`) {
-      return json({ presets: [] });
+    if (url.pathname === `/v1/workspaces/${workspaceId}/integrations/definitions`) {
+      return json({ definitions: [] });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/integrations`) {
       return json({ integrations: [] });
@@ -1096,16 +1096,18 @@ function mobbinConnections(mode: MobbinUiState["mode"]) {
   ];
 }
 
-function drivePreset() {
+function driveDefinition() {
   return {
     id: "google-drive",
     name: "Google Drive",
     summary: "Files, folders, permissions, and shared drives.",
-    family: "google",
     protocol: "openapi",
-    providerDomain: "www.googleapis.com",
-    scopes: ["openid", "email", "profile", "https://www.googleapis.com/auth/drive"],
-    features: [driveFeatureDefinition(), driveIdentityDefinition()],
+    provider: { id: "google", domain: "www.googleapis.com" },
+    authentication: {
+      kind: "oauth2",
+      scopes: ["openid", "email", "profile", "https://www.googleapis.com/auth/drive"],
+    },
+    facets: [driveFeatureDefinition(), driveIdentityDefinition()],
   };
 }
 
@@ -1122,7 +1124,8 @@ function driveInstallation() {
     name: "Google Drive",
     description: "Files, folders, permissions, and shared drives.",
     protocol: "openapi",
-    presetId: "google-drive",
+    definitionId: "google-drive",
+    definitionProvenance: "curated",
     providerDomain: "www.googleapis.com",
     baseUrl: "https://www.googleapis.com/drive/v3/",
     sourceUrl: "https://www.googleapis.com/discovery/v1/apis/drive/v3/rest",
@@ -1159,7 +1162,7 @@ function driveConnection() {
       providerPrincipalId: "google-finance",
       providerEmail: "finance@example.com",
       providerDisplayName: "Finance",
-      authorizedPresetIds: ["google-drive"],
+      authorizedDefinitionIds: ["google-drive"],
       verifiedAt: new Date(0).toISOString(),
     },
     createdBySubjectId: "browser-focus-subject",

@@ -1060,10 +1060,10 @@ export function CapabilitiesRoute({
     const params = new URLSearchParams(window.location.search);
     const outcome = params.get("integration_oauth");
     if (!outcome) return;
-    // Provider-preset API integrations have their own immutable preview/install
+    // Provider-definition API integrations have their own immutable preview/install
     // continuation. Leave those callback parameters intact for the control
     // center instead of treating them as a legacy MCP catalog connection.
-    if (params.has("api_integration_preset")) return;
+    if (params.has("api_integration_definition")) return;
     oauthHandled.current = true;
 
     const itemId = params.get("connect_item");
@@ -1562,7 +1562,7 @@ export function CapabilitiesRoute({
                     workspaceId={workspaceId}
                     connections={connections}
                     canManage={canManageApiIntegrationInstances}
-                    presetIds={["google-drive"]}
+                    definitionIds={["google-drive"]}
                     showCustomApis={false}
                     embedded
                     onChanged={async () => {
@@ -1596,7 +1596,7 @@ export function CapabilitiesRoute({
             workspaceId={workspaceId}
             connections={connections}
             canManage={canManageApiIntegrationInstances}
-            excludedPresetIds={["google-drive"]}
+            excludedDefinitionIds={["google-drive"]}
             onChanged={async () => {
               await refresh();
               onRuntimeChanged();

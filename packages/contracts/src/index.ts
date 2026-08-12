@@ -8000,6 +8000,9 @@ export type UninstallSkillResult = z.infer<typeof UninstallSkillResult>;
 export const ApiIntegrationProtocol = z.enum(["openapi", "graphql"]);
 export type ApiIntegrationProtocol = z.infer<typeof ApiIntegrationProtocol>;
 
+export const IntegrationDefinitionProvenance = z.enum(["curated", "workspace"]);
+export type IntegrationDefinitionProvenance = z.infer<typeof IntegrationDefinitionProvenance>;
+
 export const IntegrationFeatureKey = z
   .string()
   .min(1)
@@ -8044,24 +8047,33 @@ export type IntegrationFeatureDefinitionSummary = z.infer<
   typeof IntegrationFeatureDefinitionSummary
 >;
 
-export const ApiIntegrationPresetSummary = z
+export const IntegrationDefinitionSummary = z
   .object({
     id: z.string().min(1).max(128),
     name: z.string().min(1).max(200),
     summary: z.string().min(1).max(1000),
-    family: z.enum(["google", "microsoft"]),
     protocol: z.literal("openapi"),
-    providerDomain: z.string().min(1).max(253),
-    scopes: z.array(z.string().min(1).max(1024)).max(256),
-    features: z.array(IntegrationFeatureDefinitionSummary).max(128),
+    provider: z
+      .object({
+        id: z.enum(["google", "microsoft"]),
+        domain: z.string().min(1).max(253),
+      })
+      .strict(),
+    authentication: z
+      .object({
+        kind: z.literal("oauth2"),
+        scopes: z.array(z.string().min(1).max(1024)).max(256),
+      })
+      .strict(),
+    facets: z.array(IntegrationFeatureDefinitionSummary).max(128),
   })
   .strict();
-export type ApiIntegrationPresetSummary = z.infer<typeof ApiIntegrationPresetSummary>;
+export type IntegrationDefinitionSummary = z.infer<typeof IntegrationDefinitionSummary>;
 
-export const ListApiIntegrationPresetsResponse = z
-  .object({ presets: z.array(ApiIntegrationPresetSummary).max(128) })
+export const ListIntegrationDefinitionsResponse = z
+  .object({ definitions: z.array(IntegrationDefinitionSummary).max(128) })
   .strict();
-export type ListApiIntegrationPresetsResponse = z.infer<typeof ListApiIntegrationPresetsResponse>;
+export type ListIntegrationDefinitionsResponse = z.infer<typeof ListIntegrationDefinitionsResponse>;
 
 export const IntegrationInstanceKey = z
   .string()
@@ -8153,8 +8165,8 @@ export const IntegrationFeatureRemovalResult = z
   .strict();
 export type IntegrationFeatureRemovalResult = z.infer<typeof IntegrationFeatureRemovalResult>;
 
-export const ApiIntegrationSource = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("preset"), presetId: z.string().min(1).max(128) }).strict(),
+export const IntegrationSource = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("definition"), definitionId: z.string().min(1).max(128) }).strict(),
   z
     .object({
       kind: z.literal("openapi"),
@@ -8177,11 +8189,11 @@ export const ApiIntegrationSource = z.discriminatedUnion("kind", [
     })
     .strict(),
 ]);
-export type ApiIntegrationSource = z.infer<typeof ApiIntegrationSource>;
+export type IntegrationSource = z.infer<typeof IntegrationSource>;
 
 export const PreviewApiIntegrationRequest = z
   .object({
-    source: ApiIntegrationSource,
+    source: IntegrationSource,
     connectionId: z.string().uuid().optional(),
     ownership: ConnectionOwnership.optional(),
   })
@@ -8190,7 +8202,7 @@ export type PreviewApiIntegrationRequest = z.infer<typeof PreviewApiIntegrationR
 
 export const ApiIntegrationOAuthStartRequest = z
   .object({
-    presetId: z.string().min(1).max(128),
+    definitionId: z.string().min(1).max(128),
     ownership: ConnectionOwnership.optional(),
     connectionId: z.string().uuid().optional(),
     returnPath: z.string().min(1).max(2048).optional(),
@@ -8207,7 +8219,7 @@ export const ApiIntegrationOAuthConnectionMetadata = z
     providerPrincipalId: z.string().min(1).max(512),
     providerEmail: z.string().min(1).max(512).nullable(),
     providerDisplayName: z.string().min(1).max(512).nullable(),
-    authorizedPresetIds: z.array(z.string().min(1).max(128)).min(1).max(32),
+    authorizedDefinitionIds: z.array(z.string().min(1).max(128)).min(1).max(32),
     verifiedAt: z.string().datetime({ offset: true }),
   })
   .passthrough();
@@ -8257,10 +8269,10 @@ export type ApiIntegrationToolPreview = z.infer<typeof ApiIntegrationToolPreview
 
 export const ApiIntegrationPreview = z
   .object({
-    source: ApiIntegrationSource,
-    presetId: z.string().min(1).max(128).nullable(),
+    source: IntegrationSource,
+    definitionId: z.string().min(1).max(200),
+    definitionProvenance: IntegrationDefinitionProvenance,
     protocol: ApiIntegrationProtocol,
-    integrationId: z.string().min(1).max(200),
     capabilityId: z.string().min(1).max(512),
     pluginKey: z.string().min(1).max(200),
     serverId: SessionMcpServerId,
@@ -8283,7 +8295,7 @@ export type ApiIntegrationPreview = z.infer<typeof ApiIntegrationPreview>;
 
 export const InstallApiIntegrationRequest = z
   .object({
-    source: ApiIntegrationSource,
+    source: IntegrationSource,
     expectedRevisionId: z.string().min(1).max(96),
     expectedContentSha256: z.string().regex(/^[0-9a-f]{64}$/),
     connectionId: z.string().uuid().optional(),
@@ -8331,7 +8343,8 @@ export const ApiIntegrationInstallationSummary = z
     name: z.string().min(1),
     description: z.string().nullable(),
     protocol: ApiIntegrationProtocol,
-    presetId: z.string().min(1).max(128).nullable(),
+    definitionId: z.string().min(1).max(200),
+    definitionProvenance: IntegrationDefinitionProvenance,
     providerDomain: z.string().min(1),
     baseUrl: z.string().url(),
     sourceUrl: z.string().url().nullable(),
@@ -8417,7 +8430,7 @@ export const PluginManifest = z
             .object({
               key: PluginComponentKey,
               kind: z.literal("integration"),
-              source: ApiIntegrationSource,
+              source: IntegrationSource,
             })
             .strict(),
           z

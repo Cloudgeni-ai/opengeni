@@ -1434,8 +1434,8 @@ const routeLabelPatterns: Array<{
     label: "/v1/workspaces/:workspaceId/integrations/install",
   },
   {
-    pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/presets$/,
-    label: "/v1/workspaces/:workspaceId/integrations/presets",
+    pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/definitions$/,
+    label: "/v1/workspaces/:workspaceId/integrations/definitions",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+\/uninstall-preview$/,

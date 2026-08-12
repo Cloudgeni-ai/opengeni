@@ -2,8 +2,8 @@ This package contains adapted portions of Executor (https://github.com/executorj
 copyright (c) 2026 Rhys Sullivan, used under the MIT License.
 
 The adapted concepts include deterministic MCP tool identifiers, OpenAPI and
-GraphQL extraction/invocation boundaries, auth-placement modeling, provider
-preset normalization, and MCP manifest projection. Executor's Effect/FumaDB
+GraphQL extraction/invocation boundaries, auth-placement modeling, curated
+Integration Definition normalization, and MCP manifest projection. Executor's Effect/FumaDB
 application architecture, persistence, secret stores, runtime hosts, and UI
 state are not included.
 

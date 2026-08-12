@@ -1323,7 +1323,7 @@ describe("OpenGeniClient capabilities", () => {
       url: "https://api.example.test/openapi.json",
     };
     const capabilityId = "api:openapi:example-deadbeef1234";
-    await client.listApiIntegrationPresets(WORKSPACE_ID);
+    await client.listIntegrationDefinitions(WORKSPACE_ID);
     await client.previewApiIntegration(WORKSPACE_ID, { source });
     await client.installApiIntegration(WORKSPACE_ID, {
       source,
@@ -1390,7 +1390,7 @@ describe("OpenGeniClient capabilities", () => {
 
     expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
       [
-        `GET /v1/workspaces/${WORKSPACE_ID}/integrations/presets`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/integrations/definitions`,
         `POST /v1/workspaces/${WORKSPACE_ID}/integrations/preview`,
         `POST /v1/workspaces/${WORKSPACE_ID}/integrations/install`,
         `GET /v1/workspaces/${WORKSPACE_ID}/integrations`,

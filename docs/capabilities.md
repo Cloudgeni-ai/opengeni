@@ -70,9 +70,9 @@ The current compatibility table still records existing catalog installations, bu
 ### Protocol-neutral API Integrations
 
 OpenAPI 3.0/3.1 and GraphQL endpoints use an immutable preview-before-install
-flow. Provider presets currently cover Google Drive/Gmail and Microsoft Outlook
-Mail/Calendar/Contacts/OneDrive source definitions; a general OpenAPI URL,
-GraphQL endpoint, or auto-detected URL uses the same contracts. Preview performs
+flow. Curated Integration Definitions cover Google Drive/Gmail and Microsoft
+Outlook Mail/Calendar/Contacts/OneDrive; a general OpenAPI URL, GraphQL endpoint,
+or auto-detected URL creates a workspace Definition through the same contracts. Preview performs
 bounded, pinned source discovery, compiles stable tool identities and safety
 metadata, reports the required authentication without returning credentials,
 and returns the exact revision id and SHA-256. Install re-fetches the source and
@@ -116,13 +116,12 @@ remote MCP transport. Duplicate destinations, forbidden transport headers,
 cookie injection, control characters, and oversized values are rejected before
 the request URL or headers are mutated.
 
-Google and Microsoft presets use a dedicated signed PKCE flow:
+Curated Google and Microsoft Definitions use one signed PKCE flow:
 
 - `POST /v1/workspaces/:workspaceId/integrations/oauth/start`
-- Google: `GET /v1/integrations/google-drive/callback`
-- Microsoft: `GET /v1/integrations/provider-oauth/callback`
+- `GET /v1/integrations/provider-oauth/callback`
 
-The start request names the preset and ownership and may name an existing
+The start request names the Integration Definition and ownership and may name an existing
 Connection for reconnect/incremental consent. Google can reuse the deployment's
 Google Drive OAuth app; Microsoft and alternate Google clients are selected
 from `OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON` by authorization-server URL.
@@ -131,7 +130,7 @@ state before dispatching either the legacy read-only Drive connector or a named
 provider instance. A Google Web application client must include its client
 secret; a public client may explicitly use `tokenEndpointAuthMethod: "none"`.
 Callbacks consume single-use state, recheck `connections:write`, verify the
-provider principal, require every preset scope, preserve an existing refresh
+provider principal, require every Definition scope, preserve an existing refresh
 token when the provider omits a replacement, and CAS-update or duplicate-safe
 create the normal encrypted Connection. Emulator-backed tests are merge proof;
 provider-live consent remains a separately labeled operational check.
@@ -153,7 +152,7 @@ disabled and provider response bodies remain bounded.
 
 The owning endpoints are:
 
-- `GET /v1/workspaces/:workspaceId/integrations/presets`
+- `GET /v1/workspaces/:workspaceId/integrations/definitions`
 - `GET /v1/workspaces/:workspaceId/integrations`
 - `POST /v1/workspaces/:workspaceId/integrations/preview`
 - `POST /v1/workspaces/:workspaceId/integrations/install`
@@ -205,7 +204,7 @@ fallback and is not mutated. Generic browser editing refuses required object or
 array fields unless a provider-specific flow owns them, so OneDrive and future
 rich schemas cannot be submitted as silently incomplete primitive config.
 
-The preset inventory returns only safe public metadata (id, label, provider
+The Definition inventory returns only safe public metadata (id, label, provider
 family/domain, protocol, summary, requested scope names, and immutable feature
 schemas/capability facts). Deployment OAuth client identifiers, secrets, and
 provider cursors never cross this boundary. `/capabilities`

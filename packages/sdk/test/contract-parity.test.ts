@@ -929,7 +929,7 @@ describe("SDK / contracts parity", () => {
     ).toBe(true);
 
     const installRequest: InstallApiIntegrationRequest = {
-      source: { kind: "preset", presetId: "google-gmail" },
+      source: { kind: "definition", definitionId: "google-gmail" },
       expectedRevisionId: "openapi:aaaaaaaaaaaaaaaaaaaaaaaa",
       expectedContentSha256: "b".repeat(64),
       connectionId: "00000000-0000-4000-8000-000000000200",

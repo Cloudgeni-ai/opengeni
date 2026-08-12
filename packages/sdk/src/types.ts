@@ -5083,6 +5083,7 @@ export type UninstallSkillResult = {
 };
 
 export type ApiIntegrationProtocol = "openapi" | "graphql";
+export type IntegrationDefinitionProvenance = "curated" | "workspace";
 
 export type IntegrationFeatureKind =
   | "tools"
@@ -5157,35 +5158,40 @@ export type IntegrationFeatureRemovalResult = {
   remainingOwners: CapabilityComponentOwner[];
 };
 
-export type ApiIntegrationPresetSummary = {
+export type IntegrationDefinitionSummary = {
   id: string;
   name: string;
   summary: string;
-  family: "google" | "microsoft";
   protocol: "openapi";
-  providerDomain: string;
-  scopes: string[];
-  features: IntegrationFeatureDefinitionSummary[];
+  provider: {
+    id: "google" | "microsoft";
+    domain: string;
+  };
+  authentication: {
+    kind: "oauth2";
+    scopes: string[];
+  };
+  facets: IntegrationFeatureDefinitionSummary[];
 };
 
-export type ListApiIntegrationPresetsResponse = {
-  presets: ApiIntegrationPresetSummary[];
+export type ListIntegrationDefinitionsResponse = {
+  definitions: IntegrationDefinitionSummary[];
 };
 
-export type ApiIntegrationSource =
-  | { kind: "preset"; presetId: string }
+export type IntegrationSource =
+  | { kind: "definition"; definitionId: string }
   | { kind: "openapi"; url: string; baseUrl?: string | undefined }
   | { kind: "graphql"; endpoint: string; name?: string | undefined }
   | { kind: "auto"; url: string; baseUrl?: string | undefined };
 
 export type PreviewApiIntegrationRequest = {
-  source: ApiIntegrationSource;
+  source: IntegrationSource;
   connectionId?: string | undefined;
   ownership?: ConnectionOwnership | undefined;
 };
 
 export type ApiIntegrationOAuthStartRequest = {
-  presetId: string;
+  definitionId: string;
   ownership?: ConnectionOwnership | undefined;
   connectionId?: string | undefined;
   returnPath?: string | undefined;
@@ -5213,10 +5219,10 @@ export type ApiIntegrationToolPreview = {
 };
 
 export type ApiIntegrationPreview = {
-  source: ApiIntegrationSource;
-  presetId: string | null;
+  source: IntegrationSource;
+  definitionId: string;
+  definitionProvenance: IntegrationDefinitionProvenance;
   protocol: ApiIntegrationProtocol;
-  integrationId: string;
   capabilityId: string;
   pluginKey: string;
   serverId: string;
@@ -5236,7 +5242,7 @@ export type ApiIntegrationPreview = {
 };
 
 export type InstallApiIntegrationRequest = {
-  source: ApiIntegrationSource;
+  source: IntegrationSource;
   expectedRevisionId: string;
   expectedContentSha256: string;
   connectionId?: string | undefined;
@@ -5278,7 +5284,8 @@ export type ApiIntegrationInstallationSummary = {
   name: string;
   description: string | null;
   protocol: ApiIntegrationProtocol;
-  presetId: string | null;
+  definitionId: string;
+  definitionProvenance: IntegrationDefinitionProvenance;
   providerDomain: string;
   baseUrl: string;
   sourceUrl: string | null;
@@ -5325,7 +5332,7 @@ export type UninstallApiIntegrationResult = {
 
 export type PluginManifestComponent =
   | { key: string; kind: "skill"; url: string }
-  | { key: string; kind: "integration"; source: ApiIntegrationSource }
+  | { key: string; kind: "integration"; source: IntegrationSource }
   | { key: string; kind: "mcp"; serverId: string };
 
 export type PluginManifest = {

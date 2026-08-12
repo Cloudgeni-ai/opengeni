@@ -6485,11 +6485,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         }
         await publish!([{ type: "tool.auth_needed", payload }], true);
       };
-      const selectedApiIntegrationIds = new Set(turnTools.map((tool) => tool.id));
+      const selectedApiIntegrationServerIds = new Set(turnTools.map((tool) => tool.id));
       const localMcpServers = buildApiIntegrationServersForTurn({
         settings: runSettings,
         integrations: installedApiIntegrations.filter((integration) =>
-          selectedApiIntegrationIds.has(integration.serverId),
+          selectedApiIntegrationServerIds.has(integration.serverId),
         ),
         authority: {
           accountId: input.accountId,

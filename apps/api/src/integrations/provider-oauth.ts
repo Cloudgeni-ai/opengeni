@@ -2,9 +2,9 @@ import { Buffer } from "node:buffer";
 import { createHash, randomBytes } from "node:crypto";
 
 import {
-  providerDomainForPreset,
-  providerPresetById,
-  type OpenApiProviderPreset,
+  integrationDefinitionProviderDomain,
+  integrationDefinitionById,
+  type IntegrationDefinition,
 } from "@opengeni/capabilities";
 import {
   parseIntegrationsOauthClientsJson,
@@ -60,8 +60,8 @@ type ProviderOAuthState = {
   workspaceId: string;
   subjectId: string;
   ownership: ConnectionOwnership;
-  presetId: string;
-  presetFingerprint: string;
+  definitionId: string;
+  definitionFingerprint: string;
   providerDomain: string;
   authorizeScopes: string[];
   encryptedPkceVerifier: string;
@@ -121,8 +121,8 @@ export async function startApiIntegrationProviderOAuth(
     payload: ApiIntegrationOAuthStartRequest;
   },
 ): Promise<OAuthStartResponse> {
-  const preset = requiredPreset(input.payload.presetId);
-  const providerDomain = providerDomainForPreset(preset);
+  const definition = requiredDefinition(input.payload.definitionId);
+  const providerDomain = integrationDefinitionProviderDomain(definition);
   const existing = input.payload.connectionId
     ? await getConnectionMetadata(
         deps.db,
@@ -138,7 +138,7 @@ export async function startApiIntegrationProviderOAuth(
     ? requireProviderOAuthConnection(existing, {
         subjectId: input.subjectId,
         providerDomain,
-        providerFamily: preset.family,
+        providerFamily: definition.provider.id,
       })
     : null;
   const existingOwnership: ConnectionOwnership | null = existing
@@ -158,13 +158,13 @@ export async function startApiIntegrationProviderOAuth(
   const ownership = existingOwnership ?? input.payload.ownership ?? "personal";
   const authorizeScopes = uniqueStrings([
     ...(existing?.grantedScopes ?? []),
-    ...preset.oauth.scopes,
+    ...definition.authentication.scopes,
   ]);
-  const client = providerClientForPreset(deps.settings, preset);
+  const client = providerClientForDefinition(deps.settings, definition);
   const verifier = randomBytes(48).toString("base64url");
   const key = requireEnvironmentEncryption(deps.settings);
   const baseUrl = integrationBaseUrl(deps.settings.publicBaseUrl, input.requestUrl);
-  const redirectUri = `${baseUrl}${providerOAuthCallbackPath(preset)}`;
+  const redirectUri = `${baseUrl}${PROVIDER_OAUTH_CALLBACK_PATH}`;
   const returnPath = safeReturnPath(
     input.payload.returnPath ?? `/workspaces/${input.workspaceId}/capabilities`,
   );
@@ -173,8 +173,8 @@ export async function startApiIntegrationProviderOAuth(
     workspaceId: input.workspaceId,
     subjectId: input.subjectId,
     ownership,
-    presetId: preset.id,
-    presetFingerprint: providerPresetFingerprint(preset),
+    definitionId: definition.id,
+    definitionFingerprint: providerDefinitionFingerprint(definition),
     providerDomain,
     authorizeScopes,
     encryptedPkceVerifier: encryptEnvironmentValue(key, verifier),
@@ -189,7 +189,7 @@ export async function startApiIntegrationProviderOAuth(
         }
       : {}),
   });
-  const authorizationUrl = new URL(preset.oauth.authorizationUrl);
+  const authorizationUrl = new URL(definition.authentication.authorizationUrl);
   authorizationUrl.searchParams.set("response_type", "code");
   authorizationUrl.searchParams.set("client_id", client.clientId);
   authorizationUrl.searchParams.set("redirect_uri", redirectUri);
@@ -201,7 +201,7 @@ export async function startApiIntegrationProviderOAuth(
     createHash("sha256").update(verifier).digest("base64url"),
   );
   authorizationUrl.searchParams.set("prompt", "select_account");
-  if (preset.family === "google") {
+  if (definition.provider.id === "google") {
     authorizationUrl.searchParams.set("access_type", "offline");
     authorizationUrl.searchParams.set("include_granted_scopes", "true");
     authorizationUrl.searchParams.set("prompt", "consent select_account");
@@ -240,16 +240,16 @@ export async function completeApiIntegrationProviderOAuth(
     if (input.error) throw new ProviderOAuthCallbackError("provider_denied");
     if (!input.code) throw new ProviderOAuthCallbackError("missing_code");
 
-    const preset = providerPresetById(state.presetId);
-    if (!preset) throw new ProviderOAuthCallbackError("state_invalid");
+    const definition = integrationDefinitionById(state.definitionId);
+    if (!definition) throw new ProviderOAuthCallbackError("state_invalid");
     if (
-      state.presetFingerprint !== providerPresetFingerprint(preset) ||
-      state.providerDomain !== providerDomainForPreset(preset) ||
-      preset.oauth.scopes.some((scope) => !state!.authorizeScopes.includes(scope))
+      state.definitionFingerprint !== providerDefinitionFingerprint(definition) ||
+      state.providerDomain !== integrationDefinitionProviderDomain(definition) ||
+      definition.authentication.scopes.some((scope) => !state!.authorizeScopes.includes(scope))
     ) {
       throw new ProviderOAuthCallbackError("state_invalid");
     }
-    const client = providerClientForPreset(deps.settings, preset);
+    const client = providerClientForDefinition(deps.settings, definition);
     if (
       client.clientId !== state.clientId ||
       client.tokenEndpointAuthMethod !== state.tokenEndpointAuthMethod
@@ -258,17 +258,17 @@ export async function completeApiIntegrationProviderOAuth(
     }
     const key = requireEnvironmentEncryption(deps.settings);
     const verifier = decryptEnvironmentValue(key, state.encryptedPkceVerifier);
-    const redirectUri = `${apiBaseUrl}${providerOAuthCallbackPath(preset)}`;
-    const token = await exchangeProviderAuthorizationCode(deps, preset, client, {
+    const redirectUri = `${apiBaseUrl}${PROVIDER_OAUTH_CALLBACK_PATH}`;
+    const token = await exchangeProviderAuthorizationCode(deps, definition, client, {
       code: input.code,
       verifier,
       redirectUri,
     });
-    if (!providerScopesInclude(preset, token.scopes, state.authorizeScopes)) {
+    if (!providerScopesInclude(definition, token.scopes, state.authorizeScopes)) {
       throw new ProviderOAuthCallbackError("scope_not_granted");
     }
     const grantedScopes = token.scopes.length > 0 ? token.scopes : state.authorizeScopes;
-    const identity = await verifyProviderIdentity(deps, preset, token);
+    const identity = await verifyProviderIdentity(deps, definition, token);
     if (
       state.expectedProviderPrincipalId &&
       state.expectedProviderPrincipalId !== identity.principalId
@@ -287,7 +287,7 @@ export async function completeApiIntegrationProviderOAuth(
       ? requireProviderOAuthConnection(existing, {
           subjectId: state.subjectId,
           providerDomain: state.providerDomain,
-          providerFamily: preset.family,
+          providerFamily: definition.provider.id,
         })
       : null;
     if (existingMetadata && existingMetadata.providerPrincipalId !== identity.principalId) {
@@ -315,7 +315,7 @@ export async function completeApiIntegrationProviderOAuth(
         token_type: token.tokenType,
         ...(token.expiresAt ? { expires_at: token.expiresAt.toISOString() } : {}),
         scope: grantedScopes.join(" "),
-        token_endpoint: preset.oauth.tokenUrl,
+        token_endpoint: definition.authentication.tokenUrl,
         client_id: client.clientId,
         ...(client.clientSecret
           ? {
@@ -329,13 +329,13 @@ export async function completeApiIntegrationProviderOAuth(
     const metadata = ApiIntegrationOAuthConnectionMetadata.parse({
       ...(existing?.metadata ?? {}),
       credentialRole: API_INTEGRATION_OAUTH_CREDENTIAL_ROLE,
-      providerFamily: preset.family,
+      providerFamily: definition.provider.id,
       providerPrincipalId: identity.principalId,
       providerEmail: identity.email,
       providerDisplayName: identity.displayName,
-      authorizedPresetIds: uniqueStrings([
-        ...(existingMetadata?.authorizedPresetIds ?? []),
-        preset.id,
+      authorizedDefinitionIds: uniqueStrings([
+        ...(existingMetadata?.authorizedDefinitionIds ?? []),
+        definition.id,
       ]),
       verifiedAt: new Date().toISOString(),
     });
@@ -354,7 +354,7 @@ export async function completeApiIntegrationProviderOAuth(
       createdBySubjectId: state.subjectId,
       updatedBySubjectId: state.subjectId,
       credentialRole: API_INTEGRATION_OAUTH_CREDENTIAL_ROLE,
-      providerFamily: preset.family,
+      providerFamily: definition.provider.id,
       providerPrincipalId: identity.principalId,
       ...(state.connectionId
         ? {
@@ -366,7 +366,7 @@ export async function completeApiIntegrationProviderOAuth(
     if (!connection) throw new ProviderOAuthCallbackError("connection_conflict");
     return {
       redirectTo: providerOAuthReturnUrl(returnBaseUrl, state.returnPath, "success", {
-        presetId: preset.id,
+        definitionId: definition.id,
         connectionId: connection.id,
         providerDomain: connection.providerDomain,
         ownership: state.ownership,
@@ -379,7 +379,7 @@ export async function completeApiIntegrationProviderOAuth(
         state?.returnPath ?? "/integrations",
         "error",
         {
-          ...(state?.presetId ? { presetId: state.presetId } : {}),
+          ...(state?.definitionId ? { definitionId: state.definitionId } : {}),
           reason: providerOAuthFailureReason(error),
         },
       ),
@@ -387,39 +387,18 @@ export async function completeApiIntegrationProviderOAuth(
   }
 }
 
-function requiredPreset(id: string): OpenApiProviderPreset {
-  const preset = providerPresetById(id);
-  if (!preset) throw new HTTPException(404, { message: "Unknown Integration preset" });
-  return preset;
+function requiredDefinition(id: string): IntegrationDefinition {
+  const definition = integrationDefinitionById(id);
+  if (!definition) throw new HTTPException(404, { message: "Unknown Integration definition" });
+  return definition;
 }
 
-export function isApiIntegrationProviderOAuthState(
-  value: string | undefined,
+function providerClientForDefinition(
   settings: Settings,
-): boolean {
-  try {
-    readProviderOAuthState(value, settings);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function providerOAuthCallbackPath(preset: OpenApiProviderPreset): string {
-  // The existing Google OAuth client is already registered against this
-  // loopback callback. Keep that stable while the handler below distinguishes
-  // legacy Drive state from the protocol-neutral provider state.
-  return preset.family === "google"
-    ? "/v1/integrations/google-drive/callback"
-    : PROVIDER_OAUTH_CALLBACK_PATH;
-}
-
-function providerClientForPreset(
-  settings: Settings,
-  preset: OpenApiProviderPreset,
+  definition: IntegrationDefinition,
 ): ProviderOAuthClient {
   const configured = parseIntegrationsOauthClientsJson(settings.integrationsOauthClientsJson);
-  const candidates = providerClientKeys(preset);
+  const candidates = providerClientKeys(definition);
   let entry: IntegrationOAuthClientConfig | undefined;
   for (const candidate of candidates) {
     entry = configured[candidate] ?? configured[candidate.replace(/\/+$/, "")];
@@ -433,7 +412,7 @@ function providerClientForPreset(
   }
   if (
     !entry &&
-    preset.family === "google" &&
+    definition.provider.id === "google" &&
     settings.googleDriveClientId?.trim() &&
     settings.googleDriveClientSecret?.trim()
   ) {
@@ -445,7 +424,7 @@ function providerClientForPreset(
   }
   if (!entry) {
     throw new HTTPException(503, {
-      message: `${preset.name} requires an operator OAuth client configuration`,
+      message: `${definition.name} requires an operator OAuth client configuration`,
     });
   }
   return {
@@ -455,15 +434,15 @@ function providerClientForPreset(
   };
 }
 
-function providerClientKeys(preset: OpenApiProviderPreset): string[] {
-  const authorization = new URL(preset.oauth.authorizationUrl);
-  const token = new URL(preset.oauth.tokenUrl);
+function providerClientKeys(definition: IntegrationDefinition): string[] {
+  const authorization = new URL(definition.authentication.authorizationUrl);
+  const token = new URL(definition.authentication.tokenUrl);
   return uniqueStrings([
-    preset.oauth.authorizationUrl,
+    definition.authentication.authorizationUrl,
     authorization.origin,
-    preset.oauth.tokenUrl,
+    definition.authentication.tokenUrl,
     token.origin,
-    ...(preset.family === "google"
+    ...(definition.provider.id === "google"
       ? ["https://accounts.google.com"]
       : [
           "https://login.microsoftonline.com/common/v2.0",
@@ -473,16 +452,16 @@ function providerClientKeys(preset: OpenApiProviderPreset): string[] {
   ]);
 }
 
-function providerPresetFingerprint(preset: OpenApiProviderPreset): string {
+function providerDefinitionFingerprint(definition: IntegrationDefinition): string {
   return createHash("sha256")
     .update(
       JSON.stringify({
-        id: preset.id,
-        family: preset.family,
-        baseUrl: preset.baseUrl,
-        authorizationUrl: preset.oauth.authorizationUrl,
-        tokenUrl: preset.oauth.tokenUrl,
-        scopes: [...preset.oauth.scopes],
+        id: definition.id,
+        provider: definition.provider,
+        baseUrl: definition.baseUrl,
+        authorizationUrl: definition.authentication.authorizationUrl,
+        tokenUrl: definition.authentication.tokenUrl,
+        scopes: [...definition.authentication.scopes],
       }),
     )
     .digest("hex");
@@ -524,8 +503,8 @@ function readProviderOAuthState(raw: string | undefined, settings: Settings): Pr
     workspaceId: requiredStateString(payload.workspaceId),
     subjectId: requiredStateString(payload.subjectId),
     ownership,
-    presetId: requiredStateString(payload.presetId),
-    presetFingerprint: requiredStateString(payload.presetFingerprint),
+    definitionId: requiredStateString(payload.definitionId),
+    definitionFingerprint: requiredStateString(payload.definitionFingerprint),
     providerDomain: requiredStateString(payload.providerDomain),
     authorizeScopes,
     encryptedPkceVerifier: requiredStateString(payload.encryptedPkceVerifier),
@@ -543,7 +522,7 @@ function readProviderOAuthState(raw: string | undefined, settings: Settings): Pr
 
 async function exchangeProviderAuthorizationCode(
   deps: ApiRouteDeps,
-  preset: OpenApiProviderPreset,
+  definition: IntegrationDefinition,
   client: ProviderOAuthClient,
   input: { code: string; verifier: string; redirectUri: string },
 ): Promise<ProviderToken> {
@@ -565,7 +544,7 @@ async function exchangeProviderAuthorizationCode(
   } else {
     body.set("client_id", client.clientId);
   }
-  const response = await providerFetch(deps, preset.oauth.tokenUrl, {
+  const response = await providerFetch(deps, definition.authentication.tokenUrl, {
     method: "POST",
     headers,
     body,
@@ -577,7 +556,7 @@ async function exchangeProviderAuthorizationCode(
   const payload = await readResponseJsonBounded<Record<string, unknown>>(
     response,
     OAUTH_MAX_RESPONSE_BYTES,
-    `${preset.name} OAuth token response`,
+    `${definition.name} OAuth token response`,
   ).catch(() => {
     throw new ProviderOAuthCallbackError("token_exchange_failed");
   });
@@ -597,10 +576,10 @@ async function exchangeProviderAuthorizationCode(
 
 async function verifyProviderIdentity(
   deps: ApiRouteDeps,
-  preset: OpenApiProviderPreset,
+  definition: IntegrationDefinition,
   token: ProviderToken,
 ): Promise<ProviderIdentity> {
-  const url = preset.family === "google" ? GOOGLE_USERINFO_URL : MICROSOFT_USERINFO_URL;
+  const url = definition.provider.id === "google" ? GOOGLE_USERINFO_URL : MICROSOFT_USERINFO_URL;
   const response = await providerFetch(deps, url, {
     headers: {
       accept: "application/json",
@@ -614,11 +593,11 @@ async function verifyProviderIdentity(
   const payload = await readResponseJsonBounded<Record<string, unknown>>(
     response,
     OAUTH_MAX_RESPONSE_BYTES,
-    `${preset.name} identity response`,
+    `${definition.name} identity response`,
   ).catch(() => {
     throw new ProviderOAuthCallbackError("identity_verification_failed");
   });
-  if (preset.family === "google") {
+  if (definition.provider.id === "google") {
     const principalId = optionalString(payload.sub);
     if (!principalId) throw new ProviderOAuthCallbackError("identity_verification_failed");
     return {
@@ -683,7 +662,7 @@ function requireProviderOAuthConnection(
   input: {
     subjectId: string;
     providerDomain: string;
-    providerFamily: OpenApiProviderPreset["family"];
+    providerFamily: IntegrationDefinition["provider"]["id"];
   },
 ) {
   const metadata = ApiIntegrationOAuthConnectionMetadata.safeParse(connection.metadata);
@@ -695,22 +674,22 @@ function requireProviderOAuthConnection(
     metadata.data.providerFamily !== input.providerFamily
   ) {
     throw new HTTPException(422, {
-      message: "Connection is not compatible with this Integration preset",
+      message: "Connection is not compatible with this Integration definition",
     });
   }
   return metadata.data;
 }
 
 function providerScopesInclude(
-  preset: OpenApiProviderPreset,
+  definition: IntegrationDefinition,
   returnedScopes: string[],
   fallbackScopes: string[],
 ): boolean {
   const effective = returnedScopes.length > 0 ? returnedScopes : fallbackScopes;
   const normalize = (value: string) =>
-    preset.family === "microsoft" ? value.toLowerCase() : value;
+    definition.provider.id === "microsoft" ? value.toLowerCase() : value;
   const granted = new Set(effective.map(normalize));
-  return preset.oauth.scopes.every((scope) => granted.has(normalize(scope)));
+  return definition.authentication.scopes.every((scope) => granted.has(normalize(scope)));
 }
 
 function providerOAuthReturnUrl(

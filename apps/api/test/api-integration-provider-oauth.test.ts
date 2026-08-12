@@ -2,9 +2,9 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 
 import {
-  GOOGLE_GMAIL_PRESET,
-  MICROSOFT_OUTLOOK_CALENDAR_PRESET,
-  MICROSOFT_OUTLOOK_MAIL_PRESET,
+  GOOGLE_GMAIL_INTEGRATION_DEFINITION,
+  MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION,
+  MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION,
 } from "@opengeni/capabilities";
 import type { Settings } from "@opengeni/config";
 import {
@@ -143,7 +143,7 @@ function providerFixture() {
   let microsoftPrincipalId = "microsoft-principal-1";
   const fetch: typeof globalThis.fetch = async (input, init) => {
     const url = new URL(input instanceof Request ? input.url : input.toString());
-    if (url.href === GOOGLE_GMAIL_PRESET.oauth.tokenUrl) {
+    if (url.href === GOOGLE_GMAIL_INTEGRATION_DEFINITION.authentication.tokenUrl) {
       const body = requestBody(init?.body);
       tokenRequests.push({
         family: "google",
@@ -151,7 +151,7 @@ function providerFixture() {
         authorization: new Headers(init?.headers).get("authorization"),
       });
       const plan = googlePlans.shift() ?? {
-        scopes: [...GOOGLE_GMAIL_PRESET.oauth.scopes],
+        scopes: [...GOOGLE_GMAIL_INTEGRATION_DEFINITION.authentication.scopes],
         refreshToken: "google-refresh-token",
       };
       return Response.json({
@@ -162,7 +162,7 @@ function providerFixture() {
         scope: plan.scopes.join(" "),
       });
     }
-    if (url.href === MICROSOFT_OUTLOOK_MAIL_PRESET.oauth.tokenUrl) {
+    if (url.href === MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION.authentication.tokenUrl) {
       const body = requestBody(init?.body);
       tokenRequests.push({
         family: "microsoft",
@@ -170,7 +170,7 @@ function providerFixture() {
         authorization: new Headers(init?.headers).get("authorization"),
       });
       const plan = microsoftPlans.shift() ?? {
-        scopes: [...MICROSOFT_OUTLOOK_MAIL_PRESET.oauth.scopes],
+        scopes: [...MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION.authentication.scopes],
         refreshToken: "microsoft-refresh-token",
       };
       return Response.json({
@@ -262,42 +262,37 @@ async function callback(
 }
 
 describe("API Integration provider OAuth", () => {
-  test("connects a Google preset with signed PKCE state and no callback perimeter credential", async () => {
+  test("connects a Google definition with signed PKCE state and no callback perimeter credential", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const fixture = providerFixture();
     fixture.googlePlans.push({
-      scopes: [...GOOGLE_GMAIL_PRESET.oauth.scopes],
+      scopes: [...GOOGLE_GMAIL_INTEGRATION_DEFINITION.authentication.scopes],
       refreshToken: "google-refresh-token",
     });
     const started = await start(fixture, workspace, {
-      presetId: GOOGLE_GMAIL_PRESET.id,
+      definitionId: GOOGLE_GMAIL_INTEGRATION_DEFINITION.id,
       ownership: "personal",
     });
     expect(started.response.status).toBe(200);
     const authorizationUrl = new URL(started.authorizationUrl);
     expect(authorizationUrl.origin).toBe("https://accounts.google.com");
     expect(authorizationUrl.searchParams.get("scope")?.split(" ")).toEqual(
-      GOOGLE_GMAIL_PRESET.oauth.scopes,
+      GOOGLE_GMAIL_INTEGRATION_DEFINITION.authentication.scopes,
     );
     expect(authorizationUrl.searchParams.get("access_type")).toBe("offline");
     expect(authorizationUrl.searchParams.get("prompt")).toBe("consent select_account");
     expect(authorizationUrl.searchParams.get("code_challenge_method")).toBe("S256");
     expect(authorizationUrl.searchParams.get("redirect_uri")).toBe(
-      "http://127.0.0.1:8000/v1/integrations/google-drive/callback",
+      "http://127.0.0.1:8000/v1/integrations/provider-oauth/callback",
     );
     const state = authorizationUrl.searchParams.get("state")!;
-    const connected = await callback(
-      fixture,
-      state,
-      "fixture-code",
-      "/v1/integrations/google-drive/callback",
-    );
+    const connected = await callback(fixture, state);
     expect(connected.status).toBe(302);
     const location = new URL(connected.headers.get("location")!);
     expect(location.origin).toBe("http://127.0.0.1:3000");
     expect(location.searchParams.get("integration_oauth")).toBe("success");
-    expect(location.searchParams.get("presetId")).toBe(GOOGLE_GMAIL_PRESET.id);
+    expect(location.searchParams.get("definitionId")).toBe(GOOGLE_GMAIL_INTEGRATION_DEFINITION.id);
 
     const connections = await listConnectionsMetadata(
       client.db,
@@ -311,13 +306,13 @@ describe("API Integration provider OAuth", () => {
       providerDomain: "gmail.googleapis.com",
       kind: "oauth2",
       status: "active",
-      grantedScopes: GOOGLE_GMAIL_PRESET.oauth.scopes,
+      grantedScopes: GOOGLE_GMAIL_INTEGRATION_DEFINITION.authentication.scopes,
       metadata: {
         credentialRole: API_INTEGRATION_OAUTH_CREDENTIAL_ROLE,
         providerFamily: "google",
         providerPrincipalId: "google-principal-1",
         providerEmail: "google.user@example.com",
-        authorizedPresetIds: [GOOGLE_GMAIL_PRESET.id],
+        authorizedDefinitionIds: [GOOGLE_GMAIL_INTEGRATION_DEFINITION.id],
       },
     });
     expect(JSON.stringify(connection)).not.toContain("google-access");
@@ -334,7 +329,7 @@ describe("API Integration provider OAuth", () => {
       refresh_token: "google-refresh-token",
       client_id: GOOGLE_CLIENT_ID,
       client_secret: GOOGLE_CLIENT_SECRET,
-      token_endpoint: GOOGLE_GMAIL_PRESET.oauth.tokenUrl,
+      token_endpoint: GOOGLE_GMAIL_INTEGRATION_DEFINITION.authentication.tokenUrl,
     });
     expect(fixture.tokenRequests[0]?.body.get("client_secret")).toBe(GOOGLE_CLIENT_SECRET);
 
@@ -365,11 +360,11 @@ describe("API Integration provider OAuth", () => {
     const workspace = await freshWorkspace();
     const fixture = providerFixture();
     fixture.microsoftPlans.push({
-      scopes: [...MICROSOFT_OUTLOOK_MAIL_PRESET.oauth.scopes],
+      scopes: [...MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION.authentication.scopes],
       refreshToken: "microsoft-refresh-token",
     });
     const firstStart = await start(fixture, workspace, {
-      presetId: MICROSOFT_OUTLOOK_MAIL_PRESET.id,
+      definitionId: MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION.id,
       ownership: "workspace",
     });
     const firstState = new URL(firstStart.authorizationUrl).searchParams.get("state")!;
@@ -383,13 +378,13 @@ describe("API Integration provider OAuth", () => {
 
     const unionScopes = [
       ...new Set([
-        ...MICROSOFT_OUTLOOK_MAIL_PRESET.oauth.scopes,
-        ...MICROSOFT_OUTLOOK_CALENDAR_PRESET.oauth.scopes,
+        ...MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION.authentication.scopes,
+        ...MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION.authentication.scopes,
       ]),
     ];
     fixture.microsoftPlans.push({ scopes: unionScopes });
     const reconnect = await start(fixture, workspace, {
-      presetId: MICROSOFT_OUTLOOK_CALENDAR_PRESET.id,
+      definitionId: MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION.id,
       connectionId: firstConnection.id,
       ownership: "workspace",
     });
@@ -408,8 +403,11 @@ describe("API Integration provider OAuth", () => {
     expect(reconnected.id).toBe(firstConnection.id);
     expect(reconnected.version).toBe(firstConnection.version + 1);
     expect(reconnected.grantedScopes).toEqual(unionScopes);
-    expect(reconnected.metadata.authorizedPresetIds).toEqual(
-      [MICROSOFT_OUTLOOK_CALENDAR_PRESET.id, MICROSOFT_OUTLOOK_MAIL_PRESET.id].sort(),
+    expect(reconnected.metadata.authorizedDefinitionIds).toEqual(
+      [
+        MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION.id,
+        MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION.id,
+      ].sort(),
     );
     const credential = await loadConnectionCredentialForBroker(client.db, settings, {
       workspaceId: workspace.workspaceId,
@@ -429,7 +427,7 @@ describe("API Integration provider OAuth", () => {
       refreshToken: "must-not-persist",
     });
     const switchStart = await start(fixture, workspace, {
-      presetId: MICROSOFT_OUTLOOK_CALENDAR_PRESET.id,
+      definitionId: MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION.id,
       connectionId: reconnected.id,
       ownership: "workspace",
     });
@@ -453,17 +451,23 @@ describe("API Integration provider OAuth", () => {
     const fixture = providerFixture();
     fixture.googlePlans.push(
       {
-        scopes: [...GOOGLE_GMAIL_PRESET.oauth.scopes],
+        scopes: [...GOOGLE_GMAIL_INTEGRATION_DEFINITION.authentication.scopes],
         refreshToken: "google-refresh-a",
       },
       {
-        scopes: [...GOOGLE_GMAIL_PRESET.oauth.scopes],
+        scopes: [...GOOGLE_GMAIL_INTEGRATION_DEFINITION.authentication.scopes],
         refreshToken: "google-refresh-b",
       },
     );
     const [left, right] = await Promise.all([
-      start(fixture, workspace, { presetId: GOOGLE_GMAIL_PRESET.id, ownership: "personal" }),
-      start(fixture, workspace, { presetId: GOOGLE_GMAIL_PRESET.id, ownership: "personal" }),
+      start(fixture, workspace, {
+        definitionId: GOOGLE_GMAIL_INTEGRATION_DEFINITION.id,
+        ownership: "personal",
+      }),
+      start(fixture, workspace, {
+        definitionId: GOOGLE_GMAIL_INTEGRATION_DEFINITION.id,
+        ownership: "personal",
+      }),
     ]);
     const callbacks = await Promise.all([
       callback(fixture, new URL(left.authorizationUrl).searchParams.get("state")!, "left"),
@@ -486,7 +490,7 @@ describe("API Integration provider OAuth", () => {
       refreshToken: "must-not-persist",
     });
     const insufficientStart = await start(insufficient, insufficientWorkspace, {
-      presetId: GOOGLE_GMAIL_PRESET.id,
+      definitionId: GOOGLE_GMAIL_INTEGRATION_DEFINITION.id,
       ownership: "personal",
     });
     const denied = await callback(

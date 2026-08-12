@@ -7395,13 +7395,13 @@ export async function persistProviderOAuthConnection(
         ) {
           return null;
         }
-        const existingPresetIds = Array.isArray(existing.metadata.authorizedPresetIds)
-          ? existing.metadata.authorizedPresetIds.filter(
+        const existingDefinitionIds = Array.isArray(existing.metadata.authorizedDefinitionIds)
+          ? existing.metadata.authorizedDefinitionIds.filter(
               (value): value is string => typeof value === "string",
             )
           : [];
-        const incomingPresetIds = Array.isArray(input.metadata?.authorizedPresetIds)
-          ? input.metadata.authorizedPresetIds.filter(
+        const incomingDefinitionIds = Array.isArray(input.metadata?.authorizedDefinitionIds)
+          ? input.metadata.authorizedDefinitionIds.filter(
               (value): value is string => typeof value === "string",
             )
           : [];
@@ -7420,10 +7420,10 @@ export async function persistProviderOAuthConnection(
           metadata: {
             ...existing.metadata,
             ...(input.metadata ?? {}),
-            ...(existingPresetIds.length > 0 || incomingPresetIds.length > 0
+            ...(existingDefinitionIds.length > 0 || incomingDefinitionIds.length > 0
               ? {
-                  authorizedPresetIds: [
-                    ...new Set([...existingPresetIds, ...incomingPresetIds]),
+                  authorizedDefinitionIds: [
+                    ...new Set([...existingDefinitionIds, ...incomingDefinitionIds]),
                   ].sort(),
                 }
               : {}),

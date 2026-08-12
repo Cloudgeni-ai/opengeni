@@ -52,7 +52,7 @@ export type ApiIntegrationToolDefinition = {
 
 type StoredApiIntegrationRevisionBase = {
   readonly id: string;
-  readonly integrationId: string;
+  readonly definitionId: string;
   readonly contentSha256: string;
   readonly source: {
     readonly url?: string;
@@ -116,7 +116,8 @@ export type InstallApiIntegrationInput = {
   description?: string | null;
   category?: string;
   tags?: string[];
-  presetId?: string | null;
+  definitionId: string;
+  definitionProvenance: "curated" | "workspace";
   provider?: string;
   providerDomain: string;
   protocol: ApiIntegrationProtocol;
@@ -167,7 +168,8 @@ export type ApiIntegrationRuntime = {
   name: string;
   description: string | null;
   protocol: ApiIntegrationProtocol;
-  presetId: string | null;
+  definitionId: string;
+  definitionProvenance: "curated" | "workspace";
   baseUrl: string;
   sourceUrl: string | null;
   providerDomain: string;
@@ -291,7 +293,8 @@ export async function installApiIntegration(
           capabilityId: input.capabilityId,
           serverId: input.serverId,
           protocol: input.protocol,
-          presetId: input.presetId ?? null,
+          definitionId: input.definitionId,
+          definitionProvenance: input.definitionProvenance,
           provider: input.provider ?? null,
           providerDomain: input.providerDomain,
           baseUrl: input.baseUrl,
@@ -864,9 +867,16 @@ export async function listInstalledApiIntegrationsInRlsContext(
     const config = objectValue(row.bindingConfig);
     const manifest = objectValue(row.manifest);
     const capabilityId = stringValue(manifest.capabilityId);
-    const presetId = stringValue(manifest.presetId) ?? null;
+    const definitionId = stringValue(manifest.definitionId);
+    const definitionProvenance = stringValue(manifest.definitionProvenance);
     const serverId = row.runtimeKey;
-    if (!capabilityId || !serverId || row.protocol !== revision.protocol) {
+    if (
+      !capabilityId ||
+      !definitionId ||
+      (definitionProvenance !== "curated" && definitionProvenance !== "workspace") ||
+      !serverId ||
+      row.protocol !== revision.protocol
+    ) {
       throw new Error(`Installed API Integration ${row.pluginKey} has invalid immutable metadata`);
     }
     const allowedTools = stringArray(config.allowedTools) ?? revision.tools.map((tool) => tool.id);
@@ -904,7 +914,8 @@ export async function listInstalledApiIntegrationsInRlsContext(
         name: row.displayName,
         description: row.pluginDescription,
         protocol: revision.protocol,
-        presetId,
+        definitionId,
+        definitionProvenance,
         baseUrl: row.baseUrl,
         sourceUrl: row.sourceUrl,
         providerDomain: row.providerDomain,
@@ -1563,6 +1574,9 @@ async function integrationOwners(
 function assertInstallInput(input: InstallApiIntegrationInput): void {
   if (input.revision.protocol !== input.protocol)
     throw new Error("API Integration protocol mismatch");
+  if (!input.definitionId.trim() || input.revision.definitionId !== input.definitionId) {
+    throw new Error("API Integration Definition identity mismatch");
+  }
   if (
     input.revision.contentSha256.length !== 64 ||
     !/^[0-9a-f]+$/.test(input.revision.contentSha256)
@@ -1620,7 +1634,7 @@ function storedRevision(value: Record<string, unknown>): StoredApiIntegrationRev
   if (
     (protocol !== "openapi" && protocol !== "graphql") ||
     typeof value.id !== "string" ||
-    typeof value.integrationId !== "string" ||
+    typeof value.definitionId !== "string" ||
     typeof value.contentSha256 !== "string" ||
     typeof value.title !== "string" ||
     !Array.isArray(tools) ||

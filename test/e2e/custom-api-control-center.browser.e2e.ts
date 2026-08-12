@@ -351,9 +351,9 @@ async function installApi(page: Page, state: UiState): Promise<void> {
     if (url.pathname === `/v1/workspaces/${workspaceId}/sessions`) {
       return json({ sessions: [], pinned: [], pinnedTruncated: false, nextCursor: null });
     }
-    if (url.pathname === `/v1/workspaces/${workspaceId}/integrations/presets`) {
+    if (url.pathname === `/v1/workspaces/${workspaceId}/integrations/definitions`) {
       if (state.loading) await new Promise((resolve) => setTimeout(resolve, 8_000));
-      return json({ presets: presets() });
+      return json({ definitions: integrationDefinitions() });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/integrations`) {
       if (state.loading) await new Promise((resolve) => setTimeout(resolve, 8_000));
@@ -495,7 +495,7 @@ function workspace() {
   };
 }
 
-function presets() {
+function integrationDefinitions() {
   return [
     ["google-gmail", "Gmail", "google", "gmail.googleapis.com"],
     ["google-drive", "Google Drive", "google", "www.googleapis.com"],
@@ -503,15 +503,14 @@ function presets() {
     ["microsoft-outlook-calendar", "Outlook Calendar", "microsoft", "graph.microsoft.com"],
     ["microsoft-outlook-contacts", "Outlook Contacts", "microsoft", "graph.microsoft.com"],
     ["microsoft-onedrive", "OneDrive", "microsoft", "graph.microsoft.com"],
-  ].map(([id, name, family, providerDomain]) => ({
+  ].map(([id, name, providerId, providerDomain]) => ({
     id,
     name,
-    summary: `${name} preset`,
-    family,
+    summary: `${name} Integration Definition`,
     protocol: "openapi",
-    providerDomain,
-    scopes: ["read"],
-    features: id === "google-gmail" ? gmailFeatureDefinitions() : [],
+    provider: { id: providerId, domain: providerDomain },
+    authentication: { kind: "oauth2", scopes: ["read"] },
+    facets: id === "google-gmail" ? gmailFeatureDefinitions() : [],
   }));
 }
 
@@ -574,7 +573,8 @@ function instances(dense: boolean) {
       name: "Gmail — Finance",
       description: "Gmail messages, labels, drafts, and delivery.",
       protocol: "openapi",
-      presetId: "google-gmail",
+      definitionId: "google-gmail",
+      definitionProvenance: "curated",
       providerDomain: "gmail.googleapis.com",
       baseUrl: "https://gmail.googleapis.com/",
       sourceUrl: "https://www.googleapis.com/discovery/v1/apis/gmail/v1/rest",
@@ -686,7 +686,8 @@ function instance(
     name: displayName,
     description: "Linear-like deterministic GraphQL API",
     protocol: "graphql",
-    presetId: null,
+    definitionId: "linear-like",
+    definitionProvenance: "workspace",
     providerDomain: "linear.example.test",
     baseUrl: "https://linear.example.test/graphql",
     sourceUrl: "https://linear.example.test/graphql",
@@ -709,9 +710,9 @@ function preview() {
       endpoint: "https://linear.example.test/graphql",
       name: "Linear — Finance",
     },
-    presetId: null,
+    definitionId: "linear-like",
+    definitionProvenance: "workspace",
     protocol: "graphql",
-    integrationId: "linear-like",
     capabilityId: "api:linear-like",
     pluginKey: "integration/linear-like",
     serverId: "api_linear_like",

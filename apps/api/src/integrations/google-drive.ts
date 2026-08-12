@@ -29,7 +29,10 @@ import {
   ApiIntegrationOAuthConnectionMetadata,
   IntegrationFeatureMutationResult,
 } from "@opengeni/contracts";
-import { GOOGLE_DRIVE_PRESET, providerDomainForPreset } from "@opengeni/capabilities";
+import {
+  GOOGLE_DRIVE_INTEGRATION_DEFINITION,
+  integrationDefinitionProviderDomain,
+} from "@opengeni/capabilities";
 import {
   captureScheduledTaskRestoreState,
   createValidatedScheduledTask,
@@ -1531,7 +1534,9 @@ async function requireGoogleDriveApiConnection(
 ): Promise<GoogleDriveApiConnection> {
   const legacy = GoogleDriveConnectionMetadata.safeParse(connection.metadata);
   const integration = ApiIntegrationOAuthConnectionMetadata.safeParse(connection.metadata);
-  const genericProviderDomain = providerDomainForPreset(GOOGLE_DRIVE_PRESET);
+  const genericProviderDomain = integrationDefinitionProviderDomain(
+    GOOGLE_DRIVE_INTEGRATION_DEFINITION,
+  );
   const authority: GoogleDriveApiConnection | null =
     connection.kind === "oauth2" &&
     connection.subjectId === subjectId &&
@@ -1544,7 +1549,7 @@ async function requireGoogleDriveApiConnection(
           integration.success &&
           integration.data.credentialRole === API_INTEGRATION_OAUTH_CREDENTIAL_ROLE &&
           integration.data.providerFamily === "google" &&
-          integration.data.authorizedPresetIds.includes(GOOGLE_DRIVE_PRESET.id)
+          integration.data.authorizedDefinitionIds.includes(GOOGLE_DRIVE_INTEGRATION_DEFINITION.id)
         ? { kind: "integration", connection, metadata: integration.data }
         : null;
   if (!authority) {

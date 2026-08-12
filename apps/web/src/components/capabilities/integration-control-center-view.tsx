@@ -40,7 +40,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import type {
   ApiIntegrationInstallationSummary,
-  ApiIntegrationPresetSummary,
+  IntegrationDefinitionSummary,
   ConnectionMetadata,
   ConnectionOwnership,
 } from "@/types";
@@ -50,9 +50,9 @@ export type IntegrationRemoveTarget = {
   removesDefinition: boolean;
 };
 
-type PresetVisual = { icon: ComponentType<{ className?: string }> };
+type DefinitionVisual = { icon: ComponentType<{ className?: string }> };
 
-const PRESET_VISUALS: Record<string, PresetVisual> = {
+const DEFINITION_VISUALS: Record<string, DefinitionVisual> = {
   "google-gmail": { icon: MailIcon },
   "google-drive": { icon: HardDriveIcon },
   "microsoft-outlook-mail": { icon: MailIcon },
@@ -64,8 +64,8 @@ const PRESET_VISUALS: Record<string, PresetVisual> = {
 export function IntegrationControlCenterView({
   client,
   workspaceId,
-  presets,
-  instancesByPreset,
+  definitions,
+  instancesByDefinition,
   customInstances,
   connections,
   loading,
@@ -76,7 +76,7 @@ export function IntegrationControlCenterView({
   canManageOrganizationDestination,
   busyKey,
   callbackBusy,
-  setupPreset,
+  setupDefinition,
   displayName,
   ownership,
   removeTarget,
@@ -108,8 +108,8 @@ export function IntegrationControlCenterView({
 }: {
   client: OpenGeniCoreClient;
   workspaceId: string;
-  presets: ApiIntegrationPresetSummary[];
-  instancesByPreset: Map<string, ApiIntegrationInstallationSummary[]>;
+  definitions: IntegrationDefinitionSummary[];
+  instancesByDefinition: Map<string, ApiIntegrationInstallationSummary[]>;
   customInstances: ApiIntegrationInstallationSummary[];
   connections: ConnectionMetadata[] | null;
   loading: boolean;
@@ -120,7 +120,7 @@ export function IntegrationControlCenterView({
   canManageOrganizationDestination: boolean;
   busyKey: string | null;
   callbackBusy: boolean;
-  setupPreset: ApiIntegrationPresetSummary | null;
+  setupDefinition: IntegrationDefinitionSummary | null;
   displayName: string;
   ownership: ConnectionOwnership;
   removeTarget: IntegrationRemoveTarget | null;
@@ -128,7 +128,7 @@ export function IntegrationControlCenterView({
   embedded: boolean;
   showCustomApis: boolean;
   onRefresh: () => void;
-  onOpenSetup: (preset: ApiIntegrationPresetSummary) => void;
+  onOpenSetup: (definition: IntegrationDefinitionSummary) => void;
   onReconnect: (instance: ApiIntegrationInstallationSummary) => void;
   onPreviewRemove: (instance: ApiIntegrationInstallationSummary) => void;
   onSetupClose: () => void;
@@ -218,7 +218,7 @@ export function IntegrationControlCenterView({
       ) : null}
 
       <div className={cn("relative", embedded ? "py-3" : "p-4 sm:p-6")}>
-        {loading && presets.length === 0 ? (
+        {loading && definitions.length === 0 ? (
           <div className={cn("grid gap-3", !embedded && "md:grid-cols-2 xl:grid-cols-3")}>
             {Array.from({ length: embedded ? 1 : 6 }, (_, index) => (
               <Skeleton key={index} className="h-40 rounded-xl" />
@@ -240,20 +240,20 @@ export function IntegrationControlCenterView({
           </div>
         ) : (
           <div className={cn("grid gap-3", !embedded && "md:grid-cols-2 xl:grid-cols-3")}>
-            {presets.map((preset) => (
-              <PresetCard
-                key={preset.id}
+            {definitions.map((definition) => (
+              <DefinitionCard
+                key={definition.id}
                 client={client}
                 workspaceId={workspaceId}
-                preset={preset}
-                instances={instancesByPreset.get(preset.id) ?? []}
+                definition={definition}
+                instances={instancesByDefinition.get(definition.id) ?? []}
                 connections={connections}
                 canManage={canManage}
                 canManagePersonalDestination={canManagePersonalDestination}
                 canManageWorkspaceDestination={canManageWorkspaceDestination}
                 canManageOrganizationDestination={canManageOrganizationDestination}
                 busyKey={busyKey}
-                onAdd={() => onOpenSetup(preset)}
+                onAdd={() => onOpenSetup(definition)}
                 onReconnect={onReconnect}
                 onRemove={onPreviewRemove}
               />
@@ -275,11 +275,11 @@ export function IntegrationControlCenterView({
         />
       ) : null}
 
-      <Dialog open={setupPreset !== null} onOpenChange={(open) => !open && onSetupClose()}>
+      <Dialog open={setupDefinition !== null} onOpenChange={(open) => !open && onSetupClose()}>
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
             <DialogTitle>
-              {setupPreset ? `Connect ${setupPreset.name}` : "Connect service"}
+              {setupDefinition ? `Connect ${setupDefinition.name}` : "Connect service"}
             </DialogTitle>
             <DialogDescription>
               Name this account so agents and teammates can choose the right one without seeing
@@ -329,7 +329,7 @@ export function IntegrationControlCenterView({
                 Permissions requested
               </summary>
               <p className="mt-2 break-words font-mono text-2xs leading-5 text-fg-subtle">
-                {setupPreset?.scopes.join(", ")}
+                {setupDefinition?.authentication.scopes.join(", ")}
               </p>
             </details>
 
@@ -386,10 +386,10 @@ export function IntegrationControlCenterView({
   );
 }
 
-function PresetCard({
+function DefinitionCard({
   client,
   workspaceId,
-  preset,
+  definition,
   instances,
   connections,
   canManage,
@@ -403,7 +403,7 @@ function PresetCard({
 }: {
   client: OpenGeniCoreClient;
   workspaceId: string;
-  preset: ApiIntegrationPresetSummary;
+  definition: IntegrationDefinitionSummary;
   instances: ApiIntegrationInstallationSummary[];
   connections: ConnectionMetadata[] | null;
   canManage: boolean;
@@ -415,7 +415,7 @@ function PresetCard({
   onReconnect: (instance: ApiIntegrationInstallationSummary) => void;
   onRemove: (instance: ApiIntegrationInstallationSummary) => void;
 }) {
-  const Icon = (PRESET_VISUALS[preset.id] ?? { icon: CloudIcon }).icon;
+  const Icon = (DEFINITION_VISUALS[definition.id] ?? { icon: CloudIcon }).icon;
   const connectionById = new Map((connections ?? []).map((entry) => [entry.id, entry]));
   return (
     <article className="relative flex h-full flex-col overflow-hidden rounded-xl border border-border bg-bg/50 p-4 transition-colors hover:border-border-strong">
@@ -425,12 +425,14 @@ function PresetCard({
             <Icon className="size-5" />
           </span>
           <div className="min-w-0">
-            <h3 className="truncate text-sm font-semibold text-fg">{preset.name}</h3>
-            <p className="mt-1 line-clamp-2 text-xs leading-5 text-fg-muted">{preset.summary}</p>
+            <h3 className="truncate text-sm font-semibold text-fg">{definition.name}</h3>
+            <p className="mt-1 line-clamp-2 text-xs leading-5 text-fg-muted">
+              {definition.summary}
+            </p>
           </div>
         </div>
         <Badge variant="outline" className="bg-surface/50 text-2xs text-fg-subtle">
-          {preset.family === "google" ? "Google" : "Microsoft"}
+          {definition.provider.id === "google" ? "Google" : "Microsoft"}
         </Badge>
       </div>
 
@@ -515,7 +517,7 @@ function PresetCard({
                 client={client}
                 workspaceId={workspaceId}
                 instance={instance}
-                featureCount={preset.features.length}
+                featureCount={definition.facets.length}
                 canManage={canManage}
                 canManagePersonalDestination={canManagePersonalDestination}
                 canManageWorkspaceDestination={canManageWorkspaceDestination}
@@ -541,7 +543,7 @@ function PresetCard({
         onClick={onAdd}
       >
         <PlusIcon />
-        {instances.length > 0 ? "Add another account" : `Connect ${preset.name}`}
+        {instances.length > 0 ? "Add another account" : `Connect ${definition.name}`}
       </Button>
     </article>
   );

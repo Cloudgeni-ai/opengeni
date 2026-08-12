@@ -87,7 +87,7 @@ describe("custom API protocol emulator acceptance", () => {
             },
           },
         },
-        { integrationId: `linear-${scenario.label}` },
+        { definitionId: `linear-${scenario.label}` },
       );
       const toolId = revision.tools[0]!.id;
       const result = await invokeOpenApiOperation(
@@ -207,7 +207,7 @@ describe("custom API protocol emulator acceptance", () => {
       credentialResolver,
     });
     const revision = compileGraphqlRevision(authenticatedIntrospection, {
-      integrationId: "linear-like-graphql",
+      definitionId: "linear-like-graphql",
       endpoint: "https://linear.example.test/graphql",
       name: "Linear-like GraphQL",
     });
@@ -259,7 +259,7 @@ describe("custom API protocol emulator acceptance", () => {
           },
         },
       },
-      { integrationId: "linear-negative" },
+      { definitionId: "linear-negative" },
     );
     let providerCalls = 0;
     const transport = directIntegrationTransport(async () => {

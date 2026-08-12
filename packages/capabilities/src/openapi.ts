@@ -55,7 +55,7 @@ export interface OpenApiOperationBinding {
 export type OpenApiRevision = IntegrationRevision<OpenApiOperationBinding, "openapi">;
 
 export interface CompileOpenApiOptions {
-  readonly integrationId: string;
+  readonly definitionId: string;
   readonly sourceUrl?: string;
   readonly baseUrl?: string;
   readonly provider?: string;
@@ -212,13 +212,13 @@ export function compileOpenApiRevision(
   return {
     id: revisionId,
     protocol: "openapi",
-    integrationId: options.integrationId,
+    definitionId: options.definitionId,
     contentSha256,
     source: {
       ...(options.sourceUrl ? { url: options.sourceUrl } : {}),
       ...(options.provider ? { provider: options.provider } : {}),
     },
-    title: stringValue(info.title) ?? options.integrationId,
+    title: stringValue(info.title) ?? options.definitionId,
     ...(stringValue(info.description) ? { description: stringValue(info.description)! } : {}),
     ...(stringValue(info.version) ? { version: stringValue(info.version)! } : {}),
     tools,
@@ -261,7 +261,7 @@ export class OpenApiMcpServer implements MCPServer {
   readonly name: string;
 
   constructor(private readonly options: OpenApiServerOptions) {
-    this.name = `openapi:${stableToolId(options.revision.integrationId)}`;
+    this.name = `openapi:${stableToolId(options.revision.definitionId)}`;
   }
 
   async connect(): Promise<void> {}
@@ -395,7 +395,7 @@ async function resolveOpenApiCredential(
   const credential = await options.credentialResolver.resolve({
     ...options.authority,
     protocol: "openapi",
-    integrationId: options.revision.integrationId,
+    definitionId: options.revision.definitionId,
     revisionId: options.revision.id,
     operationKey: toolId,
     destinationUrl,

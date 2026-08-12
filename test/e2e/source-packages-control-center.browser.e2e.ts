@@ -299,8 +299,8 @@ async function installApi(page: Page, state: UiState): Promise<void> {
     if (url.pathname === `/v1/workspaces/${workspaceId}/sessions`) {
       return json({ sessions: [], pinned: [], pinnedTruncated: false, nextCursor: null });
     }
-    if (url.pathname === `/v1/workspaces/${workspaceId}/integrations/presets`) {
-      return json({ presets: [] });
+    if (url.pathname === `/v1/workspaces/${workspaceId}/integrations/definitions`) {
+      return json({ definitions: [] });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/integrations`) {
       return json({ integrations: [] });

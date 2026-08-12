@@ -574,8 +574,8 @@ describe("API helpers", () => {
     expect(routeLabel(`/v1/workspaces/${workspace}/integrations/oauth/start`)).toBe(
       "/v1/workspaces/:workspaceId/integrations/oauth/start",
     );
-    expect(routeLabel(`/v1/workspaces/${workspace}/integrations/presets`)).toBe(
-      "/v1/workspaces/:workspaceId/integrations/presets",
+    expect(routeLabel(`/v1/workspaces/${workspace}/integrations/definitions`)).toBe(
+      "/v1/workspaces/:workspaceId/integrations/definitions",
     );
     expect(
       routeLabel(

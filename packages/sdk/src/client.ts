@@ -132,7 +132,7 @@ import type {
   IntegrationFeatureMutationResult,
   IntegrationFeatureRemovalResult,
   IntegrationInstanceFeaturesResponse,
-  ListApiIntegrationPresetsResponse,
+  ListIntegrationDefinitionsResponse,
   ListApiIntegrationsResponse,
   MutateIntegrationFeatureRequest,
   PreviewApiIntegrationRequest,
@@ -4933,11 +4933,13 @@ export class OpenGeniClient {
     );
   }
 
-  /** List curated provider presets without exposing deployment OAuth credentials. */
-  async listApiIntegrationPresets(workspaceId: string): Promise<ListApiIntegrationPresetsResponse> {
-    return await this.requestJson<ListApiIntegrationPresetsResponse>(
+  /** List curated provider definitions without exposing deployment OAuth credentials. */
+  async listIntegrationDefinitions(
+    workspaceId: string,
+  ): Promise<ListIntegrationDefinitionsResponse> {
+    return await this.requestJson<ListIntegrationDefinitionsResponse>(
       "GET",
-      `/v1/workspaces/${workspaceId}/integrations/presets`,
+      `/v1/workspaces/${workspaceId}/integrations/definitions`,
     );
   }
 
@@ -4953,7 +4955,7 @@ export class OpenGeniClient {
     );
   }
 
-  /** Start a signed PKCE OAuth flow for a built-in Google or Microsoft preset. */
+  /** Start a signed PKCE OAuth flow for a built-in Google or Microsoft definition. */
   async startApiIntegrationOAuth(
     workspaceId: string,
     request: ApiIntegrationOAuthStartRequest,

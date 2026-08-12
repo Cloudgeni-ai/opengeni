@@ -103,6 +103,8 @@ function integrationInput(connectionId?: string, suffix = "inventory"): InstallA
     description: "Read and update inventory.",
     category: "operations",
     tags: ["inventory", "openapi"],
+    definitionId: suffix,
+    definitionProvenance: "workspace",
     providerDomain: "inventory.example.com",
     protocol: "openapi",
     baseUrl: "https://inventory.example.com/v1/",
@@ -116,7 +118,7 @@ function integrationInput(connectionId?: string, suffix = "inventory"): InstallA
     revision: {
       id: "openapi:111111111111111111111111",
       protocol: "openapi",
-      integrationId: "inventory",
+      definitionId: suffix,
       contentSha256: "1".repeat(64),
       source: { url: "https://inventory.example.com/openapi.json" },
       title: "Inventory API",
@@ -427,6 +429,7 @@ describe("API Integration persistence", () => {
     const inventoryBase = integrationInput(financeConnection.id, "linear-like-graphql");
     const base: InstallApiIntegrationInput = {
       ...inventoryBase,
+      definitionId: "linear-like-graphql",
       name: "Linear-like GraphQL",
       description: "Deterministic issue-tracker GraphQL emulator.",
       providerDomain: "linear.example.test",
@@ -438,7 +441,7 @@ describe("API Integration persistence", () => {
       revision: {
         id: "graphql:111111111111111111111111",
         protocol: "graphql",
-        integrationId: "linear-like-graphql",
+        definitionId: "linear-like-graphql",
         contentSha256: "1".repeat(64),
         source: { url: "https://linear.example.test/graphql" },
         title: "Linear-like GraphQL",
