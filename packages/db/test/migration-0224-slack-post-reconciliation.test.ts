@@ -4,10 +4,10 @@ import { readFile } from "node:fs/promises";
 import postgres from "postgres";
 import { migrate } from "../src/migrate";
 
-const migrationName = "0222_slack_post_outcome_reconciliation.sql";
+const migrationName = "0224_slack_post_outcome_reconciliation.sql";
 const migrationUrl = new URL(`../drizzle/${migrationName}`, import.meta.url);
 
-describe("migration 0222 Slack post outcome reconciliation", () => {
+describe("migration 0224 Slack post outcome reconciliation", () => {
   test("is a rolling old-writer fence with validated states and claim modes", async () => {
     const source = await readFile(migrationUrl, "utf8");
     expect(source.startsWith("-- deployment-mode: rolling\n")).toBe(true);
@@ -21,7 +21,7 @@ describe("migration 0222 Slack post outcome reconciliation", () => {
   });
 
   test("backfills live claims, blocks old unknown reclaims, and preserves FORCE RLS", async () => {
-    const blank = await acquireBlankTestDatabase("migration-0222-slack-post");
+    const blank = await acquireBlankTestDatabase("migration-0224-slack-post");
     if (!blank) return;
     const sql = postgres(blank.databaseUrl, {
       max: 1,
