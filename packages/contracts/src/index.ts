@@ -1020,6 +1020,18 @@ export type PersonalResourceRetentionMode = z.infer<typeof PersonalResourceReten
 export const SessionTenancyVisibility = z.enum(["user_private", "workspace_shared"]);
 export type SessionTenancyVisibility = z.infer<typeof SessionTenancyVisibility>;
 
+/** Public/session API vocabulary. Persistence keeps the explicit tenancy names. */
+export const SessionVisibility = z.enum(["private", "workspace"]);
+export type SessionVisibility = z.infer<typeof SessionVisibility>;
+
+export function sessionVisibilityToPublic(value: SessionTenancyVisibility): SessionVisibility {
+  return value === "user_private" ? "private" : "workspace";
+}
+
+export function sessionVisibilityFromPublic(value: SessionVisibility): SessionTenancyVisibility {
+  return value === "private" ? "user_private" : "workspace_shared";
+}
+
 export const UserResourceGrantMode = z.enum(["once", "session", "always"]);
 export type UserResourceGrantMode = z.infer<typeof UserResourceGrantMode>;
 
@@ -1189,6 +1201,21 @@ export const SessionTenancyProjection = z.object({
     .nullable(),
 });
 export type SessionTenancyProjection = z.infer<typeof SessionTenancyProjection>;
+
+/** Secret-safe public projection used by activated session APIs. */
+export const SessionTenancyPublicProjection = z.object({
+  visibility: SessionVisibility,
+  authorityEpoch: z.number().int().positive(),
+  ownedByCurrentUser: z.boolean(),
+  fork: z
+    .object({
+      sourceVisibility: SessionVisibility,
+      sourceAuthorityEpoch: z.number().int().positive(),
+      forkedAt: z.string().datetime({ offset: true }),
+    })
+    .nullable(),
+});
+export type SessionTenancyPublicProjection = z.infer<typeof SessionTenancyPublicProjection>;
 
 export const ManagedAccount = z.object({
   id: z.string().uuid(),
@@ -5023,6 +5050,8 @@ export const SessionAuthorizationOperation = z.enum([
   "session.goal.read",
   "session.goal.write",
   "session.child.create",
+  "session.visibility.write",
+  "session.fork.create",
 ]);
 export type SessionAuthorizationOperation = z.infer<typeof SessionAuthorizationOperation>;
 
@@ -8486,6 +8515,8 @@ export const Session = z.object({
   // the workspace runtime registry.
   effectiveToolPolicy: SessionEffectiveToolPolicy.optional(),
   metadata: z.record(z.string(), z.unknown()),
+  /** Additive public tenancy projection; omitted by legacy/internal readers. */
+  tenancy: SessionTenancyPublicProjection.optional(),
   /** Frozen creator fact used only for creation attribution/idempotent repair. */
   createdBy: TurnInitiator,
   createdByContext: TurnInitiatorContext,
@@ -8696,6 +8727,7 @@ export type SessionLineageResponse = z.infer<typeof SessionLineageResponse>;
 
 export const SessionEventType = z.enum([
   "session.created",
+  "session.visibility.changed",
   // Defensive read/transport projection for a malformed or historically
   // oversized retained event envelope. The original row stays durable; this
   // explicit synthetic type prevents unbounded free-form envelope fields from
@@ -10898,6 +10930,10 @@ export const CreateSessionRequest = withVariableSetIdAlias({
   // suppresses those defaults (the first-party OpenGeni server remains added).
   tools: z.array(ToolRef).default([]),
   metadata: z.record(z.string(), z.unknown()).default({}),
+  // Public vocabulary; persistence maps this to user_private/workspace_shared.
+  // Child creation may only inherit or narrow this value at the trusted core
+  // boundary; omission preserves legacy workspace-shared behavior.
+  visibility: SessionVisibility.optional(),
   model: z.string().min(1).optional(),
   reasoningEffort: ReasoningEffort.optional(),
   latencyMode: LatencyMode.optional(),

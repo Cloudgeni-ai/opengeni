@@ -529,14 +529,24 @@ export async function registerSessionTurnAttemptClaim(
     temporalWorkflowRunId: string;
     temporalActivityId: string;
     verifiedControlRevision: number;
+    authorityEpoch: number;
+    authorityVisibility: "user_private" | "workspace_shared";
+    authorityOwnerOrganizationMembershipId: string | null;
     mcpApprovalPolicies: Record<string, SessionMcpApprovalPolicy>;
     connectorActionPolicies: schema.ConnectorActionPolicySnapshotEntry[];
   },
 ): Promise<typeof schema.sessionTurnAttempts.$inferSelect> {
+  const authoritySnapshot = assertSessionAuthoritySnapshot({
+    attemptId: input.id,
+    authorityEpoch: input.authorityEpoch,
+    authorityVisibility: input.authorityVisibility,
+    authorityOwnerOrganizationMembershipId: input.authorityOwnerOrganizationMembershipId,
+  });
   const [inserted] = await db
     .insert(schema.sessionTurnAttempts)
     .values({
       ...input,
+      ...authoritySnapshot,
       state: "claimed",
     })
     // Only an idempotent replay of this exact preallocated attempt ID may
@@ -557,12 +567,22 @@ export async function registerSessionTurnAttemptClaim(
     )
     .for("update")
     .limit(1);
+  const existingAuthoritySnapshot = existing
+    ? assertSessionAuthoritySnapshot({
+        attemptId: existing.id,
+        authorityEpoch: existing.authorityEpoch,
+        authorityVisibility: existing.authorityVisibility,
+        authorityOwnerOrganizationMembershipId: existing.authorityOwnerOrganizationMembershipId,
+      })
+    : null;
   if (
     !existing ||
     existing.accountId !== input.accountId ||
     existing.sessionId !== input.sessionId ||
     existing.turnId !== input.turnId ||
     existing.executionGeneration !== input.executionGeneration ||
+    !existingAuthoritySnapshot ||
+    !sessionAuthoritySnapshotsEqual(existingAuthoritySnapshot, authoritySnapshot) ||
     existing.temporalWorkflowId !== input.temporalWorkflowId ||
     existing.temporalWorkflowRunId !== input.temporalWorkflowRunId ||
     existing.temporalActivityId !== input.temporalActivityId ||
@@ -575,6 +595,72 @@ export async function registerSessionTurnAttemptClaim(
     );
   }
   return existing;
+}
+
+export type SessionAuthoritySnapshot = {
+  authorityEpoch: number;
+  authorityVisibility: "user_private" | "workspace_shared";
+  authorityOwnerOrganizationMembershipId: string | null;
+};
+
+/**
+ * Validate the complete accepted-attempt authority tuple. Missing or partial
+ * values are not legacy defaults: current claim writers must provide the
+ * exact locked session authority explicitly.
+ */
+export function assertSessionAuthoritySnapshot(input: {
+  attemptId?: string;
+  authorityEpoch: unknown;
+  authorityVisibility: unknown;
+  authorityOwnerOrganizationMembershipId: unknown;
+}): SessionAuthoritySnapshot {
+  const valid =
+    Number.isSafeInteger(input.authorityEpoch) &&
+    (input.authorityEpoch as number) > 0 &&
+    (input.authorityVisibility === "user_private" ||
+      input.authorityVisibility === "workspace_shared") &&
+    ((input.authorityVisibility === "user_private" &&
+      typeof input.authorityOwnerOrganizationMembershipId === "string") ||
+      (input.authorityVisibility === "workspace_shared" &&
+        (input.authorityOwnerOrganizationMembershipId === null ||
+          typeof input.authorityOwnerOrganizationMembershipId === "string")));
+  if (!valid) {
+    throw new SessionControlInvariantError(
+      `Attempt ${input.attemptId ?? "unknown"} has an invalid session authority snapshot`,
+    );
+  }
+  return {
+    authorityEpoch: input.authorityEpoch as number,
+    authorityVisibility: input.authorityVisibility as SessionAuthoritySnapshot["authorityVisibility"],
+    authorityOwnerOrganizationMembershipId:
+      input.authorityOwnerOrganizationMembershipId as string | null,
+  };
+}
+
+export function sessionAuthoritySnapshotMatchesSession(
+  snapshot: SessionAuthoritySnapshot,
+  session: Pick<
+    typeof schema.sessions.$inferSelect,
+    "authorityEpoch" | "visibility" | "ownerOrganizationMembershipId"
+  >,
+): boolean {
+  return (
+    snapshot.authorityEpoch === session.authorityEpoch &&
+    snapshot.authorityVisibility === session.visibility &&
+    snapshot.authorityOwnerOrganizationMembershipId ===
+      (session.ownerOrganizationMembershipId ?? null)
+  );
+}
+
+export function sessionAuthoritySnapshotsEqual(
+  left: Pick<SessionAuthoritySnapshot, "authorityEpoch" | "authorityVisibility" | "authorityOwnerOrganizationMembershipId">,
+  right: Pick<SessionAuthoritySnapshot, "authorityEpoch" | "authorityVisibility" | "authorityOwnerOrganizationMembershipId">,
+): boolean {
+  return (
+    left.authorityEpoch === right.authorityEpoch &&
+    left.authorityVisibility === right.authorityVisibility &&
+    left.authorityOwnerOrganizationMembershipId === right.authorityOwnerOrganizationMembershipId
+  );
 }
 
 /**
