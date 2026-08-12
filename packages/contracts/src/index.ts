@@ -6972,10 +6972,10 @@ export const CapabilityPackComponentReference = z.discriminatedUnion("kind", [
   z
     .object({
       key: CapabilityPackComponentKey,
-      kind: z.literal("feature"),
+      kind: z.literal("facet"),
       capabilityId: z.string().min(1).max(512),
       instanceKey: CapabilityPackInstanceKey,
-      featureKey: z.string().min(1).max(200),
+      facetKey: z.string().min(1).max(200),
       bindingKey: CapabilityPackInstanceKey,
       configDigest: z.string().regex(/^[0-9a-f]{64}$/),
       required: z.boolean().default(true),
@@ -7184,7 +7184,7 @@ export type PackComponentResolutionStatus = z.infer<typeof PackComponentResoluti
 export const PackComponentResolution = z
   .object({
     key: CapabilityPackComponentKey,
-    kind: z.enum(["plugin", "skill", "integration", "feature", "inline_skill"]),
+    kind: z.enum(["plugin", "skill", "integration", "facet", "inline_skill"]),
     capabilityId: z.string().min(1).max(512),
     required: z.boolean(),
     status: PackComponentResolutionStatus,
@@ -7260,7 +7260,7 @@ export const PackUninstallPreview = z
         z
           .object({
             key: CapabilityPackComponentKey,
-            kind: z.enum(["plugin", "skill", "integration", "feature", "inline_skill"]),
+            kind: z.enum(["plugin", "skill", "integration", "facet", "inline_skill"]),
             capabilityId: z.string().min(1).max(512),
             retainedByOtherOwners: z.boolean(),
           })
@@ -8003,26 +8003,26 @@ export type ApiIntegrationProtocol = z.infer<typeof ApiIntegrationProtocol>;
 export const IntegrationDefinitionProvenance = z.enum(["curated", "workspace"]);
 export type IntegrationDefinitionProvenance = z.infer<typeof IntegrationDefinitionProvenance>;
 
-export const IntegrationFeatureKey = z
+export const IntegrationFacetKey = z
   .string()
   .min(1)
   .max(200)
   .regex(/^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$/);
-export type IntegrationFeatureKey = z.infer<typeof IntegrationFeatureKey>;
+export type IntegrationFacetKey = z.infer<typeof IntegrationFacetKey>;
 
-export const IntegrationFeatureKind = z.enum([
+export const IntegrationFacetKind = z.enum([
   "tools",
   "knowledge_source",
   "inbound_trigger",
   "delivery_destination",
   "identity_link",
 ]);
-export type IntegrationFeatureKind = z.infer<typeof IntegrationFeatureKind>;
+export type IntegrationFacetKind = z.infer<typeof IntegrationFacetKind>;
 
-export const IntegrationFeatureStatus = z.enum(["active", "paused", "needs_attention", "disabled"]);
-export type IntegrationFeatureStatus = z.infer<typeof IntegrationFeatureStatus>;
+export const IntegrationFacetStatus = z.enum(["active", "paused", "needs_attention", "disabled"]);
+export type IntegrationFacetStatus = z.infer<typeof IntegrationFacetStatus>;
 
-const IntegrationFeatureJsonObject = z.record(z.string(), z.unknown()).superRefine((value, ctx) => {
+const IntegrationFacetJsonObject = z.record(z.string(), z.unknown()).superRefine((value, ctx) => {
   let serialized: string;
   try {
     serialized = JSON.stringify(value);
@@ -8035,17 +8035,15 @@ const IntegrationFeatureJsonObject = z.record(z.string(), z.unknown()).superRefi
   }
 });
 
-export const IntegrationFeatureDefinitionSummary = z
+export const IntegrationFacetDefinitionSummary = z
   .object({
-    featureKey: IntegrationFeatureKey,
-    kind: IntegrationFeatureKind.exclude(["tools"]),
-    configSchema: IntegrationFeatureJsonObject,
-    capabilities: IntegrationFeatureJsonObject,
+    facetKey: IntegrationFacetKey,
+    kind: IntegrationFacetKind.exclude(["tools"]),
+    configSchema: IntegrationFacetJsonObject,
+    capabilities: IntegrationFacetJsonObject,
   })
   .strict();
-export type IntegrationFeatureDefinitionSummary = z.infer<
-  typeof IntegrationFeatureDefinitionSummary
->;
+export type IntegrationFacetDefinitionSummary = z.infer<typeof IntegrationFacetDefinitionSummary>;
 
 export const IntegrationDefinitionSummary = z
   .object({
@@ -8065,7 +8063,7 @@ export const IntegrationDefinitionSummary = z
         scopes: z.array(z.string().min(1).max(1024)).max(256),
       })
       .strict(),
-    facets: z.array(IntegrationFeatureDefinitionSummary).max(128),
+    facets: z.array(IntegrationFacetDefinitionSummary).max(128),
   })
   .strict();
 export type IntegrationDefinitionSummary = z.infer<typeof IntegrationDefinitionSummary>;
@@ -8082,16 +8080,16 @@ export const IntegrationInstanceKey = z
   .regex(/^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$/);
 export type IntegrationInstanceKey = z.infer<typeof IntegrationInstanceKey>;
 
-export const IntegrationFeatureBindingSummary = z
+export const IntegrationFacetBindingSummary = z
   .object({
     id: z.string().uuid(),
-    featureKey: IntegrationFeatureKey,
-    kind: IntegrationFeatureKind.exclude(["tools"]),
+    facetKey: IntegrationFacetKey,
+    kind: IntegrationFacetKind.exclude(["tools"]),
     bindingKey: IntegrationInstanceKey,
     displayName: z.string().min(1).max(200),
     connectionId: z.string().uuid().nullable(),
-    status: IntegrationFeatureStatus,
-    config: IntegrationFeatureJsonObject,
+    status: IntegrationFacetStatus,
+    config: IntegrationFacetJsonObject,
     version: z.number().int().positive(),
     hasCursor: z.boolean(),
     lastSuccessAt: z.string().datetime({ offset: true }).nullable(),
@@ -8100,70 +8098,68 @@ export const IntegrationFeatureBindingSummary = z
     updatedAt: z.string().datetime({ offset: true }),
   })
   .strict();
-export type IntegrationFeatureBindingSummary = z.infer<typeof IntegrationFeatureBindingSummary>;
+export type IntegrationFacetBindingSummary = z.infer<typeof IntegrationFacetBindingSummary>;
 
-export const IntegrationInstanceFeaturesResponse = z
+export const IntegrationInstanceFacetsResponse = z
   .object({
     capabilityId: z.string().min(1).max(512),
     instanceKey: IntegrationInstanceKey,
     providerDomain: z.string().min(1).max(253),
     connectionId: z.string().uuid().nullable(),
-    features: z
+    facets: z
       .array(
         z
           .object({
-            definition: IntegrationFeatureDefinitionSummary,
-            binding: IntegrationFeatureBindingSummary.nullable(),
+            definition: IntegrationFacetDefinitionSummary,
+            binding: IntegrationFacetBindingSummary.nullable(),
           })
           .strict(),
       )
       .max(128),
   })
   .strict();
-export type IntegrationInstanceFeaturesResponse = z.infer<
-  typeof IntegrationInstanceFeaturesResponse
->;
+export type IntegrationInstanceFacetsResponse = z.infer<typeof IntegrationInstanceFacetsResponse>;
 
-export const UpsertIntegrationFeatureRequest = z
+export const UpsertIntegrationFacetRequest = z
   .object({
     displayName: z.string().min(1).max(200),
-    config: IntegrationFeatureJsonObject.default({}),
+    config: IntegrationFacetJsonObject.default({}),
     expectedVersion: z.number().int().positive().optional(),
     idempotencyKey: z.string().uuid(),
   })
   .strict();
-export type UpsertIntegrationFeatureRequest = z.infer<typeof UpsertIntegrationFeatureRequest>;
+export type UpsertIntegrationFacetRequest = z.infer<typeof UpsertIntegrationFacetRequest>;
 
-export const MutateIntegrationFeatureRequest = z
+export const MutateIntegrationFacetRequest = z
   .object({
     expectedVersion: z.number().int().positive(),
     idempotencyKey: z.string().uuid(),
   })
   .strict();
-export type MutateIntegrationFeatureRequest = z.infer<typeof MutateIntegrationFeatureRequest>;
+export type MutateIntegrationFacetRequest = z.infer<typeof MutateIntegrationFacetRequest>;
 
-export const IntegrationFeatureMutationResult = z
+export const IntegrationFacetMutationResult = z
   .object({
     capabilityId: z.string().min(1).max(512),
     instanceKey: IntegrationInstanceKey,
-    featureKey: IntegrationFeatureKey,
+    facetKey: IntegrationFacetKey,
     status: z.enum(["configured", "paused", "active"]),
-    binding: IntegrationFeatureBindingSummary,
+    binding: IntegrationFacetBindingSummary,
   })
   .strict();
-export type IntegrationFeatureMutationResult = z.infer<typeof IntegrationFeatureMutationResult>;
+export type IntegrationFacetMutationResult = z.infer<typeof IntegrationFacetMutationResult>;
 
-export const IntegrationFeatureRemovalResult = z
+export const IntegrationFacetRemovalResult = z
   .object({
     capabilityId: z.string().min(1).max(512),
     instanceKey: IntegrationInstanceKey,
-    featureKey: IntegrationFeatureKey,
+    facetKey: IntegrationFacetKey,
     status: z.enum(["not_configured", "removed", "retained_by_other_owners"]),
-    binding: IntegrationFeatureBindingSummary.nullable(),
+    binding: IntegrationFacetBindingSummary.nullable(),
     remainingOwners: z.array(CapabilityComponentOwner),
   })
   .strict();
-export type IntegrationFeatureRemovalResult = z.infer<typeof IntegrationFeatureRemovalResult>;
+export type IntegrationFacetRemovalResult = z.infer<typeof IntegrationFacetRemovalResult>;
 
 export const IntegrationSource = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("definition"), definitionId: z.string().min(1).max(128) }).strict(),

@@ -39,15 +39,15 @@ import {
   MachineMetricsSeriesResponse as ContractMachineMetricsSeriesResponse,
   NewSessionDraft as ContractNewSessionDraft,
   InstallApiIntegrationRequest as ContractInstallApiIntegrationRequest,
-  IntegrationFeatureMutationResult as ContractIntegrationFeatureMutationResult,
-  IntegrationFeatureRemovalResult as ContractIntegrationFeatureRemovalResult,
-  IntegrationInstanceFeaturesResponse as ContractIntegrationInstanceFeaturesResponse,
-  MutateIntegrationFeatureRequest as ContractMutateIntegrationFeatureRequest,
+  IntegrationFacetMutationResult as ContractIntegrationFacetMutationResult,
+  IntegrationFacetRemovalResult as ContractIntegrationFacetRemovalResult,
+  IntegrationInstanceFacetsResponse as ContractIntegrationInstanceFacetsResponse,
+  MutateIntegrationFacetRequest as ContractMutateIntegrationFacetRequest,
   InstalledApiIntegration as ContractInstalledApiIntegration,
   ApiIntegrationUninstallPreview as ContractApiIntegrationUninstallPreview,
   UninstallApiIntegrationRequest as ContractUninstallApiIntegrationRequest,
   UninstallApiIntegrationResult as ContractUninstallApiIntegrationResult,
-  UpsertIntegrationFeatureRequest as ContractUpsertIntegrationFeatureRequest,
+  UpsertIntegrationFacetRequest as ContractUpsertIntegrationFacetRequest,
   CapabilityPack as ContractCapabilityPack,
   InstallPackRequest as ContractInstallPackRequest,
   PackInstallation as ContractPackInstallation,
@@ -158,15 +158,15 @@ import type {
   NewSessionDraft,
   NewSessionDraftOptions,
   InstallApiIntegrationRequest,
-  IntegrationFeatureMutationResult,
-  IntegrationFeatureRemovalResult,
-  IntegrationInstanceFeaturesResponse,
-  MutateIntegrationFeatureRequest,
+  IntegrationFacetMutationResult,
+  IntegrationFacetRemovalResult,
+  IntegrationInstanceFacetsResponse,
+  MutateIntegrationFacetRequest,
   InstalledApiIntegration,
   ApiIntegrationUninstallPreview,
   UninstallApiIntegrationRequest,
   UninstallApiIntegrationResult,
-  UpsertIntegrationFeatureRequest,
+  UpsertIntegrationFacetRequest,
   CapabilityPack,
   InstallPackRequest,
   PackInstallation,
@@ -945,32 +945,32 @@ describe("SDK / contracts parity", () => {
     expect(ContractUninstallApiIntegrationRequest.safeParse(uninstallRequest).success).toBe(true);
   });
 
-  test("generic Integration feature lifecycle shapes match the contracts", () => {
+  test("generic Integration facet lifecycle shapes match the contracts", () => {
     const acceptList = (
-      value: z.infer<typeof ContractIntegrationInstanceFeaturesResponse>,
-    ): IntegrationInstanceFeaturesResponse => value;
+      value: z.infer<typeof ContractIntegrationInstanceFacetsResponse>,
+    ): IntegrationInstanceFacetsResponse => value;
     const acceptMutation = (
-      value: z.infer<typeof ContractIntegrationFeatureMutationResult>,
-    ): IntegrationFeatureMutationResult => value;
+      value: z.infer<typeof ContractIntegrationFacetMutationResult>,
+    ): IntegrationFacetMutationResult => value;
     const acceptRemoval = (
-      value: z.infer<typeof ContractIntegrationFeatureRemovalResult>,
-    ): IntegrationFeatureRemovalResult => value;
+      value: z.infer<typeof ContractIntegrationFacetRemovalResult>,
+    ): IntegrationFacetRemovalResult => value;
     expect(
       [acceptList, acceptMutation, acceptRemoval].every((fn) => typeof fn === "function"),
     ).toBe(true);
 
-    const upsert: UpsertIntegrationFeatureRequest = {
+    const upsert: UpsertIntegrationFacetRequest = {
       displayName: "Finance inbox",
       config: { unreadOnly: true },
       expectedVersion: 2,
       idempotencyKey: "00000000-0000-4000-8000-000000000301",
     };
-    const mutation: MutateIntegrationFeatureRequest = {
+    const mutation: MutateIntegrationFacetRequest = {
       expectedVersion: 3,
       idempotencyKey: "00000000-0000-4000-8000-000000000302",
     };
-    expect(ContractUpsertIntegrationFeatureRequest.safeParse(upsert).success).toBe(true);
-    expect(ContractMutateIntegrationFeatureRequest.safeParse(mutation).success).toBe(true);
+    expect(ContractUpsertIntegrationFacetRequest.safeParse(upsert).success).toBe(true);
+    expect(ContractMutateIntegrationFacetRequest.safeParse(mutation).success).toBe(true);
   });
 
   test("SDK-built create-session requests parse under the contracts schema", () => {

@@ -10,8 +10,8 @@ import {
 } from "./capability-components";
 import { setSubjectRlsContext, withRlsContext, withWorkspaceRls, type Database } from "./database";
 import {
-  removeIntegrationFeatureBindingOwner,
-  removeIntegrationFeatureBindingOwnersForOwner,
+  removeIntegrationFacetBindingOwner,
+  removeIntegrationFacetBindingOwnersForOwner,
 } from "./integration-bindings";
 import * as schema from "./schema";
 
@@ -489,13 +489,13 @@ export async function finalizePluginPackageInstall(
           );
         }
         const ownedBindings = await tx
-          .select({ bindingId: schema.integrationFeatureBindingOwners.bindingId })
-          .from(schema.integrationFeatureBindingOwners)
+          .select({ bindingId: schema.integrationFacetBindingOwners.bindingId })
+          .from(schema.integrationFacetBindingOwners)
           .where(
             and(
-              eq(schema.integrationFeatureBindingOwners.workspaceId, input.workspaceId),
-              eq(schema.integrationFeatureBindingOwners.ownerKind, "plugin"),
-              eq(schema.integrationFeatureBindingOwners.ownerId, input.pluginInstallationId),
+              eq(schema.integrationFacetBindingOwners.workspaceId, input.workspaceId),
+              eq(schema.integrationFacetBindingOwners.ownerKind, "plugin"),
+              eq(schema.integrationFacetBindingOwners.ownerId, input.pluginInstallationId),
             ),
           );
         const retainedBindings = new Set(input.retainedBindingIds);
@@ -506,7 +506,7 @@ export async function finalizePluginPackageInstall(
               .filter((candidateId) => !retainedBindings.has(candidateId)),
           ),
         ]) {
-          await removeIntegrationFeatureBindingOwner(tx, {
+          await removeIntegrationFacetBindingOwner(tx, {
             workspaceId: input.workspaceId,
             bindingId,
             owner: { kind: "plugin", id: input.pluginInstallationId },
@@ -923,7 +923,7 @@ export async function uninstallPluginPackage(
           input.workspaceId,
           plugin.pluginInstallationId,
         );
-        await removeIntegrationFeatureBindingOwnersForOwner(tx, {
+        await removeIntegrationFacetBindingOwnersForOwner(tx, {
           workspaceId: input.workspaceId,
           owner: { kind: "plugin", id: plugin.pluginInstallationId },
         });

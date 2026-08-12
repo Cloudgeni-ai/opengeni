@@ -44,14 +44,14 @@ export interface IntegrationDefinition {
 }
 
 export interface IntegrationFacetDefinition {
-  readonly featureKey: string;
+  readonly facetKey: string;
   readonly kind: "knowledge_source" | "inbound_trigger" | "delivery_destination" | "identity_link";
   readonly configSchema: Readonly<Record<string, unknown>>;
   readonly capabilities: Readonly<Record<string, unknown>>;
 }
 
 const accountIdentityFacet = (provider: "google" | "microsoft"): IntegrationFacetDefinition => ({
-  featureKey: "account-identity",
+  facetKey: "account-identity",
   kind: "identity_link",
   configSchema: { type: "object", properties: {}, additionalProperties: false },
   capabilities: {
@@ -64,7 +64,7 @@ const accountIdentityFacet = (provider: "google" | "microsoft"): IntegrationFace
 const driveKnowledgeFacet = (
   provider: "google-drive" | "microsoft-onedrive",
 ): IntegrationFacetDefinition => ({
-  featureKey: "drive-content",
+  facetKey: "drive-content",
   kind: "knowledge_source",
   configSchema: {
     type: "object",
@@ -126,7 +126,7 @@ const mailboxFacets = (
   provider: "google-gmail" | "microsoft-outlook-mail",
 ): readonly IntegrationFacetDefinition[] => [
   {
-    featureKey: "mail-inbox",
+    facetKey: "mail-inbox",
     kind: "inbound_trigger",
     configSchema: {
       type: "object",
@@ -144,7 +144,7 @@ const mailboxFacets = (
     },
   },
   {
-    featureKey: "mail-delivery",
+    facetKey: "mail-delivery",
     kind: "delivery_destination",
     configSchema: {
       type: "object",
@@ -267,7 +267,7 @@ export const MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION: IntegrationDefin
   authentication: microsoftOAuth(["Calendars.ReadWrite"]),
   facets: [
     {
-      featureKey: "calendar-events",
+      facetKey: "calendar-events",
       kind: "inbound_trigger",
       configSchema: {
         type: "object",
@@ -285,7 +285,7 @@ export const MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION: IntegrationDefin
       },
     },
     {
-      featureKey: "calendar-delivery",
+      facetKey: "calendar-delivery",
       kind: "delivery_destination",
       configSchema: {
         type: "object",

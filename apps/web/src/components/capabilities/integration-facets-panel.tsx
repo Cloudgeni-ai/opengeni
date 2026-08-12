@@ -33,19 +33,19 @@ import { Select } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import type {
   ApiIntegrationInstallationSummary,
-  IntegrationFeatureBindingSummary,
-  IntegrationFeatureDefinitionSummary,
-  IntegrationInstanceFeaturesResponse,
+  IntegrationFacetBindingSummary,
+  IntegrationFacetDefinitionSummary,
+  IntegrationInstanceFacetsResponse,
 } from "@/types";
 
-type FeatureEntry = IntegrationInstanceFeaturesResponse["features"][number];
+type FacetEntry = IntegrationInstanceFacetsResponse["facets"][number];
 type FormValue = string | boolean;
-type FeatureFormState = Record<string, FormValue>;
+type FacetFormState = Record<string, FormValue>;
 type GoogleDriveDialogProps = {
   client: OpenGeniCoreClient;
   workspaceId: string;
   instance: ApiIntegrationInstallationSummary;
-  entry: FeatureEntry | null;
+  entry: FacetEntry | null;
   canManage: boolean;
   canManagePersonalDestination: boolean;
   canManageWorkspaceDestination: boolean;
@@ -56,7 +56,7 @@ type GoogleDriveDialogProps = {
 };
 
 const KIND_DETAILS: Record<
-  IntegrationFeatureDefinitionSummary["kind"],
+  IntegrationFacetDefinitionSummary["kind"],
   {
     label: string;
     description: string;
@@ -85,11 +85,11 @@ const KIND_DETAILS: Record<
   },
 };
 
-export function IntegrationFeaturesPanel({
+export function IntegrationFacetsPanel({
   client,
   workspaceId,
   instance,
-  featureCount,
+  facetCount,
   canManage,
   canManagePersonalDestination,
   canManageWorkspaceDestination,
@@ -99,7 +99,7 @@ export function IntegrationFeaturesPanel({
   client: OpenGeniCoreClient;
   workspaceId: string;
   instance: ApiIntegrationInstallationSummary;
-  featureCount: number;
+  facetCount: number;
   canManage: boolean;
   canManagePersonalDestination: boolean;
   canManageWorkspaceDestination: boolean;
@@ -107,14 +107,14 @@ export function IntegrationFeaturesPanel({
   GoogleDriveDialog: ComponentType<GoogleDriveDialogProps>;
 }) {
   const [open, setOpen] = useState(false);
-  const [data, setData] = useState<IntegrationInstanceFeaturesResponse | null>(null);
+  const [data, setData] = useState<IntegrationInstanceFacetsResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [busyFeatureKey, setBusyFeatureKey] = useState<string | null>(null);
-  const [editor, setEditor] = useState<FeatureEntry | null>(null);
-  const [googleDriveEditor, setGoogleDriveEditor] = useState<FeatureEntry | null>(null);
-  const [form, setForm] = useState<FeatureFormState>({});
-  const [removeTarget, setRemoveTarget] = useState<FeatureEntry | null>(null);
+  const [busyFacetKey, setBusyFacetKey] = useState<string | null>(null);
+  const [editor, setEditor] = useState<FacetEntry | null>(null);
+  const [googleDriveEditor, setGoogleDriveEditor] = useState<FacetEntry | null>(null);
+  const [form, setForm] = useState<FacetFormState>({});
+  const [removeTarget, setRemoveTarget] = useState<FacetEntry | null>(null);
   const loadSequence = useRef(0);
   const loadPromise = useRef<Promise<void> | null>(null);
 
@@ -135,7 +135,7 @@ export function IntegrationFeaturesPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  if (featureCount === 0) return null;
+  if (facetCount === 0) return null;
 
   async function load(): Promise<void> {
     if (loadPromise.current) return await loadPromise.current;
@@ -143,7 +143,7 @@ export function IntegrationFeaturesPanel({
     const pending = (async () => {
       setLoading(true);
       try {
-        const response = await client.listIntegrationFeatures(
+        const response = await client.listIntegrationFacets(
           workspaceId,
           instance.capabilityId,
           instance.instanceKey,
@@ -166,28 +166,28 @@ export function IntegrationFeaturesPanel({
     }
   }
 
-  function edit(entry: FeatureEntry): void {
+  function edit(entry: FacetEntry): void {
     if (isGoogleDriveKnowledgeSource(entry)) {
       setGoogleDriveEditor(entry);
       return;
     }
     setEditor(entry);
-    setForm(featureFormState(entry.definition, entry.binding));
+    setForm(facetFormState(entry.definition, entry.binding));
   }
 
   async function save(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     if (!editor) return;
-    setBusyFeatureKey(editor.definition.featureKey);
+    setBusyFacetKey(editor.definition.facetKey);
     try {
-      const configured = await client.configureIntegrationFeature(
+      const configured = await client.configureIntegrationFacet(
         workspaceId,
         data!.capabilityId,
         data!.instanceKey,
-        editor.definition.featureKey,
+        editor.definition.facetKey,
         {
-          displayName: `${instance.displayName} — ${featureTitle(editor.definition)}`,
-          config: featureConfigFromForm(editor.definition, form),
+          displayName: `${instance.displayName} — ${facetTitle(editor.definition)}`,
+          config: facetConfigFromForm(editor.definition, form),
           ...(editor.binding ? { expectedVersion: editor.binding.version } : {}),
           idempotencyKey: crypto.randomUUID(),
         },
@@ -199,8 +199,8 @@ export function IntegrationFeaturesPanel({
         current
           ? {
               ...current,
-              features: current.features.map((entry) =>
-                entry.definition.featureKey === editor.definition.featureKey
+              facets: current.facets.map((entry) =>
+                entry.definition.facetKey === editor.definition.facetKey
                   ? { ...entry, binding: configured.binding }
                   : entry,
               ),
@@ -208,66 +208,66 @@ export function IntegrationFeaturesPanel({
           : current,
       );
       setEditor(null);
-      toast.success(`${featureTitle(editor.definition)} configured`, {
+      toast.success(`${facetTitle(editor.definition)} configured`, {
         description: `This setting applies only to ${instance.displayName}.`,
       });
     } catch (saveError) {
-      toast.error("Couldn't save this feature", {
+      toast.error("Couldn't save this facet", {
         description: saveError instanceof Error ? saveError.message : String(saveError),
       });
     } finally {
-      setBusyFeatureKey(null);
+      setBusyFacetKey(null);
     }
   }
 
-  async function changeLifecycle(entry: FeatureEntry, action: "pause" | "resume"): Promise<void> {
+  async function changeLifecycle(entry: FacetEntry, action: "pause" | "resume"): Promise<void> {
     if (!entry.binding) return;
-    setBusyFeatureKey(entry.definition.featureKey);
+    setBusyFacetKey(entry.definition.facetKey);
     try {
       const request = {
         expectedVersion: entry.binding.version,
         idempotencyKey: crypto.randomUUID(),
       };
       if (action === "pause") {
-        await client.pauseIntegrationFeature(
+        await client.pauseIntegrationFacet(
           workspaceId,
           data!.capabilityId,
           data!.instanceKey,
-          entry.definition.featureKey,
+          entry.definition.facetKey,
           request,
         );
       } else {
-        await client.resumeIntegrationFeature(
+        await client.resumeIntegrationFacet(
           workspaceId,
           data!.capabilityId,
           data!.instanceKey,
-          entry.definition.featureKey,
+          entry.definition.facetKey,
           request,
         );
       }
       await load();
       toast.success(
-        `${featureTitle(entry.definition)} ${action === "pause" ? "paused" : "resumed"}`,
+        `${facetTitle(entry.definition)} ${action === "pause" ? "paused" : "resumed"}`,
       );
     } catch (lifecycleError) {
-      toast.error(`Couldn't ${action} this feature`, {
+      toast.error(`Couldn't ${action} this facet`, {
         description:
           lifecycleError instanceof Error ? lifecycleError.message : String(lifecycleError),
       });
     } finally {
-      setBusyFeatureKey(null);
+      setBusyFacetKey(null);
     }
   }
 
   async function remove(): Promise<boolean> {
     if (!removeTarget?.binding || !data) return false;
-    setBusyFeatureKey(removeTarget.definition.featureKey);
+    setBusyFacetKey(removeTarget.definition.facetKey);
     try {
-      await client.removeIntegrationFeature(
+      await client.removeIntegrationFacet(
         workspaceId,
         data.capabilityId,
         data.instanceKey,
-        removeTarget.definition.featureKey,
+        removeTarget.definition.facetKey,
         {
           expectedVersion: removeTarget.binding.version,
           idempotencyKey: crypto.randomUUID(),
@@ -275,22 +275,22 @@ export function IntegrationFeaturesPanel({
       );
       setRemoveTarget(null);
       await load();
-      toast.success(`${featureTitle(removeTarget.definition)} removed`, {
+      toast.success(`${facetTitle(removeTarget.definition)} removed`, {
         description: `${instance.displayName} and its Connection remain intact.`,
       });
       return true;
     } catch (removeError) {
-      toast.error("Couldn't remove this feature", {
+      toast.error("Couldn't remove this facet", {
         description: removeError instanceof Error ? removeError.message : String(removeError),
       });
       return false;
     } finally {
-      setBusyFeatureKey(null);
+      setBusyFacetKey(null);
     }
   }
 
   const activeCount =
-    data?.features.filter((entry) => entry.binding?.status === "active").length ?? 0;
+    data?.facets.filter((entry) => entry.binding?.status === "active").length ?? 0;
 
   return (
     <>
@@ -301,14 +301,14 @@ export function IntegrationFeaturesPanel({
             variant="ghost"
             size="xs"
             className="mt-1 w-full justify-between"
-            aria-label={`Manage features for ${instance.displayName}`}
+            aria-label={`Manage facets for ${instance.displayName}`}
           >
             <span className="flex items-center gap-1.5">
               <SlidersHorizontalIcon />
-              Features
+              Facets
               {data ? (
                 <span className="text-fg-subtle">
-                  {activeCount}/{data.features.length}
+                  {activeCount}/{data.facets.length}
                 </span>
               ) : null}
             </span>
@@ -322,7 +322,7 @@ export function IntegrationFeaturesPanel({
         <CollapsibleContent>
           <div
             className="mt-2 grid gap-2 border-t border-border/70 pt-3"
-            data-integration-features={instance.instanceKey}
+            data-integration-facets={instance.instanceKey}
           >
             {error ? (
               <div className="rounded-lg border border-border bg-surface p-3">
@@ -333,11 +333,11 @@ export function IntegrationFeaturesPanel({
                 </Button>
               </div>
             ) : data ? (
-              data.features.map((entry) => (
-                <FeatureRow
-                  key={entry.definition.featureKey}
+              data.facets.map((entry) => (
+                <FacetRow
+                  key={entry.definition.facetKey}
                   entry={entry}
-                  busy={busyFeatureKey === entry.definition.featureKey}
+                  busy={busyFacetKey === entry.definition.facetKey}
                   canManage={canManage}
                   onEdit={() => edit(entry)}
                   onPause={() => void changeLifecycle(entry, "pause")}
@@ -346,16 +346,16 @@ export function IntegrationFeaturesPanel({
                 />
               ))
             ) : loading ? (
-              <p className="py-3 text-center text-2xs text-fg-subtle">Loading features…</p>
+              <p className="py-3 text-center text-2xs text-fg-subtle">Loading facets…</p>
             ) : null}
           </div>
         </CollapsibleContent>
       </Collapsible>
 
-      <FeatureEditorDialog
+      <FacetEditorDialog
         entry={editor}
         form={form}
-        busy={editor ? busyFeatureKey === editor.definition.featureKey : false}
+        busy={editor ? busyFacetKey === editor.definition.facetKey : false}
         onFormChange={(key, value) => setForm((current) => ({ ...current, [key]: value }))}
         onClose={() => setEditor(null)}
         onSubmit={save}
@@ -373,8 +373,8 @@ export function IntegrationFeaturesPanel({
           canManageOrganizationDestination={canManageOrganizationDestination}
           onClose={() => setGoogleDriveEditor(null)}
           onBusyChange={(busy) =>
-            setBusyFeatureKey(
-              busy && googleDriveEditor ? googleDriveEditor.definition.featureKey : null,
+            setBusyFacetKey(
+              busy && googleDriveEditor ? googleDriveEditor.definition.facetKey : null,
             )
           }
           onSaved={load}
@@ -385,10 +385,10 @@ export function IntegrationFeaturesPanel({
         open={removeTarget !== null}
         onOpenChange={(next) => !next && setRemoveTarget(null)}
         title={
-          removeTarget ? `Remove ${featureTitle(removeTarget.definition)}?` : "Remove feature?"
+          removeTarget ? `Remove ${facetTitle(removeTarget.definition)}?` : "Remove facet?"
         }
-        description={`This removes only this feature from ${instance.displayName}. The account, Connection, tools, and sibling features remain intact.`}
-        confirmLabel="Remove feature"
+        description={`This removes only this facet from ${instance.displayName}. The account, Connection, tools, and sibling facets remain intact.`}
+        confirmLabel="Remove facet"
         destructive
         onConfirm={remove}
       />
@@ -396,7 +396,7 @@ export function IntegrationFeaturesPanel({
   );
 }
 
-function FeatureRow({
+function FacetRow({
   entry,
   busy,
   canManage,
@@ -405,7 +405,7 @@ function FeatureRow({
   onResume,
   onRemove,
 }: {
-  entry: FeatureEntry;
+  entry: FacetEntry;
   busy: boolean;
   canManage: boolean;
   onEdit: () => void;
@@ -420,7 +420,7 @@ function FeatureRow({
   return (
     <article
       className="rounded-lg border border-border bg-bg p-3"
-      data-integration-feature={entry.definition.featureKey}
+      data-integration-facet={entry.definition.facetKey}
     >
       <div className="flex items-start gap-2.5">
         <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-brand/5 text-brand">
@@ -428,8 +428,8 @@ function FeatureRow({
         </span>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-1.5">
-            <p className="text-xs font-semibold text-fg">{featureTitle(entry.definition)}</p>
-            <FeatureStatusBadge binding={binding} />
+            <p className="text-xs font-semibold text-fg">{facetTitle(entry.definition)}</p>
+            <FacetStatusBadge binding={binding} />
           </div>
           <p className="mt-1 text-2xs leading-4 text-fg-muted">{detail.description}</p>
         </div>
@@ -485,7 +485,7 @@ function FeatureRow({
   );
 }
 
-function FeatureStatusBadge({ binding }: { binding: IntegrationFeatureBindingSummary | null }) {
+function FacetStatusBadge({ binding }: { binding: IntegrationFacetBindingSummary | null }) {
   const status = binding?.status ?? "not_configured";
   const label =
     status === "active"
@@ -512,7 +512,7 @@ function FeatureStatusBadge({ binding }: { binding: IntegrationFeatureBindingSum
   );
 }
 
-function FeatureEditorDialog({
+function FacetEditorDialog({
   entry,
   form,
   busy,
@@ -520,25 +520,25 @@ function FeatureEditorDialog({
   onClose,
   onSubmit,
 }: {
-  entry: FeatureEntry | null;
-  form: FeatureFormState;
+  entry: FacetEntry | null;
+  form: FacetFormState;
   busy: boolean;
   onFormChange: (key: string, value: FormValue) => void;
   onClose: () => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
-  const fields = useMemo(() => (entry ? featureFields(entry.definition) : []), [entry]);
+  const fields = useMemo(() => (entry ? facetFields(entry.definition) : []), [entry]);
   const unsupportedRequiredFields = useMemo(
-    () => (entry ? unsupportedRequiredFeatureFields(entry.definition) : []),
+    () => (entry ? unsupportedRequiredFacetFields(entry.definition) : []),
     [entry],
   );
   return (
     <Dialog open={entry !== null} onOpenChange={(next) => !next && !busy && onClose()}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>{entry ? featureTitle(entry.definition) : "Configure feature"}</DialogTitle>
+          <DialogTitle>{entry ? facetTitle(entry.definition) : "Configure facet"}</DialogTitle>
           <DialogDescription>
-            {entry ? KIND_DETAILS[entry.definition.kind].description : "Configure this feature."}
+            {entry ? KIND_DETAILS[entry.definition.kind].description : "Configure this facet."}
           </DialogDescription>
         </DialogHeader>
         {entry ? (
@@ -552,12 +552,12 @@ function FeatureEditorDialog({
                 </div>
               ) : (
                 <div className="rounded-lg border border-brand/20 bg-brand/5 p-4 text-sm leading-6 text-fg-muted">
-                  This feature uses the connected account as-is. No additional setup is required.
+                  This facet uses the connected account as-is. No additional setup is required.
                 </div>
               )
             ) : (
               fields.map((field) => (
-                <FeatureField
+                <FacetField
                   key={field.key}
                   field={field}
                   value={form[field.key]}
@@ -584,7 +584,7 @@ function FeatureEditorDialog({
                 {busy ? <Loader2Icon className="animate-spin" /> : null}
                 {entry.binding && entry.binding.status !== "disabled"
                   ? "Save changes"
-                  : "Enable feature"}
+                  : "Enable facet"}
               </Button>
             </DialogFooter>
           </form>
@@ -594,7 +594,7 @@ function FeatureEditorDialog({
   );
 }
 
-type FeatureFieldDefinition = {
+type FacetFieldDefinition = {
   key: string;
   label: string;
   type: "string" | "boolean" | "integer" | "number";
@@ -604,16 +604,16 @@ type FeatureFieldDefinition = {
   max?: number;
 };
 
-function FeatureField({
+function FacetField({
   field,
   value,
   onChange,
 }: {
-  field: FeatureFieldDefinition;
+  field: FacetFieldDefinition;
   value: FormValue | undefined;
   onChange: (value: FormValue) => void;
 }) {
-  const id = `integration-feature-${field.key}`;
+  const id = `integration-facet-${field.key}`;
   if (field.type === "boolean") {
     return (
       <label htmlFor={id} className="flex items-start gap-3 rounded-lg border border-border p-3">
@@ -665,9 +665,9 @@ function FeatureField({
   );
 }
 
-export function featureFields(
-  definition: IntegrationFeatureDefinitionSummary,
-): FeatureFieldDefinition[] {
+export function facetFields(
+  definition: IntegrationFacetDefinitionSummary,
+): FacetFieldDefinition[] {
   const schema = definition.configSchema;
   const properties = objectValue(schema.properties);
   const required = new Set(
@@ -675,7 +675,7 @@ export function featureFields(
       ? schema.required.filter((entry): entry is string => typeof entry === "string")
       : [],
   );
-  return Object.entries(properties).flatMap(([key, raw]): FeatureFieldDefinition[] => {
+  return Object.entries(properties).flatMap(([key, raw]): FacetFieldDefinition[] => {
     const property = objectValue(raw);
     const type = property.type;
     if (type !== "string" && type !== "boolean" && type !== "integer" && type !== "number") {
@@ -697,22 +697,22 @@ export function featureFields(
   });
 }
 
-export function unsupportedRequiredFeatureFields(
-  definition: IntegrationFeatureDefinitionSummary,
+export function unsupportedRequiredFacetFields(
+  definition: IntegrationFacetDefinitionSummary,
 ): string[] {
   const schema = definition.configSchema;
   const required = Array.isArray(schema.required)
     ? schema.required.filter((entry): entry is string => typeof entry === "string")
     : [];
-  const supported = new Set(featureFields(definition).map((field) => field.key));
+  const supported = new Set(facetFields(definition).map((field) => field.key));
   return required.filter((key) => !supported.has(key));
 }
 
-export function featureFormState(
-  definition: IntegrationFeatureDefinitionSummary,
-  binding: IntegrationFeatureBindingSummary | null,
-): FeatureFormState {
-  const fields = featureFields(definition);
+export function facetFormState(
+  definition: IntegrationFacetDefinitionSummary,
+  binding: IntegrationFacetBindingSummary | null,
+): FacetFormState {
+  const fields = facetFields(definition);
   const config = binding?.config ?? {};
   return Object.fromEntries(
     fields.map((field) => {
@@ -725,12 +725,12 @@ export function featureFormState(
   );
 }
 
-export function featureConfigFromForm(
-  definition: IntegrationFeatureDefinitionSummary,
-  form: FeatureFormState,
+export function facetConfigFromForm(
+  definition: IntegrationFacetDefinitionSummary,
+  form: FacetFormState,
 ): Record<string, unknown> {
   const config: Record<string, unknown> = {};
-  for (const field of featureFields(definition)) {
+  for (const field of facetFields(definition)) {
     const value = form[field.key];
     if (field.type === "boolean") {
       config[field.key] = value === true;
@@ -743,16 +743,16 @@ export function featureConfigFromForm(
 }
 
 function requiredFieldsComplete(
-  definition: IntegrationFeatureDefinitionSummary,
-  form: FeatureFormState,
+  definition: IntegrationFacetDefinitionSummary,
+  form: FacetFormState,
 ): boolean {
-  return featureFields(definition).every(
+  return facetFields(definition).every(
     (field) => !field.required || field.type === "boolean" || String(form[field.key] ?? "").trim(),
   );
 }
 
-function featureTitle(definition: IntegrationFeatureDefinitionSummary): string {
-  const specific = humanize(definition.featureKey);
+function facetTitle(definition: IntegrationFacetDefinitionSummary): string {
+  const specific = humanize(definition.facetKey);
   const generic = KIND_DETAILS[definition.kind].label;
   return specific.toLowerCase() === generic.toLowerCase() ? generic : specific;
 }
@@ -771,9 +771,9 @@ function objectValue(value: unknown): Record<string, unknown> {
     : {};
 }
 
-function isGoogleDriveKnowledgeSource(entry: FeatureEntry): boolean {
+function isGoogleDriveKnowledgeSource(entry: FacetEntry): boolean {
   return (
-    entry.definition.featureKey === "drive-content" &&
+    entry.definition.facetKey === "drive-content" &&
     entry.definition.kind === "knowledge_source" &&
     entry.definition.capabilities.provider === "google-drive"
   );

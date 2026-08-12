@@ -4566,10 +4566,10 @@ export type CapabilityPackComponentReference =
     }
   | {
       key: string;
-      kind: "feature";
+      kind: "facet";
       capabilityId: string;
       instanceKey: string;
-      featureKey: string;
+      facetKey: string;
       bindingKey: string;
       configDigest: string;
       required: boolean;
@@ -4655,10 +4655,10 @@ export type RegisterCapabilityPackRequest = {
           }
         | {
             key: string;
-            kind: "feature";
+            kind: "facet";
             capabilityId: string;
             instanceKey: string;
-            featureKey: string;
+            facetKey: string;
             bindingKey: string;
             configDigest: string;
             required?: boolean | undefined;
@@ -4753,7 +4753,7 @@ export type PackComponentResolutionStatus = "ready" | "missing" | "mismatch";
 
 export type PackComponentResolution = {
   key: string;
-  kind: "plugin" | "skill" | "integration" | "feature" | "inline_skill";
+  kind: "plugin" | "skill" | "integration" | "facet" | "inline_skill";
   capabilityId: string;
   required: boolean;
   status: PackComponentResolutionStatus;
@@ -4808,7 +4808,7 @@ export type PackUninstallPreview = {
   installationVersion: number | null;
   components: Array<{
     key: string;
-    kind: "plugin" | "skill" | "integration" | "feature" | "inline_skill";
+    kind: "plugin" | "skill" | "integration" | "facet" | "inline_skill";
     capabilityId: string;
     retainedByOtherOwners: boolean;
   }>;
@@ -5085,30 +5085,30 @@ export type UninstallSkillResult = {
 export type ApiIntegrationProtocol = "openapi" | "graphql";
 export type IntegrationDefinitionProvenance = "curated" | "workspace";
 
-export type IntegrationFeatureKind =
+export type IntegrationFacetKind =
   | "tools"
   | "knowledge_source"
   | "inbound_trigger"
   | "delivery_destination"
   | "identity_link";
 
-export type IntegrationFeatureStatus = "active" | "paused" | "needs_attention" | "disabled";
+export type IntegrationFacetStatus = "active" | "paused" | "needs_attention" | "disabled";
 
-export type IntegrationFeatureDefinitionSummary = {
-  featureKey: string;
-  kind: Exclude<IntegrationFeatureKind, "tools">;
+export type IntegrationFacetDefinitionSummary = {
+  facetKey: string;
+  kind: Exclude<IntegrationFacetKind, "tools">;
   configSchema: Record<string, unknown>;
   capabilities: Record<string, unknown>;
 };
 
-export type IntegrationFeatureBindingSummary = {
+export type IntegrationFacetBindingSummary = {
   id: string;
-  featureKey: string;
-  kind: Exclude<IntegrationFeatureKind, "tools">;
+  facetKey: string;
+  kind: Exclude<IntegrationFacetKind, "tools">;
   bindingKey: string;
   displayName: string;
   connectionId: string | null;
-  status: IntegrationFeatureStatus;
+  status: IntegrationFacetStatus;
   config: Record<string, unknown>;
   version: number;
   hasCursor: boolean;
@@ -5118,43 +5118,43 @@ export type IntegrationFeatureBindingSummary = {
   updatedAt: string;
 };
 
-export type IntegrationInstanceFeaturesResponse = {
+export type IntegrationInstanceFacetsResponse = {
   capabilityId: string;
   instanceKey: string;
   providerDomain: string;
   connectionId: string | null;
-  features: {
-    definition: IntegrationFeatureDefinitionSummary;
-    binding: IntegrationFeatureBindingSummary | null;
+  facets: {
+    definition: IntegrationFacetDefinitionSummary;
+    binding: IntegrationFacetBindingSummary | null;
   }[];
 };
 
-export type UpsertIntegrationFeatureRequest = {
+export type UpsertIntegrationFacetRequest = {
   displayName: string;
   config?: Record<string, unknown> | undefined;
   expectedVersion?: number | undefined;
   idempotencyKey: string;
 };
 
-export type MutateIntegrationFeatureRequest = {
+export type MutateIntegrationFacetRequest = {
   expectedVersion: number;
   idempotencyKey: string;
 };
 
-export type IntegrationFeatureMutationResult = {
+export type IntegrationFacetMutationResult = {
   capabilityId: string;
   instanceKey: string;
-  featureKey: string;
+  facetKey: string;
   status: "configured" | "paused" | "active";
-  binding: IntegrationFeatureBindingSummary;
+  binding: IntegrationFacetBindingSummary;
 };
 
-export type IntegrationFeatureRemovalResult = {
+export type IntegrationFacetRemovalResult = {
   capabilityId: string;
   instanceKey: string;
-  featureKey: string;
+  facetKey: string;
   status: "not_configured" | "removed" | "retained_by_other_owners";
-  binding: IntegrationFeatureBindingSummary | null;
+  binding: IntegrationFacetBindingSummary | null;
   remainingOwners: CapabilityComponentOwner[];
 };
 
@@ -5171,7 +5171,7 @@ export type IntegrationDefinitionSummary = {
     kind: "oauth2";
     scopes: string[];
   };
-  facets: IntegrationFeatureDefinitionSummary[];
+  facets: IntegrationFacetDefinitionSummary[];
 };
 
 export type ListIntegrationDefinitionsResponse = {

@@ -158,13 +158,13 @@ The owning endpoints are:
 - `POST /v1/workspaces/:workspaceId/integrations/install`
 - `GET /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/uninstall-preview`
 - `DELETE /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey`
-- `GET /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features`
-- `GET /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey/browse`
-- `PUT /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey/source`
-- `PUT /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey`
-- `POST /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey/pause`
-- `POST /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey/resume`
-- `DELETE /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey`
+- `GET /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets`
+- `GET /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey/browse`
+- `PUT /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey/source`
+- `PUT /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey`
+- `POST /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey/pause`
+- `POST /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey/resume`
+- `DELETE /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey`
 
 One immutable Integration definition may have many active instances. Each
 instance has a stable `instanceKey`, human-editable display name, collision-free
@@ -174,7 +174,7 @@ resource-scoped configurations without copying the schema or overwriting a
 sibling. Reconnect and uninstall operate on the exact instance; the underlying
 Connection and shared definition survive unless separately removed.
 
-Provider adapters may also publish immutable generic feature definitions for
+Provider adapters may also publish immutable generic facet definitions for
 Knowledge Sources, Inbound Triggers, Delivery Destinations, and Identity Links.
 Google Drive and OneDrive expose drive-content Knowledge Sources; Gmail and
 Outlook expose mail or calendar trigger/delivery facets and connected-account
@@ -195,7 +195,7 @@ plus a bound document destination. Browse and save resolve the exact named
 Integration instance before loading its Connection. Save re-reads every source
 from Google, rejects stale client labels/types/drive identities, binds the
 organization/workspace/personal destination authority, and writes only the
-feature binding. The generic feature `PUT` rejects this provider-owned facet;
+facet binding. The generic facet `PUT` rejects this provider-owned facet;
 only the provider-specific `/source` route may persist its config, so a
 schema-valid payload cannot bypass Google metadata checks or forge destination
 authority. A sibling Google Drive instance—whether it uses another Google
@@ -205,7 +205,7 @@ array fields unless a provider-specific flow owns them, so OneDrive and future
 rich schemas cannot be submitted as silently incomplete primitive config.
 
 The Definition inventory returns only safe public metadata (id, label, provider
-family/domain, protocol, summary, requested scope names, and immutable feature
+family/domain, protocol, summary, requested scope names, and immutable facet
 schemas/capability facts). Deployment OAuth client identifiers, secrets, and
 provider cursors never cross this boundary. `/capabilities`
 renders that inventory as one service card per immutable definition and one

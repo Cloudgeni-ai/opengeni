@@ -22,9 +22,9 @@ import {
   getApiIntegrationUninstallPreview,
   getConnectionMetadata,
   installApiIntegration,
-  IntegrationFeatureBindingOwnershipConflictError,
-  IntegrationFeatureBindingVersionConflictError,
-  IntegrationFeatureBindingVersionRequiredError,
+  IntegrationFacetBindingOwnershipConflictError,
+  IntegrationFacetBindingVersionConflictError,
+  IntegrationFacetBindingVersionRequiredError,
   listInstalledApiIntegrations,
   uninstallApiIntegration,
   type ConnectionMetadataWithVerification,
@@ -71,7 +71,7 @@ export function registerApiIntegrationRoutes(
             scopes: [...definition.authentication.scopes],
           },
           facets: definition.facets.map((facet) => ({
-            featureKey: facet.featureKey,
+            facetKey: facet.facetKey,
             kind: facet.kind,
             configSchema: { ...facet.configSchema },
             capabilities: { ...facet.capabilities },
@@ -213,7 +213,7 @@ export function registerApiIntegrationRoutes(
             ownership:
               resolved.preview.connectionOwnership === "personal" ? "subject" : "workspace",
             ...(payload.allowedTools ? { allowedTools: payload.allowedTools } : {}),
-            featureDefinitions: integrationFacetDefinitions(resolved.preview.definitionId),
+            facetDefinitions: integrationFacetDefinitions(resolved.preview.definitionId),
             revision: resolved.revision,
           }),
         ),
@@ -221,9 +221,9 @@ export function registerApiIntegrationRoutes(
       );
     } catch (error) {
       if (
-        error instanceof IntegrationFeatureBindingVersionConflictError ||
-        error instanceof IntegrationFeatureBindingVersionRequiredError ||
-        error instanceof IntegrationFeatureBindingOwnershipConflictError
+        error instanceof IntegrationFacetBindingVersionConflictError ||
+        error instanceof IntegrationFacetBindingVersionRequiredError ||
+        error instanceof IntegrationFacetBindingOwnershipConflictError
       ) {
         throw new HTTPException(409, {
           message:
@@ -278,7 +278,7 @@ export function registerApiIntegrationRoutes(
       } catch (error) {
         if (
           error instanceof ApiIntegrationInstallationVersionConflictError ||
-          error instanceof IntegrationFeatureBindingVersionConflictError
+          error instanceof IntegrationFacetBindingVersionConflictError
         ) {
           throw new HTTPException(409, {
             message:

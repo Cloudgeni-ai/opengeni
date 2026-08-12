@@ -230,23 +230,23 @@ describe("custom API control center browser acceptance", () => {
       await openCapabilities(page);
       const gmail = page.locator('[data-integration-instance="account-finance"]');
       await expectText(gmail, "Gmail — Finance");
-      await gmail.getByRole("button", { name: "Manage features for Gmail — Finance" }).click();
-      await expectText(page.locator('[data-integration-features="account-finance"]'), "Mail inbox");
+      await gmail.getByRole("button", { name: "Manage facets for Gmail — Finance" }).click();
+      await expectText(page.locator('[data-integration-facets="account-finance"]'), "Mail inbox");
       await expectText(
-        page.locator('[data-integration-features="account-finance"]'),
+        page.locator('[data-integration-facets="account-finance"]'),
         "Mail delivery",
       );
       await expectText(
-        page.locator('[data-integration-features="account-finance"]'),
+        page.locator('[data-integration-facets="account-finance"]'),
         "Account identity",
       );
 
-      const inbox = page.locator('[data-integration-feature="mail-inbox"]');
+      const inbox = page.locator('[data-integration-facet="mail-inbox"]');
       await inbox.getByRole("button", { name: "Configure" }).click();
       const dialog = page.getByRole("dialog");
       await dialog.getByLabel("Folder").fill("INBOX");
       await dialog.getByLabel("Unread Only").check();
-      await dialog.getByRole("button", { name: "Enable feature" }).click();
+      await dialog.getByRole("button", { name: "Enable facet" }).click();
       await expectText(inbox, "Active");
       expect(JSON.stringify(state.mailInboxBinding)).not.toContain("history_id");
 
@@ -256,7 +256,7 @@ describe("custom API control center browser acceptance", () => {
         page,
         '[aria-labelledby="integration-control-center-heading"]',
       );
-      await page.screenshot({ path: `${evidenceDir}pass-6-gmail-features.png`, fullPage: true });
+      await page.screenshot({ path: `${evidenceDir}pass-6-gmail-facets.png`, fullPage: true });
     } finally {
       await context.close();
     }
@@ -361,11 +361,11 @@ async function installApi(page: Page, state: UiState): Promise<void> {
     }
     if (
       request.method() === "GET" &&
-      url.pathname.endsWith("/integrations/api%3Agoogle-gmail/instances/account-finance/features")
+      url.pathname.endsWith("/integrations/api%3Agoogle-gmail/instances/account-finance/facets")
     ) {
       return json(gmailFeatures(state));
     }
-    if (url.pathname.endsWith("/features/mail-inbox")) {
+    if (url.pathname.endsWith("/facets/mail-inbox")) {
       if (request.method() === "PUT") {
         const body = request.postDataJSON() as {
           displayName: string;
@@ -379,7 +379,7 @@ async function installApi(page: Page, state: UiState): Promise<void> {
         return json({
           capabilityId: "api:google-gmail",
           instanceKey: "account-finance",
-          featureKey: "mail-inbox",
+          facetKey: "mail-inbox",
           status: "configured",
           binding: state.mailInboxBinding,
         });
@@ -395,14 +395,14 @@ async function installApi(page: Page, state: UiState): Promise<void> {
         return json({
           capabilityId: "api:google-gmail",
           instanceKey: "account-finance",
-          featureKey: "mail-inbox",
+          facetKey: "mail-inbox",
           status: "removed",
           binding: state.mailInboxBinding,
           remainingOwners: [],
         });
       }
     }
-    if (request.method() === "POST" && url.pathname.endsWith("/features/mail-inbox/pause")) {
+    if (request.method() === "POST" && url.pathname.endsWith("/facets/mail-inbox/pause")) {
       state.mailInboxBinding = {
         ...state.mailInboxBinding!,
         status: "paused",
@@ -411,12 +411,12 @@ async function installApi(page: Page, state: UiState): Promise<void> {
       return json({
         capabilityId: "api:google-gmail",
         instanceKey: "account-finance",
-        featureKey: "mail-inbox",
+        facetKey: "mail-inbox",
         status: "paused",
         binding: state.mailInboxBinding,
       });
     }
-    if (request.method() === "POST" && url.pathname.endsWith("/features/mail-inbox/resume")) {
+    if (request.method() === "POST" && url.pathname.endsWith("/facets/mail-inbox/resume")) {
       state.mailInboxBinding = {
         ...state.mailInboxBinding!,
         status: "active",
@@ -425,7 +425,7 @@ async function installApi(page: Page, state: UiState): Promise<void> {
       return json({
         capabilityId: "api:google-gmail",
         instanceKey: "account-finance",
-        featureKey: "mail-inbox",
+        facetKey: "mail-inbox",
         status: "active",
         binding: state.mailInboxBinding,
       });
@@ -510,7 +510,7 @@ function integrationDefinitions() {
     protocol: "openapi",
     provider: { id: providerId, domain: providerDomain },
     authentication: { kind: "oauth2", scopes: ["read"] },
-    facets: id === "google-gmail" ? gmailFeatureDefinitions() : [],
+    facets: id === "google-gmail" ? gmailFacetDefinitions() : [],
   }));
 }
 
@@ -598,10 +598,10 @@ function instances(dense: boolean) {
   return values;
 }
 
-function gmailFeatureDefinitions() {
+function gmailFacetDefinitions() {
   return [
     {
-      featureKey: "mail-inbox",
+      facetKey: "mail-inbox",
       kind: "inbound_trigger",
       configSchema: {
         type: "object",
@@ -614,7 +614,7 @@ function gmailFeatureDefinitions() {
       capabilities: { provider: "google-gmail", connectionRequired: true, cursor: "history_id" },
     },
     {
-      featureKey: "mail-delivery",
+      facetKey: "mail-delivery",
       kind: "delivery_destination",
       configSchema: {
         type: "object",
@@ -624,7 +624,7 @@ function gmailFeatureDefinitions() {
       capabilities: { provider: "google-gmail", connectionRequired: true, delivery: "email" },
     },
     {
-      featureKey: "account-identity",
+      facetKey: "account-identity",
       kind: "identity_link",
       configSchema: { type: "object", properties: {}, additionalProperties: false },
       capabilities: { provider: "google", connectionRequired: true },
@@ -638,9 +638,9 @@ function gmailFeatures(state: UiState) {
     instanceKey: "account-finance",
     providerDomain: "gmail.googleapis.com",
     connectionId: gmailConnectionId,
-    features: gmailFeatureDefinitions().map((definition) => ({
+    facets: gmailFacetDefinitions().map((definition) => ({
       definition,
-      binding: definition.featureKey === "mail-inbox" ? state.mailInboxBinding : null,
+      binding: definition.facetKey === "mail-inbox" ? state.mailInboxBinding : null,
     })),
   };
 }
@@ -652,7 +652,7 @@ function mailInboxBinding(
 ) {
   return {
     id: "00000000-0000-4000-8000-000000000622",
-    featureKey: "mail-inbox",
+    facetKey: "mail-inbox",
     kind: "inbound_trigger" as const,
     bindingKey: "account-finance",
     displayName: "Gmail — Finance — Mail inbox",

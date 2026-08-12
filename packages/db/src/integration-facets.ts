@@ -10,24 +10,24 @@ import {
   type Database,
 } from "./database";
 import {
-  IntegrationFeatureBindingOwnershipConflictError,
-  IntegrationFeatureBindingVersionConflictError,
-  listIntegrationFeatureBindingOwners,
-  removeIntegrationFeatureBindingOwner,
-  upsertIntegrationFeatureBinding,
+  IntegrationFacetBindingOwnershipConflictError,
+  IntegrationFacetBindingVersionConflictError,
+  listIntegrationFacetBindingOwners,
+  removeIntegrationFacetBindingOwner,
+  upsertIntegrationFacetBinding,
 } from "./integration-bindings";
 import * as schema from "./schema";
 
-export type IntegrationFeatureKind =
+export type IntegrationFacetKind =
   | "knowledge_source"
   | "inbound_trigger"
   | "delivery_destination"
   | "identity_link";
 
-export type IntegrationFeatureBindingSummary = {
+export type IntegrationFacetBindingSummary = {
   id: string;
-  featureKey: string;
-  kind: IntegrationFeatureKind;
+  facetKey: string;
+  kind: IntegrationFacetKind;
   bindingKey: string;
   displayName: string;
   connectionId: string | null;
@@ -41,38 +41,38 @@ export type IntegrationFeatureBindingSummary = {
   updatedAt: string;
 };
 
-export type IntegrationFeatureDefinitionSummary = {
-  featureKey: string;
-  kind: IntegrationFeatureKind;
+export type IntegrationFacetDefinitionSummary = {
+  facetKey: string;
+  kind: IntegrationFacetKind;
   configSchema: Record<string, unknown>;
   capabilities: Record<string, unknown>;
 };
 
-export type IntegrationInstanceFeatures = {
+export type IntegrationInstanceFacets = {
   capabilityId: string;
   instanceKey: string;
   providerDomain: string;
   connectionId: string | null;
-  features: {
-    definition: IntegrationFeatureDefinitionSummary;
-    binding: IntegrationFeatureBindingSummary | null;
+  facets: {
+    definition: IntegrationFacetDefinitionSummary;
+    binding: IntegrationFacetBindingSummary | null;
   }[];
 };
 
-export type IntegrationFeatureMutationResult = {
+export type IntegrationFacetMutationResult = {
   capabilityId: string;
   instanceKey: string;
-  featureKey: string;
+  facetKey: string;
   status: "configured" | "paused" | "active";
-  binding: IntegrationFeatureBindingSummary;
+  binding: IntegrationFacetBindingSummary;
 };
 
-export type IntegrationFeatureRemovalResult = {
+export type IntegrationFacetRemovalResult = {
   capabilityId: string;
   instanceKey: string;
-  featureKey: string;
+  facetKey: string;
   status: "not_configured" | "removed" | "retained_by_other_owners";
-  binding: IntegrationFeatureBindingSummary | null;
+  binding: IntegrationFacetBindingSummary | null;
   remainingOwners: {
     kind: "direct" | "plugin" | "pack" | "migration";
     id: string;
@@ -80,20 +80,20 @@ export type IntegrationFeatureRemovalResult = {
   }[];
 };
 
-export class IntegrationFeatureNotFoundError extends Error {
-  readonly name = "IntegrationFeatureNotFoundError";
+export class IntegrationFacetNotFoundError extends Error {
+  readonly name = "IntegrationFacetNotFoundError";
 }
 
-export class IntegrationFeatureConnectionError extends Error {
-  readonly name = "IntegrationFeatureConnectionError";
+export class IntegrationFacetConnectionError extends Error {
+  readonly name = "IntegrationFacetConnectionError";
 }
 
-export class IntegrationFeatureConfigError extends Error {
-  readonly name = "IntegrationFeatureConfigError";
+export class IntegrationFacetConfigError extends Error {
+  readonly name = "IntegrationFacetConfigError";
 }
 
-export class IntegrationFeatureOperationIdempotencyError extends Error {
-  readonly name = "IntegrationFeatureOperationIdempotencyError";
+export class IntegrationFacetOperationIdempotencyError extends Error {
+  readonly name = "IntegrationFacetOperationIdempotencyError";
 }
 
 type IntegrationInstanceContext = {
@@ -104,13 +104,13 @@ type IntegrationInstanceContext = {
   connectionId: string | null;
 };
 
-export async function listIntegrationInstanceFeatures(
+export async function listIntegrationInstanceFacets(
   db: Database,
   workspaceId: string,
   subjectId: string,
   capabilityId: string,
   instanceKey: string,
-): Promise<IntegrationInstanceFeatures> {
+): Promise<IntegrationInstanceFacets> {
   return await withWorkspaceSubjectRls(db, workspaceId, subjectId, async (scopedDb) => {
     const context = await loadIntegrationInstanceContext(
       scopedDb,
@@ -119,64 +119,64 @@ export async function listIntegrationInstanceFeatures(
       capabilityId,
       instanceKey,
     );
-    if (!context) throw new IntegrationFeatureNotFoundError("Integration instance not found");
+    if (!context) throw new IntegrationFacetNotFoundError("Integration instance not found");
     const rows = await scopedDb
       .select({
-        featureKey: schema.integrationFeatureFacets.featureKey,
-        kind: schema.integrationFeatureFacets.kind,
-        configSchema: schema.integrationFeatureFacets.configSchema,
-        capabilities: schema.integrationFeatureFacets.capabilities,
-        bindingId: schema.integrationFeatureBindings.id,
-        bindingKey: schema.integrationFeatureBindings.bindingKey,
-        displayName: schema.integrationFeatureBindings.displayName,
-        connectionId: schema.integrationFeatureBindings.connectionId,
-        status: schema.integrationFeatureBindings.status,
-        config: schema.integrationFeatureBindings.config,
-        cursor: schema.integrationFeatureBindings.cursor,
-        version: schema.integrationFeatureBindings.version,
-        lastSuccessAt: schema.integrationFeatureBindings.lastSuccessAt,
-        lastErrorCode: schema.integrationFeatureBindings.lastErrorCode,
-        createdAt: schema.integrationFeatureBindings.createdAt,
-        updatedAt: schema.integrationFeatureBindings.updatedAt,
+        facetKey: schema.integrationFacetDefinitions.facetKey,
+        kind: schema.integrationFacetDefinitions.kind,
+        configSchema: schema.integrationFacetDefinitions.configSchema,
+        capabilities: schema.integrationFacetDefinitions.capabilities,
+        bindingId: schema.integrationFacetBindings.id,
+        bindingKey: schema.integrationFacetBindings.bindingKey,
+        displayName: schema.integrationFacetBindings.displayName,
+        connectionId: schema.integrationFacetBindings.connectionId,
+        status: schema.integrationFacetBindings.status,
+        config: schema.integrationFacetBindings.config,
+        cursor: schema.integrationFacetBindings.cursor,
+        version: schema.integrationFacetBindings.version,
+        lastSuccessAt: schema.integrationFacetBindings.lastSuccessAt,
+        lastErrorCode: schema.integrationFacetBindings.lastErrorCode,
+        createdAt: schema.integrationFacetBindings.createdAt,
+        updatedAt: schema.integrationFacetBindings.updatedAt,
       })
-      .from(schema.integrationFeatureFacets)
+      .from(schema.integrationFacetDefinitions)
       .leftJoin(
-        schema.integrationFeatureBindings,
+        schema.integrationFacetBindings,
         and(
-          eq(schema.integrationFeatureBindings.featureFacetId, schema.integrationFeatureFacets.id),
+          eq(schema.integrationFacetBindings.facetDefinitionId, schema.integrationFacetDefinitions.id),
           eq(
-            schema.integrationFeatureBindings.integrationFacetInstallationId,
+            schema.integrationFacetBindings.integrationFacetInstallationId,
             context.integrationFacetInstallationId,
           ),
-          eq(schema.integrationFeatureBindings.bindingKey, instanceKey),
+          eq(schema.integrationFacetBindings.bindingKey, instanceKey),
         ),
       )
       .where(
         and(
-          eq(schema.integrationFeatureFacets.integrationFacetId, context.integrationFacetId),
-          ne(schema.integrationFeatureFacets.kind, "tools"),
+          eq(schema.integrationFacetDefinitions.integrationFacetId, context.integrationFacetId),
+          ne(schema.integrationFacetDefinitions.kind, "tools"),
         ),
       )
       .orderBy(
-        asc(schema.integrationFeatureFacets.kind),
-        asc(schema.integrationFeatureFacets.featureKey),
+        asc(schema.integrationFacetDefinitions.kind),
+        asc(schema.integrationFacetDefinitions.facetKey),
       );
     return {
       capabilityId,
       instanceKey,
       providerDomain: context.providerDomain,
       connectionId: context.connectionId,
-      features: rows.map((row) => ({
+      facets: rows.map((row) => ({
         definition: {
-          featureKey: row.featureKey,
-          kind: featureKind(row.kind),
+          facetKey: row.facetKey,
+          kind: facetKind(row.kind),
           configSchema: row.configSchema,
           capabilities: row.capabilities,
         },
         binding: row.bindingId
           ? bindingSummary({
               id: row.bindingId,
-              featureKey: row.featureKey,
+              facetKey: row.facetKey,
               kind: row.kind,
               bindingKey: row.bindingKey!,
               displayName: row.displayName!,
@@ -196,7 +196,7 @@ export async function listIntegrationInstanceFeatures(
   });
 }
 
-export async function configureIntegrationFeature(
+export async function configureIntegrationFacet(
   db: Database,
   input: {
     accountId: string;
@@ -204,58 +204,58 @@ export async function configureIntegrationFeature(
     subjectId: string;
     capabilityId: string;
     instanceKey: string;
-    featureKey: string;
+    facetKey: string;
     displayName: string;
     config: Record<string, unknown>;
     expectedVersion?: number;
     idempotencyKey: string;
   },
-): Promise<IntegrationFeatureMutationResult> {
+): Promise<IntegrationFacetMutationResult> {
   const requestDigest = sha256(
     stableJson({
       action: "configure",
       capabilityId: input.capabilityId,
       instanceKey: input.instanceKey,
-      featureKey: input.featureKey,
+      facetKey: input.facetKey,
       displayName: input.displayName,
       config: input.config,
       expectedVersion: input.expectedVersion ?? null,
     }),
   );
-  return await withFeatureOperation(db, input, requestDigest, "configure", async (tx) => {
+  return await withFacetOperation(db, input, requestDigest, "configure", async (tx) => {
     const context = await requireMutationContext(tx, input);
-    const definition = await requireFeatureDefinition(tx, context, input.featureKey);
-    assertFeatureConfig(input.config, definition.configSchema);
-    await requireFeatureConnection(tx, input, context, definition.capabilities);
-    const result = await upsertIntegrationFeatureBinding(tx, {
+    const definition = await requireFacetDefinition(tx, context, input.facetKey);
+    assertFacetConfig(input.config, definition.configSchema);
+    await requireFacetConnection(tx, input, context, definition.capabilities);
+    const result = await upsertIntegrationFacetBinding(tx, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       integrationFacetInstallationId: context.integrationFacetInstallationId,
-      featureFacetId: definition.id,
+      facetDefinitionId: definition.id,
       bindingKey: input.instanceKey,
       displayName: input.displayName,
       runtimeKey: null,
       connectionId: context.connectionId,
       config: input.config,
       createdBySubjectId: input.subjectId,
-      owner: featureOwner(input.capabilityId, input.instanceKey, input.featureKey),
+      owner: facetOwner(input.capabilityId, input.instanceKey, input.facetKey),
       ...(input.expectedVersion !== undefined ? { expectedVersion: input.expectedVersion } : {}),
     });
     return {
       capabilityId: input.capabilityId,
       instanceKey: input.instanceKey,
-      featureKey: input.featureKey,
+      facetKey: input.facetKey,
       status: "configured",
       binding: bindingSummary({
         ...result.row,
-        featureKey: definition.featureKey,
+        facetKey: definition.facetKey,
         kind: definition.kind,
       }),
     };
   });
 }
 
-export async function setIntegrationFeatureLifecycle(
+export async function setIntegrationFacetLifecycle(
   db: Database,
   input: {
     accountId: string;
@@ -263,12 +263,12 @@ export async function setIntegrationFeatureLifecycle(
     subjectId: string;
     capabilityId: string;
     instanceKey: string;
-    featureKey: string;
+    facetKey: string;
     action: "pause" | "resume";
     expectedVersion: number;
     idempotencyKey: string;
   },
-): Promise<IntegrationFeatureMutationResult> {
+): Promise<IntegrationFacetMutationResult> {
   const requestDigest = sha256(
     stableJson({
       ...input,
@@ -278,52 +278,52 @@ export async function setIntegrationFeatureLifecycle(
       idempotencyKey: undefined,
     }),
   );
-  return await withFeatureOperation(db, input, requestDigest, "update", async (tx) => {
+  return await withFacetOperation(db, input, requestDigest, "update", async (tx) => {
     const context = await requireMutationContext(tx, input);
-    const definition = await requireFeatureDefinition(tx, context, input.featureKey);
-    const binding = await loadFeatureBinding(tx, context, input.instanceKey, definition.id, true);
+    const definition = await requireFacetDefinition(tx, context, input.facetKey);
+    const binding = await loadFacetBinding(tx, context, input.instanceKey, definition.id, true);
     if (!binding || binding.status === "disabled") {
-      throw new IntegrationFeatureNotFoundError("Integration feature is not configured");
+      throw new IntegrationFacetNotFoundError("Integration facet is not configured");
     }
     if (binding.version !== input.expectedVersion) {
-      throw new IntegrationFeatureBindingVersionConflictError(
+      throw new IntegrationFacetBindingVersionConflictError(
         input.instanceKey,
         input.expectedVersion,
         binding.version,
       );
     }
-    await assertDirectFeatureOwnership(tx, binding.id, input);
+    await assertDirectFacetOwnership(tx, binding.id, input);
     const targetStatus = input.action === "pause" ? "paused" : "active";
     let row = binding;
     if (binding.status !== targetStatus) {
       const [updated] = await tx
-        .update(schema.integrationFeatureBindings)
+        .update(schema.integrationFacetBindings)
         .set({
           status: targetStatus,
           version: binding.version + 1,
           ...(input.action === "resume" ? { lastErrorCode: null } : {}),
           updatedAt: new Date(),
         })
-        .where(eq(schema.integrationFeatureBindings.id, binding.id))
+        .where(eq(schema.integrationFacetBindings.id, binding.id))
         .returning();
-      if (!updated) throw new Error("Failed to update Integration feature lifecycle");
+      if (!updated) throw new Error("Failed to update Integration facet lifecycle");
       row = updated;
     }
     return {
       capabilityId: input.capabilityId,
       instanceKey: input.instanceKey,
-      featureKey: input.featureKey,
+      facetKey: input.facetKey,
       status: input.action === "pause" ? "paused" : "active",
       binding: bindingSummary({
         ...row,
-        featureKey: definition.featureKey,
+        facetKey: definition.facetKey,
         kind: definition.kind,
       }),
     };
   });
 }
 
-export async function removeIntegrationFeature(
+export async function removeIntegrationFacet(
   db: Database,
   input: {
     accountId: string;
@@ -331,58 +331,58 @@ export async function removeIntegrationFeature(
     subjectId: string;
     capabilityId: string;
     instanceKey: string;
-    featureKey: string;
+    facetKey: string;
     expectedVersion: number;
     idempotencyKey: string;
   },
-): Promise<IntegrationFeatureRemovalResult> {
+): Promise<IntegrationFacetRemovalResult> {
   const requestDigest = sha256(
     stableJson({
       action: "remove",
       capabilityId: input.capabilityId,
       instanceKey: input.instanceKey,
-      featureKey: input.featureKey,
+      facetKey: input.facetKey,
       expectedVersion: input.expectedVersion,
     }),
   );
-  return await withFeatureOperation(db, input, requestDigest, "disconnect", async (tx) => {
+  return await withFacetOperation(db, input, requestDigest, "disconnect", async (tx) => {
     const context = await requireMutationContext(tx, input);
-    const definition = await requireFeatureDefinition(tx, context, input.featureKey);
-    const binding = await loadFeatureBinding(tx, context, input.instanceKey, definition.id, true);
-    const owner = featureOwner(input.capabilityId, input.instanceKey, input.featureKey);
+    const definition = await requireFacetDefinition(tx, context, input.facetKey);
+    const binding = await loadFacetBinding(tx, context, input.instanceKey, definition.id, true);
+    const owner = facetOwner(input.capabilityId, input.instanceKey, input.facetKey);
     if (!binding) {
       return {
         capabilityId: input.capabilityId,
         instanceKey: input.instanceKey,
-        featureKey: input.featureKey,
+        facetKey: input.facetKey,
         status: "not_configured",
         binding: null,
         remainingOwners: [],
       };
     }
     if (binding.version !== input.expectedVersion) {
-      throw new IntegrationFeatureBindingVersionConflictError(
+      throw new IntegrationFacetBindingVersionConflictError(
         input.instanceKey,
         input.expectedVersion,
         binding.version,
       );
     }
-    const owners = await listIntegrationFeatureBindingOwners(tx, binding.id);
+    const owners = await listIntegrationFacetBindingOwners(tx, binding.id);
     if (!owners.some((candidate) => candidate.kind === owner.kind && candidate.id === owner.id)) {
       return {
         capabilityId: input.capabilityId,
         instanceKey: input.instanceKey,
-        featureKey: input.featureKey,
+        facetKey: input.facetKey,
         status: "not_configured",
         binding: bindingSummary({
           ...binding,
-          featureKey: definition.featureKey,
+          facetKey: definition.facetKey,
           kind: definition.kind,
         }),
         remainingOwners: owners,
       };
     }
-    const removed = await removeIntegrationFeatureBindingOwner(tx, {
+    const removed = await removeIntegrationFacetBindingOwner(tx, {
       workspaceId: input.workspaceId,
       bindingId: binding.id,
       owner,
@@ -391,12 +391,12 @@ export async function removeIntegrationFeature(
     return {
       capabilityId: input.capabilityId,
       instanceKey: input.instanceKey,
-      featureKey: input.featureKey,
+      facetKey: input.facetKey,
       status: removed.remainingOwners.length > 0 ? "retained_by_other_owners" : "removed",
       binding: removed.binding
         ? bindingSummary({
             ...removed.binding,
-            featureKey: definition.featureKey,
+            facetKey: definition.facetKey,
             kind: definition.kind,
           })
         : null,
@@ -405,7 +405,7 @@ export async function removeIntegrationFeature(
   });
 }
 
-async function withFeatureOperation<T extends Record<string, unknown>>(
+async function withFacetOperation<T extends Record<string, unknown>>(
   db: Database,
   input: {
     accountId: string;
@@ -413,7 +413,7 @@ async function withFeatureOperation<T extends Record<string, unknown>>(
     subjectId: string;
     capabilityId: string;
     instanceKey: string;
-    featureKey: string;
+    facetKey: string;
     idempotencyKey: string;
   },
   requestDigest: string,
@@ -443,13 +443,13 @@ async function withFeatureOperation<T extends Record<string, unknown>>(
           .limit(1);
         if (existing) {
           if (existing.requestDigest !== requestDigest) {
-            throw new IntegrationFeatureOperationIdempotencyError(
-              "Integration feature idempotency key was reused",
+            throw new IntegrationFacetOperationIdempotencyError(
+              "Integration facet idempotency key was reused",
             );
           }
           if (existing.status === "completed" && existing.result) return existing.result as T;
-          throw new IntegrationFeatureOperationIdempotencyError(
-            "Integration feature operation is already in progress",
+          throw new IntegrationFacetOperationIdempotencyError(
+            "Integration facet operation is already in progress",
           );
         }
         const result = await execute(tx);
@@ -461,7 +461,7 @@ async function withFeatureOperation<T extends Record<string, unknown>>(
           kind,
           targetKind: "facet_binding",
           targetId: `facet:${sha256(
-            `${input.capabilityId}\0${input.instanceKey}\0${input.featureKey}`,
+            `${input.capabilityId}\0${input.instanceKey}\0${input.facetKey}`,
           )}`,
           status: "completed",
           phase: "completed",
@@ -492,7 +492,7 @@ async function requireMutationContext(
     input.instanceKey,
     true,
   );
-  if (!context) throw new IntegrationFeatureNotFoundError("Integration instance not found");
+  if (!context) throw new IntegrationFacetNotFoundError("Integration instance not found");
   return context;
 }
 
@@ -506,30 +506,30 @@ async function loadIntegrationInstanceContext(
 ): Promise<IntegrationInstanceContext | null> {
   let query = db
     .select({
-      accountId: schema.integrationFeatureBindings.accountId,
+      accountId: schema.integrationFacetBindings.accountId,
       integrationFacetInstallationId:
-        schema.integrationFeatureBindings.integrationFacetInstallationId,
-      integrationFacetId: schema.integrationFeatureFacets.integrationFacetId,
+        schema.integrationFacetBindings.integrationFacetInstallationId,
+      integrationFacetId: schema.integrationFacetDefinitions.integrationFacetId,
       providerDomain: schema.capabilityIntegrationFacets.providerDomain,
-      connectionId: schema.integrationFeatureBindings.connectionId,
+      connectionId: schema.integrationFacetBindings.connectionId,
     })
-    .from(schema.integrationFeatureBindings)
+    .from(schema.integrationFacetBindings)
     .innerJoin(
-      schema.integrationFeatureFacets,
-      eq(schema.integrationFeatureFacets.id, schema.integrationFeatureBindings.featureFacetId),
+      schema.integrationFacetDefinitions,
+      eq(schema.integrationFacetDefinitions.id, schema.integrationFacetBindings.facetDefinitionId),
     )
     .innerJoin(
       schema.capabilityIntegrationFacets,
       eq(
         schema.capabilityIntegrationFacets.facetId,
-        schema.integrationFeatureFacets.integrationFacetId,
+        schema.integrationFacetDefinitions.integrationFacetId,
       ),
     )
     .innerJoin(
       schema.capabilityFacetInstallations,
       eq(
         schema.capabilityFacetInstallations.id,
-        schema.integrationFeatureBindings.integrationFacetInstallationId,
+        schema.integrationFacetBindings.integrationFacetInstallationId,
       ),
     )
     .innerJoin(
@@ -545,17 +545,17 @@ async function loadIntegrationInstanceContext(
     )
     .where(
       and(
-        eq(schema.integrationFeatureBindings.workspaceId, workspaceId),
-        eq(schema.integrationFeatureBindings.bindingKey, instanceKey),
-        eq(schema.integrationFeatureBindings.status, "active"),
-        eq(schema.integrationFeatureFacets.kind, "tools"),
+        eq(schema.integrationFacetBindings.workspaceId, workspaceId),
+        eq(schema.integrationFacetBindings.bindingKey, instanceKey),
+        eq(schema.integrationFacetBindings.status, "active"),
+        eq(schema.integrationFacetDefinitions.kind, "tools"),
         eq(schema.capabilityPluginInstallations.status, "active"),
         sql`${schema.capabilityPluginVersions.manifest} ->> 'capabilityId' = ${capabilityId}`,
         sql`(
-          ${schema.integrationFeatureBindings.connectionId} is null
+          ${schema.integrationFacetBindings.connectionId} is null
           or exists (
             select 1 from ${schema.connections} connection
-            where connection.id = ${schema.integrationFeatureBindings.connectionId}
+            where connection.id = ${schema.integrationFacetBindings.connectionId}
               and (connection.subject_id is null or connection.subject_id = ${subjectId})
           )
         )`,
@@ -569,28 +569,28 @@ async function loadIntegrationInstanceContext(
   return rows[0]!;
 }
 
-async function requireFeatureDefinition(
+async function requireFacetDefinition(
   db: Database,
   context: IntegrationInstanceContext,
-  featureKey: string,
-): Promise<typeof schema.integrationFeatureFacets.$inferSelect> {
+  facetKey: string,
+): Promise<typeof schema.integrationFacetDefinitions.$inferSelect> {
   const [definition] = await db
     .select()
-    .from(schema.integrationFeatureFacets)
+    .from(schema.integrationFacetDefinitions)
     .where(
       and(
-        eq(schema.integrationFeatureFacets.integrationFacetId, context.integrationFacetId),
-        eq(schema.integrationFeatureFacets.featureKey, featureKey),
-        ne(schema.integrationFeatureFacets.kind, "tools"),
+        eq(schema.integrationFacetDefinitions.integrationFacetId, context.integrationFacetId),
+        eq(schema.integrationFacetDefinitions.facetKey, facetKey),
+        ne(schema.integrationFacetDefinitions.kind, "tools"),
       ),
     )
     .limit(1);
-  if (!definition) throw new IntegrationFeatureNotFoundError("Integration feature not found");
-  featureKind(definition.kind);
+  if (!definition) throw new IntegrationFacetNotFoundError("Integration facet not found");
+  facetKind(definition.kind);
   return definition;
 }
 
-async function requireFeatureConnection(
+async function requireFacetConnection(
   db: Database,
   input: { workspaceId: string; subjectId: string },
   context: IntegrationInstanceContext,
@@ -598,8 +598,8 @@ async function requireFeatureConnection(
 ): Promise<void> {
   if (!context.connectionId) {
     if (capabilities.connectionRequired === true) {
-      throw new IntegrationFeatureConnectionError(
-        "Integration feature requires the instance Connection",
+      throw new IntegrationFacetConnectionError(
+        "Integration facet requires the instance Connection",
       );
     }
     return;
@@ -624,30 +624,30 @@ async function requireFeatureConnection(
     (connection.subjectId !== null && connection.subjectId !== input.subjectId) ||
     connection.providerDomain.toLowerCase() !== context.providerDomain.toLowerCase()
   ) {
-    throw new IntegrationFeatureConnectionError(
-      "Integration feature Connection is unavailable or does not match the provider",
+    throw new IntegrationFacetConnectionError(
+      "Integration facet Connection is unavailable or does not match the provider",
     );
   }
 }
 
-async function loadFeatureBinding(
+async function loadFacetBinding(
   db: Database,
   context: IntegrationInstanceContext,
   instanceKey: string,
-  featureFacetId: string,
+  facetDefinitionId: string,
   lock = false,
-): Promise<typeof schema.integrationFeatureBindings.$inferSelect | null> {
+): Promise<typeof schema.integrationFacetBindings.$inferSelect | null> {
   let query = db
     .select()
-    .from(schema.integrationFeatureBindings)
+    .from(schema.integrationFacetBindings)
     .where(
       and(
         eq(
-          schema.integrationFeatureBindings.integrationFacetInstallationId,
+          schema.integrationFacetBindings.integrationFacetInstallationId,
           context.integrationFacetInstallationId,
         ),
-        eq(schema.integrationFeatureBindings.featureFacetId, featureFacetId),
-        eq(schema.integrationFeatureBindings.bindingKey, instanceKey),
+        eq(schema.integrationFacetBindings.facetDefinitionId, facetDefinitionId),
+        eq(schema.integrationFacetBindings.bindingKey, instanceKey),
       ),
     )
     .limit(1);
@@ -656,35 +656,35 @@ async function loadFeatureBinding(
   return binding ?? null;
 }
 
-async function assertDirectFeatureOwnership(
+async function assertDirectFacetOwnership(
   db: Database,
   bindingId: string,
-  input: { capabilityId: string; instanceKey: string; featureKey: string },
+  input: { capabilityId: string; instanceKey: string; facetKey: string },
 ): Promise<void> {
-  const expected = featureOwner(input.capabilityId, input.instanceKey, input.featureKey);
-  const owners = await listIntegrationFeatureBindingOwners(db, bindingId);
+  const expected = facetOwner(input.capabilityId, input.instanceKey, input.facetKey);
+  const owners = await listIntegrationFacetBindingOwners(db, bindingId);
   if (!owners.some((owner) => owner.kind === expected.kind && owner.id === expected.id)) {
-    throw new IntegrationFeatureBindingOwnershipConflictError(
-      "Integration feature is not directly owned",
+    throw new IntegrationFacetBindingOwnershipConflictError(
+      "Integration facet is not directly owned",
     );
   }
   if (owners.some((owner) => owner.kind !== expected.kind || owner.id !== expected.id)) {
-    throw new IntegrationFeatureBindingOwnershipConflictError(
-      "Integration feature is shared by another owner and cannot change lifecycle in place",
+    throw new IntegrationFacetBindingOwnershipConflictError(
+      "Integration facet is shared by another owner and cannot change lifecycle in place",
     );
   }
 }
 
-function featureOwner(capabilityId: string, instanceKey: string, featureKey: string) {
+function facetOwner(capabilityId: string, instanceKey: string, facetKey: string) {
   return {
     kind: "direct" as const,
-    id: `feature:${sha256(`${capabilityId}\0${instanceKey}\0${featureKey}`)}`,
+    id: `facet:${sha256(`${capabilityId}\0${instanceKey}\0${facetKey}`)}`,
     removable: true,
   };
 }
 
 type BindingSummaryRow = Pick<
-  typeof schema.integrationFeatureBindings.$inferSelect,
+  typeof schema.integrationFacetBindings.$inferSelect,
   | "id"
   | "bindingKey"
   | "displayName"
@@ -698,15 +698,15 @@ type BindingSummaryRow = Pick<
   | "createdAt"
   | "updatedAt"
 > & {
-  featureKey: string;
+  facetKey: string;
   kind: string;
 };
 
-function bindingSummary(row: BindingSummaryRow): IntegrationFeatureBindingSummary {
+function bindingSummary(row: BindingSummaryRow): IntegrationFacetBindingSummary {
   return {
     id: row.id,
-    featureKey: row.featureKey,
-    kind: featureKind(row.kind),
+    facetKey: row.facetKey,
+    kind: facetKind(row.kind),
     bindingKey: row.bindingKey,
     displayName: row.displayName,
     connectionId: row.connectionId,
@@ -721,14 +721,14 @@ function bindingSummary(row: BindingSummaryRow): IntegrationFeatureBindingSummar
   };
 }
 
-function featureKind(value: string): IntegrationFeatureKind {
+function facetKind(value: string): IntegrationFacetKind {
   if (
     value !== "knowledge_source" &&
     value !== "inbound_trigger" &&
     value !== "delivery_destination" &&
     value !== "identity_link"
   ) {
-    throw new Error(`Unknown Integration feature kind: ${value}`);
+    throw new Error(`Unknown Integration facet kind: ${value}`);
   }
   return value;
 }
@@ -740,18 +740,18 @@ function bindingStatus(value: string): "active" | "paused" | "needs_attention" |
     value !== "needs_attention" &&
     value !== "disabled"
   ) {
-    throw new Error(`Unknown Integration feature status: ${value}`);
+    throw new Error(`Unknown Integration facet status: ${value}`);
   }
   return value;
 }
 
-function assertFeatureConfig(
+function assertFacetConfig(
   config: Record<string, unknown>,
   schemaValue: Record<string, unknown>,
 ): void {
   const serialized = stableJson(config);
   if (Buffer.byteLength(serialized, "utf8") > 131_072) {
-    throw new IntegrationFeatureConfigError("Integration feature config exceeds 131072 bytes");
+    throw new IntegrationFacetConfigError("Integration facet config exceeds 131072 bytes");
   }
   validateSchemaValue(config, schemaValue, "config", 0);
 }
@@ -762,17 +762,17 @@ function validateSchemaValue(
   path: string,
   depth: number,
 ): void {
-  if (depth > 8) throw new IntegrationFeatureConfigError(`${path} exceeds supported depth`);
+  if (depth > 8) throw new IntegrationFacetConfigError(`${path} exceeds supported depth`);
   const type = schemaValue.type;
   if (
     Array.isArray(schemaValue.enum) &&
     !schemaValue.enum.some((item) => stableJson(item) === stableJson(value))
   ) {
-    throw new IntegrationFeatureConfigError(`${path} is not an allowed value`);
+    throw new IntegrationFacetConfigError(`${path} is not an allowed value`);
   }
   if (type === "object") {
     if (!value || typeof value !== "object" || Array.isArray(value)) {
-      throw new IntegrationFeatureConfigError(`${path} must be an object`);
+      throw new IntegrationFacetConfigError(`${path} must be an object`);
     }
     const object = value as Record<string, unknown>;
     const properties = objectValue(schemaValue.properties);
@@ -780,11 +780,11 @@ function validateSchemaValue(
       ? schemaValue.required.filter((entry): entry is string => typeof entry === "string")
       : [];
     for (const key of required) {
-      if (!(key in object)) throw new IntegrationFeatureConfigError(`${path}.${key} is required`);
+      if (!(key in object)) throw new IntegrationFacetConfigError(`${path}.${key} is required`);
     }
     if (schemaValue.additionalProperties === false) {
       const unknown = Object.keys(object).find((key) => !(key in properties));
-      if (unknown) throw new IntegrationFeatureConfigError(`${path}.${unknown} is not supported`);
+      if (unknown) throw new IntegrationFacetConfigError(`${path}.${unknown} is not supported`);
     }
     for (const [key, child] of Object.entries(object)) {
       const childSchema = objectValue(properties[key]);
@@ -796,13 +796,13 @@ function validateSchemaValue(
   }
   if (type === "array") {
     if (!Array.isArray(value)) {
-      throw new IntegrationFeatureConfigError(`${path} must be an array`);
+      throw new IntegrationFacetConfigError(`${path} must be an array`);
     }
     if (typeof schemaValue.minItems === "number" && value.length < schemaValue.minItems) {
-      throw new IntegrationFeatureConfigError(`${path} has too few items`);
+      throw new IntegrationFacetConfigError(`${path} has too few items`);
     }
     if (typeof schemaValue.maxItems === "number" && value.length > schemaValue.maxItems) {
-      throw new IntegrationFeatureConfigError(`${path} has too many items`);
+      throw new IntegrationFacetConfigError(`${path} has too many items`);
     }
     const itemSchema = objectValue(schemaValue.items);
     if (Object.keys(itemSchema).length > 0) {
@@ -814,18 +814,18 @@ function validateSchemaValue(
   }
   if (type === "string") {
     if (typeof value !== "string")
-      throw new IntegrationFeatureConfigError(`${path} must be a string`);
+      throw new IntegrationFacetConfigError(`${path} must be a string`);
     if (typeof schemaValue.minLength === "number" && value.length < schemaValue.minLength) {
-      throw new IntegrationFeatureConfigError(`${path} is too short`);
+      throw new IntegrationFacetConfigError(`${path} is too short`);
     }
     if (typeof schemaValue.maxLength === "number" && value.length > schemaValue.maxLength) {
-      throw new IntegrationFeatureConfigError(`${path} is too long`);
+      throw new IntegrationFacetConfigError(`${path} is too long`);
     }
     return;
   }
   if (type === "boolean") {
     if (typeof value !== "boolean")
-      throw new IntegrationFeatureConfigError(`${path} must be a boolean`);
+      throw new IntegrationFacetConfigError(`${path} must be a boolean`);
     return;
   }
   if (type === "integer" || type === "number") {
@@ -834,15 +834,15 @@ function validateSchemaValue(
       !Number.isFinite(value) ||
       (type === "integer" && !Number.isInteger(value))
     ) {
-      throw new IntegrationFeatureConfigError(
+      throw new IntegrationFacetConfigError(
         `${path} must be ${type === "integer" ? "an integer" : "a number"}`,
       );
     }
     if (typeof schemaValue.minimum === "number" && value < schemaValue.minimum) {
-      throw new IntegrationFeatureConfigError(`${path} is below the minimum`);
+      throw new IntegrationFacetConfigError(`${path} is below the minimum`);
     }
     if (typeof schemaValue.maximum === "number" && value > schemaValue.maximum) {
-      throw new IntegrationFeatureConfigError(`${path} exceeds the maximum`);
+      throw new IntegrationFacetConfigError(`${path} exceeds the maximum`);
     }
     return;
   }

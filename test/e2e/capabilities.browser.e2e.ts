@@ -367,11 +367,11 @@ describe("capabilities browser e2e", () => {
       await expectVisible(instance);
       await expectText(instance, "Google Drive — Finance");
       await instance
-        .getByRole("button", { name: "Manage features for Google Drive — Finance" })
+        .getByRole("button", { name: "Manage facets for Google Drive — Finance" })
         .click();
-      const feature = instance.locator('[data-integration-feature="drive-content"]');
-      await expectVisible(feature);
-      await feature.getByRole("button", { name: "Configure" }).click();
+      const facet = instance.locator('[data-integration-facet="drive-content"]');
+      await expectVisible(facet);
+      await facet.getByRole("button", { name: "Configure" }).click();
 
       const dialog = page.locator('[data-slot="dialog-content"]').filter({
         hasText: "Google Drive locations · Google Drive — Finance",
@@ -397,7 +397,7 @@ describe("capabilities browser e2e", () => {
         syncCadence: "hourly",
         readPolicy: "allow",
       });
-      await expectText(feature, "Active");
+      await expectText(facet, "Active");
     } finally {
       await context.close();
     }
@@ -767,7 +767,7 @@ async function installCapabilityApi(
       "driveSaves" in state &&
       request.method() === "GET" &&
       url.pathname ===
-        `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(driveCapabilityId)}/instances/finance/features`
+        `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(driveCapabilityId)}/instances/finance/facets`
     ) {
       return json(driveFeatures(state.binding));
     }
@@ -775,7 +775,7 @@ async function installCapabilityApi(
       "driveSaves" in state &&
       request.method() === "GET" &&
       url.pathname ===
-        `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(driveCapabilityId)}/instances/finance/features/drive-content/browse`
+        `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(driveCapabilityId)}/instances/finance/facets/drive-content/browse`
     ) {
       return json(driveBrowse());
     }
@@ -783,7 +783,7 @@ async function installCapabilityApi(
       "driveSaves" in state &&
       request.method() === "PUT" &&
       url.pathname ===
-        `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(driveCapabilityId)}/instances/finance/features/drive-content/source`
+        `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(driveCapabilityId)}/instances/finance/facets/drive-content/source`
     ) {
       state.driveSaves += 1;
       state.sourceRequest = request.postDataJSON() as Record<string, unknown>;
@@ -791,7 +791,7 @@ async function installCapabilityApi(
       return json({
         capabilityId: driveCapabilityId,
         instanceKey: "finance",
-        featureKey: "drive-content",
+        facetKey: "drive-content",
         status: "configured",
         binding: state.binding,
       });
@@ -1107,7 +1107,7 @@ function driveDefinition() {
       kind: "oauth2",
       scopes: ["openid", "email", "profile", "https://www.googleapis.com/auth/drive"],
     },
-    facets: [driveFeatureDefinition(), driveIdentityDefinition()],
+    facets: [driveFacetDefinition(), driveIdentityDefinition()],
   };
 }
 
@@ -1178,16 +1178,16 @@ function driveFeatures(binding: Record<string, unknown> | null) {
     instanceKey: "finance",
     providerDomain: "www.googleapis.com",
     connectionId: driveConnectionId,
-    features: [
+    facets: [
       { definition: driveIdentityDefinition(), binding: null },
-      { definition: driveFeatureDefinition(), binding },
+      { definition: driveFacetDefinition(), binding },
     ],
   };
 }
 
-function driveFeatureDefinition() {
+function driveFacetDefinition() {
   return {
-    featureKey: "drive-content",
+    facetKey: "drive-content",
     kind: "knowledge_source",
     configSchema: {
       type: "object",
@@ -1205,7 +1205,7 @@ function driveFeatureDefinition() {
 
 function driveIdentityDefinition() {
   return {
-    featureKey: "account-identity",
+    facetKey: "account-identity",
     kind: "identity_link",
     configSchema: { type: "object", properties: {}, additionalProperties: false },
     capabilities: { provider: "google", connectionRequired: true },
@@ -1247,7 +1247,7 @@ function driveBinding(request: Record<string, unknown>) {
   const sources = Array.isArray(request.sources) ? request.sources : [];
   return {
     id: "00000000-0000-4000-8000-000000000132",
-    featureKey: "drive-content",
+    facetKey: "drive-content",
     kind: "knowledge_source",
     bindingKey: "finance",
     displayName: "Google Drive — Finance — Drive Content",

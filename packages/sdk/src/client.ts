@@ -129,16 +129,16 @@ import type {
   ApiIntegrationUninstallPreview,
   InstallApiIntegrationRequest,
   InstalledApiIntegration,
-  IntegrationFeatureMutationResult,
-  IntegrationFeatureRemovalResult,
-  IntegrationInstanceFeaturesResponse,
+  IntegrationFacetMutationResult,
+  IntegrationFacetRemovalResult,
+  IntegrationInstanceFacetsResponse,
   ListIntegrationDefinitionsResponse,
   ListApiIntegrationsResponse,
-  MutateIntegrationFeatureRequest,
+  MutateIntegrationFacetRequest,
   PreviewApiIntegrationRequest,
   UninstallApiIntegrationRequest,
   UninstallApiIntegrationResult,
-  UpsertIntegrationFeatureRequest,
+  UpsertIntegrationFacetRequest,
   PreviewPluginRequest,
   PluginPreview,
   InstallPluginRequest,
@@ -5005,38 +5005,38 @@ export class OpenGeniClient {
   }
 
   /** List immutable provider facets and their exact per-account bindings. */
-  async listIntegrationFeatures(
+  async listIntegrationFacets(
     workspaceId: string,
     capabilityId: string,
     instanceKey: string,
-  ): Promise<IntegrationInstanceFeaturesResponse> {
-    return await this.requestJson<IntegrationInstanceFeaturesResponse>(
+  ): Promise<IntegrationInstanceFacetsResponse> {
+    return await this.requestJson<IntegrationInstanceFacetsResponse>(
       "GET",
-      `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(capabilityId)}/instances/${encodeURIComponent(instanceKey)}/features`,
+      `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(capabilityId)}/instances/${encodeURIComponent(instanceKey)}/facets`,
     );
   }
 
-  /** Configure or OCC-update one adapter-owned feature on an Integration instance. */
-  async configureIntegrationFeature(
+  /** Configure or OCC-update one adapter-owned facet on an Integration instance. */
+  async configureIntegrationFacet(
     workspaceId: string,
     capabilityId: string,
     instanceKey: string,
-    featureKey: string,
-    request: UpsertIntegrationFeatureRequest,
-  ): Promise<IntegrationFeatureMutationResult> {
-    return await this.requestJson<IntegrationFeatureMutationResult>(
+    facetKey: string,
+    request: UpsertIntegrationFacetRequest,
+  ): Promise<IntegrationFacetMutationResult> {
+    return await this.requestJson<IntegrationFacetMutationResult>(
       "PUT",
-      `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(capabilityId)}/instances/${encodeURIComponent(instanceKey)}/features/${encodeURIComponent(featureKey)}`,
+      `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(capabilityId)}/instances/${encodeURIComponent(instanceKey)}/facets/${encodeURIComponent(facetKey)}`,
       request,
     );
   }
 
   /** Browse source metadata through one exact Google Drive Integration instance. */
-  async browseGoogleDriveIntegrationSource(
+  async browseGoogleDriveFacetSource(
     workspaceId: string,
     capabilityId: string,
     instanceKey: string,
-    featureKey: string,
+    facetKey: string,
     options: { parentId?: string | undefined; pageToken?: string | undefined } = {},
   ): Promise<GoogleDriveBrowseResponse> {
     const query = new URLSearchParams();
@@ -5045,84 +5045,84 @@ export class OpenGeniClient {
     const suffix = query.size > 0 ? `?${query}` : "";
     return await this.requestJson<GoogleDriveBrowseResponse>(
       "GET",
-      `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(capabilityId)}/instances/${encodeURIComponent(instanceKey)}/features/${encodeURIComponent(featureKey)}/browse${suffix}`,
+      `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(capabilityId)}/instances/${encodeURIComponent(instanceKey)}/facets/${encodeURIComponent(facetKey)}/browse${suffix}`,
     );
   }
 
   /** Verify and bind document sources to one exact Google Drive Integration instance. */
-  async saveGoogleDriveIntegrationSource(
+  async saveGoogleDriveFacetSource(
     workspaceId: string,
     capabilityId: string,
     instanceKey: string,
-    featureKey: string,
+    facetKey: string,
     request: SaveGoogleDriveIntegrationSourceRequest,
-  ): Promise<IntegrationFeatureMutationResult> {
-    return await this.requestJson<IntegrationFeatureMutationResult>(
+  ): Promise<IntegrationFacetMutationResult> {
+    return await this.requestJson<IntegrationFacetMutationResult>(
       "PUT",
-      `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(capabilityId)}/instances/${encodeURIComponent(instanceKey)}/features/${encodeURIComponent(featureKey)}/source`,
+      `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(capabilityId)}/instances/${encodeURIComponent(instanceKey)}/facets/${encodeURIComponent(facetKey)}/source`,
       request,
     );
   }
 
-  async pauseIntegrationFeature(
+  async pauseIntegrationFacet(
     workspaceId: string,
     capabilityId: string,
     instanceKey: string,
-    featureKey: string,
-    request: MutateIntegrationFeatureRequest,
-  ): Promise<IntegrationFeatureMutationResult> {
-    return await this.mutateIntegrationFeatureLifecycle(
+    facetKey: string,
+    request: MutateIntegrationFacetRequest,
+  ): Promise<IntegrationFacetMutationResult> {
+    return await this.mutateIntegrationFacetLifecycle(
       workspaceId,
       capabilityId,
       instanceKey,
-      featureKey,
+      facetKey,
       "pause",
       request,
     );
   }
 
-  async resumeIntegrationFeature(
+  async resumeIntegrationFacet(
     workspaceId: string,
     capabilityId: string,
     instanceKey: string,
-    featureKey: string,
-    request: MutateIntegrationFeatureRequest,
-  ): Promise<IntegrationFeatureMutationResult> {
-    return await this.mutateIntegrationFeatureLifecycle(
+    facetKey: string,
+    request: MutateIntegrationFacetRequest,
+  ): Promise<IntegrationFacetMutationResult> {
+    return await this.mutateIntegrationFacetLifecycle(
       workspaceId,
       capabilityId,
       instanceKey,
-      featureKey,
+      facetKey,
       "resume",
       request,
     );
   }
 
-  async removeIntegrationFeature(
+  async removeIntegrationFacet(
     workspaceId: string,
     capabilityId: string,
     instanceKey: string,
-    featureKey: string,
-    request: MutateIntegrationFeatureRequest,
-  ): Promise<IntegrationFeatureRemovalResult> {
-    return await this.requestJson<IntegrationFeatureRemovalResult>(
+    facetKey: string,
+    request: MutateIntegrationFacetRequest,
+  ): Promise<IntegrationFacetRemovalResult> {
+    return await this.requestJson<IntegrationFacetRemovalResult>(
       "DELETE",
-      `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(capabilityId)}/instances/${encodeURIComponent(instanceKey)}/features/${encodeURIComponent(featureKey)}`,
+      `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(capabilityId)}/instances/${encodeURIComponent(instanceKey)}/facets/${encodeURIComponent(facetKey)}`,
       request,
     );
   }
 
-  private async mutateIntegrationFeatureLifecycle(
+  private async mutateIntegrationFacetLifecycle(
     workspaceId: string,
     capabilityId: string,
     instanceKey: string,
-    featureKey: string,
+    facetKey: string,
     action: "pause" | "resume",
-    request: MutateIntegrationFeatureRequest,
-  ): Promise<IntegrationFeatureMutationResult> {
-    return await this.requestJson<IntegrationFeatureMutationResult>(
+    request: MutateIntegrationFacetRequest,
+  ): Promise<IntegrationFacetMutationResult> {
+    return await this.requestJson<IntegrationFacetMutationResult>(
       "POST",
-      `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(capabilityId)}/instances/${encodeURIComponent(instanceKey)}/features/${encodeURIComponent(featureKey)}/${action}`,
+      `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(capabilityId)}/instances/${encodeURIComponent(instanceKey)}/facets/${encodeURIComponent(facetKey)}/${action}`,
       request,
     );
   }

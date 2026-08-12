@@ -538,7 +538,7 @@ Every public endpoint group has typed methods:
 | Packs | `listPacks`, `registerPack`, `getPack`, `enablePack`, `deletePack`, `listPackInstallations` |
 | Capabilities | `listCapabilities`, `createCapability`, `enableCapability`, `disableCapability`, `discoverMcpCapabilities` |
 | Plugin packages | `previewPlugin`, `installPlugin`, `previewPluginUninstall`, `uninstallPlugin` |
-| API Integrations | `listIntegrationDefinitions`, `listApiIntegrations`, `previewApiIntegration`, `startApiIntegrationOAuth`, `installApiIntegration`, `previewApiIntegrationUninstall`, `uninstallApiIntegration`, `listIntegrationFeatures`, `configureIntegrationFeature`, `pauseIntegrationFeature`, `resumeIntegrationFeature`, `removeIntegrationFeature`, `browseGoogleDriveIntegrationSource`, `saveGoogleDriveIntegrationSource` |
+| API Integrations | `listIntegrationDefinitions`, `listApiIntegrations`, `previewApiIntegration`, `startApiIntegrationOAuth`, `installApiIntegration`, `previewApiIntegrationUninstall`, `uninstallApiIntegration`, `listIntegrationFacets`, `configureIntegrationFacet`, `pauseIntegrationFacet`, `resumeIntegrationFacet`, `removeIntegrationFacet`, `browseGoogleDriveFacetSource`, `saveGoogleDriveFacetSource` |
 | Remote Skills | `previewSkillImport`, `installSkill`, `previewSkillUninstall`, `uninstallSkill` |
 | GitHub | `getGitHubApp`, `githubConnectUrl`, `listGitHubRepositories`, `syncGitHubRepositories`, `createGitHubAppManifest` |
 | API keys | `listApiKeys`, `createApiKey`, `deleteApiKey` |
@@ -553,14 +553,14 @@ selected in one session without tool-name collision. Uninstall preview and
 uninstall both require the exact `instanceKey` and instance version; neither
 operation disconnects the underlying Connection.
 
-Adapter-owned Integration features are listed and mutated under the exact
-`capabilityId` + `instanceKey` + `featureKey`. Generic primitive schemas use
-`configureIntegrationFeature`; lifecycle changes and removal require the
+Adapter-owned Integration facets are listed and mutated under the exact
+`capabilityId` + `instanceKey` + `facetKey`. Generic primitive schemas use
+`configureIntegrationFacet`; lifecycle changes and removal require the
 binding's exact optimistic version plus a caller UUID idempotency key. Google
 Drive's nested folder/Shared Drive source schema has dedicated
-`browseGoogleDriveIntegrationSource` and `saveGoogleDriveIntegrationSource`
+`browseGoogleDriveFacetSource` and `saveGoogleDriveFacetSource`
 methods. They verify provider metadata through that instance's exact Connection
-and persist only a versioned feature binding—never provider credentials, page
+and persist only a versioned facet binding—never provider credentials, page
 tokens, or selected-source configuration on the Connection.
 
 ### Protocol routes (deliberately not in the SDK)

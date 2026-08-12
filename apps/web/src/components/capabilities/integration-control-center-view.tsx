@@ -22,7 +22,7 @@ import { CustomApiSection } from "@/components/capabilities/custom-api-section";
 import { CustomApiSetupDialog } from "@/components/capabilities/custom-api-setup-dialog";
 import type { CustomApiFlowState } from "@/components/capabilities/custom-api-flow";
 import { GoogleDriveKnowledgeSourceDialog } from "@/components/capabilities/google-drive-knowledge-source-dialog";
-import { IntegrationFeaturesPanel } from "@/components/capabilities/integration-features-panel";
+import { IntegrationFacetsPanel } from "@/components/capabilities/integration-facets-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
@@ -513,11 +513,11 @@ function DefinitionCard({
                   Remove
                 </Button>
               </div>
-              <IntegrationFeaturesPanel
+              <IntegrationFacetsPanel
                 client={client}
                 workspaceId={workspaceId}
                 instance={instance}
-                featureCount={definition.facets.length}
+                facetCount={definition.facets.length}
                 canManage={canManage}
                 canManagePersonalDestination={canManagePersonalDestination}
                 canManageWorkspaceDestination={canManageWorkspaceDestination}
