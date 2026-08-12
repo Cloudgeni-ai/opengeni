@@ -1,5 +1,19 @@
 # @opengeni/db
 
+## 0.33.0
+
+### Minor Changes
+
+- 3d74340: Add the inert personal Codex provider-account authority foundation and opaque
+  accepted-work snapshot contract without activating user-scoped consumption.
+
+### Patch Changes
+
+- Updated dependencies [3d74340]
+  - @opengeni/contracts@0.46.0
+  - @opengeni/codemode@0.3.1
+  - @opengeni/config@0.14.1
+
 ## 0.32.0
 
 ### Minor Changes
