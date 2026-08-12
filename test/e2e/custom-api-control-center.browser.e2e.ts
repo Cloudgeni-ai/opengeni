@@ -777,6 +777,6 @@ async function expectVisible(locator: import("playwright").Locator): Promise<voi
 }
 
 async function expectText(locator: import("playwright").Locator, expected: string): Promise<void> {
-  await expectVisible(locator);
+  await locator.filter({ hasText: expected }).waitFor({ state: "visible", timeout: 15_000 });
   expect((await locator.textContent()) ?? "").toContain(expected);
 }
