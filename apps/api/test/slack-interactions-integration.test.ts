@@ -23,6 +23,7 @@ import {
   getWorkspaceGrant,
   grantWorkspaceAccess,
   saveSlackBotUserLink,
+  synchronizeCanonicalHumanLoginBindings,
   updateWorkspaceSettings,
   type DbClient,
 } from "@opengeni/db";
@@ -778,6 +779,31 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     const requesterId = `slack-access-requester-${crypto.randomUUID()}`;
     const otherId = `slack-access-other-${crypto.randomUUID()}`;
     const ownerId = value.owner.subjectId.replace(/^user:/, "");
+    for (const userId of [requesterId, otherId, ownerId]) {
+      await shared!.admin`
+        insert into auth_users (id, name, email, email_verified)
+        values (
+          ${userId},
+          ${userId === ownerId ? "Slack access admin" : "Slack access requester"},
+          ${`${userId}@example.test`},
+          true
+        )
+      `;
+      await shared!.admin`
+        insert into auth_identities (id, user_id, provider_id, account_id)
+        values (${crypto.randomUUID()}, ${userId}, 'credential', ${userId})
+      `;
+      const identity = await synchronizeCanonicalHumanLoginBindings(client.db, userId);
+      await shared!.admin`
+        insert into auth_sessions (
+          id, user_id, token, expires_at,
+          identity_id, identity_revision, auth_revision
+        ) values (
+          ${`session-${userId}`}, ${userId}, ${crypto.randomUUID()}, now() + interval '1 hour',
+          ${identity.identityId}, ${identity.identityRevision}, ${identity.authRevision}
+        )
+      `;
+    }
     Reflect.set(value.deps, "managedAuth", {
       api: {
         getSession: async ({ headers }: { headers: Headers }) => {
