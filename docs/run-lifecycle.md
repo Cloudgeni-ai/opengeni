@@ -222,11 +222,11 @@ runtime/native headroom; a finite container that cannot safely admit one turn
 does not start. The invariant is checked both before and after Temporal's native
 worker construction, and live retained-memory growth contracts new slot
 availability. Before decoding model-facing JSONB, PostgreSQL rejects a complete
-active transcript above any of four materialization limits: 3 MiB UTF-8 JSON,
-4,096 rows, 65,536 decoded JSON nodes, or 32,768 object properties. It never
+active transcript above any of four materialization limits: 15 MiB UTF-8 JSON,
+8,192 rows, 131,072 decoded JSON nodes, or 65,536 object properties. It never
 silently trims conversation truth; normal proactive compaction keeps long
-sessions under the boundary. Approval `RunState` uses the same 3 MiB, 65,536-node,
-and 32,768-property serving envelope before SDK decoding. A missing or malformed Temporal task-queue stats
+sessions under the boundary. Approval `RunState` retains its distinct 3 MiB,
+65,536-node, and 32,768-property serving envelope before SDK decoding. A missing or malformed Temporal task-queue stats
 object is a failed read and makes the capacity sample stale; it is never
 normalized into a fresh zero backlog. The release target remains at most
 50 MiB incremental RSS per active turn. A production read-only forensic

@@ -25936,10 +25936,10 @@ export async function getActiveSessionHistoryItems(
  * deterministically before a Postgres driver decodes it instead of using the
  * pod OOM killer as admission.
  */
-export const ACTIVE_SESSION_HISTORY_MAX_JSON_BYTES = 3 * 1024 * 1024;
-export const ACTIVE_SESSION_HISTORY_MAX_ROWS = 4_096;
-export const ACTIVE_SESSION_HISTORY_MAX_JSON_NODES = 65_536;
-export const ACTIVE_SESSION_HISTORY_MAX_JSON_PROPERTIES = 32_768;
+export const ACTIVE_SESSION_HISTORY_MAX_JSON_BYTES = 15 * 1024 * 1024;
+export const ACTIVE_SESSION_HISTORY_MAX_ROWS = 8_192;
+export const ACTIVE_SESSION_HISTORY_MAX_JSON_NODES = 131_072;
+export const ACTIVE_SESSION_HISTORY_MAX_JSON_PROPERTIES = 65_536;
 
 export type ActiveSessionHistoryLimitKind =
   | "json_bytes"
