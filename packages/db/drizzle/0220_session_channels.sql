@@ -45,12 +45,10 @@ END
 $grants$;
 
 -- A root session may be filed into one channel; NULL means unfiled (the
--- inbox). The single-column ON DELETE SET NULL follows the variable_set_id
--- precedent; workspace scoping is enforced by RLS plus the application
--- create/update boundary, which resolves the channel workspace-scoped.
--- The supporting sessions index is built CONCURRENTLY in migration 0221 —
--- a plain CREATE INDEX here would hold the ADD COLUMN's ACCESS EXCLUSIVE
--- lock on the live sessions table for a full-table scan.
+-- inbox). Keep this transaction to the metadata-only nullable column addition:
+-- both the supporting index and the foreign-key validation need table scans,
+-- so migrations 0221-0223 perform those steps without retaining this ADD
+-- COLUMN transaction's ACCESS EXCLUSIVE lock for the duration of a scan.
 SET LOCAL lock_timeout = '5s';
 ALTER TABLE "sessions"
-  ADD COLUMN "channel_id" uuid REFERENCES "channels"("id") ON DELETE SET NULL;
+  ADD COLUMN "channel_id" uuid;
