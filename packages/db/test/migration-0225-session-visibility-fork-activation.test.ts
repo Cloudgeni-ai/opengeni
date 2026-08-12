@@ -9,6 +9,7 @@ import {
   createDb,
   createSession,
   ensureManagedAccessForUser,
+  forkSessionContent,
   getSession,
   getSessionGoal,
   getSessionHistoryItems,
@@ -82,6 +83,12 @@ async function sessionVisibilityFixture() {
     name: "Session owner",
   });
   const ownerGrant = ownerAccess.workspaceGrants[0]!;
+  const [ownerMembership] = await shared.admin<{ id: string }[]>`
+    select id from organization_memberships
+    where account_id = ${ownerGrant.accountId}
+      and subject_id = ${ownerSubjectId}
+      and status = 'active'
+  `;
   const otherSubjectId = `user:session-other-${suffix}`;
   const otherPersonalWorkspaceId = crypto.randomUUID();
   await shared.admin`
@@ -105,6 +112,18 @@ async function sessionVisibilityFixture() {
       ${ownerGrant.accountId}, ${ownerGrant.workspaceId}, ${otherSubjectId},
       'member', '["sessions:read","sessions:control"]'::jsonb
     )
+  `;
+  await shared.admin`
+    insert into workspace_memberships (
+      account_id, workspace_id, subject_id, role, permissions
+    ) values (
+      ${ownerGrant.accountId}, ${otherPersonalWorkspaceId}, ${ownerSubjectId},
+      'member', '["sessions:read","sessions:create","sessions:control"]'::jsonb
+    )
+  `;
+  await shared.admin`
+    insert into workspace_inference_controls (workspace_id, account_id)
+    values (${otherPersonalWorkspaceId}, ${ownerGrant.accountId})
   `;
   const session = await createSession(client.db, {
     accountId: ownerGrant.accountId,
@@ -168,8 +187,10 @@ async function sessionVisibilityFixture() {
   });
   return {
     ownerGrant,
+    ownerMembershipId: ownerMembership!.id,
     ownerSubjectId,
     otherSubjectId,
+    otherPersonalWorkspaceId,
     otherMembershipId: otherMembership!.id,
     session,
   };
@@ -324,6 +345,82 @@ describe("migration 0225 session visibility and fork activation", () => {
       order by relation.relname
     `;
     expect(manualPolicies.map((row) => row.tableName)).toEqual([...manualTables].sort());
+  });
+
+  test("executes a cross-workspace fork with copied history and fresh authority", async () => {
+    if (!shared || !client) return;
+    const value = await sessionVisibilityFixture();
+    const operationKey = `fork:${crypto.randomUUID()}`;
+    const forked = await forkSessionContent(client.db, {
+      sourceWorkspaceId: value.ownerGrant.workspaceId,
+      sourceSessionId: value.session.id,
+      actorSubjectId: value.ownerSubjectId,
+      destinationWorkspaceId: value.otherPersonalWorkspaceId,
+      destinationVisibility: "user_private",
+      operationKey,
+    });
+    expect(forked).toMatchObject({
+      workspaceId: value.otherPersonalWorkspaceId,
+      visibility: "user_private",
+      authorityEpoch: 1,
+      copiedHistoryItemCount: 1,
+      replay: false,
+    });
+
+    const [destination] = await shared.admin<
+      Array<{
+        id: string;
+        ownerId: string | null;
+        ownerSubjectId: string | null;
+        forkedFromSessionId: string | null;
+        forkedFromAuthorityEpoch: number | null;
+        forkedFromVisibility: string | null;
+        historyCount: number;
+        turnCount: number;
+        goalCount: number;
+        mcpServerCount: number;
+      }>
+    >`
+      select
+        destination.id,
+        destination.owner_organization_membership_id as "ownerId",
+        destination.owner_subject_id as "ownerSubjectId",
+        destination.forked_from_session_id as "forkedFromSessionId",
+        destination.forked_from_authority_epoch as "forkedFromAuthorityEpoch",
+        destination.forked_from_visibility as "forkedFromVisibility",
+        (select count(*)::int from session_history_items history
+          where history.session_id = destination.id) as "historyCount",
+        (select count(*)::int from session_turns turn_row
+          where turn_row.session_id = destination.id) as "turnCount",
+        (select count(*)::int from session_goals goal
+          where goal.session_id = destination.id) as "goalCount",
+        (select count(*)::int from session_mcp_servers server
+          where server.session_id = destination.id) as "mcpServerCount"
+      from sessions destination
+      where destination.id = ${forked.sessionId}
+    `;
+    expect(destination).toEqual({
+      id: forked.sessionId,
+      ownerId: value.ownerMembershipId,
+      ownerSubjectId: value.ownerSubjectId,
+      forkedFromSessionId: value.session.id,
+      forkedFromAuthorityEpoch: 1,
+      forkedFromVisibility: "workspace_shared",
+      historyCount: 1,
+      turnCount: 0,
+      goalCount: 0,
+      mcpServerCount: 0,
+    });
+
+    const replay = await forkSessionContent(client.db, {
+      sourceWorkspaceId: value.ownerGrant.workspaceId,
+      sourceSessionId: value.session.id,
+      actorSubjectId: value.ownerSubjectId,
+      destinationWorkspaceId: value.otherPersonalWorkspaceId,
+      destinationVisibility: "user_private",
+      operationKey,
+    });
+    expect(replay).toEqual({ ...forked, replay: true });
   });
 
   test("denies a same-workspace non-owner across session content and resource tables", async () => {

@@ -946,14 +946,16 @@ BEGIN
       END IF;
 
       PERFORM pg_catalog.pg_advisory_xact_lock(
-        pg_catalog.hashtext('session-fork-workspace:' || workspace_id::text)
+        pg_catalog.hashtext(
+          'session-fork-workspace:' || ordered_workspaces.lock_workspace_id::text
+        )
       )
       FROM (
-        SELECT DISTINCT workspace_id
+        SELECT DISTINCT requested.lock_workspace_id
         FROM (VALUES (p_source_workspace_id), (p_destination_workspace_id))
-          AS requested(workspace_id)
-        ORDER BY workspace_id
-      ) ordered_workspaces;
+          AS requested(lock_workspace_id)
+        ORDER BY requested.lock_workspace_id
+      ) AS ordered_workspaces;
 
       PERFORM pg_catalog.set_config(
         'opengeni.workspace_id', p_source_workspace_id::text, true

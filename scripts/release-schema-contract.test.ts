@@ -118,21 +118,21 @@ describe("release schema contract", () => {
       if (!migrations.has("0234_session_visibility_slack_policy.sql")) return null;
       if (migrations.has("0233_skill_and_integration_authority_cutover.sql")) {
         return includesActivation
-          ? "bab034047e6d9f2fd84fb06327d017d60a7c2713ba8e2373f019ce677c9a5dad"
+          ? "4bce11f774fc8487c90518933697e6d266d6449fd3c6f1c363f3ad8ee8179321"
           : "d6dc76fbd59317fc2604580576dbaeec5059701f0ac9bf9348f13e09d75a52e1";
       }
       if (migrations.has("0232_integration_facet_authority_cutover.sql")) {
         return includesActivation
-          ? "0bf2986ba3314333bed489dc5be1984da26101e983b5ba44f516bdd54ed5df00"
+          ? "5557fee1b16d297afe655a582d6722fd43e799537fbaa364dd158656c36006dc"
           : "589d0adff84c6f22f73666e42e9bf0e9eea02c1e5471a8536a676a2a9d357815";
       }
       if (migrations.has("0231_integration_definition_identity_cutover.sql")) {
         return includesActivation
-          ? "84e1fad94ee9084a8e5246d34d6a8f0573fdd5e9108e8d8c6f2ac55a1c815e9f"
+          ? "cd6e772aa87e4800a7cfbdb704f2cef48ae25f136369e317b6b4f14baacbafea"
           : "82b1ea825ea6005dd4dc97993f39d0f3fbdf3d1318889a4a45b396cc2863b499";
       }
       return includesActivation
-        ? "8a06693668fe7a4bb0b65602cf06a6e6c5904a259ac1179b7dde79789bb9fe1c"
+        ? "87156ba903c76afc2ae6f124caa78a1096fd2838eaa6c7724aba29bce2ccbc38"
         : "e6d8af32631e54e0d5bf570c558ba6e7f1885d0b0f6302593f5bd7bcb5b36728";
     };
     const activationMigration = migrations.get("0225_session_visibility_fork_activation.sql");
@@ -146,7 +146,7 @@ describe("release schema contract", () => {
               : "4b42f61f3fe276ec4e29f1b3256b386fb5eeb53042924c924c288252c3ab0a29"),
       );
       expect(activationMigration).toMatchObject({
-        sha256: "8f6c2d494afda6a7df98e5a50ed2b939654c642c142d4976507a1ea7e5632706",
+        sha256: "43945bc115ddf5e7b4b6e73a757c6bb63dde6929e1b3a89714c9cf330de87a12",
         deploymentMode: "rolling",
       });
       expect(migrations.get("0234_session_visibility_slack_policy.sql")).toMatchObject({

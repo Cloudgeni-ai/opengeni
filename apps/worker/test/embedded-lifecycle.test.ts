@@ -380,6 +380,20 @@ describe("embedded worker lifecycle contract", () => {
       ],
       [
         {
+          name: "fork_session_content(uuid, uuid, uuid, text, uuid, text, text, text)",
+          owner: "opengeni_migrator",
+          can_execute: true,
+          public_execute: false,
+          security_definer: true,
+        },
+        {
+          name: "session_private_actor_visible(uuid, uuid, uuid, text)",
+          owner: "opengeni_migrator",
+          can_execute: true,
+          public_execute: false,
+          security_definer: true,
+        },
+        {
           name: "knowledge_source_sync_lock_authority(uuid, uuid, uuid)",
           owner: "opengeni_migrator",
           can_execute: true,
@@ -388,6 +402,20 @@ describe("embedded worker lifecycle contract", () => {
         },
         {
           name: "ensure_managed_human_personal_workspace(uuid, text, uuid)",
+          owner: "opengeni_migrator",
+          can_execute: true,
+          public_execute: false,
+          security_definer: true,
+        },
+        {
+          name: "session_reference_visible(uuid, uuid, uuid)",
+          owner: "opengeni_migrator",
+          can_execute: true,
+          public_execute: false,
+          security_definer: false,
+        },
+        {
+          name: "transition_session_visibility(uuid, uuid, uuid, text, text, integer, text, text)",
           owner: "opengeni_migrator",
           can_execute: true,
           public_execute: false,
@@ -428,8 +456,12 @@ describe("embedded worker lifecycle contract", () => {
       protectedNoDirectDmlTables: [],
     })();
     expect((catalogResults[6] as Array<{ name: string }>).map((routine) => routine.name)).toEqual([
+      "fork_session_content(uuid, uuid, uuid, text, uuid, text, text, text)",
+      "session_private_actor_visible(uuid, uuid, uuid, text)",
       "knowledge_source_sync_lock_authority(uuid, uuid, uuid)",
       "ensure_managed_human_personal_workspace(uuid, text, uuid)",
+      "session_reference_visible(uuid, uuid, uuid)",
+      "transition_session_visibility(uuid, uuid, uuid, text, text, integer, text, text)",
     ]);
     expect(catalogQueries).toBe(catalogResults.length);
     expect(directExecutions).toBe(0);
