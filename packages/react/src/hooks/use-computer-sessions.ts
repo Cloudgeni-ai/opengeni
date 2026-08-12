@@ -9,13 +9,13 @@ import {
   type EmbeddedComputerInteractionClientOverride,
   useEmbeddedComputerInteraction,
 } from "../session-context";
-import { usePageLiveActivity } from "./internal";
+import { useInteractionInvalidation } from "./use-interaction-invalidation";
 
 export type UseComputerSessionsOptions = EmbeddedComputerInteractionClientOverride & {
   /** Current agent/session relevance. Workspace peers remain in `sessions`. */
   sessionId?: string | undefined;
   enabled?: boolean | undefined;
-  /** Temporary invalidation path until the interaction event stream lands. */
+  /** Polling fallback used only while the workspace invalidation stream is unavailable. */
   pollIntervalMs?: number | undefined;
 };
 
@@ -43,11 +43,14 @@ export type UseComputerSessionsResult = {
 export function useComputerSessions(
   options: UseComputerSessionsOptions = {},
 ): UseComputerSessionsResult {
-  const { client, workspaceId, registerSessionReconciler } =
-    useEmbeddedComputerInteraction(options);
+  const {
+    client,
+    workspaceId,
+    registerSessionReconciler,
+    workspaceInteractionEvent,
+    workspaceInteractionConnectionState,
+  } = useEmbeddedComputerInteraction(options);
   const enabled = options.enabled ?? true;
-  const pageLive = usePageLiveActivity();
-  const pollIntervalMs = Math.max(1_000, options.pollIntervalMs ?? 3_000);
   const [state, setState] = useState<ComputerRegistryState>(() => emptyState(workspaceId, enabled));
   const requestRef = useRef<{ id: number; controller: AbortController | null }>({
     id: 0,
@@ -120,13 +123,16 @@ export function useComputerSessions(
     };
   }, [cancelLoad, enabled, load, workspaceId]);
 
-  useEffect(() => {
-    if (!enabled || !pageLive) return;
-    const timer = setInterval(() => {
-      if (!requestRef.current.controller) void load(false);
-    }, pollIntervalMs);
-    return () => clearInterval(timer);
-  }, [enabled, load, pageLive, pollIntervalMs]);
+  useInteractionInvalidation({
+    workspaceId,
+    key: workspaceId,
+    enabled,
+    event: workspaceInteractionEvent,
+    connectionState: workspaceInteractionConnectionState,
+    knownRevision: visible.revision,
+    refresh,
+    fallbackPollIntervalMs: options.pollIntervalMs,
+  });
 
   useEffect(() => {
     if (!enabled || !options.sessionId) return;

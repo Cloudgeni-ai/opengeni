@@ -94,24 +94,31 @@ managed deployments use `OPENGENI_DELEGATION_SECRET`. There is no Codemode
 feature flag: availability follows exact attempt authority and a reachable
 execution environment.
 
-Connected Machines currently receive no OpenGeni credential or Codemode
-pointer. Their eventual Codemode transport must preserve the repository's
-machine invariant—no platform bearer written onto user-owned compute—while
-still terminating at this same attempt journal and executor.
+Connected Machines receive no Codemode manifest pointer, token file, or durable
+setup. The worker retains the same narrow bearer in memory, proactively renews
+it, and snapshots `OPENGENI_CODEMODE_URL` plus the current direct bearer only
+into each newly launched exact child exec. It is absent from machine storage,
+argv, stable environment, session/RunState serialization, and logs. A process
+already running retains its launch value; the next exec sees renewal. The Rust
+agent adds its own absolute executable path only to an authorized child, making
+`opengeni-agent codemode list|call` a dependency-free client. This is transport
+only: it terminates at the same API journal and `AttemptToolEnvironment`.
 
 ## Clients
 
 `@opengeni/codemode` exposes a persistent typed client and generates a nested,
 collision-safe namespace from `codemodePath`. `@opengeni/ogtool` is the small
-dependency-free command-line client:
+JavaScript command-line client; the installed Connected Machine agent contains
+the equivalent no-runtime list/call client:
 
 ```bash
 ogtool list
 ogtool call docs.search '{"query":"durable catalogs"}'
+"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode call docs.search '{"query":"durable catalogs"}'
 ```
 
-Both retain one caller-owned operation id, submit once, poll the journal, and
-recover by `GET` if a POST response is lost after commit. Neither silently
+All clients retain one caller-owned operation id, submit once, poll the journal,
+and recover by `GET` if a POST response is lost after commit. None silently
 retries a terminal failure or `outcome_unknown`. The agent directive recommends
 Codemode for loops, polling, bulk filtering, and intermediate data that should
 stay outside model context.

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type {
   BrowserActionCommand,
   BrowserObservation,
+  BrowserProtectedAuthFillCommand,
   InteractionSemanticNodeValue,
 } from "@opengeni/contracts";
 import { BrowserInteractionController } from "@opengeni/interaction";
@@ -31,12 +32,14 @@ e2e(
       browserSessionId,
       controllerGeneration,
       runner,
+      downloadDirectory: join(directory, "downloads"),
     });
     let releaseBarrier!: () => void;
     const barrier = new Promise<void>((resolve) => {
       releaseBarrier = resolve;
     });
     let barrierArrivals = 0;
+    let protectedAuthBody = "";
     const server = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
@@ -49,6 +52,17 @@ e2e(
           await barrier;
           const title = url.searchParams.get("title") ?? "Parallel";
           return new Response(parallelFixture(title), {
+            headers: { "content-type": "text/html; charset=utf-8" },
+          });
+        }
+        if (url.pathname === "/auth") {
+          return new Response(authFixture(), {
+            headers: { "content-type": "text/html; charset=utf-8" },
+          });
+        }
+        if (url.pathname === "/logged-in" && request.method === "POST") {
+          protectedAuthBody = await request.text();
+          return new Response("<!doctype html><title>Logged in</title><p>Authenticated</p>", {
             headers: { "content-type": "text/html; charset=utf-8" },
           });
         }
@@ -77,9 +91,9 @@ e2e(
         targetId: initial.target.id,
         documentGeneration: initial.target.documentGeneration,
         frameId: initial.frameId,
-        sequence: 1,
         mediaType: "image/jpeg",
       });
+      expect(streamed.sequence).toBeGreaterThan(0);
       expect([...streamed.data.slice(0, 2)]).toEqual([0xff, 0xd8]);
       expect(imageDimensions(streamed.data, "jpeg")).toEqual({
         width: streamed.width,
@@ -200,6 +214,18 @@ e2e(
       expect(receipts).toEqual(["prepared", "dispatched", "completed"]);
 
       const parallelOrigin = `http://127.0.0.1:${server.port}`;
+      const authPage = await driver.openTarget(`${parallelOrigin}/auth`);
+      const protectedResult = await driver.protectedFill(
+        protectedAuthCommand(authPage, parallelOrigin),
+      );
+      expect(protectedResult.status).toBe("submitted");
+      expect(protectedResult.target.url).toBe(`${parallelOrigin}/logged-in`);
+      expect(protectedAuthBody).toContain("username=fixture-user");
+      expect(protectedAuthBody).toContain("password=fixture-password");
+      expect(JSON.stringify(await driver.debug(authPage.target.id))).not.toContain(
+        "fixture-password",
+      );
+
       const firstParallel = await driver.openTarget("about:blank");
       const secondParallel = await driver.openTarget("about:blank");
       const [firstDone, secondDone] = await Promise.all([
@@ -234,7 +260,7 @@ e2e(
       expect(stale.error?.code).toBe("document_stale");
 
       const targets = await driver.listTargets();
-      expect(targets).toHaveLength(3);
+      expect(targets).toHaveLength(4);
     } finally {
       await driver.close().catch(() => undefined);
       server.stop(true);
@@ -256,9 +282,44 @@ function command(
     targetId: observation.target.id,
     expectedTargetGeneration: observation.target.targetGeneration,
     expectedDocumentGeneration: observation.target.documentGeneration,
-    expectedFrameId: observation.frameId,
+    expectedFrameId: observation.frameId!,
     actor: { kind: "agent", subjectId: "browserd-cdp-e2e" },
     action,
+  };
+}
+
+function protectedAuthCommand(
+  observation: BrowserObservation,
+  origin: string,
+): BrowserProtectedAuthFillCommand {
+  return {
+    protocolVersion: 1,
+    operationId: randomUUID(),
+    browserSessionId: observation.browserSessionId,
+    controllerGeneration: observation.target.controllerGeneration,
+    targetId: observation.target.id,
+    expectedTargetGeneration: observation.target.targetGeneration,
+    expectedDocumentGeneration: observation.target.documentGeneration!,
+    expectedFrameId: observation.frameId!,
+    actor: { kind: "system", subjectId: "protected-auth-e2e" },
+    authorityId: "password-authority",
+    credentialVersion: 1,
+    allowedOrigins: [origin],
+    fields: [
+      {
+        fieldId: "username",
+        locator: { kind: "css", selector: "#username" },
+        purpose: "identifier",
+        value: "fixture-user",
+      },
+      {
+        fieldId: "password",
+        locator: { kind: "css", selector: "#password" },
+        purpose: "password",
+        value: "fixture-password",
+      },
+    ],
+    submit: { type: "click", locator: { kind: "css", selector: "#login" } },
   };
 }
 
@@ -287,6 +348,16 @@ function fixture(title: string): string {
 
 function parallelFixture(title: string): string {
   return `<!doctype html><title>${title}</title><p id="done">Done ${title}</p>`;
+}
+
+function authFixture(): string {
+  return `<!doctype html>
+    <title>Auth</title>
+    <form method="post" action="/logged-in">
+      <label>Username <input id="username" name="username" autocomplete="username"></label>
+      <label>Password <input id="password" name="password" type="password" autocomplete="current-password" oninput="console.error('credential:' + this.value)"></label>
+      <button id="login" type="submit">Sign in</button>
+    </form>`;
 }
 
 function dataUrl(html: string): string {

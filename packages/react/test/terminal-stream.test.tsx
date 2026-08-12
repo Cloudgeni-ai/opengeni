@@ -171,6 +171,51 @@ describe("useTerminalStream connection boundary", () => {
     await hook.unmount();
   });
 
+  test("requests one fresh grant after an unexpected socket failure", async () => {
+    let reconnects = 0;
+    const hook = await renderHook(
+      () =>
+        useTerminalStream({
+          capability: capability("https://terminal.example/reconnect"),
+          onReconnectNeeded: () => {
+            reconnects += 1;
+          },
+        }),
+      undefined,
+    );
+    await flush();
+    const socket = FakeWebSocket.instances[0]!;
+    await actRun(() => socket.open());
+    await actRun(() => {
+      socket.onerror?.();
+      socket.close();
+    });
+    await flush();
+    expect(reconnects).toBe(1);
+    await hook.unmount();
+  });
+
+  test("does not request a fresh grant for an intentional disconnect", async () => {
+    let reconnects = 0;
+    const hook = await renderHook(
+      () =>
+        useTerminalStream({
+          capability: capability("https://terminal.example/intentional-close"),
+          onReconnectNeeded: () => {
+            reconnects += 1;
+          },
+        }),
+      undefined,
+    );
+    await flush();
+    const socket = FakeWebSocket.instances[0]!;
+    await actRun(() => socket.open());
+    await actRun(() => hook.result.current.disconnect());
+    await flush();
+    expect(reconnects).toBe(0);
+    await hook.unmount();
+  });
+
   test("drops queued PTY input across a transport downgrade", async () => {
     type Props = { transport: "pty-ws" | "sse-events"; url: string | null };
     const initial: Props = { transport: "pty-ws", url: null };

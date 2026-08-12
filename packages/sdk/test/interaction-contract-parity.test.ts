@@ -7,7 +7,12 @@ import {
   AttachedBrowserDeviceListResponse as ContractAttachedBrowserDeviceListResponse,
   BrowserActionReceipt as ContractBrowserActionReceipt,
   BrowserActionRequest as ContractBrowserActionRequest,
+  BrowserClipboard as ContractBrowserClipboard,
   BrowserDiagnosticBatch as ContractBrowserDiagnosticBatch,
+  BrowserDownload as ContractBrowserDownload,
+  BrowserDownloadListResponse as ContractBrowserDownloadListResponse,
+  BrowserDownloadSaveRequest as ContractBrowserDownloadSaveRequest,
+  BrowserDownloadSaveResponse as ContractBrowserDownloadSaveResponse,
   BrowserIdentity as ContractBrowserIdentity,
   BrowserIdentityListResponse as ContractBrowserIdentityListResponse,
   BrowserIdentityMutationResponse as ContractBrowserIdentityMutationResponse,
@@ -35,10 +40,15 @@ import {
   ComputerSessionMutationResponse as ContractComputerSessionMutationResponse,
   ComputerTargetListResponse as ContractComputerTargetListResponse,
   CreateComputerSessionRequest as ContractCreateComputerSessionRequest,
+  ExternalAuthInteractiveRequest as ContractExternalAuthInteractiveRequest,
+  ExternalAuthInteractiveResponse as ContractExternalAuthInteractiveResponse,
+  ExternalAuthRunRequest as ContractExternalAuthRunRequest,
+  ExternalAuthRunResponse as ContractExternalAuthRunResponse,
   COMPUTER_CONTROL_WEBSOCKET_PROTOCOL as CONTRACT_COMPUTER_WEBSOCKET_PROTOCOL,
   INTERACTION_PROTOCOL_VERSION as CONTRACT_INTERACTION_PROTOCOL_VERSION,
   PublishBrowserRevisionRequest as ContractPublishBrowserRevisionRequest,
   PublishBrowserRevisionResponse as ContractPublishBrowserRevisionResponse,
+  WorkspaceInteractionRevisionEvent as ContractWorkspaceInteractionRevisionEvent,
 } from "@opengeni/contracts";
 import type { z } from "zod";
 import {
@@ -50,7 +60,12 @@ import {
   type AttachedBrowserDeviceListResponse,
   type BrowserActionReceipt,
   type BrowserActionRequest,
+  type BrowserClipboard,
   type BrowserDiagnosticBatch,
+  type BrowserDownload,
+  type BrowserDownloadListResponse,
+  type BrowserDownloadSaveRequest,
+  type BrowserDownloadSaveResponse,
   type BrowserIdentity,
   type BrowserIdentityListResponse,
   type BrowserIdentityMutationResponse,
@@ -79,8 +94,13 @@ import {
   type ComputerSessionMutationResponse,
   type ComputerTargetListResponse,
   type CreateComputerSessionRequest,
+  type ExternalAuthInteractiveRequest,
+  type ExternalAuthInteractiveResponse,
+  type ExternalAuthRunRequest,
+  type ExternalAuthRunResponse,
   type PublishBrowserRevisionRequest,
   type PublishBrowserRevisionResponse,
+  type WorkspaceInteractionRevisionEvent,
 } from "../src/interaction";
 
 describe("SDK interaction / contracts parity", () => {
@@ -90,6 +110,15 @@ describe("SDK interaction / contracts parity", () => {
     expect(BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX).toBe(CONTRACT_BEARER_PREFIX);
     expect(BROWSER_CONTROL_MAX_FRAME_HEADER_BYTES).toBe(CONTRACT_FRAME_HEADER_BYTES);
     expect(COMPUTER_CONTROL_WEBSOCKET_PROTOCOL).toBe(CONTRACT_COMPUTER_WEBSOCKET_PROTOCOL);
+  });
+
+  test("pins workspace interaction invalidation shape", () => {
+    expect(
+      exact<
+        WorkspaceInteractionRevisionEvent,
+        z.infer<typeof ContractWorkspaceInteractionRevisionEvent>
+      >(true),
+    ).toBe(true);
   });
 
   test("pins ComputerSession read and mutation response shapes bidirectionally", () => {
@@ -145,6 +174,10 @@ describe("SDK interaction / contracts parity", () => {
       ),
       exact<BrowserTargetListResponse, z.infer<typeof ContractBrowserTargetListResponse>>(true),
       exact<BrowserDiagnosticBatch, z.infer<typeof ContractBrowserDiagnosticBatch>>(true),
+      exact<BrowserClipboard, z.infer<typeof ContractBrowserClipboard>>(true),
+      exact<BrowserDownload, z.infer<typeof ContractBrowserDownload>>(true),
+      exact<BrowserDownloadListResponse, z.infer<typeof ContractBrowserDownloadListResponse>>(true),
+      exact<BrowserDownloadSaveResponse, z.infer<typeof ContractBrowserDownloadSaveResponse>>(true),
       exact<BrowserIdentity, z.infer<typeof ContractBrowserIdentity>>(true),
       exact<BrowserIdentityListResponse, z.infer<typeof ContractBrowserIdentityListResponse>>(true),
       exact<
@@ -199,6 +232,7 @@ describe("SDK interaction / contracts parity", () => {
         z.input<typeof ContractBrowserSessionAttachmentRequest>
       >(true),
       exact<BrowserActionRequest, z.input<typeof ContractBrowserActionRequest>>(true),
+      exact<BrowserDownloadSaveRequest, z.input<typeof ContractBrowserDownloadSaveRequest>>(true),
     ];
     expect(checks.every(Boolean)).toBe(true);
   });
@@ -215,6 +249,23 @@ describe("SDK interaction / contracts parity", () => {
       exact<ComputerActionRequest, z.input<typeof ContractComputerActionRequest>>(true),
     ];
     expect(checks.every(Boolean)).toBe(true);
+  });
+
+  test("pins external browser-auth public shapes bidirectionally", () => {
+    expect(
+      [
+        exact<ExternalAuthRunRequest, z.input<typeof ContractExternalAuthRunRequest>>(true),
+        exact<ExternalAuthRunResponse, z.infer<typeof ContractExternalAuthRunResponse>>(true),
+        exact<
+          ExternalAuthInteractiveRequest,
+          z.input<typeof ContractExternalAuthInteractiveRequest>
+        >(true),
+        exact<
+          ExternalAuthInteractiveResponse,
+          z.infer<typeof ContractExternalAuthInteractiveResponse>
+        >(true),
+      ].every(Boolean),
+    ).toBe(true);
   });
 });
 

@@ -1,5 +1,5 @@
 // Minimal HAND-MIRROR of the relay stream wire messages the desktop frame client
-// needs (`StreamOpen` encode; `StreamOpenAck` + `StreamFrame` decode). It exists
+// needs (`StreamOpen`/`StreamClose` encode; `StreamOpenAck` + `StreamFrame` decode). It exists
 // because the publish-closure guard (scripts/publish-closure-guard.ts) forbids
 // `@opengeni/react` from depending on `@opengeni/agent-proto` — the published SDK
 // closure may only reach `@opengeni/sdk` among `@opengeni/*` packages. So, exactly
@@ -13,16 +13,21 @@
 //   StreamOpenAck: accepted=1(bool), error=2(AgentError msg), resumeFromSeq=3
 //   AgentError:    code=1, message=2, retryable=3, detail=4  (we read only message)
 //   StreamFrame:   channelId=1, seq=2, data=3(bytes), producedAtMs=4  (we read only data)
+//   StreamClose:   channelId=1, reason=2(int32), message=3
 import { BinaryReader, BinaryWriter } from "@bufbuild/protobuf/wire";
 
 /** `StreamKind.STREAM_KIND_DESKTOP` (agent-proto enum value). */
 export const STREAM_KIND_DESKTOP = 2;
+/** `StreamKind.STREAM_KIND_PTY` (agent-proto enum value). */
+export const STREAM_KIND_PTY = 1;
 /** `StreamKind.STREAM_KIND_BROWSER` (agent-proto enum value). */
 export const STREAM_KIND_BROWSER = 3;
 /** `StreamKind.STREAM_KIND_COMPUTER` (agent-proto enum value). */
 export const STREAM_KIND_COMPUTER = 4;
 /** `StreamRole.STREAM_ROLE_CLIENT` (agent-proto enum value). */
 export const STREAM_ROLE_CLIENT = 2;
+/** `StreamCloseReason.STREAM_CLOSE_REASON_NORMAL`. */
+export const STREAM_CLOSE_REASON_NORMAL = 1;
 
 export interface RelayChannel {
   channelId: string;
@@ -55,6 +60,35 @@ export function encodeStreamOpen(message: RelayStreamOpen): Uint8Array {
   if (message.token !== "") writer.uint32(18).string(message.token);
   if (message.role !== 0) writer.uint32(24).int32(message.role);
   if (message.resumeFromSeq !== "0") writer.uint32(32).uint64(message.resumeFromSeq);
+  return writer.finish();
+}
+
+/** Encode an intentional viewer detach. Transport loss omits this message so
+ * reconnect/resume remains available. */
+export function encodeStreamClose(message: {
+  channelId: string;
+  reason: number;
+  message: string;
+}): Uint8Array {
+  const writer = new BinaryWriter();
+  if (message.channelId !== "") writer.uint32(10).string(message.channelId);
+  if (message.reason !== 0) writer.uint32(16).int32(message.reason);
+  if (message.message !== "") writer.uint32(26).string(message.message);
+  return writer.finish();
+}
+
+/** Encode a viewer→agent PTY input `StreamFrame`. */
+export function encodeStreamFrame(message: {
+  channelId: string;
+  seq: string;
+  data: Uint8Array;
+  producedAtMs: string;
+}): Uint8Array {
+  const writer = new BinaryWriter();
+  if (message.channelId !== "") writer.uint32(10).string(message.channelId);
+  if (message.seq !== "0") writer.uint32(16).uint64(message.seq);
+  if (message.data.length > 0) writer.uint32(26).bytes(message.data);
+  if (message.producedAtMs !== "0") writer.uint32(32).uint64(message.producedAtMs);
   return writer.finish();
 }
 
@@ -99,13 +133,18 @@ export function decodeStreamOpenAck(bytes: Uint8Array): {
   return error !== undefined ? { accepted, error } : { accepted };
 }
 
-/** Decode a `StreamFrame`, extracting only the `data` (framebuffer PNG) bytes. */
-export function decodeStreamFrame(bytes: Uint8Array): { data: Uint8Array } {
+/** Decode the sequence plus `data` from a `StreamFrame`. */
+export function decodeStreamFrame(bytes: Uint8Array): { seq: string; data: Uint8Array } {
   const reader = new BinaryReader(bytes);
   const end = reader.len;
+  let seq = "0";
   let data = new Uint8Array(0);
   while (reader.pos < end) {
     const tag = reader.uint32();
+    if (tag >>> 3 === 2 && tag === 16) {
+      seq = reader.uint64().toString();
+      continue;
+    }
     if (tag >>> 3 === 3 && tag === 26) {
       // Copy into a fresh ArrayBuffer-backed view: BinaryReader.bytes() returns
       // `Uint8Array<ArrayBufferLike>` (a view into the message buffer), which both
@@ -116,5 +155,5 @@ export function decodeStreamFrame(bytes: Uint8Array): { data: Uint8Array } {
     if ((tag & 7) === 4 || tag === 0) break;
     reader.skip(tag & 7);
   }
-  return { data };
+  return { seq, data };
 }

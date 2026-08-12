@@ -5,6 +5,7 @@ type WorkflowControlActivities = Pick<
   typeof activities,
   | "enqueueGoalRetryWake"
   | "expireSessionHumanInput"
+  | "expireSessionInteractionIntervention"
   | "failSessionAttempt"
   | "getCodexCapacityWait"
   | "markSessionIdle"

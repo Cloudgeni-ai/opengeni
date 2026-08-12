@@ -282,7 +282,7 @@ export type SessionCapabilities = {
     reason: CapabilityUnavailableReason | null;
   };
   Terminal: {
-    transport: "sse-events" | "pty-ws" | null;
+    transport: "sse-events" | "pty-ws" | "relay-pty" | null;
     ptyCapable: boolean;
     shell: string;
     url: string | null;
@@ -416,7 +416,7 @@ export type AttachViewerResponse = ViewerHolder & {
   terminalUrl: string | null;
   terminalToken: string | null;
   terminalExpiresAt: string | null;
-  terminalTransport: "pty-ws" | null;
+  terminalTransport: "pty-ws" | "relay-pty" | null;
 };
 
 // Mirror of `@opengeni/contracts` AcknowledgeStreamRequest/Response — the
@@ -2386,13 +2386,17 @@ export type FirstPartyMcpToolName =
   | "browser_tabs"
   | "browser_observe"
   | "browser_act"
+  | "browser_clipboard"
   | "browser_debug"
+  | "browser_auth"
+  | "interaction_request_human"
   | "browser_identity"
   | "browser_publish"
   | "browser_lifecycle"
   | "computer_open"
   | "computer_targets"
   | "computer_observe"
+  | "computer_clipboard"
   | "computer_act"
   | "computer_lifecycle"
   | "variable_set_list"

@@ -176,7 +176,10 @@ async fn dispatch_future<P: Platform>(
         // oversized reply into a structured `PayloadTooLarge` error rather than a
         // silent publish failure + caller timeout. If a future need arises to stream
         // or chunk these bodies, bound them at the op like the screenshot does.
-        Op::Exec(req) => result(request_id, platform.exec(&req).await, RespResult::Exec),
+        Op::Exec(mut req) => {
+            crate::codemode::expose_native_client(&mut req);
+            result(request_id, platform.exec(&req).await, RespResult::Exec)
+        }
         Op::FsRead(req) => result(request_id, platform.fs_read(&req).await, RespResult::FsRead),
         Op::FsWrite(req) => result(
             request_id,

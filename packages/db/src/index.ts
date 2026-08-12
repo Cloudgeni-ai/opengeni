@@ -122,6 +122,13 @@ import {
   failCodemodeOperationInTransaction,
 } from "./codemode-operations";
 import {
+  cancelTurnInteractionInterventionsInTransaction,
+  InteractionResourceStateError,
+  persistAttemptInteractionInterventionInTransaction,
+  resolveInteractionInterventionInTransaction,
+  settleSessionMaintenanceInTransaction,
+} from "./browser-auth";
+import {
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   McpPersonalConnectionDelegations,
   SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS,
@@ -137,6 +144,7 @@ import {
   TimelineAnnotations,
   renderTimelineAnnotationsForModel,
   SessionMcpApprovalPolicy as SessionMcpApprovalPolicySchema,
+  RequestHumanInteractionToolInput,
   type TimelineAnnotation,
 } from "@opengeni/contracts";
 
@@ -20745,6 +20753,10 @@ export type SessionCreateInput = {
   maxNestedAgentDepthOverride?: number | null;
   allowNestedAgentDepthIncrease?: boolean;
   subjectId?: string | null;
+  /** Trusted, transaction-local linkage run after the exact session row and
+   * MCP metadata exist but before either can commit. It must perform database
+   * work only; throwing rolls the complete create/replay transaction back. */
+  beforeCreateCommit?: (tx: Database, sessionId: string) => Promise<void>;
 };
 
 type SessionDepthDecision =
@@ -21098,6 +21110,7 @@ async function createSessionInTransaction(
       const grouped = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
         existing.id,
       ]);
+      await input.beforeCreateCommit?.(tx, existing.id);
       return {
         session: await mapSessionWithControl(tx, existing, grouped.get(existing.id) ?? []),
         created: false,
@@ -21203,6 +21216,7 @@ async function createSessionInTransaction(
         const grouped = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
           existing.id,
         ]);
+        await input.beforeCreateCommit?.(tx, existing.id);
         return {
           session: await mapSessionWithControl(tx, existing, grouped.get(existing.id) ?? []),
           created: false,
@@ -21235,6 +21249,7 @@ async function createSessionInTransaction(
     sessionId: inserted.id,
     servers: input.mcpServers ?? [],
   });
+  await input.beforeCreateCommit?.(tx, inserted.id);
   return {
     session: await mapSessionWithControl(tx, inserted, mcpServers),
     created: true,
@@ -40961,7 +40976,7 @@ export async function forceDrainOverLimitViewerOnlyBoxes(
         updated_at = now()
       where browser.workspace_id = ${input.workspaceId}
         and browser.lifecycle in ('starting', 'active', 'suspending', 'restoring', 'ending')
-        and browser.sandbox_group_id in (
+        and browser.controller_host_sandbox_group_id in (
           select sandbox_group_id from sandbox_leases
           where workspace_id = ${input.workspaceId}
             and liveness = 'warm' and turn_holders = 0
@@ -46192,7 +46207,12 @@ export async function settleSessionAttemptInterruptions(
 export type SessionWorkPeek =
   | { kind: "runnable" }
   | { kind: "approval-pending"; triggerEventId: string }
-  | { kind: "approval-wait"; humanInputRequestId?: string; expiresAt?: string }
+  | {
+      kind: "approval-wait";
+      humanInputRequestId?: string;
+      interactionInterventionId?: string;
+      expiresAt?: string;
+    }
   | {
       kind: "capacity-wait";
       ref: {
@@ -46599,11 +46619,43 @@ export async function peekSessionWork(
             asc(schema.sessionHumanInputRequests.id),
           )
           .limit(1);
-        return expiringHumanInput?.expiresAt
+        const [expiringInteractionIntervention] = await scopedDb
+          .select({
+            id: schema.interactionInterventions.id,
+            expiresAt: schema.interactionInterventions.expiresAt,
+          })
+          .from(schema.interactionInterventions)
+          .where(
+            and(
+              eq(schema.interactionInterventions.workspaceId, workspaceId),
+              eq(schema.interactionInterventions.originatingSessionId, sessionId),
+              eq(schema.interactionInterventions.originatingTurnId, turn.id),
+              eq(schema.interactionInterventions.status, "open"),
+              isNotNull(schema.interactionInterventions.originatingToolCallId),
+            ),
+          )
+          .orderBy(
+            asc(schema.interactionInterventions.expiresAt),
+            asc(schema.interactionInterventions.id),
+          )
+          .limit(1);
+        if (
+          expiringHumanInput?.expiresAt &&
+          (!expiringInteractionIntervention ||
+            expiringHumanInput.expiresAt.getTime() <=
+              expiringInteractionIntervention.expiresAt.getTime())
+        ) {
+          return {
+            kind: "approval-wait",
+            humanInputRequestId: expiringHumanInput.id,
+            expiresAt: expiringHumanInput.expiresAt.toISOString(),
+          };
+        }
+        return expiringInteractionIntervention
           ? {
               kind: "approval-wait",
-              humanInputRequestId: expiringHumanInput.id,
-              expiresAt: expiringHumanInput.expiresAt.toISOString(),
+              interactionInterventionId: expiringInteractionIntervention.id,
+              expiresAt: expiringInteractionIntervention.expiresAt.toISOString(),
             }
           : { kind: "approval-wait" };
       }
@@ -47161,6 +47213,12 @@ export type ApplySessionTurnSettlementInput = {
       allowSkip: boolean;
       expiresAt?: Date | null;
     }>;
+    interactionInterventionRequests?: Array<{
+      id: string;
+      operationId: string;
+      toolCallId: string;
+      input: RequestHumanInteractionToolInput;
+    }>;
   };
   recording?: SessionTurnRecordingSettlement;
   /**
@@ -47349,6 +47407,7 @@ export async function applySessionTurnSettlement(
       }
 
       const humanInputRequests = input.runState?.humanInputRequests ?? [];
+      const interactionInterventionRequests = input.runState?.interactionInterventionRequests ?? [];
       if (input.runState) {
         if (input.turnStatus !== "requires_action" || input.sessionStatus !== "requires_action") {
           throw new Error("A frozen run state requires a requires_action settlement");
@@ -47365,6 +47424,17 @@ export async function applySessionTurnSettlement(
             Buffer.byteLength(request.toolCallId) > 1024
           ) {
             throw new Error("Human-input tool call id exceeds the durable payload limit");
+          }
+        }
+        for (const request of interactionInterventionRequests) {
+          RequestHumanInteractionToolInput.parse(request.input);
+          if (
+            Buffer.byteLength(request.toolCallId) < 1 ||
+            Buffer.byteLength(request.toolCallId) > 1_024
+          ) {
+            throw new Error(
+              "Interaction intervention tool call id exceeds the durable payload limit",
+            );
           }
         }
         const [{ maxVersion } = { maxVersion: 0 }] = await tx
@@ -47444,6 +47514,16 @@ export async function applySessionTurnSettlement(
               );
             }
           }
+        }
+        for (const request of interactionInterventionRequests) {
+          await persistAttemptInteractionInterventionInTransaction(tx as unknown as Database, {
+            ...request,
+            accountId: session.accountId,
+            workspaceId,
+            originatingSessionId: input.sessionId,
+            originatingTurnId: input.turnId,
+            originatingAttemptId: input.attemptId,
+          });
         }
       }
 
@@ -47563,6 +47643,7 @@ export async function applySessionTurnSettlement(
         if (waitingPrompt) effectiveSessionStatus = "queued";
       }
       const now = new Date();
+      const terminal = isTerminalSessionTurnStatus(input.turnStatus);
       const attemptOutcome = attemptOutcomeForTurnStatus(input.turnStatus);
       if (attemptOutcome) {
         await closeSessionTurnAttemptInTransaction(tx as unknown as Database, {
@@ -47575,6 +47656,21 @@ export async function applySessionTurnSettlement(
           outcome: attemptOutcome,
           closedAt: now,
         });
+      }
+      if (terminal) {
+        await cancelTurnInteractionInterventionsInTransaction(tx as unknown as Database, {
+          accountId: session.accountId,
+          workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+        });
+        if (["idle", "failed", "cancelled"].includes(effectiveSessionStatus)) {
+          await settleSessionMaintenanceInTransaction(tx as unknown as Database, {
+            accountId: session.accountId,
+            workspaceId,
+            sessionId: input.sessionId,
+          });
+        }
       }
       let sequence = session.lastSequence;
       const closesAttempt = ["failed", "cancelled", "superseded"].includes(input.turnStatus);
@@ -47780,7 +47876,6 @@ export async function applySessionTurnSettlement(
           now,
         });
       }
-      const terminal = isTerminalSessionTurnStatus(input.turnStatus);
       if (isTerminalSessionTurnStatus(input.turnStatus)) {
         const terminalType = terminalSessionTurnEventType(input.turnStatus);
         const terminalEventIndex = settlementEvents.findIndex(
@@ -50533,6 +50628,12 @@ export async function acceptSessionApprovalDecision(
     subjectId: string;
     payload: Record<string, unknown>;
     clientEventId?: string | null;
+    interactionIntervention?: {
+      interventionId: string;
+      operationId: string;
+      expectedVersion: number;
+      outcome: "completed" | "dismissed";
+    };
   },
 ): Promise<AcceptSessionApprovalDecisionResult> {
   return await withSessionActivityRlsContext(
@@ -50560,8 +50661,16 @@ export async function acceptSessionApprovalDecision(
             )
             .limit(1);
           if (existing) {
-            if (existing.type !== "user.approvalDecision") {
-              throw new Error("clientEventId belongs to a different session event");
+            const existingPayload = sessionEventPayloadRecord(
+              existing.payload,
+              existing.payloadCodecVersion,
+            );
+            if (
+              existing.type !== "user.approvalDecision" ||
+              existingPayload.approvalId !== input.payload.approvalId ||
+              existingPayload.decision !== input.payload.decision
+            ) {
+              throw new Error("clientEventId belongs to a different approval decision");
             }
             const workflowWakeRevision = await enqueueSessionWorkflowWakeInTransaction(
               tx as unknown as Database,
@@ -50657,6 +50766,60 @@ export async function acceptSessionApprovalDecision(
             sessionStatus: "requires_action",
           } as const;
         }
+        if (input.interactionIntervention) {
+          const expectedInteractionDecision =
+            input.interactionIntervention.outcome === "completed" ? "approve" : "reject";
+          if (input.payload.decision !== expectedInteractionDecision) {
+            throw new Error("Interaction outcome does not match its approval decision");
+          }
+          const [intervention] = await tx
+            .select({
+              originatingSessionId: schema.interactionInterventions.originatingSessionId,
+              originatingToolCallId: schema.interactionInterventions.originatingToolCallId,
+            })
+            .from(schema.interactionInterventions)
+            .where(
+              and(
+                eq(schema.interactionInterventions.workspaceId, input.workspaceId),
+                eq(
+                  schema.interactionInterventions.id,
+                  input.interactionIntervention.interventionId,
+                ),
+              ),
+            )
+            .limit(1);
+          if (
+            !intervention ||
+            intervention.originatingSessionId !== input.sessionId ||
+            intervention.originatingToolCallId !== approvalId
+          ) {
+            throw new Error("Interaction intervention does not belong to this approval");
+          }
+          const resolved = await resolveInteractionInterventionInTransaction(
+            tx as unknown as Database,
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              actorSubjectId: input.subjectId,
+              interventionId: input.interactionIntervention.interventionId,
+              operationId: input.interactionIntervention.operationId,
+              expectedVersion: input.interactionIntervention.expectedVersion,
+              outcome: input.interactionIntervention.outcome,
+            },
+          );
+          if (
+            (input.payload.decision === "approve" &&
+              resolved.intervention.status !== "completed") ||
+            (input.payload.decision === "reject" && resolved.intervention.status === "completed")
+          ) {
+            // A response exactly on the deadline can discover expiration only
+            // while holding the row lock. Roll the whole transaction back so
+            // the session never approves a tool whose intervention expired.
+            throw new InteractionResourceStateError(
+              "Interaction intervention expired before this response",
+            );
+          }
+        }
         const [event] = await tx
           .insert(schema.sessionEvents)
           .values(
@@ -50740,6 +50903,92 @@ export async function acceptSessionApprovalDecision(
         } as const;
       }),
   );
+}
+
+export type ExpireSessionInteractionInterventionResult = {
+  action: "expired" | "stale" | "not_found";
+  events: SessionEvent[];
+};
+
+function deterministicSystemUuid(seed: string): string {
+  const bytes = createHash("sha256").update(seed, "utf8").digest().subarray(0, 16);
+  bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x50;
+  bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/**
+ * Expire one model-owned intervention through the same exact approval boundary
+ * as a human rejection. The resource settlement and rejection event commit
+ * together inside acceptSessionApprovalDecision; a race with a human response
+ * becomes an event-free stale result.
+ */
+export async function expireSessionInteractionIntervention(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    interventionId: string;
+  },
+): Promise<ExpireSessionInteractionInterventionResult> {
+  const intervention = await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [row] = await scopedDb
+        .select({
+          id: schema.interactionInterventions.id,
+          status: schema.interactionInterventions.status,
+          version: schema.interactionInterventions.version,
+          expiresAt: schema.interactionInterventions.expiresAt,
+          originatingSessionId: schema.interactionInterventions.originatingSessionId,
+          originatingToolCallId: schema.interactionInterventions.originatingToolCallId,
+        })
+        .from(schema.interactionInterventions)
+        .where(
+          and(
+            eq(schema.interactionInterventions.workspaceId, input.workspaceId),
+            eq(schema.interactionInterventions.id, input.interventionId),
+          ),
+        )
+        .limit(1);
+      return row ?? null;
+    },
+  );
+  if (
+    !intervention ||
+    intervention.originatingSessionId !== input.sessionId ||
+    !intervention.originatingToolCallId
+  ) {
+    return { action: "not_found", events: [] };
+  }
+  if (intervention.status !== "open" || intervention.expiresAt.getTime() > Date.now()) {
+    return { action: "stale", events: [] };
+  }
+  const result = await acceptSessionApprovalDecision(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    subjectId: "system:expired",
+    payload: {
+      approvalId: intervention.originatingToolCallId,
+      decision: "reject",
+    },
+    clientEventId: `system:interaction-intervention-expired:${intervention.id}`,
+    interactionIntervention: {
+      interventionId: intervention.id,
+      operationId: deterministicSystemUuid(
+        `opengeni:interaction-intervention-expire:${intervention.id}`,
+      ),
+      expectedVersion: intervention.version,
+      outcome: "dismissed",
+    },
+  });
+  return result.action === "accepted"
+    ? { action: "expired", events: result.events }
+    : { action: "stale", events: [] };
 }
 
 /**
@@ -52649,5 +52898,8 @@ export * from "./codemode-operations";
 export * from "./browser-sessions";
 export * from "./computer-sessions";
 export * from "./browser-identities";
+export * from "./browser-state-artifacts";
 export * from "./browser-auth";
+export * from "./browser-downloads";
 export * from "./attached-browser-devices";
+export * from "./interaction-revisions";

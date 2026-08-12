@@ -27,12 +27,11 @@ export default defineConfig({
         codeSplitting: {
           groups: [
             {
-              // Keep every Radix package in one chunk. entriesAware session
-              // merging otherwise splits Popper scopes across lazy route
-              // share-chunks and crashes /settings
-              // (`createPopperScope is not a function`).
-              name: "radix",
-              test: /(?:node_modules|\.bun)[\\/](?:@radix-ui(?:\+|\/)|radix-ui(?:@|\/))/,
+              // Keep Radix and Lucide's eager icon factory in one UI runtime.
+              // entriesAware route merging can otherwise split Popper scopes,
+              // or place an icon and its factory across a circular chunk.
+              name: "ui-runtime",
+              test: /(?:(?:node_modules|\.bun)[\\/](?:@radix-ui(?:\+|\/)|radix-ui(?:@|\/))|[\\/]lucide-react[\\/]dist[\\/]esm[\\/](?:(?:createLucideIcon|Icon|context|defaultAttributes)\.mjs|shared[\\/]))/,
               priority: 15,
             },
             {

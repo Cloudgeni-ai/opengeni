@@ -12,6 +12,7 @@ import {
   type EmbeddedBrowserInteractionClientOverride,
   useEmbeddedBrowserInteraction,
 } from "../session-context";
+import { useInteractionInvalidation } from "./use-interaction-invalidation";
 
 export type UseBrowserIdentitiesOptions = EmbeddedBrowserInteractionClientOverride & {
   enabled?: boolean | undefined;
@@ -43,7 +44,8 @@ export type UseBrowserIdentitiesResult = {
 export function useBrowserIdentities(
   options: UseBrowserIdentitiesOptions = {},
 ): UseBrowserIdentitiesResult {
-  const { client, workspaceId } = useEmbeddedBrowserInteraction(options);
+  const { client, workspaceId, workspaceInteractionEvent, workspaceInteractionConnectionState } =
+    useEmbeddedBrowserInteraction(options);
   const enabled = options.enabled ?? true;
   const [state, setState] = useState(() => emptyState(workspaceId, enabled));
   const [mutationCount, setMutationCount] = useState(0);
@@ -117,6 +119,16 @@ export function useBrowserIdentities(
       cancelLoad();
     };
   }, [cancelLoad, enabled, load, workspaceId]);
+
+  useInteractionInvalidation({
+    workspaceId,
+    key: workspaceId,
+    enabled,
+    event: workspaceInteractionEvent,
+    connectionState: workspaceInteractionConnectionState,
+    knownRevision: visibleState.revision,
+    refresh,
+  });
 
   const mutate = useCallback(async <T>(operation: () => Promise<T>): Promise<T> => {
     setMutationCount((count) => count + 1);

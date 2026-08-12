@@ -113,7 +113,7 @@ describe("codemode token mint and sandbox delivery pointers", () => {
     });
   });
 
-  test("connected-machine turns mint no Codemode token and expose no Codemode pointers", async () => {
+  test("connected-machine turns mint transient material without manifest pointers", async () => {
     const settings = testSettings({
       sandboxBackend: "modal",
       delegationSecret: "codemode-secret",
@@ -126,15 +126,32 @@ describe("codemode token mint and sandbox delivery pointers", () => {
       {
         scope: { accountId, workspaceId },
         codemodeAuthority: authority,
-        skipCodemode: true,
+        codemodeDelivery: "transient_exec",
       },
     );
 
-    expect(result.codemodeToken).toBeUndefined();
-    expect(result.codemodeTokenExpiresAt).toBeUndefined();
+    expect(result.codemodeToken).toMatch(/^ogd_/);
+    expect(result.codemodeTokenExpiresAt).toBeInstanceOf(Date);
     expect(result.environment.OPENGENI_CODEMODE_URL).toBeUndefined();
     expect(result.environment.OPENGENI_CODEMODE_TOKEN_FILE).toBeUndefined();
     expect(result.environment.OPENGENI_OGTOOL_PACKAGE_SPEC).toBeUndefined();
+    expect(Object.values(result.environment)).not.toContain(result.codemodeToken);
+  });
+
+  test("explicitly disabled Codemode mints nothing and exposes no pointers", async () => {
+    const result = await sandboxEnvironmentForRun(
+      testSettings({ sandboxBackend: "modal", delegationSecret: "codemode-secret" }),
+      [],
+      {},
+      {
+        scope: { accountId, workspaceId },
+        codemodeAuthority: authority,
+        codemodeDelivery: "none",
+      },
+    );
+    expect(result.codemodeToken).toBeUndefined();
+    expect(result.environment.OPENGENI_CODEMODE_URL).toBeUndefined();
+    expect(result.environment.OPENGENI_CODEMODE_TOKEN_FILE).toBeUndefined();
   });
 
   test("the token targets the public sandbox-routable API URL, never a cluster-internal one", async () => {

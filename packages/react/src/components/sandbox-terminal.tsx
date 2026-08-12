@@ -87,6 +87,8 @@ export type SandboxTerminalProps = {
    * the firehose-only default).
    */
   onActivate?: (() => void) | undefined;
+  /** Re-negotiate the terminal capability after an unexpected socket failure. */
+  onReconnectNeeded?: (() => void) | undefined;
   className?: string | undefined;
 };
 
@@ -223,6 +225,7 @@ export function SandboxTerminal({
   showHeader,
   shell,
   onActivate,
+  onReconnectNeeded,
   className,
 }: SandboxTerminalProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -237,7 +240,8 @@ export function SandboxTerminal({
   const [activated, setActivated] = useState(false);
 
   // ── Interactive transport switch ─────────────────────────────────────────────
-  const ptyDescriptor = terminalCapability?.transport === "pty-ws";
+  const ptyDescriptor =
+    terminalCapability?.transport === "pty-ws" || terminalCapability?.transport === "relay-pty";
   const ptyAttachable = terminalCanAcquirePty(terminalCapability);
   const {
     status: ptyStatus,
@@ -251,7 +255,7 @@ export function SandboxTerminal({
     capability:
       ptyAttachable && ready
         ? {
-            transport: "pty-ws",
+            transport: terminalCapability!.transport,
             url: ptyDescriptor ? terminalCapability!.url : null,
             token: ptyDescriptor ? terminalCapability!.token : null,
             expiresAt: ptyDescriptor ? terminalCapability!.expiresAt : null,
@@ -260,6 +264,7 @@ export function SandboxTerminal({
     onOutput: (data) => {
       termRef.current?.write(data);
     },
+    onReconnectNeeded,
   });
 
   // A pty-ws capability exclusively owns the screen even while connecting or

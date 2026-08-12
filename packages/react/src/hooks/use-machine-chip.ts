@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import type { MachineState } from "@opengeni/sdk";
 import type { SessionCapabilitiesState } from "./use-session-capabilities";
 import { sandboxAcceptsLiveIo } from "../lib/sandbox-liveness";
+import { connectionStatusForState } from "../types/machines";
 
 /** The one truthful machine indicator. Honest staleness beats
  *  fake liveness: a cold/asleep box reads "offline — as of <time>", never "live". */
@@ -65,9 +66,18 @@ export function deriveMachineChip(input: DeriveMachineChipInput): MachineChip {
   const asOf = input.capturedAt ?? null;
   const offlineLabel = asOf ? `Offline — as of ${formatAsOf(asOf, now)}` : "Offline";
 
-  // 1. Only holder-confirmed warm is live. Draining is teardown-owned and may
-  // already have lost its provider instance, so it uses the capture-backed label.
-  if (sandboxAcceptsLiveIo(input.liveness)) {
+  // A connected machine has no Modal group lease, so capability negotiation
+  // legitimately reports `cold` until a stream holder is minted. Its fleet
+  // probe is the authoritative reachability signal; do not label an online Mac
+  // "Offline" merely because there is no unrelated Modal lease.
+  const selfhostedOnline =
+    input.activeIsSelfhosted === true &&
+    input.activeMachineState != null &&
+    connectionStatusForState(input.activeMachineState) === "online";
+
+  // 1. A holder-confirmed warm provider or online connected machine is live.
+  // Draining remains teardown-owned and may already have lost its instance.
+  if (sandboxAcceptsLiveIo(input.liveness) || selfhostedOnline) {
     return { state: "live", label: "Live", asOf: null };
   }
 

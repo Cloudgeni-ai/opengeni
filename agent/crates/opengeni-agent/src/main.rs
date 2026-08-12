@@ -22,7 +22,7 @@
 //! * [`supervisor`] — dial → serve → reconnect, forever, with heartbeats + the
 //!   clean going-offline.
 //! * [`cli`] — the `run` / `connect` / `connections` / `disconnect` / `service` /
-//!   `update` / `uninstall` surface.
+//!   `update` / `uninstall` surface plus native exact-attempt Codemode calls.
 //! * [`service`] — the ordinary background-service lifecycle glue.
 //! * [`update`] — the `update` subcommand wiring the self-update crate.
 //! * [`uninstall`] — the `uninstall` subcommand (remove binary/creds/enrollment).
@@ -39,6 +39,7 @@ mod browser_bridge;
 mod browser_sidecar;
 mod capacity;
 mod cli;
+mod codemode;
 mod config;
 mod dispatch;
 mod engine;
@@ -163,6 +164,7 @@ async fn dispatch_command(cli: Cli) -> anyhow_lite::Result {
                 .map_err(to_boxed)?
                 .map_err(string_err)
         }
+        Command::Codemode(args) => codemode::run(args).await.map_err(to_boxed),
         Command::Uninstall(args) => uninstall::run(&args).map_err(string_err),
         Command::BrowserNativeHost(_) => {
             tokio::task::spawn_blocking(browser_bridge::run_native_host)
@@ -343,7 +345,9 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
         platform = platform.with_oom_isolation(cgroups);
     }
     let config_dir = config::config_dir().ok();
-    platform = attach_browser_controller(platform, config_dir.as_deref());
+    let (next_platform, browser_sidecars) =
+        attach_browser_controller(platform, config_dir.as_deref());
+    platform = next_platform;
     // Clone connection platforms only after browser control is attached. Existing
     // links and links added by the watcher must expose the identical controller.
     let links = supervisor_links(&connections, &platform);
@@ -403,6 +407,9 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
             warn!(%error, "attached browser bridge did not shut down cleanly");
         }
     }
+    if let Some(sidecars) = browser_sidecars {
+        sidecars.shutdown().await;
+    }
     supervisor_result.map_err(to_boxed)?;
     info!("agent stopped");
     Ok(())
@@ -411,15 +418,21 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
 fn attach_browser_controller(
     platform: NativePlatform,
     config_dir: Option<&Path>,
-) -> NativePlatform {
+) -> (NativePlatform, Option<Arc<BrowserSidecarManager>>) {
     let Some(directory) = config_dir else {
-        return platform;
+        return (platform, None);
     };
     match BrowserSidecarManager::discover(directory) {
-        Ok(manager) => platform.with_browser_control(Arc::new(manager)),
+        Ok(manager) => {
+            let manager = Arc::new(manager);
+            (
+                platform.with_browser_control(manager.clone()),
+                Some(manager),
+            )
+        }
         Err(error) => {
             warn!(%error, "browser controller sidecar unavailable; browser-native control is disabled");
-            platform
+            (platform, None)
         }
     }
 }

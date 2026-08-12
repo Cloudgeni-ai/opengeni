@@ -1,6 +1,8 @@
 import { isOpenAIResponsesRawModelStreamEvent, type RunStreamEvent } from "@openai/agents";
 import {
+  INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,
   approvalIdentifier,
+  RequestHumanInteractionToolInput,
   RequestHumanInputToolInput,
   sessionEventMediaPreview,
   sessionEventMediaPreviewFromDataUrl,
@@ -61,6 +63,13 @@ export const HUMAN_INPUT_TOOL_NAME = "request_human_input";
 export type SerializedHumanInputInterruption = {
   toolCallId: string;
   input: ReturnType<typeof RequestHumanInputToolInput.parse>;
+};
+
+export type SerializedInteractionInterventionInterruption = {
+  toolCallId: string;
+  input: ReturnType<typeof RequestHumanInteractionToolInput.parse>;
+  /** Exact SDK approval object retained in the frozen RunState. */
+  approval: unknown;
 };
 
 function base64DecodedByteLength(value: string): number {
@@ -580,19 +589,35 @@ function requestUsageEntriesProp(
 
 export function serializeApprovals(interruptions: unknown[]): unknown[] {
   const approvals = interruptions
-    .filter((item) => interruptionToolName(item) !== HUMAN_INPUT_TOOL_NAME)
+    .filter(
+      (item) =>
+        ![HUMAN_INPUT_TOOL_NAME, INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME].includes(
+          interruptionToolName(item),
+        ),
+    )
+    .map(serializeApprovalInterruption);
+  return normalizeProtocolJsonValue(approvals, '$["approvals"]');
+}
+
+export function serializeInteractionInterventionRequests(
+  interruptions: unknown[],
+): SerializedInteractionInterventionInterruption[] {
+  return interruptions
+    .filter((item) => interruptionToolName(item) === INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME)
     .map((item: any) => {
-      if (typeof item?.toJSON === "function") {
-        return item.toJSON();
+      const toolCallId = approvalIdentifier(item);
+      if (!toolCallId) {
+        throw new Error("Interaction intervention is missing a stable tool-call identity");
       }
       return {
-        id: approvalIdentifier(item) ?? "approval",
-        name: item?.name ?? item?.rawItem?.name ?? "tool",
-        arguments: item?.arguments ?? item?.rawItem?.arguments ?? null,
-        raw: item,
+        toolCallId,
+        input: RequestHumanInteractionToolInput.parse(interruptionArguments(item)),
+        approval: normalizeProtocolJsonValue(
+          serializeApprovalInterruption(item),
+          '$["interactionInterventionApproval"]',
+        ),
       };
     });
-  return normalizeProtocolJsonValue(approvals, '$["approvals"]');
 }
 
 export function serializeHumanInputRequests(
@@ -601,24 +626,35 @@ export function serializeHumanInputRequests(
   return interruptions
     .filter((item) => interruptionToolName(item) === HUMAN_INPUT_TOOL_NAME)
     .map((item: any) => {
-      const rawArguments = item?.arguments ?? item?.rawItem?.arguments;
-      let parsedArguments: unknown = rawArguments;
-      if (typeof rawArguments === "string") {
-        try {
-          parsedArguments = JSON.parse(rawArguments);
-        } catch {
-          throw new Error("Human-input interruption contains invalid JSON arguments");
-        }
-      }
       const toolCallId = approvalIdentifier(item);
       if (!toolCallId) {
         throw new Error("Human-input interruption is missing a stable tool-call identity");
       }
       return {
         toolCallId,
-        input: RequestHumanInputToolInput.parse(parsedArguments),
+        input: RequestHumanInputToolInput.parse(interruptionArguments(item)),
       };
     });
+}
+
+function serializeApprovalInterruption(item: any): unknown {
+  if (typeof item?.toJSON === "function") return item.toJSON();
+  return {
+    id: approvalIdentifier(item) ?? "approval",
+    name: item?.name ?? item?.rawItem?.name ?? "tool",
+    arguments: item?.arguments ?? item?.rawItem?.arguments ?? null,
+    raw: item,
+  };
+}
+
+function interruptionArguments(item: any): unknown {
+  const rawArguments = item?.arguments ?? item?.rawItem?.arguments;
+  if (typeof rawArguments !== "string") return rawArguments;
+  try {
+    return JSON.parse(rawArguments) as unknown;
+  } catch {
+    throw new Error("Tool interruption contains invalid JSON arguments");
+  }
 }
 
 function interruptionToolName(item: unknown): string {

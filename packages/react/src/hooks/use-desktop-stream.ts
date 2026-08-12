@@ -19,6 +19,8 @@ export type UseDesktopStreamOptions = {
   scaleViewport?: boolean | undefined;
   /** Custom RFB factory (tests / a WebRTC swap). Defaults to a lazy @novnc/novnc. */
   rfbFactory?: DesktopRfbFactory | undefined;
+  /** Additional WebSocket protocols for an authenticated placement proxy. */
+  webSocketProtocols?: string[] | undefined;
   /** Custom socket factory for the `relay-frames` transport (tests). Defaults to
    *  `new WebSocket(url)`. Mirrors `rfbFactory` for the frame renderer. */
   webSocketFactory?: DesktopWebSocketFactory | undefined;
@@ -44,7 +46,10 @@ async function defaultRfbFactory(): Promise<DesktopRfbFactory> {
     default: new (
       t: HTMLElement,
       u: string,
-      o: { credentials?: { password?: string | undefined } | undefined },
+      o: {
+        credentials?: { password?: string | undefined } | undefined;
+        wsProtocols?: string[] | undefined;
+      },
     ) => DesktopRfbLike;
   };
   const RFB = mod.default;
@@ -71,8 +76,15 @@ async function defaultRfbFactory(): Promise<DesktopRfbFactory> {
  * way, so `DesktopViewer` is transport-agnostic.
  */
 export function useDesktopStream(options: UseDesktopStreamOptions): UseDesktopStreamResult {
-  const { capability, containerRef, interactive, scaleViewport, rfbFactory, webSocketFactory } =
-    options;
+  const {
+    capability,
+    containerRef,
+    interactive,
+    scaleViewport,
+    rfbFactory,
+    webSocketProtocols,
+    webSocketFactory,
+  } = options;
 
   // The self-hosted PNG-frame path. Always invoked (rules of hooks); dormant
   // unless `transport === "relay-frames"`, in which case it owns the surface.
@@ -113,10 +125,12 @@ export function useDesktopStream(options: UseDesktopStreamOptions): UseDesktopSt
   const scaleViewportRef = useRef(scaleViewport);
   const modeRef = useRef(mode);
   const rfbFactoryRef = useRef(rfbFactory);
+  const webSocketProtocolsRef = useRef(webSocketProtocols);
   interactiveRef.current = interactive;
   scaleViewportRef.current = scaleViewport;
   modeRef.current = mode;
   rfbFactoryRef.current = rfbFactory;
+  webSocketProtocolsRef.current = webSocketProtocols;
 
   // read-only is forced when the server says so OR the caller didn't opt in.
   const viewOnlyFor = (m: string, want: boolean | undefined) => m === "read-only" || !want;
@@ -164,6 +178,7 @@ export function useDesktopStream(options: UseDesktopStreamOptions): UseDesktopSt
         setBoth(nextDesktopState(stateRef.current, { type: "negotiated" }));
         rfb = factory(container, socketUrl, {
           credentials: token ? { password: token } : undefined,
+          ...(webSocketProtocolsRef.current ? { wsProtocols: webSocketProtocolsRef.current } : {}),
         });
         rfb.viewOnly = viewOnlyFor(modeRef.current, interactiveRef.current);
         // Fit-to-panel: SCALE the 1280x800 framebuffer down to the container

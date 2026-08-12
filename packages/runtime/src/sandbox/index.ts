@@ -263,6 +263,7 @@ export {
   type CreatePlacementBrowserSessionInput,
   type PlacementBrowserSession,
   type PlacementBrowserSessionReference,
+  type PlacementBrowserNetworkRoute,
   type PlacementBrowserTransport,
   type PlacementBrowserStateCaptureReceipt,
   type ProvisionBrowserControlClientInput,

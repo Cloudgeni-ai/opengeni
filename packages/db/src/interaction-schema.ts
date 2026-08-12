@@ -216,13 +216,17 @@ export const browserStateArtifacts = pgTable(
     contentDigest: text("content_digest").notNull(),
     manifestDigest: text("manifest_digest").notNull(),
     objectKey: text("object_key").notNull(),
-    encryptedDataKey: text("encrypted_data_key").notNull(),
+    encryptedDataKey: text("encrypted_data_key"),
     sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(),
     materialization: jsonb("materialization").$type<BrowserRevisionMaterialization>().notNull(),
-    state: text("state", { enum: ["available", "delete_pending", "deleted"] })
+    state: text("state", {
+      enum: ["available", "delete_pending", "deleting", "deleted"],
+    })
       .notNull()
       .default("available"),
     retainedUntil: timestamp("retained_until", { withTimezone: true }),
+    deleteClaimId: uuid("delete_claim_id"),
+    deleteClaimedAt: timestamp("delete_claimed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
   },
@@ -230,6 +234,12 @@ export const browserStateArtifacts = pgTable(
     workspaceArtifact: uniqueIndex("browser_state_artifacts_workspace_id_uq").on(
       table.workspaceId,
       table.id,
+    ),
+    commitAuthority: uniqueIndex("browser_state_artifacts_commit_authority_uq").on(
+      table.workspaceId,
+      table.id,
+      table.purpose,
+      table.sourceBrowserSessionId,
     ),
     objectKey: uniqueIndex("browser_state_artifacts_object_key_uq").on(table.objectKey),
     source: index("browser_state_artifacts_source_idx").on(
@@ -240,6 +250,7 @@ export const browserStateArtifacts = pgTable(
     gc: index("browser_state_artifacts_gc_idx").on(
       table.state,
       table.retainedUntil,
+      table.deleteClaimedAt,
       table.createdAt,
     ),
     valuesValid: check(
@@ -251,7 +262,10 @@ export const browserStateArtifacts = pgTable(
         and ${table.manifestDigest} ~ '^[0-9a-f]{64}$'
         and octet_length(${table.objectKey}) between 1 and 2048
         and ${table.objectKey} ~ ('^workspaces/' || ${table.workspaceId}::text || '/browser-state/[A-Za-z0-9._=-]+(/[A-Za-z0-9._=-]+)*$')
-        and octet_length(${table.encryptedDataKey}) between 16 and 8192
+        and (
+          ${table.encryptedDataKey} is null
+          or octet_length(${table.encryptedDataKey}) between 16 and 8192
+        )
         and ${table.sizeBytes} > 0
         and jsonb_typeof(${table.materialization}) = 'object'
         and octet_length(${table.materialization}::text) between 2 and 65536
@@ -261,13 +275,136 @@ export const browserStateArtifacts = pgTable(
             ${table.state} = 'available'
             and ${table.retainedUntil} is null
             and ${table.deletedAt} is null
+            and ${table.deleteClaimId} is null
+            and ${table.deleteClaimedAt} is null
+            and ${table.encryptedDataKey} is not null
           )
         )`,
     ),
     lifecycleValid: check(
       "browser_state_artifacts_lifecycle_check",
-      sql`(${table.state} = 'deleted' and ${table.deletedAt} is not null)
-        or (${table.state} <> 'deleted' and ${table.deletedAt} is null)`,
+      sql`(
+          ${table.state} = 'available'
+          and ${table.retainedUntil} is null
+          and ${table.deleteClaimId} is null
+          and ${table.deleteClaimedAt} is null
+          and ${table.deletedAt} is null
+          and ${table.encryptedDataKey} is not null
+        ) or (
+          ${table.state} = 'delete_pending'
+          and ${table.retainedUntil} is not null
+          and ${table.deleteClaimId} is null
+          and ${table.deleteClaimedAt} is null
+          and ${table.deletedAt} is null
+          and ${table.encryptedDataKey} is not null
+        ) or (
+          ${table.state} = 'deleting'
+          and ${table.retainedUntil} is not null
+          and ${table.deleteClaimId} is not null
+          and ${table.deleteClaimedAt} is not null
+          and ${table.deletedAt} is null
+          and ${table.encryptedDataKey} is not null
+        ) or (
+          ${table.state} = 'deleted'
+          and ${table.retainedUntil} is not null
+          and ${table.deleteClaimId} is null
+          and ${table.deleteClaimedAt} is null
+          and ${table.deletedAt} is not null
+          and ${table.encryptedDataKey} is null
+        )`,
+    ),
+  }),
+);
+
+/** Pre-publication object authority. This row exists before a controller can
+ * upload bytes, then becomes either a committed artifact root or reclaimable
+ * cleanup authority. It never carries encryption keys or signed URLs. */
+export const browserStateUploads = pgTable(
+  "browser_state_uploads",
+  {
+    id: uuid("id").primaryKey(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    operationId: uuid("operation_id").notNull(),
+    sourceBrowserSessionId: uuid("source_browser_session_id").notNull(),
+    purpose: text("purpose", {
+      enum: ["revision_component", "private_checkpoint"],
+    }).notNull(),
+    objectKey: text("object_key").notNull(),
+    state: text("state", {
+      enum: ["prepared", "delete_pending", "deleting", "committed", "deleted"],
+    })
+      .notNull()
+      .default("prepared"),
+    cleanupAfter: timestamp("cleanup_after", { withTimezone: true }),
+    committedArtifactId: uuid("committed_artifact_id"),
+    deleteClaimId: uuid("delete_claim_id"),
+    deleteClaimedAt: timestamp("delete_claimed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+  },
+  (table) => ({
+    workspaceUpload: uniqueIndex("browser_state_uploads_workspace_id_uq").on(
+      table.workspaceId,
+      table.id,
+    ),
+    operationObject: uniqueIndex("browser_state_uploads_operation_object_uq").on(
+      table.workspaceId,
+      table.operationId,
+      table.objectKey,
+    ),
+    objectKey: uniqueIndex("browser_state_uploads_object_key_uq").on(table.objectKey),
+    gc: index("browser_state_uploads_gc_idx").on(
+      table.state,
+      table.cleanupAfter,
+      table.deleteClaimedAt,
+      table.createdAt,
+    ),
+    valuesValid: check(
+      "browser_state_uploads_values_check",
+      sql`octet_length(${table.objectKey}) between 1 and 2048
+        and ${table.objectKey} ~ ('^workspaces/' || ${table.workspaceId}::text || '/browser-state/[A-Za-z0-9._=-]+(/[A-Za-z0-9._=-]+)*$')
+        and ${table.updatedAt} >= ${table.createdAt}`,
+    ),
+    lifecycleValid: check(
+      "browser_state_uploads_lifecycle_check",
+      sql`(
+          ${table.state} = 'prepared'
+          and ${table.cleanupAfter} is not null
+          and ${table.committedArtifactId} is null
+          and ${table.deleteClaimId} is null
+          and ${table.deleteClaimedAt} is null
+          and ${table.deletedAt} is null
+        ) or (
+          ${table.state} = 'delete_pending'
+          and ${table.cleanupAfter} is not null
+          and ${table.committedArtifactId} is null
+          and ${table.deleteClaimId} is null
+          and ${table.deleteClaimedAt} is null
+          and ${table.deletedAt} is null
+        ) or (
+          ${table.state} = 'deleting'
+          and ${table.cleanupAfter} is not null
+          and ${table.committedArtifactId} is null
+          and ${table.deleteClaimId} is not null
+          and ${table.deleteClaimedAt} is not null
+          and ${table.deletedAt} is null
+        ) or (
+          ${table.state} = 'committed'
+          and ${table.cleanupAfter} is null
+          and ${table.committedArtifactId} is not null
+          and ${table.deleteClaimId} is null
+          and ${table.deleteClaimedAt} is null
+          and ${table.deletedAt} is null
+        ) or (
+          ${table.state} = 'deleted'
+          and ${table.cleanupAfter} is not null
+          and ${table.committedArtifactId} is null
+          and ${table.deleteClaimId} is null
+          and ${table.deleteClaimedAt} is null
+          and ${table.deletedAt} is not null
+        )`,
     ),
   }),
 );
@@ -432,6 +569,9 @@ export const browserSessions = pgTable(
     deviceId: uuid("device_id"),
     externalProviderId: text("external_provider_id"),
     externalPlacementId: text("external_placement_id"),
+    /** Sandbox group hosting browserd when the logical browser itself lives
+     * on a remote provider. This is deliberately separate from placement. */
+    controllerHostSandboxGroupId: uuid("controller_host_sandbox_group_id"),
     controllerId: text("controller_id"),
     controllerGeneration: text("controller_generation"),
     placementInstanceId: text("placement_instance_id"),
@@ -446,6 +586,13 @@ export const browserSessions = pgTable(
     baseRevisionId: uuid("base_revision_id"),
     linkedComputerSessionId: uuid("linked_computer_session_id"),
     networkRouteId: uuid("network_route_id"),
+    networkRouteVersion: bigint("network_route_version", { mode: "number" }),
+    networkRouteConfiguration: jsonb("network_route_configuration"),
+    networkRouteConsistency: jsonb("network_route_consistency"),
+    networkRouteCredentialVersion: bigint("network_route_credential_version", {
+      mode: "number",
+    }),
+    networkRouteAuthorityDigest: text("network_route_authority_digest"),
     privateCheckpointArtifactId: uuid("private_checkpoint_artifact_id"),
     capabilities: jsonb("capabilities").$type<BrowserSessionCapabilities>().notNull(),
     createOperationId: uuid("create_operation_id").notNull(),
@@ -478,6 +625,16 @@ export const browserSessions = pgTable(
       table.sandboxGroupId,
       table.lifecycle,
     ),
+    controllerHostSandboxGroup: index("browser_sessions_controller_host_sandbox_group_idx").on(
+      table.workspaceId,
+      table.controllerHostSandboxGroupId,
+      table.lifecycle,
+    ),
+    networkRoute: index("browser_sessions_workspace_network_route_idx").on(
+      table.workspaceId,
+      table.networkRouteId,
+      table.lifecycle,
+    ),
     valuesValid: check(
       "browser_sessions_values_check",
       sql`octet_length(${table.name}) between 1 and 200
@@ -485,6 +642,27 @@ export const browserSessions = pgTable(
         and octet_length(${table.createdBySubjectId}) between 1 and 1024
         and ${table.tokenGeneration} > 0
         and octet_length(${table.capabilities}::text) between 2 and 65536
+        and (
+          (${table.networkRouteId} is null
+            and ${table.networkRouteVersion} is null
+            and ${table.networkRouteConfiguration} is null
+            and ${table.networkRouteConsistency} is null
+            and ${table.networkRouteCredentialVersion} is null
+            and ${table.networkRouteAuthorityDigest} is null)
+          or
+          (${table.networkRouteId} is not null
+            and ${table.networkRouteVersion} > 0
+            and jsonb_typeof(${table.networkRouteConfiguration}) = 'object'
+            and octet_length(${table.networkRouteConfiguration}::text) between 2 and 65536
+            and jsonb_typeof(${table.networkRouteConsistency}) = 'object'
+            and octet_length(${table.networkRouteConsistency}::text) between 2 and 65536
+            and (${table.networkRouteCredentialVersion} is null or ${table.networkRouteCredentialVersion} > 0)
+            and (${table.networkRouteAuthorityDigest} is not null or ${table.networkRouteCredentialVersion} is null)
+            and (${table.networkRouteAuthorityDigest} is null or (
+              octet_length(${table.networkRouteAuthorityDigest}) between 16 and 256
+              and ${table.networkRouteAuthorityDigest} ~ '^[A-Za-z0-9._~-]+$'
+            )))
+        )
         and (${table.engineVersion} is null or octet_length(${table.engineVersion}) between 1 and 256)
         and (${table.failureCode} is null or octet_length(${table.failureCode}) between 1 and 512)`,
     ),
@@ -537,6 +715,19 @@ export const browserSessions = pgTable(
           and ${table.placementInstanceId} is not null
           and octet_length(${table.placementInstanceId}) between 1 and 512
           and ${table.controllerHeartbeatAt} is not null
+        )`,
+    ),
+    controllerHostValid: check(
+      "browser_sessions_controller_host_check",
+      sql`(
+          ${table.placementKind} = 'sandbox_group'
+          and ${table.controllerHostSandboxGroupId} = ${table.sandboxGroupId}
+        ) or (
+          ${table.placementKind} = 'external_provider'
+          and ${table.controllerHostSandboxGroupId} is not null
+        ) or (
+          ${table.placementKind} in ('connected_machine', 'attached_device')
+          and ${table.controllerHostSandboxGroupId} is null
         )`,
     ),
     identityRevisionValid: check(
@@ -873,6 +1064,15 @@ export const siteAuthConnections = pgTable(
       .default("unknown"),
     lastVerifiedAt: timestamp("last_verified_at", { withTimezone: true }),
     lastVerifiedUrl: text("last_verified_url"),
+    lastCheckedAt: timestamp("last_checked_at", { withTimezone: true }),
+    nextCheckAt: timestamp("next_check_at", { withTimezone: true }),
+    maintenanceOperationId: uuid("maintenance_operation_id"),
+    maintenanceAction: text("maintenance_action", { enum: ["health_check", "repair"] }),
+    maintenanceDueAt: timestamp("maintenance_due_at", { withTimezone: true }),
+    maintenanceClaimedAt: timestamp("maintenance_claimed_at", { withTimezone: true }),
+    maintenanceSessionId: uuid("maintenance_session_id"),
+    maintenanceStartedAt: timestamp("maintenance_started_at", { withTimezone: true }),
+    healthSequence: bigint("health_sequence", { mode: "number" }).notNull().default(0),
     repairCode: text("repair_code"),
     version: bigint("version", { mode: "number" }).notNull().default(1),
     createOperationId: uuid("create_operation_id").notNull(),
@@ -897,6 +1097,11 @@ export const siteAuthConnections = pgTable(
       table.workspaceId,
       table.status,
       table.updatedAt,
+      table.id,
+    ),
+    maintenance: index("site_auth_connections_health_maintenance_idx").on(
+      table.nextCheckAt,
+      table.maintenanceClaimedAt,
       table.id,
     ),
     valuesValid: check(
@@ -943,6 +1148,50 @@ export const siteAuthConnections = pgTable(
           and ${table.repairCode} is not null
         )`,
     ),
+    healthValid: check(
+      "site_auth_connections_health_check",
+      sql`(
+          (
+            ${table.healthSequence} = 0
+            and ${table.lastCheckedAt} is null
+          ) or (
+            ${table.healthSequence} > 0
+            and ${table.lastCheckedAt} is not null
+          )
+        ) and (
+          (
+            ${table.status} = 'active'
+            and ${table.healthPolicy}->>'mode' = 'maintained'
+            and ${table.nextCheckAt} is not null
+          ) or (
+            not (${table.status} = 'active' and ${table.healthPolicy}->>'mode' = 'maintained')
+            and ${table.nextCheckAt} is null
+          )
+        )`,
+    ),
+    maintenanceValid: check(
+      "site_auth_connections_maintenance_check",
+      sql`(
+          ${table.maintenanceOperationId} is null
+          and ${table.maintenanceAction} is null
+          and ${table.maintenanceDueAt} is null
+          and ${table.maintenanceClaimedAt} is null
+          and ${table.maintenanceSessionId} is null
+          and ${table.maintenanceStartedAt} is null
+        ) or (
+          ${table.status} = 'active'
+          and ${table.healthPolicy}->>'mode' = 'maintained'
+          and ${table.maintenanceOperationId} is not null
+          and ${table.maintenanceAction} in ('health_check', 'repair')
+          and ${table.maintenanceDueAt} is not null
+          and ${table.maintenanceClaimedAt} is not null
+          and ${table.maintenanceSessionId} is not null
+          and (
+            ${table.maintenanceStartedAt} is null
+            or ${table.maintenanceStartedAt} >= ${table.maintenanceDueAt}
+          )
+        )`,
+    ),
   }),
 );
 
@@ -958,6 +1207,13 @@ export const authRuns = pgTable(
     controllerGeneration: text("controller_generation").notNull(),
     targetGeneration: text("target_generation").notNull(),
     documentGeneration: text("document_generation"),
+    purpose: text("purpose", { enum: ["authenticate", "health_check", "repair"] })
+      .notNull()
+      .default("authenticate"),
+    healthSequence: bigint("health_sequence", { mode: "number" })
+      .notNull()
+      .default(sql`nextval('auth_runs_health_sequence_seq'::regclass)`),
+    maintenanceOperationId: uuid("maintenance_operation_id"),
     methodId: text("method_id"),
     authorityId: text("authority_id"),
     state: text("state", {
@@ -1006,6 +1262,9 @@ export const authRuns = pgTable(
       table.siteAuthConnectionId,
       table.createdAt,
     ),
+    maintenanceOperation: uniqueIndex("auth_runs_workspace_maintenance_operation_uq")
+      .on(table.workspaceId, table.maintenanceOperationId)
+      .where(sql`${table.maintenanceOperationId} is not null`),
     valuesValid: check(
       "auth_runs_values_check",
       sql`octet_length(${table.targetId}) between 1 and 512
@@ -1026,6 +1285,16 @@ export const authRuns = pgTable(
         and (${table.failureCode} is null or octet_length(${table.failureCode}) between 1 and 512)
         and ${table.version} > 0
         and octet_length(${table.createdBySubjectId}) between 1 and 1024`,
+    ),
+    healthEvidenceValid: check(
+      "auth_runs_health_evidence_check",
+      sql`${table.purpose} in ('authenticate', 'health_check', 'repair')
+        and ${table.healthSequence} > 0`,
+    ),
+    maintenanceValid: check(
+      "auth_runs_maintenance_check",
+      sql`${table.maintenanceOperationId} is null
+        or ${table.purpose} in ('health_check', 'repair')`,
     ),
     lifecycleValid: check(
       "auth_runs_lifecycle_check",
@@ -1088,6 +1357,7 @@ export const interactionInterventions = pgTable(
     originatingTurnId: uuid("originating_turn_id"),
     originatingAttemptId: uuid("originating_attempt_id"),
     originatingToolOperationId: uuid("originating_tool_operation_id"),
+    originatingToolCallId: text("originating_tool_call_id"),
     responseActorSubjectId: text("response_actor_subject_id"),
     version: bigint("version", { mode: "number" }).notNull().default(1),
     operationId: uuid("operation_id").notNull(),
@@ -1105,6 +1375,14 @@ export const interactionInterventions = pgTable(
       table.workspaceId,
       table.operationId,
     ),
+    originatingToolCall: uniqueIndex("interaction_interventions_originating_tool_call_uq")
+      .on(
+        table.workspaceId,
+        table.originatingSessionId,
+        table.originatingTurnId,
+        table.originatingToolCallId,
+      )
+      .where(sql`${table.originatingToolCallId} is not null`),
     openResource: index("interaction_interventions_open_resource_idx").on(
       table.workspaceId,
       table.resourceKind,
@@ -1128,6 +1406,10 @@ export const interactionInterventions = pgTable(
         and ${table.reason} = btrim(${table.reason})
         and (${table.originatingAttemptId} is null or ${table.originatingTurnId} is not null)
         and (${table.originatingToolOperationId} is null or ${table.originatingAttemptId} is not null)
+        and (${table.originatingToolCallId} is null or (
+          ${table.originatingAttemptId} is not null
+          and octet_length(${table.originatingToolCallId}) between 1 and 1024
+        ))
         and (${table.responseActorSubjectId} is null or octet_length(${table.responseActorSubjectId}) between 1 and 1024)
         and ${table.version} > 0`,
     ),
@@ -1152,13 +1434,30 @@ export const interactionResourceOperations = pgTable(
     accountId: uuid("account_id").notNull(),
     workspaceId: uuid("workspace_id").notNull(),
     resourceKind: text("resource_kind", {
-      enum: ["network_route", "site_auth_connection", "auth_run", "intervention"],
+      enum: [
+        "network_route",
+        "site_auth_connection",
+        "auth_run",
+        "intervention",
+        "browser_download",
+      ],
     }).notNull(),
     resourceId: uuid("resource_id").notNull(),
     kind: text("kind", {
-      enum: ["create", "update", "start", "report", "protected_fill", "verify", "resolve"],
+      enum: [
+        "create",
+        "update",
+        "start",
+        "report",
+        "protected_fill",
+        "external_auth",
+        "verify",
+        "resolve",
+        "save",
+      ],
     }).notNull(),
     requestDigest: text("request_digest").notNull(),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
     state: text("state", {
       enum: ["prepared", "dispatched", "completed", "failed", "outcome_unknown"],
     })
@@ -1185,6 +1484,8 @@ export const interactionResourceOperations = pgTable(
     valuesValid: check(
       "interaction_resource_operations_values_check",
       sql`${table.requestDigest} ~ '^[0-9a-f]{64}$'
+        and jsonb_typeof(${table.metadata}) = 'object'
+        and octet_length(${table.metadata}::text) between 2 and 65536
         and (${table.resultVersion} is null or ${table.resultVersion} > 0)
         and (${table.result} is null or (
           jsonb_typeof(${table.result}) = 'object'

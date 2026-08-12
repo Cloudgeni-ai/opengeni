@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import type {
   ComputerActionCommand,
   ComputerActionReceipt,
+  ComputerClipboard,
   ComputerObservation,
   ComputerSessionCapabilities,
   ComputerTarget,
@@ -53,6 +54,7 @@ export type ComputerSupervisorDriver = ComputerInteractionDriver & {
   readonly capabilities: ComputerSessionCapabilities;
   listTargets(): Promise<ComputerTarget[]>;
   capture(targetId: string): Promise<ComputerImageFrame>;
+  clipboard(): Promise<ComputerClipboard>;
   subscribeFrames(
     targetId: string,
     options?: ComputerFrameStreamOptions,
@@ -239,12 +241,37 @@ export class ComputerSupervisor {
     return await this.requireActive(reference).driver.capture(targetId);
   }
 
+  async clipboard(reference: ComputerSessionReference): Promise<ComputerClipboard> {
+    return await this.requireActive(reference).driver.clipboard();
+  }
+
   async subscribeFrames(
     reference: ComputerSessionReference,
     targetId: string,
     options?: ComputerFrameStreamOptions,
   ): Promise<ComputerFrameSubscription> {
     return await this.requireActive(reference).driver.subscribeFrames(targetId, options);
+  }
+
+  /** Resolve the private loopback RFB endpoint for one exact isolated screen.
+   * The endpoint is consumed only by BrowserControlServer's authenticated
+   * WebSocket proxy and is never returned across the placement boundary. */
+  async rfbPort(reference: ComputerSessionReference, targetId: string): Promise<number> {
+    const runtime = this.requireActive(reference);
+    if (runtime.environmentLease.rfbPort === null) {
+      throw new InteractionControllerError(
+        "unsupported",
+        "this computer seat does not expose an RFB transport",
+      );
+    }
+    const target = await runtime.driver.target(targetId);
+    if (!target || target.kind !== "screen") {
+      throw new InteractionControllerError(
+        "invalid_action",
+        "RFB is available only for a complete screen target",
+      );
+    }
+    return runtime.environmentLease.rfbPort;
   }
 
   async heartbeat(reference: ComputerSessionReference): Promise<void> {
@@ -441,14 +468,14 @@ export class ComputerSupervisor {
       failures.push(error);
     }
     try {
-      await runtime.environmentLease.close();
-      environmentClosed = true;
+      runtime.journal.close();
+      journalClosed = true;
     } catch (error) {
       failures.push(error);
     }
     try {
-      runtime.journal.close();
-      journalClosed = true;
+      await runtime.environmentLease.close();
+      environmentClosed = true;
     } catch (error) {
       failures.push(error);
     }

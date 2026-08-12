@@ -9,7 +9,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   decodeStreamFrame,
   decodeStreamOpenAck,
+  encodeStreamClose,
   encodeStreamOpen,
+  STREAM_CLOSE_REASON_NORMAL,
   STREAM_KIND_COMPUTER,
   STREAM_ROLE_CLIENT,
 } from "../lib/relay-wire";
@@ -39,6 +41,7 @@ export type ComputerFrameWebSocketFactory = (
 const RELAY_TAG_OPEN = 1;
 const RELAY_TAG_OPEN_ACK = 2;
 const RELAY_TAG_FRAME = 3;
+const RELAY_TAG_CLOSE = 4;
 
 export type UseComputerFrameStreamOptions = EmbeddedComputerInteractionClientOverride & {
   computerSessionId: string | null;
@@ -53,7 +56,7 @@ export type UseComputerFrameStreamResult = {
   frame: ComputerFrame | null;
   attachment: Pick<
     ComputerSessionAttachment,
-    "computerSessionId" | "controllerGeneration" | "targetId" | "expiresAt"
+    "computerSessionId" | "controllerGeneration" | "targetId" | "stream" | "expiresAt"
   > | null;
   error: Error | null;
   reconnect: () => void;
@@ -106,12 +109,31 @@ export function useComputerFrameStream(
     let expiryTimer: ReturnType<typeof setTimeout> | null = null;
     let failures = 0;
     let controllerGeneration: string | null = null;
+    let activeAttachment: ComputerSessionAttachment | null = null;
     let activeStream: ComputerSessionAttachment["stream"] | null = null;
+    let attachmentExpiresAt = 0;
+    let lastRelaySequence: string | null = null;
     let relayAccepted = false;
     const attachmentAbort = new AbortController();
 
-    const clearSocket = () => {
+    const clearSocket = (terminateProducer = false) => {
       if (!socket) return;
+      if (terminateProducer && activeStream?.kind === "relay" && socket.readyState === 1) {
+        try {
+          socket.send(
+            relayDatagram(
+              RELAY_TAG_CLOSE,
+              encodeStreamClose({
+                channelId: activeStream.channel.channelId,
+                reason: STREAM_CLOSE_REASON_NORMAL,
+                message: "viewer detached",
+              }),
+            ),
+          );
+        } catch {
+          // OPEN can race a transport close. Local teardown must still finish.
+        }
+      }
       socket.removeEventListener("open", onOpen);
       socket.removeEventListener("message", onMessage);
       socket.removeEventListener("error", onError);
@@ -129,7 +151,7 @@ export function useComputerFrameStream(
       setResult((current) => ({ ...current, state: "reconnecting" }));
       reconnectTimer = setTimeout(() => {
         reconnectTimer = null;
-        void connect();
+        connectSocket();
       }, delay);
     };
 
@@ -149,9 +171,14 @@ export function useComputerFrameStream(
           channel: { ...activeStream.channel, kind: STREAM_KIND_COMPUTER },
           token: activeStream.token,
           role: STREAM_ROLE_CLIENT,
-          resumeFromSeq: "0",
+          resumeFromSeq:
+            lastRelaySequence === null ? "0" : (BigInt(lastRelaySequence) + 1n).toString(),
         });
-        socket?.send(relayDatagram(RELAY_TAG_OPEN, body));
+        try {
+          socket?.send(relayDatagram(RELAY_TAG_OPEN, body));
+        } catch (error) {
+          fail(error);
+        }
         return;
       }
       setResult((current) => ({ ...current, state: "live", error: null }));
@@ -170,13 +197,29 @@ export function useComputerFrameStream(
             if (tag === RELAY_TAG_OPEN_ACK) {
               const ack = decodeStreamOpenAck(body);
               if (!ack.accepted) {
+                activeAttachment = null;
+                activeStream = null;
+                attachmentExpiresAt = 0;
                 throw new Error(ack.error?.message ?? "computer stream was rejected by the relay");
               }
               relayAccepted = true;
               return;
             }
+            if (tag === RELAY_TAG_CLOSE) {
+              // A relay close is terminal for this producer/channel. Reusing
+              // the same attachment only reconnects to a dead channel forever;
+              // invalidate it so the retry mints a fresh producer.
+              activeAttachment = null;
+              activeStream = null;
+              attachmentExpiresAt = 0;
+              lastRelaySequence = null;
+              relayAccepted = false;
+              throw new Error("Computer frame source ended.");
+            }
             if (tag !== RELAY_TAG_FRAME || !relayAccepted) return;
-            frameBytes = decodeStreamFrame(body).data;
+            const relayFrame = decodeStreamFrame(body);
+            lastRelaySequence = relayFrame.seq;
+            frameBytes = relayFrame.data;
           }
           const frame = await decodeComputerFrameMessage(frameBytes);
           if (disposed) return;
@@ -209,7 +252,39 @@ export function useComputerFrameStream(
       scheduleReconnect();
     };
 
-    const connect = async () => {
+    const connectSocket = () => {
+      if (disposed) return;
+      clearSocket();
+      if (!activeAttachment || !activeStream || attachmentExpiresAt <= Date.now() + 1_000) {
+        void attach();
+        return;
+      }
+      if (activeStream.kind === "direct_rfb") {
+        setResult((current) => ({ ...current, state: "live", error: null }));
+        return;
+      }
+      relayAccepted = false;
+      setResult((current) => ({
+        ...current,
+        state: "connecting",
+        error: null,
+      }));
+      const createSocket =
+        factoryRef.current ?? ((url: string, protocols: string[]) => new WebSocket(url, protocols));
+      socket = createSocket(
+        activeStream.kind === "relay"
+          ? activeStream.url
+          : computerFrameSocketUrl(activeAttachment, streamRef.current),
+        activeStream.kind === "direct_websocket" ? [...activeStream.protocols] : [],
+      );
+      socket.binaryType = "arraybuffer";
+      socket.addEventListener("open", onOpen);
+      socket.addEventListener("message", onMessage);
+      socket.addEventListener("error", onError);
+      socket.addEventListener("close", onClose);
+    };
+
+    const attach = async () => {
       if (disposed) return;
       clearSocket();
       if (expiryTimer) clearTimeout(expiryTimer);
@@ -237,7 +312,10 @@ export function useComputerFrameStream(
           throw new Error("computer attachment does not match the requested resource");
         }
         controllerGeneration = attachment.controllerGeneration;
+        activeAttachment = attachment;
         activeStream = attachment.stream;
+        attachmentExpiresAt = Date.parse(attachment.expiresAt);
+        lastRelaySequence = null;
         relayAccepted = false;
         setResult((current) => ({
           ...current,
@@ -246,46 +324,36 @@ export function useComputerFrameStream(
             computerSessionId: attachment.computerSessionId,
             controllerGeneration: attachment.controllerGeneration,
             targetId: attachment.targetId,
+            stream: attachment.stream,
             expiresAt: attachment.expiresAt,
           },
           error: null,
         }));
-        const createSocket =
-          factoryRef.current ??
-          ((url: string, protocols: string[]) => new WebSocket(url, protocols));
-        socket = createSocket(
-          attachment.stream.kind === "relay"
-            ? attachment.stream.url
-            : computerFrameSocketUrl(attachment, streamRef.current),
-          attachment.stream.kind === "direct_websocket" ? [...attachment.stream.protocols] : [],
-        );
-        socket.binaryType = "arraybuffer";
-        socket.addEventListener("open", onOpen);
-        socket.addEventListener("message", onMessage);
-        socket.addEventListener("error", onError);
-        socket.addEventListener("close", onClose);
-        const expiresAt = Date.parse(attachment.expiresAt);
-        const refreshIn = Number.isFinite(expiresAt)
-          ? Math.max(1_000, expiresAt - Date.now() - 5_000)
+        const refreshIn = Number.isFinite(attachmentExpiresAt)
+          ? Math.max(1_000, attachmentExpiresAt - Date.now() - 5_000)
           : 60_000;
         expiryTimer = setTimeout(() => {
           if (disposed) return;
-          clearSocket();
-          void connect();
+          clearSocket(true);
+          activeAttachment = null;
+          activeStream = null;
+          attachmentExpiresAt = 0;
+          void attach();
         }, refreshIn);
+        connectSocket();
       } catch (cause) {
         if (attachmentAbort.signal.aborted || disposed) return;
         fail(cause);
       }
     };
 
-    void connect();
+    void attach();
     return () => {
       disposed = true;
       attachmentAbort.abort();
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (expiryTimer) clearTimeout(expiryTimer);
-      clearSocket();
+      clearSocket(true);
     };
   }, [client, enabled, nonce, options.computerSessionId, options.targetId, workspaceId]);
 

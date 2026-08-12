@@ -19,6 +19,8 @@ build
 coverage
 htmlcov
 .coverage
+.cache
+artifacts
 tmp
 .turbo
 .vite

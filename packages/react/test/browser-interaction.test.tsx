@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { StreamFrame, StreamOpen, StreamOpenAck } from "@opengeni/agent-proto";
+import { OpenGeniApiError } from "@opengeni/sdk";
 import type {
   AttachedBrowserDevice,
   BrowserActionReceipt,
+  BrowserDownload,
   BrowserFrame,
   BrowserFrameMetadata,
   BrowserIdentity,
@@ -12,15 +14,18 @@ import type {
   BrowserSessionAttachment,
   BrowserSessionMutationResponse,
   BrowserTarget,
+  InteractionPlacement,
+  InteractionIntervention,
 } from "@opengeni/sdk/interaction";
 import { act } from "react";
-import { BrowserViewer } from "../src/components/browser-viewer";
+import { browserKey, BrowserViewer } from "../src/components/browser-viewer";
 import { useAttachedBrowsers } from "../src/hooks/use-attached-browsers";
 import type {
   BrowserFrameWebSocket,
   BrowserFrameWebSocketFactory,
 } from "../src/hooks/use-browser-frame-stream";
 import { useBrowserFrameStream } from "../src/hooks/use-browser-frame-stream";
+import { useBrowserDownloads } from "../src/hooks/use-browser-downloads";
 import { useBrowserSession } from "../src/hooks/use-browser-session";
 import { useBrowserSessions } from "../src/hooks/use-browser-sessions";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
@@ -38,6 +43,25 @@ const BROWSER_IDENTITY_ID = "88888888-8888-4888-8888-888888888888";
 const BROWSER_REVISION_ID = "99999999-9999-4999-8999-999999999999";
 const COMPUTER_SESSION_ID = "abababab-abab-4bab-8bab-abababababab";
 const NOW = "2026-08-09T12:00:00.000Z";
+
+function browserDownload(overrides: Partial<BrowserDownload> = {}): BrowserDownload {
+  return {
+    id: "12121212-1212-4212-8212-121212121212",
+    browserSessionId: BROWSER_SESSION_ID,
+    controllerGeneration: "controller-1",
+    targetId: "target-1",
+    filename: "report.pdf",
+    status: "completed",
+    receivedBytes: 42_000,
+    totalBytes: 42_000,
+    sha256: "a".repeat(64),
+    version: 1,
+    startedAt: NOW,
+    settledAt: NOW,
+    failureCode: null,
+    ...overrides,
+  };
+}
 
 function attachedBrowserDevice(): AttachedBrowserDevice {
   return {
@@ -107,7 +131,8 @@ function browserSession(
       tabs: true,
       downloads: true,
       uploads: true,
-      clipboard: false,
+      clipboard: true,
+      permissions: true,
       diagnostics: true,
       rawCdp: false,
       linkedComputer: false,
@@ -296,6 +321,36 @@ function attachment(
   };
 }
 
+function intervention(overrides: Partial<InteractionIntervention> = {}): InteractionIntervention {
+  return {
+    id: "77777777-7777-4777-8777-777777777777",
+    accountId: ACCOUNT_ID,
+    workspaceId: WORKSPACE_ID,
+    resourceKind: "browser_session",
+    resourceId: BROWSER_SESSION_ID,
+    targetId: "target-1",
+    controllerGeneration: "controller-1",
+    targetGeneration: "target-1-generation",
+    documentGeneration: "document-1",
+    kind: "manual_login",
+    reason: "Sign in to continue checkout.",
+    status: "open",
+    authRunId: null,
+    originatingSessionId: SESSION_ID,
+    originatingTurnId: null,
+    originatingAttemptId: null,
+    originatingToolOperationId: null,
+    responseActorSubjectId: null,
+    version: 1,
+    operationId: "88888888-8888-4888-8888-888888888888",
+    expiresAt: "2026-08-10T12:15:00.000Z",
+    createdAt: NOW,
+    updatedAt: NOW,
+    settledAt: null,
+    ...overrides,
+  };
+}
+
 function relayAttachment(targetId: string): BrowserSessionAttachment {
   return {
     browserSessionId: BROWSER_SESSION_ID,
@@ -468,6 +523,65 @@ describe("BrowserSession React resources", () => {
     await hook.unmount();
   });
 
+  test("lists exact downloads and preserves one save operation across an ambiguous retry", async () => {
+    const download = browserDownload();
+    const operationIds: string[] = [];
+    let saveAttempts = 0;
+    const client = fakeClient({
+      listBrowserDownloads: async () => ({
+        browserSessionId: BROWSER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        downloads: [download],
+      }),
+      saveBrowserDownload: async (_workspaceId, _browserSessionId, _downloadId, request) => {
+        operationIds.push(request.operationId);
+        saveAttempts += 1;
+        if (saveAttempts === 1) throw new Error("connection closed after dispatch");
+        return {
+          download,
+          destinationPath: request.destinationPath,
+          fileId: "13131313-1313-4313-8313-131313131313",
+          operationId: request.operationId,
+          replayed: true,
+        };
+      },
+    });
+    const hook = await renderHook(
+      (enabled: boolean) =>
+        useBrowserDownloads({
+          client,
+          workspaceId: WORKSPACE_ID,
+          browserSessionId: BROWSER_SESSION_ID,
+          enabled,
+          pollIntervalMs: 60_000,
+        }),
+      true as boolean,
+    );
+    await flush(20);
+
+    expect(hook.result.current.downloads).toEqual([download]);
+    let firstError: unknown;
+    await actRun(async () => {
+      try {
+        await hook.result.current.saveToWorkspace(download.id, "reports/report.pdf");
+      } catch (cause) {
+        firstError = cause;
+      }
+    });
+    expect(firstError).toBeInstanceOf(Error);
+    await hook.rerender(false);
+    await hook.rerender(true);
+    await flush(20);
+    const response = await actRun(
+      async () => await hook.result.current.saveToWorkspace(download.id, "reports/report.pdf"),
+    );
+    expect(response.replayed).toBe(true);
+    expect(operationIds).toHaveLength(2);
+    expect(operationIds[0]).toBe(operationIds[1]);
+    expect(hook.result.current.savingDownloadIds).toEqual([]);
+    await hook.unmount();
+  });
+
   test("uses each completed action observation immediately for the next fence", async () => {
     const calls: Array<{
       targetId: string;
@@ -562,6 +676,57 @@ describe("BrowserSession React resources", () => {
         expectedFrameId: "shown-frame",
       },
     ]);
+    await hook.unmount();
+  });
+
+  test("reconciles a tab that disappears between inventory and selection", async () => {
+    const stale = target(BROWSER_SESSION_ID, "stale-target");
+    const live = target(BROWSER_SESSION_ID, "live-target");
+    let inventoryCalls = 0;
+    const selectionCalls: string[] = [];
+    const client = fakeClient({
+      getBrowserSession: async () => browserSession(),
+      listBrowserTargets: async () => {
+        inventoryCalls += 1;
+        return {
+          browserSessionId: BROWSER_SESSION_ID,
+          controllerGeneration: "controller-1",
+          targets: inventoryCalls === 1 ? [stale] : [live],
+        };
+      },
+      observeBrowserTarget: async (_workspaceId, _browserSessionId, targetId) =>
+        observation(BROWSER_SESSION_ID, targetId === live.id ? live : stale),
+      selectBrowserTarget: async (_workspaceId, _browserSessionId, targetId) => {
+        selectionCalls.push(targetId);
+        if (targetId === stale.id) {
+          throw new OpenGeniApiError(
+            404,
+            JSON.stringify({
+              error: { code: "target_not_found", message: "browser target does not exist" },
+            }),
+          );
+        }
+        return observation(BROWSER_SESSION_ID, live);
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useBrowserSession({
+          client,
+          workspaceId: WORKSPACE_ID,
+          browserSessionId: BROWSER_SESSION_ID,
+          pollIntervalMs: 60_000,
+        }),
+      undefined,
+    );
+    await flush(20);
+
+    const selected = await actRun(async () => await hook.result.current.selectTarget(stale.id));
+    expect(selected.id).toBe(live.id);
+    expect(selectionCalls).toEqual([stale.id, live.id]);
+    expect(inventoryCalls).toBe(2);
+    expect(hook.result.current.selectedTarget?.id).toBe(live.id);
+    expect(hook.result.current.error).toBeNull();
     await hook.unmount();
   });
 });
@@ -722,6 +887,256 @@ describe("BrowserSession frame stream", () => {
 });
 
 describe("BrowserViewer", () => {
+  test("ignores standalone modifier keydowns before a browser shortcut", () => {
+    const event = (key: string, overrides: Partial<Parameters<typeof browserKey>[0]> = {}) => ({
+      altKey: false,
+      ctrlKey: false,
+      key,
+      metaKey: false,
+      shiftKey: false,
+      ...overrides,
+    });
+
+    expect(browserKey(event("Meta", { metaKey: true }))).toBeNull();
+    expect(browserKey(event("Control", { ctrlKey: true }))).toBeNull();
+    expect(browserKey(event("Alt", { altKey: true }))).toBeNull();
+    expect(browserKey(event("a", { metaKey: true }))).toBe("Meta+a");
+  });
+
+  test("opens actionable runtime and page diagnostics without leaving the browser", async () => {
+    const current = browserSession();
+    const currentTarget = target();
+    const download = browserDownload();
+    const saves: unknown[] = [];
+    const client = fakeClient({
+      listBrowserSessions: async () => ({ revision: 1, sessions: [current] }),
+      getBrowserSession: async () => current,
+      listBrowserTargets: async () => ({
+        browserSessionId: BROWSER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        targets: [currentTarget],
+      }),
+      observeBrowserTarget: async () => ({
+        ...observation(BROWSER_SESSION_ID, currentTarget),
+        diagnostics: {
+          consoleErrorCount: 1,
+          failedRequestCount: 1,
+          downloadCount: 1,
+          pageErrorCount: 0,
+        },
+      }),
+      attachBrowserSession: async () => attachment(currentTarget.id),
+      listBrowserDiagnostics: async () => ({
+        browserSessionId: BROWSER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        targetId: currentTarget.id,
+        targetGeneration: currentTarget.targetGeneration,
+        entries: [
+          {
+            sequence: 1,
+            kind: "failed_request",
+            level: "error",
+            message: "Request failed with status 503",
+            url: "https://opengeni.ai/api/health",
+            method: "GET",
+            status: 503,
+            filename: null,
+            occurredAt: NOW,
+          },
+        ],
+        cursor: 1,
+        truncated: false,
+      }),
+      listBrowserDownloads: async () => ({
+        browserSessionId: BROWSER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        downloads: [download],
+      }),
+      saveBrowserDownload: async (_workspaceId, browserSessionId, downloadId, request) => {
+        saves.push({ browserSessionId, downloadId, request });
+        return {
+          download,
+          destinationPath: request.destinationPath,
+          fileId: "13131313-1313-4313-8313-131313131313",
+          operationId: request.operationId,
+          replayed: false,
+        };
+      },
+    });
+    const rendered = await renderComponent(
+      <BrowserViewer
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        webSocketFactory={(url, protocols) =>
+          new FakeBrowserSocket(url, protocols) as unknown as BrowserFrameWebSocket
+        }
+      />,
+    );
+    await flush(40);
+
+    const debug = rendered.container.querySelector<HTMLButtonElement>(
+      "button[aria-controls='browser-diagnostics-drawer']",
+    );
+    expect(debug).not.toBeNull();
+    await actRun(() => debug!.click());
+    await flush(10);
+
+    const drawer = rendered.container.querySelector("[aria-label='Browser diagnostics']");
+    expect(drawer?.textContent).toContain("chromium 151 · headless");
+    expect(drawer?.textContent).toContain("opengeni.cdp.v1");
+    expect(drawer?.textContent).toContain("Semantic page structure available");
+    expect(drawer?.textContent).toContain("Request failed with status 503");
+    expect(drawer?.textContent).toContain("GET · 503 · https://opengeni.ai/api/health");
+    expect(drawer?.textContent).toContain("report.pdf");
+
+    const destination = rendered.container.querySelector<HTMLInputElement>(
+      "input[aria-label='Workspace path for report.pdf']",
+    );
+    expect(destination).not.toBeNull();
+    await actRun(() => {
+      const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+      setValue?.call(destination, "reports/final.pdf");
+      destination!.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    });
+    const save = destination
+      ?.closest("li")
+      ?.querySelector<HTMLButtonElement>("button:not([disabled])");
+    expect(save?.textContent?.trim()).toBe("Save");
+    await actRun(() => save!.click());
+    await flush(10);
+    expect(saves).toHaveLength(1);
+    expect(saves[0]).toMatchObject({
+      browserSessionId: BROWSER_SESSION_ID,
+      downloadId: download.id,
+      request: { destinationPath: "reports/final.pdf", overwrite: false },
+    });
+    expect(drawer?.textContent).toContain("Saved");
+
+    const close = rendered.container.querySelector<HTMLButtonElement>(
+      "button[aria-label='Close browser diagnostics']",
+    );
+    expect(close).not.toBeNull();
+    await actRun(() => close!.click());
+    expect(rendered.container.querySelector("[aria-label='Browser diagnostics']")).toBeNull();
+    await rendered.unmount();
+  });
+
+  test("does not advertise or query downloads when the selected controller lacks them", async () => {
+    const current = browserSession();
+    current.capabilities = { ...current.capabilities, downloads: false };
+    const currentTarget = target();
+    let downloadQueries = 0;
+    const client = fakeClient({
+      listBrowserSessions: async () => ({ revision: 1, sessions: [current] }),
+      getBrowserSession: async () => current,
+      listBrowserTargets: async () => ({
+        browserSessionId: BROWSER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        targets: [currentTarget],
+      }),
+      observeBrowserTarget: async () => observation(BROWSER_SESSION_ID, currentTarget),
+      attachBrowserSession: async () => attachment(currentTarget.id),
+      listBrowserDiagnostics: async () => ({
+        browserSessionId: BROWSER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        targetId: currentTarget.id,
+        targetGeneration: currentTarget.targetGeneration,
+        entries: [],
+        cursor: 0,
+        truncated: false,
+      }),
+      listBrowserDownloads: async () => {
+        downloadQueries += 1;
+        throw new Error("unsupported");
+      },
+    });
+    const rendered = await renderComponent(
+      <BrowserViewer
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        webSocketFactory={(url, protocols) =>
+          new FakeBrowserSocket(url, protocols) as unknown as BrowserFrameWebSocket
+        }
+      />,
+    );
+    await flush(30);
+    const debug = rendered.container.querySelector<HTMLButtonElement>(
+      "button[aria-controls='browser-diagnostics-drawer']",
+    );
+    await actRun(() => debug!.click());
+    await flush(10);
+
+    expect(rendered.container.querySelector("#browser-downloads-title")).toBeNull();
+    expect(downloadQueries).toBe(0);
+    await rendered.unmount();
+  });
+
+  test("surfaces and resolves an exact durable browser intervention", async () => {
+    const current = browserSession();
+    const currentTarget = target();
+    let pending = intervention();
+    const resolutions: unknown[] = [];
+    const client = fakeClient({
+      listBrowserSessions: async () => ({ revision: 1, sessions: [current] }),
+      getBrowserSession: async () => current,
+      listBrowserTargets: async () => ({
+        browserSessionId: BROWSER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        targets: [currentTarget],
+      }),
+      observeBrowserTarget: async () => observation(BROWSER_SESSION_ID, currentTarget),
+      attachBrowserSession: async () => attachment(currentTarget.id),
+      listInteractionInterventions: async () => ({
+        interventions: pending.status === "open" ? [pending] : [],
+      }),
+      resolveInteractionIntervention: async (_workspaceId, interventionId, request) => {
+        resolutions.push({ interventionId, ...request });
+        pending = {
+          ...pending,
+          status: request.outcome,
+          version: pending.version + 1,
+          settledAt: NOW,
+        };
+        return {
+          intervention: pending,
+          operationId: request.operationId,
+          replayed: false,
+        };
+      },
+    });
+    const rendered = await renderComponent(
+      <BrowserViewer
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        webSocketFactory={(url, protocols) =>
+          new FakeBrowserSocket(url, protocols) as unknown as BrowserFrameWebSocket
+        }
+      />,
+    );
+    await flush(40);
+
+    expect(rendered.container.textContent).toContain("Sign in needed");
+    expect(rendered.container.textContent).toContain("Sign in to continue checkout.");
+    const done = [...rendered.container.querySelectorAll("button")].find(
+      (button) => button.textContent?.trim() === "Done",
+    );
+    expect(done).toBeDefined();
+    await actRun(() => done!.click());
+    await flush(10);
+
+    expect(resolutions).toHaveLength(1);
+    expect(resolutions[0]).toMatchObject({
+      interventionId: pending.id,
+      expectedVersion: 1,
+      outcome: "completed",
+    });
+    expect(rendered.container.textContent).not.toContain("Sign in needed");
+    await rendered.unmount();
+  });
+
   test("wakes a selected suspended browser before touching its controller", async () => {
     const suspended: BrowserSession = {
       ...browserSession(),
@@ -899,6 +1314,136 @@ describe("BrowserViewer", () => {
     expect(canvas?.className).toContain("invisible");
     expect(rendered.container.textContent).toContain("Connecting");
     await rendered.unmount();
+  });
+
+  test("keeps unrelated workspace browsers discoverable without claiming one for this agent", async () => {
+    const peer = browserSession(PEER_BROWSER_SESSION_ID, PEER_SESSION_ID, "Connected Mac browser");
+    peer.placement = {
+      kind: "connected_machine",
+      sandboxId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    };
+    let controllerReads = 0;
+    const client = fakeClient({
+      listBrowserSessions: async () => ({ revision: 1, sessions: [peer] }),
+      getBrowserSession: async () => {
+        controllerReads += 1;
+        return peer;
+      },
+    });
+    const rendered = await renderComponent(
+      <BrowserViewer client={client} workspaceId={WORKSPACE_ID} sessionId={SESSION_ID} />,
+    );
+    await flush(30);
+
+    expect(controllerReads).toBe(0);
+    expect(rendered.container.textContent).toContain("No browser for this agent");
+    expect(rendered.container.textContent).toContain("Workspace browsers");
+    expect(rendered.container.textContent).toContain("Connected Mac browser");
+    await rendered.unmount();
+  });
+
+  test("routes clipboard events and only committed IME text through causal browser actions", async () => {
+    const current = browserSession();
+    const currentTarget = target();
+    const currentObservation = observation(BROWSER_SESSION_ID, currentTarget);
+    const actions: BrowserActionReceipt["operationId"][] = [];
+    const actionValues: unknown[] = [];
+    const copied: string[] = [];
+    const priorClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: async (text: string) => copied.push(text) },
+    });
+    const client = fakeClient({
+      listBrowserSessions: async () => ({ revision: 1, sessions: [current] }),
+      getBrowserSession: async () => current,
+      listBrowserTargets: async () => ({
+        browserSessionId: BROWSER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        targets: [currentTarget],
+      }),
+      observeBrowserTarget: async () => currentObservation,
+      attachBrowserSession: async () => attachment(currentTarget.id),
+      actInBrowser: async (_workspaceId, _browserSessionId, request) => {
+        actions.push(request.operationId);
+        actionValues.push(request.action);
+        return receipt(currentObservation, request.operationId);
+      },
+      readBrowserClipboard: async () => ({
+        browserSessionId: BROWSER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        revision: 1,
+        text: "remote selection",
+        source: "copy",
+        sourceTargetId: currentTarget.id,
+        updatedAt: NOW,
+      }),
+    });
+    const socket = new FakeBrowserSocket("wss://browser.example.test/v1/frames", [
+      "opengeni.browser.v1",
+      "opengeni.auth.test",
+    ]);
+    const rendered = await renderComponent(
+      <BrowserViewer
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        webSocketFactory={() => socket as unknown as BrowserFrameWebSocket}
+      />,
+    );
+    try {
+      await flush(30);
+      await dispatch(socket, "open");
+      await dispatch(socket, "message", {
+        data: frameMessage("target-1", 1).buffer,
+      });
+      await flush(5);
+      const keyboard = rendered.container.querySelector<HTMLTextAreaElement>(
+        "textarea[aria-label='Browser keyboard input']",
+      );
+      expect(keyboard).not.toBeNull();
+      const paste = new ClipboardEvent("paste", { bubbles: true, cancelable: true });
+      Object.defineProperty(paste, "clipboardData", {
+        value: { getData: (kind: string) => (kind === "text/plain" ? "local paste" : "") },
+      });
+      await actRun(() => {
+        keyboard!.dispatchEvent(paste);
+        keyboard!.dispatchEvent(new ClipboardEvent("copy", { bubbles: true, cancelable: true }));
+      });
+      await flush(20);
+
+      const keyboardAfterClipboard = rendered.container.querySelector<HTMLTextAreaElement>(
+        "textarea[aria-label='Browser keyboard input']",
+      );
+      expect(keyboardAfterClipboard).not.toBeNull();
+      await actRun(() => {
+        keyboardAfterClipboard!.dispatchEvent(
+          new CompositionEvent("compositionstart", { bubbles: true, data: "" }),
+        );
+        keyboardAfterClipboard!.value = "に";
+        keyboardAfterClipboard!.dispatchEvent(
+          new InputEvent("input", { bubbles: true, data: "に", isComposing: true }),
+        );
+        keyboardAfterClipboard!.value = "日本";
+        keyboardAfterClipboard!.dispatchEvent(
+          new CompositionEvent("compositionend", { bubbles: true, data: "日本" }),
+        );
+        keyboardAfterClipboard!.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      await flush(20);
+
+      expect(actions).toHaveLength(3);
+      expect(actionValues).toEqual([
+        { type: "clipboard", operation: "paste", text: "local paste" },
+        { type: "clipboard", operation: "copy" },
+        { type: "type", text: "日本" },
+      ]);
+      expect(copied).toEqual(["remote selection"]);
+    } finally {
+      if (priorClipboard) Object.defineProperty(navigator, "clipboard", priorClipboard);
+      else Reflect.deleteProperty(navigator, "clipboard");
+      await rendered.unmount();
+    }
   });
 
   test("turns a temporary browser into an explicit reusable profile version", async () => {
@@ -1136,6 +1681,90 @@ describe("BrowserViewer", () => {
     await rendered.unmount();
   });
 
+  test("starts a fast semantic browser without inventing a desktop or frame stream", async () => {
+    const currentTarget = target();
+    const created: BrowserSession = {
+      ...browserSession(),
+      name: "Fast browser",
+      driverId: "opengeni.lightpanda.cdp.v1",
+      engine: "lightpanda",
+      engineVersion: "0.3.5",
+      headless: true,
+      capabilities: {
+        ...browserSession().capabilities,
+        liveFrames: false,
+        humanInput: false,
+        tabs: false,
+        downloads: false,
+        clipboard: false,
+        permissions: false,
+        privateCheckpoint: false,
+        identityPublication: false,
+        parallelTargets: false,
+      },
+    };
+    const createRequests: unknown[] = [];
+    let linkedComputerCreates = 0;
+    let frameAttachments = 0;
+    const client = fakeClient({
+      listBrowserSessions: async () => ({ revision: 1, sessions: [] }),
+      listBrowserIdentities: async () => ({ revision: 1, identities: [] }),
+      createBrowserSession: async (_workspaceId, request) => {
+        createRequests.push(request);
+        return mutation(created);
+      },
+      getBrowserSession: async () => created,
+      listBrowserTargets: async () => ({
+        browserSessionId: created.id,
+        controllerGeneration: "controller-1",
+        targets: [currentTarget],
+      }),
+      observeBrowserTarget: async () => observation(created.id, currentTarget),
+      attachBrowserSession: async () => {
+        frameAttachments += 1;
+        return attachment(currentTarget.id);
+      },
+    });
+    const rendered = await renderComponent(
+      <BrowserViewer
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        createLinkedComputer={async () => {
+          linkedComputerCreates += 1;
+          return { id: COMPUTER_SESSION_ID, placement: created.placement };
+        }}
+      />,
+    );
+    await flush(30);
+
+    const launchSummary = rendered.container.querySelector<HTMLElement>(
+      "summary[aria-label='New browser']",
+    );
+    expect(launchSummary).not.toBeNull();
+    await actRun(() => launchSummary!.click());
+    const fast = [...(launchSummary!.closest("details")?.querySelectorAll("button") ?? [])].find(
+      (button) => button.textContent?.includes("Fast semantic browser"),
+    );
+    expect(fast).toBeDefined();
+    await actRun(() => fast!.click());
+    await flush(40);
+
+    expect(createRequests).toHaveLength(1);
+    expect(createRequests[0]).toMatchObject({
+      sessionId: SESSION_ID,
+      name: "Fast browser",
+      engine: "lightpanda",
+      headless: true,
+    });
+    expect(linkedComputerCreates).toBe(0);
+    expect(frameAttachments).toBe(0);
+    expect(rendered.container.querySelector("button[aria-label='New tab']")).toBeNull();
+    expect(rendered.container.textContent).toContain("Semantic browser");
+    expect(rendered.container.textContent).toContain("Available page controls");
+    await rendered.unmount();
+  });
+
   test("starts the canonical BrowserSession against a connected Chrome profile", async () => {
     const device = attachedBrowserDevice();
     const created: BrowserSession = {
@@ -1144,15 +1773,21 @@ describe("BrowserViewer", () => {
       placement: { kind: "attached_device", deviceId: device.id },
       engine: "chrome",
       headless: false,
+      linkedComputerSessionId: COMPUTER_SESSION_ID,
       capabilities: {
         ...browserSession().capabilities,
         downloads: false,
         uploads: false,
         privateCheckpoint: false,
         identityPublication: false,
+        linkedComputer: true,
       },
     };
     const createRequests: unknown[] = [];
+    const linkedComputerCreates: Array<{
+      name: string;
+      placement: InteractionPlacement | undefined;
+    }> = [];
     const client = fakeClient({
       listAttachedBrowsers: async () => ({ revision: 4, devices: [device] }),
       listBrowserSessions: async () => ({ revision: 1, sessions: [] }),
@@ -1169,7 +1804,18 @@ describe("BrowserViewer", () => {
       }),
     });
     const rendered = await renderComponent(
-      <BrowserViewer client={client} workspaceId={WORKSPACE_ID} sessionId={SESSION_ID} />,
+      <BrowserViewer
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        createLinkedComputer={async (name, placement) => {
+          linkedComputerCreates.push({ name, placement });
+          return {
+            id: COMPUTER_SESSION_ID,
+            placement: created.placement,
+          };
+        }}
+      />,
     );
     await flush(30);
 
@@ -1191,8 +1837,15 @@ describe("BrowserViewer", () => {
       sessionId: SESSION_ID,
       name: "cloudgeni.ai",
       headless: false,
+      linkedComputerSessionId: COMPUTER_SESSION_ID,
       placement: { kind: "attached_device", deviceId: device.id },
     });
+    expect(linkedComputerCreates).toEqual([
+      {
+        name: "cloudgeni.ai computer",
+        placement: { kind: "attached_device", deviceId: device.id },
+      },
+    ]);
     expect(rendered.container.textContent).toContain("Your browser");
     expect(rendered.container.textContent).toContain("live");
     await rendered.unmount();

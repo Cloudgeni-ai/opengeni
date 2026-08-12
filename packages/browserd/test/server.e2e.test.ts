@@ -34,7 +34,11 @@ e2e(
       browserSessionId: randomUUID(),
       controllerGeneration: `controller-${randomUUID()}`,
     };
-    const server = BrowserControlServer.start({ supervisor, adminToken, port: 0 });
+    const server = BrowserControlServer.start({
+      supervisor,
+      adminToken,
+      port: 0,
+    });
     let websocket: WebSocket | null = null;
     try {
       const created = await request(server, "/v1/browser-sessions", adminToken, {
@@ -59,8 +63,57 @@ e2e(
         command(observation, button.ref),
       );
       expect(acted.status).toBe(200);
-      const receipt = (await acted.json()) as { data: { observation: BrowserObservation } };
-      expect(names(receipt.data.observation)).toContain("Clicked through browserd");
+      const receipt = (await acted.json()) as {
+        data: { observation: BrowserObservation };
+      };
+      expect(names(receipt.data.observation)).toContain("Clicked 1 time");
+
+      const replayOperationId = randomUUID();
+      const replayCommand = command(receipt.data.observation, button.ref, replayOperationId);
+      const [replayOne, replayTwo] = await Promise.all([
+        request(
+          server,
+          `/v1/browser-sessions/${reference.browserSessionId}/actions`,
+          controlToken,
+          replayCommand,
+        ),
+        request(
+          server,
+          `/v1/browser-sessions/${reference.browserSessionId}/actions`,
+          controlToken,
+          replayCommand,
+        ),
+      ]);
+      expect(replayOne.status).toBe(200);
+      expect(replayTwo.status).toBe(200);
+      expect(await replayOne.json()).toEqual(await replayTwo.json());
+
+      const afterReplay = await observe(
+        server,
+        reference.browserSessionId,
+        observation.target.id,
+        viewToken,
+      );
+      expect(names(afterReplay)).toContain("Clicked 2 times");
+      const [concurrentOne, concurrentTwo] = await Promise.all([
+        request(
+          server,
+          `/v1/browser-sessions/${reference.browserSessionId}/actions`,
+          controlToken,
+          command(afterReplay, button.ref),
+        ),
+        request(
+          server,
+          `/v1/browser-sessions/${reference.browserSessionId}/actions`,
+          controlToken,
+          command(afterReplay, button.ref),
+        ),
+      ]);
+      expect(concurrentOne.status).toBe(200);
+      expect(concurrentTwo.status).toBe(200);
+      expect(
+        names(await observe(server, reference.browserSessionId, observation.target.id, viewToken)),
+      ).toContain("Clicked 4 times");
 
       const screenshot = await fetch(
         `${server.url}/v1/browser-sessions/${reference.browserSessionId}/targets/${encodeURIComponent(observation.target.id)}/screenshot`,
@@ -94,7 +147,10 @@ e2e(
         server,
         `/v1/browser-sessions/${reference.browserSessionId}/end`,
         adminToken,
-        { controllerGeneration: reference.controllerGeneration, removeState: true },
+        {
+          controllerGeneration: reference.controllerGeneration,
+          removeState: true,
+        },
       );
       expect(ended.status).toBe(200);
     } finally {
@@ -107,13 +163,17 @@ e2e(
 );
 
 function fixture(): string {
-  return `data:text/html,${encodeURIComponent(`<!doctype html><html><head><title>Wire fixture</title></head><body><button onclick="this.textContent='Clicked through browserd'">Click me</button></body></html>`)}`;
+  return `data:text/html,${encodeURIComponent(`<!doctype html><html><head><title>Wire fixture</title></head><body><button onclick="window.fixtureClicks=(window.fixtureClicks??0)+1;this.textContent='Clicked '+window.fixtureClicks+' '+(window.fixtureClicks===1?'time':'times')">Click me</button></body></html>`)}`;
 }
 
-function command(observation: BrowserObservation, ref: string): BrowserActionCommand {
+function command(
+  observation: BrowserObservation,
+  ref: string,
+  operationId = randomUUID(),
+): BrowserActionCommand {
   return {
     protocolVersion: 1,
-    operationId: randomUUID(),
+    operationId,
     browserSessionId: observation.browserSessionId,
     controllerGeneration: observation.target.controllerGeneration,
     targetId: observation.target.id,
@@ -125,6 +185,20 @@ function command(observation: BrowserObservation, ref: string): BrowserActionCom
   };
 }
 
+async function observe(
+  server: BrowserControlServer,
+  browserSessionId: string,
+  targetId: string,
+  viewToken: string,
+): Promise<BrowserObservation> {
+  const response = await fetch(
+    `${server.url}/v1/browser-sessions/${browserSessionId}/targets/${encodeURIComponent(targetId)}/observation`,
+    { headers: { authorization: `Bearer ${viewToken}` } },
+  );
+  expect(response.status).toBe(200);
+  return ((await response.json()) as { data: BrowserObservation }).data;
+}
+
 async function request(
   server: BrowserControlServer,
   path: string,
@@ -133,7 +207,10 @@ async function request(
 ): Promise<Response> {
   return await fetch(`${server.url}${path}`, {
     method: "POST",
-    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    headers: {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+    },
     body: JSON.stringify(body),
   });
 }

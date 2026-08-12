@@ -13,14 +13,27 @@ import {
   type WorkspaceControlStreamTransport,
 } from "./workspace-control-stream";
 import {
+  streamWorkspaceInteractionRevisions,
+  type WorkspaceInteractionRevisionStreamTransport,
+} from "./interaction-revision-stream";
+import {
   OpenGeniInteractionClient,
+  type AuthRun,
+  type AuthRunListOptions,
+  type AuthRunListResponse,
+  type AuthRunMutationResponse,
   type AttachedBrowserDevice,
   type AttachedBrowserDeviceListOptions,
   type AttachedBrowserDeviceListResponse,
   type BrowserActionReceipt,
   type BrowserActionRequest,
+  type BrowserClipboard,
   type BrowserDiagnosticBatch,
   type BrowserDiagnosticsOptions,
+  type BrowserDownload,
+  type BrowserDownloadListResponse,
+  type BrowserDownloadSaveRequest,
+  type BrowserDownloadSaveResponse,
   type BrowserIdentity,
   type BrowserIdentityListOptions,
   type BrowserIdentityListResponse,
@@ -34,11 +47,11 @@ import {
   type BrowserSessionLifecycleRequest,
   type BrowserSessionListResponse,
   type BrowserSessionMutationResponse,
-  type BrowserTarget,
   type BrowserTargetListResponse,
   type BrowserRevisionListResponse,
   type ComputerActionReceipt,
   type ComputerActionRequest,
+  type ComputerClipboard,
   type ComputerObservation,
   type ComputerSession,
   type ComputerSessionAttachment,
@@ -51,8 +64,36 @@ import {
   type CreateBrowserIdentityRequest,
   type CreateBrowserSessionRequest,
   type CreateComputerSessionRequest,
+  type CreateInteractionInterventionRequest,
+  type CreateNetworkRouteRequest,
+  type CreateSiteAuthConnectionRequest,
+  type ExternalAuthInteractiveRequest,
+  type ExternalAuthInteractiveResponse,
+  type ExternalAuthRunRequest,
+  type ExternalAuthRunResponse,
+  type InteractionIntervention,
+  type InteractionInterventionListOptions,
+  type InteractionInterventionListResponse,
+  type InteractionInterventionMutationResponse,
+  type NetworkRoute,
+  type NetworkRouteListOptions,
+  type NetworkRouteListResponse,
+  type NetworkRouteMutationResponse,
+  type ProtectedAuthFillRequest,
+  type ProtectedAuthFillResponse,
   type PublishBrowserRevisionRequest,
   type PublishBrowserRevisionResponse,
+  type ReportAuthRunRequest,
+  type ResolveInteractionInterventionRequest,
+  type SiteAuthConnection,
+  type SiteAuthConnectionListOptions,
+  type SiteAuthConnectionListResponse,
+  type SiteAuthConnectionMutationResponse,
+  type StartAuthRunRequest,
+  type UpdateNetworkRouteRequest,
+  type UpdateSiteAuthConnectionRequest,
+  type VerifyAuthRunRequest,
+  type WorkspaceInteractionRevisionEvent,
 } from "./interaction";
 import type {
   AccessContext,
@@ -2274,6 +2315,356 @@ export class OpenGeniClient {
 
   // --- Browser / Computer interaction resources --------------------------------
 
+  streamWorkspaceInteractionRevisions(
+    workspaceId: string,
+    options: StreamSessionEventsOptions = {},
+  ): AsyncGenerator<WorkspaceInteractionRevisionEvent, void, void> {
+    return streamWorkspaceInteractionRevisions(
+      this.workspaceInteractionRevisionStreamTransport(workspaceId),
+      options,
+    );
+  }
+
+  workspaceInteractionRevisionStreamTransport(
+    workspaceId: string,
+  ): WorkspaceInteractionRevisionStreamTransport {
+    return {
+      openStream: async (after, signal) =>
+        await this.openWorkspaceInteractionRevisionStream(workspaceId, {
+          after,
+          ...(signal ? { signal } : {}),
+        }),
+    };
+  }
+
+  async openWorkspaceInteractionRevisionStream(
+    workspaceId: string,
+    options: { after?: number; signal?: AbortSignal } = {},
+  ): Promise<ReadableStream<Uint8Array>> {
+    const correlationId = crypto.randomUUID();
+    const response = await this.fetchImpl(
+      this.url(`/v1/workspaces/${workspaceId}/interaction-events/stream`, {
+        after: String(options.after ?? 0),
+      }),
+      {
+        method: "GET",
+        headers: {
+          ...this.headers(correlationId),
+          Accept: "text/event-stream",
+        },
+        ...(options.signal ? { signal: options.signal } : {}),
+      },
+    );
+    assertApiContractResponse(response);
+    if (!response.ok) {
+      throw await apiErrorFromResponse(response, { method: "GET", correlationId });
+    }
+    if (!response.body) {
+      throw new OpenGeniApiError(response.status, "SSE response did not include a readable body");
+    }
+    return response.body;
+  }
+
+  async listNetworkRoutes(
+    workspaceId: string,
+    options: NetworkRouteListOptions = {},
+  ): Promise<NetworkRouteListResponse> {
+    return await this.requestJson<NetworkRouteListResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/network-routes`,
+      undefined,
+      options.includeArchived ? { includeArchived: "true" } : {},
+      options,
+    );
+  }
+
+  async getNetworkRoute(
+    workspaceId: string,
+    networkRouteId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<NetworkRoute> {
+    return await this.requestJson<NetworkRoute>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/network-routes/${encodeURIComponent(networkRouteId)}`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  async createNetworkRoute(
+    workspaceId: string,
+    request: CreateNetworkRouteRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<NetworkRouteMutationResponse> {
+    return await this.requestJson<NetworkRouteMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/network-routes`,
+      request,
+      {},
+      options,
+    );
+  }
+
+  async updateNetworkRoute(
+    workspaceId: string,
+    networkRouteId: string,
+    request: UpdateNetworkRouteRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<NetworkRouteMutationResponse> {
+    return await this.requestJson<NetworkRouteMutationResponse>(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/network-routes/${encodeURIComponent(networkRouteId)}`,
+      request,
+      {},
+      options,
+    );
+  }
+
+  async listSiteAuthConnections(
+    workspaceId: string,
+    options: SiteAuthConnectionListOptions = {},
+  ): Promise<SiteAuthConnectionListResponse> {
+    return await this.requestJson<SiteAuthConnectionListResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/site-auth-connections`,
+      undefined,
+      options.includeArchived ? { includeArchived: "true" } : {},
+      options,
+    );
+  }
+
+  async getSiteAuthConnection(
+    workspaceId: string,
+    siteAuthConnectionId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<SiteAuthConnection> {
+    return await this.requestJson<SiteAuthConnection>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/site-auth-connections/${encodeURIComponent(siteAuthConnectionId)}`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  async createSiteAuthConnection(
+    workspaceId: string,
+    request: CreateSiteAuthConnectionRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<SiteAuthConnectionMutationResponse> {
+    return await this.requestJson<SiteAuthConnectionMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/site-auth-connections`,
+      request,
+      {},
+      options,
+    );
+  }
+
+  async updateSiteAuthConnection(
+    workspaceId: string,
+    siteAuthConnectionId: string,
+    request: UpdateSiteAuthConnectionRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<SiteAuthConnectionMutationResponse> {
+    return await this.requestJson<SiteAuthConnectionMutationResponse>(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/site-auth-connections/${encodeURIComponent(siteAuthConnectionId)}`,
+      request,
+      {},
+      options,
+    );
+  }
+
+  async listAuthRuns(
+    workspaceId: string,
+    options: AuthRunListOptions = {},
+  ): Promise<AuthRunListResponse> {
+    return await this.requestJson<AuthRunListResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/auth-runs`,
+      undefined,
+      {
+        ...(options.browserSessionId ? { browserSessionId: options.browserSessionId } : {}),
+        ...(options.siteAuthConnectionId
+          ? { siteAuthConnectionId: options.siteAuthConnectionId }
+          : {}),
+        ...(options.includeSettled ? { includeSettled: "true" } : {}),
+      },
+      options,
+    );
+  }
+
+  async getAuthRun(
+    workspaceId: string,
+    authRunId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<AuthRun> {
+    return await this.requestJson<AuthRun>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/auth-runs/${encodeURIComponent(authRunId)}`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  async startBrowserAuthRun(
+    workspaceId: string,
+    browserSessionId: string,
+    request: StartAuthRunRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<AuthRunMutationResponse> {
+    return await this.requestJson<AuthRunMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/auth-runs`,
+      request,
+      {},
+      options,
+    );
+  }
+
+  async reportBrowserAuthRun(
+    workspaceId: string,
+    browserSessionId: string,
+    authRunId: string,
+    request: ReportAuthRunRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<AuthRunMutationResponse> {
+    return await this.requestJson<AuthRunMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/auth-runs/${encodeURIComponent(authRunId)}/report`,
+      request,
+      {},
+      options,
+    );
+  }
+
+  async protectedBrowserAuthFill(
+    workspaceId: string,
+    browserSessionId: string,
+    authRunId: string,
+    request: ProtectedAuthFillRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<ProtectedAuthFillResponse> {
+    return await this.requestJson<ProtectedAuthFillResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/auth-runs/${encodeURIComponent(authRunId)}/protected-fill`,
+      request,
+      {},
+      options,
+    );
+  }
+
+  async advanceExternalBrowserAuthRun(
+    workspaceId: string,
+    browserSessionId: string,
+    authRunId: string,
+    request: ExternalAuthRunRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<ExternalAuthRunResponse> {
+    return await this.requestJson<ExternalAuthRunResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/auth-runs/${encodeURIComponent(authRunId)}/external-auth`,
+      request,
+      {},
+      options,
+    );
+  }
+
+  async openExternalBrowserAuthFlow(
+    workspaceId: string,
+    browserSessionId: string,
+    authRunId: string,
+    request: ExternalAuthInteractiveRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<ExternalAuthInteractiveResponse> {
+    return await this.requestJson<ExternalAuthInteractiveResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/auth-runs/${encodeURIComponent(authRunId)}/external-auth/interactive`,
+      request,
+      {},
+      options,
+    );
+  }
+
+  async verifyBrowserAuthRun(
+    workspaceId: string,
+    browserSessionId: string,
+    authRunId: string,
+    request: VerifyAuthRunRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<AuthRunMutationResponse> {
+    return await this.requestJson<AuthRunMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/auth-runs/${encodeURIComponent(authRunId)}/verify`,
+      request,
+      {},
+      options,
+    );
+  }
+
+  async listInteractionInterventions(
+    workspaceId: string,
+    options: InteractionInterventionListOptions = {},
+  ): Promise<InteractionInterventionListResponse> {
+    return await this.requestJson<InteractionInterventionListResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/interaction-interventions`,
+      undefined,
+      {
+        ...(options.resourceKind ? { resourceKind: options.resourceKind } : {}),
+        ...(options.resourceId ? { resourceId: options.resourceId } : {}),
+        ...(options.includeSettled ? { includeSettled: "true" } : {}),
+      },
+      options,
+    );
+  }
+
+  async getInteractionIntervention(
+    workspaceId: string,
+    interventionId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<InteractionIntervention> {
+    return await this.requestJson<InteractionIntervention>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/interaction-interventions/${encodeURIComponent(interventionId)}`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  async createInteractionIntervention(
+    workspaceId: string,
+    request: CreateInteractionInterventionRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<InteractionInterventionMutationResponse> {
+    return await this.requestJson<InteractionInterventionMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/interaction-interventions`,
+      request,
+      {},
+      options,
+    );
+  }
+
+  async resolveInteractionIntervention(
+    workspaceId: string,
+    interventionId: string,
+    request: ResolveInteractionInterventionRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<InteractionInterventionMutationResponse> {
+    return await this.requestJson<InteractionInterventionMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/interaction-interventions/${encodeURIComponent(interventionId)}/resolve`,
+      request,
+      {},
+      options,
+    );
+  }
+
   async listAttachedBrowsers(
     workspaceId: string,
     options: AttachedBrowserDeviceListOptions = {},
@@ -2385,6 +2776,65 @@ export class OpenGeniClient {
     );
   }
 
+  async readBrowserClipboard(
+    workspaceId: string,
+    browserSessionId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserClipboard> {
+    return await this.requestJson<BrowserClipboard>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/clipboard`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  async listBrowserDownloads(
+    workspaceId: string,
+    browserSessionId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserDownloadListResponse> {
+    return await this.requestJson<BrowserDownloadListResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/downloads`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  async getBrowserDownload(
+    workspaceId: string,
+    browserSessionId: string,
+    downloadId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserDownload> {
+    return await this.requestJson<BrowserDownload>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/downloads/${encodeURIComponent(downloadId)}`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  async saveBrowserDownload(
+    workspaceId: string,
+    browserSessionId: string,
+    downloadId: string,
+    request: BrowserDownloadSaveRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserDownloadSaveResponse> {
+    return await this.requestJson<BrowserDownloadSaveResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/downloads/${encodeURIComponent(downloadId)}/save`,
+      request,
+      {},
+      options,
+    );
+  }
+
   async createBrowserSession(
     workspaceId: string,
     request: CreateBrowserSessionRequest,
@@ -2418,8 +2868,8 @@ export class OpenGeniClient {
     browserSessionId: string,
     request: BrowserOpenTargetRequest = {},
     options: OpenGeniRequestOptions = {},
-  ): Promise<BrowserTarget> {
-    return await this.requestJson<BrowserTarget>(
+  ): Promise<BrowserObservation> {
+    return await this.requestJson<BrowserObservation>(
       "POST",
       `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/targets`,
       request,
@@ -2433,8 +2883,8 @@ export class OpenGeniClient {
     browserSessionId: string,
     targetId: string,
     options: OpenGeniRequestOptions = {},
-  ): Promise<BrowserTarget> {
-    return await this.requestJson<BrowserTarget>(
+  ): Promise<BrowserObservation> {
+    return await this.requestJson<BrowserObservation>(
       "POST",
       `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/targets/${encodeURIComponent(targetId)}/select`,
       {},
@@ -2634,6 +3084,20 @@ export class OpenGeniClient {
     return await this.requestJson<ComputerSession>(
       "GET",
       `/v1/workspaces/${workspaceId}/computer-sessions/${encodeURIComponent(computerSessionId)}`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  async readComputerClipboard(
+    workspaceId: string,
+    computerSessionId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<ComputerClipboard> {
+    return await this.requestJson<ComputerClipboard>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/computer-sessions/${encodeURIComponent(computerSessionId)}/clipboard`,
       undefined,
       {},
       options,

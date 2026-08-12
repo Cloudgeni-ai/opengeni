@@ -19,7 +19,18 @@ describe("BrowserSession route discipline", () => {
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId/select"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId/observation"',
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/downloads"',
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/downloads/:downloadId"',
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/downloads/:downloadId/save"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/actions"',
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/clipboard"',
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs"',
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId"',
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/report"',
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/protected-fill"',
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/external-auth"',
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/external-auth/interactive"',
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/verify"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/operations/:operationId"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId/diagnostics"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/attachments"',
@@ -49,6 +60,14 @@ describe("BrowserSession route discipline", () => {
     expect(source).toContain('kind: "relay"');
     expect(source).toContain("BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX");
     expect(source).not.toMatch(/url[^\n]*relayToken/u);
+    const attachment = source.slice(
+      source.indexOf(
+        '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/attachments"',
+      ),
+      source.indexOf('"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/heartbeat"'),
+    );
+    expect(attachment).toContain("requestOrigin(context, deps.settings.corsAllowOriginRegex)");
+    expect(attachment).toContain("client.addAllowedOrigins([origin])");
   });
 
   test("admits every controller call through the durable generation fence", async () => {
@@ -61,6 +80,113 @@ describe("BrowserSession route discipline", () => {
     expect(activeController.indexOf("if (!admitted)")).toBeLessThan(
       activeController.indexOf("return await withBrowserPlacement("),
     );
+  });
+
+  test("brokers protected auth outside model-visible browser actions", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const start = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/protected-fill"',
+    );
+    const end = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/verify"',
+      start,
+    );
+    const route = source.slice(start, end);
+    expect(route.indexOf("if (replay?.response)")).toBeLessThan(
+      route.indexOf("withActiveBrowserController"),
+    );
+    expect(route.indexOf("getProtectedAuthFillPreparation")).toBeLessThan(
+      route.indexOf("loadBoundBrowserCredential"),
+    );
+    expect(route.indexOf("dispatchProtectedAuthFill")).toBeLessThan(
+      route.indexOf("sessionClient.protectedAuthFill"),
+    );
+    expect(route).toContain("resolveProtectedAuthFieldValues");
+    expect(route).toContain("protectedAuthReceipt");
+    expect(route).not.toContain("BrowserActionCommand.parse");
+  });
+
+  test("keeps provider auth durable while gating its hosted flow to humans", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const start = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/external-auth"',
+    );
+    const interactiveStart = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/external-auth/interactive"',
+      start,
+    );
+    const durable = source.slice(start, interactiveStart);
+    const interactive = source.slice(
+      interactiveStart,
+      source.indexOf(
+        '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/verify"',
+        interactiveStart,
+      ),
+    );
+    expect(durable.indexOf("prepareExternalAuth")).toBeLessThan(
+      durable.indexOf("dispatchExternalAuth"),
+    );
+    expect(durable.indexOf("dispatchExternalAuth")).toBeLessThan(
+      durable.indexOf("sessionClient.externalAuth"),
+    );
+    expect(durable.indexOf("sessionClient.externalAuth")).toBeLessThan(
+      durable.indexOf("completeExternalAuth"),
+    );
+    expect(durable).toContain(
+      "provider exposed a hosted login URL outside the human-only endpoint",
+    );
+    expect(interactive).toContain('grant.principalKind !== "human_session"');
+    expect(interactive).toContain('action: "interactive"');
+    expect(interactive).not.toContain("completeExternalAuth");
+  });
+
+  test("stages upload bytes privately before the canonical browser action", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const start = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/actions"',
+    );
+    const end = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs"',
+      start,
+    );
+    const route = source.slice(start, end);
+    expect(route).toContain('requireAccessGrant(context, deps, workspaceId, "files:read")');
+    expect(route.indexOf("getFiles(deps.db")).toBeLessThan(
+      route.indexOf("sessionClient.stageWorkspaceFiles"),
+    );
+    expect(route.indexOf("sessionClient.stageWorkspaceFiles")).toBeLessThan(
+      route.indexOf("sessionClient.action(command)"),
+    );
+    expect(route).toContain("sessionClient.receipt(request.operationId)");
+  });
+
+  test("publishes one exact private download before one fenced workspace import", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const start = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/downloads/:downloadId/save"',
+    );
+    const end = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId/observation"',
+      start,
+    );
+    const route = source.slice(start, end);
+    expect(route.indexOf("findBrowserDownloadSave")).toBeLessThan(
+      route.indexOf("if (!objectStorage)"),
+    );
+    expect(route.indexOf("sessionClient.exportDownload")).toBeLessThan(
+      route.indexOf("finalizeBrowserDownloadFile"),
+    );
+    expect(route.indexOf("finalizeBrowserDownloadFile")).toBeLessThan(
+      route.indexOf("dispatchBrowserDownloadSave"),
+    );
+    expect(route.indexOf("dispatchBrowserDownloadSave")).toBeLessThan(
+      route.indexOf("service.importWorkspaceFile"),
+    );
+    expect(route.indexOf("service.importWorkspaceFile")).toBeLessThan(
+      route.indexOf("completeBrowserDownloadSave"),
+    );
+    expect(route).toContain('operation: "browser.download.save"');
+    expect(route).toContain("mayReplaceExisting: save.overwrite && dispatched.dispatchedNow");
   });
 
   test("resolves linked browsers through the exact active ComputerSession placement", async () => {
@@ -94,12 +220,11 @@ describe("BrowserSession route discipline", () => {
     expect(route.indexOf('prepared.kind === "completed"')).toBeLessThan(
       route.indexOf("const objectStorage = deps.objectStorage"),
     );
-    expect(route.indexOf("createPutUrl")).toBeLessThan(
-      route.indexOf("dispatchBrowserRevisionPublication"),
-    );
     expect(route.indexOf("dispatchBrowserRevisionPublication")).toBeLessThan(
-      route.indexOf("client.captureState"),
+      route.indexOf("stateUpload"),
     );
+    expect(route.indexOf("stateUpload")).toBeLessThan(route.indexOf("createPutUrl"));
+    expect(route.indexOf("createPutUrl")).toBeLessThan(route.indexOf("client.captureState"));
     expect(route.indexOf("client.captureState")).toBeLessThan(
       route.indexOf("commitBrowserRevisionPublication"),
     );
@@ -125,8 +250,10 @@ describe("BrowserSession route discipline", () => {
     expect(suspend).toContain("if (isTerminalOperation(prepared.operation.state))");
     expect(resume).toContain("if (isTerminalOperation(prepared.operation.state))");
     expect(suspend.indexOf("dispatchBrowserSessionOperation")).toBeLessThan(
-      suspend.indexOf("client.captureState"),
+      suspend.indexOf("stateUpload"),
     );
+    expect(suspend.indexOf("stateUpload")).toBeLessThan(suspend.indexOf("createPutUrl"));
+    expect(suspend.indexOf("createPutUrl")).toBeLessThan(suspend.indexOf("client.captureState"));
     expect(suspend).toContain('afterCapture: "stop"');
     expect(suspend.indexOf("client.captureState")).toBeLessThan(
       suspend.indexOf("commitBrowserSessionSuspension"),
@@ -138,11 +265,15 @@ describe("BrowserSession route discipline", () => {
       resume.indexOf("prepareBrowserPrivateCheckpointRestore"),
     );
     expect(resume.indexOf("prepareBrowserPrivateCheckpointRestore")).toBeLessThan(
+      resume.indexOf("resolveBrowserNetworkRouteLaunch"),
+    );
+    expect(resume.indexOf("resolveBrowserNetworkRouteLaunch")).toBeLessThan(
       resume.indexOf("ensureDispatchedGeneration"),
     );
     expect(resume.indexOf("ensureDispatchedGeneration")).toBeLessThan(
       resume.indexOf("client.createSession"),
     );
+    expect(resume).toContain("...(networkRoute ? { networkRoute } : {})");
   });
 
   test("preserves exact human, service, and agent-attempt action provenance", () => {

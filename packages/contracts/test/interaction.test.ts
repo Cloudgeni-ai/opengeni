@@ -1,18 +1,24 @@
 import { describe, expect, test } from "bun:test";
+import { randomUUID } from "node:crypto";
 import {
   AuthRun,
   BrowserActionCommand,
   BrowserActionRequest,
   BrowserActionReceipt,
+  BrowserClipboard,
   BrowserDiagnosticBatch,
+  BrowserExternalAuthCommand,
+  BrowserExternalAuthResult,
   BrowserIdentity,
   BrowserObservation,
   BrowserRevision,
   BrowserRevisionMaterialization,
   BrowserSessionAttachment,
+  BrowserWorkspaceFileStageRequest,
   ComputerActionCommand,
   ComputerActionRequest,
   ComputerActionReceipt,
+  ComputerClipboard,
   ComputerSessionAttachment,
   ComputerSessionAttachmentRequest,
   ComputerTargetListResponse,
@@ -20,6 +26,8 @@ import {
   CreateSiteAuthConnectionRequest,
   CreateBrowserSessionRequest,
   CreateComputerSessionRequest,
+  ExternalAuthInteractiveResponse,
+  ExternalAuthRunRequest,
   InteractionActor,
   InteractionError,
   PublishBrowserRevisionRequest,
@@ -82,8 +90,23 @@ describe("interaction contracts", () => {
       CreateBrowserSessionRequest.parse({
         operationId,
         sessionId: "33333333-3333-4333-8333-333333333333",
-      }).headless,
-    ).toBe(true);
+      }),
+    ).toMatchObject({ headless: true, engine: "chromium" });
+    expect(
+      CreateBrowserSessionRequest.parse({
+        operationId,
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        engine: "lightpanda",
+      }).engine,
+    ).toBe("lightpanda");
+    expect(
+      CreateBrowserSessionRequest.safeParse({
+        operationId,
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        engine: "lightpanda",
+        headless: false,
+      }).success,
+    ).toBe(false);
     expect(
       CreateBrowserSessionRequest.safeParse({
         operationId,
@@ -118,12 +141,47 @@ describe("interaction contracts", () => {
           deviceId: "66666666-6666-4666-8666-666666666666",
         },
       }).success,
-    ).toBe(false);
+    ).toBe(true);
     expect(
       CreateBrowserSessionRequest.safeParse({
         operationId,
         sessionId: "33333333-3333-4333-8333-333333333333",
         baseRevisionId: "44444444-4444-4444-8444-444444444444",
+      }).success,
+    ).toBe(false);
+    expect(
+      CreateBrowserSessionRequest.parse({
+        operationId,
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        placement: {
+          kind: "external_provider",
+          providerId: "kernel",
+          placementId: "default",
+        },
+      }).placement,
+    ).toEqual({ kind: "external_provider", providerId: "kernel", placementId: "default" });
+    expect(
+      CreateBrowserSessionRequest.parse({
+        operationId,
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        placement: {
+          kind: "external_provider",
+          providerId: "kernel",
+          placementId: "default",
+        },
+        networkRouteId: "77777777-7777-4777-8777-777777777777",
+      }).networkRouteId,
+    ).toBe("77777777-7777-4777-8777-777777777777");
+    expect(
+      CreateBrowserSessionRequest.safeParse({
+        operationId,
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        placement: {
+          kind: "external_provider",
+          providerId: "kernel",
+          placementId: "default",
+        },
+        identityId: "44444444-4444-4444-8444-444444444444",
       }).success,
     ).toBe(false);
     expect(
@@ -349,6 +407,49 @@ describe("interaction contracts", () => {
     ).toBe(false);
   });
 
+  test("keeps native computer clipboard reads bounded and mutations causal", () => {
+    expect(
+      ComputerClipboard.parse({
+        computerSessionId,
+        controllerGeneration: "controller-2",
+        text: "native clipboard",
+        truncated: false,
+        observedAt: "2026-08-10T12:00:00.000Z",
+      }),
+    ).toMatchObject({ text: "native clipboard", truncated: false });
+    expect(
+      ComputerClipboard.safeParse({
+        computerSessionId,
+        controllerGeneration: "controller-2",
+        text: null,
+        truncated: true,
+        observedAt: "2026-08-10T12:00:00.000Z",
+      }).success,
+    ).toBe(false);
+
+    const base = {
+      operationId,
+      targetId: "screen-1",
+      expectedTargetGeneration: "target-4",
+      expectedObservationId: null,
+      expectedFrameId: null,
+    };
+    expect(
+      ComputerActionRequest.parse({
+        ...base,
+        action: { type: "clipboard", operation: "write", text: "hello" },
+      }).action,
+    ).toEqual({ type: "clipboard", operation: "write", text: "hello" });
+    for (const action of [
+      { type: "clipboard", operation: "write" },
+      { type: "clipboard", operation: "clear", text: "unexpected" },
+      { type: "clipboard", operation: "copy", text: "unexpected" },
+      { type: "clipboard", operation: "paste", text: "unexpected" },
+    ]) {
+      expect(ComputerActionRequest.safeParse({ ...base, action }).success).toBe(false);
+    }
+  });
+
   test("validates generation-fenced human pointer actions", () => {
     const base = {
       operationId,
@@ -373,6 +474,133 @@ describe("interaction contracts", () => {
       BrowserActionRequest.safeParse({
         ...base,
         action: { type: "pointer", action: "click", x: 1, y: 2, deltaY: 40 },
+      }).success,
+    ).toBe(false);
+  });
+
+  test("keeps browser clipboard state private, bounded, and action-fenced", () => {
+    expect(
+      BrowserClipboard.parse({
+        browserSessionId,
+        controllerGeneration: "controller-2",
+        revision: 0,
+        text: "",
+        source: "empty",
+        sourceTargetId: null,
+        updatedAt: null,
+      }),
+    ).toMatchObject({ revision: 0, source: "empty" });
+    expect(
+      BrowserClipboard.safeParse({
+        browserSessionId,
+        controllerGeneration: "controller-2",
+        revision: 0,
+        text: "stale",
+        source: "write",
+        sourceTargetId: "target-1",
+        updatedAt: "2026-08-10T12:00:00.000Z",
+      }).success,
+    ).toBe(false);
+
+    const base = {
+      operationId,
+      targetId: "target-1",
+      expectedTargetGeneration: "target-4",
+      expectedDocumentGeneration: "document-9",
+      expectedFrameId: "frame-12",
+    };
+    expect(
+      BrowserActionRequest.parse({
+        ...base,
+        action: { type: "clipboard", operation: "paste", text: "hello" },
+      }).action,
+    ).toMatchObject({ type: "clipboard", operation: "paste", text: "hello" });
+    for (const action of [
+      { type: "clipboard", operation: "write" },
+      { type: "clipboard", operation: "clear", text: "unexpected" },
+      { type: "clipboard", operation: "copy", content: "value" },
+      { type: "clipboard", operation: "paste", content: "text" },
+    ]) {
+      expect(BrowserActionRequest.safeParse({ ...base, action }).success).toBe(false);
+    }
+  });
+
+  test("bounds browser web-permission control to typed origin-fenced settings", () => {
+    const base = {
+      operationId,
+      targetId: "target-1",
+      expectedTargetGeneration: "target-4",
+      expectedDocumentGeneration: "document-9",
+      expectedFrameId: "frame-12",
+    };
+    expect(
+      BrowserActionRequest.parse({
+        ...base,
+        action: { type: "permission", permission: "geolocation", setting: "denied" },
+      }).action,
+    ).toEqual({ type: "permission", permission: "geolocation", setting: "denied" });
+    for (const action of [
+      { type: "permission", permission: "unknown", setting: "granted" },
+      { type: "permission", permission: "camera", setting: "reset" },
+      {
+        type: "permission",
+        permission: "notifications",
+        setting: "prompt",
+        origin: "https://unfenced.example",
+      },
+    ]) {
+      expect(BrowserActionRequest.safeParse({ ...base, action }).success).toBe(false);
+    }
+  });
+
+  test("bounds browser workspace-file staging and aggregate upload batches", () => {
+    const fileId = randomUUID();
+    const authority = {
+      fileId,
+      safeFilename: "report.txt",
+      sizeBytes: 12,
+      sha256: "a".repeat(64),
+      download: {
+        url: "https://objects.example.test/file?signature=private",
+        expiresAt: "2026-08-10T12:05:00.000Z",
+      },
+    };
+    expect(
+      BrowserWorkspaceFileStageRequest.safeParse({
+        operationId,
+        files: [authority, authority],
+      }).success,
+    ).toBe(false);
+    expect(
+      BrowserWorkspaceFileStageRequest.safeParse({
+        operationId,
+        files: [{ ...authority, safeFilename: "../secret" }],
+      }).success,
+    ).toBe(false);
+
+    const fileIds = Array.from({ length: 101 }, () => randomUUID());
+    expect(
+      BrowserActionRequest.safeParse({
+        operationId,
+        targetId: "target-1",
+        expectedTargetGeneration: "target-4",
+        expectedDocumentGeneration: "document-9",
+        expectedFrameId: "frame-12",
+        action: {
+          type: "batch",
+          actions: [
+            {
+              type: "upload",
+              locator: { kind: "css", selector: "#one" },
+              workspaceFileIds: fileIds.slice(0, 100),
+            },
+            {
+              type: "upload",
+              locator: { kind: "css", selector: "#two" },
+              workspaceFileIds: fileIds.slice(100),
+            },
+          ],
+        },
       }).success,
     ).toBe(false);
   });
@@ -627,6 +855,17 @@ describe("interaction contracts", () => {
         origins: ["https://example.com"],
       }).success,
     ).toBe(false);
+    expect(
+      CreateSiteAuthConnectionRequest.safeParse({
+        ...auth,
+        preferredIdentityId: "88888888-8888-4888-8888-888888888888",
+        preferredPlacement: {
+          kind: "external_provider",
+          providerId: "kernel",
+          placementId: "eu-west",
+        },
+      }).success,
+    ).toBe(false);
 
     const baseRun = {
       id: "44444444-4444-4444-8444-444444444444",
@@ -638,6 +877,7 @@ describe("interaction contracts", () => {
       controllerGeneration: "controller-1",
       targetGeneration: "target-1",
       documentGeneration: "document-1",
+      purpose: "authenticate",
       methodId: null,
       authorityId: null,
       choices: [],
@@ -671,5 +911,43 @@ describe("interaction contracts", () => {
         choices: [{ id: "password", label: "Password", methodId: "password" }],
       }).success,
     ).toBe(true);
+  });
+
+  test("keeps provider login control private and hosted URLs human-only", () => {
+    const authRunId = "44444444-4444-4444-8444-444444444444";
+    expect(
+      ExternalAuthRunRequest.parse({
+        operationId,
+        expectedVersion: 1,
+        action: "start",
+      }),
+    ).toEqual({ operationId, expectedVersion: 1, action: "start" });
+    expect(
+      BrowserExternalAuthCommand.parse({
+        browserSessionId,
+        controllerGeneration: "controller-1",
+        operationId,
+        authRunId,
+        adapterId: "kernel",
+        connectionId: "managed-connection-1",
+        action: "interactive",
+      }).connectionId,
+    ).toBe("managed-connection-1");
+    expect(
+      BrowserExternalAuthResult.safeParse({
+        state: "in_progress",
+        externalAction: null,
+        interactiveUrl: "https://auth.example.test/hosted",
+        failureCode: null,
+        profileLoaded: false,
+      }).success,
+    ).toBe(false);
+    expect(
+      ExternalAuthInteractiveResponse.parse({
+        authRunId,
+        url: "https://auth.example.test/hosted",
+        expiresAt: null,
+      }).url,
+    ).toBe("https://auth.example.test/hosted");
   });
 });

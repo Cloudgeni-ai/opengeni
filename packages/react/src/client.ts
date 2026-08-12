@@ -94,6 +94,7 @@ export type SessionClientLike = Pick<
   | "getWorkspaceModelCatalog"
   | "listWorkspaceControlEvents"
   | "streamWorkspaceControlEvents"
+  | "streamWorkspaceInteractionRevisions"
   | "getBillingUsage"
   // Stream surfacing (Phase 5): capability negotiation + viewer lifecycle
   | "getClientConfig"
@@ -103,6 +104,24 @@ export type SessionClientLike = Pick<
   | "heartbeatViewer"
   | "detachViewer"
   // Browser/Computer interaction resources
+  | "listNetworkRoutes"
+  | "getNetworkRoute"
+  | "createNetworkRoute"
+  | "updateNetworkRoute"
+  | "listSiteAuthConnections"
+  | "getSiteAuthConnection"
+  | "createSiteAuthConnection"
+  | "updateSiteAuthConnection"
+  | "listAuthRuns"
+  | "getAuthRun"
+  | "startBrowserAuthRun"
+  | "reportBrowserAuthRun"
+  | "protectedBrowserAuthFill"
+  | "verifyBrowserAuthRun"
+  | "listInteractionInterventions"
+  | "getInteractionIntervention"
+  | "createInteractionIntervention"
+  | "resolveInteractionIntervention"
   | "listAttachedBrowsers"
   | "getAttachedBrowser"
   | "listBrowserIdentities"
@@ -111,6 +130,10 @@ export type SessionClientLike = Pick<
   | "listBrowserRevisions"
   | "listBrowserSessions"
   | "getBrowserSession"
+  | "readBrowserClipboard"
+  | "listBrowserDownloads"
+  | "getBrowserDownload"
+  | "saveBrowserDownload"
   | "createBrowserSession"
   | "listBrowserTargets"
   | "openBrowserTarget"
@@ -128,6 +151,7 @@ export type SessionClientLike = Pick<
   | "endBrowserSession"
   | "listComputerSessions"
   | "getComputerSession"
+  | "readComputerClipboard"
   | "createComputerSession"
   | "listComputerTargets"
   | "observeComputerTarget"
@@ -227,9 +251,38 @@ export type EmbeddedRealtimeSessionClientLike = Pick<
   | "endSessionRealtime"
 >;
 
+/** Exact public SDK surface required by cross-surface human interventions. */
+export type EmbeddedInterventionClientLike = Pick<
+  OpenGeniClient,
+  | "streamWorkspaceInteractionRevisions"
+  | "listInteractionInterventions"
+  | "getInteractionIntervention"
+  | "createInteractionIntervention"
+  | "resolveInteractionIntervention"
+>;
+
 /** Exact public SDK surface required by BrowserSession hooks and components. */
 export type EmbeddedBrowserInteractionClientLike = Pick<
   OpenGeniClient,
+  | "streamWorkspaceInteractionRevisions"
+  | "listNetworkRoutes"
+  | "getNetworkRoute"
+  | "createNetworkRoute"
+  | "updateNetworkRoute"
+  | "listSiteAuthConnections"
+  | "getSiteAuthConnection"
+  | "createSiteAuthConnection"
+  | "updateSiteAuthConnection"
+  | "listAuthRuns"
+  | "getAuthRun"
+  | "startBrowserAuthRun"
+  | "reportBrowserAuthRun"
+  | "protectedBrowserAuthFill"
+  | "verifyBrowserAuthRun"
+  | "listInteractionInterventions"
+  | "getInteractionIntervention"
+  | "createInteractionIntervention"
+  | "resolveInteractionIntervention"
   | "listAttachedBrowsers"
   | "getAttachedBrowser"
   | "listBrowserIdentities"
@@ -238,6 +291,10 @@ export type EmbeddedBrowserInteractionClientLike = Pick<
   | "listBrowserRevisions"
   | "listBrowserSessions"
   | "getBrowserSession"
+  | "readBrowserClipboard"
+  | "listBrowserDownloads"
+  | "getBrowserDownload"
+  | "saveBrowserDownload"
   | "createBrowserSession"
   | "listBrowserTargets"
   | "openBrowserTarget"
@@ -253,13 +310,16 @@ export type EmbeddedBrowserInteractionClientLike = Pick<
   | "suspendBrowserSession"
   | "resumeBrowserSession"
   | "endBrowserSession"
->;
+> &
+  EmbeddedInterventionClientLike;
 
 /** Exact public SDK surface required by ComputerSession hooks and components. */
 export type EmbeddedComputerInteractionClientLike = Pick<
   OpenGeniClient,
+  | "streamWorkspaceInteractionRevisions"
   | "listComputerSessions"
   | "getComputerSession"
+  | "readComputerClipboard"
   | "createComputerSession"
   | "listComputerTargets"
   | "observeComputerTarget"
@@ -268,7 +328,8 @@ export type EmbeddedComputerInteractionClientLike = Pick<
   | "attachComputerSession"
   | "heartbeatComputerSession"
   | "endComputerSession"
->;
+> &
+  EmbeddedInterventionClientLike;
 
 /** Complete public Browser + Computer interaction surface. */
 export type EmbeddedInteractionClientLike = EmbeddedBrowserInteractionClientLike &

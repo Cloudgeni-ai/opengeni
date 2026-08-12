@@ -54,8 +54,13 @@ async function renderPanel(props: ComponentProps<typeof CodexDeviceCodePanel> = 
 describe("CodexDeviceCodePanel", () => {
   test("copies the exact device code and confirms the action", async () => {
     const copies: string[] = [];
+    let copied!: () => void;
+    const copiedPromise = new Promise<void>((resolve) => {
+      copied = resolve;
+    });
     setClipboard(async (value) => {
       copies.push(value);
+      copied();
     });
     const { container, root } = await renderPanel();
 
@@ -66,6 +71,7 @@ describe("CodexDeviceCodePanel", () => {
 
       await act(async () => {
         button!.click();
+        await copiedPromise;
         await Promise.resolve();
       });
 

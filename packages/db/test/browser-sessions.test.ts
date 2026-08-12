@@ -5,6 +5,7 @@ import {
   activateBrowserSession,
   activateComputerSession,
   ATTACHED_BROWSER_SESSION_CAPABILITIES,
+  bindBrowserSessionNetworkRouteAuthority,
   bootstrapWorkspace,
   BrowserSessionNotFoundError,
   BrowserSessionOperationConflictError,
@@ -15,6 +16,8 @@ import {
   commitWarmingToWarm,
   completeBrowserSessionEnd,
   createDb,
+  createEnrollment,
+  createNetworkRoute,
   createSession,
   dispatchBrowserSessionOperation,
   dispatchComputerSessionOperation,
@@ -25,12 +28,15 @@ import {
   getBrowserSessionControlRecord,
   getBrowserPrivateCheckpointAuthority,
   listBrowserSessions,
+  LIGHTPANDA_BROWSER_SESSION_CAPABILITIES,
+  MANAGED_BROWSER_SESSION_CAPABILITIES,
   prepareBrowserSessionCreate,
   prepareBrowserSessionEnd,
   prepareBrowserSessionResume,
   prepareBrowserSessionSuspend,
   prepareComputerSessionCreate,
   prepareComputerSessionEnd,
+  reconcileAttachedBrowserInventory,
   reapStaleLeaseHolders,
   touchBrowserSessionController,
 } from "../src";
@@ -159,6 +165,25 @@ function checkpointArtifact(
 }
 
 describe("durable BrowserSession lifecycle", () => {
+  test("advertises proven managed transfer capabilities without overclaiming attached Chrome", () => {
+    expect(MANAGED_BROWSER_SESSION_CAPABILITIES).toMatchObject({
+      downloads: true,
+      uploads: true,
+    });
+    expect(ATTACHED_BROWSER_SESSION_CAPABILITIES).toMatchObject({
+      downloads: false,
+      uploads: false,
+    });
+    expect(LIGHTPANDA_BROWSER_SESSION_CAPABILITIES).toMatchObject({
+      semanticObservation: true,
+      screenshots: true,
+      liveFrames: false,
+      downloads: false,
+      privateCheckpoint: false,
+      identityPublication: false,
+    });
+  });
+
   test("binds a headed browser to one active same-placement ComputerSession", async () => {
     if (!available) return;
     const scope = await fixture();
@@ -201,6 +226,7 @@ describe("durable BrowserSession lifecycle", () => {
         semanticActions: true,
         pointerInput: true,
         keyboardInput: true,
+        clipboard: true,
         backgroundActions: true,
         parallelApps: true,
       },
@@ -262,6 +288,126 @@ describe("durable BrowserSession lifecycle", () => {
         ...createInput(scope),
         placement: { kind: "connected_machine", sandboxId: crypto.randomUUID() },
         headless: false,
+        linkedComputerSessionId: computer.session.id,
+      }),
+    ).rejects.toBeInstanceOf(BrowserSessionStateError);
+  });
+
+  test("binds attached Chrome to the exact active device ComputerSession", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const deviceId = crypto.randomUUID();
+    const enrollment = await createEnrollment(client.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      pubkey: `ed25519:${crypto.randomUUID()}`,
+      os: "macos",
+      arch: "arm64",
+    });
+    await reconcileAttachedBrowserInventory(client.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      enrollmentId: enrollment.id,
+      snapshot: {
+        bridgeGeneration: "bridge:test",
+        revision: 1,
+        devices: [
+          {
+            id: deviceId,
+            name: "Attached Chrome",
+            profileLabel: "Work",
+            browserName: "Google Chrome",
+            browserVersion: "151.0.7922.108",
+            extensionVersion: "1.0.0",
+            platform: "macos",
+            architecture: "arm64",
+            connectionGeneration: "chrome-generation:test",
+            inventoryRevision: 1,
+            tabCount: 1,
+            capabilities: {
+              tabInventory: true,
+              debuggerAttachment: true,
+              semanticObservation: true,
+              screenshots: true,
+              liveFrames: true,
+              humanInput: true,
+              diagnostics: true,
+              rawCdp: false,
+              linkedComputer: true,
+            },
+          },
+        ],
+      },
+    });
+    const computerOperationId = crypto.randomUUID();
+    const computer = await prepareComputerSessionCreate(client.db, {
+      ...scope,
+      operationId: computerOperationId,
+      associatedSessionId: scope.sessionId,
+      actorSubjectId: scope.subjectId,
+      name: "Attached Chrome computer",
+      placement: { kind: "attached_device", deviceId },
+    });
+    const controller = {
+      controllerId: "browserd:attached-test",
+      controllerGeneration: crypto.randomUUID(),
+      placementInstanceId: "chrome-generation:test",
+    };
+    await dispatchComputerSessionOperation(client.db, {
+      ...scope,
+      operationId: computerOperationId,
+      computerSessionId: computer.session.id,
+      controllerGeneration: controller.controllerGeneration,
+      controller,
+    });
+    await activateComputerSession(client.db, {
+      ...scope,
+      operationId: computerOperationId,
+      computerSessionId: computer.session.id,
+      controller,
+      platform: "macos",
+      adapter: "opengeni.ax.v1",
+      seatId: "console",
+      displayId: "main",
+      capabilities: {
+        semanticObservation: true,
+        appDiscovery: true,
+        appLaunch: true,
+        windowCapture: true,
+        screenCapture: true,
+        semanticActions: true,
+        pointerInput: true,
+        keyboardInput: true,
+        clipboard: true,
+        backgroundActions: true,
+        parallelApps: true,
+      },
+    });
+
+    const browser = await prepareBrowserSessionCreate(client.db, {
+      ...createInput(scope),
+      placement: { kind: "attached_device", deviceId },
+      driverId: "opengeni.attached-chrome.v1",
+      engine: "chrome",
+      headless: false,
+      capabilities: ATTACHED_BROWSER_SESSION_CAPABILITIES,
+      linkedComputerSessionId: computer.session.id,
+    });
+    expect(browser.session).toMatchObject({
+      placement: { kind: "attached_device", deviceId },
+      headless: false,
+      linkedComputerSessionId: computer.session.id,
+      capabilities: { linkedComputer: true },
+    });
+
+    await expect(
+      prepareBrowserSessionCreate(client.db, {
+        ...createInput(scope),
+        placement: { kind: "attached_device", deviceId: crypto.randomUUID() },
+        driverId: "opengeni.attached-chrome.v1",
+        engine: "chrome",
+        headless: false,
+        capabilities: ATTACHED_BROWSER_SESSION_CAPABILITIES,
         linkedComputerSessionId: computer.session.id,
       }),
     ).rejects.toBeInstanceOf(BrowserSessionStateError);
@@ -560,10 +706,59 @@ describe("durable BrowserSession lifecycle", () => {
     ).toMatchObject({ state: "failed", replayed: true });
   });
 
-  test("suspends onto one private checkpoint and resumes under a fresh controller fence", async () => {
+  test("resumes routed private state under fresh controller and route authority fences", async () => {
     if (!available) return;
     const scope = await fixture();
-    const active = await activeBrowser(scope);
+    const route = await createNetworkRoute(client.db, {
+      ...scope,
+      actorSubjectId: scope.subjectId,
+      operationId: crypto.randomUUID(),
+      name: `Resume route ${crypto.randomUUID()}`,
+      configuration: { kind: "direct" },
+      consistency: {
+        dns: "placement",
+        expectedPublicIp: null,
+        expectedRegion: null,
+        locale: null,
+        timezone: null,
+        geolocation: null,
+        webRtc: "default",
+        stability: "session",
+      },
+    });
+    const createOperationId = crypto.randomUUID();
+    const prepared = await prepareBrowserSessionCreate(client.db, {
+      ...createInput(scope, createOperationId),
+      networkRouteId: route.route.id,
+    });
+    const initialRouteDigest = `route.${"a".repeat(43)}`;
+    await bindBrowserSessionNetworkRouteAuthority(client.db, {
+      ...scope,
+      browserSessionId: prepared.session.id,
+      operationId: createOperationId,
+      routeVersion: route.route.version,
+      credentialVersion: null,
+      authorityDigest: initialRouteDigest,
+    });
+    const controllerGeneration = crypto.randomUUID();
+    await dispatchBrowserSessionOperation(client.db, {
+      ...scope,
+      operationId: createOperationId,
+      browserSessionId: prepared.session.id,
+      controllerGeneration,
+    });
+    const activated = await activateBrowserSession(client.db, {
+      ...scope,
+      operationId: createOperationId,
+      browserSessionId: prepared.session.id,
+      controller: {
+        controllerId: "browserd:test",
+        controllerGeneration,
+        placementInstanceId: "placement:test",
+      },
+      engineVersion: "151.0.7922.108",
+    });
+    const active = { ...activated, controllerGeneration };
     const suspendOperationId = crypto.randomUUID();
     const suspending = await prepareBrowserSessionSuspend(client.db, {
       ...scope,
@@ -577,6 +772,10 @@ describe("durable BrowserSession lifecycle", () => {
       operationId: suspendOperationId,
       browserSessionId: active.session.id,
       controllerGeneration: active.controllerGeneration,
+      stateUpload: {
+        objectKey: checkpointArtifact(scope, suspendOperationId).objectKey,
+        cleanupAfter: new Date(Date.now() + 60_000),
+      },
     });
     const suspended = await commitBrowserSessionSuspension(client.db, {
       ...scope,
@@ -623,6 +822,28 @@ describe("durable BrowserSession lifecycle", () => {
       actorSubjectId: scope.subjectId,
     });
     expect(restoring.session.lifecycle).toBe("restoring");
+    expect(
+      (
+        await getBrowserSessionControlRecord(client.db, {
+          ...scope,
+          browserSessionId: active.session.id,
+          operationId: resumeOperationId,
+        })
+      ).networkRouteAuthority,
+    ).toMatchObject({
+      routeId: route.route.id,
+      routeVersion: route.route.version,
+      authorityDigest: null,
+    });
+    const resumedRouteDigest = `route.${"b".repeat(43)}`;
+    await bindBrowserSessionNetworkRouteAuthority(client.db, {
+      ...scope,
+      browserSessionId: active.session.id,
+      operationId: resumeOperationId,
+      routeVersion: route.route.version,
+      credentialVersion: null,
+      authorityDigest: resumedRouteDigest,
+    });
     const resumedGeneration = crypto.randomUUID();
     const resumedController = {
       controllerId: "browserd:test",
@@ -636,6 +857,16 @@ describe("durable BrowserSession lifecycle", () => {
       controllerGeneration: resumedGeneration,
       controller: resumedController,
     });
+    await expect(
+      bindBrowserSessionNetworkRouteAuthority(client.db, {
+        ...scope,
+        browserSessionId: active.session.id,
+        operationId: resumeOperationId,
+        routeVersion: route.route.version,
+        credentialVersion: null,
+        authorityDigest: `route.${"c".repeat(43)}`,
+      }),
+    ).rejects.toBeInstanceOf(BrowserSessionOperationConflictError);
     const resumed = await activateBrowserSession(client.db, {
       ...scope,
       operationId: resumeOperationId,
@@ -648,6 +879,14 @@ describe("durable BrowserSession lifecycle", () => {
       controller: resumedController,
     });
     expect(resumedGeneration).not.toBe(active.controllerGeneration);
+    expect(
+      (
+        await getBrowserSessionControlRecord(client.db, {
+          ...scope,
+          browserSessionId: active.session.id,
+        })
+      ).networkRouteAuthority,
+    ).toMatchObject({ authorityDigest: resumedRouteDigest });
     expect(
       await getBrowserPrivateCheckpointAuthority(client.db, {
         ...scope,
@@ -716,6 +955,35 @@ describe("durable BrowserSession lifecycle", () => {
         browserSessionId: browser.session.id,
       }),
     ).rejects.toBeInstanceOf(BrowserSessionNotFoundError);
+  });
+
+  test("pins remote browserd authority to the immutable source sandbox", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const prepared = await prepareBrowserSessionCreate(client.db, {
+      ...createInput(scope),
+      placement: {
+        kind: "external_provider",
+        providerId: "kernel",
+        placementId: "default",
+      },
+      driverId: "opengeni.external.cdp.v1",
+      engine: "external",
+      capabilities: ATTACHED_BROWSER_SESSION_CAPABILITIES,
+    });
+    expect(prepared.session.placement).toEqual({
+      kind: "external_provider",
+      providerId: "kernel",
+      placementId: "default",
+    });
+    expect(
+      (
+        await getBrowserSessionControlRecord(client.db, {
+          ...scope,
+          browserSessionId: prepared.session.id,
+        })
+      ).controllerHostSandboxGroupId,
+    ).toBe(scope.sandboxGroupId);
   });
 
   test("rejects a control operation bound to another BrowserSession", async () => {

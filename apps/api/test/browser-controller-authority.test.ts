@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   deriveBrowserControllerAdminToken,
+  deriveBrowserNetworkRouteAuthorityDigest,
   deriveBrowserSessionControllerTokens,
   deriveBrowserViewGrantToken,
   deriveComputerSessionControllerTokens,
@@ -19,6 +20,54 @@ const scope = {
 };
 
 describe("browser controller authority derivation", () => {
+  test("binds route authority to its exact snapshot and credential without exposing either", () => {
+    const input = {
+      rootSecret: scope.rootSecret,
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      browserSessionId: "44444444-4444-4444-8444-444444444444",
+      routeId: "99999999-9999-4999-8999-999999999999",
+      routeVersion: 2,
+      credentialVersion: 7,
+      configuration: {
+        kind: "proxy" as const,
+        protocol: "https" as const,
+        host: "proxy.example.test",
+        port: 8443,
+        credential: {
+          connectionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          connectionSubjectId: "proxy-account",
+          providerDomain: "proxy.example.test",
+        },
+      },
+      consistency: {
+        dns: "proxy" as const,
+        expectedPublicIp: null,
+        expectedRegion: "NO",
+        locale: "nb-NO",
+        timezone: "Europe/Oslo",
+        geolocation: null,
+        webRtc: "disable_non_proxied_udp" as const,
+        stability: "sticky" as const,
+      },
+      proxyCredential: { username: "route-user", password: "private-route-password" },
+    };
+    const digest = deriveBrowserNetworkRouteAuthorityDigest(input);
+    expect(digest).toMatch(/^ogr\.[A-Za-z0-9_-]{43}$/u);
+    expect(deriveBrowserNetworkRouteAuthorityDigest(input)).toBe(digest);
+    expect(digest).not.toContain("route-user");
+    expect(digest).not.toContain("private-route-password");
+    expect(
+      deriveBrowserNetworkRouteAuthorityDigest({
+        ...input,
+        proxyCredential: { ...input.proxyCredential, password: "rotated" },
+      }),
+    ).not.toBe(digest);
+    expect(deriveBrowserNetworkRouteAuthorityDigest({ ...input, routeVersion: 3 })).not.toBe(
+      digest,
+    );
+  });
+
   test("is deterministic, domain-separated, and bound to every durable fence", () => {
     const sessionScope = {
       ...scope,

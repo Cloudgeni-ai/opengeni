@@ -111,6 +111,21 @@ export type ChannelASession = {
     runAs?: string;
     maxBytes?: number;
   }): Promise<string | Uint8Array>;
+  writeFile?(args: {
+    path: string;
+    content: string | Uint8Array;
+    createParents?: boolean;
+    runAs?: string;
+  }): Promise<unknown>;
+  /** Narrow control-plane staging outside /workspace. Routing sessions forward
+   * this without advancing the workspace mutation generation. */
+  writePlacementPrivate?(args: {
+    path: string;
+    content: string | Uint8Array;
+    createParents?: boolean;
+    runAs?: string;
+  }): Promise<unknown>;
+  deletePlacementPrivate?(path: string, runAs?: string): Promise<void>;
   writeStdin?(args: {
     sessionId: number;
     chars?: string;
@@ -134,6 +149,28 @@ export type ChannelASession = {
   execCommandForProcessControl?(providerSessionId: number, args: ChannelAExecArgs): Promise<string>;
   createEditor?(runAs?: string): ChannelAEditor;
   supportsPty?(): boolean;
+};
+
+export type WorkspaceFileImportRequest = {
+  operationId: string;
+  destinationPath: string;
+  overwrite: boolean;
+  /** True only for the request that durably crossed the save dispatch fence. */
+  mayReplaceExisting: boolean;
+  sizeBytes: number;
+  sha256: string;
+  source: {
+    url: string;
+    expiresAt: string;
+  };
+};
+
+export type WorkspaceFileImportReceipt = {
+  destinationPath: string;
+  sizeBytes: number;
+  sha256: string;
+  replayed: boolean;
+  revision: number;
 };
 
 // ── Errors mapped to HTTP status at the route. ───────────────────────────────
@@ -809,6 +846,166 @@ export class SandboxChannelAService {
       "write",
     );
     return { path, sizeBytes: bytes.byteLength, revision: this.revision };
+  }
+
+  /** Import one exact signed object into /workspace. The signed URL is staged
+   * outside the workspace and never enters argv, environment, stdout, events,
+   * or the public receipt. Exactly one routed exec crosses the workspace
+   * mutation boundary; target hashing makes response-loss retries safe. */
+  async importWorkspaceFile(req: WorkspaceFileImportRequest): Promise<WorkspaceFileImportReceipt> {
+    const operationId = workspaceImportOperationId(req.operationId);
+    const destinationPath = assertPortableWorkspaceFilePath(req.destinationPath);
+    if (typeof req.overwrite !== "boolean" || typeof req.mayReplaceExisting !== "boolean") {
+      throw new ChannelAValidationError("workspace import overwrite policy is invalid");
+    }
+    if (req.mayReplaceExisting && !req.overwrite) {
+      throw new ChannelAValidationError("workspace import replacement authority is invalid");
+    }
+    if (
+      !Number.isSafeInteger(req.sizeBytes) ||
+      req.sizeBytes < 0 ||
+      req.sizeBytes > 5_000_000_000
+    ) {
+      throw new ChannelAValidationError("workspace import size is invalid");
+    }
+    const expectedSha256 = workspaceImportSha256(req.sha256);
+    const source = workspaceImportSource(req.source);
+    const transferId = crypto.randomUUID();
+    const privateDirectory = "/tmp/opengeni-private/workspace-imports";
+    const configPath = `${privateDirectory}/${operationId}-${transferId}.curl`;
+    const config = workspaceImportCurlConfig(source.url);
+    await this.writePlacementPrivate(configPath, config);
+
+    const destination = this.workspaceRoot
+      ? this.joinRoot(destinationPath)
+      : `./${destinationPath}`;
+    const frame = transferId.replaceAll("-", "");
+    const okMarker = `__OPENGENI_WORKSPACE_IMPORT_${frame}_OK__`;
+    const conflictMarker = `__OPENGENI_WORKSPACE_IMPORT_${frame}_CONFLICT__`;
+    const missingMarker = `__OPENGENI_WORKSPACE_IMPORT_${frame}_MISSING_PARENT__`;
+    const escapeMarker = `__OPENGENI_WORKSPACE_IMPORT_${frame}_ESCAPE__`;
+    const unavailableMarker = `__OPENGENI_WORKSPACE_IMPORT_${frame}_UNAVAILABLE__`;
+    const integrityMarker = `__OPENGENI_WORKSPACE_IMPORT_${frame}_INTEGRITY__`;
+    const root = this.workspaceRoot || ".";
+    const tempName = `.opengeni-download-${operationId}-${frame}.tmp`;
+    const allowReplace = req.overwrite && req.mayReplaceExisting;
+    const script = [
+      "set +e",
+      "umask 077",
+      PORTABLE_REALPATH_EXISTING_FUNCTION,
+      PORTABLE_SHA256_FILE_FUNCTION,
+      `config=${shellQuote(configPath)}`,
+      `temp=${shellQuote(tempName)}`,
+      `trap 'rm -f "$config" "$temp"' EXIT`,
+      `root=$(opengeni_realpath_existing ${shellQuote(root)}) || { printf %s ${shellQuote(unavailableMarker)}; exit 70; }`,
+      `destination=${shellQuote(destination)}`,
+      'parent=$(dirname "$destination")',
+      'name=$(basename "$destination")',
+      'target="./$name"',
+      `test -d "$parent" || { printf %s ${shellQuote(missingMarker)}; exit 66; }`,
+      `test ! -L "$destination" || { printf %s ${shellQuote(escapeMarker)}; exit 68; }`,
+      `cd -P -- "$parent" || { printf %s ${shellQuote(missingMarker)}; exit 66; }`,
+      "parent_real=$(pwd -P)",
+      `case "$parent_real" in "$root"|"$root"/*) ;; *) printf %s ${shellQuote(escapeMarker)}; exit 67 ;; esac`,
+      'opengeni_target_matches() { test -f "$target" && test ! -L "$target" || return 1; bytes=$(wc -c <"$target" | tr -d " \\n") || return 1; test "$bytes" = ' +
+        shellQuote(String(req.sizeBytes)) +
+        ' || return 1; digest=$(opengeni_sha256_file "$target") || return 1; test "$digest" = ' +
+        shellQuote(expectedSha256) +
+        "; }",
+      `existed=0; if test -e "$target" || test -L "$target"; then existed=1; if opengeni_target_matches; then printf '%s\\t%s' ${shellQuote(okMarker)} replayed; exit 0; fi; ${allowReplace ? ":" : `printf %s ${shellQuote(conflictMarker)}; exit 72`}; fi`,
+      `curl --config "$config" --output "$temp" >/dev/null 2>&1 || { printf %s ${shellQuote(unavailableMarker)}; exit 73; }`,
+      `bytes=$(wc -c <"$temp" | tr -d ' \\n') || { printf %s ${shellQuote(unavailableMarker)}; exit 70; }`,
+      `digest=$(opengeni_sha256_file "$temp") || { printf %s ${shellQuote(unavailableMarker)}; exit 70; }`,
+      `if test "$bytes" != ${shellQuote(String(req.sizeBytes))} || test "$digest" != ${shellQuote(expectedSha256)}; then printf %s ${shellQuote(integrityMarker)}; exit 74; fi`,
+      `chmod 0644 "$temp" || { printf %s ${shellQuote(unavailableMarker)}; exit 70; }`,
+      allowReplace
+        ? `mv -f "$temp" "$target" || { printf %s ${shellQuote(unavailableMarker)}; exit 70; }`
+        : `if ! ln "$temp" "$target" 2>/dev/null; then if opengeni_target_matches; then printf '%s\\t%s' ${shellQuote(okMarker)} replayed; exit 0; fi; printf %s ${shellQuote(conflictMarker)}; exit 72; fi; rm -f "$temp"`,
+      `if test "$existed" = 1; then outcome=replaced; else outcome=created; fi`,
+      `printf '%s\\t%s' ${shellQuote(okMarker)} "$outcome"`,
+    ].join("; ");
+
+    let result: Awaited<ReturnType<SandboxChannelAService["run"]>>;
+    try {
+      result = await this.run({
+        cmd: internalBashCommand(script),
+        yieldTimeMs: 20 * 60_000,
+        maxOutputTokens: 2_048,
+      });
+    } finally {
+      await this.session.deletePlacementPrivate?.(configPath, this.runAs).catch(() => undefined);
+    }
+    if (result.sessionId !== undefined) {
+      throw new ChannelAUnavailableError("Workspace file import did not settle; retry it.");
+    }
+    if (result.stdout.includes(conflictMarker) || result.exitCode === 72) {
+      throw new ChannelAConflictError(`destination differs from this download: ${destinationPath}`);
+    }
+    if (result.stdout.includes(missingMarker) || result.exitCode === 66) {
+      throw new ChannelANotFoundError(`destination parent not found: ${destinationPath}`);
+    }
+    if (result.stdout.includes(escapeMarker) || result.exitCode === 67 || result.exitCode === 68) {
+      throw new ChannelAValidationError(
+        `destination resolves outside workspace: ${destinationPath}`,
+      );
+    }
+    if (result.stdout.includes(integrityMarker) || result.exitCode === 74) {
+      throw new ChannelAUnavailableError("Workspace file source failed integrity verification.");
+    }
+    const prefix = `${okMarker}\t`;
+    const markerIndex = result.stdout.indexOf(prefix);
+    if (
+      markerIndex < 0 ||
+      (result.exitCode !== null && result.exitCode !== 0) ||
+      result.stdout.includes(unavailableMarker)
+    ) {
+      throw new ChannelAUnavailableError("Workspace file import is temporarily unavailable.");
+    }
+    const outcome = result.stdout.slice(markerIndex + prefix.length).trim();
+    if (outcome !== "created" && outcome !== "replaced" && outcome !== "replayed") {
+      throw new ChannelAUnavailableError("Workspace file import returned an invalid receipt.");
+    }
+    const replayed = outcome === "replayed";
+    if (!replayed) {
+      this.revision++;
+      await this.emitFsChanged(
+        [
+          {
+            path: destinationPath,
+            kind: outcome === "created" ? "created" : "modified",
+            isDir: false,
+            sizeBytes: req.sizeBytes,
+          },
+        ],
+        "write",
+      );
+    }
+    return {
+      destinationPath,
+      sizeBytes: req.sizeBytes,
+      sha256: expectedSha256,
+      replayed,
+      revision: this.revision,
+    };
+  }
+
+  private async writePlacementPrivate(path: string, content: string): Promise<void> {
+    const write =
+      this.session.writePlacementPrivate?.bind(this.session) ??
+      this.session.writeFile?.bind(this.session);
+    if (!write) {
+      throw new ChannelAUnsupportedError("the box cannot stage private workspace-import authority");
+    }
+    try {
+      await write({
+        path,
+        content,
+        createParents: true,
+        ...(this.runAs ? { runAs: this.runAs } : {}),
+      });
+    } catch {
+      throw new ChannelAUnavailableError("Workspace file import could not be staged.");
+    }
   }
 
   private async tryEditorWrite(absPath: string, content: string): Promise<boolean> {
@@ -2166,6 +2363,101 @@ export function assertSafeRelPath(p: string): string {
   const norm = assertSafeRelPathOrRoot(p);
   if (norm === "") throw new ChannelAValidationError("path is required");
   return norm;
+}
+
+function assertPortableWorkspaceFilePath(value: unknown): string {
+  if (
+    typeof value !== "string" ||
+    value.length < 1 ||
+    value.length > 4_096 ||
+    value !== value.trim() ||
+    value.startsWith("/") ||
+    /^[A-Za-z]:[\\/]/u.test(value) ||
+    value.includes("\\") ||
+    /[\u0000-\u001f\u007f]/u.test(value)
+  ) {
+    throw new ChannelAValidationError("workspace import destination path is invalid");
+  }
+  const segments = value.split("/");
+  if (
+    segments.some(
+      (segment) =>
+        segment.length < 1 ||
+        segment === "." ||
+        segment === ".." ||
+        /[<>:"|?*]/u.test(segment) ||
+        /[ .]$/u.test(segment) ||
+        /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(segment),
+    )
+  ) {
+    throw new ChannelAValidationError("workspace import destination path is invalid");
+  }
+  return value;
+}
+
+function workspaceImportOperationId(value: unknown): string {
+  if (
+    typeof value !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value)
+  ) {
+    throw new ChannelAValidationError("workspace import operation id is invalid");
+  }
+  return value;
+}
+
+function workspaceImportSha256(value: unknown): string {
+  if (typeof value !== "string" || !/^[0-9a-f]{64}$/u.test(value)) {
+    throw new ChannelAValidationError("workspace import checksum is invalid");
+  }
+  return value;
+}
+
+function workspaceImportSource(value: unknown): { url: string; expiresAt: string } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new ChannelAValidationError("workspace import source is invalid");
+  }
+  const input = value as { url?: unknown; expiresAt?: unknown };
+  if (
+    typeof input.url !== "string" ||
+    Buffer.byteLength(input.url) > 32 * 1_024 ||
+    typeof input.expiresAt !== "string"
+  ) {
+    throw new ChannelAValidationError("workspace import source is invalid");
+  }
+  let url: URL;
+  try {
+    url = new URL(input.url);
+  } catch {
+    throw new ChannelAValidationError("workspace import source URL is invalid");
+  }
+  if (
+    (url.protocol !== "https:" && url.protocol !== "http:") ||
+    url.username ||
+    url.password ||
+    url.hash
+  ) {
+    throw new ChannelAValidationError("workspace import source URL is invalid");
+  }
+  const expiresAtMs = Date.parse(input.expiresAt);
+  if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) {
+    throw new ChannelAUnavailableError("Workspace file source authority has expired.");
+  }
+  return { url: url.toString(), expiresAt: new Date(expiresAtMs).toISOString() };
+}
+
+function workspaceImportCurlConfig(url: string): string {
+  const quoted = url.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+  return [
+    `url = "${quoted}"`,
+    "location",
+    "fail",
+    "silent",
+    "show-error",
+    'proto = "=http,https"',
+    'proto-redir = "=http,https"',
+    "connect-timeout = 30",
+    "max-time = 900",
+  ].join("\n");
 }
 
 function shellQuote(s: string): string {

@@ -13,7 +13,9 @@ import {
 import {
   decodeStreamFrame,
   decodeStreamOpenAck,
+  encodeStreamClose,
   encodeStreamOpen,
+  STREAM_CLOSE_REASON_NORMAL,
   STREAM_KIND_BROWSER,
   STREAM_ROLE_CLIENT,
 } from "../lib/relay-wire";
@@ -39,6 +41,7 @@ export type BrowserFrameWebSocketFactory = (
 const RELAY_TAG_OPEN = 1;
 const RELAY_TAG_OPEN_ACK = 2;
 const RELAY_TAG_FRAME = 3;
+const RELAY_TAG_CLOSE = 4;
 
 export type UseBrowserFrameStreamOptions = EmbeddedBrowserInteractionClientOverride & {
   browserSessionId: string | null;
@@ -112,12 +115,31 @@ export function useBrowserFrameStream(
     let expiryTimer: ReturnType<typeof setTimeout> | null = null;
     let failures = 0;
     let controllerGeneration: string | null = null;
+    let activeAttachment: BrowserSessionAttachment | null = null;
     let activeStream: BrowserSessionAttachment["stream"] | null = null;
+    let attachmentExpiresAt = 0;
+    let lastRelaySequence: string | null = null;
     let relayAccepted = false;
     const attachmentAbort = new AbortController();
 
-    const clearSocket = () => {
+    const clearSocket = (terminateProducer = false) => {
       if (!socket) return;
+      if (terminateProducer && activeStream?.kind === "relay" && socket.readyState === 1) {
+        try {
+          socket.send(
+            relayDatagram(
+              RELAY_TAG_CLOSE,
+              encodeStreamClose({
+                channelId: activeStream.channel.channelId,
+                reason: STREAM_CLOSE_REASON_NORMAL,
+                message: "viewer detached",
+              }),
+            ),
+          );
+        } catch {
+          // OPEN can race a transport close. Local teardown must still finish.
+        }
+      }
       socket.removeEventListener("open", onOpen);
       socket.removeEventListener("message", onMessage);
       socket.removeEventListener("error", onError);
@@ -135,7 +157,7 @@ export function useBrowserFrameStream(
       setResult((current) => ({ ...current, state: "reconnecting" }));
       reconnectTimer = setTimeout(() => {
         reconnectTimer = null;
-        void connect();
+        connectSocket();
       }, delay);
     };
 
@@ -158,9 +180,14 @@ export function useBrowserFrameStream(
           },
           token: activeStream.token,
           role: STREAM_ROLE_CLIENT,
-          resumeFromSeq: "0",
+          resumeFromSeq:
+            lastRelaySequence === null ? "0" : (BigInt(lastRelaySequence) + 1n).toString(),
         });
-        socket?.send(relayDatagram(RELAY_TAG_OPEN, body));
+        try {
+          socket?.send(relayDatagram(RELAY_TAG_OPEN, body));
+        } catch (error) {
+          fail(error);
+        }
         return;
       }
       setResult((current) => ({ ...current, state: "live", error: null }));
@@ -179,13 +206,26 @@ export function useBrowserFrameStream(
             if (tag === RELAY_TAG_OPEN_ACK) {
               const ack = decodeStreamOpenAck(body);
               if (!ack.accepted) {
+                activeAttachment = null;
+                activeStream = null;
+                attachmentExpiresAt = 0;
                 throw new Error(ack.error?.message ?? "browser stream was rejected by the relay");
               }
               relayAccepted = true;
               return;
             }
+            if (tag === RELAY_TAG_CLOSE) {
+              activeAttachment = null;
+              activeStream = null;
+              attachmentExpiresAt = 0;
+              lastRelaySequence = null;
+              relayAccepted = false;
+              throw new Error("Browser frame source ended.");
+            }
             if (tag !== RELAY_TAG_FRAME || !relayAccepted) return;
-            frameBytes = decodeStreamFrame(body).data;
+            const relayFrame = decodeStreamFrame(body);
+            lastRelaySequence = relayFrame.seq;
+            frameBytes = relayFrame.data;
           }
           const frame = decodeBrowserFrameMessage(frameBytes);
           if (frame.browserSessionId !== browserSessionId || frame.targetId !== targetId) {
@@ -217,7 +257,35 @@ export function useBrowserFrameStream(
       scheduleReconnect();
     };
 
-    const connect = async () => {
+    const connectSocket = () => {
+      if (disposed) return;
+      clearSocket();
+      if (!activeAttachment || !activeStream || attachmentExpiresAt <= Date.now() + 1_000) {
+        void attach();
+        return;
+      }
+      relayAccepted = false;
+      setResult((current) => ({
+        ...current,
+        state: "connecting",
+        error: null,
+      }));
+      const createSocket =
+        factoryRef.current ?? ((url: string, protocols: string[]) => new WebSocket(url, protocols));
+      socket = createSocket(
+        activeStream.kind === "relay"
+          ? activeStream.url
+          : browserFrameSocketUrl(activeAttachment, streamRef.current),
+        activeStream.kind === "direct_websocket" ? [...activeStream.protocols] : [],
+      );
+      socket.binaryType = "arraybuffer";
+      socket.addEventListener("open", onOpen);
+      socket.addEventListener("message", onMessage);
+      socket.addEventListener("error", onError);
+      socket.addEventListener("close", onClose);
+    };
+
+    const attach = async () => {
       if (disposed) return;
       clearSocket();
       if (expiryTimer) clearTimeout(expiryTimer);
@@ -242,7 +310,10 @@ export function useBrowserFrameStream(
           throw new Error("browser attachment does not match the requested resource");
         }
         controllerGeneration = attachment.controllerGeneration;
+        activeAttachment = attachment;
         activeStream = attachment.stream;
+        attachmentExpiresAt = Date.parse(attachment.expiresAt);
+        lastRelaySequence = null;
         relayAccepted = false;
         setResult((current) => ({
           ...current,
@@ -255,42 +326,31 @@ export function useBrowserFrameStream(
           },
           error: null,
         }));
-        const createSocket =
-          factoryRef.current ??
-          ((url: string, protocols: string[]) => new WebSocket(url, protocols));
-        socket = createSocket(
-          attachment.stream.kind === "relay"
-            ? attachment.stream.url
-            : browserFrameSocketUrl(attachment, streamRef.current),
-          attachment.stream.kind === "direct_websocket" ? [...attachment.stream.protocols] : [],
-        );
-        socket.binaryType = "arraybuffer";
-        socket.addEventListener("open", onOpen);
-        socket.addEventListener("message", onMessage);
-        socket.addEventListener("error", onError);
-        socket.addEventListener("close", onClose);
-        const expiresAt = Date.parse(attachment.expiresAt);
-        const refreshIn = Number.isFinite(expiresAt)
-          ? Math.max(1_000, expiresAt - Date.now() - 5_000)
+        const refreshIn = Number.isFinite(attachmentExpiresAt)
+          ? Math.max(1_000, attachmentExpiresAt - Date.now() - 5_000)
           : 60_000;
         expiryTimer = setTimeout(() => {
           if (disposed) return;
-          clearSocket();
-          void connect();
+          clearSocket(true);
+          activeAttachment = null;
+          activeStream = null;
+          attachmentExpiresAt = 0;
+          void attach();
         }, refreshIn);
+        connectSocket();
       } catch (cause) {
         if (attachmentAbort.signal.aborted || disposed) return;
         fail(cause);
       }
     };
 
-    void connect();
+    void attach();
     return () => {
       disposed = true;
       attachmentAbort.abort();
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (expiryTimer) clearTimeout(expiryTimer);
-      clearSocket();
+      clearSocket(true);
     };
   }, [client, enabled, nonce, options.browserSessionId, options.targetId, workspaceId]);
 

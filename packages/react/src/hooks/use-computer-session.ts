@@ -1,6 +1,7 @@
 import type {
   ComputerAction,
   ComputerActionReceipt,
+  ComputerClipboard,
   ComputerFrame,
   ComputerObservation,
   ComputerSession,
@@ -28,6 +29,7 @@ export type UseComputerSessionResult = {
   mutating: boolean;
   error: Error | null;
   refresh: () => Promise<void>;
+  readClipboard: () => Promise<ComputerClipboard>;
   /** Changes only this viewer's target cursor; it never takes ownership or
    * foregrounds an application. */
   selectTarget: (targetId: string) => Promise<ComputerTarget>;
@@ -112,7 +114,7 @@ export function useComputerSession(options: UseComputerSessionOptions): UseCompu
       ]);
       if (!mountedRef.current || requestRef.current.id !== id) return;
       const targets = sortComputerTargets(targetResponse.targets);
-      const selected = chooseTarget(targets, selectedTargetIdRef.current);
+      const selected = chooseTarget(targets, selectedTargetIdRef.current, session.platform);
       const observation = selected
         ? await client.observeComputerTarget(workspaceId, computerSessionId, selected.id, {
             signal: controller.signal,
@@ -364,6 +366,11 @@ export function useComputerSession(options: UseComputerSessionOptions): UseCompu
     [dispatchAction],
   );
 
+  const readClipboard = useCallback(async (): Promise<ComputerClipboard> => {
+    if (!computerSessionId) throw new Error("No ComputerSession is selected.");
+    return await client.readComputerClipboard(workspaceId, computerSessionId);
+  }, [client, computerSessionId, workspaceId]);
+
   return {
     session: visible.session,
     targets: visible.targets,
@@ -374,6 +381,7 @@ export function useComputerSession(options: UseComputerSessionOptions): UseCompu
     mutating: visible.mutating,
     error: visible.error,
     refresh,
+    readClipboard,
     selectTarget,
     act,
     actFromFrame,
@@ -407,9 +415,21 @@ function emptyState(computerSessionId: string | null, loading: boolean): Compute
 function chooseTarget(
   targets: readonly ComputerTarget[],
   preferredId: string | null,
+  platform: ComputerSession["platform"],
 ): ComputerTarget | null {
+  const preferred = targets.find((target) => target.id === preferredId);
+  if (preferred) return preferred;
+  if (platform === "linux") {
+    return (
+      targets.find((target) => target.focused && target.kind === "screen") ??
+      targets.find((target) => target.kind === "screen") ??
+      targets.find((target) => target.focused && target.kind === "window") ??
+      targets.find((target) => target.kind === "window") ??
+      targets[0] ??
+      null
+    );
+  }
   return (
-    targets.find((target) => target.id === preferredId) ??
     targets.find((target) => target.focused && target.kind === "window") ??
     targets.find((target) => target.kind === "window") ??
     targets.find((target) => target.focused && target.kind === "app") ??

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { createAttemptToolEnvironment } from "@opengeni/codemode";
 import type {
+  AuthRun,
   BrowserActionRequest,
   BrowserActionReceipt,
   BrowserObservation,
@@ -10,6 +11,7 @@ import type {
   ComputerActionReceipt,
   ComputerObservation,
   ComputerTarget,
+  InteractionIntervention,
 } from "@opengeni/contracts";
 import type { InteractionTransport } from "@opengeni/sdk";
 import {
@@ -27,6 +29,39 @@ const computerSessionId = randomUUID();
 const now = "2026-08-10T12:00:00.000Z";
 
 describe("interaction attempt tools", () => {
+  test("opens attached browsers headed and forwards the selected network route", async () => {
+    let createRequest: Record<string, unknown> | null = null;
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        listBrowserSessions: async () => ({ revision: 0, sessions: [] }),
+        createBrowserSession: async (_workspaceId, request) => {
+          createRequest = request as unknown as Record<string, unknown>;
+          return { session: { lifecycle: "starting" } } as never;
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_open"],
+      permissions: ["sessions:control"],
+    });
+    const deviceId = randomUUID();
+    const networkRouteId = randomUUID();
+    await definitions[0]!.execute(
+      {
+        mode: "new",
+        placement: { kind: "attached_device", deviceId },
+        networkRouteId,
+      },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+    expect(createRequest).toMatchObject({
+      sessionId,
+      headless: false,
+      placement: { kind: "attached_device", deviceId },
+      networkRouteId,
+    });
+  });
+
   test("projects one permission-filtered definition set into the exact attempt catalog", () => {
     const definitions = createInteractionAttemptToolDefinitions({
       transport: unusedTransport(),
@@ -38,9 +73,11 @@ describe("interaction attempt tools", () => {
     expect(definitions.map((definition) => definition.identity.toolName)).toEqual([
       "interaction_discover",
       "browser_observe",
+      "browser_clipboard",
       "browser_debug",
       "computer_targets",
       "computer_observe",
+      "computer_clipboard",
     ]);
     const environment = createAttemptToolEnvironment({
       scope: {
@@ -54,7 +91,7 @@ describe("interaction attempt tools", () => {
       generation: 1,
       definitions,
     });
-    expect(environment.catalog.entries).toHaveLength(5);
+    expect(environment.catalog.entries).toHaveLength(7);
     expect(environment.catalog.entries[0]).toMatchObject({
       identity: { serverId: "interaction", toolName: "interaction_discover" },
       modelName: "interaction__interaction_discover",
@@ -63,8 +100,46 @@ describe("interaction attempt tools", () => {
       approval: "none",
       annotations: { readOnlyHint: true, idempotentHint: true },
     });
-    expect(environment.catalog.entries[0]!.inputSchema).toMatchObject({ type: "object" });
-    expect(environment.catalog.entries[0]!.outputSchema).toMatchObject({ type: "object" });
+    expect(environment.catalog.entries[0]!.inputSchema).toMatchObject({
+      type: "object",
+    });
+    expect(environment.catalog.entries[0]!.outputSchema).toMatchObject({
+      type: "object",
+    });
+  });
+
+  test("reads only the private BrowserSession clipboard through the shared catalog", async () => {
+    const clipboard = {
+      browserSessionId,
+      controllerGeneration: "controller-1",
+      revision: 2,
+      text: "copied text",
+      source: "copy" as const,
+      sourceTargetId: "tab-1",
+      updatedAt: now,
+    };
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        readBrowserClipboard: async () => clipboard,
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_clipboard"],
+      permissions: ["sessions:read"],
+    });
+    const result = await definitions[0]!.execute(
+      { browserSessionId },
+      {
+        operationId: randomUUID(),
+        caller: { kind: "model", subjectId: "model:test" },
+      },
+    );
+
+    expect(definitions[0]).toMatchObject({
+      codemodePath: ["interaction", "browser", "clipboard"],
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    });
+    expect(result.structuredContent).toEqual(clipboard);
   });
 
   test("keeps model and Codemode Browser actions on the same durable operation and fences", async () => {
@@ -206,6 +281,147 @@ describe("interaction attempt tools", () => {
     expect(result.isError).not.toBe(true);
   });
 
+  test("reads only the exact ComputerSession native clipboard", async () => {
+    const clipboard = {
+      computerSessionId,
+      controllerGeneration: "controller-1",
+      text: "native clipboard",
+      truncated: false,
+      observedAt: now,
+    };
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        readComputerClipboard: async () => clipboard,
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_clipboard"],
+      permissions: ["sessions:read"],
+    });
+    const result = await definitions[0]!.execute(
+      { computerSessionId },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+
+    expect(definitions[0]).toMatchObject({
+      codemodePath: ["interaction", "computer", "clipboard"],
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    });
+    expect(result.structuredContent).toEqual(clipboard);
+  });
+
+  test("routes browser auth discovery through the canonical typed transport", async () => {
+    let includeArchived: boolean | undefined;
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        listSiteAuthConnections: async (_workspaceId, options) => {
+          includeArchived = options?.includeArchived;
+          return { revision: 7, connections: [] };
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_auth"],
+      permissions: ["sessions:control"],
+    });
+    const result = await definitions[0]!.execute(
+      { operation: "list_connections", includeArchived: true },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+
+    expect(includeArchived).toBe(true);
+    expect(result.structuredContent).toEqual({
+      operation: "list_connections",
+      result: { revision: 7, connections: [] },
+    });
+  });
+
+  test("advances provider-managed auth without exposing the hosted login URL", async () => {
+    const run = externalAuthRun();
+    let received:
+      | { workspaceId: string; browserSessionId: string; authRunId: string; request: unknown }
+      | undefined;
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        advanceExternalBrowserAuthRun: async (
+          receivedWorkspaceId,
+          receivedBrowserSessionId,
+          authRunId,
+          request,
+        ) => {
+          received = {
+            workspaceId: receivedWorkspaceId,
+            browserSessionId: receivedBrowserSessionId,
+            authRunId,
+            request,
+          };
+          return {
+            run,
+            status: "needs_human",
+            operationId: request.operationId,
+            replayed: false,
+          };
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_auth"],
+      permissions: ["sessions:control"],
+    });
+    const operationId = randomUUID();
+    const result = await definitions[0]!.execute(
+      {
+        operation: "advance_external",
+        browserSessionId,
+        authRunId: run.id,
+        expectedVersion: 2,
+        action: "poll",
+      },
+      { operationId, caller: { kind: "model", subjectId: "model:test" } },
+    );
+
+    expect(received).toEqual({
+      workspaceId,
+      browserSessionId,
+      authRunId: run.id,
+      request: { operationId, expectedVersion: 2, action: "poll" },
+    });
+    expect(result.structuredContent).toEqual({
+      operation: "advance_external",
+      result: { run, status: "needs_human", operationId, replayed: false },
+    });
+    expect(JSON.stringify(result.structuredContent)).not.toContain("hosted");
+  });
+
+  test("resumes the exact human interaction with a fresh target observation", async () => {
+    const target = browserTarget();
+    const observation = browserObservation(target);
+    const intervention = completedBrowserIntervention(target);
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({ observeBrowserTarget: async () => observation }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["interaction_request_human"],
+      permissions: ["sessions:control"],
+      interventionResume: { toolCallId: "interaction-human-call", intervention },
+    });
+    expect(definitions[0]).toMatchObject({
+      modelName: "interaction__interaction_request_human",
+      codemodePath: ["interaction", "requestHuman"],
+      approval: "human",
+    });
+    const result = await definitions[0]!.execute(
+      { operation: "wait", interventionId: intervention.id },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+
+    expect(result.structuredContent).toEqual({
+      intervention,
+      observation,
+      observationErrorCode: null,
+    });
+  });
+
   test("uses the pointer action's exact frame instead of silently changing its authority", async () => {
     const target = computerTarget();
     const observation = computerObservation(target);
@@ -227,9 +443,18 @@ describe("interaction attempt tools", () => {
       {
         computerSessionId,
         targetId: target.id,
-        action: { type: "pointer", frameId: "frame-user-saw", action: "click", x: 10, y: 20 },
+        action: {
+          type: "pointer",
+          frameId: "frame-user-saw",
+          action: "click",
+          x: 10,
+          y: 20,
+        },
       },
-      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      {
+        operationId: randomUUID(),
+        caller: { kind: "model", subjectId: "model:test" },
+      },
     );
 
     expect(request).toMatchObject({ expectedFrameId: "frame-user-saw" });
@@ -289,6 +514,35 @@ function browserObservation(target: BrowserTarget): BrowserObservation {
     },
     dialog: null,
     observedAt: now,
+  };
+}
+
+function completedBrowserIntervention(target: BrowserTarget): InteractionIntervention {
+  return {
+    id: randomUUID(),
+    accountId,
+    workspaceId,
+    resourceKind: "browser_session",
+    resourceId: browserSessionId,
+    targetId: target.id,
+    controllerGeneration: target.controllerGeneration,
+    targetGeneration: target.targetGeneration,
+    documentGeneration: target.documentGeneration,
+    kind: "mfa",
+    reason: "Complete MFA in this exact tab.",
+    status: "completed",
+    authRunId: null,
+    originatingSessionId: sessionId,
+    originatingTurnId: turnId,
+    originatingAttemptId: attemptId,
+    originatingToolOperationId: randomUUID(),
+    responseActorSubjectId: "user:test",
+    version: 2,
+    operationId: randomUUID(),
+    expiresAt: "2026-08-10T12:15:00.000Z",
+    createdAt: now,
+    updatedAt: now,
+    settledAt: now,
   };
 }
 
@@ -355,6 +609,36 @@ function computerReceipt(
     settledAt: now,
     observation,
     error: null,
+  };
+}
+
+function externalAuthRun(): AuthRun {
+  return {
+    id: randomUUID(),
+    accountId,
+    workspaceId,
+    siteAuthConnectionId: randomUUID(),
+    browserSessionId,
+    targetId: "tab-auth",
+    controllerGeneration: "controller-1",
+    targetGeneration: "target-auth",
+    documentGeneration: "document-auth",
+    purpose: "authenticate",
+    methodId: "kernel-managed",
+    authorityId: "kernel-managed",
+    state: "awaiting_external_action",
+    choices: [],
+    pendingFields: [],
+    externalAction: { kind: "human", label: "Finish sign-in", expiresAt: null },
+    interventionId: randomUUID(),
+    verifiedUrl: null,
+    failureCode: null,
+    version: 2,
+    operationId: randomUUID(),
+    createdBySubjectId: "model:test",
+    createdAt: now,
+    updatedAt: now,
+    settledAt: null,
   };
 }
 

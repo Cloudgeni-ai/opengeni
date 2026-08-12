@@ -77,7 +77,10 @@ export interface DesktopRfbLike {
 export type DesktopRfbFactory = (
   target: HTMLElement,
   url: string,
-  opts: { credentials?: { password?: string | undefined } | undefined },
+  opts: {
+    credentials?: { password?: string | undefined } | undefined;
+    wsProtocols?: string[] | undefined;
+  },
 ) => DesktopRfbLike;
 
 export type DesktopConnectionState =

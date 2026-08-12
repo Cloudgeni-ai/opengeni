@@ -88,6 +88,7 @@ import { registerGitHubRoutes } from "./routes/github";
 import { registerInstallRoutes } from "./routes/install";
 import { registerApiIntegrationRoutes } from "./routes/api-integrations";
 import { registerIntegrationFeatureRoutes } from "./routes/integration-features";
+import { registerInteractionResourceRoutes } from "./routes/interaction-resources";
 import { registerPackRoutes } from "./routes/packs";
 import { registerPluginRoutes } from "./routes/plugins";
 import { registerSkillRoutes } from "./routes/skills";
@@ -631,6 +632,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerDocumentRoutes(app, routeDeps);
   registerGitHubRoutes(app, routeDeps);
   registerInstallRoutes(app, routeDeps);
+  registerInteractionResourceRoutes(app, routeDeps);
   registerWorkspaceRoutes(app, routeDeps);
   registerInsightsRoutes(app, routeDeps);
   registerWorkspaceInstructionPolicyRoutes(app, routeDeps);
@@ -989,7 +991,10 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T
   }
 }
 
-const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
+const routeLabelPatterns: Array<{
+  pattern: RegExp;
+  label: string | ((match: RegExpMatchArray) => string);
+}> = [
   { pattern: /^\/healthz$/, label: "/healthz" },
   { pattern: /^\/readyz$/, label: "/readyz" },
   { pattern: /^\/traffic-readyz$/, label: "/traffic-readyz" },
@@ -1050,6 +1055,150 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/control-events\/stream$/,
     label: "/v1/workspaces/:workspaceId/control-events/stream",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/interaction-events\/stream$/,
+    label: "/v1/workspaces/:workspaceId/interaction-events/stream",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/attached-browsers\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId/attached-browsers/:deviceId",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/attached-browsers$/,
+    label: "/v1/workspaces/:workspaceId/attached-browsers",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/browser-identities\/[^/]+\/revisions$/,
+    label: "/v1/workspaces/:workspaceId/browser-identities/:identityId/revisions",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/browser-identities\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId/browser-identities/:identityId",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/browser-identities$/,
+    label: "/v1/workspaces/:workspaceId/browser-identities",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/browser-sessions\/[^/]+\/downloads\/[^/]+\/save$/,
+    label:
+      "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/downloads/:downloadId/save",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/browser-sessions\/[^/]+\/downloads\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/downloads/:downloadId",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/browser-sessions\/[^/]+\/downloads$/,
+    label: "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/downloads",
+  },
+  {
+    pattern:
+      /^\/v1\/workspaces\/[^/]+\/browser-sessions\/[^/]+\/auth-runs\/[^/]+\/external-auth\/interactive$/,
+    label:
+      "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/external-auth/interactive",
+  },
+  {
+    pattern:
+      /^\/v1\/workspaces\/[^/]+\/browser-sessions\/[^/]+\/auth-runs\/[^/]+\/(external-auth|protected-fill|report|verify)$/,
+    label: (match) =>
+      `/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/${match[1]}`,
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/browser-sessions\/[^/]+\/auth-runs\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/browser-sessions\/[^/]+\/auth-runs$/,
+    label: "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs",
+  },
+  {
+    pattern:
+      /^\/v1\/workspaces\/[^/]+\/browser-sessions\/[^/]+\/targets\/[^/]+\/(diagnostics|observation|select)$/,
+    label: (match) =>
+      `/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId/${match[1]}`,
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/browser-sessions\/[^/]+\/targets\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/browser-sessions\/[^/]+\/operations\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/operations/:operationId",
+  },
+  {
+    pattern:
+      /^\/v1\/workspaces\/[^/]+\/browser-sessions\/[^/]+\/(actions|attachments|clipboard|end|heartbeat|resume|revisions|suspend|targets)$/,
+    label: (match) => `/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/${match[1]}`,
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/browser-sessions\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/browser-sessions$/,
+    label: "/v1/workspaces/:workspaceId/browser-sessions",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/computer-sessions\/[^/]+\/targets\/[^/]+\/observation$/,
+    label:
+      "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/targets/:targetId/observation",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/computer-sessions\/[^/]+\/operations\/[^/]+$/,
+    label:
+      "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/operations/:operationId",
+  },
+  {
+    pattern:
+      /^\/v1\/workspaces\/[^/]+\/computer-sessions\/[^/]+\/(actions|attachments|clipboard|end|heartbeat|targets)$/,
+    label: (match) =>
+      `/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/${match[1]}`,
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/computer-sessions\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/computer-sessions$/,
+    label: "/v1/workspaces/:workspaceId/computer-sessions",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/network-routes\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId/network-routes/:networkRouteId",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/network-routes$/,
+    label: "/v1/workspaces/:workspaceId/network-routes",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/site-auth-connections\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId/site-auth-connections/:siteAuthConnectionId",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/site-auth-connections$/,
+    label: "/v1/workspaces/:workspaceId/site-auth-connections",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/auth-runs\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId/auth-runs/:authRunId",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/auth-runs$/,
+    label: "/v1/workspaces/:workspaceId/auth-runs",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/interaction-interventions\/[^/]+\/resolve$/,
+    label: "/v1/workspaces/:workspaceId/interaction-interventions/:interventionId/resolve",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/interaction-interventions\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId/interaction-interventions/:interventionId",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/interaction-interventions$/,
+    label: "/v1/workspaces/:workspaceId/interaction-interventions",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/control-events$/,
@@ -1495,9 +1644,11 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
 ];
 
 export function routeLabel(pathname: string): string {
-  const match = routeLabelPatterns.find(({ pattern }) => pattern.test(pathname));
-  if (match) {
-    return match.label;
+  for (const candidate of routeLabelPatterns) {
+    const match = pathname.match(candidate.pattern);
+    if (match) {
+      return typeof candidate.label === "string" ? candidate.label : candidate.label(match);
+    }
   }
   return pathname.startsWith("/v1/") ? "/v1/unknown" : "/unknown";
 }

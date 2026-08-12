@@ -147,7 +147,6 @@ fn observed_event_mask() -> u64 {
         CGEventType::LeftMouseUp,
         CGEventType::RightMouseDown,
         CGEventType::RightMouseUp,
-        CGEventType::MouseMoved,
         CGEventType::LeftMouseDragged,
         CGEventType::RightMouseDragged,
         CGEventType::KeyDown,
@@ -265,7 +264,6 @@ mod tests {
     fn event_mask_contains_every_supported_input_family() {
         let mask = observed_event_mask();
         for event_type in [
-            CGEventType::MouseMoved,
             CGEventType::LeftMouseDown,
             CGEventType::OtherMouseDragged,
             CGEventType::KeyDown,
@@ -274,6 +272,11 @@ mod tests {
         ] {
             assert_ne!(mask & (1_u64 << event_type.0), 0);
         }
+        // Passive cursor motion is not a conflicting interaction. Treating it
+        // as one made targeted typing/paste fail whenever the person merely
+        // moved their mouse while watching the agent. Clicks, drags, scrolls,
+        // and keyboard input still preempt synthetic fallback.
+        assert_eq!(mask & (1_u64 << CGEventType::MouseMoved.0), 0);
     }
 
     #[test]

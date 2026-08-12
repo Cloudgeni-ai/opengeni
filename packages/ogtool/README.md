@@ -15,10 +15,11 @@ Always replace `<version>` with the exact version in the deployment BOM; do not 
 `latest` in a production image. An embedding host may expose that pinned spec through
 `OPENGENI_OGTOOL_PACKAGE_SPEC`.
 
-The CLI reads `OPENGENI_CODEMODE_URL` and the bearer path in
-`OPENGENI_CODEMODE_TOKEN_FILE`. The token remains in the protected file and is read anew for
-each CLI process, so worker-side token renewal does not require reinstalling or restarting the
-CLI. `ogtool doctor` checks local availability without printing the token.
+The CLI reads `OPENGENI_CODEMODE_URL` plus either the bearer in
+`OPENGENI_CODEMODE_TOKEN` or its path in `OPENGENI_CODEMODE_TOKEN_FILE`. Managed sandboxes use
+the protected file and reread it for every request. Connected Machines receive the direct bearer
+only in the exact agent command's child environment; it is not installed machine-wide or written
+to disk. `ogtool doctor` reports the selected delivery mode without printing the token.
 
 Commands:
 

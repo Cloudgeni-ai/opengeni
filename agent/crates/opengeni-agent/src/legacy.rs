@@ -94,8 +94,9 @@ pub async fn serve_exec_scoped<P: Platform>(
     platform: &Arc<P>,
     scope: &str,
     request_id: String,
-    req: v1::ExecRequest,
+    mut req: v1::ExecRequest,
 ) -> ControlResponse {
+    crate::codemode::expose_native_client(&mut req);
     let op_id = scoped_op_id(scope, &request_id);
     let origin = scoped_origin(scope, LEGACY_ORIGIN);
     let ticket = match engine.admit(&op_id, JobClass::Heavy, &origin).await {

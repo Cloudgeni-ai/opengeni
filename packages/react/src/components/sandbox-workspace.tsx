@@ -25,6 +25,7 @@ import {
   useState,
 } from "react";
 import type { SessionEvent } from "@opengeni/sdk";
+import type { InteractionPlacement } from "@opengeni/sdk/interaction";
 import {
   CircleCheckIcon,
   CpuIcon,
@@ -245,6 +246,9 @@ export type UseSandboxWorkspaceTabsOptions = ClientOverride & {
   initialTab?: string | null | undefined;
   /** Actually selected dock tab. Inactive data surfaces retain cache but issue no live reads. */
   activeTab?: string | null | undefined;
+  /** Whether the dock is visible. Hidden docks retain UI state but must not keep
+   * expensive browser/computer media streams alive. */
+  workspaceVisible?: boolean | undefined;
   /** Host-routed notifications (mutation errors, desktop-consent failures). The
    *  package never imports a toast library — the host decides how to surface. */
   onNotify?: ((notification: WorkspaceNotification) => void) | undefined;
@@ -317,6 +321,7 @@ export function useSandboxWorkspaceTabs(
   } = options;
   const initialTab = options.initialTab ?? null;
   const activeTab = options.activeTab ?? initialTab;
+  const workspaceVisible = options.workspaceVisible ?? true;
   const requestedSurfaces = options.surfaces ?? WORKBENCH_SURFACES;
   const surfaceSet = new Set<SandboxWorkspaceSurface>(requestedSurfaces);
   const changesEnabled = surfaceSet.has(WORKBENCH_TAB_CHANGES);
@@ -325,11 +330,12 @@ export function useSandboxWorkspaceTabs(
   const browserEnabled = surfaceSet.has(WORKBENCH_TAB_BROWSER);
   const desktopEnabled = surfaceSet.has(WORKBENCH_TAB_DESKTOP);
   const createLinkedComputer = useCallback(
-    async (name: string) => {
+    async (name: string, placement?: InteractionPlacement) => {
       const response = await client.createComputerSession(workspaceId, {
         operationId: crypto.randomUUID(),
         sessionId,
         name,
+        ...(placement ? { placement } : {}),
       });
       return {
         id: response.session.id,
@@ -748,6 +754,7 @@ export function useSandboxWorkspaceTabs(
               result={terminal}
               terminalCapability={capabilities?.Terminal ?? null}
               onActivate={() => requestWarmIntent("warmTerminal")}
+              onReconnectNeeded={caps.renegotiate}
               showHeader
               shell={capabilities?.Terminal.shell ?? undefined}
               liveness={liveness}
@@ -772,6 +779,7 @@ export function useSandboxWorkspaceTabs(
               client={client}
               workspaceId={workspaceId}
               sessionId={sessionId}
+              enabled={workspaceVisible && resolvedActiveTab === WORKBENCH_TAB_BROWSER}
               onNotify={onNotify}
               {...(desktopEnabled ? { createLinkedComputer } : {})}
               {...(onOpenComputerSession ? { onOpenComputer: onOpenComputerSession } : {})}
@@ -796,6 +804,7 @@ export function useSandboxWorkspaceTabs(
               client={client}
               workspaceId={workspaceId}
               sessionId={sessionId}
+              enabled={workspaceVisible && resolvedActiveTab === WORKBENCH_TAB_DESKTOP}
               onNotify={onNotify}
               requestedComputerSessionId={requestedComputerSessionId}
               requestedComputerRequestId={requestedComputerRequestId}
@@ -828,6 +837,8 @@ export function useSandboxWorkspaceTabs(
     onNotify,
     browserWebSocketFactory,
     computerWebSocketFactory,
+    workspaceVisible,
+    resolvedActiveTab,
     client,
     workspaceId,
     liveness,
@@ -979,6 +990,7 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
     ...(surfaces ? { surfaces } : {}),
     ...(initialTab ? { initialTab } : {}),
     activeTab: activeTabHint,
+    workspaceVisible: collapsed !== true,
     ...(onNotify ? { onNotify } : {}),
     ...(browserWebSocketFactory ? { browserWebSocketFactory } : {}),
     ...(computerWebSocketFactory ? { computerWebSocketFactory } : {}),
@@ -1057,13 +1069,13 @@ function MachineStateChip({ chip }: { chip: MachineChip }) {
     <div
       role="status"
       aria-label={`Machine: ${chip.label}`}
-      className="inline-flex min-h-7 items-center gap-1.5 px-2 py-1 text-og-xs font-medium text-og-fg-muted max-[1023px]:min-h-11 pointer-coarse:min-h-11"
+      className="inline-flex min-h-7 min-w-0 items-center gap-1.5 px-2 py-1 text-og-xs font-medium text-og-fg-muted max-[1023px]:min-h-11 pointer-coarse:min-h-11"
     >
       <span
         className={cn("size-1.5 shrink-0 rounded-full", chipDotClass(chip.state))}
         aria-hidden
       />
-      <span className="max-w-[11rem] truncate">{chip.label}</span>
+      <span className="min-w-0 max-w-[11rem] truncate">{chip.label}</span>
     </div>
   );
 }

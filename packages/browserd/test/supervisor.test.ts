@@ -2,7 +2,12 @@ import { describe, expect, test } from "bun:test";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { BrowserActionCommand, BrowserObservation, BrowserTarget } from "@opengeni/contracts";
+import type {
+  BrowserActionCommand,
+  BrowserExternalAuthCommand,
+  BrowserObservation,
+  BrowserTarget,
+} from "@opengeni/contracts";
 import {
   BrowserSupervisor,
   BROWSER_STATE_ARTIFACT_CONTENT_TYPE,
@@ -13,6 +18,20 @@ import {
 } from "../src";
 
 describe("BrowserSupervisor", () => {
+  test.skipIf(process.platform === "win32")(
+    "rejects a managed socket root before accepting sessions when Unix sockets cannot fit",
+    async () => {
+      await expect(
+        BrowserSupervisor.open({
+          rootDirectory: "/tmp/ogb-supervisor-capacity",
+          socketRootDirectory: `/tmp/${"socket-root-too-long-".repeat(4)}`,
+        }),
+      ).rejects.toThrow(
+        "agent-browser socket directory and identifiers exceed the Unix socket limit",
+      );
+    },
+  );
+
   test("hosts independent sessions and journals each causal action", async () => {
     await withSupervisor(async ({ supervisor, contexts }) => {
       const first = reference(1);
@@ -45,6 +64,116 @@ describe("BrowserSupervisor", () => {
         ),
       ).toBe(true);
     });
+  });
+
+  test("serializes provider authentication and fences ordinary mutations while it reconfigures", async () => {
+    let releaseFirst!: () => void;
+    let firstStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      firstStarted = resolve;
+    });
+    const release = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let authCalls = 0;
+    await withSupervisor(
+      async ({ supervisor }) => {
+        const session = reference(41);
+        const created = await supervisor.createSession({ ...session, headed: false });
+        const base = {
+          browserSessionId: session.browserSessionId,
+          controllerGeneration: session.controllerGeneration,
+          authRunId: randomUUID(),
+          adapterId: "kernel",
+          connectionId: "managed-auth-1",
+          action: "poll" as const,
+        };
+        const first = supervisor.externalAuth({
+          ...base,
+          operationId: randomUUID(),
+        });
+        await started;
+        await expect(supervisor.action(command(created.observation))).rejects.toThrow(
+          "changing state",
+        );
+        const second = supervisor.externalAuth({
+          ...base,
+          operationId: randomUUID(),
+        });
+        expect(authCalls).toBe(1);
+        releaseFirst();
+        expect(await first).toMatchObject({ state: "in_progress" });
+        expect(await second).toMatchObject({ state: "in_progress" });
+        expect(authCalls).toBe(2);
+        expect(await supervisor.listTargets(session)).toHaveLength(1);
+      },
+      {
+        driverHooks: {
+          async externalAuth() {
+            authCalls += 1;
+            if (authCalls === 1) {
+              firstStarted();
+              await release;
+            }
+            return {
+              state: "in_progress",
+              externalAction: null,
+              interactiveUrl: null,
+              failureCode: null,
+              profileLoaded: false,
+            };
+          },
+        },
+      },
+    );
+  });
+
+  test("repairs a lost managed browser without replaying an ambiguous action", async () => {
+    let firstDriverLost = false;
+    let factoryCalls = 0;
+    let dispatches = 0;
+    await withSupervisor(
+      async ({ supervisor }) => {
+        const session = reference(11);
+        const created = await supervisor.createSession({
+          ...session,
+          headed: false,
+          initialUrl: "https://recovery.test/",
+        });
+        const operationId = randomUUID();
+        const receipt = await supervisor.action(command(created.observation, operationId));
+        expect(receipt.state).toBe("outcome_unknown");
+        expect(receipt.error?.code).toBe("controller_lost");
+        expect(dispatches).toBe(1);
+        expect(factoryCalls).toBe(2);
+
+        const recovered = await supervisor.listTargets(session);
+        expect(recovered).toHaveLength(1);
+        expect(recovered[0]!.id).not.toBe(created.observation.target.id);
+        expect(recovered[0]!.url).toBe("https://recovery.test/");
+
+        expect(await supervisor.action(command(created.observation, operationId))).toEqual(receipt);
+        expect(dispatches).toBe(1);
+        const stale = await supervisor.action(command(created.observation));
+        expect(stale.state).toBe("failed");
+        expect(stale.error?.code).toBe("target_not_found");
+      },
+      {
+        onFactory: () => {
+          factoryCalls += 1;
+        },
+        driverHooks: {
+          available: (instance) => instance > 1 || !firstDriverLost,
+          async dispatch(instance) {
+            dispatches += 1;
+            if (instance === 1) {
+              firstDriverLost = true;
+              throw new Error("fixture browser transport disappeared after dispatch");
+            }
+          },
+        },
+      },
+    );
   });
 
   test("deduplicates concurrent creation and rejects stale or conflicting bindings", async () => {
@@ -88,7 +217,10 @@ describe("BrowserSupervisor", () => {
         ...session,
         headed: true,
         linkedComputer,
-        launchEnvironment: { DISPLAY: ":101", DBUS_SESSION_BUS_ADDRESS: "unix:path=/tmp/bus" },
+        launchEnvironment: {
+          DISPLAY: ":101",
+          DBUS_SESSION_BUS_ADDRESS: "unix:path=/tmp/bus",
+        },
       });
       expect(contexts.get(session.browserSessionId)).toMatchObject({
         launchEnvironment: {
@@ -100,7 +232,10 @@ describe("BrowserSupervisor", () => {
         supervisor.createSession({
           ...session,
           headed: true,
-          linkedComputer: { ...linkedComputer, controllerGeneration: "computer-controller-2" },
+          linkedComputer: {
+            ...linkedComputer,
+            controllerGeneration: "computer-controller-2",
+          },
           launchEnvironment: { DISPLAY: ":101" },
         }),
       ).rejects.toMatchObject({ code: "operation_conflict" });
@@ -191,6 +326,134 @@ describe("BrowserSupervisor", () => {
           dataKey: Buffer.alloc(32),
           aad: Buffer.from("attached"),
           upload: uploadAuthority(),
+        }),
+      ).rejects.toMatchObject({ code: "unsupported" });
+      await expect(
+        supervisor.createSession({
+          ...session,
+          headed: false,
+          networkRoute: {
+            ...withoutProxyAuthority(proxyRoute()),
+            kind: "direct",
+            consistency: {
+              ...proxyRoute().consistency,
+              dns: "placement",
+              webRtc: "proxy_only",
+            },
+          },
+        }),
+      ).rejects.toMatchObject({ code: "unsupported" });
+    });
+  });
+
+  test("binds one exact proxy authority and permits only a secretless replay", async () => {
+    await withSupervisor(async ({ supervisor, contexts }) => {
+      const session = reference(1);
+      const route = proxyRoute("http://user:password@proxy.test:8443/");
+      await supervisor.createSession({
+        ...session,
+        headed: false,
+        networkRoute: route,
+      });
+      expect(contexts.get(session.browserSessionId)?.networkRoute).toEqual(route);
+
+      await expect(
+        supervisor.createSession({
+          ...session,
+          headed: false,
+          networkRoute: withoutProxyAuthority(route),
+        }),
+      ).resolves.toMatchObject(session);
+      await expect(
+        supervisor.createSession({
+          ...session,
+          headed: false,
+          networkRoute: { ...route, authorityDigest: `ogr.${"z".repeat(43)}` },
+        }),
+      ).rejects.toMatchObject({ code: "operation_conflict" });
+      await expect(
+        supervisor.createSession({
+          ...session,
+          headed: false,
+          networkRoute: {
+            ...route,
+            proxyUrl: "http://user:other@proxy.test:8443/",
+          },
+        }),
+      ).rejects.toMatchObject({ code: "operation_conflict" });
+    });
+
+    await withSupervisor(async ({ supervisor }) => {
+      const session = reference(2);
+      await expect(
+        supervisor.createSession({
+          ...session,
+          headed: false,
+          networkRoute: withoutProxyAuthority(proxyRoute()),
+        }),
+      ).rejects.toMatchObject({
+        code: "resource_unavailable",
+        retryable: true,
+      });
+    });
+  });
+
+  test("rejects route guarantees that its browser transport cannot provide", async () => {
+    await withSupervisor(async ({ supervisor }) => {
+      const session = reference(1);
+      const transport = {
+        kind: "attached_chrome" as const,
+        deviceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        connectionGeneration: "chrome-generation-1",
+        browserName: "Chrome",
+        browserVersion: "151.0.0.0",
+      };
+      await expect(
+        supervisor.createSession({
+          ...session,
+          headed: true,
+          transport,
+          networkRoute: proxyRoute(),
+        }),
+      ).rejects.toMatchObject({ code: "unsupported" });
+      await expect(
+        supervisor.createSession({
+          ...session,
+          headed: false,
+          networkRoute: {
+            ...proxyRoute(),
+            consistency: { ...proxyRoute().consistency, dns: "placement" },
+          },
+        }),
+      ).rejects.toMatchObject({ code: "unsupported" });
+    });
+  });
+
+  test("binds managed egress to its exact external provider transport", async () => {
+    await withSupervisor(async ({ supervisor, contexts }) => {
+      const session = reference(1);
+      const route = managedRoute();
+      const transport = {
+        kind: "external_provider" as const,
+        providerId: "kernel" as const,
+        placementId: "default",
+        authority: { apiKey: "kernel-private-key" },
+      };
+      await supervisor.createSession({ ...session, headed: false, transport, networkRoute: route });
+      expect(contexts.get(session.browserSessionId)?.networkRoute).toEqual(route);
+      await expect(
+        supervisor.createSession({
+          ...reference(2),
+          headed: false,
+          transport: { ...transport, providerId: "browserbase" },
+          networkRoute: route,
+        }),
+      ).rejects.toMatchObject({ code: "unsupported" });
+      await expect(
+        supervisor.createSession({
+          ...reference(3),
+          headed: false,
+          networkRoute: route,
         }),
       ).rejects.toMatchObject({ code: "unsupported" });
     });
@@ -485,8 +748,13 @@ async function withSupervisor(
     maxSessions?: number;
     onFactory?: () => void;
     driverHooks?: {
-      dispatch?: () => void | Promise<void>;
+      dispatch?: (instance: number) => void | Promise<void>;
+      externalAuth?: (
+        instance: number,
+        command: BrowserExternalAuthCommand,
+      ) => ReturnType<NonNullable<BrowserSupervisorDriver["externalAuth"]>>;
       engineVersion?: () => string;
+      available?: (instance: number) => boolean;
     };
     uploadArtifact?: (path: string, authority: BrowserStateUploadAuthority) => Promise<void>;
   } = {},
@@ -517,8 +785,13 @@ async function withSupervisor(
 function fakeDriver(
   context: BrowserSupervisorDriverContext,
   hooks: {
-    dispatch?: () => void | Promise<void>;
+    dispatch?: (instance: number) => void | Promise<void>;
+    externalAuth?: (
+      instance: number,
+      command: BrowserExternalAuthCommand,
+    ) => ReturnType<NonNullable<BrowserSupervisorDriver["externalAuth"]>>;
     engineVersion?: () => string;
+    available?: (instance: number) => boolean;
   } = {},
   instance = 1,
 ): BrowserSupervisorDriver {
@@ -557,6 +830,7 @@ function fakeDriver(
   });
   const requireOpen = () => {
     if (closed) throw new Error("driver closed");
+    if (hooks.available && !hooks.available(instance)) throw new Error("driver unavailable");
   };
   return {
     async start(url) {
@@ -591,8 +865,23 @@ function fakeDriver(
     },
     async dispatch() {
       requireOpen();
-      await hooks.dispatch?.();
+      await hooks.dispatch?.(instance);
       return observation();
+    },
+    async protectedFill() {
+      requireOpen();
+      return { target: { ...target }, status: "submitted" };
+    },
+    async externalAuth(authCommand) {
+      requireOpen();
+      if (hooks.externalAuth) return await hooks.externalAuth(instance, authCommand);
+      return {
+        state: "in_progress",
+        externalAction: null,
+        interactiveUrl: null,
+        failureCode: null,
+        profileLoaded: false,
+      };
     },
     async captureScreenshot() {
       requireOpen();
@@ -629,6 +918,17 @@ function fakeDriver(
         truncated: false,
       };
     },
+    readClipboard() {
+      return {
+        browserSessionId: context.browserSessionId,
+        controllerGeneration: context.controllerGeneration,
+        revision: 0,
+        text: "",
+        source: "empty",
+        sourceTargetId: null,
+        updatedAt: null,
+      };
+    },
     async runtimeSnapshot() {
       requireOpen();
       return {
@@ -636,6 +936,9 @@ function fakeDriver(
         engineVersion: hooks.engineVersion?.() ?? "140.0.0.0",
         tabs: [{ url: target.url, selected: target.selected }],
       };
+    },
+    async isAvailable() {
+      return !closed && (hooks.available?.(instance) ?? true);
     },
     async close() {
       closed = true;
@@ -648,6 +951,60 @@ function reference(sequence: number) {
     browserSessionId: `11111111-1111-4111-8111-${sequence.toString().padStart(12, "0")}`,
     controllerGeneration: `controller-${sequence}`,
   };
+}
+
+function proxyRoute(proxyUrl = "http://user:password@proxy.test:8443/") {
+  return {
+    routeId: "22222222-2222-4222-8222-222222222222",
+    routeVersion: 1,
+    authorityDigest: `ogr.${"a".repeat(43)}`,
+    kind: "proxy" as const,
+    consistency: {
+      dns: "proxy" as const,
+      expectedPublicIp: null,
+      expectedRegion: null,
+      locale: "en-US",
+      timezone: "Europe/Oslo",
+      geolocation: {
+        latitude: 59.9139,
+        longitude: 10.7522,
+        accuracyMeters: 50,
+      },
+      webRtc: "disable_non_proxied_udp" as const,
+      stability: "session" as const,
+    },
+    proxyUrl,
+  };
+}
+
+function managedRoute() {
+  return {
+    routeId: "33333333-3333-4333-8333-333333333333",
+    routeVersion: 2,
+    authorityDigest: `ogr.${"m".repeat(43)}`,
+    kind: "managed" as const,
+    consistency: {
+      dns: "provider" as const,
+      expectedPublicIp: null,
+      expectedRegion: "NO",
+      locale: "nb-NO",
+      timezone: "Europe/Oslo",
+      geolocation: { latitude: 59.9139, longitude: 10.7522, accuracyMeters: 25 },
+      webRtc: "disable_non_proxied_udp" as const,
+      stability: "session" as const,
+    },
+    providerRoute: {
+      providerId: "kernel" as const,
+      routeId: "kernel-proxy-7",
+      egressClass: "isp" as const,
+      region: "NO",
+    },
+  };
+}
+
+function withoutProxyAuthority(route: ReturnType<typeof proxyRoute>) {
+  const { proxyUrl: _proxyUrl, ...authority } = route;
+  return authority;
 }
 
 function command(

@@ -1,12 +1,22 @@
 import { createHash, timingSafeEqual } from "node:crypto";
+import { connect, type Socket } from "node:net";
 import {
   BROWSER_CONTROL_PORT,
   BROWSER_PROFILE_ARTIFACT_FORMAT,
   BrowserActionCommand,
+  BrowserDownloadExportRequest,
+  BrowserDownloadListResponse,
+  BrowserExternalAuthCommand,
   BrowserRevisionMaterialization,
   type BrowserActionCommand as BrowserActionCommandValue,
+  type BrowserExternalAuthCommand as BrowserExternalAuthCommandValue,
+  BrowserProtectedAuthFillCommand,
+  type BrowserProtectedAuthFillCommand as BrowserProtectedAuthFillCommandValue,
+  BrowserWorkspaceFileStageRequest,
   ComputerActionCommand,
+  COMPUTER_RFB_WEBSOCKET_PROTOCOL,
   type ComputerActionCommand as ComputerActionCommandValue,
+  NetworkRouteConsistency,
   type InteractionError,
 } from "@opengeni/contracts";
 import { InteractionControllerError } from "@opengeni/interaction";
@@ -99,7 +109,22 @@ type ComputerSocketData = {
   closed: boolean;
 };
 
-type InteractionSocketData = BrowserSocketData | ComputerSocketData;
+type ComputerRfbSocketData = {
+  kind: "computer_rfb";
+  reference: ComputerSessionReference;
+  authorization:
+    | { kind: "session"; tokenGeneration: number }
+    | { kind: "grant"; grantId: string; expiresAtMs: number };
+  targetId: string;
+  rfbPort: number;
+  upstream: Socket | null;
+  pending: Uint8Array[];
+  pendingBytes: number;
+  expiryTimer: ReturnType<typeof setTimeout> | null;
+  closed: boolean;
+};
+
+type InteractionSocketData = BrowserSocketData | ComputerSocketData | ComputerRfbSocketData;
 type BrowserServer = ReturnType<typeof Bun.serve<InteractionSocketData>>;
 type BrowserSocket = Bun.ServerWebSocket<InteractionSocketData>;
 
@@ -112,6 +137,7 @@ export type BrowserControlServerOptions = {
   allowedOrigins?: readonly string[];
   browserExecutablePath?: string;
   closeSupervisorOnStop?: boolean;
+  onUnexpectedError?: (error: unknown, context: { method: string; pathname: string }) => void;
 };
 
 export class BrowserControlServer {
@@ -124,6 +150,9 @@ export class BrowserControlServer {
   private readonly allowedOrigins: Set<string>;
   private readonly browserExecutablePath: string | undefined;
   private readonly closeSupervisorOnStop: boolean;
+  private readonly onUnexpectedError:
+    | ((error: unknown, context: { method: string; pathname: string }) => void)
+    | undefined;
   private readonly authorities = new Map<string, SessionAuthority>();
   private readonly computerAuthorities = new Map<string, ComputerSessionAuthority>();
   private readonly lifecycleTails = new Map<string, Promise<void>>();
@@ -142,6 +171,7 @@ export class BrowserControlServer {
     }
     this.browserExecutablePath = options.browserExecutablePath;
     this.closeSupervisorOnStop = options.closeSupervisorOnStop ?? true;
+    this.onUnexpectedError = options.onUnexpectedError;
     const requestedHostname = options.hostname ?? "127.0.0.1";
     this.server = Bun.serve<InteractionSocketData>({
       hostname: requestedHostname,
@@ -150,15 +180,18 @@ export class BrowserControlServer {
       maxRequestBodySize: BROWSER_CONTROL_MAX_JSON_BYTES,
       fetch: async (request, server) => await this.handleFetch(request, server),
       websocket: {
-        maxPayloadLength: 1_024,
+        // Frame sockets are server-only, but RFB carries keyboard, pointer and
+        // clipboard messages from noVNC. Keep a bounded envelope large enough
+        // for an ordinary clipboard without permitting unbounded buffering.
+        maxPayloadLength: 1024 * 1024,
         backpressureLimit: 32 * 1024 * 1024,
         closeOnBackpressureLimit: true,
         perMessageDeflate: false,
         open: (socket) => {
           this.onSocketOpen(socket);
         },
-        message: (socket) => {
-          socket.close(1003, "frame stream is server-only");
+        message: (socket, message) => {
+          this.onSocketMessage(socket, message);
         },
         close: (socket) => {
           this.onSocketClose(socket);
@@ -193,7 +226,9 @@ export class BrowserControlServer {
       socket.terminate();
     }
     const subscriptionResults = await Promise.allSettled(
-      sockets.map(async (socket) => await socket.data.subscription?.close()),
+      sockets.map(async (socket) => {
+        if (socket.data.kind !== "computer_rfb") await socket.data.subscription?.close();
+      }),
     );
     for (const result of subscriptionResults) {
       if (result.status === "rejected") failures.push(result.reason);
@@ -245,6 +280,16 @@ export class BrowserControlServer {
       const response = await this.route(request, server);
       return response ? this.withCors(response, normalizedOrigin) : undefined;
     } catch (error) {
+      if (!(error instanceof ProtocolError) && !(error instanceof InteractionControllerError)) {
+        try {
+          this.onUnexpectedError?.(error, {
+            method: request.method,
+            pathname: new URL(request.url).pathname,
+          });
+        } catch {
+          // Diagnostics must never alter the controller response contract.
+        }
+      }
       return this.withCors(protocolResponse(error), normalizedOrigin);
     }
   }
@@ -342,12 +387,121 @@ export class BrowserControlServer {
       }
       return success(await this.supervisor.action(command));
     }
+    if (
+      segments.length === 6 &&
+      segments[3] === "operations" &&
+      segments[5] === "workspace-files"
+    ) {
+      if (request.method !== "POST") {
+        throw new ProtocolError("invalid_action", "method not allowed", 405);
+      }
+      const operationId = requireUuid(segments[4], "operation id");
+      const staged = BrowserWorkspaceFileStageRequest.safeParse(await readJson(request));
+      if (!staged.success) {
+        throw new ProtocolError(
+          "invalid_action",
+          "workspace-file staging authority is invalid",
+          400,
+        );
+      }
+      if (staged.data.operationId !== operationId) {
+        throw new ProtocolError(
+          "operation_conflict",
+          "workspace-file staging authority targets another operation",
+          409,
+        );
+      }
+      return success(await this.supervisor.stageWorkspaceFiles(reference, staged.data));
+    }
+    if (segments.length === 4 && segments[3] === "protected-auth-fills") {
+      if (request.method !== "POST") {
+        throw new ProtocolError("invalid_action", "method not allowed", 405);
+      }
+      const command = parseProtectedAuthFillCommand(await readJson(request));
+      if (command.browserSessionId !== browserSessionId) {
+        throw new ProtocolError(
+          "operation_conflict",
+          "protected fill targets another browser session",
+          409,
+        );
+      }
+      return success(await this.supervisor.protectedAuthFill(command));
+    }
+    if (segments.length === 4 && segments[3] === "external-auth") {
+      if (request.method !== "POST") {
+        throw new ProtocolError("invalid_action", "method not allowed", 405);
+      }
+      const command = parseExternalAuthCommand(await readJson(request));
+      if (command.browserSessionId !== browserSessionId) {
+        throw new ProtocolError(
+          "operation_conflict",
+          "external authentication targets another browser session",
+          409,
+        );
+      }
+      return success(await this.supervisor.externalAuth(command));
+    }
+    if (segments.length === 4 && segments[3] === "downloads") {
+      if (request.method !== "GET") {
+        throw new ProtocolError("invalid_action", "method not allowed", 405);
+      }
+      return success(
+        BrowserDownloadListResponse.parse({
+          ...reference,
+          downloads: await this.supervisor.listDownloads(reference),
+        }),
+      );
+    }
+    if (segments.length === 4 && segments[3] === "clipboard") {
+      if (request.method !== "GET") {
+        throw new ProtocolError("invalid_action", "method not allowed", 405);
+      }
+      return success(this.supervisor.readClipboard(reference));
+    }
+    if (segments.length === 5 && segments[3] === "downloads") {
+      if (request.method !== "GET") {
+        throw new ProtocolError("invalid_action", "method not allowed", 405);
+      }
+      const download = await this.supervisor.getDownload(
+        reference,
+        requireUuid(segments[4], "download id"),
+      );
+      if (!download) throw new ProtocolError("resource_not_found", "download not found", 404);
+      return success(download);
+    }
+    if (segments.length === 6 && segments[3] === "downloads" && segments[5] === "exports") {
+      if (request.method !== "POST") {
+        throw new ProtocolError("invalid_action", "method not allowed", 405);
+      }
+      const downloadId = requireUuid(segments[4], "download id");
+      const exported = BrowserDownloadExportRequest.safeParse(await readJson(request));
+      if (!exported.success) {
+        throw new ProtocolError("invalid_action", "download export authority is invalid", 400);
+      }
+      if (exported.data.downloadId !== downloadId) {
+        throw new ProtocolError(
+          "operation_conflict",
+          "download export targets another resource",
+          409,
+        );
+      }
+      return success(await this.supervisor.exportDownload(reference, exported.data));
+    }
     if (segments.length === 5 && segments[3] === "operations") {
       if (request.method !== "GET") {
         throw new ProtocolError("invalid_action", "method not allowed", 405);
       }
       const operationId = requireUuid(segments[4], "operation id");
       const receipt = this.supervisor.receipt(reference, operationId);
+      if (!receipt) throw new ProtocolError("resource_not_found", "operation not found", 404);
+      return success(receipt);
+    }
+    if (segments.length === 5 && segments[3] === "protected-auth-operations") {
+      if (request.method !== "GET") {
+        throw new ProtocolError("invalid_action", "method not allowed", 405);
+      }
+      const operationId = requireUuid(segments[4], "operation id");
+      const receipt = this.supervisor.protectedAuthReceipt(reference, operationId);
       if (!receipt) throw new ProtocolError("resource_not_found", "operation not found", 404);
       return success(receipt);
     }
@@ -456,6 +610,12 @@ export class BrowserControlServer {
       }
       return this.upgradeComputerFrames(request, server, computerSessionId, segments[4]!, url);
     }
+    if (segments.length === 6 && segments[3] === "targets" && segments[5] === "rfb") {
+      if (request.method !== "GET") {
+        throw new ProtocolError("invalid_action", "method not allowed", 405);
+      }
+      return await this.upgradeComputerRfb(request, server, computerSessionId, segments[4]!);
+    }
 
     const authority = this.requireComputerSession(
       request,
@@ -465,6 +625,10 @@ export class BrowserControlServer {
     const reference = computerBinding(authority);
     if (segments.length === 4 && segments[3] === "targets") {
       if (request.method === "GET") return success(await supervisor.listTargets(reference));
+      throw new ProtocolError("invalid_action", "method not allowed", 405);
+    }
+    if (segments.length === 4 && segments[3] === "clipboard") {
+      if (request.method === "GET") return success(await supervisor.clipboard(reference));
       throw new ProtocolError("invalid_action", "method not allowed", 405);
     }
     if (segments.length === 4 && segments[3] === "actions") {
@@ -555,9 +719,10 @@ export class BrowserControlServer {
           ...(body.initialUrl ? { initialUrl: body.initialUrl } : {}),
           ...(body.restore ? { restore: body.restore } : {}),
           ...(body.transport ? { transport: body.transport } : {}),
-          ...(body.linkedComputer
+          ...(body.networkRoute ? { networkRoute: body.networkRoute } : {}),
+          ...(body.linkedComputer ? { linkedComputer: body.linkedComputer } : {}),
+          ...(body.linkedComputer && body.transport?.kind !== "attached_chrome"
             ? {
-                linkedComputer: body.linkedComputer,
                 launchEnvironment: this.requireComputerSupervisor().launchEnvironment(
                   body.linkedComputer,
                 ),
@@ -917,13 +1082,19 @@ export class BrowserControlServer {
         ? { format: parseImageFormat(url.searchParams.get("format")) }
         : {}),
       ...(url.searchParams.has("quality")
-        ? { quality: parseInteger(url.searchParams.get("quality"), "quality", 1, 100) }
+        ? {
+            quality: parseInteger(url.searchParams.get("quality"), "quality", 1, 100),
+          }
         : {}),
       ...(url.searchParams.has("maxWidth")
-        ? { maxWidth: parseInteger(url.searchParams.get("maxWidth"), "maxWidth", 1, 4_096) }
+        ? {
+            maxWidth: parseInteger(url.searchParams.get("maxWidth"), "maxWidth", 1, 4_096),
+          }
         : {}),
       ...(url.searchParams.has("maxHeight")
-        ? { maxHeight: parseInteger(url.searchParams.get("maxHeight"), "maxHeight", 1, 4_096) }
+        ? {
+            maxHeight: parseInteger(url.searchParams.get("maxHeight"), "maxHeight", 1, 4_096),
+          }
         : {}),
       ...(url.searchParams.has("everyNthFrame")
         ? {
@@ -954,10 +1125,74 @@ export class BrowserControlServer {
         expiryTimer: null,
         closed: false,
       },
-      headers: { "sec-websocket-protocol": COMPUTER_CONTROL_WEBSOCKET_PROTOCOL },
+      headers: {
+        "sec-websocket-protocol": COMPUTER_CONTROL_WEBSOCKET_PROTOCOL,
+      },
     });
     if (!upgraded) {
       throw new ProtocolError("resource_unavailable", "frame stream upgrade failed", 503, true);
+    }
+    return undefined;
+  }
+
+  private async upgradeComputerRfb(
+    request: Request,
+    server: BrowserServer,
+    computerSessionId: string,
+    targetId: string,
+  ): Promise<Response | undefined> {
+    const protocols = (request.headers.get("sec-websocket-protocol") ?? "")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean);
+    if (!protocols.includes("binary") || !protocols.includes(COMPUTER_RFB_WEBSOCKET_PROTOCOL)) {
+      throw new ProtocolError("invalid_action", "computer RFB protocol is required", 426);
+    }
+    const bearerProtocols = protocols.filter((value) =>
+      value.startsWith(BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX),
+    );
+    if (bearerProtocols.length !== 1) {
+      throw new ProtocolError("permission_denied", "RFB authorization is required", 401);
+    }
+    const token = requireToken(
+      bearerProtocols[0]!.slice(BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX.length),
+      "RFB stream token",
+    );
+    const authorization = this.authorizeComputerToken(computerSessionId, token, false, true);
+    const authority = authorization.authority;
+    const reference = computerBinding(authority);
+    const boundedTargetId = requireOpaqueId(targetId, "computer target id");
+    const supervisor = this.computerSupervisor;
+    if (!supervisor) {
+      throw new ProtocolError("unsupported", "computer controller is unavailable", 422);
+    }
+    const rfbPort = await supervisor.rfbPort(reference, boundedTargetId);
+    const upgraded = server.upgrade(request, {
+      data: {
+        kind: "computer_rfb",
+        reference,
+        authorization:
+          authorization.kind === "session"
+            ? { kind: "session", tokenGeneration: authority.tokenGeneration }
+            : {
+                kind: "grant",
+                grantId: authorization.grant.id,
+                expiresAtMs: authorization.grant.expiresAtMs,
+              },
+        targetId: boundedTargetId,
+        rfbPort,
+        upstream: null,
+        pending: [],
+        pendingBytes: 0,
+        expiryTimer: null,
+        closed: false,
+      },
+      // noVNC's Websock requires the conventional `binary` selection. The
+      // additional requested protocols carry our version and scoped grant.
+      headers: { "sec-websocket-protocol": "binary" },
+    });
+    if (!upgraded) {
+      throw new ProtocolError("resource_unavailable", "RFB stream upgrade failed", 503, true);
     }
     return undefined;
   }
@@ -996,7 +1231,64 @@ export class BrowserControlServer {
         if (!socket.data.closed) socket.close(1008, "authorization expired");
       }, remainingMs);
     }
-    void this.pumpFrames(socket);
+    if (socket.data.kind === "computer_rfb") {
+      this.openComputerRfb(socket);
+    } else {
+      void this.pumpFrames(socket);
+    }
+  }
+
+  private onSocketMessage(socket: BrowserSocket, message: string | Buffer): void {
+    const data = socket.data;
+    if (data.kind !== "computer_rfb") {
+      socket.close(1003, "frame stream is server-only");
+      return;
+    }
+    if (typeof message === "string") {
+      socket.close(1003, "RFB requires binary messages");
+      return;
+    }
+    const bytes = new Uint8Array(message.buffer, message.byteOffset, message.byteLength);
+    if (data.upstream && !data.upstream.destroyed) {
+      data.upstream.write(bytes);
+      return;
+    }
+    if (data.pendingBytes + bytes.byteLength > 1024 * 1024) {
+      socket.close(1009, "RFB input buffer exceeded");
+      return;
+    }
+    const copy = bytes.slice();
+    data.pending.push(copy);
+    data.pendingBytes += copy.byteLength;
+  }
+
+  private openComputerRfb(socket: BrowserSocket): void {
+    const data = socket.data;
+    if (data.kind !== "computer_rfb") return;
+    const upstream = connect({ host: "127.0.0.1", port: data.rfbPort });
+    data.upstream = upstream;
+    upstream.setNoDelay(true);
+    upstream.once("connect", () => {
+      if (data.closed) {
+        upstream.destroy();
+        return;
+      }
+      for (const pending of data.pending) upstream.write(pending);
+      data.pending = [];
+      data.pendingBytes = 0;
+    });
+    upstream.on("data", (chunk) => {
+      if (data.closed) return;
+      if (socket.send(chunk, false) < 0) {
+        socket.close(1013, "RFB consumer is too slow");
+      }
+    });
+    upstream.once("error", () => {
+      if (!data.closed) socket.close(1011, "RFB stream unavailable");
+    });
+    upstream.once("close", () => {
+      if (!data.closed) socket.close(1000, "RFB stream closed");
+    });
   }
 
   private onSocketClose(socket: BrowserSocket): void {
@@ -1005,7 +1297,14 @@ export class BrowserControlServer {
     if (socket.data.expiryTimer) clearTimeout(socket.data.expiryTimer);
     socket.data.expiryTimer = null;
     this.sockets.delete(socket);
-    void socket.data.subscription?.close();
+    if (socket.data.kind === "computer_rfb") {
+      socket.data.upstream?.destroy();
+      socket.data.upstream = null;
+      socket.data.pending = [];
+      socket.data.pendingBytes = 0;
+    } else {
+      void socket.data.subscription?.close();
+    }
   }
 
   private async pumpFrames(socket: BrowserSocket): Promise<void> {
@@ -1037,8 +1336,8 @@ export class BrowserControlServer {
           break;
         }
       }
-    } catch {
-      if (!data.closed) socket.close(1011, "frame stream unavailable");
+    } catch (error) {
+      if (!data.closed) socket.close(1011, frameStreamCloseReason(error));
     } finally {
       await data.subscription?.close();
       data.subscription = null;
@@ -1071,8 +1370,8 @@ export class BrowserControlServer {
           break;
         }
       }
-    } catch {
-      if (!data.closed) socket.close(1011, "frame stream unavailable");
+    } catch (error) {
+      if (!data.closed) socket.close(1011, frameStreamCloseReason(error));
     } finally {
       await data.subscription?.close();
       data.subscription = null;
@@ -1236,6 +1535,17 @@ export class BrowserControlServer {
   }
 }
 
+function frameStreamCloseReason(error: unknown): string {
+  const detail = error instanceof Error ? error.message : "unknown failure";
+  // WebSocket control frames allow at most 123 UTF-8 bytes. Keep diagnostics
+  // useful and transport-safe without placing page/application text in logs.
+  const ascii = detail
+    .replace(/[^\x20-\x7e]/g, "?")
+    .replace(/\s+/g, " ")
+    .trim();
+  return `frame stream unavailable: ${ascii || "unknown failure"}`.slice(0, 120);
+}
+
 class ProtocolError extends Error {
   constructor(
     readonly code: InteractionError["code"],
@@ -1319,7 +1629,16 @@ function interactionStatus(code: string): number {
 }
 
 function routeNeedsControl(segments: readonly string[], request: Request): boolean {
-  if (segments[3] === "actions") return true;
+  if (
+    segments[3] === "actions" ||
+    segments[3] === "external-auth" ||
+    segments[3] === "protected-auth-fills" ||
+    segments[3] === "protected-auth-operations" ||
+    (segments[3] === "downloads" && segments[5] === "exports") ||
+    (segments[3] === "operations" && request.method === "POST")
+  ) {
+    return true;
+  }
   if (segments[3] !== "targets") return false;
   if (segments.length === 4) return request.method === "POST";
   if (segments.length === 5) return request.method === "DELETE";
@@ -1367,6 +1686,22 @@ function parseActionCommand(value: unknown): BrowserActionCommandValue {
   return result.data;
 }
 
+function parseProtectedAuthFillCommand(value: unknown): BrowserProtectedAuthFillCommandValue {
+  const result = BrowserProtectedAuthFillCommand.safeParse(value);
+  if (!result.success) {
+    throw new ProtocolError("invalid_action", "protected-fill command is invalid", 400);
+  }
+  return result.data;
+}
+
+function parseExternalAuthCommand(value: unknown): BrowserExternalAuthCommandValue {
+  const result = BrowserExternalAuthCommand.safeParse(value);
+  if (!result.success) {
+    throw new ProtocolError("invalid_action", "external-auth command is invalid", 400);
+  }
+  return result.data;
+}
+
 function parseComputerActionCommand(value: unknown): ComputerActionCommandValue {
   const result = ComputerActionCommand.safeParse(value);
   if (!result.success) throw new ProtocolError("invalid_action", "computer action is invalid", 400);
@@ -1382,6 +1717,7 @@ function parseCreateSession(value: Record<string, unknown>): {
   headed: boolean;
   initialUrl?: string;
   transport?: NonNullable<BrowserSupervisorSessionOptions["transport"]>;
+  networkRoute?: NonNullable<BrowserSupervisorSessionOptions["networkRoute"]>;
   linkedComputer?: { computerSessionId: string; controllerGeneration: string };
   restore?: BrowserStateRestoreInput & { dataKey: Buffer; aad: Buffer };
 } {
@@ -1394,6 +1730,7 @@ function parseCreateSession(value: Record<string, unknown>): {
     "headed",
     "initialUrl",
     "transport",
+    "networkRoute",
     "linkedComputer",
     "restore",
   ]);
@@ -1413,10 +1750,99 @@ function parseCreateSession(value: Record<string, unknown>): {
       ? {}
       : { initialUrl: requireString(value.initialUrl, "initialUrl", 16_384) }),
     ...(value.transport === undefined ? {} : { transport: parseBrowserTransport(value.transport) }),
+    ...(value.networkRoute === undefined
+      ? {}
+      : { networkRoute: parseBrowserNetworkRoute(value.networkRoute) }),
     ...(value.linkedComputer === undefined
       ? {}
       : { linkedComputer: parseLinkedComputer(value.linkedComputer) }),
     ...(value.restore === undefined ? {} : { restore: parseStateRestore(value.restore) }),
+  };
+}
+
+function parseBrowserNetworkRoute(
+  value: unknown,
+): NonNullable<BrowserSupervisorSessionOptions["networkRoute"]> {
+  if (!isRecord(value)) {
+    throw new ProtocolError("invalid_action", "browser network route is invalid", 400);
+  }
+  assertOnlyKeys(value, [
+    "routeId",
+    "routeVersion",
+    "authorityDigest",
+    "kind",
+    "consistency",
+    "proxyUrl",
+    "providerRoute",
+  ]);
+  if (
+    value.kind !== "direct" &&
+    value.kind !== "proxy" &&
+    value.kind !== "managed" &&
+    value.kind !== "tunnel"
+  ) {
+    throw new ProtocolError("invalid_action", "browser network route kind is unsupported", 400);
+  }
+  const consistency = NetworkRouteConsistency.safeParse(value.consistency);
+  if (!consistency.success) {
+    throw new ProtocolError("invalid_action", "browser network route consistency is invalid", 400);
+  }
+  const authorityDigest = requireString(
+    value.authorityDigest,
+    "browser network route authority digest",
+    256,
+  );
+  if (!/^[A-Za-z0-9._~-]{16,256}$/u.test(authorityDigest)) {
+    throw new ProtocolError("invalid_action", "browser network route authority is invalid", 400);
+  }
+  return {
+    routeId: requireUuid(value.routeId, "browser network route id"),
+    routeVersion: requireInteger(
+      value.routeVersion,
+      "browser network route version",
+      1,
+      MAX_TOKEN_GENERATION,
+    ),
+    authorityDigest,
+    kind: value.kind,
+    consistency: consistency.data,
+    ...(value.proxyUrl === undefined
+      ? {}
+      : {
+          proxyUrl: requireString(value.proxyUrl, "browser proxy authority", 16_384),
+        }),
+    ...(value.providerRoute === undefined
+      ? {}
+      : { providerRoute: parseManagedProviderRoute(value.providerRoute) }),
+  };
+}
+
+function parseManagedProviderRoute(
+  value: unknown,
+): NonNullable<NonNullable<BrowserSupervisorSessionOptions["networkRoute"]>["providerRoute"]> {
+  if (!isRecord(value)) {
+    throw new ProtocolError("invalid_action", "managed browser route is invalid", 400);
+  }
+  assertOnlyKeys(value, ["providerId", "routeId", "egressClass", "region"]);
+  if (value.providerId !== "browserbase" && value.providerId !== "kernel") {
+    throw new ProtocolError("invalid_action", "managed browser route provider is unsupported", 400);
+  }
+  if (
+    value.egressClass !== "datacenter" &&
+    value.egressClass !== "residential" &&
+    value.egressClass !== "isp"
+  ) {
+    throw new ProtocolError("invalid_action", "managed browser route egress is invalid", 400);
+  }
+  if (value.region !== null && typeof value.region !== "string") {
+    throw new ProtocolError("invalid_action", "managed browser route region is invalid", 400);
+  }
+  return {
+    providerId: value.providerId,
+    routeId: requireOpaqueId(value.routeId, "managed browser provider route id"),
+    egressClass: value.egressClass,
+    region:
+      value.region === null ? null : requireOpaqueId(value.region, "managed browser route region"),
   };
 }
 
@@ -1469,8 +1895,65 @@ function parseBrowserTransport(
     throw new ProtocolError("invalid_action", "browser transport is invalid", 400);
   }
   if (value.kind === "managed") {
-    assertOnlyKeys(value, ["kind"]);
-    return { kind: "managed" };
+    assertOnlyKeys(value, ["kind", "engine"]);
+    if (
+      value.engine !== undefined &&
+      value.engine !== "chromium" &&
+      value.engine !== "lightpanda"
+    ) {
+      throw new ProtocolError("invalid_action", "managed browser engine is unsupported", 400);
+    }
+    return { kind: "managed", engine: value.engine ?? "chromium" };
+  }
+  if (value.kind === "external_provider") {
+    assertOnlyKeys(value, [
+      "kind",
+      "providerId",
+      "placementId",
+      "authority",
+      "timeoutSeconds",
+      "stealth",
+    ]);
+    if (value.providerId !== "browserbase" && value.providerId !== "kernel") {
+      throw new ProtocolError("invalid_action", "external browser provider is unsupported", 400);
+    }
+    if (!isRecord(value.authority)) {
+      throw new ProtocolError("invalid_action", "external browser authority is invalid", 400);
+    }
+    assertOnlyKeys(value.authority, ["apiKey", "endpoint"]);
+    return {
+      kind: "external_provider",
+      providerId: value.providerId,
+      placementId: requireOpaqueId(value.placementId, "external browser placement id"),
+      authority: {
+        apiKey: requireString(
+          value.authority.apiKey,
+          "external browser provider credential",
+          8_192,
+        ),
+        ...(value.authority.endpoint === undefined
+          ? {}
+          : {
+              endpoint: requireHttpEndpoint(
+                value.authority.endpoint,
+                "external browser provider endpoint",
+              ),
+            }),
+      },
+      ...(value.timeoutSeconds === undefined
+        ? {}
+        : {
+            timeoutSeconds: requireInteger(
+              value.timeoutSeconds,
+              "external browser timeout",
+              1,
+              86_400,
+            ),
+          }),
+      ...(value.stealth === undefined
+        ? {}
+        : { stealth: requireBoolean(value.stealth, "external browser stealth") }),
+    };
   }
   if (value.kind !== "attached_chrome") {
     throw new ProtocolError("invalid_action", "browser transport is unsupported", 400);
@@ -1493,6 +1976,25 @@ function parseBrowserTransport(
     browserName: requireString(value.browserName, "attached browser name", 100),
     browserVersion: requireString(value.browserVersion, "attached browser version", 256),
   };
+}
+
+function requireHttpEndpoint(value: unknown, label: string): string {
+  const text = requireString(value, label, 16_384);
+  let parsed: URL;
+  try {
+    parsed = new URL(text);
+  } catch {
+    throw new ProtocolError("invalid_action", `${label} is invalid`, 400);
+  }
+  if (
+    (parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
+    parsed.username ||
+    parsed.password ||
+    parsed.hash
+  ) {
+    throw new ProtocolError("invalid_action", `${label} is invalid`, 400);
+  }
+  return parsed.toString().replace(/\/$/u, "");
 }
 
 function parseStateRestore(

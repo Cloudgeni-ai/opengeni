@@ -1,19 +1,30 @@
 import { createHash, randomUUID } from "node:crypto";
+import { resolve as resolvePath } from "node:path";
 import {
   BrowserActionCommand,
+  BrowserClipboard,
   BrowserDiagnosticBatch,
   BrowserDiagnosticEntry,
   BrowserDialog,
+  BrowserExternalAuthCommand,
+  BrowserExternalAuthResult,
   BrowserObservation,
+  BrowserProtectedAuthFillCommand,
   BrowserTarget,
   INTERACTION_MAX_DIAGNOSTIC_ENTRIES,
+  INTERACTION_MAX_CLIPBOARD_BYTES,
   INTERACTION_PROTOCOL_VERSION,
   type BrowserAction,
   type BrowserActionCommand as BrowserActionCommandValue,
+  type BrowserClipboard as BrowserClipboardValue,
   type BrowserDiagnosticBatch as BrowserDiagnosticBatchValue,
   type BrowserDiagnosticKind,
+  type BrowserExternalAuthCommand as BrowserExternalAuthCommandValue,
+  type BrowserExternalAuthResult as BrowserExternalAuthResultValue,
   type BrowserLocator,
   type BrowserObservation as BrowserObservationValue,
+  type BrowserProtectedAuthFillCommand as BrowserProtectedAuthFillCommandValue,
+  type BrowserProtectedAuthObservation as BrowserProtectedAuthObservationValue,
   type BrowserTarget as BrowserTargetValue,
 } from "@opengeni/contracts";
 import {
@@ -21,6 +32,7 @@ import {
   type BrowserInteractionDriver,
 } from "@opengeni/interaction";
 import {
+  namespaceCdpAccessibilityFrame,
   normalizeCdpAccessibilityTree,
   type CdpAccessibilityEntry,
   type CdpAccessibilitySnapshot,
@@ -40,18 +52,68 @@ import {
   type BrowserScreenshotOptions,
   type NormalizedBrowserFrameStreamOptions,
 } from "./media";
+import type {
+  BrowserDownloadBeginEvent,
+  BrowserDownloadProgressEvent,
+  BrowserDownloadProgressResult,
+} from "./downloads";
 import type { AgentBrowserJsonCommand } from "./runner";
 
 const DEFAULT_ACTION_TIMEOUT_MS = 30_000;
 const BROWSER_START_TIMEOUT_MS = 30_000;
+const TARGET_CREATION_SETTLE_TIMEOUT_MS = 5_000;
+const FRAME_FALLBACK_INTERVAL_MS = 750;
 const GRACEFUL_BROWSER_CLOSE_TIMEOUT_MS = 30_000;
 const NETWORK_IDLE_MS = 500;
+const PROTECTED_AUTH_AUTO_ADVANCE_TIMEOUT_MS = 3_000;
+const PROTECTED_AUTH_DIAGNOSTIC_QUIET_MS = 5_000;
+const MAX_FRAME_TREES = 512;
+const ACCESSIBILITY_FRAME_CONCURRENCY = 16;
+const ACCESSIBILITY_SNAPSHOT_ATTEMPTS = 3;
+type BrowserPermissionAction = Extract<BrowserAction, { type: "permission" }>;
+const CDP_PERMISSION_NAMES: Record<BrowserPermissionAction["permission"], string> = {
+  geolocation: "geolocation",
+  notifications: "notifications",
+  camera: "videoCapture",
+  microphone: "audioCapture",
+  midi: "midi",
+  midi_sysex: "midiSysex",
+  sensors: "sensors",
+  idle_detection: "idleDetection",
+  local_fonts: "localFonts",
+  window_management: "windowManagement",
+};
+const USER_AGENT_METADATA_EXPRESSION = `(async () => {
+  const data = navigator.userAgentData;
+  if (!data || typeof data.getHighEntropyValues !== "function") return null;
+  const high = await data.getHighEntropyValues([
+    "architecture", "bitness", "formFactors", "fullVersionList", "model",
+    "platformVersion", "wow64"
+  ]);
+  return {
+    brands: data.brands,
+    mobile: data.mobile,
+    platform: data.platform,
+    ...high,
+  };
+})()`;
 
 class DialogOpenedSignal extends Error {}
 
 export type BrowserCommandRunner = {
   run: AgentBrowserJsonCommand;
-  terminate?: () => Promise<void>;
+  daemonPid?: () => Promise<number | null>;
+  terminate?: (expectedPid?: number | null) => Promise<void>;
+  externalAuth?: (
+    command: BrowserExternalAuthCommand,
+    options?: { timeoutMs?: number; signal?: AbortSignal },
+  ) => Promise<BrowserExternalAuthDispatchResult>;
+};
+
+export type BrowserExternalAuthDispatchResult = {
+  result: BrowserExternalAuthResultValue;
+  /** The provider changed the physical browser behind its stable session. */
+  browserReconfigured: boolean;
 };
 
 export type BrowserCdpConnection = {
@@ -88,6 +150,11 @@ type MainFrame = {
   url: string;
 };
 
+type PageFrameTree = {
+  frame: MainFrame;
+  childFrames: PageFrameTree[];
+};
+
 type Diagnostics = {
   consoleErrorCount: number;
   failedRequestCount: number;
@@ -98,6 +165,9 @@ type Diagnostics = {
 type TargetScreencast = {
   options: NormalizedBrowserFrameStreamOptions;
   sequence: number;
+  lastFrameAt: number;
+  captureDeviceScaleFactor: number | null;
+  fallbackAbort: AbortController;
   subscriptions: Map<string, LatestBrowserFrameSubscription>;
   unsubscribe: () => void;
 };
@@ -119,9 +189,33 @@ type TargetState = {
   failedRequests: Set<string>;
   requests: Map<string, { method: string; url: string }>;
   lastNetworkActivityAt: number;
+  networkActivitySequence: number;
   screencast: TargetScreencast | null;
+  protectedAuthActive: boolean;
+  protectedAuthQuietUntil: number;
   tail: Promise<void>;
   unsubscribe: Array<() => void>;
+};
+
+type ProtectedElementMetadata = {
+  connected: boolean;
+  visible: boolean;
+  editable: boolean;
+  disabled: boolean;
+  readOnly: boolean;
+  tag: string;
+  inputType: string;
+  origin: string;
+  hasForm: boolean;
+  formAction: string | null;
+  formMethod: string | null;
+  submitType: string | null;
+};
+
+type ResolvedProtectedField = {
+  backendDOMNodeId: number;
+  purpose: BrowserProtectedAuthFillCommandValue["fields"][number]["purpose"];
+  value: string;
 };
 
 export type AgentBrowserDriverOptions = {
@@ -130,16 +224,64 @@ export type AgentBrowserDriverOptions = {
   runner: BrowserCommandRunner;
   now?: () => Date;
   createId?: () => string;
-  resolveWorkspaceFiles?: (workspaceFileIds: readonly string[]) => Promise<readonly string[]>;
+  resolveWorkspaceFiles?: (
+    operationId: string,
+    workspaceFileIds: readonly string[],
+  ) => Promise<readonly string[]>;
+  downloadDirectory?: string;
+  downloadEvents?: {
+    begin(event: BrowserDownloadBeginEvent): Promise<unknown>;
+    progress(event: BrowserDownloadProgressEvent): Promise<BrowserDownloadProgressResult>;
+    reject(guid: string, failureCode: string): Promise<void>;
+  };
   connect?: (endpoint: string) => Promise<BrowserCdpConnection>;
-  engine?: "chromium" | "chrome";
+  engine?: "chromium" | "chrome" | "lightpanda";
+  /** Whether the lifecycle runner or this controller-owned CDP connection
+   * creates page targets. Remote and non-Chromium CDP engines commonly scope
+   * targets to the connection that created them, so they require `cdp`. */
+  targetLifecycle?: "runner" | "cdp";
+  tabControl?: boolean;
+  frameStreaming?: boolean;
+  emulation?: BrowserSessionEmulation;
+  permissionControl?: boolean;
+};
+
+export type BrowserSessionEmulation = {
+  locale: string | null;
+  timezone: string | null;
+  geolocation: {
+    latitude: number;
+    longitude: number;
+    accuracyMeters: number;
+  } | null;
+};
+
+type BrowserUserAgentMetadata = {
+  brands?: Array<{ brand: string; version: string }>;
+  fullVersionList?: Array<{ brand: string; version: string }>;
+  platform: string;
+  platformVersion: string;
+  architecture: string;
+  model: string;
+  mobile: boolean;
+  bitness?: string;
+  wow64?: boolean;
+  formFactors?: string[];
 };
 
 export type BrowserRuntimeSnapshot = {
-  engine: "chromium" | "chrome";
+  engine: "chromium" | "chrome" | "lightpanda";
   engineVersion: string | null;
   tabs: Array<{ url: string; selected: boolean }>;
 };
+
+function hasBrowserEmulation(
+  value: BrowserSessionEmulation | undefined,
+): value is BrowserSessionEmulation {
+  return Boolean(
+    value && (value.locale !== null || value.timezone !== null || value.geolocation !== null),
+  );
+}
 
 /**
  * Target-scoped browser authority. agent-browser owns the pinned Chrome/profile
@@ -152,10 +294,21 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private readonly runner: BrowserCommandRunner;
   private readonly now: () => Date;
   private readonly createId: () => string;
-  private readonly engine: "chromium" | "chrome";
+  /** Private physical-process fence. Provider target/loader ids are not
+   * required to be globally unique and may repeat after crash recovery. */
+  private physicalGeneration: string;
+  private readonly engine: "chromium" | "chrome" | "lightpanda";
+  private readonly targetLifecycle: "runner" | "cdp";
+  private readonly tabControl: boolean;
+  private readonly frameStreaming: boolean;
+  private readonly emulation: BrowserSessionEmulation | null;
+  private readonly permissionControl: boolean;
+  private userAgentMetadataPromise: Promise<BrowserUserAgentMetadata> | null = null;
   private readonly resolveWorkspaceFiles:
-    | ((workspaceFileIds: readonly string[]) => Promise<readonly string[]>)
+    | ((operationId: string, workspaceFileIds: readonly string[]) => Promise<readonly string[]>)
     | undefined;
+  private readonly downloadDirectory: string | null;
+  private readonly downloadEvents: AgentBrowserDriverOptions["downloadEvents"];
   private readonly connect: (endpoint: string) => Promise<BrowserCdpConnection>;
   private readonly states = new Map<string, TargetState>();
   private readonly firstSeenAt = new Map<string, string>();
@@ -166,6 +319,15 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private userAgent = "";
   private browserProduct = "";
   private browserUnsubscribe: Array<() => void> = [];
+  private clipboardRevision = 0;
+  private clipboardText = "";
+  private clipboardSource: BrowserClipboardValue["source"] = "empty";
+  private clipboardSourceTargetId: string | null = null;
+  private clipboardUpdatedAt: string | null = null;
+  private readonly externalAuthResults = new Map<
+    string,
+    { digest: string; result: BrowserExternalAuthResultValue }
+  >();
   private started = false;
 
   constructor(options: AgentBrowserDriverOptions) {
@@ -174,18 +336,44 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     this.runner = options.runner;
     this.now = options.now ?? (() => new Date());
     this.createId = options.createId ?? randomUUID;
+    this.physicalGeneration = randomUUID();
     this.engine = options.engine ?? "chromium";
+    this.targetLifecycle = options.targetLifecycle ?? "runner";
+    this.tabControl = options.tabControl ?? true;
+    this.frameStreaming = options.frameStreaming ?? true;
+    this.emulation = hasBrowserEmulation(options.emulation) ? options.emulation : null;
+    this.permissionControl = options.permissionControl ?? true;
     this.resolveWorkspaceFiles = options.resolveWorkspaceFiles;
+    this.downloadDirectory = options.downloadDirectory
+      ? resolvePath(options.downloadDirectory)
+      : null;
+    this.downloadEvents = options.downloadEvents;
     this.connect = options.connect ?? (async (endpoint) => await CdpConnection.connect(endpoint));
   }
 
   async start(url?: string): Promise<BrowserObservationValue> {
-    const launched = await this.runner.run<{ url?: unknown; targetId?: unknown }>(
-      url === undefined ? ["open"] : ["open", url],
-      { timeoutMs: BROWSER_START_TIMEOUT_MS },
-    );
+    const deferNavigation = this.emulation !== null && url !== undefined && url !== "about:blank";
+    const launchUrl = this.emulation !== null ? "about:blank" : url;
     this.started = true;
-    const connection = await this.ensureConnection();
+    let connection: BrowserCdpConnection;
+    let launched: { url?: unknown; targetId?: unknown };
+    if (this.targetLifecycle === "cdp") {
+      connection = await this.ensureConnection();
+      const created = await connection.send<{ targetId?: unknown }>(
+        "Target.createTarget",
+        { url: launchUrl ?? "about:blank", background: true },
+        { timeoutMs: BROWSER_START_TIMEOUT_MS },
+      );
+      launched = { targetId: created.targetId, url: launchUrl ?? "about:blank" };
+    } else {
+      launched = await this.runner.run<{
+        url?: unknown;
+        targetId?: unknown;
+      }>(launchUrl === undefined ? ["open"] : ["open", launchUrl], {
+        timeoutMs: BROWSER_START_TIMEOUT_MS,
+      });
+      connection = await this.ensureConnection();
+    }
     const targets = await this.targetInfos(connection);
     const launchedUrl = typeof launched.url === "string" ? launched.url : url;
     const launchedTargetId = typeof launched.targetId === "string" ? launched.targetId : undefined;
@@ -196,11 +384,23 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       targets.find((candidate) => candidate.type === "page" && candidate.url === launchedUrl) ??
       visiblePageTargets(targets)[0];
     if (!target) throw new Error("managed browser launched without a page target");
-    await connection.send("Target.activateTarget", {
-      targetId: target.targetId,
-    });
     this.selectedTargetId = target.targetId;
+    if (deferNavigation) {
+      await this.navigate(await this.ensureTargetState(target), url);
+    }
     return await this.observe(target.targetId);
+  }
+
+  /** Bounded liveness probe for the supervisor's recovery path. It never
+   * starts or repairs the browser, preserving one recovery authority. */
+  async isAvailable(): Promise<boolean> {
+    if (!this.started || !this.connection) return false;
+    try {
+      await this.connection.send("Browser.getVersion", {}, { timeoutMs: 2_000 });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async listTargets(): Promise<BrowserTargetValue[]> {
@@ -213,25 +413,43 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   async openTarget(url = "about:blank"): Promise<BrowserObservationValue> {
+    if (!this.tabControl) {
+      throw new InteractionDefiniteDriverError(
+        "unsupported",
+        "this browser engine does not support multiple tabs",
+      );
+    }
     const connection = await this.ensureConnection();
-    const result = await connection.send<{ targetId?: unknown }>("Target.createTarget", { url });
-    if (typeof result.targetId !== "string") throw new Error("CDP did not return a target id");
-    await connection.send("Target.activateTarget", {
-      targetId: result.targetId,
+    const deferNavigation = this.emulation !== null && url !== "about:blank";
+    const result = await connection.send<{ targetId?: unknown }>("Target.createTarget", {
+      url: deferNavigation ? "about:blank" : url,
+      background: true,
     });
+    if (typeof result.targetId !== "string") throw new Error("CDP did not return a target id");
+    const createdTarget = await this.waitForCreatedTargetInfo(connection, result.targetId);
+    const createdState = await this.ensureTargetState(createdTarget);
+    await this.waitForCreatedTargetFrame(createdState);
     this.selectedTargetId = result.targetId;
+    if (deferNavigation) {
+      await this.navigate(createdState, url);
+    }
     return await this.observe(result.targetId);
   }
 
   async selectTarget(targetId: string): Promise<BrowserObservationValue> {
     const connection = await this.ensureConnection();
     await this.requireTargetInfo(connection, targetId);
-    await connection.send("Target.activateTarget", { targetId });
     this.selectedTargetId = targetId;
     return await this.observe(targetId);
   }
 
   async closeTarget(targetId: string): Promise<BrowserTargetValue[]> {
+    if (!this.tabControl) {
+      throw new InteractionDefiniteDriverError(
+        "unsupported",
+        "this browser engine does not support closing individual tabs",
+      );
+    }
     const connection = await this.ensureConnection();
     await this.requireTargetInfo(connection, targetId);
     await connection.send("Target.closeTarget", { targetId });
@@ -249,18 +467,28 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     this.connectionPromise = null;
     let closeError: unknown = null;
     let terminationError: unknown = null;
-    if (this.started) {
+    let daemonPid: number | null = null;
+    if (this.started && this.targetLifecycle === "runner" && this.runner.daemonPid) {
       try {
-        await this.runner.run(["close"], { timeoutMs: GRACEFUL_BROWSER_CLOSE_TIMEOUT_MS });
+        daemonPid = await this.runner.daemonPid();
+      } catch (error) {
+        terminationError = error;
+      }
+    }
+    if (this.started && this.targetLifecycle === "runner") {
+      try {
+        await this.runner.run(["close"], {
+          timeoutMs: GRACEFUL_BROWSER_CLOSE_TIMEOUT_MS,
+        });
       } catch (error) {
         closeError = error;
       }
     }
     this.started = false;
     try {
-      await this.runner.terminate?.();
+      await this.runner.terminate?.(daemonPid);
     } catch (error) {
-      terminationError = error;
+      terminationError ??= error;
     } finally {
       connection?.close();
     }
@@ -404,12 +632,19 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     targetId: string,
     options: BrowserFrameStreamOptions = {},
   ): Promise<BrowserFrameSubscription> {
+    if (!this.frameStreaming) {
+      throw new InteractionDefiniteDriverError(
+        "unsupported",
+        "this browser engine does not support live frame streaming",
+      );
+    }
     const normalized = normalizeFrameStreamOptions(options);
-    return await this.withTarget(targetId, async (state) => {
+    const configured = await this.withTarget(targetId, async (state) => {
       let screencast = state.screencast;
       if (screencast && !sameFrameOptions(screencast.options, normalized)) {
         throw new Error("browser target already has a differently configured frame stream");
       }
+      let created = false;
       if (!screencast) {
         const connection = await this.ensureConnection();
         const unsubscribe = connection.on(
@@ -420,10 +655,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         screencast = {
           options: normalized,
           sequence: 0,
+          lastFrameAt: 0,
+          captureDeviceScaleFactor: null,
+          fallbackAbort: new AbortController(),
           subscriptions: new Map(),
           unsubscribe,
         };
         state.screencast = screencast;
+        created = true;
         try {
           await this.sendTarget(state, "Page.startScreencast", {
             format: normalized.format,
@@ -446,13 +685,31 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         async () => await this.releaseFrameSubscription(targetId, subscriptionId),
       );
       screencast.subscriptions.set(subscriptionId, subscription);
-      return subscription;
+      return { screencast, subscription, created };
     });
+    try {
+      // Chromium does not emit Page.screencastFrame for a background tab in a
+      // headed browser. Seed every subscriber from the same target-scoped CDP
+      // surface so attachment readiness never depends on focusing Chrome.
+      await this.captureFallbackFrame(targetId, configured.screencast);
+    } catch (error) {
+      await configured.subscription.close().catch(() => undefined);
+      throw error;
+    }
+    if (configured.created) this.pollFallbackFrames(targetId, configured.screencast);
+    return configured.subscription;
   }
 
-  async dispatch(commandInput: BrowserActionCommandValue): Promise<BrowserObservationValue> {
+  async dispatch(
+    commandInput: BrowserActionCommandValue & { observationMode: "none" },
+  ): Promise<null>;
+  async dispatch(
+    commandInput: BrowserActionCommandValue & { observationMode?: "full" },
+  ): Promise<BrowserObservationValue>;
+  async dispatch(commandInput: BrowserActionCommandValue): Promise<BrowserObservationValue>;
+  async dispatch(commandInput: BrowserActionCommandValue): Promise<BrowserObservationValue | null> {
     const command = BrowserActionCommand.parse(commandInput);
-    return await this.withTarget(command.targetId, async (state, info) => {
+    const observation = await this.withTarget(command.targetId, async (state, info) => {
       if (!state.dialog) await this.refreshFrame(state);
       this.assertExpectedGenerations(command, state);
       const actions = command.action.type === "batch" ? command.action.actions : [command.action];
@@ -465,7 +722,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       let completedActions = 0;
       for (const action of actions) {
         try {
-          await this.dispatchAction(state, action);
+          await this.dispatchAction(state, action, command.operationId);
           completedActions += 1;
           if (state.dialog) {
             if (completedActions < actions.length) {
@@ -492,12 +749,200 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             : error;
         }
       }
+      if (command.observationMode === "none") return null;
       const currentInfo = await this.requireTargetInfo(
         await this.ensureConnection(),
         info.targetId,
       );
       return await this.observeUnlocked(state, currentInfo);
     });
+    this.refreshSubscribedFrame(command.targetId);
+    return observation;
+  }
+
+  readClipboard(): BrowserClipboardValue {
+    return BrowserClipboard.parse({
+      browserSessionId: this.browserSessionId,
+      controllerGeneration: this.controllerGeneration,
+      revision: this.clipboardRevision,
+      text: this.clipboardText,
+      source: this.clipboardSource,
+      sourceTargetId: this.clipboardSourceTargetId,
+      updatedAt: this.clipboardUpdatedAt,
+    });
+  }
+
+  /** Controller-private credential injection. This path returns no semantic
+   * tree and suppresses screenshots/diagnostics while values exist in-page. */
+  async protectedFill(
+    commandInput: BrowserProtectedAuthFillCommandValue,
+  ): Promise<BrowserProtectedAuthObservationValue> {
+    const command = BrowserProtectedAuthFillCommand.parse(commandInput);
+    return await this.withTarget(command.targetId, async (state, info) => {
+      if (state.dialog) {
+        throw new InteractionDefiniteDriverError(
+          "invalid_action",
+          "browser JavaScript dialog must be handled before protected fill",
+        );
+      }
+      await this.refreshFrame(state);
+      this.assertProtectedAuthGenerations(command, state);
+      state.protectedAuthActive = true;
+      const startingDocumentGeneration = state.documentGeneration;
+      const startingNetworkActivitySequence = state.networkActivitySequence;
+      const allowedOrigins = new Set(command.allowedOrigins);
+      const resolvedFields: ResolvedProtectedField[] = [];
+      let submitNodeId: number | null = null;
+      let submitted = false;
+      try {
+        for (const field of command.fields) {
+          const node = await this.resolveLocator(state, field.locator);
+          if (node.backendDOMNodeId === null) {
+            throw new InteractionDefiniteDriverError(
+              "invalid_action",
+              "protected-fill field has no DOM action target",
+            );
+          }
+          const metadata = await this.protectedElementMetadata(state, node.backendDOMNodeId);
+          this.assertProtectedField(metadata, field.purpose, allowedOrigins);
+          resolvedFields.push({
+            backendDOMNodeId: node.backendDOMNodeId,
+            purpose: field.purpose,
+            value: field.value,
+          });
+        }
+        if (command.submit.type === "click") {
+          const node = await this.resolveLocator(state, command.submit.locator);
+          if (node.backendDOMNodeId === null) {
+            throw new InteractionDefiniteDriverError(
+              "invalid_action",
+              "protected-fill submit control has no DOM action target",
+            );
+          }
+          const metadata = await this.protectedElementMetadata(state, node.backendDOMNodeId);
+          this.assertProtectedSubmit(metadata, allowedOrigins);
+          submitNodeId = node.backendDOMNodeId;
+        } else if (command.submit.type === "press" && command.submit.locator) {
+          const node = await this.resolveLocator(state, command.submit.locator);
+          if (node.backendDOMNodeId === null) {
+            throw new InteractionDefiniteDriverError(
+              "invalid_action",
+              "protected-fill key target has no DOM action target",
+            );
+          }
+          const metadata = await this.protectedElementMetadata(state, node.backendDOMNodeId);
+          this.assertProtectedSubmit(metadata, allowedOrigins);
+          submitNodeId = node.backendDOMNodeId;
+        }
+
+        // Locator resolution refreshes browser state. Recheck every causal
+        // fence once more immediately before the first value crosses CDP.
+        await this.refreshFrame(state);
+        this.assertProtectedAuthGenerations(command, state);
+        for (const field of resolvedFields) {
+          await this.focusNode(state, field.backendDOMNodeId);
+          await this.selectAllAndDelete(state);
+          await this.sendActionTarget(state, "Input.insertText", {
+            text: field.value,
+          });
+        }
+
+        if (command.submit.type === "click") {
+          await this.clickNode(state, submitNodeId, "left", 1);
+          submitted = true;
+        } else if (command.submit.type === "press") {
+          await this.focusNode(
+            state,
+            submitNodeId ?? resolvedFields.at(-1)?.backendDOMNodeId ?? null,
+          );
+          await this.pressKey(state, command.submit.key);
+          submitted = true;
+        }
+
+        const transitioned = await this.waitForProtectedAuthTransition(
+          state,
+          startingDocumentGeneration,
+          startingNetworkActivitySequence,
+        );
+        if (!submitted && !transitioned) {
+          await this.clearProtectedFields(state, resolvedFields);
+          throw new Error("protected fill without submit did not produce an observable transition");
+        }
+        if (!transitioned && state.documentGeneration === startingDocumentGeneration) {
+          await this.clearProtectedFields(state, resolvedFields);
+        }
+        const currentInfo = await this.requireTargetInfo(
+          await this.ensureConnection(),
+          info.targetId,
+        );
+        await this.refreshFrame(state);
+        return {
+          target: this.targetFromInfo(currentInfo, state),
+          status: submitted || transitioned ? "submitted" : "working",
+        };
+      } catch (error) {
+        await this.clearProtectedFields(state, resolvedFields).catch(() => undefined);
+        throw error;
+      } finally {
+        state.protectedAuthActive = false;
+        state.protectedAuthQuietUntil = Date.now() + PROTECTED_AUTH_DIAGNOSTIC_QUIET_MS;
+      }
+    });
+  }
+
+  /** Controller-private provider authentication. Provider credentials and
+   * hosted-login URLs never enter an ordinary browser action. */
+  async externalAuth(
+    commandInput: BrowserExternalAuthCommandValue,
+  ): Promise<BrowserExternalAuthResultValue> {
+    const command = BrowserExternalAuthCommand.parse(commandInput);
+    if (
+      command.browserSessionId !== this.browserSessionId ||
+      command.controllerGeneration !== this.controllerGeneration
+    ) {
+      throw new InteractionDefiniteDriverError(
+        "controller_stale",
+        "external authentication targets another browser controller",
+      );
+    }
+    if (!this.runner.externalAuth) {
+      throw new InteractionDefiniteDriverError(
+        "unsupported",
+        "this browser placement does not support provider-managed authentication",
+      );
+    }
+    const digest = createHash("sha256")
+      .update(
+        JSON.stringify({
+          browserSessionId: command.browserSessionId,
+          controllerGeneration: command.controllerGeneration,
+          authRunId: command.authRunId,
+          adapterId: command.adapterId,
+          connectionId: command.connectionId,
+          action: command.action,
+        }),
+      )
+      .digest("hex");
+    const replay = this.externalAuthResults.get(command.operationId);
+    if (replay) {
+      if (replay.digest !== digest) {
+        throw new InteractionDefiniteDriverError(
+          "operation_conflict",
+          "external-auth operation id was reused with another request",
+        );
+      }
+      return replay.result;
+    }
+    const dispatched = await this.runner.externalAuth(command);
+    const result = BrowserExternalAuthResult.parse(dispatched.result);
+    if (dispatched.browserReconfigured) {
+      await this.reconnectAfterProviderReconfiguration();
+    }
+    this.externalAuthResults.set(command.operationId, { digest, result });
+    while (this.externalAuthResults.size > 512) {
+      this.externalAuthResults.delete(this.externalAuthResults.keys().next().value as string);
+    }
+    return result;
   }
 
   private async ensureConnection(): Promise<BrowserCdpConnection> {
@@ -515,6 +960,18 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }>("Browser.getVersion");
       this.browserProduct = typeof version.product === "string" ? version.product : "";
       this.userAgent = typeof version.userAgent === "string" ? version.userAgent : "";
+      if (this.downloadDirectory) {
+        await connection.send("Browser.setDownloadBehavior", {
+          behavior: "allowAndName",
+          downloadPath: this.downloadDirectory,
+          eventsEnabled: true,
+        });
+      }
+      if (this.emulation?.geolocation) {
+        await connection.send("Browser.grantPermissions", {
+          permissions: ["geolocation"],
+        });
+      }
       await connection.send("Target.setDiscoverTargets", { discover: true });
       this.browserUnsubscribe.push(
         connection.on("Target.targetDestroyed", (event) => {
@@ -525,7 +982,21 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           const state = [...this.states.values()].find(
             (candidate) => candidate.frame.id === frameId,
           );
-          if (state) {
+          if (this.downloadEvents) {
+            const guid = typeof event.params.guid === "string" ? event.params.guid : "";
+            const suggestedFilename =
+              typeof event.params.suggestedFilename === "string"
+                ? event.params.suggestedFilename
+                : "download";
+            void this.downloadEvents
+              .begin({
+                guid,
+                targetId: state?.targetId ?? null,
+                suggestedFilename,
+              })
+              .catch(() => undefined);
+          }
+          if (state && !this.protectedAuthQuiet(state)) {
             state.diagnostics.downloadCount += 1;
             this.appendDiagnostic(state, {
               kind: "download",
@@ -538,6 +1009,34 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             });
           }
         }),
+        connection.on("Browser.downloadProgress", (event) => {
+          if (!this.downloadEvents) return;
+          const guid = typeof event.params.guid === "string" ? event.params.guid : "";
+          const state = event.params.state;
+          if (state !== "inProgress" && state !== "completed" && state !== "canceled") return;
+          const receivedBytes = event.params.receivedBytes;
+          const totalBytes = event.params.totalBytes;
+          if (typeof receivedBytes !== "number" || !Number.isSafeInteger(receivedBytes)) return;
+          if (
+            totalBytes !== undefined &&
+            (typeof totalBytes !== "number" || !Number.isSafeInteger(totalBytes))
+          ) {
+            return;
+          }
+          void this.downloadEvents
+            .progress({
+              guid,
+              state,
+              receivedBytes,
+              totalBytes: typeof totalBytes === "number" ? totalBytes : null,
+            })
+            .then(async ({ cancelReason }) => {
+              if (!cancelReason) return;
+              await connection.send("Browser.cancelDownload", { guid }).catch(() => undefined);
+              await this.downloadEvents?.reject(guid, cancelReason);
+            })
+            .catch(() => undefined);
+        }),
       );
       this.connection = connection;
       return connection;
@@ -548,6 +1047,38 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       this.connectionPromise = null;
       throw error;
     }
+  }
+
+  private async reconnectAfterProviderReconfiguration(): Promise<void> {
+    for (const unsubscribe of this.browserUnsubscribe.splice(0)) unsubscribe();
+    for (const targetId of [...this.states.keys()]) this.removeState(targetId);
+    this.firstSeenAt.clear();
+    this.attaching.clear();
+    this.selectedTargetId = null;
+    this.userAgentMetadataPromise = null;
+    this.userAgent = "";
+    this.browserProduct = "";
+    this.physicalGeneration = randomUUID();
+    const previous = this.connection;
+    this.connection = null;
+    this.connectionPromise = null;
+    previous?.close();
+
+    const connection = await this.ensureConnection();
+    let targets = visiblePageTargets(await this.targetInfos(connection));
+    if (targets.length === 0) {
+      const created = await connection.send<{ targetId?: unknown }>("Target.createTarget", {
+        url: "about:blank",
+        background: true,
+      });
+      if (typeof created.targetId !== "string") {
+        throw new Error("reconfigured browser did not return a target id");
+      }
+      targets = visiblePageTargets(await this.targetInfos(connection));
+    }
+    const selected = targets[0];
+    if (!selected) throw new Error("reconfigured browser has no page target");
+    this.selectedTargetId = selected.targetId;
   }
 
   private async withTarget<T>(
@@ -595,6 +1126,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       connection.send("Network.enable", {}, { sessionId }),
       connection.send("Log.enable", {}, { sessionId }),
     ]);
+    await this.applyEmulation(connection, sessionId);
     const frame = await this.mainFrame(sessionId);
     const state: TargetState = {
       targetId: info.targetId,
@@ -603,10 +1135,16 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       frame,
       documentGeneration: documentGeneration(
         this.controllerGeneration,
+        this.physicalGeneration,
         info.targetId,
         frame.loaderId,
       ),
-      frameGeneration: frameGeneration(this.controllerGeneration, info.targetId, frame.id),
+      frameGeneration: frameGeneration(
+        this.controllerGeneration,
+        this.physicalGeneration,
+        info.targetId,
+        frame.id,
+      ),
       accessibility: null,
       dialog: null,
       diagnostics: {
@@ -622,7 +1160,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       failedRequests: new Set(),
       requests: new Map(),
       lastNetworkActivityAt: Date.now(),
+      networkActivitySequence: 0,
       screencast: null,
+      protectedAuthActive: false,
+      protectedAuthQuietUntil: 0,
       tail: Promise.resolve(),
       unsubscribe: [],
     };
@@ -635,6 +1176,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       connection.on(
         "Runtime.consoleAPICalled",
         (event) => {
+          if (this.protectedAuthQuiet(state)) return;
           const level = consoleLevel(event.params.type);
           if (level === "error") state.diagnostics.consoleErrorCount += 1;
           this.appendDiagnostic(state, {
@@ -652,6 +1194,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       connection.on(
         "Runtime.exceptionThrown",
         (event) => {
+          if (this.protectedAuthQuiet(state)) return;
           state.diagnostics.pageErrorCount += 1;
           const details = isRecord(event.params.exceptionDetails)
             ? event.params.exceptionDetails
@@ -679,12 +1222,15 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
               state.inflightRequests.add(requestId);
             }
             const request = isRecord(event.params.request) ? event.params.request : {};
-            state.requests.set(requestId, {
-              method: boundedMethod(request.method),
-              url: boundedUrlField(request.url) ?? "about:blank",
-            });
-            boundMap(state.requests, 10_000);
+            if (!this.protectedAuthQuiet(state)) {
+              state.requests.set(requestId, {
+                method: boundedMethod(request.method),
+                url: boundedUrlField(request.url) ?? "about:blank",
+              });
+              boundMap(state.requests, 10_000);
+            }
           }
+          state.networkActivitySequence += 1;
           state.lastNetworkActivityAt = Date.now();
         },
         sessionId,
@@ -698,6 +1244,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             state.failedRequests.delete(requestId);
             state.requests.delete(requestId);
           }
+          state.networkActivitySequence += 1;
           state.lastNetworkActivityAt = Date.now();
         },
         sessionId,
@@ -717,6 +1264,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             state.failedRequests.delete(requestId);
             state.requests.delete(requestId);
           }
+          state.networkActivitySequence += 1;
           state.lastNetworkActivityAt = Date.now();
         },
         sessionId,
@@ -726,7 +1274,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         (event) => {
           const requestId = stringField(event.params, "requestId");
           const response = isRecord(event.params.response) ? event.params.response : null;
-          if (requestId && typeof response?.status === "number" && response.status >= 400) {
+          if (
+            !this.protectedAuthQuiet(state) &&
+            requestId &&
+            typeof response?.status === "number" &&
+            response.status >= 400
+          ) {
             this.recordFailedRequest(state, requestId, {
               message: `HTTP ${Math.trunc(response.status)}`,
               status: Math.trunc(response.status),
@@ -753,6 +1306,223 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     );
     this.states.set(info.targetId, state);
     return state;
+  }
+
+  private async applyEmulation(connection: BrowserCdpConnection, sessionId: string): Promise<void> {
+    if (!this.emulation) return;
+    if (this.emulation.locale) {
+      if (!this.userAgent) {
+        throw new Error("browser did not expose a user agent for locale emulation");
+      }
+      const userAgentMetadata = await this.normalUserAgentMetadata(connection, sessionId);
+      await this.applyInheritedStringOverride({
+        connection,
+        sessionId,
+        method: "Emulation.setLocaleOverride",
+        params: { locale: this.emulation.locale },
+        expression: "Intl.DateTimeFormat().resolvedOptions().locale",
+        expected: this.emulation.locale,
+        normalize: normalizeLocale,
+      });
+      await connection.send(
+        "Emulation.setUserAgentOverride",
+        {
+          userAgent: this.userAgent,
+          acceptLanguage: this.emulation.locale,
+          userAgentMetadata,
+        },
+        { sessionId },
+      );
+    }
+    if (this.emulation.timezone) {
+      await this.applyInheritedStringOverride({
+        connection,
+        sessionId,
+        method: "Emulation.setTimezoneOverride",
+        params: { timezoneId: this.emulation.timezone },
+        expression: "Intl.DateTimeFormat().resolvedOptions().timeZone",
+        expected: this.emulation.timezone,
+        normalize: (value) => value,
+      });
+    }
+    if (this.emulation.geolocation) {
+      await connection.send(
+        "Emulation.setGeolocationOverride",
+        {
+          latitude: this.emulation.geolocation.latitude,
+          longitude: this.emulation.geolocation.longitude,
+          accuracy: this.emulation.geolocation.accuracyMeters,
+        },
+        { sessionId },
+      );
+    }
+  }
+
+  private async applyInheritedStringOverride(options: {
+    connection: BrowserCdpConnection;
+    sessionId: string;
+    method: "Emulation.setLocaleOverride" | "Emulation.setTimezoneOverride";
+    params: Readonly<Record<string, unknown>>;
+    expression: string;
+    expected: string;
+    normalize: (value: string) => string;
+  }): Promise<void> {
+    try {
+      await options.connection.send(options.method, options.params, {
+        sessionId: options.sessionId,
+      });
+      return;
+    } catch (error) {
+      if (!(error instanceof CdpProtocolError) || error.method !== options.method) throw error;
+      const current = await options.connection.send<{
+        result?: unknown;
+        exceptionDetails?: unknown;
+      }>(
+        "Runtime.evaluate",
+        { expression: options.expression, returnByValue: true },
+        { sessionId: options.sessionId },
+      );
+      const value = isRecord(current.result) ? current.result.value : null;
+      if (
+        current.exceptionDetails ||
+        typeof value !== "string" ||
+        options.normalize(value) !== options.normalize(options.expected)
+      ) {
+        throw error;
+      }
+    }
+  }
+
+  private async normalUserAgentMetadata(
+    connection: BrowserCdpConnection,
+    sessionId: string,
+  ): Promise<BrowserUserAgentMetadata> {
+    if (!this.userAgentMetadataPromise) {
+      this.userAgentMetadataPromise = this.loadNormalUserAgentMetadata(connection, sessionId);
+    }
+    try {
+      return await this.userAgentMetadataPromise;
+    } catch (error) {
+      this.userAgentMetadataPromise = null;
+      throw error;
+    }
+  }
+
+  private async loadNormalUserAgentMetadata(
+    connection: BrowserCdpConnection,
+    sessionId: string,
+  ): Promise<BrowserUserAgentMetadata> {
+    const evaluated = await connection.send<{
+      result?: unknown;
+      exceptionDetails?: unknown;
+    }>(
+      "Runtime.evaluate",
+      {
+        expression: USER_AGENT_METADATA_EXPRESSION,
+        awaitPromise: true,
+        returnByValue: true,
+      },
+      { sessionId },
+    );
+    if (
+      !evaluated.exceptionDetails &&
+      isRecord(evaluated.result) &&
+      evaluated.result.value !== null &&
+      evaluated.result.value !== undefined
+    ) {
+      return parseUserAgentMetadata(evaluated.result.value);
+    }
+    return await this.loadUserAgentMetadataFromHiddenTarget(connection);
+  }
+
+  private async loadUserAgentMetadataFromHiddenTarget(
+    connection: BrowserCdpConnection,
+  ): Promise<BrowserUserAgentMetadata> {
+    const created = await connection.send<{ targetId?: unknown }>("Target.createTarget", {
+      url: "about:blank",
+      hidden: true,
+    });
+    if (typeof created.targetId !== "string") {
+      throw new Error("browser could not create a hidden metadata target");
+    }
+    let metadata: BrowserUserAgentMetadata | null = null;
+    let metadataError: unknown = null;
+    try {
+      const attached = await connection.send<{ sessionId?: unknown }>("Target.attachToTarget", {
+        targetId: created.targetId,
+        flatten: true,
+      });
+      if (typeof attached.sessionId !== "string") {
+        throw new Error("browser could not attach its hidden metadata target");
+      }
+      await Promise.all([
+        connection.send("Page.enable", {}, { sessionId: attached.sessionId }),
+        connection.send("Runtime.enable", {}, { sessionId: attached.sessionId }),
+      ]);
+      await this.navigateForUserAgentMetadata(connection, attached.sessionId, "chrome://version/");
+      const evaluated = await connection.send<{
+        result?: unknown;
+        exceptionDetails?: unknown;
+      }>(
+        "Runtime.evaluate",
+        {
+          expression: USER_AGENT_METADATA_EXPRESSION,
+          awaitPromise: true,
+          returnByValue: true,
+        },
+        { sessionId: attached.sessionId },
+      );
+      if (evaluated.exceptionDetails || !isRecord(evaluated.result)) {
+        throw new Error("browser could not preserve User-Agent metadata for locale emulation");
+      }
+      metadata = parseUserAgentMetadata(evaluated.result.value);
+    } catch (error) {
+      metadataError = error;
+    }
+    let closeError: unknown = null;
+    try {
+      const closed = await connection.send<{ success?: unknown }>("Target.closeTarget", {
+        targetId: created.targetId,
+      });
+      if (closed.success !== true) {
+        throw new Error("browser could not close its hidden metadata target");
+      }
+    } catch (error) {
+      closeError = error;
+    }
+    if (metadataError && closeError) {
+      throw new AggregateError(
+        [metadataError, closeError],
+        "browser metadata discovery and cleanup both failed",
+      );
+    }
+    if (metadataError) throw metadataError;
+    if (closeError) throw closeError;
+    if (!metadata) throw new Error("browser returned no User-Agent metadata");
+    return metadata;
+  }
+
+  private async navigateForUserAgentMetadata(
+    connection: BrowserCdpConnection,
+    sessionId: string,
+    url: string,
+  ): Promise<void> {
+    const loaded = connection.waitForEvent("Page.loadEventFired", {
+      sessionId,
+      timeoutMs: 5_000,
+    });
+    let navigation: { errorText?: unknown };
+    try {
+      navigation = await connection.send("Page.navigate", { url }, { sessionId });
+    } catch (error) {
+      await loaded.catch(() => undefined);
+      throw error;
+    }
+    if (typeof navigation.errorText === "string" && navigation.errorText) {
+      await loaded.catch(() => undefined);
+      throw new Error(`browser metadata navigation failed: ${navigation.errorText}`);
+    }
+    await loaded;
   }
 
   private async observeUnlocked(
@@ -787,22 +1557,71 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   private async refreshAccessibility(state: TargetState): Promise<CdpAccessibilitySnapshot> {
+    for (let attempt = 0; attempt < ACCESSIBILITY_SNAPSHOT_ATTEMPTS; attempt += 1) {
+      const before = flattenFrameTree(await this.frameTree(state.sessionId));
+      const nodes = await this.collectAccessibilityFrames(state.sessionId, before);
+      const after = flattenFrameTree(await this.frameTree(state.sessionId));
+      if (frameTreeFingerprint(before) !== frameTreeFingerprint(after)) {
+        continue;
+      }
+      const accessibility = normalizeCdpAccessibilityTree({
+        nodes,
+        controllerGeneration: this.controllerGeneration,
+        targetId: state.targetId,
+        documentGeneration: state.documentGeneration,
+      });
+      state.accessibility = accessibility;
+      return accessibility;
+    }
+    throw new Error("browser frame tree did not settle for a bounded accessibility observation");
+  }
+
+  private async collectAccessibilityFrames(
+    sessionId: string,
+    frames: readonly MainFrame[],
+  ): Promise<CdpAxNode[]> {
+    const nodes: CdpAxNode[] = [];
+    for (let offset = 0; offset < frames.length; offset += ACCESSIBILITY_FRAME_CONCURRENCY) {
+      const batch = frames.slice(offset, offset + ACCESSIBILITY_FRAME_CONCURRENCY);
+      const results = await Promise.allSettled(
+        batch.map(async (frame) => ({
+          frame,
+          nodes: await this.accessibilityFrame(sessionId, frame),
+        })),
+      );
+      const hasFailure = results.some((result) => result.status === "rejected");
+      const current = hasFailure
+        ? new Map(
+            flattenFrameTree(await this.frameTree(sessionId)).map((frame) => [frame.id, frame]),
+          )
+        : null;
+      for (const [index, result] of results.entries()) {
+        if (result.status === "fulfilled") {
+          nodes.push(...result.value.nodes);
+          continue;
+        }
+        const currentFrame = current?.get(batch[index]!.id);
+        if (currentFrame) nodes.push(...(await this.accessibilityFrame(sessionId, currentFrame)));
+      }
+    }
+    return nodes;
+  }
+
+  private async accessibilityFrame(sessionId: string, frame: MainFrame): Promise<CdpAxNode[]> {
     const connection = await this.ensureConnection();
     const response = await connection.send<{ nodes?: unknown }>(
       "Accessibility.getFullAXTree",
-      {},
-      { sessionId: state.sessionId },
+      { frameId: frame.id },
+      { sessionId },
     );
-    if (!Array.isArray(response.nodes))
+    if (!Array.isArray(response.nodes)) {
       throw new Error("CDP returned an invalid accessibility tree");
-    const accessibility = normalizeCdpAccessibilityTree({
-      nodes: response.nodes as CdpAxNode[],
-      controllerGeneration: this.controllerGeneration,
-      targetId: state.targetId,
-      documentGeneration: state.documentGeneration,
-    });
-    state.accessibility = accessibility;
-    return accessibility;
+    }
+    return namespaceCdpAccessibilityFrame(
+      frame.id,
+      response.nodes as CdpAxNode[],
+      `${frame.id}\0${frame.loaderId}`,
+    );
   }
 
   private async refreshFrame(state: TargetState): Promise<void> {
@@ -811,10 +1630,16 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       state.frame = frame;
       state.documentGeneration = documentGeneration(
         this.controllerGeneration,
+        this.physicalGeneration,
         state.targetId,
         frame.loaderId,
       );
-      state.frameGeneration = frameGeneration(this.controllerGeneration, state.targetId, frame.id);
+      state.frameGeneration = frameGeneration(
+        this.controllerGeneration,
+        this.physicalGeneration,
+        state.targetId,
+        frame.id,
+      );
       state.accessibility = null;
     } else {
       state.frame = frame;
@@ -822,6 +1647,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   private async mainFrame(sessionId: string): Promise<MainFrame> {
+    return (await this.frameTree(sessionId)).frame;
+  }
+
+  private async frameTree(sessionId: string): Promise<PageFrameTree> {
     const connection = await this.ensureConnection();
     const response = await connection.send<{ frameTree?: unknown }>(
       "Page.getFrameTree",
@@ -831,15 +1660,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     if (!isRecord(response.frameTree) || !isRecord(response.frameTree.frame)) {
       throw new Error("CDP returned an invalid frame tree");
     }
-    const frame = response.frameTree.frame;
-    if (
-      typeof frame.id !== "string" ||
-      typeof frame.loaderId !== "string" ||
-      typeof frame.url !== "string"
-    ) {
-      throw new Error("CDP returned an invalid main frame");
-    }
-    return { id: frame.id, loaderId: frame.loaderId, url: frame.url };
+    return parseFrameTree(response.frameTree);
   }
 
   private async layoutMetrics(state: TargetState): Promise<{
@@ -898,6 +1719,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         this.failScreencast(state, transportError(error));
       });
     }
+    if (state.protectedAuthActive) return;
     try {
       const metadata = isRecord(event.params.metadata) ? event.params.metadata : {};
       const data = decodeBoundedBase64Image(event.params.data);
@@ -919,10 +1741,111 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         scrollX: numberField(metadata, "scrollOffsetX") ?? 0,
         scrollY: numberField(metadata, "scrollOffsetY") ?? 0,
       });
+      screencast.lastFrameAt = Date.now();
       for (const subscription of screencast.subscriptions.values()) subscription.push(frame);
     } catch (error) {
       this.failScreencast(state, transportError(error));
     }
+  }
+
+  private async captureFallbackFrame(targetId: string, expected: TargetScreencast): Promise<void> {
+    await this.withTarget(targetId, async (state) => {
+      if (state.screencast !== expected || this.protectedAuthQuiet(state)) return;
+      await this.refreshFrame(state);
+      const metrics = await this.layoutMetrics(state);
+      const viewport = metrics.viewport;
+      const estimatedDeviceScaleFactor = expected.captureDeviceScaleFactor ?? 1;
+      let scale = Math.min(
+        1,
+        expected.options.maxWidth / (viewport.width * estimatedDeviceScaleFactor),
+        expected.options.maxHeight / (viewport.height * estimatedDeviceScaleFactor),
+      );
+      let data: Uint8Array<ArrayBufferLike> = new Uint8Array();
+      let dimensions = { width: 0, height: 0 };
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const response = await this.sendTarget<{ data?: unknown }>(
+          state,
+          "Page.captureScreenshot",
+          {
+            format: expected.options.format,
+            ...(expected.options.format === "jpeg" ? { quality: expected.options.quality } : {}),
+            fromSurface: true,
+            captureBeyondViewport: false,
+            clip: {
+              x: viewport.x,
+              y: viewport.y,
+              width: viewport.width,
+              height: viewport.height,
+              scale,
+            },
+          },
+        );
+        data = decodeBoundedBase64Image(response.data);
+        dimensions = imageDimensions(data, expected.options.format);
+        if (
+          dimensions.width <= expected.options.maxWidth &&
+          dimensions.height <= expected.options.maxHeight
+        ) {
+          break;
+        }
+        scale *= Math.min(
+          expected.options.maxWidth / dimensions.width,
+          expected.options.maxHeight / dimensions.height,
+        );
+      }
+      if (
+        dimensions.width > expected.options.maxWidth ||
+        dimensions.height > expected.options.maxHeight
+      ) {
+        throw new Error("browser screenshot could not honor the frame dimension bound");
+      }
+      if (state.screencast !== expected || this.protectedAuthQuiet(state)) return;
+      expected.captureDeviceScaleFactor = finiteScale(dimensions.width / (viewport.width * scale));
+      const frame = this.imageFrame({
+        state,
+        sequence: ++expected.sequence,
+        format: expected.options.format,
+        data,
+        width: dimensions.width,
+        height: dimensions.height,
+        deviceScaleFactor: finiteScale(dimensions.width / viewport.width),
+        scrollX: viewport.x,
+        scrollY: viewport.y,
+      });
+      expected.lastFrameAt = Date.now();
+      for (const subscription of expected.subscriptions.values()) subscription.push(frame);
+    });
+  }
+
+  private pollFallbackFrames(targetId: string, expected: TargetScreencast): void {
+    void (async () => {
+      while (!expected.fallbackAbort.signal.aborted) {
+        await delay(FRAME_FALLBACK_INTERVAL_MS);
+        if (expected.fallbackAbort.signal.aborted) return;
+        const state = this.states.get(targetId);
+        if (!state || state.screencast !== expected) return;
+        if (Date.now() - expected.lastFrameAt < FRAME_FALLBACK_INTERVAL_MS) continue;
+        try {
+          await this.captureFallbackFrame(targetId, expected);
+        } catch (error) {
+          const current = this.states.get(targetId);
+          if (current?.screencast === expected) {
+            this.failScreencast(current, transportError(error));
+          }
+          return;
+        }
+      }
+    })();
+  }
+
+  private refreshSubscribedFrame(targetId: string): void {
+    const state = this.states.get(targetId);
+    const screencast = state?.screencast;
+    if (!screencast || Date.now() - screencast.lastFrameAt < 50) return;
+    void this.captureFallbackFrame(targetId, screencast).catch(() => {
+      // The regular fallback loop owns recovery. This eager capture exists only
+      // to make an accepted input visible without waiting for its idle cadence.
+    });
   }
 
   private async releaseFrameSubscription(targetId: string, subscriptionId: string): Promise<void> {
@@ -934,6 +1857,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       screencast.subscriptions.delete(subscriptionId);
       if (screencast.subscriptions.size > 0) return;
       screencast.unsubscribe();
+      screencast.fallbackAbort.abort();
       state.screencast = null;
       await this.sendTarget(state, "Page.stopScreencast");
     });
@@ -949,11 +1873,227 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     if (!screencast) return;
     state.screencast = null;
     screencast.unsubscribe();
+    screencast.fallbackAbort.abort();
     for (const subscription of screencast.subscriptions.values()) subscription.fail(error);
     screencast.subscriptions.clear();
   }
 
-  private async dispatchAction(state: TargetState, action: BrowserAction): Promise<void> {
+  private assertProtectedAuthGenerations(
+    command: BrowserProtectedAuthFillCommandValue,
+    state: TargetState,
+  ): void {
+    if (command.browserSessionId !== this.browserSessionId) {
+      throw new InteractionDefiniteDriverError(
+        "resource_not_found",
+        "protected fill targets another browser session",
+      );
+    }
+    if (command.controllerGeneration !== this.controllerGeneration) {
+      throw new InteractionDefiniteDriverError(
+        "controller_stale",
+        "protected fill targets an earlier browser controller",
+      );
+    }
+    if (command.expectedTargetGeneration !== this.targetGeneration(state.targetId)) {
+      throw new InteractionDefiniteDriverError(
+        "target_stale",
+        "protected fill targets an earlier browser target",
+      );
+    }
+    if (command.expectedDocumentGeneration !== state.documentGeneration) {
+      throw new InteractionDefiniteDriverError(
+        "document_stale",
+        "protected fill targets an earlier browser document",
+      );
+    }
+    if (command.expectedFrameId !== state.frameGeneration) {
+      throw new InteractionDefiniteDriverError(
+        "frame_stale",
+        "protected fill targets an earlier browser frame",
+      );
+    }
+  }
+
+  private async protectedElementMetadata(
+    state: TargetState,
+    backendDOMNodeId: number,
+  ): Promise<ProtectedElementMetadata> {
+    const value = await this.callOnNode(
+      state,
+      backendDOMNodeId,
+      PROTECTED_ELEMENT_METADATA_FUNCTION,
+      [],
+    );
+    if (!isRecord(value)) throw new Error("browser returned invalid protected-field metadata");
+    const metadata: ProtectedElementMetadata = {
+      connected: value.connected === true,
+      visible: value.visible === true,
+      editable: value.editable === true,
+      disabled: value.disabled === true,
+      readOnly: value.readOnly === true,
+      tag: typeof value.tag === "string" ? value.tag : "",
+      inputType: typeof value.inputType === "string" ? value.inputType : "",
+      origin: typeof value.origin === "string" ? value.origin : "",
+      hasForm: value.hasForm === true,
+      formAction: typeof value.formAction === "string" ? value.formAction : null,
+      formMethod: typeof value.formMethod === "string" ? value.formMethod : null,
+      submitType: typeof value.submitType === "string" ? value.submitType : null,
+    };
+    if (
+      metadata.tag.length === 0 ||
+      metadata.origin.length === 0 ||
+      Buffer.byteLength(metadata.origin) > 16_384 ||
+      (metadata.formAction !== null && Buffer.byteLength(metadata.formAction) > 16_384)
+    ) {
+      throw new Error("browser returned invalid protected-field metadata");
+    }
+    return metadata;
+  }
+
+  private assertProtectedField(
+    metadata: ProtectedElementMetadata,
+    purpose: ResolvedProtectedField["purpose"],
+    allowedOrigins: ReadonlySet<string>,
+  ): void {
+    this.assertProtectedElement(metadata, allowedOrigins);
+    if (!metadata.editable || metadata.disabled || metadata.readOnly) {
+      throw new InteractionDefiniteDriverError(
+        "invalid_action",
+        "protected-fill field is not editable",
+      );
+    }
+    const ordinaryInputTypes = new Set(["email", "number", "search", "tel", "text", "url"]);
+    const acceptsOrdinaryText =
+      metadata.tag === "textarea" ||
+      metadata.inputType === "contenteditable" ||
+      ordinaryInputTypes.has(metadata.inputType);
+    if (purpose === "password" && metadata.inputType !== "password") {
+      throw new InteractionDefiniteDriverError(
+        "invalid_action",
+        "password authority requires a password field",
+      );
+    }
+    if (purpose === "identifier" && !acceptsOrdinaryText) {
+      throw new InteractionDefiniteDriverError(
+        "invalid_action",
+        "identifier authority requires a visible text field",
+      );
+    }
+    if (
+      (purpose === "secret" || purpose === "totp") &&
+      metadata.inputType !== "password" &&
+      !acceptsOrdinaryText
+    ) {
+      throw new InteractionDefiniteDriverError(
+        "invalid_action",
+        "secret authority requires a visible text or password field",
+      );
+    }
+    if (purpose !== "identifier" && metadata.hasForm && metadata.formMethod === "get") {
+      throw new InteractionDefiniteDriverError(
+        "permission_denied",
+        "protected secrets cannot be submitted through a GET form",
+      );
+    }
+  }
+
+  private assertProtectedSubmit(
+    metadata: ProtectedElementMetadata,
+    allowedOrigins: ReadonlySet<string>,
+  ): void {
+    this.assertProtectedElement(metadata, allowedOrigins);
+    if (metadata.disabled) {
+      throw new InteractionDefiniteDriverError(
+        "invalid_action",
+        "protected-fill submit target is disabled",
+      );
+    }
+    if (metadata.hasForm && metadata.formMethod === "get" && metadata.submitType !== "button") {
+      throw new InteractionDefiniteDriverError(
+        "permission_denied",
+        "protected secrets cannot be submitted through a GET form",
+      );
+    }
+  }
+
+  private assertProtectedElement(
+    metadata: ProtectedElementMetadata,
+    allowedOrigins: ReadonlySet<string>,
+  ): void {
+    if (!metadata.connected || !metadata.visible) {
+      throw new InteractionDefiniteDriverError(
+        "invalid_action",
+        "protected-fill target is not visible and connected",
+      );
+    }
+    if (!allowedOrigins.has(metadata.origin)) {
+      throw new InteractionDefiniteDriverError(
+        "permission_denied",
+        "protected-fill target frame origin is not authorized",
+      );
+    }
+    if (metadata.formAction !== null) {
+      let actionOrigin: string;
+      try {
+        actionOrigin = new URL(metadata.formAction).origin;
+      } catch {
+        throw new InteractionDefiniteDriverError(
+          "invalid_action",
+          "protected-fill form action is invalid",
+        );
+      }
+      if (!allowedOrigins.has(actionOrigin)) {
+        throw new InteractionDefiniteDriverError(
+          "permission_denied",
+          "protected-fill form action origin is not authorized",
+        );
+      }
+    }
+  }
+
+  private async waitForProtectedAuthTransition(
+    state: TargetState,
+    startingDocumentGeneration: string,
+    startingNetworkActivitySequence: number,
+  ): Promise<boolean> {
+    const deadline = Date.now() + PROTECTED_AUTH_AUTO_ADVANCE_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      await this.refreshFrame(state);
+      if (state.documentGeneration !== startingDocumentGeneration) return true;
+      if (
+        state.networkActivitySequence > startingNetworkActivitySequence &&
+        state.inflightRequests.size === 0 &&
+        Date.now() - state.lastNetworkActivityAt >= NETWORK_IDLE_MS
+      ) {
+        return true;
+      }
+      await delay(50);
+    }
+    return false;
+  }
+
+  private async clearProtectedFields(
+    state: TargetState,
+    fields: readonly ResolvedProtectedField[],
+  ): Promise<void> {
+    const failures: unknown[] = [];
+    for (const field of fields) {
+      try {
+        await this.callOnNode(state, field.backendDOMNodeId, CLEAR_PROTECTED_VALUE_FUNCTION, []);
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    if (failures.length > 0) {
+      throw new AggregateError(failures, "protected fields could not be cleared safely");
+    }
+  }
+
+  private async dispatchAction(
+    state: TargetState,
+    action: BrowserAction,
+    operationId: string,
+  ): Promise<void> {
     switch (action.type) {
       case "navigate":
         await this.navigate(state, action.url);
@@ -1083,7 +2223,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             "this browser placement cannot resolve workspace files for upload",
           );
         }
-        const paths = await this.resolveWorkspaceFiles(action.workspaceFileIds);
+        const paths = await this.resolveWorkspaceFiles(operationId, action.workspaceFileIds);
         if (paths.length !== action.workspaceFileIds.length) {
           throw new InteractionDefiniteDriverError(
             "resource_not_found",
@@ -1097,9 +2237,154 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         });
         return;
       }
+      case "clipboard":
+        await this.dispatchClipboardAction(state, action);
+        return;
+      case "permission":
+        await this.dispatchPermissionAction(state, action);
+        return;
       case "wait":
         await this.waitForCondition(state, action);
         return;
+    }
+  }
+
+  private async dispatchClipboardAction(
+    state: TargetState,
+    action: Extract<BrowserAction, { type: "clipboard" }>,
+  ): Promise<void> {
+    if (action.operation === "clear") {
+      this.setClipboard("", "clear", state.targetId);
+      return;
+    }
+    if (action.operation === "write") {
+      if (action.text === undefined) {
+        throw new InteractionDefiniteDriverError(
+          "invalid_action",
+          "browser clipboard write requires text",
+        );
+      }
+      this.setClipboard(action.text, "write", state.targetId);
+      return;
+    }
+    if (action.operation === "copy") {
+      const text = await this.copyBrowserText(state, action.locator, action.content ?? "selection");
+      this.setClipboard(text, "copy", state.targetId);
+      return;
+    }
+    const text = action.text ?? this.clipboardText;
+    if (action.text !== undefined) this.setClipboard(text, "paste", state.targetId);
+    if (action.locator) {
+      const node = await this.resolveLocator(state, action.locator);
+      await this.focusNode(state, node.backendDOMNodeId);
+    }
+    if (text) {
+      await this.sendActionTarget(state, "Input.insertText", { text });
+    }
+  }
+
+  private async dispatchPermissionAction(
+    state: TargetState,
+    action: BrowserPermissionAction,
+  ): Promise<void> {
+    if (!this.permissionControl) {
+      throw new InteractionDefiniteDriverError(
+        "unsupported",
+        "this browser placement cannot set web permissions programmatically",
+      );
+    }
+    const origin = webOrigin(state.frame.url);
+    try {
+      await (
+        await this.ensureConnection()
+      ).send("Browser.setPermission", {
+        permission: { name: CDP_PERMISSION_NAMES[action.permission] },
+        setting: action.setting,
+        origin,
+      });
+    } catch (error) {
+      if (error instanceof CdpProtocolError) {
+        throw new InteractionDefiniteDriverError(
+          error.code === -32_601 ? "unsupported" : "invalid_action",
+          error.code === -32_601
+            ? "this browser engine does not support programmatic permission control"
+            : "the browser rejected this permission setting",
+        );
+      }
+      throw error;
+    }
+  }
+
+  private async copyBrowserText(
+    state: TargetState,
+    locator: BrowserLocator | undefined,
+    content: "selection" | "value" | "text",
+  ): Promise<string> {
+    let value: unknown;
+    if (locator) {
+      const node = await this.resolveLocator(state, locator);
+      value = await this.callOnNode(state, node.backendDOMNodeId, COPY_BROWSER_TEXT_FUNCTION, [
+        { value: content },
+      ]);
+    } else {
+      value = await this.evaluateAction(
+        state,
+        `(${COPY_ACTIVE_BROWSER_TEXT_FUNCTION})(${json(content)})`,
+      );
+      if (!isRecord(value) || (value.ok !== true && value.error !== "protected")) {
+        const accessibility = await this.refreshAccessibility(state);
+        const focused = accessibility.focusedRef
+          ? accessibility.entriesByRef.get(accessibility.focusedRef)
+          : null;
+        if (focused?.backendDOMNodeId) {
+          value = await this.callOnNode(
+            state,
+            focused.backendDOMNodeId,
+            COPY_BROWSER_TEXT_FUNCTION,
+            [{ value: content }],
+          );
+        }
+      }
+    }
+    if (!isRecord(value) || value.ok !== true || typeof value.text !== "string") {
+      const reason =
+        isRecord(value) && typeof value.error === "string" ? value.error : "unavailable";
+      throw new InteractionDefiniteDriverError(
+        reason === "protected" ? "permission_denied" : "invalid_action",
+        reason === "protected"
+          ? "browser clipboard cannot copy a protected field"
+          : "browser clipboard source is unavailable",
+      );
+    }
+    this.assertClipboardText(value.text);
+    return value.text;
+  }
+
+  private setClipboard(
+    text: string,
+    source: Exclude<BrowserClipboardValue["source"], "empty">,
+    targetId: string,
+  ): void {
+    this.assertClipboardText(text);
+    if (this.clipboardRevision >= Number.MAX_SAFE_INTEGER) {
+      throw new InteractionDefiniteDriverError(
+        "resource_unavailable",
+        "browser clipboard revision capacity is exhausted",
+      );
+    }
+    this.clipboardRevision += 1;
+    this.clipboardText = text;
+    this.clipboardSource = source;
+    this.clipboardSourceTargetId = targetId;
+    this.clipboardUpdatedAt = this.timestamp();
+  }
+
+  private assertClipboardText(text: string): void {
+    if (Buffer.byteLength(text, "utf8") > INTERACTION_MAX_CLIPBOARD_BYTES) {
+      throw new InteractionDefiniteDriverError(
+        "invalid_action",
+        "browser clipboard text exceeds its UTF-8 byte envelope",
+      );
     }
   }
 
@@ -1285,10 +2570,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       y: ys.reduce((sum, value) => sum + value, 0) / ys.length,
     };
     if (requireHit) {
-      const hit = await this.callOnNode(state, backendDOMNodeId, HIT_TEST_FUNCTION, [
-        { value: point.x },
-        { value: point.y },
-      ]);
+      const hit = await this.callOnNode(state, backendDOMNodeId, HIT_TEST_FUNCTION, []);
       if (hit !== true) {
         throw new InteractionDefiniteDriverError(
           "invalid_action",
@@ -1303,6 +2585,21 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private async focusNode(state: TargetState, backendDOMNodeId: number | null): Promise<void> {
     if (backendDOMNodeId === null) {
       throw new InteractionDefiniteDriverError("invalid_action", "browser node cannot be focused");
+    }
+    if (this.engine === "lightpanda") {
+      const focused = await this.callOnNode(
+        state,
+        backendDOMNodeId,
+        "function () { this.focus(); return document.activeElement === this; }",
+        [],
+      );
+      if (focused !== true) {
+        throw new InteractionDefiniteDriverError(
+          "invalid_action",
+          "browser node cannot be focused",
+        );
+      }
+      return;
     }
     await this.sendActionTarget(state, "DOM.focus", {
       backendNodeId: backendDOMNodeId,
@@ -1773,7 +3070,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   private targetGeneration(targetId: string): string {
-    return generation("target", this.browserSessionId, this.controllerGeneration, targetId);
+    return generation(
+      "target",
+      this.browserSessionId,
+      this.controllerGeneration,
+      this.physicalGeneration,
+      targetId,
+    );
   }
 
   private async targetInfos(connection: BrowserCdpConnection): Promise<TargetInfo[]> {
@@ -1796,6 +3099,47 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     return info;
   }
 
+  /** Headed Chromium can acknowledge a background target before its first URL
+   * reaches Target.getTargets/Page.getFrameTree. Do not expose that transient
+   * empty document (or fail after the tab was already created); wait for the
+   * exact returned target to become observable while keeping it unfocused. */
+  private async waitForCreatedTargetInfo(
+    connection: BrowserCdpConnection,
+    targetId: string,
+  ): Promise<TargetInfo> {
+    const deadline = Date.now() + TARGET_CREATION_SETTLE_TIMEOUT_MS;
+    let last: TargetInfo | null = null;
+    do {
+      last =
+        (await this.targetInfos(connection)).find((candidate) => candidate.targetId === targetId) ??
+        null;
+      if (last && isVisibleTarget(last) && last.url.length > 0) return last;
+      await delay(25);
+    } while (Date.now() < deadline);
+    if (!last || !isVisibleTarget(last)) {
+      throw new InteractionDefiniteDriverError("target_not_found", "browser target does not exist");
+    }
+    throw new InteractionDefiniteDriverError(
+      "timeout",
+      "browser target did not become observable",
+      true,
+    );
+  }
+
+  private async waitForCreatedTargetFrame(state: TargetState): Promise<void> {
+    const deadline = Date.now() + TARGET_CREATION_SETTLE_TIMEOUT_MS;
+    do {
+      await this.refreshFrame(state);
+      if (state.frame.url.length > 0) return;
+      await delay(25);
+    } while (Date.now() < deadline);
+    throw new InteractionDefiniteDriverError(
+      "timeout",
+      "browser target document did not become observable",
+      true,
+    );
+  }
+
   private onFrameNavigated(state: TargetState, event: CdpEvent): void {
     if (!isRecord(event.params.frame) || typeof event.params.frame.parentId === "string") return;
     const frame = event.params.frame;
@@ -1806,13 +3150,25 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     ) {
       return;
     }
+    // Some CDP-compatible engines omit `parentId` on child-frame navigation
+    // events. A page target has one established main-frame id, so never let a
+    // malformed child event invalidate the top-level document generation.
+    // `refreshFrame` still detects the exceptional case where the real main
+    // frame id itself changes.
+    if (frame.id !== state.frame.id) return;
     state.frame = { id: frame.id, loaderId: frame.loaderId, url: frame.url };
     state.documentGeneration = documentGeneration(
       this.controllerGeneration,
+      this.physicalGeneration,
       state.targetId,
       frame.loaderId,
     );
-    state.frameGeneration = frameGeneration(this.controllerGeneration, state.targetId, frame.id);
+    state.frameGeneration = frameGeneration(
+      this.controllerGeneration,
+      this.physicalGeneration,
+      state.targetId,
+      frame.id,
+    );
     state.accessibility = null;
   }
 
@@ -1821,6 +3177,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     requestId: string,
     details: { message: string; status?: number; url?: string | null },
   ): void {
+    if (this.protectedAuthQuiet(state)) return;
     if (state.failedRequests.has(requestId)) return;
     state.failedRequests.add(requestId);
     state.diagnostics.failedRequestCount += 1;
@@ -1840,6 +3197,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     state: TargetState,
     entry: Omit<BrowserDiagnosticEntry, "sequence" | "occurredAt">,
   ): void {
+    if (this.protectedAuthQuiet(state)) return;
     const parsed = BrowserDiagnosticEntry.parse({
       ...entry,
       sequence: ++state.diagnosticSequence,
@@ -1861,6 +3219,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     for (const unsubscribe of state.unsubscribe) unsubscribe();
     this.states.delete(targetId);
     this.firstSeenAt.delete(targetId);
+  }
+
+  private protectedAuthQuiet(state: TargetState): boolean {
+    return state.protectedAuthActive || Date.now() < state.protectedAuthQuietUntil;
   }
 
   private firstSeen(targetId: string): string {
@@ -1915,14 +3277,20 @@ function targetKind(info: TargetInfo): BrowserTargetValue["kind"] {
 
 function documentGeneration(
   controllerGeneration: string,
+  physicalGeneration: string,
   targetId: string,
   loaderId: string,
 ): string {
-  return generation("document", controllerGeneration, targetId, loaderId);
+  return generation("document", controllerGeneration, physicalGeneration, targetId, loaderId);
 }
 
-function frameGeneration(controllerGeneration: string, targetId: string, frameId: string): string {
-  return generation("frame", controllerGeneration, targetId, frameId);
+function frameGeneration(
+  controllerGeneration: string,
+  physicalGeneration: string,
+  targetId: string,
+  frameId: string,
+): string {
+  return generation("frame", controllerGeneration, physicalGeneration, targetId, frameId);
 }
 
 function generation(prefix: string, ...parts: string[]): string {
@@ -2040,15 +3408,21 @@ const KEY_DEFINITIONS: Record<
   space: { key: " ", code: "Space", keyCode: 32, text: " " },
 };
 
-const HIT_TEST_FUNCTION = `function(x, y) {
-  const hit = document.elementFromPoint(x, y);
-  return Boolean(hit && (this === hit || this.contains?.(hit)));
+const HIT_TEST_FUNCTION = `function() {
+  const element = this instanceof Element ? this : this.parentElement;
+  if (!(element instanceof Element) || !element.isConnected) return false;
+  const rect = element.getBoundingClientRect();
+  const root = element.getRootNode();
+  const hitTest = root && typeof root.elementFromPoint === "function" ? root : document;
+  const hit = hitTest.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+  return Boolean(hit && (element === hit || element.contains?.(hit)));
 }`;
 
 const VISIBLE_FUNCTION = `function() {
-  if (!(this instanceof Element) || !this.isConnected) return false;
-  const style = getComputedStyle(this);
-  const rect = this.getBoundingClientRect();
+  const element = this instanceof Element ? this : this.parentElement;
+  if (!(element instanceof Element) || !element.isConnected) return false;
+  const style = getComputedStyle(element);
+  const rect = element.getBoundingClientRect();
   return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
 }`;
 
@@ -2067,6 +3441,108 @@ const SELECT_OPTIONS_FUNCTION = `function(values) {
 
 const SCROLL_FUNCTION = `function(deltaX, deltaY) {
   this.scrollBy({ left: deltaX, top: deltaY, behavior: "instant" });
+  return true;
+}`;
+
+const COPY_BROWSER_TEXT_FUNCTION = `function(content) {
+  const element = this && this.nodeType === 1 ? this : this?.parentElement;
+  if (!element || element.nodeType !== 1 || !element.isConnected) return { ok: false, error: "unavailable" };
+  const tag = String(element.tagName || "").toLowerCase();
+  if (tag === "input" && String(element.type).toLowerCase() === "password") {
+    return { ok: false, error: "protected" };
+  }
+  if (content === "value") {
+    if (tag === "input" || tag === "textarea" || tag === "select") {
+      return { ok: true, text: String(element.value ?? "") };
+    }
+    return { ok: false, error: "unavailable" };
+  }
+  if (content === "text") {
+    return { ok: true, text: String(element.innerText ?? element.textContent ?? "") };
+  }
+  if (tag === "input" || tag === "textarea") {
+    const start = element.selectionStart;
+    const end = element.selectionEnd;
+    if (typeof start !== "number" || typeof end !== "number") return { ok: false, error: "unavailable" };
+    return { ok: true, text: String(element.value).slice(start, end) };
+  }
+  const selection = element.ownerDocument.defaultView?.getSelection();
+  if (!selection || selection.rangeCount === 0) return { ok: true, text: "" };
+  const range = selection.getRangeAt(0);
+  if (!element.contains(range.commonAncestorContainer) && range.commonAncestorContainer !== element) {
+    return { ok: false, error: "unavailable" };
+  }
+  return { ok: true, text: selection.toString() };
+}`;
+
+const COPY_ACTIVE_BROWSER_TEXT_FUNCTION = `function(content) {
+  let element = document.activeElement || document.body;
+  for (let depth = 0; depth < 16 && ["iframe", "frame"].includes(String(element?.tagName || "").toLowerCase()); depth += 1) {
+    try {
+      const nested = element.contentDocument?.activeElement;
+      if (!nested) return { ok: false, error: "unavailable" };
+      element = nested;
+    } catch {
+      return { ok: false, error: "unavailable" };
+    }
+  }
+  return (${COPY_BROWSER_TEXT_FUNCTION}).call(element, content);
+}`;
+
+const PROTECTED_ELEMENT_METADATA_FUNCTION = `function() {
+  if (!(this instanceof Element)) return null;
+  const document = this.ownerDocument;
+  const view = document?.defaultView;
+  if (!document || !view) return null;
+  const tag = String(this.tagName || "").toLowerCase();
+  const style = view.getComputedStyle(this);
+  const rect = this.getBoundingClientRect();
+  const connected = this.isConnected === true;
+  const visible = connected && style.visibility !== "hidden" && style.display !== "none" &&
+    style.opacity !== "0" && rect.width > 0 && rect.height > 0;
+  const disabled = this.disabled === true;
+  const readOnly = this.readOnly === true;
+  const contentEditable = this.isContentEditable === true;
+  const inputType = tag === "input"
+    ? String(this.getAttribute("type") || "text").toLowerCase()
+    : contentEditable ? "contenteditable" : tag === "textarea" ? "text" : "";
+  const editableInputTypes = new Set(["email", "number", "password", "search", "tel", "text", "url"]);
+  const editable = !disabled && !readOnly &&
+    (tag === "textarea" || contentEditable || (tag === "input" && editableInputTypes.has(inputType)));
+  const form = this.form instanceof view.HTMLFormElement ? this.form : this.closest?.("form");
+  const ownFormAction = typeof this.formAction === "string" && this.formAction.length > 0
+    ? this.formAction
+    : null;
+  const formAction = ownFormAction || (form ? form.action : null);
+  const ownFormMethod = typeof this.formMethod === "string" && this.formMethod.length > 0
+    ? this.formMethod
+    : null;
+  const formMethod = form ? String(ownFormMethod || form.method || "get").toLowerCase() : null;
+  const submitType = tag === "button"
+    ? String(this.getAttribute("type") || "submit").toLowerCase()
+    : tag === "input" ? inputType : null;
+  return {
+    connected,
+    visible,
+    editable,
+    disabled,
+    readOnly,
+    tag,
+    inputType,
+    origin: document.location.origin,
+    hasForm: Boolean(form),
+    formAction,
+    formMethod,
+    submitType,
+  };
+}`;
+
+const CLEAR_PROTECTED_VALUE_FUNCTION = `function() {
+  if (!(this instanceof Element) || !this.isConnected) return false;
+  const tag = String(this.tagName || "").toLowerCase();
+  if (tag === "input" || tag === "textarea") this.value = "";
+  else if (this.isContentEditable === true) this.textContent = "";
+  else return false;
   return true;
 }`;
 
@@ -2236,6 +3712,130 @@ function sameFrameOptions(
 
 function transportError(value: unknown): Error {
   return value instanceof Error ? value : new CdpTransportError("browser media stream failed");
+}
+
+function parseUserAgentMetadata(value: unknown): BrowserUserAgentMetadata {
+  if (!isRecord(value) || typeof value.mobile !== "boolean") {
+    throw new Error("browser returned invalid User-Agent metadata");
+  }
+  const metadata: BrowserUserAgentMetadata = {
+    platform: userAgentMetadataString(value.platform),
+    platformVersion: userAgentMetadataString(value.platformVersion),
+    architecture: userAgentMetadataString(value.architecture),
+    model: userAgentMetadataString(value.model),
+    mobile: value.mobile,
+  };
+  const brands = userAgentBrandList(value.brands);
+  const fullVersionList = userAgentBrandList(value.fullVersionList);
+  const bitness = optionalUserAgentMetadataString(value.bitness);
+  const formFactors = userAgentStringList(value.formFactors);
+  if (brands) metadata.brands = brands;
+  if (fullVersionList) metadata.fullVersionList = fullVersionList;
+  if (bitness !== undefined) metadata.bitness = bitness;
+  if (typeof value.wow64 === "boolean") metadata.wow64 = value.wow64;
+  if (formFactors) metadata.formFactors = formFactors;
+  return metadata;
+}
+
+function userAgentBrandList(value: unknown): Array<{ brand: string; version: string }> | null {
+  if (value === undefined) return null;
+  if (!Array.isArray(value) || value.length > 32) {
+    throw new Error("browser returned invalid User-Agent brands");
+  }
+  return value.map((entry) => {
+    if (!isRecord(entry)) throw new Error("browser returned invalid User-Agent brand");
+    return {
+      brand: userAgentMetadataString(entry.brand),
+      version: userAgentMetadataString(entry.version),
+    };
+  });
+}
+
+function userAgentStringList(value: unknown): string[] | null {
+  if (value === undefined) return null;
+  if (!Array.isArray(value) || value.length > 32) {
+    throw new Error("browser returned invalid User-Agent form factors");
+  }
+  return value.map(userAgentMetadataString);
+}
+
+function optionalUserAgentMetadataString(value: unknown): string | undefined {
+  return value === undefined ? undefined : userAgentMetadataString(value);
+}
+
+function userAgentMetadataString(value: unknown): string {
+  if (typeof value !== "string" || Buffer.byteLength(value) > 512 || /[\r\n\0]/u.test(value)) {
+    throw new Error("browser returned invalid User-Agent metadata");
+  }
+  return value;
+}
+
+function normalizeLocale(value: string): string {
+  return value.replaceAll("_", "-").toLocaleLowerCase();
+}
+
+function webOrigin(value: string): string {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new InteractionDefiniteDriverError(
+      "invalid_action",
+      "browser permission control requires an HTTP(S) top-level document",
+    );
+  }
+  if ((url.protocol !== "http:" && url.protocol !== "https:") || url.origin === "null") {
+    throw new InteractionDefiniteDriverError(
+      "invalid_action",
+      "browser permission control requires an HTTP(S) top-level document",
+    );
+  }
+  return url.origin;
+}
+
+function parseFrameTree(
+  value: Record<string, unknown>,
+  state: { count: number } = { count: 0 },
+): PageFrameTree {
+  state.count += 1;
+  if (state.count > MAX_FRAME_TREES) {
+    throw new Error("CDP frame tree exceeds its bounded envelope");
+  }
+  if (!isRecord(value.frame)) throw new Error("CDP returned an invalid frame tree");
+  const frame = value.frame;
+  if (
+    typeof frame.id !== "string" ||
+    typeof frame.loaderId !== "string" ||
+    typeof frame.url !== "string"
+  ) {
+    throw new Error("CDP returned an invalid frame");
+  }
+  const rawChildren = value.childFrames;
+  if (rawChildren !== undefined && !Array.isArray(rawChildren)) {
+    throw new Error("CDP returned invalid child frames");
+  }
+  return {
+    frame: { id: frame.id, loaderId: frame.loaderId, url: frame.url },
+    childFrames: (rawChildren ?? []).map((child) => {
+      if (!isRecord(child)) throw new Error("CDP returned an invalid child frame");
+      return parseFrameTree(child, state);
+    }),
+  };
+}
+
+function flattenFrameTree(root: PageFrameTree): MainFrame[] {
+  const frames: MainFrame[] = [];
+  const pending = [root];
+  while (pending.length > 0) {
+    const current = pending.shift()!;
+    frames.push(current.frame);
+    pending.unshift(...current.childFrames);
+  }
+  return frames;
+}
+
+function frameTreeFingerprint(frames: readonly MainFrame[]): string {
+  return frames.map((frame) => `${frame.id}\0${frame.loaderId}`).join("\n");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

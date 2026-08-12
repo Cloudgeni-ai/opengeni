@@ -178,6 +178,8 @@ try {
     "package/dist/editable-artifacts.d.ts",
     "package/dist/editable-artifacts-worker.js",
     "package/dist/editable-artifacts-worker.d.ts",
+    "package/dist/interaction.js",
+    "package/dist/interaction.d.ts",
   ]) {
     if (!sdkTarballContents.split("\n").includes(artifact)) {
       throw new Error(`SDK tarball is missing ${artifact}`);
@@ -340,6 +342,8 @@ try {
     "package/dist/artifacts-presentation.d.ts",
     "package/dist/artifacts-spreadsheet.js",
     "package/dist/artifacts-spreadsheet.d.ts",
+    "package/dist/interaction.js",
+    "package/dist/interaction.d.ts",
     "package/styles/compiled.css",
     "package/styles/compiled.d.ts",
     "package/styles/effective-tokens.css",
@@ -368,8 +372,23 @@ try {
     ({ manifest }) => manifest.name === "@opengeni/contracts",
   );
   if (!contracts) throw new Error("runtime package closure did not stage @opengeni/contracts");
+  const codemode = runtimeLocalDependencies.find(
+    ({ manifest }) => manifest.name === "@opengeni/codemode",
+  );
+  if (!codemode) throw new Error("runtime package closure did not stage @opengeni/codemode");
   if (sdk.manifest.dependencies?.["@opengeni/contracts"] !== `^${contracts.manifest.version}`) {
     throw new Error("SDK tarball does not declare the staged canonical contracts version");
+  }
+  if (
+    codemode.manifest.dependencies?.["@opengeni/contracts"] !== `^${contracts.manifest.version}`
+  ) {
+    throw new Error("Codemode tarball does not declare the staged canonical contracts version");
+  }
+  const codemodeTarballContents = await run(["tar", "-tzf", codemode.tarball], consumerRoot, true);
+  for (const artifact of ["package/dist/index.js", "package/dist/index.d.ts"]) {
+    if (!codemodeTarballContents.split("\n").includes(artifact)) {
+      throw new Error(`Codemode tarball is missing ${artifact}`);
+    }
   }
   const contractsTarballContents = await run(
     ["tar", "-tzf", contracts.tarball],
@@ -414,6 +433,7 @@ try {
   ) as PackageManifest;
 
   const sdkFile = `file:${sdk.tarball}`;
+  const codemodeFile = `file:${codemode.tarball}`;
   const artifactToolFile = `file:${artifactTool.tarball}`;
   const contractsFile = `file:${contracts.tarball}`;
   const consumerManifest = {
@@ -430,10 +450,12 @@ try {
       ssr: "bun ssr.tsx",
       "artifact-contract": "bun artifact-contract.ts",
       "artifact-codecs": "bun artifact-codecs.ts",
+      "codemode-proof": "bun codemode-proof.ts",
     },
     dependencies: {
       ...(reactSource.peerDependencies ?? {}),
       "@opengeni/artifact-tool": artifactToolFile,
+      "@opengeni/codemode": codemodeFile,
       "@opengeni/contracts": contractsFile,
       "@opengeni/react": `file:${react.tarball}`,
       "@opengeni/sdk": sdkFile,
@@ -475,6 +497,7 @@ try {
             "browser.tsx",
             "artifact-contract.ts",
             "artifact-codecs.ts",
+            "codemode-proof.ts",
             "consumer.css",
             "presentation.tsx",
             "runtime-proof.ts",
@@ -535,13 +558,15 @@ try {
         'import type { PresentationEditorProps as PresentationOnlyProps } from "@opengeni/react/artifacts/presentation";',
         'import type { SpreadsheetGridProps as SpreadsheetOnlyProps } from "@opengeni/react/artifacts/spreadsheet";',
         'import type { BrowserViewerProps, ComputerViewerProps } from "@opengeni/react/interaction";',
+        'import type { BrowserSessionResource, ComputerSessionResource } from "@opengeni/sdk/interaction";',
+        'import type { CodemodeClient, CodemodeToolsNamespace, OpenGeniCodemode } from "@opengeni/codemode";',
         'import type * as ReactRoot from "@opengeni/react";',
         'import type { EditableArtifactSyncController, BrowserEditableArtifactWorkerKernel, CreateEditableArtifactHttpLiveTransportOptions } from "@opengeni/sdk/editable-artifacts";',
         'import type { OpenGeniClient as ArtifactApiClient, EditableArtifactResource } from "@opengeni/sdk/artifacts";',
         'import type { installBrowserArtifactWorkerEntry } from "@opengeni/sdk/editable-artifacts/worker";',
         "type Assert<T extends true> = T;",
         'type RootOmitsInteraction = Assert<"BrowserViewer" extends keyof typeof ReactRoot ? false : "ComputerViewer" extends keyof typeof ReactRoot ? false : true>;',
-        "export type PackedNodeNextSurface = [Document, Workbook, ReferenceWorkbook, NativeSpreadsheetSession, ArtifactKernelRuntime, typeof locateVerifiedArtifactRuntime, DocumentEntry, typeof renderDocument, typeof exportDocx, PresentationEntry, typeof executePresentationRender, typeof exportPresentationPptx, SpreadsheetEntry, typeof renderWorkbook, SpreadsheetXlsxCodec, EditableArtifactMutationIntent, typeof encodeEditableArtifactMutationIntent, EditableArtifactLiveServerFrame, typeof decodeEditableArtifactLiveServerWireFrame, DocumentEditorProps, SpreadsheetGridProps, DocumentOnlyProps, PresentationOnlyProps, SpreadsheetOnlyProps, BrowserViewerProps, ComputerViewerProps, RootOmitsInteraction, EditableArtifactSyncController, BrowserEditableArtifactWorkerKernel, CreateEditableArtifactHttpLiveTransportOptions, ArtifactApiClient, EditableArtifactResource, typeof installBrowserArtifactWorkerEntry];",
+        "export type PackedNodeNextSurface = [Document, Workbook, ReferenceWorkbook, NativeSpreadsheetSession, ArtifactKernelRuntime, typeof locateVerifiedArtifactRuntime, DocumentEntry, typeof renderDocument, typeof exportDocx, PresentationEntry, typeof executePresentationRender, typeof exportPresentationPptx, SpreadsheetEntry, typeof renderWorkbook, SpreadsheetXlsxCodec, EditableArtifactMutationIntent, typeof encodeEditableArtifactMutationIntent, EditableArtifactLiveServerFrame, typeof decodeEditableArtifactLiveServerWireFrame, DocumentEditorProps, SpreadsheetGridProps, DocumentOnlyProps, PresentationOnlyProps, SpreadsheetOnlyProps, BrowserViewerProps, ComputerViewerProps, BrowserSessionResource, ComputerSessionResource, CodemodeClient, CodemodeToolsNamespace, OpenGeniCodemode, RootOmitsInteraction, EditableArtifactSyncController, BrowserEditableArtifactWorkerKernel, CreateEditableArtifactHttpLiveTransportOptions, ArtifactApiClient, EditableArtifactResource, typeof installBrowserArtifactWorkerEntry];",
         "",
       ].join("\n"),
     ),
@@ -765,6 +790,35 @@ try {
     writeFile(
       join(consumerRoot, "runtime-proof.ts"),
       'import { getSkillLibraryEntry, listSkillLibraryEntries } from "@opengeni/runtime/skill-library";\nconst entry = getSkillLibraryEntry("azure-verified-modules", "1.0.0");\nif (!entry) throw new Error("packed runtime skill-library entry was not available");\nif (!listSkillLibraryEntries().some((candidate) => candidate.id === entry.id && candidate.version === entry.version)) throw new Error("packed runtime skill-library list did not include the entry");\nconsole.log(`RUNTIME_SKILL_LIBRARY_OK version=${entry.version} hash=${entry.contentSha256}`);\n',
+    ),
+    writeFile(
+      join(consumerRoot, "codemode-proof.ts"),
+      [
+        'import { createAttemptToolEnvironment } from "@opengeni/codemode";',
+        "",
+        'const ids = { accountId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222", sessionId: "33333333-3333-4333-8333-333333333333", turnId: "44444444-4444-4444-8444-444444444444", attemptId: "55555555-5555-4555-8555-555555555555" };',
+        "const callers: string[] = [];",
+        "const environment = createAttemptToolEnvironment({",
+        "  scope: { ...ids, executionGeneration: 1 },",
+        "  generation: 1,",
+        "  definitions: [{",
+        '    identity: { serverId: "example", toolName: "echo" },',
+        '    modelName: "example__echo",',
+        '    codemodePath: ["example", "echo"],',
+        '    inputSchema: { type: "object", properties: { value: { type: "string" } }, required: ["value"], additionalProperties: false },',
+        '    outputSchema: { type: "object", properties: { value: { type: "string" } }, required: ["value"], additionalProperties: false },',
+        '    source: "mcp",',
+        '    approval: "none",',
+        '    execute: (args, context) => { callers.push(context.caller.kind); return { content: [{ type: "text", text: String(args.value) }], structuredContent: { value: String(args.value) } }; },',
+        "  }],",
+        "});",
+        'await environment.callModel({ modelName: "example__echo", arguments: { value: "model" }, subjectId: "model:proof" });',
+        "const entry = environment.catalog.entries[0]!;",
+        'const result = await environment.call({ operationId: "66666666-6666-4666-8666-666666666666", catalogDigest: environment.catalog.digest, identity: entry.identity, arguments: { value: "codemode" }, caller: { kind: "codemode", subjectId: "agent:proof" } });',
+        'if (callers.join(",") !== "model,codemode" || result.structuredContent?.value !== "codemode") throw new Error("packed Codemode did not share the exact attempt executor");',
+        'console.log(`CODEMODE_OK digest=${environment.catalog.digest} callers=${callers.join(",")}`);',
+        "",
+      ].join("\n"),
     ),
     writeFile(
       join(consumerRoot, "sdk-types.ts"),
@@ -1084,6 +1138,7 @@ try {
   await run(["bun", "run", "ssr"], consumerRoot);
   await run(["bun", "run", "artifact-contract"], consumerRoot);
   await run(["bun", "run", "artifact-codecs"], consumerRoot);
+  await run(["bun", "run", "codemode-proof"], consumerRoot);
   await run(["bun", "run", "runtime-proof.ts"], consumerRoot);
   process.stdout.write("[publish-consumer] installing spreadsheet-only artifact consumer\n");
   await run(["bun", "install"], minimalSpreadsheetRoot);
@@ -1211,7 +1266,7 @@ try {
 
   passed = true;
   process.stdout.write(
-    `[publish-consumer] PASS ${sdk.manifest.name}@${sdk.manifest.version} + ${artifactTool.manifest.name}@${artifactTool.manifest.version} + ${react.manifest.name}@${react.manifest.version} + ${runtime.manifest.name}@${runtime.manifest.version}; strict types, compiler-free scoped browser CSS, CSS-free session and realtime-only bundles, SSR, and packed artifacts are clean.\n`,
+    `[publish-consumer] PASS ${sdk.manifest.name}@${sdk.manifest.version} + ${artifactTool.manifest.name}@${artifactTool.manifest.version} + ${react.manifest.name}@${react.manifest.version} + ${codemode.manifest.name}@${codemode.manifest.version} + ${runtime.manifest.name}@${runtime.manifest.version}; strict types, compiler-free scoped browser CSS, CSS-free session and realtime-only bundles, SSR, packed interaction/Codemode, and packed artifacts are clean.\n`,
   );
 } finally {
   if (passed && !keepArtifacts) {

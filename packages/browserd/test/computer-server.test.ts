@@ -66,6 +66,18 @@ describe("Computer routes on the placement interaction server", () => {
         id: "window-1",
         computerSessionId: reference.computerSessionId,
       });
+      const clipboard = await request(
+        server,
+        `/v1/computer-sessions/${reference.computerSessionId}/clipboard`,
+        { token: viewToken },
+      );
+      expect(clipboard.status).toBe(200);
+      expect((await json(clipboard)).data).toMatchObject({
+        computerSessionId: reference.computerSessionId,
+        controllerGeneration: reference.controllerGeneration,
+        text: "fixture clipboard",
+        truncated: false,
+      });
       expect(
         (
           await request(
@@ -224,6 +236,7 @@ class FixtureComputerDriver implements ComputerSupervisorDriver {
     semanticActions: true,
     pointerInput: true,
     keyboardInput: true,
+    clipboard: true,
     backgroundActions: true,
     parallelApps: true,
   };
@@ -248,6 +261,16 @@ class FixtureComputerDriver implements ComputerSupervisorDriver {
 
   async capture(): Promise<ComputerImageFrame> {
     return this.frame(0);
+  }
+
+  async clipboard() {
+    return {
+      computerSessionId: this.context.computerSessionId,
+      controllerGeneration: this.context.controllerGeneration,
+      text: "fixture clipboard",
+      truncated: false,
+      observedAt: "2026-08-11T12:00:00.000Z",
+    };
   }
 
   async subscribeFrames(): Promise<ComputerFrameSubscription> {
@@ -324,6 +347,7 @@ function fixtureEnvironmentAllocator(): ComputerEnvironmentAllocator {
       return {
         seatId: "seat-1",
         displayId: ":101",
+        rfbPort: null,
         environment: { PATH: process.env.PATH ?? "/usr/bin" },
         async close() {},
       };

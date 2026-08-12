@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import {
   contractForProfile,
   deploymentProfiles,
+  EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV,
   generateRuntimeArtifacts,
   missingRuntimeEnvVars,
   parseDeploymentContract,
@@ -982,6 +983,13 @@ describe("deployment contract", () => {
         "OPENGENI_SANDBOX_WARMING_TIMEOUT_MS",
       ]),
     );
+    expect(EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV).toEqual([
+      "OPENGENI_BROWSERBASE_API_KEY",
+      "OPENGENI_KERNEL_API_KEY",
+      "OPENGENI_KERNEL_ENDPOINT",
+      "OPENGENI_KERNEL_BROWSER_TIMEOUT_SECONDS",
+      "OPENGENI_KERNEL_BROWSER_STEALTH",
+    ]);
     expect(SANDBOX_REQUIRED_ENV.daytona.required).toEqual(["OPENGENI_DAYTONA_API_KEY"]);
     expect(SANDBOX_REQUIRED_ENV.docker.required).toEqual([]);
     expect(SANDBOX_REQUIRED_ENV.none.required).toEqual([]);
@@ -1090,5 +1098,44 @@ describe("deployment contract", () => {
     expect(artifacts.runtimeEnv).toContain(
       "OPENGENI_MODAL_IMAGE_REF=ghcr.io/opengeni/modal:latest",
     );
+  });
+
+  test("renders configured external browser providers without making them mandatory", () => {
+    const env = {
+      OPENGENI_BROWSERBASE_API_KEY: "browserbase-private",
+      OPENGENI_KERNEL_API_KEY: "kernel-private",
+      OPENGENI_KERNEL_ENDPOINT: "https://kernel.example.test",
+      OPENGENI_KERNEL_BROWSER_TIMEOUT_SECONDS: "1800",
+      OPENGENI_KERNEL_BROWSER_STEALTH: "true",
+    };
+    const artifacts = generateRuntimeArtifacts(
+      withSandboxBackend("docker"),
+      {
+        temporal_host: { value: "host:7233" },
+        object_storage_bucket: { value: "opengeni-files" },
+        object_storage_azure_connection_string: { value: "x", sensitive: true },
+        helm_set_values: { value: {} },
+      },
+      env,
+    );
+
+    for (const [key, value] of Object.entries(env)) {
+      expect(artifacts.runtimeEnv).toContain(`${key}=${value}`);
+      expect(artifacts.missingEnvVars).not.toContain(key);
+    }
+    const absent = generateRuntimeArtifacts(
+      withSandboxBackend("docker"),
+      {
+        temporal_host: { value: "host:7233" },
+        object_storage_bucket: { value: "opengeni-files" },
+        object_storage_azure_connection_string: { value: "x", sensitive: true },
+        helm_set_values: { value: {} },
+      },
+      {},
+    );
+    for (const key of EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV) {
+      expect(absent.runtimeEnv).not.toContain(`${key}=`);
+      expect(absent.missingEnvVars).not.toContain(key);
+    }
   });
 });

@@ -5,7 +5,7 @@ import {
   type EmbeddedBrowserInteractionClientOverride,
   useEmbeddedBrowserInteraction,
 } from "../session-context";
-import { usePageLiveActivity } from "./internal";
+import { useInteractionInvalidation } from "./use-interaction-invalidation";
 
 export type UseAttachedBrowsersOptions = EmbeddedBrowserInteractionClientOverride & {
   enabled?: boolean | undefined;
@@ -27,11 +27,10 @@ export type UseAttachedBrowsersResult = {
 export function useAttachedBrowsers(
   options: UseAttachedBrowsersOptions = {},
 ): UseAttachedBrowsersResult {
-  const { client, workspaceId } = useEmbeddedBrowserInteraction(options);
+  const { client, workspaceId, workspaceInteractionEvent, workspaceInteractionConnectionState } =
+    useEmbeddedBrowserInteraction(options);
   const enabled = options.enabled ?? true;
   const includeDisconnected = options.includeDisconnected ?? false;
-  const pageLive = usePageLiveActivity();
-  const pollIntervalMs = Math.max(1_000, options.pollIntervalMs ?? 3_000);
   const [state, setState] = useState(() => emptyState(workspaceId, enabled));
   const requestRef = useRef<{ id: number; controller: AbortController | null }>({
     id: 0,
@@ -105,13 +104,16 @@ export function useAttachedBrowsers(
     };
   }, [cancelLoad, enabled, load, workspaceId]);
 
-  useEffect(() => {
-    if (!enabled || !pageLive) return;
-    const timer = setInterval(() => {
-      if (!requestRef.current.controller) void load(false);
-    }, pollIntervalMs);
-    return () => clearInterval(timer);
-  }, [enabled, load, pageLive, pollIntervalMs]);
+  useInteractionInvalidation({
+    workspaceId,
+    key: `${workspaceId}:${includeDisconnected}`,
+    enabled,
+    event: workspaceInteractionEvent,
+    connectionState: workspaceInteractionConnectionState,
+    knownRevision: visible.revision,
+    refresh,
+    fallbackPollIntervalMs: options.pollIntervalMs,
+  });
 
   return {
     revision: visible.revision,

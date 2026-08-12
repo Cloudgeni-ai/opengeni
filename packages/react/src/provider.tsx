@@ -3,6 +3,7 @@ import {
   OPENGENI_API_CONTRACT_REVISION,
   type StreamConnectionState,
   type WorkspaceControlEvent,
+  type WorkspaceInteractionRevisionEvent,
 } from "@opengeni/sdk";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { SessionClientLike } from "./client";
@@ -17,6 +18,7 @@ export type OpenGeniProviderProps = {
   client: SessionClientLike;
   workspaceId: string;
   onWorkspaceControlEvent?: ((event: WorkspaceControlEvent) => void) | undefined;
+  onWorkspaceInteractionEvent?: ((event: WorkspaceInteractionRevisionEvent) => void) | undefined;
   children?: ReactNode;
 };
 
@@ -28,6 +30,7 @@ export function OpenGeniProvider({
   client,
   workspaceId,
   onWorkspaceControlEvent,
+  onWorkspaceInteractionEvent,
   children,
 }: OpenGeniProviderProps) {
   const [workspaceControlEvent, setWorkspaceControlEvent] = useState<WorkspaceControlEvent | null>(
@@ -36,15 +39,23 @@ export function OpenGeniProvider({
   const [workspaceControlConnectionState, setWorkspaceControlConnectionState] = useState<
     StreamConnectionState | "idle" | "error"
   >("idle");
+  const [workspaceInteractionEvent, setWorkspaceInteractionEvent] =
+    useState<WorkspaceInteractionRevisionEvent | null>(null);
+  const [workspaceInteractionConnectionState, setWorkspaceInteractionConnectionState] = useState<
+    StreamConnectionState | "idle" | "error"
+  >("idle");
   const [contractMismatch, setContractMismatch] = useState<OpenGeniApiContractMismatchError | null>(
     null,
   );
   const callbackRef = useRef(onWorkspaceControlEvent);
+  const interactionCallbackRef = useRef(onWorkspaceInteractionEvent);
   const reconcilersRef = useRef(new Map<string, Map<string, () => Promise<void>>>());
   const reconcileInFlightRef = useRef(new Map<string, Promise<void>>());
   const workspaceControlSequencesRef = useRef(new Map<string, number>());
+  const workspaceInteractionSequencesRef = useRef(new Map<string, number>());
   const pageLive = usePageLiveActivity();
   callbackRef.current = onWorkspaceControlEvent;
+  interactionCallbackRef.current = onWorkspaceInteractionEvent;
 
   const verifyApiContract = useCallback(async (): Promise<void> => {
     try {
@@ -147,12 +158,56 @@ export function OpenGeniProvider({
     return () => controller.abort();
   }, [client, pageLive, verifyApiContract, workspaceId]);
 
+  useEffect(() => {
+    setWorkspaceInteractionEvent(null);
+    if (!pageLive) {
+      setWorkspaceInteractionConnectionState("idle");
+      return;
+    }
+    const controller = new AbortController();
+    setWorkspaceInteractionConnectionState("connecting");
+    void (async () => {
+      try {
+        await verifyApiContract();
+        const resumeAfter = workspaceInteractionSequencesRef.current.get(workspaceId) ?? 0;
+        const stream = client.streamWorkspaceInteractionRevisions(workspaceId, {
+          after: resumeAfter,
+          signal: controller.signal,
+          onStateChange: setWorkspaceInteractionConnectionState,
+        });
+        for await (const event of stream) {
+          if (controller.signal.aborted) return;
+          workspaceInteractionSequencesRef.current.set(
+            workspaceId,
+            Math.max(
+              workspaceInteractionSequencesRef.current.get(workspaceId) ?? 0,
+              event.sequence,
+            ),
+          );
+          setWorkspaceInteractionEvent((current) =>
+            !current || event.sequence > current.sequence ? event : current,
+          );
+          interactionCallbackRef.current?.(event);
+        }
+      } catch (error) {
+        if (error instanceof OpenGeniApiContractMismatchError) {
+          setContractMismatch(error);
+          reloadForContractMismatchOnce(error);
+        }
+        if (!controller.signal.aborted) setWorkspaceInteractionConnectionState("error");
+      }
+    })();
+    return () => controller.abort();
+  }, [client, pageLive, verifyApiContract, workspaceId]);
+
   const value = useMemo(
     () => ({
       client,
       workspaceId,
       workspaceControlEvent,
       workspaceControlConnectionState,
+      workspaceInteractionEvent,
+      workspaceInteractionConnectionState,
       registerSessionReconciler,
       reconcileSession,
     }),
@@ -161,6 +216,8 @@ export function OpenGeniProvider({
       workspaceId,
       workspaceControlEvent,
       workspaceControlConnectionState,
+      workspaceInteractionEvent,
+      workspaceInteractionConnectionState,
       registerSessionReconciler,
       reconcileSession,
     ],

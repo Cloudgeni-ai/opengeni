@@ -47,6 +47,7 @@ use std::time::{Duration, Instant};
 mod ax;
 mod ax_element;
 mod input_monitor;
+mod stream;
 
 use block2::RcBlock;
 use core_foundation::base::{CFType, TCFType as _};
@@ -74,6 +75,7 @@ use crate::{
 
 pub(crate) use ax::MacAxControllerImpl;
 use input_monitor::{input_activity_monitor, InputActivityMonitor};
+pub(crate) use stream::CaptureStream;
 
 const MAX_CAPTURE_PIXELS: usize = 64 * 1024 * 1024;
 
@@ -359,6 +361,13 @@ pub(super) fn capture_rgba() -> Result<RgbaFrame, MacFfiError> {
 }
 
 pub(super) fn capture_display_rgba(display_id: u32) -> Result<RgbaFrame, MacFfiError> {
+    capture_display_rgba_sized(display_id, None)
+}
+
+pub(super) fn capture_display_rgba_sized(
+    display_id: u32,
+    max_size: Option<(u32, u32)>,
+) -> Result<RgbaFrame, MacFfiError> {
     if !CGPreflightScreenCaptureAccess() {
         return Err(MacFfiError::PermissionDenied(
             "Screen Recording permission is not granted".to_string(),
@@ -380,7 +389,7 @@ pub(super) fn capture_display_rgba(display_id: u32) -> Result<RgbaFrame, MacFfiE
                 return;
             }
             let content: &SCShareableContent = unsafe { &*content };
-            capture_from_content(content, display_id, &tx);
+            capture_from_content(content, display_id, max_size, &tx);
         },
     );
 
@@ -406,6 +415,14 @@ pub(super) fn capture_window_rgba(
     window_id: u32,
     expected_process_id: u32,
 ) -> Result<MacWindowFrame, MacFfiError> {
+    capture_window_rgba_sized(window_id, expected_process_id, None)
+}
+
+pub(super) fn capture_window_rgba_sized(
+    window_id: u32,
+    expected_process_id: u32,
+    max_size: Option<(u32, u32)>,
+) -> Result<MacWindowFrame, MacFfiError> {
     if !CGPreflightScreenCaptureAccess() {
         return Err(MacFfiError::PermissionDenied(
             "Screen Recording permission is required for window capture".to_string(),
@@ -422,7 +439,7 @@ pub(super) fn capture_window_rgba(
                 return;
             }
             let content: &SCShareableContent = unsafe { &*content };
-            capture_window_from_content(content, window_id, expected_process_id, &tx);
+            capture_window_from_content(content, window_id, expected_process_id, max_size, &tx);
         },
     );
     unsafe {
@@ -444,6 +461,7 @@ fn capture_window_from_content(
     content: &SCShareableContent,
     window_id: u32,
     expected_process_id: u32,
+    max_size: Option<(u32, u32)>,
     tx: &mpsc::Sender<Result<MacWindowFrame, String>>,
 ) {
     let windows = unsafe { content.windows() };
@@ -477,8 +495,11 @@ fn capture_window_from_content(
         height: rect.size.height,
     };
     let (scale_x, scale_y) = window_backing_scale(content, bounds);
-    let pixel_width = (bounds.width * scale_x).ceil().max(1.0) as usize;
-    let pixel_height = (bounds.height * scale_y).ceil().max(1.0) as usize;
+    let native_width = (bounds.width * scale_x).ceil().max(1.0) as u32;
+    let native_height = (bounds.height * scale_y).ceil().max(1.0) as u32;
+    let (pixel_width, pixel_height) = fit_capture_size(native_width, native_height, max_size);
+    let pixel_width = pixel_width as usize;
+    let pixel_height = pixel_height as usize;
     if pixel_width
         .checked_mul(pixel_height)
         .is_none_or(|pixels| pixels > MAX_CAPTURE_PIXELS)
@@ -560,6 +581,7 @@ fn window_backing_scale(content: &SCShareableContent, window: MacRect) -> (f64, 
 fn capture_from_content(
     content: &SCShareableContent,
     display_id: u32,
+    max_size: Option<(u32, u32)>,
     tx: &mpsc::Sender<Result<RgbaFrame, String>>,
 ) {
     let displays = unsafe { content.displays() };
@@ -585,11 +607,12 @@ fn capture_from_content(
         )
     };
 
-    let (pw, ph) = display_pixel_dims(display_id).unwrap_or_else(|| {
+    let (native_width, native_height) = display_pixel_dims(display_id).unwrap_or_else(|| {
         let w = unsafe { display.width() };
         let h = unsafe { display.height() };
         (w.max(0) as u32, h.max(0) as u32)
     });
+    let (pw, ph) = fit_capture_size(native_width, native_height, max_size);
 
     let config = unsafe { SCStreamConfiguration::new() };
     unsafe {
@@ -615,6 +638,21 @@ fn capture_from_content(
             Some(&*inner),
         );
     }
+}
+
+fn fit_capture_size(width: u32, height: u32, max_size: Option<(u32, u32)>) -> (u32, u32) {
+    let Some((max_width, max_height)) = max_size else {
+        return (width, height);
+    };
+    if width <= max_width && height <= max_height {
+        return (width, height);
+    }
+    let scale =
+        (f64::from(max_width) / f64::from(width)).min(f64::from(max_height) / f64::from(height));
+    (
+        (f64::from(width) * scale).floor().max(1.0) as u32,
+        (f64::from(height) * scale).floor().max(1.0) as u32,
+    )
 }
 
 /// Convert a captured BGRA `CGImage` to tightly-packed RGBA8, honoring the image's
@@ -739,6 +777,24 @@ pub(super) fn inject_window(
     let _seat = lock_input_seat()?;
     let prepared = prepare_batch(
         std::slice::from_ref(event),
+        Some(WindowInputGeometry {
+            logical_bounds,
+            frame_width,
+            frame_height,
+        }),
+    )?;
+    post_prepared(&prepared)
+}
+
+pub(super) fn inject_window_batch(
+    events: &[InputEvent],
+    logical_bounds: MacRect,
+    frame_width: u32,
+    frame_height: u32,
+) -> Result<(), MacFfiError> {
+    let _seat = lock_input_seat()?;
+    let prepared = prepare_batch(
+        events,
         Some(WindowInputGeometry {
             logical_bounds,
             frame_width,

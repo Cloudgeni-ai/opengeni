@@ -16,6 +16,11 @@ import {
   type InteractionLifecycleOperationKind,
   type InteractionLifecycleOperationReceipt as InteractionLifecycleOperationReceiptValue,
   type InteractionPlacement,
+  NetworkRouteConfiguration,
+  NetworkRouteConsistency,
+  networkRoutePlacementCompatibilityIssue,
+  type NetworkRouteConfiguration as NetworkRouteConfigurationValue,
+  type NetworkRouteConsistency as NetworkRouteConsistencyValue,
 } from "@opengeni/contracts";
 import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { type Database, withRlsContext } from "./database";
@@ -25,6 +30,9 @@ import {
 } from "./interaction-revisions";
 import { safeDatabaseErrorFacts } from "./persistence-errors";
 import {
+  commitBrowserStateUploadInTransaction,
+  markBrowserStateUploadsDeletePendingInTransaction,
+  prepareBrowserStateUploadInTransaction,
   validateBrowserStateArtifactCommitInput,
   type BrowserStateArtifactCommitInput,
 } from "./browser-state-artifacts";
@@ -45,9 +53,10 @@ export const MANAGED_BROWSER_SESSION_CAPABILITIES = BrowserSessionCapabilities.p
   liveFrames: true,
   humanInput: true,
   tabs: true,
-  downloads: false,
-  uploads: false,
-  clipboard: false,
+  downloads: true,
+  uploads: true,
+  clipboard: true,
+  permissions: true,
   diagnostics: true,
   rawCdp: false,
   linkedComputer: false,
@@ -64,13 +73,54 @@ export const ATTACHED_BROWSER_SESSION_CAPABILITIES = BrowserSessionCapabilities.
   tabs: true,
   downloads: false,
   uploads: false,
-  clipboard: false,
+  clipboard: true,
+  permissions: false,
   diagnostics: true,
   rawCdp: false,
   linkedComputer: false,
   privateCheckpoint: false,
   identityPublication: false,
   parallelTargets: true,
+});
+
+/** Remote Chromium controlled through the same native CDP driver. Files and
+ * portable profile state remain false because their bytes live on another host. */
+export const EXTERNAL_BROWSER_SESSION_CAPABILITIES = BrowserSessionCapabilities.parse({
+  semanticObservation: true,
+  screenshots: true,
+  liveFrames: true,
+  humanInput: true,
+  tabs: true,
+  downloads: false,
+  uploads: false,
+  clipboard: true,
+  permissions: true,
+  diagnostics: true,
+  rawCdp: false,
+  linkedComputer: false,
+  privateCheckpoint: false,
+  identityPublication: false,
+  parallelTargets: true,
+});
+
+/** Measured against Lightpanda 0.3.5. Unsupported Chromium-only affordances
+ * remain false instead of being emulated or silently routed elsewhere. */
+export const LIGHTPANDA_BROWSER_SESSION_CAPABILITIES = BrowserSessionCapabilities.parse({
+  semanticObservation: true,
+  screenshots: true,
+  liveFrames: false,
+  humanInput: false,
+  tabs: false,
+  downloads: false,
+  uploads: true,
+  clipboard: false,
+  permissions: false,
+  diagnostics: true,
+  rawCdp: false,
+  linkedComputer: false,
+  privateCheckpoint: false,
+  identityPublication: false,
+  parallelTargets: false,
 });
 
 export class BrowserSessionNotFoundError extends Error {
@@ -135,7 +185,11 @@ export type BrowserSessionControlRecord = {
   session: BrowserSession;
   tokenGeneration: number;
   sourceSessionId: string;
+  /** Placement hosting browserd. It equals the logical sandbox placement for
+   * managed browsers and remains the source home sandbox for remote browsers. */
+  controllerHostSandboxGroupId: string | null;
   createOperationId: string;
+  networkRouteAuthority: BrowserSessionNetworkRouteAuthority | null;
   operation: null | {
     operationId: string;
     kind: InteractionLifecycleOperationKind;
@@ -143,6 +197,15 @@ export type BrowserSessionControlRecord = {
     controllerGeneration: string | null;
     actorSubjectId: string;
   };
+};
+
+export type BrowserSessionNetworkRouteAuthority = {
+  routeId: string;
+  routeVersion: number;
+  credentialVersion: number | null;
+  authorityDigest: string | null;
+  configuration: NetworkRouteConfigurationValue;
+  consistency: NetworkRouteConsistencyValue;
 };
 
 function iso(value: Date): string {
@@ -329,7 +392,7 @@ export function browserSessionCreateRequestDigest(input: PrepareBrowserSessionCr
         : { kind: "blank_identity" as const }
     : { kind: "none" as const };
   return requestDigest({
-    version: 3,
+    version: 4,
     associatedSessionId: input.associatedSessionId,
     name: input.name,
     initialUrl: input.initialUrl,
@@ -502,7 +565,8 @@ export async function getBrowserPrivateCheckpointAuthority(
         !artifact ||
         artifact.sourceBrowserSessionId !== session.id ||
         artifact.purpose !== "private_checkpoint" ||
-        artifact.state !== "available"
+        artifact.state !== "available" ||
+        artifact.encryptedDataKey === null
       ) {
         throw new BrowserSessionStateError(
           "BrowserSession private checkpoint authority is inconsistent",
@@ -578,7 +642,9 @@ async function controlRecordFromRows(
     session: browserSessionFromRows(row, associations),
     tokenGeneration: row.tokenGeneration,
     sourceSessionId: createdAssociations[0]!.sessionId,
+    controllerHostSandboxGroupId: row.controllerHostSandboxGroupId,
     createOperationId: row.createOperationId,
+    networkRouteAuthority: networkRouteAuthorityFromRow(row),
     operation: operation
       ? {
           operationId: operation.operationId,
@@ -588,6 +654,23 @@ async function controlRecordFromRows(
           actorSubjectId: operation.actorSubjectId,
         }
       : null,
+  };
+}
+
+function networkRouteAuthorityFromRow(
+  row: BrowserSessionRow,
+): BrowserSessionNetworkRouteAuthority | null {
+  if (!row.networkRouteId) return null;
+  if (!row.networkRouteVersion || !row.networkRouteConfiguration || !row.networkRouteConsistency) {
+    throw new Error("BrowserSession network route is missing its pinned authority");
+  }
+  return {
+    routeId: row.networkRouteId,
+    routeVersion: row.networkRouteVersion,
+    credentialVersion: row.networkRouteCredentialVersion,
+    authorityDigest: row.networkRouteAuthorityDigest,
+    configuration: NetworkRouteConfiguration.parse(row.networkRouteConfiguration),
+    consistency: NetworkRouteConsistency.parse(row.networkRouteConsistency),
   };
 }
 
@@ -617,7 +700,7 @@ export async function prepareBrowserSessionCreate(
           });
         }
         const [sourceSession] = await tx
-          .select({ id: schema.sessions.id })
+          .select({ id: schema.sessions.id, sandboxGroupId: schema.sessions.sandboxGroupId })
           .from(schema.sessions)
           .where(
             and(
@@ -628,7 +711,7 @@ export async function prepareBrowserSessionCreate(
           .limit(1);
         if (!sourceSession) throw new BrowserSessionNotFoundError("Associated session not found");
         await assertLinkedComputerAvailable(tx, input);
-        await assertNetworkRouteAvailable(tx, input);
+        const networkRoute = await assertNetworkRouteAvailable(tx, input);
         const identitySelection = await resolveCreateIdentitySelection(tx, input);
 
         const [insertedOperation] = await tx
@@ -644,7 +727,9 @@ export async function prepareBrowserSessionCreate(
             state: "prepared",
             actorSubjectId: input.actorSubjectId,
           })
-          .onConflictDoNothing({ target: schema.interactionOperations.operationId })
+          .onConflictDoNothing({
+            target: schema.interactionOperations.operationId,
+          })
           .returning();
         if (!insertedOperation) {
           const existing = await loadOperation(tx, input.workspaceId, input.operationId);
@@ -660,6 +745,12 @@ export async function prepareBrowserSessionCreate(
         }
 
         const placementColumns = placementToColumns(input.placement);
+        const controllerHostSandboxGroupId =
+          input.placement.kind === "sandbox_group"
+            ? input.placement.sandboxGroupId
+            : input.placement.kind === "external_provider"
+              ? sourceSession.sandboxGroupId
+              : null;
         const [insertedSession] = await tx
           .insert(schema.browserSessions)
           .values({
@@ -669,12 +760,16 @@ export async function prepareBrowserSessionCreate(
             name: input.name,
             lifecycle: "starting",
             ...placementColumns,
+            controllerHostSandboxGroupId,
             driverId: input.driverId,
             engine: input.engine,
             headless: input.headless,
             identityId: identitySelection.identityId,
             baseRevisionId: identitySelection.baseRevisionId,
             networkRouteId: input.networkRouteId ?? null,
+            networkRouteVersion: networkRoute?.version ?? null,
+            networkRouteConfiguration: networkRoute?.configuration ?? null,
+            networkRouteConsistency: networkRoute?.consistency ?? null,
             linkedComputerSessionId: input.linkedComputerSessionId ?? null,
             capabilities,
             createOperationId: input.operationId,
@@ -705,6 +800,120 @@ export async function prepareBrowserSessionCreate(
   );
 }
 
+/**
+ * Bind the broker-resolved, secret-free launch authority before controller
+ * dispatch. A prepared operation may refresh this binding while no physical
+ * controller owns it; after dispatch it is immutable and replay-fenced.
+ */
+export async function bindBrowserSessionNetworkRouteAuthority(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    browserSessionId: string;
+    operationId: string;
+    routeVersion: number;
+    credentialVersion: number | null;
+    authorityDigest: string;
+  },
+): Promise<BrowserSessionNetworkRouteAuthority> {
+  if (!Number.isSafeInteger(input.routeVersion) || input.routeVersion < 1) {
+    throw new BrowserSessionStateError("Network route version is invalid");
+  }
+  if (
+    input.credentialVersion !== null &&
+    (!Number.isSafeInteger(input.credentialVersion) || input.credentialVersion < 1)
+  ) {
+    throw new BrowserSessionStateError("Network route credential version is invalid");
+  }
+  if (!/^[A-Za-z0-9._~-]{16,256}$/u.test(input.authorityDigest)) {
+    throw new BrowserSessionStateError("Network route authority digest is invalid");
+  }
+  return await withRlsContext(
+    db,
+    input,
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        await lockOperation(tx, input.workspaceId, input.operationId);
+        const operation = await loadOperation(tx, input.workspaceId, input.operationId);
+        assertOperationResource(operation, input.browserSessionId);
+        if (operation!.kind !== "create" && operation!.kind !== "resume") {
+          throw new BrowserSessionOperationConflictError(
+            "Network route authority belongs to another browser operation",
+          );
+        }
+        const [current] = await tx
+          .select()
+          .from(schema.browserSessions)
+          .where(
+            and(
+              eq(schema.browserSessions.accountId, input.accountId),
+              eq(schema.browserSessions.workspaceId, input.workspaceId),
+              eq(schema.browserSessions.id, input.browserSessionId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!current) throw new BrowserSessionNotFoundError("BrowserSession not found");
+        if (
+          !current.networkRouteId ||
+          current.networkRouteVersion !== input.routeVersion ||
+          !current.networkRouteConfiguration ||
+          !current.networkRouteConsistency
+        ) {
+          throw new BrowserSessionOperationConflictError(
+            "BrowserSession route does not match this launch authority",
+          );
+        }
+        const configuration = NetworkRouteConfiguration.parse(current.networkRouteConfiguration);
+        const hasCredential = "credential" in configuration && configuration.credential !== null;
+        if (hasCredential !== (input.credentialVersion !== null)) {
+          throw new BrowserSessionStateError(
+            "Network route credential authority does not match its configuration",
+          );
+        }
+        if (
+          current.networkRouteAuthorityDigest === input.authorityDigest &&
+          current.networkRouteCredentialVersion === input.credentialVersion
+        ) {
+          return networkRouteAuthorityFromRow(current)!;
+        }
+        if (
+          operation!.state !== "prepared" ||
+          operation!.controllerGeneration !== null ||
+          current.controllerGeneration !== null
+        ) {
+          throw new BrowserSessionOperationConflictError(
+            "Dispatched BrowserSession route authority is immutable",
+          );
+        }
+        const [updated] = await tx
+          .update(schema.browserSessions)
+          .set({
+            networkRouteCredentialVersion: input.credentialVersion,
+            networkRouteAuthorityDigest: input.authorityDigest,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(schema.browserSessions.workspaceId, input.workspaceId),
+              eq(schema.browserSessions.id, input.browserSessionId),
+              eq(schema.browserSessions.networkRouteVersion, input.routeVersion),
+              isNull(schema.browserSessions.controllerGeneration),
+            ),
+          )
+          .returning();
+        if (!updated) {
+          throw new BrowserSessionOperationConflictError(
+            "Network route authority binding lost its fence",
+          );
+        }
+        return networkRouteAuthorityFromRow(updated)!;
+      }),
+  );
+}
+
 function normalizedBrowserCapabilities(
   input: PrepareBrowserSessionCreateInput,
 ): BrowserSessionCapabilitiesValue {
@@ -717,9 +926,13 @@ function normalizedBrowserCapabilities(
 async function assertNetworkRouteAvailable(
   db: Database,
   input: PrepareBrowserSessionCreateInput,
-): Promise<void> {
+): Promise<{
+  version: number;
+  configuration: NetworkRouteConfigurationValue;
+  consistency: NetworkRouteConsistencyValue;
+} | null> {
   const networkRouteId = input.networkRouteId ?? null;
-  if (!networkRouteId) return;
+  if (!networkRouteId) return null;
   const [route] = await db
     .select()
     .from(schema.networkRoutes)
@@ -731,35 +944,24 @@ async function assertNetworkRouteAvailable(
       ),
     )
     .limit(1)
-    .for("key share");
+    .for("update");
   if (!route) throw new BrowserSessionNotFoundError("Network route not found");
   if (route.status !== "active") {
     throw new BrowserSessionStateError("Network route is archived");
   }
-  if (
-    route.configuration.kind === "tunnel" &&
-    !placementsEqual(route.configuration.placement, input.placement)
-  ) {
-    throw new BrowserSessionStateError("Tunnel route is bound to another placement");
-  }
-}
-
-function placementsEqual(left: InteractionPlacement, right: InteractionPlacement): boolean {
-  if (left.kind !== right.kind) return false;
-  switch (left.kind) {
-    case "sandbox_group":
-      return right.kind === "sandbox_group" && left.sandboxGroupId === right.sandboxGroupId;
-    case "connected_machine":
-      return right.kind === "connected_machine" && left.sandboxId === right.sandboxId;
-    case "attached_device":
-      return right.kind === "attached_device" && left.deviceId === right.deviceId;
-    case "external_provider":
-      return (
-        right.kind === "external_provider" &&
-        left.providerId === right.providerId &&
-        left.placementId === right.placementId
-      );
-  }
+  const configuration = NetworkRouteConfiguration.parse(route.configuration);
+  const consistency = NetworkRouteConsistency.parse(route.consistency);
+  const compatibilityIssue = networkRoutePlacementCompatibilityIssue(
+    configuration,
+    consistency,
+    input.placement,
+  );
+  if (compatibilityIssue) throw new BrowserSessionStateError(compatibilityIssue);
+  return {
+    version: safeInteger(route.version, "network route version"),
+    configuration,
+    consistency,
+  };
 }
 
 async function assertLinkedComputerAvailable(
@@ -770,11 +972,6 @@ async function assertLinkedComputerAvailable(
   if (!computerSessionId) return;
   if (input.headless) {
     throw new BrowserSessionStateError("A linked ComputerSession requires a headed browser");
-  }
-  if (input.placement.kind === "attached_device") {
-    throw new BrowserSessionStateError(
-      "Attached Chrome does not expose an exact linked ComputerSession yet",
-    );
   }
   const [computer] = await db
     .select()
@@ -911,6 +1108,7 @@ export async function dispatchBrowserSessionOperation(
     browserSessionId: string;
     controllerGeneration: string;
     controller?: InteractionControllerBinding;
+    stateUpload?: { objectKey: string; cleanupAfter: Date };
   },
 ): Promise<InteractionLifecycleOperationReceiptValue> {
   const controller = input.controller ? InteractionControllerBinding.parse(input.controller) : null;
@@ -929,6 +1127,16 @@ export async function dispatchBrowserSessionOperation(
         const operation = await loadOperation(tx, input.workspaceId, input.operationId);
         assertOperationResource(operation, input.browserSessionId);
         if (operation!.state === "prepared") {
+          if (input.stateUpload) {
+            await prepareBrowserStateUploadInTransaction(tx, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              operationId: input.operationId,
+              sourceBrowserSessionId: input.browserSessionId,
+              purpose: "private_checkpoint",
+              ...input.stateUpload,
+            });
+          }
           if (controller) {
             await lockBrowserSession(tx, input.workspaceId, input.browserSessionId);
             const now = new Date();
@@ -999,6 +1207,16 @@ export async function dispatchBrowserSessionOperation(
             );
           }
         }
+        if (input.stateUpload && operation!.state === "dispatched") {
+          await prepareBrowserStateUploadInTransaction(tx, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            operationId: input.operationId,
+            sourceBrowserSessionId: input.browserSessionId,
+            purpose: "private_checkpoint",
+            ...input.stateUpload,
+          });
+        }
         return operationReceipt(operation!, true);
       }),
   );
@@ -1042,6 +1260,25 @@ export async function activateBrowserSession(
           );
         }
         await lockBrowserSession(tx, input.workspaceId, input.browserSessionId);
+        const [currentSession] = await tx
+          .select({
+            networkRouteId: schema.browserSessions.networkRouteId,
+            networkRouteAuthorityDigest: schema.browserSessions.networkRouteAuthorityDigest,
+          })
+          .from(schema.browserSessions)
+          .where(
+            and(
+              eq(schema.browserSessions.workspaceId, input.workspaceId),
+              eq(schema.browserSessions.id, input.browserSessionId),
+            ),
+          )
+          .limit(1);
+        if (!currentSession) throw new BrowserSessionNotFoundError("BrowserSession not found");
+        if (currentSession.networkRouteId && !currentSession.networkRouteAuthorityDigest) {
+          throw new BrowserSessionStateError(
+            "BrowserSession network route authority was not bound before activation",
+          );
+        }
         const now = new Date();
         const [sessionRow] = await tx
           .update(schema.browserSessions)
@@ -1287,6 +1524,12 @@ async function prepareBrowserSessionLifecycleTransition(
                   .set({
                     lifecycle: transition.targetLifecycle,
                     failureCode: null,
+                    ...(transition.kind === "resume"
+                      ? {
+                          networkRouteCredentialVersion: null,
+                          networkRouteAuthorityDigest: null,
+                        }
+                      : {}),
                     updatedAt: now,
                   })
                   .where(
@@ -1398,6 +1641,14 @@ export async function commitBrowserSessionSuspension(
           })
           .returning({ id: schema.browserStateArtifacts.id });
         if (!artifactRow) throw new Error("Browser checkpoint artifact insert was lost");
+        await commitBrowserStateUploadInTransaction(tx, {
+          workspaceId: input.workspaceId,
+          operationId: input.operationId,
+          sourceBrowserSessionId: input.browserSessionId,
+          purpose: "private_checkpoint",
+          objectKey: artifact.objectKey,
+          artifactId,
+        });
 
         if (current.privateCheckpointArtifactId) {
           const [retired] = await tx
@@ -1669,6 +1920,9 @@ async function failBrowserSessionTransition(
         if (!sessionRow || !operationRow) {
           throw new Error("BrowserSession lifecycle failure settlement was lost");
         }
+        if (input.kind === "suspend") {
+          await markBrowserStateUploadsDeletePendingInTransaction(tx, input);
+        }
         const associations = await loadAssociations(tx, input.workspaceId, [
           input.browserSessionId,
         ]);
@@ -1712,7 +1966,9 @@ export async function prepareBrowserSessionEnd(
               actorSubjectId: input.actorSubjectId,
               ...(terminal ? { dispatchedAt: now, settledAt: now } : {}),
             })
-            .onConflictDoNothing({ target: schema.interactionOperations.operationId })
+            .onConflictDoNothing({
+              target: schema.interactionOperations.operationId,
+            })
             .returning();
           if (!insertedOperation) {
             const existing = await loadOperation(tx, input.workspaceId, input.operationId);
@@ -1905,7 +2161,7 @@ export async function touchBrowserSessionController(
           )
           .limit(1);
         if (!observed) return false;
-        if (observed.placementKind === "sandbox_group") {
+        if (observed.controllerHostSandboxGroupId) {
           // Match the reaper's exact lease -> holder -> BrowserSession lock
           // order. The pre-lock observation is only a locator; every authority
           // predicate is repeated below while the corresponding row is locked.
@@ -1915,7 +2171,7 @@ export async function touchBrowserSessionController(
             join browser_sessions browser
               on browser.account_id = lease.account_id
              and browser.workspace_id = lease.workspace_id
-             and browser.sandbox_group_id = lease.sandbox_group_id
+             and browser.controller_host_sandbox_group_id = lease.sandbox_group_id
             where browser.account_id = ${input.accountId}
               and browser.workspace_id = ${input.workspaceId}
               and browser.id = ${input.browserSessionId}
@@ -1934,7 +2190,7 @@ export async function touchBrowserSessionController(
             and holder.kind = 'interaction'
             and holder.holder_id = ${`browser-session:${input.browserSessionId}`}
             and lease.workspace_id = ${input.workspaceId}
-            and lease.sandbox_group_id = ${observed.sandboxGroupId}
+            and lease.sandbox_group_id = ${observed.controllerHostSandboxGroupId}
             and lease.instance_id = ${observed.placementInstanceId}
           returning holder.id
         `);

@@ -169,7 +169,7 @@ impl Driver {
     /// The server's negotiated max payload (the reply/request size wall).
     #[must_use]
     pub fn max_payload(&self) -> usize {
-        self.client.max_payload()
+        self.client.server_info().max_payload
     }
 
     /// The underlying NATS client (the op-stream plumbing shares it).
@@ -215,6 +215,15 @@ impl Driver {
             op: Some(op.into_wire()),
         };
         let payload = Bytes::from(control.encode_to_vec());
+        if payload.len() > self.max_payload() {
+            return OpOutcome {
+                label,
+                latency_us: 0,
+                class: OpClass::Transport("REQUEST_TOO_LARGE".to_string()),
+                exec_timed_out: false,
+                payload_len: None,
+            };
+        }
         let request = async_nats::Request::new()
             .payload(payload)
             .timeout(Some(timeout));
@@ -298,8 +307,6 @@ fn transport_label(kind: RequestErrorKind) -> &'static str {
     match kind {
         RequestErrorKind::TimedOut => "CLIENT_TIMEOUT",
         RequestErrorKind::NoResponders => "NO_RESPONDERS",
-        RequestErrorKind::InvalidSubject => "CLIENT_INVALID_SUBJECT",
-        RequestErrorKind::MaxPayloadExceeded => "REQUEST_TOO_LARGE",
         RequestErrorKind::Other => "CLIENT_OTHER",
     }
 }

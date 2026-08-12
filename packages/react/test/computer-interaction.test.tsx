@@ -11,7 +11,7 @@ import type {
   ComputerTarget,
 } from "@opengeni/sdk/interaction";
 import { act } from "react";
-import { ComputerViewer } from "../src/components/computer-viewer";
+import { computerKey, ComputerViewer } from "../src/components/computer-viewer";
 import type {
   ComputerFrameWebSocket,
   ComputerFrameWebSocketFactory,
@@ -62,6 +62,7 @@ function computerSession(
       semanticActions: true,
       pointerInput: true,
       keyboardInput: true,
+      clipboard: true,
       backgroundActions: true,
       parallelApps: true,
     },
@@ -280,7 +281,11 @@ describe("ComputerSession React resources", () => {
     const screenTarget = target("screen-1", "screen");
     const requests: unknown[] = [];
     const client = fakeClient({
-      getComputerSession: async () => computerSession(),
+      getComputerSession: async () => ({
+        ...computerSession(),
+        platform: "macos",
+        adapter: "opengeni.macos.ax-sck.v1",
+      }),
       listComputerTargets: async () => ({
         computerSessionId: COMPUTER_SESSION_ID,
         controllerGeneration: "controller-1",
@@ -452,6 +457,22 @@ describe("ComputerSession frame stream", () => {
 });
 
 describe("ComputerViewer", () => {
+  test("ignores standalone modifier keydowns before a computer shortcut", () => {
+    const event = (
+      key: string,
+      modifiers: Partial<{
+        altKey: boolean;
+        ctrlKey: boolean;
+        metaKey: boolean;
+        shiftKey: boolean;
+      }> = {},
+    ) => ({ altKey: false, ctrlKey: false, metaKey: false, shiftKey: false, key, ...modifiers });
+    expect(computerKey(event("Meta", { metaKey: true }))).toBeNull();
+    expect(computerKey(event("Control", { ctrlKey: true }))).toBeNull();
+    expect(computerKey(event("Alt", { altKey: true }))).toBeNull();
+    expect(computerKey(event("a", { metaKey: true }))).toBe("Meta+a");
+  });
+
   test("pins an exact ComputerSession requested by Browser navigation", async () => {
     const current = computerSession();
     const peer = computerSession(PEER_COMPUTER_SESSION_ID, PEER_SESSION_ID, "Peer Mac");
@@ -535,7 +556,66 @@ describe("ComputerViewer", () => {
       expectedObservationId: "observation-window-1-generation",
       action: { type: "semantic", locator: { kind: "ref", ref: "e1" }, action: "invoke" },
     });
-    expect(rendered.container.textContent).toContain("native actions can stay in the background");
+    expect(rendered.container.textContent).toContain("semantic controls stay in the background");
+    expect(
+      rendered.container.querySelector<HTMLTextAreaElement>(
+        "textarea[aria-label='Computer keyboard input']",
+      )?.disabled,
+    ).toBe(false);
+    await rendered.unmount();
+  });
+
+  test("keeps semantic controls live but disables raw input for an unfocused background window", async () => {
+    const backgroundWindow = { ...target(), focused: false };
+    const actions: unknown[] = [];
+    const client = fakeClient({
+      listComputerSessions: async () => ({ revision: 1, sessions: [computerSession()] }),
+      getComputerSession: async () => computerSession(),
+      listComputerTargets: async () => ({
+        computerSessionId: COMPUTER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        targets: [backgroundWindow],
+      }),
+      observeComputerTarget: async () => observation(backgroundWindow),
+      attachComputerSession: async (_workspaceId, _computerSessionId, request) =>
+        attachment(request.targetId),
+      actInComputer: async (_workspaceId, _computerSessionId, request) => {
+        actions.push(request);
+        return receipt(observation(backgroundWindow), request.operationId);
+      },
+    });
+    const rendered = await renderComponent(
+      <ComputerViewer
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        webSocketFactory={(url, protocols) =>
+          new FakeComputerSocket(url, protocols) as unknown as ComputerFrameWebSocket
+        }
+      />,
+    );
+    await flush(40);
+
+    const keyboard = rendered.container.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='Computer keyboard input']",
+    );
+    expect(keyboard?.disabled).toBe(true);
+    if (keyboard) {
+      keyboard.value = "must-not-foreground";
+      await actRun(() => keyboard.dispatchEvent(new InputEvent("input", { bubbles: true })));
+    }
+    expect(actions).toHaveLength(0);
+
+    const semantic = [...rendered.container.querySelectorAll("button")].find(
+      (button) => button.textContent?.trim() === "Run checks",
+    );
+    expect(semantic).toBeDefined();
+    await actRun(() => semantic!.click());
+    await flush(5);
+    expect(actions).toHaveLength(1);
+    expect(actions[0]).toMatchObject({
+      action: { type: "semantic", locator: { kind: "ref", ref: "e1" }, action: "invoke" },
+    });
     await rendered.unmount();
   });
 });

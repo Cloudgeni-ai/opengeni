@@ -8,6 +8,7 @@
 #![doc(html_root_url = "https://docs.rs/opengeni-computer-native")]
 
 mod adapter;
+mod clipboard;
 mod model;
 mod rpc;
 mod tree;

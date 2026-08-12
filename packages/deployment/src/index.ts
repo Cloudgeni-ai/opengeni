@@ -156,6 +156,17 @@ export const SANDBOX_LIFECYCLE_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_SANDBOX_WARMING_TIMEOUT_MS",
 ];
 
+/** Optional remote-browser authorities and launch policy. These remain API
+ * runtime secrets/settings; browserd receives only a per-session private
+ * transport envelope over its placement-local control channel. */
+export const EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV: readonly string[] = [
+  "OPENGENI_BROWSERBASE_API_KEY",
+  "OPENGENI_KERNEL_API_KEY",
+  "OPENGENI_KERNEL_ENDPOINT",
+  "OPENGENI_KERNEL_BROWSER_TIMEOUT_SECONDS",
+  "OPENGENI_KERNEL_BROWSER_STEALTH",
+];
+
 /** Control-plane secrets needed for a complete Connected Machine deployment.
  * The config layer permits graceful degradation when these are absent; a
  * deployment whose primary backend is selfhosted cannot. */
@@ -2312,6 +2323,9 @@ function runtimeEnvValues(
     entries.push(valueEnv(key, env[key]));
   }
   for (const key of SANDBOX_LIFECYCLE_PASSTHROUGH_ENV) {
+    entries.push(valueEnv(key, env[key]));
+  }
+  for (const key of EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV) {
     entries.push(valueEnv(key, env[key]));
   }
 

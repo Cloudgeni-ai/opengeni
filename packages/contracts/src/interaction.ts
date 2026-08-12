@@ -5,6 +5,7 @@ export const INTERACTION_PROTOCOL_VERSION = 1 as const;
 export const BROWSER_CONTROL_PROTOCOL_VERSION = INTERACTION_PROTOCOL_VERSION;
 export const BROWSER_CONTROL_WEBSOCKET_PROTOCOL = "opengeni.browser.v1" as const;
 export const COMPUTER_CONTROL_WEBSOCKET_PROTOCOL = "opengeni.computer.v1" as const;
+export const COMPUTER_RFB_WEBSOCKET_PROTOCOL = "opengeni.computer.rfb.v1" as const;
 export const BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX = "opengeni.auth." as const;
 export const BROWSER_CONTROL_MAX_JSON_BYTES = 40 * 1024 * 1024;
 export const BROWSER_CONTROL_MAX_FRAME_HEADER_BYTES = 64 * 1024;
@@ -16,6 +17,28 @@ export const INTERACTION_MAX_SEMANTIC_NODES = 10_000;
 export const INTERACTION_MAX_CHANGED_NODES = 2_000;
 export const INTERACTION_MAX_DIAGNOSTIC_ENTRIES = 1_000;
 export const INTERACTION_MAX_ACTIONS_PER_BATCH = 32;
+export const INTERACTION_MAX_WORKSPACE_FILES_PER_COMMAND = 100;
+export const INTERACTION_MAX_CLIPBOARD_BYTES = 1024 * 1024;
+
+/**
+ * Latest-wins workspace invalidation for Browser/Computer resources. This is
+ * deliberately a cursor snapshot rather than a durable event-log entry:
+ * consumers refetch authoritative resource lists whenever `revision` advances.
+ */
+export const WorkspaceInteractionRevisionEvent = z
+  .object({
+    workspaceId: z.string().uuid(),
+    sequence: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    revision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    type: z.literal("workspace.interaction.changed"),
+    occurredAt: z.string().datetime({ offset: true }),
+  })
+  .strict()
+  .refine((event) => event.sequence === event.revision, {
+    message: "interaction event sequence must equal revision",
+    path: ["sequence"],
+  });
+export type WorkspaceInteractionRevisionEvent = z.infer<typeof WorkspaceInteractionRevisionEvent>;
 
 const opaqueGeneration = z
   .string()
@@ -168,6 +191,7 @@ export const BrowserSessionCapabilities = z
     downloads: z.boolean(),
     uploads: z.boolean(),
     clipboard: z.boolean(),
+    permissions: z.boolean(),
     diagnostics: z.boolean(),
     rawCdp: z.boolean(),
     linkedComputer: z.boolean(),
@@ -204,6 +228,48 @@ export const BrowserSession = z
   })
   .strict();
 export type BrowserSession = z.infer<typeof BrowserSession>;
+
+/** Controller-private, BrowserSession-scoped clipboard. This is deliberately
+ * distinct from a ComputerSession/host OS clipboard so concurrent browsers do
+ * not exchange ambient machine state. */
+export const BrowserClipboard = z
+  .object({
+    browserSessionId: z.string().uuid(),
+    controllerGeneration: opaqueGeneration,
+    revision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    text: z
+      .string()
+      .max(INTERACTION_MAX_CLIPBOARD_BYTES)
+      .refine(
+        (value) => new TextEncoder().encode(value).byteLength <= INTERACTION_MAX_CLIPBOARD_BYTES,
+        { message: "browser clipboard text exceeds its UTF-8 byte envelope" },
+      ),
+    source: z.enum(["empty", "write", "clear", "copy", "paste"]),
+    sourceTargetId: boundedOpaqueId.nullable(),
+    updatedAt: z.string().datetime({ offset: true }).nullable(),
+  })
+  .strict()
+  .superRefine((clipboard, context) => {
+    if (clipboard.revision === 0) {
+      if (
+        clipboard.text !== "" ||
+        clipboard.source !== "empty" ||
+        clipboard.sourceTargetId !== null ||
+        clipboard.updatedAt !== null
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: "initial browser clipboard state must be empty",
+        });
+      }
+    } else if (clipboard.source === "empty" || clipboard.updatedAt === null) {
+      context.addIssue({
+        code: "custom",
+        message: "updated browser clipboard state requires a source and timestamp",
+      });
+    }
+  });
+export type BrowserClipboard = z.infer<typeof BrowserClipboard>;
 
 /** One live Chrome-profile bridge installed on an enrolled machine. This is a
  *  transport endpoint, not saved browser/login state: BrowserIdentity remains
@@ -521,6 +587,93 @@ export const NetworkRouteConsistency = z
   .strict();
 export type NetworkRouteConsistency = z.infer<typeof NetworkRouteConsistency>;
 
+export function interactionPlacementsEqual(
+  left: InteractionPlacement,
+  right: InteractionPlacement,
+): boolean {
+  if (left.kind !== right.kind) return false;
+  switch (left.kind) {
+    case "sandbox_group":
+      return right.kind === "sandbox_group" && left.sandboxGroupId === right.sandboxGroupId;
+    case "connected_machine":
+      return right.kind === "connected_machine" && left.sandboxId === right.sandboxId;
+    case "attached_device":
+      return right.kind === "attached_device" && left.deviceId === right.deviceId;
+    case "external_provider":
+      return (
+        right.kind === "external_provider" &&
+        left.providerId === right.providerId &&
+        left.placementId === right.placementId
+      );
+  }
+}
+
+/** One secret-free compatibility rule shared by configuration, persistence,
+ * and launch. `null` placement means the ordinary managed sandbox default. */
+export function networkRoutePlacementCompatibilityIssue(
+  configuration: NetworkRouteConfiguration,
+  consistency: NetworkRouteConsistency,
+  placement: InteractionPlacement | null,
+): string | null {
+  if (configuration.kind === "tunnel") {
+    if (!placement || !interactionPlacementsEqual(configuration.placement, placement)) {
+      return "Tunnel route is bound to another placement";
+    }
+  }
+  if (configuration.kind === "managed") {
+    if (placement?.kind !== "external_provider") {
+      return "Managed NetworkRoutes require an external browser provider placement";
+    }
+    if (configuration.providerId !== placement.providerId) {
+      return "Managed NetworkRoute belongs to another external browser provider";
+    }
+    if (configuration.credential !== null) {
+      return "Managed provider routes cannot use a separate proxy credential";
+    }
+    if (consistency.dns !== "provider") {
+      return "Managed provider routes require provider DNS";
+    }
+    if (configuration.providerId === "browserbase") {
+      if (configuration.routeId !== "default" || configuration.egressClass !== "residential") {
+        return "Browserbase supports only its default managed residential route";
+      }
+      if (configuration.region !== null && !/^[A-Za-z]{2}$/u.test(configuration.region)) {
+        return "Browserbase managed route region must be a two-letter country code";
+      }
+      if (consistency.stability !== "session") {
+        return "Browserbase managed routing cannot promise a stable IP across sessions";
+      }
+    } else if (configuration.providerId !== "kernel") {
+      return `Managed NetworkRoute provider ${configuration.providerId} is unsupported`;
+    }
+    return null;
+  }
+  if (placement?.kind === "external_provider") {
+    return "External browser providers require a provider-managed NetworkRoute";
+  }
+  const expectedDns = configuration.kind === "proxy" ? "proxy" : "placement";
+  if (consistency.dns !== expectedDns) {
+    return `Network route ${configuration.kind} cannot provide ${consistency.dns} DNS`;
+  }
+  if (consistency.webRtc === "proxy_only" && configuration.kind !== "proxy") {
+    return "WebRTC proxy-only routing requires a proxy network route";
+  }
+  if (placement?.kind === "attached_device") {
+    if (configuration.kind === "proxy") {
+      return "Attached Chrome cannot change its process-scoped proxy configuration";
+    }
+    if (
+      consistency.locale !== null ||
+      consistency.timezone !== null ||
+      consistency.geolocation !== null ||
+      consistency.webRtc !== "default"
+    ) {
+      return "Attached Chrome cannot change process-scoped route emulation";
+    }
+  }
+  return null;
+}
+
 export const NetworkRoute = z
   .object({
     id: z.string().uuid(),
@@ -637,6 +790,9 @@ export const SiteAuthAuthority = z.discriminatedUnion("kind", [
       kind: z.literal("external_provider"),
       label: z.string().trim().min(1).max(200),
       adapterId: boundedOpaqueId,
+      /** Opaque provider-owned auth-connection reference. It is meaningful
+       * only to the named adapter and never treated as credential material. */
+      connectionId: boundedOpaqueId,
       credential: InteractionCredentialAuthorityRef.nullable(),
     })
     .strict(),
@@ -673,6 +829,22 @@ export type SiteAuthHealthPolicy = z.infer<typeof SiteAuthHealthPolicy>;
 export const SiteAuthVerificationState = z.enum(["unknown", "verified", "needs_repair", "failed"]);
 export type SiteAuthVerificationState = z.infer<typeof SiteAuthVerificationState>;
 
+export const SiteAuthMaintenance = z
+  .object({
+    action: z.enum(["health_check", "repair"]),
+    /** Hidden until the durable session start has been confirmed. */
+    sessionId: z.string().uuid().nullable(),
+    dueAt: z.string().datetime({ offset: true }),
+    startedAt: z.string().datetime({ offset: true }).nullable(),
+  })
+  .strict();
+export type SiteAuthMaintenance = z.infer<typeof SiteAuthMaintenance>;
+
+/** Trusted service provenance for scheduler-authored maintenance sessions. */
+export const SITE_AUTH_MAINTENANCE_OPERATION_CONTEXT_KEY =
+  "opengeniSiteAuthMaintenanceOperationId" as const;
+export const SITE_AUTH_MAINTENANCE_CONNECTION_CONTEXT_KEY = "opengeniSiteAuthConnectionId" as const;
+
 const SiteAuthConnectionConfiguration = z
   .object({
     name: z.string().trim().min(1).max(200),
@@ -693,6 +865,17 @@ function validateSiteAuthConfiguration(
   connection: z.infer<typeof SiteAuthConnectionConfiguration>,
   context: z.RefinementCtx,
 ): void {
+  if (
+    connection.preferredIdentityId &&
+    (connection.preferredPlacement?.kind === "attached_device" ||
+      connection.preferredPlacement?.kind === "external_provider")
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["preferredIdentityId"],
+      message: "the preferred placement owns its live profile identity",
+    });
+  }
   if (new Set(connection.origins).size !== connection.origins.length) {
     context.addIssue({ code: "custom", path: ["origins"], message: "origins repeat" });
   }
@@ -767,6 +950,9 @@ export const SiteAuthConnection = SiteAuthConnectionConfiguration.extend({
   verificationState: SiteAuthVerificationState,
   lastVerifiedAt: z.string().datetime({ offset: true }).nullable(),
   lastVerifiedUrl: boundedUrl.nullable(),
+  lastCheckedAt: z.string().datetime({ offset: true }).nullable(),
+  nextCheckAt: z.string().datetime({ offset: true }).nullable(),
+  maintenance: SiteAuthMaintenance.nullable(),
   repairCode: boundedOpaqueId.nullable(),
   version: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   createdBySubjectId: z.string().min(1).max(1_024),
@@ -862,6 +1048,7 @@ export const AuthRun = z
     controllerGeneration: opaqueGeneration,
     targetGeneration: opaqueGeneration,
     documentGeneration: opaqueGeneration.nullable(),
+    purpose: z.enum(["authenticate", "health_check", "repair"]),
     methodId: boundedOpaqueId.nullable(),
     authorityId: boundedOpaqueId.nullable(),
     state: AuthRunState,
@@ -945,15 +1132,15 @@ export const StartAuthRunRequest = z
     targetId: boundedOpaqueId,
     expectedTargetGeneration: opaqueGeneration,
     expectedDocumentGeneration: opaqueGeneration.nullable(),
+    purpose: z.enum(["authenticate", "health_check", "repair"]).optional(),
     methodId: boundedOpaqueId.optional(),
     authorityId: boundedOpaqueId.optional(),
   })
   .strict();
 export type StartAuthRunRequest = z.infer<typeof StartAuthRunRequest>;
 
-export const ReportAuthRunRequest = z
+export const ReportAuthRunPayload = z
   .object({
-    operationId: z.string().uuid(),
     expectedVersion: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
     methodId: boundedOpaqueId.optional(),
     authorityId: boundedOpaqueId.optional(),
@@ -1001,6 +1188,11 @@ export const ReportAuthRunRequest = z
       });
     }
   });
+export type ReportAuthRunPayload = z.infer<typeof ReportAuthRunPayload>;
+
+export const ReportAuthRunRequest = ReportAuthRunPayload.safeExtend({
+  operationId: z.string().uuid(),
+});
 export type ReportAuthRunRequest = z.infer<typeof ReportAuthRunRequest>;
 
 export const ProtectedAuthField = z
@@ -1044,6 +1236,101 @@ export const ProtectedAuthFillResponse = z
   })
   .strict();
 export type ProtectedAuthFillResponse = z.infer<typeof ProtectedAuthFillResponse>;
+
+/** Public request for advancing a provider-managed AuthRun. Provider secrets,
+ * profile names, browser ids, and hosted-login URLs stay behind browserd. */
+export const ExternalAuthRunRequest = z
+  .object({
+    operationId: z.string().uuid(),
+    expectedVersion: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    action: z.enum(["start", "poll"]),
+  })
+  .strict();
+export type ExternalAuthRunRequest = z.infer<typeof ExternalAuthRunRequest>;
+
+export const ExternalAuthRunResponse = z
+  .object({
+    run: AuthRun,
+    status: z.enum(["working", "needs_human", "ready_to_verify", "failed"]),
+    operationId: z.string().uuid(),
+    replayed: z.boolean(),
+  })
+  .strict();
+export type ExternalAuthRunResponse = z.infer<typeof ExternalAuthRunResponse>;
+
+/** Human-only request for opening the provider's ephemeral hosted login UI. */
+export const ExternalAuthInteractiveRequest = z
+  .object({
+    operationId: z.string().uuid(),
+    expectedVersion: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  })
+  .strict();
+export type ExternalAuthInteractiveRequest = z.infer<typeof ExternalAuthInteractiveRequest>;
+
+export const ExternalAuthInteractiveResponse = z
+  .object({
+    authRunId: z.string().uuid(),
+    url: boundedHttpUrl,
+    expiresAt: z.string().datetime({ offset: true }).nullable(),
+  })
+  .strict();
+export type ExternalAuthInteractiveResponse = z.infer<typeof ExternalAuthInteractiveResponse>;
+
+/** Controller-private Kernel/host-adapter command. This crosses only the
+ * authenticated API -> browserd control channel; it is not a model tool. */
+export const BrowserExternalAuthCommand = z
+  .object({
+    browserSessionId: z.string().uuid(),
+    controllerGeneration: opaqueGeneration,
+    operationId: z.string().uuid(),
+    authRunId: z.string().uuid(),
+    adapterId: boundedOpaqueId,
+    connectionId: boundedOpaqueId,
+    action: z.enum(["start", "poll", "interactive"]),
+  })
+  .strict();
+export type BrowserExternalAuthCommand = z.infer<typeof BrowserExternalAuthCommand>;
+
+export const BrowserExternalAuthResult = z
+  .object({
+    state: z.enum(["authenticated", "in_progress", "needs_human", "failed"]),
+    externalAction: AuthRunExternalAction.nullable(),
+    interactiveUrl: boundedHttpUrl.nullable(),
+    failureCode: boundedOpaqueId.nullable(),
+    profileLoaded: z.boolean(),
+  })
+  .strict()
+  .superRefine((result, context) => {
+    if ((result.state === "needs_human") !== (result.externalAction !== null)) {
+      context.addIssue({
+        code: "custom",
+        path: ["externalAction"],
+        message: "human external-auth state requires an action",
+      });
+    }
+    if ((result.state === "failed") !== (result.failureCode !== null)) {
+      context.addIssue({
+        code: "custom",
+        path: ["failureCode"],
+        message: "failed external-auth state requires a failure code",
+      });
+    }
+    if (result.interactiveUrl !== null && result.state !== "needs_human") {
+      context.addIssue({
+        code: "custom",
+        path: ["interactiveUrl"],
+        message: "interactive URL requires a human external-auth state",
+      });
+    }
+    if (result.profileLoaded && result.state !== "authenticated") {
+      context.addIssue({
+        code: "custom",
+        path: ["profileLoaded"],
+        message: "only authenticated external auth can load a profile",
+      });
+    }
+  });
+export type BrowserExternalAuthResult = z.infer<typeof BrowserExternalAuthResult>;
 
 export const VerifyAuthRunRequest = z
   .object({
@@ -1140,6 +1427,38 @@ export type InteractionInterventionMutationResponse = z.infer<
   typeof InteractionInterventionMutationResponse
 >;
 
+/** Canonical model/Codemode input for one typed browser/computer human wait. */
+export const INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME = "interaction__interaction_request_human";
+
+export const RequestHumanInteractionToolInput = z.discriminatedUnion("operation", [
+  z.object({ operation: z.literal("wait"), interventionId: z.string().uuid() }).strict(),
+  z
+    .object({
+      operation: z.literal("request"),
+      resourceKind: z.enum(["browser_session", "computer_session"]),
+      resourceId: z.string().uuid(),
+      targetId: boundedOpaqueId,
+      expectedControllerGeneration: opaqueGeneration,
+      expectedTargetGeneration: opaqueGeneration,
+      expectedDocumentGeneration: opaqueGeneration.nullable(),
+      kind: z.enum(["manual_login", "mfa", "external_action", "confirmation", "other"]),
+      reason: z.string().trim().min(1).max(2_048),
+      authRunId: z.string().uuid().optional(),
+      expiresInSeconds: z.number().int().min(30).max(86_400).default(900),
+    })
+    .strict(),
+]);
+export type RequestHumanInteractionToolInput = z.infer<typeof RequestHumanInteractionToolInput>;
+
+export const RequestHumanInteractionToolOutput = z
+  .object({
+    intervention: InteractionIntervention,
+    observation: z.lazy(() => z.union([BrowserObservation, ComputerObservation])).nullable(),
+    observationErrorCode: z.string().min(1).max(128).nullable(),
+  })
+  .strict();
+export type RequestHumanInteractionToolOutput = z.infer<typeof RequestHumanInteractionToolOutput>;
+
 export const BrowserIdentityListResponse = z
   .object({
     revision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
@@ -1211,6 +1530,155 @@ export const BrowserTarget = z
   })
   .strict();
 export type BrowserTarget = z.infer<typeof BrowserTarget>;
+
+export const BrowserDownloadStatus = z.enum([
+  "in_progress",
+  "completed",
+  "cancelled",
+  "failed",
+  "unavailable",
+]);
+export type BrowserDownloadStatus = z.infer<typeof BrowserDownloadStatus>;
+
+/** One browser-produced file. Its bytes remain private to the exact controller
+ * until an explicit save publishes and materializes them. No placement path or
+ * source URL crosses this contract. */
+export const BrowserDownload = z
+  .object({
+    id: z.string().uuid(),
+    browserSessionId: z.string().uuid(),
+    controllerGeneration: opaqueGeneration,
+    targetId: boundedOpaqueId.nullable(),
+    filename: z
+      .string()
+      .min(1)
+      .max(4_096)
+      .regex(/^[^\u0000-\u001f\u007f]+$/u),
+    status: BrowserDownloadStatus,
+    receivedBytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    totalBytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).nullable(),
+    sha256: sha256Hex.nullable(),
+    version: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    startedAt: z.string().datetime({ offset: true }),
+    settledAt: z.string().datetime({ offset: true }).nullable(),
+    failureCode: boundedOpaqueId.nullable(),
+  })
+  .strict()
+  .superRefine((download, context) => {
+    const terminal = download.status !== "in_progress";
+    if (terminal !== (download.settledAt !== null)) {
+      context.addIssue({
+        code: "custom",
+        path: ["settledAt"],
+        message: "download settlement must match its terminal status",
+      });
+    }
+    if (
+      (download.status === "failed" || download.status === "unavailable") !==
+      (download.failureCode !== null)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["failureCode"],
+        message: "failed or unavailable downloads require one failure code",
+      });
+    }
+    if (download.status === "completed") {
+      if (download.sha256 === null || download.totalBytes !== download.receivedBytes) {
+        context.addIssue({
+          code: "custom",
+          path: ["sha256"],
+          message: "completed downloads require exact bytes and SHA-256",
+        });
+      }
+    } else if (download.sha256 !== null) {
+      context.addIssue({
+        code: "custom",
+        path: ["sha256"],
+        message: "only completed downloads carry a SHA-256",
+      });
+    }
+  });
+export type BrowserDownload = z.infer<typeof BrowserDownload>;
+
+export const BrowserDownloadListResponse = z
+  .object({
+    browserSessionId: z.string().uuid(),
+    controllerGeneration: opaqueGeneration,
+    downloads: z.array(BrowserDownload).max(10_000),
+  })
+  .strict();
+export type BrowserDownloadListResponse = z.infer<typeof BrowserDownloadListResponse>;
+
+const workspaceRelativeFilePath = z
+  .string()
+  .min(1)
+  .max(4_096)
+  .refine((value) => {
+    if (value !== value.trim() || value.startsWith("/") || /^[A-Za-z]:[\\/]/u.test(value)) {
+      return false;
+    }
+    if (value.includes("\\") || value.includes("\0")) return false;
+    const segments = value.split("/");
+    return segments.every(
+      (segment) =>
+        segment.length > 0 &&
+        segment !== "." &&
+        segment !== ".." &&
+        !/[<>:"|?*\u0000-\u001f\u007f]/u.test(segment) &&
+        !/[ .]$/u.test(segment) &&
+        !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(segment),
+    );
+  }, "destinationPath must be a portable workspace-relative file path");
+
+export const BrowserDownloadSaveRequest = z
+  .object({
+    operationId: z.string().uuid(),
+    destinationPath: workspaceRelativeFilePath,
+    overwrite: z.boolean().default(false),
+  })
+  .strict();
+export type BrowserDownloadSaveRequest = z.infer<typeof BrowserDownloadSaveRequest>;
+
+export const BrowserDownloadSaveResponse = z
+  .object({
+    download: BrowserDownload,
+    destinationPath: workspaceRelativeFilePath,
+    fileId: z.string().uuid(),
+    operationId: z.string().uuid(),
+    replayed: z.boolean(),
+  })
+  .strict();
+export type BrowserDownloadSaveResponse = z.infer<typeof BrowserDownloadSaveResponse>;
+
+/** Controller-private, narrow object authority for publishing one exact
+ * completed download. Signed URLs and headers never appear in public SDK or
+ * durable controller receipts. */
+export const BrowserDownloadExportRequest = z
+  .object({
+    operationId: z.string().uuid(),
+    downloadId: z.string().uuid(),
+    upload: z
+      .object({
+        url: boundedHttpUrl,
+        requiredHeaders: z.record(z.string().min(1).max(256), z.string().max(8_192)),
+        expiresAt: z.string().datetime({ offset: true }),
+      })
+      .strict(),
+  })
+  .strict();
+export type BrowserDownloadExportRequest = z.infer<typeof BrowserDownloadExportRequest>;
+
+export const BrowserDownloadExportReceipt = z
+  .object({
+    operationId: z.string().uuid(),
+    downloadId: z.string().uuid(),
+    sizeBytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    sha256: sha256Hex,
+    replayed: z.boolean(),
+  })
+  .strict();
+export type BrowserDownloadExportReceipt = z.infer<typeof BrowserDownloadExportReceipt>;
 
 export const InteractionRect = z
   .object({
@@ -1417,6 +1885,26 @@ export const ComputerLocator = z.discriminatedUnion("kind", [
 ]);
 export type ComputerLocator = z.infer<typeof ComputerLocator>;
 
+/** Web-platform permissions which a managed browser can set for the exact
+ * top-level origin currently fenced by a BrowserActionCommand. Names remain
+ * provider-neutral; drivers map them to their native permission descriptors. */
+export const BrowserPermission = z.enum([
+  "geolocation",
+  "notifications",
+  "camera",
+  "microphone",
+  "midi",
+  "midi_sysex",
+  "sensors",
+  "idle_detection",
+  "local_fonts",
+  "window_management",
+]);
+export type BrowserPermission = z.infer<typeof BrowserPermission>;
+
+export const BrowserPermissionSetting = z.enum(["granted", "denied", "prompt"]);
+export type BrowserPermissionSetting = z.infer<typeof BrowserPermissionSetting>;
+
 const browserActionVariants = [
   z.object({ type: z.literal("navigate"), url: boundedUrl }).strict(),
   z
@@ -1539,6 +2027,84 @@ const browserActionVariants = [
     .strict(),
   z
     .object({
+      type: z.literal("clipboard"),
+      operation: z.enum(["write", "clear", "copy", "paste"]),
+      text: z
+        .string()
+        .max(INTERACTION_MAX_CLIPBOARD_BYTES)
+        .refine(
+          (value) => new TextEncoder().encode(value).byteLength <= INTERACTION_MAX_CLIPBOARD_BYTES,
+          { message: "browser clipboard text exceeds its UTF-8 byte envelope" },
+        )
+        .optional(),
+      locator: BrowserLocator.optional(),
+      content: z.enum(["selection", "value", "text"]).optional(),
+    })
+    .strict()
+    .superRefine((action, context) => {
+      if (action.operation === "write") {
+        if (action.text === undefined) {
+          context.addIssue({
+            code: "custom",
+            path: ["text"],
+            message: "clipboard write requires text",
+          });
+        }
+        if (action.locator !== undefined || action.content !== undefined) {
+          context.addIssue({
+            code: "custom",
+            message: "clipboard write accepts only text",
+          });
+        }
+        return;
+      }
+      if (action.operation === "clear") {
+        if (
+          action.text !== undefined ||
+          action.locator !== undefined ||
+          action.content !== undefined
+        ) {
+          context.addIssue({
+            code: "custom",
+            message: "clipboard clear accepts no payload",
+          });
+        }
+        return;
+      }
+      if (action.operation === "copy") {
+        if (action.text !== undefined) {
+          context.addIssue({
+            code: "custom",
+            path: ["text"],
+            message: "clipboard copy does not accept text",
+          });
+        }
+        if (action.content !== undefined && action.content !== "selection" && !action.locator) {
+          context.addIssue({
+            code: "custom",
+            path: ["locator"],
+            message: "copying element value or text requires a locator",
+          });
+        }
+        return;
+      }
+      if (action.content !== undefined) {
+        context.addIssue({
+          code: "custom",
+          path: ["content"],
+          message: "clipboard paste does not accept content",
+        });
+      }
+    }),
+  z
+    .object({
+      type: z.literal("permission"),
+      permission: BrowserPermission,
+      setting: BrowserPermissionSetting,
+    })
+    .strict(),
+  z
+    .object({
       type: z.literal("wait"),
       condition: z.enum(["load", "network_idle", "visible", "hidden"]),
       locator: BrowserLocator.optional(),
@@ -1555,7 +2121,19 @@ export const BrowserActionBatch = z
     type: z.literal("batch"),
     actions: z.array(BrowserAction).min(1).max(INTERACTION_MAX_ACTIONS_PER_BATCH),
   })
-  .strict();
+  .strict()
+  .superRefine((batch, context) => {
+    const fileIds = new Set(
+      batch.actions.flatMap((action) => (action.type === "upload" ? action.workspaceFileIds : [])),
+    );
+    if (fileIds.size > INTERACTION_MAX_WORKSPACE_FILES_PER_COMMAND) {
+      context.addIssue({
+        code: "custom",
+        path: ["actions"],
+        message: "browser action references too many workspace files",
+      });
+    }
+  });
 export type BrowserActionBatch = z.infer<typeof BrowserActionBatch>;
 
 export const InteractionError = z
@@ -1600,10 +2178,69 @@ export const BrowserActionCommand = z
     expectedDocumentGeneration: opaqueGeneration.nullable(),
     expectedFrameId: opaqueGeneration.nullable(),
     actor: InteractionActor,
+    /** Human live-control surfaces already receive the resulting pixels. They
+     * may omit the expensive semantic snapshot; agent actions keep it. */
+    observationMode: z.enum(["full", "none"]).optional(),
     action: z.union([BrowserAction, BrowserActionBatch]),
   })
   .strict();
 export type BrowserActionCommand = z.infer<typeof BrowserActionCommand>;
+
+/** Controller-private authority used to materialize immutable workspace files
+ * beside a BrowserSession before an upload action dispatches. Signed URLs and
+ * placement paths never appear in the public BrowserAction or its receipt. */
+export const BrowserWorkspaceFileAuthority = z
+  .object({
+    fileId: z.string().uuid(),
+    safeFilename: z
+      .string()
+      .min(1)
+      .max(240)
+      .regex(/^[A-Za-z0-9._ -]+$/u)
+      .refine((value) => value !== "." && value !== "..", {
+        message: "safe filename must be one path segment",
+      }),
+    sizeBytes: z.number().int().nonnegative().max(5_000_000_000),
+    sha256: sha256Hex.nullable(),
+    download: z
+      .object({
+        url: boundedHttpUrl,
+        expiresAt: z.string().datetime({ offset: true }),
+      })
+      .strict(),
+  })
+  .strict();
+export type BrowserWorkspaceFileAuthority = z.infer<typeof BrowserWorkspaceFileAuthority>;
+
+export const BrowserWorkspaceFileStageRequest = z
+  .object({
+    operationId: z.string().uuid(),
+    files: z.array(BrowserWorkspaceFileAuthority).min(1).max(100),
+  })
+  .strict()
+  .superRefine((request, context) => {
+    const seen = new Set<string>();
+    for (const [index, file] of request.files.entries()) {
+      if (seen.has(file.fileId)) {
+        context.addIssue({
+          code: "custom",
+          path: ["files", index, "fileId"],
+          message: "workspace file authority is duplicated",
+        });
+      }
+      seen.add(file.fileId);
+    }
+  });
+export type BrowserWorkspaceFileStageRequest = z.infer<typeof BrowserWorkspaceFileStageRequest>;
+
+export const BrowserWorkspaceFileStageResponse = z
+  .object({
+    operationId: z.string().uuid(),
+    fileIds: z.array(z.string().uuid()).min(1).max(100),
+    replayed: z.boolean(),
+  })
+  .strict();
+export type BrowserWorkspaceFileStageResponse = z.infer<typeof BrowserWorkspaceFileStageResponse>;
 
 export const InteractionOperationState = z.enum([
   "prepared",
@@ -1671,6 +2308,9 @@ export const CreateBrowserSessionRequest = z
     name: z.string().trim().min(1).max(200).optional(),
     initialUrl: boundedUrl.optional(),
     headless: z.boolean().default(true),
+    /** Managed engine choice. Attached Chrome continues to derive its engine
+     * from the selected device rather than accepting an impersonated value. */
+    engine: z.enum(["chromium", "lightpanda"]).default("chromium"),
     placement: InteractionPlacement.optional(),
     identityId: z.string().uuid().optional(),
     baseRevisionId: z.string().uuid().optional(),
@@ -1693,12 +2333,42 @@ export const CreateBrowserSessionRequest = z
         message: "a linked computer requires a headed browser",
       });
     }
-    if (value.placement?.kind === "attached_device") {
+    if (value.engine === "lightpanda") {
+      if (!value.headless) {
+        context.addIssue({
+          code: "custom",
+          path: ["headless"],
+          message: "Lightpanda is a headless semantic browser",
+        });
+      }
+      if (value.identityId || value.baseRevisionId) {
+        context.addIssue({
+          code: "custom",
+          path: ["identityId"],
+          message: "Lightpanda does not support Chromium browser identities",
+        });
+      }
+      if (value.networkRouteId) {
+        context.addIssue({
+          code: "custom",
+          path: ["networkRouteId"],
+          message: "Lightpanda network routes are not supported yet",
+        });
+      }
       if (value.linkedComputerSessionId) {
         context.addIssue({
           code: "custom",
           path: ["linkedComputerSessionId"],
-          message: "attached Chrome does not expose an exact linked computer yet",
+          message: "Lightpanda has no linked desktop window",
+        });
+      }
+    }
+    if (value.placement?.kind === "attached_device") {
+      if (value.engine !== "chromium") {
+        context.addIssue({
+          code: "custom",
+          path: ["engine"],
+          message: "attached browser placement uses the selected Chrome engine",
         });
       }
       if (value.headless) {
@@ -1713,6 +2383,29 @@ export const CreateBrowserSessionRequest = z
           code: "custom",
           path: ["identityId"],
           message: "attached browser placement already has a live profile identity",
+        });
+      }
+    }
+    if (value.placement?.kind === "external_provider") {
+      if (value.engine !== "chromium") {
+        context.addIssue({
+          code: "custom",
+          path: ["engine"],
+          message: "external browser providers use their Chromium-compatible engine",
+        });
+      }
+      if (value.identityId || value.baseRevisionId) {
+        context.addIssue({
+          code: "custom",
+          path: ["identityId"],
+          message: "external browser providers do not yet support portable BrowserIdentity state",
+        });
+      }
+      if (value.linkedComputerSessionId) {
+        context.addIssue({
+          code: "custom",
+          path: ["linkedComputerSessionId"],
+          message: "external browser providers cannot link a placement desktop",
         });
       }
     }
@@ -1783,6 +2476,14 @@ const DirectInteractionFrameStreamAttachment = z
   })
   .strict();
 
+const DirectComputerRfbAttachment = z
+  .object({
+    kind: z.literal("direct_rfb"),
+    url: boundedUrl,
+    protocols: z.array(z.string().min(1).max(2_048)).length(3),
+  })
+  .strict();
+
 function relayInteractionFrameStreamAttachment<const Kind extends 3 | 4>(kind: Kind) {
   return z
     .object({
@@ -1810,6 +2511,7 @@ export type BrowserFrameStreamAttachment = z.infer<typeof BrowserFrameStreamAtta
 
 export const ComputerFrameStreamAttachment = z.discriminatedUnion("kind", [
   DirectInteractionFrameStreamAttachment,
+  DirectComputerRfbAttachment,
   relayInteractionFrameStreamAttachment(4),
 ]);
 export type ComputerFrameStreamAttachment = z.infer<typeof ComputerFrameStreamAttachment>;
@@ -1850,6 +2552,7 @@ export const BrowserActionRequest = z
     expectedTargetGeneration: opaqueGeneration,
     expectedDocumentGeneration: opaqueGeneration.nullable(),
     expectedFrameId: opaqueGeneration.nullable(),
+    observationMode: z.enum(["full", "none"]).default("full"),
     action: z.union([BrowserAction, BrowserActionBatch]),
   })
   .strict();
@@ -1903,6 +2606,104 @@ export const BrowserActionReceipt = z
   });
 export type BrowserActionReceipt = z.infer<typeof BrowserActionReceipt>;
 
+/** Controller-private protected-fill wire contract. Secret values cross only
+ * the credential broker -> exact placement controller boundary; this command
+ * is never projected into model MCP, Codemode, public action history, or UI. */
+export const BrowserProtectedAuthFieldValue = ProtectedAuthField.extend({
+  purpose: SiteAuthFieldPurpose,
+  value: z.string().min(1).max(65_536),
+}).strict();
+export type BrowserProtectedAuthFieldValue = z.infer<typeof BrowserProtectedAuthFieldValue>;
+
+export const BrowserProtectedAuthFillCommand = z
+  .object({
+    protocolVersion: z.literal(INTERACTION_PROTOCOL_VERSION),
+    operationId: z.string().uuid(),
+    browserSessionId: z.string().uuid(),
+    controllerGeneration: opaqueGeneration,
+    targetId: boundedOpaqueId,
+    expectedTargetGeneration: opaqueGeneration,
+    expectedDocumentGeneration: opaqueGeneration,
+    expectedFrameId: opaqueGeneration,
+    actor: InteractionActor,
+    authorityId: boundedOpaqueId,
+    credentialVersion: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    allowedOrigins: z.array(canonicalWebOrigin).min(1).max(64),
+    fields: z.array(BrowserProtectedAuthFieldValue).min(1).max(32),
+    submit: ProtectedAuthSubmit,
+  })
+  .strict()
+  .superRefine((command, context) => {
+    if (new Set(command.allowedOrigins).size !== command.allowedOrigins.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["allowedOrigins"],
+        message: "protected-fill origins repeat",
+      });
+    }
+    const fieldIds = command.fields.map((field) => field.fieldId);
+    if (new Set(fieldIds).size !== fieldIds.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["fields"],
+        message: "protected-fill field ids repeat",
+      });
+    }
+  });
+export type BrowserProtectedAuthFillCommand = z.infer<typeof BrowserProtectedAuthFillCommand>;
+
+export const BrowserProtectedAuthObservation = z
+  .object({
+    target: BrowserTarget,
+    status: z.enum(["submitted", "working"]),
+  })
+  .strict();
+export type BrowserProtectedAuthObservation = z.infer<typeof BrowserProtectedAuthObservation>;
+
+/** Secret-free placement receipt. It can be journaled, replayed, and returned
+ * to the broker without retaining any field value or model-visible page tree. */
+export const BrowserProtectedAuthFillReceipt = z
+  .object({
+    protocolVersion: z.literal(INTERACTION_PROTOCOL_VERSION),
+    operationId: z.string().uuid(),
+    browserSessionId: z.string().uuid(),
+    controllerGeneration: opaqueGeneration,
+    targetId: boundedOpaqueId,
+    state: InteractionOperationState,
+    dispatchedAt: z.string().datetime({ offset: true }).nullable(),
+    settledAt: z.string().datetime({ offset: true }).nullable(),
+    observation: BrowserProtectedAuthObservation.nullable(),
+    error: InteractionError.nullable(),
+  })
+  .strict()
+  .superRefine((receipt, context) => {
+    if (
+      receipt.state === "completed" &&
+      (receipt.error !== null || receipt.observation === null || receipt.settledAt === null)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "completed protected-fill receipt requires a result and no error",
+      });
+    }
+    if (
+      (receipt.state === "failed" || receipt.state === "outcome_unknown") &&
+      (receipt.error === null || receipt.observation !== null || receipt.settledAt === null)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "terminal protected-fill error requires error, no result, and time",
+      });
+    }
+    if (receipt.state === "dispatched" && receipt.dispatchedAt === null) {
+      context.addIssue({
+        code: "custom",
+        message: "dispatched protected-fill receipt requires dispatch time",
+      });
+    }
+  });
+export type BrowserProtectedAuthFillReceipt = z.infer<typeof BrowserProtectedAuthFillReceipt>;
+
 export const ComputerSessionCapabilities = z
   .object({
     semanticObservation: z.boolean(),
@@ -1913,11 +2714,42 @@ export const ComputerSessionCapabilities = z
     semanticActions: z.boolean(),
     pointerInput: z.boolean(),
     keyboardInput: z.boolean(),
+    clipboard: z.boolean(),
     backgroundActions: z.boolean(),
     parallelApps: z.boolean(),
   })
   .strict();
 export type ComputerSessionCapabilities = z.infer<typeof ComputerSessionCapabilities>;
+
+/** A fresh bounded read of the native clipboard for the ComputerSession's
+ * graphical seat. Physical ComputerSessions on the same login seat intentionally
+ * observe the same OS clipboard; BrowserSession private clipboards never do. */
+export const ComputerClipboard = z
+  .object({
+    computerSessionId: z.string().uuid(),
+    controllerGeneration: opaqueGeneration,
+    text: z
+      .string()
+      .max(INTERACTION_MAX_CLIPBOARD_BYTES)
+      .refine(
+        (value) => new TextEncoder().encode(value).byteLength <= INTERACTION_MAX_CLIPBOARD_BYTES,
+        { message: "computer clipboard text exceeds its UTF-8 byte envelope" },
+      )
+      .nullable(),
+    truncated: z.boolean(),
+    observedAt: z.string().datetime({ offset: true }),
+  })
+  .strict()
+  .superRefine((clipboard, context) => {
+    if (clipboard.text === null && clipboard.truncated) {
+      context.addIssue({
+        code: "custom",
+        path: ["truncated"],
+        message: "an unavailable computer clipboard value cannot be truncated",
+      });
+    }
+  });
+export type ComputerClipboard = z.infer<typeof ComputerClipboard>;
 
 export const ComputerSession = z
   .object({
@@ -2079,6 +2911,29 @@ export const ComputerAction = z.discriminatedUnion("type", [
       value: z.string().max(1_000_000),
     })
     .strict(),
+  z
+    .object({
+      type: z.literal("clipboard"),
+      operation: z.enum(["write", "clear", "copy", "paste"]),
+      text: z
+        .string()
+        .max(INTERACTION_MAX_CLIPBOARD_BYTES)
+        .refine(
+          (value) => new TextEncoder().encode(value).byteLength <= INTERACTION_MAX_CLIPBOARD_BYTES,
+          { message: "computer clipboard text exceeds its UTF-8 byte envelope" },
+        )
+        .optional(),
+    })
+    .strict()
+    .superRefine((action, context) => {
+      if ((action.operation === "write") !== (action.text !== undefined)) {
+        context.addIssue({
+          code: "custom",
+          path: ["text"],
+          message: "computer clipboard text is required exactly for write",
+        });
+      }
+    }),
   z.object({ type: z.literal("focus"), targetId: boundedOpaqueId }).strict(),
   z
     .object({

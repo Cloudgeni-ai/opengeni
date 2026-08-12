@@ -12,6 +12,7 @@ describe("ComputerSession route discipline", () => {
       '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId"',
       '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/targets"',
       '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/targets/:targetId/observation"',
+      '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/clipboard"',
       '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/actions"',
       '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/operations/:operationId"',
       '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/attachments"',
@@ -26,6 +27,16 @@ describe("ComputerSession route discipline", () => {
     expect(source).toContain('kind: "relay"');
     expect(source).toContain("openRelayedComputerFrameStream");
     expect(source).toContain("COMPUTER_CONTROL_WEBSOCKET_PROTOCOL");
+    const attachment = source.slice(
+      source.indexOf(
+        '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/attachments"',
+      ),
+      source.indexOf(
+        '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/heartbeat"',
+      ),
+    );
+    expect(attachment).toContain("requestOrigin(context, deps.settings.corsAllowOriginRegex)");
+    expect(attachment).toContain("client.addAllowedOrigins([origin])");
     expect(await readFile(appUrl, "utf8")).toContain(
       "registerComputerSessionRoutes(app, routeDeps)",
     );
@@ -63,6 +74,23 @@ describe("ComputerSession route discipline", () => {
     expect(source).toContain("holderId: interactionHolderId(computerSessionId)");
     expect(source).toContain("return `computer-session:${computerSessionId}`");
     expect(source).toContain("expectedPlacementInstanceId");
+  });
+
+  test("routes attached-device ComputerSessions through the exact connected agent fence", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const placement = source.slice(
+      source.indexOf("async function withComputerPlacement"),
+      source.indexOf("async function withActiveComputerController"),
+    );
+    expect(placement).toContain('expectedPlacement?.kind === "attached_device"');
+    expect(placement).toContain("getAttachedBrowserDevice(deps.db");
+    expect(placement).toContain("getEnrollment(");
+    expect(placement).toContain("buildSelfhostedBackendSession({");
+    expect(placement).toContain("new NatsControlRpc(");
+    expect(placement).toContain(
+      "assertPlacementInstance(expectedPlacementInstanceId, device.connectionGeneration)",
+    );
+    expect(placement).toContain("placementInstanceId: device.connectionGeneration");
   });
 
   test("dispatches lifecycle authority before physical mutation and preserves unknown outcomes", async () => {

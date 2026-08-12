@@ -17,6 +17,7 @@ use atspi::{
     ObjectRefOwned, Role, ScrollType, State,
 };
 use futures::stream::{self, StreamExt as _};
+use image::{codecs::jpeg::JpegEncoder, ExtendedColorType, ImageEncoder as _};
 use opengeni_agent_platform::{
     DesktopBackend as _, LinuxDesktop, LinuxWindow, LinuxWindowRect, PlatformError,
 };
@@ -26,20 +27,23 @@ use sha2::{Digest as _, Sha256};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use crate::clipboard::NativeClipboardController;
 use crate::tree::semantic_roots_equivalent;
 use crate::{
     ComputerAdapter, NativeAction, NativeActionCommand, NativeActionValue, NativeAdapterError,
     NativeAdapterErrorCode, NativeAdapterResult, NativeCapabilities, NativeCapturedFrame,
-    NativeKeyboardAction, NativeLocator, NativeNodeMetadata, NativeNodeValue, NativeObservation,
-    NativePointerAction, NativePointerButton, NativeRect, NativeRedactedValue,
-    NativeRedactionReason, NativeSemanticAction, NativeSemanticPlatform, NativeTarget,
-    NativeTargetKind, RawSemanticNode, SemanticSnapshotIndex,
+    NativeClipboard, NativeClipboardAction, NativeKeyboardAction, NativeLocator,
+    NativeNodeMetadata, NativeNodeValue, NativeObservation, NativePointerAction,
+    NativePointerButton, NativeRect, NativeRedactedValue, NativeRedactionReason,
+    NativeSemanticAction, NativeSemanticPlatform, NativeTarget, NativeTargetKind, RawSemanticNode,
+    SemanticSnapshotIndex,
 };
 
 const CACHE_TIMEOUT: Duration = Duration::from_secs(5);
 const NATIVE_CALL_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_CACHE_ITEMS: usize = 50_000;
 const MAX_ENRICH_CONCURRENCY: usize = 32;
+const MAX_DETAILED_ENRICHMENT_NODES: usize = 64;
 const MAX_WINDOW_FRAME_FENCES: usize = 512;
 const MUTATION_SETTLE_DELAYS: [Duration; 4] = [
     Duration::ZERO,
@@ -87,6 +91,7 @@ pub(crate) struct AtspiComputerAdapter {
     frame_sequence: AtomicU64,
     latest: RwLock<BTreeMap<String, StoredObservation>>,
     desktop: Option<LinuxDesktop>,
+    clipboard: Option<NativeClipboardController>,
     latest_screen_frame: RwLock<Option<String>>,
     latest_window_frames: RwLock<BTreeMap<String, WindowFrameFence>>,
 }
@@ -114,6 +119,7 @@ impl AtspiComputerAdapter {
             frame_sequence: AtomicU64::new(0),
             latest: RwLock::new(BTreeMap::new()),
             desktop: LinuxDesktop::open_default().ok(),
+            clipboard: NativeClipboardController::open().ok(),
             latest_screen_frame: RwLock::new(None),
             latest_window_frames: RwLock::new(BTreeMap::new()),
         })
@@ -205,7 +211,7 @@ impl AtspiComputerAdapter {
             Err(error) => Err(error),
         };
         match cached {
-            Ok(items) if !items.is_empty() => Ok(items),
+            Ok(items) if !items.is_empty() && cache_snapshot_complete(&items) => Ok(items),
             Ok(_) | Err(_) => self.crawl_application(root).await,
         }
     }
@@ -353,6 +359,13 @@ impl AtspiComputerAdapter {
         for record in &mut records {
             record.x11_window = correlate_x11_window(&record.target, &windows);
         }
+        // AT-SPI exposes many nested Role::Frame objects inside Chromium and
+        // other complex applications. They are semantic children, not desktop
+        // windows. Surface only frames/windows that correlate to a real X11
+        // window; applications remain available as semantic roots.
+        records.retain(|record| {
+            record.target.kind == NativeTargetKind::App || record.x11_window.is_some()
+        });
         records.sort_by(|left, right| {
             target_kind_rank(left.target.kind)
                 .cmp(&target_kind_rank(right.target.kind))
@@ -392,10 +405,11 @@ impl AtspiComputerAdapter {
             .into_iter()
             .filter(|item| object_key(&item.object).is_ok_and(|key| descendants.contains(&key)))
             .collect();
+        let detailed = selected.len() <= MAX_DETAILED_ENRICHMENT_NODES;
         let enriched = stream::iter(
             selected
                 .into_iter()
-                .map(|item| async move { self.enrich_node(item).await }),
+                .map(|item| async move { self.enrich_node(item, detailed).await }),
         )
         .buffer_unordered(MAX_ENRICH_CONCURRENCY)
         .collect::<Vec<_>>()
@@ -453,6 +467,7 @@ impl AtspiComputerAdapter {
     async fn enrich_node(
         &self,
         item: CacheItem,
+        detailed: bool,
     ) -> NativeAdapterResult<(RawSemanticNode, ObjectRecord)> {
         let key = object_key(&item.object)?;
         let parent_key = if item.parent.is_null() {
@@ -460,24 +475,37 @@ impl AtspiComputerAdapter {
         } else {
             Some(object_key(&item.parent)?)
         };
+        // The AT-SPI cache is the coherent observation snapshot. Re-querying
+        // every cached Chromium node for descriptions, bounds and text creates
+        // hundreds of synchronous calls into the browser and can terminate the
+        // native accessibility bridge. Keep observation cache-only; actions
+        // resolve the retained native object and use its typed interface.
         let interactive = item.ifaces.contains(Interface::Action)
-            || item.ifaces.contains(Interface::Component)
             || item.ifaces.contains(Interface::EditableText)
             || item.ifaces.contains(Interface::Selection)
             || item.ifaces.contains(Interface::Value)
+            || item.states.contains(State::Focusable)
             || is_target_role(item.role);
-        let identifier = if interactive {
+        let identifier = if detailed && interactive {
             self.accessible_identifier(&item.object).await
         } else {
             None
         };
-        let description = if interactive {
+        let description = if detailed && interactive {
             self.accessible_description(&item.object).await
         } else {
             None
         };
-        let bounds = self.component_bounds(&item.object, item.ifaces).await;
-        let value = self.node_value(&item).await;
+        let bounds = if detailed && interactive {
+            self.component_bounds(&item.object, item.ifaces).await
+        } else {
+            None
+        };
+        let value = if detailed {
+            self.node_value(&item).await
+        } else {
+            None
+        };
         let states = item.states.iter().map(|state| state.to_string()).collect();
         let actions = normalized_actions(&item);
         let interfaces: Vec<String> = item
@@ -566,7 +594,7 @@ impl AtspiComputerAdapter {
                 return Some(NativeNodeValue::Text(value.to_string()));
             }
         }
-        if item.ifaces.contains(Interface::Text) {
+        if item.ifaces.contains(Interface::EditableText) {
             let proxy = self.text_proxy(&item.object).await.ok()?;
             let count = timed(proxy.character_count()).await.ok()?.clamp(0, 32_768);
             return timed(proxy.get_text(0, count))
@@ -937,6 +965,14 @@ impl AtspiComputerAdapter {
                 }
             }
             NativeAction::Keyboard { .. } => {}
+            NativeAction::Clipboard { operation, text } => {
+                validate_clipboard_payload(*operation, text.as_deref())?;
+                if self.clipboard.is_none() {
+                    return Err(NativeAdapterError::unsupported(
+                        "native text clipboard is unavailable on this Linux graphical seat",
+                    ));
+                }
+            }
             NativeAction::Semantic { .. }
             | NativeAction::Focus { .. }
             | NativeAction::Launch { .. } => {
@@ -1190,6 +1226,41 @@ impl AtspiComputerAdapter {
             ))
         })
     }
+
+    async fn dispatch_clipboard_storage(
+        &self,
+        command: &NativeActionCommand,
+    ) -> Option<NativeAdapterResult<NativeObservation>> {
+        let NativeAction::Clipboard { operation, text } = &command.action else {
+            return None;
+        };
+        if !matches!(
+            operation,
+            NativeClipboardAction::Write | NativeClipboardAction::Clear
+        ) {
+            return None;
+        }
+        Some(
+            async {
+                self.validate(command).await?;
+                self.clipboard
+                    .as_ref()
+                    .ok_or_else(|| {
+                        NativeAdapterError::unsupported(
+                            "native text clipboard is unavailable on this Linux graphical seat",
+                        )
+                    })?
+                    .mutate(*operation, text.clone())
+                    .await?;
+                self.observe(&command.target_id).await.map_err(|error| {
+                    NativeAdapterError::outcome_unknown(format!(
+                        "native clipboard changed but target state could not be observed: {error}"
+                    ))
+                })
+            }
+            .await,
+        )
+    }
 }
 
 #[async_trait]
@@ -1208,6 +1279,7 @@ impl ComputerAdapter for AtspiComputerAdapter {
             semantic_actions: true,
             pointer_input: desktop,
             keyboard_input: desktop,
+            clipboard: self.clipboard.is_some(),
             background_actions: true,
             parallel_apps: true,
         }
@@ -1269,6 +1341,59 @@ impl ComputerAdapter for AtspiComputerAdapter {
         self.capture_window_target(record).await
     }
 
+    async fn capture_stream(
+        &self,
+        target_id: &str,
+        options: crate::NativeCaptureOptions,
+    ) -> NativeAdapterResult<NativeCapturedFrame> {
+        let mut frame = self.capture(target_id).await?;
+        if frame.width > options.max_width || frame.height > options.max_height {
+            return Err(NativeAdapterError::definite(
+                NativeAdapterErrorCode::InvalidAction,
+                "Linux live-frame bounds are smaller than the native target",
+                false,
+            ));
+        }
+        if options.format == crate::NativeFrameFormat::Png {
+            return Ok(frame);
+        }
+        let rgb = image::load_from_memory(&frame.bytes)
+            .map_err(|error| {
+                NativeAdapterError::definite(
+                    NativeAdapterErrorCode::DriverFailed,
+                    format!("decode Linux live frame: {error}"),
+                    true,
+                )
+            })?
+            .to_rgb8();
+        let mut jpeg = Vec::new();
+        JpegEncoder::new_with_quality(&mut jpeg, options.quality)
+            .write_image(&rgb, frame.width, frame.height, ExtendedColorType::Rgb8)
+            .map_err(|error| {
+                NativeAdapterError::definite(
+                    NativeAdapterErrorCode::DriverFailed,
+                    format!("encode Linux live frame: {error}"),
+                    true,
+                )
+            })?;
+        frame.mime_type = "image/jpeg".to_string();
+        frame.sha256 = hex::encode(Sha256::digest(&jpeg));
+        frame.bytes = jpeg;
+        Ok(frame)
+    }
+
+    async fn clipboard(&self) -> NativeAdapterResult<NativeClipboard> {
+        self.clipboard
+            .as_ref()
+            .ok_or_else(|| {
+                NativeAdapterError::unsupported(
+                    "native text clipboard is unavailable on this Linux graphical seat",
+                )
+            })?
+            .read()
+            .await
+    }
+
     async fn validate(&self, command: &NativeActionCommand) -> NativeAdapterResult<()> {
         if let Some(screen) = self.screen_target() {
             if screen.id == command.target_id {
@@ -1313,6 +1438,22 @@ impl ComputerAdapter for AtspiComputerAdapter {
                     "Linux pixel input must target the exact X11 screen",
                 ));
             }
+            NativeAction::Clipboard { operation, text } => {
+                validate_clipboard_payload(*operation, text.as_deref())?;
+                if matches!(
+                    operation,
+                    NativeClipboardAction::Copy | NativeClipboardAction::Paste
+                ) {
+                    return Err(NativeAdapterError::unsupported(
+                        "Linux clipboard copy/paste must target the exact X11 screen",
+                    ));
+                }
+                if self.clipboard.is_none() {
+                    return Err(NativeAdapterError::unsupported(
+                        "native text clipboard is unavailable on this Linux graphical seat",
+                    ));
+                }
+            }
             NativeAction::Focus { target_id } => {
                 if target_id != &command.target_id {
                     return Err(NativeAdapterError::definite(
@@ -1335,6 +1476,9 @@ impl ComputerAdapter for AtspiComputerAdapter {
         &self,
         command: &NativeActionCommand,
     ) -> NativeAdapterResult<NativeObservation> {
+        if let Some(result) = self.dispatch_clipboard_storage(command).await {
+            return result;
+        }
         if let Some(screen) = self.screen_target() {
             if screen.id == command.target_id {
                 self.validate_screen(command, &screen).await?;
@@ -1402,6 +1546,7 @@ impl ComputerAdapter for AtspiComputerAdapter {
                 }
                 NativeAction::Pointer { .. }
                 | NativeAction::Keyboard { .. }
+                | NativeAction::Clipboard { .. }
                 | NativeAction::Launch { .. } => {
                     return Err(NativeAdapterError::unsupported(
                         "native action is unavailable in the AT-SPI adapter",
@@ -1457,6 +1602,27 @@ fn descendant_keys(root: &str, items: &[CacheItem]) -> NativeAdapterResult<BTree
     Ok(selected)
 }
 
+fn cache_snapshot_complete(items: &[CacheItem]) -> bool {
+    let mut observed_children = BTreeMap::<String, usize>::new();
+    for item in items {
+        if item.parent.is_null() {
+            continue;
+        }
+        let Ok(parent) = object_key(&item.parent) else {
+            return false;
+        };
+        *observed_children.entry(parent).or_default() += 1;
+    }
+    items.iter().all(|item| {
+        item.children >= 0
+            && usize::try_from(item.children).is_ok_and(|expected| {
+                object_key(&item.object).ok().is_some_and(|key| {
+                    observed_children.get(&key).copied().unwrap_or(0) == expected
+                })
+            })
+    })
+}
+
 fn convert_legacy_cache(items: Vec<LegacyCacheItem>) -> NativeAdapterResult<Vec<CacheItem>> {
     let mut child_indices = BTreeMap::<String, i32>::new();
     for item in &items {
@@ -1503,7 +1669,14 @@ fn normalized_actions(item: &CacheItem) -> Vec<String> {
     if item.ifaces.contains(Interface::Action) {
         actions.insert("invoke".to_string());
     }
-    if item.ifaces.contains(Interface::Component) {
+    if item.ifaces.contains(Interface::Component)
+        && (item.states.contains(State::Focusable)
+            || item.ifaces.contains(Interface::Action)
+            || item.ifaces.contains(Interface::EditableText)
+            || item.ifaces.contains(Interface::Selection)
+            || item.ifaces.contains(Interface::Value)
+            || is_target_role(item.role))
+    {
         actions.insert("focus".to_string());
         actions.insert("scroll_into_view".to_string());
     }
@@ -1586,6 +1759,7 @@ fn correlate_x11_window(target: &NativeTarget, windows: &[LinuxWindow]) -> Optio
     if target.kind != NativeTargetKind::Window {
         return None;
     }
+    let process_scoped = target.process_id.is_some();
     let mut candidates: Vec<&LinuxWindow> = if let Some(process_id) = target.process_id {
         windows
             .iter()
@@ -1601,12 +1775,10 @@ fn correlate_x11_window(target: &NativeTarget, windows: &[LinuxWindow]) -> Optio
             .filter(|window| normalized_title(&window.title) == title)
             .collect()
     };
-    if candidates.len() == 1 {
-        return candidates.first().map(|window| (*window).clone());
-    }
     if candidates.is_empty() {
         return None;
     }
+    let mut placement_match = !process_scoped;
 
     let title = normalized_title(&target.title);
     if !title.is_empty() {
@@ -1617,12 +1789,9 @@ fn correlate_x11_window(target: &NativeTarget, windows: &[LinuxWindow]) -> Optio
             .collect();
         if !titled.is_empty() {
             candidates = titled;
+            placement_match = true;
         }
     }
-    if candidates.len() == 1 {
-        return candidates.first().map(|window| (*window).clone());
-    }
-
     if let Some(bounds) = target.bounds {
         let placed: Vec<&LinuxWindow> = candidates
             .iter()
@@ -1631,9 +1800,10 @@ fn correlate_x11_window(target: &NativeTarget, windows: &[LinuxWindow]) -> Optio
             .collect();
         if !placed.is_empty() {
             candidates = placed;
+            placement_match = true;
         }
     }
-    (candidates.len() == 1).then(|| candidates[0].clone())
+    (placement_match && candidates.len() == 1).then(|| candidates[0].clone())
 }
 
 fn normalized_title(value: &str) -> String {
@@ -1762,12 +1932,48 @@ fn pixel_inputs(
                 action: v1::KeyAction::Press as i32,
             }),
         )]),
+        NativeAction::Clipboard { operation, text } => {
+            validate_clipboard_payload(*operation, text.as_deref())?;
+            let key = match operation {
+                NativeClipboardAction::Copy => "Control+c",
+                NativeClipboardAction::Paste => "Control+v",
+                NativeClipboardAction::Write | NativeClipboardAction::Clear => {
+                    return Err(NativeAdapterError::unsupported(
+                        "clipboard storage mutations are not X11 key input",
+                    ));
+                }
+            };
+            Ok(vec![desktop_input(v1::desktop_input::Event::Key(
+                v1::KeyEvent {
+                    key: key.to_string(),
+                    is_text: false,
+                    action: v1::KeyAction::Press as i32,
+                },
+            ))])
+        }
         NativeAction::Semantic { .. }
         | NativeAction::Focus { .. }
         | NativeAction::Launch { .. } => Err(NativeAdapterError::unsupported(
             "action is not an X11 screen input",
         )),
     }
+}
+
+fn validate_clipboard_payload(
+    operation: NativeClipboardAction,
+    text: Option<&str>,
+) -> NativeAdapterResult<()> {
+    if (operation == NativeClipboardAction::Write) != text.is_some() {
+        return Err(invalid_action(
+            "native clipboard text is required exactly for write",
+        ));
+    }
+    if text.is_some_and(|value| value.len() > 1024 * 1024) {
+        return Err(invalid_action(
+            "native clipboard text exceeds its UTF-8 byte envelope",
+        ));
+    }
+    Ok(())
 }
 
 fn pointer_input(

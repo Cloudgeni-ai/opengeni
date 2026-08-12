@@ -347,7 +347,9 @@ describe("deterministic bounded execution", () => {
       expect(source).not.toContain('"--parallel=1"');
       expect(source).not.toContain('"--isolate"');
       expect(source).toContain("--max-concurrency=${budget.concurrency}");
+      expect(source).toContain('"--no-env-file"');
     }
+    expect(readFileSync("scripts/run-browser-e2e.ts", "utf8")).toContain('"--no-env-file"');
   });
 });
 
