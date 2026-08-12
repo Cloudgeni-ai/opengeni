@@ -35,7 +35,7 @@ const migrationPath = new URL("../drizzle/0150_slack_task_interactions.sql", imp
 const reactionMigrationPath = new URL("../drizzle/0156_slack_reaction_trigger.sql", import.meta.url)
   .pathname;
 const nativeActionMigrationPath = new URL(
-  "../drizzle/0224_slack_native_actions.sql",
+  "../drizzle/0227_slack_native_actions.sql",
   import.meta.url,
 ).pathname;
 
