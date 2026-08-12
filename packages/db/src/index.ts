@@ -338,6 +338,7 @@ export * from "./knowledge-source-sync";
 export * from "./generated-images";
 export * from "./slack-user-link-access";
 export * from "./video-generation";
+export * from "./xai-subscription";
 export { interruptedToolCallResult } from "./session-tool-call-settlement";
 export { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
 export {

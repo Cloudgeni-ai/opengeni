@@ -56,10 +56,24 @@ const MANAGED_HUMAN_PERSONAL_WORKSPACE_AUTHORITY_TABLES = [
   "organization_user_resource_authorities",
   "organization_user_resource_grants",
 ] as const;
+const XAI_CREATE_CREDENTIAL_ROUTINE =
+  "create_xai_subscription_credential(uuid, uuid, text, text, text, text, text, text, text, timestamp with time zone)";
+const XAI_RESOLVE_POOL_ROUTINE = "resolve_xai_authority_pool(uuid, uuid, text, jsonb)";
+const XAI_REVALIDATE_CREDENTIAL_ROUTINE =
+  "revalidate_xai_subscription_authority(uuid, text, uuid, jsonb)";
+const XAI_AUTHORITY_TABLES = [
+  "organization_memberships",
+  "organization_user_resource_authorities",
+  "workspace_memberships",
+  "xai_subscription_credentials",
+] as const;
 
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
+  XAI_CREATE_CREDENTIAL_ROUTINE,
   KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE,
   MANAGED_HUMAN_PERSONAL_WORKSPACE_ROUTINE,
+  XAI_RESOLVE_POOL_ROUTINE,
+  XAI_REVALIDATE_CREDENTIAL_ROUTINE,
 ] as const;
 
 /**
@@ -290,6 +304,11 @@ export const FORCE_RLS_TABLES = [
   "workspace_variable_sets",
   "workspace_video_generation_policies",
   "workspace_video_generation_quotas",
+  "xai_capacity_waiters",
+  "xai_credential_leases",
+  "xai_rotation_settings",
+  "xai_session_account_pins",
+  "xai_subscription_credentials",
 ] as const;
 
 /**
@@ -450,6 +469,11 @@ export const RUNTIME_FULL_DML_TABLES = [
   "workspace_video_generation_policies",
   "workspace_video_generation_quotas",
   "workspaces",
+  "xai_capacity_waiters",
+  "xai_credential_leases",
+  "xai_rotation_settings",
+  "xai_session_account_pins",
+  "xai_subscription_credentials",
 ] as const;
 
 /** Configuration and lifecycle-owned audit rows are read-only at runtime. */
@@ -1194,6 +1218,36 @@ export function evaluateRuntimeDatabasePosture(
         violations.push(
           `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0].owner}`,
         );
+      }
+    } else if (
+      routine.name === XAI_CREATE_CREDENTIAL_ROUTINE ||
+      routine.name === XAI_RESOLVE_POOL_ROUTINE ||
+      routine.name === XAI_REVALIDATE_CREDENTIAL_ROUTINE
+    ) {
+      if (!tableByName.has("xai_subscription_credentials")) {
+        continue;
+      }
+      const missingAuthorityTables = XAI_AUTHORITY_TABLES.filter(
+        (tableName) => !tableByName.has(tableName),
+      );
+      if (missingAuthorityTables.length > 0) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
+        );
+      } else {
+        const authorityTables = XAI_AUTHORITY_TABLES.map(
+          (tableName) => tableByName.get(tableName)!,
+        );
+        const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+        if (authorityOwners.size !== 1) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
+          );
+        } else if (routine.owner !== authorityTables[0]!.owner) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
+          );
+        }
       }
     } else if (targetSchemaOwner && routine.owner !== targetSchemaOwner) {
       violations.push(
