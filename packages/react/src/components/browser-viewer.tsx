@@ -77,8 +77,9 @@ export type BrowserViewerProps = EmbeddedBrowserInteractionClientOverride & {
   /** Tests/demos only. Production uses the browser's native WebSocket. */
   webSocketFactory?: BrowserFrameWebSocketFactory | undefined;
   renderEmpty?: ((create: () => void, creating: boolean) => ReactNode) | undefined;
-  /** Optional host capability for a headed managed browser. Browser-only
-   * embedders remain valid and create headless sessions instead. */
+  /** Optional host capability for placing a human-created headed browser inside
+   * an exact ComputerSession. Browser-only embedders still create a headed
+   * browser; they simply omit the linked desktop resource. */
   createLinkedComputer?:
     | ((
         name: string,
@@ -92,7 +93,6 @@ export type BrowserViewerProps = EmbeddedBrowserInteractionClientOverride & {
 type BrowserSelection = { sessionId: string; pinned: boolean } | null;
 type BrowserLaunchChoice =
   | { kind: "clean" }
-  | { kind: "fast" }
   | { kind: "profile"; identityId: string }
   | { kind: "attached"; device: AttachedBrowserDevice };
 type PointerStart = {
@@ -451,27 +451,26 @@ export function BrowserViewer({
           ? profiles.identities.find((candidate) => candidate.id === choice.identityId)
           : null;
       const device = choice.kind === "attached" ? choice.device : null;
-      const fast = choice.kind === "fast";
       const browserName =
-        device?.profileLabel ??
-        device?.name ??
-        (identity ? `${identity.name} browser` : fast ? "Fast browser" : "Browser");
+        device?.profileLabel ?? device?.name ?? (identity ? `${identity.name} browser` : "Browser");
       setCreating(true);
       void (async () => {
-        const linkedComputer =
-          !fast && createLinkedComputer
-            ? await createLinkedComputer(
-                `${browserName} computer`,
-                device ? { kind: "attached_device", deviceId: device.id } : undefined,
-              )
-            : null;
+        const linkedComputer = createLinkedComputer
+          ? await createLinkedComputer(
+              `${browserName} computer`,
+              device ? { kind: "attached_device", deviceId: device.id } : undefined,
+            )
+          : null;
         const response = await createRegistryBrowser({
           sessionId,
           name: browserName,
-          ...(fast ? { engine: "lightpanda" as const, headless: true } : {}),
+          // Human-created browsers are always ordinary visual Chromium/Chrome.
+          // Lightpanda remains an agent-only optimization requested explicitly
+          // through browser_open; if an agent creates one it is still visible in
+          // the shared BrowserSession switcher.
+          headless: false,
           ...(device
             ? {
-                headless: false,
                 placement: {
                   kind: "attached_device" as const,
                   deviceId: device.id,
@@ -480,7 +479,6 @@ export function BrowserViewer({
             : {}),
           ...(linkedComputer
             ? {
-                headless: false,
                 linkedComputerSessionId: linkedComputer.id,
                 placement: linkedComputer.placement,
               }
@@ -512,7 +510,17 @@ export function BrowserViewer({
         if (!identity) {
           const name = newProfileName?.trim() ?? "";
           if (!name) return false;
-          identity = (await profiles.create({ name })).identity;
+          // First-save is intentionally two-phase: the named identity exists
+          // before its first immutable revision. If capture/upload failed after
+          // that create, retry into the same empty identity instead of turning
+          // the recoverable draft into a permanent name conflict.
+          identity =
+            profiles.identities.find(
+              (candidate) =>
+                candidate.status === "active" &&
+                candidate.revisionCount === 0 &&
+                candidate.name.localeCompare(name, undefined, { sensitivity: "base" }) === 0,
+            ) ?? (await profiles.create({ name })).identity;
         }
         const response = await profiles.publish(session.id, {
           identityId: identity.id,
@@ -1037,19 +1045,8 @@ function BrowserLaunchMenu(props: {
         >
           <Globe2Icon className="size-3.5 text-og-muted" />
           <span>
-            <span className="block text-og-control text-og-fg">Clean browser</span>
-            <span className="block text-og-xs text-og-subtle">No saved profile</span>
-          </span>
-        </button>
-        <button
-          type="button"
-          onClick={() => choose({ kind: "fast" })}
-          className="flex w-full items-center gap-2 rounded-og-sm px-2 py-2 text-left transition hover:bg-og-surface-2"
-        >
-          <ZapIcon className="size-3.5 text-og-muted" />
-          <span>
-            <span className="block text-og-control text-og-fg">Fast semantic browser</span>
-            <span className="block text-og-xs text-og-subtle">Headless · optimized for agents</span>
+            <span className="block text-og-control text-og-fg">Fresh browser</span>
+            <span className="block text-og-xs text-og-subtle">Visual browser · no saved state</span>
           </span>
         </button>
         {props.identities.length > 0 ? (
@@ -1540,10 +1537,7 @@ function BrowserViewport(props: {
       // The first click was already dispatched immediately. Tell CDP this is
       // the continuation (clickCount=2), so the page receives a true dblclick
       // without making every ordinary click wait for the double-click window.
-      enqueue(
-        { type: "pointer", action: "click", clickCount: 2, x: to.x, y: to.y },
-        start.frame,
-      );
+      enqueue({ type: "pointer", action: "click", clickCount: 2, x: to.x, y: to.y }, start.frame);
       return;
     }
     lastClickRef.current = { at: now, x: to.x, y: to.y, frame: start.frame };
@@ -2441,7 +2435,9 @@ function frameMatchesSelectedTarget(
     session &&
     target &&
     frame.browserSessionId === session.id &&
-    frame.targetId === target.id,
+    frame.targetId === target.id &&
+    frame.targetGeneration === target.targetGeneration &&
+    frame.documentGeneration === target.documentGeneration,
   );
 }
 

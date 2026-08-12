@@ -496,7 +496,7 @@ describe("durable ComputerSession lifecycle", () => {
     );
   });
 
-  test("reaps one stale ComputerSession without losing a live peer BrowserSession", async () => {
+  test("does not infer controller loss from an inactive interaction viewer", async () => {
     if (!available) return;
     const scope = await fixture();
     const computerOperationId = crypto.randomUUID();
@@ -629,16 +629,15 @@ describe("durable ComputerSession lifecycle", () => {
       interactionHolderTtlMs: 90_000,
       idleGraceMs: 45_000,
     });
-    expect(reaped.reapedInteractions).toBe(1);
+    expect(reaped.reapedInteractions).toBe(0);
     expect(
       await getComputerSession(client.db, {
         ...scope,
         computerSessionId: computer.session.id,
       }),
     ).toMatchObject({
-      lifecycle: "lost",
-      controller: null,
-      failureCode: "controller_heartbeat_expired",
+      lifecycle: "active",
+      failureCode: null,
     });
     expect(
       await getBrowserSession(client.db, { ...scope, browserSessionId: browser.session.id }),

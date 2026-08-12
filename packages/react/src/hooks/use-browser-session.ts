@@ -121,14 +121,8 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
       ]);
       if (!mountedRef.current || requestRef.current.id !== id) return;
       const selected = chooseTarget(targetResponse.targets, selectedTargetIdRef.current);
-      const observation = selected
-        ? await client.observeBrowserTarget(workspaceId, browserSessionId, selected.id, {
-            signal: controller.signal,
-          })
-        : null;
-      if (!mountedRef.current || requestRef.current.id !== id) return;
       selectedTargetIdRef.current = selected?.id ?? null;
-      observationRef.current = { browserSessionId, observation };
+      observationRef.current = { browserSessionId, observation: null };
       setState((current) =>
         current.browserSessionId === browserSessionId
           ? {
@@ -136,12 +130,36 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
               session,
               targets: targetResponse.targets,
               selectedTargetId: selected?.id ?? null,
-              observation,
+              observation: null,
               loading: false,
               error: null,
             }
           : current,
       );
+      if (!selected) return;
+      try {
+        const observation = await client.observeBrowserTarget(
+          workspaceId,
+          browserSessionId,
+          selected.id,
+          { signal: controller.signal },
+        );
+        if (!mountedRef.current || requestRef.current.id !== id) return;
+        observationRef.current = { browserSessionId, observation };
+        setState((current) =>
+          current.browserSessionId === browserSessionId &&
+          current.selectedTargetId === observation.target.id
+            ? { ...current, observation }
+            : current,
+        );
+      } catch (cause) {
+        if (controller.signal.aborted || !mountedRef.current || requestRef.current.id !== id)
+          return;
+        // Target inventory and the media plane remain authoritative for the
+        // human-facing browser. A failed semantic snapshot must not blank or
+        // disable an otherwise live visual browser.
+        void cause;
+      }
     } catch (cause) {
       if (controller.signal.aborted || !mountedRef.current || requestRef.current.id !== id) return;
       setState((current) =>

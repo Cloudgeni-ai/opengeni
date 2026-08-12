@@ -407,6 +407,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     if (!this.started || !this.connection) return false;
     try {
       await this.connection.send("Browser.getVersion", {}, { timeoutMs: 2_000 });
+      const selected = this.selectedTargetId ? this.states.get(this.selectedTargetId) : null;
+      if (selected) {
+        await this.connection.send(
+          "Page.getFrameTree",
+          {},
+          { sessionId: selected.sessionId, timeoutMs: 2_000 },
+        );
+      }
       return true;
     } catch {
       return false;

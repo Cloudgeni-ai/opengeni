@@ -400,10 +400,7 @@ export function ComputerViewer({
           />
           <div className="flex min-h-0 flex-1">
             {rfbStream ? (
-              <div
-                className="relative min-h-0 flex-1 bg-black"
-                onCopyCapture={copyFromRfb}
-              >
+              <div className="relative min-h-0 flex-1 bg-black" onCopyCapture={copyFromRfb}>
                 <DesktopViewer
                   capability={rfbCapability}
                   interactive

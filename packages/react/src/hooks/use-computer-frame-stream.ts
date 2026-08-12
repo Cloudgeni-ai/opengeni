@@ -42,6 +42,7 @@ const RELAY_TAG_OPEN = 1;
 const RELAY_TAG_OPEN_ACK = 2;
 const RELAY_TAG_FRAME = 3;
 const RELAY_TAG_CLOSE = 4;
+const MAX_AUTOMATIC_RECONNECTS_WITHOUT_A_FRAME = 2;
 
 export type UseComputerFrameStreamOptions = EmbeddedComputerInteractionClientOverride & {
   computerSessionId: string | null;
@@ -146,6 +147,7 @@ export function useComputerFrameStream(
 
     const scheduleReconnect = () => {
       if (disposed || reconnectTimer) return;
+      if (failures >= MAX_AUTOMATIC_RECONNECTS_WITHOUT_A_FRAME) return;
       const delay = Math.min(5_000, 250 * 2 ** Math.min(failures, 5));
       failures += 1;
       setResult((current) => ({ ...current, state: "reconnecting" }));
@@ -155,17 +157,16 @@ export function useComputerFrameStream(
       }, delay);
     };
 
-    const fail = (cause: unknown) => {
+    const fail = (cause: unknown, reconnectAutomatically = true) => {
       if (disposed) return;
       const error = cause instanceof Error ? cause : new Error(String(cause));
       setResult((current) => ({ ...current, state: "error", error }));
       clearSocket();
-      scheduleReconnect();
+      if (reconnectAutomatically) scheduleReconnect();
     };
 
     const onOpen = () => {
       if (disposed) return;
-      failures = 0;
       if (activeStream?.kind === "relay") {
         const body = encodeStreamOpen({
           channel: { ...activeStream.channel, kind: STREAM_KIND_COMPUTER },
@@ -214,7 +215,8 @@ export function useComputerFrameStream(
               attachmentExpiresAt = 0;
               lastRelaySequence = null;
               relayAccepted = false;
-              throw new Error("Computer frame source ended.");
+              fail(new Error("Computer frame source ended."), false);
+              return;
             }
             if (tag !== RELAY_TAG_FRAME || !relayAccepted) return;
             const relayFrame = decodeStreamFrame(body);
@@ -232,6 +234,10 @@ export function useComputerFrameStream(
           const key = `${computerSessionId}:${targetId}:${frame.controllerGeneration}:${frame.targetGeneration}`;
           if (latestRef.current.key === key && frame.sequence <= latestRef.current.sequence) return;
           latestRef.current = { key, sequence: frame.sequence };
+          // A real decoded frame—not merely a socket handshake—is the recovery
+          // boundary. Resetting on `open` caused a dead producer to reconnect
+          // forever and continuously spawn fresh relay/SCK work.
+          failures = 0;
           setResult((current) => ({
             ...current,
             state: "live",

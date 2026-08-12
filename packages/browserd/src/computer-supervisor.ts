@@ -119,15 +119,18 @@ export class ComputerSupervisor {
         if (!options.nativeBinaryPath) {
           throw new Error("nativeBinaryPath is required for native ComputerSessions");
         }
-        const client = await ComputerNativeClient.open({
-          binaryPath: resolve(options.nativeBinaryPath),
-          env: context.environment,
-          cwd: context.sessionDirectory,
-        });
+        const clientFactory = async () =>
+          await ComputerNativeClient.open({
+            binaryPath: resolve(options.nativeBinaryPath!),
+            env: context.environment,
+            cwd: context.sessionDirectory,
+          });
+        const client = await clientFactory();
         return new NativeComputerDriver({
           computerSessionId: context.computerSessionId,
           controllerGeneration: context.controllerGeneration,
           client,
+          clientFactory,
         });
       });
   }

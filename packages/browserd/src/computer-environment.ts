@@ -228,6 +228,20 @@ export class LinuxVirtualComputerEnvironmentAllocator implements ComputerEnviron
           "-forever",
           "-shared",
           "-nopw",
+          // Match the long-proven sandbox display stack. XDamage/XFixes are
+          // unreliable against Xvfb and produced partially repainted white
+          // blocks in isolated ComputerSessions. Polling at a bounded LAN-tuned
+          // cadence is both visually correct and materially less reconnect-prone.
+          "-wait",
+          "50",
+          "-xkb",
+          "-noxdamage",
+          "-noxfixes",
+          "-repeat",
+          "-ping",
+          "1",
+          "-speeds",
+          "lan",
           "-quiet",
         ],
         {
