@@ -10,6 +10,7 @@ export const OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY = "__opengeniMcpResultV1" as co
 export const OPENGENI_INNER_MCP_CUSTOM_DATA_KEY = "__opengeniInnerMcpCustomData" as const;
 
 const SDK_RESULT_PROJECTION = Symbol("opengeni.sdkMcpResultProjection");
+const MCP_RESULT_BRIDGE_EXTRACTORS = new WeakSet<McpCustomDataExtractor>();
 
 type McpCustomDataExtractor = NonNullable<MCPServer["customDataExtractor"]>;
 type McpCustomDataContext = Parameters<McpCustomDataExtractor>[0];
@@ -179,6 +180,7 @@ export class McpResultCustomDataBridge {
         );
         if (
           normalizedInnerCustomData &&
+          MCP_RESULT_BRIDGE_EXTRACTORS.has(innerExtractor) &&
           Object.hasOwn(normalizedInnerCustomData, OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY)
         ) {
           // A PrefixedMcpServer may itself be wrapped by another prefixed
@@ -202,43 +204,33 @@ export class McpResultCustomDataBridge {
           : { [OPENGENI_INNER_MCP_CUSTOM_DATA_KEY]: innerCustomData }),
       };
     };
+    MCP_RESULT_BRIDGE_EXTRACTORS.add(this.customDataExtractor);
   }
 
   async captureResult(
     args: Record<string, unknown> | null,
     invoke: (cleanArgs: Record<string, unknown> | null) => Promise<unknown>,
   ): Promise<unknown> {
-    const token = this.takeToken(args);
-    try {
-      const invoked = await invoke(args);
-      const result = normalizeMcpResult(isSdkResultProjection(invoked) ? invoked.content : invoked);
-      if (token) this.resultsByToken.set(token, result);
-      if (token && this.input?.sdkModelOutput === "result") {
-        // The prefixed server historically exposed the complete MCP result as
-        // model output. Keep that shape while the SDK reads the standard result
-        // fields and the bridge retains the exact audit copy out of band. Mark
-        // the compatibility projection privately so another prefixed wrapper
-        // can recover the raw result before parsing it at its own boundary.
-        const projected = { ...result, content: result } as Record<PropertyKey, unknown>;
-        Object.defineProperty(projected, SDK_RESULT_PROJECTION, {
-          value: true,
-          enumerable: false,
-          configurable: false,
-          writable: false,
-        });
-        return projected;
-      }
-      return result;
-    } finally {
-      if (args && token) {
-        Object.defineProperty(args, this.argumentKey, {
-          value: token,
-          enumerable: true,
-          configurable: true,
-          writable: false,
-        });
-      }
+    const { arguments: cleanArguments, token } = this.copyArgumentsWithoutToken(args);
+    const invoked = await invoke(cleanArguments);
+    const result = normalizeMcpResult(isSdkResultProjection(invoked) ? invoked.content : invoked);
+    if (token) this.resultsByToken.set(token, result);
+    if (token && this.input?.sdkModelOutput === "result") {
+      // The prefixed server historically exposed the complete MCP result as
+      // model output. Keep that shape while the SDK reads the standard result
+      // fields and the bridge retains the exact audit copy out of band. Mark
+      // the compatibility projection privately so another prefixed wrapper
+      // can recover the raw result before parsing it at its own boundary.
+      const projected = { ...result, content: result } as Record<PropertyKey, unknown>;
+      Object.defineProperty(projected, SDK_RESULT_PROJECTION, {
+        value: true,
+        enumerable: false,
+        configurable: false,
+        writable: false,
+      });
+      return projected;
     }
+    return result;
   }
 
   private async resolveInnerMeta(
@@ -253,12 +245,17 @@ export class McpResultCustomDataBridge {
     });
   }
 
-  private takeToken(args: Record<string, unknown> | null): string | null {
-    if (!args) return null;
-    const token = args[this.argumentKey];
-    if (typeof token !== "string") return null;
-    delete args[this.argumentKey];
-    return token;
+  private copyArgumentsWithoutToken(args: Record<string, unknown> | null): {
+    arguments: Record<string, unknown> | null;
+    token: string | null;
+  } {
+    if (!args || typeof args[this.argumentKey] !== "string") {
+      return { arguments: args, token: null };
+    }
+    const token = args[this.argumentKey] as string;
+    const cleanArguments = { ...args };
+    delete cleanArguments[this.argumentKey];
+    return { arguments: cleanArguments, token };
   }
 
   private consumeArguments(args: Record<string, unknown> | null): {
@@ -292,14 +289,9 @@ export function unwrapSdkMcpResultProjection(value: unknown): unknown {
 
 function stripMcpResultMarkerFromCustomData(customData: unknown): boolean {
   if (!isPlainRecord(customData)) return false;
-  let changed = false;
-  if (Object.hasOwn(customData, OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY)) {
-    delete customData[OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY];
-    changed = true;
-  }
-  const inner = customData[OPENGENI_INNER_MCP_CUSTOM_DATA_KEY];
-  if (stripMcpResultMarkerFromCustomData(inner)) changed = true;
-  return changed;
+  if (!Object.hasOwn(customData, OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY)) return false;
+  delete customData[OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY];
+  return true;
 }
 
 function compactSerializedRunItem(item: unknown): boolean {

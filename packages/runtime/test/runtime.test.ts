@@ -4876,6 +4876,142 @@ describe("runtime event normalization", () => {
     });
   });
 
+  test("an ordinary inner extractor may own OpenGeni-looking custom-data keys", async () => {
+    const fullResult = {
+      content: [{ type: "text" as const, text: "caller-owned marker content" }],
+      isError: false,
+    };
+    const callerOwnedCustomData = {
+      [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: { callerOwned: true },
+      callerReceipt: "retain-caller-marker",
+    };
+    const inner: MCPServer = {
+      name: "caller-marker-inner",
+      cacheToolsList: false,
+      customDataExtractor: async () => callerOwnedCustomData,
+      async connect() {},
+      async close() {},
+      async listTools() {
+        return [
+          {
+            name: "inspect",
+            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+          },
+        ];
+      },
+      async callTool() {
+        return fullResult.content;
+      },
+      async callToolResult() {
+        return fullResult;
+      },
+      async invalidateToolsCache() {},
+    };
+    const wrapped = new PrefixedMcpServer(inner, "caller_marker");
+    const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false });
+    const model = new ScriptedModel([
+      { output: [scriptedFunctionCall("caller_marker__inspect", {}, "caller-marker-call")] },
+      { outputText: "done" },
+    ]);
+    const agent = buildOpenGeniAgent(settings, [], {
+      model,
+      hostedWebSearch: false,
+      mcpServers: [wrapped],
+    });
+
+    const result = await runAgentStream(agent, "Inspect it", settings);
+    const streamed: any[] = [];
+    for await (const event of result.toStream()) streamed.push(event);
+    await result.completed;
+
+    const outputEvent = streamed.find(
+      (event) =>
+        event.type === "run_item_stream_event" && event.item?.type === "tool_call_output_item",
+    );
+    expect(outputEvent?.item.customData).toEqual({
+      [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: fullResult,
+      [OPENGENI_INNER_MCP_CUSTOM_DATA_KEY]: callerOwnedCustomData,
+    });
+    expect(releaseMcpResultCustomDataFromSdkEvent(outputEvent)).toBe(true);
+    expect(outputEvent?.item.customData).toEqual({
+      [OPENGENI_INNER_MCP_CUSTOM_DATA_KEY]: callerOwnedCustomData,
+    });
+  });
+
+  test("a custom server may freeze its clean arguments after a successful call", async () => {
+    const fullResult = {
+      content: [{ type: "text" as const, text: "frozen arguments accepted" }],
+      structuredContent: { receiptId: "frozen-arguments-1" },
+      isError: false,
+    };
+    const receivedArguments: Array<Record<string, unknown> | null> = [];
+    const inner: MCPServer = {
+      name: "freezing-arguments-inner",
+      cacheToolsList: false,
+      async connect() {},
+      async close() {},
+      async listTools() {
+        return [
+          {
+            name: "commit",
+            inputSchema: {
+              type: "object",
+              properties: { value: { type: "string" } },
+              required: ["value"],
+              additionalProperties: false,
+            },
+          },
+        ];
+      },
+      async callTool(_toolName, args) {
+        receivedArguments.push(args);
+        if (args) Object.freeze(args);
+        return fullResult.content;
+      },
+      async callToolResult(_toolName, args) {
+        receivedArguments.push(args);
+        if (args) Object.freeze(args);
+        return fullResult;
+      },
+      async invalidateToolsCache() {},
+    };
+    const wrapped = new PrefixedMcpServer(inner, "freezing_arguments");
+    const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false });
+    const model = new ScriptedModel([
+      {
+        output: [
+          scriptedFunctionCall(
+            "freezing_arguments__commit",
+            { value: "committed" },
+            "freezing-arguments-call",
+          ),
+        ],
+      },
+      { outputText: "done" },
+    ]);
+    const agent = buildOpenGeniAgent(settings, [], {
+      model,
+      hostedWebSearch: false,
+      mcpServers: [wrapped],
+    });
+
+    const result = await runAgentStream(agent, "Commit it", settings);
+    const streamed: any[] = [];
+    for await (const event of result.toStream()) streamed.push(event);
+    await result.completed;
+
+    const outputEvent = streamed.find(
+      (event) =>
+        event.type === "run_item_stream_event" && event.item?.type === "tool_call_output_item",
+    );
+    expect(outputEvent?.item.output).toEqual(fullResult);
+    expect(outputEvent?.item.customData).toEqual({
+      [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: fullResult,
+    });
+    expect(receivedArguments).toEqual([{ value: "committed" }]);
+    expect(Object.isFrozen(receivedArguments[0])).toBe(true);
+  });
+
   test("the Agents SDK preserves structured-content-only prefixed MCP model output", async () => {
     const fullResult = {
       content: [],
