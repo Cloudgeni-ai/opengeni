@@ -207,41 +207,56 @@ describe("runtime database posture evaluator", () => {
         )
         .map(([table]) => table)
         .sort();
+      const personalResourceProtectedTableCount = [
+        "personal_resource_once_consumption_receipts",
+        "session_attempt_personal_resource_admissions",
+        "session_attempt_personal_resource_snapshots",
+      ].filter(
+        (table) =>
+          new Set<string>(FORCE_RLS_TABLES).has(table) &&
+          new Set<string>(PROTECTED_NO_DIRECT_DML_TABLES).has(table),
+      ).length;
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 239],
+            [FORCE_RLS_TABLES, 236],
             [NON_RLS_RUNTIME_TABLES, 11],
             [RUNTIME_FULL_DML_TABLES, 138],
             [RUNTIME_READ_ONLY_TABLES, 17],
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 43],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 29],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 22],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 19],
             [RUNTIME_DML_TABLES, 228],
           ] as const)
         : ([
-            [FORCE_RLS_TABLES, 186],
+            [FORCE_RLS_TABLES, 183],
             [NON_RLS_RUNTIME_TABLES, 11],
             [RUNTIME_FULL_DML_TABLES, 112],
             [RUNTIME_READ_ONLY_TABLES, 16],
             [readUpdateTables, 0],
             [RUNTIME_READ_INSERT_TABLES, 38],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 12],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 19],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 16],
             [RUNTIME_DML_TABLES, 178],
           ] as const);
       for (const [tables, length] of contracts) {
-        expect(tables).toHaveLength(length);
+        const expectedLength =
+          tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
+            ? length + personalResourceProtectedTableCount
+            : length;
+        expect(tables).toHaveLength(expectedLength);
         expect(new Set(tables).size).toBe(tables.length);
         expect([...tables].sort()).toEqual([...tables]);
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = hasCurrentMainActivityLedger ? 250 : 197;
+      const tableCount = hasCurrentMainActivityLedger ? 247 : 194;
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
-        tableCount,
+        tableCount + personalResourceProtectedTableCount,
       );
-      expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(tableCount);
+      expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(
+        tableCount + personalResourceProtectedTableCount,
+      );
       expect(RUNTIME_TABLE_PRIVILEGES.memory_slack_publication_configurations).toEqual([
         "SELECT",
         "INSERT",
