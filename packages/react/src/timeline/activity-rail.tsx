@@ -417,6 +417,12 @@ function WorkerRow({
             {truncate(item.prompt, 140)}
           </p>
         ) : null}
+        {failed && item.failure ? (
+          <div className="mt-1 min-w-0 text-og-sm text-og-status-failed">
+            <p className="font-og-mono text-og-xs">{item.failure.code}</p>
+            <p className="mt-0.5 break-words">{item.failure.message}</p>
+          </div>
+        ) : null}
       </div>
       {failed ? (
         <span className="inline-flex shrink-0 self-center items-center gap-1.5 font-og-mono text-og-xs leading-none text-og-status-failed">

@@ -574,6 +574,11 @@ so consumers can render attachment chips. `groupTimeline` clusters consecutive
 activity for collapsed display. Use them directly if you want custom rendering
 with the same semantics.
 
+Failed worker items may also carry `failure: { code, message }`. The projection
+accepts only the bounded structured orchestration envelope retained in MCP
+output; it does not reinterpret arbitrary legacy error strings. `ActivityRail`
+renders the code and message directly beneath the failed worker row.
+
 ### Compatibility
 
 The projection is a tolerant reader over `SessionEvent.payload` because the wire
