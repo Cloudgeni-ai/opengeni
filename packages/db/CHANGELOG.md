@@ -1,5 +1,29 @@
 # @opengeni/db
 
+## 0.36.0
+
+### Minor Changes
+
+- 478d7fe: Add explicit, bounded root-task-tree coordination note tools with exact-attempt authority, private-session visibility, expiry, immutable create/archive receipts, and safe retry semantics.
+- 478d7fe: Persist exact accepted-turn goal authority, separate semantic goal revisions
+  from execution progress, and add policy-controlled rewrite proposals with API,
+  SDK, MCP, and runtime support.
+
+### Patch Changes
+
+- d86610d: Show elapsed UTC-hour buckets for the Insights Today range while retaining UTC-day buckets for longer ranges.
+- 478d7fe: Add a reversible workspace memory prompt mode that removes the legacy standing memory block, keeps preference observations out of agent behavioral authority, contains company-profile context for child agents, and reports metadata-only model-context contribution telemetry.
+- Updated dependencies [d86610d]
+- Updated dependencies [d86610d]
+- Updated dependencies [478d7fe]
+- Updated dependencies [d86610d]
+- Updated dependencies [478d7fe]
+- Updated dependencies [478d7fe]
+- Updated dependencies [478d7fe]
+  - @opengeni/contracts@0.50.0
+  - @opengeni/config@0.16.1
+  - @opengeni/codemode@0.4.1
+
 ## 0.35.1
 
 ### Patch Changes

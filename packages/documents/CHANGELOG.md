@@ -1,5 +1,22 @@
 # @opengeni/documents
 
+## 0.5.38
+
+### Patch Changes
+
+- 478d7fe: Add permission-first agent Knowledge search, exact fetch, and cursor-bounded browsing over authorized Documents.
+- Updated dependencies [d86610d]
+- Updated dependencies [d86610d]
+- Updated dependencies [478d7fe]
+- Updated dependencies [d86610d]
+- Updated dependencies [478d7fe]
+- Updated dependencies [478d7fe]
+- Updated dependencies [478d7fe]
+  - @opengeni/contracts@0.50.0
+  - @opengeni/db@0.36.0
+  - @opengeni/config@0.16.1
+  - @opengeni/storage@0.2.93
+
 ## 0.5.37
 
 ### Patch Changes

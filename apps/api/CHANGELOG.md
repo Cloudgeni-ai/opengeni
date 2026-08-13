@@ -1,5 +1,41 @@
 # @opengeni/api-router
 
+## 0.30.0
+
+### Minor Changes
+
+- 478d7fe: Add explicit, bounded root-task-tree coordination note tools with exact-attempt authority, private-session visibility, expiry, immutable create/archive receipts, and safe retry semantics.
+- 478d7fe: Persist exact accepted-turn goal authority, separate semantic goal revisions
+  from execution progress, and add policy-controlled rewrite proposals with API,
+  SDK, MCP, and runtime support.
+
+### Patch Changes
+
+- d86610d: Prevent deterministic model-generated worker-spawn failures, hide exhausted nested-agent creation, and show bounded structured session orchestration diagnostics in worker timeline rows while preserving the advanced public REST/SDK create contract.
+- 478d7fe: Add permission-first agent Knowledge search, exact fetch, and cursor-bounded browsing over authorized Documents.
+- Updated dependencies [d86610d]
+- Updated dependencies [d86610d]
+- Updated dependencies [6435af7]
+- Updated dependencies [478d7fe]
+- Updated dependencies [d86610d]
+- Updated dependencies [d86610d]
+- Updated dependencies [d86610d]
+- Updated dependencies [478d7fe]
+- Updated dependencies [478d7fe]
+- Updated dependencies [478d7fe]
+  - @opengeni/contracts@0.50.0
+  - @opengeni/core@0.28.0
+  - @opengeni/runtime@0.23.0
+  - @opengeni/db@0.36.0
+  - @opengeni/config@0.16.1
+  - @opengeni/documents@0.5.38
+  - @opengeni/artifact-tool@0.2.8
+  - @opengeni/codemode@0.4.1
+  - @opengeni/events@0.3.109
+  - @opengeni/github@0.4.56
+  - @opengeni/observability@0.7.5
+  - @opengeni/storage@0.2.93
+
 ## 0.29.2
 
 ### Patch Changes
