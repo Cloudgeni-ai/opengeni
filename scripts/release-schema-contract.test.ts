@@ -111,6 +111,13 @@ describe("release schema contract", () => {
 
   test("preserves published host-export history and appends the forward repair", async () => {
     const completeSourceContract = await buildSchemaContract();
+    const completeMigrations = new Map(
+      completeSourceContract.migrations.map((migration) => [migration.path, migration]),
+    );
+    expect(completeMigrations.get("0238_sandbox_provider_loss_receipts.sql")).toMatchObject({
+      sha256: "e907115fc6c67901c990e538a0d7699ae5464fd47a62fe997068acab8d31685f",
+      deploymentMode: "rolling",
+    });
     const transitionReaper = completeSourceContract.migrations.find(
       (migration) => migration.path === "0237_interaction_transition_reaper.sql",
     );
