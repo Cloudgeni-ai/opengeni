@@ -27,24 +27,30 @@ import { useAppContext } from "@/context";
 import {
   AGENT_DIAGRAM_NODE_HEIGHT,
   AGENT_DIAGRAM_NODE_WIDTH,
+  agentHasMatchingDescendants,
   buildAgentTopology,
+  canStartAgentTopologyRootRead,
   countTopologyDescendants,
   filterAgentTopology,
   isActiveAgent,
   isPausedAgent,
   layoutAgentTopologyDiagram,
   limitAgentTopology,
+  mergeAgentTopologySessions,
+  selectAgentTopologyBranchesToLoad,
   summarizeAgentTopology,
   type AgentTopologyFilter,
   type AgentTopologyNode,
 } from "@/lib/agent-topology";
 import { relativeTimeLabel } from "@/lib/sessions-group";
 import { cn } from "@/lib/utils";
-import type { AgentTopologySession } from "@opengeni/sdk";
+import { OpenGeniApiError, type AgentTopologySession } from "@opengeni/sdk";
 
 const ROOT_PAGE_LIMIT = 25;
+const CHILD_PAGE_LIMIT = 100;
 const MAX_LOADED_AGENTS = 200;
 const MAX_RENDERED_AGENTS = 200;
+const AUTO_EXPAND_CONCURRENCY = 4;
 
 type AgentTopologyView = "outline" | "diagram";
 
@@ -52,6 +58,7 @@ type AgentTopologyData = {
   sessions: AgentTopologySession[];
   loading: boolean;
   refreshing: boolean;
+  loadingMore: boolean;
   total: number;
   hasMore: boolean;
   nextCursor: string | null;
@@ -70,6 +77,7 @@ const EMPTY_DATA: AgentTopologyData = {
   sessions: [],
   loading: true,
   refreshing: false,
+  loadingMore: false,
   total: 0,
   hasMore: false,
   nextCursor: null,
@@ -78,7 +86,9 @@ const EMPTY_DATA: AgentTopologyData = {
 
 export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
-  const requestSequence = useRef(0);
+  const dataGeneration = useRef(0);
+  const rootRequest = useRef<symbol | null>(null);
+  const branchRequests = useRef(new Map<string, symbol>());
   const [data, setData] = useState<AgentTopologyData>(EMPTY_DATA);
   const [branchPages, setBranchPages] = useState<ReadonlyMap<string, AgentTopologyBranchPage>>(
     () => new Map(),
@@ -86,17 +96,21 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
   const [filter, setFilter] = useState<AgentTopologyFilter>("active");
   const [query, setQuery] = useState("");
   const [view, setView] = useState<AgentTopologyView>("outline");
-  const [maxDepth, setMaxDepth] = useState<number | null>(3);
-  const [maxChildren, setMaxChildren] = useState<number | null>(5);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
+  const [manuallyCollapsed, setManuallyCollapsed] = useState<ReadonlySet<string>>(() => new Set());
 
   const refresh = useCallback(
     async (cursor?: string) => {
-      const request = ++requestSequence.current;
+      const generation = dataGeneration.current;
+      const loadingMore = !!cursor;
+      if (!canStartAgentTopologyRootRead(rootRequest.current !== null)) return;
+      const request = Symbol(loadingMore ? "root-page" : "root-refresh");
+      rootRequest.current = request;
       setData((current) => ({
         ...current,
         loading: !cursor && current.sessions.length === 0,
         refreshing: !cursor && current.sessions.length > 0,
+        loadingMore: loadingMore || current.loadingMore,
         error: null,
       }));
       try {
@@ -106,24 +120,20 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
           ...(cursor ? { cursor } : {}),
           ...(search ? { search } : { parentSessionId: null }),
         });
-        if (request !== requestSequence.current) return;
+        if (generation !== dataGeneration.current || rootRequest.current !== request) return;
         setData((current) => {
-          const sessions = new Map<string, AgentTopologySession>();
-          if (cursor) {
-            for (const session of current.sessions) sessions.set(session.id, session);
-          } else if (!search) {
-            for (const session of current.sessions) {
-              if (session.parentSessionId !== null) sessions.set(session.id, session);
-            }
-          }
-          for (const session of page.sessions) {
-            if (sessions.size >= MAX_LOADED_AGENTS && !sessions.has(session.id)) break;
-            sessions.set(session.id, session);
-          }
+          // Keep already paged roots during the 15-second first-page refresh.
+          // Query/workspace changes reset the collection before starting a new
+          // generation, so preserving here cannot mix different result sets.
           return {
-            sessions: [...sessions.values()],
+            sessions: mergeAgentTopologySessions(
+              current.sessions,
+              page.sessions,
+              MAX_LOADED_AGENTS,
+            ),
             loading: false,
             refreshing: false,
+            loadingMore: loadingMore ? false : current.loadingMore,
             total: page.total,
             hasMore: page.hasMore,
             nextCursor: page.nextCursor,
@@ -135,26 +145,32 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
           setBranchPages(new Map());
         }
       } catch (error) {
-        if (request !== requestSequence.current) return;
+        if (generation !== dataGeneration.current || rootRequest.current !== request) return;
         setData((current) => ({
           ...current,
           loading: false,
           refreshing: false,
+          loadingMore: loadingMore ? false : current.loadingMore,
           error: error instanceof Error ? error : new Error(String(error)),
         }));
+      } finally {
+        if (rootRequest.current === request) rootRequest.current = null;
       }
     },
     [context.client, query, workspaceId],
   );
 
   useEffect(() => {
+    dataGeneration.current += 1;
+    rootRequest.current = null;
+    branchRequests.current.clear();
     setData(EMPTY_DATA);
     setExpanded(new Set());
+    setManuallyCollapsed(new Set());
     setBranchPages(new Map());
     const start = window.setTimeout(() => void refresh(), query.trim() ? 250 : 0);
     const interval = query.trim() ? undefined : window.setInterval(() => void refresh(), 15_000);
     return () => {
-      requestSequence.current += 1;
       window.clearTimeout(start);
       if (interval !== undefined) window.clearInterval(interval);
     };
@@ -162,8 +178,12 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
 
   const loadChildren = useCallback(
     async (parentSessionId: string, cursor?: string) => {
+      if (branchRequests.current.has(parentSessionId)) return;
       const remaining = MAX_LOADED_AGENTS - data.sessions.length;
       if (remaining <= 0) return;
+      const generation = dataGeneration.current;
+      const request = Symbol(parentSessionId);
+      branchRequests.current.set(parentSessionId, request);
       setBranchPages((current) =>
         new Map(current).set(parentSessionId, {
           ...(current.get(parentSessionId) ?? {
@@ -177,18 +197,32 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
         }),
       );
       try {
-        const page = await context.client.listAgentTopology(workspaceId, {
-          parentSessionId,
-          limit: Math.min(remaining, maxChildren ?? 25),
-          ...(cursor ? { cursor } : {}),
-        });
+        const read = () =>
+          context.client.listAgentTopology(workspaceId, {
+            parentSessionId,
+            limit: Math.min(remaining, CHILD_PAGE_LIMIT),
+            ...(cursor ? { cursor } : {}),
+          });
+        const page = await readAgentTopologyWithRetry(
+          read,
+          () =>
+            generation === dataGeneration.current &&
+            branchRequests.current.get(parentSessionId) === request,
+        );
+        if (
+          generation !== dataGeneration.current ||
+          branchRequests.current.get(parentSessionId) !== request
+        )
+          return;
         setData((current) => {
-          const sessions = new Map(current.sessions.map((session) => [session.id, session]));
-          for (const session of page.sessions) {
-            if (sessions.size >= MAX_LOADED_AGENTS && !sessions.has(session.id)) break;
-            sessions.set(session.id, session);
-          }
-          return { ...current, sessions: [...sessions.values()] };
+          return {
+            ...current,
+            sessions: mergeAgentTopologySessions(
+              current.sessions,
+              page.sessions,
+              MAX_LOADED_AGENTS,
+            ),
+          };
         });
         setBranchPages((current) =>
           new Map(current).set(parentSessionId, {
@@ -200,6 +234,11 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
           }),
         );
       } catch (error) {
+        if (
+          generation !== dataGeneration.current ||
+          branchRequests.current.get(parentSessionId) !== request
+        )
+          return;
         setBranchPages((current) =>
           new Map(current).set(parentSessionId, {
             ...(current.get(parentSessionId) ?? {
@@ -211,9 +250,13 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
             error: error instanceof Error ? error : new Error(String(error)),
           }),
         );
+      } finally {
+        if (branchRequests.current.get(parentSessionId) === request) {
+          branchRequests.current.delete(parentSessionId);
+        }
       }
     },
-    [context.client, data.sessions.length, maxChildren, workspaceId],
+    [context.client, data.sessions.length, workspaceId],
   );
 
   const forest = useMemo(() => buildAgentTopology(data.sessions), [data.sessions]);
@@ -221,14 +264,22 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
   const limitedTopology = useMemo(
     () =>
       limitAgentTopology(filteredForest, {
-        maxDepth,
-        maxChildren,
+        maxDepth: null,
+        maxChildren: null,
         maxNodes: MAX_RENDERED_AGENTS,
       }),
-    [filteredForest, maxChildren, maxDepth],
+    [filteredForest],
   );
   const visibleForest = limitedTopology.roots;
   const summary = useMemo(() => summarizeAgentTopology(data.sessions), [data.sessions]);
+  const loadedChildrenByParent = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const session of data.sessions) {
+      if (!session.parentSessionId) continue;
+      counts.set(session.parentSessionId, (counts.get(session.parentSessionId) ?? 0) + 1);
+    }
+    return counts;
+  }, [data.sessions]);
   const collapsed = useMemo(
     () =>
       new Set(
@@ -240,6 +291,12 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
   );
   const toggleCollapsed = (sessionId: string) => {
     const willExpand = !expanded.has(sessionId);
+    setManuallyCollapsed((current) => {
+      const next = new Set(current);
+      if (willExpand) next.delete(sessionId);
+      else next.add(sessionId);
+      return next;
+    });
     setExpanded((current) => {
       const next = new Set(current);
       if (next.has(sessionId)) next.delete(sessionId);
@@ -248,6 +305,49 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
     });
     if (willExpand && !branchPages.has(sessionId)) void loadChildren(sessionId);
   };
+
+  // The ordinary view opens the matching workstreams for the user. Fetches
+  // remain bounded and branch-local, but descendants no longer appear absent
+  // until every root is manually expanded.
+  useEffect(() => {
+    if (query.trim() || data.loading || data.sessions.length >= MAX_LOADED_AGENTS) return;
+    const candidates: string[] = [];
+    const visit = (nodes: AgentTopologyNode[]) => {
+      for (const node of nodes) {
+        if (
+          agentHasMatchingDescendants(node.session, filter) &&
+          !manuallyCollapsed.has(node.session.id)
+        ) {
+          candidates.push(node.session.id);
+        }
+        visit(node.children);
+      }
+    };
+    visit(filteredForest);
+    if (candidates.length === 0) return;
+    setExpanded((current) => {
+      const next = new Set(current);
+      for (const sessionId of candidates) next.add(sessionId);
+      return next;
+    });
+    for (const sessionId of selectAgentTopologyBranchesToLoad(
+      candidates,
+      new Set(branchPages.keys()),
+      new Set(branchRequests.current.keys()),
+      AUTO_EXPAND_CONCURRENCY,
+    )) {
+      void loadChildren(sessionId);
+    }
+  }, [
+    branchPages,
+    data.loading,
+    data.sessions.length,
+    filter,
+    filteredForest,
+    loadChildren,
+    manuallyCollapsed,
+    query,
+  ]);
 
   return (
     <ContentPage width="wide" className="gap-5" data-agent-topology>
@@ -289,12 +389,6 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
         <div className="flex min-w-0 flex-col gap-3 border-b border-border px-3 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-4">
           <div className="flex min-w-0 flex-wrap items-center gap-2">
             <AgentViewToggle value={view} onChange={setView} />
-            <TopologyLimitControls
-              maxDepth={maxDepth}
-              maxChildren={maxChildren}
-              onMaxDepthChange={setMaxDepth}
-              onMaxChildrenChange={setMaxChildren}
-            />
             <div
               className="flex min-w-0 flex-wrap items-center gap-1"
               role="group"
@@ -354,14 +448,6 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
           </span>
         </div>
 
-        {data.hasMore || data.sessions.length >= MAX_LOADED_AGENTS ? (
-          <div className="mx-3 rounded-md border border-status-waiting/30 bg-status-waiting/10 px-3 py-2 text-xs text-status-waiting">
-            The browser keeps at most {MAX_LOADED_AGENTS} agents in memory. Expand only the branches
-            you need; omitted descendant counts remain server-authored
-            {data.hasMore ? ", and more roots are available" : ""}.
-          </div>
-        ) : null}
-
         <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-4 sm:px-4">
           {data.loading ? (
             <AgentTreeSkeleton />
@@ -392,6 +478,8 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
                   onToggle={toggleCollapsed}
                   hiddenByParent={limitedTopology.hiddenByParent}
                   branchPages={branchPages}
+                  loadedChildrenByParent={loadedChildrenByParent}
+                  canLoadMore={data.sessions.length < MAX_LOADED_AGENTS}
                   onLoadMore={(parentSessionId, cursor) =>
                     void loadChildren(parentSessionId, cursor)
                   }
@@ -402,9 +490,11 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
                   variant="outline"
                   size="sm"
                   onClick={() => void refresh(data.nextCursor ?? undefined)}
-                  disabled={data.loading || data.refreshing}
+                  disabled={data.loading || data.refreshing || data.loadingMore}
                 >
-                  Load more {query.trim() ? "matches" : "root agents"}
+                  {data.loadingMore
+                    ? "Loading more agents…"
+                    : `Load more ${query.trim() ? "matches" : "agents"}`}
                 </Button>
               ) : null}
             </div>
@@ -456,53 +546,6 @@ function AgentViewToggle({
           {label}
         </button>
       ))}
-    </div>
-  );
-}
-
-function TopologyLimitControls({
-  maxDepth,
-  maxChildren,
-  onMaxDepthChange,
-  onMaxChildrenChange,
-}: {
-  maxDepth: number | null;
-  maxChildren: number | null;
-  onMaxDepthChange: (value: number | null) => void;
-  onMaxChildrenChange: (value: number | null) => void;
-}) {
-  return (
-    <div className="flex items-center gap-1.5" aria-label="Topology display limits">
-      <label>
-        <span className="sr-only">Maximum nested depth</span>
-        <select
-          value={maxDepth ?? "all"}
-          onChange={(event) =>
-            onMaxDepthChange(event.target.value === "all" ? null : Number(event.target.value))
-          }
-          className="h-8 rounded-md border border-border bg-surface/50 px-2 text-xs text-fg outline-none focus-visible:border-brand/50"
-        >
-          <option value="2">Depth 2</option>
-          <option value="3">Depth 3</option>
-          <option value="5">Depth 5</option>
-          <option value="all">Any depth</option>
-        </select>
-      </label>
-      <label>
-        <span className="sr-only">Maximum children per agent</span>
-        <select
-          value={maxChildren ?? "all"}
-          onChange={(event) =>
-            onMaxChildrenChange(event.target.value === "all" ? null : Number(event.target.value))
-          }
-          className="h-8 rounded-md border border-border bg-surface/50 px-2 text-xs text-fg outline-none focus-visible:border-brand/50"
-        >
-          <option value="5">5 per agent</option>
-          <option value="10">10 per agent</option>
-          <option value="25">25 per agent</option>
-          <option value="all">All children</option>
-        </select>
-      </label>
     </div>
   );
 }
@@ -695,6 +738,8 @@ function AgentBranch({
   onToggle,
   hiddenByParent,
   branchPages,
+  loadedChildrenByParent,
+  canLoadMore,
   onLoadMore,
 }: {
   node: AgentTopologyNode;
@@ -704,6 +749,8 @@ function AgentBranch({
   onToggle: (sessionId: string) => void;
   hiddenByParent: ReadonlyMap<string, number>;
   branchPages: ReadonlyMap<string, AgentTopologyBranchPage>;
+  loadedChildrenByParent: ReadonlyMap<string, number>;
+  canLoadMore: boolean;
   onLoadMore: (parentSessionId: string, cursor: string) => void;
 }) {
   const hasChildren = node.session.children.directChildren > 0 || node.children.length > 0;
@@ -820,10 +867,12 @@ function AgentBranch({
               onToggle={onToggle}
               hiddenByParent={hiddenByParent}
               branchPages={branchPages}
+              loadedChildrenByParent={loadedChildrenByParent}
+              canLoadMore={canLoadMore}
               onLoadMore={onLoadMore}
             />
           ))}
-          {branchPage?.loading ? (
+          {!canLoadMore ? null : branchPage?.loading ? (
             <div className="px-2 py-1 text-xs text-fg-subtle">Loading children…</div>
           ) : branchPage?.error ? (
             <button
@@ -839,13 +888,34 @@ function AgentBranch({
               className="px-2 py-1 text-left text-xs text-fg-muted hover:text-fg hover:underline"
               onClick={() => onLoadMore(node.session.id, branchPage.nextCursor!)}
             >
-              Load more children
+              Load up to{" "}
+              {Math.min(
+                CHILD_PAGE_LIMIT,
+                Math.max(0, branchPage.total - (loadedChildrenByParent.get(node.session.id) ?? 0)),
+              ).toLocaleString()}{" "}
+              more children
             </button>
           ) : null}
         </div>
       ) : null}
     </div>
   );
+}
+
+async function readAgentTopologyWithRetry<T>(
+  read: () => Promise<T>,
+  isCurrent: () => boolean,
+): Promise<T> {
+  try {
+    return await read();
+  } catch (error) {
+    const retryable =
+      (error instanceof OpenGeniApiError && error.retryable) || error instanceof TypeError;
+    if (!retryable || !isCurrent()) throw error;
+    await new Promise((resolve) => window.setTimeout(resolve, 250));
+    if (!isCurrent()) throw error;
+    return await read();
+  }
 }
 
 function agentStatus(session: AgentTopologySession): {
@@ -865,19 +935,44 @@ function agentStatus(session: AgentTopologySession): {
     return { label, tone: "idle", pulse: false, textClass: "text-fg-subtle" };
   }
   if (session.status === "running") {
-    return { label: "Running", tone: "running", pulse: true, textClass: "text-status-running" };
+    return {
+      label: "Running",
+      tone: "running",
+      pulse: true,
+      textClass: "text-status-running",
+    };
   }
   if (session.status === "queued") {
-    return { label: "Queued", tone: "queued", pulse: false, textClass: "text-status-queued" };
+    return {
+      label: "Queued",
+      tone: "queued",
+      pulse: false,
+      textClass: "text-status-queued",
+    };
   }
   if (session.status === "requires_action") {
-    return { label: "Needs you", tone: "waiting", pulse: false, textClass: "text-status-waiting" };
+    return {
+      label: "Needs you",
+      tone: "waiting",
+      pulse: false,
+      textClass: "text-status-waiting",
+    };
   }
   if (session.status === "failed") {
-    return { label: "Failed", tone: "failed", pulse: false, textClass: "text-status-failed" };
+    return {
+      label: "Failed",
+      tone: "failed",
+      pulse: false,
+      textClass: "text-status-failed",
+    };
   }
   if (session.status === "cancelled") {
-    return { label: "Cancelled", tone: "cancelled", pulse: false, textClass: "text-fg-subtle" };
+    return {
+      label: "Cancelled",
+      tone: "cancelled",
+      pulse: false,
+      textClass: "text-fg-subtle",
+    };
   }
   return {
     label: isActiveAgent(session) ? "Active" : "Idle",
@@ -905,18 +1000,16 @@ export function AgentTopologyPreviewRoute() {
   const sessions = useMemo(() => previewSessions(), []);
   const fullForest = useMemo(() => buildAgentTopology(sessions), [sessions]);
   const summary = useMemo(() => summarizeAgentTopology(sessions), [sessions]);
-  const [view, setView] = useState<AgentTopologyView>("diagram");
-  const [maxDepth, setMaxDepth] = useState<number | null>(3);
-  const [maxChildren, setMaxChildren] = useState<number | null>(5);
+  const [view, setView] = useState<AgentTopologyView>("outline");
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set());
   const limitedTopology = useMemo(
     () =>
       limitAgentTopology(fullForest, {
-        maxDepth,
-        maxChildren,
+        maxDepth: null,
+        maxChildren: null,
         maxNodes: MAX_RENDERED_AGENTS,
       }),
-    [fullForest, maxChildren, maxDepth],
+    [fullForest],
   );
   const forest = limitedTopology.roots;
   const toggleCollapsed = (sessionId: string) => {
@@ -970,12 +1063,6 @@ export function AgentTopologyPreviewRoute() {
                 {limitedTopology.hiddenCount.toLocaleString()} summarized
               </span>
               <AgentViewToggle value={view} onChange={setView} />
-              <TopologyLimitControls
-                maxDepth={maxDepth}
-                maxChildren={maxChildren}
-                onMaxDepthChange={setMaxDepth}
-                onMaxChildrenChange={setMaxChildren}
-              />
             </div>
           </div>
           {view === "outline" ? (
@@ -990,6 +1077,8 @@ export function AgentTopologyPreviewRoute() {
                   onToggle={toggleCollapsed}
                   hiddenByParent={limitedTopology.hiddenByParent}
                   branchPages={new Map()}
+                  loadedChildrenByParent={new Map()}
+                  canLoadMore={false}
                   onLoadMore={() => {}}
                 />
               ))}

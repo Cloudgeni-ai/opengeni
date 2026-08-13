@@ -18,7 +18,7 @@ import type {
   InteractionIntervention,
 } from "@opengeni/sdk/interaction";
 import { act } from "react";
-import { browserKey } from "../src/components/browser-input";
+import { browserKey, normalizeBrowserAddress } from "../src/components/browser-input";
 import { BrowserViewer } from "../src/components/browser-viewer";
 import { useAttachedBrowsers } from "../src/hooks/use-attached-browsers";
 import type {
@@ -949,6 +949,14 @@ describe("BrowserViewer", () => {
     expect(browserKey(event("a", { metaKey: true }), "other")).toBe("Meta+a");
   });
 
+  test("treats the browser address field as an omnibox", () => {
+    expect(normalizeBrowserAddress("example.com")).toBe("https://example.com/");
+    expect(normalizeBrowserAddress("localhost:3000/test")).toBe("http://localhost:3000/test");
+    expect(normalizeBrowserAddress("opengeni browser platform")).toBe(
+      "https://www.google.com/search?q=opengeni%20browser%20platform",
+    );
+  });
+
   test("opens actionable runtime and page diagnostics without leaving the browser", async () => {
     const current = browserSession();
     const currentTarget = target();
@@ -1363,8 +1371,10 @@ describe("BrowserViewer", () => {
     expect(address).not.toBeNull();
     expect(form).not.toBeNull();
     await actRun(() => {
-      address!.value = "example.com";
-      address!.dispatchEvent(new Event("input", { bubbles: true }));
+      const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+      setValue?.call(address, "example.com");
+      address!.dispatchEvent(new InputEvent("input", { bubbles: true }));
+      address!.dispatchEvent(new Event("change", { bubbles: true }));
     });
     await actRun(() => form!.requestSubmit());
     await flush(5);
@@ -1922,6 +1932,7 @@ describe("BrowserViewer", () => {
       sessionId: SESSION_ID,
       name: "Browser",
       headless: false,
+      initialUrl: "https://www.google.com/",
       linkedComputerSessionId: COMPUTER_SESSION_ID,
       placement: created.placement,
     });
