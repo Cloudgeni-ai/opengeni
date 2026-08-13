@@ -481,6 +481,14 @@ Normal publication and crash recovery consume the same retained event value, so
 recovery cannot reconstruct a poorer MCP result from model-facing content or
 drop open protocol extension fields.
 
+First-party `session_create` and `session_send_message` failures return an MCP
+`isError` result with a bounded structured `{ error: { code, message } }`
+projection. The durable tool-output event retains that raw MCP result, and the
+React timeline promotes the two calls to worker rows that display the safe code
+and message. Known authorization/control failures use fixed public wording;
+unknown internal exceptions remain generic. This diagnostic projection does
+not alter transaction admission, retry, or idempotency semantics.
+
 Before a personal MCP is attached, the worker/Codemode boundary revalidates the
 delegation's exact workspace membership, connection id, provider domain, kind,
 owner subject, and active status. A missing, revoked, transferred, or otherwise

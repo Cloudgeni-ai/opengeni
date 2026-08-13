@@ -73,13 +73,33 @@ export function codemodeTokenFileFromEnvironment(
   return codemodeTokenFileForSession(manifestTokenFile, sessionId);
 }
 
-/** Prefix one sandbox command with its session-specific Codemode pointer. */
-export function withCodemodeTokenEnvironment(cmd: string, tokenFile: string): string {
-  return [`export OPENGENI_CODEMODE_TOKEN_FILE=${shellCodemodePath(tokenFile)}`, cmd].join("\n");
+/**
+ * Prefix one sandbox command with its attempt-current Codemode routing.
+ *
+ * The token pointer is session-specific. The URL is deliberately projected on
+ * every exec too: a warm managed box keeps its baked manifest environment, but
+ * the externally reachable deployment/tunnel origin may change between turns.
+ * Per-command export makes a resumed box use the current route without an
+ * illegal live-manifest environment mutation.
+ */
+export function withCodemodeTokenEnvironment(
+  cmd: string,
+  tokenFile: string,
+  codemodeUrl?: string,
+): string {
+  return [
+    `export OPENGENI_CODEMODE_TOKEN_FILE=${shellCodemodePath(tokenFile)}`,
+    ...(codemodeUrl ? [`export OPENGENI_CODEMODE_URL=${shellQuote(codemodeUrl)}`] : []),
+    cmd,
+  ].join("\n");
 }
 
 /** Preserve provider identity/capabilities while decorating command creation. */
-export function withCodemodeTokenSession<T extends object>(session: T, tokenFile: string): T {
+export function withCodemodeTokenSession<T extends object>(
+  session: T,
+  tokenFile: string,
+  codemodeUrl?: string,
+): T {
   return new Proxy(session, {
     get(target, property, receiver) {
       if (property === "exec" || property === "execCommand") {
@@ -90,7 +110,7 @@ export function withCodemodeTokenSession<T extends object>(session: T, tokenFile
         return async (args: ExecCommandArgs) =>
           await command.call(target, {
             ...args,
-            cmd: withCodemodeTokenEnvironment(args.cmd, tokenFile),
+            cmd: withCodemodeTokenEnvironment(args.cmd, tokenFile, codemodeUrl),
           });
       }
       const value = Reflect.get(target, property, receiver) as unknown;
@@ -100,12 +120,16 @@ export function withCodemodeTokenSession<T extends object>(session: T, tokenFile
 }
 
 /** Decorate every client-created/resumed session with one session pointer. */
-export function withCodemodeTokenClient(client: SandboxClient, tokenFile: string): SandboxClient {
+export function withCodemodeTokenClient(
+  client: SandboxClient,
+  tokenFile: string,
+  codemodeUrl?: string,
+): SandboxClient {
   const decorated = new WeakMap<object, SandboxSessionLike>();
   const wrap = <T extends SandboxSessionLike>(session: T): T => {
     const existing = decorated.get(session);
     if (existing) return existing as T;
-    const wrapped = withCodemodeTokenSession(session, tokenFile);
+    const wrapped = withCodemodeTokenSession(session, tokenFile, codemodeUrl);
     decorated.set(session, wrapped);
     return wrapped;
   };

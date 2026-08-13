@@ -63,6 +63,7 @@ import {
   escapedMcpTimeoutRecoveryFailure,
   filterUnmaterializedSandboxFileDownloads,
   finalizeDurableTurnOpStreams,
+  connectedSubscriptionImageGenerationAuthority,
   historyRowsToAppend,
   hostedWebSearchForTurn,
   isLazySandboxProvisionRetryable,
@@ -4264,6 +4265,21 @@ describe("hostedWebSearchForTurn (provider support)", () => {
   test("applies the deployment capability gate to the legacy built-in path", () => {
     expect(hostedWebSearchForTurn(null, true)).toBe(true);
     expect(hostedWebSearchForTurn(null, false)).toBe(false);
+  });
+});
+
+describe("connectedSubscriptionImageGenerationAuthority", () => {
+  test("omits the optional tool when delegated model authority has no connected credential", () => {
+    expect(connectedSubscriptionImageGenerationAuthority({}, null)).toBeNull();
+    expect(connectedSubscriptionImageGenerationAuthority(null, "credential-id")).toBeNull();
+  });
+
+  test("exposes the optional tool only with both execution context and credential identity", () => {
+    const context = { getToken: true };
+    expect(connectedSubscriptionImageGenerationAuthority(context, "credential-id")).toEqual({
+      credentialContext: context,
+      credentialId: "credential-id",
+    });
   });
 });
 

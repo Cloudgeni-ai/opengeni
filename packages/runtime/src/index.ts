@@ -2944,6 +2944,10 @@ export type PrepareToolsOptions = {
   // Exact model-visible catalog selection for the broad first-party server.
   // Permissions are signed separately and remain the authorization boundary.
   firstPartyTools?: FirstPartyMcpToolName[];
+  // Trusted root-relative depth facts for model-visible catalog shaping. These
+  // are signed into the delegated token as a pair; DB admission is unchanged.
+  nestedAgentDepth?: number;
+  effectiveMaxNestedAgentDepth?: number;
   resolveCredential?: (
     input: ResolveConnectionCredentialInput,
   ) => Promise<ResolveConnectionCredentialResult>;
@@ -4416,6 +4420,12 @@ async function signFirstPartyDelegatedBearer(
   if (hasAnyAttemptClaim && !hasExactAttemptClaims) {
     return null;
   }
+  const depthClaims = [options.nestedAgentDepth, options.effectiveMaxNestedAgentDepth];
+  const hasAnyDepthClaim = depthClaims.some((claim) => claim !== undefined);
+  const hasExactDepthClaims = depthClaims.every((claim) => claim !== undefined);
+  if (hasAnyDepthClaim && (!hasExactDepthClaims || !hasExactAttemptClaims)) {
+    return null;
+  }
   return await signDelegatedAccessToken(delegationSecret, {
     accountId: options.accountId,
     workspaceId: options.workspaceId,
@@ -4424,6 +4434,12 @@ async function signFirstPartyDelegatedBearer(
     permissions: options.firstPartyPermissions ?? [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS],
     principalKind: hasExactAttemptClaims ? "agent_attempt" : "service",
     firstPartyMcpTools: options.firstPartyTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+    ...(hasExactDepthClaims
+      ? {
+          nestedAgentDepth: options.nestedAgentDepth!,
+          effectiveMaxNestedAgentDepth: options.effectiveMaxNestedAgentDepth!,
+        }
+      : {}),
     ...(hasExactAttemptClaims
       ? {
           sessionId: options.sessionId!,
@@ -5359,6 +5375,7 @@ export async function runAgentStream(
         : input;
   const environment = overrides.sandboxEnvironment ?? collectSandboxEnvironment(settings);
   const codemodeTokenFile = codemodeTokenFileForAgent(agent, environment);
+  const codemodeUrl = environment.OPENGENI_CODEMODE_URL;
   const genesisTitleInputFilter = takeGenesisTitleInputFilter(agent);
   if (overrides.onRunCredentialSessionReady && !overrides.runCredentialSessionId) {
     throw new Error("runCredentialSessionId is required when run credential setup is enabled");
@@ -5385,13 +5402,13 @@ export async function runAgentStream(
       ? withRunCredentialsSession(session as SandboxSessionLike, overrides.runCredentialSessionId)
       : (session as SandboxSessionLike);
     const agentSession = codemodeTokenFile
-      ? withCodemodeTokenSession(credentialAgentSession, codemodeTokenFile)
+      ? withCodemodeTokenSession(credentialAgentSession, codemodeTokenFile, codemodeUrl)
       : credentialAgentSession;
     const credentialSetupSession = overrides.runCredentialSessionId
       ? withRunCredentialsSession(setupSession, overrides.runCredentialSessionId)
       : setupSession;
     const decoratedSetupSession = codemodeTokenFile
-      ? withCodemodeTokenSession(credentialSetupSession, codemodeTokenFile)
+      ? withCodemodeTokenSession(credentialSetupSession, codemodeTokenFile, codemodeUrl)
       : credentialSetupSession;
     // Platform setup (manifest-env pin + beforeAgentStart hooks + file downloads)
     // against the UN-proxied established box — the ONE-TRUTH helper shared with the
@@ -5479,7 +5496,7 @@ export async function runAgentStream(
         )
       : resourceClient;
     const codemodeResourceClient = codemodeTokenFile
-      ? withCodemodeTokenClient(credentialResourceClient, codemodeTokenFile)
+      ? withCodemodeTokenClient(credentialResourceClient, codemodeTokenFile, codemodeUrl)
       : credentialResourceClient;
     const decoratedClient = withSandboxLifecycleHooks(
       codemodeResourceClient,
@@ -5557,7 +5574,7 @@ export async function runAgentStream(
       : resourceClient;
   const codemodeClient =
     credentialClient && codemodeTokenFile
-      ? withCodemodeTokenClient(credentialClient, codemodeTokenFile)
+      ? withCodemodeTokenClient(credentialClient, codemodeTokenFile, codemodeUrl)
       : credentialClient;
   // TOKEN-BROKER (B1): the per-turn git token seed, forwarded OFF-MANIFEST so the
   // repository-clone hook seeds it to the box's token file before the clone.

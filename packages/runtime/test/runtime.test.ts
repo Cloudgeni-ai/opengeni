@@ -5882,6 +5882,53 @@ describe("runtime event normalization", () => {
     }
   });
 
+  test("signs trusted nested-agent depth facts into each agent-attempt bearer", async () => {
+    const seenDepths: Array<[number | undefined, number | undefined]> = [];
+    const mcp = startTestMcpServer({
+      validateAuthorization: async (authorization) => {
+        if (!authorization?.startsWith("Bearer ")) return false;
+        const payload = await verifyDelegatedAccessToken(
+          "test-delegation-secret",
+          authorization.slice("Bearer ".length),
+        );
+        if (!payload) return false;
+        seenDepths.push([payload.nestedAgentDepth, payload.effectiveMaxNestedAgentDepth]);
+        return true;
+      },
+    });
+    const prepared = await prepareAgentTools(
+      testSettings({
+        mcpServers: [
+          {
+            id: "opengeni",
+            name: "OpenGeni",
+            url: `${mcp.url}?ws={workspaceId}`,
+            cacheToolsList: false,
+          },
+        ],
+      }),
+      [{ kind: "mcp", id: "opengeni" }],
+      {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        turnId: "44444444-4444-4444-8444-444444444444",
+        attemptId: "55555555-5555-4555-8555-555555555555",
+        executionGeneration: 1,
+        nestedAgentDepth: 3,
+        effectiveMaxNestedAgentDepth: 3,
+      },
+    );
+    try {
+      await prepared.mcpServers[0]!.listTools();
+      expect(seenDepths.length).toBeGreaterThan(0);
+      expect(seenDepths.every((value) => value[0] === 3 && value[1] === 3)).toBe(true);
+    } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
   test("a genuinely-broken first-party bearer still fails loud (no masking, no retry loop)", async () => {
     // The dynamic refresh must NOT mask a real breakage: if the endpoint rejects
     // every bearer (e.g. a server-side secret mismatch), the required first-party

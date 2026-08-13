@@ -1985,6 +1985,11 @@ export const DelegatedAccessTokenPayload = z
     // Model-visible first-party tool selection for a worker-bound session.
     // This is visibility only; permissions remain the authorization boundary.
     firstPartyMcpTools: z.array(FirstPartyMcpToolName).optional(),
+    // Trusted root-relative depth facts frozen when the worker prepares this
+    // attempt. They shape only the model-visible tool catalog; the database
+    // remains authoritative for admission and concurrent policy changes.
+    nestedAgentDepth: NestedAgentDepthValue.optional(),
+    effectiveMaxNestedAgentDepth: NestedAgentDepthValue.optional(),
     // The turn making the call (the caller's identity), HMAC-signed by the worker
     // at turn setup. Lets a tool classify WHO is calling from the token itself,
     // instead of racily re-reading the session's live active_turn_id — e.g. the
@@ -2005,6 +2010,23 @@ export const DelegatedAccessTokenPayload = z
       payload.executionGeneration,
     ];
     const exactAttemptClaimCount = exactAttemptClaims.filter((value) => value !== undefined).length;
+    const depthClaimCount = [payload.nestedAgentDepth, payload.effectiveMaxNestedAgentDepth].filter(
+      (value) => value !== undefined,
+    ).length;
+    if (depthClaimCount !== 0 && depthClaimCount !== 2) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["nestedAgentDepth"],
+        message: "nested-agent depth claims must be supplied together",
+      });
+    }
+    if (depthClaimCount > 0 && payload.principalKind !== "agent_attempt") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["principalKind"],
+        message: "nested-agent depth claims require an agent_attempt principal",
+      });
+    }
     if (
       payload.principalKind === "human_session" &&
       (exactAttemptClaimCount !== 0 || payload.serviceInitiator !== undefined)
@@ -12626,6 +12648,15 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
         }),
       )
       .default([]),
+    firstPartyMcpTools: z
+      .object({
+        default: z.array(FirstPartyMcpToolName),
+        allowed: z.array(FirstPartyMcpToolName),
+      })
+      .default({
+        default: [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+        allowed: [...FIRST_PARTY_MCP_TOOL_NAMES],
+      }),
     fileUploads: z.object({
       enabled: z.boolean(),
       maxSizeBytes: z.number().int().positive(),
