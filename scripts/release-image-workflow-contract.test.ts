@@ -745,6 +745,10 @@ describe("release image workflow contract", () => {
     expect(release).toContain('if [ -n "$EXPECTED_PACKAGES" ]; then');
     expect(release).toContain('candidate_verify_args+=(--expected-packages "$EXPECTED_PACKAGES")');
     expect(release).toContain('bun scripts/release-candidate.ts "${candidate_verify_args[@]}"');
+    expect(
+      release.match(/--verify "\$GITHUB_WORKSPACE\/evidence\/release-candidate\.json"/g),
+    ).toHaveLength(2);
+    expect(release).not.toContain("--verify evidence/release-candidate.json");
     expect(release).toContain(
       'bun scripts/release-version.ts "$GITHUB_WORKSPACE/deploy/helm/opengeni/Chart.yaml"',
     );
