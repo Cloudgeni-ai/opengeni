@@ -4254,6 +4254,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         if (inputs.length > 0 && !appended.accepted) {
           throw new TurnAttemptFencedError("turn execution generation was fenced");
         }
+        if (inputs.length > 0) {
+          turnLifecycleMetricsFor(observability).progress(turnId!);
+        }
         activityContext?.heartbeat({
           ...heartbeatDetails,
           phase: "events_published",
@@ -4347,6 +4350,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           turnMetricOutcome = "cancelled";
           return false;
         }
+        turnLifecycleMetricsFor(observability).progress(turnId!);
         if (recordingForSettlement && preparedRecording) {
           if (result.recordingMutationApplied) {
             activeRecording = null;
@@ -8333,6 +8337,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               currentToolBatchCallIds = new Set<string>();
               currentToolBatchCompletedCallIds = new Set<string>();
               await reconcileConversationTruth();
+              turnLifecycleMetricsFor(observability).progress(turnId!);
               modelCheckpointMemoryCollector.schedule(observability);
               try {
                 await ensureRunAllowed(
