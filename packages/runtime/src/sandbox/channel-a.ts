@@ -281,21 +281,14 @@ const PORTABLE_SHA256_FILE_FUNCTION = [
   "  return 127",
   "}",
 ].join("\n");
-// Descriptor confinement has two provider command surfaces. Linux exposes the
-// opened path through procfs and GNU stat; stock macOS exposes descriptor paths
-// through lsof and BSD stat over /dev/fd. Both branches bind three already-open
-// descriptors to the same current non-symlink inode beneath the physical repo
-// root before any body reads bytes, preserving the symlink/parent-swap defense.
+// Descriptor confinement does not discover descriptor paths. That would require
+// `lsof` on stock macOS, where it can block for many seconds on network-backed
+// filesystems. Instead, every command opens the descriptor first, resolves the
+// current path inside the physical root, then proves the resolved path and the
+// already-open descriptor name the same inode before reading bytes. A swap
+// before resolution fails the root/identity checks; a later swap cannot redirect
+// the descriptor. Linux uses procfs + GNU stat and macOS uses devfs + BSD stat.
 const PORTABLE_DESCRIPTOR_FUNCTIONS = [
-  "opengeni_set_fd_path() {",
-  '  fd="$1"',
-  "  opengeni_fd_path=",
-  '  if opengeni_fd_path=$(readlink -f -- "/proc/$$/fd/$fd" 2>/dev/null); then [ -n "$opengeni_fd_path" ]; return; fi',
-  "  lsof_bin=",
-  "  if command -v lsof >/dev/null 2>&1; then lsof_bin=$(command -v lsof); elif [ -x /usr/sbin/lsof ]; then lsof_bin=/usr/sbin/lsof; else return 127; fi",
-  '  while IFS= read -r -d \'\' field; do case "$field" in n*) opengeni_fd_path=${field#n} ;; esac; done < <("$lsof_bin" -a -p "$$" -d "$fd" -Fn0 2>/dev/null)',
-  '  [ -n "$opengeni_fd_path" ]',
-  "}",
   "opengeni_fd_identity() {",
   '  fd="$1"',
   '  if identity=$(stat -Lc "%d:%i" -- "/proc/$$/fd/$fd" 2>/dev/null); then printf "%s" "$identity"; return; fi',
@@ -717,8 +710,8 @@ export class SandboxChannelAService {
   }
 
   /** Binary-safe fallback for sessions without native reads. The file is opened
-   *  before checking `/proc/.../fd/3`, so a symlink swap cannot redirect the
-   *  subsequent read after confinement has been established. */
+   * before its resolved path is root-checked and matched to the descriptor's
+   * inode, so a symlink/path swap cannot redirect the subsequent read. */
   private async fsReadViaExec(path: string, req: FsReadRequest): Promise<FsReadResponse> {
     const root = this.workspaceRoot || ".";
     const abs = this.joinRoot(path);
@@ -727,10 +720,12 @@ export class SandboxChannelAService {
       PORTABLE_DESCRIPTOR_FUNCTIONS,
       `root=$(opengeni_realpath_existing ${shellQuote(root)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
       `exec 3<${shellQuote(abs)} || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
-      `opengeni_set_fd_path 3 || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
-      `target="$opengeni_fd_path"`,
+      `target=$(opengeni_realpath_existing ${shellQuote(abs)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
       `case "$target" in "$root"|"$root"/*) ;; *) printf '__OPENGENI_FS_ESCAPE__'; exit 67 ;; esac`,
       `test -f "$target" || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
+      `opened_identity=$(opengeni_fd_identity 3) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
+      `target_identity=$(opengeni_path_identity "$target") || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
+      `test "$opened_identity" = "$target_identity" || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
       `printf '__OPENGENI_FS_READ_OK__\\n'`,
       `head -c ${req.maxBytes} <&3 | base64 | tr -d '\\n'`,
     ].join("; ");
@@ -1335,26 +1330,20 @@ export class SandboxChannelAService {
   private confinedUntrackedRegularFileCommand(target: string, body: string): string {
     const fileArg = target.startsWith("./") ? target : `./${target}`;
     return [
+      PORTABLE_REALPATH_EXISTING_FUNCTION,
       PORTABLE_DESCRIPTOR_FUNCTIONS,
       `file=${shellQuote(fileArg)}`,
       'exec 3<"$file" || exit 66',
       'exec 4<"$file" || exit 66',
       'exec 5<"$file" || exit 66',
       "root=$(pwd -P) || exit 66",
-      "opengeni_set_fd_path 3 || exit 66",
-      'opened3="$opengeni_fd_path"',
-      "opengeni_set_fd_path 4 || exit 66",
-      'opened4="$opengeni_fd_path"',
-      "opengeni_set_fd_path 5 || exit 66",
-      'opened5="$opengeni_fd_path"',
-      'case "$opened3" in "$root"|"$root"/*) ;; *) exit 67 ;; esac',
-      'case "$opened4" in "$root"|"$root"/*) ;; *) exit 67 ;; esac',
-      'case "$opened5" in "$root"|"$root"/*) ;; *) exit 67 ;; esac',
+      'target=$(opengeni_realpath_existing "$file") || exit 66',
+      'case "$target" in "$root"|"$root"/*) ;; *) exit 67 ;; esac',
       'test ! -L "$file" && test -f "$file" || exit 66',
       "opened3_identity=$(opengeni_fd_identity 3) || exit 66",
       "opened4_identity=$(opengeni_fd_identity 4) || exit 66",
       "opened5_identity=$(opengeni_fd_identity 5) || exit 66",
-      'path_identity=$(opengeni_path_identity "$file") || exit 66',
+      'path_identity=$(opengeni_path_identity "$target") || exit 66',
       'test "$opened3_identity" = "$opened4_identity" || exit 66',
       'test "$opened3_identity" = "$opened5_identity" || exit 66',
       'test "$opened3_identity" = "$path_identity" || exit 66',
@@ -1368,6 +1357,7 @@ export class SandboxChannelAService {
    * per-file fallback; symlinks expose only their link text. */
   private combinedUntrackedSnapshotCommand(pathspec: string, maxBytesPerFile: number): string {
     return [
+      PORTABLE_REALPATH_EXISTING_FUNCTION,
       PORTABLE_DESCRIPTOR_FUNCTIONS,
       'list=$(mktemp "${TMPDIR:-/tmp}/opengeni-untracked-list.XXXXXX") || exit 70',
       'snap=""',
@@ -1389,20 +1379,13 @@ export class SandboxChannelAService {
       '    exec 4<"$file" || exit 66',
       '    exec 5<"$file" || exit 66',
       "    root=$(pwd -P) || exit 66",
-      "    opengeni_set_fd_path 3 || exit 66",
-      '    opened3="$opengeni_fd_path"',
-      "    opengeni_set_fd_path 4 || exit 66",
-      '    opened4="$opengeni_fd_path"',
-      "    opengeni_set_fd_path 5 || exit 66",
-      '    opened5="$opengeni_fd_path"',
-      '    case "$opened3" in "$root"|"$root"/*) ;; *) exit 67 ;; esac',
-      '    case "$opened4" in "$root"|"$root"/*) ;; *) exit 67 ;; esac',
-      '    case "$opened5" in "$root"|"$root"/*) ;; *) exit 67 ;; esac',
+      '    target_path=$(opengeni_realpath_existing "$file") || exit 66',
+      '    case "$target_path" in "$root"|"$root"/*) ;; *) exit 67 ;; esac',
       '    test ! -L "$file" && test -f "$file" || exit 66',
       "    opened3_identity=$(opengeni_fd_identity 3) || exit 66",
       "    opened4_identity=$(opengeni_fd_identity 4) || exit 66",
       "    opened5_identity=$(opengeni_fd_identity 5) || exit 66",
-      '    path_identity=$(opengeni_path_identity "$file") || exit 66',
+      '    path_identity=$(opengeni_path_identity "$target_path") || exit 66',
       '    test "$opened3_identity" = "$opened4_identity" || exit 66',
       '    test "$opened3_identity" = "$opened5_identity" || exit 66',
       '    test "$opened3_identity" = "$path_identity" || exit 66',
