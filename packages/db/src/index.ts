@@ -46170,9 +46170,14 @@ export async function claimSessionWorkForAttempt(
   input: ClaimSessionWorkForAttemptInput,
 ): Promise<ClaimSessionWorkForAttemptResult> {
   const { sessionId, workflowId } = input;
-  return await withWorkspaceSessionActivityRls(
+  return await retrySessionActivityRls(
     db,
     workspaceId,
+    {
+      stage: "session_attempts.claim",
+      eventTypes: ["session.turn.attempt_claimed"],
+      maxAttempts: 3,
+    },
     async (scopedDb) =>
       await withSessionActivitySavepoint(scopedDb, async (tx) => {
         const deliverPendingUpdates = async (

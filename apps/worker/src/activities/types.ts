@@ -230,8 +230,17 @@ export type FailSessionAttemptInput = {
   workspaceId: string;
   sessionId: string;
   attemptId: string;
+  /** Added in v2; old Temporal histories derive the session's canonical id. */
+  workflowId?: string;
+  /** Added in v2; old Temporal histories use the bounded 60-second floor. */
+  retryDelayMs?: number;
   error?: string;
 };
+
+export type FailSessionAttemptResult =
+  | { action: "failed" }
+  | { action: "unclaimed" }
+  | { action: "stale" };
 
 export type RecoverDispatchInput = {
   accountId: string;

@@ -520,11 +520,24 @@ supersession, and worker-death events commit
 with turn status, session status/pointer, and `lastSequence` in one transaction.
 Generic appends and operation-keyed Agent Message/Steer commands retry PostgreSQL
 `40P01`/`40001` only around their bounded, idempotent persistence transaction.
+The pre-inference turn claim follows the same rule around its complete
+transaction, reusing the exact workflow, run, attempt, and dispatch identities.
 Provider inference, tools, live event publication, and workflow wakes remain after
 that boundary and are never replayed. An exhausted or non-retryable database
 failure surfaces as sanitized typed truth with SQLSTATE, stage, one correlation
 ID, an equally sanitized typed cause, and allowlisted catalog identifiers—never
 raw SQL text, a raw driver cause, or bound parameters.
+
+An activity transport/database failure can occur before that transaction creates
+its attempt row. The failure activity distinguishes this from a stale or settled
+attempt, records a delayed `session_workflow_wake_outbox` revision, and returns an
+explicit `unclaimed` result. New workflow histories retain the logical turn,
+back off exponentially to a one-minute ceiling, and re-peek durable work; they do
+not mark the session failed or complete the workflow over a `recovering` turn.
+Older histories retain their recorded activity arguments for deterministic
+replay, while the upgraded activity derives the stable workflow id and leaves
+the same durable restart obligation. Migration 0237 seeds that obligation for
+already-recovering active turns whose `active_attempt_id` is null.
 
 After a reviewed release reaches staging, run the dry-by-default event-ordering invariant canary
 with `bun run canary:session-event-ordering`. Execution requires

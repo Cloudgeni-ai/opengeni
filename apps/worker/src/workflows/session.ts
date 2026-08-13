@@ -89,6 +89,17 @@ export function deferredResultMayContinue(entryWakeups: number, currentWakeups: 
   return currentWakeups !== entryWakeups;
 }
 
+/**
+ * Bound repeated failures that happen before an attempt row exists. The
+ * activity mirrors this deterministic delay into the durable wake outbox, so
+ * a live workflow and a replacement workflow observe the same retry floor.
+ */
+export function unclaimedAttemptRetryDelayMs(consecutiveFailures: number): number {
+  if (!Number.isFinite(consecutiveFailures) || consecutiveFailures <= 0) return 1_000;
+  const exponent = Math.min(6, Math.max(0, Math.trunc(consecutiveFailures) - 1));
+  return Math.min(60_000, 1_000 * 2 ** exponent);
+}
+
 /** Deterministic Temporal timer delay for a persisted structured-input deadline. */
 export function humanInputDeadlineWaitMs(expiresAt: string, nowMs = Date.now()): number {
   const deadline = Date.parse(expiresAt);
@@ -216,6 +227,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
   const receiptGatedCancellation = patched("session-attempt-quiescence-v2");
   const writerSetQuiescenceRecovery = patched("session-attempt-writer-set-quiescence-v1");
   const staleControlSignalIsOnlyWakeHint = patched("session-control-stale-wake-v1");
+  const unclaimedAttemptRecovery = patched("session-unclaimed-attempt-recovery-v1");
   const turnActivity = turnActivityForTaskQueue(workflowInfo().taskQueue, receiptGatedCancellation);
   let approvalWakeups = 0;
   let interruptionWakeups = 0;
@@ -230,6 +242,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
   // weeks-long session survivable.
   let turnsThisRun = 0;
   let capacityChecksThisRun = 0;
+  let unclaimedAttemptFailures = 0;
 
   setHandler(userMessage, () => {
     signalVersion += 1;
@@ -763,16 +776,45 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         // truth when the bounded redispatch ceiling was exceeded.
         return false;
       }
-      await activity.failSessionAttempt({
+      if (!unclaimedAttemptRecovery) {
+        // Replay compatibility: histories recorded before v2 scheduled this
+        // exact argument shape and treated the activity as void. The upgraded
+        // activity still writes a delayed durable wake when no attempt exists,
+        // so a closed legacy run is replaced safely by a fresh v2 workflow.
+        await activity.failSessionAttempt({
+          accountId,
+          workspaceId,
+          sessionId,
+          attemptId,
+          error: workflowFailureMessage(outcome.error),
+        });
+        return false;
+      }
+      const retryDelayMs = unclaimedAttemptRetryDelayMs(unclaimedAttemptFailures + 1);
+      const seenWakeups = wakeups;
+      const seenInterruptionWakeups = interruptionWakeups;
+      const failure = await activity.failSessionAttempt({
         accountId,
         workspaceId,
         sessionId,
         attemptId,
+        workflowId: workflowInfo().workflowId,
+        retryDelayMs,
         error: workflowFailureMessage(outcome.error),
       });
-      return false;
+      if (failure.action === "unclaimed") {
+        unclaimedAttemptFailures += 1;
+        await condition(
+          () => interruptionWakeups !== seenInterruptionWakeups || wakeups !== seenWakeups,
+          retryDelayMs,
+        );
+        return true;
+      }
+      unclaimedAttemptFailures = 0;
+      return failure.action !== "failed";
     }
 
+    unclaimedAttemptFailures = 0;
     if (outcome.result.status === "unclaimed") {
       return true;
     }

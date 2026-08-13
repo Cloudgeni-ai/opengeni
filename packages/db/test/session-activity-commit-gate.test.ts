@@ -4,8 +4,10 @@ import { and, eq, inArray, sql } from "drizzle-orm";
 
 import {
   bootstrapWorkspace,
+  claimSessionWorkForAttempt,
   createDb,
   createSession,
+  initializeSessionStartAtomically,
   lockSessionEventWriteRows,
   mutateSessionControlInTransaction,
   retrySessionActivityRls,
@@ -647,6 +649,94 @@ describe("session activity commit gate", () => {
     ).toEqual(
       Array.from({ length: sessions.length }, (_, index) => counterBefore + BigInt(index + 1)),
     );
+  });
+
+  test("attempt claim retries a transient finalization fault without duplicate state", async () => {
+    const grant = await createWorkspace();
+    const session = await createTestSession(grant, "retry the exact logical turn");
+    await initializeSessionStartAtomically(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    const attemptId = crypto.randomUUID();
+    const suffix = crypto.randomUUID().replaceAll("-", "");
+    const sequenceName = `claim_retry_${suffix}`;
+    const functionName = `raise_claim_retry_${suffix}`;
+    const triggerName = `raise_claim_retry_${suffix}`;
+    const quotedSequence = `opengeni_private.${quoteIdentifier(sequenceName)}`;
+    const quotedFunction = `opengeni_private.${quoteIdentifier(functionName)}`;
+    const quotedTrigger = quoteIdentifier(triggerName);
+    const counterBefore = await readCounter(grant.workspaceId!);
+
+    try {
+      await shared.admin.unsafe(`create sequence ${quotedSequence}`);
+      await shared.admin.unsafe(`
+        create function ${quotedFunction}() returns trigger
+        language plpgsql security definer set search_path = pg_catalog
+        as $function$
+        begin
+          if new.id = '${attemptId}'::uuid
+            and nextval('${quotedSequence}'::regclass) = 1 then
+            raise exception 'synthetic attempt-claim deadlock'
+              using errcode = '40P01';
+          end if;
+          return new;
+        end
+        $function$
+      `);
+      await shared.admin.unsafe(`
+        create trigger ${quotedTrigger}
+        before insert on session_turn_attempts
+        for each row execute function ${quotedFunction}()
+      `);
+
+      const claimed = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        workflowId: `session-${session.id}`,
+        workflowRunId: crypto.randomUUID(),
+        attemptId,
+        dispatchId: `activity-${crypto.randomUUID()}`,
+        trigger: { kind: "next" },
+      });
+
+      expect(claimed.action).toBe("claimed");
+      if (claimed.action !== "claimed") throw new Error("Expected attempt claim to succeed");
+      const [sequence] = await shared.admin.unsafe<Array<{ sequenceValue: string }>>(
+        `select last_value::text as "sequenceValue" from ${quotedSequence}`,
+      );
+      const [evidence] = await shared.admin<
+        Array<{
+          attemptCount: number;
+          activeAttemptId: string | null;
+          turnStatus: string;
+        }>
+      >`
+        select
+          (select count(*)::integer from session_turn_attempts where id = ${attemptId}) as "attemptCount",
+          turn_row.active_attempt_id as "activeAttemptId",
+          turn_row.status as "turnStatus"
+        from session_turns turn_row
+        where turn_row.workspace_id = ${grant.workspaceId!}
+          and turn_row.id = ${claimed.turn.id}`;
+      expect(sequence).toEqual({ sequenceValue: "2" });
+      expect(evidence).toEqual({
+        attemptCount: 1,
+        activeAttemptId: attemptId,
+        turnStatus: "running",
+      });
+      expect(await readCounter(grant.workspaceId!)).toBe(counterBefore + 1n);
+      expect(await readSessionState(grant.workspaceId!, session.id)).toMatchObject({
+        status: "running",
+        pendingXid: null,
+      });
+    } finally {
+      await shared.admin.unsafe(`drop trigger if exists ${quotedTrigger} on session_turn_attempts`);
+      await shared.admin.unsafe(`drop function if exists ${quotedFunction}()`);
+      await shared.admin.unsafe(`drop sequence if exists ${quotedSequence}`);
+    }
   });
 
   test("a concurrent parent control transaction retries a transient fault atomically", async () => {
