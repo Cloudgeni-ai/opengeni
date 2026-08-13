@@ -156,6 +156,15 @@ jobs:
             "opengeni-browserd-${{ matrix.target }}" \
             "opengeni-agent-browser-${{ matrix.target }}" \
             "opengeni-computer-native-${{ matrix.target }}"
+          (
+            cd agent
+            OPENGENI_RUNTIME_BUILD_ID="$GITHUB_SHA" \
+            OPENGENI_EMBEDDED_BROWSERD="$GITHUB_WORKSPACE/opengeni-browserd-${{ matrix.target }}" \
+            OPENGENI_EMBEDDED_AGENT_BROWSER="$GITHUB_WORKSPACE/opengeni-agent-browser-${{ matrix.target }}" \
+            OPENGENI_EMBEDDED_COMPUTER_NATIVE="$GITHUB_WORKSPACE/opengeni-computer-native-${{ matrix.target }}" \
+              cargo zigbuild --release --target "${{ matrix.target }}" -p opengeni-agent
+          )
+          cp "agent/target/${{ matrix.target }}/release/opengeni-agent" "${{ matrix.asset }}"
 
       # ---- macOS: build both arches natively, lipo into ONE universal binary. ----
       - name: Build (macOS universal)
@@ -216,6 +225,23 @@ jobs:
             "opengeni-browserd-${{ matrix.target }}" \
             "opengeni-agent-browser-${{ matrix.target }}" \
             "opengeni-computer-native-${{ matrix.target }}"
+          (
+            cd agent
+            OPENGENI_RUNTIME_BUILD_ID="$GITHUB_SHA" \
+            OPENGENI_EMBEDDED_BROWSERD="$GITHUB_WORKSPACE/opengeni-browserd-x64" \
+            OPENGENI_EMBEDDED_AGENT_BROWSER="$GITHUB_WORKSPACE/packages/browserd/dist/opengeni-agent-browser-x64" \
+            OPENGENI_EMBEDDED_COMPUTER_NATIVE="$GITHUB_WORKSPACE/agent/target/x86_64-apple-darwin/release/opengeni-computer-native" \
+              cargo build --release --target x86_64-apple-darwin -p opengeni-agent --features macos-desktop
+            OPENGENI_RUNTIME_BUILD_ID="$GITHUB_SHA" \
+            OPENGENI_EMBEDDED_BROWSERD="$GITHUB_WORKSPACE/opengeni-browserd-arm64" \
+            OPENGENI_EMBEDDED_AGENT_BROWSER="$GITHUB_WORKSPACE/packages/browserd/dist/opengeni-agent-browser-arm64" \
+            OPENGENI_EMBEDDED_COMPUTER_NATIVE="$GITHUB_WORKSPACE/agent/target/aarch64-apple-darwin/release/opengeni-computer-native" \
+              cargo build --release --target aarch64-apple-darwin -p opengeni-agent --features macos-desktop
+          )
+          lipo -create \
+            agent/target/x86_64-apple-darwin/release/opengeni-agent \
+            agent/target/aarch64-apple-darwin/release/opengeni-agent \
+            -output "${{ matrix.asset }}"
 
       # The native macOS runner also executes the workspace tests before the
       # universal artifact is accepted.
@@ -253,6 +279,16 @@ jobs:
           OPENGENI_BROWSERD_AGENT_BROWSER_OUTPUT="opengeni-agent-browser-${{ matrix.target }}.exe" \
             bun packages/browserd/scripts/stage-agent-browser.ts
           mv "packages/browserd/dist/opengeni-agent-browser-${{ matrix.target }}.exe" .
+          workspace_windows="$(pwd -W)"
+          (
+            cd agent
+            OPENGENI_RUNTIME_BUILD_ID="$GITHUB_SHA" \
+            OPENGENI_EMBEDDED_BROWSERD="$workspace_windows\\opengeni-browserd-${{ matrix.target }}.exe" \
+            OPENGENI_EMBEDDED_AGENT_BROWSER="$workspace_windows\\opengeni-agent-browser-${{ matrix.target }}.exe" \
+            OPENGENI_EMBEDDED_COMPUTER_NATIVE="$workspace_windows\\opengeni-computer-native-${{ matrix.target }}.exe" \
+              cargo build --release --target "${{ matrix.target }}" -p opengeni-agent
+          )
+          cp "agent/target/${{ matrix.target }}/release/opengeni-agent.exe" "${{ matrix.asset }}"
 
       # ---- Detect signing creds in a PRIOR step (so the gates can read them). ----
       # GitHub Actions does NOT expose a step's own `env:` to that step's `if:`, so a

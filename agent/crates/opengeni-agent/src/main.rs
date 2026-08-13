@@ -43,6 +43,7 @@ mod codemode;
 mod config;
 mod dispatch;
 mod engine;
+mod embedded_runtime;
 mod enrollment;
 mod instance_lock;
 mod job;

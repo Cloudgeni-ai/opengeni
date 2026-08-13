@@ -67,7 +67,15 @@ impl BrowserSidecarManager {
     /// Resolves the packaged sidecar and creates a manager rooted in the agent's
     /// owner-only configuration directory.
     pub fn discover(config_dir: impl Into<PathBuf>) -> PlatformResult<Self> {
-        Self::with_binary(config_dir, discover_browserd_binary()?)
+        let config_dir = config_dir.into();
+        let binary = if std::env::var_os(BROWSERD_BINARY_ENV).is_some() {
+            discover_browserd_binary()?
+        } else if let Some(embedded) = crate::embedded_runtime::materialize(&config_dir)? {
+            embedded
+        } else {
+            discover_browserd_binary()?
+        };
+        Self::with_binary(config_dir, binary)
     }
 
     /// Constructs a manager with an explicit binary (the live-test seam).
@@ -711,8 +719,12 @@ mod tests {
             serde_json::from_str::<ReadyDocument>(legacy).is_err(),
             "a pre-identity sidecar must not be silently mixed into the runtime"
         );
-        let current = r#"{"service":"opengeni-browserd","status":"ready","protocolVersion":1,"runtimeBuildId":"development","computer":true,"hostname":"127.0.0.1","port":1234}"#;
-        let ready = serde_json::from_str::<ReadyDocument>(current).expect("current ready document");
+        let current = format!(
+            r#"{{"service":"opengeni-browserd","status":"ready","protocolVersion":1,"runtimeBuildId":"{}","computer":true,"hostname":"127.0.0.1","port":1234}}"#,
+            expected_runtime_build_id()
+        );
+        let ready =
+            serde_json::from_str::<ReadyDocument>(&current).expect("current ready document");
         assert_eq!(ready.runtime_build_id, expected_runtime_build_id());
     }
 
@@ -817,10 +829,11 @@ mod tests {
                     "#!/bin/sh\n",
                     "printf '%s\\n%s\\n%s\\n' \"$OPENGENI_BROWSERD_AGENT_BROWSER_BINARY\" \"$OPENGENI_BROWSERD_LIGHTPANDA_BINARY\" \"$OPENGENI_BROWSERD_COMPUTER_NATIVE_BINARY\" > '{capture}'\n",
                     "printf '%s\\n' '{{\"service\":\"opengeni-browserd\",\"status\":\"ready\",",
-                    "\"protocolVersion\":1,\"runtimeBuildId\":\"development\",\"computer\":true,\"hostname\":\"127.0.0.1\",\"port\":{port}}}'\n",
+                    "\"protocolVersion\":1,\"runtimeBuildId\":\"{build_id}\",\"computer\":true,\"hostname\":\"127.0.0.1\",\"port\":{port}}}'\n",
                     "exec sleep 30\n",
                 ),
                 capture = environment_capture.display(),
+                build_id = expected_runtime_build_id(),
                 port = controller_port,
             ),
         )
