@@ -236,8 +236,13 @@ Grant rows carry the owning membership and a canonical action; `once` and
 `session` are fenced to one exact session plus positive authority epoch, while
 `always` is a standing grant with null session and epoch. A later activation
 slice must consume `once` grants atomically before accepting use. Slice B does
-not create any authority or grant rows, and the personal workspace remains
-absent from runtime workspace access.
+not create any authority or grant rows. The first disjoint runtime activation
+appends the exact active membership's personal workspace only to the
+authenticated owning managed human's `AccessContext.workspaceGrants`, after the
+lifecycle capability converges. It remains absent from `workspace_memberships`,
+keeps the legacy Better Auth workspace as `defaultWorkspaceId`, and omits
+workspace/member/API-key administration permissions so neither account admins
+nor another principal gain ambient or delegable access.
 The managed-human-only `GET /v1/organization-memberships` route exposes just
 the exact active membership, organization, and personal-workspace identifiers
 returned by that provisioning capability; it is unavailable to API keys and
