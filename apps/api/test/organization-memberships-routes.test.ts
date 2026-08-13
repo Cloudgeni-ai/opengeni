@@ -157,8 +157,8 @@ describe("organization membership routes", () => {
       headers: { cookie: "session=present" },
     });
     expect(denied.status).toBe(403);
-    expect(await denied.json()).toEqual({
-      message: "organization membership is not active",
-    });
+    // This minimal route harness has no application-level JSON error adapter,
+    // so bare Hono renders HTTPException messages as plain text.
+    expect(await denied.text()).toBe("organization membership is not active");
   });
 });
