@@ -194,9 +194,78 @@ describe("appendAndPublishEvents is best-effort on the live fan-out", () => {
     expect(publishCalls).toBe(0);
   });
 
-  test("detached fenced fanout returns after the durable append and preserves sequence order", async () => {
-    const appended: unknown[] = [];
-    const pendingPublishes: Array<() => void> = [];
+  const eventFor = (sequence: number, type = "sandbox.box.created") => ({
+    id: `00000000-0000-4000-8000-${String(sequence).padStart(12, "0")}`,
+    workspaceId: SENTINEL_WS,
+    sessionId: "00000000-0000-4000-8000-000000000001",
+    sequence,
+    type,
+    payload: { sequence },
+    occurredAt: "2026-07-10T00:00:00.000Z",
+    clientEventId: null,
+    turnId: "00000000-0000-4000-8000-000000000020",
+  });
+
+  test("managed NATS publish reports success, failure, and timeout while legacy publish stays no-throw", async () => {
+    const createBus = async (
+      overrides: Partial<ReturnType<typeof fakeNatsConnection>>,
+      publishFlushTimeoutMs = 10,
+    ) =>
+      await createNatsEventBus(SENTINEL_URL, undefined, {
+        connect: (async () => ({ ...fakeNatsConnection(), ...overrides }) as never) as never,
+        publishFlushTimeoutMs,
+      });
+    const events = [eventFor(1)] as never;
+
+    const succeeded = await createBus({});
+    expect(await succeeded.publishWithOutcome!(SENTINEL_WS, "session", events)).toBe("succeeded");
+
+    const rejectedFlush = await createBus({
+      flush: async () => {
+        throw new Error("flush failed");
+      },
+    });
+    expect(await rejectedFlush.publishWithOutcome!(SENTINEL_WS, "session", events)).toBe("failed");
+    await expect(rejectedFlush.publish(SENTINEL_WS, "session", events)).resolves.toBeUndefined();
+
+    const timedOut = await createBus(
+      {
+        flush: async () => await new Promise<void>(() => {}),
+      },
+      1,
+    );
+    expect(await timedOut.publishWithOutcome!(SENTINEL_WS, "session", events)).toBe("timed_out");
+
+    const synchronousFailure = await createBus({
+      publish: () => {
+        throw new Error("connection closed");
+      },
+    });
+    expect(await synchronousFailure.publishWithOutcome!(SENTINEL_WS, "session", events)).toBe(
+      "failed",
+    );
+    await expect(
+      synchronousFailure.publish(SENTINEL_WS, "session", events),
+    ).resolves.toBeUndefined();
+  });
+
+  test("the activity lane records the managed transport outcome instead of legacy publish success", async () => {
+    const outcomes: string[] = [];
+    const fanout = createDetachedSessionEventFanout(
+      {
+        publish: async () => {},
+        publishWithOutcome: async () => "timed_out",
+      } as never,
+      { onPublishOutcome: ({ outcome }) => outcomes.push(outcome) },
+    );
+
+    fanout.enqueue(SENTINEL_WS, "session", [eventFor(1)] as never);
+    await fanout.drain();
+    expect(outcomes).toEqual(["timed_out"]);
+  });
+
+  test("a lower detached sequence is invoked before a higher awaited sequence", async () => {
+    const releases: Array<() => void> = [];
     const published: number[][] = [];
     const outcomes: string[] = [];
     const bus = {
@@ -206,32 +275,17 @@ describe("appendAndPublishEvents is best-effort on the live fan-out", () => {
         events: Array<{ sequence: number }>,
       ) => {
         published.push(events.map((event) => event.sequence));
-        await new Promise<void>((resolve) => pendingPublishes.push(resolve));
+        await new Promise<void>((resolve) => releases.push(resolve));
       },
     } as never;
     const fanout = createDetachedSessionEventFanout(bus, {
       timeoutScheduler: () => () => {},
       onPublishOutcome: ({ outcome }) => outcomes.push(outcome),
     });
-    let durableCommitted = false;
-    const appendSessionEventsForTurnAttempt = async () => {
-      durableCommitted = true;
-      const event = {
-        id: "00000000-0000-4000-8000-000000000011",
-        workspaceId: SENTINEL_WS,
-        sessionId: "00000000-0000-4000-8000-000000000001",
-        sequence: 11,
-        type: "sandbox.operation.completed",
-        payload: { name: "sandbox.provision" },
-        occurredAt: "2026-07-10T00:00:00.000Z",
-        clientEventId: null,
-        turnId: "00000000-0000-4000-8000-000000000020",
-      };
-      appended.push(event);
-      return { events: [event], accepted: true };
-    };
+    const append = (sequence: number) =>
+      (async () => ({ events: [eventFor(sequence)], accepted: true })) as never;
 
-    const first = await appendAndPublishTurnEventsFenced(
+    const detached = await appendAndPublishTurnEventsFenced(
       {} as never,
       bus,
       SENTINEL_WS,
@@ -239,23 +293,18 @@ describe("appendAndPublishEvents is best-effort on the live fan-out", () => {
       "00000000-0000-4000-8000-000000000020",
       1,
       "00000000-0000-4000-8000-000000000021",
-      [{ type: "sandbox.operation.completed", payload: { name: "sandbox.provision" } }] as never,
+      [{ type: "sandbox.box.created", payload: {} }] as never,
       {
         fanout: "detached",
         detachedFanout: fanout,
-        appendSessionEventsForTurnAttempt: appendSessionEventsForTurnAttempt as never,
+        appendSessionEventsForTurnAttempt: append(11),
       },
     );
-
-    expect(first.accepted).toBe(true);
-    expect(durableCommitted).toBe(true);
-    expect(appended).toHaveLength(1);
+    expect(detached.accepted).toBe(true);
     expect(published).toEqual([[11]]);
-    expect(outcomes).toEqual([]);
 
-    // A second durable append can complete while the first live publish is slow.
-    const secondEvent = { ...appended[0], sequence: 12 };
-    const second = await appendAndPublishTurnEventsFenced(
+    let awaitedCompleted = false;
+    const awaited = appendAndPublishTurnEventsFenced(
       {} as never,
       bus,
       SENTINEL_WS,
@@ -263,29 +312,65 @@ describe("appendAndPublishEvents is best-effort on the live fan-out", () => {
       "00000000-0000-4000-8000-000000000020",
       1,
       "00000000-0000-4000-8000-000000000021",
-      [{ type: "sandbox.operation.completed", payload: { name: "sandbox.provision" } }] as never,
+      [{ type: "turn.completed", payload: {} }] as never,
       {
-        fanout: "detached",
+        fanout: "awaited",
         detachedFanout: fanout,
-        appendSessionEventsForTurnAttempt: (async () => ({
-          events: [secondEvent],
-          accepted: true,
-        })) as never,
+        appendSessionEventsForTurnAttempt: append(12),
       },
-    );
-    expect(second.accepted).toBe(true);
-    expect(published).toEqual([[11]]);
-
-    pendingPublishes.shift()!();
+    ).then(() => {
+      awaitedCompleted = true;
+    });
     await settleMicrotasks();
-    pendingPublishes.shift()!();
-    await fanout.drain();
+    expect(published).toEqual([[11]]);
+    expect(awaitedCompleted).toBe(false);
+
+    releases.shift()!();
+    await settleMicrotasks();
     expect(published).toEqual([[11], [12]]);
-    expect(outcomes).toEqual(["published", "published"]);
+    expect(awaitedCompleted).toBe(false);
+    releases.shift()!();
+    await awaited;
+    expect(outcomes).toEqual(["succeeded"]);
   });
 
-  test("detached fanout drops a bounded overflow without changing durable ordering", async () => {
-    const release: Array<() => void> = [];
+  test("an admitted awaited sequence cannot be overtaken by a later detached enqueue", async () => {
+    const releases: Array<() => void> = [];
+    const published: number[][] = [];
+    const bus = {
+      publish: async (
+        _workspaceId: string,
+        _sessionId: string,
+        events: Array<{ sequence: number }>,
+      ) => {
+        published.push(events.map((event) => event.sequence));
+        await new Promise<void>((resolve) => releases.push(resolve));
+      },
+    } as never;
+    const fanout = createDetachedSessionEventFanout(bus, {
+      timeoutScheduler: () => () => {},
+    });
+
+    fanout.enqueue(SENTINEL_WS, "session", [eventFor(1)] as never);
+    const awaited = fanout.publishAwaited(SENTINEL_WS, "session", [
+      eventFor(2, "turn.completed"),
+    ] as never);
+    fanout.enqueue(SENTINEL_WS, "session", [eventFor(3)] as never);
+    expect(published).toEqual([[1]]);
+
+    releases.shift()!();
+    await settleMicrotasks();
+    expect(published).toEqual([[1], [2]]);
+    releases.shift()!();
+    await awaited;
+    await settleMicrotasks();
+    expect(published).toEqual([[1], [2], [3]]);
+    releases.shift()!();
+    await fanout.drain();
+  });
+
+  test("one active plus the oldest pending batch is retained and later overflow is dropped", async () => {
+    const releases: Array<() => void> = [];
     const published: number[][] = [];
     const outcomes: string[] = [];
     const bus = {
@@ -295,88 +380,48 @@ describe("appendAndPublishEvents is best-effort on the live fan-out", () => {
         events: Array<{ sequence: number }>,
       ) => {
         published.push(events.map((event) => event.sequence));
-        await new Promise<void>((resolve) => release.push(resolve));
+        await new Promise<void>((resolve) => releases.push(resolve));
       },
     } as never;
     const fanout = createDetachedSessionEventFanout(bus, {
       timeoutScheduler: () => () => {},
       onPublishOutcome: ({ outcome }) => outcomes.push(outcome),
     });
-    const eventFor = (sequence: number) => ({
-      id: `00000000-0000-4000-8000-${String(sequence).padStart(12, "0")}`,
-      workspaceId: SENTINEL_WS,
-      sessionId: "00000000-0000-4000-8000-000000000001",
-      sequence,
-      type: "sandbox.box.created",
-      payload: { sandboxId: `sandbox-${sequence}` },
-      occurredAt: "2026-07-10T00:00:00.000Z",
-      clientEventId: null,
-      turnId: null,
-    });
-    const enqueue = (sequence: number) =>
-      fanout.enqueue(SENTINEL_WS, "00000000-0000-4000-8000-000000000001", [eventFor(sequence)]);
 
-    enqueue(1);
-    enqueue(2);
-    enqueue(3);
-    await settleMicrotasks();
+    fanout.enqueue(SENTINEL_WS, "session", [eventFor(1)] as never);
+    fanout.enqueue(SENTINEL_WS, "session", [eventFor(2)] as never);
+    fanout.enqueue(SENTINEL_WS, "session", [eventFor(3)] as never);
     expect(published).toEqual([[1]]);
-    expect(outcomes).toContain("dropped");
+    expect(outcomes).toEqual(["dropped"]);
 
-    release.shift()!();
+    releases.shift()!();
     await settleMicrotasks();
-    release.shift()!();
-    await fanout.drain();
     expect(published).toEqual([[1], [2]]);
-    expect(outcomes).toEqual(["dropped", "published", "published"]);
+    releases.shift()!();
+    await fanout.drain();
+    expect(outcomes).toEqual(["dropped", "succeeded", "succeeded"]);
   });
 
-  test("a detached publish failure is observed and the queue continues with the next batch", async () => {
-    const published: number[][] = [];
+  test("failure and timeout release the lane while late rejection stays handled", async () => {
     const outcomes: string[] = [];
-    let publishCalls = 0;
+    const published: number[][] = [];
+    const timeoutCallbacks: Array<() => void> = [];
+    let rejectFirst!: (error: Error) => void;
+    let call = 0;
     const bus = {
       publish: async (
         _workspaceId: string,
         _sessionId: string,
         events: Array<{ sequence: number }>,
       ) => {
-        publishCalls += 1;
+        call += 1;
         published.push(events.map((event) => event.sequence));
-        if (publishCalls === 1) throw new Error("simulated live transport failure");
-      },
-    } as never;
-    const fanout = createDetachedSessionEventFanout(bus, {
-      onPublishOutcome: ({ outcome }) => outcomes.push(outcome),
-    });
-    const eventFor = (sequence: number) => ({
-      id: `00000000-0000-4000-8000-${String(sequence).padStart(12, "0")}`,
-      workspaceId: SENTINEL_WS,
-      sessionId: "00000000-0000-4000-8000-000000000001",
-      sequence,
-      type: "sandbox.box.created",
-      payload: { sandboxId: `sandbox-${sequence}` },
-      occurredAt: "2026-07-10T00:00:00.000Z",
-      clientEventId: null,
-      turnId: null,
-    });
-
-    fanout.enqueue(SENTINEL_WS, "00000000-0000-4000-8000-000000000001", [eventFor(1)]);
-    fanout.enqueue(SENTINEL_WS, "00000000-0000-4000-8000-000000000001", [eventFor(2)]);
-    await fanout.drain();
-
-    expect(published).toEqual([[1], [2]]);
-    expect(outcomes).toEqual(["failed", "published"]);
-  });
-
-  test("a hung detached publish keeps one active provider operation and never starts a second", async () => {
-    let publishCalls = 0;
-    const outcomes: string[] = [];
-    const timeoutCallbacks: Array<() => void> = [];
-    const bus = {
-      publish: async () => {
-        publishCalls += 1;
-        return await new Promise<void>(() => {});
+        if (call === 1) {
+          return await new Promise<void>((_resolve, reject) => {
+            rejectFirst = reject;
+          });
+        }
+        if (call === 2) throw new Error("simulated live transport failure");
       },
     } as never;
     const fanout = createDetachedSessionEventFanout(bus, {
@@ -386,82 +431,81 @@ describe("appendAndPublishEvents is best-effort on the live fan-out", () => {
       },
       onPublishOutcome: ({ outcome }) => outcomes.push(outcome),
     });
-    const eventFor = (sequence: number) => ({
-      id: `00000000-0000-4000-8000-${String(sequence).padStart(12, "0")}`,
-      workspaceId: SENTINEL_WS,
-      sessionId: "00000000-0000-4000-8000-000000000001",
-      sequence,
-      type: "sandbox.box.created",
-      payload: { sandboxId: `sandbox-${sequence}` },
-      occurredAt: "2026-07-10T00:00:00.000Z",
-      clientEventId: null,
-      turnId: null,
-    });
-    fanout.enqueue(SENTINEL_WS, "00000000-0000-4000-8000-000000000001", [eventFor(1)]);
-    fanout.enqueue(SENTINEL_WS, "00000000-0000-4000-8000-000000000001", [eventFor(2)]);
-    fanout.enqueue(SENTINEL_WS, "00000000-0000-4000-8000-000000000001", [eventFor(3)]);
-    timeoutCallbacks.shift()!();
-    await settleMicrotasks();
-    expect(publishCalls).toBe(1);
-    expect(outcomes).toEqual(["dropped", "timed_out"]);
+    const unhandled: unknown[] = [];
+    const onUnhandled = (error: unknown) => unhandled.push(error);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      fanout.enqueue(SENTINEL_WS, "session", [eventFor(1)] as never);
+      fanout.enqueue(SENTINEL_WS, "session", [eventFor(2)] as never);
+      timeoutCallbacks.shift()!();
+      await fanout.drain();
+      expect(published).toEqual([[1], [2]]);
+      expect(outcomes).toEqual(["timed_out", "failed"]);
+
+      rejectFirst(new Error("late provider rejection"));
+      await settleMicrotasks();
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
   });
 
-  test("late settlement resumes the retained FIFO batch and accepts later fanout", async () => {
-    const release: Array<() => void> = [];
-    const published: number[][] = [];
-    const outcomes: string[] = [];
-    const timeoutCallbacks: Array<() => void> = [];
-    const bus = {
-      publish: async (
-        _workspaceId: string,
-        _sessionId: string,
-        events: Array<{ sequence: number }>,
-      ) => {
-        published.push(events.map((event) => event.sequence));
-        await new Promise<void>((resolve) => release.push(resolve));
-      },
-    } as never;
-    const fanout = createDetachedSessionEventFanout(bus, {
-      timeoutScheduler: (callback) => {
-        timeoutCallbacks.push(callback);
-        return () => {};
-      },
-      onPublishOutcome: ({ outcome }) => outcomes.push(outcome),
-    });
-    const eventFor = (sequence: number) => ({
-      id: `00000000-0000-4000-8000-${String(sequence).padStart(12, "0")}`,
-      workspaceId: SENTINEL_WS,
-      sessionId: "00000000-0000-4000-8000-000000000001",
-      sequence,
-      type: "sandbox.box.created",
-      payload: { sandboxId: `sandbox-${sequence}` },
-      occurredAt: "2026-07-10T00:00:00.000Z",
-      clientEventId: null,
-      turnId: null,
-    });
-    const enqueue = (sequence: number) =>
-      fanout.enqueue(SENTINEL_WS, "00000000-0000-4000-8000-000000000001", [eventFor(sequence)]);
+  test("all activity exits close bounded ownership, drop pending work, and isolate worker reuse", async () => {
+    const reasons = [
+      "activity_completed",
+      "activity_failed",
+      "activity_cancelled",
+      "worker_shutdown",
+    ] as const;
+    for (const reason of reasons) {
+      const outcomes: string[] = [];
+      const timeoutCallbacks: Array<() => void> = [];
+      let rejectLate!: (error: Error) => void;
+      const fanout = createDetachedSessionEventFanout(
+        {
+          publish: async () =>
+            await new Promise<void>((_resolve, reject) => {
+              rejectLate = reject;
+            }),
+        } as never,
+        {
+          timeoutScheduler: (callback) => {
+            timeoutCallbacks.push(callback);
+            return () => {};
+          },
+          onPublishOutcome: ({ outcome }) => outcomes.push(outcome),
+        },
+      );
+      const unhandled: unknown[] = [];
+      const onUnhandled = (error: unknown) => unhandled.push(error);
+      process.on("unhandledRejection", onUnhandled);
+      try {
+        fanout.enqueue(SENTINEL_WS, "session", [eventFor(1)] as never);
+        fanout.enqueue(SENTINEL_WS, "session", [eventFor(2)] as never);
+        const closing = fanout.close(reason);
+        timeoutCallbacks.at(-1)!();
+        await closing;
+        expect(outcomes).toEqual(["dropped", "timed_out"]);
 
-    enqueue(1);
-    enqueue(2);
-    enqueue(3);
-    timeoutCallbacks.shift()!();
-    await settleMicrotasks();
-    expect(published).toEqual([[1]]);
-    expect(outcomes).toEqual(["dropped", "timed_out"]);
+        fanout.enqueue(SENTINEL_WS, "session", [eventFor(3)] as never);
+        expect(outcomes).toEqual(["dropped", "timed_out", "dropped"]);
+        rejectLate(new Error(`late settlement after ${reason}`));
+        await settleMicrotasks();
+        expect(unhandled).toEqual([]);
+      } finally {
+        process.off("unhandledRejection", onUnhandled);
+      }
 
-    release.shift()!();
-    await settleMicrotasks();
-    expect(published).toEqual([[1], [2]]);
-    release.shift()!();
-    await fanout.drain();
-
-    enqueue(4);
-    await settleMicrotasks();
-    expect(published).toEqual([[1], [2], [4]]);
-    release.shift()!();
-    await fanout.drain();
-    expect(outcomes).toEqual(["dropped", "timed_out", "published", "published"]);
+      const reusedPublished: number[][] = [];
+      const nextActivity = createDetachedSessionEventFanout({
+        publish: async (_workspaceId, _sessionId, events: Array<{ sequence: number }>) => {
+          reusedPublished.push(events.map((event) => event.sequence));
+        },
+      } as never);
+      nextActivity.enqueue(SENTINEL_WS, "session", [eventFor(4)] as never);
+      await nextActivity.drain();
+      expect(reusedPublished).toEqual([[4]]);
+    }
   });
 
   test("critical fenced publication still awaits a delayed live fanout", async () => {
