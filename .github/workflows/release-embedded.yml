@@ -609,12 +609,15 @@ jobs:
         run: |
           set -euo pipefail
           images="$(jq -c '[.images | to_entries[] | .value]' evidence/release-candidate.json)"
-          OPENGENI_RELEASE_BOM_SOURCE_SHA="$SOURCE_SHA" \
-          OPENGENI_RELEASE_BOM_VERSION="$RELEASE_VERSION" \
-          OPENGENI_RELEASE_BOM_PACKAGES="$BOM_PACKAGES" \
-          OPENGENI_RELEASE_BOM_IMAGES="$images" \
-          OPENGENI_RELEASE_BOM_CHART="$RELEASE_CHART" \
-          (cd .release/controller && bun scripts/release-bom.ts)
+          (
+            export OPENGENI_RELEASE_BOM_SOURCE_SHA="$SOURCE_SHA"
+            export OPENGENI_RELEASE_BOM_VERSION="$RELEASE_VERSION"
+            export OPENGENI_RELEASE_BOM_PACKAGES="$BOM_PACKAGES"
+            export OPENGENI_RELEASE_BOM_IMAGES="$images"
+            export OPENGENI_RELEASE_BOM_CHART="$RELEASE_CHART"
+            cd .release/controller
+            bun scripts/release-bom.ts
+          )
           printf '%s  %s\n' \
             "$(sha256sum evidence/release-bom.json | awk '{print $1}')" \
             evidence/release-bom.json \

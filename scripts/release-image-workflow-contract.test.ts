@@ -598,6 +598,8 @@ describe("release image workflow contract", () => {
     expect(finalJob).toContain("--prefer-index=false");
     expect(finalJob).toContain("evidence/release-candidate.json");
     expect(finalJob).toContain("bun scripts/release-bom.ts");
+    expect(finalJob).toContain('export OPENGENI_RELEASE_BOM_SOURCE_SHA="$SOURCE_SHA"');
+    expect(finalJob).not.toMatch(/OPENGENI_RELEASE_BOM_CHART=.*\\\n\s*\(cd /);
     expect(finalJob).toContain("release_version=\"$(jq -er '.releaseVersion'");
     expect(finalJob).toContain(
       'source_release_version="$(cd .release/controller && bun scripts/release-version.ts "$GITHUB_WORKSPACE/deploy/helm/opengeni/Chart.yaml")"',
@@ -779,6 +781,8 @@ describe("release image workflow contract", () => {
     expect(release).toContain("bun scripts/resolve-github-release-state.ts");
     expect(release).not.toContain('gh release view "$tag"');
     expect(release).toContain("bun scripts/release-bom.ts");
+    expect(release).toContain('export OPENGENI_RELEASE_BOM_SOURCE_SHA="$SOURCE_SHA"');
+    expect(release).not.toMatch(/OPENGENI_RELEASE_BOM_CHART=.*\\\n\s*\(cd /);
     expect(release).toContain("evidence/release-bom.json");
     expect(release).toContain('docker logout "$REGISTRY"');
     expect(registryReconcile).toBeGreaterThan(-1);
