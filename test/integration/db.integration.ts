@@ -2890,9 +2890,19 @@ async function createRlsAppRole(
   );
   // Match the runtime role's exact target-schema-local capabilities. These
   // functions are intentionally excluded from the broad private helper grant
-  // and remain unavailable to PUBLIC. The xAI validator is invoker-rights and
-  // is required to evaluate the immutable snapshot CHECK constraints on
-  // ordinary session inserts.
+  // and remain unavailable to PUBLIC. The session reference helper and xAI
+  // validator are invoker-rights; the latter evaluates immutable snapshot
+  // CHECK constraints on ordinary session inserts.
+  await db.execute(
+    dbSql.raw(
+      `GRANT EXECUTE ON FUNCTION public.session_private_actor_visible(uuid, uuid, uuid, text) TO "${role}"`,
+    ),
+  );
+  await db.execute(
+    dbSql.raw(
+      `GRANT EXECUTE ON FUNCTION public.session_reference_visible(uuid, uuid, uuid) TO "${role}"`,
+    ),
+  );
   await db.execute(
     dbSql.raw(
       `GRANT EXECUTE ON FUNCTION public.lock_nested_agent_depth_configuration() TO "${role}"`,

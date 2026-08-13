@@ -174,6 +174,7 @@ import {
   requireTurnInstructionsAuthority,
   requireSessionAuthorization,
   requireSessionAuthorizationListScope,
+  withResolvedSessionAuthorization,
   SESSION_AUTHORIZATION_DEFAULT_REAUTHORIZE_MS,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
@@ -389,10 +390,6 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (!operation) {
       throw sessionAuthorizationHttpError(new SessionAuthorizationUnavailableError());
     }
-    if (operation === "session.codex_account.write" && !deps.sessionAuthorization) {
-      await next();
-      return;
-    }
     const grant = await requireAccessGrant(c, deps, workspaceId);
     try {
       const authorization = await requireSessionAuthorization(deps, grant, {
@@ -401,6 +398,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         surface: "http",
       });
       if (authorization) requestSessionAuthorization.set(c.req.raw, authorization);
+      if (authorization) {
+        await withResolvedSessionAuthorization(authorization, next);
+        return;
+      }
     } catch (error) {
       throw sessionAuthorizationHttpError(error);
     }

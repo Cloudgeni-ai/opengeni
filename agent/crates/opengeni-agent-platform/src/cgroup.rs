@@ -20,15 +20,17 @@
 //!    `<service>/supervisor` leaf, then enable the memory controller in
 //!    `<service>/cgroup.subtree_control`. Per-op cgroups are then
 //!    `<service>/op-<n>` siblings of `supervisor`, each with its own memory
-//!    accounting.
+//!    accounting and systemd-oomd selection. Separate leaves do not by themselves
+//!    constrain memory or change the global kernel OOM victim order.
 //! 2. **Per-exec placement** ([`OpCgroups::place_process_group`]). After a child is
 //!    spawned, the caller stops its process group, places the direct child + #344
 //!    process-group anchor, then drains every same-group process still inherited in
 //!    `supervisor` into the same fresh `op-<n>` leaf before resuming the group. The
 //!    drain does not assume that `killpg(SIGSTOP)` is synchronous: once a parent is
 //!    moved, every later child inherits the op leaf, and the scan continues until no
-//!    ordinary descendant remains in `supervisor`. A memory blow-up in the op leaf
-//!    is contained to that leaf; the supervisor in its own leaf survives.
+//!    ordinary descendant remains in `supervisor`. Optional per-op limits contain
+//!    a memory blow-up to that leaf. Without a limit, the child score bias below is
+//!    what makes global kernel OOM prefer host work over the supervisor.
 //! 3. **Teardown** ([`OpCgroupHandle`]). The op leaf is `rmdir`'d after the op's
 //!    process tree is reaped, tolerating a transient `EBUSY` with a bounded retry.
 //!
@@ -414,6 +416,8 @@ impl OpCgroupHandle {
 #[cfg(target_os = "linux")]
 #[must_use]
 pub fn establish_oom_isolation(config: OpCgroupConfig) -> Option<Arc<OpCgroups>> {
+    report_supervisor_oom_score_adj();
+
     // 1. cgroup v2 unified hierarchy at the standard mount?
     let mount = Path::new(CGROUP2_MOUNT);
     if !mount.join("cgroup.controllers").exists() {
@@ -460,7 +464,8 @@ pub fn establish_oom_isolation(config: OpCgroupConfig) -> Option<Arc<OpCgroups>>
         return None;
     }
 
-    // 4. No-internal-processes dance: create and PROTECT the supervisor leaf,
+    // 4. No-internal-processes dance: create the supervisor leaf and protect it
+    //    from systemd-oomd,
     //    move ourselves into it, then delegate the memory controller to sibling
     //    op leaves. `ManagedOOMPreference=avoid` lives as an xattr on the service
     //    cgroup and is not inherited by this child. Stamping the actual leaf
@@ -500,7 +505,7 @@ pub fn establish_oom_isolation(config: OpCgroupConfig) -> Option<Arc<OpCgroups>>
         memory_max = ?config.memory_max,
         memory_high = ?config.memory_high,
         placement_pid_breaker,
-        "established per-op OOM cgroup isolation: host execs run in memory sub-cgroups; the protected control supervisor is fate-isolated in its own leaf"
+        "established per-op memory cgroups: host execs have separate accounting and systemd-oomd fate; kernel OOM selection remains score-based"
     );
     Some(Arc::new(OpCgroups {
         service_dir,
@@ -595,6 +600,42 @@ fn create_dir_idempotent(dir: &Path) -> std::io::Result<()> {
 #[cfg(target_os = "linux")]
 const EXEC_OOM_SCORE_ADJ: i32 = 500;
 
+/// Reports the effective supervisor victim bias. Service managers are allowed to
+/// clamp a requested negative value, so the generated unit text is not evidence
+/// that kernel OOM protection is active; `/proc` is authoritative.
+#[cfg(target_os = "linux")]
+fn report_supervisor_oom_score_adj() {
+    match std::fs::read_to_string("/proc/self/oom_score_adj")
+        .ok()
+        .and_then(|value| parse_oom_score_adj(&value))
+    {
+        Some(score) if score < 0 => tracing::info!(
+            oom_score_adj = score,
+            "control supervisor has negative kernel OOM victim bias"
+        ),
+        Some(0) => tracing::info!(
+            oom_score_adj = 0,
+            "control supervisor has neutral kernel OOM victim bias"
+        ),
+        Some(score) => tracing::warn!(
+            oom_score_adj = score,
+            "control supervisor has positive kernel OOM victim bias; delegated cgroups do not protect it from host-wide kernel OOM"
+        ),
+        None => tracing::warn!(
+            "could not read the control supervisor's effective kernel OOM victim bias"
+        ),
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_oom_score_adj(value: &str) -> Option<i32> {
+    value
+        .trim()
+        .parse::<i32>()
+        .ok()
+        .filter(|score| (-1000..=1000).contains(score))
+}
+
 /// Guards the "log once" of an `oom_score_adj` write failure so a restrictive host
 /// policy is reported once, not per exec.
 #[cfg(target_os = "linux")]
@@ -658,6 +699,14 @@ fn op_cgroup_name(op_id: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_only_valid_kernel_oom_adjustments() {
+        assert_eq!(parse_oom_score_adj("-200\n"), Some(-200));
+        assert_eq!(parse_oom_score_adj("1000"), Some(1000));
+        assert_eq!(parse_oom_score_adj("1001"), None);
+        assert_eq!(parse_oom_score_adj("invalid"), None);
+    }
 
     #[test]
     fn parses_the_unified_line_from_a_hybrid_proc_cgroup() {

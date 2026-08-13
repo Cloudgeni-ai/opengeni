@@ -5,7 +5,11 @@ import { join, resolve as resolvePath } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createObservability } from "@opengeni/observability";
 import { testSettings } from "@opengeni/testing";
-import { RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES, type Database } from "@opengeni/db";
+import {
+  RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
+  RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES,
+  type Database,
+} from "@opengeni/db";
 import {
   createOpenGeniWorker,
   resolveOpenGeniWorkflowDefinition,
@@ -405,7 +409,9 @@ describe("embedded worker lifecycle contract", () => {
         owner: "opengeni_migrator",
         can_execute: true,
         public_execute: false,
-        security_definer: name !== "xai_provider_account_authority_snapshot_v1_valid(jsonb)",
+        security_definer: !(RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES as readonly string[]).includes(
+          name,
+        ),
       })),
       [
         {

@@ -2448,6 +2448,7 @@ export const sessions = pgTable(
     // explicitly workspace-shared and have no owner membership, so absent
     // fields can never manufacture user authority.
     ownerOrganizationMembershipId: uuid("owner_organization_membership_id"),
+    ownerSubjectId: text("owner_subject_id"),
     visibility: text("visibility").notNull().default("workspace_shared"),
     authorityEpoch: integer("authority_epoch").notNull().default(1),
     // Independent-copy provenance. A destination may use either visibility and

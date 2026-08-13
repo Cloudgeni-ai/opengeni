@@ -31,8 +31,10 @@ const tenancyTables = [
 // reflects migration 0219's managed-human lifecycle activation instead.
 const historicalTenancySystemOnlyPolicy = "organization_tenancy_system_only";
 const currentLedgerTenancyLifecyclePolicy = "organization_tenancy_lifecycle";
-const currentLedgerTenancyLifecycleExpression =
+const managedHumanTenancyLifecycleExpression =
   "(current_setting('opengeni.organization_tenancy_lifecycle'::text, true) = 'managed_human_provisioning'::text)";
+const sessionVisibilityTenancyLifecycleExpression =
+  "(current_setting('opengeni.organization_tenancy_lifecycle'::text, true) = ANY (ARRAY['managed_human_provisioning'::text, 'session_visibility_activation'::text]))";
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
@@ -289,12 +291,37 @@ describe("migration 0218 organization tenancy foundation", () => {
       authorityEpoch: 1,
       forkedFromSessionId: null,
     });
+    const [sessionAuthorityFence] = await shared.admin<{ installed: boolean }[]>`
+      select exists (
+        select 1
+        from pg_trigger trigger_row
+        join pg_class table_row on table_row.oid = trigger_row.tgrelid
+        join pg_namespace namespace_row on namespace_row.oid = table_row.relnamespace
+        where namespace_row.nspname = current_schema()
+          and table_row.relname = 'sessions'
+          and trigger_row.tgname = 'sessions_authority_write_fence'
+          and not trigger_row.tgisinternal
+      ) as installed
+    `;
+    const sessionAuthorityFenceInstalled = sessionAuthorityFence?.installed === true;
+    const directSessionAuthorityMutationSqlState = sessionAuthorityFenceInstalled
+      ? "42501"
+      : "23514";
     await expectSqlState(
       async () =>
-        await shared!.admin`
-          update sessions set visibility = 'user_private' where id = ${session.id}
-        `,
-      "23514",
+        sessionAuthorityFenceInstalled
+          ? await shared!.admin`
+              update sessions
+              set
+                visibility = 'user_private',
+                owner_organization_membership_id = ${membership!.id},
+                owner_subject_id = 'human:org-tenancy-owner'
+              where id = ${session.id}
+            `
+          : await shared!.admin`
+              update sessions set visibility = 'user_private' where id = ${session.id}
+            `,
+      directSessionAuthorityMutationSqlState,
     );
     await expectSqlState(
       async () =>
@@ -307,7 +334,7 @@ describe("migration 0218 organization tenancy foundation", () => {
             forked_by_organization_membership_id = ${membership!.id}
           where id = ${session.id}
         `,
-      "23514",
+      directSessionAuthorityMutationSqlState,
     );
 
     await expectSqlState(
@@ -495,20 +522,27 @@ describe("migration 0218 organization tenancy foundation", () => {
     // narrowly scoped owner-only policies; their own migration tests own those
     // contracts, while the direct app privilege checks below remain deny-all.
     expect([...policyRows]).toEqual(
-      [...tenancyTables].sort().map((tableName) => ({
-        tableName,
-        rlsEnabled: true,
-        rlsForced: true,
-        policyCount: 1,
-        policyNames: [currentLedgerTenancyLifecyclePolicy],
-        policyCommands: ["*"],
-        usingExpressions: [currentLedgerTenancyLifecycleExpression],
-        checkExpressions: [currentLedgerTenancyLifecycleExpression],
-        appSelect: false,
-        appInsert: false,
-        appUpdate: false,
-        appDelete: false,
-      })),
+      [...tenancyTables].sort().map((tableName) => {
+        const lifecycleExpression =
+          tableName === "organization_memberships" ||
+          tableName === "organization_user_resource_grants"
+            ? sessionVisibilityTenancyLifecycleExpression
+            : managedHumanTenancyLifecycleExpression;
+        return {
+          tableName,
+          rlsEnabled: true,
+          rlsForced: true,
+          policyCount: 1,
+          policyNames: [currentLedgerTenancyLifecyclePolicy],
+          policyCommands: ["*"],
+          usingExpressions: [lifecycleExpression],
+          checkExpressions: [lifecycleExpression],
+          appSelect: false,
+          appInsert: false,
+          appUpdate: false,
+          appDelete: false,
+        };
+      }),
     );
 
     const app = postgres(shared.appUrl, { max: 1 });

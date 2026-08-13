@@ -189,7 +189,8 @@ beforeAll(async () => {
   await admin.unsafe(
     `GRANT USAGE ON SCHEMA public, opengeni_private TO codex_app;` +
       ` GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO codex_app;` +
-      ` GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO codex_app;`,
+      ` GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO codex_app;` +
+      ` GRANT EXECUTE ON FUNCTION public.session_reference_visible(uuid, uuid, uuid) TO codex_app;`,
   );
   client = createDb(APP_URL);
   db = client.db;
