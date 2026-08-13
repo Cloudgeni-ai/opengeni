@@ -1,8 +1,18 @@
-import { DocumentSearchResponse, ListIndexedDocumentsResponse } from "@opengeni/contracts";
 import {
+  KNOWLEDGE_BROWSE_CURSOR_MAX_CHARS,
+  KnowledgeBrowseResponse,
+  KnowledgeGetResponse,
+  KnowledgeRecordId,
+  KnowledgeSearchResponse,
+  ListIndexedDocumentsResponse,
+} from "@opengeni/contracts";
+import {
+  browseEffectiveKnowledge,
+  getEffectiveKnowledgeRecord,
   getDocumentChunk,
   listDocumentBases,
   listEffectiveIndexedDocuments,
+  searchEffectiveKnowledge,
   searchEffectiveDocuments,
   type DocumentAccessFilter,
   type DocumentServices,
@@ -91,7 +101,6 @@ export function buildDocumentsMcpServer(
         documentServices,
         input,
         options.initiatingSubjectId,
-        false,
       ),
   );
 
@@ -103,15 +112,78 @@ export function buildDocumentsMcpServer(
       inputSchema: SearchInputSchema,
     },
     async (input) =>
-      searchContent(
+      searchKnowledge(
         db,
         accountId,
         workspaceId,
         documentServices,
         input,
         options.initiatingSubjectId,
-        true,
       ),
+  );
+
+  server.registerTool(
+    "knowledge_get",
+    {
+      description:
+        "Fetch one stable Knowledge record by the id returned from knowledge_search or knowledge_browse. Authorization and agent access are rechecked before content or links are returned.",
+      inputSchema: { id: KnowledgeRecordId },
+    },
+    async ({ id }) => {
+      const record = await getEffectiveKnowledgeRecord(db, {
+        accountId,
+        workspaceId,
+        initiatingSubjectId: options.initiatingSubjectId,
+        id,
+      });
+      return {
+        content: [
+          {
+            type: "text",
+            text: record
+              ? JSON.stringify(KnowledgeGetResponse.parse({ record }))
+              : `knowledge record not found: ${id}`,
+          },
+        ],
+        isError: !record,
+      };
+    },
+  );
+
+  server.registerTool(
+    "knowledge_browse",
+    {
+      description:
+        "Browse authorized Knowledge without crawling folders. Omit parentId to list source documents; pass a document record id to inspect its chunks. Opaque cursors are bound to this user, workspace, parent, and filters.",
+      inputSchema: {
+        parentId: KnowledgeRecordId.optional(),
+        topic: z.string().min(1).max(256).optional(),
+        sourceKinds: SearchInputSchema.sourceKinds,
+        cursor: z.string().min(1).max(KNOWLEDGE_BROWSE_CURSOR_MAX_CHARS).optional(),
+        limit: z.number().int().positive().max(50).optional(),
+      },
+    },
+    async ({ parentId, topic, sourceKinds, cursor, limit }) => ({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            KnowledgeBrowseResponse.parse(
+              await browseEffectiveKnowledge(db, {
+                accountId,
+                workspaceId,
+                initiatingSubjectId: options.initiatingSubjectId,
+                ...(parentId ? { parentId } : {}),
+                ...(topic ? { topic } : {}),
+                ...(sourceKinds ? { sourceKinds } : {}),
+                ...(cursor ? { cursor } : {}),
+                ...(limit ? { limit } : {}),
+              }),
+            ),
+          ),
+        },
+      ],
+    }),
   );
 
   server.registerTool(
@@ -295,7 +367,6 @@ async function searchContent(
     aclTags?: string[] | undefined;
   },
   initiatingSubjectId: string,
-  wrapResponse: boolean,
 ) {
   const results = await searchEffectiveDocuments(
     db,
@@ -317,8 +388,46 @@ async function searchContent(
     content: [
       {
         type: "text" as const,
-        text: JSON.stringify(wrapResponse ? DocumentSearchResponse.parse({ results }) : results),
+        text: JSON.stringify(results),
       },
+    ],
+  };
+}
+
+async function searchKnowledge(
+  db: Database,
+  accountId: string,
+  workspaceId: string,
+  documentServices: DocumentServices,
+  input: {
+    query: string;
+    baseIds?: string[] | undefined;
+    limit?: number | undefined;
+    mode?: "hybrid" | "vector" | "keyword" | undefined;
+    sourceKinds?: Parameters<typeof searchContent>[4]["sourceKinds"];
+    aclTags?: string[] | undefined;
+  },
+  initiatingSubjectId: string,
+) {
+  const response = await searchEffectiveKnowledge(
+    db,
+    {
+      accountId,
+      workspaceId,
+      query: input.query,
+      ...(input.baseIds ? { baseIds: input.baseIds } : {}),
+      ...(input.limit ? { limit: input.limit } : {}),
+      ...(input.mode ? { mode: input.mode } : {}),
+      ...(input.sourceKinds ? { sourceKinds: input.sourceKinds } : {}),
+      ...(input.aclTags ? { aclTags: input.aclTags } : {}),
+      initiatingSubjectId,
+      surface: "agent",
+    },
+    documentServices,
+  );
+  return {
+    content: [
+      { type: "text" as const, text: JSON.stringify(KnowledgeSearchResponse.parse(response)) },
     ],
   };
 }

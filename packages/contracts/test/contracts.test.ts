@@ -31,6 +31,7 @@ import {
   gitRemotePathAliases,
   gitRemoteUriAliases,
   KnowledgeMemorySearchRequest,
+  KnowledgeSearchResponse,
   MarketingDailyAnalysisTaskRequest,
   mergeToolRefs,
   McpServerConnectionRef,
@@ -1725,6 +1726,62 @@ describe("contracts", () => {
       authorityKind: "personal",
       authoritySubjectId: "user:initiator",
     });
+
+    const knowledge = KnowledgeSearchResponse.parse({
+      results: [
+        {
+          record: {
+            id: "document_chunk:00000000-0000-4000-8000-000000000011",
+            kind: "document_chunk",
+            title: "Network policy",
+            content: {
+              format: "markdown",
+              body: "Private endpoints require the approved policy.",
+              summary: null,
+              topics: ["platform"],
+              metadata: { chunkIndex: 0 },
+            },
+            authority: { kind: "personal", subjectId: "must-not-project" },
+            provenance: {
+              source: {
+                kind: "repository",
+                uri: "https://example.test/runbook",
+                externalId: "runbook-1",
+                title: "Network policy",
+                author: "Platform",
+                createdAt: null,
+                updatedAt: null,
+                version: "v1",
+              },
+              indexedAt: "2026-08-13T10:00:00.000Z",
+            },
+            lifecycle: { state: "active", updatedAt: "2026-08-13T10:00:00.000Z" },
+            quality: {
+              trust: "sourced",
+              freshnessAt: "2026-08-13T10:00:00.000Z",
+              conflict: "not_evaluated",
+              correction: "current_source_version",
+            },
+            links: [
+              {
+                relation: "parent",
+                target: {
+                  kind: "knowledge",
+                  id: "document:00000000-0000-4000-8000-000000000013",
+                },
+              },
+            ],
+          },
+          retrieval: {
+            score: 0.75,
+            matchType: "keyword",
+            vectorScore: null,
+            keywordScore: 0.75,
+          },
+        },
+      ],
+    });
+    expect(knowledge.results[0]?.record.authority).toEqual({ kind: "personal" });
   });
 
   test("accepts knowledge memory contracts", () => {

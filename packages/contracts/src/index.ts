@@ -12778,4 +12778,5 @@ export * from "./workspace-learning-policy";
 export * from "./workspace-state";
 export * from "./preference-registry";
 export * from "./scoped-knowledge";
+export * from "./knowledge";
 export * from "./canonical-human-identities";
