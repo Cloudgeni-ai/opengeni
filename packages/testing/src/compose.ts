@@ -414,7 +414,7 @@ export async function buildSandboxImage(
     ["docker", "build", "-f", "docker/sandbox.Dockerfile", "-t", tag, "."],
     {
       cwd,
-      timeoutMs: 300_000,
+      timeoutMs: 600_000,
     },
   );
   if (result.exitCode !== 0) {

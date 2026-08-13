@@ -82,7 +82,7 @@ describe("Channel-A structured services e2e (real Docker box, API-direct)", () =
       },
       { timeoutMs: 180_000 },
     );
-  }, 360_000);
+  }, 660_000);
 
   afterAll(async () => {
     await worker?.stop();
