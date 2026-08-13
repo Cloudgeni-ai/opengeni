@@ -259,6 +259,35 @@ export class SlackBotProviderError extends Error {
   }
 }
 
+export async function authorizeSlackSharedImageRead(
+  channel: {
+    isArchived: boolean;
+    isShared: boolean;
+    isExternallyShared: boolean;
+    isOrgShared: boolean;
+    isPendingExternallyShared: boolean;
+    isMpim: boolean;
+  },
+  authorizeSharedRead: (() => Promise<void>) | undefined,
+): Promise<void> {
+  if (channel.isArchived) {
+    throw new SlackBotProviderError("is_archived");
+  }
+  if (
+    !channel.isShared &&
+    !channel.isExternallyShared &&
+    !channel.isOrgShared &&
+    !channel.isPendingExternallyShared &&
+    !channel.isMpim
+  ) {
+    throw new SlackBotProviderError("slack_connect_unsupported");
+  }
+  if (!authorizeSharedRead) {
+    throw new SlackBotProviderError("slack_connect_unsupported");
+  }
+  await authorizeSharedRead();
+}
+
 const SLACK_CREDENTIAL_REJECTION_CODES = new Set([
   "account_inactive",
   "invalid_auth",
@@ -649,11 +678,18 @@ export class OpenGeniSlackBotClient {
   async prepareReactionImageDownloads(input: {
     channelId: string;
     files: readonly { id: string; name: string; title: string }[];
+    authorizeSharedRead?: () => Promise<void>;
   }): Promise<PreparedSlackReactionImage[]> {
     const result = await this.withAudit("file.content.read", async (headers) => {
-      await this.requireActiveNonSharedMemberChannel(headers, input.channelId);
+      if (input.authorizeSharedRead) {
+        const channel = await this.requireMemberChannel(headers, input.channelId);
+        await authorizeSlackSharedImageRead(channel, input.authorizeSharedRead);
+      } else {
+        await this.requireActiveNonSharedMemberChannel(headers, input.channelId);
+      }
       const prepared: PreparedSlackReactionImage[] = [];
       for (const candidate of input.files) {
+        await input.authorizeSharedRead?.();
         const payload = await this.call(headers, "files.info", { file: candidate.id });
         const fileRecord = slackRecord(payload.file);
         const file = projectFile(fileRecord);
@@ -688,6 +724,7 @@ export class OpenGeniSlackBotClient {
   /** Download and fully validate one previously authorized Slack image. */
   async downloadReactionImage(
     input: PreparedSlackReactionImage,
+    authorizeSharedRead?: () => Promise<void>,
   ): Promise<DownloadedSlackReactionImage> {
     return await this.withAudit("file.content.read", async () => {
       if (!SLACK_REACTION_IMAGE_MIME_TYPES.has(input.declaredMimeType)) {
@@ -700,6 +737,7 @@ export class OpenGeniSlackBotClient {
       ) {
         throw new SlackBotProviderError("invalid_file_size");
       }
+      await authorizeSharedRead?.();
       const response = await this.fetchPrivateFile(input.downloadUrl, "file.content.read");
       const responseContentType = normalizedContentType(response.headers.get("content-type"));
       if (!SLACK_REACTION_IMAGE_MIME_TYPES.has(responseContentType)) {
