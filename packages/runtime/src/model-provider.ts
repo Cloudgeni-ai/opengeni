@@ -14,6 +14,7 @@ export {
   CodexSubscriptionUnavailableError,
   WorkspaceGatewayUnavailableError,
   WorkspaceModelPolicyBlockedError,
+  XaiSubscriptionUnavailableError,
 } from "./model-provider-errors";
 export {
   azureOpenAIDefaultQuery,

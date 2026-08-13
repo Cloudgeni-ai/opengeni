@@ -21,8 +21,17 @@ import {
   installOrReadTurnExecutionPolicyForAttempt,
   persistAttemptToolCatalog,
   workspaceCodexSubscriptionActive,
+  acquireXaiCredentialLease,
+  heartbeatXaiCredentialLeaseUntil,
+  releaseXaiCredentialLease,
+  getXaiSessionAccountPin,
+  recordXaiSessionLastAccount,
+  updateXaiQuotaMetadata,
+  XAI_CREDENTIAL_LEASE_TTL_MS,
   acquireCodexCredentialLease,
   armCodexCapacityWait,
+  armXaiCapacityWait,
+  reconcileXaiCapacityWait,
   heartbeatCodexCredentialLeaseUntil,
   releaseCodexCredentialLease,
   CODEX_CREDENTIAL_LEASE_TTL_MS,
@@ -195,6 +204,7 @@ import {
   settingsWithEnabledCapabilityMcpServers,
   settingsWithSessionMcpServersForRun,
   settingsWithWorkspaceGatewayCredential,
+  withXaiSubscriptionProvider,
 } from "./capabilities";
 import {
   CODEX_USAGE_EXHAUSTED_PCT,
@@ -241,6 +251,15 @@ import {
   type CodexUsageHeaderSnapshot,
 } from "@opengeni/codex";
 import { mergeResourceRefs } from "./common";
+import {
+  fetchXaiSubscriptionQuota,
+  isXaiSubscriptionTransportError,
+  XaiSubscriptionReloginRequired,
+  xaiSubscriptionRequestStorage,
+  type XaiSubscriptionRequestContext,
+} from "@opengeni/xai-subscription";
+import { buildXaiTurnRequestAuthorization } from "./xai-auth";
+import { executeXaiSubscriptionImageGeneration } from "./xai-image-generation";
 import {
   assertSessionAllowsProductModel,
   defaultSessionMcpServerIds,
@@ -421,6 +440,7 @@ import {
   type SessionTurn,
   type ToolAuthNeededPayload,
   type TurnExecutionPolicyV1,
+  type XaiProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
 import { createHash, randomUUID } from "node:crypto";
 import { createModelCheckpointMemoryCollector } from "../model-checkpoint-memory-collector";
@@ -499,6 +519,7 @@ export function shouldPublishToolAuthNeededForTurn(
 export function turnExecutionPolicyBillingIdentity(policy: TurnExecutionPolicyV1): {
   externallyBilled: boolean;
   codexSubscription: boolean;
+  xaiSubscription: boolean;
 } {
   return {
     externallyBilled: policy.billing.metering === "external",
@@ -506,6 +527,10 @@ export function turnExecutionPolicyBillingIdentity(policy: TurnExecutionPolicyV1
       policy.providerId === "codex-subscription" &&
       policy.credentialSource.kind === "connected_subscription" &&
       policy.credentialSource.provider === "codex",
+    xaiSubscription:
+      policy.providerId === "supergrok-subscription" &&
+      policy.credentialSource.kind === "connected_subscription" &&
+      policy.credentialSource.provider === "xai",
   };
 }
 
@@ -2255,9 +2280,12 @@ export function structuredToolTransportForTurn(
   resolvedModel: { provider: { kind: RegistryProviderKind } } | null,
 ): boolean {
   if (!resolvedModel) return true;
-  return !["codex-subscription", "vercel-gateway-managed", "vercel-gateway-workspace"].includes(
-    resolvedModel.provider.kind,
-  );
+  return ![
+    "codex-subscription",
+    "xai-subscription",
+    "vercel-gateway-managed",
+    "vercel-gateway-workspace",
+  ].includes(resolvedModel.provider.kind);
 }
 
 /**
@@ -2828,6 +2856,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     );
     const sandboxOperationObserver = sandboxOperationMetricObserver(observability);
     let isCodexTurn = false;
+    let isXaiTurn = false;
     let isExternallyBilledTurn = false;
     let executionGeneration = 0;
     let providerRecoveryCount = 0;
@@ -2959,6 +2988,83 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       }, 60_000);
       codexLeaseHeartbeatTimer.unref?.();
     };
+    let xaiLeaseHeld = false;
+    let xaiLeaseLost = false;
+    let xaiLeaseSubjectId: string | null = null;
+    let xaiLeaseHolderId: string | null = null;
+    let xaiLeaseGeneration: number | null = null;
+    let xaiLeaseConfirmedUntilMs: number | null = null;
+    let xaiLeaseHeartbeatInFlight = false;
+    let xaiLeaseHeartbeatTimer: ReturnType<typeof setInterval> | undefined;
+    const markXaiLeaseLost = (reason: "deadline" | "not_found"): void => {
+      if (xaiLeaseLost) return;
+      xaiLeaseLost = true;
+      observability.warn("xAI credential lease was lost during an active turn", {
+        workspaceId: input.workspaceId,
+        turnId,
+        reason,
+      });
+    };
+    const renewXaiLease = async (): Promise<void> => {
+      if (
+        !turnId ||
+        !xaiLeaseHeld ||
+        !xaiLeaseSubjectId ||
+        !xaiLeaseHolderId ||
+        xaiLeaseGeneration === null ||
+        xaiLeaseLost
+      ) {
+        return;
+      }
+      if (codexCredentialLeaseDeadlineExpired(xaiLeaseConfirmedUntilMs)) {
+        markXaiLeaseLost("deadline");
+        return;
+      }
+      if (xaiLeaseHeartbeatInFlight) return;
+      xaiLeaseHeartbeatInFlight = true;
+      const renewalStartedAtMs = performance.now();
+      try {
+        const renewedUntil = await heartbeatXaiCredentialLeaseUntil(db, {
+          workspaceId: input.workspaceId,
+          subjectId: xaiLeaseSubjectId,
+          turnId,
+          holderId: xaiLeaseHolderId,
+          generation: xaiLeaseGeneration,
+          leaseTtlMs: XAI_CREDENTIAL_LEASE_TTL_MS,
+        });
+        if (!renewedUntil) {
+          markXaiLeaseLost("not_found");
+        } else {
+          xaiLeaseConfirmedUntilMs = renewalStartedAtMs + XAI_CREDENTIAL_LEASE_TTL_MS;
+        }
+      } catch (error) {
+        if (codexCredentialLeaseDeadlineExpired(xaiLeaseConfirmedUntilMs)) {
+          markXaiLeaseLost("deadline");
+          return;
+        }
+        observability.warn("xAI credential lease heartbeat failed", {
+          workspaceId: input.workspaceId,
+          turnId,
+          ...safeErrorDiagnostic(error),
+        });
+      } finally {
+        xaiLeaseHeartbeatInFlight = false;
+      }
+    };
+    const startXaiLeaseHeartbeat = (): void => {
+      if (!turnId || xaiLeaseHeartbeatTimer) return;
+      xaiLeaseHeartbeatTimer = setInterval(() => {
+        void renewXaiLease();
+      }, 60_000);
+      xaiLeaseHeartbeatTimer.unref?.();
+    };
+    const renewServingCredentialLease = async (
+      reason: "timer" | "runtime_event" | "model_usage",
+    ): Promise<void> => {
+      await renewCodexLease(reason);
+      await renewXaiLease();
+    };
+    const servingCredentialLeaseLost = (): boolean => codexLeaseLost || xaiLeaseLost;
     // P1.2 ownership inversion: when sandboxOwnershipEnabled, the turn resolves
     // the one box by id from the group lease and injects it NON-OWNED into the
     // run. null when the flag is off (byte-for-byte the legacy build-and-discard
@@ -3908,6 +4014,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // The Codex account this turn runs on (pin > workspace active), resolved once
     // a codex-billed turn is confirmed and threaded into the token resolver below.
     let effectiveCodexCredentialId: string | null = null;
+    let effectiveXaiCredentialId: string | null = null;
+    let xaiAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1 | null = null;
+    let xaiRequestContext: XaiSubscriptionRequestContext | null = null;
+    let xaiCredentialQuarantined = false;
     // The session's Codex credential BEFORE this turn resolved its own — captured
     // before recordSessionActiveCodexCredential overwrites the durable pointer, so
     // a per-call usage log can report whether the serving account CHANGED since the
@@ -3975,10 +4085,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         mcpSettings,
         codexSubscriptionActive,
       );
+      const xaiSettings = codexSettings.supergrokSubscriptionEnabled
+        ? withXaiSubscriptionProvider(codexSettings)
+        : codexSettings;
       const capabilitySettings = await settingsWithWorkspaceGatewayCredential(
         db,
         input.workspaceId,
-        codexSettings,
+        xaiSettings,
       );
       const codexAppsCredentialId = capabilitySettings.codexConnectedAppsEnabled
         ? await resolveCodexAppsCredentialIdForRun(db, input.workspaceId)
@@ -4017,6 +4130,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const billingIdentity = turnExecutionPolicyBillingIdentity(turnExecutionPolicy);
       isExternallyBilledTurn = billingIdentity.externallyBilled;
       isCodexTurn = billingIdentity.codexSubscription;
+      isXaiTurn = billingIdentity.xaiSubscription;
       triggerEventId = turn.triggerEventId;
       const trigger = await getSessionEvent(db, input.workspaceId, triggerEventId);
       if (!trigger) {
@@ -4872,6 +4986,169 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         }
       }
 
+      if (isXaiTurn) {
+        const authoritySnapshot = turn.xaiProviderAccountAuthoritySnapshot;
+        xaiAuthoritySnapshot = authoritySnapshot;
+        const subjectId =
+          authoritySnapshot.scope === "user"
+            ? turn.initiatingHumanSubjectId
+            : "worker:xai-workspace";
+        if (!subjectId) {
+          throw new Error("User-scoped SuperGrok work has no frozen initiating human");
+        }
+        const sessionPin = await getXaiSessionAccountPin(db, {
+          workspaceId: input.workspaceId,
+          subjectId,
+          sessionId: input.sessionId,
+          authoritySnapshot,
+        });
+        const leaseStartedAtMs = performance.now();
+        const leased = await acquireXaiCredentialLease(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId,
+          turnId: turn.id,
+          holderId: dispatchId,
+          authoritySnapshot,
+          pinnedCredentialId: sessionPin?.pinnedCredentialId ?? null,
+        });
+        effectiveXaiCredentialId = leased.credentialId;
+        xaiLeaseSubjectId = subjectId;
+        xaiLeaseHolderId = leased.holderId;
+        xaiLeaseGeneration = leased.generation;
+        xaiLeaseConfirmedUntilMs = leased.leasedUntil
+          ? leaseStartedAtMs + XAI_CREDENTIAL_LEASE_TTL_MS
+          : null;
+        xaiLeaseHeld =
+          effectiveXaiCredentialId !== null &&
+          leased.holderId !== null &&
+          leased.generation !== null &&
+          xaiLeaseConfirmedUntilMs !== null;
+        if (!effectiveXaiCredentialId) {
+          const connected = leased.accounts.length;
+          const allocatorEnabled = leased.accounts.filter(
+            (account) => account.allocatorEnabled,
+          ).length;
+          if (connected === 0) {
+            throw Object.assign(
+              new Error("No SuperGrok subscription account is connected for this authority scope"),
+              { code: "xai_not_connected" },
+            );
+          }
+          if (turn.source === "compaction") {
+            if (
+              !(await settle!({
+                events: [
+                  {
+                    type: "turn.cancelled",
+                    payload: {
+                      maintenance: "context_compaction",
+                      reason: "xai_capacity_unavailable",
+                      requestPreserved: true,
+                    },
+                  },
+                  { type: "session.status.changed", payload: { status: "idle" } },
+                ],
+                turnStatus: "cancelled",
+                sessionStatus: "idle",
+                activeTurnId: null,
+              }))
+            ) {
+              return claimedResult({ status: "cancelled" });
+            }
+            turnMetricOutcome = "cancelled";
+            activityStatus = "idle";
+            return claimedResult({ status: "idle", deferredUntilWake: true });
+          }
+          const goal = await getSessionGoal(db, input.workspaceId, input.sessionId).catch(
+            () => null,
+          );
+          const activeGoal = goal?.status === "active" ? goal : null;
+          const now = new Date();
+          const futureResets = leased.accounts
+            .map((account) => account.exhaustedUntil)
+            .filter((date): date is Date => date !== null && date > now);
+          const earliestResetAt = futureResets.length
+            ? new Date(Math.min(...futureResets.map((date) => date.getTime())))
+            : null;
+          const error =
+            allocatorEnabled === 0
+              ? "All connected SuperGrok subscription accounts are disabled for allocation"
+              : "All connected SuperGrok subscription accounts are temporarily unavailable";
+          const armed = await armXaiCapacityWait(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId,
+            sessionId: input.sessionId,
+            turnId: turn.id,
+            attemptId: input.attemptId,
+            workflowId: input.workflowId,
+            authoritySnapshot,
+            goalId: activeGoal?.id ?? null,
+            goalVersion: activeGoal?.version ?? null,
+            earliestResetAt,
+            failurePayload: {
+              error,
+              code: allocatorEnabled === 0 ? "xai_allocator_disabled" : "xai_capacity_unavailable",
+              detail: "waiting for an eligible account, reconnect, pin change, or quota reset",
+            },
+          });
+          if (armed.action === "waiting") {
+            await publishDurableSessionEvents(
+              bus,
+              input.workspaceId,
+              input.sessionId,
+              armed.events,
+            );
+            turnMetricOutcome = "recovering";
+            activityStatus = "waiting_capacity";
+            return claimedResult({
+              status: "waiting_capacity",
+              capacityWait: {
+                provider: "xai",
+                waiterId: armed.waiter.id,
+                generation: armed.waiter.generation,
+                nextCheckAt: armed.waiter.nextCheckAt.toISOString(),
+                wakeRevision: armed.waiter.wakeRevision,
+              },
+            });
+          }
+          if (
+            !(await settle!({
+              events: [
+                {
+                  type: "turn.failed",
+                  payload: {
+                    error,
+                    code: "xai_capacity_wait_stale",
+                    retryable: false,
+                    recovery: "user_message",
+                  },
+                },
+                { type: "session.status.changed", payload: { status: "idle" } },
+              ],
+              turnStatus: "failed",
+              sessionStatus: "idle",
+              activeTurnId: null,
+            }))
+          ) {
+            return claimedResult({ status: "cancelled" });
+          }
+          turnMetricOutcome = "failed";
+          activityStatus = "idle";
+          return claimedResult({ status: "idle" });
+        }
+        if (xaiLeaseHeld) startXaiLeaseHeartbeat();
+        await recordXaiSessionLastAccount(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId,
+          sessionId: input.sessionId,
+          authoritySnapshot,
+          credentialId: effectiveXaiCredentialId,
+        });
+      }
+
       // Pack-scoped runtime: enabled packs may declare the sandbox image this
       // workspace's sessions run in and skills for the sandbox skill index.
       // Resolved after turn.started so a composition conflict (two enabled
@@ -5181,8 +5458,35 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               };
             })()
           : null;
+      if (resolvedModel?.provider.kind === "xai-subscription") {
+        if (!effectiveXaiCredentialId || !xaiLeaseSubjectId) {
+          throw new Error("SuperGrok subscription execution has no leased credential");
+        }
+        let xaiModelRequestSequence = 0;
+        const authorization = await buildXaiTurnRequestAuthorization({
+          db,
+          settings: runSettings,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: xaiLeaseSubjectId,
+          sessionId: input.sessionId,
+          turnId: turn.id,
+          credentialId: effectiveXaiCredentialId,
+          authoritySnapshot: turn.xaiProviderAccountAuthoritySnapshot,
+          hostedSearch: {
+            webSearch: runSettings.webSearchEnabled,
+            xSearch: runSettings.webSearchEnabled,
+          },
+          nextRequestId: () => `${dispatchId}:xai:${++xaiModelRequestSequence}`,
+        });
+        xaiRequestContext = authorization.context;
+      }
       const withCodex = <T>(fn: () => Promise<T>): Promise<T> =>
         codexContext ? codexRequestStorage.run(codexContext, fn) : fn();
+      const withProviderRequestContext = <T>(fn: () => Promise<T>): Promise<T> =>
+        xaiRequestContext
+          ? xaiSubscriptionRequestStorage.run(xaiRequestContext, fn)
+          : withCodex(fn);
       const withCodexRemoteCompaction = <T>(fn: () => Promise<T>): Promise<T> =>
         withCodex(() =>
           withCodexRequestOverrides(
@@ -5226,15 +5530,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           servingCredentialId: effectiveCodexCredentialId,
           priorSessionCredentialId: priorSessionCodexCredentialId,
           emittedSourceKeys: emittedModelUsageSourceKeys,
-          renewLease: () => renewCodexLease("model_usage"),
-          leaseLost: () => codexLeaseLost,
-          leaseLostMessage: "Codex credential lease expired during context compaction",
+          renewLease: () => renewServingCredentialLease("model_usage"),
+          leaseLost: servingCredentialLeaseLost,
+          leaseLostMessage: "Provider credential lease expired during context compaction",
         });
       };
       const compactionSummarizerFor = (systemInstructions?: string) =>
         resolvedModel
           ? (s: Settings, m: Array<Record<string, unknown>>) =>
-              withCodex(() =>
+              withProviderRequestContext(() =>
                 summarizeContextForCompaction(s, m, {
                   client: resolvedModel.client,
                   provider: resolvedModel.provider,
@@ -6721,6 +7025,40 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           };
         }
 
+        if (resolvedModel?.provider.kind === "xai-subscription") {
+          const xaiImageContext = xaiRequestContext;
+          const xaiImageCredentialId = effectiveXaiCredentialId;
+          if (!xaiImageContext || !xaiImageCredentialId) {
+            throw new Error("SuperGrok image generation requires a connected subscription account");
+          }
+          return {
+            imageGeneration: {
+              kind: "provider_adapter",
+              execute: async ({ prompt, references }, { toolCallId }) => {
+                const resolvedReferences = await resolveImageReferences(references);
+                const receipt = await executeXaiSubscriptionImageGeneration({
+                  db,
+                  objectStorage,
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  turnId: turn.id,
+                  attemptId: input.attemptId,
+                  toolCallId,
+                  prompt,
+                  references: resolvedReferences,
+                  credentialId: xaiImageCredentialId,
+                  xaiContext: xaiImageContext,
+                  ...(runtimeCancellationSignal ? { abortSignal: runtimeCancellationSignal } : {}),
+                });
+                generatedImageReceiptsByArtifactId.set(receipt.artifact.artifactId, receipt);
+                await materializeGeneratedImage(receipt);
+                return receipt;
+              },
+            },
+          };
+        }
+
         const gatewayResolution = resolveModelProvider(
           capabilitySettings,
           WORKSPACE_GATEWAY_PROVIDER_ID,
@@ -7787,9 +8125,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     preparedInput: runInput!,
                     ...(fileDownloadsMaterializedForRun ? { fileDownloadsMaterialized: true } : {}),
                     onRuntimeEvent: async (event) => {
-                      await renewCodexLease("runtime_event");
-                      if (codexLeaseLost) {
-                        throw new Error("Codex credential lease expired during sandbox setup");
+                      await renewServingCredentialLease("runtime_event");
+                      if (servingCredentialLeaseLost()) {
+                        throw new Error("Provider credential lease expired during sandbox setup");
                       }
                       await publish!([{ type: event.type, payload: event.payload }], true);
                     },
@@ -7817,9 +8155,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             signal: runtimeCancellationSignal,
             sandboxEnvironment,
             onRuntimeEvent: async (event) => {
-              await renewCodexLease("runtime_event");
-              if (codexLeaseLost) {
-                throw new Error("Codex credential lease expired during the active turn");
+              await renewServingCredentialLease("runtime_event");
+              if (servingCredentialLeaseLost()) {
+                throw new Error("Provider credential lease expired during the active turn");
               }
               await publish!([{ type: event.type, payload: event.payload }], true);
             },
@@ -7896,7 +8234,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         if (codexLeaseLost) {
           throw new Error("Codex credential lease expired before the model run");
         }
-        stream = await withCodex(runStreamOnce);
+        if (xaiLeaseLost) {
+          throw new Error("xAI credential lease expired before the model run");
+        }
+        stream = await withProviderRequestContext(runStreamOnce);
         // Bounded provider label for the streaming SLIs — the resolved registry
         // provider id (or the built-in OpenAI/Azure provider), never a raw
         // user-supplied model string.
@@ -7957,9 +8298,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               servingCredentialId: effectiveCodexCredentialId,
               priorSessionCredentialId: priorSessionCodexCredentialId,
               emittedSourceKeys: emittedModelUsageSourceKeys,
-              renewLease: () => renewCodexLease("model_usage"),
-              leaseLost: () => codexLeaseLost,
-              leaseLostMessage: "Codex credential lease expired during the active turn",
+              renewLease: () => renewServingCredentialLease("model_usage"),
+              leaseLost: servingCredentialLeaseLost,
+              leaseLostMessage: "Provider credential lease expired during the active turn",
               setLastInputTokens: setLastInputTokensFenced,
             });
             assertModelResponseLatencyMode({
@@ -8253,9 +8594,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             });
             let aggregateAuthoritative = false;
             await recordCompletedModelCallBeforeOwnershipFences({
-              renewLease: () => renewCodexLease("model_usage"),
-              leaseLost: () => codexLeaseLost,
-              leaseLostMessage: "Codex credential lease expired during the active turn",
+              renewLease: () => renewServingCredentialLease("model_usage"),
+              leaseLost: servingCredentialLeaseLost,
+              leaseLostMessage: "Provider credential lease expired during the active turn",
               recordUsage: async () => {
                 const billing = await recordModelUsageAndDebitCredits(settings, db, {
                   accountId: input.accountId,
@@ -8983,6 +9324,29 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       ) {
         return await settleLostCodexAttempt(turnId, codexLeaseHolderId, codexLeaseGeneration);
       }
+      if (xaiLeaseLost && isXaiTurn && publish && turnId && turnStartedPublished) {
+        await flushRuntimeBatcher();
+        await reconcileConversationTruth({ requireDurable: true });
+        const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+          sessionId: input.sessionId,
+          turnId,
+          triggerEventId: triggerEventId!,
+          attemptId: input.attemptId,
+          reason: "xai_lease_lost",
+          detail: { provider: "supergrok-subscription" },
+        });
+        if (recovery.action === "stale") {
+          acknowledgeLostAttemptOwnership();
+          activityStatus = "cancelled";
+          turnMetricOutcome = "cancelled";
+          return claimedResult({ status: "cancelled" });
+        }
+        acknowledgeRecoveryQuiescence();
+        await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
+        activityStatus = "recovering";
+        turnMetricOutcome = "recovering";
+        return claimedResult({ status: "recovering" });
+      }
       // Definitive Codex credential/account refusals are the only provider
       // errors that may walk the pool. This is an explicit checkpoint + SAME
       // turn recovery, never an SDK/Temporal blind retry. A network break,
@@ -9165,6 +9529,143 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             }
           }
         }
+      }
+      const xaiCredentialFailure =
+        isXaiTurn && effectiveXaiCredentialId ? classifyXaiCredentialFailure(error) : null;
+      if (
+        xaiCredentialFailure &&
+        effectiveXaiCredentialId &&
+        xaiAuthoritySnapshot &&
+        xaiLeaseSubjectId &&
+        xaiLeaseHolderId &&
+        xaiLeaseGeneration !== null &&
+        publish &&
+        turnId &&
+        turnStartedPublished
+      ) {
+        await flushRuntimeBatcher();
+        await reconcileConversationTruth({ requireDurable: true });
+        const goal = await getSessionGoal(db, input.workspaceId, input.sessionId).catch(() => null);
+        const activeGoal = goal?.status === "active" ? goal : null;
+        const now = new Date();
+        const cooldownUntil =
+          xaiCredentialFailure.kind === "rate_limit"
+            ? new Date(now.getTime() + Math.max(1, xaiCredentialFailure.cooldownMs ?? 60_000))
+            : null;
+        const failurePayload = {
+          error:
+            xaiCredentialFailure.kind === "auth"
+              ? "The serving SuperGrok account requires reconnection"
+              : xaiCredentialFailure.kind === "forbidden"
+                ? "The serving SuperGrok account is not authorized for this request"
+                : "The serving SuperGrok account is temporarily rate limited",
+          code:
+            xaiCredentialFailure.kind === "auth"
+              ? "xai_relogin_required"
+              : xaiCredentialFailure.kind === "forbidden"
+                ? "xai_account_forbidden"
+                : "xai_account_rate_limited",
+          detail: "the same accepted turn is waiting for another eligible account",
+        };
+        const armed = await armXaiCapacityWait(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: xaiLeaseSubjectId,
+          sessionId: input.sessionId,
+          turnId,
+          attemptId: input.attemptId,
+          workflowId: input.workflowId,
+          authoritySnapshot: xaiAuthoritySnapshot,
+          goalId: activeGoal?.id ?? null,
+          goalVersion: activeGoal?.version ?? null,
+          earliestResetAt: cooldownUntil,
+          failurePayload,
+          leaseFence: {
+            holderId: xaiLeaseHolderId,
+            generation: xaiLeaseGeneration,
+          },
+          credentialQuarantine:
+            xaiCredentialFailure.kind === "auth"
+              ? {
+                  kind: "status",
+                  status: "needs_relogin",
+                  lastError: "model request remained unauthorized after refresh",
+                }
+              : xaiCredentialFailure.kind === "forbidden"
+                ? {
+                    kind: "status",
+                    status: "error",
+                    lastError: "model request was forbidden for this credential",
+                  }
+                : { kind: "cooldown", until: cooldownUntil! },
+          now,
+        });
+        if (armed.action === "waiting") {
+          xaiLeaseHeld = false;
+          xaiCredentialQuarantined = true;
+          await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, armed.events);
+          const evaluated = await reconcileXaiCapacityWait(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            waiterId: armed.waiter.id,
+            generation: armed.waiter.generation,
+            now,
+          });
+          if (evaluated.events.length > 0) {
+            await publishDurableSessionEvents(
+              bus,
+              input.workspaceId,
+              input.sessionId,
+              evaluated.events,
+            );
+          }
+          activityError = error;
+          if (evaluated.action === "resumed") {
+            activityStatus = "recovering";
+            turnMetricOutcome = "recovering";
+            return claimedResult({ status: "recovering" });
+          }
+          if (evaluated.action === "waiting") {
+            activityStatus = "waiting_capacity";
+            turnMetricOutcome = "recovering";
+            return claimedResult({
+              status: "waiting_capacity",
+              capacityWait: {
+                provider: "xai",
+                waiterId: evaluated.waiter.id,
+                generation: evaluated.waiter.generation,
+                nextCheckAt: evaluated.waiter.nextCheckAt.toISOString(),
+                wakeRevision: evaluated.waiter.wakeRevision,
+              },
+            });
+          }
+          acknowledgeLostAttemptOwnership();
+          activityStatus = "cancelled";
+          turnMetricOutcome = "cancelled";
+          return claimedResult({ status: "cancelled" });
+        }
+
+        const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+          sessionId: input.sessionId,
+          turnId,
+          triggerEventId: triggerEventId!,
+          attemptId: input.attemptId,
+          reason: "xai_credential_recheck",
+          detail: failurePayload,
+        });
+        if (recovery.action === "stale") {
+          acknowledgeLostAttemptOwnership();
+          activityStatus = "cancelled";
+          turnMetricOutcome = "cancelled";
+          return claimedResult({ status: "cancelled" });
+        }
+        acknowledgeRecoveryQuiescence();
+        await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
+        activityStatus = "recovering";
+        turnMetricOutcome = "recovering";
+        activityError = error;
+        return claimedResult({ status: "recovering" });
       }
       // A ChatGPT/Codex usage cap (429 usage_limit_reached) is account state,
       // NOT an agent failure: surface the precise, actionable message (so the
@@ -9977,6 +10478,57 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           );
           codexLeaseHeld = false;
         }
+        if (
+          effectiveXaiCredentialId &&
+          xaiLeaseSubjectId &&
+          xaiRequestContext &&
+          !xaiCredentialQuarantined
+        ) {
+          const quota = await waitForTurnFinalizerStep(
+            fetchXaiSubscriptionQuota({ context: xaiRequestContext }).catch(() => null),
+            finalizerSignal,
+          );
+          if (quota) {
+            await waitForTurnFinalizerStep(
+              updateXaiQuotaMetadata(db, {
+                workspaceId: input.workspaceId,
+                subjectId: xaiLeaseSubjectId,
+                credentialId: effectiveXaiCredentialId,
+                quotaUsedPercent: quota.usedPercent,
+                quotaResetAt: quota.period?.end ?? null,
+                quotaCheckedAt: quota.checkedAt,
+                exhaustedUntil:
+                  quota.usedPercent !== null && quota.usedPercent >= 100
+                    ? (quota.period?.end ?? null)
+                    : null,
+              }).catch(() => undefined),
+              finalizerSignal,
+            );
+          }
+        }
+        if (xaiLeaseHeartbeatTimer) {
+          clearInterval(xaiLeaseHeartbeatTimer);
+          xaiLeaseHeartbeatTimer = undefined;
+        }
+        if (
+          xaiLeaseHeld &&
+          turnId &&
+          xaiLeaseSubjectId &&
+          xaiLeaseHolderId &&
+          xaiLeaseGeneration !== null
+        ) {
+          await waitForTurnFinalizerStep(
+            releaseXaiCredentialLease(db, {
+              workspaceId: input.workspaceId,
+              subjectId: xaiLeaseSubjectId,
+              turnId,
+              holderId: xaiLeaseHolderId,
+              generation: xaiLeaseGeneration,
+            }).catch(() => undefined),
+            finalizerSignal,
+          );
+          xaiLeaseHeld = false;
+        }
         // Workbench v2 turn-end workspace capture — runs FIRST in
         // the turn-end finally, while the box is MAXIMALLY ALIVE. The agent's last
         // tool ran before this finally, so /workspace is already final; capture is
@@ -10352,6 +10904,51 @@ export function isTransientProviderError(error: unknown): boolean {
   return /overloaded|an error occurred while processing your request|connection error|service unavailable|bad gateway|gateway timeout/i.test(
     message,
   );
+}
+
+export type XaiCredentialFailure = {
+  kind: "auth" | "forbidden" | "rate_limit";
+  cooldownMs: number | null;
+};
+
+/**
+ * Only definitive SuperGrok account refusals may move the same logical turn to
+ * another credential. The marked transport response proves inference was
+ * rejected before a stream began; refresh relogin is equally definitive.
+ */
+export function classifyXaiCredentialFailure(error: unknown): XaiCredentialFailure | null {
+  let relogin: unknown = error;
+  for (let depth = 0; depth < 6 && relogin && typeof relogin === "object"; depth += 1) {
+    if (relogin instanceof XaiSubscriptionReloginRequired) {
+      return { kind: "auth", cooldownMs: null };
+    }
+    relogin = (relogin as Record<string, unknown>).cause;
+  }
+  if (!isXaiSubscriptionTransportError(error)) return null;
+  let current: unknown = error;
+  for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
+    const value = current as Record<string, unknown>;
+    const body =
+      value.error && typeof value.error === "object"
+        ? (value.error as Record<string, unknown>)
+        : null;
+    const status = Number(value.status ?? value.statusCode ?? body?.status ?? body?.statusCode);
+    const code = String(value.code ?? body?.code ?? "").toLowerCase();
+    if (status === 401 || code === "unauthorized" || code === "invalid_token") {
+      return { kind: "auth", cooldownMs: null };
+    }
+    if (status === 403) {
+      return { kind: "forbidden", cooldownMs: null };
+    }
+    if (status === 429 || code === "rate_limit_exceeded" || code === "too_many_requests") {
+      return {
+        kind: "rate_limit",
+        cooldownMs: providerRetryAfterMs(error) ?? PROVIDER_BACKPRESSURE_DELAY_MS,
+      };
+    }
+    current = value.cause;
+  }
+  return null;
 }
 
 export function agentRunFailurePayload(

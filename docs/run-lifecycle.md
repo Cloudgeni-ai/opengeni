@@ -277,6 +277,15 @@ routes upstream as `gpt-5.6-sol`. Billing and Codex allocator eligibility are
 derived from the explicit accepted attribution, never from a model prefix or a
 mutable active-credential snapshot; malformed present metadata fails closed.
 
+SuperGrok/xAI connected-subscription work separately freezes an identifier-free
+`workspace | user` provider-account authority snapshot. Workspace is the
+default shared pool. User scope is explicit/private and remains bound to the
+exact initiating human. Send, Steer, edits, children, goal continuations,
+schedules, compaction, and internal updates copy only their exact causal
+snapshot; runtime never substitutes the session creator, current browser user,
+worker identity, or another member's account. See
+[`supergrok-subscription.md`](supergrok-subscription.md).
+
 The same accepted logical-turn boundary governs prompt policy and structured
 preferences. After claim, the owning attempt installs immutable instruction-
 policy and preference-descriptor snapshots reconstructed from lifecycle events
@@ -352,6 +361,13 @@ failures never rotate or blindly replay. The allocator, strict workspace scope,
 five-hour reset semantics, and rollout fence are canonical in
 [`codex-subscription-rotation.md`](codex-subscription-rotation.md).
 
+SuperGrok/xAI uses the same provider-tagged durable same-turn wait protocol but
+with its explicit workspace-or-user authority pool. A definitive typed or
+marked 401, 403, or 429 may quarantine only the exact leased credential while
+the attempt is atomically closed and preserved; ambiguous 5xx, partial streams,
+and unrelated errors never walk the pool. See
+[`supergrok-subscription.md`](supergrok-subscription.md).
+
 When every allocator-enabled Codex credential is unavailable, this recovery
 boundary becomes a durable capacity wait for the current logical turn, whether
 or not the session has an active goal. The worker atomically closes the exact
@@ -373,7 +389,10 @@ to `recovering`; ordinary attempt admission then claims the same turn id with a
 new attempt before provider/model/tool/billing work starts. It creates no
 system update, new queue turn, user message, usage event, or goal continuation,
 and it does not independently settle/requeue the blocked turn, poll with
-inference, or redeem a reset/boost entitlement.
+inference, redeem a reset/boost entitlement, create a consent prompt, or borrow
+another user's account. For SuperGrok, account reconnect,
+allocator/rotation changes, and exact lease release durably advance the same
+waiter plus workflow-wake outbox.
 
 Ordinary prompts queued during the wait remain behind the current turn. Pause
 leaves the waiter intact and lets the workflow close; Resume's revisioned

@@ -116,6 +116,14 @@ import type {
   CodexConnectStart,
   CodexUsage,
   CodexUsageMap,
+  SuperGrokAccount,
+  SuperGrokAccountsResponse,
+  SuperGrokAccountScope,
+  SuperGrokAllocatorUpdate,
+  SuperGrokConnectionStatus,
+  SuperGrokConnectPoll,
+  SuperGrokConnectStart,
+  SuperGrokRotationSettings,
   BillingSummary,
   BillingUsageResponse,
   InsightsRange,
@@ -2366,7 +2374,10 @@ export class OpenGeniClient {
     );
     assertApiContractResponse(response);
     if (!response.ok) {
-      throw await apiErrorFromResponse(response, { method: "GET", correlationId });
+      throw await apiErrorFromResponse(response, {
+        method: "GET",
+        correlationId,
+      });
     }
     if (!response.body) {
       throw new OpenGeniApiError(response.status, "SSE response did not include a readable body");
@@ -5758,6 +5769,97 @@ export class OpenGeniClient {
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/codex-account`,
       { target },
     );
+  }
+
+  // --- SuperGrok/xAI connected subscriptions ------------------------------------------------------
+
+  async supergrokStatus(workspaceId: string): Promise<SuperGrokConnectionStatus> {
+    return await this.requestJson<SuperGrokConnectionStatus>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/supergrok/status`,
+    );
+  }
+
+  async supergrokConnectStart(
+    workspaceId: string,
+    scope: SuperGrokAccountScope = "workspace",
+  ): Promise<SuperGrokConnectStart> {
+    return await this.requestJson<SuperGrokConnectStart>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/supergrok/connect/start`,
+      { scope },
+    );
+  }
+
+  async supergrokConnectPoll(workspaceId: string, state: string): Promise<SuperGrokConnectPoll> {
+    return await this.requestJson<SuperGrokConnectPoll>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/supergrok/connect/poll`,
+      { state },
+    );
+  }
+
+  async listSuperGrokAccounts(workspaceId: string): Promise<SuperGrokAccountsResponse> {
+    return await this.requestJson<SuperGrokAccountsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/supergrok/accounts`,
+    );
+  }
+
+  async activateSuperGrokAccount(
+    workspaceId: string,
+    accountId: string,
+  ): Promise<{ activated: boolean; accountId: string }> {
+    return await this.requestJson<{ activated: boolean; accountId: string }>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/supergrok/accounts/${accountId}/activate`,
+      {},
+    );
+  }
+
+  async setSuperGrokRotationSettings(
+    workspaceId: string,
+    patch: { rotationEnabled: boolean },
+  ): Promise<SuperGrokRotationSettings> {
+    return await this.requestJson<SuperGrokRotationSettings>(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/supergrok/settings`,
+      patch,
+    );
+  }
+
+  async setSuperGrokAccountAllocator(
+    workspaceId: string,
+    accountId: string,
+    input: { enabled: boolean; expectedVersion: number },
+  ): Promise<SuperGrokAllocatorUpdate> {
+    return await this.requestJson<SuperGrokAllocatorUpdate>(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/supergrok/accounts/${accountId}/allocator`,
+      input,
+    );
+  }
+
+  async renameSuperGrokAccount(
+    workspaceId: string,
+    accountId: string,
+    label: string | null,
+  ): Promise<SuperGrokAccount> {
+    return await this.requestJson<SuperGrokAccount>(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/supergrok/accounts/${accountId}`,
+      { label },
+    );
+  }
+
+  async disconnectSuperGrokAccount(
+    workspaceId: string,
+    accountId: string,
+  ): Promise<{ disconnected: boolean; newActiveId: string | null }> {
+    return await this.requestJson<{
+      disconnected: boolean;
+      newActiveId: string | null;
+    }>("DELETE", `/v1/workspaces/${workspaceId}/supergrok/accounts/${accountId}`, {});
   }
 
   /** Contract-checked JSON transport shared by opt-in typed SDK clients. */

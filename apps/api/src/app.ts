@@ -4,6 +4,7 @@ import {
   configuredAllowedReasoningEfforts,
   configuredModels,
   withCodexCatalogProvider,
+  withXaiSubscriptionCatalogProvider,
 } from "@opengeni/config";
 import {
   ClientConfig,
@@ -72,6 +73,7 @@ import { allowedCorsOrigin } from "./http/cors";
 import { registerCapabilityRoutes } from "./routes/capabilities";
 import { registerCatalogAssetRoutes } from "./routes/catalog-assets";
 import { registerCodexRoutes } from "./routes/codex";
+import { registerSuperGrokRoutes } from "./routes/supergrok";
 import { registerConnectionRoutes } from "./routes/connections";
 import { registerDocumentRoutes } from "./routes/documents";
 import { registerEnrollmentRoutes } from "./routes/enrollments";
@@ -466,9 +468,12 @@ export function createAppComposition(deps: AppDependencies): {
 
   app.get("/v1/config/client", async (c) => {
     c.header("cache-control", "no-store");
-    const catalogSettings = deps.settings.codexSubscriptionEnabled
+    const codexCatalogSettings = deps.settings.codexSubscriptionEnabled
       ? withCodexCatalogProvider(deps.settings)
       : deps.settings;
+    const catalogSettings = deps.settings.supergrokSubscriptionEnabled
+      ? withXaiSubscriptionCatalogProvider(codexCatalogSettings)
+      : codexCatalogSettings;
     return c.json(
       ClientConfig.parse({
         deploymentRevision: deps.settings.deploymentRevision,
@@ -662,6 +667,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerSessionRoutes(app, routeDeps);
   registerScheduledTaskRoutes(app, routeDeps);
   registerCodexRoutes(app, routeDeps);
+  registerSuperGrokRoutes(app, routeDeps);
   registerTranscriptionRoutes(app, routeDeps);
   registerEditableArtifactRoutes(app, routeDeps);
   registerVideoGenerationRoutes(app, routeDeps);
@@ -1015,6 +1021,22 @@ const routeLabelPatterns: Array<{
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/codex\/status$/,
     label: "/v1/workspaces/:workspaceId/codex/status",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/supergrok\/connect\/(start|poll)$/,
+    label: (match) => `/v1/workspaces/:workspaceId/supergrok/connect/${match[1]}`,
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/supergrok\/(status|accounts|settings)$/,
+    label: (match) => `/v1/workspaces/:workspaceId/supergrok/${match[1]}`,
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/supergrok\/accounts\/[^/]+\/(activate|allocator)$/,
+    label: (match) => `/v1/workspaces/:workspaceId/supergrok/accounts/:accountId/${match[1]}`,
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/supergrok\/accounts\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId/supergrok/accounts/:accountId",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/codex\/usage$/,

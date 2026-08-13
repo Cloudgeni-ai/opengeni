@@ -12253,7 +12253,7 @@ export const ModelCredentialSourceV1 =
       z
         .object({
           kind: z.literal("connected_subscription"),
-          provider: z.literal("codex"),
+          provider: z.enum(["codex", "xai"]),
         })
         .strict(),
       z
@@ -12464,7 +12464,7 @@ export const ClientModel = /* @__PURE__ */ defineModelContractSchema(() =>
     provider: z.string(), // provider id
     providerLabel: z.string(),
     api: z.enum(["responses", "chat"]),
-    source: z.enum(["opengeni", "codex", "workspace_gateway"]).optional(),
+    source: z.enum(["opengeni", "codex", "supergrok", "workspace_gateway"]).optional(),
     contextWindowTokens: z.number().int().positive().optional(),
     // Additive normalized definition metadata. Optional so older server payloads
     // remain parseable; current servers project the complete V1 set.
@@ -12761,6 +12761,7 @@ export function evaluateWorkspaceModelPolicy(
 }
 
 export * from "./codex-fleet-policy";
+export * from "./xai-provider-account-authority";
 export * from "./workspace-instruction-policies";
 export * from "./company-profile";
 export * from "./workspace-learning-policy";

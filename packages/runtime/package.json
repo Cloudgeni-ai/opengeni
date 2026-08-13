@@ -60,6 +60,7 @@
     "@opengeni/contracts": "workspace:*",
     "@opengeni/network": "workspace:*",
     "@opengeni/sdk": "workspace:*",
+    "@opengeni/xai-subscription": "workspace:*",
     "debug": "4.4.3",
     "modal": "0.9.0",
     "openai": "6.47.0",

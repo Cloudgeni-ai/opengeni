@@ -46,6 +46,7 @@ import {
   type TurnInitiator,
   type TurnInitiatorContext,
   type TurnExecutionPolicyV1,
+  type XaiProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
 import {
   createSession,
@@ -65,6 +66,7 @@ import {
   getWorkspaceControlEvent,
   getSessionLineage,
   getSessionTurn,
+  getSessionTurnXaiProviderAccountAuthoritySnapshot,
   getWorkspaceModelPolicy,
   initializeSessionStartAtomically,
   listSessionTurns,
@@ -601,6 +603,7 @@ export async function createAndStartSessionWithOutcome(input: {
   mcpServers?: CreateSessionMcpServerInput[];
   sessionMcpServers?: SessionMcpServerMetadata[];
   personalConnectionDelegations?: McpPersonalConnectionDelegation[];
+  xaiProviderAccountAuthoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1;
   // The manager session spawning this worker (a worker-signed sessionId claim
   // on the creating grant); null for direct API creates and scheduled runs.
   // When set, the worker's terminal-for-now transitions wake this parent.
@@ -686,6 +689,11 @@ export async function createAndStartSessionWithOutcome(input: {
       ...(input.sandboxOs ? { sandboxOs: input.sandboxOs } : {}),
       mcpServers: input.mcpServers ?? [],
       personalConnectionDelegations: input.personalConnectionDelegations ?? [],
+      ...(input.xaiProviderAccountAuthoritySnapshot
+        ? {
+            initialXaiProviderAccountAuthoritySnapshot: input.xaiProviderAccountAuthoritySnapshot,
+          }
+        : {}),
       maxNestedAgentDepthOverride: input.maxNestedAgentDepthOverride ?? null,
       allowNestedAgentDepthIncrease: input.allowNestedAgentDepthIncrease ?? false,
       subjectId: input.subjectId ?? null,
@@ -746,6 +754,11 @@ export async function createAndStartSessionWithOutcome(input: {
       ...(input.sandboxOs ? { sandboxOs: input.sandboxOs } : {}),
       mcpServers: input.mcpServers ?? [],
       personalConnectionDelegations: input.personalConnectionDelegations ?? [],
+      ...(input.xaiProviderAccountAuthoritySnapshot
+        ? {
+            initialXaiProviderAccountAuthoritySnapshot: input.xaiProviderAccountAuthoritySnapshot,
+          }
+        : {}),
       maxNestedAgentDepthOverride: input.maxNestedAgentDepthOverride ?? null,
       allowNestedAgentDepthIncrease: input.allowNestedAgentDepthIncrease ?? false,
       subjectId: input.subjectId ?? null,
@@ -1316,6 +1329,15 @@ export async function createSessionForRequestWithOutcome(
       message: "caller attempt does not belong to the parent session",
     });
   }
+  const xaiProviderAccountAuthoritySnapshot =
+    parentSession && creationInitiator.actor
+      ? await getSessionTurnXaiProviderAccountAuthoritySnapshot(
+          db,
+          workspaceId,
+          parentSession.id,
+          creationInitiator.actor.turnId,
+        )
+      : undefined;
   const capabilityRuntimeSettings = await settingsWithEnabledCapabilityMcpServers(
     db,
     workspaceId,
@@ -1869,6 +1891,7 @@ export async function createSessionForRequestWithOutcome(
       mcpServers: sessionMcpServers.dbServers,
       sessionMcpServers: sessionMcpServers.metadata,
       personalConnectionDelegations,
+      ...(xaiProviderAccountAuthoritySnapshot ? { xaiProviderAccountAuthoritySnapshot } : {}),
       parentSessionId,
       createIdempotencyKey: payload.idempotencyKey ?? null,
       maxNestedAgentDepthOverride: payload.maxNestedAgentDepth ?? null,

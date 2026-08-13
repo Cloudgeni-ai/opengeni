@@ -23,6 +23,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { CodexSubscriptionsCard } from "@/components/codex-connection";
+import { SuperGrokSubscriptionsCard } from "@/components/supergrok-connection";
 import { AiGatewayConnectionCard } from "@/components/ai-gateway-connection";
 import { VideoGenerationPreferenceRow } from "@/components/video-generation-settings";
 import { LoadErrorState } from "@/components/common";
@@ -380,6 +381,12 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
         {/* Codex live overview is intentionally once-per-mount; remount at tenant boundary. */}
         <CodexSubscriptionsCard
           key={workspaceId}
+          workspaceId={workspaceId}
+          canManage={canDeleteWorkspace}
+        />
+
+        <SuperGrokSubscriptionsCard
+          key={`supergrok:${workspaceId}`}
           workspaceId={workspaceId}
           canManage={canDeleteWorkspace}
         />

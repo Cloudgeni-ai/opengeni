@@ -142,11 +142,15 @@ export type ActivityServices = ControlActivityServices &
   };
 
 export type CodexCapacityWaitRef = {
+  /** Absent only for Temporal histories written before provider-tagged waits. */
+  provider?: "codex" | "xai";
   waiterId: string;
   generation: number;
   nextCheckAt: string;
   wakeRevision: number;
 };
+
+export type XaiCapacityWaitRef = CodexCapacityWaitRef & { provider: "xai" };
 
 export type GetCodexCapacityWaitInput = {
   workspaceId: string;
@@ -160,6 +164,8 @@ export type ReconcileCodexCapacityWaitInput = {
   waiterId: string;
   generation: number;
   cause: "timer" | "signal" | "queue" | "recovery";
+  /** Absent only for Codex waits and pre-provider-tagged workflow histories. */
+  provider?: "codex" | "xai";
 };
 
 export type ReconcileCodexCapacityWaitResult =

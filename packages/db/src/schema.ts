@@ -9,7 +9,9 @@ import type {
   SessionMcpApprovalPolicy,
   SlackUserLinkAccessRequest,
   TimelineAnnotation,
+  XaiProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
+import { WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1 } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import type { SessionToolPolicy } from "@opengeni/contracts";
 import type { HumanInputQuestion, HumanInputResponse } from "@opengeni/contracts";
@@ -2189,6 +2191,190 @@ export const codexCredentialLeases = pgTable(
   }),
 );
 
+// Encrypted multi-account xAI/SuperGrok credentials. Provider tokens and
+// cookies live only inside credential_encrypted; every other column is bounded
+// allocation/health metadata. User-scoped rows are created only by the
+// migration-owned lifecycle function that also creates their exact generic
+// organization_user_resource_authorities row.
+export const xaiSubscriptionCredentials = pgTable(
+  "xai_subscription_credentials",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    credentialEncrypted: text("credential_encrypted").notNull(),
+    providerAccountId: text("provider_account_id"),
+    label: text("label"),
+    accountEmail: text("account_email"),
+    planType: text("plan_type"),
+    status: text("status").notNull().default("active"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    lastRefreshAt: timestamp("last_refresh_at", { withTimezone: true }),
+    lastError: text("last_error"),
+    version: integer("version").notNull().default(1),
+    allocatorEnabled: boolean("allocator_enabled").notNull().default(true),
+    allocatorVersion: integer("allocator_version").notNull().default(1),
+    allocatorUpdatedAt: timestamp("allocator_updated_at", { withTimezone: true }),
+    quotaUsedPercent: integer("quota_used_percent"),
+    quotaResetAt: timestamp("quota_reset_at", { withTimezone: true }),
+    quotaCheckedAt: timestamp("quota_checked_at", { withTimezone: true }),
+    exhaustedUntil: timestamp("exhausted_until", { withTimezone: true }),
+    selectionCount: integer("selection_count").notNull().default(0),
+    lastSelectedAt: timestamp("last_selected_at", { withTimezone: true }),
+    authorityScope: text("authority_scope").notNull().default("workspace"),
+    ownerOrganizationMembershipId: uuid("owner_organization_membership_id"),
+    organizationUserResourceAuthorityId: uuid("organization_user_resource_authority_id"),
+    organizationUserResourceKind: text("organization_user_resource_kind"),
+    organizationUserResourceAuthorityGeneration: bigint(
+      "organization_user_resource_authority_generation",
+      { mode: "number" },
+    ),
+    // Connection attribution only. Ownership/execution authority comes from
+    // the explicit authority tuple above and the frozen acceptance snapshot.
+    connectedBySubjectId: text("connected_by_subject_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceIdentity: uniqueIndex("xai_subscription_credentials_workspace_id_uq").on(
+      table.workspaceId,
+      table.id,
+    ),
+    workspaceAccountIdentity: uniqueIndex(
+      "xai_subscription_credentials_workspace_account_id_uq",
+    ).on(table.workspaceId, table.accountId, table.id),
+    providerIdentity: uniqueIndex("xai_subscription_credentials_provider_identity_uq")
+      .on(
+        table.workspaceId,
+        table.authorityScope,
+        table.ownerOrganizationMembershipId,
+        table.providerAccountId,
+      )
+      .where(sql`${table.providerAccountId} is not null`),
+    workspaceStatus: index("xai_subscription_credentials_workspace_status_idx").on(
+      table.workspaceId,
+      table.status,
+      table.allocatorEnabled,
+    ),
+    scopeValid: check(
+      "xai_subscription_credentials_authority_scope_chk",
+      sql`${table.authorityScope} in ('workspace', 'user')`,
+    ),
+    authorityShapeValid: check(
+      "xai_subscription_credentials_authority_shape_chk",
+      sql`(
+          ${table.authorityScope} = 'workspace'
+          and ${table.ownerOrganizationMembershipId} is null
+          and ${table.organizationUserResourceAuthorityId} is null
+          and ${table.organizationUserResourceKind} is null
+          and ${table.organizationUserResourceAuthorityGeneration} is null
+        ) or (
+          ${table.authorityScope} = 'user'
+          and ${table.ownerOrganizationMembershipId} is not null
+          and ${table.organizationUserResourceAuthorityId} is not null
+          and ${table.organizationUserResourceKind} = 'xai_subscription'
+          and ${table.organizationUserResourceAuthorityGeneration} > 0
+        )`,
+    ),
+    statusValid: check(
+      "xai_subscription_credentials_status_chk",
+      sql`${table.status} in ('active', 'needs_relogin', 'error', 'disabled')`,
+    ),
+    versionValid: check(
+      "xai_subscription_credentials_version_chk",
+      sql`${table.version} > 0 and ${table.allocatorVersion} > 0`,
+    ),
+    quotaValid: check(
+      "xai_subscription_credentials_quota_chk",
+      sql`${table.quotaUsedPercent} is null or ${table.quotaUsedPercent} between 0 and 100`,
+    ),
+  }),
+);
+
+// One fair-allocation serialization row per workspace or exact user pool.
+export const xaiRotationSettings = pgTable(
+  "xai_rotation_settings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    authorityScope: text("authority_scope").notNull().default("workspace"),
+    ownerOrganizationMembershipId: uuid("owner_organization_membership_id"),
+    activeCredentialId: uuid("active_credential_id"),
+    rotationEnabled: boolean("rotation_enabled").notNull().default(true),
+    fairnessCursor: bigint("fairness_cursor", { mode: "number" }).notNull().default(0),
+    version: integer("version").notNull().default(1),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspacePool: uniqueIndex("xai_rotation_settings_workspace_pool_uq").on(
+      table.workspaceId,
+      table.authorityScope,
+      table.ownerOrganizationMembershipId,
+    ),
+    scopeValid: check(
+      "xai_rotation_settings_authority_scope_chk",
+      sql`(${table.authorityScope} = 'workspace' and ${table.ownerOrganizationMembershipId} is null)
+        or (${table.authorityScope} = 'user' and ${table.ownerOrganizationMembershipId} is not null)`,
+    ),
+    countersValid: check(
+      "xai_rotation_settings_counters_chk",
+      sql`${table.fairnessCursor} >= 0 and ${table.version} > 0`,
+    ),
+  }),
+);
+
+// Exact logical-turn lease. A replacement holder for the same turn preserves
+// the credential and advances generation; stale holders must match both.
+export const xaiCredentialLeases = pgTable(
+  "xai_credential_leases",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    authorityScope: text("authority_scope").notNull(),
+    ownerOrganizationMembershipId: uuid("owner_organization_membership_id"),
+    credentialId: uuid("credential_id").notNull(),
+    turnId: uuid("turn_id").notNull(),
+    holderId: text("holder_id").notNull(),
+    generation: integer("generation").notNull().default(1),
+    leasedUntil: timestamp("leased_until", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceTurn: uniqueIndex("xai_credential_leases_workspace_turn_uq").on(
+      table.workspaceId,
+      table.turnId,
+    ),
+    activeCredential: index("xai_credential_leases_active_credential_idx").on(
+      table.workspaceId,
+      table.credentialId,
+      table.leasedUntil,
+    ),
+    expiry: index("xai_credential_leases_expiry_idx").on(table.leasedUntil),
+    scopeValid: check(
+      "xai_credential_leases_authority_scope_chk",
+      sql`(${table.authorityScope} = 'workspace' and ${table.ownerOrganizationMembershipId} is null)
+        or (${table.authorityScope} = 'user' and ${table.ownerOrganizationMembershipId} is not null)`,
+    ),
+    generationValid: check("xai_credential_leases_generation_chk", sql`${table.generation} > 0`),
+  }),
+);
+
 // Workspace-shared channels organize root sessions ("workstreams") by work
 // type in the rail. Pure organizational metadata: filing a session into a
 // channel never affects execution, authority, memory, or history.
@@ -2338,6 +2524,12 @@ export const sessions = pgTable(
       .$type<McpPersonalConnectionDelegation[]>()
       .notNull()
       .default([]),
+    initialXaiProviderAccountAuthoritySnapshot: jsonb(
+      "initial_xai_provider_account_authority_snapshot",
+    )
+      .$type<XaiProviderAccountAuthoritySnapshotV1>()
+      .notNull()
+      .default(WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1),
     // Durable tool-policy origin. Migration 0136 removes the old null/legacy
     // representation so every session has one explicit policy mode.
     toolPolicy: jsonb("tool_policy").$type<SessionToolPolicy>().notNull(),
@@ -4276,6 +4468,10 @@ export const sessionTurns = pgTable(
       .$type<McpPersonalConnectionDelegation[]>()
       .notNull()
       .default([]),
+    xaiProviderAccountAuthoritySnapshot: jsonb("xai_provider_account_authority_snapshot")
+      .$type<XaiProviderAccountAuthoritySnapshotV1>()
+      .notNull()
+      .default(WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1),
     cancelledBy: text("cancelled_by"),
     cancelReason: text("cancel_reason"),
     // Atomic per-turn codemode call budget counter (migration 0043). Incremented
@@ -5175,6 +5371,10 @@ export const sessionSystemUpdates = pgTable(
       .$type<McpPersonalConnectionDelegation[]>()
       .notNull()
       .default([]),
+    xaiProviderAccountAuthoritySnapshot: jsonb("xai_provider_account_authority_snapshot")
+      .$type<XaiProviderAccountAuthoritySnapshotV1>()
+      .notNull()
+      .default(WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1),
     // pending is visible queue truth; delivered means its exact model-memory
     // batch was durably claimed. Terminal cancellation/supersession is explicit.
     state: text("state").notNull().default("pending"),
@@ -5262,6 +5462,10 @@ export const sessionSystemUpdateOutbox = pgTable(
       .$type<McpPersonalConnectionDelegation[]>()
       .notNull()
       .default([]),
+    xaiProviderAccountAuthoritySnapshot: jsonb("xai_provider_account_authority_snapshot")
+      .$type<XaiProviderAccountAuthoritySnapshotV1>()
+      .notNull()
+      .default(WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1),
     status: text("status").notNull().default("pending"),
     attempts: integer("attempts").notNull().default(0),
     updateId: uuid("update_id"),
@@ -5465,6 +5669,126 @@ export const codexCapacityWaiters = pgTable(
       table.status,
       table.wakeRevision,
       table.observedWakeRevision,
+    ),
+  }),
+);
+
+// Per-session pin and last-account state is kept outside the shared session row
+// so user-scoped account identifiers remain behind the same exact-subject RLS
+// policy as every other xAI persistence table.
+export const xaiSessionAccountPins = pgTable(
+  "xai_session_account_pins",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id").notNull(),
+    authorityScope: text("authority_scope").notNull().default("workspace"),
+    ownerOrganizationMembershipId: uuid("owner_organization_membership_id"),
+    pinnedCredentialId: uuid("pinned_credential_id"),
+    pinSource: text("pin_source"),
+    lastCredentialId: uuid("last_credential_id"),
+    version: integer("version").notNull().default(1),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    // Migration 0231 adds NULLS NOT DISTINCT so workspace scope is also a
+    // singleton; Drizzle 0.45 cannot encode that PostgreSQL index modifier.
+    workspaceSessionPool: uniqueIndex("xai_session_account_pins_workspace_session_uq").on(
+      table.workspaceId,
+      table.sessionId,
+      table.authorityScope,
+      table.ownerOrganizationMembershipId,
+    ),
+    scopeValid: check(
+      "xai_session_account_pins_authority_scope_chk",
+      sql`(${table.authorityScope} = 'workspace' and ${table.ownerOrganizationMembershipId} is null)
+        or (${table.authorityScope} = 'user' and ${table.ownerOrganizationMembershipId} is not null)`,
+    ),
+    pinValid: check(
+      "xai_session_account_pins_pin_chk",
+      sql`(${table.pinnedCredentialId} is null and ${table.pinSource} is null)
+        or (${table.pinnedCredentialId} is not null and ${table.pinSource} in ('manual', 'policy'))`,
+    ),
+    versionValid: check("xai_session_account_pins_version_chk", sql`${table.version} > 0`),
+  }),
+);
+
+// Durable same-turn capacity wait. The blocked turn owns the immutable xAI
+// authority snapshot; this row carries only pool scope and wake/retry metadata.
+export const xaiCapacityWaiters = pgTable(
+  "xai_capacity_waiters",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id").notNull(),
+    goalId: uuid("goal_id"),
+    goalVersion: integer("goal_version"),
+    blockedTurnId: uuid("blocked_turn_id").notNull(),
+    blockedTurnGeneration: integer("blocked_turn_generation").notNull(),
+    workflowId: text("workflow_id").notNull(),
+    authorityScope: text("authority_scope").notNull(),
+    ownerOrganizationMembershipId: uuid("owner_organization_membership_id"),
+    status: text("status").notNull().default("waiting"),
+    generation: integer("generation").notNull().default(1),
+    earliestResetAt: timestamp("earliest_reset_at", { withTimezone: true }),
+    nextCheckAt: timestamp("next_check_at", { withTimezone: true }).notNull(),
+    wakeRevision: integer("wake_revision").notNull().default(1),
+    observedWakeRevision: integer("observed_wake_revision").notNull().default(0),
+    lastWakeReason: text("last_wake_reason").notNull().default("capacity_wait_armed"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    // Migration 0234 uses NULLS NOT DISTINCT so workspace scope is also a
+    // singleton; Drizzle 0.45 cannot encode that PostgreSQL index modifier.
+    workspaceSessionPool: uniqueIndex("xai_capacity_waiters_workspace_session_uq").on(
+      table.workspaceId,
+      table.sessionId,
+      table.authorityScope,
+      table.ownerOrganizationMembershipId,
+    ),
+    pending: index("xai_capacity_waiters_pending_idx").on(
+      table.workspaceId,
+      table.status,
+      table.nextCheckAt,
+    ),
+    wakeRepair: index("xai_capacity_waiters_wake_repair_idx").on(
+      table.status,
+      table.wakeRevision,
+      table.observedWakeRevision,
+    ),
+    scopeValid: check(
+      "xai_capacity_waiters_authority_scope_chk",
+      sql`(${table.authorityScope} = 'workspace' and ${table.ownerOrganizationMembershipId} is null)
+        or (${table.authorityScope} = 'user' and ${table.ownerOrganizationMembershipId} is not null)`,
+    ),
+    statusValid: check(
+      "xai_capacity_waiters_status_chk",
+      sql`${table.status} in ('waiting', 'resumed', 'superseded')`,
+    ),
+    countersValid: check(
+      "xai_capacity_waiters_counters_chk",
+      sql`${table.blockedTurnGeneration} >= 0
+        and ${table.generation} > 0
+        and ${table.wakeRevision} > 0
+        and ${table.observedWakeRevision} >= 0
+        and ${table.observedWakeRevision} <= ${table.wakeRevision}`,
+    ),
+    goalFenceValid: check(
+      "xai_capacity_waiters_goal_fence_chk",
+      sql`(${table.goalId} is null and ${table.goalVersion} is null)
+        or (${table.goalId} is not null and ${table.goalVersion} > 0)`,
     ),
   }),
 );
@@ -7172,6 +7496,10 @@ export const scheduledTasks = pgTable(
       .$type<McpPersonalConnectionDelegation[]>()
       .notNull()
       .default([]),
+    xaiProviderAccountAuthoritySnapshot: jsonb("xai_provider_account_authority_snapshot")
+      .$type<XaiProviderAccountAuthoritySnapshotV1>()
+      .notNull()
+      .default(WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1),
     reusableSessionId: uuid("reusable_session_id").references(() => sessions.id, {
       onDelete: "set null",
     }),

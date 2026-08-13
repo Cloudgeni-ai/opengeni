@@ -13,14 +13,28 @@ ADD --checksum=sha256:8d7b3a1d7b9024beef94e7fc7ce854030ee4d6def5f802b8e0e8824731
 ADD --checksum=sha256:a5005b353a1738dd3d239234841cfcc808a7ec9faaebfcede3528f9fab3ae058 https://github.com/lightpanda-io/browser/archive/refs/tags/0.3.5.tar.gz /lightpanda-0.3.5-source.tar.gz
 ADD --checksum=sha256:8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef https://raw.githubusercontent.com/lightpanda-io/browser/0.3.5/LICENSE /lightpanda-LICENSE
 
-FROM rust:1.82-bookworm AS computer-native-build
+FROM --platform=$BUILDPLATFORM tonistiigi/xx:1.9.0@sha256:c64defb9ed5a91eacb37f96ccc3d4cd72521c4bd18d5442905b95e2226b0e707 AS xx
+FROM --platform=$BUILDPLATFORM rust:1.82-bookworm AS computer-native-build
+
+COPY --from=xx / /
+
+# Keep the large Rust release build on the native GitHub runner. `xx-cargo`
+# selects the requested OCI target and configures clang/lld for its glibc ABI;
+# `xx-verify` fails closed if the copied helper is not actually target-native.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends clang lld \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src/agent
+ARG TARGETPLATFORM
+RUN xx-apt-get install -y --no-install-recommends xx-c-essentials
 COPY agent .
 RUN set -eux; \
-    cargo build --locked --release -p opengeni-computer-native; \
+    rust_target="$(xx-cargo --print-target-triple)"; \
+    xx-cargo build --locked --release --target-dir /src/agent/target -p opengeni-computer-native; \
     mkdir -p /out; \
-    install -m 0755 target/release/opengeni-computer-native /out/opengeni-computer-native
+    install -m 0755 "target/${rust_target}/release/opengeni-computer-native" /out/opengeni-computer-native; \
+    xx-verify /out/opengeni-computer-native
 
 FROM oven/bun:1.3.14 AS bun-runtime
 
