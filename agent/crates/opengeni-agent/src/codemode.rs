@@ -16,7 +16,7 @@ use tokio::time::{sleep, Instant};
 use uuid::Uuid;
 
 use crate::cli::{CodemodeAction, CodemodeArgs, CodemodeCallArgs};
-use opengeni_agent_proto::v1::ExecRequest;
+use opengeni_agent_proto::v1::{self, ControlRequest, ExecRequest};
 
 const URL_ENV: &str = "OPENGENI_CODEMODE_URL";
 const TOKEN_ENV: &str = "OPENGENI_CODEMODE_TOKEN";
@@ -45,6 +45,46 @@ pub fn expose_native_client(request: &mut ExecRequest) {
         request
             .env
             .insert(NATIVE_CLIENT_ENV.to_string(), executable.to_string());
+    }
+}
+
+/// Bind an attempt-scoped Codemode exec to the deployment origin of the exact
+/// Connected Machine link carrying it. The control plane cannot safely infer
+/// this route: one runner may serve several deployments, while `localhost` has
+/// a different meaning on each host. A legacy connection has no authoritative
+/// origin and therefore never calls this function.
+pub fn bind_connection_origin(
+    request: &mut ControlRequest,
+    api_base_url: &str,
+    workspace_id: &str,
+) {
+    let Some(exec) = request_exec_mut(request) else {
+        return;
+    };
+    if !exec.env.contains_key(TOKEN_ENV) {
+        return;
+    }
+    let Ok(mut url) = Url::parse(api_base_url) else {
+        return;
+    };
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return;
+    }
+    let prefix = url.path().trim_end_matches('/');
+    url.set_path(&format!("{prefix}/v1/workspaces/{workspace_id}/codemode"));
+    url.set_query(None);
+    url.set_fragment(None);
+    exec.env.insert(URL_ENV.to_string(), url.to_string());
+}
+
+fn request_exec_mut(request: &mut ControlRequest) -> Option<&mut ExecRequest> {
+    match request.op.as_mut()? {
+        v1::control_request::Op::Exec(exec) => Some(exec),
+        v1::control_request::Op::OpStart(start) => match start.op.as_mut()? {
+            v1::op_start::Op::Exec(exec) => Some(exec),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -614,6 +654,89 @@ mod tests {
         let executable = ordinary.env.get(NATIVE_CLIENT_ENV).expect("native client");
         assert!(std::path::Path::new(executable).is_absolute());
         assert!(!executable.contains("attempt-secret"));
+    }
+
+    #[test]
+    fn connected_machine_exec_uses_the_exact_link_origin() {
+        let mut exec = ExecRequest::default();
+        exec.env.insert(
+            URL_ENV.to_string(),
+            "http://127.0.0.1:8000/stale".to_string(),
+        );
+        exec.env
+            .insert(TOKEN_ENV.to_string(), "attempt-secret".to_string());
+        let mut request = ControlRequest {
+            op: Some(v1::control_request::Op::Exec(exec)),
+            ..ControlRequest::default()
+        };
+
+        bind_connection_origin(
+            &mut request,
+            "https://machine.example.test/opengeni/",
+            "workspace-1",
+        );
+
+        let Some(v1::control_request::Op::Exec(exec)) = request.op else {
+            panic!("exec request");
+        };
+        assert_eq!(
+            exec.env.get(URL_ENV).map(String::as_str),
+            Some("https://machine.example.test/opengeni/v1/workspaces/workspace-1/codemode")
+        );
+    }
+
+    #[test]
+    fn connected_machine_origin_is_not_projected_without_attempt_authority() {
+        let mut exec = ExecRequest::default();
+        exec.env.insert(
+            URL_ENV.to_string(),
+            "https://worker.example.test/codemode".to_string(),
+        );
+        let mut request = ControlRequest {
+            op: Some(v1::control_request::Op::Exec(exec)),
+            ..ControlRequest::default()
+        };
+
+        bind_connection_origin(&mut request, "https://machine.example.test", "workspace-1");
+
+        let Some(v1::control_request::Op::Exec(exec)) = request.op else {
+            panic!("exec request");
+        };
+        assert_eq!(
+            exec.env.get(URL_ENV).map(String::as_str),
+            Some("https://worker.example.test/codemode")
+        );
+    }
+
+    #[test]
+    fn connected_machine_streamed_exec_uses_the_exact_link_origin() {
+        let mut exec = ExecRequest::default();
+        exec.env
+            .insert(TOKEN_ENV.to_string(), "attempt-secret".to_string());
+        let mut request = ControlRequest {
+            op: Some(v1::control_request::Op::OpStart(v1::OpStart {
+                op: Some(v1::op_start::Op::Exec(exec)),
+                ..v1::OpStart::default()
+            })),
+            ..ControlRequest::default()
+        };
+
+        bind_connection_origin(
+            &mut request,
+            "https://machine.example.test/opengeni",
+            "workspace-1",
+        );
+
+        let Some(v1::control_request::Op::OpStart(start)) = request.op else {
+            panic!("op start request");
+        };
+        let Some(v1::op_start::Op::Exec(exec)) = start.op else {
+            panic!("streamed exec request");
+        };
+        assert_eq!(
+            exec.env.get(URL_ENV).map(String::as_str),
+            Some("https://machine.example.test/opengeni/v1/workspaces/workspace-1/codemode")
+        );
     }
 
     #[tokio::test]
