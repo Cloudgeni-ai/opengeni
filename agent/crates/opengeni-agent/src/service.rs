@@ -9,6 +9,8 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use opengeni_agent_platform::service::{self, ServiceBackend, ServiceScope, ServiceSpec};
 use tracing::info;
@@ -23,12 +25,28 @@ enum LaunchdInstallAction {
     Reload,
 }
 
-fn launchd_install_action(loaded: bool, restart: bool) -> LaunchdInstallAction {
-    match (loaded, restart) {
-        (false, _) => LaunchdInstallAction::Bootstrap,
-        (true, false) => LaunchdInstallAction::KeepLoaded,
-        (true, true) => LaunchdInstallAction::Reload,
+fn launchd_install_action(
+    loaded: bool,
+    restart: bool,
+    definition_changed: bool,
+    loaded_program_matches: bool,
+) -> LaunchdInstallAction {
+    if !loaded {
+        LaunchdInstallAction::Bootstrap
+    } else if restart || definition_changed || !loaded_program_matches {
+        LaunchdInstallAction::Reload
+    } else {
+        LaunchdInstallAction::KeepLoaded
     }
+}
+
+fn launchd_loaded_program_matches(output: &str, binary_path: &Path) -> bool {
+    let expected = binary_path.to_string_lossy();
+    output.lines().any(|line| {
+        line.trim()
+            .strip_prefix("program = ")
+            .is_some_and(|program| program == expected)
+    })
 }
 
 /// Idempotently installs, enables, and starts the ordinary background service.
@@ -196,6 +214,9 @@ fn reset_systemd_aggregate_limits(install_scope: ServiceScope) -> Result<(), Str
 fn install_launchd(spec: &ServiceSpec, restart: bool) -> Result<(), String> {
     let plist_path = service::launchd_plist_path(&home()?);
     let body = service::render_launchd_plist(spec);
+    let definition_changed = std::fs::read(&plist_path)
+        .map(|existing| existing != body.as_bytes())
+        .unwrap_or(true);
     if let Some(parent) = plist_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
@@ -206,8 +227,17 @@ fn install_launchd(spec: &ServiceSpec, restart: bool) -> Result<(), String> {
     let uid = unsafe_uid();
     let domain = format!("gui/{uid}");
     let target = format!("{domain}/{}", service::ids::LAUNCHD_LABEL);
-    let loaded = capture("launchctl", &["print", &target]).is_ok();
-    match launchd_install_action(loaded, restart) {
+    let loaded_definition = capture("launchctl", &["print", &target]).ok();
+    let loaded = loaded_definition.is_some();
+    let loaded_program_matches = loaded_definition
+        .as_deref()
+        .is_some_and(|output| launchd_loaded_program_matches(output, &spec.binary_path));
+    match launchd_install_action(
+        loaded,
+        restart,
+        definition_changed,
+        loaded_program_matches,
+    ) {
         LaunchdInstallAction::KeepLoaded => {}
         LaunchdInstallAction::Reload => {
             // launchd caches a loaded job's definition. Rewriting the plist and
@@ -216,16 +246,24 @@ fn install_launchd(spec: &ServiceSpec, restart: bool) -> Result<(), String> {
             // previous build indefinitely. Boot the loaded definition out and
             // bootstrap the exact plist we just wrote so the restarted process
             // is definition-coherent with disk.
-            run_tool("launchctl", &["bootout", &target])?;
-            run_tool(
-                "launchctl",
-                &["bootstrap", &domain, &plist_path.to_string_lossy()],
+            if let Err(error) = run_tool("launchctl", &["bootout", &target]) {
+                if capture("launchctl", &["print", &target]).is_ok() {
+                    return Err(error);
+                }
+            }
+            activate_launchd_definition(
+                &domain,
+                &target,
+                &plist_path,
+                &spec.binary_path,
             )?;
         }
         LaunchdInstallAction::Bootstrap => {
-            run_tool(
-                "launchctl",
-                &["bootstrap", &domain, &plist_path.to_string_lossy()],
+            activate_launchd_definition(
+                &domain,
+                &target,
+                &plist_path,
+                &spec.binary_path,
             )?;
         }
     }
@@ -234,6 +272,42 @@ fn install_launchd(spec: &ServiceSpec, restart: bool) -> Result<(), String> {
         plist_path.display()
     );
     Ok(())
+}
+
+/// `bootout` may return before launchd has completely retired the old job.
+/// Retrying `bootstrap` blindly is still safe only if every iteration first
+/// inspects the exact label and accepts success solely when launchd reports the
+/// expected program path. This also recovers a lost successful bootstrap reply
+/// without ever admitting two definitions.
+fn activate_launchd_definition(
+    domain: &str,
+    target: &str,
+    plist_path: &Path,
+    expected_binary: &Path,
+) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let plist = plist_path.to_string_lossy();
+    let mut last_error = "launchd did not accept the new service definition".to_string();
+    loop {
+        if let Ok(definition) = capture("launchctl", &["print", target]) {
+            if launchd_loaded_program_matches(&definition, expected_binary) {
+                return Ok(());
+            }
+            last_error = "launchd loaded the label with an unexpected program path".to_string();
+        } else {
+            match capture("launchctl", &["bootstrap", domain, &plist]) {
+                Ok(_) => {}
+                Err(error) => last_error = error,
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "could not converge the LaunchAgent to {} within five seconds: {last_error}",
+                expected_binary.display()
+            ));
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
 }
 
 /// Windows: register the SCM service + set restart-on-failure recovery. The binary
@@ -576,17 +650,38 @@ mod tests {
     #[test]
     fn launchd_restart_reloads_the_definition_instead_of_kickstarting_the_cached_job() {
         assert_eq!(
-            launchd_install_action(true, true),
+            launchd_install_action(true, true, false, true),
             LaunchdInstallAction::Reload
         );
         assert_eq!(
-            launchd_install_action(true, false),
+            launchd_install_action(true, false, false, true),
             LaunchdInstallAction::KeepLoaded
         );
         assert_eq!(
-            launchd_install_action(false, false),
+            launchd_install_action(false, false, false, false),
             LaunchdInstallAction::Bootstrap
         );
+        assert_eq!(
+            launchd_install_action(true, false, true, true),
+            LaunchdInstallAction::Reload
+        );
+        assert_eq!(
+            launchd_install_action(true, false, false, false),
+            LaunchdInstallAction::Reload
+        );
+    }
+
+    #[test]
+    fn launchd_loaded_program_match_is_exact_and_space_safe() {
+        let expected = Path::new("/Applications/OpenGeni Agent/opengeni-agent");
+        assert!(launchd_loaded_program_matches(
+            "gui/501/ai.opengeni.agent = {\n\tprogram = /Applications/OpenGeni Agent/opengeni-agent\n}\n",
+            expected,
+        ));
+        assert!(!launchd_loaded_program_matches(
+            "gui/501/ai.opengeni.agent = {\n\tprogram = /tmp/old/opengeni-agent\n}\n",
+            expected,
+        ));
     }
 
     #[test]
