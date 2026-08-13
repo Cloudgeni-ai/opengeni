@@ -38,8 +38,17 @@ export interface RoutableSandbox {
   kind: "modal" | "selfhosted" | string;
   name: string;
   /** For a selfhosted sandbox this is its enrollment id (== the agent id the
-   *  control-plane subject `agent.<ws>.<id>.rpc` addresses). Null for modal. */
+   *  exact generation-fenced control-plane subject addresses). Null for modal. */
   enrollmentId: string | null;
+}
+
+/** One atomically resolved live Connected Machine route. The process identity
+ * and optional stream capability come from the same enrollment snapshot so a
+ * build can never combine a successor's RPC subject with a predecessor's
+ * capability state. */
+export interface SelfhostedConnectionBinding {
+  connectionInstanceId: string;
+  opStream?: SelfhostedOpStreamDeps;
 }
 
 export interface ActiveBackendResolverDeps {
@@ -70,12 +79,11 @@ export interface ActiveBackendResolverDeps {
    *  scoped NATS connection). Returns a ControlRpc whose offline/timeout maps to
    *  agent_offline/agent_reconnecting (never a NotFound). */
   controlRpcFactory(): ControlRpc;
-  /** Resolve the streaming exec transport for a selfhosted target. Returning
-   *  undefined means the runner is legacy-only. Kept as an injected callback so
-   *  this db-free leaf does not know enrollment capability storage. */
-  resolveSelfhostedOpStream?: (
+  /** Resolve the exact currently leased daemon instance and its optional stream
+   *  transport from one enrollment snapshot. Null means no live runner. */
+  resolveSelfhostedConnection: (
     sandbox: RoutableSandbox,
-  ) => Promise<SelfhostedOpStreamDeps | undefined>;
+  ) => Promise<SelfhostedConnectionBinding | null>;
   /** The relay-URL shape config for selfhosted stream endpoints. */
   relay: SelfhostedRelayConfig;
   /** Establish (resume-by-id) a NON-DEFAULT modal target's box session for a swap.
@@ -305,19 +313,26 @@ export function makeActiveBackendResolver(
       // the epoch and rejects a stale op with ERROR_CODE_FENCED → the proxy
       // re-resolves + retries against the new active sandbox. The SAME factory the
       // worker turn's machine-primary establish branch uses (one build shape).
-      const opStream = await deps.resolveSelfhostedOpStream?.(sandbox);
+      const connection = await deps.resolveSelfhostedConnection(sandbox);
+      if (!connection) {
+        throw new ActiveBackendUnresolvableError(
+          "offline_enrollment",
+          `selfhosted sandbox ${sandbox.id} has no live runner connection`,
+        );
+      }
       const { session } = await buildSelfhostedBackendSession({
         workspaceId: deps.workspaceId,
         relay: deps.relay,
         controlRpcFactory: deps.controlRpcFactory,
         agentId: sandbox.enrollmentId,
+        connectionInstanceId: connection.connectionInstanceId,
         epoch: pointer.activeEpoch,
         ...(deps.selfhostedTimeoutMs !== undefined ? { timeoutMs: deps.selfhostedTimeoutMs } : {}),
         ...(deps.selfhostedExecTimeoutMs !== undefined
           ? { execTimeoutMs: deps.selfhostedExecTimeoutMs }
           : {}),
         ...(deps.selfhostedOnOp !== undefined ? { onOp: deps.selfhostedOnOp } : {}),
-        ...(opStream !== undefined ? { opStream } : {}),
+        ...(connection.opStream !== undefined ? { opStream: connection.opStream } : {}),
         // The turn's declared environment → the session's manifest.environment, so
         // the SDK's per-turn manifest-env delta is empty (no "cannot change manifest
         // environment variables" throw on a pin-to-vm turn).

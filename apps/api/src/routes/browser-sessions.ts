@@ -98,7 +98,7 @@ import {
   getBrowserPrivateCheckpointAuthority,
   getAttachedBrowserDevice,
   getBrowserRevisionArtifactAuthority,
-  getEnrollment,
+  getLiveEnrollmentConnection,
   getExternalAuthInteractiveContext,
   getFilesForSubject,
   getFileUpload,
@@ -2573,18 +2573,19 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
       if (device.state !== "connected") {
         throw new BrowserSessionStateError("Attached browser is disconnected");
       }
-      const enrollment = await getEnrollment(
+      const enrollment = await getLiveEnrollmentConnection(
         deps.db,
         sourceSession.workspaceId,
         device.enrollmentId,
       );
-      if (!enrollment || enrollment.status !== "active") {
+      if (!enrollment || enrollment.status !== "active" || !enrollment.connectionInstanceId) {
         throw new BrowserSessionStateError("Attached browser machine is unavailable");
       }
       assertPlacementInstance(expectedPlacementInstanceId, device.connectionGeneration);
       const built = await buildSelfhostedBackendSession({
         workspaceId: sourceSession.workspaceId,
         agentId: device.enrollmentId,
+        connectionInstanceId: enrollment.connectionInstanceId,
         relay: relayConfigFromSettings(deps.settings),
         controlRpcFactory: () => new NatsControlRpc(async () => deps.bus.getRequestConnection()),
         // Browser-profile generation is the physical controller fence. Epoch 0

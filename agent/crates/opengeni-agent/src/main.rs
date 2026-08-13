@@ -2,8 +2,9 @@
 //!
 //! Run your own machine as a first-class OpenGeni sandbox. After a one-time
 //! device-flow enrollment the agent dials the OpenGeni control plane over NATS,
-//! subscribes to a subject that IS its identity (`agent.<ws>.<id>.rpc`), and
-//! answers control RPCs (exec / filesystem / git today; terminal + desktop
+//! claims one process generation and subscribes to its exact authority subject
+//! (`agent.<ws>.<id>.connection.<instance>.rpc`), then answers control RPCs
+//! (exec / filesystem / git today; terminal + desktop
 //! streams in M8) against the host — all with bulletproof, full-jitter reconnect
 //! resiliency and a clean SIGINT/SIGTERM going-offline (§23.0).
 //!
@@ -351,7 +352,8 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     platform = next_platform;
     // Clone connection platforms only after browser control is attached. Existing
     // links and links added by the watcher must expose the identical controller.
-    let links = supervisor_links(&connections, &platform);
+    let connection_instance_id = uuid::Uuid::new_v4().to_string();
+    let links = supervisor_links(&connections, &platform, &connection_instance_id);
     let (updates_tx, updates_rx) = tokio::sync::watch::channel(links.clone());
     let browser_bridge = start_browser_bridge(config_dir.as_deref()).await;
 
@@ -376,6 +378,7 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     // a workspace never requires restarting this agent or interrupts other links.
     let watcher_api_url = api_url.to_string();
     let watcher_platform = platform.clone();
+    let watcher_connection_instance_id = connection_instance_id.clone();
     let watcher = tokio::spawn(async move {
         let mut current = connections;
         loop {
@@ -385,7 +388,8 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
             }
             match config::load_connections(&watcher_api_url) {
                 Ok(next) if next != current => {
-                    let next_links = supervisor_links(&next, &watcher_platform);
+                    let next_links =
+                        supervisor_links(&next, &watcher_platform, &watcher_connection_instance_id);
                     if updates_tx.send(next_links).is_err() {
                         return;
                     }
@@ -452,6 +456,7 @@ async fn start_browser_bridge(config_dir: Option<&Path>) -> Option<BrowserBridge
 fn supervisor_links(
     connections: &[StoredConnection],
     platform: &NativePlatform,
+    connection_instance_id: &str,
 ) -> Vec<SupervisorLink<NativePlatform>> {
     connections
         .iter()
@@ -466,7 +471,8 @@ fn supervisor_links(
             });
             let link_platform = Arc::new(platform.clone().with_stream_registry(Arc::new(hub)));
             let link =
-                SupervisorLink::new(connection.connection_id.clone(), link_platform, credentials);
+                SupervisorLink::new(connection.connection_id.clone(), link_platform, credentials)
+                    .with_connection_instance_id(connection_instance_id);
             if connection.legacy_origin {
                 link
             } else {

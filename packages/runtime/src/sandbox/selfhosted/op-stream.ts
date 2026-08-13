@@ -108,11 +108,14 @@ export interface OpStreamJournal {
 export interface OpStreamExecClientDeps {
   workspaceId: string;
   agentId: string;
+  /** Exact live daemon instance. Production always supplies it; omission keeps
+   *  direct protocol tests compatible with the legacy subject shape. */
+  connectionInstanceId?: string;
   /** The lease/active epoch every ControlRequest is fenced under. */
   epoch: number;
   /** The rpc request/reply seam (OpStart/OpQuery/OpAttach ride here). */
   controlRpc: ControlRpc;
-  /** The rpc subject (`agent.<ws>.<id>.rpc`). */
+  /** The exact claimed process RPC subject. */
   rpcSubject: string;
   /** The frame/ack seam (subscribe + publish). */
   transport: OpStreamTransport;
@@ -249,7 +252,11 @@ export class OpStreamExecClient {
    * are swallowed for the same reason.
    */
   async finalizeSettledOps(): Promise<void> {
-    const ackSubject = opAckSubject(this.deps.workspaceId, this.deps.agentId);
+    const ackSubject = opAckSubject(
+      this.deps.workspaceId,
+      this.deps.agentId,
+      this.deps.connectionInstanceId,
+    );
     while (this.settled.length > 0) {
       // Non-null: length checked above (single-threaded event loop).
       const op = this.settled.shift() as SettledOp;
@@ -346,7 +353,12 @@ class OpConsumer {
     // Subscription BEFORE OpStart (protocol invariant): no frame can be
     // published before the consumer exists on a healthy path.
     this.subscription = await this.deps.transport.subscribe(
-      opFrameSubject(this.deps.workspaceId, this.deps.agentId, this.opId),
+      opFrameSubject(
+        this.deps.workspaceId,
+        this.deps.agentId,
+        this.opId,
+        this.deps.connectionInstanceId,
+      ),
       (payload) => this.onFramePayload(payload),
     );
 
@@ -656,7 +668,7 @@ class OpConsumer {
     }).finish();
     try {
       await this.deps.transport.publish(
-        opAckSubject(this.deps.workspaceId, this.deps.agentId),
+        opAckSubject(this.deps.workspaceId, this.deps.agentId, this.deps.connectionInstanceId),
         ack,
       );
     } catch {

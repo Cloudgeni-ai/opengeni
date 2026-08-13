@@ -6087,6 +6087,15 @@ export type MachineState =
 
 export type MachineKind = "modal" | "selfhosted";
 
+export type MachineConnectionAuthority = {
+  state: "not_applicable" | "unclaimed" | "active" | "expired";
+  generation: number;
+  supersededCount: number;
+  leaseExpiresAt: string | null;
+  duplicateRunnerDeniedCount: number;
+  duplicateRunnerDeniedAt: string | null;
+};
+
 /** A machine as the Machines dashboard renders it (an enrolled selfhosted machine
  *  or the session's synthetic Modal group box, `isSessionGroup: true`). */
 export type MachineView = {
@@ -6110,6 +6119,8 @@ export type MachineView = {
   allowScreenControl: boolean;
   sharedSessionCount: number;
   lastSeenAt: string | null;
+  /** Secret-free single-runner authority diagnostics. */
+  connectionAuthority: MachineConnectionAuthority;
   metrics: MetricSample | null;
 };
 

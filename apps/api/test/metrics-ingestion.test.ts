@@ -20,15 +20,20 @@ import {
 // real postgres is covered by machines-routes.test.ts.
 
 describe("parseAgentEventSubject", () => {
-  test("extracts workspaceId + agentId from agent.<ws>.<id>.events", () => {
-    expect(parseAgentEventSubject("agent.ws-123.ag-456.events")).toEqual({
+  test("extracts workspace, enrollment, and process from a fenced event", () => {
+    expect(
+      parseAgentEventSubject(
+        "agent.ws-123.ag-456.connection.bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.events",
+      ),
+    ).toEqual({
       workspaceId: "ws-123",
       agentId: "ag-456",
+      connectionInstanceId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
     });
   });
 
-  test("the wildcard subscription subject is agent.*.*.events", () => {
-    expect(AGENT_EVENTS_SUBJECT).toBe("agent.*.*.events");
+  test("the wildcard subscription includes the process authority segment", () => {
+    expect(AGENT_EVENTS_SUBJECT).toBe("agent.*.*.connection.*.events");
   });
 
   test("rejects a malformed / non-events subject", () => {
@@ -60,7 +65,7 @@ describe("handleAgentEventPayload — GoingOffline machine-plane recording", () 
       {} as never,
       observability as never,
       payload,
-      "agent.11111111-1111-1111-1111-111111111111.agent-abc.events",
+      "agent.11111111-1111-1111-1111-111111111111.agent-abc.connection.bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.events",
     );
     expect(counters).toHaveLength(1);
     expect(counters[0]!.name).toBe("opengeni_machine_going_offline_total");

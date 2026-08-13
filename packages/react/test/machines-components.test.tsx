@@ -8,6 +8,7 @@
 import { describe, expect, test } from "bun:test";
 import { registerDom, renderComponent, flush } from "./render-hook";
 import { MachineCard } from "../src/components/machine-card";
+import { MachineDetail } from "../src/components/machines/machine-detail";
 import { MachinesDashboard } from "../src/components/machines-dashboard";
 import { MachineMetrics } from "../src/components/machine-metrics";
 import { ConnectionStatusPill, MachineStatusPill } from "../src/components/machine-status-pill";
@@ -66,6 +67,14 @@ function machine(
     allowScreenControl: true,
     sharedSessionCount: 1,
     lastSeenAt: "2026-06-26T09:15:00.000Z",
+    connectionAuthority: {
+      state: "active",
+      generation: 1,
+      supersededCount: 0,
+      leaseExpiresAt: "2026-06-26T09:16:00.000Z",
+      duplicateRunnerDeniedCount: 0,
+      duplicateRunnerDeniedAt: null,
+    },
     metrics: idle,
     ...overrides,
   };
@@ -211,6 +220,58 @@ describe("MachineCard — attach/swap affordance", () => {
     await flush();
     expect(r.container.querySelector("[data-shared-disclosure]")).not.toBeNull();
     expect(r.container.textContent).toContain("2 sessions are on this machine");
+    await r.unmount();
+  });
+
+  test("a blocked competing runner is visible from the fleet card", async () => {
+    const m = machine({
+      sandboxId: "sh-conflict",
+      state: "online",
+      connectionAuthority: {
+        state: "active",
+        generation: 3,
+        supersededCount: 2,
+        leaseExpiresAt: "2026-06-26T09:16:00.000Z",
+        duplicateRunnerDeniedCount: 1,
+        duplicateRunnerDeniedAt: "2026-06-26T09:15:30.000Z",
+      },
+    });
+    const r = await renderComponent(<MachineCard machine={m} />);
+    await flush();
+    expect(r.container.querySelector("[data-runner-conflict]")).not.toBeNull();
+    expect(r.container.textContent).toContain("Competing agent process blocked");
+    await r.unmount();
+  });
+});
+
+describe("MachineDetail — runner authority diagnostics", () => {
+  test("shows the live generation, fenced predecessors, and blocked competing runners", async () => {
+    const m = machine({
+      sandboxId: "sh-authority-detail",
+      state: "online",
+      connectionAuthority: {
+        state: "active",
+        generation: 4,
+        supersededCount: 3,
+        leaseExpiresAt: "2026-06-26T09:16:00.000Z",
+        duplicateRunnerDeniedCount: 2,
+        duplicateRunnerDeniedAt: "2026-06-26T09:15:30.000Z",
+      },
+    });
+    const r = await renderComponent(
+      <MachineDetail
+        machine={m}
+        series={[]}
+        window="1h"
+        onWindowChange={() => {}}
+        now={new Date("2026-06-26T09:15:40.000Z").getTime()}
+      />,
+    );
+    await flush();
+    expect(r.container.querySelector('[data-connection-authority="active"]')).not.toBeNull();
+    expect(r.container.textContent).toContain("generation 4");
+    expect(r.container.textContent).toContain("3 earlier runners fenced");
+    expect(r.container.textContent).toContain("Blocked 2 competing runners");
     await r.unmount();
   });
 });

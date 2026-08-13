@@ -7,6 +7,7 @@
 // `og-*` token system — no new visual language, just the missing depth.
 // ----------------------------------------------------------------------------
 import {
+  AlertTriangleIcon,
   ArrowLeftIcon,
   CpuIcon,
   LaptopIcon,
@@ -57,6 +58,10 @@ export function MachineDetail({
   const tone = HEALTH_TOKEN[health.level];
   const latest = machine.metrics;
   const sampledAgo = latest ? formatRelativeTime(latest.sampledAt, new Date(now)) : null;
+  const authority = machine.connectionAuthority;
+  const duplicateDeniedAgo = authority.duplicateRunnerDeniedAt
+    ? formatRelativeTime(authority.duplicateRunnerDeniedAt, new Date(now))
+    : null;
 
   // Only render metrics that have a value (GPU is dropped on headless boxes).
   const visible = METRICS.filter((m) => !(m.key === "gpu" && latest?.gpuUtilPct == null));
@@ -206,6 +211,30 @@ export function MachineDetail({
             })}
           </div>
         )}
+
+        {authority.state !== "not_applicable" ? (
+          <div
+            data-connection-authority={authority.state}
+            className="flex flex-wrap items-center justify-between gap-2 rounded-og-md border border-og-border bg-og-surface-1/75 px-3 py-2 text-og-xs"
+          >
+            <span className="text-og-fg-muted">
+              Runner {authority.state.replace("_", " ")} · generation {authority.generation}
+              {authority.supersededCount > 0
+                ? ` · ${authority.supersededCount} earlier ${authority.supersededCount === 1 ? "runner" : "runners"} fenced`
+                : ""}
+            </span>
+            {authority.duplicateRunnerDeniedCount > 0 ? (
+              <span className="inline-flex items-center gap-1.5 text-og-status-failed">
+                <AlertTriangleIcon className="size-3.5" aria-hidden />
+                Blocked {authority.duplicateRunnerDeniedCount} competing runner
+                {authority.duplicateRunnerDeniedCount === 1 ? "" : "s"}
+                {duplicateDeniedAgo
+                  ? ` · ${duplicateDeniedAgo === "now" ? "now" : `${duplicateDeniedAgo} ago`}`
+                  : ""}
+              </span>
+            ) : null}
+          </div>
+        ) : null}
       </div>
 
       {/* ── history charts ──────────────────────────────────────────────── */}

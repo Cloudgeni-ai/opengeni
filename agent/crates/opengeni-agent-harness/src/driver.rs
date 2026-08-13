@@ -187,7 +187,7 @@ impl Driver {
         &self,
         workspace_id: &str,
     ) -> Result<HeartbeatCollector, String> {
-        let subject = format!("agent.{workspace_id}.*.events");
+        let subject = format!("agent.{workspace_id}.*.connection.*.events");
         let subscriber = self
             .client
             .subscribe(subject)
@@ -320,6 +320,8 @@ struct EventState {
     offline: BTreeMap<String, Vec<Instant>>,
     /// Per-agent LATEST heartbeat payload (capacity/admission telemetry).
     latest: BTreeMap<String, v1::Heartbeat>,
+    /// Exact process generation parsed from each concrete event subject.
+    connection_instances: BTreeMap<String, String>,
 }
 
 /// Collects agent-originated events (heartbeats + going-offline) off the fleet
@@ -342,6 +344,13 @@ impl HeartbeatCollector {
                 };
                 let now = Instant::now();
                 let mut guard = task_state.lock().unwrap();
+                if let Some(connection_instance_id) =
+                    connection_instance_from_subject(message.subject.as_str())
+                {
+                    guard
+                        .connection_instances
+                        .insert(event.agent_id.clone(), connection_instance_id);
+                }
                 match event.event {
                     Some(Event::Heartbeat(hb)) => {
                         guard
@@ -365,6 +374,17 @@ impl HeartbeatCollector {
     #[must_use]
     pub fn latest_heartbeat(&self, agent_id: &str) -> Option<v1::Heartbeat> {
         self.state.lock().unwrap().latest.get(agent_id).cloned()
+    }
+
+    /// Exact live process generation discovered from its event subject.
+    #[must_use]
+    pub fn connection_instance_id(&self, agent_id: &str) -> Option<String> {
+        self.state
+            .lock()
+            .unwrap()
+            .connection_instances
+            .get(agent_id)
+            .cloned()
     }
 
     /// The number of heartbeats seen for an agent so far.
@@ -431,6 +451,12 @@ impl HeartbeatCollector {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     }
+}
+
+fn connection_instance_from_subject(subject: &str) -> Option<String> {
+    let parts: Vec<&str> = subject.split('.').collect();
+    (parts.len() == 6 && parts[0] == "agent" && parts[3] == "connection" && parts[5] == "events")
+        .then(|| parts[4].to_string())
 }
 
 impl Drop for HeartbeatCollector {

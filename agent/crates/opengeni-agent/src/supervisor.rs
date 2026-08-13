@@ -7,9 +7,11 @@
 //! 1. **Dials** the control plane over NATS with the enrollment Account creds and
 //!    sends a [`Hello`] (carrying the resume token so the control plane fences by
 //!    epoch and recognizes a reconnect vs a fresh enrollment).
-//! 2. **Subscribes** to `agent.<ws>.<id>.rpc` — that subscription IS the registry
-//!    (§10.1) — and serves each [`ControlRequest`] by dispatching it to the
-//!    [`Platform`] and replying on the message's reply inbox.
+//! 2. **Claims one process generation** and subscribes to
+//!    `agent.<ws>.<id>.connection.<instance>.rpc`. The exact process subject is
+//!    the live routing authority: a cloned credential cannot share or steal its
+//!    work. Each [`ControlRequest`] is dispatched to the [`Platform`] and the
+//!    response is sent on the message's reply inbox.
 //! 3. **Heartbeats** every 5s on the events subject with a metrics sample so the
 //!    control plane can dead-detect a vanished agent (§10.6 cadence).
 //! 4. On an **unexpected disconnect**, sleeps a full-jitter [`Backoff::standard`]
@@ -256,6 +258,9 @@ pub struct SupervisorLink<P: Platform> {
     pub credentials: StoredCredentials,
     /// Authoritative deployment origin persisted by a non-legacy enrollment.
     pub api_url: Option<String>,
+    /// Random for this daemon process and stable across control/bulk reconnects.
+    /// Auth-callout leases this exact value and operational subjects include it.
+    pub connection_instance_id: String,
 }
 
 impl<P: Platform> Clone for SupervisorLink<P> {
@@ -265,6 +270,7 @@ impl<P: Platform> Clone for SupervisorLink<P> {
             platform: self.platform.clone(),
             credentials: self.credentials.clone(),
             api_url: self.api_url.clone(),
+            connection_instance_id: self.connection_instance_id.clone(),
         }
     }
 }
@@ -282,6 +288,7 @@ impl<P: Platform> SupervisorLink<P> {
             platform,
             credentials,
             api_url: None,
+            connection_instance_id: uuid::Uuid::new_v4().to_string(),
         }
     }
 
@@ -289,6 +296,14 @@ impl<P: Platform> SupervisorLink<P> {
     #[must_use]
     pub fn with_api_url(mut self, api_url: impl Into<String>) -> Self {
         self.api_url = Some(api_url.into());
+        self
+    }
+
+    /// Use the process-wide runner identity. Credential-directory reconciliation
+    /// must preserve it rather than looking like a competing daemon.
+    #[must_use]
+    pub fn with_connection_instance_id(mut self, instance_id: impl Into<String>) -> Self {
+        self.connection_instance_id = instance_id.into();
         self
     }
 }
@@ -300,6 +315,7 @@ struct WorkspaceLink<P: Platform> {
     platform: Arc<P>,
     creds: StoredCredentials,
     api_url: Option<String>,
+    connection_instance_id: String,
     epoch: Arc<EpochCell>,
     shutdown: ShutdownSignal,
     /// The CURRENT generation's bulk frame channel (op-frame publishes ride a
@@ -317,10 +333,38 @@ impl<P: Platform> WorkspaceLink<P> {
             platform: definition.platform,
             creds: definition.credentials,
             api_url: definition.api_url,
+            connection_instance_id: definition.connection_instance_id,
             epoch: Arc::new(EpochCell::default()),
             shutdown: ShutdownSignal::default(),
             bulk_tx: Arc::new(std::sync::RwLock::new(None)),
         }
+    }
+
+    fn subject_prefix(&self) -> String {
+        format!(
+            "agent.{}.{}.connection.{}",
+            self.creds.workspace_id, self.creds.agent_id, self.connection_instance_id
+        )
+    }
+
+    fn rpc_subject(&self) -> String {
+        format!("{}.rpc", self.subject_prefix())
+    }
+
+    fn events_subject(&self) -> String {
+        format!("{}.events", self.subject_prefix())
+    }
+
+    fn hello_subject(&self) -> String {
+        format!("{}.hello", self.subject_prefix())
+    }
+
+    fn ack_subject(&self) -> String {
+        format!("{}.ack", self.subject_prefix())
+    }
+
+    fn op_subject(&self, op_id: &str) -> String {
+        format!("{}.op.{op_id}", self.subject_prefix())
     }
 }
 
@@ -551,7 +595,7 @@ impl<P: Platform + 'static> Supervisor<P> {
         info!(
             connection_id = %link.connection_id,
             agent_id = %link.creds.agent_id,
-            subject = %link.creds.rpc_subject(),
+            subject = %link.rpc_subject(),
             "agent supervisor starting (foreground run model)"
         );
 
@@ -645,15 +689,15 @@ impl<P: Platform + 'static> Supervisor<P> {
         backoff.reset();
 
         // Subscribe to the RPC subject — this IS the registry.
-        let subscription = match client.subscribe(link.creds.rpc_subject()).await {
+        let subscription = match client.subscribe(link.rpc_subject()).await {
             Ok(sub) => sub,
             Err(e) => return ConnectionOutcome::Disconnected(format!("subscribe failed: {e}")),
         };
-        debug!(subject = %link.creds.rpc_subject(), "subscribed to rpc subject");
+        debug!(subject = %link.rpc_subject(), "subscribed to rpc subject");
 
         // The ack subject rides the SAME control connection (PROTOCOL.md
         // §Subjects: subscribed alongside rpc at establishment).
-        let ack_subscription = match client.subscribe(link.creds.ack_subject()).await {
+        let ack_subscription = match client.subscribe(link.ack_subject()).await {
             Ok(sub) => sub,
             Err(e) => return ConnectionOutcome::Disconnected(format!("ack subscribe failed: {e}")),
         };
@@ -1016,7 +1060,7 @@ impl<P: Platform + 'static> Supervisor<P> {
         let scope = link.connection_id.clone();
         let request_id = request.request_id.clone();
         let (request_epoch, held_epoch) = (request.epoch, ctx.epoch);
-        let subject = link.creds.op_subject(&request_id);
+        let subject = link.op_subject(&request_id);
         let bulk = link.bulk_tx.clone();
         let sink_engine = self.engine.clone();
         let sink: crate::ops::FrameSink = Arc::new(move |bytes: Vec<u8>| {
@@ -1047,8 +1091,9 @@ impl<P: Platform + 'static> Supervisor<P> {
     /// Dials NATS presenting the enrollment BEARER as the connect auth-token (the
     /// AUTH-CALLOUT model, / M-AUTH): the server delegates to the
     /// control-plane callout responder, which validates the bearer and returns a
-    /// workspace-scoped user JWT — so this connection can pub/sub ONLY
-    /// `agent.<ws>.>` (+ `_INBOX.>`). The URL(s) are `wss://` (the relay-symmetric
+    /// process-scoped user JWT — so this connection can pub/sub ONLY its exact
+    /// `agent.<ws>.<id>.connection.<instance>.>` subtree (and publish reply inboxes).
+    /// The URL(s) are `wss://` (the relay-symmetric
     /// TLS ingress); async-nats's default features include the websocket transport,
     /// so a `wss://` server URL rides the same TLS endpoint as the relay with no
     /// separate TCP load balancer.
@@ -1078,7 +1123,10 @@ impl<P: Platform + 'static> Supervisor<P> {
         let event_transport_lost = transport_lost.clone();
         let opts = async_nats::ConnectOptions::new()
             .token(link.creds.nats_bearer.clone())
-            .name(format!("opengeni-agent/{}", link.creds.agent_id))
+            .name(format!(
+                "opengeni-agent/connection/{}",
+                link.connection_instance_id
+            ))
             // See the note above: Some(1), NOT 0 (which means unlimited).
             .max_reconnects(Some(1))
             .event_callback(move |event| {
@@ -1151,7 +1199,7 @@ impl<P: Platform + 'static> Supervisor<P> {
         // that arrives we hold the last persisted epoch so dispatch can fence.
         link.epoch.store(link.creds.last_known_epoch);
         client
-            .publish(hello_subject(link), hello.encode_to_vec().into())
+            .publish(link.hello_subject(), hello.encode_to_vec().into())
             .await?;
         client.flush().await.ok();
         debug!(epoch = link.epoch.load(), "sent hello");
@@ -1271,7 +1319,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             })),
         };
         client
-            .publish(link.creds.events_subject(), event.encode_to_vec().into())
+            .publish(link.events_subject(), event.encode_to_vec().into())
             .await
     }
 
@@ -1286,7 +1334,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             })),
         };
         if let Err(e) = client
-            .publish(link.creds.events_subject(), event.encode_to_vec().into())
+            .publish(link.events_subject(), event.encode_to_vec().into())
             .await
         {
             warn!(error = %e, "failed to publish going-offline");
@@ -1295,14 +1343,6 @@ impl<P: Platform + 'static> Supervisor<P> {
         let _ = client.flush().await;
         info!("announced going-offline; closing cleanly");
     }
-}
-
-/// The subject the control plane listens on for an agent's connect hello.
-fn hello_subject<P: Platform>(link: &WorkspaceLink<P>) -> String {
-    format!(
-        "agent.{}.{}.hello",
-        link.creds.workspace_id, link.creds.agent_id
-    )
 }
 
 /// A legacy op the adapter serves as an engine job.
@@ -1539,6 +1579,8 @@ pub(crate) fn hostname_or_default() -> String {
 mod tests {
     use super::*;
 
+    const TEST_CONNECTION_INSTANCE_ID: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+
     #[test]
     fn epoch_cell_round_trips() {
         let cell = EpochCell::default();
@@ -1707,11 +1749,10 @@ mod tests {
         let url = format!("nats://127.0.0.1:{port}");
         let credentials = it::test_credentials(&url);
         let platform = Arc::new(NativePlatform::new());
-        let link = WorkspaceLink::from_definition(SupervisorLink::new(
-            "transport-loss-test",
-            platform.clone(),
-            credentials.clone(),
-        ));
+        let link = WorkspaceLink::from_definition(
+            SupervisorLink::new("transport-loss-test", platform.clone(), credentials.clone())
+                .with_connection_instance_id(TEST_CONNECTION_INSTANCE_ID),
+        );
         let supervisor = Supervisor::new(platform, credentials, "test-0.0.0");
         let ConnectedNats {
             client: _client,
@@ -1751,11 +1792,10 @@ mod tests {
         let url = format!("nats://127.0.0.1:{port}");
         let credentials = it::test_credentials(&url);
         let platform = Arc::new(NativePlatform::new());
-        let link = WorkspaceLink::from_definition(SupervisorLink::new(
-            "bulk-loss-test",
-            platform.clone(),
-            credentials.clone(),
-        ));
+        let link = WorkspaceLink::from_definition(
+            SupervisorLink::new("bulk-loss-test", platform.clone(), credentials.clone())
+                .with_connection_instance_id(TEST_CONNECTION_INSTANCE_ID),
+        );
         let supervisor = Supervisor::new(platform, credentials, "test-0.0.0");
         let ConnectedNats {
             client: control_client,
@@ -1769,11 +1809,11 @@ mod tests {
             transport_lost: bulk_transport_lost,
         } = supervisor.connect(&link).await.expect("connect bulk lane");
         let subscription = control_client
-            .subscribe("agent.hx-test-ws.hx-test-agent.rpc".to_string())
+            .subscribe(link.rpc_subject())
             .await
             .expect("subscribe rpc");
         let ack_subscription = control_client
-            .subscribe("agent.hx-test-ws.hx-test-agent.ack".to_string())
+            .subscribe(link.ack_subject())
             .await
             .expect("subscribe ack");
 
@@ -1816,11 +1856,10 @@ mod tests {
         let url = format!("nats://127.0.0.1:{port}");
         let credentials = it::test_credentials(&url);
         let platform = Arc::new(NativePlatform::new());
-        let link = WorkspaceLink::from_definition(SupervisorLink::new(
-            "control-loss-test",
-            platform.clone(),
-            credentials.clone(),
-        ));
+        let link = WorkspaceLink::from_definition(
+            SupervisorLink::new("control-loss-test", platform.clone(), credentials.clone())
+                .with_connection_instance_id(TEST_CONNECTION_INSTANCE_ID),
+        );
         let supervisor = Supervisor::new(platform, credentials, "test-0.0.0");
         let ConnectedNats {
             client: control_client,
@@ -1834,11 +1873,11 @@ mod tests {
             transport_lost: bulk_transport_lost,
         } = supervisor.connect(&link).await.expect("connect bulk lane");
         let subscription = control_client
-            .subscribe("agent.hx-test-ws.hx-test-agent.rpc".to_string())
+            .subscribe(link.rpc_subject())
             .await
             .expect("subscribe rpc");
         let ack_subscription = control_client
-            .subscribe("agent.hx-test-ws.hx-test-agent.ack".to_string())
+            .subscribe(link.ack_subject())
             .await
             .expect("subscribe ack");
 
@@ -1892,20 +1931,24 @@ mod tests {
         let _server = it::NatsServerGuard::spawn(&nats_bin, port);
         let url = format!("nats://127.0.0.1:{port}");
 
-        // A watcher on the agent's outbound events subject.
+        let definition = SupervisorLink::new(
+            "clean-shutdown-test",
+            Arc::new(NativePlatform::new()),
+            it::test_credentials(&url),
+        )
+        .with_connection_instance_id(TEST_CONNECTION_INSTANCE_ID);
+        let link = WorkspaceLink::from_definition(definition.clone());
+
+        // A watcher on this exact process generation's outbound events subject.
         let client = it::connect_with_retry(&url, Duration::from_secs(5)).await;
         let mut events = client
-            .subscribe("agent.hx-test-ws.hx-test-agent.events".to_string())
+            .subscribe(link.events_subject())
             .await
             .expect("subscribe to events subject");
 
         // A disposable supervisor over the real native platform, dialing the local
         // no-auth server (which accepts the throwaway bearer).
-        let supervisor = Supervisor::new(
-            Arc::new(NativePlatform::new()),
-            it::test_credentials(&url),
-            "test-0.0.0",
-        );
+        let supervisor = Supervisor::new_links(&[definition], "test-0.0.0");
         let shutdown = supervisor.shutdown_handle();
         let run = tokio::spawn(async move { supervisor.run().await });
 
@@ -1964,15 +2007,19 @@ mod tests {
         second_credentials.workspace_id = "workspace-b".to_string();
         second_credentials.agent_id = "agent-b".to_string();
         let platform = Arc::new(NativePlatform::with_root(std::env::temp_dir()));
-        let first = SupervisorLink::new("connection-a", platform.clone(), first_credentials);
-        let second = SupervisorLink::new("connection-b", platform, second_credentials);
+        let first = SupervisorLink::new("connection-a", platform.clone(), first_credentials)
+            .with_connection_instance_id(TEST_CONNECTION_INSTANCE_ID);
+        let second = SupervisorLink::new("connection-b", platform, second_credentials)
+            .with_connection_instance_id(TEST_CONNECTION_INSTANCE_ID);
+        let first_link = WorkspaceLink::from_definition(first.clone());
+        let second_link = WorkspaceLink::from_definition(second.clone());
 
         let mut first_events = client
-            .subscribe("agent.workspace-a.agent-a.events".to_string())
+            .subscribe(first_link.events_subject())
             .await
             .expect("subscribe first events");
         let mut second_events = client
-            .subscribe("agent.workspace-b.agent-b.events".to_string())
+            .subscribe(second_link.events_subject())
             .await
             .expect("subscribe second events");
         let supervisor = Supervisor::new_links(&[first.clone(), second.clone()], "test-0.0.0");
@@ -2010,10 +2057,7 @@ mod tests {
         };
         let reply = tokio::time::timeout(
             Duration::from_secs(5),
-            client.request(
-                "agent.workspace-b.agent-b.rpc".to_string(),
-                ping.encode_to_vec().into(),
-            ),
+            client.request(second_link.rpc_subject(), ping.encode_to_vec().into()),
         )
         .await
         .expect("remaining link responds promptly")
@@ -2049,22 +2093,25 @@ mod tests {
         let url = format!("nats://127.0.0.1:{port}");
         let client = it::connect_with_retry(&url, Duration::from_secs(5)).await;
 
+        let definition = SupervisorLink::new(
+            "op-stream-wire-test",
+            Arc::new(NativePlatform::with_root(std::env::temp_dir())),
+            it::test_credentials(&url),
+        )
+        .with_connection_instance_id(TEST_CONNECTION_INSTANCE_ID);
+        let link = WorkspaceLink::from_definition(definition.clone());
         let op_id = "wire-op-1";
         // Subscription-before-start (protocol invariant).
         let mut op_frames = client
-            .subscribe(format!("agent.hx-test-ws.hx-test-agent.op.{op_id}"))
+            .subscribe(link.op_subject(op_id))
             .await
             .expect("subscribe op subject");
         let mut events = client
-            .subscribe("agent.hx-test-ws.hx-test-agent.events".to_string())
+            .subscribe(link.events_subject())
             .await
             .expect("subscribe events");
 
-        let supervisor = Supervisor::new(
-            Arc::new(NativePlatform::with_root(std::env::temp_dir())),
-            it::test_credentials(&url),
-            "test-0.0.0",
-        );
+        let supervisor = Supervisor::new_links(&[definition], "test-0.0.0");
         let shutdown = supervisor.shutdown_handle();
         let run = tokio::spawn(async move { supervisor.run().await });
         assert!(
@@ -2093,10 +2140,7 @@ mod tests {
         };
         let reply = tokio::time::timeout(
             Duration::from_secs(10),
-            client.request(
-                "agent.hx-test-ws.hx-test-agent.rpc".to_string(),
-                start.encode_to_vec().into(),
-            ),
+            client.request(link.rpc_subject(), start.encode_to_vec().into()),
         )
         .await
         .expect("OpStarted within timeout")
@@ -2140,7 +2184,7 @@ mod tests {
         // runner-side initial attachment).
         client
             .publish(
-                "agent.hx-test-ws.hx-test-agent.ack".to_string(),
+                link.ack_subject(),
                 v1::OpAck {
                     op_id: op_id.to_string(),
                     acked_seq: exit_seq,
@@ -2164,10 +2208,7 @@ mod tests {
         };
         let reply = tokio::time::timeout(
             Duration::from_secs(5),
-            client.request(
-                "agent.hx-test-ws.hx-test-agent.rpc".to_string(),
-                query.encode_to_vec().into(),
-            ),
+            client.request(link.rpc_subject(), query.encode_to_vec().into()),
         )
         .await
         .expect("status within timeout")

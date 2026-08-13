@@ -12300,6 +12300,20 @@ export type MachineState = z.infer<typeof MachineState>;
 export const MachineKind = z.enum(["modal", "selfhosted"]);
 export type MachineKind = z.infer<typeof MachineKind>;
 
+/** Diagnostic projection of the single live Connected-Machine runner authority.
+ * It contains no bearer or NATS subject material. `supersededCount` is derived
+ * from the monotonic generation; duplicate-denial evidence records valid
+ * competing processes that were prevented from receiving work. */
+export const MachineConnectionAuthority = z.object({
+  state: z.enum(["not_applicable", "unclaimed", "active", "expired"]),
+  generation: z.number().int().nonnegative(),
+  supersededCount: z.number().int().nonnegative(),
+  leaseExpiresAt: z.string().nullable(),
+  duplicateRunnerDeniedCount: z.number().int().nonnegative(),
+  duplicateRunnerDeniedAt: z.string().nullable(),
+});
+export type MachineConnectionAuthority = z.infer<typeof MachineConnectionAuthority>;
+
 /**
  * A machine as the Machines dashboard renders it. The workspace's enrolled
  * selfhosted machines PLUS the session's synthetic Modal group box
@@ -12329,6 +12343,7 @@ export const MachineView = z.object({
   allowScreenControl: z.boolean(),
   sharedSessionCount: z.number().int(),
   lastSeenAt: z.string().nullable(),
+  connectionAuthority: MachineConnectionAuthority,
   metrics: MetricSample.nullable(),
 });
 export type MachineView = z.infer<typeof MachineView>;

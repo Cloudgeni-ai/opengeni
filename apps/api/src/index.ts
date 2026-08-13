@@ -306,7 +306,8 @@ export async function startApi() {
   } as const;
   // The PRIVILEGED control-plane NATS login (M-AUTH): when the server runs with
   // auth_callout, api/worker authenticate as a static account user permitted to
-  // request `agent.*.rpc`. Null in local dev (anonymous connect — the bus default).
+  // request exact generation-fenced agent RPC subjects. Null in local dev
+  // (anonymous connect — the bus default).
   const controlPlaneAuth = resolveNatsControlPlaneAuth(settings);
   try {
     await retryStartupDependency(

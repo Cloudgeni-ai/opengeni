@@ -65,6 +65,14 @@ function machine(
     allowScreenControl: true,
     sharedSessionCount: 1,
     lastSeenAt: "2026-06-26T09:15:00.000Z",
+    connectionAuthority: {
+      state: "active",
+      generation: 1,
+      supersededCount: 0,
+      leaseExpiresAt: "2026-06-26T09:16:00.000Z",
+      duplicateRunnerDeniedCount: 0,
+      duplicateRunnerDeniedAt: null,
+    },
     metrics: idleMetrics,
     ...overrides,
   };

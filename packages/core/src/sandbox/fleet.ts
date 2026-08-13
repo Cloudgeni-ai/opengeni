@@ -14,6 +14,7 @@
 import type { Settings } from "@opengeni/config";
 import {
   getEnrollment,
+  getLiveEnrollmentConnection,
   getSandbox,
   listSandboxes,
   readActiveSandbox,
@@ -191,13 +192,15 @@ async function probeEnrollment(
   services: FleetServices,
   workspaceId: string,
   enrollment: EnrollmentRecord,
+  liveConnection: EnrollmentRecord | null = enrollment,
 ): Promise<{ liveness: FleetLiveness; consented: boolean; hasDisplay: boolean }> {
   const { settings, bus } = services;
   let probeResponded = false;
-  if (enrollment.status === "active") {
+  if (liveConnection?.connectionInstanceId) {
     const session = new SelfhostedSession({
       workspaceId,
       agentId: enrollment.id,
+      connectionInstanceId: liveConnection.connectionInstanceId,
       controlRpc: controlRpc(bus),
       relay: relayConfigFromSettings(settings),
       timeoutMs: PROBE_TIMEOUT_MS,
@@ -313,8 +316,13 @@ export async function listFleet(
       // intentionally absent from the normal attach/run picker.
       continue;
     }
+    const liveConnection = await getLiveEnrollmentConnection(
+      db,
+      ctx.workspaceId,
+      sandbox.enrollmentId,
+    );
     const probe = enrollment
-      ? await probeEnrollment(services, ctx.workspaceId, enrollment)
+      ? await probeEnrollment(services, ctx.workspaceId, enrollment, liveConnection)
       : { liveness: "offline" as FleetLiveness, consented: false, hasDisplay: false };
     entries.push({
       id: sandbox.id,
@@ -412,7 +420,11 @@ async function resolveTarget(
         code: "offline_enrollment",
       };
     }
-    const enrollment = await getEnrollment(services.db, ctx.workspaceId, sandbox.enrollmentId);
+    const enrollment = await getLiveEnrollmentConnection(
+      services.db,
+      ctx.workspaceId,
+      sandbox.enrollmentId,
+    );
     if (!enrollment) {
       return {
         ok: false,
@@ -420,7 +432,7 @@ async function resolveTarget(
         code: "offline_enrollment",
       };
     }
-    const probe = await probeEnrollment(services, ctx.workspaceId, enrollment);
+    const probe = await probeEnrollment(services, ctx.workspaceId, enrollment, enrollment);
     if (probe.liveness !== "online") {
       return {
         ok: false,
@@ -569,6 +581,8 @@ export type RunOnResult = {
 export type RunOnSelfhostedMachine = {
   workspaceId: string;
   agentId: string;
+  /** Exact live daemon. Optional only for in-memory protocol tests. */
+  connectionInstanceId?: string;
   controlRpc: ControlRpc;
   relay: SelfhostedRelayConfig;
   /** Short request/reply deadline for read/write and other control operations. */
@@ -593,6 +607,9 @@ export async function executeRunOnSelfhostedMachine(
   const session = new SelfhostedSession({
     workspaceId: machine.workspaceId,
     agentId: machine.agentId,
+    ...(machine.connectionInstanceId !== undefined
+      ? { connectionInstanceId: machine.connectionInstanceId }
+      : {}),
     controlRpc: machine.controlRpc,
     relay: machine.relay,
     timeoutMs: machine.controlTimeoutMs,
@@ -686,8 +703,12 @@ export async function runOnSandbox(
       reason: `run_on routes one-off ops to enrolled selfhosted machines; ${sandbox.kind} targets are reached via the active sandbox (swap to it first)`,
     };
   }
-  const enrollment = await getEnrollment(services.db, ctx.workspaceId, sandbox.enrollmentId);
-  if (!enrollment || enrollment.status !== "active") {
+  const enrollment = await getLiveEnrollmentConnection(
+    services.db,
+    ctx.workspaceId,
+    sandbox.enrollmentId,
+  );
+  if (!enrollment || enrollment.status !== "active" || !enrollment.connectionInstanceId) {
     return {
       target,
       targetName: sandbox.name,
@@ -701,6 +722,7 @@ export async function runOnSandbox(
     {
       workspaceId: ctx.workspaceId,
       agentId: sandbox.enrollmentId,
+      connectionInstanceId: enrollment.connectionInstanceId,
       controlRpc: controlRpc(services.bus),
       relay: relayConfigFromSettings(services.settings),
       controlTimeoutMs: services.settings.sandboxSelfhostedControlTimeoutMs,

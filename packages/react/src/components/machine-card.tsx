@@ -1,4 +1,5 @@
 import {
+  AlertTriangleIcon,
   ArrowRightIcon,
   CpuIcon,
   LaptopIcon,
@@ -143,6 +144,16 @@ export function MachineCard({
         >
           <UsersIcon className="size-3.5 shrink-0 text-og-accent" aria-hidden />
           Shared — {machine.sharedSessionCount} sessions are on this machine.
+        </p>
+      ) : null}
+
+      {machine.connectionAuthority.duplicateRunnerDeniedCount > 0 ? (
+        <p
+          data-runner-conflict
+          className="flex items-center gap-1.5 rounded-og-md border border-og-status-failed/30 bg-og-status-failed/5 px-2.5 py-1.5 text-og-xs text-og-status-failed"
+        >
+          <AlertTriangleIcon className="size-3.5 shrink-0" aria-hidden />
+          Competing agent process blocked. Open diagnostics for details.
         </p>
       ) : null}
 

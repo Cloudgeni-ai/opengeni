@@ -1866,7 +1866,8 @@ export interface OpProgress {
 
 /**
  * A server→runner cumulative ack + credit replenishment, published fire-and-forget
- * on the ack subject (`agent.<ws>.<id>.ack`). Best-effort, healed by repetition.
+ * on the exact process ack subject
+ * (`agent.<ws>.<id>.connection.<instance>.ack`). Best-effort, healed by repetition.
  */
 export interface OpAck {
   opId: string;

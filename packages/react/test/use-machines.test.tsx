@@ -32,6 +32,14 @@ function machine(overrides: Partial<MachineView> & Pick<MachineView, "sandboxId"
     allowScreenControl: true,
     sharedSessionCount: 1,
     lastSeenAt: null,
+    connectionAuthority: {
+      state: "active",
+      generation: 1,
+      supersededCount: 0,
+      leaseExpiresAt: null,
+      duplicateRunnerDeniedCount: 0,
+      duplicateRunnerDeniedAt: null,
+    },
     metrics: null,
     ...overrides,
   };

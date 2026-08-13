@@ -21,6 +21,7 @@
 import type { Settings } from "@opengeni/config";
 import {
   getSession,
+  getLiveEnrollmentConnection,
   listEnrollments,
   listSandboxes,
   readActiveSandbox,
@@ -48,6 +49,34 @@ export type MachinesServices = {
 };
 
 const PROBE_TIMEOUT_MS = 5_000;
+
+function connectionAuthorityFor(
+  enrollment: EnrollmentRecord | null,
+  liveConnection: EnrollmentRecord | null,
+): MachineView["connectionAuthority"] {
+  if (!enrollment) {
+    return {
+      state: "not_applicable",
+      generation: 0,
+      supersededCount: 0,
+      leaseExpiresAt: null,
+      duplicateRunnerDeniedCount: 0,
+      duplicateRunnerDeniedAt: null,
+    };
+  }
+  return {
+    state: liveConnection
+      ? "active"
+      : enrollment.connectionInstanceId && enrollment.connectionLeaseExpiresAt
+        ? "expired"
+        : "unclaimed",
+    generation: enrollment.connectionGeneration,
+    supersededCount: Math.max(0, enrollment.connectionGeneration - 1),
+    leaseExpiresAt: enrollment.connectionLeaseExpiresAt,
+    duplicateRunnerDeniedCount: enrollment.connectionDuplicateDeniedCount,
+    duplicateRunnerDeniedAt: enrollment.connectionDuplicateDeniedAt,
+  };
+}
 
 function controlRpc(bus: EventBus | undefined): ControlRpc {
   return new NatsControlRpc(async (): Promise<NatsRequestConnection | null> => {
@@ -91,6 +120,7 @@ async function probeEnrollment(
   services: MachinesServices,
   workspaceId: string,
   enrollment: EnrollmentRecord,
+  liveConnection: EnrollmentRecord | null,
 ): Promise<{
   state: "online" | "reconnecting" | "offline";
   consented: boolean;
@@ -98,10 +128,11 @@ async function probeEnrollment(
 }> {
   const { settings, bus } = services;
   let probeResponded = false;
-  if (enrollment.status === "active") {
+  if (liveConnection?.connectionInstanceId) {
     const session = new SelfhostedSession({
       workspaceId,
       agentId: enrollment.id,
+      connectionInstanceId: liveConnection.connectionInstanceId,
       controlRpc: controlRpc(bus),
       relay: relayConfigFromSettings(settings),
       timeoutMs: PROBE_TIMEOUT_MS,
@@ -210,6 +241,7 @@ export async function listMachines(
         allowScreenControl: false,
         sharedSessionCount: 1,
         lastSeenAt: null,
+        connectionAuthority: connectionAuthorityFor(null, null),
         metrics: null,
       }),
     );
@@ -233,10 +265,11 @@ export async function listMachines(
       if (!enrollment) {
         return null;
       }
-      const [probe, lease] = await Promise.all([
-        probeEnrollment(services, workspaceId, enrollment),
+      const [liveConnection, lease] = await Promise.all([
+        getLiveEnrollmentConnection(db, workspaceId, enrollment.id),
         readLease(db, workspaceId, sandbox.id),
       ]);
+      const probe = await probeEnrollment(services, workspaceId, enrollment, liveConnection);
       const state = machineStateFor(probe.state, probe.hasDisplay);
 
       // sharedSessionCount = the lease refcount for this machine's group. The
@@ -263,6 +296,7 @@ export async function listMachines(
         allowScreenControl: enrollment.allowScreenControl,
         sharedSessionCount,
         lastSeenAt: enrollment.lastSeenAt,
+        connectionAuthority: connectionAuthorityFor(enrollment, liveConnection),
         metrics: metricsRow ? metricRowToSample(metricsRow) : null,
       });
     }),

@@ -30,8 +30,15 @@ function sessionWith(rpc: ControlRpc, epoch = 0, terminalScopeId?: string): Self
 }
 
 describe("SelfhostedSession — structural surface over a ControlRpc (mock)", () => {
-  test("subject is agent.<ws>.<id>.rpc", () => {
+  test("legacy isolated callers retain the pre-claim subject shape", () => {
     expect(subjectFor(WS, AGENT)).toBe(`agent.${WS}.${AGENT}.rpc`);
+  });
+
+  test("live routing addresses the exact claimed daemon instance", () => {
+    const instanceId = "22222222-2222-4222-8222-222222222222";
+    expect(subjectFor(WS, AGENT, instanceId)).toBe(
+      `agent.${WS}.${AGENT}.connection.${instanceId}.rpc`,
+    );
   });
 
   test("exec runs through the agent and returns stdout/exitCode", async () => {

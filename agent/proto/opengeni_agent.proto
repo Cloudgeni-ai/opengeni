@@ -11,12 +11,12 @@
 //
 // ## Transport overview (informational — the transport itself is NOT in this file)
 //
-//   * CONTROL plane: NATS request/reply. The agent subscribes to a subject that
-//     IS its identity (`agent.<workspaceId>.<agentId>.rpc`); the control plane
-//     issues a `ControlRequest` and receives a `ControlResponse`. Subject routing
-//     is the registry (no bespoke agentId→connection table). Liveness is "is
-//     there a responder on the subject". Ownership stays in Postgres (the lease);
-//     NATS only routes.
+//   * CONTROL plane: NATS request/reply. The runner process subscribes to its
+//     generation-fenced address
+//     (`agent.<workspaceId>.<agentId>.connection.<instanceId>.rpc`); the control
+//     plane resolves the currently claimed instance in Postgres, issues a
+//     `ControlRequest`, and receives a `ControlResponse`. Postgres owns live
+//     process authority; NATS only routes to that exact process address.
 //
 //   * STREAM plane: a stateless relay edge. pty + desktop bytes ride
 //     `StreamFrame` messages over a relay channel, fate-isolated from the control
@@ -903,8 +903,8 @@ message UpdateMayProceedResponse {
 // A generic sequenced/acked/credited transfer plane plus thin op-lifecycle
 // bookkeeping, layered over the SAME control subject for the server→runner
 // requests and two new fire-and-forget subjects for the bulk direction:
-//   * `agent.<ws>.<id>.op.<op_id>`  — runner→server op frames (OpFrame).
-//   * `agent.<ws>.<id>.ack`         — server→runner acks/credit (OpAck).
+//   * `agent.<ws>.<id>.connection.<instance>.op.<op_id>` — runner→server frames.
+//   * `agent.<ws>.<id>.connection.<instance>.ack` — server→runner acks/credit.
 // Everything here is ADDITIVE: the legacy request/reply exec/fs/git ops remain
 // valid forever and are served by adapters over the same engine. These types
 // wire NO behavior on their own — they are the contract the runtime implements.
@@ -1089,7 +1089,8 @@ message OpData {
 message OpProgress {}
 
 // A server→runner cumulative ack + credit replenishment, published fire-and-forget
-// on the ack subject (`agent.<ws>.<id>.ack`). Best-effort, healed by repetition.
+// on the exact process ack subject
+// (`agent.<ws>.<id>.connection.<instance>.ack`). Best-effort, healed by repetition.
 message OpAck {
   string op_id = 1;
   // Cumulative: every frame with seq ≤ acked_seq is acknowledged.

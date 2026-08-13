@@ -12,9 +12,11 @@ import { decodeAuthRequest, mintAuthResponse, nkeys } from "@opengeni/events";
 const SECRET = "test-enrollment-signing-secret";
 const WS = "11111111-1111-4111-8111-111111111111";
 const AGENT = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const CONNECTION = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 
 // The active-enrollment registry the mocked getEnrollment resolves against.
 const active = new Map<string, number>([[`${WS}:${AGENT}`, 1]]);
+const connectionOwners = new Map<string, string>();
 
 // `bun test` runs EVERY test file in ONE shared process, and a top-level
 // `mock.module` replaces a module process-globally for the WHOLE run — it is
@@ -36,6 +38,7 @@ const realDb = await import("@opengeni/db");
 // module `realDb.getEnrollment` would resolve back to the stub — capturing it
 // here avoids infinite self-delegation.
 const realGetEnrollment = realDb.getEnrollment;
+const realClaimEnrollmentConnection = realDb.claimEnrollmentConnection;
 mock.module("@opengeni/db", () => ({
   ...realDb,
   getEnrollment: async (db: never, workspaceId: string, enrollmentId: string) => {
@@ -53,6 +56,32 @@ mock.module("@opengeni/db", () => ({
           status: "active",
           credentialGeneration,
         } as never);
+  },
+  claimEnrollmentConnection: async (
+    db: never,
+    input: {
+      workspaceId: string;
+      enrollmentId: string;
+      credentialGeneration: number;
+      connectionInstanceId: string;
+    },
+  ) => {
+    if (input.workspaceId !== WS) {
+      return realClaimEnrollmentConnection(db, input as never);
+    }
+    const key = `${input.workspaceId}:${input.enrollmentId}`;
+    const currentGeneration = active.get(key);
+    const currentOwner = connectionOwners.get(key);
+    const claimed =
+      currentGeneration === input.credentialGeneration &&
+      (currentOwner === undefined || currentOwner === input.connectionInstanceId);
+    if (claimed) connectionOwners.set(key, input.connectionInstanceId);
+    return {
+      claimed,
+      connectionInstanceId: claimed ? input.connectionInstanceId : (currentOwner ?? null),
+      connectionGeneration: claimed ? 1 : 0,
+      connectionLeaseExpiresAt: null,
+    };
   },
 }));
 
@@ -72,13 +101,16 @@ function deps() {
 }
 
 /** Build a synthetic authorization-REQUEST JWT (only the payload is decoded). */
-function authRequest(authToken: string | undefined): Uint8Array {
+function authRequest(authToken: string | undefined, connectionInstanceId = CONNECTION): Uint8Array {
   const userNkey = nkeys.createUser().getPublicKey();
   const payload = {
     nats: {
       user_nkey: userNkey,
       server_id: { id: "NSERVERID" },
-      connect_opts: authToken ? { auth_token: authToken } : {},
+      connect_opts: {
+        ...(authToken ? { auth_token: authToken } : {}),
+        name: `opengeni-agent/connection/${connectionInstanceId}`,
+      },
     },
   };
   const jwt = `h.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.s`;
@@ -96,6 +128,7 @@ function readResponse(bytes: Uint8Array): { granted: boolean; error?: string; us
 afterEach(() => {
   active.clear();
   active.set(`${WS}:${AGENT}`, 1);
+  connectionOwners.clear();
 });
 
 // Restore the REAL @opengeni/db so other files in this shared `bun test` process
@@ -118,12 +151,13 @@ describe("handleAuthorizationRequest", () => {
     const out = await handleAuthorizationRequest(deps(), authRequest(bearer));
     const res = readResponse(out);
     expect(res.granted).toBe(true);
-    // The minted user JWT scopes pub/sub to ONLY this workspace's subtree.
+    // The minted user JWT scopes pub/sub to ONLY this exact live process.
     const userClaims = JSON.parse(
       Buffer.from(res.userJwt!.split(".")[1]!, "base64url").toString("utf8"),
     );
-    expect(userClaims.nats.pub.allow).toEqual([`agent.${WS}.>`, "_INBOX.>"]);
-    expect(userClaims.nats.sub.allow).toEqual([`agent.${WS}.>`, "_INBOX.>"]);
+    const scope = `agent.${WS}.${AGENT}.connection.${CONNECTION}.>`;
+    expect(userClaims.nats.pub.allow).toEqual([scope, "_INBOX.>"]);
+    expect(userClaims.nats.sub.allow).toEqual([scope]);
     expect(userClaims.aud).toBe("APP");
     const now = Math.floor(Date.now() / 1000);
     expect(userClaims.exp).toBeGreaterThan(now);
@@ -190,6 +224,42 @@ describe("handleAuthorizationRequest", () => {
     expect(res.error).toMatch(/generation/i);
   });
 
+  test("a malformed connection name is denied before authority can be claimed", async () => {
+    const bearer = await signEnrollmentBearer(SECRET, {
+      workspaceId: WS,
+      agentId: AGENT,
+      enrollmentId: AGENT,
+      credentialGeneration: 1,
+      subjectPrefix: `agent.${WS}.${AGENT}`,
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    });
+    const res = readResponse(
+      await handleAuthorizationRequest(deps(), authRequest(bearer, "not-a-valid-uuid")),
+    );
+    expect(res.granted).toBe(false);
+    expect(res.error).toMatch(/connection instance/i);
+  });
+
+  test("a second live process cannot share one enrollment credential", async () => {
+    const bearer = await signEnrollmentBearer(SECRET, {
+      workspaceId: WS,
+      agentId: AGENT,
+      enrollmentId: AGENT,
+      credentialGeneration: 1,
+      subjectPrefix: `agent.${WS}.${AGENT}`,
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    });
+    expect(
+      readResponse(await handleAuthorizationRequest(deps(), authRequest(bearer))).granted,
+    ).toBe(true);
+    const successor = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const denied = readResponse(
+      await handleAuthorizationRequest(deps(), authRequest(bearer, successor)),
+    );
+    expect(denied.granted).toBe(false);
+    expect(denied.error).toMatch(/another runner/i);
+  });
+
   test("the user JWT never outlives a sooner bearer expiration", async () => {
     const bearerExp = Math.floor(Date.now() / 1000) + 30;
     const bearer = await signEnrollmentBearer(SECRET, {
@@ -225,6 +295,7 @@ describe("handleAuthorizationRequest", () => {
     const decoded = decodeAuthRequest(Buffer.from(authRequest("oge_x")).toString("utf8"));
     expect(decoded?.authToken).toBe("oge_x");
     expect(decoded?.serverId).toBe("NSERVERID");
+    expect(decoded?.name).toBe(`opengeni-agent/connection/${CONNECTION}`);
     // And mintAuthResponse is importable (the responder's dependency).
     expect(typeof mintAuthResponse).toBe("function");
   });

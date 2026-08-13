@@ -929,9 +929,10 @@ const SettingsSchema = z.object({
   // nats-server is configured with AUTH CALLOUT: an external agent connects
   // presenting its `oge_` enrollment bearer as the connect auth-token; the server
   // issues an authorization request on $SYS.REQ.USER.AUTH to our responder, which
-  // validates the bearer and returns a SIGNED NATS user JWT scoped to pub/sub ONLY
-  // `agent.<ws>.>` (+ `_INBOX.>`). That per-subject scope IS the per-workspace
-  // isolation. These are deployment-level secrets in the opengeni-runtime secret
+  // validates the bearer, claims one daemon generation, and returns a SIGNED NATS
+  // user JWT scoped to that exact process subtree (+ `_INBOX.>`). The exact scope
+  // provides both workspace isolation and single-daemon routing authority. These
+  // are deployment-level secrets in the opengeni-runtime secret
   // (Helm-clobbered configmap avoided), all OPTIONAL: when the callout plane is not
   // configured the responder simply does not start (selfhosted agents cannot
   // connect — graceful, never a boot-fail).
@@ -943,7 +944,7 @@ const SettingsSchema = z.object({
   // The TARGET ACCOUNT NAME the minted user is placed into (the server-config-mode
   // `auth_callout.account`, e.g. "APP"). The responder writes it as the minted user
   // JWT `aud` so nats-server binds the agent to this account — the SAME account the
-  // privileged control plane connects into, so `agent.<ws>.<id>.rpc` request/reply
+  // privileged control plane connects into, so exact process request/reply
   // routes. Optional; resolveNatsCalloutConfig defaults it to "APP".
   selfhostedNatsCalloutAccountName: z.string().optional(),
   // The callout RESPONDER's own NATS login (one of the `auth_callout.auth_users`
@@ -952,7 +953,7 @@ const SettingsSchema = z.object({
   selfhostedNatsCalloutUser: z.string().optional(),
   selfhostedNatsCalloutPassword: z.string().optional(),
   // The PRIVILEGED control-plane login (api/worker): a static account user that may
-  // request `agent.*.rpc` + receive its inbox replies. The event bus + the
+  // request exact process RPC subjects + receive their inbox replies. The event bus + the
   // selfhosted control RPC ride THIS connection. Username/password; when unset the
   // bus connects anonymously (local dev / a NATS with no auth_callout).
   selfhostedNatsControlUser: z.string().optional(),
@@ -5522,7 +5523,7 @@ export function resolveNatsCalloutConfig(settings: Settings): NatsCalloutConfig 
  * The PRIVILEGED control-plane NATS login (api/worker). Present only when BOTH a
  * user and password are set; otherwise null and the bus connects anonymously (local
  * dev / a NATS without auth_callout). When the callout plane is on, this is the
- * static account user permitted to request `agent.*.rpc`.
+ * static account user permitted to request exact generation-fenced agent RPC subjects.
  */
 export interface NatsControlPlaneAuth {
   user: string;

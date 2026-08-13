@@ -30,7 +30,7 @@ import type { Session } from "@opengeni/contracts";
 import {
   acquireLease,
   getSandboxSessionEnvelope,
-  getEnrollment,
+  getLiveEnrollmentConnection,
   getSandbox,
   loadWorkspaceEnvironmentForRun,
   markWarmLeaseInstanceLost,
@@ -598,10 +598,16 @@ async function withChannelAOperation<T>(
           message: "machine-home session points to an unavailable Connected Machine",
         });
       }
-      const enrollment = await getEnrollment(db, workspaceId, sandbox.enrollmentId);
+      const enrollment = await getLiveEnrollmentConnection(db, workspaceId, sandbox.enrollmentId);
+      if (!enrollment?.connectionInstanceId) {
+        throw new HTTPException(409, {
+          message: "Connected Machine has no live runner connection",
+        });
+      }
       const built = await buildSelfhostedBackendSession({
         workspaceId,
         agentId: sandbox.enrollmentId,
+        connectionInstanceId: enrollment.connectionInstanceId,
         relay: relayConfigFromSettings(settings),
         controlRpcFactory: () => new NatsControlRpc(async () => bus.getRequestConnection()),
         epoch: pointer.activeEpoch,

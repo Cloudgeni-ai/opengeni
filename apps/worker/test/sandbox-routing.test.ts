@@ -27,6 +27,7 @@ import {
   createSession,
   createDb,
   acquireLease,
+  claimEnrollmentConnection,
   claimSessionWorkForAttempt,
   commitWarmingToWarm,
   getSandbox,
@@ -75,10 +76,15 @@ const testOpJournal: OpStreamJournal = {
 
 /** A MemoryEventBus whose responder echoes a marker hostname for exec — the
  *  enrolled machine. */
-function busWithAgent(workspaceId: string, agentId: string, hostname: string): MemoryEventBus {
+function busWithAgent(
+  workspaceId: string,
+  agentId: string,
+  connectionInstanceId: string,
+  hostname: string,
+): MemoryEventBus {
   const bus = new MemoryEventBus();
   const enc = new TextEncoder();
-  bus.subscribeRequests(subjectFor(workspaceId, agentId), (payload) => {
+  bus.subscribeRequests(subjectFor(workspaceId, agentId, connectionInstanceId), (payload) => {
     const req = ControlRequest.decode(payload);
     const op = req.op;
     let res: ControlResponse;
@@ -119,6 +125,21 @@ function busWithAgent(workspaceId: string, agentId: string, hostname: string): M
     return ControlResponse.encode(res).finish();
   });
   return bus;
+}
+
+async function claimTestConnection(input: {
+  workspaceId: string;
+  enrollmentId: string;
+  credentialGeneration: number;
+}): Promise<string> {
+  const connectionInstanceId = crypto.randomUUID();
+  const claimed = await claimEnrollmentConnection(db, {
+    ...input,
+    connectionInstanceId,
+    leaseMs: 60_000,
+  });
+  expect(claimed.claimed).toBe(true);
+  return connectionInstanceId;
 }
 
 /** A fake established GROUP box whose exec returns a fixed marker — the default
@@ -246,6 +267,11 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
       name: "laptop",
       enrollmentId: enrollment.id,
     });
+    const connectionInstanceId = await claimTestConnection({
+      workspaceId,
+      enrollmentId: enrollment.id,
+      credentialGeneration: enrollment.credentialGeneration,
+    });
 
     // Seed the durable warm home so a same-target route epoch change exercises
     // the worker's lease-backed home resolver instead of the static fallback.
@@ -274,7 +300,12 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
     });
     expect(committed.committed).toBe(true);
 
-    const bus = busWithAgent(workspaceId, enrollment.id, "the-laptop") as never;
+    const bus = busWithAgent(
+      workspaceId,
+      enrollment.id,
+      connectionInstanceId,
+      "the-laptop",
+    ) as never;
 
     // Wrap the established group box in the routing proxy (what the turn does).
     const established = wrapTurnBoxWithRouting(
@@ -974,7 +1005,17 @@ describe("M7 worker routing — turn-start reconcile (issue #341 invariant B)", 
       kind: "modal",
       name: "sibling",
     });
-    const bus = busWithAgent(workspaceId, enrollment.id, "the-laptop") as never;
+    const connectionInstanceId = await claimTestConnection({
+      workspaceId,
+      enrollmentId: enrollment.id,
+      credentialGeneration: enrollment.credentialGeneration,
+    });
+    const bus = busWithAgent(
+      workspaceId,
+      enrollment.id,
+      connectionInstanceId,
+      "the-laptop",
+    ) as never;
 
     // Pre-swap: pin the session to the machine (the pre-swap backend the ops route to).
     await setActiveSandbox(db, {

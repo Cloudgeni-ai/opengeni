@@ -14,7 +14,7 @@ use tokio::process::Child;
 use crate::proc;
 
 /// The fixed workspace id every disposable agent shares (so one wildcard events
-/// subscription — `agent.<ws>.*.events` — sees the whole fleet).
+/// subscription — `agent.<ws>.*.connection.*.events` — sees the whole fleet).
 pub const WORKSPACE_ID: &str = "hx-ws";
 
 /// A single disposable agent process and its scratch dirs.
@@ -33,6 +33,9 @@ pub struct DisposableAgent {
     pid: i32,
     /// Extra env for this agent (the op-scenario test-override knobs).
     extra_env: Vec<(String, String)>,
+    /// Exact process generation discovered from the first heartbeat subject.
+    /// It changes after a hard relaunch and is never guessed or persisted.
+    connection_instance_id: Option<String>,
 }
 
 impl DisposableAgent {
@@ -82,6 +85,7 @@ impl DisposableAgent {
             child: None,
             pid: 0,
             extra_env,
+            connection_instance_id: None,
         };
         agent.launch()?;
         Ok(agent)
@@ -137,6 +141,7 @@ impl DisposableAgent {
     ///
     /// Propagates a spawn failure.
     pub fn relaunch(&mut self) -> Result<(), String> {
+        self.connection_instance_id = None;
         self.launch()
     }
 
@@ -159,7 +164,31 @@ impl DisposableAgent {
     /// The RPC subject the driver issues ControlRequests on.
     #[must_use]
     pub fn rpc_subject(&self) -> String {
-        format!("agent.{}.{}.rpc", WORKSPACE_ID, self.agent_id)
+        format!("{}.rpc", self.subject_prefix())
+    }
+
+    /// Bind the exact process generation observed by the control-plane wildcard.
+    pub fn bind_connection_instance(&mut self, connection_instance_id: String) {
+        self.connection_instance_id = Some(connection_instance_id);
+    }
+
+    /// The exact live process generation. Readiness must bind this first.
+    #[must_use]
+    pub fn connection_instance_id(&self) -> &str {
+        self.connection_instance_id
+            .as_deref()
+            .expect("agent heartbeat readiness must bind its connection instance")
+    }
+
+    /// Exact generation-fenced subject prefix.
+    #[must_use]
+    pub fn subject_prefix(&self) -> String {
+        format!(
+            "agent.{}.{}.connection.{}",
+            WORKSPACE_ID,
+            self.agent_id,
+            self.connection_instance_id()
+        )
     }
 
     /// The agent's scratch working directory (its reported workspace root).

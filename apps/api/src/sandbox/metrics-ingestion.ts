@@ -1,11 +1,11 @@
 // apps/api/src/sandbox/metrics-ingestion.ts — the M10 metrics INGESTION consumer
 // + the connect-Hello DISPLAY-REFRESH consumer. The
 // enrolled agent piggybacks a `MetricsSample` on its ~5s heartbeat (an
-// `AgentEvent` published one-way on `agent.<ws>.<id>.events`) and publishes a
-// `Hello` (its live self-description) on `agent.<ws>.<id>.hello` on every connect
+// `AgentEvent` published one-way on the exact process events subject) and publishes a
+// `Hello` (its live self-description) on the exact process hello subject on every connect
 // /reconnect. This module owns the two agent→control-plane inbound consumers:
 //
-//   `agent.*.*.events` (heartbeat) →
+//   `agent.*.*.connection.*.events` (heartbeat) →
 //     1. touchEnrollmentLastSeen  — the liveness cursor (online/reconnecting/offline
 //        derivation + the M3 probe disambiguation).
 //     2. ingestMachineMetricsSample — UPSERT machine_metrics_latest (the "now" row)
@@ -13,7 +13,7 @@
 //     A GOING-OFFLINE event is not a metrics point — liveness flips via the lease/
 //     probe path; we skip it here (no-op).
 //
-//   `agent.*.*.hello` (connect) →
+//   `agent.*.*.connection.*.hello` (connect) →
 //     refreshEnrollmentDisplay — reconcile `enrollments.has_display` to the LIVE
 //     capability the Hello reports. `has_display` was previously FROZEN at the
 //     enroll-time offer snapshot; a machine that GAINS a display later (a Mac that
@@ -34,13 +34,14 @@ import {
   clearEnrollmentWentOffline,
   disconnectAttachedBrowserDevices,
   getEnrollment,
+  getLiveEnrollmentConnection,
   ingestMachineMetricsSample,
   reconcileAttachedBrowserInventory,
+  releaseEnrollmentConnection,
+  renewEnrollmentConnection,
   sessionsWithActiveOpOnEnrollment,
   setEnrollmentDisplayState,
   setEnrollmentOpStreamState,
-  setEnrollmentWentOffline,
-  touchEnrollmentLastSeen,
   type AppendEventInput,
   type Database,
   type MachineMetricsSample,
@@ -61,40 +62,51 @@ import {
   type AttachedBrowserInventorySnapshot as WireAttachedBrowserInventorySnapshot,
   type MetricsSample,
 } from "@opengeni/agent-proto";
+import { AGENT_CONNECTION_LEASE_MS } from "./connection-authority";
 
 /** The wildcard subject the agent event plane publishes heartbeats on. */
-export const AGENT_EVENTS_SUBJECT = "agent.*.*.events";
+export const AGENT_EVENTS_SUBJECT = "agent.*.*.connection.*.events";
 
 /** The wildcard subject the agent publishes its connect Hello on. */
-export const AGENT_HELLO_SUBJECT = "agent.*.*.hello";
+export const AGENT_HELLO_SUBJECT = "agent.*.*.connection.*.hello";
 
 /**
- * Parse `agent.<ws>.<id>.<tail>` → `{ workspaceId, agentId }`, requiring the
+ * Parse `agent.<ws>.<id>.connection.<instance>.<tail>` into its exact authority,
  * expected tail token. Returns null for a subject that does not match the shape
  * (defensive — the subscription pattern already constrains it).
  */
 function parseAgentSubject(
   subject: string,
   tail: "events" | "hello",
-): { workspaceId: string; agentId: string } | null {
+): { workspaceId: string; agentId: string; connectionInstanceId: string } | null {
   const parts = subject.split(".");
-  if (parts.length !== 4 || parts[0] !== "agent" || parts[3] !== tail) {
+  if (
+    parts.length !== 6 ||
+    parts[0] !== "agent" ||
+    parts[3] !== "connection" ||
+    !parts[4] ||
+    parts[5] !== tail
+  ) {
     return null;
   }
-  return { workspaceId: parts[1]!, agentId: parts[2]! };
+  return {
+    workspaceId: parts[1]!,
+    agentId: parts[2]!,
+    connectionInstanceId: parts[4]!,
+  };
 }
 
-/** Parse `agent.<ws>.<id>.events` → `{ workspaceId, agentId }` (heartbeat plane). */
+/** Parse the exact process events subject (heartbeat plane). */
 export function parseAgentEventSubject(
   subject: string,
-): { workspaceId: string; agentId: string } | null {
+): { workspaceId: string; agentId: string; connectionInstanceId: string } | null {
   return parseAgentSubject(subject, "events");
 }
 
-/** Parse `agent.<ws>.<id>.hello` → `{ workspaceId, agentId }` (connect plane). */
+/** Parse the exact process hello subject (connect plane). */
 export function parseAgentHelloSubject(
   subject: string,
-): { workspaceId: string; agentId: string } | null {
+): { workspaceId: string; agentId: string; connectionInstanceId: string } | null {
   return parseAgentSubject(subject, "hello");
 }
 
@@ -218,30 +230,23 @@ async function ingestAttachedBrowserInventory(
 }
 
 /**
- * Ingest ONE decoded heartbeat for an enrolled machine. Resolves the enrollment's
- * accountId (needed for the RLS-scoped writes) from the enrollment row; an
- * unknown/cross-workspace agentId is ignored (no row → no write). Touches
- * last-seen + upserts latest + downsamples the series.
+ * Ingest the OPTIONAL metrics sample carried by an already-authorized heartbeat.
+ * Connection renewal is deliberately owned by the outer event handler and runs
+ * before optional telemetry/inventory work, so telemetry absence or failure can
+ * never make a healthy runner lose authority.
  */
-export async function ingestHeartbeat(
+async function ingestHeartbeatMetrics(
   db: Database,
-  input: { workspaceId: string; agentId: string; sample: MetricsSample },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    agentId: string;
+    sample: MetricsSample;
+  },
 ): Promise<{ ingested: boolean; seriesAppended: boolean }> {
-  // The enrollment row is the source of the accountId (the RLS principal) and the
-  // existence check. A revoked machine still reports its accountId, so we ingest
-  // (the dashboard shows its last sample); a truly unknown id is a no-op.
-  const enrollment = await getEnrollment(db, input.workspaceId, input.agentId);
-  if (!enrollment) {
-    return { ingested: false, seriesAppended: false };
-  }
   const sample = wireSampleToDbSample(input.sample);
-  await touchEnrollmentLastSeen(db, {
-    accountId: enrollment.accountId,
-    workspaceId: input.workspaceId,
-    enrollmentId: input.agentId,
-  });
   const result = await ingestMachineMetricsSample(db, {
-    accountId: enrollment.accountId,
+    accountId: input.accountId,
     workspaceId: input.workspaceId,
     enrollmentId: input.agentId,
     sample,
@@ -340,12 +345,16 @@ export async function handleAgentEventPayload(
     try {
       const enrollment = await getEnrollment(db, ids.workspaceId, ids.agentId);
       if (enrollment) {
-        await setEnrollmentWentOffline(db, {
+        const released = await releaseEnrollmentConnection(db, {
           accountId: enrollment.accountId,
           workspaceId: ids.workspaceId,
           enrollmentId: ids.agentId,
+          connectionInstanceId: ids.connectionInstanceId,
           reason,
         });
+        // A late goodbye from a superseded process is not the current machine
+        // going offline. It must not disconnect browsers or fan out link loss.
+        if (!released.released) return;
         try {
           await disconnectAttachedBrowserDevices(db, {
             accountId: enrollment.accountId,
@@ -400,6 +409,24 @@ export async function handleAgentEventPayload(
     return; // an unknown event kind → not a metrics point.
   }
   const heartbeat = event.event.heartbeat;
+  const enrollment = await getEnrollment(db, ids.workspaceId, ids.agentId).catch(() => null);
+  if (!enrollment || enrollment.connectionInstanceId !== ids.connectionInstanceId) return;
+  try {
+    const renewed = await renewEnrollmentConnection(db, {
+      accountId: enrollment.accountId,
+      workspaceId: ids.workspaceId,
+      enrollmentId: ids.agentId,
+      connectionInstanceId: ids.connectionInstanceId,
+      leaseMs: AGENT_CONNECTION_LEASE_MS,
+    });
+    if (!renewed.renewed) return;
+  } catch (error) {
+    observability?.warn?.("Failed to renew a machine connection heartbeat", {
+      subject,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return;
+  }
   if (heartbeat.attachedBrowserInventory) {
     try {
       await ingestAttachedBrowserInventory(db, {
@@ -417,7 +444,8 @@ export async function handleAgentEventPayload(
   const metrics = heartbeat.metrics;
   if (!metrics) return;
   try {
-    await ingestHeartbeat(db, {
+    await ingestHeartbeatMetrics(db, {
+      accountId: enrollment.accountId,
       workspaceId: ids.workspaceId,
       agentId: ids.agentId,
       sample: metrics,
@@ -431,7 +459,7 @@ export async function handleAgentEventPayload(
 }
 
 /**
- * Start the metrics-ingestion consumer: subscribe `agent.*.*.events` and ingest
+ * Start the metrics-ingestion consumer: subscribe exact process events and ingest
  * every heartbeat. Gated by sandboxSelfhostedEnabled (the caller checks the flag;
  * a disabled deployment never starts the consumer). Returns the unsubscribe fn.
  */
@@ -505,6 +533,7 @@ export async function refreshEnrollmentDisplay(
     agentId: string;
     hasDisplay: boolean;
     desktopUnavailableReason?: string | null;
+    connectionInstanceId?: string;
   },
 ): Promise<{ updated: boolean }> {
   const desktopUnavailableReason = input.desktopUnavailableReason ?? null;
@@ -526,6 +555,7 @@ export async function refreshEnrollmentDisplay(
     enrollmentId: input.agentId,
     hasDisplay: input.hasDisplay,
     desktopUnavailableReason,
+    ...(input.connectionInstanceId ? { connectionInstanceId: input.connectionInstanceId } : {}),
   });
 }
 
@@ -541,6 +571,7 @@ export async function refreshEnrollmentOpStream(
     workspaceId: string;
     agentId: string;
     opStream: boolean;
+    connectionInstanceId?: string;
   },
 ): Promise<{ updated: boolean }> {
   const enrollment = await getEnrollment(db, input.workspaceId, input.agentId);
@@ -557,6 +588,7 @@ export async function refreshEnrollmentOpStream(
     workspaceId: input.workspaceId,
     enrollmentId: input.agentId,
     opStream: input.opStream,
+    ...(input.connectionInstanceId ? { connectionInstanceId: input.connectionInstanceId } : {}),
   });
 }
 
@@ -589,17 +621,29 @@ export async function handleHelloPayload(
     });
     return;
   }
+  const authority = await getLiveEnrollmentConnection(db, ids.workspaceId, ids.agentId).catch(
+    () => null,
+  );
+  if (!authority || authority.connectionInstanceId !== ids.connectionInstanceId) {
+    observability?.warn?.("Ignored a Hello from a superseded runner instance", {
+      workspaceId: ids.workspaceId,
+      agentId: ids.agentId,
+    });
+    return;
+  }
   try {
     await refreshEnrollmentDisplay(db, {
       workspaceId: ids.workspaceId,
       agentId: ids.agentId,
       hasDisplay: helloReportsDisplay(hello),
       desktopUnavailableReason: helloDesktopUnavailableReason(hello),
+      connectionInstanceId: ids.connectionInstanceId,
     });
     await refreshEnrollmentOpStream(db, {
       workspaceId: ids.workspaceId,
       agentId: ids.agentId,
       opStream: helloReportsOpStream(hello),
+      connectionInstanceId: ids.connectionInstanceId,
     });
   } catch (error) {
     observability?.warn?.("Failed to refresh an enrollment's capabilities from a Hello", {
@@ -616,23 +660,21 @@ export async function handleHelloPayload(
   // sessions with an active op on it — a restored only ever pairs a prior lost, so
   // a routine connect Hello (no marker) emits nothing.
   try {
-    const enrollment = await getEnrollment(db, ids.workspaceId, ids.agentId);
-    if (enrollment) {
-      const { cleared } = await clearEnrollmentWentOffline(db, {
-        accountId: enrollment.accountId,
-        workspaceId: ids.workspaceId,
-        enrollmentId: ids.agentId,
-      });
-      if (cleared && bus) {
-        await fanOutMachineLinkEvents(
-          db,
-          bus,
-          observability,
-          ids.workspaceId,
-          ids.agentId,
-          (activeTurnId) => [{ type: "machine.link.restored", turnId: activeTurnId, payload: {} }],
-        );
-      }
+    const { cleared } = await clearEnrollmentWentOffline(db, {
+      accountId: authority.accountId,
+      workspaceId: ids.workspaceId,
+      enrollmentId: ids.agentId,
+      connectionInstanceId: ids.connectionInstanceId,
+    });
+    if (cleared && bus) {
+      await fanOutMachineLinkEvents(
+        db,
+        bus,
+        observability,
+        ids.workspaceId,
+        ids.agentId,
+        (activeTurnId) => [{ type: "machine.link.restored", turnId: activeTurnId, payload: {} }],
+      );
     }
   } catch (error) {
     observability?.warn?.("Failed to clear a machine going-offline marker on a Hello", {
@@ -643,7 +685,7 @@ export async function handleHelloPayload(
 }
 
 /**
- * Start the Hello display-refresh consumer: subscribe `agent.*.*.hello` and
+ * Start the Hello display-refresh consumer: subscribe exact process hellos and
  * reconcile `has_display` to the live capability the agent reports on every
  * connect. Gated by sandboxSelfhostedEnabled (the caller checks the flag). Returns
  * the unsubscribe fn.

@@ -7394,6 +7394,21 @@ export const enrollments = pgTable(
     // 1; every successful re-enrollment increments this atomically before a new
     // bearer is signed. Auth and self-revoke require an exact row/claim match.
     credentialGeneration: integer("credential_generation").notNull().default(1),
+    // One live runner instance owns this enrollment's data-plane address at a
+    // time. Auth-callout claims/renews the lease before NATS grants a connection;
+    // every operational subject includes the instance id, so an older still-open
+    // socket cannot receive work after a successor claims authority.
+    connectionInstanceId: text("connection_instance_id"),
+    connectionGeneration: integer("connection_generation").notNull().default(0),
+    connectionLeaseExpiresAt: timestamp("connection_lease_expires_at", { withTimezone: true }),
+    // Durable diagnostics for valid cloned credentials / duplicate daemons that
+    // were blocked while another process held the live authority lease.
+    connectionDuplicateDeniedCount: integer("connection_duplicate_denied_count")
+      .notNull()
+      .default(0),
+    connectionDuplicateDeniedAt: timestamp("connection_duplicate_denied_at", {
+      withTimezone: true,
+    }),
     os: text("os", { enum: enrollmentOsValues }).notNull().default("linux"),
     arch: text("arch").notNull().default("x86_64"),
     // Heartbeat liveness cursor. Null until the first connect.
@@ -7418,6 +7433,21 @@ export const enrollments = pgTable(
     ),
     // List a workspace's ACTIVE machines without scanning revoked rows.
     workspaceStatus: index("enrollments_workspace_status_idx").on(table.workspaceId, table.status),
+    connectionAuthorityShape: check(
+      "enrollments_connection_authority_shape_chk",
+      sql`(${table.connectionInstanceId} is null and ${table.connectionLeaseExpiresAt} is null)
+        or (${table.connectionInstanceId} is not null
+          and length(${table.connectionInstanceId}) between 1 and 128
+          and ${table.connectionLeaseExpiresAt} is not null)`,
+    ),
+    connectionGenerationNonnegative: check(
+      "enrollments_connection_generation_chk",
+      sql`${table.connectionGeneration} >= 0`,
+    ),
+    connectionDuplicateDeniedCountNonnegative: check(
+      "enrollments_connection_duplicate_denied_count_chk",
+      sql`${table.connectionDuplicateDeniedCount} >= 0`,
+    ),
   }),
 );
 

@@ -33,6 +33,7 @@ import { githubAppBotIdentity } from "@opengeni/github";
 import { type Session, type StreamUrlRotatedPayload } from "@opengeni/contracts";
 import {
   acquireLease,
+  getLiveEnrollmentConnection,
   getSandbox,
   getSandboxSessionEnvelope,
   heartbeatLeaseHolder,
@@ -1127,11 +1128,18 @@ async function tryMintActiveSelfhostedStream(
     if (resolveSelfhostedSession) {
       shSession = await resolveSelfhostedSession(sandbox);
     } else {
+      const enrollment = await getLiveEnrollmentConnection(
+        services.db,
+        workspaceId,
+        sandbox.enrollmentId,
+      );
+      if (!enrollment?.connectionInstanceId) return null;
       const client = new SelfhostedSandboxClient({
         workspaceId,
         relay: relayConfigFromSettings(settings),
         controlRpcFactory: () => controlRpc(bus),
         agentId: sandbox.enrollmentId,
+        connectionInstanceId: enrollment.connectionInstanceId,
         epoch: session.activeEpoch,
         // Stream authority rotates; terminal process identity does not.
         terminalScopeId: session.id,

@@ -895,6 +895,7 @@ export type {
   MetricSample,
   MachineState,
   MachineKind,
+  MachineConnectionAuthority,
   MachineView,
   MachinesResponse,
   MachineMetricsSeriesResponse,

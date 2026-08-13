@@ -1,6 +1,7 @@
 //! The control-RPC dispatch table.
 //!
-//! A [`ControlRequest`] arrives on the agent's `agent.<ws>.<id>.rpc` subject
+//! A [`ControlRequest`] arrives on the agent's exact claimed process subject
+//! (`agent.<ws>.<id>.connection.<instance>.rpc`)
 //! (§10.1). [`dispatch`] decodes its `op` oneof, calls the matching
 //! [`Platform`](opengeni_agent_platform::Platform) method, and builds a
 //! [`ControlResponse`] that carries the same `request_id` and either the typed

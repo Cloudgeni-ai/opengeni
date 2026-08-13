@@ -2,7 +2,7 @@
 //
 // `ControlRpc` is the ONE seam the `SelfhostedSession` depends on to reach a
 // user's enrolled machine: request/reply addressed by the subject
-// `agent.<workspaceId>.<agentId>.rpc`, payloads encoded/decoded via
+// `agent.<workspaceId>.<agentId>.connection.<instanceId>.rpc`, payloads encoded/decoded via
 // `@opengeni/agent-proto` (the single-source-of-truth wire types). The session
 // knows NOTHING about NATS — it speaks only `ControlRpc`.
 //
@@ -53,10 +53,18 @@ export interface ControlRpc {
   ): Promise<ControlResponse>;
 }
 
-/** The control-plane RPC subject for an enrolled agent — its subscription IS the
- *  registry (the binding two-plane decision). */
-export function subjectFor(workspaceId: string, agentId: string): string {
-  return `agent.${workspaceId}.${agentId}.rpc`;
+/** The control-plane RPC subject for an enrolled agent. Production always supplies
+ * the exact claimed daemon instance; the legacy shape remains only for isolated
+ * compatibility tests and callers that do not route a live machine. */
+export function subjectFor(
+  workspaceId: string,
+  agentId: string,
+  connectionInstanceId?: string,
+): string {
+  const prefix = `agent.${workspaceId}.${agentId}`;
+  return connectionInstanceId
+    ? `${prefix}.connection.${connectionInstanceId}.rpc`
+    : `${prefix}.rpc`;
 }
 
 // ── The runtime error taxonomy for a selfhosted control op ────────────────────

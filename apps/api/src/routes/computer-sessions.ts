@@ -36,7 +36,7 @@ import {
   findComputerSessionControlRecordByOperation,
   getAttachedBrowserDevice,
   getComputerSessionControlRecord,
-  getEnrollment,
+  getLiveEnrollmentConnection,
   getSession,
   listComputerSessions,
   prepareComputerSessionCreate,
@@ -765,18 +765,19 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
       if (device.state !== "connected") {
         throw new ComputerSessionStateError("Attached browser machine is disconnected");
       }
-      const enrollment = await getEnrollment(
+      const enrollment = await getLiveEnrollmentConnection(
         deps.db,
         sourceSession.workspaceId,
         device.enrollmentId,
       );
-      if (!enrollment || enrollment.status !== "active") {
+      if (!enrollment || enrollment.status !== "active" || !enrollment.connectionInstanceId) {
         throw new ComputerSessionStateError("Attached browser machine is unavailable");
       }
       assertPlacementInstance(expectedPlacementInstanceId, device.connectionGeneration);
       const built = await buildSelfhostedBackendSession({
         workspaceId: sourceSession.workspaceId,
         agentId: device.enrollmentId,
+        connectionInstanceId: enrollment.connectionInstanceId,
         relay: relayConfigFromSettings(deps.settings),
         controlRpcFactory: () => new NatsControlRpc(async () => deps.bus.getRequestConnection()),
         epoch: 0,
