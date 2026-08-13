@@ -110,7 +110,11 @@ import {
   type SessionAttemptQuiescenceCommit,
   type SessionTurnRecordingSettlement,
 } from "@opengeni/db";
-import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@opengeni/events";
+import {
+  appendAndPublishTurnEventsFenced,
+  createDetachedSessionEventFanout,
+  publishDurableSessionEvents,
+} from "@opengeni/events";
 import { sandboxLeaseTelemetryKey, sandboxOperationMetricObserver } from "@opengeni/observability";
 import {
   sandboxStateEntryFromRunState,
@@ -385,6 +389,9 @@ import {
   recordCompanyBrainContributions,
   recordSessionEventAppendLatency,
   recordSessionEventPublishLatency,
+  AgentLoopPhaseTracker,
+  recordAgentLoopPhaseDuration,
+  recordDetachedSessionEventFanoutOutcome,
   recordTurnSandboxEstablishPolicy,
   recordTurnStartupPhase,
   recordTurnWorkerPreparationTotal,
@@ -2975,6 +2982,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       runtimeMetricsHooksForObservability(observability),
     );
     const sandboxOperationObserver = sandboxOperationMetricObserver(observability);
+    const detachedLifecycleFanout = createDetachedSessionEventFanout(bus, {
+      onPublishOutcome: ({ outcome, durationSeconds }) => {
+        recordSessionEventPublishLatency(observability, { durationSeconds });
+        recordDetachedSessionEventFanoutOutcome(observability, { outcome, durationSeconds });
+      },
+    });
+    const agentLoopPhaseTracker = new AgentLoopPhaseTracker();
     let isCodexTurn = false;
     let isXaiTurn = false;
     let isExternallyBilledTurn = false;
@@ -3438,6 +3452,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     const publishSandboxLifecycleEvents = async (sandbox: ResumedTurnSandbox): Promise<void> => {
       const established = sandbox.established;
       if (publish && established.origin && established.origin !== "resumed") {
+        agentLoopPhaseTracker.markProvisionCompleted();
         const lifecycleEvents: Array<{
           type: "sandbox.box.lost" | "sandbox.box.created";
           payload: unknown;
@@ -4343,6 +4358,24 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>,
         immediate = false,
       ) => {
+        const detached = events.every(
+          (event) =>
+            event.type === "sandbox.box.created" ||
+            event.type === "sandbox.box.lost" ||
+            event.type === "sandbox.box.snapshot" ||
+            event.type === "sandbox.operation.started" ||
+            event.type === "sandbox.operation.completed" ||
+            event.type === "sandbox.operation.failed" ||
+            event.type === "sandbox.env.drift" ||
+            event.type === "rig.setup.started" ||
+            event.type === "rig.setup.completed" ||
+            event.type === "rig.setup.failed" ||
+            event.type === "rig.setup.skipped" ||
+            event.type === "agent.toolCall.output",
+        );
+        if (events.some((event) => event.type === "agent.toolCall.output")) {
+          agentLoopPhaseTracker.markToolOutput();
+        }
         const inputs = events.map((event) => ({
           ...event,
           payload: event.payload,
@@ -4360,14 +4393,22 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           input.attemptId,
           inputs,
           {
-            onAppend: ({ durationSeconds }) =>
-              recordSessionEventAppendLatency(observability, {
-                durationSeconds,
-              }),
+            onAppend: ({ durationSeconds }) => {
+              recordSessionEventAppendLatency(observability, { durationSeconds });
+              if (detached) {
+                recordAgentLoopPhaseDuration(observability, {
+                  phase: "durable_append",
+                  durationSeconds,
+                });
+              }
+            },
             onPublish: ({ durationSeconds }) =>
               recordSessionEventPublishLatency(observability, {
                 durationSeconds,
               }),
+            ...(detached
+              ? { fanout: "detached" as const, detachedFanout: detachedLifecycleFanout }
+              : {}),
           },
         );
         if (inputs.length > 0 && !appended.accepted) {
@@ -8798,6 +8839,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // Escaped MCP setup timeouts are automatically recoverable only
           // before this line.
           recordCompanyBrainContributionReceiptOnce();
+          agentLoopPhaseTracker.recordModelRequestStart(observability);
           const providerDispatchStartedAt = performance.now();
           let providerDispatchOutcome: "completed" | "failed" = "completed";
           try {
