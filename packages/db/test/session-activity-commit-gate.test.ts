@@ -3,10 +3,12 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import { and, eq, inArray, sql } from "drizzle-orm";
 
 import {
+  addSessionSystemUpdate,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   createDb,
   createSession,
+  failSessionWorkBeforeAttemptClaim,
   initializeSessionStartAtomically,
   lockSessionEventWriteRows,
   mutateSessionControlInTransaction,
@@ -737,6 +739,237 @@ describe("session activity commit gate", () => {
       await shared.admin.unsafe(`drop function if exists ${quotedFunction}()`);
       await shared.admin.unsafe(`drop sequence if exists ${quotedSequence}`);
     }
+  });
+
+  test("a permanent pre-claim invariant fails the exact durable work without an attempt", async () => {
+    const grant = await createWorkspace();
+    const session = await createTestSession(grant, "terminal pre-claim invariant");
+    await initializeSessionStartAtomically(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    const [queued] = await shared.admin<Array<{ id: string }>>`
+      select id
+      from session_turns
+      where workspace_id = ${grant.workspaceId!}
+        and session_id = ${session.id}
+        and status = 'queued'
+      limit 1`;
+    if (!queued) throw new Error("Queued test turn is missing");
+    await shared.admin`
+      update session_turns
+      set metadata = '{"dispatchGeneration":"malformed"}'::jsonb
+      where id = ${queued.id}`;
+    const workflowId = `session-${session.id}`;
+    const attemptId = crypto.randomUUID();
+
+    const claimError = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      workflowId,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: `activity-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    }).catch((error) => error);
+    expect(claimError).toBeInstanceOf(Error);
+    expect((claimError as Error).message).toContain("Malformed turn dispatch metadata");
+
+    const failed = await failSessionWorkBeforeAttemptClaim(client.db, grant.workspaceId!, {
+      accountId: grant.accountId,
+      sessionId: session.id,
+      workflowId,
+      trigger: { kind: "next" },
+      error: "Agent turn admission failed before attempt claim.",
+    });
+    expect(failed).toMatchObject({ action: "failed", turnId: queued.id });
+    const [evidence] = await shared.admin<
+      Array<{
+        sessionStatus: string;
+        activeTurnId: string | null;
+        turnStatus: string;
+        attemptCount: number;
+        failedEvents: number;
+        statusEvents: number;
+      }>
+    >`
+      select
+        session_row.status as "sessionStatus",
+        session_row.active_turn_id as "activeTurnId",
+        turn_row.status as "turnStatus",
+        (select count(*)::integer from session_turn_attempts where id = ${attemptId}) as "attemptCount",
+        (select count(*)::integer from session_events where workspace_id = ${grant.workspaceId!}
+          and session_id = ${session.id} and turn_id = ${queued.id} and type = 'turn.failed') as "failedEvents",
+        (select count(*)::integer from session_events where workspace_id = ${grant.workspaceId!}
+          and session_id = ${session.id} and type = 'session.status.changed'
+          and payload ->> 'status' = 'failed') as "statusEvents"
+      from sessions session_row
+      join session_turns turn_row on turn_row.id = ${queued.id}
+      where session_row.id = ${session.id}`;
+    expect(evidence).toEqual({
+      sessionStatus: "failed",
+      activeTurnId: null,
+      turnStatus: "failed",
+      attemptCount: 0,
+      failedEvents: 1,
+      statusEvents: 1,
+    });
+  });
+
+  test("a permanent session-level admission failure closes pending input and notifies its parent", async () => {
+    const grant = await createWorkspace();
+    const parent = await createTestSession(grant, "parent of pre-claim failure");
+    const child = await createTestSession(grant, "child with pending machine input", parent.id);
+    const update = await addSessionSystemUpdate(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: child.id,
+      kind: "agent_message",
+      classification: "info",
+      sourceId: crypto.randomUUID(),
+      dedupeKey: crypto.randomUUID(),
+      summary: "Pending work that cannot be admitted",
+      payload: {
+        type: "agent_message",
+        text: "Pending work that cannot be admitted",
+        operationId: crypto.randomUUID(),
+      },
+    });
+    if (!update.added) throw new Error(`Pending test update was rejected: ${update.reason}`);
+
+    const failed = await failSessionWorkBeforeAttemptClaim(client.db, grant.workspaceId!, {
+      accountId: grant.accountId,
+      sessionId: child.id,
+      workflowId: `session-${child.id}`,
+      trigger: { kind: "next" },
+      error: "Agent turn admission failed before attempt claim.",
+    });
+    expect(failed).toMatchObject({ action: "failed", turnId: null });
+    const [evidence] = await shared.admin<
+      Array<{
+        status: string;
+        activeTurnId: string | null;
+        compactRequested: boolean;
+        updateState: string;
+        turnCount: number;
+        outboxCount: number;
+      }>
+    >`
+      select
+        session_row.status,
+        session_row.active_turn_id as "activeTurnId",
+        session_row.compact_requested as "compactRequested",
+        update_row.state as "updateState",
+        (select count(*)::integer from session_turns where workspace_id = ${grant.workspaceId!}
+          and session_id = ${child.id}) as "turnCount",
+        (select count(*)::integer from session_system_update_outbox
+          where workspace_id = ${grant.workspaceId!}
+            and source_session_id = ${child.id}
+            and target_session_id = ${parent.id}
+            and kind = 'child_terminal_result'
+            and payload ->> 'status' = 'failed') as "outboxCount"
+      from sessions session_row
+      join session_system_updates update_row on update_row.id = ${update.update.id}
+      where session_row.id = ${child.id}`;
+    expect(evidence).toEqual({
+      status: "failed",
+      activeTurnId: null,
+      compactRequested: false,
+      updateState: "failed",
+      turnCount: 0,
+      outboxCount: 1,
+    });
+  });
+
+  test("pre-claim settlement cannot overwrite an attempt whose commit response was lost", async () => {
+    const grant = await createWorkspace();
+    const session = await createTestSession(grant, "ambiguous successful claim");
+    await initializeSessionStartAtomically(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    const workflowId = `session-${session.id}`;
+    const attemptId = crypto.randomUUID();
+    const claim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      workflowId,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: `activity-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    expect(claim.action).toBe("claimed");
+
+    expect(
+      await failSessionWorkBeforeAttemptClaim(client.db, grant.workspaceId!, {
+        accountId: grant.accountId,
+        sessionId: session.id,
+        workflowId,
+        trigger: { kind: "next" },
+        error: "Agent turn admission failed before attempt claim.",
+      }),
+    ).toEqual({ action: "stale", turnId: null, events: [] });
+
+    const [evidence] = await shared.admin<
+      Array<{ sessionStatus: string; turnStatus: string; attemptState: string }>
+    >`
+      select session_row.status as "sessionStatus", turn_row.status as "turnStatus",
+        attempt_row.state as "attemptState"
+      from sessions session_row
+      join session_turns turn_row on turn_row.id = session_row.active_turn_id
+      join session_turn_attempts attempt_row on attempt_row.id = turn_row.active_attempt_id
+      where session_row.id = ${session.id}`;
+    expect(evidence).toEqual({
+      sessionStatus: "running",
+      turnStatus: "running",
+      attemptState: "claimed",
+    });
+  });
+
+  test("pre-claim settlement respects a concurrent effective pause", async () => {
+    const grant = await createWorkspace();
+    const session = await createTestSession(grant, "paused before permanent settlement");
+    await initializeSessionStartAtomically(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    await withWorkspaceSessionActivityRls(client.db, grant.workspaceId!, async (db) => {
+      await mutateSessionControlInTransaction(db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        actor: { type: "human", subjectId: grant.subjectId },
+        operationKey: crypto.randomUUID(),
+        action: "pause",
+      });
+    });
+
+    expect(
+      await failSessionWorkBeforeAttemptClaim(client.db, grant.workspaceId!, {
+        accountId: grant.accountId,
+        sessionId: session.id,
+        workflowId: `session-${session.id}`,
+        trigger: { kind: "next" },
+        error: "Agent turn admission failed before attempt claim.",
+      }),
+    ).toEqual({ action: "stale", turnId: null, events: [] });
+    const [evidence] = await shared.admin<Array<{ status: string; failedEvents: number }>>`
+      select session_row.status,
+        (select count(*)::integer from session_events
+          where workspace_id = ${grant.workspaceId!} and session_id = ${session.id}
+            and type = 'session.status.changed' and payload ->> 'status' = 'failed')
+          as "failedEvents"
+      from sessions session_row where session_row.id = ${session.id}`;
+    expect(evidence?.status).not.toBe("failed");
+    expect(evidence?.failedEvents).toBe(0);
   });
 
   test("a concurrent parent control transaction retries a transient fault atomically", async () => {

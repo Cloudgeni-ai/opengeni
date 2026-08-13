@@ -528,17 +528,31 @@ failure surfaces as sanitized typed truth with SQLSTATE, stage, one correlation
 ID, an equally sanitized typed cause, and allowlisted catalog identifiers—never
 raw SQL text, a raw driver cause, or bound parameters.
 
-An activity transport/database failure can occur before that transaction creates
-its attempt row. The failure activity distinguishes this from a stale or settled
-attempt, records a delayed `session_workflow_wake_outbox` revision, and returns an
-explicit `unclaimed` result. New workflow histories retain the logical turn,
-back off exponentially to a one-minute ceiling, and re-peek durable work; they do
-not mark the session failed or complete the workflow over a `recovering` turn.
+An activity failure can occur before that transaction creates its attempt row.
+The turn worker exports a stable typed Temporal disposition: exhausted
+contention and operational database unavailability are retryable, while
+constraints, permissions, malformed state, and claim invariants are permanent.
+The failure activity distinguishes this from a
+stale or settled attempt. Retryable and rolling-legacy unknown failures record a
+delayed `session_workflow_wake_outbox` revision and return an explicit
+`unclaimed` result; new workflow histories retain the logical turn, back off
+exponentially to a one-minute ceiling, and re-peek durable work. User/queue,
+control, accepted approval, and capacity signals all interrupt that timer,
+including signals received while activity execution or failure settlement is
+in flight. A permanent failure atomically fails the exact still-runnable turn
+(or the session-level
+compaction/internal-update obligation), session, events, maintenance, and child
+terminal outbox without fabricating an attempt row or looping. Raw SQL and
+invariant messages never enter workflow history.
 Older histories retain their recorded activity arguments for deterministic
 replay. A still-open legacy history records a tail patch after its historical
 failure activity and follows the bounded re-peek path even when a rolling legacy
 activity worker returned void; an already-completed history replays its original
-close. The upgraded activity derives the stable workflow id and leaves the same
+close. A separate pre-claim-classification marker preserves the exact v2
+failure-activity arguments for histories that already recorded that command;
+new histories and open histories that have not reached it can send the trigger
+and typed disposition fields. The upgraded
+activity derives the stable workflow id and leaves the same
 durable restart obligation. Migration 0238 seeds that obligation for
 already-recovering active turns whose `active_attempt_id` is null and for every
 effectively active pre-attempt claim shape whose existing wake revision was

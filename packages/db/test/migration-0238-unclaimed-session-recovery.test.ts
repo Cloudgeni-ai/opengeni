@@ -464,14 +464,14 @@ describe("migration 0238 unclaimed session recovery", () => {
       where action = 'session.workflow.unclaimed_attempt_wake_seeded'
         and target_id in (${orphaned.session.id}, ${queuedOrphan.session.id})
       order by target_id`;
-    expect(audits).toEqual(
+    expect([...audits]).toEqual(
       [
         { targetId: orphaned.session.id, wakeRevision: Number(orphanedAfter.wakeRevision) },
         {
           targetId: queuedOrphan.session.id,
           wakeRevision: Number(queuedOrphanAfter.wakeRevision),
         },
-      ].toSorted((left, right) => left.targetId.localeCompare(right.targetId)),
+      ].sort((left, right) => left.targetId.localeCompare(right.targetId)),
     );
   });
 

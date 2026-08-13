@@ -82,6 +82,7 @@ import {
   processCompactionModelUsageEvent,
   processModelResponseTerminalEvent,
   persistOrSignalSessionAttemptQuiescence,
+  preClaimAdmissionFailure,
   PROVIDER_BACKPRESSURE_DELAY_MS,
   providerRecoveryCountFromMetadata,
   providerRetryAfterMs,
@@ -3766,6 +3767,59 @@ describe("transient provider error classifier", () => {
       historyPersistenceStage: "sandbox_envelope",
     });
     expect(agentRunFailurePayload(mandatory).retryable).toBeUndefined();
+  });
+
+  test("exports only retry-safe admission truth to Temporal history", () => {
+    const deadlock = new SessionEventPersistenceError({
+      code: "db_deadlock",
+      sqlState: "40P01",
+      stage: "session_attempts.claim",
+      eventTypes: ["session.turn.attempt_claimed"],
+      correlationId: "corr-preclaim",
+      attempts: 3,
+      retryOutcome: "exhausted",
+      database: { table: "session_turn_attempts" },
+    });
+    expect(preClaimAdmissionFailure(deadlock)).toMatchObject({
+      type: "OpenGeniPreClaimFailure",
+      nonRetryable: true,
+      details: [{ disposition: "retryable", code: "db_deadlock" }],
+    });
+    const connectionLoss = new SessionEventPersistenceError({
+      code: "db_failure",
+      sqlState: "08006",
+      stage: "session_attempts.claim",
+      eventTypes: ["session.turn.attempt_claimed"],
+      correlationId: "corr-connection-loss",
+      attempts: 1,
+      retryOutcome: "not_retryable",
+      database: {},
+    });
+    expect(preClaimAdmissionFailure(connectionLoss)).toMatchObject({
+      details: [{ disposition: "retryable", code: "db_failure" }],
+    });
+    const constraint = new SessionEventPersistenceError({
+      code: "db_failure",
+      sqlState: "23505",
+      stage: "session_attempts.claim",
+      eventTypes: ["session.turn.attempt_claimed"],
+      correlationId: "corr-constraint",
+      attempts: 1,
+      retryOutcome: "not_retryable",
+      database: { constraint: "session_turn_attempts_pkey" },
+    });
+    expect(preClaimAdmissionFailure(constraint)).toMatchObject({
+      details: [{ disposition: "permanent", code: "db_failure" }],
+    });
+    expect(preClaimAdmissionFailure(new Error("SECRET malformed metadata"))).toMatchObject({
+      type: "OpenGeniPreClaimFailure",
+      nonRetryable: true,
+      message: "Agent turn admission failed before attempt claim.",
+      details: [{ disposition: "permanent", code: "claim_invariant" }],
+    });
+    expect(
+      JSON.stringify(preClaimAdmissionFailure(new Error("SECRET malformed metadata"))),
+    ).not.toContain("SECRET");
   });
 
   test("retains an exact database cause internally but sanitizes the session payload", async () => {

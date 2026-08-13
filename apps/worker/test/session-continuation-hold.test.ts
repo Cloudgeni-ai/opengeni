@@ -4,6 +4,7 @@ import {
   deferredResultMayContinue,
   humanInputDeadlineWaitMs,
   unclaimedAttemptRetryDelayMs,
+  unclaimedAttemptWakeChanged,
 } from "../src/workflows/session";
 
 // P3 all-capped infinite-loop bugfix (fix #6). session.ts must treat a rotation
@@ -88,5 +89,26 @@ describe("unclaimedAttemptRetryDelayMs — pre-claim failures do not hot-loop", 
   test("normalizes invalid counters to the first retry floor", () => {
     expect(unclaimedAttemptRetryDelayMs(0)).toBe(1_000);
     expect(unclaimedAttemptRetryDelayMs(Number.NaN)).toBe(1_000);
+  });
+});
+
+describe("unclaimed-attempt backoff wake coverage", () => {
+  const baseline = {
+    wakeups: 3,
+    interruptionWakeups: 4,
+    approvalWakeups: 5,
+    capacityWakeups: 6,
+  };
+
+  test("every signal that can change admission interrupts the timer", () => {
+    for (const key of Object.keys(baseline) as Array<keyof typeof baseline>) {
+      expect(unclaimedAttemptWakeChanged(baseline, { ...baseline, [key]: baseline[key] + 1 })).toBe(
+        true,
+      );
+    }
+  });
+
+  test("unchanged counters preserve the bounded delay", () => {
+    expect(unclaimedAttemptWakeChanged(baseline, baseline)).toBe(false);
   });
 });

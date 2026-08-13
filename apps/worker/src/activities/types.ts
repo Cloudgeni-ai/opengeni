@@ -234,6 +234,13 @@ export type FailSessionAttemptInput = {
   workflowId?: string;
   /** Added in v2; old Temporal histories use the bounded 60-second floor. */
   retryDelayMs?: number;
+  /** Added in v3. Upgraded turn workers classify failures from the atomic
+   * admission transaction; omission is a rolling-deploy/legacy unknown and
+   * deliberately keeps the recoverable wake behavior. */
+  preClaimFailureDisposition?: PreClaimFailureDisposition;
+  /** The workflow admission trigger is required to re-evaluate the same
+   * durable admission branch before terminally settling a permanent failure. */
+  trigger?: RunAgentTurnInput["trigger"];
   error?: string;
 };
 
@@ -242,6 +249,16 @@ export type FailSessionAttemptResult =
   | { action: "unclaimed" }
   | { action: "terminal" }
   | { action: "stale" };
+
+export type PreClaimFailureDisposition = "retryable" | "permanent";
+
+export type PreClaimFailureDetail = {
+  disposition: PreClaimFailureDisposition;
+  code: "db_deadlock" | "db_serialization_failure" | "db_failure" | "claim_invariant";
+};
+
+export const PRE_CLAIM_FAILURE_TYPE = "OpenGeniPreClaimFailure";
+export const PRE_CLAIM_FAILURE_MESSAGE = "Agent turn admission failed before attempt claim.";
 
 export type RecoverDispatchInput = {
   accountId: string;

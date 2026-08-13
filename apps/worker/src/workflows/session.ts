@@ -16,7 +16,10 @@ import type * as activities from "../activities";
 import {
   ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_MESSAGE,
   ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_TYPE,
+  PRE_CLAIM_FAILURE_MESSAGE,
+  PRE_CLAIM_FAILURE_TYPE,
   type EscapedMcpTimeoutRecoveryDetail,
+  type PreClaimFailureDisposition,
 } from "../activities/types";
 import {
   activity,
@@ -100,6 +103,26 @@ export function unclaimedAttemptRetryDelayMs(consecutiveFailures: number): numbe
   return Math.min(60_000, 1_000 * 2 ** exponent);
 }
 
+export type SessionWakeCounters = {
+  wakeups: number;
+  interruptionWakeups: number;
+  approvalWakeups: number;
+  capacityWakeups: number;
+};
+
+/** Any signal that can make the failed admission runnable interrupts backoff. */
+export function unclaimedAttemptWakeChanged(
+  baseline: SessionWakeCounters,
+  current: SessionWakeCounters,
+): boolean {
+  return (
+    current.wakeups !== baseline.wakeups ||
+    current.interruptionWakeups !== baseline.interruptionWakeups ||
+    current.approvalWakeups !== baseline.approvalWakeups ||
+    current.capacityWakeups !== baseline.capacityWakeups
+  );
+}
+
 /** Deterministic Temporal timer delay for a persisted structured-input deadline. */
 export function humanInputDeadlineWaitMs(expiresAt: string, nowMs = Date.now()): number {
   const deadline = Date.parse(expiresAt);
@@ -174,6 +197,40 @@ export function escapedMcpTimeoutRecoveryDetail(
     triggerEventId: detail.triggerEventId,
     executionGeneration: detail.executionGeneration!,
   };
+}
+
+/** Read only the upgraded turn worker's explicit pre-claim wire contract. */
+export function preClaimFailureDisposition(error: unknown): PreClaimFailureDisposition | undefined {
+  if (!(error instanceof ActivityFailure) || error.activityType !== "runAgentTurn") {
+    return undefined;
+  }
+  const cause = error.cause;
+  if (
+    !(cause instanceof ApplicationFailure) ||
+    cause.type !== PRE_CLAIM_FAILURE_TYPE ||
+    cause.message !== PRE_CLAIM_FAILURE_MESSAGE
+  ) {
+    return undefined;
+  }
+  const detail = cause.details?.[0] as { disposition?: unknown; code?: unknown } | undefined;
+  if (
+    detail?.code !== "db_deadlock" &&
+    detail?.code !== "db_serialization_failure" &&
+    detail?.code !== "db_failure" &&
+    detail?.code !== "claim_invariant"
+  ) {
+    return undefined;
+  }
+  const disposition = detail.disposition;
+  if (disposition !== "retryable" && disposition !== "permanent") return undefined;
+  if (
+    (detail.code === "db_deadlock" || detail.code === "db_serialization_failure") &&
+    disposition !== "retryable"
+  ) {
+    return undefined;
+  }
+  if (detail.code === "claim_invariant" && disposition !== "permanent") return undefined;
+  return disposition;
 }
 
 /**
@@ -592,6 +649,16 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     trigger: activities.RunAgentTurnInput["trigger"],
   ): Promise<boolean> {
     const capacityWaitEntryBaseline = { wakeups, capacityWakeups };
+    // Capture every admission-relevant signal before activity dispatch. A
+    // signal may arrive while runAgentTurn is still failing before claim, or
+    // while the failure-control activity settles. Either must interrupt the
+    // bounded recovery timer instead of being erased by a later baseline.
+    const preDispatchRetryWakeBaseline: SessionWakeCounters = {
+      wakeups,
+      interruptionWakeups,
+      approvalWakeups,
+      capacityWakeups,
+    };
     const attemptId = uuid4();
     let interruptionBaseline = interruptionWakeups;
 
@@ -776,6 +843,12 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         // truth when the bounded redispatch ceiling was exceeded.
         return false;
       }
+      const postDispatchRetryWakeBaseline: SessionWakeCounters = {
+        wakeups,
+        interruptionWakeups,
+        approvalWakeups,
+        capacityWakeups,
+      };
       if (!unclaimedAttemptRecovery) {
         // Replay compatibility: histories recorded before v2 scheduled this
         // exact argument shape and treated the activity as void. Preserve the
@@ -799,28 +872,71 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
           return false;
         }
         const retryDelayMs = unclaimedAttemptRetryDelayMs(unclaimedAttemptFailures + 1);
-        const seenWakeups = wakeups;
-        const seenInterruptionWakeups = interruptionWakeups;
+        // Histories that already recorded the legacy tail used a post-control
+        // two-signal baseline. Preserve that exact condition on replay; an old
+        // open history reaching this tail for the first time can adopt the
+        // pre-dispatch four-signal contract.
+        const upgradedLegacySignalBaseline = patched("session-legacy-preclaim-signal-baseline-v1");
+        const retryWakeBaseline = upgradedLegacySignalBaseline
+          ? preDispatchRetryWakeBaseline
+          : {
+              wakeups,
+              interruptionWakeups,
+              approvalWakeups,
+              capacityWakeups,
+            };
         unclaimedAttemptFailures += 1;
-        await condition(
-          () => interruptionWakeups !== seenInterruptionWakeups || wakeups !== seenWakeups,
-          retryDelayMs,
-        );
+        await condition(() => {
+          const current = {
+            wakeups,
+            interruptionWakeups,
+            approvalWakeups,
+            capacityWakeups,
+          };
+          return upgradedLegacySignalBaseline
+            ? unclaimedAttemptWakeChanged(retryWakeBaseline, current)
+            : current.interruptionWakeups !== retryWakeBaseline.interruptionWakeups ||
+                current.wakeups !== retryWakeBaseline.wakeups;
+        }, retryDelayMs);
         return true;
       }
       const retryDelayMs = unclaimedAttemptRetryDelayMs(unclaimedAttemptFailures + 1);
-      const seenWakeups = wakeups;
-      const seenInterruptionWakeups = interruptionWakeups;
+      const admissionFailureDisposition = preClaimFailureDisposition(outcome.error);
+      // Keep this marker immediately adjacent to the changed command. A
+      // history that already recorded the v2 activity replays the old shape;
+      // an open history that has never reached this branch can record v3.
+      const classifiedPreClaimFailure = patched("session-preclaim-failure-classification-v1");
+      const retryWakeBaseline = classifiedPreClaimFailure
+        ? preDispatchRetryWakeBaseline
+        : postDispatchRetryWakeBaseline;
       const failure: activities.FailSessionAttemptResult | undefined =
-        await activity.failSessionAttempt({
-          accountId,
-          workspaceId,
-          sessionId,
-          attemptId,
-          workflowId: workflowInfo().workflowId,
-          retryDelayMs,
-          error: workflowFailureMessage(outcome.error),
-        });
+        await activity.failSessionAttempt(
+          classifiedPreClaimFailure
+            ? {
+                accountId,
+                workspaceId,
+                sessionId,
+                attemptId,
+                workflowId: workflowInfo().workflowId,
+                retryDelayMs,
+                ...(admissionFailureDisposition
+                  ? { preClaimFailureDisposition: admissionFailureDisposition }
+                  : {}),
+                trigger,
+                error: workflowFailureMessage(outcome.error),
+              }
+            : {
+                // Replay the exact v2 command shape. Adding optional fields to
+                // a Temporal activity argument still changes command history.
+                accountId,
+                workspaceId,
+                sessionId,
+                attemptId,
+                workflowId: workflowInfo().workflowId,
+                retryDelayMs,
+                error: workflowFailureMessage(outcome.error),
+              },
+        );
       // During a rolling deploy an upgraded workflow worker can schedule this
       // activity on a legacy control worker whose wire result was void. Treat
       // that unknown commit outcome like an unclaimed attempt: wait, then
@@ -829,10 +945,18 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       // Neither path replays model or tool side effects speculatively.
       if (!failure || failure.action === "unclaimed") {
         unclaimedAttemptFailures += 1;
-        await condition(
-          () => interruptionWakeups !== seenInterruptionWakeups || wakeups !== seenWakeups,
-          retryDelayMs,
-        );
+        await condition(() => {
+          const current = {
+            wakeups,
+            interruptionWakeups,
+            approvalWakeups,
+            capacityWakeups,
+          };
+          return classifiedPreClaimFailure
+            ? unclaimedAttemptWakeChanged(retryWakeBaseline, current)
+            : current.interruptionWakeups !== retryWakeBaseline.interruptionWakeups ||
+                current.wakeups !== retryWakeBaseline.wakeups;
+        }, retryDelayMs);
         return true;
       }
       unclaimedAttemptFailures = 0;

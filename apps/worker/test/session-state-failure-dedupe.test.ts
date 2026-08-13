@@ -131,6 +131,62 @@ describe("failSessionAttempt child-terminal identity", () => {
     expect(notBefore.getTime()).toBeGreaterThanOrEqual(before + 4_000);
   });
 
+  test("terminally settles an explicitly permanent pre-claim failure", async () => {
+    const enqueue = mock(async () => 1);
+    const publishCalls: unknown[][] = [];
+    const parentWakeCalls: unknown[][] = [];
+    const terminalSettlement = mock(async () => ({
+      action: "failed" as const,
+      turnId: "turn-1",
+      events: [
+        { id: "failed-1", type: "turn.failed" },
+        { id: "status-1", type: "session.status.changed" },
+      ],
+    }));
+    const activities = createSessionStateActivities(
+      async () =>
+        ({
+          db: {},
+          bus: { publish: async () => undefined },
+          settings: {},
+          observability: {},
+          wakeSessionWorkflow: null,
+        }) as any,
+      {
+        requireSession: mock(
+          async () => ({ status: "queued", temporalWorkflowId: "session-child-1" }) as any,
+        ),
+        getSessionTurnForAttempt: mock(async () => null),
+        getSessionAttemptActivityRef: mock(async () => null),
+        failSessionWorkBeforeAttemptClaim: terminalSettlement as any,
+        enqueueSessionWorkflowWake: enqueue as any,
+        publishDurableSessionEvents: mock(async (...args: unknown[]) => {
+          publishCalls.push(args);
+        }),
+        deliverFailedChildTurnToParent: mock(async (...args: unknown[]) => {
+          parentWakeCalls.push(args);
+        }),
+      },
+    );
+
+    const result = await activities.failSessionAttempt({
+      accountId: "account-1",
+      workspaceId: "workspace-1",
+      sessionId: "child-1",
+      attemptId: "attempt-never-created",
+      workflowId: "session-child-1",
+      preClaimFailureDisposition: "permanent",
+      trigger: { kind: "next" },
+      error: "Agent turn admission failed before attempt claim.",
+    });
+
+    expect(result).toEqual({ action: "failed" });
+    expect(terminalSettlement).toHaveBeenCalledTimes(1);
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(publishCalls).toHaveLength(1);
+    expect(parentWakeCalls).toHaveLength(1);
+  });
+
   test("does not manufacture a wake when the exact attempt already settled", async () => {
     const enqueue = mock(async () => 1);
     const activities = createSessionStateActivities(

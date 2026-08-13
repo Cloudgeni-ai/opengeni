@@ -2,6 +2,7 @@ import {
   settleSessionAttemptInterruptions,
   applySessionTurnSettlement,
   enqueueSessionWorkflowWake,
+  failSessionWorkBeforeAttemptClaim,
   requestSessionTurnRecovery,
   recoverSessionDispatch,
   reconcileSessionAttemptQuiescence,
@@ -43,6 +44,7 @@ export type SessionStateActivityOverrides = Partial<{
   settleSessionAttemptInterruptions: typeof settleSessionAttemptInterruptions;
   applySessionTurnSettlement: typeof applySessionTurnSettlement;
   enqueueSessionWorkflowWake: typeof enqueueSessionWorkflowWake;
+  failSessionWorkBeforeAttemptClaim: typeof failSessionWorkBeforeAttemptClaim;
   requestSessionTurnRecovery: typeof requestSessionTurnRecovery;
   recoverSessionDispatch: typeof recoverSessionDispatch;
   reconcileSessionAttemptQuiescence: typeof reconcileSessionAttemptQuiescence;
@@ -78,6 +80,8 @@ export function createSessionStateActivities(
     overrides.applySessionTurnSettlement ?? applySessionTurnSettlement;
   const enqueueSessionWorkflowWakeFn =
     overrides.enqueueSessionWorkflowWake ?? enqueueSessionWorkflowWake;
+  const failSessionWorkBeforeAttemptClaimFn =
+    overrides.failSessionWorkBeforeAttemptClaim ?? failSessionWorkBeforeAttemptClaim;
   const requestSessionTurnRecoveryFn =
     overrides.requestSessionTurnRecovery ?? requestSessionTurnRecovery;
   const recoverSessionDispatchFn = overrides.recoverSessionDispatch ?? recoverSessionDispatch;
@@ -134,6 +138,28 @@ export function createSessionStateActivities(
         temporalWorkflowId: workflowId,
       });
       if (attempt) return { action: "stale" };
+
+      if (input.preClaimFailureDisposition === "permanent" && input.trigger) {
+        const failed = await failSessionWorkBeforeAttemptClaimFn(db, input.workspaceId, {
+          accountId: input.accountId,
+          sessionId: input.sessionId,
+          workflowId,
+          trigger: input.trigger,
+          error: input.error ?? "Agent turn admission failed before attempt claim.",
+        });
+        if (failed.action === "terminal") return { action: "terminal" };
+        if (failed.action === "stale") return { action: "stale" };
+        await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, failed.events);
+        if (failed.turnId) {
+          await deliverFailedChildTurnToParentFn(
+            { db, bus, settings, observability, wakeSessionWorkflow },
+            input.workspaceId,
+            input.sessionId,
+            failed.turnId,
+          );
+        }
+        return { action: "failed" };
+      }
 
       const requestedRetryDelayMs = input.retryDelayMs;
       const retryDelayMs =
