@@ -1,11 +1,17 @@
 import type { ConfiguredModel, ResolvedModelProvider, Settings } from "@opengeni/config";
 import { configuredProviders, resolveModelProvider } from "@opengeni/config";
-import { OpenAIChatCompletionsModel, type Model, type ModelProvider } from "@openai/agents";
+import {
+  OpenAIChatCompletionsModel,
+  type Model,
+  type ModelProvider,
+  type ModelRequest,
+} from "@openai/agents";
 import OpenAI from "openai";
 import { CODEX_MODEL_ID_PREFIX } from "@opengeni/codex";
 import { XAI_SUBSCRIPTION_MODEL_ID_PREFIX } from "@opengeni/xai-subscription";
 
 import { AppendOnlyOpenAIResponsesModel } from "./append-only-responses-model";
+import { recordModelPreparationMeasurement } from "./model-preparation-diagnostics";
 import { buildProviderClient } from "./model-provider-client";
 import {
   CodexSubscriptionUnavailableError,
@@ -19,6 +25,24 @@ export class OpenGeniResponsesModel extends AppendOnlyOpenAIResponsesModel {
     protected readonly provider: ResolvedModelProvider,
   ) {
     super(client, model);
+  }
+
+  protected override _buildResponsesCreateRequest(request: ModelRequest, stream: boolean) {
+    const startedAt = performance.now();
+    let outcome: "completed" | "failed" = "completed";
+    try {
+      return super._buildResponsesCreateRequest(request, stream);
+    } catch (error) {
+      outcome = "failed";
+      throw error;
+    } finally {
+      recordModelPreparationMeasurement({
+        phase: "responses_request_build",
+        outcome,
+        durationSeconds: (performance.now() - startedAt) / 1_000,
+        count: typeof request.input === "string" ? 1 : request.input.length,
+      });
+    }
   }
 }
 

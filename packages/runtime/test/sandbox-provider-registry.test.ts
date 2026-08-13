@@ -23,6 +23,7 @@ import {
   sdkBackendIdForSandboxBackend,
   selectBackend,
 } from "../src/sandbox";
+import { dockerInspectProvesMissing } from "../src/sandbox/providers/docker";
 
 // Per-provider credential stubs so build() can run without real creds. Only the
 // fields validateCredentials requires per backend are present.
@@ -218,6 +219,35 @@ describe("createSandboxClient — per-backend matrix construction", () => {
     ) as { resumeExact?: unknown };
 
     expect(typeof client.resumeExact).toBe("function");
+  });
+
+  test("docker exact resume recognizes only exact missing-container diagnostics", () => {
+    const containerId = "fba61104cc50168d";
+
+    expect(
+      dockerInspectProvesMissing(
+        { stderr: `Error response from daemon: No such container: ${containerId}\n` },
+        containerId,
+      ),
+    ).toBe(true);
+    expect(
+      dockerInspectProvesMissing(
+        { stderr: `Error: No such container: ${containerId}` },
+        containerId,
+      ),
+    ).toBe(true);
+    expect(
+      dockerInspectProvesMissing(
+        { stderr: `Error response from daemon: No such container: another-container` },
+        containerId,
+      ),
+    ).toBe(false);
+    expect(
+      dockerInspectProvesMissing(
+        { stderr: `permission denied while inspecting ${containerId}` },
+        containerId,
+      ),
+    ).toBe(false);
   });
 
   test("local exact resume never restores or creates a replacement workspace", async () => {

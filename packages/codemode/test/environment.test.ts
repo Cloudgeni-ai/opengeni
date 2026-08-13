@@ -129,6 +129,69 @@ describe("AttemptToolEnvironment", () => {
     expect(calls).toEqual(["model:one", "codemode:two"]);
   });
 
+  test("reuses structural validators without sharing attempt executors", async () => {
+    const calls: string[] = [];
+    const first = createAttemptToolEnvironment({
+      scope,
+      generation: 1,
+      definitions: [
+        {
+          ...definition("docs", "search", async () => {
+            calls.push("first");
+            return { content: [] };
+          }),
+          inputSchema: {
+            type: "object",
+            properties: { query: { type: "string" } },
+            required: ["query"],
+            additionalProperties: false,
+          },
+        },
+      ],
+    });
+    const second = createAttemptToolEnvironment({
+      scope: {
+        ...scope,
+        attemptId: "77777777-7777-4777-8777-777777777777",
+      },
+      generation: 1,
+      definitions: [
+        {
+          ...definition("docs", "search", async () => {
+            calls.push("second");
+            return { content: [] };
+          }),
+          inputSchema: {
+            type: "object",
+            properties: { query: { type: "string" } },
+            required: ["query"],
+            additionalProperties: false,
+          },
+        },
+      ],
+    });
+
+    await first.callModel({
+      modelName: "docs__search",
+      arguments: { query: "one" },
+      subjectId: "agent:test",
+    });
+    await second.callModel({
+      modelName: "docs__search",
+      arguments: { query: "two" },
+      subjectId: "agent:test",
+    });
+    await expect(
+      second.callModel({
+        modelName: "docs__search",
+        arguments: { query: 2 },
+        subjectId: "agent:test",
+      }),
+    ).rejects.toBeInstanceOf(AttemptToolInputValidationError);
+    expect(calls).toEqual(["first", "second"]);
+    expect(first.catalog.attemptId).not.toBe(second.catalog.attemptId);
+  });
+
   test("rejects stale catalogs before execution", async () => {
     let executed = false;
     const environment = createAttemptToolEnvironment({
@@ -201,7 +264,9 @@ describe("AttemptToolEnvironment", () => {
             executions += 1;
             return {
               content: [],
-              structuredContent: { count: args.validResult === true ? 1 : "wrong" },
+              structuredContent: {
+                count: args.validResult === true ? 1 : "wrong",
+              },
             };
           }),
           inputSchema: {

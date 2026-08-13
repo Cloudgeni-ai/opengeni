@@ -358,6 +358,74 @@ describe("durable attachment history projection", () => {
 });
 
 describe("turnInput attachment projection", () => {
+  test("reports bounded history subphases without letting diagnostics change input", async () => {
+    const workspaceId = "00000000-0000-4000-8000-000000000030";
+    const sessionId = "00000000-0000-4000-8000-000000000031";
+    const phases: string[] = [];
+    const listUpdates = spyOn(opengeniDb, "listSessionSystemUpdatesForTurn").mockResolvedValue([]);
+    const getEnvelope = spyOn(opengeniDb, "getSandboxSessionEnvelope").mockResolvedValue(null);
+    const runtime = {
+      prepareInput: async () => ({ input: [], persistedHistoryCount: 1 }),
+    } as unknown as OpenGeniRuntime;
+
+    try {
+      const prepared = await turnInput(
+        {} as Database,
+        runtime,
+        {},
+        {
+          id: "00000000-0000-4000-8000-000000000032",
+          workspaceId,
+          sessionId,
+          sequence: 1,
+          type: "user.message",
+          payload: { text: "measure history", resources: [] },
+          occurredAt: "2026-08-13T00:00:00.000Z",
+        },
+        {
+          turnId: "00000000-0000-4000-8000-000000000033",
+          providerApi: "responses",
+          loadActiveHistory: async () => [
+            {
+              id: "00000000-0000-4000-8000-000000000034",
+              position: 0,
+              item: user("measure history"),
+              providerArtifactInvalidatedAt: null,
+            },
+          ],
+          onPreparationPhase: (measurement) => {
+            phases.push(measurement.phase);
+            expect(measurement.outcome).toBe("completed");
+            expect(measurement.durationSeconds).toBeGreaterThanOrEqual(0);
+            if (measurement.phase === "provider_projection") {
+              throw new Error("diagnostic sink unavailable");
+            }
+          },
+        },
+      );
+
+      expect(prepared.persistedHistoryCount).toBe(1);
+      expect(new Set(phases)).toEqual(
+        new Set([
+          "system_update_load",
+          "current_attachment_resolution",
+          "durable_history_load",
+          "sandbox_envelope_load",
+          "canonical_projection",
+          "provider_projection",
+          "attachment_ref_projection",
+          "screenshot_materialization",
+          "model_attachment_projection",
+          "runtime_input_assembly",
+          "artifact_candidate_scan",
+        ]),
+      );
+    } finally {
+      listUpdates.mockRestore();
+      getEnvelope.mockRestore();
+    }
+  });
+
   test("accepts annotation-only user-message triggers backed by canonical history", async () => {
     const workspaceId = "00000000-0000-4000-8000-000000000040";
     const sessionId = "00000000-0000-4000-8000-000000000041";
