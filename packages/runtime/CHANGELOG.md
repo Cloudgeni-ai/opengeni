@@ -1,5 +1,25 @@
 # @opengeni/runtime
 
+## 0.23.0
+
+### Minor Changes
+
+- 478d7fe: Persist exact accepted-turn goal authority, separate semantic goal revisions
+  from execution progress, and add policy-controlled rewrite proposals with API,
+  SDK, MCP, and runtime support.
+
+### Patch Changes
+
+- 478d7fe: Add a reversible workspace memory prompt mode that removes the legacy standing memory block, keeps preference observations out of agent behavioral authority, contains company-profile context for child agents, and reports metadata-only model-context contribution telemetry.
+- Updated dependencies [478d7fe]
+- Updated dependencies [478d7fe]
+- Updated dependencies [478d7fe]
+- Updated dependencies [478d7fe]
+  - @opengeni/contracts@0.50.0
+  - @opengeni/sdk@0.57.0
+  - @opengeni/config@0.16.2
+  - @opengeni/codemode@0.4.2
+
 ## 0.22.1
 
 ### Patch Changes
