@@ -50,10 +50,11 @@ export async function createInteractionUiFixture(): Promise<InteractionUiFixture
     browserSessionId: browser.id,
     computerSessionId: computer.id,
     dispose: async () => {
-      await Promise.allSettled([
-        browser.end({ operationId: crypto.randomUUID() }),
-        computer.end({ operationId: crypto.randomUUID() }),
-      ]);
+      // A linked browser is a live holder of its computer. Release it first so
+      // cleanup cannot race the computer end against that ownership edge and
+      // silently leave the desktop running after an acceptance process exits.
+      await browser.end({ operationId: crypto.randomUUID() }).catch(() => undefined);
+      await computer.end({ operationId: crypto.randomUUID() }).catch(() => undefined);
     },
   };
 }
