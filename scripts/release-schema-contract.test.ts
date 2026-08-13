@@ -117,20 +117,36 @@ describe("release schema contract", () => {
     expect(sourceContract.sha256).toBe(
       migrations.has("0235_canonical_human_login_bindings.sql")
         ? migrations.has("0234_xai_subscription_authority.sql")
-          ? migrations.has("0229_realtime_turn_instructions.sql")
-            ? "4cb613df607e68a198aa1ba5b686659db8477393f8a9f1979b0b2b107a118ca3"
-            : "5450adec25b4684b082ce97c0ab5ce76f33b15de2e943945b5e73534ff67be82"
-          : migrations.has("0229_realtime_turn_instructions.sql")
-            ? "f862809038f98f61b97f2087b4207df200de5198c9db9f51639390a0e56a3780"
-            : "e0f7b19f681fee92ea7813660fee0227fef4ed885032a134f36b399591888d8c"
-        : migrations.has("0234_xai_subscription_authority.sql")
-          ? migrations.has("0229_realtime_turn_instructions.sql")
-            ? "0e82931309ece1fc85d7e0f0b33379b4685f72b7ebfa1221c81aa5e5084c19c0"
-            : "035c70dfee83fe5b0962697bf7167bfd09b77d69ea3d3b0e25907998f58d7005"
-          : migrations.has("0233_skill_and_integration_authority_cutover.sql")
+          ? migrations.has("0223_pending_tool_event_output.sql")
             ? migrations.has("0229_realtime_turn_instructions.sql")
-              ? "c8385a2150df346f54918fac0504451d4de8d9377de4fc0548cf2c4780328ffb"
-              : "03b2633febc6805e697fb5aa2002136a80c8699181f9b4c65b3b559ef6726d18"
+              ? "c48d11c533a0848a3443390bda821754daa529dbf7c100b7dac070ae3da9eec7"
+              : "94db34c0bd7ee7a3fe9c7a44f7e2705de9bdbe39d1503fa79ec52b024d71ad42"
+            : migrations.has("0229_realtime_turn_instructions.sql")
+              ? "4cb613df607e68a198aa1ba5b686659db8477393f8a9f1979b0b2b107a118ca3"
+              : "5450adec25b4684b082ce97c0ab5ce76f33b15de2e943945b5e73534ff67be82"
+          : migrations.has("0223_pending_tool_event_output.sql")
+            ? migrations.has("0229_realtime_turn_instructions.sql")
+              ? "6309e5771063c94e75462b66cca87c5da03626f6c7353311278130ad3f69b791"
+              : "bdf9243aad43605eb2cc380992f564a706aa06ffea885854f6be5911abe2f5c3"
+            : migrations.has("0229_realtime_turn_instructions.sql")
+              ? "f862809038f98f61b97f2087b4207df200de5198c9db9f51639390a0e56a3780"
+              : "e0f7b19f681fee92ea7813660fee0227fef4ed885032a134f36b399591888d8c"
+        : migrations.has("0234_xai_subscription_authority.sql")
+          ? migrations.has("0223_pending_tool_event_output.sql")
+            ? migrations.has("0229_realtime_turn_instructions.sql")
+              ? "cc24c99ed76afdd5d61c8152259775eb8ab33c0cd5f0b6213bbcedfabc3674e0"
+              : "f6370d47ee43da07781d21a67fe07ffb353c9c8ea4e22ec3bf75ba3793f7634a"
+            : migrations.has("0229_realtime_turn_instructions.sql")
+              ? "0e82931309ece1fc85d7e0f0b33379b4685f72b7ebfa1221c81aa5e5084c19c0"
+              : "035c70dfee83fe5b0962697bf7167bfd09b77d69ea3d3b0e25907998f58d7005"
+          : migrations.has("0233_skill_and_integration_authority_cutover.sql")
+            ? migrations.has("0223_pending_tool_event_output.sql")
+              ? migrations.has("0229_realtime_turn_instructions.sql")
+                ? "a149984ff0178bbfed52407e040edfa0bdd34fa101641ef58bf00941dad39891"
+                : "2ec6043704c9f0b8c635ff989d5155e2f047a2377b6a8784139c98b006bcc487"
+              : migrations.has("0229_realtime_turn_instructions.sql")
+                ? "c8385a2150df346f54918fac0504451d4de8d9377de4fc0548cf2c4780328ffb"
+                : "03b2633febc6805e697fb5aa2002136a80c8699181f9b4c65b3b559ef6726d18"
             : migrations.has("0232_integration_facet_authority_cutover.sql")
               ? migrations.has("0229_realtime_turn_instructions.sql")
                 ? "11ff08bb63c195e3bc65d1ff706b204170ba63c2ab6c57ed1d43a2ae045768a0"
@@ -187,20 +203,36 @@ describe("release schema contract", () => {
       ...sourceContract,
       sha256: migrations.has("0235_canonical_human_login_bindings.sql")
         ? migrations.has("0234_xai_subscription_authority.sql")
-          ? migrations.has("0229_realtime_turn_instructions.sql")
-            ? "4cb613df607e68a198aa1ba5b686659db8477393f8a9f1979b0b2b107a118ca3"
-            : "5450adec25b4684b082ce97c0ab5ce76f33b15de2e943945b5e73534ff67be82"
-          : migrations.has("0229_realtime_turn_instructions.sql")
-            ? "f862809038f98f61b97f2087b4207df200de5198c9db9f51639390a0e56a3780"
-            : "e0f7b19f681fee92ea7813660fee0227fef4ed885032a134f36b399591888d8c"
-        : migrations.has("0234_xai_subscription_authority.sql")
-          ? migrations.has("0229_realtime_turn_instructions.sql")
-            ? "0e82931309ece1fc85d7e0f0b33379b4685f72b7ebfa1221c81aa5e5084c19c0"
-            : "035c70dfee83fe5b0962697bf7167bfd09b77d69ea3d3b0e25907998f58d7005"
-          : migrations.has("0233_skill_and_integration_authority_cutover.sql")
+          ? migrations.has("0223_pending_tool_event_output.sql")
             ? migrations.has("0229_realtime_turn_instructions.sql")
-              ? "c8385a2150df346f54918fac0504451d4de8d9377de4fc0548cf2c4780328ffb"
-              : "03b2633febc6805e697fb5aa2002136a80c8699181f9b4c65b3b559ef6726d18"
+              ? "c48d11c533a0848a3443390bda821754daa529dbf7c100b7dac070ae3da9eec7"
+              : "94db34c0bd7ee7a3fe9c7a44f7e2705de9bdbe39d1503fa79ec52b024d71ad42"
+            : migrations.has("0229_realtime_turn_instructions.sql")
+              ? "4cb613df607e68a198aa1ba5b686659db8477393f8a9f1979b0b2b107a118ca3"
+              : "5450adec25b4684b082ce97c0ab5ce76f33b15de2e943945b5e73534ff67be82"
+          : migrations.has("0223_pending_tool_event_output.sql")
+            ? migrations.has("0229_realtime_turn_instructions.sql")
+              ? "6309e5771063c94e75462b66cca87c5da03626f6c7353311278130ad3f69b791"
+              : "bdf9243aad43605eb2cc380992f564a706aa06ffea885854f6be5911abe2f5c3"
+            : migrations.has("0229_realtime_turn_instructions.sql")
+              ? "f862809038f98f61b97f2087b4207df200de5198c9db9f51639390a0e56a3780"
+              : "e0f7b19f681fee92ea7813660fee0227fef4ed885032a134f36b399591888d8c"
+        : migrations.has("0234_xai_subscription_authority.sql")
+          ? migrations.has("0223_pending_tool_event_output.sql")
+            ? migrations.has("0229_realtime_turn_instructions.sql")
+              ? "cc24c99ed76afdd5d61c8152259775eb8ab33c0cd5f0b6213bbcedfabc3674e0"
+              : "f6370d47ee43da07781d21a67fe07ffb353c9c8ea4e22ec3bf75ba3793f7634a"
+            : migrations.has("0229_realtime_turn_instructions.sql")
+              ? "0e82931309ece1fc85d7e0f0b33379b4685f72b7ebfa1221c81aa5e5084c19c0"
+              : "035c70dfee83fe5b0962697bf7167bfd09b77d69ea3d3b0e25907998f58d7005"
+          : migrations.has("0233_skill_and_integration_authority_cutover.sql")
+            ? migrations.has("0223_pending_tool_event_output.sql")
+              ? migrations.has("0229_realtime_turn_instructions.sql")
+                ? "a149984ff0178bbfed52407e040edfa0bdd34fa101641ef58bf00941dad39891"
+                : "2ec6043704c9f0b8c635ff989d5155e2f047a2377b6a8784139c98b006bcc487"
+              : migrations.has("0229_realtime_turn_instructions.sql")
+                ? "c8385a2150df346f54918fac0504451d4de8d9377de4fc0548cf2c4780328ffb"
+                : "03b2633febc6805e697fb5aa2002136a80c8699181f9b4c65b3b559ef6726d18"
             : migrations.has("0232_integration_facet_authority_cutover.sql")
               ? migrations.has("0229_realtime_turn_instructions.sql")
                 ? "11ff08bb63c195e3bc65d1ff706b204170ba63c2ab6c57ed1d43a2ae045768a0"
@@ -426,6 +458,7 @@ describe("release schema contract", () => {
         (migrations.has("0220_session_channels.sql") ? 1 : 0) +
         (migrations.has("0221_sessions_channel_index.sql") ? 1 : 0) +
         (migrations.has("0222_session_visibility_authority_epochs.sql") ? 1 : 0) +
+        (migrations.has("0223_pending_tool_event_output.sql") ? 1 : 0) +
         (migrations.has("0222_sessions_channel_fk.sql") ? 1 : 0) +
         (migrations.has("0223_sessions_channel_fk_validate.sql") ? 1 : 0) +
         (migrations.has("0224_slack_post_outcome_reconciliation.sql") ? 1 : 0) +
@@ -442,20 +475,36 @@ describe("release schema contract", () => {
     expect(contract.sha256).toBe(
       migrations.has("0235_canonical_human_login_bindings.sql")
         ? migrations.has("0234_xai_subscription_authority.sql")
-          ? migrations.has("0229_realtime_turn_instructions.sql")
-            ? "4cb613df607e68a198aa1ba5b686659db8477393f8a9f1979b0b2b107a118ca3"
-            : "5450adec25b4684b082ce97c0ab5ce76f33b15de2e943945b5e73534ff67be82"
-          : migrations.has("0229_realtime_turn_instructions.sql")
-            ? "f862809038f98f61b97f2087b4207df200de5198c9db9f51639390a0e56a3780"
-            : "e0f7b19f681fee92ea7813660fee0227fef4ed885032a134f36b399591888d8c"
-        : migrations.has("0234_xai_subscription_authority.sql")
-          ? migrations.has("0229_realtime_turn_instructions.sql")
-            ? "0e82931309ece1fc85d7e0f0b33379b4685f72b7ebfa1221c81aa5e5084c19c0"
-            : "035c70dfee83fe5b0962697bf7167bfd09b77d69ea3d3b0e25907998f58d7005"
-          : migrations.has("0233_skill_and_integration_authority_cutover.sql")
+          ? migrations.has("0223_pending_tool_event_output.sql")
             ? migrations.has("0229_realtime_turn_instructions.sql")
-              ? "c8385a2150df346f54918fac0504451d4de8d9377de4fc0548cf2c4780328ffb"
-              : "03b2633febc6805e697fb5aa2002136a80c8699181f9b4c65b3b559ef6726d18"
+              ? "c48d11c533a0848a3443390bda821754daa529dbf7c100b7dac070ae3da9eec7"
+              : "94db34c0bd7ee7a3fe9c7a44f7e2705de9bdbe39d1503fa79ec52b024d71ad42"
+            : migrations.has("0229_realtime_turn_instructions.sql")
+              ? "4cb613df607e68a198aa1ba5b686659db8477393f8a9f1979b0b2b107a118ca3"
+              : "5450adec25b4684b082ce97c0ab5ce76f33b15de2e943945b5e73534ff67be82"
+          : migrations.has("0223_pending_tool_event_output.sql")
+            ? migrations.has("0229_realtime_turn_instructions.sql")
+              ? "6309e5771063c94e75462b66cca87c5da03626f6c7353311278130ad3f69b791"
+              : "bdf9243aad43605eb2cc380992f564a706aa06ffea885854f6be5911abe2f5c3"
+            : migrations.has("0229_realtime_turn_instructions.sql")
+              ? "f862809038f98f61b97f2087b4207df200de5198c9db9f51639390a0e56a3780"
+              : "e0f7b19f681fee92ea7813660fee0227fef4ed885032a134f36b399591888d8c"
+        : migrations.has("0234_xai_subscription_authority.sql")
+          ? migrations.has("0223_pending_tool_event_output.sql")
+            ? migrations.has("0229_realtime_turn_instructions.sql")
+              ? "cc24c99ed76afdd5d61c8152259775eb8ab33c0cd5f0b6213bbcedfabc3674e0"
+              : "f6370d47ee43da07781d21a67fe07ffb353c9c8ea4e22ec3bf75ba3793f7634a"
+            : migrations.has("0229_realtime_turn_instructions.sql")
+              ? "0e82931309ece1fc85d7e0f0b33379b4685f72b7ebfa1221c81aa5e5084c19c0"
+              : "035c70dfee83fe5b0962697bf7167bfd09b77d69ea3d3b0e25907998f58d7005"
+          : migrations.has("0233_skill_and_integration_authority_cutover.sql")
+            ? migrations.has("0223_pending_tool_event_output.sql")
+              ? migrations.has("0229_realtime_turn_instructions.sql")
+                ? "a149984ff0178bbfed52407e040edfa0bdd34fa101641ef58bf00941dad39891"
+                : "2ec6043704c9f0b8c635ff989d5155e2f047a2377b6a8784139c98b006bcc487"
+              : migrations.has("0229_realtime_turn_instructions.sql")
+                ? "c8385a2150df346f54918fac0504451d4de8d9377de4fc0548cf2c4780328ffb"
+                : "03b2633febc6805e697fb5aa2002136a80c8699181f9b4c65b3b559ef6726d18"
             : migrations.has("0232_integration_facet_authority_cutover.sql")
               ? migrations.has("0229_realtime_turn_instructions.sql")
                 ? "11ff08bb63c195e3bc65d1ff706b204170ba63c2ab6c57ed1d43a2ae045768a0"
@@ -681,6 +730,12 @@ describe("release schema contract", () => {
       sha256: "26ed3d2ffcaf572623ad263aaa0103625b4ed1e9d28bcb7b5d35eb972d9762d1",
       deploymentMode: "maintenance",
     });
+    if (migrations.has("0223_pending_tool_event_output.sql")) {
+      expect(migrations.get("0223_pending_tool_event_output.sql")).toMatchObject({
+        sha256: "851cdb5dfe14f1cf6323e6cf59e55269b87d2db4406ea2ad10147553635eb707",
+        deploymentMode: "rolling",
+      });
+    }
     if (migrations.has("0234_xai_subscription_authority.sql")) {
       expect(migrations.get("0234_xai_subscription_authority.sql")).toMatchObject({
         sha256: "be0c23d624d545226068ce7627a2b458fe9aad996ea7ee750753c81eeb8988a8",

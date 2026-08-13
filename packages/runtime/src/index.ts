@@ -77,6 +77,7 @@ import {
   type LazyToolTransport,
 } from "./lazy-tool-transport";
 import { GmailRestMcpServer, isOfficialGmailMcpConfig } from "./gmail-rest-mcp";
+import { McpResultCustomDataBridge, unwrapSdkMcpResultProjection } from "./mcp-result-custom-data";
 export {
   GMAIL_REST_API_BASE,
   GMAIL_REST_MCP_TOOLS,
@@ -368,6 +369,13 @@ export {
   serializeHumanInputRequests,
   serializeInteractionInterventionRequests,
 } from "./run-events";
+export {
+  compactMcpResultCustomDataRunState,
+  OPENGENI_INNER_MCP_CUSTOM_DATA_KEY,
+  OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY,
+  mcpResultFromCustomData,
+  releaseMcpResultCustomDataFromSdkEvent,
+} from "./mcp-result-custom-data";
 export type {
   ModelResponseServiceTierEvent,
   ModelResponseUsage,
@@ -4662,6 +4670,9 @@ function logPublicMcpLifecycleFailure(error: Error): void {
  */
 class AttemptDefinitionMcpServer implements MCPServer {
   readonly cacheToolsList = true;
+  private readonly resultCustomDataBridge = new McpResultCustomDataBridge();
+  readonly customDataExtractor = this.resultCustomDataBridge.customDataExtractor;
+  readonly toolMetaResolver = this.resultCustomDataBridge.toolMetaResolver;
   readonly name = "opengeni-attempt-local-tools";
   private readonly tools: RuntimeMcpTool[];
   private environment: AttemptToolEnvironment | null = null;
@@ -4731,13 +4742,15 @@ class AttemptDefinitionMcpServer implements MCPServer {
     if (!this.environment) {
       throw new Error("local model tool server has no exact attempt authority");
     }
-    return await this.environment.callModel({
-      modelName: toolName,
-      arguments: args ?? {},
-      subjectId: this.subjectId,
-      ...(meta === undefined ? {} : { transportMeta: meta }),
-      ...(options?.signal ? { signal: options.signal } : {}),
-    });
+    return await this.resultCustomDataBridge.captureResult(args, async (cleanArgs) =>
+      this.environment!.callModel({
+        modelName: toolName,
+        arguments: cleanArgs ?? {},
+        subjectId: this.subjectId,
+        ...(meta === undefined ? {} : { transportMeta: meta }),
+        ...(options?.signal ? { signal: options.signal } : {}),
+      }),
+    );
   }
 
   async invalidateToolsCache(): Promise<void> {
@@ -4748,6 +4761,8 @@ class AttemptDefinitionMcpServer implements MCPServer {
 /** @internal Exported for exact SDK-boundary conformance tests. */
 export class PrefixedMcpServer implements MCPServer {
   readonly cacheToolsList: boolean;
+  readonly customDataExtractor: NonNullable<MCPServer["customDataExtractor"]>;
+  readonly toolMetaResolver: NonNullable<MCPServer["toolMetaResolver"]>;
   readonly name: string;
   readonly prefix: string;
   readonly registryId: string;
@@ -4763,6 +4778,7 @@ export class PrefixedMcpServer implements MCPServer {
   private frozenTools: Promise<RuntimeMcpTool[]> | null = null;
   private attemptToolEnvironment: AttemptToolEnvironment | null = null;
   private attemptToolSubjectId = "worker:mcp-model";
+  private readonly resultCustomDataBridge: McpResultCustomDataBridge;
   private readonly lifecycleFailures: Partial<Record<McpLifecyclePhase, McpLifecycleFailure>> = {};
 
   constructor(
@@ -4781,6 +4797,13 @@ export class PrefixedMcpServer implements MCPServer {
     this.name = `${MCP_SDK_LIFECYCLE_NAME}:${safeMcpServerIdentity(registryId)}`;
     this.prefix = prefixedMcpToolName(registryId, "");
     this.cacheToolsList = inner.cacheToolsList;
+    this.resultCustomDataBridge = new McpResultCustomDataBridge({
+      innerServer: inner,
+      unprefixToolName: (toolName) => this.unprefixToolName(toolName),
+      sdkModelOutput: "result",
+    });
+    this.customDataExtractor = this.resultCustomDataBridge.customDataExtractor;
+    this.toolMetaResolver = this.resultCustomDataBridge.toolMetaResolver;
     this.allowedTools = allowedTools ? new Set(allowedTools) : undefined;
     this.bestEffort = bestEffort;
   }
@@ -4913,20 +4936,7 @@ export class PrefixedMcpServer implements MCPServer {
     meta?: Record<string, unknown> | null,
     options?: { signal?: AbortSignal },
   ): Promise<any> {
-    const unprefixed = this.unprefixToolName(toolName);
-    if (!this.isAllowed(unprefixed)) {
-      throw new Error(`MCP tool ${unprefixed} is not allowed for server ${this.registryId}`);
-    }
-    const result = this.attemptToolEnvironment
-      ? await this.attemptToolEnvironment.callModel({
-          modelName: toolName,
-          arguments: args ?? {},
-          subjectId: this.attemptToolSubjectId,
-          ...(meta === undefined ? {} : { transportMeta: meta }),
-          ...(options?.signal ? { signal: options.signal } : {}),
-        })
-      : await this.executeCatalogTool(unprefixed, args ?? {}, meta, options);
-    return result;
+    return await this.callToolResult(toolName, args, meta, options);
   }
 
   async callToolResult(
@@ -4939,15 +4949,17 @@ export class PrefixedMcpServer implements MCPServer {
     if (!this.isAllowed(unprefixed)) {
       throw new Error(`MCP tool ${unprefixed} is not allowed for server ${this.registryId}`);
     }
-    return this.attemptToolEnvironment
-      ? await this.attemptToolEnvironment.callModel({
-          modelName: toolName,
-          arguments: args ?? {},
-          subjectId: this.attemptToolSubjectId,
-          ...(meta === undefined ? {} : { transportMeta: meta }),
-          ...(options?.signal ? { signal: options.signal } : {}),
-        })
-      : await this.executeCatalogTool(unprefixed, args ?? {}, meta, options);
+    return await this.resultCustomDataBridge.captureResult(args, async (cleanArgs) =>
+      this.attemptToolEnvironment
+        ? this.attemptToolEnvironment.callModel({
+            modelName: toolName,
+            arguments: cleanArgs ?? {},
+            subjectId: this.attemptToolSubjectId,
+            ...(meta === undefined ? {} : { transportMeta: meta }),
+            ...(options?.signal ? { signal: options.signal } : {}),
+          })
+        : this.executeCatalogTool(unprefixed, cleanArgs ?? {}, meta, options),
+    );
   }
 
   async executeCatalogTool(
@@ -4960,9 +4972,10 @@ export class PrefixedMcpServer implements MCPServer {
       throw new Error(`MCP tool ${unprefixed} is not allowed for server ${this.registryId}`);
     }
     try {
-      const output = this.inner.callToolResult
+      const projectedOutput = this.inner.callToolResult
         ? await this.inner.callToolResult(unprefixed, args, meta, options)
         : mcpContentAsResult(await this.inner.callTool(unprefixed, args, meta, options));
+      const output = unwrapSdkMcpResultProjection(projectedOutput);
       assertMcpPayloadWithinBytes(output, MCP_MAX_TOOL_RESULT_BYTES, "MCP tool result");
       return AttemptToolResult.parse(output);
     } catch (error) {

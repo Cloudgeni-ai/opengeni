@@ -11,6 +11,7 @@ import {
 } from "@opengeni/contracts";
 
 import { normalizeProtocolJsonValue } from "./protocol-json";
+import { mcpResultFromCustomData } from "./mcp-result-custom-data";
 
 export type NormalizedRuntimeEvent = {
   type: SessionEventType;
@@ -118,6 +119,31 @@ function toolOutputMediaPreview(value: unknown): SessionEventMediaPreview | null
     if (typeof url !== "string" || url.length === 0) return null;
     return sessionEventMediaPreviewFromDataUrl(url) ?? sessionEventMediaPreview("image/*", null);
   }
+  if ((record.type === "image" || record.type === "audio") && typeof record.data === "string") {
+    const mediaType =
+      typeof record.mimeType === "string" && record.mimeType.length > 0
+        ? record.mimeType
+        : record.type === "audio"
+          ? "audio/*"
+          : "image/png";
+    return (
+      sessionEventMediaPreviewFromDataUrl(record.data) ??
+      sessionEventMediaPreview(mediaType, base64DecodedByteLength(record.data))
+    );
+  }
+  if (record.type === "resource" && record.resource && typeof record.resource === "object") {
+    const resource = record.resource as Record<string, unknown>;
+    if (typeof resource.blob === "string") {
+      const mediaType =
+        typeof resource.mimeType === "string" && resource.mimeType.length > 0
+          ? resource.mimeType
+          : "application/octet-stream";
+      return (
+        sessionEventMediaPreviewFromDataUrl(resource.blob) ??
+        sessionEventMediaPreview(mediaType, base64DecodedByteLength(resource.blob))
+      );
+    }
+  }
   if (record.type !== "image" || !record.image || typeof record.image !== "object") return null;
   const image = record.image as Record<string, unknown>;
   const mediaType =
@@ -156,6 +182,15 @@ export function normalizeToolOutputForEvent(output: unknown): unknown {
       return normalized[0];
     }
     return normalized;
+  }
+  if (output && typeof output === "object") {
+    const record = output as Record<string, unknown>;
+    if (Array.isArray(record.content)) {
+      return {
+        ...record,
+        content: record.content.map((el) => toolOutputMediaPreview(el) ?? el),
+      };
+    }
   }
   return output;
 }
@@ -281,6 +316,7 @@ export function normalizeSdkEvent(
       },
     });
   } else if (item.type === "tool_call_output_item") {
+    const retainedMcpResult = mcpResultFromCustomData(item.customData);
     pushProtocolEvent({
       type: "agent.toolCall.output",
       payload: {
@@ -290,7 +326,7 @@ export function normalizeSdkEvent(
         output:
           "toolOutputOverride" in options
             ? options.toolOutputOverride
-            : normalizeToolOutputForEvent(item.output),
+            : normalizeToolOutputForEvent(retainedMcpResult ?? item.output),
       },
       ...(options.retainedOutputEvidence !== undefined
         ? { retainedOutputEvidence: options.retainedOutputEvidence }
