@@ -296,6 +296,7 @@ describe("Slack event classification and safe projection", () => {
       triggerKind: "app_mention",
       text: "(file-only Slack invocation)",
       slackMessageTs: "4.1",
+      hasFiles: true,
     });
     expect(
       slackEventInboxEntry(
@@ -308,8 +309,22 @@ describe("Slack event classification and safe projection", () => {
           files: [{ id: "F2", title: "screenshot.png" }],
         }),
         bot,
-      )?.triggerKind,
-    ).toBe("dm");
+      ),
+    ).toMatchObject({ triggerKind: "dm", hasFiles: true });
+    expect(
+      slackEventInboxEntry(
+        envelope({
+          type: "message",
+          user: "U1",
+          channel: "C1",
+          ts: "4.3",
+          thread_ts: "4.0",
+          text: "inspect this",
+          files: [{ id: "F3", name: "trace.png" }],
+        }),
+        bot,
+      ),
+    ).toMatchObject({ triggerKind: "thread_reply", hasFiles: true });
   });
 
   test("keeps a maximum-size mention plus context inside the Slack input budget", () => {

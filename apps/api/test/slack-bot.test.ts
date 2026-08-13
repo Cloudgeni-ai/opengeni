@@ -155,6 +155,9 @@ type SlackCall = {
   fileId: string | null;
   clientMessageId: string | null;
   parentTimestamp: string | null;
+  oldest: string | null;
+  latest: string | null;
+  inclusive: string | null;
   threadTimestamp: string | null;
   unfurlLinks: string | null;
   unfurlMedia: string | null;
@@ -272,6 +275,9 @@ function fakeSlack(
       fileId: params.get("file"),
       clientMessageId: params.get("client_msg_id"),
       parentTimestamp: params.get("ts"),
+      oldest: params.get("oldest"),
+      latest: params.get("latest"),
+      inclusive: params.get("inclusive"),
       threadTimestamp: params.get("thread_ts"),
       unfurlLinks: params.get("unfurl_links"),
       unfurlMedia: params.get("unfurl_media"),
@@ -2464,6 +2470,24 @@ describe("OpenGeni Slack bot connection", () => {
     expect(slack.calls.find((call) => call.method === "conversations.replies")).toMatchObject({
       channel: "C_MEMBER",
       parentTimestamp: "1.000",
+    });
+    await bot.threadReplies({
+      channelId: "C_MEMBER",
+      threadTimestamp: "1.000",
+      oldest: "1.001",
+      latest: "1.001",
+      inclusive: true,
+      limit: 1,
+    });
+    expect(
+      slack.calls.filter((call) => call.method === "conversations.replies").at(-1),
+    ).toMatchObject({
+      channel: "C_MEMBER",
+      parentTimestamp: "1.000",
+      oldest: "1.001",
+      latest: "1.001",
+      inclusive: "true",
+      limit: "1",
     });
     await expect(bot.listFiles({ channelId: "G_PRIVATE" })).rejects.toThrow("not_in_channel");
     expect(slack.calls.filter((call) => call.method === "files.list")).toHaveLength(0);

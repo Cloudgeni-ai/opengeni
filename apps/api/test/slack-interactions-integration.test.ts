@@ -3637,6 +3637,124 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(value.slack.calls.filter((call) => call.method === "files.info")).toHaveLength(1);
   });
 
+  test("mixed Slack DMs and existing-thread replies import only their exact images", async () => {
+    if (!available) return;
+    const value = await fixture();
+    const channelId = "D_MIXED_FILES";
+    const rootTimestamp = "1722000000.000010";
+    const replyTimestamp = "1722000000.000011";
+    const rootEventId = `E_DM_MIXED_${crypto.randomUUID()}`;
+    const replyEventId = `E_REPLY_MIXED_${crypto.randomUUID()}`;
+    const objectStore = reactionObjectStorage();
+    Reflect.set(value.deps, "objectStorage", objectStore.storage);
+    value.slack.privateFiles.set("F_DM_MIXED", {
+      channelId,
+      filename: "initial-context.png",
+      contentType: "image/png",
+      bytes: fixturePng(),
+    });
+    value.slack.privateFiles.set("F_REPLY_MIXED", {
+      channelId,
+      filename: "follow-up-context.webp",
+      contentType: "image/webp",
+      bytes: fixtureWebp(),
+    });
+    value.slack.channelHistories.set(channelId, {
+      messages: [
+        {
+          ts: rootTimestamp,
+          user: value.ownerSlackUserId,
+          text: "Inspect the initial screenshot",
+          files: [{ id: "F_DM_MIXED", name: "initial-context.png", title: "Initial context" }],
+        },
+      ],
+    });
+    const rootEvent = {
+      teamId: value.teamId,
+      eventId: rootEventId,
+      event: {
+        type: "message",
+        channel_type: "im",
+        user: value.ownerSlackUserId,
+        channel: channelId,
+        ts: rootTimestamp,
+        text: "Inspect the initial screenshot",
+        files: [{ id: "F_DM_MIXED", name: "initial-context.png", title: "Initial context" }],
+      },
+    };
+    expect((await postEvent(value.app, rootEvent)).status).toBe(200);
+    await drainAll(value.deps);
+
+    value.slack.reactionContexts.set(`${channelId}:${rootTimestamp}`, {
+      messages: [
+        {
+          ts: rootTimestamp,
+          user: value.ownerSlackUserId,
+          text: "Inspect the initial screenshot",
+          files: [{ id: "F_DM_MIXED", name: "initial-context.png", title: "Initial context" }],
+        },
+        {
+          ts: replyTimestamp,
+          thread_ts: rootTimestamp,
+          user: value.ownerSlackUserId,
+          text: "Compare it with this follow-up",
+          files: [
+            {
+              id: "F_REPLY_MIXED",
+              name: "follow-up-context.webp",
+              title: "Follow-up context",
+            },
+          ],
+        },
+      ],
+    });
+    const replyEvent = {
+      teamId: value.teamId,
+      eventId: replyEventId,
+      event: {
+        type: "message",
+        user: value.ownerSlackUserId,
+        channel: channelId,
+        ts: replyTimestamp,
+        thread_ts: rootTimestamp,
+        text: "Compare it with this follow-up",
+        files: [
+          {
+            id: "F_REPLY_MIXED",
+            name: "follow-up-context.webp",
+            title: "Follow-up context",
+          },
+        ],
+      },
+    };
+    expect((await postEvent(value.app, replyEvent)).status).toBe(200);
+    expect((await postEvent(value.app, replyEvent)).status).toBe(200);
+    await drainAll(value.deps);
+
+    const [route] = await interactions(value.owner.workspaceId);
+    const messages = await shared!.admin<
+      { text: string; resources: Array<{ mountPath: string }> }[]
+    >`
+      select payload ->> 'text' as text, payload -> 'resources' as resources
+      from session_events
+      where workspace_id = ${value.owner.workspaceId}
+        and session_id = ${route!.session_id}
+        and type = 'user.message'
+      order by sequence`;
+    expect(messages).toHaveLength(2);
+    expect(messages[0]!.resources.map((resource) => resource.mountPath)).toEqual([
+      "attachments/slack/01-initial-context.png",
+    ]);
+    expect(messages[1]!.resources.map((resource) => resource.mountPath)).toEqual([
+      "attachments/slack/02-follow-up-context.webp",
+    ]);
+    expect(messages[1]!.text).toContain("Compare it with this follow-up");
+    expect(messages[1]!.text).toContain("attachments/slack/02-follow-up-context.webp");
+    expect(messages[1]!.text).not.toContain("initial-context.png");
+    expect(objectStore.objects.size).toBe(2);
+    expect(value.slack.calls.filter((call) => call.method === "files.info")).toHaveLength(2);
+  });
+
   test("requester-bound native controls update the exact Slack message and settle sibling handles", async () => {
     if (!available) return;
     const value = await fixture();

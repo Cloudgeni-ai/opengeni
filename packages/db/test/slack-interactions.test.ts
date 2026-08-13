@@ -38,6 +38,8 @@ const nativeActionMigrationPath = new URL(
   "../drizzle/0227_slack_native_actions.sql",
   import.meta.url,
 ).pathname;
+const fileFactMigrationPath = new URL("../drizzle/0229_slack_inbox_file_fact.sql", import.meta.url)
+  .pathname;
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -147,6 +149,7 @@ function inboxInput(input: {
     slackThreadTs: null,
     triggerKind: input.triggerKind ?? ("dm" as const),
     text: input.triggerKind === "reaction" ? "genie" : "Start a private task",
+    hasFiles: false,
   };
 }
 
@@ -190,6 +193,14 @@ describe("Slack interaction migration and durable database boundary", () => {
     expect(sql).toContain("slack_bot_update_operations_workspace_operation_uq");
     expect(sql).not.toContain("rawItem");
     expect(sql).not.toContain("arguments");
+  });
+
+  test("persists one bounded file-presence fact for ordinary Slack inbox rows", async () => {
+    const sql = await readFile(fileFactMigrationPath, "utf8");
+    expect(sql.startsWith("-- deployment-mode: rolling\n")).toBe(true);
+    expect(sql).toContain('ADD COLUMN "has_files" boolean NOT NULL DEFAULT false');
+    expect(sql).not.toContain("jsonb");
+    expect(sql).not.toContain("provider payload");
   });
 
   test("enforces FORCE RLS and grants only the declared runtime DML", async () => {
