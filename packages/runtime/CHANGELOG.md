@@ -1,20 +1,5 @@
 # @opengeni/runtime
 
-## 0.22.1
-
-### Patch Changes
-
-- 4e23e52: Prevent deterministic model-generated worker-spawn failures, hide exhausted nested-agent creation, and show bounded structured session orchestration diagnostics in worker timeline rows while preserving the advanced public REST/SDK create contract.
-- 27a8789: Add opt-in document-parsing guidance for the pinned AnyDoc sandbox runtime.
-- 40248f9: Reissue the complete MCP result fidelity release source after the prior automated Version PR was merged without the required provider-native approval.
-- Updated dependencies [4e23e52]
-- Updated dependencies [14aa2ad]
-- Updated dependencies [219d690]
-  - @opengeni/contracts@0.49.1
-  - @opengeni/config@0.16.1
-  - @opengeni/sdk@0.56.1
-  - @opengeni/codemode@0.4.1
-
 ## 0.22.0
 
 ### Minor Changes

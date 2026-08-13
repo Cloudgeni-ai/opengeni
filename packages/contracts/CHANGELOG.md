@@ -1,13 +1,5 @@
 # @opengeni/contracts
 
-## 0.49.1
-
-### Patch Changes
-
-- 4e23e52: Prevent deterministic model-generated worker-spawn failures, hide exhausted nested-agent creation, and show bounded structured session orchestration diagnostics in worker timeline rows while preserving the advanced public REST/SDK create contract.
-- 14aa2ad: Show elapsed UTC-hour buckets for the Insights Today range while retaining UTC-day buckets for longer ranges.
-- 219d690: Run published HTML artifacts as exact source in an opaque-origin sandbox, raise their UTF-8 ceiling to 4 MiB, and expose reusable React rendering. Add deployment-configurable default and allowed built-in session tools plus configured shared-key delegation fallback.
-
 ## 0.49.0
 
 ### Minor Changes
