@@ -75,10 +75,10 @@ describe("migration 0241 atomic personal-resource delegation", () => {
       "session_attempt_personal_resource_snapshots",
       "personal_resource_once_consumption_receipts",
     ]) {
-      expect(source).toContain(`CREATE TABLE \"${table}\"`);
-      expect(source).toContain(`ALTER TABLE \"${table}\" ENABLE ROW LEVEL SECURITY`);
-      expect(source).toContain(`ALTER TABLE \"${table}\" FORCE ROW LEVEL SECURITY`);
-      expect(source).toContain(`REVOKE ALL ON TABLE \"${table}\" FROM opengeni_app`);
+      expect(source).toContain(`CREATE TABLE "${table}"`);
+      expect(source).toContain(`ALTER TABLE "${table}" ENABLE ROW LEVEL SECURITY`);
+      expect(source).toContain(`ALTER TABLE "${table}" FORCE ROW LEVEL SECURITY`);
+      expect(source).toContain(`REVOKE ALL ON TABLE "${table}" FROM opengeni_app`);
     }
     expect(source).toContain(
       'PRIMARY KEY (\n    "attempt_id", "resource_kind", "resource_id"\n  )',
@@ -160,6 +160,8 @@ describe("migration 0241 atomic personal-resource delegation", () => {
     expect(source).toContain("grant_value.session_id IS NULL");
     expect(source).toContain("grant_value.authority_epoch IS NULL");
     expect(source).toContain("FOR UPDATE");
+    expect(source).toContain("rig_version.workspace_id = member_row.personal_workspace_id");
+    expect(source).toContain("rig_version.workspace_id = snapshot.origin_workspace_id");
 
     // A once grant is changed exactly once under its row lock and gets one
     // durable exact-attempt receipt. Retry/replay resolves only through that
@@ -200,7 +202,7 @@ describe("migration 0241 atomic personal-resource delegation", () => {
     expect(source).toContain("personal-resource authority snapshot is no longer live");
 
     const runtimePosture = await readFile(runtimePostureUrl, "utf8");
-    const provisionRoles = await readFile(provisionRolesUrl, "utf8");
+    const provisionRolesSource = await readFile(provisionRolesUrl, "utf8");
     expect(runtimePosture).toContain(
       '"resolve_session_attempt_personal_resources(uuid, uuid, uuid)"',
     );
@@ -209,16 +211,18 @@ describe("migration 0241 atomic personal-resource delegation", () => {
       "session_attempt_personal_resource_snapshots",
       "personal_resource_once_consumption_receipts",
     ]) {
-      expect(runtimePosture).toContain(`\"${table}\"`);
+      expect(runtimePosture).toContain(`"${table}"`);
     }
-    expect(provisionRoles).toContain("resolve_session_attempt_personal_resources(uuid,uuid,uuid)");
-    expect(provisionRoles).toContain(
+    expect(provisionRolesSource).toContain(
+      "resolve_session_attempt_personal_resources(uuid,uuid,uuid)",
+    );
+    expect(provisionRolesSource).toContain(
       "REVOKE ALL ON FUNCTION %I.resolve_session_attempt_personal_resources(uuid, uuid, uuid) FROM PUBLIC",
     );
-    expect(provisionRoles).toContain(
+    expect(provisionRolesSource).toContain(
       "GRANT EXECUTE ON FUNCTION %I.resolve_session_attempt_personal_resources(uuid, uuid, uuid) TO %I",
     );
-    expect(provisionRoles).toContain(
+    expect(provisionRolesSource).toContain(
       "opengeni_private.personal_resource_delegation_capability_active(text)",
     );
     expect(runtimePosture).toContain('"personal_resource_delegation_capability_active(text)"');
@@ -362,6 +366,89 @@ describe("migration 0241 atomic personal-resource delegation", () => {
         await app.end({ timeout: 5 });
         await admin.end({ timeout: 5 });
       }
+    }
+  }, 180_000);
+
+  test("rejects cross-workspace rig versions at admission and resolution", async () => {
+    const blank = await acquireBlankTestDatabase("migration-0241-rig-version-workspace-fence");
+    if (!blank) return;
+
+    const appPassword = "apppw";
+    await migrate(blank.databaseUrl);
+    await provisionRoles(blank.databaseUrl, {
+      appPassword,
+      rlsStrategy: "force",
+    });
+    const admin = postgres(blank.databaseUrl, {
+      max: 4,
+      prepare: false,
+      onnotice: () => undefined,
+    });
+    const appUrl = new URL(blank.databaseUrl);
+    appUrl.username = "opengeni_app";
+    appUrl.password = appPassword;
+    const app = postgres(appUrl.toString(), {
+      max: 1,
+      prepare: false,
+      onnotice: () => undefined,
+    });
+    try {
+      const ids = await createFixture(admin, "session");
+      await setRuntimeScope(app, ids);
+      const [mismatchedVersion] = await app<Array<{ id: string }>>`
+        insert into rig_versions (
+          account_id, workspace_id, rig_id, version, default_variable_set_ids, active
+        ) values (
+          ${ids.account}, ${ids.targetWorkspace}, ${ids.rig}, 2, '[]'::jsonb, true
+        ) returning id
+      `;
+      expect(mismatchedVersion?.id).toBeTruthy();
+
+      await app`
+        update sessions
+        set rig_version_id = ${mismatchedVersion!.id}
+        where id = ${ids.session}
+      `;
+      await expect(
+        insertAttempt(
+          app,
+          ids,
+          ids.attemptA,
+          "workflow-mismatched-admission",
+          "run-mismatched-admission",
+          "activity-mismatched-admission",
+        ),
+      ).rejects.toThrow("personal resource identity changed during admission");
+
+      await app`
+        update sessions
+        set rig_version_id = ${ids.rigVersion}
+        where id = ${ids.session}
+      `;
+      await insertAttempt(
+        app,
+        ids,
+        ids.attemptA,
+        "workflow-valid-admission",
+        "run-valid-admission",
+        "activity-valid-admission",
+      );
+      await admin`
+        update session_attempt_personal_resource_snapshots
+        set resource_version_id = ${mismatchedVersion!.id}
+        where attempt_id = ${ids.attemptA}
+          and resource_kind = 'rig'
+      `;
+      await expect(
+        app`
+          select * from resolve_session_attempt_personal_resources(
+            ${ids.account}, ${ids.targetWorkspace}, ${ids.attemptA}
+          )
+        `,
+      ).rejects.toThrow("personal-resource authority snapshot is no longer live");
+    } finally {
+      await app.end({ timeout: 5 });
+      await admin.end({ timeout: 5 });
     }
   }, 180_000);
 

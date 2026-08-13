@@ -539,6 +539,7 @@ BEGIN
             WHERE rig_version.id = resource_row.resource_version_id
               AND rig_version.account_id = NEW.account_id
               AND rig_version.rig_id = resource_row.resource_id
+              AND rig_version.workspace_id = member_row.personal_workspace_id
             FOR SHARE;
           END IF;
         END IF;
@@ -805,6 +806,7 @@ BEGIN
                   ON rig_version.id = snapshot.resource_version_id
                  AND rig_version.rig_id = rig.id
                  AND rig_version.account_id = rig.account_id
+                 AND rig_version.workspace_id = snapshot.origin_workspace_id
                 WHERE rig.id = snapshot.resource_id
                   AND rig.account_id = snapshot.account_id
                   AND rig.workspace_id = snapshot.origin_workspace_id
