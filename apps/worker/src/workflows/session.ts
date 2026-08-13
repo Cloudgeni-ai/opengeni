@@ -793,16 +793,23 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       const retryDelayMs = unclaimedAttemptRetryDelayMs(unclaimedAttemptFailures + 1);
       const seenWakeups = wakeups;
       const seenInterruptionWakeups = interruptionWakeups;
-      const failure = await activity.failSessionAttempt({
-        accountId,
-        workspaceId,
-        sessionId,
-        attemptId,
-        workflowId: workflowInfo().workflowId,
-        retryDelayMs,
-        error: workflowFailureMessage(outcome.error),
-      });
-      if (failure.action === "unclaimed") {
+      const failure: activities.FailSessionAttemptResult | undefined =
+        await activity.failSessionAttempt({
+          accountId,
+          workspaceId,
+          sessionId,
+          attemptId,
+          workflowId: workflowInfo().workflowId,
+          retryDelayMs,
+          error: workflowFailureMessage(outcome.error),
+        });
+      // During a rolling deploy an upgraded workflow worker can schedule this
+      // activity on a legacy control worker whose wire result was void. Treat
+      // that unknown commit outcome like an unclaimed attempt: wait, then
+      // re-read durable state. A legacy worker that settled the failure leaves
+      // an idle turn; one that no-op'd before claim leaves recoverable work.
+      // Neither path replays model or tool side effects speculatively.
+      if (!failure || failure.action === "unclaimed") {
         unclaimedAttemptFailures += 1;
         await condition(
           () => interruptionWakeups !== seenInterruptionWakeups || wakeups !== seenWakeups,

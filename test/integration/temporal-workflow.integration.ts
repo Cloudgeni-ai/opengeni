@@ -199,7 +199,7 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
-    "does not retry failed agent activities",
+    "does not retry a failed turn when a legacy activity worker returns void",
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;
       const scope = workflowScope();
