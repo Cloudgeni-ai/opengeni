@@ -853,9 +853,7 @@ impl X11KeyboardMapping {
     }
 }
 
-fn keyboard_mapping(
-    conn: &x11rb::rust_connection::RustConnection,
-) -> Option<X11KeyboardMapping> {
+fn keyboard_mapping(conn: &x11rb::rust_connection::RustConnection) -> Option<X11KeyboardMapping> {
     let setup = conn.setup();
     let min = setup.min_keycode;
     let max = setup.max_keycode;
