@@ -778,17 +778,35 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       }
       if (!unclaimedAttemptRecovery) {
         // Replay compatibility: histories recorded before v2 scheduled this
-        // exact argument shape and treated the activity as void. The upgraded
-        // activity still writes a delayed durable wake when no attempt exists,
-        // so a closed legacy run is replaced safely by a fresh v2 workflow.
-        await activity.failSessionAttempt({
-          accountId,
-          workspaceId,
-          sessionId,
-          attemptId,
-          error: workflowFailureMessage(outcome.error),
-        });
-        return false;
+        // exact argument shape and treated the activity as void. Preserve the
+        // completed-history tail during replay, but keep a still-open legacy
+        // history alive after its activity completes. The nested patch marker
+        // is recorded only when an old history reaches this previously absent
+        // tail on a live workflow task; already-completed histories replay the
+        // original close without emitting a new timer command.
+        const legacyFailure: activities.FailSessionAttemptResult | undefined =
+          await activity.failSessionAttempt({
+            accountId,
+            workspaceId,
+            sessionId,
+            attemptId,
+            error: workflowFailureMessage(outcome.error),
+          });
+        if (!patched("session-legacy-unclaimed-attempt-tail-v1")) {
+          return false;
+        }
+        if (legacyFailure?.action === "failed" || legacyFailure?.action === "terminal") {
+          return false;
+        }
+        const retryDelayMs = unclaimedAttemptRetryDelayMs(unclaimedAttemptFailures + 1);
+        const seenWakeups = wakeups;
+        const seenInterruptionWakeups = interruptionWakeups;
+        unclaimedAttemptFailures += 1;
+        await condition(
+          () => interruptionWakeups !== seenInterruptionWakeups || wakeups !== seenWakeups,
+          retryDelayMs,
+        );
+        return true;
       }
       const retryDelayMs = unclaimedAttemptRetryDelayMs(unclaimedAttemptFailures + 1);
       const seenWakeups = wakeups;

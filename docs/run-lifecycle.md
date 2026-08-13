@@ -535,9 +535,15 @@ explicit `unclaimed` result. New workflow histories retain the logical turn,
 back off exponentially to a one-minute ceiling, and re-peek durable work; they do
 not mark the session failed or complete the workflow over a `recovering` turn.
 Older histories retain their recorded activity arguments for deterministic
-replay, while the upgraded activity derives the stable workflow id and leaves
-the same durable restart obligation. Migration 0238 seeds that obligation for
-already-recovering active turns whose `active_attempt_id` is null.
+replay. A still-open legacy history records a tail patch after its historical
+failure activity and follows the bounded re-peek path even when a rolling legacy
+activity worker returned void; an already-completed history replays its original
+close. The upgraded activity derives the stable workflow id and leaves the same
+durable restart obligation. Migration 0238 seeds that obligation for
+already-recovering active turns whose `active_attempt_id` is null and
+active-workspace queued no-attempt turns whose existing initial wake revision
+was fully delivered. Healthy queued turns with an undelivered wake, or with no
+wake because their workspace is paused, remain untouched.
 
 After a reviewed release reaches staging, run the dry-by-default event-ordering invariant canary
 with `bun run canary:session-event-ordering`. Execution requires

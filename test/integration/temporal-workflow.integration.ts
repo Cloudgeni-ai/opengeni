@@ -199,7 +199,7 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
-    "does not retry a failed turn when a legacy activity worker returns void",
+    "re-peeks after a legacy activity worker returns void without redispatching settled work",
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;
       const scope = workflowScope();
@@ -223,6 +223,7 @@ describe("Temporal workflow integration", () => {
       const run = worker.run();
       try {
         const client = new Client({ connection });
+        const startedAt = Date.now();
         const handle = await client.workflow.start("sessionWorkflow", {
           taskQueue,
           workflowId: `wf-${crypto.randomUUID()}`,
@@ -237,6 +238,7 @@ describe("Temporal workflow integration", () => {
         await handle.result();
         expect(attempts).toBe(1);
         expect(failures).toHaveLength(1);
+        expect(Date.now() - startedAt).toBeGreaterThanOrEqual(900);
       } finally {
         worker.shutdown();
         await run;

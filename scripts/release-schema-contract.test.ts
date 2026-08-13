@@ -127,8 +127,8 @@ describe("release schema contract", () => {
       if (!migrations.has("0236_session_visibility_slack_policy.sql")) return null;
       if (migrations.has("0238_recover_unclaimed_session_turns.sql")) {
         return includesActivation
-          ? "ed80dd26e588f4f0e1d70af66569c2d552fd9fc9b199782fd81bfbff865d888f"
-          : "eaa155c6c0fab27d552bb1bca75f857e372882017597bf4645bcdb8b4ff82aa3";
+          ? "c7fb690f30d8e6e7e93a86b00fefe706a45450373a3d4a2337c4a436df1684d9"
+          : "4a0d20f788844f6d8e1adb24eb184799fe1e13683a7e7a8158315d2dfb8a16a5";
       }
       if (migrations.has("0228_interaction_controller_data_plane.sql")) {
         return includesActivation
@@ -647,7 +647,7 @@ describe("release schema contract", () => {
     }
     if (migrations.has("0238_recover_unclaimed_session_turns.sql")) {
       expect(migrations.get("0238_recover_unclaimed_session_turns.sql")).toMatchObject({
-        sha256: "ae2d8e0bd83003c13a985514113235f35f5f2649e019cd9aec23409e74767256",
+        sha256: "03795ca47988ad1cbbb7ba0f7987f78c0031ec5b743c91c43b4563bac5e1c0b5",
         deploymentMode: "rolling",
       });
     }

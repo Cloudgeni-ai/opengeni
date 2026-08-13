@@ -9,6 +9,8 @@ import {
   createDb,
   createSession,
   initializeSessionStartAtomically,
+  mutateWorkspaceControlInTransaction,
+  withWorkspaceRls,
 } from "../src/index";
 
 const migrationPath = join(
@@ -33,7 +35,10 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-async function createInitializedSession(initialMessage: string) {
+async function createInitializedSession(
+  initialMessage: string,
+  options: { pausedWorkspace?: boolean } = {},
+) {
   const suffix = crypto.randomUUID();
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "migration-0238-test",
@@ -45,6 +50,20 @@ async function createInitializedSession(initialMessage: string) {
     subjectId: `subject-${suffix}`,
   });
   const grant = access.workspaceGrants[0]!;
+  if (options.pausedWorkspace) {
+    await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db.transaction((tx) =>
+        mutateWorkspaceControlInTransaction(tx as unknown as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          actor: { type: "human", subjectId: grant.subjectId },
+          operationKey: `pause:${suffix}`,
+          action: "pause",
+          reason: "migration recovery regression",
+        }),
+      ),
+    );
+  }
   const session = await createSession(client.db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId!,
@@ -72,6 +91,12 @@ async function applyMigration() {
 }
 
 async function readWake(sessionId: string) {
+  const row = await readWakeOrNull(sessionId);
+  if (!row) throw new Error(`Workflow wake missing for session ${sessionId}`);
+  return row;
+}
+
+async function readWakeOrNull(sessionId: string) {
   const [row] = await shared.admin<
     Array<{
       wakeRevision: string;
@@ -91,8 +116,7 @@ async function readWake(sessionId: string) {
       last_error as "lastError"
     from session_workflow_wake_outbox
     where session_id = ${sessionId}`;
-  if (!row) throw new Error(`Workflow wake missing for session ${sessionId}`);
-  return row;
+  return row ?? null;
 }
 
 async function readRecoveryPredicate(sessionId: string) {
@@ -120,9 +144,13 @@ async function readRecoveryPredicate(sessionId: string) {
 }
 
 describe("migration 0238 unclaimed session recovery", () => {
-  test("seeds only orphaned recovering turns and preserves an earlier pending delivery", async () => {
+  test("seeds exact recovering and delivered-wake queued orphans without touching healthy queued work", async () => {
     const orphaned = await createInitializedSession("recover this orphaned turn");
-    const healthy = await createInitializedSession("leave this queued turn alone");
+    const queuedOrphan = await createInitializedSession("recover this delivered queued turn");
+    const healthy = await createInitializedSession("leave this pending queued turn alone");
+    const paused = await createInitializedSession("leave this paused queued turn alone", {
+      pausedWorkspace: true,
+    });
     const pendingAt = new Date(Date.now() - 5_000);
 
     await shared.admin`
@@ -139,6 +167,13 @@ describe("migration 0238 unclaimed session recovery", () => {
       update session_workflow_wake_outbox
       set next_attempt_at = ${pendingAt}, attempts = 4, last_error = 'transient delivery error'
       where session_id = ${orphaned.session.id}`;
+    await shared.admin`
+      update session_workflow_wake_outbox
+      set delivered_revision = wake_revision,
+          next_attempt_at = now() - interval '1 hour',
+          attempts = 2,
+          last_error = 'initial wake was already delivered'
+      where session_id = ${queuedOrphan.session.id}`;
 
     expect(await readRecoveryPredicate(orphaned.session.id)).toEqual({
       sessionStatus: "recovering",
@@ -148,10 +183,14 @@ describe("migration 0238 unclaimed session recovery", () => {
     });
 
     const orphanedBefore = await readWake(orphaned.session.id);
+    const queuedOrphanBefore = await readWake(queuedOrphan.session.id);
     const healthyBefore = await readWake(healthy.session.id);
+    const pausedBefore = await readWakeOrNull(paused.session.id);
     await applyMigration();
     const orphanedAfter = await readWake(orphaned.session.id);
+    const queuedOrphanAfter = await readWake(queuedOrphan.session.id);
     const healthyAfter = await readWake(healthy.session.id);
+    const pausedAfter = await readWakeOrNull(paused.session.id);
 
     expect(orphanedAfter).toMatchObject({
       wakeRevision: String(Number(orphanedBefore.wakeRevision) + 1),
@@ -161,17 +200,35 @@ describe("migration 0238 unclaimed session recovery", () => {
       lastError: null,
     });
     expect(orphanedAfter.nextAttemptAt.getTime()).toBe(pendingAt.getTime());
+    expect(queuedOrphanAfter).toMatchObject({
+      wakeRevision: String(Number(queuedOrphanBefore.wakeRevision) + 1),
+      deliveredRevision: queuedOrphanBefore.wakeRevision,
+      reason: "unclaimed_attempt_recovery_cutover",
+      attempts: 0,
+      lastError: null,
+    });
+    expect(queuedOrphanAfter.nextAttemptAt.getTime()).toBeGreaterThan(Date.now() + 58_000);
     expect(healthyAfter).toEqual(healthyBefore);
+    expect(pausedBefore).toBeNull();
+    expect(pausedAfter).toBeNull();
 
-    const [audit] = await shared.admin<Array<{ count: number; wakeRevision: number }>>`
+    const audits = await shared.admin<Array<{ targetId: string; wakeRevision: number }>>`
       select
-        count(*)::integer as count,
-        max((metadata ->> 'wakeRevision')::integer) as "wakeRevision"
+        target_id as "targetId",
+        (metadata ->> 'wakeRevision')::integer as "wakeRevision"
       from audit_events
-      where workspace_id = ${orphaned.grant.workspaceId!}
-        and target_id = ${orphaned.session.id}
-        and action = 'session.workflow.unclaimed_attempt_wake_seeded'`;
-    expect(audit).toEqual({ count: 1, wakeRevision: Number(orphanedAfter.wakeRevision) });
+      where action = 'session.workflow.unclaimed_attempt_wake_seeded'
+        and target_id in (${orphaned.session.id}, ${queuedOrphan.session.id})
+      order by target_id`;
+    expect(audits).toEqual(
+      [
+        { targetId: orphaned.session.id, wakeRevision: Number(orphanedAfter.wakeRevision) },
+        {
+          targetId: queuedOrphan.session.id,
+          wakeRevision: Number(queuedOrphanAfter.wakeRevision),
+        },
+      ].toSorted((left, right) => left.targetId.localeCompare(right.targetId)),
+    );
   });
 
   test("creates a delayed pending revision when the previous wake was delivered", async () => {
