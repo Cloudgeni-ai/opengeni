@@ -155,6 +155,16 @@ function safePosture(): RuntimeDatabasePosture {
       ...canonicalHumanIdentityAuthorityTables(),
       ...xaiAuthorityTables(),
     ],
+    privateTables: [
+      {
+        name: "personal_resource_delegation_capabilities",
+        owner: "opengeni_migrator",
+        select: false,
+        insert: false,
+        update: false,
+        delete: false,
+      },
+    ],
     targetRoutines: RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.map((name) => ({
       name,
       owner: "opengeni_migrator",
@@ -169,7 +179,15 @@ function safePosture(): RuntimeDatabasePosture {
         name: "workspace_rls_visible(uuid, uuid)",
         owner: "opengeni_migrator",
         execute: true,
+        publicExecute: false,
         securityDefiner: false,
+      },
+      {
+        name: "personal_resource_delegation_capability_active(text)",
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
       },
     ],
   };
@@ -326,6 +344,29 @@ describe("runtime database posture evaluator", () => {
 
   test("accepts the exact least-privilege FORCE-RLS contract", () => {
     expect(evaluateRuntimeDatabasePosture(safePosture(), options)).toEqual([]);
+  });
+
+  test("enforces the exact personal-resource private capability boundary", () => {
+    const posture = safePosture();
+    const capabilityTable = posture.privateTables[0]!;
+    const capabilityRoutine = posture.privateRoutines.find(
+      (routine) => routine.name === "personal_resource_delegation_capability_active(text)",
+    )!;
+    capabilityTable.select = true;
+    capabilityRoutine.owner = "another_owner";
+    capabilityRoutine.execute = false;
+    capabilityRoutine.publicExecute = true;
+    capabilityRoutine.securityDefiner = false;
+
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("does not match table owner"),
+        expect.stringContaining("is not SECURITY DEFINER"),
+        expect.stringContaining("runtime role lacks personal-resource capability predicate"),
+        expect.stringContaining("PUBLIC has forbidden personal-resource capability predicate"),
+        expect.stringContaining("forbidden direct privileges on private table"),
+      ]),
+    );
   });
 
   test("accepts public-schema authority owned by the two protected tables", () => {
@@ -635,8 +676,12 @@ describe("runtime database posture evaluator", () => {
     posture.tables.find(
       (table) => table.name === "editable_artifact_live_outbox",
     )!.artifactOutboxDispatcherPolicy = false;
-    posture.privateRoutines[1]!.securityDefiner = false;
-    posture.privateRoutines[2]!.owner = "another_owner";
+    posture.privateRoutines.find((routine) =>
+      routine.name.startsWith("claim_editable_artifact_live_outbox("),
+    )!.securityDefiner = false;
+    posture.privateRoutines.find((routine) =>
+      routine.name.startsWith("mark_editable_artifact_live_outbox_published("),
+    )!.owner = "another_owner";
     expect(evaluateRuntimeDatabasePosture(posture, artifactOptions)).toEqual(
       expect.arrayContaining([
         "table editable_artifact_live_outbox lacks its owner dispatcher RLS policy",
@@ -669,7 +714,9 @@ describe("runtime database posture evaluator", () => {
       },
     };
     expect(evaluateRuntimeDatabasePosture(posture, artifactOptions)).toEqual([]);
-    posture.privateRoutines[1]!.owner = "another_owner";
+    posture.privateRoutines.find((routine) =>
+      routine.name.startsWith("advance_editable_artifact_authorization_revision("),
+    )!.owner = "another_owner";
     expect(evaluateRuntimeDatabasePosture(posture, artifactOptions)).toEqual(
       expect.arrayContaining([expect.stringContaining("does not match table owner")]),
     );
@@ -717,8 +764,12 @@ describe("runtime database posture evaluator", () => {
     expect(evaluateRuntimeDatabasePosture(posture, artifactOptions)).toEqual([]);
 
     posture.tables[0]!.artifactMaterializerPolicy = false;
-    posture.privateRoutines[1]!.execute = true;
-    posture.privateRoutines[2]!.owner = "another_owner";
+    posture.privateRoutines.find((routine) =>
+      routine.name.startsWith("claim_editable_artifact_materializations("),
+    )!.execute = true;
+    posture.privateRoutines.find((routine) =>
+      routine.name.startsWith("renew_editable_artifact_materialization("),
+    )!.owner = "another_owner";
     expect(evaluateRuntimeDatabasePosture(posture, artifactOptions)).toEqual(
       expect.arrayContaining([
         "table editable_artifact_materialization_jobs lacks its owner materializer RLS policy",

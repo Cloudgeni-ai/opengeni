@@ -3,15 +3,16 @@ import { acquireBlankTestDatabase } from "@opengeni/testing";
 import { readFile } from "node:fs/promises";
 import postgres from "postgres";
 import { migrate } from "../src/migrate";
+import { provisionRoles } from "../src/provision-roles";
 
 const migrationUrl = new URL(
-  "../drizzle/0240_atomic_personal_resource_delegation.sql",
+  "../drizzle/0241_atomic_personal_resource_delegation.sql",
   import.meta.url,
 );
 const runtimePostureUrl = new URL("../src/runtime-posture.ts", import.meta.url);
 const provisionRolesUrl = new URL("../src/provision-roles.ts", import.meta.url);
 
-describe("migration 0240 atomic personal-resource delegation", () => {
+describe("migration 0241 atomic personal-resource delegation", () => {
   test("freezes the complete admission, snapshot, consumption, and runtime posture", async () => {
     const source = await readFile(migrationUrl, "utf8");
     const executableSource = source.replace(/^--.*$/gmu, "");
@@ -43,6 +44,27 @@ describe("migration 0240 atomic personal-resource delegation", () => {
     );
     expect(source).toContain(
       "REVOKE ALL ON TABLE opengeni_private.personal_resource_delegation_capabilities\n      FROM opengeni_app",
+    );
+    expect(source).toContain(
+      "CREATE OR REPLACE FUNCTION opengeni_private.personal_resource_delegation_capability_active",
+    );
+    expect(source).toContain("STABLE\nSECURITY DEFINER\nSET search_path = pg_catalog");
+    expect(source).toContain(
+      "REVOKE ALL ON FUNCTION\n  opengeni_private.personal_resource_delegation_capability_active(text)\n  FROM PUBLIC",
+    );
+    expect(source).toContain(
+      "GRANT EXECUTE ON FUNCTION\n      opengeni_private.personal_resource_delegation_capability_active(text)\n      TO opengeni_app",
+    );
+    expect(source).toContain(
+      "opengeni_private.personal_resource_delegation_capability_active(''admit'')",
+    );
+    expect(source).toContain("opengeni_private.personal_resource_delegation_capability_active()");
+    const policySource = source.slice(
+      source.indexOf("DO $personal_resource_capability_policies$"),
+      source.indexOf("DO $personal_resource_delegation_functions$"),
+    );
+    expect(policySource).not.toContain(
+      "FROM opengeni_private.personal_resource_delegation_capabilities",
     );
     expect(executableSource).not.toContain("opengeni.organization_tenancy_lifecycle");
 
@@ -196,10 +218,155 @@ describe("migration 0240 atomic personal-resource delegation", () => {
     expect(provisionRoles).toContain(
       "GRANT EXECUTE ON FUNCTION %I.resolve_session_attempt_personal_resources(uuid, uuid, uuid) TO %I",
     );
+    expect(provisionRoles).toContain(
+      "opengeni_private.personal_resource_delegation_capability_active(text)",
+    );
+    expect(runtimePosture).toContain('"personal_resource_delegation_capability_active(text)"');
+    expect(runtimePosture).toContain('"personal_resource_delegation_capabilities"');
   });
 
+  test("converges helper ACLs in both provisioning orders without breaking ordinary app-role RLS", async () => {
+    const appPassword = "apppw";
+    for (const order of ["migrate-then-provision", "provision-then-migrate"] as const) {
+      const blank = await acquireBlankTestDatabase(`migration-0241-capability-${order}`);
+      if (!blank) return;
+
+      if (order === "migrate-then-provision") {
+        await migrate(blank.databaseUrl);
+        await provisionRoles(blank.databaseUrl, {
+          appPassword,
+          rlsStrategy: "force",
+        });
+      } else {
+        await provisionRoles(blank.databaseUrl, {
+          appPassword,
+          rlsStrategy: "force",
+        });
+        await migrate(blank.databaseUrl);
+      }
+
+      const admin = postgres(blank.databaseUrl, {
+        max: 4,
+        prepare: false,
+        onnotice: () => undefined,
+      });
+      const appUrl = new URL(blank.databaseUrl);
+      appUrl.username = "opengeni_app";
+      appUrl.password = appPassword;
+      const app = postgres(appUrl.toString(), {
+        max: 1,
+        prepare: false,
+        onnotice: () => undefined,
+      });
+      try {
+        const [posture] = await admin<
+          Array<{
+            sameOwner: boolean;
+            securityDefiner: boolean;
+            hardenedSearchPath: boolean;
+            appExecute: boolean;
+            publicExecute: boolean;
+            appTableAccess: boolean;
+          }>
+        >`
+            select
+              p.proowner = c.relowner as "sameOwner",
+              p.prosecdef as "securityDefiner",
+              coalesce(p.proconfig @> array['search_path=pg_catalog']::text[], false)
+                as "hardenedSearchPath",
+              has_function_privilege(
+                'opengeni_app', p.oid, 'EXECUTE'
+              ) as "appExecute",
+              exists (
+                select 1
+                from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
+                where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
+              ) as "publicExecute",
+              has_table_privilege(
+                'opengeni_app', c.oid, 'SELECT, INSERT, UPDATE, DELETE'
+              ) as "appTableAccess"
+            from pg_proc p
+            join pg_namespace pn on pn.oid = p.pronamespace
+            join pg_class c
+              on c.relname = 'personal_resource_delegation_capabilities'
+            join pg_namespace cn
+              on cn.oid = c.relnamespace and cn.nspname = 'opengeni_private'
+            where pn.nspname = 'opengeni_private'
+              and p.proname = 'personal_resource_delegation_capability_active'
+              and pg_catalog.oidvectortypes(p.proargtypes) = 'text'
+          `;
+        expect(posture).toEqual({
+          sameOwner: true,
+          securityDefiner: true,
+          hardenedSearchPath: true,
+          appExecute: true,
+          publicExecute: false,
+          appTableAccess: false,
+        });
+
+        const ids = await createFixture(admin, "once", { directOnly: true });
+        await admin`
+            insert into workspace_variable_sets (account_id, workspace_id, name)
+            values (${ids.account}, ${ids.targetWorkspace}, ${`target-${order}`})
+          `;
+        await setRuntimeScope(app, ids);
+
+        const [capability] = await app<
+          Array<{ anyActive: boolean; admitActive: boolean; resolveActive: boolean }>
+        >`
+            select
+              opengeni_private.personal_resource_delegation_capability_active()
+                as "anyActive",
+              opengeni_private.personal_resource_delegation_capability_active('admit')
+                as "admitActive",
+              opengeni_private.personal_resource_delegation_capability_active('resolve')
+                as "resolveActive"
+          `;
+        expect(capability).toEqual({
+          anyActive: false,
+          admitActive: false,
+          resolveActive: false,
+        });
+
+        await app`
+            insert into rigs (account_id, workspace_id, name)
+            values (${ids.account}, ${ids.targetWorkspace}, ${`ordinary-${order}`})
+          `;
+        const [variableSets] = await app<Array<{ count: number }>>`
+            select count(*)::int as count
+            from workspace_variable_sets
+            where account_id = ${ids.account}
+              and workspace_id = ${ids.targetWorkspace}
+          `;
+        expect(variableSets?.count).toBe(1);
+        await expect(
+          app`select * from opengeni_private.personal_resource_delegation_capabilities`,
+        ).rejects.toThrow(/permission denied/iu);
+
+        await insertAttempt(
+          app,
+          ids,
+          ids.attemptA,
+          `workflow-${order}`,
+          `run-${order}`,
+          `activity-${order}`,
+        );
+        expect(
+          await app`
+              select * from resolve_session_attempt_personal_resources(
+                ${ids.account}, ${ids.targetWorkspace}, ${ids.attemptA}
+              )
+            `,
+        ).toHaveLength(1);
+      } finally {
+        await app.end({ timeout: 5 });
+        await admin.end({ timeout: 5 });
+      }
+    }
+  }, 180_000);
+
   test("atomically snapshots direct/transitive selections and replays one once receipt", async () => {
-    const blank = await acquireBlankTestDatabase("migration-0240-personal-resource-replay");
+    const blank = await acquireBlankTestDatabase("migration-0241-personal-resource-replay");
     if (!blank) return;
 
     const sql = postgres(blank.databaseUrl, { max: 4, onnotice: () => undefined });
@@ -295,7 +462,7 @@ describe("migration 0240 atomic personal-resource delegation", () => {
   });
 
   test("serializes concurrent once use and fails closed after live authority drift", async () => {
-    const blank = await acquireBlankTestDatabase("migration-0240-personal-resource-concurrency");
+    const blank = await acquireBlankTestDatabase("migration-0241-personal-resource-concurrency");
     if (!blank) return;
 
     const admin = postgres(blank.databaseUrl, { max: 6, onnotice: () => undefined });
@@ -427,7 +594,7 @@ describe("migration 0240 atomic personal-resource delegation", () => {
   });
 
   test("admits exact session and always grant fences", async () => {
-    const blank = await acquireBlankTestDatabase("migration-0240-personal-resource-fences");
+    const blank = await acquireBlankTestDatabase("migration-0241-personal-resource-fences");
     if (!blank) return;
 
     const sql = postgres(blank.databaseUrl, { max: 4, onnotice: () => undefined });

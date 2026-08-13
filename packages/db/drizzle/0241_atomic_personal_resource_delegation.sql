@@ -30,6 +30,41 @@ BEGIN
 END
 $personal_resource_capability_revoke$;
 
+CREATE OR REPLACE FUNCTION opengeni_private.personal_resource_delegation_capability_active(
+  p_capability_kind text DEFAULT NULL
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $personal_resource_capability_active$
+  SELECT EXISTS (
+    SELECT 1
+    FROM opengeni_private.personal_resource_delegation_capabilities capability
+    WHERE capability.backend_pid = pg_catalog.pg_backend_pid()
+      AND capability.transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
+      AND (
+        p_capability_kind IS NULL
+        OR capability.capability_kind = p_capability_kind
+      )
+  )
+$personal_resource_capability_active$;
+
+REVOKE ALL ON FUNCTION
+  opengeni_private.personal_resource_delegation_capability_active(text)
+  FROM PUBLIC;
+
+DO $personal_resource_capability_grant$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
+    GRANT EXECUTE ON FUNCTION
+      opengeni_private.personal_resource_delegation_capability_active(text)
+      TO opengeni_app;
+  END IF;
+END
+$personal_resource_capability_grant$;
+
 CREATE TABLE "session_attempt_personal_resource_admissions" (
   "attempt_id" uuid PRIMARY KEY REFERENCES "session_turn_attempts"("id") ON DELETE CASCADE,
   "account_id" uuid NOT NULL,
@@ -218,11 +253,9 @@ BEGIN
     EXECUTE format(
       'CREATE POLICY personal_resource_delegation_capability_read ON %I.%I '
         || 'FOR SELECT USING ('
-        || 'current_user = %L AND EXISTS ('
-        || 'SELECT 1 FROM opengeni_private.personal_resource_delegation_capabilities capability '
-        || 'WHERE capability.backend_pid = pg_catalog.pg_backend_pid() '
-        || 'AND capability.transaction_id = pg_catalog.pg_current_xact_id_if_assigned()'
-        || '))',
+        || 'current_user = %L AND '
+        || 'opengeni_private.personal_resource_delegation_capability_active()'
+        || ')',
       data_schema,
       table_name,
       migration_owner
@@ -230,12 +263,9 @@ BEGIN
     EXECUTE format(
       'CREATE POLICY personal_resource_delegation_capability_insert ON %I.%I '
         || 'FOR INSERT WITH CHECK ('
-        || 'current_user = %L AND EXISTS ('
-        || 'SELECT 1 FROM opengeni_private.personal_resource_delegation_capabilities capability '
-        || 'WHERE capability.backend_pid = pg_catalog.pg_backend_pid() '
-        || 'AND capability.transaction_id = pg_catalog.pg_current_xact_id_if_assigned() '
-        || 'AND capability.capability_kind = ''admit'''
-        || '))',
+        || 'current_user = %L AND '
+        || 'opengeni_private.personal_resource_delegation_capability_active(''admit'')'
+        || ')',
       data_schema,
       table_name,
       migration_owner
@@ -252,11 +282,9 @@ BEGIN
     EXECUTE format(
       'CREATE POLICY personal_resource_delegation_read ON %I.%I '
         || 'FOR SELECT USING ('
-        || 'current_user = %L AND EXISTS ('
-        || 'SELECT 1 FROM opengeni_private.personal_resource_delegation_capabilities capability '
-        || 'WHERE capability.backend_pid = pg_catalog.pg_backend_pid() '
-        || 'AND capability.transaction_id = pg_catalog.pg_current_xact_id_if_assigned()'
-        || '))',
+        || 'current_user = %L AND '
+        || 'opengeni_private.personal_resource_delegation_capability_active()'
+        || ')',
       data_schema,
       table_name,
       migration_owner
@@ -266,29 +294,21 @@ BEGIN
   EXECUTE format(
     'CREATE POLICY personal_resource_delegation_grant_read '
       || 'ON %I.organization_user_resource_grants FOR SELECT USING ('
-      || 'current_user = %L AND EXISTS ('
-      || 'SELECT 1 FROM opengeni_private.personal_resource_delegation_capabilities capability '
-      || 'WHERE capability.backend_pid = pg_catalog.pg_backend_pid() '
-      || 'AND capability.transaction_id = pg_catalog.pg_current_xact_id_if_assigned()'
-      || '))',
+      || 'current_user = %L AND '
+      || 'opengeni_private.personal_resource_delegation_capability_active()'
+      || ')',
     data_schema,
     migration_owner
   );
   EXECUTE format(
     'CREATE POLICY personal_resource_delegation_grant_update '
       || 'ON %I.organization_user_resource_grants FOR UPDATE USING ('
-      || 'current_user = %L AND EXISTS ('
-      || 'SELECT 1 FROM opengeni_private.personal_resource_delegation_capabilities capability '
-      || 'WHERE capability.backend_pid = pg_catalog.pg_backend_pid() '
-      || 'AND capability.transaction_id = pg_catalog.pg_current_xact_id_if_assigned() '
-      || 'AND capability.capability_kind = ''admit'''
-      || ')) WITH CHECK ('
-      || 'current_user = %L AND EXISTS ('
-      || 'SELECT 1 FROM opengeni_private.personal_resource_delegation_capabilities capability '
-      || 'WHERE capability.backend_pid = pg_catalog.pg_backend_pid() '
-      || 'AND capability.transaction_id = pg_catalog.pg_current_xact_id_if_assigned() '
-      || 'AND capability.capability_kind = ''admit'''
-      || '))',
+      || 'current_user = %L AND '
+      || 'opengeni_private.personal_resource_delegation_capability_active(''admit'')'
+      || ') WITH CHECK ('
+      || 'current_user = %L AND '
+      || 'opengeni_private.personal_resource_delegation_capability_active(''admit'')'
+      || ')',
     data_schema,
     migration_owner,
     migration_owner

@@ -1008,6 +1008,15 @@ BEGIN
       owner_role,
       ${literal(role)}
     );
+    IF to_regprocedure('opengeni_private.personal_resource_delegation_capability_active(text)') IS NOT NULL THEN
+      REVOKE ALL ON FUNCTION
+        opengeni_private.personal_resource_delegation_capability_active(text)
+        FROM PUBLIC;
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION opengeni_private.personal_resource_delegation_capability_active(text) TO %I',
+        ${literal(role)}
+      );
+    END IF;
     -- Global cross-workspace artifact workers are separate capabilities. Never
     -- let the generic tenant-scoped app role inherit them from the historical
     -- blanket grant of already-installed helpers.
