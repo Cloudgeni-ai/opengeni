@@ -97,7 +97,7 @@ export function mergeAgentTopologySessions(
 ): AgentTopologySession[] {
   const sessions = new Map(current.map((session) => [session.id, session]));
   for (const session of incoming) {
-    if (sessions.size >= maxSessions && !sessions.has(session.id)) break;
+    if (sessions.size >= maxSessions && !sessions.has(session.id)) continue;
     sessions.set(session.id, session);
   }
   return [...sessions.values()];

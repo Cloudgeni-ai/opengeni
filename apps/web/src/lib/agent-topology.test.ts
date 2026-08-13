@@ -111,6 +111,18 @@ describe("agent topology", () => {
     ]);
   });
 
+  test("refreshes known agents after skipping novel agents beyond the cap", () => {
+    const rootA = session("root-a");
+    const rootB = session("root-b");
+    const novel = session("novel");
+    const refreshedRootB = { ...rootB, title: "refreshed" };
+
+    expect(mergeAgentTopologySessions([rootA, rootB], [novel, refreshedRootB], 2)).toEqual([
+      rootA,
+      refreshedRootB,
+    ]);
+  });
+
   test("fills only the available global auto-expand request slots", () => {
     expect(
       selectAgentTopologyBranchesToLoad(
