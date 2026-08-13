@@ -45,6 +45,8 @@ import {
 } from "../src/index";
 
 const BARRIER_CLASS = 630_063;
+const externalAdminUrl = process.env.OPENGENI_EVENT_ORDER_POSTGRES_ADMIN_URL?.trim();
+const externalAppUrl = process.env.OPENGENI_EVENT_ORDER_POSTGRES_APP_URL?.trim();
 
 type WorkspaceFixture = {
   accountId: string;
@@ -779,7 +781,20 @@ const genericWriters: GenericWriter[] = [
 ];
 
 beforeAll(async () => {
-  const acquired = await acquireSharedTestDatabase("session-event-lock-order");
+  if ((externalAdminUrl === undefined) !== (externalAppUrl === undefined)) {
+    throw new Error(
+      "set both OPENGENI_EVENT_ORDER_POSTGRES_ADMIN_URL and OPENGENI_EVENT_ORDER_POSTGRES_APP_URL",
+    );
+  }
+  const acquired =
+    externalAdminUrl && externalAppUrl
+      ? {
+          admin: postgres(externalAdminUrl, { max: 8, prepare: false }),
+          adminUrl: externalAdminUrl,
+          appUrl: externalAppUrl,
+          release: async () => undefined,
+        }
+      : await acquireSharedTestDatabase("session-event-lock-order");
   if (!acquired) throw new Error("PostgreSQL test database unavailable");
   shared = acquired;
   admin = shared.admin;
@@ -1933,6 +1948,7 @@ describe("event-ordering invariant canonical session-event lock order", () => {
                   parentSessionId: parent.sessionId,
                 },
                 personalConnectionDelegations: [],
+                xaiProviderAccountAuthoritySnapshot: { version: 1, scope: "workspace" },
               });
           }
         };

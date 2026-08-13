@@ -50,6 +50,10 @@
       "types": "./src/codex-provider-account-authority.ts",
       "default": "./src/codex-provider-account-authority.ts"
     },
+    "./xai-provider-account-authority": {
+      "types": "./src/xai-provider-account-authority.ts",
+      "default": "./src/xai-provider-account-authority.ts"
+    },
     "./editable-artifacts": {
       "types": "./src/editable-artifacts.ts",
       "default": "./src/editable-artifacts.ts"

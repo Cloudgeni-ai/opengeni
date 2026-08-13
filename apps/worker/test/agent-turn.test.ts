@@ -12,6 +12,10 @@ import {
   type CodexRequestContext,
 } from "@opengeni/codex";
 import {
+  XAI_SUBSCRIPTION_TRANSPORT_ERROR_HEADER,
+  XaiSubscriptionReloginRequired,
+} from "@opengeni/xai-subscription";
+import {
   ActiveSessionHistoryLimitExceededError,
   ApprovalRunStateLimitExceededError,
   interruptedToolCallResult,
@@ -42,6 +46,7 @@ import {
   assertPhysicalToolQuiescenceForCancellation,
   assertSessionAttemptQuiescenceRecoveryDurable,
   classifyContextWindowOverflowError,
+  classifyXaiCredentialFailure,
   credentialSubjectIdForTurnInitiator,
   classifyMcpTransportTimeoutError,
   clearAttemptCredentialsWithSettledFence,
@@ -689,6 +694,7 @@ describe("accepted turn execution identity", () => {
     expect(turnExecutionPolicyBillingIdentity(base)).toEqual({
       externallyBilled: true,
       codexSubscription: false,
+      xaiSubscription: false,
     });
     expect(
       turnExecutionPolicyBillingIdentity({
@@ -699,14 +705,36 @@ describe("accepted turn execution identity", () => {
         credentialSource: { kind: "connected_subscription", provider: "codex" },
         billing: { upstreamPayer: "connected_subscription", metering: "external" },
       }),
-    ).toEqual({ externallyBilled: true, codexSubscription: true });
+    ).toEqual({
+      externallyBilled: true,
+      codexSubscription: true,
+      xaiSubscription: false,
+    });
+    expect(
+      turnExecutionPolicyBillingIdentity({
+        ...base,
+        productModelId: "supergrok/grok-4.5",
+        providerId: "supergrok-subscription",
+        upstreamModelId: "grok-4.5",
+        credentialSource: { kind: "connected_subscription", provider: "xai" },
+        billing: { upstreamPayer: "connected_subscription", metering: "external" },
+      }),
+    ).toEqual({
+      externallyBilled: true,
+      codexSubscription: false,
+      xaiSubscription: true,
+    });
     expect(
       turnExecutionPolicyBillingIdentity({
         ...base,
         credentialSource: { kind: "deployment", mechanism: "api_key" },
         billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
       }),
-    ).toEqual({ externallyBilled: false, codexSubscription: false });
+    ).toEqual({
+      externallyBilled: false,
+      codexSubscription: false,
+      xaiSubscription: false,
+    });
   });
 
   test("classifies only legacy user/API turns as explicit policy requests", () => {
@@ -4033,6 +4061,37 @@ describe("transient provider error classifier", () => {
     expect(providerRecoveryCountFromMetadata({ providerRecoveryCount: -1 })).toBe(0);
   });
 
+  test("classifies only definitive marked SuperGrok account refusals for rotation", () => {
+    const marked = (status: number, headers: HeadersInit = {}) =>
+      Object.assign(new Error(`xAI request failed (${status})`), {
+        status,
+        headers: new Headers({
+          ...Object.fromEntries(new Headers(headers).entries()),
+          [XAI_SUBSCRIPTION_TRANSPORT_ERROR_HEADER]: "1",
+        }),
+      });
+    expect(classifyXaiCredentialFailure(new XaiSubscriptionReloginRequired())).toEqual({
+      kind: "auth",
+      cooldownMs: null,
+    });
+    expect(classifyXaiCredentialFailure(marked(401))).toEqual({
+      kind: "auth",
+      cooldownMs: null,
+    });
+    expect(classifyXaiCredentialFailure(marked(403))).toEqual({
+      kind: "forbidden",
+      cooldownMs: null,
+    });
+    expect(classifyXaiCredentialFailure(marked(429, { "retry-after": "12" }))).toEqual({
+      kind: "rate_limit",
+      cooldownMs: 12_000,
+    });
+    expect(classifyXaiCredentialFailure(marked(503))).toBeNull();
+    expect(
+      classifyXaiCredentialFailure(Object.assign(new Error("unrelated 401"), { status: 401 })),
+    ).toBeNull();
+  });
+
   test("recognizes SDK statusCode when status is not present", () => {
     const transient = Object.assign(new Error("provider unavailable"), { statusCode: 503 });
     expect(isTransientProviderError(transient)).toBe(true);
@@ -4113,8 +4172,9 @@ describe("structuredToolTransportForTurn", () => {
   const resolved = (kind: RegistryProviderKind) =>
     ({ provider: { kind } }) as Parameters<typeof structuredToolTransportForTurn>[0];
 
-  test("keeps hosted tool types off Codex and both Gateway credential paths", () => {
+  test("keeps OpenAI-hosted tool types off connected subscriptions and Gateway paths", () => {
     expect(structuredToolTransportForTurn(resolved("codex-subscription"))).toBe(false);
+    expect(structuredToolTransportForTurn(resolved("xai-subscription"))).toBe(false);
     expect(structuredToolTransportForTurn(resolved("vercel-gateway-managed"))).toBe(false);
     expect(structuredToolTransportForTurn(resolved("vercel-gateway-workspace"))).toBe(false);
   });
@@ -4176,6 +4236,9 @@ describe("lazyToolTransportForTurn", () => {
   });
 
   test("contains Gateway and other providers behind generic dispatch", () => {
+    expect(lazyToolTransportForTurn(resolved("xai-subscription", "responses"))).toBe(
+      "generic_dispatch",
+    );
     expect(lazyToolTransportForTurn(resolved("vercel-gateway-managed", "responses"))).toBe(
       "generic_dispatch",
     );

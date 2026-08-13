@@ -545,6 +545,12 @@ export type {
   UseCodexAccountsOptions,
   UseCodexAccountsResult,
 } from "./hooks/use-codex-accounts";
+export { useSuperGrokAccounts } from "./hooks/use-supergrok-accounts";
+export type {
+  SuperGrokAccountsClientLike,
+  UseSuperGrokAccountsOptions,
+  UseSuperGrokAccountsResult,
+} from "./hooks/use-supergrok-accounts";
 
 // Sandbox helpers
 export { gitFileDiffToPatch } from "./lib/git-patch";

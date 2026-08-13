@@ -1,9 +1,11 @@
 import {
   fetchCodexUsageForAccount,
   getCodexCapacityWaitForSession,
+  getXaiCapacityWaitForSession,
   listCodexAccountStatuses,
   listPendingCodexCapacityWakeTargets,
   reconcileCodexCapacityWait as reconcileCodexCapacityWaitDb,
+  reconcileXaiCapacityWait as reconcileXaiCapacityWaitDb,
   type CodexCapacityWakeTarget,
   type CodexCapacitySelectionContext,
 } from "@opengeni/db";
@@ -154,9 +156,18 @@ async function refreshCapacityMetadata(
 export function createCodexCapacityActivities(services: () => Promise<ControlActivityServices>) {
   async function getCodexCapacityWait(input: GetCodexCapacityWaitInput) {
     const { db } = await services();
-    const waiter = await getCodexCapacityWaitForSession(db, input.workspaceId, input.sessionId);
+    const codexWaiter = await getCodexCapacityWaitForSession(
+      db,
+      input.workspaceId,
+      input.sessionId,
+    );
+    const xaiWaiter = codexWaiter
+      ? null
+      : await getXaiCapacityWaitForSession(db, input.workspaceId, input.sessionId);
+    const waiter = codexWaiter ?? xaiWaiter;
     return waiter
       ? {
+          ...(xaiWaiter ? { provider: "xai" as const } : {}),
           waiterId: waiter.id,
           generation: waiter.generation,
           // A capacity mutation may have committed while its Temporal signal
@@ -176,6 +187,42 @@ export function createCodexCapacityActivities(services: () => Promise<ControlAct
     input: ReconcileCodexCapacityWaitInput,
   ): Promise<ReconcileCodexCapacityWaitResult> {
     const resolved = await services();
+    if (input.provider === "xai") {
+      const current = await getXaiCapacityWaitForSession(
+        resolved.db,
+        input.workspaceId,
+        input.sessionId,
+      );
+      if (!current || current.id !== input.waiterId || current.generation !== input.generation) {
+        return { action: "stale" };
+      }
+      const result = await reconcileXaiCapacityWaitDb(resolved.db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        waiterId: input.waiterId,
+        generation: input.generation,
+      });
+      if (result.events.length > 0) {
+        try {
+          await resolved.bus.publish(input.workspaceId, input.sessionId, result.events);
+        } catch {
+          // Postgres is authoritative; SSE replay/gap fill repairs missed fanout.
+        }
+      }
+      if (result.action === "resumed") return { action: "resumed" };
+      if (result.action === "waiting") {
+        return {
+          action: "waiting",
+          provider: "xai",
+          waiterId: result.waiter.id,
+          generation: result.waiter.generation,
+          nextCheckAt: result.waiter.nextCheckAt.toISOString(),
+          wakeRevision: result.waiter.wakeRevision,
+        };
+      }
+      return { action: result.action };
+    }
     const current = await getCodexCapacityWaitForSession(
       resolved.db,
       input.workspaceId,

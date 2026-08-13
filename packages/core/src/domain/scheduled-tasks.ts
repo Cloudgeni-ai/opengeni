@@ -10,6 +10,7 @@ import type {
   SessionAuthorizationSurface,
   CreateScheduledTaskRequest as CreateScheduledTaskPayload,
   UpdateScheduledTaskRequest as UpdateScheduledTaskPayload,
+  XaiProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
 import { OPENGENI_SLACK_BOT_SESSION_METADATA_KEY } from "@opengeni/contracts";
 import {
@@ -21,10 +22,12 @@ import {
   getRig,
   getScheduledTask,
   getScheduledTaskPersonalConnectionDelegations,
+  getSessionTurnXaiProviderAccountAuthoritySnapshot,
   getSession,
   requireWorkspace,
   scopedKnowledgeScopeKey,
   updateScheduledTask,
+  resolveXaiProviderAccountAuthoritySnapshotForAcceptance,
   type Database,
   type UpdateScheduledTaskInput,
 } from "@opengeni/db";
@@ -161,6 +164,18 @@ export async function createValidatedScheduledTask(input: {
         source: personalConnectionDelegationSourceForGrant(input.grant),
       });
   const creationInitiator = creationInitiatorForGrant(input.grant);
+  const xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1 =
+    creationInitiator.actor
+      ? await getSessionTurnXaiProviderAccountAuthoritySnapshot(
+          input.db,
+          input.grant.workspaceId,
+          creationInitiator.actor.sessionId,
+          creationInitiator.actor.turnId,
+        )
+      : await resolveXaiProviderAccountAuthoritySnapshotForAcceptance(input.db, {
+          workspaceId: input.grant.workspaceId,
+          subjectId: input.grant.subjectId,
+        });
   return await createScheduledTask(input.db, {
     id,
     accountId: input.grant.accountId,
@@ -177,6 +192,7 @@ export async function createValidatedScheduledTask(input: {
     ...(creationInitiator.context ? { createdByContext: creationInitiator.context } : {}),
     createdByActor: creationInitiator.actor ?? null,
     personalConnectionDelegations,
+    xaiProviderAccountAuthoritySnapshot,
     targetSessionId: target?.id ?? null,
     variableSetId: input.payload.variableSetId ?? null,
     rigId: input.payload.rigId ?? null,

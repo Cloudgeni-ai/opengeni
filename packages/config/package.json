@@ -35,6 +35,7 @@
   "dependencies": {
     "@opengeni/codex": "workspace:*",
     "@opengeni/contracts": "workspace:*",
+    "@opengeni/xai-subscription": "workspace:*",
     "zod": "^4.2.1"
   },
   "devDependencies": {

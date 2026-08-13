@@ -281,6 +281,7 @@ export {
   OpenGeniResponsesModel,
   WorkspaceGatewayUnavailableError,
   WorkspaceModelPolicyBlockedError,
+  XaiSubscriptionUnavailableError,
   azureOpenAIDefaultQuery,
   buildModelInstance,
   buildOpenAIClientFromSettings,
@@ -1256,10 +1257,11 @@ export function extractResponseOutputText(response: unknown): string {
  */
 class CompactionResponsesModel extends OpenGeniResponsesModel {
   async fetchResponse(request: ModelRequest): Promise<ModelResponse> {
-    if (this.provider.kind !== "codex-subscription") {
+    if (this.provider.kind !== "codex-subscription" && this.provider.kind !== "xai-subscription") {
       return (await this._fetchResponse(request, false)) as unknown as ModelResponse;
     }
-    // Codex is streaming-only. Use the SDK's normal streaming adapter so its
+    // Connected subscription proxies are streaming-first. Use the SDK's normal
+    // streaming adapter so its
     // terminal reducer, output reconstruction, and failure checks remain the
     // single protocol implementation; only collect the final ModelResponse.
     let response: ModelResponse | undefined;
