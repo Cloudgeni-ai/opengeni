@@ -112,6 +112,19 @@ function Get-AssetUrl($name) {
   return "$base/agent/v$Version/$name"
 }
 
+function Test-ReleaseAssetAvailable($name, $tmp) {
+  $url = "$(Get-AssetUrl $name).sha256"
+  try {
+    if ($url -like 'file://*') {
+      return Test-Path -LiteralPath ([uri]$url).LocalPath -PathType Leaf
+    }
+    Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing | Out-Null
+    return $true
+  } catch {
+    return $false
+  }
+}
+
 function Invoke-Download($url, $out) {
   try {
     # Support file:// (used by the install smoke test + air-gapped mirrors); the
@@ -191,6 +204,48 @@ function Test-SignatureOpenssl($file, $sig) {
   }
 }
 
+function Install-VerifiedInteractionRuntime($agentAsset, $tmp, $installDir) {
+  $target = $agentAsset -replace '^opengeni-agent-', '' -replace '\.exe$', ''
+  $browserd = "opengeni-browserd-$target.exe"
+  $agentBrowser = "opengeni-agent-browser-$target.exe"
+  $computerNative = "opengeni-computer-native-$target.exe"
+  $probe = Join-Path $tmp 'interaction-runtime-probe.sha256'
+  if (-not (Test-ReleaseAssetAvailable $browserd $probe)) {
+    Log 'this release predates the packaged browser/computer runtime'
+    return
+  }
+
+  $runtime = @(
+    @{ Asset = $browserd; Destination = 'opengeni-browserd.exe' },
+    @{ Asset = $agentBrowser; Destination = 'agent-browser.exe' },
+    @{ Asset = $computerNative; Destination = 'opengeni-computer-native.exe' }
+  )
+  $staged = Join-Path $tmp 'interaction-runtime'
+  New-Item -ItemType Directory -Path $staged -Force | Out-Null
+  foreach ($entry in $runtime) {
+    $assetName = [string]$entry.Asset
+    $assetUrl = Get-AssetUrl $assetName
+    $assetPath = Join-Path $staged ([string]$entry.Destination)
+    $shaPath = "$assetPath.sha256"
+    $sigPath = "$assetPath.minisig"
+    Invoke-Download $assetUrl $assetPath
+    Invoke-Download "$assetUrl.sha256" $shaPath
+    Invoke-Download "$assetUrl.minisig" $sigPath
+    $want = ((Get-Content $shaPath -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
+    $got = Get-Sha256 $assetPath
+    if ($want -ne $got) { Fail 4 "checksum mismatch for $assetName: expected $want got $got" }
+    Test-Signature $assetPath $sigPath
+  }
+
+  foreach ($entry in $runtime) {
+    $destination = Join-Path $installDir ([string]$entry.Destination)
+    $incoming = "$destination.new"
+    Copy-Item -LiteralPath (Join-Path $staged ([string]$entry.Destination)) -Destination $incoming -Force
+    Move-Item -LiteralPath $incoming -Destination $destination -Force
+  }
+  Log "installed the version-coherent browser/computer runtime in $installDir"
+}
+
 function Get-InstallDir {
   $d = Get-EnvOr 'OPENGENI_INSTALL_DIR' (Join-Path $env:LOCALAPPDATA 'OpenGeni\bin')
   return $d
@@ -249,6 +304,7 @@ function Main {
       }
       Move-Item -Force $binTmp $dest
       Log "installed verified binary to $dest"
+      Install-VerifiedInteractionRuntime $asset $tmp $installDir
     }
     Add-UserPath $installDir
 

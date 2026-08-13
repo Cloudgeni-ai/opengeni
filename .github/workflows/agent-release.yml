@@ -99,6 +99,15 @@ jobs:
       - name: Install the Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install workspace dependencies
+        shell: bash
+        run: bun install --frozen-lockfile
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
@@ -110,20 +119,51 @@ jobs:
         if: matrix.kind == 'linux'
         shell: bash
         working-directory: agent
+        env:
+          OPENGENI_RUNTIME_BUILD_ID: ${{ github.sha }}
         run: |
           set -euo pipefail
           pip install ziglang
           cargo install --locked cargo-zigbuild
           rustup target add "${{ matrix.target }}"
           cargo zigbuild --release --target "${{ matrix.target }}" -p opengeni-agent
+          cargo zigbuild --release --target "${{ matrix.target }}" -p opengeni-computer-native
           cp "target/${{ matrix.target }}/release/opengeni-agent" "../${{ matrix.asset }}"
+          cp "target/${{ matrix.target }}/release/opengeni-computer-native" \
+            "../opengeni-computer-native-${{ matrix.target }}"
           file "../${{ matrix.asset }}"
+
+      - name: Build interaction helpers (Linux musl)
+        if: matrix.kind == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ matrix.target }}" in
+            x86_64-*) bun_target=bun-linux-x64-musl; browser_arch=x64 ;;
+            aarch64-*) bun_target=bun-linux-arm64-musl; browser_arch=arm64 ;;
+            *) echo "unsupported Linux interaction target" >&2; exit 1 ;;
+          esac
+          bun build --compile --target="$bun_target" packages/browserd/src/main.ts \
+            --define "process.env.OPENGENI_RUNTIME_BUILD_ID=\"${GITHUB_SHA}\"" \
+            --outfile "opengeni-browserd-${{ matrix.target }}"
+          OPENGENI_BROWSERD_TARGET_PLATFORM=linux \
+          OPENGENI_BROWSERD_TARGET_ARCH="$browser_arch" \
+          OPENGENI_BROWSERD_TARGET_MUSL=true \
+          OPENGENI_BROWSERD_AGENT_BROWSER_OUTPUT="opengeni-agent-browser-${{ matrix.target }}" \
+            bun packages/browserd/scripts/stage-agent-browser.ts
+          mv "packages/browserd/dist/opengeni-agent-browser-${{ matrix.target }}" .
+          chmod 0755 \
+            "opengeni-browserd-${{ matrix.target }}" \
+            "opengeni-agent-browser-${{ matrix.target }}" \
+            "opengeni-computer-native-${{ matrix.target }}"
 
       # ---- macOS: build both arches natively, lipo into ONE universal binary. ----
       - name: Build (macOS universal)
         if: matrix.kind == 'macos'
         shell: bash
         working-directory: agent
+        env:
+          OPENGENI_RUNTIME_BUILD_ID: ${{ github.sha }}
         run: |
           set -euo pipefail
           rustup target add x86_64-apple-darwin aarch64-apple-darwin
@@ -135,11 +175,47 @@ jobs:
           # runner (the objc2 Apple FFI has no Linux/Windows target).
           cargo build --release --target x86_64-apple-darwin -p opengeni-agent --features macos-desktop
           cargo build --release --target aarch64-apple-darwin -p opengeni-agent --features macos-desktop
+          cargo build --release --target x86_64-apple-darwin -p opengeni-computer-native
+          cargo build --release --target aarch64-apple-darwin -p opengeni-computer-native
           lipo -create \
             "target/x86_64-apple-darwin/release/opengeni-agent" \
             "target/aarch64-apple-darwin/release/opengeni-agent" \
             -output "../${{ matrix.asset }}"
+          lipo -create \
+            "target/x86_64-apple-darwin/release/opengeni-computer-native" \
+            "target/aarch64-apple-darwin/release/opengeni-computer-native" \
+            -output "../opengeni-computer-native-${{ matrix.target }}"
           lipo -info "../${{ matrix.asset }}"
+
+      - name: Build interaction helpers (macOS universal)
+        if: matrix.kind == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun build --compile --target=bun-darwin-x64 packages/browserd/src/main.ts \
+            --define "process.env.OPENGENI_RUNTIME_BUILD_ID=\"${GITHUB_SHA}\"" \
+            --outfile opengeni-browserd-x64
+          bun build --compile --target=bun-darwin-arm64 packages/browserd/src/main.ts \
+            --define "process.env.OPENGENI_RUNTIME_BUILD_ID=\"${GITHUB_SHA}\"" \
+            --outfile opengeni-browserd-arm64
+          lipo -create opengeni-browserd-x64 opengeni-browserd-arm64 \
+            -output "opengeni-browserd-${{ matrix.target }}"
+          OPENGENI_BROWSERD_TARGET_PLATFORM=darwin \
+          OPENGENI_BROWSERD_TARGET_ARCH=x64 \
+          OPENGENI_BROWSERD_AGENT_BROWSER_OUTPUT=opengeni-agent-browser-x64 \
+            bun packages/browserd/scripts/stage-agent-browser.ts
+          OPENGENI_BROWSERD_TARGET_PLATFORM=darwin \
+          OPENGENI_BROWSERD_TARGET_ARCH=arm64 \
+          OPENGENI_BROWSERD_AGENT_BROWSER_OUTPUT=opengeni-agent-browser-arm64 \
+            bun packages/browserd/scripts/stage-agent-browser.ts
+          lipo -create \
+            packages/browserd/dist/opengeni-agent-browser-x64 \
+            packages/browserd/dist/opengeni-agent-browser-arm64 \
+            -output "opengeni-agent-browser-${{ matrix.target }}"
+          chmod 0755 \
+            "opengeni-browserd-${{ matrix.target }}" \
+            "opengeni-agent-browser-${{ matrix.target }}" \
+            "opengeni-computer-native-${{ matrix.target }}"
 
       # The native macOS runner also executes the workspace tests before the
       # universal artifact is accepted.
@@ -153,11 +229,30 @@ jobs:
         if: matrix.kind == 'windows'
         shell: bash
         working-directory: agent
+        env:
+          OPENGENI_RUNTIME_BUILD_ID: ${{ github.sha }}
         run: |
           set -euo pipefail
           rustup target add "${{ matrix.target }}"
           cargo build --release --target "${{ matrix.target }}" -p opengeni-agent
+          cargo build --release --target "${{ matrix.target }}" -p opengeni-computer-native
           cp "target/${{ matrix.target }}/release/opengeni-agent.exe" "../${{ matrix.asset }}"
+          cp "target/${{ matrix.target }}/release/opengeni-computer-native.exe" \
+            "../opengeni-computer-native-${{ matrix.target }}.exe"
+
+      - name: Build interaction helpers (Windows x64)
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun build --compile --target=bun-windows-x64 packages/browserd/src/main.ts \
+            --define "process.env.OPENGENI_RUNTIME_BUILD_ID=\"${GITHUB_SHA}\"" \
+            --outfile "opengeni-browserd-${{ matrix.target }}.exe"
+          OPENGENI_BROWSERD_TARGET_PLATFORM=win32 \
+          OPENGENI_BROWSERD_TARGET_ARCH=x64 \
+          OPENGENI_BROWSERD_AGENT_BROWSER_OUTPUT="opengeni-agent-browser-${{ matrix.target }}.exe" \
+            bun packages/browserd/scripts/stage-agent-browser.ts
+          mv "packages/browserd/dist/opengeni-agent-browser-${{ matrix.target }}.exe" .
 
       # ---- Detect signing creds in a PRIOR step (so the gates can read them). ----
       # GitHub Actions does NOT expose a step's own `env:` to that step's `if:`, so a
@@ -242,11 +337,16 @@ jobs:
           set -euo pipefail
           APP="OpenGeni Agent.app"
           rm -rf "$APP"
-          mkdir -p "$APP/Contents/MacOS"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Helpers"
           # The universal binary built above becomes the bundle's executable. Its
           # CFBundleExecutable is `opengeni-agent` (matches install.sh's local path).
           cp "${{ matrix.asset }}" "$APP/Contents/MacOS/opengeni-agent"
           chmod 0755 "$APP/Contents/MacOS/opengeni-agent"
+          cp "opengeni-browserd-${{ matrix.target }}" "$APP/Contents/Helpers/opengeni-browserd"
+          cp "opengeni-agent-browser-${{ matrix.target }}" "$APP/Contents/Helpers/agent-browser"
+          cp "opengeni-computer-native-${{ matrix.target }}" \
+            "$APP/Contents/Helpers/opengeni-computer-native"
+          chmod 0755 "$APP/Contents/Helpers/"*
           # Info.plist kept in sync with install.sh's write_info_plist (same keys +
           # STABLE bundle id ai.opengeni.agent; LSUIElement hides the Dock icon).
           cat > "$APP/Contents/Info.plist" <<PLIST
@@ -297,15 +397,23 @@ jobs:
         run: |
           Write-Host "Azure Key Vault cert present — Authenticode-signing ${{ matrix.asset }}"
           dotnet tool install --global AzureSignTool
-          AzureSignTool sign `
-            --azure-key-vault-url "$env:AZURE_KEY_VAULT_URL" `
-            --azure-key-vault-certificate "$env:AZURE_KEY_VAULT_CERT" `
-            --azure-key-vault-client-id "$env:AZURE_CLIENT_ID" `
-            --azure-key-vault-client-secret "$env:AZURE_CLIENT_SECRET" `
-            --azure-key-vault-tenant-id "$env:AZURE_TENANT_ID" `
-            --timestamp-rfc3161 "http://timestamp.digicert.com" `
-            --file-digest sha256 `
-            "${{ matrix.asset }}"
+          $artifacts = @(
+            "${{ matrix.asset }}",
+            "opengeni-browserd-${{ matrix.target }}.exe",
+            "opengeni-agent-browser-${{ matrix.target }}.exe",
+            "opengeni-computer-native-${{ matrix.target }}.exe"
+          ) | Where-Object { Test-Path $_ }
+          foreach ($artifact in $artifacts) {
+            AzureSignTool sign `
+              --azure-key-vault-url "$env:AZURE_KEY_VAULT_URL" `
+              --azure-key-vault-certificate "$env:AZURE_KEY_VAULT_CERT" `
+              --azure-key-vault-client-id "$env:AZURE_CLIENT_ID" `
+              --azure-key-vault-client-secret "$env:AZURE_CLIENT_SECRET" `
+              --azure-key-vault-tenant-id "$env:AZURE_TENANT_ID" `
+              --timestamp-rfc3161 "http://timestamp.digicert.com" `
+              --file-digest sha256 `
+              $artifact
+          }
 
       - name: Windows unsigned note (no cert)
         if: matrix.kind == 'windows' && steps.creds.outputs.has_windows != 'true'
@@ -344,6 +452,19 @@ jobs:
               shasum -a 256 "OpenGeni-Agent.app.zip" > "OpenGeni-Agent.app.zip.sha256"
             fi
           fi
+          for companion in \
+            "opengeni-browserd-${{ matrix.target }}"* \
+            "opengeni-agent-browser-${{ matrix.target }}"* \
+            "opengeni-computer-native-${{ matrix.target }}"*
+          do
+            [ -f "$companion" ] || continue
+            rsign sign -W -s /tmp/minisign.key -x "$companion.minisig" "$companion"
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "$companion" > "$companion.sha256"
+            else
+              shasum -a 256 "$companion" > "$companion.sha256"
+            fi
+          done
           rm -f /tmp/minisign.key
 
       - name: Upload artifact bundle
@@ -359,6 +480,9 @@ jobs:
             OpenGeni-Agent.app.zip
             OpenGeni-Agent.app.zip.sha256
             OpenGeni-Agent.app.zip.minisig
+            opengeni-browserd-${{ matrix.target }}*
+            opengeni-agent-browser-${{ matrix.target }}*
+            opengeni-computer-native-${{ matrix.target }}*
           if-no-files-found: error
 
   # The publish job needs ALL builds, so NO partial release. It assembles the
