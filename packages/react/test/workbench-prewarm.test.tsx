@@ -12,7 +12,7 @@
    contract is required and the choice latches before real content paints.
    -------------------------------------------------------------------------- */
 import { describe, expect, test } from "bun:test";
-import { act, type ReactElement, type ReactNode } from "react";
+import { act, type ReactElement, type ReactNode, useMemo } from "react";
 import type { GetWorkspaceCaptureResponse, WorkspaceCaptureManifest } from "@opengeni/sdk";
 import { registerDom, renderComponent, flush } from "./render-hook";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
@@ -366,25 +366,28 @@ describe("workbench prewarm gating (Refinement 1)", () => {
     const result = { current: undefined as unknown as UseSandboxWorkspaceTabsResult };
 
     function Harness({ revision }: { revision: number | null }) {
-      const context: OpenGeniContextValue = {
-        client,
-        workspaceId: WORKSPACE_ID,
-        workspaceControlEvent: null,
-        workspaceControlConnectionState: "idle",
-        workspaceInteractionEvent:
-          revision === null
-            ? null
-            : {
-                workspaceId: WORKSPACE_ID,
-                sequence: revision,
-                revision,
-                type: "workspace.interaction.changed",
-                occurredAt: "2026-08-13T10:00:00.000Z",
-              },
-        workspaceInteractionConnectionState: "live",
-        registerSessionReconciler: () => () => undefined,
-        reconcileSession: async () => undefined,
-      };
+      const context = useMemo<OpenGeniContextValue>(
+        () => ({
+          client,
+          workspaceId: WORKSPACE_ID,
+          workspaceControlEvent: null,
+          workspaceControlConnectionState: "idle",
+          workspaceInteractionEvent:
+            revision === null
+              ? null
+              : {
+                  workspaceId: WORKSPACE_ID,
+                  sequence: revision,
+                  revision,
+                  type: "workspace.interaction.changed",
+                  occurredAt: "2026-08-13T10:00:00.000Z",
+                },
+          workspaceInteractionConnectionState: "live",
+          registerSessionReconciler: () => () => undefined,
+          reconcileSession: async () => undefined,
+        }),
+        [revision],
+      );
       return (
         <OpenGeniContext.Provider value={context}>
           <Probe />
