@@ -1,5 +1,11 @@
 # @opengeni/contracts
 
+## 0.48.0
+
+### Minor Changes
+
+- 05c52f2: Add workspace-governed Slack shared-conversation task policies with durable enforcement and public contracts, and enforce vertical-only agent session authority across core and persistence.
+
 ## 0.47.0
 
 ### Minor Changes

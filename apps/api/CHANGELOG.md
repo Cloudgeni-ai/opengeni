@@ -1,5 +1,31 @@
 # @opengeni/api-router
 
+## 0.29.0
+
+### Minor Changes
+
+- 05c52f2: Add workspace-governed Slack shared-conversation task policies with durable enforcement and public contracts, and enforce vertical-only agent session authority across core and persistence.
+- 691573c: Activate server-authoritative session visibility and content forking. Add user-private session ownership, authority-epoch transitions, explicit cross-workspace fork operations, session-scoped RLS actor propagation, and API authorization that preserves workspace-shared access while enforcing private-session ownership.
+
+### Patch Changes
+
+- c38f31a: Import authorized images from Slack direct messages and existing task-thread replies.
+- Updated dependencies [05c52f2]
+- Updated dependencies [c38f31a]
+- Updated dependencies [691573c]
+  - @opengeni/contracts@0.48.0
+  - @opengeni/db@0.35.0
+  - @opengeni/core@0.27.0
+  - @opengeni/artifact-tool@0.2.6
+  - @opengeni/codemode@0.3.3
+  - @opengeni/config@0.15.1
+  - @opengeni/documents@0.5.36
+  - @opengeni/events@0.3.107
+  - @opengeni/github@0.4.54
+  - @opengeni/observability@0.7.3
+  - @opengeni/runtime@0.21.1
+  - @opengeni/storage@0.2.91
+
 ## 0.28.0
 
 ### Minor Changes
