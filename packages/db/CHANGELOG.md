@@ -1,5 +1,15 @@
 # @opengeni/db
 
+## 0.35.0
+
+### Minor Changes
+
+- 691573c: Activate server-authoritative session visibility and content forking. Add user-private session ownership, authority-epoch transitions, explicit cross-workspace fork operations, session-scoped RLS actor propagation, and API authorization that preserves workspace-shared access while enforcing private-session ownership.
+
+### Patch Changes
+
+- c38f31a: Import authorized images from Slack direct messages and existing task-thread replies.
+
 ## 0.34.0
 
 ### Minor Changes
