@@ -7,6 +7,7 @@ import {
 import {
   BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX,
   BROWSER_CONTROL_WEBSOCKET_PROTOCOL,
+  BROWSER_CONTROL_PORT,
   BROWSER_CONTROL_PROTOCOL_VERSION,
   BROWSER_PROFILE_ARTIFACT_FORMAT,
   BROWSER_STATE_ARTIFACT_CONTENT_TYPE,
@@ -122,6 +123,8 @@ import {
   prepareProtectedAuthFill,
   reportAuthRun,
   releaseLeaseHolder,
+  readLease,
+  recordLeaseControllerDataPlaneUrl,
   loadConnectionCredentialForBroker,
   markProtectedAuthFillOutcomeUnknown,
   startAuthRun,
@@ -152,6 +155,7 @@ import {
   BrowserControlTransportError,
   BrowserControlUnsupportedError,
   buildStreamUrl,
+  exposedPortEndpointFromUrl,
   buildSelfhostedBackendSession,
   mintStreamToken,
   NatsControlRpc,
@@ -172,6 +176,8 @@ import {
   deriveBrowserSessionControllerTokens,
   deriveBrowserViewGrantToken,
 } from "../browser-controller-authority";
+import { withCachedController } from "../controller-data-plane";
+import { withInteractionHolderHeartbeat } from "../interaction-holder-heartbeat";
 import {
   browserStateArtifactAad,
   browserStateManifestDigest,
@@ -380,7 +386,19 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
               prepared.session.id,
               request.operationId,
               placement.placementInstanceId,
-            );
+            ).catch(async (error: unknown) => {
+              if (interactionHeld) {
+                await releaseInteractionHolder(
+                  deps,
+                  grant,
+                  workspaceId,
+                  prepared!.session.id,
+                  placement.controllerHostSandboxGroupId,
+                ).catch(() => undefined);
+              }
+              throw error;
+            });
+            const preparedSession = prepared.session;
             const controllerGeneration = requireOperationGeneration(record);
             const linkedComputer = await requireLinkedComputerBinding(
               deps,
@@ -406,23 +424,43 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
               tokenGeneration: record.tokenGeneration,
             });
             try {
-              const { client } = await provisionBrowserControlClient(placement.session, {
+              await withBrowserCreationController(
+                deps,
+                grant,
+                workspaceId,
+                placement,
                 adminToken,
-                nativeAuthority: nativeBrowserControllerAuthority(workspaceId, placement),
-                ...(origin ? { allowedOrigins: [origin] } : {}),
-              });
-              await client.createSession({
-                browserSessionId: prepared.session.id,
-                controllerGeneration,
-                tokenGeneration: record.tokenGeneration,
-                ...tokens,
-                headed: !prepared.session.headless,
-                transport: browserRuntimeTransport(prepared.session, placement.transport),
-                ...(linkedComputer ? { linkedComputer } : {}),
-                ...(networkRoute ? { networkRoute } : {}),
-                ...(request.initialUrl ? { initialUrl: request.initialUrl } : {}),
-                ...(restore ? { restore } : {}),
-              });
+                origin,
+                async (client) =>
+                  await withInteractionHolderHeartbeat(
+                    deps,
+                    {
+                      grant,
+                      workspaceId,
+                      sandboxGroupId: placement.controllerHostSandboxGroupId,
+                      holderId: interactionHolderId(preparedSession.id),
+                      operationId: request.operationId,
+                      resourceId: preparedSession.id,
+                      controllerGeneration,
+                    },
+                    async () =>
+                      await client.createSession({
+                        browserSessionId: preparedSession.id,
+                        controllerGeneration,
+                        tokenGeneration: record.tokenGeneration,
+                        ...tokens,
+                        headed: !preparedSession.headless,
+                        transport: browserRuntimeTransport(preparedSession, placement.transport),
+                        ...(linkedComputer ? { linkedComputer } : {}),
+                        ...(networkRoute ? { networkRoute } : {}),
+                        ...(request.initialUrl ? { initialUrl: request.initialUrl } : {}),
+                        ...(restore ? { restore } : {}),
+                      }),
+                  ),
+              );
+              await cacheBrowserControllerPlacement(grant, workspaceId, placement).catch(
+                () => placement,
+              );
             } catch (error) {
               if (
                 error instanceof BrowserControlTransportError ||
@@ -888,7 +926,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         workspaceId,
         browserSessionId,
         "session.control",
-        "browser.control",
+        "browser.action",
         async ({ sessionClient, binding, record }) => {
           const command = BrowserActionCommand.parse({
             protocolVersion: BROWSER_CONTROL_PROTOCOL_VERSION,
@@ -1705,7 +1743,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
               })()
             : {
                 kind: "direct_websocket" as const,
-                url: await client.frameStreamUrl(reference, request.targetId),
+                url: await client.frameStreamUrl(reference, request.targetId, request.stream),
                 protocols: [
                   BROWSER_CONTROL_WEBSOCKET_PROTOCOL,
                   `${BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX}${token}`,
@@ -2027,20 +2065,33 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
               const client = await provisionController(deps, grant, record, placement, origin);
               let receipt: PlacementBrowserStateCaptureReceipt;
               try {
-                receipt = await client.captureState({
-                  browserSessionId,
-                  controllerGeneration: binding.controllerGeneration,
-                  operationId: request.operationId,
-                  objectKey,
-                  afterCapture: "stop",
-                  dataKey,
-                  aad,
-                  upload: {
-                    url: signed.url,
-                    requiredHeaders: signed.requiredHeaders,
-                    expiresAt: signed.expiresAt.toISOString(),
+                receipt = await withInteractionHolderHeartbeat(
+                  deps,
+                  {
+                    grant,
+                    workspaceId,
+                    sandboxGroupId: record.controllerHostSandboxGroupId,
+                    holderId: interactionHolderId(browserSessionId),
+                    operationId: request.operationId,
+                    resourceId: browserSessionId,
+                    controllerGeneration: binding.controllerGeneration,
                   },
-                });
+                  async () =>
+                    await client.captureState({
+                      browserSessionId,
+                      controllerGeneration: binding.controllerGeneration,
+                      operationId: request.operationId,
+                      objectKey,
+                      afterCapture: "stop",
+                      dataKey,
+                      aad,
+                      upload: {
+                        url: signed.url,
+                        requiredHeaders: signed.requiredHeaders,
+                        expiresAt: signed.expiresAt.toISOString(),
+                      },
+                    }),
+                );
               } catch (error) {
                 const failed = await settleBrowserSessionSuspensionCaptureFailure(
                   deps,
@@ -2240,7 +2291,18 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
               browserSessionId,
               request.operationId,
               placement.placementInstanceId,
-            );
+            ).catch(async (error: unknown) => {
+              if (interactionHeld) {
+                await releaseInteractionHolder(
+                  deps,
+                  grant,
+                  workspaceId,
+                  browserSessionId,
+                  placement.controllerHostSandboxGroupId,
+                ).catch(() => undefined);
+              }
+              throw error;
+            });
             const controllerGeneration = requireOperationGeneration(record);
             const linkedComputer = await requireLinkedComputerBinding(
               deps,
@@ -2271,17 +2333,30 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
               ...(origin ? { allowedOrigins: [origin] } : {}),
             });
             try {
-              await client.createSession({
-                browserSessionId,
-                controllerGeneration,
-                tokenGeneration: record.tokenGeneration,
-                ...tokens,
-                headed: !prepared.session.headless,
-                transport: browserRuntimeTransport(prepared.session, placement.transport),
-                ...(linkedComputer ? { linkedComputer } : {}),
-                ...(networkRoute ? { networkRoute } : {}),
-                restore: restore!,
-              });
+              await withInteractionHolderHeartbeat(
+                deps,
+                {
+                  grant,
+                  workspaceId,
+                  sandboxGroupId: placement.controllerHostSandboxGroupId,
+                  holderId: interactionHolderId(browserSessionId),
+                  operationId: request.operationId,
+                  resourceId: browserSessionId,
+                  controllerGeneration,
+                },
+                async () =>
+                  await client.createSession({
+                    browserSessionId,
+                    controllerGeneration,
+                    tokenGeneration: record.tokenGeneration,
+                    ...tokens,
+                    headed: !prepared.session.headless,
+                    transport: browserRuntimeTransport(prepared.session, placement.transport),
+                    ...(linkedComputer ? { linkedComputer } : {}),
+                    ...(networkRoute ? { networkRoute } : {}),
+                    restore: restore!,
+                  }),
+              );
             } catch (error) {
               if (!isDefiniteBrowserControllerFailure(error)) throw error;
               try {
@@ -2427,12 +2502,25 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
             });
             const client = await provisionController(deps, grant, record, placement, origin);
             try {
-              await client.endSession(
+              await withInteractionHolderHeartbeat(
+                deps,
                 {
-                  browserSessionId,
+                  grant,
+                  workspaceId,
+                  sandboxGroupId: placement.controllerHostSandboxGroupId,
+                  holderId: interactionHolderId(browserSessionId),
+                  operationId: request.operationId,
+                  resourceId: browserSessionId,
                   controllerGeneration: binding.controllerGeneration,
                 },
-                { removeState: true },
+                async () =>
+                  await client.endSession(
+                    {
+                      browserSessionId,
+                      controllerGeneration: binding.controllerGeneration,
+                    },
+                    { removeState: true },
+                  ),
               );
             } catch (error) {
               // Physical absence already satisfies an exact end. A stale live
@@ -2536,6 +2624,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
     }
     const runWithChannelA =
       operation === "browser.read" ||
+      operation === "browser.action" ||
       operation === "browser.control" ||
       operation === "browser.attach"
         ? withChannelARead
@@ -2549,6 +2638,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         subjectId: grant.subjectId,
         waitSignal,
         operation,
+        retryControllerTransport: operation === "browser.read" || operation === "browser.action",
       },
       async (handle) => {
         if (expectedPlacement?.kind === "sandbox_group") {
@@ -2667,6 +2757,110 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
     };
   }
 
+  function controllerOnlySession(url: string): BrowserControlPlacementSession {
+    const endpoint = exposedPortEndpointFromUrl(url);
+    return {
+      resolveExposedPort: async (port: number) => {
+        if (port !== BROWSER_CONTROL_PORT) {
+          throw new BrowserControlUnsupportedError(`cached controller cannot expose port ${port}`);
+        }
+        return endpoint;
+      },
+    };
+  }
+
+  async function cachedBrowserPlacement(
+    record: BrowserSessionControlRecord,
+  ): Promise<BrowserPlacement | null> {
+    const binding = record.session.controller;
+    const sandboxGroupId = record.controllerHostSandboxGroupId;
+    if (!binding || !sandboxGroupId) return null;
+    const lease = await readLease(deps.db, record.session.workspaceId, sandboxGroupId);
+    if (
+      !lease ||
+      (lease.liveness !== "warm" && lease.liveness !== "draining") ||
+      lease.instanceId !== binding.placementInstanceId ||
+      !lease.controllerDataPlaneUrl
+    ) {
+      return null;
+    }
+    return {
+      placement: record.session.placement,
+      controllerHostSandboxGroupId: sandboxGroupId,
+      placementInstanceId: binding.placementInstanceId,
+      session: controllerOnlySession(lease.controllerDataPlaneUrl),
+      lease,
+      transport:
+        record.session.placement.kind === "external_provider"
+          ? externalBrowserTransport(deps, record.session.placement)
+          : { kind: "managed" },
+    };
+  }
+
+  async function cacheBrowserControllerPlacement(
+    grant: AccessGrant,
+    workspaceId: string,
+    placement: BrowserPlacement,
+  ): Promise<BrowserPlacement> {
+    const sandboxGroupId = placement.controllerHostSandboxGroupId;
+    if (!sandboxGroupId || !placement.lease?.instanceId || !placement.session.resolveExposedPort) {
+      return placement;
+    }
+    const endpoint = await placement.session.resolveExposedPort(BROWSER_CONTROL_PORT);
+    const url = buildStreamUrl(endpoint);
+    const lease = await recordLeaseControllerDataPlaneUrl(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      sandboxGroupId,
+      expectedEpoch: placement.lease.leaseEpoch,
+      expectedInstanceId: placement.lease.instanceId,
+      controllerDataPlaneUrl: url,
+    });
+    if (!lease) return placement;
+    return { ...placement, session: controllerOnlySession(url), lease };
+  }
+
+  async function withBrowserCreationController<T>(
+    routeDeps: ApiRouteDeps,
+    grant: AccessGrant,
+    workspaceId: string,
+    placement: BrowserPlacement,
+    adminToken: string,
+    origin: string | null,
+    operation: (client: BrowserControlClient) => Promise<T>,
+  ): Promise<T> {
+    const sandboxGroupId = placement.controllerHostSandboxGroupId;
+    const cachedUrl = placement.lease?.controllerDataPlaneUrl;
+    return await withCachedController({
+      cachedUrl: sandboxGroupId ? (cachedUrl ?? null) : null,
+      createCachedClient: (url) =>
+        new BrowserControlClient(controllerOnlySession(url), { adminToken }),
+      prepareCachedClient: async (client) => {
+        if (origin) await client.addAllowedOrigins([origin]);
+      },
+      invalidateCachedUrl: async () => {
+        if (!sandboxGroupId || !placement.lease) return;
+        await recordLeaseControllerDataPlaneUrl(routeDeps.db, {
+          accountId: grant.accountId,
+          workspaceId,
+          sandboxGroupId,
+          expectedEpoch: placement.lease.leaseEpoch,
+          expectedInstanceId: placement.placementInstanceId,
+          controllerDataPlaneUrl: null,
+        });
+      },
+      provisionClient: async () => {
+        const { client } = await provisionBrowserControlClient(placement.session, {
+          adminToken,
+          nativeAuthority: nativeBrowserControllerAuthority(workspaceId, placement),
+          ...(origin ? { allowedOrigins: [origin] } : {}),
+        });
+        return client;
+      },
+      use: operation,
+    });
+  }
+
   async function withActiveBrowserController<T>(
     context: Context,
     grant: AccessGrant,
@@ -2703,6 +2897,76 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
       if (!admitted) {
         throw new BrowserSessionStateError("BrowserSession controller authority changed");
       }
+      const run = async (placement: BrowserPlacement): Promise<T> => {
+        // An active binding already proves browserd was provisioned. Reusing
+        // it avoids restarting/checking the sidecar on every live input.
+        const client = connectController(deps, grant, record, placement);
+        const tokens = deriveBrowserSessionControllerTokens({
+          rootSecret: browserAuthorityRoot(deps),
+          accountId: grant.accountId,
+          workspaceId,
+          placement: record.session.placement,
+          placementInstanceId: placement.placementInstanceId,
+          browserSessionId,
+          controllerGeneration: binding.controllerGeneration,
+          tokenGeneration: record.tokenGeneration,
+        });
+        const controller = {
+          client,
+          sessionClient: client.sessionClient({
+            reference: {
+              browserSessionId,
+              controllerGeneration: binding.controllerGeneration,
+            },
+            ...tokens,
+          }),
+          record,
+          binding,
+          placement,
+        };
+        let result: T;
+        try {
+          result = await callback(controller);
+        } catch (error) {
+          if (!recoverMissing || !isMissingBrowserControllerSession(error)) throw error;
+          await recoverActiveBrowserController(
+            deps,
+            grant,
+            record,
+            binding,
+            placement,
+            client,
+            tokens,
+          );
+          result = await callback(controller);
+        }
+        return result;
+      };
+      const cached = await cachedBrowserPlacement(record);
+      if (cached) {
+        try {
+          return await run(cached);
+        } catch (error) {
+          const safelyReplayable =
+            channelOperation === "browser.read" || channelOperation === "browser.action";
+          if (
+            !safelyReplayable ||
+            (!(error instanceof BrowserControlTransportError) &&
+              !(error instanceof BrowserControlRequestError && error.retryable))
+          ) {
+            throw error;
+          }
+          await recordLeaseControllerDataPlaneUrl(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            sandboxGroupId: cached.controllerHostSandboxGroupId!,
+            expectedEpoch: cached.lease!.leaseEpoch,
+            expectedInstanceId: cached.placementInstanceId,
+            controllerDataPlaneUrl: null,
+          }).catch(() => null);
+        }
+      }
+
       const sourceSession = await requireSourceSession(deps, workspaceId, record.sourceSessionId);
       return await withBrowserPlacement(
         sourceSession,
@@ -2711,57 +2975,12 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         binding.placementInstanceId,
         channelOperation,
         context.req.raw.signal,
-        async (placement) => {
-          // An active binding already proves browserd was provisioned. Reusing
-          // it avoids restarting/checking the sidecar on every live input.
-          const client = connectController(deps, grant, record, placement);
-          const tokens = deriveBrowserSessionControllerTokens({
-            rootSecret: browserAuthorityRoot(deps),
-            accountId: grant.accountId,
-            workspaceId,
-            placement: record.session.placement,
-            placementInstanceId: placement.placementInstanceId,
-            browserSessionId,
-            controllerGeneration: binding.controllerGeneration,
-            tokenGeneration: record.tokenGeneration,
-          });
-          const controller = {
-            client,
-            sessionClient: client.sessionClient({
-              reference: {
-                browserSessionId,
-                controllerGeneration: binding.controllerGeneration,
-              },
-              ...tokens,
-            }),
-            record,
-            binding,
-            placement,
-          };
-          let result: T;
-          try {
-            result = await callback(controller);
-          } catch (error) {
-            if (!recoverMissing || !isMissingBrowserControllerSession(error)) throw error;
-            await recoverActiveBrowserController(
-              deps,
-              grant,
-              record,
-              binding,
-              placement,
-              client,
-              tokens,
-            );
-            result = await callback(controller);
-          }
-          await touchBrowserSessionController(deps.db, {
-            accountId: grant.accountId,
-            workspaceId,
-            browserSessionId,
-            controllerGeneration: binding.controllerGeneration,
-          }).catch(() => false);
-          return result;
-        },
+        async (placement) =>
+          await run(
+            await cacheBrowserControllerPlacement(grant, workspaceId, placement).catch(
+              () => placement,
+            ),
+          ),
       );
     } catch (error) {
       throw browserRouteError(error);

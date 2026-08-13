@@ -59,7 +59,9 @@ pub use desktop::{
     fit_frame_to_budget, resolve_desktop, CapturedFrame, DesktopBackend, FittedFrame, NoDesktop,
 };
 #[cfg(target_os = "linux")]
-pub use desktop::{LinuxDesktop, LinuxWindow, LinuxWindowRect};
+pub use desktop::{
+    validate_linux_named_key_chord, LinuxDesktop, LinuxRgbaFrame, LinuxWindow, LinuxWindowRect,
+};
 pub use error::{PlatformError, PlatformResult};
 pub use native::{assemble_git_response, spawn_contained, ContainedExec, NativePlatform};
 pub use pty::{spawn_pty, PtyProcess};
@@ -311,8 +313,7 @@ pub trait Platform: Send + Sync {
     /// the channel + a `pty_id` for subsequent resize/close.
     async fn pty_open(&self, req: &v1::PtyOpenRequest) -> PlatformResult<v1::PtyOpenResponse> {
         let registry = self.stream_registry().ok_or_else(|| no_relay("pty_open"))?;
-        let process = pty::spawn_pty(req, &self.default_shell())?;
-        registry.register_pty(process).await
+        registry.open_pty(req, &self.default_shell()).await
     }
 
     /// Writes input bytes to an open PTY by id (the programmatic-injection control
@@ -399,6 +400,19 @@ pub trait Platform: Send + Sync {
 /// hub; faked in platform unit tests. Object-safe so it can live behind an `Arc`.
 #[async_trait]
 pub trait StreamRegistry: Send + Sync {
+    /// Opens or reuses a PTY. A non-empty `scope_id` is idempotent: repeated and
+    /// concurrent calls for that scope MUST return the same live PTY/channel.
+    /// The default preserves the legacy new-process behavior for registries that
+    /// do not implement scoped reuse; the relay hub overrides it atomically.
+    async fn open_pty(
+        &self,
+        req: &v1::PtyOpenRequest,
+        default_shell: &[String],
+    ) -> PlatformResult<v1::PtyOpenResponse> {
+        let process = spawn_pty(req, default_shell)?;
+        self.register_pty(process).await
+    }
+
     /// Pumps a spawned PTY over a new relay PTY channel; returns the open response
     /// (the `pty_id` + the channel the viewer connects to).
     async fn register_pty(&self, process: PtyProcess) -> PlatformResult<v1::PtyOpenResponse>;

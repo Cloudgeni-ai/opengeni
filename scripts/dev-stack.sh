@@ -25,6 +25,23 @@ if [ -z "${OPENGENI_SANDBOX_SELFHOSTED_ENABLED:-}" ]; then
 fi
 export OPENGENI_SANDBOX_SELFHOSTED_ENABLED
 
+# Browser and Computer are first-class localhost surfaces. Production remains
+# fail-closed in packages/config, while a development stack should exercise the
+# same interactive capabilities users are actively building. Preserve explicit
+# false values so disabled-policy states are still easy to test intentionally.
+if [ -z "${OPENGENI_SANDBOX_DESKTOP_ENABLED:-}" ]; then
+  OPENGENI_SANDBOX_DESKTOP_ENABLED=true
+fi
+if [ -z "${OPENGENI_SANDBOX_DESKTOP_INTERACTIVE:-}" ]; then
+  OPENGENI_SANDBOX_DESKTOP_INTERACTIVE=true
+fi
+if [ -z "${OPENGENI_COMPUTER_USE_ENABLED:-}" ]; then
+  OPENGENI_COMPUTER_USE_ENABLED=true
+fi
+export OPENGENI_SANDBOX_DESKTOP_ENABLED
+export OPENGENI_SANDBOX_DESKTOP_INTERACTIVE
+export OPENGENI_COMPUTER_USE_ENABLED
+
 # The Modal SDK natively supports MODAL_TOKEN_* and ~/.modal.toml, while the
 # deployment-facing OpenGeni config intentionally requires explicit credentials.
 # Bridge those standard local sources for this dev process only; never persist
@@ -140,6 +157,19 @@ else
   fi
 fi
 export COMPOSE_PROJECT_NAME
+
+# Modal's application name is also an ownership namespace: the sandbox reaper
+# lists instances in that application and removes instances absent from this
+# stack's database. Reusing a copied .env value across worktrees therefore lets
+# one local stack reap another stack's live sandboxes. Isolate it alongside the
+# Compose project by default. Set OPENGENI_PIN_MODAL_APP_NAME=1 only when a
+# deliberately shared Modal application is required.
+if [ "${OPENGENI_SANDBOX_BACKEND:-docker}" = "modal" ]; then
+  if [ "${OPENGENI_PIN_MODAL_APP_NAME:-0}" != "1" ]; then
+    OPENGENI_MODAL_APP_NAME="opengeni-${COMPOSE_PROJECT_NAME}"
+  fi
+  export OPENGENI_MODAL_APP_NAME
+fi
 
 # A stopped host dev process intentionally leaves this worktree's dependency
 # containers running. Reuse the generated ports when those exact compose
@@ -560,6 +590,72 @@ fi
 # the generated facade is verified. The facade never searches alternate roots.
 bun install --frozen-lockfile
 
+# Connected Machines use the real NATS auth-callout boundary in local development,
+# too. Generate one stable worktree-local signing identity/password pair, render an
+# ignored NATS configuration, and authenticate the API/worker control connections.
+# Reusing these values across restarts keeps existing enrollments valid; parallel
+# worktrees remain isolated by their own .env, Compose project, ports, and config.
+if [ "${OPENGENI_SANDBOX_SELFHOSTED_ENABLED:-false}" = "true" ]; then
+  generated_nats_env=0
+  if [ -z "${OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_SEED:-}" ]; then
+    IFS=$'\t' read -r OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_SEED \
+      OPENGENI_SELFHOSTED_NATS_CALLOUT_PUBLIC_KEY < <(
+      bun -e '
+        import { nkeys } from "@opengeni/events";
+        const account = nkeys.createAccount();
+        const seed = new TextDecoder().decode(account.getSeed());
+        process.stdout.write(`${seed}\t${account.getPublicKey()}\n`);
+      '
+    )
+    generated_nats_env=1
+  else
+    derived_nats_public_key="$({
+      OPENGENI_LOCAL_NATS_SEED="$OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_SEED" bun -e '
+        import { nkeys } from "@opengeni/events";
+        const key = nkeys.fromSeed(new TextEncoder().encode(Bun.env.OPENGENI_LOCAL_NATS_SEED));
+        process.stdout.write(key.getPublicKey());
+      '
+    })"
+    if [ -n "${OPENGENI_SELFHOSTED_NATS_CALLOUT_PUBLIC_KEY:-}" ] &&
+      [ "$OPENGENI_SELFHOSTED_NATS_CALLOUT_PUBLIC_KEY" != "$derived_nats_public_key" ]; then
+      echo "OPENGENI_SELFHOSTED_NATS_CALLOUT_PUBLIC_KEY does not match its account seed." >&2
+      exit 1
+    fi
+    OPENGENI_SELFHOSTED_NATS_CALLOUT_PUBLIC_KEY="$derived_nats_public_key"
+  fi
+  OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_NAME="${OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_NAME:-APP}"
+  OPENGENI_SELFHOSTED_NATS_CALLOUT_USER="${OPENGENI_SELFHOSTED_NATS_CALLOUT_USER:-auth}"
+  OPENGENI_SELFHOSTED_NATS_CONTROL_USER="${OPENGENI_SELFHOSTED_NATS_CONTROL_USER:-control}"
+  if [ -z "${OPENGENI_SELFHOSTED_NATS_CALLOUT_PASSWORD:-}" ]; then
+    OPENGENI_SELFHOSTED_NATS_CALLOUT_PASSWORD="$(bun -e 'import { randomBytes } from "node:crypto"; process.stdout.write(randomBytes(24).toString("base64url"))')"
+    generated_nats_env=1
+  fi
+  if [ -z "${OPENGENI_SELFHOSTED_NATS_CONTROL_PASSWORD:-}" ]; then
+    OPENGENI_SELFHOSTED_NATS_CONTROL_PASSWORD="$(bun -e 'import { randomBytes } from "node:crypto"; process.stdout.write(randomBytes(24).toString("base64url"))')"
+    generated_nats_env=1
+  fi
+  export OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_SEED
+  export OPENGENI_SELFHOSTED_NATS_CALLOUT_PUBLIC_KEY
+  export OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_NAME
+  export OPENGENI_SELFHOSTED_NATS_CALLOUT_USER
+  export OPENGENI_SELFHOSTED_NATS_CALLOUT_PASSWORD
+  export OPENGENI_SELFHOSTED_NATS_CONTROL_USER
+  export OPENGENI_SELFHOSTED_NATS_CONTROL_PASSWORD
+  if [ "$generated_nats_env" = "1" ]; then
+    {
+      printf '\n%s\n' '# Generated by scripts/dev-stack.sh for local NATS auth-callout.'
+      printf 'OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_SEED=%s\n' "$OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_SEED"
+      printf 'OPENGENI_SELFHOSTED_NATS_CALLOUT_PUBLIC_KEY=%s\n' "$OPENGENI_SELFHOSTED_NATS_CALLOUT_PUBLIC_KEY"
+      printf 'OPENGENI_SELFHOSTED_NATS_CALLOUT_PASSWORD=%s\n' "$OPENGENI_SELFHOSTED_NATS_CALLOUT_PASSWORD"
+      printf 'OPENGENI_SELFHOSTED_NATS_CONTROL_PASSWORD=%s\n' "$OPENGENI_SELFHOSTED_NATS_CONTROL_PASSWORD"
+    } >>.env
+    echo "Generated and persisted the local NATS auth-callout identity in .env."
+  fi
+  OPENGENI_NATS_CONFIG_FILE="$(pwd)/.opengeni/nats-auth-callout.conf"
+  export OPENGENI_NATS_CONFIG_FILE
+  bun scripts/prepare-development-nats-config.ts --output "$OPENGENI_NATS_CONFIG_FILE" >/dev/null
+fi
+
 # Local editable-artifact authority uses a separately typed current-host bundle.
 # It is rebuilt only when its exact source/toolchain fingerprint or smoke receipt
 # changes. Production's complete eight-target locator remains untouched and a
@@ -611,12 +707,14 @@ fi
 {
   printf '%s\n' "# Generated by scripts/dev-stack.sh for worktree stack ${COMPOSE_PROJECT_NAME}. Do not commit."
   printf 'COMPOSE_PROJECT_NAME=%s\n' "${COMPOSE_PROJECT_NAME}"
+  printf 'OPENGENI_MODAL_APP_NAME=%s\n' "${OPENGENI_MODAL_APP_NAME:-opengeni-sandbox}"
   printf 'OPENGENI_DOCKER_NETWORK=%s\n' "${OPENGENI_DOCKER_NETWORK}"
   printf 'OPENGENI_DOCKER_IMAGE=%s\n' "${OPENGENI_DOCKER_IMAGE:-opengeni-sandbox:local}"
   printf 'OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED=%s\n' "${OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED:-false}"
   printf 'OPENGENI_POSTGRES_HOST_PORT=%s\n' "${OPENGENI_POSTGRES_HOST_PORT}"
   printf 'OPENGENI_NATS_HOST_PORT=%s\n' "${OPENGENI_NATS_HOST_PORT}"
   printf 'OPENGENI_NATS_MONITOR_HOST_PORT=%s\n' "${OPENGENI_NATS_MONITOR_HOST_PORT}"
+  printf 'OPENGENI_NATS_CONFIG_FILE=%s\n' "${OPENGENI_NATS_CONFIG_FILE:-$(pwd)/deploy/nats/local-development.conf}"
   printf 'OPENGENI_TEMPORAL_HOST_PORT=%s\n' "${OPENGENI_TEMPORAL_HOST_PORT}"
   printf 'OPENGENI_MINIO_HOST_PORT=%s\n' "${OPENGENI_MINIO_HOST_PORT}"
   printf 'OPENGENI_MINIO_CONSOLE_HOST_PORT=%s\n' "${OPENGENI_MINIO_CONSOLE_HOST_PORT}"
@@ -691,7 +789,7 @@ else
 fi
 
 if [ "$start_local_relay" = "1" ]; then
-  (cd agent && cargo run --quiet -p opengeni-relay) &
+  bash scripts/run-development-relay.sh &
   pids+=("$!")
 fi
 

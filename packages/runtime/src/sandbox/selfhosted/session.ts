@@ -260,6 +260,11 @@ export interface SelfhostedSessionDeps {
   agentId: string;
   controlRpc: ControlRpc;
   relay: SelfhostedRelayConfig;
+  /** Stable identity for the session's interactive terminal. Repeated stream
+   *  capability mints carrying this value reattach the existing PTY/channel
+   *  instead of spawning a replacement shell. Omitted preserves explicit
+   *  create-new semantics for non-viewer callers. */
+  terminalScopeId?: string;
   /** Op-stream exec transport (present = enabled; see SelfhostedOpStreamDeps). */
   opStream?: SelfhostedOpStreamDeps;
   /** The lease/active epoch this session is fenced under (echoed on every
@@ -359,6 +364,7 @@ export class SelfhostedSession {
   readonly agentId: string;
   private readonly controlRpc: ControlRpc;
   private readonly relay: SelfhostedRelayConfig;
+  private readonly terminalScopeId: string;
   private readonly epoch: number;
   private readonly timeoutMs: number;
   /** The exec process deadline (0 = none; omission is legacy embedding behavior). */
@@ -413,6 +419,7 @@ export class SelfhostedSession {
     this.agentId = deps.agentId;
     this.controlRpc = deps.controlRpc;
     this.relay = deps.relay;
+    this.terminalScopeId = deps.terminalScopeId ?? "";
     this.epoch = deps.epoch ?? 0;
     this.timeoutMs = deps.timeoutMs ?? SELFHOSTED_DEFAULT_TIMEOUT_MS;
     this.execTimeoutMs = deps.execTimeoutMs;
@@ -1114,10 +1121,11 @@ export class SelfhostedSession {
    * real relay tier (the byte pump) behind THIS seam.
    *
    * THE CHANNEL-KEY QUERY (the M8b relay-dial contract): the relay
-   * routes by `{workspaceId, agentId, port}` — the EXACT `ChannelKey::query` the
+   * routes by `{workspaceId, agentId, port, channelId}` — the EXACT `ChannelKey::query` the
    * agent's relay client (`opengeni-agent-stream`) appends when it registers the
-   * producer side: `ws=<workspaceId>&agent=<agentId>&port=<port>`. We append the
-   * agent-registered `channel=<channelId>` as a correlation hint. So the viewer
+   * producer side: `ws=<workspaceId>&agent=<agentId>&port=<port>&channel=<channelId>`.
+   * Channel id is routing identity, not a correlation hint, so concurrent PTYs
+   * on one connected machine never replace one another. The viewer
    * dials `wss://<relay>/stream?ws=&agent=&port=&channel=` and presents the minted
    * `ogs_` token in-band (NEVER as a URL param) — the relay pairs it with the
    * producer by the routing key.
@@ -1131,7 +1139,7 @@ export class SelfhostedSession {
     // EVERY port — that wrongly coupled the terminal to the desktop probe, so a
     // headless (or display-degraded) machine could never get a terminal even though
     // `ptyOpen` would have succeeded. The returned channelId is the relay
-    // correlation hint; both ops carry a `StreamChannel` on their response.
+    // routing identity; both ops carry a `StreamChannel` on their response.
     let channel: StreamChannel | undefined;
     if (port === DESKTOP_STREAM_PORT) {
       const result = await this.call({
@@ -1160,6 +1168,7 @@ export class SelfhostedSession {
           cols: 0,
           rows: 0,
           term: "xterm-256color",
+          scopeId: this.terminalScopeId,
         },
       });
       if (result.$case !== "ptyOpen") {
@@ -1173,7 +1182,7 @@ export class SelfhostedSession {
     const channelId = channelKey(this.workspaceId, this.agentId, port);
     const tls = this.relay.tls ?? true;
     // The routing key the relay pairs producer↔consumer by — IDENTICAL to the
-    // agent's `ChannelKey::query` — plus the channel-id correlation hint.
+    // agent's `ChannelKey::query`, including the stream-instance channel id.
     const routingQuery =
       `ws=${encodeURIComponent(this.workspaceId)}` +
       `&agent=${encodeURIComponent(this.agentId)}` +
@@ -1233,6 +1242,7 @@ export class SelfhostedSandboxClient {
   private readonly relay: SelfhostedRelayConfig;
   private readonly controlRpcFactory: () => ControlRpc;
   private readonly defaultAgentId: string | undefined;
+  private readonly terminalScopeId: string | undefined;
   private readonly epoch: number | undefined;
   private readonly timeoutMs: number | undefined;
   private readonly execTimeoutMs: number | undefined;
@@ -1251,6 +1261,8 @@ export class SelfhostedSandboxClient {
     /** The agentId a bare create()/resume() (no state) binds to. Optional: the
      *  resume path supplies it via deserializeSessionState. */
     agentId?: string;
+    /** Stable terminal identity (normally the durable OpenGeni session id). */
+    terminalScopeId?: string;
     epoch?: number;
     /** The control-op timeout threaded into every bound session. */
     timeoutMs?: number;
@@ -1279,6 +1291,7 @@ export class SelfhostedSandboxClient {
     this.relay = opts.relay;
     this.controlRpcFactory = opts.controlRpcFactory;
     this.defaultAgentId = opts.agentId;
+    this.terminalScopeId = opts.terminalScopeId;
     this.epoch = opts.epoch;
     this.timeoutMs = opts.timeoutMs;
     this.execTimeoutMs = opts.execTimeoutMs;
@@ -1302,6 +1315,7 @@ export class SelfhostedSandboxClient {
       agentId,
       controlRpc: this.controlRpc(),
       relay: this.relay,
+      ...(this.terminalScopeId !== undefined ? { terminalScopeId: this.terminalScopeId } : {}),
       ...(this.epoch !== undefined ? { epoch: this.epoch } : {}),
       ...(this.timeoutMs !== undefined ? { timeoutMs: this.timeoutMs } : {}),
       ...(this.execTimeoutMs !== undefined ? { execTimeoutMs: this.execTimeoutMs } : {}),
@@ -1375,6 +1389,8 @@ export interface SelfhostedSessionBuild {
   agentId: string;
   /** The relay-URL shape for stream endpoints. */
   relay: SelfhostedRelayConfig;
+  /** Stable terminal identity; normally the durable OpenGeni session id. */
+  terminalScopeId?: string;
   /** Lazily build the live ControlRpc (the request-scoped NATS connection). */
   controlRpcFactory: () => ControlRpc;
   /** The lease/active epoch the session is fenced under (echoed on every op). */
@@ -1423,6 +1439,7 @@ export async function buildSelfhostedBackendSession(
     controlRpcFactory: deps.controlRpcFactory,
     agentId: deps.agentId,
     epoch: deps.epoch,
+    ...(deps.terminalScopeId !== undefined ? { terminalScopeId: deps.terminalScopeId } : {}),
     ...(deps.timeoutMs !== undefined ? { timeoutMs: deps.timeoutMs } : {}),
     ...(deps.execTimeoutMs !== undefined ? { execTimeoutMs: deps.execTimeoutMs } : {}),
     ...(deps.onOp !== undefined ? { onOp: deps.onOp } : {}),

@@ -111,16 +111,15 @@ async fn metrics_handler(State(state): State<RelayState>) -> impl IntoResponse {
     )
 }
 
-/// The dial query (`?ws=&agent=&port=&channel=`). The relay routes by `{ws, agent,
-/// port}` (the [`ChannelKey`](opengeni_agent_stream::ChannelKey)); `channel` is the
-/// control-plane channel-id hint (carried for correlation, not routing).
+/// The dial query (`?ws=&agent=&port=&channel=`). All four coordinates form the
+/// routing key. `channel` distinguishes concurrent stream instances on the same
+/// machine and logical port.
 #[derive(Debug, serde::Deserialize)]
 pub(crate) struct DialQuery {
     pub ws: String,
     pub agent: String,
     pub port: u32,
-    #[serde(default)]
-    pub channel: Option<String>,
+    pub channel: String,
 }
 
 /// `GET /stream` — upgrade to a WebSocket then run the per-connection handshake +
@@ -228,7 +227,7 @@ pub(crate) mod conn {
         let conn_gen = attached.gen;
         tracing::debug!(
             ws = %query.ws, agent = %query.agent, port = query.port,
-            channel = query.channel.as_deref().unwrap_or(""), role = ?role,
+            channel = %query.channel, role = ?role,
             resume_from_seq, "relay channel attached"
         );
         if send_ack(ws_tx, true, attached.resume_from_seq, "")
@@ -361,6 +360,7 @@ pub(crate) mod conn {
         if channel.workspace_id != query.ws
             || channel.agent_id != query.agent
             || channel.port != query.port
+            || channel.channel_id != query.channel
         {
             return Err("channel key does not match the dial query".to_string());
         }
@@ -369,6 +369,7 @@ pub(crate) mod conn {
             workspace_id: channel.workspace_id.clone(),
             agent_id: channel.agent_id.clone(),
             port: channel.port,
+            channel_id: channel.channel_id.clone(),
         };
 
         let role = match v1::StreamRole::try_from(open.role).unwrap_or(v1::StreamRole::Unspecified)

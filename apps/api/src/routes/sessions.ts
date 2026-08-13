@@ -76,6 +76,7 @@ import {
   clearSessionGoal,
   clearSessionContext,
   getOpenPtySession,
+  getEnrollment,
   getRetainedProcess,
   getSandbox,
   getSession,
@@ -162,7 +163,12 @@ import {
   type ChannelAHandle,
   type ChannelAOperation,
 } from "../sandbox/channel-a";
-import { negotiateCapabilities } from "@opengeni/runtime/sandbox";
+import {
+  NatsControlRpc,
+  negotiateCapabilities,
+  negotiateSelfhostedCapabilities,
+  SelfhostedSession,
+} from "@opengeni/runtime/sandbox";
 import type { Context, Hono, MiddlewareHandler } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
@@ -215,6 +221,7 @@ import {
   sessionWithEffectiveToolPolicy,
   workspaceSessionToolPolicyDefaultServerIds,
   workspaceSessionToolPolicyServerIds,
+  relayConfigFromSettings,
 } from "@opengeni/core";
 import { assertSessionExists, boundedLimit } from "../http/common";
 import { sseSessionStream } from "../http/sse";
@@ -2208,6 +2215,15 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (!session) {
       throw new HTTPException(404, { message: "session not found" });
     }
+    // Capability truth follows the ACTIVE placement, not the session's managed
+    // home lease. A connected machine has no Modal group lease; treating that
+    // absence as `cold` makes the client suppress the very viewer attach that
+    // would mint its relay terminal/desktop cells. Resolve the active target once
+    // and use the selfhosted liveness probe when it is a connected machine.
+    const activeSandbox = session.activeSandboxId
+      ? await getSandbox(db, workspaceId, session.activeSandboxId)
+      : null;
+    const selfhostedActive = activeSandbox?.kind === "selfhosted";
     const lease = await readGroupLease(
       { db, settings },
       { workspaceId, sandboxGroupId: session.sandboxGroupId },
@@ -2231,36 +2247,64 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     // startup, port exposure, or short-lived bearer mint. Besides enforcing least
     // privilege, that keeps the 120-second stream credentials from aging before a
     // user opens their surface. POST /viewers is the sole credential grant.
-    const capabilities = negotiateCapabilities({
+    const commonNegotiation = {
       sessionId,
-      backend: session.sandboxBackend as SandboxBackend,
-      os: session.sandboxOs,
-      liveness: lease?.liveness ?? "cold",
-      leaseEpoch: lease?.leaseEpoch ?? 0,
-      workspaceGeneration: lease?.workspaceGeneration ?? null,
-      archiveGeneration: lease?.archiveGeneration ?? null,
-      archiveComplete: lease?.archiveComplete ?? false,
       desktopEnabled: settings.sandboxDesktopEnabled,
       // Human take-control: when the desktop is available + this policy is on
       // (default), the cell is mode "interactive" — the noVNC viewer drives :0
       // (x11vnc runs without -viewonly). Off → mode "read-only" (client disables
       // take-control). Independent of the agent's computerUseReadOnly.
       desktopInteractive: settings.sandboxDesktopInteractive,
-      // P4.3 computer-use: the agent drives :0 (xdotool/scrot); availability
+      // P4.3 computer-use: the agent drives the active display; availability
       // tracks the desktop tier + a desktop-capable backend.
       computerUseEnabled: settings.computerUseEnabled,
       computerUseReadOnly: settings.computerUseReadOnly,
-      // Graceful degrade (stream-token availability contract): if desktop is enabled but no stream-token
-      // secret is resolvable, the desktop cell reports transport:null rather
-      // than advertising a plane we can never authorize.
+      // Graceful degrade when scoped stream credentials cannot be minted.
       streamTokenSecretAvailable: !streamTokenDegraded(settings),
       desktopAcknowledged: acknowledged,
       shared,
       sharedSessionIds: visibleSharedSessionIds,
-      // Plane policy only. Live addresses are intentionally absent on a
-      // descriptor read and arrive from an authorized viewer grant.
       terminalEnabled: settings.sandboxTerminalEnabled,
-    });
+    } as const;
+
+    let capabilities;
+    if (selfhostedActive && activeSandbox.enrollmentId) {
+      const enrollment = await getEnrollment(db, workspaceId, activeSandbox.enrollmentId);
+      let probeResponded = false;
+      if (enrollment?.status === "active") {
+        const machine = new SelfhostedSession({
+          workspaceId,
+          agentId: enrollment.id,
+          controlRpc: new NatsControlRpc(async () => bus.getRequestConnection()),
+          relay: relayConfigFromSettings(settings),
+          epoch: session.activeEpoch,
+          timeoutMs: settings.sandboxSelfhostedControlTimeoutMs,
+        });
+        try {
+          probeResponded = await machine.ping();
+        } catch {
+          probeResponded = false;
+        }
+      }
+      capabilities = await negotiateSelfhostedCapabilities({
+        ...commonNegotiation,
+        os: enrollment?.os ?? session.sandboxOs,
+        leaseEpoch: session.activeEpoch,
+        enrollment,
+        probeResponded,
+      });
+    } else {
+      capabilities = negotiateCapabilities({
+        ...commonNegotiation,
+        backend: session.sandboxBackend as SandboxBackend,
+        os: session.sandboxOs,
+        liveness: lease?.liveness ?? "cold",
+        leaseEpoch: lease?.leaseEpoch ?? 0,
+        workspaceGeneration: lease?.workspaceGeneration ?? null,
+        archiveGeneration: lease?.archiveGeneration ?? null,
+        archiveComplete: lease?.archiveComplete ?? false,
+      });
+    }
 
     const repositoryRoots = [
       ...new Set(
@@ -2299,11 +2343,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       },
     };
     if (capabilities.DesktopStream.transport !== null) {
-      const activeSandbox = session.activeSandboxId
-        ? await getSandbox(db, workspaceId, session.activeSandboxId)
-        : null;
       const wire = resolveActiveDesktopTransport(
-        activeSandbox?.kind === "selfhosted",
+        selfhostedActive,
         settings.sandboxDesktopInteractive !== false,
       );
       responseCapabilities = {

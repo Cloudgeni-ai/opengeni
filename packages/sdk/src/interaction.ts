@@ -542,6 +542,7 @@ export type BrowserIdentity = {
   workspaceId: string;
   name: string;
   status: BrowserIdentityStatus;
+  version: number;
   defaultRevisionId: string | null;
   headGeneration: number;
   revisionCount: number;
@@ -563,6 +564,14 @@ export type BrowserRevisionListResponse = {
 export type CreateBrowserIdentityRequest = {
   operationId: string;
   name: string;
+};
+
+export type UpdateBrowserIdentityRequest = {
+  operationId: string;
+  expectedVersion: number;
+  name?: string | undefined;
+  status?: BrowserIdentityStatus | undefined;
+  defaultRevisionId?: string | undefined;
 };
 
 export type BrowserIdentityMutationResponse = {
@@ -1301,6 +1310,12 @@ export interface InteractionTransport {
     request: CreateBrowserIdentityRequest,
     options?: OpenGeniRequestOptions,
   ): Promise<BrowserIdentityMutationResponse>;
+  updateBrowserIdentity(
+    workspaceId: string,
+    identityId: string,
+    request: UpdateBrowserIdentityRequest,
+    options?: OpenGeniRequestOptions,
+  ): Promise<BrowserIdentityMutationResponse>;
   listBrowserRevisions(
     workspaceId: string,
     identityId: string,
@@ -1913,6 +1928,13 @@ export class BrowserIdentityResource {
 
   async revisions(options: OpenGeniRequestOptions = {}): Promise<BrowserRevisionListResponse> {
     return await this.transport.listBrowserRevisions(this.workspaceId, this.id, options);
+  }
+
+  async update(
+    request: UpdateBrowserIdentityRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserIdentityMutationResponse> {
+    return await this.transport.updateBrowserIdentity(this.workspaceId, this.id, request, options);
   }
 }
 

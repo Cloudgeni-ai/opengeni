@@ -335,7 +335,7 @@ export async function provisionBrowserControlClient(
   session: BrowserControlPlacementSession,
   input: ProvisionBrowserControlClientInput,
 ): Promise<ProvisionBrowserControlClientResult> {
-  requirePlacementRequestSurface(session);
+  requirePlacementProvisioningSurface(session);
   const adminToken = requireToken(input.adminToken, "browser controller admin token");
   if (session.ensureBrowserControl) {
     if (!input.nativeAuthority) {
@@ -693,6 +693,13 @@ export class BrowserControlClient {
   async frameStreamUrl(
     reference: PlacementBrowserSessionReference,
     targetId: string,
+    stream: {
+      format?: "jpeg" | "png" | undefined;
+      quality?: number | undefined;
+      maxWidth?: number | undefined;
+      maxHeight?: number | undefined;
+      everyNthFrame?: number | undefined;
+    } = {},
   ): Promise<string> {
     const binding = parseReference(reference);
     if (!this.session.resolveExposedPort) {
@@ -708,12 +715,19 @@ export class BrowserControlClient {
       );
     }
     const path = `/v1/browser-sessions/${binding.browserSessionId}/targets/${encodeURIComponent(requireOpaqueId(targetId, "target id"))}/frames`;
-    return buildStreamUrl({ ...endpoint, path });
+    return frameStreamUrlWithOptions(buildStreamUrl({ ...endpoint, path }), stream);
   }
 
   async computerFrameStreamUrl(
     reference: PlacementComputerSessionReference,
     targetId: string,
+    stream: {
+      format?: "jpeg" | "png" | undefined;
+      quality?: number | undefined;
+      maxWidth?: number | undefined;
+      maxHeight?: number | undefined;
+      everyNthFrame?: number | undefined;
+    } = {},
   ): Promise<string> {
     const binding = parseComputerReference(reference);
     if (!this.session.resolveExposedPort) {
@@ -728,7 +742,7 @@ export class BrowserControlClient {
       );
     }
     const path = `/v1/computer-sessions/${binding.computerSessionId}/targets/${encodeURIComponent(requireOpaqueId(targetId, "computer target id"))}/frames`;
-    return buildStreamUrl({ ...endpoint, path });
+    return frameStreamUrlWithOptions(buildStreamUrl({ ...endpoint, path }), stream);
   }
 
   async computerRfbStreamUrl(
@@ -890,6 +904,12 @@ export class BrowserControlClient {
           error instanceof RangeError
         ) {
           throw error;
+        }
+        if (!this.session.exec && !this.session.execCommand) {
+          throw new BrowserControlTransportError(
+            "cached browser controller endpoint is temporarily unavailable",
+            { cause: error },
+          );
         }
         // Port discovery or its transport can fail transiently. The existing
         // idempotent operation journal makes the private exec fallback safe even
@@ -1898,7 +1918,7 @@ function sha256(value: unknown, label: string): string {
   return value;
 }
 
-function requirePlacementRequestSurface(session: BrowserControlPlacementSession): void {
+function requirePlacementProvisioningSurface(session: BrowserControlPlacementSession): void {
   const hasPrivateWrite =
     typeof session.writePlacementPrivate === "function" ||
     typeof session.writeFile === "function" ||
@@ -1910,6 +1930,19 @@ function requirePlacementRequestSurface(session: BrowserControlPlacementSession)
   ) {
     throw new BrowserControlUnsupportedError(
       "browser placement requires exec and a private file transport",
+    );
+  }
+}
+
+function requirePlacementRequestSurface(session: BrowserControlPlacementSession): void {
+  const hasExec = typeof session.exec === "function" || typeof session.execCommand === "function";
+  const hasPrivateWrite =
+    typeof session.writePlacementPrivate === "function" ||
+    typeof session.writeFile === "function" ||
+    (hasExec && typeof session.writeStdin === "function");
+  if (typeof session.resolveExposedPort !== "function" && (!hasExec || !hasPrivateWrite)) {
+    throw new BrowserControlUnsupportedError(
+      "browser placement requires a controller endpoint or exec and a private file transport",
     );
   }
 }
@@ -2317,6 +2350,45 @@ function boundedInteger(value: number, minimum: number, maximum: number, label: 
     throw new RangeError(`${label} is invalid`);
   }
   return value;
+}
+
+function frameStreamUrlWithOptions(
+  value: string,
+  stream: {
+    format?: "jpeg" | "png" | undefined;
+    quality?: number | undefined;
+    maxWidth?: number | undefined;
+    maxHeight?: number | undefined;
+    everyNthFrame?: number | undefined;
+  },
+): string {
+  const url = new URL(value);
+  if (stream.format !== undefined) url.searchParams.set("format", stream.format);
+  if (stream.quality !== undefined) {
+    url.searchParams.set(
+      "quality",
+      String(boundedInteger(stream.quality, 1, 100, "browser frame quality")),
+    );
+  }
+  if (stream.maxWidth !== undefined) {
+    url.searchParams.set(
+      "maxWidth",
+      String(boundedInteger(stream.maxWidth, 1, 4_096, "browser frame width")),
+    );
+  }
+  if (stream.maxHeight !== undefined) {
+    url.searchParams.set(
+      "maxHeight",
+      String(boundedInteger(stream.maxHeight, 1, 4_096, "browser frame height")),
+    );
+  }
+  if (stream.everyNthFrame !== undefined) {
+    url.searchParams.set(
+      "everyNthFrame",
+      String(boundedInteger(stream.everyNthFrame, 1, 60, "browser frame sampling interval")),
+    );
+  }
+  return url.toString();
 }
 
 function boundedTimeout(value: number): number {

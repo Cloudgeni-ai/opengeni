@@ -14,8 +14,13 @@ const SECRET_NAME = "acr-credentials-gecko";
 
 /** A fake modal module capturing the fromRegistry(tag, secret) call shape. */
 function fakeModal() {
-  const fakeImage = { imageId: "im-fake", objectId: "im-fake" };
+  const builtImage = { imageId: "im-built", objectId: "im-built" };
+  const build = mock(async (_app: unknown) => builtImage);
+  const dockerfileCommands = mock((_commands: string[], _params?: unknown) => fakeImage);
+  const fakeImage = { imageId: "", objectId: "", build, dockerfileCommands };
   const fromRegistry = mock((_tag: string, _secret: unknown) => fakeImage);
+  const app = { appId: "ap-fake" };
+  const appFromName = mock(async (_name: string, _params?: unknown) => app);
   const clientOptions: unknown[] = [];
   // The Secret is resolved via the AUTHENTICATED client (client.secrets.fromName),
   // never the static modal.Secret.fromName (which uses getDefaultClient).
@@ -27,13 +32,25 @@ function fakeModal() {
       ModalClient: class {
         images = { fromRegistry };
         secrets = { fromName: secretFromName };
+        apps = { fromName: appFromName };
 
         constructor(options: unknown) {
           clientOptions.push(options);
         }
       },
     }) as unknown as Awaited<ReturnType<ModalModuleLoader>>;
-  return { loadModal, fromRegistry, secretFromName, clientOptions, fakeImage };
+  return {
+    loadModal,
+    fromRegistry,
+    secretFromName,
+    appFromName,
+    build,
+    dockerfileCommands,
+    clientOptions,
+    fakeImage,
+    builtImage,
+    app,
+  };
 }
 
 afterEach(() => {
@@ -83,7 +100,17 @@ describe("resolveModalImageSelector", () => {
       modalImageRegistrySecret: SECRET_NAME,
       modalEnvironment: "main",
     });
-    const { loadModal, fromRegistry, secretFromName, clientOptions, fakeImage } = fakeModal();
+    const {
+      loadModal,
+      fromRegistry,
+      secretFromName,
+      appFromName,
+      build,
+      dockerfileCommands,
+      clientOptions,
+      builtImage,
+      app,
+    } = fakeModal();
 
     await ensureModalRegistryImage(settings, loadModal);
 
@@ -101,10 +128,23 @@ describe("resolveModalImageSelector", () => {
     expect(fromRegistry).toHaveBeenCalledTimes(1);
     expect(fromRegistry.mock.calls[0]?.[0]).toBe(IMAGE_REF);
     expect(fromRegistry.mock.calls[0]?.[1]).toEqual({ secretId: "sec-fake" });
+    expect(appFromName).toHaveBeenCalledTimes(1);
+    expect(appFromName.mock.calls[0]?.[0]).toBe(settings.modalAppName);
+    expect(appFromName.mock.calls[0]?.[1]).toEqual({
+      environment: "main",
+      createIfMissing: true,
+    });
+    expect(build).toHaveBeenCalledTimes(1);
+    expect(build.mock.calls[0]?.[0]).toBe(app);
+    expect(dockerfileCommands).toHaveBeenCalledTimes(1);
+    expect(dockerfileCommands.mock.calls[0]).toEqual([
+      ["LABEL io.opengeni.registry-import=authenticated"],
+      {},
+    ]);
 
     const selector = resolveModalImageSelector(settings);
     expect(selector?.kind).toBe("image");
-    expect(selector?.value).toBe(fakeImage);
+    expect(selector?.value).toBe(builtImage);
   });
 });
 
@@ -155,6 +195,31 @@ describe("ensureModalRegistryImage", () => {
     await ensureModalRegistryImage(settings, loadModal);
     await ensureModalRegistryImage(settings, loadModal);
     expect(fromRegistry).toHaveBeenCalledTimes(1);
+  });
+
+  test("retries one sticky failed registry import with Modal force-build", async () => {
+    const settings = testSettings({
+      sandboxBackend: "modal",
+      modalImageRef: IMAGE_REF,
+      modalImageRegistrySecret: SECRET_NAME,
+    });
+    const fixture = fakeModal();
+    fixture.build.mockImplementationOnce(async () => {
+      throw new Error("cached provider image failure");
+    });
+
+    await ensureModalRegistryImage(settings, fixture.loadModal);
+
+    expect(fixture.fromRegistry).toHaveBeenCalledTimes(2);
+    expect(fixture.build).toHaveBeenCalledTimes(2);
+    expect(fixture.dockerfileCommands.mock.calls[0]).toEqual([
+      ["LABEL io.opengeni.registry-import=authenticated"],
+      {},
+    ]);
+    expect(fixture.dockerfileCommands.mock.calls[1]).toEqual([
+      ["LABEL io.opengeni.registry-import=authenticated"],
+      { forceBuild: true },
+    ]);
   });
 });
 

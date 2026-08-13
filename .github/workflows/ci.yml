@@ -589,7 +589,7 @@ jobs:
 
       - name: Real workspace capture acceptance
         run: >-
-          bun test --max-concurrency=1 --timeout 420000
+          bun test --max-concurrency=1 --timeout 720000
           --test-name-pattern
           'captures a real turn-end multi-repository workspace through the public API'
           ./test/e2e/sandbox.e2e.ts

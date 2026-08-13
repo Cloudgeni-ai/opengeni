@@ -81,7 +81,7 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
   async listTargets(): Promise<ComputerTargetValue[]> {
     this.assertOpen();
     try {
-      return (await (await this.activeClient()).targets()).map((target) =>
+      return (await this.readWithRecovery(async (client) => await client.targets())).map((target) =>
         this.projectTarget(target),
       );
     } catch (error) {
@@ -96,7 +96,9 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
   async observe(targetId: string): Promise<ComputerObservationValue> {
     this.assertOpen();
     try {
-      return this.projectObservation(await (await this.activeClient()).observe(targetId));
+      return this.projectObservation(
+        await this.readWithRecovery(async (client) => await client.observe(targetId)),
+      );
     } catch (error) {
       throw predispatchError(error);
     }
@@ -111,12 +113,11 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
     }
   }
 
-  async dispatch(command: ComputerActionCommand): Promise<ComputerObservationValue> {
+  async dispatch(command: ComputerActionCommand): Promise<ComputerObservationValue | null> {
     this.assertOpen();
     try {
-      return this.projectObservation(
-        await (await this.activeClient()).dispatch(nativeCommand(command)),
-      );
+      const observation = await (await this.activeClient()).dispatch(nativeCommand(command));
+      return observation === null ? null : this.projectObservation(observation);
     } catch (error) {
       if (error instanceof NativeComputerError && !error.dispatched) {
         throw new InteractionDefiniteDriverError(
@@ -132,7 +133,10 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
   async capture(targetId: string): Promise<ComputerImageFrame> {
     this.assertOpen();
     try {
-      return this.projectFrame(await (await this.activeClient()).capture(targetId), 0);
+      return this.projectFrame(
+        await this.readWithRecovery(async (client) => await client.capture(targetId)),
+        0,
+      );
     } catch (error) {
       throw predispatchError(error);
     }
@@ -144,7 +148,7 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
       return ComputerClipboard.parse({
         computerSessionId: this.computerSessionId,
         controllerGeneration: this.controllerGeneration,
-        ...(await (await this.activeClient()).clipboard()),
+        ...(await this.readWithRecovery(async (client) => await client.clipboard())),
         observedAt: this.now().toISOString(),
       });
     } catch (error) {
@@ -200,12 +204,23 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    const subscriptions = [...this.frameStreams.values()].flatMap((stream) => {
+    const streams = [...this.frameStreams.values()];
+    const subscriptions = streams.flatMap((stream) => {
       stream.stopped = true;
       return [...stream.subscriptions.values()];
     });
     this.frameStreams.clear();
     await Promise.allSettled(subscriptions.map(async (subscription) => await subscription.close()));
+    // Let each producer observe `stopped` and send its explicit StopCapture
+    // request before closing the native RPC pipe. Otherwise the helper retains
+    // ScreenCaptureKit streams during EOF teardown, forcing the client through
+    // its kill timeout and making an ordinary ComputerSession end exceed the
+    // placement gateway deadline.
+    await Promise.allSettled(
+      streams.map(async (stream) => {
+        if (stream.done) await stream.done;
+      }),
+    );
     await this.recovery?.catch(() => undefined);
     await this.client.close();
   }
@@ -332,6 +347,22 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
     if (this.recovery) await this.recovery;
     this.assertOpen();
     return this.client;
+  }
+
+  private async readWithRecovery<T>(
+    operation: (client: ComputerNativeTransport) => Promise<T>,
+  ): Promise<T> {
+    const client = await this.activeClient();
+    try {
+      return await operation(client);
+    } catch (error) {
+      // Typed adapter failures describe the OS operation and leave the helper
+      // healthy. Everything else is a helper transport/protocol failure. Reads
+      // are side-effect-free, so replace the poisoned process once and retry.
+      if (error instanceof NativeComputerError) throw error;
+      const replacement = await this.recoverClient(client);
+      return await operation(replacement);
+    }
   }
 
   private async recoverClient(

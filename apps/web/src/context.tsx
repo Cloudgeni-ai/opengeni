@@ -1440,7 +1440,9 @@ export function RootRouteComponent() {
       ) : (
         <AppContext.Provider value={appContext}>
           <Outlet />
-          {import.meta.env.DEV ? <TanStackRouterDevtools position="bottom-right" /> : null}
+          {import.meta.env.DEV && import.meta.env.VITE_OPENGENI_ROUTER_DEVTOOLS === "true" ? (
+            <TanStackRouterDevtools position="bottom-right" />
+          ) : null}
         </AppContext.Provider>
       )}
     </main>

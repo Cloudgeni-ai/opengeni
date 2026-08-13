@@ -132,6 +132,12 @@ export { streamWorkspaceControlEvents } from "./workspace-control-stream";
 export type { WorkspaceControlStreamTransport } from "./workspace-control-stream";
 export { streamWorkspaceInteractionRevisions } from "./interaction-revision-stream";
 export type { WorkspaceInteractionRevisionStreamTransport } from "./interaction-revision-stream";
+export { parseWorkspaceLiveEvent, streamWorkspaceLiveEvents } from "./workspace-live-stream";
+export type {
+  WorkspaceLiveEvent,
+  WorkspaceLiveStreamOptions,
+  WorkspaceLiveStreamTransport,
+} from "./workspace-live-stream";
 export type {
   CreateWorkspaceArtifactRequest,
   PublishWorkspaceArtifactVersionRequest,

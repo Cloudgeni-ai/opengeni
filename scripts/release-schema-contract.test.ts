@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { buildSchemaContract } from "./release-schema-contract";
@@ -110,12 +110,26 @@ describe("release schema contract", () => {
   });
 
   test("preserves published host-export history and appends the forward repair", async () => {
-    const sourceContract = await buildSchemaContract();
+    const completeSourceContract = await buildSchemaContract();
+    const transitionReaper = completeSourceContract.migrations.find(
+      (migration) => migration.path === "0237_interaction_transition_reaper.sql",
+    );
+    const sourceContract = transitionReaper
+      ? await contractWithoutMigration(transitionReaper.path)
+      : completeSourceContract;
+    if (transitionReaper) {
+      expect(transitionReaper).toMatchObject({ deploymentMode: "maintenance" });
+    }
     const migrations = new Map(
       sourceContract.migrations.map((migration) => [migration.path, migration]),
     );
     const sessionVisibilityContractHash = (includesActivation: boolean): string | null => {
       if (!migrations.has("0236_session_visibility_slack_policy.sql")) return null;
+      if (migrations.has("0228_interaction_controller_data_plane.sql")) {
+        return includesActivation
+          ? "cd849d761b5d79454d213a3c26d5d20ab0906db3ba1462866dfa7893f2ff417b"
+          : "71ec3a7b1a61c681eba76d88d22dae8e1f3c3d1f194f1732e1b5ba4ffe703238";
+      }
       if (migrations.has("0229_slack_inbox_file_fact.sql")) {
         return includesActivation
           ? "b681853738c32371ca30328ccc1c3ceb9d8e767f84855f82d6abba334a62f38d"
@@ -395,12 +409,14 @@ describe("release schema contract", () => {
         (migrations.has("0226_personal_codex_authority_foundation.sql") ? 1 : 0) +
         (migrations.has("0227_slack_native_actions.sql") ? 1 : 0) +
         (migrations.has("0228_slack_task_policy.sql") ? 1 : 0) +
+        (migrations.has("0228_interaction_controller_data_plane.sql") ? 1 : 0) +
         (migrations.has("0229_slack_inbox_file_fact.sql") ? 1 : 0) +
         (migrations.has("0231_integration_definition_identity_cutover.sql") ? 1 : 0) +
         (migrations.has("0232_integration_facet_authority_cutover.sql") ? 1 : 0) +
         (migrations.has("0233_skill_and_integration_authority_cutover.sql") ? 1 : 0) +
         (migrations.has("0234_xai_subscription_authority.sql") ? 1 : 0) +
         (migrations.has("0235_canonical_human_login_bindings.sql") ? 1 : 0) +
+        (migrations.has("0236_browser_identity_lifecycle.sql") ? 1 : 0) +
         (migrations.has("0225_session_visibility_fork_activation.sql") ? 1 : 0) +
         (migrations.has("0236_session_visibility_slack_policy.sql") ? 1 : 0),
     );
@@ -1046,6 +1062,17 @@ describe("release schema contract", () => {
     });
   });
 });
+
+async function contractWithoutMigration(excludedPath: string) {
+  const source = join(import.meta.dir, "../packages/db/drizzle");
+  const directory = await mkdtemp(join(tmpdir(), "opengeni-schema-contract-filtered-"));
+  directories.push(directory);
+  for (const entry of await readdir(source, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith(".sql") || entry.name === excludedPath) continue;
+    await copyFile(join(source, entry.name), join(directory, entry.name));
+  }
+  return await buildSchemaContract(directory);
+}
 
 async function fixture(files: Array<[string, string]>): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "opengeni-schema-contract-"));

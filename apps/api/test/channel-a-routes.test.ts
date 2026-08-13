@@ -8,6 +8,7 @@ import {
   ChannelAConflictError,
   ChannelAUnavailableError,
   ChannelAValidationError,
+  BrowserControlTransportError,
 } from "@opengeni/runtime/sandbox";
 import {
   channelAOperationFailureDiagnostic,
@@ -366,6 +367,28 @@ describe("P4.4 Channel-A route discipline", () => {
     );
     expect(value).toBe("fresh");
     expect(order).toEqual(["run:1", "refresh:1", "run:2", "refresh:2", "run:3"]);
+  });
+
+  test("an explicitly replay-safe controller transport failure rebuilds the provider handle", async () => {
+    let calls = 0;
+    const refreshes: number[] = [];
+    const value = await runChannelAReadWithFreshHandleRetry(
+      async () => {
+        calls += 1;
+        if (calls === 1) throw new BrowserControlTransportError("controller route rotated");
+        return "recovered";
+      },
+      async (attempt) => {
+        refreshes.push(attempt);
+      },
+      {
+        maxFreshHandleRetries: 2,
+        retryableError: (error) => error instanceof BrowserControlTransportError,
+      },
+    );
+    expect(value).toBe("recovered");
+    expect(calls).toBe(2);
+    expect(refreshes).toEqual([1]);
   });
 
   test("provider-neutral recovery defaults to one retry and never replays non-transient errors", async () => {

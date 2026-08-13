@@ -587,6 +587,13 @@ describe("BrowserSession SDK", () => {
         if (url.endsWith("/browser-identities") && method === "POST") {
           return json({ identity, operationId, replayed: false }, 201);
         }
+        if (url.endsWith(`/browser-identities/${BROWSER_IDENTITY_ID}`) && method === "PATCH") {
+          return json({
+            identity: { ...identity, status: "archived", version: identity.version + 1 },
+            operationId,
+            replayed: false,
+          });
+        }
         if (url.endsWith(`/browser-identities/${BROWSER_IDENTITY_ID}/revisions`)) {
           return json({ identity, revisions: [revision] });
         }
@@ -620,6 +627,15 @@ describe("BrowserSession SDK", () => {
     });
     expect(await resource.get()).toEqual(identity);
     expect((await resource.revisions()).revisions).toEqual([revision]);
+    expect(
+      (
+        await resource.update({
+          operationId,
+          expectedVersion: identity.version,
+          status: "archived",
+        })
+      ).identity.status,
+    ).toBe("archived");
     const published = await client.interaction.browsers
       .session(WORKSPACE_ID, BROWSER_SESSION_ID)
       .publishRevision({
@@ -628,12 +644,29 @@ describe("BrowserSession SDK", () => {
         expectedHeadGeneration: 0,
       });
     expect(published.revision).toEqual(revision);
+    expect(calls).toContainEqual({
+      url: `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/browser-identities/${BROWSER_IDENTITY_ID}`,
+      method: "PATCH",
+      body: {
+        operationId,
+        expectedVersion: identity.version,
+        status: "archived",
+      },
+    });
     expect(JSON.stringify(published)).not.toContain("objectKey");
     expect(calls.map(({ method, body }) => ({ method, body }))).toEqual([
       { method: "GET", body: null },
       { method: "POST", body: { operationId, name: identity.name } },
       { method: "GET", body: null },
       { method: "GET", body: null },
+      {
+        method: "PATCH",
+        body: {
+          operationId,
+          expectedVersion: identity.version,
+          status: "archived",
+        },
+      },
       {
         method: "POST",
         body: {
@@ -1224,6 +1257,7 @@ function browserIdentity(): BrowserIdentity {
     workspaceId: WORKSPACE_ID,
     name: "Signed in work",
     status: "active",
+    version: 1,
     defaultRevisionId: null,
     headGeneration: 0,
     revisionCount: 0,

@@ -121,7 +121,7 @@ export interface ComputerNativeTransport {
   stopCapture(targetId: string): Promise<void>;
   clipboard(): Promise<NativeComputerClipboard>;
   validate(command: NativeComputerActionCommand): Promise<void>;
-  dispatch(command: NativeComputerActionCommand): Promise<NativeComputerObservation>;
+  dispatch(command: NativeComputerActionCommand): Promise<NativeComputerObservation | null>;
   close(): Promise<void>;
 }
 
@@ -264,8 +264,13 @@ export class ComputerNativeClient implements ComputerNativeTransport {
     );
   }
 
-  async dispatch(command: NativeComputerActionCommand): Promise<NativeComputerObservation> {
-    return await this.request("dispatch", { command }, parseObservation, this.requestTimeoutMs);
+  async dispatch(command: NativeComputerActionCommand): Promise<NativeComputerObservation | null> {
+    return await this.request(
+      "dispatch",
+      { command },
+      (value) => (value === null ? null : parseObservation(value)),
+      this.requestTimeoutMs,
+    );
   }
 
   async close(): Promise<void> {

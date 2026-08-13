@@ -1,3 +1,6 @@
+import { createReadStream } from "node:fs";
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
 import { stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { BROWSER_STATE_ARTIFACT_CONTENT_TYPE } from "@opengeni/contracts";
@@ -29,42 +32,74 @@ export class BrowserStateUploadError extends Error {
 export async function uploadBrowserStateArtifact(
   artifactPathInput: string,
   authorityInput: BrowserStateUploadAuthority,
-  options: { timeoutMs?: number; fetch?: typeof fetch; now?: () => Date } = {},
+  options: { timeoutMs?: number; now?: () => Date } = {},
 ): Promise<void> {
   const artifactPath = resolve(artifactPathInput);
   const authority = validateUploadAuthority(authorityInput, options.now?.() ?? new Date());
   const info = await stat(artifactPath);
   if (!info.isFile() || info.size < 1) throw new Error("browser state artifact is unavailable");
   const timeoutMs = boundedTimeout(options.timeoutMs ?? DEFAULT_UPLOAD_TIMEOUT_MS);
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  timer.unref?.();
+  let status: number;
   try {
-    let response: Response;
-    try {
-      response = await (options.fetch ?? fetch)(authority.url, {
-        method: "PUT",
-        headers: authority.requiredHeaders,
-        body: Bun.file(artifactPath),
-        redirect: "error",
-        signal: controller.signal,
-      });
-    } catch {
-      throw new BrowserStateUploadError(
-        "browser state upload outcome is unknown after transport failure",
-        true,
-      );
-    }
-    await response.body?.cancel().catch(() => undefined);
-    if (!response.ok) {
-      throw new BrowserStateUploadError(
-        `browser state upload outcome is unknown after storage returned HTTP ${response.status}`,
-        true,
-      );
-    }
-  } finally {
-    clearTimeout(timer);
+    status = await putArtifact(authority, artifactPath, info.size, timeoutMs);
+  } catch {
+    throw new BrowserStateUploadError(
+      "browser state upload outcome is unknown after transport failure",
+      true,
+    );
   }
+  if (status < 200 || status >= 300) {
+    throw new BrowserStateUploadError(
+      `browser state upload outcome is unknown after storage returned HTTP ${status}`,
+      true,
+    );
+  }
+}
+
+/**
+ * Stream the artifact without Bun fetch. Bun 1.3.14 on Linux can segfault after
+ * a successful streamed PUT, including when the empty response body is never
+ * read. Node's request stream is stable on the same runtime and gives us the
+ * only response field this presigned-object contract needs: the status code.
+ */
+function putArtifact(
+  authority: BrowserStateUploadAuthority,
+  artifactPath: string,
+  sizeBytes: number,
+  timeoutMs: number,
+): Promise<number> {
+  const url = new URL(authority.url);
+  const request = url.protocol === "https:" ? httpsRequest : httpRequest;
+  return new Promise((resolvePromise, rejectPromise) => {
+    let settled = false;
+    const settle = (result: { status?: number; error?: Error }) => {
+      if (settled) return;
+      settled = true;
+      if (result.error) rejectPromise(result.error);
+      else resolvePromise(result.status!);
+    };
+    const outgoing = request(url, {
+      method: "PUT",
+      headers: {
+        ...authority.requiredHeaders,
+        "content-length": String(sizeBytes),
+      },
+    });
+    outgoing.setTimeout(timeoutMs, () => {
+      outgoing.destroy(new Error("browser state upload timed out"));
+    });
+    outgoing.once("response", (response) => {
+      const status = response.statusCode;
+      response.destroy();
+      if (status === undefined) settle({ error: new Error("storage response has no status") });
+      else settle({ status });
+    });
+    outgoing.once("error", (error) => settle({ error }));
+
+    const artifact = createReadStream(artifactPath);
+    artifact.once("error", (error) => outgoing.destroy(error));
+    artifact.pipe(outgoing);
+  });
 }
 
 export function validateUploadAuthority(

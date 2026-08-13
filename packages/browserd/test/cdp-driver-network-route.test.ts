@@ -159,7 +159,8 @@ test("installs route emulation on about:blank before the first external navigati
   try {
     const observation = await driver.start(destination);
     expect(observation.target.url).toBe(destination);
-    expect(runnerCalls[0]).toEqual(["open"]);
+    expect(runnerCalls[0]).toEqual(["get", "cdp-url"]);
+    expect(runnerCalls.some((call) => call[0] === "open")).toBe(false);
     await driver.selectTarget("target-1");
     expect((await driver.openTarget()).target.id).toBe("target-2");
     expect(cdpCalls.some((call) => call.method === "Target.activateTarget")).toBe(false);
@@ -368,8 +369,31 @@ test("settles a headed background target before returning its first observation"
         height: 2,
       },
     });
+    const compactFrames = await driver.subscribeFrames(opened.target.id, {
+      format: "jpeg",
+      quality: 55,
+      maxWidth: 320,
+      maxHeight: 240,
+      everyNthFrame: 2,
+    });
+    const compactStreamed = await compactFrames[Symbol.asyncIterator]().next();
+    expect(compactStreamed).toMatchObject({
+      done: false,
+      value: {
+        targetId: "target-2",
+        sequence: 1,
+        width: 3,
+        height: 2,
+      },
+    });
+    const captureQualities = calls
+      .filter((call) => call.method === "Page.captureScreenshot")
+      .map((call) => call.params?.quality);
+    expect(captureQualities).toContain(70);
+    expect(captureQualities).toContain(55);
     expect(calls.some((call) => call.method === "Page.captureScreenshot")).toBe(true);
     await frames.close();
+    await compactFrames.close();
   } finally {
     await driver.close();
   }

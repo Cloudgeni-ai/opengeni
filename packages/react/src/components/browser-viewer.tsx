@@ -8,6 +8,7 @@ import type {
   BrowserFrame,
   BrowserIdentity,
   BrowserObservation,
+  BrowserRevision,
   BrowserSession,
   BrowserTarget,
   ComputerSession,
@@ -17,6 +18,8 @@ import type {
 } from "@opengeni/sdk/interaction";
 import {
   BugIcon,
+  ArchiveIcon,
+  CheckIcon,
   ChevronDownIcon,
   CircleAlertIcon,
   DownloadIcon,
@@ -26,6 +29,7 @@ import {
   MonitorIcon,
   PlusIcon,
   RefreshCwIcon,
+  RotateCcwIcon,
   SaveIcon,
   UserRoundIcon,
   XIcon,
@@ -61,6 +65,7 @@ import { cn } from "../lib/cn";
 import { copyTextToClipboard } from "../lib/clipboard";
 import { formatBytes } from "../lib/format";
 import type { EmbeddedBrowserInteractionClientOverride } from "../session-context";
+import { browserKey } from "./browser-input";
 import { InteractionInterventionBanner } from "./interaction-intervention-banner";
 
 export type BrowserViewerNotification = {
@@ -133,7 +138,11 @@ export function BrowserViewer({
 }: BrowserViewerProps) {
   const registry = useBrowserSessions({ ...override, sessionId, enabled });
   const attached = useAttachedBrowsers({ ...override, enabled });
-  const profiles = useBrowserIdentities({ ...override, enabled });
+  const profiles = useBrowserIdentities({ ...override, enabled, includeArchived: true });
+  const activeProfiles = useMemo(
+    () => profiles.identities.filter((identity) => identity.status === "active"),
+    [profiles.identities],
+  );
   const createRegistryBrowser = registry.create;
   const loadProfileRevisions = profiles.revisions;
   const liveSessions = useMemo(
@@ -153,6 +162,11 @@ export function BrowserViewer({
   const [creating, setCreating] = useState(false);
   const [savingProfile, setSavingProfile] = useState(false);
   const [baseRevisionOrdinal, setBaseRevisionOrdinal] = useState<number | null>(null);
+  const [profileHistory, setProfileHistory] = useState<{
+    identityId: string;
+    loading: boolean;
+    revisions: BrowserRevision[];
+  } | null>(null);
   const [resumeAttempt, setResumeAttempt] = useState<{
     sessionId: string;
     attempt: BrowserResumeAttempt;
@@ -417,21 +431,28 @@ export function BrowserViewer({
   useEffect(() => {
     const identityId = browser.session?.identityId ?? selectedRegistrySession?.identityId;
     const revisionId = browser.session?.baseRevisionId ?? selectedRegistrySession?.baseRevisionId;
-    if (!identityId || !revisionId) {
+    if (!identityId) {
       setBaseRevisionOrdinal(null);
+      setProfileHistory(null);
       return;
     }
     let disposed = false;
     setBaseRevisionOrdinal(null);
+    setProfileHistory({ identityId, loading: true, revisions: [] });
     void loadProfileRevisions(identityId)
       .then((response) => {
         if (!disposed) {
           setBaseRevisionOrdinal(
-            response.revisions.find((revision) => revision.id === revisionId)?.ordinal ?? null,
+            revisionId
+              ? (response.revisions.find((revision) => revision.id === revisionId)?.ordinal ?? null)
+              : null,
           );
+          setProfileHistory({ identityId, loading: false, revisions: response.revisions });
         }
       })
-      .catch(() => undefined);
+      .catch(() => {
+        if (!disposed) setProfileHistory({ identityId, loading: false, revisions: [] });
+      });
     return () => {
       disposed = true;
     };
@@ -448,19 +469,28 @@ export function BrowserViewer({
       if (creating) return;
       const identity =
         choice.kind === "profile"
-          ? profiles.identities.find((candidate) => candidate.id === choice.identityId)
+          ? activeProfiles.find((candidate) => candidate.id === choice.identityId)
           : null;
       const device = choice.kind === "attached" ? choice.device : null;
       const browserName =
         device?.profileLabel ?? device?.name ?? (identity ? `${identity.name} browser` : "Browser");
       setCreating(true);
       void (async () => {
-        const linkedComputer = createLinkedComputer
-          ? await createLinkedComputer(
+        let linkedComputer: Pick<ComputerSession, "id" | "placement"> | null = null;
+        let computerViewUnavailable = false;
+        if (createLinkedComputer) {
+          try {
+            linkedComputer = await createLinkedComputer(
               `${browserName} computer`,
               device ? { kind: "attached_device", deviceId: device.id } : undefined,
-            )
-          : null;
+            );
+          } catch {
+            // Browser control is independently useful on locked/headless placements.
+            // A linked ComputerSession is an optional visual enhancement and must not
+            // prevent the canonical BrowserSession from starting.
+            computerViewUnavailable = true;
+          }
+        }
         const response = await createRegistryBrowser({
           sessionId,
           name: browserName,
@@ -486,6 +516,12 @@ export function BrowserViewer({
           ...(identity ? { identityId: identity.id } : {}),
         });
         setSelection({ sessionId: response.session.id, pinned: true });
+        if (computerViewUnavailable) {
+          onNotify?.({
+            kind: "info",
+            message: "Browser opened. Computer view is unavailable on this placement.",
+          });
+        }
       })()
         .catch((cause) => notifyError(cause, "Could not open a browser."))
         .finally(() => setCreating(false));
@@ -495,7 +531,8 @@ export function BrowserViewer({
       createRegistryBrowser,
       creating,
       notifyError,
-      profiles.identities,
+      onNotify,
+      activeProfiles,
       sessionId,
     ],
   );
@@ -528,6 +565,17 @@ export function BrowserViewer({
           advanceDefault: true,
         });
         setBaseRevisionOrdinal(response.revision.ordinal);
+        setProfileHistory((current) => ({
+          identityId: response.identity.id,
+          loading: false,
+          revisions:
+            current?.identityId === response.identity.id
+              ? [
+                  ...current.revisions.filter((revision) => revision.id !== response.revision.id),
+                  response.revision,
+                ]
+              : [response.revision],
+        }));
         await Promise.all([browser.refresh(), registry.refresh()]);
         onNotify?.({
           kind: "info",
@@ -545,6 +593,46 @@ export function BrowserViewer({
       }
     },
     [browser, notifyError, onNotify, profiles, registry, savingProfile, selectedProfile],
+  );
+
+  const updateProfile = useCallback(
+    async (
+      identity: BrowserIdentity,
+      update: { name?: string; status?: "active" | "archived"; defaultRevisionId?: string },
+    ): Promise<boolean> => {
+      if (savingProfile) return false;
+      setSavingProfile(true);
+      try {
+        const response = await profiles.update(identity.id, {
+          expectedVersion: identity.version,
+          ...update,
+        });
+        if (update.defaultRevisionId) {
+          const ordinal = profileHistory?.revisions.find(
+            (revision) => revision.id === update.defaultRevisionId,
+          )?.ordinal;
+          onNotify?.({
+            kind: "info",
+            message: `${response.identity.name}${ordinal ? ` version ${ordinal}` : ""} will open by default in future browsers.`,
+          });
+        } else if (update.status === "archived") {
+          onNotify?.({
+            kind: "info",
+            message: `${response.identity.name} hidden from new browsers. Existing browsers are unchanged.`,
+          });
+        } else if (update.status === "active") {
+          onNotify?.({ kind: "info", message: `${response.identity.name} restored.` });
+        }
+        return true;
+      } catch (cause) {
+        notifyError(cause, "Could not update this browser profile.");
+        await profiles.refresh().catch(() => undefined);
+        return false;
+      } finally {
+        setSavingProfile(false);
+      }
+    },
+    [notifyError, onNotify, profileHistory?.revisions, profiles, savingProfile],
   );
 
   if (!enabled) return null;
@@ -575,7 +663,9 @@ export function BrowserViewer({
             attachedDevices={attached.devices}
             identities={profiles.identities}
             creating={creating}
+            mutatingProfile={savingProfile}
             onCreate={createBrowser}
+            onRestore={(identity) => updateProfile(identity, { status: "active" })}
             prominent
           />
           {registry.error ? (
@@ -598,6 +688,7 @@ export function BrowserViewer({
         attachedDevices={attached.devices}
         selectedProfile={selectedProfile}
         baseRevisionOrdinal={baseRevisionOrdinal}
+        profileHistory={profileHistory}
         creating={creating}
         savingProfile={savingProfile}
         refreshing={registry.refreshing || attached.refreshing}
@@ -609,6 +700,7 @@ export function BrowserViewer({
         }}
         onCreate={createBrowser}
         onSaveProfile={saveProfileVersion}
+        onUpdateProfile={updateProfile}
         onRefresh={() => void Promise.all([registry.refresh(), attached.refresh()])}
       />
       <InteractionInterventionBanner
@@ -795,6 +887,7 @@ function BrowserToolbar(props: {
   identities: BrowserIdentity[];
   selectedProfile: BrowserIdentity | null;
   baseRevisionOrdinal: number | null;
+  profileHistory: { identityId: string; loading: boolean; revisions: BrowserRevision[] } | null;
   creating: boolean;
   savingProfile: boolean;
   refreshing: boolean;
@@ -803,6 +896,10 @@ function BrowserToolbar(props: {
   onFollow: () => void;
   onCreate: (choice?: BrowserLaunchChoice) => void;
   onSaveProfile: (newProfileName?: string) => Promise<boolean>;
+  onUpdateProfile: (
+    identity: BrowserIdentity,
+    update: { name?: string; status?: "active" | "archived"; defaultRevisionId?: string },
+  ) => Promise<boolean>;
   onRefresh: () => void;
 }) {
   const detailsRef = useRef<HTMLDetailsElement | null>(null);
@@ -858,8 +955,10 @@ function BrowserToolbar(props: {
         session={selected ?? null}
         identity={props.selectedProfile}
         baseRevisionOrdinal={props.baseRevisionOrdinal}
+        history={props.profileHistory}
         saving={props.savingProfile}
         onSave={props.onSaveProfile}
+        onUpdate={props.onUpdateProfile}
       />
       <button
         type="button"
@@ -873,7 +972,9 @@ function BrowserToolbar(props: {
         attachedDevices={props.attachedDevices}
         identities={props.identities}
         creating={props.creating}
+        mutatingProfile={props.savingProfile}
         onCreate={props.onCreate}
+        onRestore={(identity) => props.onUpdateProfile(identity, { status: "active" })}
       />
     </div>
   );
@@ -966,7 +1067,9 @@ function BrowserLaunchMenu(props: {
   attachedDevices: AttachedBrowserDevice[];
   identities: BrowserIdentity[];
   creating: boolean;
+  mutatingProfile: boolean;
   onCreate: (choice?: BrowserLaunchChoice) => void;
+  onRestore: (identity: BrowserIdentity) => Promise<boolean>;
   prominent?: boolean;
 }) {
   const detailsRef = useRef<HTMLDetailsElement | null>(null);
@@ -974,22 +1077,28 @@ function BrowserLaunchMenu(props: {
     detailsRef.current?.removeAttribute("open");
     props.onCreate(choice);
   };
+  const restore = async (identity: BrowserIdentity) => {
+    if (await props.onRestore(identity)) detailsRef.current?.removeAttribute("open");
+  };
+  const busy = props.creating || props.mutatingProfile;
+  const activeIdentities = props.identities.filter((identity) => identity.status === "active");
+  const archivedIdentities = props.identities.filter((identity) => identity.status === "archived");
   return (
     <details ref={detailsRef} className={cn("relative", props.prominent && "mt-4 inline-block")}>
       <summary
         onClick={(event) => {
-          if (props.creating) event.preventDefault();
+          if (busy) event.preventDefault();
         }}
         className={cn(
           "cursor-pointer list-none items-center justify-center gap-1.5 text-og-muted transition hover:bg-og-surface-2 hover:text-og-fg [&::-webkit-details-marker]:hidden",
           props.prominent
             ? "inline-flex h-8 rounded-og-sm border border-og-border bg-og-surface-1 px-3 text-og-control font-medium text-og-fg"
             : "grid size-7 place-items-center rounded-og-sm",
-          props.creating && "pointer-events-none opacity-50",
+          busy && "pointer-events-none opacity-50",
         )}
         aria-label="New browser"
       >
-        {props.creating ? (
+        {busy ? (
           <LoaderCircleIcon className="size-3.5 animate-spin" />
         ) : (
           <PlusIcon className="size-3.5" />
@@ -1049,9 +1158,9 @@ function BrowserLaunchMenu(props: {
             <span className="block text-og-xs text-og-subtle">Visual browser · no saved state</span>
           </span>
         </button>
-        {props.identities.length > 0 ? (
+        {activeIdentities.length > 0 ? (
           <div className="mt-1 border-t border-og-border pt-1">
-            {props.identities.map((identity) => (
+            {activeIdentities.map((identity) => (
               <button
                 key={identity.id}
                 type="button"
@@ -1071,6 +1180,28 @@ function BrowserLaunchMenu(props: {
             ))}
           </div>
         ) : null}
+        {archivedIdentities.length > 0 ? (
+          <details className="mt-1 border-t border-og-border pt-1">
+            <summary className="flex cursor-pointer list-none items-center gap-1.5 rounded-og-sm px-2 py-1.5 text-og-xs text-og-subtle transition hover:bg-og-surface-2 hover:text-og-fg [&::-webkit-details-marker]:hidden">
+              <ArchiveIcon className="size-3" /> Hidden profiles · {archivedIdentities.length}
+              <ChevronDownIcon className="ml-auto size-3" />
+            </summary>
+            {archivedIdentities.map((identity) => (
+              <button
+                key={identity.id}
+                type="button"
+                disabled={busy}
+                onClick={() => void restore(identity)}
+                className="flex w-full items-center gap-2 rounded-og-sm px-2 py-2 text-left transition hover:bg-og-surface-2 disabled:opacity-50"
+              >
+                <RotateCcwIcon className="size-3.5 text-og-muted" />
+                <span className="min-w-0 flex-1 truncate text-og-control text-og-fg">
+                  Restore {identity.name}
+                </span>
+              </button>
+            ))}
+          </details>
+        ) : null}
       </div>
     </details>
   );
@@ -1080,14 +1211,25 @@ function BrowserProfileMenu(props: {
   session: BrowserSession | null;
   identity: BrowserIdentity | null;
   baseRevisionOrdinal: number | null;
+  history: { identityId: string; loading: boolean; revisions: BrowserRevision[] } | null;
   saving: boolean;
   onSave: (newProfileName?: string) => Promise<boolean>;
+  onUpdate: (
+    identity: BrowserIdentity,
+    update: { name?: string; status?: "active" | "archived"; defaultRevisionId?: string },
+  ) => Promise<boolean>;
 }) {
   const detailsRef = useRef<HTMLDetailsElement | null>(null);
   const nameInputId = useId();
   const [name, setName] = useState("");
   const attached = props.session?.placement.kind === "attached_device";
-  const canSave = props.session?.capabilities.identityPublication ?? false;
+  const canSave =
+    (props.session?.capabilities.identityPublication ?? false) &&
+    props.identity?.status !== "archived";
+  const revisions =
+    props.identity && props.history?.identityId === props.identity.id
+      ? [...props.history.revisions].sort((left, right) => right.ordinal - left.ordinal)
+      : [];
   const save = async (newProfileName?: string) => {
     if (await props.onSave(newProfileName)) {
       setName("");
@@ -1137,14 +1279,65 @@ function BrowserProfileMenu(props: {
             <p className="mt-0.5 text-og-xs leading-4 text-og-subtle">
               {attached
                 ? "This session drives the existing Chrome profile and its current login state."
-                : props.identity
-                  ? props.baseRevisionOrdinal
-                    ? `Started from version ${props.baseRevisionOrdinal}.`
-                    : "Not saved yet."
-                  : "This browser is not reusable yet."}
+                : props.identity?.status === "archived"
+                  ? "Hidden from new browsers. This already-open browser is unchanged."
+                  : props.identity
+                    ? props.baseRevisionOrdinal
+                      ? `Started from version ${props.baseRevisionOrdinal}.`
+                      : "Not saved yet."
+                    : "This browser is not reusable yet."}
             </p>
           </div>
         </div>
+        {props.identity && revisions.length > 0 ? (
+          <div className="mt-3 border-t border-og-border pt-2">
+            <p className="px-1 text-[10px] font-medium uppercase tracking-[0.12em] text-og-subtle">
+              Saved versions
+            </p>
+            <div className="mt-1 max-h-40 overflow-y-auto">
+              {revisions.map((revision) => {
+                const isDefault = revision.id === props.identity?.defaultRevisionId;
+                const isCurrent = revision.ordinal === props.baseRevisionOrdinal;
+                return (
+                  <button
+                    key={revision.id}
+                    type="button"
+                    disabled={isDefault || props.saving || props.identity?.status === "archived"}
+                    onClick={() =>
+                      void props.onUpdate(props.identity!, { defaultRevisionId: revision.id })
+                    }
+                    className="flex w-full items-center gap-2 rounded-og-sm px-2 py-1.5 text-left transition hover:bg-og-surface-2 disabled:cursor-default disabled:opacity-70"
+                  >
+                    <span className="grid size-4 place-items-center text-og-muted">
+                      {isDefault ? <CheckIcon className="size-3.5 text-og-status-running" /> : null}
+                    </span>
+                    <span className="min-w-0 flex-1 text-og-control text-og-fg">
+                      Version {revision.ordinal}
+                    </span>
+                    <span className="text-[10px] text-og-subtle">
+                      {isCurrent && isDefault
+                        ? "current · default"
+                        : isDefault
+                          ? "default"
+                          : isCurrent
+                            ? "current · Use by default"
+                            : "Use by default"}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+            <p className="mt-1 px-2 text-[10px] leading-4 text-og-subtle">
+              Changing the default affects only browsers opened later.
+            </p>
+          </div>
+        ) : props.identity &&
+          props.history?.identityId === props.identity.id &&
+          props.history.loading ? (
+          <p className="mt-3 flex items-center gap-1.5 border-t border-og-border px-2 pt-2 text-og-xs text-og-subtle">
+            <LoaderCircleIcon className="size-3 animate-spin" /> Loading saved versions…
+          </p>
+        ) : null}
         {canSave ? (
           props.identity ? (
             <button
@@ -1199,9 +1392,30 @@ function BrowserProfileMenu(props: {
           <p className="mt-3 rounded-og-sm bg-og-surface-2 px-2.5 py-2 text-og-xs text-og-subtle">
             {attached
               ? "Chrome keeps this profile's state directly; OpenGeni does not copy it automatically."
-              : "This browser cannot save reusable profile state."}
+              : props.identity?.status === "archived"
+                ? "Restore this profile before saving another version."
+                : "This browser cannot save reusable profile state."}
           </p>
         )}
+        {!attached && props.identity ? (
+          <button
+            type="button"
+            disabled={props.saving}
+            onClick={() =>
+              void props.onUpdate(props.identity!, {
+                status: props.identity!.status === "active" ? "archived" : "active",
+              })
+            }
+            className="mt-2 flex h-8 w-full items-center justify-center gap-1.5 rounded-og-sm px-3 text-og-control text-og-muted transition hover:bg-og-surface-2 hover:text-og-fg disabled:opacity-50"
+          >
+            {props.identity.status === "active" ? (
+              <ArchiveIcon className="size-3.5" />
+            ) : (
+              <RotateCcwIcon className="size-3.5" />
+            )}
+            {props.identity.status === "active" ? "Hide from new browsers" : "Restore profile"}
+          </button>
+        ) : null}
         {canSave ? (
           <p className="mt-2 text-[10px] leading-4 text-og-subtle">
             Saving briefly restarts this browser. Other open browsers are unchanged.
@@ -1322,6 +1536,12 @@ function BrowserAddressBar(props: {
           }}
           onBlur={() => {
             focusedRef.current = false;
+          }}
+          onKeyDown={(event) => {
+            if (event.key !== "Enter") return;
+            event.preventDefault();
+            const normalized = normalizeBrowserAddress(draft);
+            if (normalized) props.onNavigate(normalized);
           }}
           disabled={!props.target}
           className="min-w-0 flex-1 bg-transparent text-og-control text-og-fg placeholder:text-og-subtle focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent disabled:opacity-50"
@@ -2364,37 +2584,6 @@ function browserPoint(
     x: Math.max(0, pixelX / frame.deviceScaleFactor),
     y: Math.max(0, pixelY / frame.deviceScaleFactor),
   };
-}
-
-export function browserKey(
-  event: Pick<
-    KeyboardEvent<HTMLTextAreaElement>,
-    "altKey" | "ctrlKey" | "key" | "metaKey" | "shiftKey"
-  >,
-): string | null {
-  // Modifier keydowns precede the actual chord key. They are not executable
-  // browser actions by themselves (for example Meta+Meta is invalid CDP input).
-  if (["Alt", "AltGraph", "Control", "Meta", "Shift"].includes(event.key)) return null;
-  const special = new Set([
-    "Enter",
-    "Tab",
-    "Escape",
-    "Backspace",
-    "Delete",
-    "ArrowUp",
-    "ArrowDown",
-    "ArrowLeft",
-    "ArrowRight",
-  ]);
-  const modified = event.altKey || event.ctrlKey || event.metaKey;
-  if (!modified && !special.has(event.key)) return null;
-  const parts: string[] = [];
-  if (event.ctrlKey) parts.push("Control");
-  if (event.altKey) parts.push("Alt");
-  if (event.metaKey) parts.push("Meta");
-  if (event.shiftKey) parts.push("Shift");
-  parts.push(event.key === " " ? "Space" : event.key);
-  return parts.join("+");
 }
 
 function normalizeBrowserAddress(value: string): string | null {

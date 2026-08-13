@@ -68,6 +68,8 @@ const TARGET_CREATION_SETTLE_TIMEOUT_MS = 5_000;
 const FRAME_FALLBACK_INTERVAL_MS = 100;
 const FRAME_CAPTURE_TIMEOUT_MS = 2_000;
 const FRAME_CAPTURE_FAILURE_LIMIT = 3;
+const MAX_FRAME_PROFILES_PER_TARGET = 4;
+const MAX_FRAME_SUBSCRIPTIONS_PER_TARGET = 32;
 const GRACEFUL_BROWSER_CLOSE_TIMEOUT_MS = 30_000;
 const NETWORK_IDLE_MS = 500;
 const PROTECTED_AUTH_AUTO_ADVANCE_TIMEOUT_MS = 3_000;
@@ -168,6 +170,7 @@ type Diagnostics = {
 };
 
 type TargetScreencast = {
+  key: string;
   options: NormalizedBrowserFrameStreamOptions;
   sequence: number;
   lastFrameAt: number;
@@ -196,7 +199,7 @@ type TargetState = {
   requests: Map<string, { method: string; url: string }>;
   lastNetworkActivityAt: number;
   networkActivitySequence: number;
-  screencast: TargetScreencast | null;
+  screencasts: Map<string, TargetScreencast>;
   protectedAuthActive: boolean;
   protectedAuthQuietUntil: number;
   tail: Promise<void>;
@@ -359,10 +362,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
 
   async start(url?: string): Promise<BrowserObservationValue> {
     const deferNavigation = url !== undefined && url !== "about:blank";
-    // `agent-browser open <url>` both supplies Chromium's launch URL and opens
-    // the URL through its daemon. On a cold profile that produces two tabs.
-    // Start the private browser once, then perform the one intended navigation
-    // through our target-scoped CDP authority.
+    // Resolving the daemon's private CDP endpoint is itself the cold-start
+    // primitive. Calling `agent-browser open` first makes the CLI perform one
+    // complete launch/lifecycle reconciliation and `get cdp-url` immediately
+    // perform another. Apart from adding seconds on headed macOS, the first
+    // command can also manufacture a redundant tab. Connect once, reuse the
+    // launch-created page, and perform the one intended navigation through our
+    // target-scoped CDP authority.
     const launchUrl = this.targetLifecycle === "runner" ? undefined : url;
     this.started = true;
     let connection: BrowserCdpConnection;
@@ -374,15 +380,25 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         { url: launchUrl ?? "about:blank", background: true },
         { timeoutMs: BROWSER_START_TIMEOUT_MS },
       );
-      launched = { targetId: created.targetId, url: launchUrl ?? "about:blank" };
+      launched = {
+        targetId: created.targetId,
+        url: launchUrl ?? "about:blank",
+      };
     } else {
-      launched = await this.runner.run<{
-        url?: unknown;
-        targetId?: unknown;
-      }>(launchUrl === undefined ? ["open"] : ["open", launchUrl], {
-        timeoutMs: BROWSER_START_TIMEOUT_MS,
-      });
       connection = await this.ensureConnection();
+      let page = visiblePageTargets(await this.targetInfos(connection))[0];
+      if (!page) {
+        const created = await connection.send<{ targetId?: unknown }>(
+          "Target.createTarget",
+          { url: "about:blank", background: true },
+          { timeoutMs: BROWSER_START_TIMEOUT_MS },
+        );
+        if (typeof created.targetId !== "string") {
+          throw new Error("managed browser did not return its initial page target");
+        }
+        page = await this.waitForCreatedTargetInfo(connection, created.targetId);
+      }
+      launched = { targetId: page.targetId, url: page.url };
     }
     const targets = await this.targetInfos(connection);
     const launchedUrl = typeof launched.url === "string" ? launched.url : url;
@@ -662,13 +678,15 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
     const normalized = normalizeFrameStreamOptions(options);
     const configured = await this.withTarget(targetId, async (state) => {
-      let screencast = state.screencast;
-      if (screencast && !sameFrameOptions(screencast.options, normalized)) {
-        throw new Error("browser target already has a differently configured frame stream");
-      }
+      const key = frameStreamProfileKey(normalized);
+      let screencast = state.screencasts.get(key);
       let created = false;
       if (!screencast) {
+        if (state.screencasts.size >= MAX_FRAME_PROFILES_PER_TARGET) {
+          throw new Error("browser target frame-profile bound was reached");
+        }
         screencast = {
+          key,
           options: normalized,
           sequence: 0,
           lastFrameAt: 0,
@@ -678,15 +696,19 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           subscriptions: new Map(),
           unsubscribe: () => undefined,
         };
-        state.screencast = screencast;
+        state.screencasts.set(key, screencast);
         created = true;
       }
-      if (screencast.subscriptions.size >= 32) {
+      const subscriptionCount = [...state.screencasts.values()].reduce(
+        (sum, candidate) => sum + candidate.subscriptions.size,
+        0,
+      );
+      if (subscriptionCount >= MAX_FRAME_SUBSCRIPTIONS_PER_TARGET) {
         throw new Error("browser target frame-subscriber bound was reached");
       }
       const subscriptionId = this.createId();
       const subscription = new LatestBrowserFrameSubscription(
-        async () => await this.releaseFrameSubscription(targetId, subscriptionId),
+        async () => await this.releaseFrameSubscription(targetId, key, subscriptionId),
       );
       screencast.subscriptions.set(subscriptionId, subscription);
       return { state, screencast, subscription, created };
@@ -700,7 +722,18 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       // Chromium does not emit Page.screencastFrame for a background tab in a
       // headed browser. Seed every subscriber from the same target-scoped CDP
       // surface so attachment readiness never depends on focusing Chrome.
-      await this.captureFallbackFrame(targetId, configured.screencast);
+      let seedFailure: unknown;
+      for (let attempt = 0; attempt < FRAME_CAPTURE_FAILURE_LIMIT; attempt += 1) {
+        try {
+          await this.captureFallbackFrame(targetId, configured.screencast);
+          seedFailure = undefined;
+          break;
+        } catch (error) {
+          seedFailure = error;
+          if (attempt + 1 < FRAME_CAPTURE_FAILURE_LIMIT) await delay(25 * (attempt + 1));
+        }
+      }
+      if (seedFailure !== undefined) throw seedFailure;
       frameStreamDiagnostic("browser.frame.subscribe.seeded", {
         browserSessionId: this.browserSessionId,
         targetId,
@@ -1181,7 +1214,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       requests: new Map(),
       lastNetworkActivityAt: Date.now(),
       networkActivitySequence: 0,
-      screencast: null,
+      screencasts: new Map(),
       protectedAuthActive: false,
       protectedAuthQuietUntil: 0,
       tail: Promise.resolve(),
@@ -1739,7 +1772,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       // observations, or tab control.
       const state = this.states.get(targetId);
       if (!state) throw new Error("browser target does not exist");
-      if (state.screencast !== expected || this.protectedAuthQuiet(state)) return;
+      if (state.screencasts.get(expected.key) !== expected || this.protectedAuthQuiet(state))
+        return;
       const metrics = await this.layoutMetrics(state, FRAME_CAPTURE_TIMEOUT_MS);
       const viewport = metrics.viewport;
       const estimatedDeviceScaleFactor = expected.captureDeviceScaleFactor ?? 1;
@@ -1788,7 +1822,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       ) {
         throw new Error("browser screenshot could not honor the frame dimension bound");
       }
-      if (state.screencast !== expected || this.protectedAuthQuiet(state)) return;
+      if (state.screencasts.get(expected.key) !== expected || this.protectedAuthQuiet(state))
+        return;
       expected.captureDeviceScaleFactor = finiteScale(dimensions.width / (viewport.width * scale));
       const frame = this.imageFrame({
         state,
@@ -1816,10 +1851,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     void (async () => {
       let consecutiveFailures = 0;
       while (!expected.fallbackAbort.signal.aborted) {
-        await delay(FRAME_FALLBACK_INTERVAL_MS);
+        await delay(FRAME_FALLBACK_INTERVAL_MS * expected.options.everyNthFrame);
         if (expected.fallbackAbort.signal.aborted) return;
         const state = this.states.get(targetId);
-        if (!state || state.screencast !== expected) return;
+        if (!state || state.screencasts.get(expected.key) !== expected) return;
         if (Date.now() - expected.lastFrameAt < FRAME_FALLBACK_INTERVAL_MS) continue;
         try {
           await this.captureFallbackFrame(targetId, expected);
@@ -1828,8 +1863,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           consecutiveFailures += 1;
           if (consecutiveFailures < FRAME_CAPTURE_FAILURE_LIMIT) continue;
           const current = this.states.get(targetId);
-          if (current?.screencast === expected) {
-            this.failScreencast(current, transportError(error));
+          if (current?.screencasts.get(expected.key) === expected) {
+            this.failScreencast(current, expected, transportError(error));
           }
           return;
         }
@@ -1839,25 +1874,30 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
 
   private refreshSubscribedFrame(targetId: string): void {
     const state = this.states.get(targetId);
-    const screencast = state?.screencast;
-    if (!screencast || Date.now() - screencast.lastFrameAt < 50) return;
-    void this.captureFallbackFrame(targetId, screencast).catch(() => {
-      // The regular fallback loop owns recovery. This eager capture exists only
-      // to make an accepted input visible without waiting for its idle cadence.
-    });
+    if (!state) return;
+    for (const screencast of state.screencasts.values()) {
+      void this.captureFallbackFrame(targetId, screencast).catch(() => {
+        // The regular fallback loop owns recovery. This eager capture exists only
+        // to make an accepted input visible without waiting for its idle cadence.
+      });
+    }
   }
 
-  private async releaseFrameSubscription(targetId: string, subscriptionId: string): Promise<void> {
+  private async releaseFrameSubscription(
+    targetId: string,
+    profileKey: string,
+    subscriptionId: string,
+  ): Promise<void> {
     const state = this.states.get(targetId);
     if (!state) return;
     const release = state.tail.then(async () => {
-      const screencast = state.screencast;
+      const screencast = state.screencasts.get(profileKey);
       if (!screencast) return;
       screencast.subscriptions.delete(subscriptionId);
       if (screencast.subscriptions.size > 0) return;
       screencast.unsubscribe();
       screencast.fallbackAbort.abort();
-      state.screencast = null;
+      state.screencasts.delete(profileKey);
     });
     state.tail = release.then(
       () => undefined,
@@ -1866,14 +1906,19 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     await release;
   }
 
-  private failScreencast(state: TargetState, error: Error): void {
-    const screencast = state.screencast;
-    if (!screencast) return;
-    state.screencast = null;
+  private failScreencast(state: TargetState, screencast: TargetScreencast, error: Error): void {
+    if (state.screencasts.get(screencast.key) !== screencast) return;
+    state.screencasts.delete(screencast.key);
     screencast.unsubscribe();
     screencast.fallbackAbort.abort();
     for (const subscription of screencast.subscriptions.values()) subscription.fail(error);
     screencast.subscriptions.clear();
+  }
+
+  private failAllScreencasts(state: TargetState, error: Error): void {
+    for (const screencast of [...state.screencasts.values()]) {
+      this.failScreencast(state, screencast, error);
+    }
   }
 
   private assertProtectedAuthGenerations(
@@ -3220,7 +3265,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private removeState(targetId: string): void {
     const state = this.states.get(targetId);
     if (!state) return;
-    this.failScreencast(state, new CdpTransportError("browser target closed"));
+    this.failAllScreencasts(state, new CdpTransportError("browser target closed"));
     for (const unsubscribe of state.unsubscribe) unsubscribe();
     this.states.delete(targetId);
     this.firstSeenAt.delete(targetId);
@@ -3695,17 +3740,14 @@ function mouseButtonMask(button: "left" | "right" | "middle"): number {
   }
 }
 
-function sameFrameOptions(
-  left: NormalizedBrowserFrameStreamOptions,
-  right: NormalizedBrowserFrameStreamOptions,
-): boolean {
-  return (
-    left.format === right.format &&
-    left.quality === right.quality &&
-    left.maxWidth === right.maxWidth &&
-    left.maxHeight === right.maxHeight &&
-    left.everyNthFrame === right.everyNthFrame
-  );
+function frameStreamProfileKey(options: NormalizedBrowserFrameStreamOptions): string {
+  return [
+    options.format,
+    options.quality,
+    options.maxWidth,
+    options.maxHeight,
+    options.everyNthFrame,
+  ].join(":");
 }
 
 function transportError(value: unknown): Error {

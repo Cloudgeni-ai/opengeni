@@ -1222,6 +1222,39 @@ export async function dispatchBrowserSessionOperation(
   );
 }
 
+/** Pulse one exact dispatched lifecycle operation while its controller mutation
+ * is still in flight. This is not viewer or resource activity: it exists only
+ * so the global reaper can distinguish a long profile transfer from an API
+ * caller that disappeared after dispatch. */
+export async function touchInteractionOperation(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    operationId: string;
+    resourceId: string;
+    controllerGeneration: string;
+  },
+): Promise<boolean> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const [row] = await scopedDb
+      .update(schema.interactionOperations)
+      .set({ updatedAt: new Date() })
+      .where(
+        and(
+          eq(schema.interactionOperations.accountId, input.accountId),
+          eq(schema.interactionOperations.workspaceId, input.workspaceId),
+          eq(schema.interactionOperations.operationId, input.operationId),
+          eq(schema.interactionOperations.resourceId, input.resourceId),
+          eq(schema.interactionOperations.state, "dispatched"),
+          eq(schema.interactionOperations.controllerGeneration, input.controllerGeneration),
+        ),
+      )
+      .returning({ operationId: schema.interactionOperations.operationId });
+    return Boolean(row);
+  });
+}
+
 export async function activateBrowserSession(
   db: Database,
   input: {

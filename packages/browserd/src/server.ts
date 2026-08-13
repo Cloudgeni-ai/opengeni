@@ -53,6 +53,7 @@ const MAX_TOKEN_GENERATION = Number.MAX_SAFE_INTEGER;
 const MAX_ALLOWED_ORIGINS = 64;
 const MAX_VIEW_GRANTS_PER_SESSION = 64;
 const MAX_VIEW_GRANT_TTL_MS = 10 * 60_000;
+const MAX_RFB_INPUT_BUFFER_BYTES = 1024 * 1024;
 
 type ViewGrant = {
   id: string;
@@ -1250,10 +1251,19 @@ export class BrowserControlServer {
     }
     const bytes = new Uint8Array(message.buffer, message.byteOffset, message.byteLength);
     if (data.upstream && !data.upstream.destroyed) {
+      // net.Socket.write() accepts data even after returning false; without an
+      // explicit bound a malicious/buggy viewer can therefore grow Node's TCP
+      // write queue without limit while x11vnc is stalled. Ordinary RFB input is
+      // tiny (pointer/key events and bounded clipboard payloads), so one shared
+      // 1 MiB envelope covers both pre-connect and connected buffering.
+      if (data.upstream.writableLength + bytes.byteLength > MAX_RFB_INPUT_BUFFER_BYTES) {
+        socket.close(1009, "RFB input buffer exceeded");
+        return;
+      }
       data.upstream.write(bytes);
       return;
     }
-    if (data.pendingBytes + bytes.byteLength > 1024 * 1024) {
+    if (data.pendingBytes + bytes.byteLength > MAX_RFB_INPUT_BUFFER_BYTES) {
       socket.close(1009, "RFB input buffer exceeded");
       return;
     }
@@ -1279,8 +1289,15 @@ export class BrowserControlServer {
     });
     upstream.on("data", (chunk) => {
       if (data.closed) return;
-      if (socket.send(chunk, false) < 0) {
-        socket.close(1013, "RFB consumer is too slow");
+      if (socket.send(chunk, false) === 0) {
+        // x11vnc is request-driven and a raw 1440x900 response is bounded well
+        // below the websocket queue limit. Bun's negative result means it
+        // accepted the message under backpressure; pausing the producer there
+        // can deadlock in the middle of one framebuffer rectangle because Bun
+        // does not guarantee another drain callback for this bridge. A zero
+        // result means bytes were actually dropped, so fail rather than expose
+        // a silently truncated RFB stream.
+        socket.close(1011, "RFB stream dropped output");
       }
     });
     upstream.once("error", () => {

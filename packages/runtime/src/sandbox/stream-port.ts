@@ -136,6 +136,38 @@ export function buildStreamUrl(endpoint: ExposedPortEndpoint): string {
   return query ? `${authority}?${query}` : authority;
 }
 
+/** Rehydrate a persisted provider tunnel URL without contacting the provider.
+ * Only the exact ws/wss shape emitted by buildStreamUrl is accepted. */
+export function exposedPortEndpointFromUrl(value: string): ExposedPortEndpoint {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new StreamPortUnavailableError("cached provider endpoint is not a valid URL");
+  }
+  if (
+    (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") ||
+    parsed.username !== "" ||
+    parsed.password !== "" ||
+    parsed.hash !== "" ||
+    parsed.hostname === ""
+  ) {
+    throw new StreamPortUnavailableError("cached provider endpoint has an invalid authority");
+  }
+  const tls = parsed.protocol === "wss:";
+  const port = parsed.port === "" ? (tls ? 443 : 80) : Number(parsed.port);
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+    throw new StreamPortUnavailableError("cached provider endpoint has an invalid port");
+  }
+  return {
+    host: parsed.hostname,
+    port,
+    tls,
+    path: parsed.pathname || "/",
+    query: parsed.search.startsWith("?") ? parsed.search.slice(1) : parsed.search,
+  };
+}
+
 /**
  * Resolve the provider's scoped tunnel for the stream port and mint the scoped
  * OpenGeni stream token. Returns a coherent `{url, token, expiresAt, transport,

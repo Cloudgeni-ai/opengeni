@@ -119,12 +119,14 @@ export class BrowserInteractionController {
             throw new InteractionControllerError(
               "target_stale",
               "browser target changed before the command could dispatch",
+              true,
             );
           }
           if (command.expectedDocumentGeneration !== target.documentGeneration) {
             throw new InteractionControllerError(
               "document_stale",
               "browser document changed before the command could dispatch",
+              true,
             );
           }
         },
@@ -295,12 +297,14 @@ export class BrowserProtectedAuthController {
             throw new InteractionControllerError(
               "target_stale",
               "browser target changed before protected fill",
+              true,
             );
           }
           if (command.expectedDocumentGeneration !== target.documentGeneration) {
             throw new InteractionControllerError(
               "document_stale",
               "browser document changed before protected fill",
+              true,
             );
           }
         },
@@ -409,7 +413,7 @@ export type ComputerInteractionDriver = {
   target(targetId: string): Promise<ComputerTargetValue | null>;
   observe(targetId: string): Promise<ComputerObservationValue>;
   validate?(command: ComputerActionCommandValue, target: ComputerTargetValue): Promise<void> | void;
-  dispatch(command: ComputerActionCommandValue): Promise<ComputerObservationValue>;
+  dispatch(command: ComputerActionCommandValue): Promise<ComputerObservationValue | null>;
 };
 
 export type ComputerInteractionAuthority = {
@@ -487,6 +491,7 @@ export class ComputerInteractionController {
             throw new InteractionControllerError(
               "target_stale",
               "computer target changed before the command could dispatch",
+              true,
             );
           }
         },

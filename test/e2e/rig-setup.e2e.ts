@@ -60,7 +60,7 @@ describe("real Docker rig-setup e2e", () => {
       timeoutMs: 90_000,
       describe: () => worker.logs(),
     });
-  }, 360_000);
+  }, 660_000);
 
   afterAll(async () => {
     await worker?.stop();

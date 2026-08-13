@@ -42,7 +42,7 @@ const RELAY_TAG_OPEN = 1;
 const RELAY_TAG_OPEN_ACK = 2;
 const RELAY_TAG_FRAME = 3;
 const RELAY_TAG_CLOSE = 4;
-const MAX_CONSECUTIVE_RECONNECTS = 6;
+const MAX_AUTOMATIC_RECONNECTS_WITHOUT_A_FRAME = 2;
 
 export type UseBrowserFrameStreamOptions = EmbeddedBrowserInteractionClientOverride & {
   browserSessionId: string | null;
@@ -112,6 +112,12 @@ export function useBrowserFrameStream(
 
     let disposed = false;
     let socket: BrowserFrameWebSocket | null = null;
+    let socketHandlers: {
+      open: () => void;
+      message: (event: MessageEvent) => void;
+      error: () => void;
+      close: () => void;
+    } | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let expiryTimer: ReturnType<typeof setTimeout> | null = null;
     let failures = 0;
@@ -121,10 +127,14 @@ export function useBrowserFrameStream(
     let attachmentExpiresAt = 0;
     let lastRelaySequence: string | null = null;
     let relayAccepted = false;
+    let pendingFrame: { bytes: Uint8Array; source: BrowserFrameWebSocket } | null = null;
+    let decodingFrame = false;
     const attachmentAbort = new AbortController();
 
     const clearSocket = (terminateProducer = false) => {
       if (!socket) return;
+      const current = socket;
+      const handlers = socketHandlers;
       if (terminateProducer && activeStream?.kind === "relay" && socket.readyState === 1) {
         try {
           socket.send(
@@ -141,28 +151,25 @@ export function useBrowserFrameStream(
           // OPEN can race a transport close. Local teardown must still finish.
         }
       }
-      socket.removeEventListener("open", onOpen);
-      socket.removeEventListener("message", onMessage);
-      socket.removeEventListener("error", onError);
-      socket.removeEventListener("close", onClose);
-      if (socket.readyState === 0 || socket.readyState === 1) {
-        socket.close(1000, "viewer detached");
+      if (handlers) {
+        current.removeEventListener("open", handlers.open);
+        current.removeEventListener("message", handlers.message);
+        current.removeEventListener("error", handlers.error);
+        current.removeEventListener("close", handlers.close);
+      }
+      if (current.readyState === 0 || current.readyState === 1) {
+        current.close(1000, "viewer detached");
       }
       socket = null;
+      socketHandlers = null;
+      pendingFrame = null;
     };
 
     const scheduleReconnect = () => {
       if (disposed || reconnectTimer) return;
-      failures += 1;
-      if (failures > MAX_CONSECUTIVE_RECONNECTS) {
-        setResult((current) => ({
-          ...current,
-          state: "error",
-          error: current.error ?? new Error("Browser view could not reconnect."),
-        }));
-        return;
-      }
+      if (failures >= MAX_AUTOMATIC_RECONNECTS_WITHOUT_A_FRAME) return;
       const delay = Math.min(5_000, 250 * 2 ** Math.min(failures, 5));
+      failures += 1;
       setResult((current) => ({ ...current, state: "reconnecting" }));
       reconnectTimer = setTimeout(() => {
         reconnectTimer = null;
@@ -170,16 +177,16 @@ export function useBrowserFrameStream(
       }, delay);
     };
 
-    const fail = (cause: unknown) => {
+    const fail = (cause: unknown, reconnectAutomatically = true) => {
       if (disposed) return;
       const error = cause instanceof Error ? cause : new Error(String(cause));
       setResult((current) => ({ ...current, state: "error", error }));
       clearSocket();
-      scheduleReconnect();
+      if (reconnectAutomatically) scheduleReconnect();
     };
 
-    const onOpen = () => {
-      if (disposed) return;
+    const onOpen = (source: BrowserFrameWebSocket) => {
+      if (disposed || source !== socket) return;
       if (activeStream?.kind === "relay") {
         const body = encodeStreamOpen({
           channel: {
@@ -192,7 +199,7 @@ export function useBrowserFrameStream(
             lastRelaySequence === null ? "0" : (BigInt(lastRelaySequence) + 1n).toString(),
         });
         try {
-          socket?.send(relayDatagram(RELAY_TAG_OPEN, body));
+          source.send(relayDatagram(RELAY_TAG_OPEN, body));
         } catch (error) {
           fail(error);
         }
@@ -201,11 +208,48 @@ export function useBrowserFrameStream(
       setResult((current) => ({ ...current, state: "live", error: null }));
     };
 
-    const onMessage = (event: MessageEvent) => {
+    const drainLatestFrame = async () => {
+      if (decodingFrame) return;
+      decodingFrame = true;
+      try {
+        while (pendingFrame) {
+          if (disposed) break;
+          const pending = pendingFrame;
+          pendingFrame = null;
+          const { bytes, source } = pending;
+          const frame = decodeBrowserFrameMessage(bytes);
+          if (disposed || source !== socket) continue;
+          if (frame.browserSessionId !== browserSessionId || frame.targetId !== targetId) {
+            throw new Error("browser frame belongs to another resource");
+          }
+          if (!controllerGeneration || frame.controllerGeneration !== controllerGeneration) {
+            throw new Error("browser frame belongs to a stale controller");
+          }
+          const key = `${browserSessionId}:${targetId}:${frame.controllerGeneration}:${frame.targetGeneration}:${frame.documentGeneration}`;
+          if (latestRef.current.key === key && frame.sequence <= latestRef.current.sequence)
+            continue;
+          latestRef.current = { key, sequence: frame.sequence };
+          failures = 0;
+          setResult((current) => ({
+            ...current,
+            state: "live",
+            frame,
+            error: null,
+          }));
+        }
+      } catch (cause) {
+        fail(cause);
+      } finally {
+        decodingFrame = false;
+        if (!disposed && pendingFrame) void drainLatestFrame();
+      }
+    };
+
+    const onMessage = (source: BrowserFrameWebSocket, event: MessageEvent) => {
       void (async () => {
         try {
           const bytes = await messageBytes(event.data);
-          if (disposed) return;
+          if (disposed || source !== socket) return;
           let frameBytes = bytes;
           if (activeStream?.kind === "relay") {
             if (bytes.length < 1) throw new Error("browser relay returned an empty message");
@@ -228,40 +272,29 @@ export function useBrowserFrameStream(
               attachmentExpiresAt = 0;
               lastRelaySequence = null;
               relayAccepted = false;
-              throw new Error("Browser frame source ended.");
+              fail(new Error("Browser frame source ended."), false);
+              return;
             }
             if (tag !== RELAY_TAG_FRAME || !relayAccepted) return;
             const relayFrame = decodeStreamFrame(body);
             lastRelaySequence = relayFrame.seq;
             frameBytes = relayFrame.data;
           }
-          const frame = decodeBrowserFrameMessage(frameBytes);
-          if (frame.browserSessionId !== browserSessionId || frame.targetId !== targetId) {
-            throw new Error("browser frame belongs to another resource");
-          }
-          if (!controllerGeneration || frame.controllerGeneration !== controllerGeneration) {
-            throw new Error("browser frame belongs to a stale controller");
-          }
-          const key = `${browserSessionId}:${targetId}:${frame.controllerGeneration}:${frame.targetGeneration}:${frame.documentGeneration}`;
-          if (latestRef.current.key === key && frame.sequence <= latestRef.current.sequence) return;
-          latestRef.current = { key, sequence: frame.sequence };
-          failures = 0;
-          setResult((current) => ({
-            ...current,
-            state: "live",
-            frame,
-            error: null,
-          }));
+          pendingFrame = { bytes: frameBytes, source };
+          void drainLatestFrame();
         } catch (cause) {
           fail(cause);
         }
       })();
     };
 
-    const onError = () => fail(new Error("Browser view lost connection."));
+    const onError = (source: BrowserFrameWebSocket) => {
+      if (source !== socket) return;
+      fail(new Error("Browser view lost connection."));
+    };
 
-    const onClose = () => {
-      if (disposed) return;
+    const onClose = (source: BrowserFrameWebSocket) => {
+      if (disposed || source !== socket) return;
       clearSocket();
       scheduleReconnect();
     };
@@ -281,17 +314,24 @@ export function useBrowserFrameStream(
       }));
       const createSocket =
         factoryRef.current ?? ((url: string, protocols: string[]) => new WebSocket(url, protocols));
-      socket = createSocket(
+      const openedSocket = createSocket(
         activeStream.kind === "relay"
           ? activeStream.url
           : browserFrameSocketUrl(activeAttachment, streamRef.current),
         activeStream.kind === "direct_websocket" ? [...activeStream.protocols] : [],
       );
-      socket.binaryType = "arraybuffer";
-      socket.addEventListener("open", onOpen);
-      socket.addEventListener("message", onMessage);
-      socket.addEventListener("error", onError);
-      socket.addEventListener("close", onClose);
+      socket = openedSocket;
+      socketHandlers = {
+        open: () => onOpen(openedSocket),
+        message: (event) => onMessage(openedSocket, event),
+        error: () => onError(openedSocket),
+        close: () => onClose(openedSocket),
+      };
+      openedSocket.binaryType = "arraybuffer";
+      openedSocket.addEventListener("open", socketHandlers.open);
+      openedSocket.addEventListener("message", socketHandlers.message);
+      openedSocket.addEventListener("error", socketHandlers.error);
+      openedSocket.addEventListener("close", socketHandlers.close);
     };
 
     const attach = async () => {

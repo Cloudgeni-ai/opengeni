@@ -31,8 +31,8 @@ export type UseDesktopStreamResult = {
   error: Error | null;
   /** Manual reconnect (e.g. after a securityfailure once a fresh URL arrives). */
   reconnect: () => void;
-  /** Paste directly through an interactive RFB connection. */
-  pasteText: (text: string) => boolean;
+  /** Synchronous input on the already-open RFB authority. */
+  sendKey?: ((keysym: number, code: string, down?: boolean) => boolean) | undefined;
 };
 
 /** Lazy-load @novnc/novnc's RFB as the default factory. Imported inside the
@@ -105,6 +105,12 @@ export function useDesktopStream(options: UseDesktopStreamOptions): UseDesktopSt
   };
 
   const reconnect = () => setNonce((n) => n + 1);
+  const sendKey = useCallback((keysym: number, code: string, down?: boolean): boolean => {
+    const rfb = rfbRef.current;
+    if (!rfb?.sendKey || rfb.viewOnly || stateRef.current !== "connected") return false;
+    rfb.sendKey(keysym, code, down);
+    return true;
+  }, []);
 
   const url = capability?.url ?? null;
   // The credential is keyed into the connect effect so a token rotation (new
@@ -257,33 +263,10 @@ export function useDesktopStream(options: UseDesktopStreamOptions): UseDesktopSt
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scaleViewport, state]);
 
-  const pasteText = useCallback((text: string): boolean => {
-    const rfb = rfbRef.current;
-    if (
-      stateRef.current !== "connected" ||
-      !rfb ||
-      rfb.viewOnly ||
-      !rfb.clipboardPasteFrom ||
-      !rfb.sendKey
-    ) {
-      return false;
-    }
-    rfb.clipboardPasteFrom(text);
-    // x11vnc applies ClientCutText asynchronously. Shift+Insert is the native
-    // Linux paste chord in terminals and browsers and avoids two API trips.
-    setTimeout(() => {
-      if (rfbRef.current !== rfb || stateRef.current !== "connected" || rfb.viewOnly) return;
-      rfb.sendKey?.(0xffe1, "ShiftLeft", true);
-      rfb.sendKey?.(0xff63, "Insert");
-      rfb.sendKey?.(0xffe1, "ShiftLeft", false);
-    }, 20);
-    return true;
-  }, []);
-
   // Delegate to whichever transport owns the surface. For `relay-frames` the
   // noVNC effect above is dormant (it bailed to idle) and the frame renderer
   // drives; for `vnc-ws` (and everything else) the noVNC path drives while the
   // frame renderer stays idle. Same public shape either way.
-  if (transport === "relay-frames") return { ...frameStream, pasteText: () => false };
-  return { state, error, reconnect, pasteText };
+  if (transport === "relay-frames") return frameStream;
+  return { state, error, reconnect, sendKey };
 }

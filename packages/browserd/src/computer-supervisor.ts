@@ -381,7 +381,6 @@ export class ComputerSupervisor {
         controller,
         lifecycle: "active",
       };
-      await driver.listTargets();
       return runtime;
     } catch (error) {
       const failures: unknown[] = [error];

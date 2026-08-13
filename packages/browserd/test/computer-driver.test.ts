@@ -74,6 +74,7 @@ describe("NativeComputerDriver", () => {
       await driver.close();
     }
     expect(transport.closed).toBe(true);
+    expect(transport.stoppedCaptures).toBe(1);
   });
 
   test("preserves definite native lock failures in public receipts", async () => {
@@ -100,6 +101,31 @@ describe("NativeComputerDriver", () => {
         dispatchedAt: null,
         error: { code: "machine_locked", retryable: true },
       });
+    } finally {
+      await driver.close();
+    }
+  });
+
+  test("settles a successful target-replacing action without fabricating an observation", async () => {
+    const transport = new FixtureNativeTransport();
+    transport.dispatchObservation = null;
+    const driver = new NativeComputerDriver({
+      computerSessionId,
+      controllerGeneration,
+      client: transport,
+    });
+    const controller = new ComputerInteractionController({
+      computerSessionId,
+      controllerGeneration,
+      driver,
+    });
+    try {
+      expect(await controller.run(command())).toMatchObject({
+        state: "completed",
+        observation: null,
+        error: null,
+      });
+      expect(transport.dispatched).toEqual(transport.validated);
     } finally {
       await driver.close();
     }
@@ -137,6 +163,31 @@ describe("NativeComputerDriver", () => {
       await driver.close();
     }
   });
+
+  test("replaces a poisoned native helper once for safe target reads", async () => {
+    const poisoned = new FixtureNativeTransport();
+    poisoned.targetsError = new Error("native computer helper returned a malformed response");
+    const replacement = new FixtureNativeTransport();
+    let recoveries = 0;
+    const driver = new NativeComputerDriver({
+      computerSessionId,
+      controllerGeneration,
+      client: poisoned,
+      clientFactory: async () => {
+        recoveries += 1;
+        return replacement;
+      },
+    });
+    try {
+      await expect(driver.listTargets()).resolves.toMatchObject([
+        { id: "window-1", computerSessionId, controllerGeneration },
+      ]);
+      expect(recoveries).toBe(1);
+      expect(poisoned.closed).toBe(true);
+    } finally {
+      await driver.close();
+    }
+  });
 });
 
 class FixtureNativeTransport implements ComputerNativeTransport {
@@ -150,13 +201,17 @@ class FixtureNativeTransport implements ComputerNativeTransport {
   dispatched: NativeComputerActionCommand | null = null;
   validateError: Error | null = null;
   startCaptureError: Error | null = null;
+  targetsError: Error | null = null;
+  dispatchObservation: ReturnType<typeof observation> | null = observation("observation-2");
   closed = false;
+  stoppedCaptures = 0;
 
   async capabilities(): Promise<ComputerSessionCapabilities> {
     return this.handshake.capabilities;
   }
 
   async targets() {
+    if (this.targetsError) throw this.targetsError;
     return [target()];
   }
 
@@ -181,7 +236,9 @@ class FixtureNativeTransport implements ComputerNativeTransport {
     if (this.startCaptureError) throw this.startCaptureError;
   }
 
-  async stopCapture(): Promise<void> {}
+  async stopCapture(): Promise<void> {
+    this.stoppedCaptures += 1;
+  }
 
   async clipboard() {
     return { text: "fixture clipboard", truncated: false };
@@ -194,7 +251,7 @@ class FixtureNativeTransport implements ComputerNativeTransport {
 
   async dispatch(nativeCommand: NativeComputerActionCommand) {
     this.dispatched = nativeCommand;
-    return observation("observation-2");
+    return this.dispatchObservation;
   }
 
   async close(): Promise<void> {

@@ -158,9 +158,11 @@ pub trait ComputerAdapter: Send + Sync {
     /// Validates all observation/frame fences without performing a mutation.
     async fn validate(&self, command: &NativeActionCommand) -> NativeAdapterResult<()>;
 
-    /// Executes one already-validated command and returns a fresh observation.
+    /// Executes one already-validated command and returns a fresh observation
+    /// when the mutated target still exists. A successful action may replace
+    /// or close its target, in which case completion has no observation.
     async fn dispatch(
         &self,
         command: &NativeActionCommand,
-    ) -> NativeAdapterResult<NativeObservation>;
+    ) -> NativeAdapterResult<Option<NativeObservation>>;
 }

@@ -623,7 +623,13 @@ const SettingsSchema = z.object({
   // the Modal session envelope persists the actual image ID.
   modalImageId: z
     .string()
-    .regex(/^im-[A-Za-z0-9]{22}$/)
+    // Modal image IDs are provider-opaque. Older builds use a 22-character
+    // random suffix while current filesystem snapshots use a 26-character
+    // ULID suffix. Validate the stable namespace/safe alphabet and let Modal
+    // remain authoritative over current/future suffix lengths.
+    .min(4)
+    .max(128)
+    .regex(/^im-[A-Za-z0-9]+$/)
     .optional(),
   // Name of a Modal Secret (containing REGISTRY_USERNAME + REGISTRY_PASSWORD) used
   // to authenticate the pull of `modalImageRef` from a PRIVATE registry. When UNSET

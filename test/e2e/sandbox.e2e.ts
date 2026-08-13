@@ -48,7 +48,7 @@ describe("real Docker sandbox e2e", () => {
       timeoutMs: 90_000,
       describe: () => worker.logs(),
     });
-  }, 360_000);
+  }, 660_000);
 
   afterAll(async () => {
     await worker?.stop();

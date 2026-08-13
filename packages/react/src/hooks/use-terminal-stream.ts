@@ -7,7 +7,7 @@ import {
   ttydResizeFrame,
   TtydServerCommand,
 } from "@opengeni/sdk";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   decodeStreamFrame,
   decodeStreamOpenAck,
@@ -59,6 +59,8 @@ export type UseTerminalStreamResult = {
 // input rather than ever executing a truncated shell command.
 export const MAX_PENDING_TERMINAL_INPUT_CODE_UNITS = 64 * 1024;
 const TERMINAL_CONNECT_EXPIRY_SKEW_MS = 5_000;
+const TERMINAL_RECONNECT_INITIAL_MS = 100;
+const TERMINAL_RECONNECT_MAX_MS = 3_000;
 const RELAY_TAG_OPEN = 1;
 const RELAY_TAG_OPEN_ACK = 2;
 const RELAY_TAG_FRAME = 3;
@@ -94,7 +96,7 @@ function relayChannelFromUrl(url: string): RelayChannel {
 function sendRelayInput(
   socket: WebSocket,
   channel: RelayChannel,
-  sequence: number,
+  sequence: bigint,
   data: string,
 ): void {
   socket.send(
@@ -102,7 +104,7 @@ function sendRelayInput(
       RELAY_TAG_FRAME,
       encodeStreamFrame({
         channelId: channel.channelId,
-        seq: String(sequence),
+        seq: sequence.toString(),
         data: new TextEncoder().encode(data),
         producedAtMs: String(Date.now()),
       }),
@@ -169,12 +171,18 @@ function closeSocket(socket: WebSocket | null): void {
 export function useTerminalStream(options: UseTerminalStreamOptions): UseTerminalStreamResult {
   const { capability, onOutput, onTitle, onReconnectNeeded, initialCols, initialRows } = options;
   const [status, setStatus] = useState<TerminalStreamStatus>("closed");
+  const [reconnectGeneration, setReconnectGeneration] = useState(0);
   const wsRef = useRef<WebSocket | null>(null);
   const pendingInputRef = useRef("");
   const socketFailedRef = useRef(false);
   const socketAuthenticatedRef = useRef(false);
   const relayChannelRef = useRef<RelayChannel | null>(null);
-  const relayInputSequenceRef = useRef(0);
+  const relayIdentityRef = useRef<string | null>(null);
+  const relayInputSequenceRef = useRef(0n);
+  const relayOutputSequenceRef = useRef(0n);
+  const reconnectAttemptRef = useRef(0);
+  const credentialIdentityRef = useRef<string | null>(null);
+  const refreshRequestedRef = useRef(false);
   const intentionalCloseRef = useRef<WeakSet<WebSocket>>(new WeakSet());
   // Latest size, so a resize() before the socket opens is replayed on open, and a
   // reconnect seeds the right geometry.
@@ -195,6 +203,8 @@ export function useTerminalStream(options: UseTerminalStreamOptions): UseTermina
   const url = capability?.url ?? null;
   const token = capability?.token ?? null;
   const expiresAt = capability?.expiresAt ?? null;
+  const transportRef = useRef(transport);
+  transportRef.current = transport;
 
   useEffect(() => {
     // SSR / no WebSocket / not a live pty-ws cell: stay closed; the caller falls
@@ -206,8 +216,20 @@ export function useTerminalStream(options: UseTerminalStreamOptions): UseTermina
       // captured for a PTY if this surface later changes back from firehose mode.
       pendingInputRef.current = "";
       socketAuthenticatedRef.current = false;
+      relayIdentityRef.current = null;
+      relayInputSequenceRef.current = 0n;
+      relayOutputSequenceRef.current = 0n;
+      reconnectAttemptRef.current = 0;
+      credentialIdentityRef.current = null;
+      refreshRequestedRef.current = false;
       setStatus("closed");
       return;
+    }
+    const credentialIdentity = `${transport}\u0000${url ?? ""}\u0000${token ?? ""}\u0000${expiresAt ?? ""}`;
+    if (credentialIdentityRef.current !== credentialIdentity) {
+      credentialIdentityRef.current = credentialIdentity;
+      reconnectAttemptRef.current = 0;
+      refreshRequestedRef.current = false;
     }
     // A changed/cleared credential is a new connection attempt boundary. It may
     // receive input while its exact grant is pending even if the prior socket
@@ -223,13 +245,17 @@ export function useTerminalStream(options: UseTerminalStreamOptions): UseTermina
     }
     if (!terminalStreamCredentialUsable({ transport, url, expiresAt })) {
       // A descriptor from an older rolling server may still carry a bearer that
-      // aged out before this surface mounted. Wait for the exact fresh grant.
+      // aged out before this surface mounted. Ask once for the exact fresh grant.
       setStatus("closed");
+      if (!refreshRequestedRef.current) {
+        refreshRequestedRef.current = true;
+        onReconnectNeededRef.current?.();
+      }
       return;
     }
 
     let disposed = false;
-    let reconnectRequested = false;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let socket: WebSocket;
     let relayChannel: RelayChannel | null = null;
     const relayOutputDecoder = new TextDecoder();
@@ -237,8 +263,18 @@ export function useTerminalStream(options: UseTerminalStreamOptions): UseTermina
     try {
       if (relay) {
         relayChannel = relayChannelFromUrl(url);
+        const relayIdentity = [
+          relayChannel.workspaceId,
+          relayChannel.agentId,
+          relayChannel.port,
+          relayChannel.channelId,
+        ].join("\u0000");
+        if (relayIdentityRef.current !== relayIdentity) {
+          relayIdentityRef.current = relayIdentity;
+          relayInputSequenceRef.current = 0n;
+          relayOutputSequenceRef.current = 0n;
+        }
         relayChannelRef.current = relayChannel;
-        relayInputSequenceRef.current = 0;
         socket = new WebSocket(url);
       } else {
         // The ttyd "tty" subprotocol is REQUIRED — ttyd rejects a handshake without
@@ -253,10 +289,30 @@ export function useTerminalStream(options: UseTerminalStreamOptions): UseTermina
     socket.binaryType = "arraybuffer";
     wsRef.current = socket;
 
-    const requestReconnect = () => {
-      if (disposed || reconnectRequested || intentionalCloseRef.current.has(socket)) return;
-      reconnectRequested = true;
+    const requestFreshGrant = () => {
+      if (disposed || refreshRequestedRef.current || intentionalCloseRef.current.has(socket))
+        return;
+      refreshRequestedRef.current = true;
       onReconnectNeededRef.current?.();
+    };
+
+    const scheduleTransportReconnect = () => {
+      if (disposed || reconnectTimer !== null || intentionalCloseRef.current.has(socket)) return;
+      if (refreshRequestedRef.current) return;
+      if (!terminalStreamCredentialUsable({ transport, url, expiresAt })) {
+        requestFreshGrant();
+        return;
+      }
+      const attempt = reconnectAttemptRef.current++;
+      const delay = Math.min(
+        TERMINAL_RECONNECT_INITIAL_MS * 2 ** Math.min(attempt, 8),
+        TERMINAL_RECONNECT_MAX_MS,
+      );
+      setStatus("connecting");
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        if (!disposed) setReconnectGeneration((generation) => generation + 1);
+      }, delay);
     };
 
     socket.onopen = () => {
@@ -270,13 +326,13 @@ export function useTerminalStream(options: UseTerminalStreamOptions): UseTermina
                 channel: relayChannel,
                 token: token ?? "",
                 role: STREAM_ROLE_CLIENT,
-                resumeFromSeq: "0",
+                resumeFromSeq: relayOutputSequenceRef.current.toString(),
               }),
             ),
           );
         } catch {
-          socketFailedRef.current = true;
-          setStatus("error");
+          socketFailedRef.current = false;
+          setStatus("connecting");
           closeSocket(socket);
         }
         return;
@@ -295,12 +351,14 @@ export function useTerminalStream(options: UseTerminalStreamOptions): UseTermina
         }
         socketAuthenticatedRef.current = true;
       } catch {
-        socketFailedRef.current = true;
-        setStatus("error");
+        socketFailedRef.current = false;
+        setStatus("connecting");
         closeSocket(socket);
         return;
       }
       setStatus("open");
+      reconnectAttemptRef.current = 0;
+      refreshRequestedRef.current = false;
     };
 
     socket.onmessage = (ev: MessageEvent) => {
@@ -315,6 +373,8 @@ export function useTerminalStream(options: UseTerminalStreamOptions): UseTermina
           try {
             const ack = decodeStreamOpenAck(body);
             if (!ack.accepted) throw new Error(ack.error?.message ?? "terminal relay rejected");
+            reconnectAttemptRef.current = 0;
+            refreshRequestedRef.current = false;
             socketAuthenticatedRef.current = true;
             if (pendingInputRef.current.length > 0) {
               sendRelayInput(
@@ -329,11 +389,15 @@ export function useTerminalStream(options: UseTerminalStreamOptions): UseTermina
           } catch {
             socketFailedRef.current = true;
             setStatus("error");
+            requestFreshGrant();
             closeSocket(socket);
           }
         } else if (tag === RELAY_TAG_FRAME && socketAuthenticatedRef.current) {
           try {
             const frame = decodeStreamFrame(body);
+            const sequence = BigInt(frame.seq);
+            if (sequence < relayOutputSequenceRef.current) return;
+            relayOutputSequenceRef.current = sequence + 1n;
             if (frame.data.length > 0) {
               onOutputRef.current?.(relayOutputDecoder.decode(frame.data, { stream: true }));
             }
@@ -359,17 +423,19 @@ export function useTerminalStream(options: UseTerminalStreamOptions): UseTermina
 
     socket.onerror = () => {
       if (!disposed) {
-        socketFailedRef.current = true;
-        setStatus("error");
-        requestReconnect();
+        // A network/relay outage is retryable with the same credential and PTY.
+        // Keep accepting bounded input while the transport comes back.
+        socketFailedRef.current = false;
+        setStatus("connecting");
+        closeSocket(socket);
       }
     };
     socket.onclose = () => {
       if (wsRef.current === socket) wsRef.current = null;
       socketAuthenticatedRef.current = false;
       if (!disposed) {
-        setStatus(socketFailedRef.current ? "error" : "closed");
-        requestReconnect();
+        if (socketFailedRef.current) setStatus("error");
+        else scheduleTransportReconnect();
       }
     };
 
@@ -378,6 +444,7 @@ export function useTerminalStream(options: UseTerminalStreamOptions): UseTermina
       wsRef.current = null;
       socketAuthenticatedRef.current = false;
       relayChannelRef.current = null;
+      if (reconnectTimer !== null) clearTimeout(reconnectTimer);
       // Drop handlers so an in-flight close/error doesn't mutate state post-unmount.
       socket.onopen = null;
       socket.onmessage = null;
@@ -387,64 +454,66 @@ export function useTerminalStream(options: UseTerminalStreamOptions): UseTermina
     };
     // A url/token change (rotation) re-runs this effect → close old, open new.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [transport, url, token, expiresAt]);
+  }, [transport, url, token, expiresAt, reconnectGeneration]);
+
+  const write = useCallback((data: string) => {
+    const currentTransport = transportRef.current;
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN && socketAuthenticatedRef.current) {
+      try {
+        const relayChannel = relayChannelRef.current;
+        if (currentTransport === "relay-pty" && relayChannel) {
+          sendRelayInput(ws, relayChannel, relayInputSequenceRef.current++, data);
+        } else {
+          ws.send(ttydInputFrame(data));
+        }
+      } catch {
+        socketFailedRef.current = false;
+        setStatus("connecting");
+        closeSocket(ws);
+      }
+    } else if (
+      (currentTransport === "pty-ws" || currentTransport === "relay-pty") &&
+      !socketFailedRef.current
+    ) {
+      const nextSize = pendingInputRef.current.length + data.length;
+      if (nextSize > MAX_PENDING_TERMINAL_INPUT_CODE_UNITS) {
+        pendingInputRef.current = "";
+        socketFailedRef.current = true;
+        setStatus("error");
+        closeSocket(ws);
+        return;
+      }
+      pendingInputRef.current += data;
+    }
+  }, []);
+  const resize = useCallback((cols: number, rows: number) => {
+    if (cols <= 0 || rows <= 0) return;
+    sizeRef.current = { cols, rows };
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN && socketAuthenticatedRef.current) {
+      try {
+        // Self-hosted relay PTYs carry raw input/output frames. Resize remains
+        // an out-of-band control operation; do not send ttyd framing into them.
+        if (transportRef.current === "pty-ws") ws.send(ttydResizeFrame(cols, rows));
+      } catch {
+        // socket raced closed — geometry is replayed on the next open.
+      }
+    }
+  }, []);
+  const disconnect = useCallback(() => {
+    const ws = wsRef.current;
+    wsRef.current = null;
+    pendingInputRef.current = "";
+    socketFailedRef.current = false;
+    socketAuthenticatedRef.current = false;
+    relayChannelRef.current = null;
+    setStatus("closed");
+    if (ws) intentionalCloseRef.current.add(ws);
+    closeSocket(ws);
+  }, []);
 
   return useMemo<UseTerminalStreamResult>(() => {
-    const write = (data: string) => {
-      const ws = wsRef.current;
-      if (ws && ws.readyState === WebSocket.OPEN && socketAuthenticatedRef.current) {
-        try {
-          const relayChannel = relayChannelRef.current;
-          if (transport === "relay-pty" && relayChannel) {
-            sendRelayInput(ws, relayChannel, relayInputSequenceRef.current++, data);
-          } else {
-            ws.send(ttydInputFrame(data));
-          }
-        } catch {
-          socketFailedRef.current = true;
-          setStatus("error");
-          closeSocket(ws);
-        }
-      } else if (
-        (transport === "pty-ws" || transport === "relay-pty") &&
-        !socketFailedRef.current
-      ) {
-        const nextSize = pendingInputRef.current.length + data.length;
-        if (nextSize > MAX_PENDING_TERMINAL_INPUT_CODE_UNITS) {
-          pendingInputRef.current = "";
-          socketFailedRef.current = true;
-          setStatus("error");
-          closeSocket(ws);
-          return;
-        }
-        pendingInputRef.current += data;
-      }
-    };
-    const resize = (cols: number, rows: number) => {
-      if (cols <= 0 || rows <= 0) return;
-      sizeRef.current = { cols, rows };
-      const ws = wsRef.current;
-      if (ws && ws.readyState === WebSocket.OPEN && socketAuthenticatedRef.current) {
-        try {
-          // Self-hosted relay PTYs carry raw input/output frames. Resize remains
-          // an out-of-band control operation; do not send ttyd framing into them.
-          if (transport === "pty-ws") ws.send(ttydResizeFrame(cols, rows));
-        } catch {
-          // socket raced closed — geometry is replayed on the next open.
-        }
-      }
-    };
-    const disconnect = () => {
-      const ws = wsRef.current;
-      wsRef.current = null;
-      pendingInputRef.current = "";
-      socketFailedRef.current = false;
-      socketAuthenticatedRef.current = false;
-      relayChannelRef.current = null;
-      setStatus("closed");
-      if (ws) intentionalCloseRef.current.add(ws);
-      closeSocket(ws);
-    };
     return { connected: status === "open", status, write, resize, disconnect };
-  }, [status, transport]);
+  }, [status, write, resize, disconnect]);
 }

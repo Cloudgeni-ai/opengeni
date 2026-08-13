@@ -469,7 +469,11 @@ fn build_runtime(
         configuration.setHeight(height as usize);
         configuration.setPixelFormat(kCVPixelFormatType_32BGRA);
         configuration.setMinimumFrameInterval(CMTime::new(1, LIVE_FRAMES_PER_SECOND));
-        configuration.setQueueDepth(1);
+        // Keep enough IOSurfaces for ScreenCaptureKit to publish a changed
+        // window while the previous frame is copied on our serial callback
+        // queue. A depth of one can permanently pin desktop-independent
+        // window streams to their first surface on macOS.
+        configuration.setQueueDepth(3);
         configuration.setScalesToFit(false);
         configuration.setPreservesAspectRatio(true);
         configuration.setShowsCursor(shows_cursor);

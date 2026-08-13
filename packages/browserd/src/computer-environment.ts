@@ -81,14 +81,16 @@ export class LinuxVirtualComputerEnvironmentAllocator implements ComputerEnviron
       dataDirectory,
       temporaryDirectory,
     ];
-    for (const directory of directories) {
-      await rm(directory, { recursive: true, force: true });
-      await mkdir(directory, {
-        recursive: directory !== runtimeDirectory,
-        mode: 0o700,
-      });
-      await chmod(directory, 0o700);
-    }
+    await Promise.all(
+      directories.map(async (directory) => {
+        await rm(directory, { recursive: true, force: true });
+        await mkdir(directory, {
+          recursive: directory !== runtimeDirectory,
+          mode: 0o700,
+        });
+        await chmod(directory, 0o700);
+      }),
+    );
 
     const processes: ChildProcess[] = [];
     try {
@@ -179,6 +181,9 @@ export class LinuxVirtualComputerEnvironmentAllocator implements ComputerEnviron
         });
         processes.push(windowManager);
         drain(windowManager.stderr);
+        // XFWM must be ready before the first client maps. Otherwise a late
+        // manager/client race can steal focus after the linked browser opens,
+        // making an acknowledged native keyboard action hit the wrong window.
         await assertStillRunning(windowManager, "virtual window manager");
       }
 
@@ -234,6 +239,13 @@ export class LinuxVirtualComputerEnvironmentAllocator implements ComputerEnviron
           // cadence is both visually correct and materially less reconnect-prone.
           "-wait",
           "50",
+          // ComputerSession changes can originate through semantic/native
+          // control rather than the RFB client. Disable x11vnc's deep-idle
+          // screen-blank throttle (two ~1.5 s sleeps) so the first externally
+          // driven change after an idle viewer is streamed immediately. Normal
+          // nap behavior and the bounded 50 ms polling cadence remain enabled.
+          "-sb",
+          "0",
           "-xkb",
           "-noxdamage",
           "-noxfixes",

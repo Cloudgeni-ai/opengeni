@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 const scriptPath = new URL("./dev-stack.sh", import.meta.url);
 const sandboxDockerfilePath = new URL("../docker/sandbox.Dockerfile", import.meta.url);
 const envExamplePath = new URL("../.env.example", import.meta.url);
+const relaySupervisorPath = new URL("./run-development-relay.sh", import.meta.url);
 
 describe("local artifact runtime stack contract", () => {
   test("script is valid shell and uses the strict current-host runtime producer", async () => {
@@ -76,6 +77,17 @@ describe("local artifact runtime stack contract", () => {
     expect(source).not.toContain("printf 'OPENGENI_MODAL_TOKEN_SECRET=%s");
   });
 
+  test("isolates Modal sandbox ownership between local worktrees", async () => {
+    const source = await Bun.file(scriptPath).text();
+
+    expect(source).toContain('[ "${OPENGENI_PIN_MODAL_APP_NAME:-0}" != "1" ]');
+    expect(source).toContain('OPENGENI_MODAL_APP_NAME="opengeni-${COMPOSE_PROJECT_NAME}"');
+    expect(source).toContain("export OPENGENI_MODAL_APP_NAME");
+    expect(source).toContain(
+      "printf 'OPENGENI_MODAL_APP_NAME=%s\\n' \"${OPENGENI_MODAL_APP_NAME:-opengeni-sandbox}\"",
+    );
+  });
+
   test("makes local Connected Machines self-initializing", async () => {
     const [source, envExample] = await Promise.all([
       Bun.file(scriptPath).text(),
@@ -89,6 +101,44 @@ describe("local artifact runtime stack contract", () => {
     expect(source).toContain("OPENGENI_STREAM_TOKEN_SECRET");
     expect(source).toContain("OPENGENI_SELFHOSTED_NATS_URL");
     expect(source).toContain("OPENGENI_SELFHOSTED_RELAY_URL");
+    expect(source).toContain("OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_SEED");
+    expect(source).toContain("OPENGENI_SELFHOSTED_NATS_CALLOUT_PASSWORD");
+    expect(source).toContain("OPENGENI_SELFHOSTED_NATS_CONTROL_PASSWORD");
+    expect(source).toContain("bun scripts/prepare-development-nats-config.ts");
+    expect(source).toContain("OPENGENI_NATS_CONFIG_FILE");
+    expect(source).toContain("bash scripts/run-development-relay.sh");
+  });
+
+  test("enables interactive Browser and Computer surfaces locally by default", async () => {
+    const source = await Bun.file(scriptPath).text();
+
+    for (const setting of [
+      "OPENGENI_SANDBOX_DESKTOP_ENABLED",
+      "OPENGENI_SANDBOX_DESKTOP_INTERACTIVE",
+      "OPENGENI_COMPUTER_USE_ENABLED",
+    ]) {
+      expect(source).toContain(`if [ -z "\${${setting}:-}" ]; then`);
+      expect(source).toContain(`${setting}=true`);
+      expect(source).toContain(`export ${setting}`);
+    }
+  });
+
+  test("supervises the local relay and terminates its current child cleanly", async () => {
+    const syntax = Bun.spawn(["bash", "-n", relaySupervisorPath.pathname], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [status, stderr, source] = await Promise.all([
+      syntax.exited,
+      new Response(syntax.stderr).text(),
+      Bun.file(relaySupervisorPath).text(),
+    ]);
+    expect(status).toBe(0);
+    expect(stderr).toBe("");
+    expect(source).toContain('while [ "$stopping" = "0" ]');
+    expect(source).toContain("cargo run --quiet -p opengeni-relay &");
+    expect(source).toContain("trap cleanup EXIT INT TERM");
+    expect(source).toContain('kill "$child_pid"');
   });
 
   test("unsandboxed execution is explicitly local, loopback, and visible in runtime env", async () => {

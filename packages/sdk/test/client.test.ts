@@ -798,6 +798,35 @@ describe("OpenGeniClient", () => {
     });
   });
 
+  test("uses canonical outcome-unknown truth for an accepted mutation transport failure", async () => {
+    const body = JSON.stringify({
+      error: {
+        status: 503,
+        code: "upstream_unavailable",
+        message: "OpenGeni could not confirm the controller mutation.",
+        retryable: true,
+        outcomeUnknown: true,
+        requestId: "controller-mutation-503",
+      },
+    });
+    const { client } = makeClient(
+      () => new Response(body, { status: 503, headers: { "content-type": "application/json" } }),
+    );
+    const error = await client
+      .sendMessage(WORKSPACE_ID, SESSION_ID, {
+        text: "continue",
+        clientEventId: "same-id",
+      })
+      .catch((caught) => caught);
+
+    expect(error).toMatchObject({
+      status: 503,
+      retryable: true,
+      outcomeUnknown: true,
+      correlationId: "controller-mutation-503",
+    });
+  });
+
   test("preserves an actionable canonical 503 message instead of masking it as retryable", async () => {
     const body = JSON.stringify({
       error: {

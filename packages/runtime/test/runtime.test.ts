@@ -5637,6 +5637,70 @@ describe("runtime event normalization", () => {
     }
   });
 
+  test("includes every model-visible MCP and in-process tool in Codemode exactly once", async () => {
+    const mcp = startTestMcpServer();
+    const prepared = await prepareAgentTools(
+      testSettings({
+        mcpServers: [
+          {
+            id: "docs",
+            name: "Document Search",
+            url: mcp.url,
+            cacheToolsList: false,
+          },
+        ],
+      }),
+      [{ kind: "mcp", id: "docs" }],
+      {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        turnId: "44444444-4444-4444-8444-444444444444",
+        attemptId: "55555555-5555-4555-8555-555555555555",
+        executionGeneration: 1,
+        attemptToolDefinitions: [
+          {
+            identity: { serverId: "interaction", toolName: "browser_observe" },
+            modelName: "interaction__browser_observe",
+            codemodePath: ["interaction", "browser", "observe"],
+            inputSchema: { type: "object", additionalProperties: false },
+            source: "interaction",
+            approval: "none",
+            execute: async () => ({ content: [] }),
+          },
+        ],
+      },
+    );
+    try {
+      const modelNames = (
+        await Promise.all(prepared.mcpServers.map(async (server) => await server.listTools()))
+      )
+        .flat()
+        .map((tool) => tool.name)
+        .sort();
+      const catalogNames = prepared
+        .attemptToolCatalog!.entries.map((entry) => entry.modelName)
+        .sort();
+      expect(catalogNames).toEqual(modelNames);
+      expect(new Set(catalogNames).size).toBe(catalogNames.length);
+      expect(prepared.attemptToolCatalog!.entries).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            identity: { serverId: "docs", toolName: "search_documents" },
+            source: "docs",
+          }),
+          expect.objectContaining({
+            identity: { serverId: "interaction", toolName: "browser_observe" },
+            source: "interaction",
+          }),
+        ]),
+      );
+    } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
   test("rejects in-process definitions without exact attempt scope", async () => {
     await expect(
       prepareAgentTools(testSettings(), [], {

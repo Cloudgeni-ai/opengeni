@@ -530,6 +530,7 @@ describe("P4.2 desktop pixel data plane (real lease + RLS + fence)", () => {
       instanceId: null,
       leaseEpoch: live.leaseEpoch + 1,
       terminalDataPlaneUrl: null,
+      controllerDataPlaneUrl: null,
     });
   }, 60_000);
 
