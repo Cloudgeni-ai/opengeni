@@ -155,6 +155,7 @@ export type SessionRealtimeInboundEntryInput = {
   delegationItemId?: string | null | undefined;
   text?: string | null | undefined;
   payload?: Record<string, unknown> | undefined;
+  modelContext?: string | undefined;
 };
 
 export type SyncSessionRealtimeLedgerInput = AssertSessionRealtimeOwnerInput & {
@@ -1016,12 +1017,34 @@ function canonicalJsonValue(value: unknown): unknown {
   return value;
 }
 
+function normalizedModelContext(input: SessionRealtimeInboundEntryInput): string | null {
+  const value = input.modelContext?.trim();
+  if (!value) {
+    if (input.modelContext !== undefined) {
+      throw new Error("Realtime modelContext must not be empty");
+    }
+    return null;
+  }
+  if (value.length > 32_768) {
+    throw new Error("Realtime modelContext exceeds the server limit");
+  }
+  if (
+    input.kind !== "delegation_call" &&
+    input.kind !== "user_transcript" &&
+    input.kind !== "assistant_transcript"
+  ) {
+    throw new Error("Realtime modelContext requires a delegation or finalized transcript");
+  }
+  return value;
+}
+
 function inboundReplayMatches(
   row: EntryRow,
   input: SessionRealtimeInboundEntryInput,
   role: "user" | "assistant" | null,
   text: string | null,
   payload: Record<string, unknown>,
+  modelContext: string | null,
 ): boolean {
   const storedText =
     row.text === null ? null : fromPostgresLosslessText(row.text, row.textCodecVersion);
@@ -1034,9 +1057,30 @@ function inboundReplayMatches(
     row.delegationItemId === (input.delegationItemId ?? null) &&
     row.sourceUpdateId === null &&
     storedText === text &&
+    row.modelContext === modelContext &&
     JSON.stringify(canonicalJsonValue(storedPayload)) ===
       JSON.stringify(canonicalJsonValue(payload))
   );
+}
+
+async function delegationModelContextMatches(
+  db: Database,
+  row: EntryRow,
+  modelContext: string | null,
+): Promise<boolean> {
+  if (row.kind !== "delegation_call" || row.turnId === null) return true;
+  const [turn] = await db
+    .select({ modelContext: schema.sessionTurns.modelContext })
+    .from(schema.sessionTurns)
+    .where(
+      and(
+        eq(schema.sessionTurns.workspaceId, row.workspaceId),
+        eq(schema.sessionTurns.sessionId, row.sessionId),
+        eq(schema.sessionTurns.id, row.turnId),
+      ),
+    )
+    .limit(1);
+  return turn?.modelContext === modelContext;
 }
 
 async function appendInvalidDelegationFailure(
@@ -1083,6 +1127,7 @@ async function admitRealtimeDelegationInTransaction(
   accountId: string,
   incoming: SessionRealtimeInboundEntryInput,
   entryId: string,
+  modelContext: string | null,
 ): Promise<{ turnId: string; eventIds: string[]; wakeRevision: number }> {
   const [session] = await db
     .select()
@@ -1142,6 +1187,7 @@ async function admitRealtimeDelegationInTransaction(
     operationKey: incoming.operationId,
     delivery: "steer",
     text: incoming.text!,
+    modelContext,
     messagePresentation: {
       kind: "realtime_voice",
       text: inputTranscript,
@@ -1359,6 +1405,7 @@ export async function syncSessionRealtimeLedgerInTransaction(
     const payload = boundedPayload(incoming.payload);
     const role = expectedRole(incoming);
     const text = incoming.text ?? null;
+    const modelContext = normalizedModelContext(incoming);
     assertBoundedString(text, SESSION_REALTIME_LEDGER_MAX_TEXT_BYTES, "Realtime text");
     if (
       (incoming.kind === "user_transcript" || incoming.kind === "assistant_transcript") &&
@@ -1392,7 +1439,10 @@ export async function syncSessionRealtimeLedgerInTransaction(
       )
       .limit(1);
     if (existing) {
-      if (!inboundReplayMatches(existing, incoming, role, text, payload)) {
+      if (
+        !inboundReplayMatches(existing, incoming, role, text, payload, modelContext) ||
+        !(await delegationModelContextMatches(db, existing, modelContext))
+      ) {
         throw new SessionRealtimeConflictError(
           incoming.kind === "delegation_call"
             ? "REALTIME_DELEGATION_CHANGED"
@@ -1423,6 +1473,7 @@ export async function syncSessionRealtimeLedgerInTransaction(
         textCodecVersion: LOSSLESS_CONTENT_CODEC_VERSION,
         payload,
         payloadCodecVersion: LOSSLESS_CONTENT_CODEC_VERSION,
+        modelContext,
         createdAt: now,
         updatedAt: now,
       })
@@ -1447,6 +1498,7 @@ export async function syncSessionRealtimeLedgerInTransaction(
           modeRow.accountId,
           incoming,
           entry.id,
+          modelContext,
         );
         const [linked] = await db
           .update(schema.sessionRealtimeEntries)

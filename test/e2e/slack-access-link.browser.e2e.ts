@@ -9,7 +9,7 @@ const workspaceId = "00000000-0000-4000-8000-000000000241";
 const requestId = "00000000-0000-4000-8000-000000000242";
 const defaultWorkspaceId = "00000000-0000-4000-8000-000000000243";
 const defaultAccountId = "00000000-0000-4000-8000-000000000244";
-const apiContractRevision = "2026-08-social-provider-tools-v1";
+const apiContractRevision = "2026-08-model-context-v1";
 const signedLink = "signed.slack.browser.bearer";
 
 type AccessUiState = {

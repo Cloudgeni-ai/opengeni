@@ -15,7 +15,7 @@ const workspaceId = "00000000-0000-4000-8000-000000000231";
 const accountId = "00000000-0000-4000-8000-000000000232";
 const connectionId = "00000000-0000-4000-8000-000000000233";
 const bindingId = "00000000-0000-4000-8000-000000000234";
-const apiContractRevision = "2026-08-social-provider-tools-v1";
+const apiContractRevision = "2026-08-model-context-v1";
 
 type FixtureState = {
   bindingState: "active" | "quarantined" | null;

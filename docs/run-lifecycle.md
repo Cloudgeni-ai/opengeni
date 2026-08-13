@@ -282,8 +282,11 @@ the causal human in `initiating_human_subject_id` solely for personal
 preference authority while retaining their service initiator; pure service work
 has no personal authority. Runtime composition is deterministic: core safety,
 organization/workspace/user preference descriptors plus organization/global,
-workspace, and role policy, then session/turn instructions, tool/repository/
-skill substrate, and memory. Documents and RAG evidence never become policy,
+workspace, and role policy, then durable session instructions, tool/repository/
+skill substrate, and memory. Optional application `modelContext` is not part of
+that prefix: claim stores it as a separate leading `input_text` part of the
+exact chronological user message. Standard timeline rendering omits it, while
+full audit data retains it. Documents and RAG evidence never become policy,
 and full preference bodies require explicit retrieval. When no structured
 governance applies, the legacy prompt bytes remain unchanged.
 
@@ -1036,6 +1039,15 @@ counts.
 
 A session's content lives in three places. Keep them straight; reaching for the
 wrong one is the classic mistake.
+
+Application-provided `modelContext` follows the same rule: it is ordinary
+model-visible user-role content attached to one accepted message, not a system
+or developer instruction. Initial, queued Send/Steer, realtime delegation, and
+finalized transcript handoff all converge on the same canonical history shape.
+Because the newest message carries the changing bytes, persistent
+`Agent.instructions` and earlier history remain prompt-cache stable. Public
+turn/queue projections and the standard timeline omit the field; full event and
+audit reads may return it, so it is never a secret boundary.
 
 1. **`session_history_items` — conversation truth (the model-facing store).**
    Ordered, protocol-preserving SDK `AgentInputItem` JSON, exact for accepted

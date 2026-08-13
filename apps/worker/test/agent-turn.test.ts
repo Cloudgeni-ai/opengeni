@@ -106,7 +106,7 @@ import {
   lazyToolTransportForTurn,
   turnExecutionPolicyBillingIdentity,
   turnOperationCancellationFailure,
-  unavailableMcpTurnInstructions,
+  unavailableMcpOperationalContext,
   waitForTurnOperation,
   waitForTurnFinalizerStep,
   waitForTurnStreamCleanup,
@@ -197,10 +197,10 @@ describe("Connected Machine durable stream finalization", () => {
   });
 });
 
-describe("disconnected MCP turn instructions", () => {
+describe("disconnected MCP operational context", () => {
   test("warns the model without exposing an unbounded unavailable registry", () => {
     expect(
-      unavailableMcpTurnInstructions({
+      unavailableMcpOperationalContext({
         droppedIds: ["cap-linear", "cap-slack"],
         droppedCount: 4,
       }),
@@ -210,11 +210,11 @@ describe("disconnected MCP turn instructions", () => {
   });
 
   test("is absent when no selected server was dropped", () => {
-    expect(unavailableMcpTurnInstructions({ droppedIds: [], droppedCount: 0 })).toBeUndefined();
+    expect(unavailableMcpOperationalContext({ droppedIds: [], droppedCount: 0 })).toBeUndefined();
   });
 
   test("keeps a generic warning when legacy ids cannot be projected safely", () => {
-    expect(unavailableMcpTurnInstructions({ droppedIds: [], droppedCount: 1 })).toContain(
+    expect(unavailableMcpOperationalContext({ droppedIds: [], droppedCount: 1 })).toContain(
       "1 unavailable server(s)",
     );
   });

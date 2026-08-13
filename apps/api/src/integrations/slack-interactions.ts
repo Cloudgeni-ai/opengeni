@@ -1083,7 +1083,7 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     session = await createSessionForRequest(deps, grant, entry.workspaceId, {
       requestedSessionId: interaction.sessionReservationId,
       initialMessage: slackInvocationPreparedEntry(preparedEntry, preparedAttachments).text,
-      turnInstructions: SLACK_TASK_INSTRUCTIONS,
+      modelContext: SLACK_TASK_INSTRUCTIONS,
       firstPartyMcpTools: slackTaskFirstPartyMcpTools(deps.settings),
       resources: preparedAttachments.resources,
       ...(preferredModel ? { model: preferredModel } : {}),
@@ -1592,7 +1592,7 @@ async function processSlackReactionInboxEntry(
     session = await createSessionForRequest(deps, grant, entry.workspaceId, {
       requestedSessionId: interaction.sessionReservationId,
       initialMessage: preparedEntry.text,
-      turnInstructions: SLACK_TASK_INSTRUCTIONS,
+      modelContext: SLACK_TASK_INSTRUCTIONS,
       // The exact reacted message and bounded containing thread are already in
       // the prompt; do not expose general Slack history tools for this trigger.
       firstPartyMcpTools: resolveFirstPartyMcpToolPolicy(deps.settings).default,
@@ -1977,7 +1977,7 @@ async function acceptSlackReactionTask(
   }
   await acceptSessionUserMessage(deps, grant, entry.workspaceId, sessionId, {
     text: entry.text,
-    turnInstructions: SLACK_TASK_INSTRUCTIONS,
+    modelContext: SLACK_TASK_INSTRUCTIONS,
     resources,
     clientEventId,
   });
@@ -2061,7 +2061,7 @@ async function continueSlackSession(
   }
   await acceptSessionUserMessage(deps, grant, entry.workspaceId, interaction.sessionId, {
     text: entry.text,
-    turnInstructions: SLACK_TASK_INSTRUCTIONS,
+    modelContext: SLACK_TASK_INSTRUCTIONS,
     resources,
     clientEventId: `slack:${entry.providerEventId}`,
   });

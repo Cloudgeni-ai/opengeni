@@ -237,6 +237,7 @@ export async function flushSessionRealtimeTranscriptTailInTransaction(
       textCodecVersion: schema.sessionRealtimeEntries.textCodecVersion,
       payload: schema.sessionRealtimeEntries.payload,
       payloadCodecVersion: schema.sessionRealtimeEntries.payloadCodecVersion,
+      modelContext: schema.sessionRealtimeEntries.modelContext,
     })
     .from(schema.sessionRealtimeEntries)
     .where(
@@ -258,6 +259,19 @@ export async function flushSessionRealtimeTranscriptTailInTransaction(
   }));
   const rendered = renderSessionRealtimeTail(decodedRows);
   if (!rendered.context) return null;
+  let foundUserTranscript = false;
+  let modelContext: string | null = null;
+  for (let index = decodedRows.length - 1; index >= 0; index -= 1) {
+    const entry = decodedRows[index]!;
+    if (entry.role === "user") {
+      foundUserTranscript = true;
+      modelContext = entry.modelContext;
+      break;
+    }
+  }
+  if (!foundUserTranscript) {
+    modelContext = decodedRows.at(-1)?.modelContext ?? null;
+  }
 
   const [session] = await db
     .select({ metadata: schema.sessions.metadata })
@@ -286,6 +300,7 @@ export async function flushSessionRealtimeTranscriptTailInTransaction(
     operationKey: deterministicUuid(`opengeni:session-realtime-tail-flush:${mode.id}`),
     delivery: "steer",
     text: rendered.context,
+    modelContext,
     messagePresentation: {
       kind: "realtime_voice_handoff",
       text: "Voice session ended. Remaining conversation context was sent to the agent.",

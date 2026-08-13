@@ -359,6 +359,17 @@ describe("buildTimeline", () => {
     expect((items[0] as UserMessageItem).text).toBe("Still readable");
   });
 
+  test("omits model context from the rendered user message", () => {
+    reset();
+    const hidden = "Application-only selected record 42";
+    const items = buildTimeline([
+      event("user.message", { text: "Visible request", modelContext: hidden }),
+    ]);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ kind: "user-message", text: "Visible request" });
+    expect(JSON.stringify(items)).not.toContain(hidden);
+  });
+
   test("accumulates streaming deltas into one agent message and finalizes on completed", () => {
     reset();
     const user = event("user.message", { text: "Deploy staging" });

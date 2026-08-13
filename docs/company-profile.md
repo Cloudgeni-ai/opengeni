@@ -143,9 +143,11 @@ CORE is:
 5. workspace preference descriptors;
 6. immutable initiating-user preference descriptors;
 7. matching session role policy;
-8. session and exact-turn instructions;
+8. durable session instructions;
 9. selected tool/repository substrate;
 10. bounded Memory/knowledge retrieval.
+
+Per-message `modelContext` is outside this authority block. It enters only as ordinary chronological user-role content attached to its accepted message and cannot modify company-profile authority or the persistent instruction prefix.
 
 The rendered company-profile slice fails closed above 32,768 UTF-8 bytes, and
 the existing complete governance block retains its 131,072-byte fail-closed

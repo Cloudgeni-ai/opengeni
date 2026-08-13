@@ -169,7 +169,6 @@ describe("exact-attempt workspace governance prompt", () => {
     const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
       workspaceGovernance: governance!,
       sessionInstructions: "SESSION_SENTINEL",
-      turnInstructions: "TURN_SENTINEL",
       persistentSessionSettings: { titleIsSet: true },
       workspaceMemory: "MEMORY_SENTINEL",
     });
@@ -183,7 +182,6 @@ describe("exact-attempt workspace governance prompt", () => {
       "USER_PREF_SENTINEL descriptor sentinel",
       "ROLE_POLICY_SENTINEL",
       "SESSION_SENTINEL",
-      "TURN_SENTINEL",
       "Persistent session settings already in effect",
       "MEMORY_SENTINEL",
     ];

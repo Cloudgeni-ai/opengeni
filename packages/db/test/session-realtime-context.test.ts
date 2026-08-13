@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { MODEL_CONTEXT_LABEL } from "@opengeni/contracts";
 import { and, asc, eq } from "drizzle-orm";
 
 import {
@@ -7,10 +8,12 @@ import {
   beginSessionRealtimeInTransaction,
   bootstrapWorkspace,
   claimSessionRealtimeConnectionInTransaction,
+  claimSessionWorkForAttempt,
   completeSessionRealtimeConnectionInTransaction,
   createDb,
   createSession,
   endSessionRealtimeInTransaction,
+  getActiveSessionHistoryItems,
   getSessionRealtimeContinuityEntries,
   renderSessionRealtimeTail,
   SESSION_REALTIME_CONTEXT_MAX_BYTES,
@@ -85,6 +88,7 @@ function transcript(
   role: "user" | "assistant",
   text: string,
   payload: Record<string, unknown> = {},
+  modelContext?: string,
 ): SessionRealtimeInboundEntryInput {
   return {
     operationId: crypto.randomUUID(),
@@ -92,6 +96,7 @@ function transcript(
     role,
     text,
     payload: { turnId: crypto.randomUUID(), ...payload },
+    ...(modelContext === undefined ? {} : { modelContext }),
   };
 }
 
@@ -247,11 +252,17 @@ describe("session realtime transcript tail and continuity", () => {
     expect(facts.turns).toHaveLength(0);
   });
 
-  test("ending with transcript tail immediately creates one canonical Steer turn", async () => {
+  test("ending with transcript tail attaches the latest user message context to one canonical Steer", async () => {
     const value = await fixture();
+    const userModelContext = "Current application context: organization profile revision 42.";
     const mode = await runMode(value, [
-      transcript("user", "Please remember the final constraint"),
-      transcript("assistant", "I will."),
+      transcript("user", "Please remember the final constraint", {}, userModelContext),
+      transcript(
+        "assistant",
+        "I will.",
+        {},
+        "Assistant-side context must not replace the latest user message context.",
+      ),
     ]);
     const replay = await transaction(value.workspaceId, (tx) =>
       endSessionRealtimeInTransaction(tx, {
@@ -295,6 +306,7 @@ describe("session realtime transcript tail and continuity", () => {
     expect(facts.turns[0]).toMatchObject({
       id: facts.projections[0]?.turnId,
       status: "queued",
+      modelContext: userModelContext,
       metadata: {
         delivery: "steer",
         realtimeTailFlush: { source: SESSION_REALTIME_TAIL_SOURCE },
@@ -302,11 +314,49 @@ describe("session realtime transcript tail and continuity", () => {
     });
     expect(facts.userEvent?.payload).toMatchObject({
       text: "Voice session ended. Remaining conversation context was sent to the agent.",
+      modelContext: userModelContext,
       presentation: {
         kind: "realtime_voice_handoff",
         context: facts.projections[0]?.context,
       },
     });
+    const claim = await claimSessionWorkForAttempt(client.db, value.workspaceId, {
+      sessionId: value.session.id,
+      workflowId: `session-${value.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(claim).toMatchObject({ action: "claimed", turn: { id: facts.turns[0]?.id } });
+    const history = await getActiveSessionHistoryItems(
+      client.db,
+      value.workspaceId,
+      value.session.id,
+    );
+    expect(history.at(-1)?.item).toMatchObject({
+      role: "user",
+      content: [
+        { type: "input_text", text: `${MODEL_CONTEXT_LABEL}\n${userModelContext}` },
+        { type: "input_text", text: facts.projections[0]?.context },
+      ],
+    });
+  });
+
+  test("a later user transcript without context clears earlier assistant-only context", async () => {
+    const value = await fixture();
+    await runMode(value, [
+      transcript("assistant", "One status update.", {}, "assistant-only context"),
+      transcript("user", "Thanks, that is all."),
+    ]);
+    const [turn] = await transaction(value.workspaceId, (tx) =>
+      tx
+        .select({ modelContext: schema.sessionTurns.modelContext })
+        .from(schema.sessionTurns)
+        .where(eq(schema.sessionTurns.sessionId, value.session.id))
+        .orderBy(asc(schema.sessionTurns.createdAt)),
+    );
+    expect(turn?.modelContext).toBeNull();
   });
 
   test("flushes only finalized transcript after the latest delegation fence", async () => {
