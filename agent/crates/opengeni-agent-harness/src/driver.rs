@@ -363,6 +363,10 @@ impl HeartbeatCollector {
                     Some(Event::GoingOffline(_)) => {
                         guard.offline.entry(event.agent_id).or_default().push(now);
                     }
+                    // This collector owns liveness assertions only. Update
+                    // progress travels on the same exact-instance event stream
+                    // but is asserted by update-specific harness scenarios.
+                    Some(Event::AgentUpdateProgress(_)) => {}
                     None => {}
                 }
             }
