@@ -71,6 +71,11 @@ const CANONICAL_HUMAN_IDENTITY_AUTHORITY_TABLES = [
 const SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE =
   "session_private_actor_visible(uuid, uuid, uuid, text)";
 const SESSION_REFERENCE_VISIBLE_ROUTINE = "session_reference_visible(uuid, uuid, uuid)";
+const TASK_NOTE_CAPABILITY_ROUTINES = [
+  "create_task_note_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, integer)",
+  "archive_task_note_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, integer, text)",
+  "list_task_notes_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, boolean, integer)",
+] as const;
 const TRANSITION_SESSION_VISIBILITY_ROUTINE =
   "transition_session_visibility(uuid, uuid, uuid, text, text, integer, text, text)";
 const FORK_SESSION_CONTENT_ROUTINE =
@@ -80,6 +85,7 @@ const SESSION_AUTHORITY_ROUTINES = new Set<string>([
   SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE,
   SESSION_REFERENCE_VISIBLE_ROUTINE,
   TRANSITION_SESSION_VISIBILITY_ROUTINE,
+  ...TASK_NOTE_CAPABILITY_ROUTINES,
 ]);
 const XAI_CREATE_CREDENTIAL_ROUTINE =
   "create_xai_subscription_credential(uuid, uuid, text, text, text, text, text, text, text, timestamp with time zone)";
@@ -363,6 +369,9 @@ export const FORCE_RLS_TABLES = [
   "xai_rotation_settings",
   "xai_session_account_pins",
   "xai_subscription_credentials",
+  "task_note_events",
+  "task_note_write_capabilities",
+  "task_notes",
 ] as const;
 
 /**
@@ -655,6 +664,9 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "organization_user_resource_grants",
   "organization_user_retention_policies",
   "session_visibility_write_capabilities",
+  "task_note_events",
+  "task_note_write_capabilities",
+  "task_notes",
 ] as const;
 
 export type RuntimeTableDmlPrivilege = "SELECT" | "INSERT" | "UPDATE" | "DELETE";

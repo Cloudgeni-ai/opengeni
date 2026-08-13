@@ -808,6 +808,9 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "memory_correct",
   "preference_registry_summary",
   "preference_registry_get",
+  "task_notes_list",
+  "task_note_save",
+  "task_note_archive",
   "sandboxes_list",
   "sandbox_attach",
   "sandbox_swap",
@@ -12896,4 +12899,5 @@ export * from "./workspace-state";
 export * from "./preference-registry";
 export * from "./scoped-knowledge";
 export * from "./knowledge";
+export * from "./task-notes";
 export * from "./canonical-human-identities";

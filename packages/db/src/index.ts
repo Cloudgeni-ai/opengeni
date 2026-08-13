@@ -351,6 +351,7 @@ export * from "./memory-governance";
 export * from "./memory-slack-delivery";
 export * from "./scoped-knowledge";
 export * from "./knowledge-source-sync";
+export * from "./task-notes";
 export * from "./generated-images";
 export * from "./slack-user-link-access";
 export * from "./video-generation";

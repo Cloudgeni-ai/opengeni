@@ -170,6 +170,27 @@ describe("first-party MCP tool visibility policy", () => {
     expect(registeredToolNames(admitted)).toEqual(["session_create"]);
   });
 
+  test("task-tree note tools require exact agent-attempt authority and their own permissions", () => {
+    const selected: FirstPartyMcpToolName[] = [
+      "task_notes_list",
+      "task_note_save",
+      "task_note_archive",
+    ];
+    const readOnly = buildOpenGeniMcpServer(deps(), grant(["sessions:read"], selected));
+    expect(registeredToolNames(readOnly)).toEqual(["task_notes_list"]);
+
+    const admitted = buildOpenGeniMcpServer(
+      deps(),
+      grant(["sessions:read", "sessions:control"], selected),
+    );
+    expect(registeredToolNames(admitted)).toEqual([...selected].sort());
+
+    const humanGrant = grant(["sessions:read", "sessions:control"], selected);
+    humanGrant.principalKind = "human";
+    const denied = buildOpenGeniMcpServer(deps(), humanGrant);
+    expect(registeredToolNames(denied)).toEqual([]);
+  });
+
   test("the broad catalog excludes compatibility-only and local first-party tools", () => {
     const server = buildOpenGeniMcpServer(
       deps(),

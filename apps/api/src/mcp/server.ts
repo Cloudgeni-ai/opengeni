@@ -40,6 +40,11 @@ import {
   SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES,
   SESSION_GOAL_TEXT_MAX_BYTES,
   sessionGoalUtf8Bytes,
+  TASK_NOTE_LIST_DEFAULT_LIMIT,
+  TASK_NOTE_LIST_MAX_LIMIT,
+  TASK_NOTE_MAX_LIFETIME_DAYS,
+  TASK_NOTE_REASON_MAX_BYTES,
+  TASK_NOTE_TEXT_MAX_BYTES,
 } from "@opengeni/contracts";
 import {
   countVariableSets,
@@ -93,6 +98,9 @@ import {
   listWorkspaceArtifacts,
   publishWorkspaceArtifactVersion,
   rollbackWorkspaceArtifact,
+  archiveTaskNote,
+  createTaskNote,
+  listTaskNotes,
 } from "@opengeni/db";
 import {
   appendAndPublishEvents,
@@ -257,6 +265,9 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
     allOf: ["workspace:read"],
   },
   preference_registry_get: { sessionRequired: true, allOf: ["workspace:read"] },
+  task_notes_list: { sessionRequired: true, allOf: ["sessions:read"] },
+  task_note_save: { sessionRequired: true, allOf: ["sessions:control"] },
+  task_note_archive: { sessionRequired: true, allOf: ["sessions:control"] },
   sandboxes_list: { sessionRequired: true, allOf: ["sessions:read"] },
   sandbox_attach: { sessionRequired: true, allOf: ["sessions:control"] },
   sandbox_swap: { sessionRequired: true, allOf: ["sessions:control"] },
@@ -575,6 +586,7 @@ export function buildOpenGeniMcpServer(
   }
   if (sessionId !== null && exactAgentAttemptClaims(grant) !== null) {
     registerPreferenceRegistryTools(server, deps, grant, json);
+    registerTaskNoteTools(server, deps, grant, sessionId, json);
   }
   if (sessionId !== null && exactAgentAttemptClaims(grant) !== null) {
     registerWorkspaceArtifactTools(server, deps, grant, sessionId, json);
@@ -2676,6 +2688,7 @@ function exactAgentAttemptClaims(grant: AccessGrant): {
   attemptId: string;
   executionGeneration: number;
 } | null {
+  if (grant.principalKind !== "agent_attempt") return null;
   const metadata = grant.metadata ?? {};
   if (
     typeof metadata["sessionId"] !== "string" ||
@@ -2694,6 +2707,109 @@ function exactAgentAttemptClaims(grant: AccessGrant): {
     attemptId: metadata["attemptId"],
     executionGeneration: metadata["executionGeneration"],
   };
+}
+
+function registerTaskNoteTools(
+  server: McpServer,
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  sessionId: string,
+  json: JsonResult,
+): void {
+  const attemptClaims = () => {
+    const resolved = exactAgentAttemptClaims(grant);
+    if (!resolved || resolved.sessionId !== sessionId) {
+      throw new Error("Exact signed task-note attempt authority is required.");
+    }
+    return { accountId: grant.accountId, workspaceId: grant.workspaceId, ...resolved };
+  };
+  const authorize = async () => {
+    await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+  };
+  const boundedUtf8 = (maxBytes: number, label: string) =>
+    z4
+      .string()
+      .min(1)
+      .refine((value) => value === value.trim(), {
+        message: `${label} must not have leading or trailing whitespace`,
+      })
+      .refine((value) => new TextEncoder().encode(value).byteLength <= maxBytes, {
+        message: `${label} must be at most ${maxBytes} UTF-8 bytes`,
+      });
+
+  server.registerTool(
+    "task_notes_list",
+    {
+      description:
+        "Explicitly retrieve bounded, unexpired coordination notes shared by this session's root task tree. Notes are non-authoritative and are never injected into prompts automatically.",
+      inputSchema: {
+        includeArchived: z4.boolean().optional().default(false),
+        limit: z4
+          .number()
+          .int()
+          .min(1)
+          .max(TASK_NOTE_LIST_MAX_LIMIT)
+          .optional()
+          .default(TASK_NOTE_LIST_DEFAULT_LIMIT),
+      },
+    },
+    async ({ includeArchived, limit }) => {
+      await authorize();
+      return json(await listTaskNotes(deps.db, { ...attemptClaims(), includeArchived, limit }));
+    },
+  );
+
+  server.registerTool(
+    "task_note_save",
+    {
+      description:
+        "Save one bounded, expiring, non-authoritative coordination note for agents in this root task tree. Use a fresh operationId; exact retries of the same attempt and input replay safely.",
+      inputSchema: {
+        operationId: z4.string().uuid(),
+        kind: z4.enum(["finding", "decision", "blocker", "ownership", "artifact", "handoff"]),
+        text: boundedUtf8(TASK_NOTE_TEXT_MAX_BYTES, "Task note text"),
+        expiresInDays: z4.number().int().min(1).max(TASK_NOTE_MAX_LIFETIME_DAYS),
+      },
+    },
+    async ({ operationId, kind, text, expiresInDays }) => {
+      await authorize();
+      return json(
+        await createTaskNote(deps.db, {
+          ...attemptClaims(),
+          operationId,
+          kind,
+          text,
+          expiresInDays,
+        }),
+      );
+    },
+  );
+
+  server.registerTool(
+    "task_note_archive",
+    {
+      description:
+        "Archive a coordination note from this root task tree with optimistic version fencing. This preserves its immutable create receipt and records a separate archive receipt.",
+      inputSchema: {
+        operationId: z4.string().uuid(),
+        noteId: z4.string().uuid(),
+        expectedVersion: z4.number().int().min(1).max(1),
+        reason: boundedUtf8(TASK_NOTE_REASON_MAX_BYTES, "Task note archive reason"),
+      },
+    },
+    async ({ operationId, noteId, expectedVersion, reason }) => {
+      await authorize();
+      return json(
+        await archiveTaskNote(deps.db, {
+          ...attemptClaims(),
+          operationId,
+          noteId,
+          expectedVersion,
+          reason,
+        }),
+      );
+    },
+  );
 }
 
 function registerPreferenceRegistryTools(

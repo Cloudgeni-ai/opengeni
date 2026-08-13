@@ -884,6 +884,14 @@ once; a replay after execution started is recorded as outcome-unknown, and a
 replay after completion is rejected as already executed. Recovery may therefore
 re-enter the SDK approval step without issuing the MCP request again.
 
+Root-task-tree note tools follow that same no-ambiguous-replay boundary. Their
+operation receipts bind the exact accepted turn, attempt, execution generation,
+root tree, and input. The same attempt/input may replay its durable receipt, but
+a recovered successor attempt cannot claim or reissue the predecessor's
+operation UUID. Notes remain an explicit retrieval surface and are never
+composed into recovery history or ordinary prompts. See
+[`company-brain-write-routing.md`](company-brain-write-routing.md).
+
 Resource-based turn workers use that exact graceful path only as emergency
 memory protection. Temporal's cgroup-aware slot tuner closes new admission at
 `OPENGENI_TURN_WORKER_TARGET_MEMORY_USAGE`; reaching that target is ordinary
