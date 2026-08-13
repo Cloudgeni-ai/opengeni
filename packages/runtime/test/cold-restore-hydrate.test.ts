@@ -18,6 +18,7 @@ import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
   decodeModalSnapshotId,
+  decodeNativeSnapshotRef,
   describeNativeSnapshotArchive,
   establishSandboxSessionFromEnvelope as establishRuntimeSandboxSessionFromEnvelope,
   readWorkspaceArchiveFromEnvelopeSessionState,
@@ -29,8 +30,10 @@ import { testSettings } from "@opengeni/testing";
 
 const hydrateCalls: Uint8Array[] = [];
 const createArgs: Array<{ manifest?: unknown; snapshot?: unknown }> = [];
+const clientPersistenceModes: Array<string | undefined> = [];
 // Controls for hydrateWorkspace-throw + delete tracking.
 let hydrateWorkspaceFailuresRemaining = 0;
+let lastHydrateWorkspaceFailure: Error | null = null;
 const deleteCalls: unknown[] = [];
 const EXPECTED_WORKSPACE_SHA = "a".repeat(64);
 let observedWorkspaceSha = EXPECTED_WORKSPACE_SHA;
@@ -39,7 +42,9 @@ const restoreEvents: string[] = [];
 
 class FakeModalSandboxClient {
   backendId = "modal";
-  constructor(public options: unknown) {}
+  constructor(
+    public options: { workspacePersistence: string | undefined; createFailure?: unknown },
+  ) {}
   async deserializeSessionState(state: Record<string, unknown>) {
     return { ...state };
   }
@@ -56,8 +61,9 @@ class FakeModalSandboxClient {
         "assertCoreSnapshotUnsupported: ModalSandboxClient.create({ snapshot }) is unsupported",
       );
     }
+    if (this.options.createFailure !== undefined) throw this.options.createFailure;
     const session = {
-      state: { sandboxId: "sb-fresh" },
+      state: { sandboxId: "sb-fresh", workspacePersistence: this.options.workspacePersistence },
       async exec() {
         restoreEvents.push("fingerprint-exec");
         return {
@@ -67,8 +73,26 @@ class FakeModalSandboxClient {
       async hydrateWorkspace(data: Uint8Array) {
         if (hydrateWorkspaceFailuresRemaining > 0) {
           hydrateWorkspaceFailuresRemaining -= 1;
-          throw new Error(
+          lastHydrateWorkspaceFailure = new Error(
             "hydrateWorkspace: snapshot GC'd or provider timeout (test-injected failure)",
+          );
+          throw lastHydrateWorkspaceFailure;
+        }
+        const snapshot = decodeNativeSnapshotRef(data);
+        const expectedPersistence =
+          snapshot?.provider === "modal_snapshot_filesystem"
+            ? "snapshot_filesystem"
+            : snapshot?.provider === "modal_snapshot_directory"
+              ? "snapshot_directory"
+              : null;
+        const actualPersistence = snapshot?.workspacePersistence ?? expectedPersistence;
+        if (
+          expectedPersistence &&
+          (actualPersistence !== expectedPersistence ||
+            session.state.workspacePersistence !== expectedPersistence)
+        ) {
+          throw new Error(
+            `Modal snapshot reference uses ${String(actualPersistence)}, but this session expects ${String(session.state.workspacePersistence)}.`,
           );
         }
         hydrateCalls.push(data);
@@ -92,7 +116,12 @@ function establishSandboxSessionFromEnvelope(
 ) {
   return establishRuntimeSandboxSessionFromEnvelope(settings, envelope, {
     ...opts,
-    clientFactory: () => new FakeModalSandboxClient(undefined),
+    clientFactory: (_backend, currentSettings) => {
+      clientPersistenceModes.push(currentSettings.modalWorkspacePersistence);
+      return new FakeModalSandboxClient({
+        workspacePersistence: currentSettings.modalWorkspacePersistence,
+      });
+    },
   });
 }
 
@@ -105,6 +134,16 @@ const SNAPSHOT_PREV_REF =
 const SNAPSHOT_PREV_B64 = Buffer.from(new TextEncoder().encode(SNAPSHOT_PREV_REF)).toString(
   "base64",
 );
+const DIRECTORY_SNAPSHOT_REF =
+  'MODAL_SANDBOX_DIR_SNAPSHOT_V1\n{"snapshot_id":"im-dir-snap-abc","workspace_persistence":"snapshot_directory"}';
+const DIRECTORY_SNAPSHOT_B64 = Buffer.from(
+  new TextEncoder().encode(DIRECTORY_SNAPSHOT_REF),
+).toString("base64");
+const INCONSISTENT_SNAPSHOT_REF =
+  'MODAL_SANDBOX_FS_SNAPSHOT_V1\n{"snapshot_id":"im-inconsistent","workspace_persistence":"snapshot_directory"}';
+const INCONSISTENT_SNAPSHOT_B64 = Buffer.from(
+  new TextEncoder().encode(INCONSISTENT_SNAPSHOT_REF),
+).toString("base64");
 const TAR_BYTES = new TextEncoder().encode("PK-opengeni-test-tar");
 const TAR_B64 = Buffer.from(TAR_BYTES).toString("base64");
 
@@ -142,12 +181,13 @@ function envelopeWithArchivePair(currentB64: string, previousB64: string) {
   return envelope;
 }
 
-function modalSettings() {
+function modalSettings(overrides: Parameters<typeof testSettings>[0] = {}) {
   return testSettings({
     sandboxBackend: "modal",
     modalAppName: "app",
     modalTokenId: "tok",
     modalTokenSecret: "sec",
+    ...overrides,
   });
 }
 
@@ -523,6 +563,7 @@ describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
   test("cold-restore creates a FRESH box (NO snapshot arg) and hydrates from the lease archive", async () => {
     hydrateCalls.length = 0;
     createArgs.length = 0;
+    clientPersistenceModes.length = 0;
 
     const established = await establishSandboxSessionFromEnvelope(
       modalSettings(),
@@ -537,9 +578,51 @@ describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
     // (2) the persisted archive was replayed via hydrateWorkspace on the fresh box.
     expect(hydrateCalls).toHaveLength(1);
     expect(new TextDecoder().decode(hydrateCalls[0]!)).toBe(SNAPSHOT_REF);
+    expect(clientPersistenceModes).toEqual(["snapshot_directory", "snapshot_filesystem"]);
     expect(established.instanceId).toBe("sb-fresh");
     expect(established.origin).toBe("restored");
     expect(established.restoredArchive?.archiveSha256).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  test("cold-restore pins a directory snapshot when the process default is filesystem", async () => {
+    hydrateCalls.length = 0;
+    createArgs.length = 0;
+    clientPersistenceModes.length = 0;
+
+    const established = await establishSandboxSessionFromEnvelope(
+      modalSettings({ modalWorkspacePersistence: "snapshot_filesystem" }),
+      envelopeWithArchive(DIRECTORY_SNAPSHOT_B64),
+      { sessionId: "sess-cold-directory", recovery: "create-or-restore", environment: {} },
+    );
+
+    expect(hydrateCalls).toHaveLength(1);
+    expect(new TextDecoder().decode(hydrateCalls[0]!)).toBe(DIRECTORY_SNAPSHOT_REF);
+    expect(clientPersistenceModes).toEqual(["snapshot_filesystem", "snapshot_directory"]);
+    expect(established.instanceId).toBe("sb-fresh");
+    expect(established.origin).toBe("restored");
+  });
+
+  test("cold-restore rejects contradictory Modal snapshot persistence before provider create", async () => {
+    createArgs.length = 0;
+    clientPersistenceModes.length = 0;
+
+    await expect(
+      establishSandboxSessionFromEnvelope(
+        modalSettings(),
+        envelopeWithArchive(INCONSISTENT_SNAPSHOT_B64),
+        {
+          sessionId: "sess-cold-inconsistent-persistence",
+          recovery: "create-or-restore",
+          environment: {},
+        },
+      ),
+    ).rejects.toMatchObject({
+      code: "native_snapshot_reference_invalid",
+      retryable: false,
+    });
+
+    expect(clientPersistenceModes).toEqual(["snapshot_directory"]);
+    expect(createArgs).toHaveLength(0);
   });
 
   test("attributes a hydrate replacement before restore verification runs on it", async () => {
@@ -653,6 +736,60 @@ describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
     expect(established.origin).toBe("created");
   });
 
+  test("native archive mode remains pinned through logical image fallback", async () => {
+    hydrateCalls.length = 0;
+    createArgs.length = 0;
+    const builtClients: Array<{
+      imageId: string | undefined;
+      workspacePersistence: string | undefined;
+    }> = [];
+    const settings = testSettings({
+      sandboxBackend: "modal",
+      modalImageRef: undefined,
+      modalImageId: "im-stale-rig-image",
+      modalWorkspacePersistence: "snapshot_directory",
+    });
+    const logicalFallbackSettings = testSettings({
+      sandboxBackend: "modal",
+      modalImageRef: undefined,
+      modalImageId: "im-logical-base-image",
+      modalWorkspacePersistence: "snapshot_directory",
+    });
+
+    const established = await establishRuntimeSandboxSessionFromEnvelope(
+      settings,
+      envelopeWithArchive(SNAPSHOT_B64),
+      {
+        sessionId: "sess-native-mode-logical-fallback",
+        recovery: "create-or-restore",
+        environment: {},
+        logicalFallbackSettings,
+        clientFactory: (_backend, currentSettings) => {
+          builtClients.push({
+            imageId: currentSettings.modalImageId,
+            workspacePersistence: currentSettings.modalWorkspacePersistence,
+          });
+          const restoreOfMissingImage =
+            currentSettings.modalImageId === "im-stale-rig-image" &&
+            currentSettings.modalWorkspacePersistence === "snapshot_filesystem";
+          return new FakeModalSandboxClient({
+            workspacePersistence: currentSettings.modalWorkspacePersistence,
+            ...(restoreOfMissingImage ? { createFailure: { status: 404 } } : {}),
+          });
+        },
+      },
+    );
+
+    expect(builtClients).toEqual([
+      { imageId: "im-stale-rig-image", workspacePersistence: "snapshot_directory" },
+      { imageId: "im-stale-rig-image", workspacePersistence: "snapshot_filesystem" },
+      { imageId: "im-logical-base-image", workspacePersistence: "snapshot_filesystem" },
+    ]);
+    expect(hydrateCalls).toHaveLength(1);
+    expect(established.instanceId).toBe("sb-fresh");
+    expect(established.origin).toBe("restored");
+  });
+
   test("cold-restore never silently selects workspaceArchivePrev when the selected revision fails", async () => {
     hydrateCalls.length = 0;
     createArgs.length = 0;
@@ -680,21 +817,30 @@ describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
     createArgs.length = 0;
     deleteCalls.length = 0;
     hydrateWorkspaceFailuresRemaining = 1;
+    lastHydrateWorkspaceFailure = null;
 
     try {
-      await expect(
-        establishSandboxSessionFromEnvelope(modalSettings(), envelopeWithArchive(SNAPSHOT_B64), {
+      const error = await establishSandboxSessionFromEnvelope(
+        modalSettings(),
+        envelopeWithArchive(SNAPSHOT_B64),
+        {
           sessionId: "sess-hydrate-fail-closed",
           recovery: "create-or-restore",
           environment: {},
-        }),
-      ).rejects.toMatchObject({ code: "archive_hydration_failed" });
+        },
+      ).then(
+        () => null,
+        (caught: unknown) => caught,
+      );
+      expect(error).toMatchObject({ code: "archive_hydration_failed" });
+      expect((error as Error).cause).toBe(lastHydrateWorkspaceFailure);
       expect(deleteCalls.length).toBe(1);
       expect(deleteCalls[0]).toMatchObject({ sandboxId: "sb-fresh" });
       expect(createArgs).toHaveLength(1);
       expect(hydrateCalls).toHaveLength(0);
     } finally {
       hydrateWorkspaceFailuresRemaining = 0;
+      lastHydrateWorkspaceFailure = null;
     }
   });
 
