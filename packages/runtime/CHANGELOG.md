@@ -1,5 +1,11 @@
 # @opengeni/runtime
 
+## 0.21.2
+
+### Patch Changes
+
+- 61e0b89: Restore verified Modal workspace snapshots with the persistence mode recorded by the selected artifact.
+
 ## 0.21.1
 
 ### Patch Changes
