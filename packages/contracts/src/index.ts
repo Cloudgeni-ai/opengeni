@@ -2661,9 +2661,9 @@ export type InsightsModelUsageRow = z.infer<typeof InsightsModelUsageRow>;
 
 export const InsightsSeriesPoint = z.object({
   label: z.string().min(1),
-  /** Day-bucketed sum of usage_events.model.cost (workspace-wide) or filtered facts when provider/model set. */
+  /** UTC hour/day-bucketed sum of usage_events.model.cost (workspace-wide) or filtered facts when provider/model set. */
   modelCostUsd: z.number().nonnegative(),
-  /** Day-bucketed hypothetical provider-rate USD for calls with captured pricing. */
+  /** UTC hour/day-bucketed hypothetical provider-rate USD for calls with captured pricing. */
   estimatedProviderUsd: z.number().nonnegative(),
   estimatedProviderCostKnownCalls: z.number().int().nonnegative(),
   warmSeconds: z.number().nonnegative(),

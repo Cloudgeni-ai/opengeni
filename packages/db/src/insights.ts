@@ -125,6 +125,10 @@ function dayKeyUtc(value: Date): string {
   return value.toISOString().slice(0, 10);
 }
 
+function hourKeyUtc(value: Date): string {
+  return `${value.toISOString().slice(0, 13)}:00`;
+}
+
 export async function sumUsageQuantityInRange(
   db: Database,
   input: {
@@ -153,7 +157,7 @@ export async function sumUsageQuantityInRange(
   });
 }
 
-export async function sumUsageQuantityByDay(
+async function sumUsageQuantityByBucket(
   db: Database,
   input: {
     workspaceId: string;
@@ -161,12 +165,21 @@ export async function sumUsageQuantityByDay(
     since: Date;
     until: Date;
   },
+  granularity: "day" | "hour",
 ): Promise<Map<string, number>> {
   const context = await rlsContextForWorkspace(db, input.workspaceId);
   return await withRlsContext(db, context, async (scopedDb) => {
+    const bucket =
+      granularity === "hour"
+        ? sql<string>`to_char(date_trunc('hour', ${schema.usageEvents.occurredAt} at time zone 'UTC'), 'YYYY-MM-DD"T"HH24:00')`
+        : sql<string>`to_char(date_trunc('day', ${schema.usageEvents.occurredAt} at time zone 'UTC'), 'YYYY-MM-DD')`;
+    const bucketGroup =
+      granularity === "hour"
+        ? sql`date_trunc('hour', ${schema.usageEvents.occurredAt} at time zone 'UTC')`
+        : sql`date_trunc('day', ${schema.usageEvents.occurredAt} at time zone 'UTC')`;
     const rows = await scopedDb
       .select({
-        day: sql<string>`to_char(date_trunc('day', ${schema.usageEvents.occurredAt} at time zone 'UTC'), 'YYYY-MM-DD')`,
+        bucket,
         total: sql<number>`coalesce(sum(${schema.usageEvents.quantity}), 0)`,
       })
       .from(schema.usageEvents)
@@ -178,9 +191,33 @@ export async function sumUsageQuantityByDay(
           lt(schema.usageEvents.occurredAt, input.until),
         ),
       )
-      .groupBy(sql`date_trunc('day', ${schema.usageEvents.occurredAt} at time zone 'UTC')`);
-    return new Map(rows.map((row) => [row.day, Number(row.total)]));
+      .groupBy(bucketGroup);
+    return new Map(rows.map((row) => [row.bucket, Number(row.total)]));
   });
+}
+
+export async function sumUsageQuantityByDay(
+  db: Database,
+  input: {
+    workspaceId: string;
+    eventType: string;
+    since: Date;
+    until: Date;
+  },
+): Promise<Map<string, number>> {
+  return await sumUsageQuantityByBucket(db, input, "day");
+}
+
+export async function sumUsageQuantityByHour(
+  db: Database,
+  input: {
+    workspaceId: string;
+    eventType: string;
+    since: Date;
+    until: Date;
+  },
+): Promise<Map<string, number>> {
+  return await sumUsageQuantityByBucket(db, input, "hour");
 }
 
 export async function aggregateModelCallFacts(
@@ -249,7 +286,23 @@ export async function aggregateModelCallFacts(
   });
 }
 
-export async function aggregateModelCallFactsByDay(
+type ModelCallFactSeriesAggregate = {
+  costMicros: number;
+  estimatedProviderCostMicros: number;
+  estimatedProviderCostKnownCalls: number;
+  inputTokens: number;
+  outputTokens: number;
+  cachedTokens: number;
+  cacheInputTokens: number;
+  cacheWriteTokens: number;
+  reasoningTokens: number;
+  totalTokens: number;
+  tokenKnownCalls: number;
+  cacheKnownCalls: number;
+  calls: number;
+};
+
+async function aggregateModelCallFactsByBucket(
   db: Database,
   input: {
     workspaceId: string;
@@ -258,26 +311,8 @@ export async function aggregateModelCallFactsByDay(
     provider?: string | null;
     model?: string | null;
   },
-): Promise<
-  Map<
-    string,
-    {
-      costMicros: number;
-      estimatedProviderCostMicros: number;
-      estimatedProviderCostKnownCalls: number;
-      inputTokens: number;
-      outputTokens: number;
-      cachedTokens: number;
-      cacheInputTokens: number;
-      cacheWriteTokens: number;
-      reasoningTokens: number;
-      totalTokens: number;
-      tokenKnownCalls: number;
-      cacheKnownCalls: number;
-      calls: number;
-    }
-  >
-> {
+  granularity: "day" | "hour",
+): Promise<Map<string, ModelCallFactSeriesAggregate>> {
   const context = await rlsContextForWorkspace(db, input.workspaceId);
   return await withRlsContext(db, context, async (scopedDb) => {
     const clauses = [
@@ -287,9 +322,17 @@ export async function aggregateModelCallFactsByDay(
       ...(input.provider ? [eq(schema.modelCallFacts.provider, input.provider)] : []),
       ...(input.model ? [eq(schema.modelCallFacts.model, input.model)] : []),
     ];
+    const bucket =
+      granularity === "hour"
+        ? sql<string>`to_char(date_trunc('hour', ${schema.modelCallFacts.occurredAt} at time zone 'UTC'), 'YYYY-MM-DD"T"HH24:00')`
+        : sql<string>`to_char(date_trunc('day', ${schema.modelCallFacts.occurredAt} at time zone 'UTC'), 'YYYY-MM-DD')`;
+    const bucketGroup =
+      granularity === "hour"
+        ? sql`date_trunc('hour', ${schema.modelCallFacts.occurredAt} at time zone 'UTC')`
+        : sql`date_trunc('day', ${schema.modelCallFacts.occurredAt} at time zone 'UTC')`;
     const rows = await scopedDb
       .select({
-        day: sql<string>`to_char(date_trunc('day', ${schema.modelCallFacts.occurredAt} at time zone 'UTC'), 'YYYY-MM-DD')`,
+        bucket,
         costMicros: sql<number>`coalesce(sum(${schema.modelCallFacts.pricedCostMicros}) filter (where ${schema.modelCallFacts.billingPath} = 'opengeni_credits'), 0)`,
         estimatedProviderCostMicros: sql<number>`coalesce(sum(${schema.modelCallFacts.estimatedProviderCostMicros}), 0)`,
         estimatedProviderCostKnownCalls: sql<number>`count(${schema.modelCallFacts.estimatedProviderCostMicros})::int`,
@@ -306,10 +349,10 @@ export async function aggregateModelCallFactsByDay(
       })
       .from(schema.modelCallFacts)
       .where(and(...clauses))
-      .groupBy(sql`date_trunc('day', ${schema.modelCallFacts.occurredAt} at time zone 'UTC')`);
+      .groupBy(bucketGroup);
     return new Map(
       rows.map((row) => [
-        row.day,
+        row.bucket,
         {
           costMicros: Number(row.costMicros),
           estimatedProviderCostMicros: Number(row.estimatedProviderCostMicros),
@@ -328,6 +371,32 @@ export async function aggregateModelCallFactsByDay(
       ]),
     );
   });
+}
+
+export async function aggregateModelCallFactsByDay(
+  db: Database,
+  input: {
+    workspaceId: string;
+    since: Date;
+    until: Date;
+    provider?: string | null;
+    model?: string | null;
+  },
+): Promise<Map<string, ModelCallFactSeriesAggregate>> {
+  return await aggregateModelCallFactsByBucket(db, input, "day");
+}
+
+export async function aggregateModelCallFactsByHour(
+  db: Database,
+  input: {
+    workspaceId: string;
+    since: Date;
+    until: Date;
+    provider?: string | null;
+    model?: string | null;
+  },
+): Promise<Map<string, ModelCallFactSeriesAggregate>> {
+  return await aggregateModelCallFactsByBucket(db, input, "hour");
 }
 
 export async function aggregateWarmSecondsByGroup(
@@ -781,6 +850,18 @@ export function enumerateUtcDays(since: Date, until: Date): string[] {
     cursor.setUTCDate(cursor.getUTCDate() + 1);
   }
   return days;
+}
+
+export function enumerateUtcHours(since: Date, until: Date): string[] {
+  const hours: string[] = [];
+  const cursor = new Date(since);
+  cursor.setUTCMinutes(0, 0, 0);
+  const end = until.getTime();
+  while (cursor.getTime() < end) {
+    hours.push(hourKeyUtc(cursor));
+    cursor.setUTCHours(cursor.getUTCHours() + 1);
+  }
+  return hours;
 }
 
 /**

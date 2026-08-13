@@ -78,6 +78,7 @@ export function AreaChart(props: {
 }) {
   const reduceMotion = useReducedMotion();
   const gradId = useId();
+  const plotClipId = useId();
   const [active, setActive] = useState<number | null>(null);
   const height = props.height ?? 220;
   const width = 720;
@@ -182,12 +183,15 @@ export function AreaChart(props: {
 
       <svg
         viewBox={`0 0 ${width} ${height}`}
-        className="h-auto w-full cursor-crosshair overflow-visible"
+        className="h-auto w-full cursor-crosshair overflow-hidden"
         role="img"
         aria-label="Trend chart"
         onPointerMove={onMove}
       >
         <defs>
+          <clipPath id={plotClipId}>
+            <rect x={padL} y={padTop} width={innerW} height={innerH} />
+          </clipPath>
           {geometry.map(({ series }, index) => (
             <linearGradient key={series.id} id={`${gradId}-${index}`} x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" stopColor="currentColor" stopOpacity={0.22} />
@@ -236,18 +240,20 @@ export function AreaChart(props: {
           );
         })}
 
-        {activeX != null ? (
-          <motion.rect
-            x={activeX - innerW / props.labels.length / 2}
-            y={padTop}
-            width={Math.max(innerW / props.labels.length, 12)}
-            height={innerH}
-            className="fill-fg/[0.04]"
-            initial={false}
-            animate={{ x: activeX - innerW / props.labels.length / 2 }}
-            transition={{ type: "spring", stiffness: 380, damping: 36 }}
-          />
-        ) : null}
+        <g clipPath={`url(#${plotClipId})`} data-chart-plot-highlight="clipped">
+          {activeX != null ? (
+            <motion.rect
+              x={activeX - innerW / props.labels.length / 2}
+              y={padTop}
+              width={Math.max(innerW / props.labels.length, 12)}
+              height={innerH}
+              className="fill-fg/[0.04]"
+              initial={false}
+              animate={{ x: activeX - innerW / props.labels.length / 2 }}
+              transition={{ type: "spring", stiffness: 380, damping: 36 }}
+            />
+          ) : null}
+        </g>
 
         {geometry.map(({ series, line, area, points }, index) => (
           <g key={series.id} className={series.className}>
