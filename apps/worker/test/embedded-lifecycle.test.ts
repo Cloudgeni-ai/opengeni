@@ -404,6 +404,16 @@ describe("embedded worker lifecycle contract", () => {
           can_trigger: false,
         })),
       ],
+      [
+        {
+          name: "personal_resource_delegation_capabilities",
+          owner: "opengeni_migrator",
+          can_select: false,
+          can_insert: false,
+          can_update: false,
+          can_delete: false,
+        },
+      ],
       RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.map((name) => ({
         name,
         owner: "opengeni_migrator",
@@ -418,6 +428,13 @@ describe("embedded worker lifecycle contract", () => {
           name: "workspace_rls_visible(uuid, uuid)",
           owner: "opengeni_migrator",
           can_execute: true,
+        },
+        {
+          name: "personal_resource_delegation_capability_active(text)",
+          owner: "opengeni_migrator",
+          can_execute: true,
+          public_execute: false,
+          security_definer: true,
         },
       ],
     ];
@@ -456,7 +473,7 @@ describe("embedded worker lifecycle contract", () => {
         "canonical_human_identity_operations",
       ],
     })();
-    expect((catalogResults[6] as Array<{ name: string }>).map((routine) => routine.name)).toEqual([
+    expect((catalogResults[7] as Array<{ name: string }>).map((routine) => routine.name)).toEqual([
       ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
     ]);
     expect(catalogQueries).toBe(catalogResults.length);
