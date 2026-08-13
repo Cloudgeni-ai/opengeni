@@ -56,6 +56,8 @@ const MANAGED_HUMAN_PERSONAL_WORKSPACE_AUTHORITY_TABLES = [
   "organization_user_resource_authorities",
   "organization_user_resource_grants",
 ] as const;
+const PERSONAL_RESOURCE_ATTEMPT_RESOLVER_ROUTINE =
+  "resolve_session_attempt_personal_resources(uuid, uuid, uuid)";
 const CANONICAL_HUMAN_IDENTITY_ROUTINES = [
   "ensure_canonical_human_identity(text, text)",
   "validate_canonical_human_session(text, text, boolean)",
@@ -77,6 +79,7 @@ const FORK_SESSION_CONTENT_ROUTINE =
   "fork_session_content(uuid, uuid, uuid, text, uuid, text, text, text)";
 const SESSION_AUTHORITY_ROUTINES = new Set<string>([
   FORK_SESSION_CONTENT_ROUTINE,
+  PERSONAL_RESOURCE_ATTEMPT_RESOLVER_ROUTINE,
   SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE,
   SESSION_REFERENCE_VISIBLE_ROUTINE,
   TRANSITION_SESSION_VISIBILITY_ROUTINE,
@@ -106,6 +109,7 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   XAI_DISCONNECT_CREDENTIAL_ROUTINE,
   KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE,
   MANAGED_HUMAN_PERSONAL_WORKSPACE_ROUTINE,
+  PERSONAL_RESOURCE_ATTEMPT_RESOLVER_ROUTINE,
   ...CANONICAL_HUMAN_IDENTITY_ROUTINES,
   SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE,
   SESSION_REFERENCE_VISIBLE_ROUTINE,
@@ -263,6 +267,7 @@ export const FORCE_RLS_TABLES = [
   "organization_user_retention_policies",
   "pack_installation_components",
   "pack_installations",
+  "personal_resource_once_consumption_receipts",
   "preference_registry_events",
   "preference_registry_preferences",
   "preference_registry_revisions",
@@ -283,6 +288,8 @@ export const FORCE_RLS_TABLES = [
   "scheduled_tasks",
   "session_attempt_codemode_calls",
   "session_attempt_interruptions",
+  "session_attempt_personal_resource_admissions",
+  "session_attempt_personal_resource_snapshots",
   "session_attempt_tool_catalogs",
   "session_command_receipts",
   "session_events",
@@ -652,6 +659,9 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "organization_user_resource_authorities",
   "organization_user_resource_grants",
   "organization_user_retention_policies",
+  "personal_resource_once_consumption_receipts",
+  "session_attempt_personal_resource_admissions",
+  "session_attempt_personal_resource_snapshots",
   "session_visibility_write_capabilities",
 ] as const;
 

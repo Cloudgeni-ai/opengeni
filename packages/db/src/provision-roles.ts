@@ -935,6 +935,22 @@ BEGIN
     END IF;
     IF to_regprocedure(
       format(
+        '%I.resolve_session_attempt_personal_resources(uuid,uuid,uuid)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.resolve_session_attempt_personal_resources(uuid, uuid, uuid) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.resolve_session_attempt_personal_resources(uuid, uuid, uuid) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
         '%I.scoped_knowledge_advance_source_acl(uuid,uuid,bigint,bigint,uuid,text,text,text,text,text,text)',
         ${literal(schema)}
       )
