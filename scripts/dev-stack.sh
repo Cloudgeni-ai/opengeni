@@ -303,17 +303,15 @@ choose_port OPENGENI_TURN_WORKER_HTTP_PORT 8002
 choose_port OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT 9465
 choose_port OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT 9466
 choose_port OPENGENI_WEB_PORT 3000
+if [ "${OPENGENI_SANDBOX_BACKEND:-docker}" = "modal" ]; then
+  choose_port OPENGENI_SANDBOX_EDGE_PORT 10080
+fi
 if [ "${OPENGENI_SANDBOX_SELFHOSTED_ENABLED:-false}" = "true" ]; then
   choose_port OPENGENI_RELAY_HOST_PORT 8280
 fi
 
 pids=()
-owned_ngrok_tunnel_name=""
 cleanup() {
-  if [ -n "$owned_ngrok_tunnel_name" ]; then
-    curl -fsS -X DELETE "http://127.0.0.1:4040/api/tunnels/${owned_ngrok_tunnel_name}" \
-      >/dev/null 2>&1 || true
-  fi
   if [ "${#pids[@]}" -gt 0 ]; then
     kill "${pids[@]}" >/dev/null 2>&1 || true
   fi
@@ -484,68 +482,80 @@ if [ "${OPENGENI_SANDBOX_BACKEND:-docker}" = "modal" ]; then
     [ "$sandbox_object_host" = "localhost" ] ||
     [[ "$sandbox_object_host" = *.ngrok-free.app ]] ||
     [[ "$sandbox_object_host" = *.ngrok-free.dev ]] ||
-    [[ "$sandbox_object_host" = *.ngrok.io ]]; then
-    if ! command -v ngrok >/dev/null 2>&1; then
-      echo "Modal local development needs ngrok or an externally reachable OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT." >&2
+    [[ "$sandbox_object_host" = *.ngrok.io ]] ||
+    [[ "$sandbox_object_host" = *.trycloudflare.com ]]; then
+    needs_modal_object_route=1
+  else
+    needs_modal_object_route=0
+  fi
+
+  # The API/worker live on the developer host while Modal executes remotely.
+  # Publish one exact worktree-scoped edge for presigned objects plus
+  # MCP/Codemode; browser/UI origins and Connected Machine enrollment remain
+  # unchanged.
+  mcp_host="$({
+    OPENGENI_LOCAL_MCP_URL="${OPENGENI_MCP_URL:-http://127.0.0.1:${OPENGENI_API_PORT}}" bun -e '
+      const url = new URL(Bun.env.OPENGENI_LOCAL_MCP_URL.replace("{workspaceId}", "workspace"));
+      process.stdout.write(url.hostname.toLowerCase());
+    '
+  })"
+  if [ -z "${OPENGENI_MCP_URL:-}" ] ||
+    [ "$mcp_host" = "127.0.0.1" ] ||
+    [ "$mcp_host" = "localhost" ] ||
+    [ "$mcp_host" = "host.docker.internal" ] ||
+    [[ "$mcp_host" = *.ngrok-free.app ]] ||
+    [[ "$mcp_host" = *.ngrok-free.dev ]] ||
+    [[ "$mcp_host" = *.ngrok.io ]] ||
+    [[ "$mcp_host" = *.trycloudflare.com ]]; then
+    needs_modal_api_route=1
+  else
+    needs_modal_api_route=0
+  fi
+
+  if [ "$needs_modal_object_route" = "1" ] || [ "$needs_modal_api_route" = "1" ]; then
+    if ! command -v cloudflared >/dev/null 2>&1; then
+      echo "Modal local development needs cloudflared or explicit sandbox-reachable object and MCP endpoints." >&2
       exit 1
     fi
-
-    ngrok_tunnel_url() {
-      local tunnels
-      tunnels="$(curl -fsS http://127.0.0.1:4040/api/tunnels 2>/dev/null || true)"
-      if [ -z "$tunnels" ]; then
-        return 0
-      fi
-      OPENGENI_NGROK_TUNNELS="$tunnels" OPENGENI_NGROK_TARGET_PORT="$OPENGENI_MINIO_HOST_PORT" bun -e '
-        const value = JSON.parse(Bun.env.OPENGENI_NGROK_TUNNELS);
-        const port = Bun.env.OPENGENI_NGROK_TARGET_PORT;
-        const tunnel = value.tunnels?.find((candidate) => {
-          try {
-            const target = new URL(candidate.config?.addr);
-            return (target.port || (target.protocol === "https:" ? "443" : "80")) === port;
-          } catch {
-            return false;
-          }
-        });
-        if (typeof tunnel?.public_url === "string" && tunnel.public_url.startsWith("https://")) {
-          process.stdout.write(tunnel.public_url);
-        }
-      '
+    mkdir -p .opengeni
+    edge_log=".opengeni/cloudflared-sandbox-edge.log"
+    : >"$edge_log"
+    OPENGENI_SANDBOX_EDGE_API_ORIGIN="http://127.0.0.1:${OPENGENI_API_PORT}" \
+      OPENGENI_SANDBOX_EDGE_OBJECT_ORIGIN="http://127.0.0.1:${OPENGENI_MINIO_HOST_PORT}" \
+      bun scripts/dev-sandbox-edge.ts &
+    pids+=("$!")
+    for _attempt in $(seq 1 100); do
+      curl -fsS "http://127.0.0.1:${OPENGENI_SANDBOX_EDGE_PORT}/__opengeni_edge_health" \
+        >/dev/null 2>&1 && break
+      sleep 0.05
+    done
+    curl -fsS "http://127.0.0.1:${OPENGENI_SANDBOX_EDGE_PORT}/__opengeni_edge_health" \
+      >/dev/null || {
+      echo "Could not start the local Modal sandbox edge." >&2
+      exit 1
     }
-
-    sandbox_object_tunnel_url="$(ngrok_tunnel_url)"
-    if [ -z "$sandbox_object_tunnel_url" ]; then
-      if curl -fsS http://127.0.0.1:4040/api/tunnels >/dev/null 2>&1; then
-        owned_ngrok_tunnel_name="opengeni-${COMPOSE_PROJECT_NAME}-minio"
-        ngrok_request="$({
-          OPENGENI_NGROK_NAME="$owned_ngrok_tunnel_name" OPENGENI_NGROK_TARGET_PORT="$OPENGENI_MINIO_HOST_PORT" bun -e '
-            process.stdout.write(JSON.stringify({
-              name: Bun.env.OPENGENI_NGROK_NAME,
-              proto: "http",
-              addr: `http://127.0.0.1:${Bun.env.OPENGENI_NGROK_TARGET_PORT}`,
-            }));
-          '
-        })"
-        curl -fsS -X POST -H "content-type: application/json" --data "$ngrok_request" \
-          http://127.0.0.1:4040/api/tunnels >/dev/null
-      else
-        mkdir -p .opengeni
-        ngrok http "http://127.0.0.1:${OPENGENI_MINIO_HOST_PORT}" \
-          --log ".opengeni/ngrok-object-storage.log" --log-format json &
-        pids+=("$!")
-      fi
-      for _attempt in $(seq 1 100); do
-        sandbox_object_tunnel_url="$(ngrok_tunnel_url)"
-        [ -n "$sandbox_object_tunnel_url" ] && break
-        sleep 0.1
-      done
-    fi
-    if [ -z "$sandbox_object_tunnel_url" ]; then
-      echo "Could not establish the Modal-to-MinIO development tunnel." >&2
+    cloudflared tunnel --no-autoupdate \
+      --url "http://127.0.0.1:${OPENGENI_SANDBOX_EDGE_PORT}" \
+      --logfile "$edge_log" --loglevel info >/dev/null 2>&1 &
+    pids+=("$!")
+    sandbox_edge_url=""
+    for _attempt in $(seq 1 200); do
+      sandbox_edge_url="$(grep -Eo 'https://[-a-z0-9]+\.trycloudflare\.com' "$edge_log" | tail -n 1 || true)"
+      [ -n "$sandbox_edge_url" ] && break
+      sleep 0.1
+    done
+    if [ -z "$sandbox_edge_url" ]; then
+      echo "Could not establish the remote Modal sandbox edge." >&2
       exit 1
     fi
-    export OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT="$sandbox_object_tunnel_url"
-    echo "  modal-object-storage=${OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT}"
+    if [ "$needs_modal_object_route" = "1" ]; then
+      export OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT="$sandbox_edge_url"
+      echo "  modal-object-storage=${OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT}"
+    fi
+    if [ "$needs_modal_api_route" = "1" ]; then
+      export OPENGENI_MCP_URL="${sandbox_edge_url}/v1/workspaces/{workspaceId}/mcp"
+      echo "  modal-opengeni-api=${sandbox_edge_url}"
+    fi
   fi
 fi
 
@@ -724,6 +734,9 @@ fi
   printf 'OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT=%s\n' "${OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT}"
   printf 'OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT=%s\n' "${OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT}"
   printf 'OPENGENI_WEB_PORT=%s\n' "${OPENGENI_WEB_PORT}"
+  if [ -n "${OPENGENI_SANDBOX_EDGE_PORT:-}" ]; then
+    printf 'OPENGENI_SANDBOX_EDGE_PORT=%s\n' "${OPENGENI_SANDBOX_EDGE_PORT}"
+  fi
   if [ "${OPENGENI_SANDBOX_SELFHOSTED_ENABLED:-false}" = "true" ]; then
     printf 'OPENGENI_RELAY_HOST_PORT=%s\n' "${OPENGENI_RELAY_HOST_PORT}"
     printf 'OPENGENI_SELFHOSTED_NATS_URL=%s\n' "${OPENGENI_SELFHOSTED_NATS_URL}"
@@ -741,6 +754,9 @@ fi
   printf 'OPENGENI_OBJECT_STORAGE_ENDPOINT=%s\n' "${OPENGENI_OBJECT_STORAGE_ENDPOINT}"
   printf 'OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT=%s\n' "${OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT}"
   printf 'OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT=%s\n' "${OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT}"
+  if [ -n "${OPENGENI_MCP_URL:-}" ]; then
+    printf 'OPENGENI_MCP_URL=%s\n' "${OPENGENI_MCP_URL}"
+  fi
   printf 'OPENGENI_CODEX_SUBSCRIPTION_ENABLED=%s\n' "${OPENGENI_CODEX_SUBSCRIPTION_ENABLED}"
   printf 'NODE_ENV=%s\n' "${NODE_ENV}"
   printf 'OPENGENI_ARTIFACT_DEVELOPMENT_RUNTIME_MANIFEST=%s\n' "${OPENGENI_ARTIFACT_DEVELOPMENT_RUNTIME_MANIFEST}"

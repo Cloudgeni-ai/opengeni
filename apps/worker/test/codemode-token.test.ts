@@ -91,7 +91,7 @@ describe("codemode token mint and sandbox delivery pointers", () => {
       "/workspace/.opengeni/codemode-token",
     );
     expect(result.environment.OPENGENI_CODEMODE_URL).toBe(
-      `http://127.0.0.1:8000/v1/workspaces/${workspaceId}/codemode`,
+      `http://127.0.0.1:3000/v1/workspaces/${workspaceId}/codemode`,
     );
     expect(Object.values(result.environment)).not.toContain(result.codemodeToken);
 
@@ -177,5 +177,25 @@ describe("codemode token mint and sandbox delivery pointers", () => {
       `https://app.opengeni.example/v1/workspaces/${workspaceId}/codemode`,
     );
     expect(result.environment.OPENGENI_CODEMODE_URL).not.toContain("127.0.0.1");
+  });
+
+  test("remote managed sandboxes default to the deployment public origin", async () => {
+    const result = await sandboxEnvironmentForRun(
+      testSettings({
+        sandboxBackend: "modal",
+        delegationSecret: "codemode-secret",
+        publicBaseUrl: "https://app.opengeni.example/",
+      }),
+      [],
+      {},
+      {
+        scope: { accountId, workspaceId },
+        codemodeAuthority: authority,
+      },
+    );
+
+    expect(result.environment.OPENGENI_CODEMODE_URL).toBe(
+      `https://app.opengeni.example/v1/workspaces/${workspaceId}/codemode`,
+    );
   });
 });

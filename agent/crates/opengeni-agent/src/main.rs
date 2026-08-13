@@ -464,7 +464,13 @@ fn supervisor_links(
                 allow_screen_control: credentials.consented_screen_control,
             });
             let link_platform = Arc::new(platform.clone().with_stream_registry(Arc::new(hub)));
-            SupervisorLink::new(connection.connection_id.clone(), link_platform, credentials)
+            let link =
+                SupervisorLink::new(connection.connection_id.clone(), link_platform, credentials);
+            if connection.legacy_origin {
+                link
+            } else {
+                link.with_api_url(connection.api_url.clone())
+            }
         })
         .collect()
 }
