@@ -22,11 +22,13 @@ const output = resolve(
   process.env.OPENGENI_INTERACTION_UI_OUTPUT ??
     `.agent/evidence/interaction-ui-live-${Date.now()}.json`,
 );
+const webOrigin = new URL(process.env.OPENGENI_INTERACTION_UI_WEB_URL ?? "http://127.0.0.1:3200")
+  .origin;
 const fixture = await createInteractionUiFixture();
 const browser = await chromium.launch({ headless: true });
 const context = await browser.newContext({ viewport: { width: 1_440, height: 900 } });
 await context.grantPermissions(["clipboard-read", "clipboard-write"], {
-  origin: "http://127.0.0.1:3200",
+  origin: webOrigin,
 });
 const page = await context.newPage();
 const checks: string[] = [];
@@ -111,7 +113,8 @@ page.on("request", (request) => {
 
 try {
   await page.goto(
-    `http://127.0.0.1:3200/workspaces/${fixture.workspaceId}/sessions/${fixture.sessionId}`,
+    new URL(`/workspaces/${fixture.workspaceId}/sessions/${fixture.sessionId}`, `${webOrigin}/`)
+      .href,
     { waitUntil: "domcontentloaded" },
   );
   const browserTab = page.getByRole("tab", { name: "Browser", exact: true });
