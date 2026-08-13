@@ -3,6 +3,7 @@ import {
   type GenerateVideoToolInput,
   type VideoGenerationCapabilities,
   type VideoGenerationPolicy,
+  type XaiProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
 import {
   normalizeVideoGenerationRequest,
@@ -18,6 +19,7 @@ import {
   markVideoGenerationPrepared,
   type Database,
   type VideoGenerationReference,
+  type XaiCredentialForRun,
 } from "@opengeni/db";
 import {
   calculateVideoGenerationCreditCostMicros,
@@ -32,14 +34,16 @@ import {
   videoReferenceStagingKey,
   type SandboxCommandRunner,
 } from "./video-reference-staging";
-import { encryptVideoGenerationApiKey } from "./video-generation-credential";
+import {
+  encryptVideoGenerationApiKey,
+  encryptVideoGenerationXaiCredential,
+} from "./video-generation-credential";
 
 export type VideoGenerationCredentialLease = Readonly<{
-  fundingSource: "opengeni_credits" | "workspace_gateway";
+  fundingSource: "opengeni_credits" | "workspace_gateway" | "supergrok_subscription";
   connectionId: string | null;
   version: number;
   credentialEncrypted: string;
-  apiKey: string;
 }>;
 
 export type AcceptedVideoGeneration = Readonly<{
@@ -77,7 +81,36 @@ export function managedVideoGenerationCredentialLease(
       encryptionKey,
       settings.vercelAiGatewayApiKey,
     ),
-    apiKey: settings.vercelAiGatewayApiKey,
+  });
+}
+
+export function xaiVideoGenerationCredentialLease(input: {
+  settings: Settings;
+  credential: XaiCredentialForRun;
+  subjectId: string;
+  authoritySnapshot: XaiProviderAccountAuthoritySnapshotV1;
+}): VideoGenerationCredentialLease {
+  const encryptionKey = environmentsEncryptionKeyBytes(input.settings);
+  if (!encryptionKey) {
+    throw new Error("SuperGrok video generation requires OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY");
+  }
+  const { accessToken, refreshToken } = input.credential.secret;
+  const userId = input.credential.providerAccountId;
+  if (!accessToken || !refreshToken || !userId) {
+    throw new Error("The selected SuperGrok account cannot fund video generation");
+  }
+  return Object.freeze({
+    fundingSource: "supergrok_subscription",
+    connectionId: null,
+    version: input.credential.version,
+    credentialEncrypted: encryptVideoGenerationXaiCredential(encryptionKey, {
+      accessToken,
+      refreshToken,
+      userId,
+      credentialId: input.credential.id,
+      subjectId: input.subjectId,
+      authoritySnapshot: input.authoritySnapshot,
+    }),
   });
 }
 

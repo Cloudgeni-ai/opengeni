@@ -22,12 +22,14 @@ import {
   nestedPostgresSqlState,
   reconcileXaiCapacityWait,
   recordXaiSessionLastAccount,
+  refreshXaiSubscriptionCredentialSerialized,
   releaseXaiCredentialLease,
   setXaiSessionAccountPin,
   supersedeSessionCurrentDirectionInTransaction,
   updateXaiQuotaMetadata,
   updateXaiRotationSettings,
   wakeXaiCapacityWaiters,
+  xaiCredentialShardIndex,
   withSessionActivityRlsContext,
   withWorkspaceSubjectSessionActivityRls,
   type DbClient,
@@ -390,6 +392,61 @@ describe("migration 0234 xAI subscription authority", () => {
     expect(revoked?.revokedAt).toBeInstanceOf(Date);
   }, 180_000);
 
+  test("serializes rotating OAuth refresh tokens across concurrent sessions", async () => {
+    if (!shared || !client) return;
+    const fixture = await seedWorkspace();
+    const [subjectId] = fixture.subjects;
+    const created = await createXaiSubscriptionCredential(client.db, {
+      ...fixture,
+      subjectId: subjectId!,
+      secret: {
+        version: 1,
+        accessToken: "shared-access-0",
+        refreshToken: "shared-refresh-0",
+      },
+      encryptionKey,
+      providerAccountId: `shared-${crypto.randomUUID()}`,
+      label: "Shared xAI",
+    });
+    let providerRefreshCalls = 0;
+    const refresh = async () => {
+      providerRefreshCalls += 1;
+      await Bun.sleep(20);
+      return {
+        secret: {
+          version: 1 as const,
+          accessToken: "shared-access-1",
+          refreshToken: "shared-refresh-1",
+        },
+        expiresAt: new Date(Date.now() + 60_000),
+      };
+    };
+    const input = {
+      ...fixture,
+      subjectId: subjectId!,
+      credentialId: created.account.id,
+      authoritySnapshot: created.authoritySnapshot,
+      encryptionKey,
+      observedAccessToken: "shared-access-0",
+      observedRefreshToken: "shared-refresh-0",
+      refresh,
+    };
+    const results = await Promise.all([
+      refreshXaiSubscriptionCredentialSerialized(client.db, input),
+      refreshXaiSubscriptionCredentialSerialized(client.db, input),
+    ]);
+
+    expect(providerRefreshCalls).toBe(1);
+    expect(results.map((result) => result.refreshed).sort()).toEqual([false, true]);
+    for (const result of results) {
+      expect(result.credential.secret).toEqual({
+        version: 1,
+        accessToken: "shared-access-1",
+        refreshToken: "shared-refresh-1",
+      });
+    }
+  }, 180_000);
+
   test("persists quota metadata and excludes credentials during cooldown", async () => {
     if (!shared || !client) return;
     const fixture = await seedWorkspace();
@@ -427,6 +484,7 @@ describe("migration 0234 xAI subscription authority", () => {
     const firstLease = await acquireXaiCredentialLease(client.db, {
       ...fixture,
       subjectId: subjectId!,
+      sessionId: firstTurn.sessionId,
       turnId: firstTurn.turnId,
       holderId: "holder:quota-cooldown",
       authoritySnapshot: workspaceSnapshot,
@@ -464,15 +522,18 @@ describe("migration 0234 xAI subscription authority", () => {
     const recoveredLease = await acquireXaiCredentialLease(client.db, {
       ...fixture,
       subjectId: subjectId!,
+      sessionId: secondTurn.sessionId,
       turnId: secondTurn.turnId,
       holderId: "holder:quota-recovered",
       authoritySnapshot: workspaceSnapshot,
+      pinnedCredentialId: cooling.id,
+      pinSource: "manual",
       now: recoveredAt,
     });
     expect(recoveredLease.credentialId).toBe(cooling.id);
   }, 180_000);
 
-  test("allocates fairly with exact-turn reuse, session pins, cooldowns, and lease exclusion", async () => {
+  test("shards sessions stably while preserving exact-turn reuse, pins, and concurrency", async () => {
     if (!shared || !client) return;
     const fixture = await seedWorkspace();
     const [subjectId] = fixture.subjects;
@@ -496,14 +557,18 @@ describe("migration 0234 xAI subscription authority", () => {
     const firstLease = await acquireXaiCredentialLease(client.db, {
       ...fixture,
       subjectId: subjectId!,
+      sessionId: firstTurn.sessionId,
       turnId: firstTurn.turnId,
       holderId: "holder:first",
       authoritySnapshot: workspaceSnapshot,
     });
-    expect(firstLease.credentialId).not.toBeNull();
+    expect(firstLease.credentialId).toBe(
+      firstLease.accounts[xaiCredentialShardIndex(firstTurn.sessionId, accounts.length)]!.id,
+    );
     const retriedFirst = await acquireXaiCredentialLease(client.db, {
       ...fixture,
       subjectId: subjectId!,
+      sessionId: firstTurn.sessionId,
       turnId: firstTurn.turnId,
       holderId: "holder:first-retry",
       authoritySnapshot: workspaceSnapshot,
@@ -517,23 +582,37 @@ describe("migration 0234 xAI subscription authority", () => {
     const secondLease = await acquireXaiCredentialLease(client.db, {
       ...fixture,
       subjectId: subjectId!,
+      sessionId: secondTurn.sessionId,
       turnId: secondTurn.turnId,
       holderId: "holder:second",
       authoritySnapshot: workspaceSnapshot,
     });
-    expect(secondLease.credentialId).not.toBe(firstLease.credentialId);
-    expect(new Set([firstLease.credentialId, secondLease.credentialId])).toEqual(
-      new Set(accounts.map((account) => account.account.id)),
+    expect(secondLease.credentialId).toBe(
+      secondLease.accounts[xaiCredentialShardIndex(secondTurn.sessionId, accounts.length)]!.id,
     );
 
-    const unavailable = await acquireXaiCredentialLease(client.db, {
+    const thirdLease = await acquireXaiCredentialLease(client.db, {
       ...fixture,
       subjectId: subjectId!,
+      sessionId: thirdTurn.sessionId,
       turnId: thirdTurn.turnId,
       holderId: "holder:third",
       authoritySnapshot: workspaceSnapshot,
     });
-    expect(unavailable).toMatchObject({ credentialId: null, reused: false });
+    expect(thirdLease).toMatchObject({
+      credentialId:
+        thirdLease.accounts[xaiCredentialShardIndex(thirdTurn.sessionId, accounts.length)]!.id,
+      reused: false,
+    });
+    expect(
+      await releaseXaiCredentialLease(client.db, {
+        workspaceId: fixture.workspaceId,
+        subjectId: subjectId!,
+        turnId: thirdTurn.turnId,
+        holderId: "holder:third",
+        generation: thirdLease.generation!,
+      }),
+    ).toBe(true);
     expect(
       await releaseXaiCredentialLease(client.db, {
         workspaceId: fixture.workspaceId,
@@ -562,6 +641,17 @@ describe("migration 0234 xAI subscription authority", () => {
       pinSource: "manual",
     });
     expect(pin.pinnedCredentialId).toBe(firstLease.credentialId);
+    await expect(
+      setXaiSessionAccountPin(client.db, {
+        ...fixture,
+        subjectId: subjectId!,
+        sessionId: thirdTurn.sessionId,
+        authoritySnapshot: workspaceSnapshot,
+        credentialId: secondLease.credentialId,
+        pinSource: "policy",
+        expectedVersion: null,
+      }),
+    ).rejects.toThrow("xAI session pin changed");
     expect(
       await getXaiSessionAccountPin(client.db, {
         workspaceId: fixture.workspaceId,
@@ -576,10 +666,12 @@ describe("migration 0234 xAI subscription authority", () => {
     const pinnedLease = await acquireXaiCredentialLease(client.db, {
       ...fixture,
       subjectId: subjectId!,
+      sessionId: thirdTurn.sessionId,
       turnId: thirdTurn.turnId,
       holderId: "holder:pinned",
       authoritySnapshot: workspaceSnapshot,
       pinnedCredentialId: firstLease.credentialId,
+      pinSource: "manual",
     });
     expect(pinnedLease.credentialId).toBe(firstLease.credentialId);
     const recorded = await recordXaiSessionLastAccount(client.db, {
@@ -600,6 +692,7 @@ describe("migration 0234 xAI subscription authority", () => {
       acquireXaiCredentialLease(client.db, {
         ...fixture,
         subjectId: subjectId!,
+        sessionId: mismatchedTurn.sessionId,
         turnId: mismatchedTurn.turnId,
         holderId: "holder:mismatch",
         authoritySnapshot: workspaceSnapshot,
@@ -628,6 +721,7 @@ describe("migration 0234 xAI subscription authority", () => {
     const firstLease = await acquireXaiCredentialLease(client.db, {
       ...fixture,
       subjectId: subjectId!,
+      sessionId: firstTurn.sessionId,
       turnId: firstTurn.turnId,
       holderId: "holder:rotation-bootstrap",
       authoritySnapshot: workspaceSnapshot,
@@ -662,6 +756,7 @@ describe("migration 0234 xAI subscription authority", () => {
     const fixedLease = await acquireXaiCredentialLease(client.db, {
       ...fixture,
       subjectId: subjectId!,
+      sessionId: fixedTurn.sessionId,
       turnId: fixedTurn.turnId,
       holderId: "holder:rotation-disabled",
       authoritySnapshot: workspaceSnapshot,
@@ -693,6 +788,7 @@ describe("migration 0234 xAI subscription authority", () => {
     const unavailable = await acquireXaiCredentialLease(client.db, {
       ...fixture,
       subjectId: subjectId!,
+      sessionId: unavailableTurn.sessionId,
       turnId: unavailableTurn.turnId,
       holderId: "holder:rotation-disabled-unavailable",
       authoritySnapshot: workspaceSnapshot,
@@ -700,7 +796,7 @@ describe("migration 0234 xAI subscription authority", () => {
     expect(unavailable).toMatchObject({ credentialId: null, reused: false });
   }, 180_000);
 
-  test("releasing an exact lease durably wakes a blocked turn in the same authority pool", async () => {
+  test("permits concurrent exact-turn leases on one SuperGrok account", async () => {
     if (!shared || !client) return;
     const fixture = await seedWorkspace();
     const [subjectId] = fixture.subjects;
@@ -719,6 +815,7 @@ describe("migration 0234 xAI subscription authority", () => {
     const lease = await acquireXaiCredentialLease(client.db, {
       ...fixture,
       subjectId: subjectId!,
+      sessionId: holderTurn.sessionId,
       turnId: holderTurn.turnId,
       holderId: "holder:lease-wake",
       authoritySnapshot: workspaceSnapshot,
@@ -729,31 +826,20 @@ describe("migration 0234 xAI subscription authority", () => {
       reused: false,
     });
 
-    const blockedTurn = await seedSessionTurn(fixture);
-    const unavailable = await acquireXaiCredentialLease(client.db, {
+    const concurrentTurn = await seedSessionTurn(fixture);
+    const concurrentLease = await acquireXaiCredentialLease(client.db, {
       ...fixture,
       subjectId: subjectId!,
-      turnId: blockedTurn.turnId,
-      holderId: "holder:lease-wake-blocked",
+      sessionId: concurrentTurn.sessionId,
+      turnId: concurrentTurn.turnId,
+      holderId: "holder:concurrent",
       authoritySnapshot: workspaceSnapshot,
     });
-    expect(unavailable.credentialId).toBeNull();
-    const armed = await armXaiCapacityWait(client.db, {
-      ...fixture,
-      subjectId: subjectId!,
-      sessionId: blockedTurn.sessionId,
-      turnId: blockedTurn.turnId,
-      attemptId: blockedTurn.attemptId,
-      workflowId: blockedTurn.workflowId,
-      authoritySnapshot: workspaceSnapshot,
-      earliestResetAt: null,
-      failurePayload: {
-        error: "the only SuperGrok account is leased by another turn",
-        code: "xai_capacity_unavailable",
-      },
+    expect(concurrentLease).toMatchObject({
+      credentialId: account.account.id,
+      generation: 1,
+      reused: false,
     });
-    expect(armed.action).toBe("waiting");
-    if (armed.action !== "waiting") throw new Error("xAI capacity waiter did not arm");
 
     expect(
       await releaseXaiCredentialLease(client.db, {
@@ -765,34 +851,14 @@ describe("migration 0234 xAI subscription authority", () => {
       }),
     ).toBe(true);
     expect(
-      await getXaiCapacityWaitForSession(client.db, fixture.workspaceId, blockedTurn.sessionId),
-    ).toMatchObject({
-      id: armed.waiter.id,
-      wakeRevision: 2,
-      observedWakeRevision: 1,
-      lastWakeReason: "xai_credential_lease_released",
-    });
-    const [wake] = await shared.admin<
-      { wake_revision: string; reason: string; temporal_workflow_id: string }[]
-    >`
-      select wake_revision, reason, temporal_workflow_id
-      from session_workflow_wake_outbox
-      where workspace_id = ${fixture.workspaceId}
-        and session_id = ${blockedTurn.sessionId}`;
-    expect(wake).toMatchObject({
-      wake_revision: "1",
-      reason: "xai_capacity",
-      temporal_workflow_id: blockedTurn.workflowId,
-    });
-    expect(
-      await reconcileXaiCapacityWait(client.db, {
-        accountId: fixture.accountId,
+      await releaseXaiCredentialLease(client.db, {
         workspaceId: fixture.workspaceId,
-        sessionId: blockedTurn.sessionId,
-        waiterId: armed.waiter.id,
-        generation: armed.waiter.generation,
+        subjectId: subjectId!,
+        turnId: concurrentTurn.turnId,
+        holderId: "holder:concurrent",
+        generation: concurrentLease.generation!,
       }),
-    ).toMatchObject({ action: "resumed", waiter: { status: "resumed" } });
+    ).toBe(true);
   }, 180_000);
 
   test("steering a capacity-blocked turn supersedes its xAI waiter atomically", async () => {

@@ -22,7 +22,7 @@ export async function fetchXaiSubscriptionModels(input: {
   baseUrl?: string;
 }): Promise<XaiSubscriptionModelMetadata[]> {
   const body = await fetchXaiProxyJson<unknown>({
-    path: "models-v2",
+    path: "models",
     context: input.context,
     ...(input.fetch ? { fetch: input.fetch } : {}),
     ...(input.timeoutMs ? { timeoutMs: input.timeoutMs } : {}),

@@ -28,11 +28,21 @@ export function normalizeXaiSubscriptionRequestBody(
   }
   body.include = include;
 
-  const tools = Array.isArray(body.tools) ? [...body.tools] : [];
+  const tools = Array.isArray(body.tools) ? body.tools.map(normalizeXaiSubscriptionTool) : [];
   appendHostedTool(tools, "web_search", hostedSearch?.webSearch);
   appendHostedTool(tools, "x_search", hostedSearch?.xSearch);
   if (tools.length > 0) body.tools = tools;
   return body;
+}
+
+function normalizeXaiSubscriptionTool(tool: unknown): unknown {
+  if (!tool || typeof tool !== "object" || Array.isArray(tool)) return tool;
+  const record = tool as Record<string, unknown>;
+  if (record.type !== "web_search") return tool;
+  // OpenAI's Responses tool factory adds this tuning hint. Grok's CLI proxy
+  // supports native web_search but rejects the OpenAI-only argument.
+  const { search_context_size: _unsupported, ...supported } = record;
+  return supported;
 }
 
 function appendHostedTool(
@@ -52,7 +62,7 @@ function appendHostedTool(
   ) {
     return;
   }
-  tools.push(options === true ? { type } : { type, ...options });
+  tools.push(normalizeXaiSubscriptionTool(options === true ? { type } : { type, ...options }));
 }
 
 export function normalizeXaiResponseEventJson(value: unknown): {

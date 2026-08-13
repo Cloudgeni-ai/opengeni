@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { SEEDANCE_2_5_MODEL_ID } from "@opengeni/contracts";
-import { defaultVideoGenerationPolicy, videoGenerationCapabilitiesForPolicy } from "../src";
+import { GROK_IMAGINE_VIDEO_1_5_MODEL_ID, SEEDANCE_2_5_MODEL_ID } from "@opengeni/contracts";
+import {
+  defaultVideoGenerationPolicy,
+  videoGenerationCapabilitiesForPolicy,
+  videoGenerationModelSupportsFundingSource,
+} from "../src";
 
 describe("video generation capability catalog", () => {
   test("is disabled by default", () => {
@@ -12,7 +16,7 @@ describe("video generation capability catalog", () => {
     ).toThrow("disabled");
   });
 
-  test("projects one stable reviewed Seedance capability", () => {
+  test("projects the stable reviewed Seedance capability", () => {
     const capabilities = videoGenerationCapabilitiesForPolicy({
       policy: {
         schemaVersion: 1,
@@ -33,5 +37,37 @@ describe("video generation capability catalog", () => {
       "video_reference",
     ]);
     expect(capabilities.capabilityRevision).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  test("binds Grok video exclusively to connected SuperGrok", () => {
+    expect(
+      videoGenerationModelSupportsFundingSource(
+        GROK_IMAGINE_VIDEO_1_5_MODEL_ID,
+        "supergrok_subscription",
+      ),
+    ).toBe(true);
+    expect(
+      videoGenerationModelSupportsFundingSource(
+        GROK_IMAGINE_VIDEO_1_5_MODEL_ID,
+        "opengeni_credits",
+      ),
+    ).toBe(false);
+    const capabilities = videoGenerationCapabilitiesForPolicy({
+      policy: {
+        schemaVersion: 1,
+        revision: 3,
+        fundingSource: "supergrok_subscription",
+        enabledModelIds: [GROK_IMAGINE_VIDEO_1_5_MODEL_ID],
+        defaultModelId: GROK_IMAGINE_VIDEO_1_5_MODEL_ID,
+      },
+      credentialVersion: 7,
+    });
+    expect(capabilities.models).toEqual([
+      expect.objectContaining({
+        modelId: GROK_IMAGINE_VIDEO_1_5_MODEL_ID,
+        sourceModes: ["text", "first_frame", "image_reference"],
+        supportsAudio: true,
+      }),
+    ]);
   });
 });

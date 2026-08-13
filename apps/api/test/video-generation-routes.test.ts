@@ -5,6 +5,7 @@ import {
   bootstrapWorkspace,
   createConnection,
   createDb,
+  createXaiSubscriptionCredential,
   deleteWorkspace,
   type DbClient,
 } from "@opengeni/db";
@@ -18,6 +19,7 @@ import { registerVideoGenerationRoutes } from "../src/routes/video-generation";
 
 const SECRET = "video-generation-routes-test-secret";
 const MODEL_ID = "bytedance/seedance-2.5";
+const SUPERGROK_MODEL_ID = "xai/grok-imagine-video-1.5";
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient;
@@ -92,9 +94,10 @@ describe("video generation workspace routes", () => {
         },
         fundingOptions: [
           { source: "opengeni_credits", available: false },
+          { source: "supergrok_subscription", available: false },
           { source: "workspace_gateway", available: false },
         ],
-        availableModels: [{ modelId: MODEL_ID }],
+        availableModels: [{ modelId: MODEL_ID }, { modelId: "xai/grok-imagine-video-1.5" }],
         capabilities: null,
       });
 
@@ -111,7 +114,10 @@ describe("video generation workspace routes", () => {
 
       const readOnlyMutation = await app.request(`${settingsUrl(workspace.workspaceId)}/policy`, {
         method: "PUT",
-        headers: { authorization: readAuthorization, "content-type": "application/json" },
+        headers: {
+          authorization: readAuthorization,
+          "content-type": "application/json",
+        },
         body: JSON.stringify({
           expectedRevision: 0,
           fundingSource: "workspace_gateway",
@@ -123,7 +129,10 @@ describe("video generation workspace routes", () => {
 
       const enabled = await app.request(`${settingsUrl(workspace.workspaceId)}/policy`, {
         method: "PUT",
-        headers: { authorization: adminAuthorization, "content-type": "application/json" },
+        headers: {
+          authorization: adminAuthorization,
+          "content-type": "application/json",
+        },
         body: JSON.stringify({
           expectedRevision: 0,
           fundingSource: "workspace_gateway",
@@ -147,6 +156,7 @@ describe("video generation workspace routes", () => {
       expect(await configured.json()).toMatchObject({
         fundingOptions: [
           { source: "opengeni_credits", available: false },
+          { source: "supergrok_subscription", available: false },
           { source: "workspace_gateway", available: true },
         ],
         policy: {
@@ -164,7 +174,10 @@ describe("video generation workspace routes", () => {
 
       const stale = await app.request(`${settingsUrl(workspace.workspaceId)}/policy`, {
         method: "PUT",
-        headers: { authorization: adminAuthorization, "content-type": "application/json" },
+        headers: {
+          authorization: adminAuthorization,
+          "content-type": "application/json",
+        },
         body: JSON.stringify({
           expectedRevision: 0,
           fundingSource: "workspace_gateway",
@@ -176,7 +189,10 @@ describe("video generation workspace routes", () => {
 
       const unknown = await app.request(`${settingsUrl(workspace.workspaceId)}/policy`, {
         method: "PUT",
-        headers: { authorization: adminAuthorization, "content-type": "application/json" },
+        headers: {
+          authorization: adminAuthorization,
+          "content-type": "application/json",
+        },
         body: JSON.stringify({
           expectedRevision: 1,
           fundingSource: "workspace_gateway",
@@ -209,6 +225,7 @@ describe("video generation workspace routes", () => {
       expect(await initial.json()).toMatchObject({
         fundingOptions: [
           { source: "opengeni_credits", available: true },
+          { source: "supergrok_subscription", available: false },
           { source: "workspace_gateway", available: false },
         ],
         capabilities: null,
@@ -234,8 +251,84 @@ describe("video generation workspace routes", () => {
         headers: { authorization },
       });
       expect(await configured.json()).toMatchObject({
-        policy: { fundingSource: "opengeni_credits", enabledModelIds: [MODEL_ID] },
-        capabilities: { defaultModelId: MODEL_ID, models: [{ modelId: MODEL_ID }] },
+        policy: {
+          fundingSource: "opengeni_credits",
+          enabledModelIds: [MODEL_ID],
+        },
+        capabilities: {
+          defaultModelId: MODEL_ID,
+          models: [{ modelId: MODEL_ID }],
+        },
+      });
+    } finally {
+      await deleteWorkspace(client.db, workspace.workspaceId);
+    }
+  });
+
+  test("enables Grok Imagine Video through an eligible SuperGrok subscription", async () => {
+    const workspace = await workspaceFixture();
+    const supergrokApp = new Hono();
+    registerVideoGenerationRoutes(supergrokApp, {
+      db: client.db,
+      settings: testSettings({
+        delegationSecret: SECRET,
+        supergrokSubscriptionEnabled: true,
+      }),
+    } as ApiRouteDeps);
+    try {
+      await createXaiSubscriptionCredential(client.db, {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        subjectId: workspace.subjectId,
+        scope: "workspace",
+        encryptionKey: Buffer.alloc(32, 9),
+        secret: { version: 1, accessToken: "supergrok-video-test-token" },
+        providerAccountId: `supergrok-video-${crypto.randomUUID()}`,
+        label: "SuperGrok video test",
+      });
+
+      const authorization = await bearer(workspace, ["workspace:read", "workspace:admin"]);
+      const initial = await supergrokApp.request(settingsUrl(workspace.workspaceId), {
+        headers: { authorization },
+      });
+      expect(initial.status).toBe(200);
+      expect(await initial.json()).toMatchObject({
+        fundingOptions: [
+          { source: "opengeni_credits", available: false },
+          { source: "supergrok_subscription", available: true },
+          { source: "workspace_gateway", available: false },
+        ],
+      });
+
+      const enabled = await supergrokApp.request(`${settingsUrl(workspace.workspaceId)}/policy`, {
+        method: "PUT",
+        headers: { authorization, "content-type": "application/json" },
+        body: JSON.stringify({
+          expectedRevision: 0,
+          fundingSource: "supergrok_subscription",
+          enabledModelIds: [SUPERGROK_MODEL_ID],
+          defaultModelId: SUPERGROK_MODEL_ID,
+        }),
+      });
+      expect(enabled.status).toBe(200);
+      expect(await enabled.json()).toEqual({
+        schemaVersion: 1,
+        revision: 1,
+        fundingSource: "supergrok_subscription",
+        enabledModelIds: [SUPERGROK_MODEL_ID],
+        defaultModelId: SUPERGROK_MODEL_ID,
+      });
+
+      const configured = await supergrokApp.request(settingsUrl(workspace.workspaceId), {
+        headers: { authorization },
+      });
+      expect(configured.status).toBe(200);
+      expect(await configured.json()).toMatchObject({
+        capabilities: {
+          schemaVersion: 1,
+          defaultModelId: SUPERGROK_MODEL_ID,
+          models: [{ modelId: SUPERGROK_MODEL_ID }],
+        },
       });
     } finally {
       await deleteWorkspace(client.db, workspace.workspaceId);

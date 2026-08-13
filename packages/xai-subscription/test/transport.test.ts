@@ -12,16 +12,19 @@ describe("SuperGrok request normalization", () => {
     expect(
       normalizeXaiSubscriptionRequestBody(
         {
-          model: "supergrok/grok-4.5",
+          model: "supergrok/grok-4.6",
           store: true,
           include: ["file_search_call.results"],
-          tools: [{ type: "function", name: "shell" }],
+          tools: [
+            { type: "function", name: "shell" },
+            { type: "web_search", search_context_size: "medium" },
+          ],
         },
         (slug) => slug,
         { webSearch: true, xSearch: { allowed_x_handles: ["xai"] } },
       ),
     ).toEqual({
-      model: "grok-4.5",
+      model: "grok-4.6",
       store: false,
       include: ["file_search_call.results", "reasoning.encrypted_content"],
       tools: [
@@ -76,7 +79,7 @@ describe("SuperGrok subscription fetch", () => {
       bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
       expect(headers.get("x-xai-token-auth")).toBe("xai-grok-cli");
       expect(headers.get("x-grok-conv-id")).toBe("session-1");
-      expect(headers.get("x-grok-model-override")).toBe("grok-4.5");
+      expect(headers.get("x-grok-model-override")).toBe("grok-4.6");
       if (calls === 1) return Response.json({ error: "expired" }, { status: 401 });
       const payload = JSON.stringify({
         type: "response.completed",
@@ -109,13 +112,13 @@ describe("SuperGrok subscription fetch", () => {
         await wrapped("https://cli-chat-proxy.grok.com/v1/responses", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ model: "supergrok/grok-4.5", input: "hello" }),
+          body: JSON.stringify({ model: "supergrok/grok-4.6", input: "hello" }),
         }),
     );
     const text = await response.text();
     expect(authorizations).toEqual(["Bearer stale", "Bearer fresh"]);
     expect(bodies[0]).toEqual({
-      model: "grok-4.5",
+      model: "grok-4.6",
       input: "hello",
       store: false,
       include: ["reasoning.encrypted_content"],
@@ -145,7 +148,7 @@ describe("SuperGrok subscription fetch", () => {
       async () =>
         await wrapped("https://cli-chat-proxy.grok.com/v1/responses", {
           method: "POST",
-          body: JSON.stringify({ model: "supergrok/grok-4.5", input: "hello" }),
+          body: JSON.stringify({ model: "supergrok/grok-4.6", input: "hello" }),
         }),
     );
     expect(response.status).toBe(503);
