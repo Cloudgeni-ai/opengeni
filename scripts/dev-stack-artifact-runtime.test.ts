@@ -77,6 +77,17 @@ describe("local artifact runtime stack contract", () => {
     expect(source).not.toContain("printf 'OPENGENI_MODAL_TOKEN_SECRET=%s");
   });
 
+  test("isolates Modal sandbox ownership between local worktrees", async () => {
+    const source = await Bun.file(scriptPath).text();
+
+    expect(source).toContain('[ "${OPENGENI_PIN_MODAL_APP_NAME:-0}" != "1" ]');
+    expect(source).toContain('OPENGENI_MODAL_APP_NAME="opengeni-${COMPOSE_PROJECT_NAME}"');
+    expect(source).toContain("export OPENGENI_MODAL_APP_NAME");
+    expect(source).toContain(
+      "printf 'OPENGENI_MODAL_APP_NAME=%s\\n' \"${OPENGENI_MODAL_APP_NAME:-opengeni-sandbox}\"",
+    );
+  });
+
   test("makes local Connected Machines self-initializing", async () => {
     const [source, envExample] = await Promise.all([
       Bun.file(scriptPath).text(),
