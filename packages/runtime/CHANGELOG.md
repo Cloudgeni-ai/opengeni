@@ -1,5 +1,11 @@
 # @opengeni/runtime
 
+## 0.22.1
+
+### Patch Changes
+
+- 40248f9: Reissue the complete MCP result fidelity release source after the prior automated Version PR was merged without the required provider-native approval.
+
 ## 0.22.0
 
 ### Minor Changes
