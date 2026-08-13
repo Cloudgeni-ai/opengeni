@@ -61,6 +61,14 @@ access on the personal workspace, and malformed subjects fail closed. The app
 role still has zero direct SELECT/INSERT/UPDATE/DELETE privileges on all four
 organization-tenancy tables.
 
+`GET /v1/organization-memberships` is the first read-only managed-human
+discovery surface. It accepts only a current Better Auth human session and
+returns the exact active membership id, organization id, and personal-workspace
+id emitted by that same narrow provisioning capability. API keys, delegated
+bearers, configured/local access, and missing or terminal memberships fail
+closed. The response intentionally omits subjects, retention state, grants,
+resource authority, and personal-workspace runtime access.
+
 ## Canonical human identity and login bindings
 
 Migration `0235_canonical_human_login_bindings.sql` adds a separate,
@@ -185,7 +193,7 @@ rewritten in the same release that first activates user authority.
 
 ## Non-goals in Slices A and B
 
-- organization/member API or UI;
+- organization invitation, role/admin, offboarding, or member-management UI;
 - personal-workspace runtime access or a personal `workspace_memberships` row;
 - user-resource authority/grant writes, discovery, or sharing;
 - resource CRUD or discovery changes;

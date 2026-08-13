@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
+  ListManagedOrganizationMembershipsResponse,
+  ManagedOrganizationMembershipProjection,
   OrganizationMembershipProjection,
   ResourceAuthorityEnvelope,
   ResourceAuthorityListScope,
@@ -139,6 +141,27 @@ describe("organization tenancy foundation contracts", () => {
     expect(serialized).not.toContain("subjectId");
     expect(serialized).not.toContain("organizationMembershipId");
     expect(serialized).not.toContain("ownerOrganizationMembershipId");
+  });
+
+  test("projects only exact managed-human bootstrap facts", () => {
+    const membership = ManagedOrganizationMembershipProjection.parse({
+      id: ids.membership,
+      organizationId: ids.organization,
+      status: "active",
+      personalWorkspaceId: ids.workspace,
+      subjectId: "must-not-survive",
+      personalRetentionUntil: "2026-09-13T00:00:00.000Z",
+    });
+
+    expect(membership).toEqual({
+      id: ids.membership,
+      organizationId: ids.organization,
+      status: "active",
+      personalWorkspaceId: ids.workspace,
+    });
+    expect(ListManagedOrganizationMembershipsResponse.parse({ memberships: [membership] })).toEqual(
+      { memberships: [membership] },
+    );
   });
 
   test("rejects illegal grant fences and allows only exact standing/session forms", () => {

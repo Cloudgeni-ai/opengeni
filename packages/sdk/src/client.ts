@@ -219,6 +219,7 @@ import type {
   KnowledgeMemory,
   KnowledgeMemorySearchRequest,
   ListApiKeysResponse,
+  ListManagedOrganizationMembershipsResponse,
   ListPacksResponse,
   // Bring-your-own-compute: the Machines dashboard + per-machine metrics (M10).
   MachinesResponse,
@@ -3282,6 +3283,14 @@ export class OpenGeniClient {
   /** The caller's access context: subject, account + workspace grants, defaults. */
   async getAccessContext(): Promise<AccessContext> {
     return await this.requestJson<AccessContext>("GET", "/v1/access/me");
+  }
+
+  /** Active organization memberships proven by the current managed-human session. */
+  async listOrganizationMemberships(): Promise<ListManagedOrganizationMembershipsResponse> {
+    return await this.requestJson<ListManagedOrganizationMembershipsResponse>(
+      "GET",
+      "/v1/organization-memberships",
+    );
   }
 
   async listWorkspaces(): Promise<Workspace[]> {

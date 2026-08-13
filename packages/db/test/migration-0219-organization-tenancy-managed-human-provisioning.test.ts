@@ -8,6 +8,7 @@ import postgres from "postgres";
 import {
   createDb,
   ensureManagedAccessForUser,
+  ensureManagedAccessForUserWithOrganizationMemberships,
   listWorkspacesForSubject,
   nestedPostgresSqlState,
   setRlsContext,
@@ -142,12 +143,17 @@ describe("migration 0219 managed-human organization provisioning", () => {
       name: "Slice B managed human",
     };
     const first = await ensureManagedAccessForUser(client.db, input);
+    const provisioned = await ensureManagedAccessForUserWithOrganizationMemberships(
+      client.db,
+      input,
+    );
     const repeated = await ensureManagedAccessForUser(client.db, input);
     const concurrent = await Promise.all(
       Array.from({ length: 6 }, () => ensureManagedAccessForUser(client!.db, input)),
     );
 
     expect(repeated).toEqual(first);
+    expect(provisioned.accessContext).toEqual(first);
     expect(concurrent).toEqual(Array.from({ length: 6 }, () => first));
     expect(first.workspaceGrants).toHaveLength(1);
     expect((await listWorkspacesForSubject(client.db, subjectId)).map((row) => row.id)).toEqual([
@@ -249,6 +255,14 @@ describe("migration 0219 managed-human organization provisioning", () => {
       status: "active",
       personalWorkspaceId: personalWorkspace!.id,
     });
+    expect(provisioned.organizationMemberships).toEqual([
+      {
+        id: membership!.id,
+        organizationId: account!.id,
+        status: "active",
+        personalWorkspaceId: personalWorkspace!.id,
+      },
+    ]);
     expect(control).toEqual({ accountId: account!.id });
     expect(personalAccess).toEqual({ count: 0 });
     expect(defaultAccess).toEqual({ count: 1 });

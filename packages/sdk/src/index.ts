@@ -319,6 +319,8 @@ export type {
   BillingEntitlementsResponse,
   BillingMode,
   BillingSummary,
+  ListManagedOrganizationMembershipsResponse,
+  ManagedOrganizationMembership,
   BillingUsageResponse,
   InsightsRange,
   InsightsBillingPath,

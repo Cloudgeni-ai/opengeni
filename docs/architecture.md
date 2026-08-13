@@ -238,6 +238,10 @@ Grant rows carry the owning membership and a canonical action; `once` and
 slice must consume `once` grants atomically before accepting use. Slice B does
 not create any authority or grant rows, and the personal workspace remains
 absent from runtime workspace access.
+The managed-human-only `GET /v1/organization-memberships` route exposes just
+the exact active membership, organization, and personal-workspace identifiers
+returned by that provisioning capability; it is unavailable to API keys and
+delegated principals and does not expose retention, grant, or resource state.
 Sessions gain additive owner, `user_private|workspace_shared` visibility,
 authority-epoch, and independent-fork provenance columns; every existing row
 defaults to workspace-shared epoch 1 with no owner or fork authority. This slice
