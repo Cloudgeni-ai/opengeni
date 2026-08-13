@@ -16,6 +16,7 @@ import {
   prepareRetainedScreenshotArtifact,
   PROTECTED_NO_DIRECT_DML_TABLES,
   RUNTIME_FULL_DML_TABLES,
+  RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
   rlsStrategyFor,
   setSubjectRlsContext,
   upsertKnowledgeProvider,
@@ -295,50 +296,15 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
     expect(posture.memberships).toEqual([]);
     expect(posture.ownedSchemas).toEqual([]);
     expect(posture.ownedRelations).toEqual([]);
-    expect(posture.targetRoutines).toEqual([
-      {
-        name: "apply_canonical_human_identity_operation(uuid, text, bigint, text, uuid, text, text, text)",
+    expect(posture.targetRoutines).toEqual(
+      RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.map((name) => ({
+        name,
         owner: "postgres",
         execute: true,
         publicExecute: false,
-        securityDefiner: true,
-      },
-      {
-        name: "ensure_canonical_human_identity(text, text)",
-        owner: "postgres",
-        execute: true,
-        publicExecute: false,
-        securityDefiner: true,
-      },
-      {
-        name: "ensure_managed_human_personal_workspace(uuid, text, uuid)",
-        owner: "postgres",
-        execute: true,
-        publicExecute: false,
-        securityDefiner: true,
-      },
-      {
-        name: "get_canonical_human_identity_projection(text)",
-        owner: "postgres",
-        execute: true,
-        publicExecute: false,
-        securityDefiner: true,
-      },
-      {
-        name: "knowledge_source_sync_lock_authority(uuid, uuid, uuid)",
-        owner: "postgres",
-        execute: true,
-        publicExecute: false,
-        securityDefiner: true,
-      },
-      {
-        name: "validate_canonical_human_session(text, text, boolean)",
-        owner: "postgres",
-        execute: true,
-        publicExecute: false,
-        securityDefiner: true,
-      },
-    ]);
+        securityDefiner: name !== "xai_provider_account_authority_snapshot_v1_valid(jsonb)",
+      })).sort((left, right) => left.name.localeCompare(right.name)),
+    );
     expect(posture.tables.filter((table) => table.rlsEnabled)).toHaveLength(
       FORCE_RLS_TABLES.length,
     );
