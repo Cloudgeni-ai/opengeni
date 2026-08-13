@@ -1,5 +1,18 @@
 # @opengeni/core
 
+## 0.27.0
+
+### Minor Changes
+
+- 691573c: Activate server-authoritative session visibility and content forking. Add user-private session ownership, authority-epoch transitions, explicit cross-workspace fork operations, session-scoped RLS actor propagation, and API authorization that preserves workspace-shared access while enforcing private-session ownership.
+
+### Patch Changes
+
+- Updated dependencies [691573c]
+  - @opengeni/db@0.35.0
+  - @opengeni/documents@0.5.36
+  - @opengeni/events@0.3.107
+
 ## 0.26.0
 
 ### Minor Changes
