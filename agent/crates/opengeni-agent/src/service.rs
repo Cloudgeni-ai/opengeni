@@ -16,6 +16,21 @@ use tracing::info;
 use crate::browser_bridge;
 use crate::cli::{ServiceAction, ServiceArgs, ServiceInstallArgs, ServiceScopeArgs, StartArgs};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LaunchdInstallAction {
+    KeepLoaded,
+    Bootstrap,
+    Reload,
+}
+
+fn launchd_install_action(loaded: bool, restart: bool) -> LaunchdInstallAction {
+    match (loaded, restart) {
+        (false, _) => LaunchdInstallAction::Bootstrap,
+        (true, false) => LaunchdInstallAction::KeepLoaded,
+        (true, true) => LaunchdInstallAction::Reload,
+    }
+}
+
 /// Idempotently installs, enables, and starts the ordinary background service.
 pub fn ensure_running(args: &StartArgs) -> Result<(), String> {
     install(&ServiceInstallArgs {
@@ -191,15 +206,28 @@ fn install_launchd(spec: &ServiceSpec, restart: bool) -> Result<(), String> {
     let uid = unsafe_uid();
     let domain = format!("gui/{uid}");
     let target = format!("{domain}/{}", service::ids::LAUNCHD_LABEL);
-    if capture("launchctl", &["print", &target]).is_ok() {
-        if restart {
-            run_tool("launchctl", &["kickstart", "-k", &target])?;
+    let loaded = capture("launchctl", &["print", &target]).is_ok();
+    match launchd_install_action(loaded, restart) {
+        LaunchdInstallAction::KeepLoaded => {}
+        LaunchdInstallAction::Reload => {
+            // launchd caches a loaded job's definition. Rewriting the plist and
+            // kickstarting the label restarts the *old* ProgramArguments, which
+            // makes an apparently successful binary upgrade keep executing the
+            // previous build indefinitely. Boot the loaded definition out and
+            // bootstrap the exact plist we just wrote so the restarted process
+            // is definition-coherent with disk.
+            run_tool("launchctl", &["bootout", &target])?;
+            run_tool(
+                "launchctl",
+                &["bootstrap", &domain, &plist_path.to_string_lossy()],
+            )?;
         }
-    } else {
-        run_tool(
-            "launchctl",
-            &["bootstrap", &domain, &plist_path.to_string_lossy()],
-        )?;
+        LaunchdInstallAction::Bootstrap => {
+            run_tool(
+                "launchctl",
+                &["bootstrap", &domain, &plist_path.to_string_lossy()],
+            )?;
+        }
     }
     println!(
         "installed the opengeni-agent LaunchAgent at {}.",
@@ -543,6 +571,22 @@ mod tests {
     fn scope_label_is_human_readable() {
         assert_eq!(scope_label(ServiceScope::User), "user");
         assert_eq!(scope_label(ServiceScope::System), "system");
+    }
+
+    #[test]
+    fn launchd_restart_reloads_the_definition_instead_of_kickstarting_the_cached_job() {
+        assert_eq!(
+            launchd_install_action(true, true),
+            LaunchdInstallAction::Reload
+        );
+        assert_eq!(
+            launchd_install_action(true, false),
+            LaunchdInstallAction::KeepLoaded
+        );
+        assert_eq!(
+            launchd_install_action(false, false),
+            LaunchdInstallAction::Bootstrap
+        );
     }
 
     #[test]
