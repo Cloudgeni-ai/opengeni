@@ -661,6 +661,10 @@ async function main(): Promise<void> {
         computerObservation = await computer.observe(computerTarget.id);
         record("computerObserve", performance.now() - started);
       }
+      // Chromium's Linux AT-SPI bridge exposes editable HTML inputs through
+      // Component + Text, so semantic focus followed by the native keyboard
+      // path is the truthful portable contract. macOS AX exposes set_value and
+      // additionally proves background mutation without foreground focus.
       let inputNode: InteractionSemanticNode;
       try {
         inputNode = findSemanticNode(computerObservation.semantic, (node) => {
@@ -668,7 +672,7 @@ async function main(): Promise<void> {
             (node.role === "entry" || node.role === "text_field") &&
             (node.name === "Acceptance input" || node.description === "Acceptance input") &&
             node.actions.includes("focus") &&
-            node.actions.includes("set_value")
+            (!isMacBrowserWindow || node.actions.includes("set_value"))
           );
         });
       } catch {
@@ -724,7 +728,7 @@ async function main(): Promise<void> {
             (node.role === "entry" || node.role === "text_field") &&
             (node.name === "Acceptance input" || node.description === "Acceptance input") &&
             node.actions.includes("focus") &&
-            node.actions.includes("set_value")
+            (!isMacBrowserWindow || node.actions.includes("set_value"))
           );
         });
         checks.push("computer.background-semantic-exact", "computer.background-no-focus-steal");
@@ -751,7 +755,7 @@ async function main(): Promise<void> {
             (node.role === "entry" || node.role === "text_field") &&
             (node.name === "Acceptance input" || node.description === "Acceptance input") &&
             node.actions.includes("focus") &&
-            node.actions.includes("set_value")
+            (!isMacBrowserWindow || node.actions.includes("set_value"))
           );
         });
         checks.push("computer.explicit-target-focus");
@@ -764,7 +768,7 @@ async function main(): Promise<void> {
             (node.role === "entry" || node.role === "text_field") &&
             (node.name === "Acceptance input" || node.description === "Acceptance input") &&
             node.actions.includes("focus") &&
-            node.actions.includes("set_value")
+            (!isMacBrowserWindow || node.actions.includes("set_value"))
           );
         });
         focusReceipt = await acceptanceStep("computer semantic focus", async () =>
