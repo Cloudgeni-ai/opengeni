@@ -536,7 +536,7 @@ back off exponentially to a one-minute ceiling, and re-peek durable work; they d
 not mark the session failed or complete the workflow over a `recovering` turn.
 Older histories retain their recorded activity arguments for deterministic
 replay, while the upgraded activity derives the stable workflow id and leaves
-the same durable restart obligation. Migration 0237 seeds that obligation for
+the same durable restart obligation. Migration 0238 seeds that obligation for
 already-recovering active turns whose `active_attempt_id` is null.
 
 After a reviewed release reaches staging, run the dry-by-default event-ordering invariant canary

@@ -240,6 +240,7 @@ export type FailSessionAttemptInput = {
 export type FailSessionAttemptResult =
   | { action: "failed" }
   | { action: "unclaimed" }
+  | { action: "terminal" }
   | { action: "stale" };
 
 export type RecoverDispatchInput = {

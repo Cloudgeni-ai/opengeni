@@ -2,6 +2,36 @@ import { describe, expect, mock, test } from "bun:test";
 import { createSessionStateActivities } from "../src/activities/session-state";
 
 describe("failSessionAttempt child-terminal identity", () => {
+  test("reports existing failed and cancelled session truth as terminal", async () => {
+    for (const status of ["failed", "cancelled"] as const) {
+      const getTurn = mock(async () => null);
+      const activities = createSessionStateActivities(
+        async () =>
+          ({
+            db: {},
+            bus: { publish: async () => undefined },
+            settings: {},
+            observability: {},
+            wakeSessionWorkflow: null,
+          }) as any,
+        {
+          requireSession: mock(async () => ({ status }) as any),
+          getSessionTurnForAttempt: getTurn as any,
+        },
+      );
+
+      expect(
+        await activities.failSessionAttempt({
+          accountId: "account-1",
+          workspaceId: "workspace-1",
+          sessionId: "session-1",
+          attemptId: "attempt-1",
+        }),
+      ).toEqual({ action: "terminal" });
+      expect(getTurn).not.toHaveBeenCalled();
+    }
+  });
+
   test("reuses the failed turn identity already persisted by settlement", async () => {
     const parentWakeCalls: unknown[][] = [];
     const activities = createSessionStateActivities(

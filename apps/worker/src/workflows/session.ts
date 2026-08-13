@@ -818,7 +818,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         return true;
       }
       unclaimedAttemptFailures = 0;
-      return failure.action !== "failed";
+      return failure.action !== "failed" && failure.action !== "terminal";
     }
 
     unclaimedAttemptFailures = 0;

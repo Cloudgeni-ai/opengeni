@@ -111,7 +111,11 @@ export function createSessionStateActivities(
     const { db, bus, settings, observability, wakeSessionWorkflow } = await services();
     const session = await requireSessionFn(db, input.workspaceId, input.sessionId);
     if (session.status === "failed" || session.status === "cancelled") {
-      return { action: "stale" };
+      // The activity may be retried after failure settlement committed but its
+      // response or event fanout was lost. Preserve terminal session truth so
+      // the workflow cannot interpret an idle peek as permission to synthesize
+      // an active-goal continuation.
+      return { action: "terminal" };
     }
     const workflowId =
       input.workflowId ?? session.temporalWorkflowId ?? `session-${input.sessionId}`;

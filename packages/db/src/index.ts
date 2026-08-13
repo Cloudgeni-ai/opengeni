@@ -44955,6 +44955,7 @@ export async function materializeGoalContinuation(
         if (
           !goalRead ||
           goalRead.status !== "active" ||
+          session.status === "failed" ||
           session.status === "cancelled" ||
           effectiveControl.state !== "active"
         ) {
@@ -52299,10 +52300,19 @@ export async function enqueueSessionWorkflowWakeInTransaction(
           : sql`${schema.sessionWorkflowWakeOutbox.controlRevision}`,
         reason: input.reason,
         attempts: 0,
-        // Coalescing a delayed retry must never postpone an already-due wake
-        // owned by another producer. A later revision makes the batch richer;
-        // it does not revoke the earlier delivery obligation.
-        nextAttemptAt: sql`least(${schema.sessionWorkflowWakeOutbox.nextAttemptAt}, ${nextAttemptAt.toISOString()}::timestamptz)`,
+        // Coalescing a delayed retry must never postpone an undelivered wake
+        // owned by another producer. Once every prior revision is delivered,
+        // however, this is a new obligation and must honor its own deadline;
+        // retaining the old (usually past) deadline would defeat backoff.
+        nextAttemptAt: sql`case
+          when ${schema.sessionWorkflowWakeOutbox.wakeRevision}
+            > ${schema.sessionWorkflowWakeOutbox.deliveredRevision}
+          then least(
+            ${schema.sessionWorkflowWakeOutbox.nextAttemptAt},
+            ${nextAttemptAt.toISOString()}::timestamptz
+          )
+          else ${nextAttemptAt.toISOString()}::timestamptz
+        end`,
         lastError: null,
         updatedAt: now,
       },
