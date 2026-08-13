@@ -3798,6 +3798,23 @@ describe("transient provider error classifier", () => {
     expect(preClaimAdmissionFailure(connectionLoss)).toMatchObject({
       details: [{ disposition: "retryable", code: "db_failure" }],
     });
+    const rawConnectionLoss = Object.assign(new Error("SECRET socket detail"), {
+      code: "CONNECTION_CLOSED",
+      errno: "CONNECTION_CLOSED",
+    });
+    expect(preClaimAdmissionFailure(rawConnectionLoss)).toMatchObject({
+      details: [{ disposition: "retryable", code: "db_failure" }],
+    });
+    expect(JSON.stringify(preClaimAdmissionFailure(rawConnectionLoss))).not.toContain("SECRET");
+    expect(
+      preClaimAdmissionFailure(
+        Object.assign(new Error("SECRET nested socket detail"), {
+          cause: { code: "ECONNRESET" },
+        }),
+      ),
+    ).toMatchObject({
+      details: [{ disposition: "retryable", code: "db_failure" }],
+    });
     const constraint = new SessionEventPersistenceError({
       code: "db_failure",
       sqlState: "23505",

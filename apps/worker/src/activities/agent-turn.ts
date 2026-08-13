@@ -83,6 +83,7 @@ import {
   SandboxImageConflictError,
   ActiveSessionHistoryLimitExceededError,
   ApprovalRunStateLimitExceededError,
+  isRetryableDatabaseTransportFailure,
   isSessionEventPersistenceError,
   getEnrollment,
   abandonRecordingForTurnAttempt,
@@ -707,6 +708,7 @@ export function escapedMcpTimeoutRecoveryFailure(input: {
 export function preClaimAdmissionFailure(error: unknown): ApplicationFailure {
   const persistenceFailure = isSessionEventPersistenceError(error) ? error : null;
   const sqlState = persistenceFailure?.details.sqlState ?? null;
+  const rawTransportFailure = sqlState === null && isRetryableDatabaseTransportFailure(error);
   // The database transaction itself retries only the two contention failures
   // proven safe for immediate replay. Once the activity has failed, the
   // workflow may also retry operational outages after a durable re-read and
@@ -714,21 +716,23 @@ export function preClaimAdmissionFailure(error: unknown): ApplicationFailure {
   // they commonly represent a lost connection; known constraint, auth, and
   // application SQLSTATEs are permanent and must not create an infinite loop.
   const retryable = Boolean(
-    persistenceFailure &&
-    (sqlState === null ||
-      sqlState.startsWith("08") ||
-      sqlState.startsWith("40") ||
-      sqlState.startsWith("53") ||
-      sqlState === "55P03" ||
-      sqlState === "57014" ||
-      sqlState === "57P01" ||
-      sqlState === "57P02" ||
-      sqlState === "57P03" ||
-      sqlState.startsWith("58")),
+    rawTransportFailure ||
+    (persistenceFailure &&
+      (sqlState === null ||
+        sqlState.startsWith("08") ||
+        sqlState.startsWith("40") ||
+        sqlState.startsWith("53") ||
+        sqlState === "55P03" ||
+        sqlState === "57014" ||
+        sqlState === "57P01" ||
+        sqlState === "57P02" ||
+        sqlState === "57P03" ||
+        sqlState.startsWith("58"))),
   );
   const detail: PreClaimFailureDetail = {
     disposition: retryable ? "retryable" : "permanent",
-    code: persistenceFailure?.details.code ?? "claim_invariant",
+    code:
+      persistenceFailure?.details.code ?? (rawTransportFailure ? "db_failure" : "claim_invariant"),
   };
   return ApplicationFailure.create({
     message: PRE_CLAIM_FAILURE_MESSAGE,
