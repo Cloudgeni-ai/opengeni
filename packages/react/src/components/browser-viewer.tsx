@@ -15,6 +15,7 @@ import type {
   InteractionPlacement,
   InteractionIntervention,
   InteractionSemanticNode,
+  SiteAuthConnection,
 } from "@opengeni/sdk/interaction";
 import { interactionControlFailureFromError } from "@opengeni/sdk/interaction";
 import {
@@ -62,6 +63,7 @@ import { useBrowserDownloads } from "../hooks/use-browser-downloads";
 import { useBrowserSession } from "../hooks/use-browser-session";
 import { useBrowserSessions } from "../hooks/use-browser-sessions";
 import { useInteractionInterventions } from "../hooks/use-interaction-interventions";
+import { useSiteAuthConnections } from "../hooks/use-site-auth-connections";
 import { cn } from "../lib/cn";
 import { copyTextToClipboard } from "../lib/clipboard";
 import { formatBytes } from "../lib/format";
@@ -140,6 +142,10 @@ export function BrowserViewer({
   const registry = useBrowserSessions({ ...override, sessionId, enabled });
   const attached = useAttachedBrowsers({ ...override, enabled });
   const profiles = useBrowserIdentities({ ...override, enabled, includeArchived: true });
+  const siteAuth = useSiteAuthConnections({
+    ...override,
+    enabled: enabled && profiles.identities.length > 0,
+  });
   const activeProfiles = useMemo(
     () => profiles.identities.filter((identity) => identity.status === "active"),
     [profiles.identities],
@@ -363,6 +369,15 @@ export function BrowserViewer({
           identity.id === (browser.session?.identityId ?? selectedRegistrySession?.identityId),
       ) ?? null,
     [browser.session?.identityId, profiles.identities, selectedRegistrySession?.identityId],
+  );
+  const selectedProfileAuth = useMemo(
+    () =>
+      selectedProfile
+        ? siteAuth.connections.filter(
+            (connection) => connection.preferredIdentityId === selectedProfile.id,
+          )
+        : [],
+    [selectedProfile, siteAuth.connections],
   );
 
   useEffect(() => {
@@ -691,6 +706,7 @@ export function BrowserViewer({
         selectedProfile={selectedProfile}
         baseRevisionOrdinal={baseRevisionOrdinal}
         profileHistory={profileHistory}
+        authConnections={selectedProfileAuth}
         creating={creating}
         savingProfile={savingProfile}
         refreshing={registry.refreshing || attached.refreshing}
@@ -890,6 +906,7 @@ function BrowserToolbar(props: {
   selectedProfile: BrowserIdentity | null;
   baseRevisionOrdinal: number | null;
   profileHistory: { identityId: string; loading: boolean; revisions: BrowserRevision[] } | null;
+  authConnections: SiteAuthConnection[];
   creating: boolean;
   savingProfile: boolean;
   refreshing: boolean;
@@ -958,6 +975,7 @@ function BrowserToolbar(props: {
         identity={props.selectedProfile}
         baseRevisionOrdinal={props.baseRevisionOrdinal}
         history={props.profileHistory}
+        authConnections={props.authConnections}
         saving={props.savingProfile}
         onSave={props.onSaveProfile}
         onUpdate={props.onUpdateProfile}
@@ -1214,6 +1232,7 @@ function BrowserProfileMenu(props: {
   identity: BrowserIdentity | null;
   baseRevisionOrdinal: number | null;
   history: { identityId: string; loading: boolean; revisions: BrowserRevision[] } | null;
+  authConnections: SiteAuthConnection[];
   saving: boolean;
   onSave: (newProfileName?: string) => Promise<boolean>;
   onUpdate: (
@@ -1300,6 +1319,7 @@ function BrowserProfileMenu(props: {
               {revisions.map((revision) => {
                 const isDefault = revision.id === props.identity?.defaultRevisionId;
                 const isCurrent = revision.ordinal === props.baseRevisionOrdinal;
+                const materialization = revisionMaterializationSummary(revision);
                 return (
                   <button
                     key={revision.id}
@@ -1313,8 +1333,13 @@ function BrowserProfileMenu(props: {
                     <span className="grid size-4 place-items-center text-og-muted">
                       {isDefault ? <CheckIcon className="size-3.5 text-og-status-running" /> : null}
                     </span>
-                    <span className="min-w-0 flex-1 text-og-control text-og-fg">
-                      Version {revision.ordinal}
+                    <span className="min-w-0 flex-1">
+                      <span className="block text-og-control text-og-fg">
+                        Version {revision.ordinal}
+                      </span>
+                      <span className="block truncate text-[10px] text-og-subtle">
+                        {materialization.label}
+                      </span>
                     </span>
                     <span className="text-[10px] text-og-subtle">
                       {isCurrent && isDefault
@@ -1330,7 +1355,8 @@ function BrowserProfileMenu(props: {
               })}
             </div>
             <p className="mt-1 px-2 text-[10px] leading-4 text-og-subtle">
-              Changing the default affects only browsers opened later.
+              Changing the default affects only browsers opened later. Saved browser data can be
+              copied; a website may still expire or re-verify its own session.
             </p>
           </div>
         ) : props.identity &&
@@ -1339,6 +1365,34 @@ function BrowserProfileMenu(props: {
           <p className="mt-3 flex items-center gap-1.5 border-t border-og-border px-2 pt-2 text-og-xs text-og-subtle">
             <LoaderCircleIcon className="size-3 animate-spin" /> Loading saved versions…
           </p>
+        ) : null}
+        {props.identity && props.authConnections.length > 0 ? (
+          <div className="mt-3 border-t border-og-border pt-2">
+            <p className="px-1 text-[10px] font-medium uppercase tracking-[0.12em] text-og-subtle">
+              Login health
+            </p>
+            <div className="mt-1 space-y-1">
+              {props.authConnections.map((connection) => {
+                const health = siteAuthHealth(connection);
+                return (
+                  <div
+                    key={connection.id}
+                    className="flex items-start gap-2 rounded-og-sm px-2 py-1.5"
+                  >
+                    <span className={cn("mt-1 size-1.5 shrink-0 rounded-full", health.dotClass)} />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-og-control text-og-fg">
+                        {connection.name}
+                      </span>
+                      <span className="block truncate text-[10px] text-og-subtle">
+                        {connection.accountLabel} · {health.label}
+                      </span>
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
         ) : null}
         {canSave ? (
           props.identity ? (
@@ -1426,6 +1480,47 @@ function BrowserProfileMenu(props: {
       </div>
     </details>
   );
+}
+
+function revisionMaterializationSummary(revision: BrowserRevision): { label: string } {
+  const materializations = revision.components.map((component) => component.materialization);
+  const placementBound = materializations.find(
+    (materialization) => materialization.portability === "placement_bound",
+  );
+  if (placementBound) {
+    return {
+      label: placementBound.reason
+        ? `This machine only · ${placementBound.reason}`
+        : "This machine only",
+    };
+  }
+  const providerBound = materializations.find(
+    (materialization) => materialization.portability === "provider_bound",
+  );
+  if (providerBound) {
+    return {
+      label: providerBound.reason
+        ? `Provider-bound · ${providerBound.reason}`
+        : "Provider-bound",
+    };
+  }
+  return { label: "Portable browser data" };
+}
+
+function siteAuthHealth(connection: SiteAuthConnection): {
+  label: string;
+  dotClass: string;
+} {
+  switch (connection.verificationState) {
+    case "verified":
+      return { label: "Verified", dotClass: "bg-og-status-running" };
+    case "needs_repair":
+      return { label: "Sign-in needs attention", dotClass: "bg-og-status-waiting" };
+    case "failed":
+      return { label: "Verification failed", dotClass: "bg-og-status-error" };
+    case "unknown":
+      return { label: "Not checked yet", dotClass: "bg-og-muted" };
+  }
 }
 
 function MenuButton(props: { children: ReactNode; onClick: () => void; disabled?: boolean }) {

@@ -16,6 +16,7 @@ import type {
   BrowserTarget,
   InteractionPlacement,
   InteractionIntervention,
+  SiteAuthConnection,
 } from "@opengeni/sdk/interaction";
 import { act } from "react";
 import { browserKey, normalizeBrowserAddress } from "../src/components/browser-input";
@@ -209,6 +210,41 @@ function browserRevision(identity: BrowserIdentity, session: BrowserSession): Br
     ],
     createdBySubjectId: "user:test",
     createdAt: NOW,
+  };
+}
+
+function siteAuthConnection(
+  identity: BrowserIdentity,
+  overrides: Partial<SiteAuthConnection> = {},
+): SiteAuthConnection {
+  return {
+    id: "12121212-abab-4bab-8bab-121212121212",
+    accountId: ACCOUNT_ID,
+    workspaceId: WORKSPACE_ID,
+    name: "Google",
+    accountLabel: "jorgen@cloudgeni.ai",
+    origins: ["https://accounts.google.com"],
+    loginUrl: "https://accounts.google.com/",
+    verificationUrlPrefixes: ["https://myaccount.google.com/"],
+    authorities: [{ id: "human", kind: "human", label: "Human", fields: [] }],
+    methods: [{ id: "passkey", kind: "passkey", label: "Passkey", authorityIds: ["human"] }],
+    preferredIdentityId: identity.id,
+    preferredPlacement: null,
+    preferredNetworkRouteId: null,
+    healthPolicy: { mode: "on_use", intervalSeconds: null, automaticRepair: false },
+    status: "active",
+    verificationState: "needs_repair",
+    lastVerifiedAt: null,
+    lastVerifiedUrl: null,
+    lastCheckedAt: NOW,
+    nextCheckAt: null,
+    maintenance: null,
+    repairCode: "passkey_required",
+    version: 1,
+    createdBySubjectId: "user:test",
+    createdAt: NOW,
+    updatedAt: NOW,
+    ...overrides,
   };
 }
 
@@ -1846,6 +1882,10 @@ describe("BrowserViewer", () => {
       listBrowserSessions: async () => ({ revision: 1, sessions: [current] }),
       listBrowserIdentities: async () => ({ revision: 1, identities: [identity] }),
       listBrowserRevisions: async () => ({ identity, revisions: [first, second] }),
+      listSiteAuthConnections: async () => ({
+        revision: 1,
+        connections: [siteAuthConnection(identity)],
+      }),
       updateBrowserIdentity: async (_workspaceId, identityId, request) => {
         updates.push({ identityId, ...request });
         const defaultChanged =
@@ -1886,6 +1926,12 @@ describe("BrowserViewer", () => {
     );
     expect(profileSummary).toBeDefined();
     await actRun(() => profileSummary!.click());
+    expect(rendered.container.textContent).toContain("Portable browser data");
+    expect(rendered.container.textContent).toContain("Google");
+    expect(rendered.container.textContent).toContain("Sign-in needs attention");
+    expect(rendered.container.textContent).toContain(
+      "Saved browser data can be copied; a website may still expire or re-verify its own session.",
+    );
     const chooseDefault = [...rendered.container.querySelectorAll("button")].find(
       (button) =>
         button.textContent?.includes("Version 2") && button.textContent?.includes("Use by default"),
