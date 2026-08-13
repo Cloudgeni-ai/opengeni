@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   isDatabasePersistenceFailure,
+  isRetryableDatabaseTransportFailure,
   nestedPostgresSqlState,
   runIdempotentPersistenceTransaction,
   safeDatabaseErrorFacts,
@@ -22,6 +23,33 @@ function databaseError(overrides: Record<string, unknown> = {}): Error {
 }
 
 describe("session event persistence failure truth", () => {
+  test("recognizes raw postgres transport failures without message heuristics", () => {
+    for (const code of [
+      "CONNECTION_CLOSED",
+      "CONNECTION_DESTROYED",
+      "CONNECTION_ENDED",
+      "CONNECT_TIMEOUT",
+      "ECONNRESET",
+      "ECONNREFUSED",
+      "EPIPE",
+      "ETIMEDOUT",
+      "EAI_AGAIN",
+    ]) {
+      const error = Object.assign(new Error("sanitized transport failure"), { code });
+      expect(isRetryableDatabaseTransportFailure(error)).toBe(true);
+      expect(isDatabasePersistenceFailure(error)).toBe(true);
+    }
+
+    expect(
+      isRetryableDatabaseTransportFailure({
+        cause: { driverError: { errno: "enetunreach" } },
+      }),
+    ).toBe(true);
+    expect(isRetryableDatabaseTransportFailure({ code: "23505" })).toBe(false);
+    expect(isRetryableDatabaseTransportFailure(new Error("CONNECTION_CLOSED"))).toBe(false);
+    expect(nestedPostgresSqlState({ code: "EPIPE" })).toBeNull();
+  });
+
   test("recognizes only database-shaped failures without SQLSTATE", () => {
     expect(
       isDatabasePersistenceFailure({
@@ -160,6 +188,36 @@ describe("session event persistence failure truth", () => {
     expect((source as Error & { driverError: { detail: string } }).driverError.detail).toBe(
       syntheticValue,
     );
+  });
+
+  test("raw transport loss is wrapped as database truth without immediate replay", async () => {
+    let attempts = 0;
+    const source = Object.assign(new Error("socket closed"), {
+      code: "CONNECTION_CLOSED",
+      errno: "CONNECTION_CLOSED",
+    });
+    const error = await runIdempotentPersistenceTransaction(
+      {
+        stage: "session_attempts.claim",
+        eventTypes: ["session.turn.attempt_claimed"],
+        correlationId: "raw-transport-correlation",
+      },
+      async () => {
+        attempts += 1;
+        throw source;
+      },
+    ).catch((caught) => caught);
+
+    expect(attempts).toBe(1);
+    expect(error).toBeInstanceOf(SessionEventPersistenceError);
+    expect((error as SessionEventPersistenceError).details).toMatchObject({
+      code: "db_failure",
+      sqlState: null,
+      attempts: 1,
+      retryOutcome: "not_retryable",
+      correlationId: "raw-transport-correlation",
+    });
+    expect((error as SessionEventPersistenceError).cause).toBe(source);
   });
 
   test("rethrows a domain error unchanged and never retries it", async () => {

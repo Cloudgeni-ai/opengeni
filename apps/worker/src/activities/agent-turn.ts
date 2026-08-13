@@ -87,6 +87,7 @@ import {
   SandboxImageConflictError,
   ActiveSessionHistoryLimitExceededError,
   ApprovalRunStateLimitExceededError,
+  isRetryableDatabaseTransportFailure,
   isSessionEventPersistenceError,
   getEnrollment,
   abandonRecordingForTurnAttempt,
@@ -344,6 +345,7 @@ import {
 import type {
   TurnActivityServices as ActivityServices,
   EscapedMcpTimeoutRecoveryDetail,
+  PreClaimFailureDetail,
   RunAgentTurnInput,
   RunAgentTurnResult,
   SessionAttemptQuiescenceProof,
@@ -351,6 +353,8 @@ import type {
 import {
   ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_MESSAGE,
   ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_TYPE,
+  PRE_CLAIM_FAILURE_MESSAGE,
+  PRE_CLAIM_FAILURE_TYPE,
 } from "./types";
 import {
   resumeBoxForTurn,
@@ -701,6 +705,52 @@ export function escapedMcpTimeoutRecoveryFailure(input: {
     type: ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_TYPE,
     nonRetryable: true,
     details: [input.detail],
+  });
+}
+
+/**
+ * Convert the atomic claim transaction's failure into a small, stable
+ * Temporal wire contract. The original error remains in activity diagnostics,
+ * but SQL text, parameters, and arbitrary invariant messages never enter
+ * workflow history. Contention and operational database unavailability are
+ * safe to re-read after backoff because the claim transaction contains no
+ * model/tool effects; permanent database and state failures require terminal
+ * settlement.
+ */
+export function preClaimAdmissionFailure(error: unknown): ApplicationFailure {
+  const persistenceFailure = isSessionEventPersistenceError(error) ? error : null;
+  const sqlState = persistenceFailure?.details.sqlState ?? null;
+  const rawTransportFailure = sqlState === null && isRetryableDatabaseTransportFailure(error);
+  // The database transaction itself retries only the two contention failures
+  // proven safe for immediate replay. Once the activity has failed, the
+  // workflow may also retry operational outages after a durable re-read and
+  // bounded delay. Unknown driver/database failures stay recoverable because
+  // they commonly represent a lost connection; known constraint, auth, and
+  // application SQLSTATEs are permanent and must not create an infinite loop.
+  const retryable = Boolean(
+    rawTransportFailure ||
+    (persistenceFailure &&
+      (sqlState === null ||
+        sqlState.startsWith("08") ||
+        sqlState.startsWith("40") ||
+        sqlState.startsWith("53") ||
+        sqlState === "55P03" ||
+        sqlState === "57014" ||
+        sqlState === "57P01" ||
+        sqlState === "57P02" ||
+        sqlState === "57P03" ||
+        sqlState.startsWith("58"))),
+  );
+  const detail: PreClaimFailureDetail = {
+    disposition: retryable ? "retryable" : "permanent",
+    code:
+      persistenceFailure?.details.code ?? (rawTransportFailure ? "db_failure" : "claim_invariant"),
+  };
+  return ApplicationFailure.create({
+    message: PRE_CLAIM_FAILURE_MESSAGE,
+    type: PRE_CLAIM_FAILURE_TYPE,
+    nonRetryable: true,
+    details: [detail],
   });
 }
 
@@ -4073,7 +4123,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // only exists in the RunState blob), never through a swapped trigger.
     let triggerType: string | null = null;
     try {
-      const session = await requireSession(db, input.workspaceId, input.sessionId);
       const claim = await claimSessionWorkForAttempt(db, input.workspaceId, {
         sessionId: input.sessionId,
         workflowId: input.workflowId,
@@ -4088,6 +4137,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       }
       const turn = claim.turn;
       turnId = turn.id;
+      // Establish durable attempt ownership before any later read can fail.
+      // Therefore every failure with no turnId came from the one atomic claim
+      // transaction and can be classified without conflating ordinary runtime
+      // or transport failures with admission failures.
+      const session = await requireSession(db, input.workspaceId, input.sessionId);
       executionGeneration = turn.executionGeneration;
       providerRecoveryCount = providerRecoveryCountFromMetadata(turn.metadata);
       let installedApiIntegrations: readonly ApiIntegrationRuntime[] = [];
@@ -10437,7 +10491,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       }
       activityStatus = "failed";
       activityError = error;
-      if (!publish || !turnId || !turnStartedPublished) {
+      if (!turnId) {
+        throw preClaimAdmissionFailure(error);
+      }
+      if (!publish || !turnStartedPublished) {
         throw error;
       }
       // A partial/malformed stream may have emitted assistant/tool items (and

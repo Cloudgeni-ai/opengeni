@@ -1458,7 +1458,15 @@ describe("durable active-goal wake", () => {
     });
   });
 
-  test("cancelled and corrupt idle sessions report truth before refusing or repairing work", async () => {
+  test("terminal and corrupt idle sessions refuse or repair goal work", async () => {
+    const failed = await runningGoalFixture();
+    await settleIdle(failed);
+    await shared.admin`
+      update sessions set status = 'failed'
+      where workspace_id = ${failed.grant.workspaceId!} and id = ${failed.session.id}`;
+    expect((await materialize(failed)).action).toBe("none");
+    expect(await counts(failed)).toMatchObject({ updates: 0, usage: 0, events: 0 });
+
     const cancelled = await runningGoalFixture();
     await settleIdle(cancelled);
     await shared.admin`

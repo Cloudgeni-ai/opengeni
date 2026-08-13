@@ -45617,6 +45617,7 @@ export async function materializeGoalContinuation(
         if (
           !goalRead ||
           goalRead.status !== "active" ||
+          session.status === "failed" ||
           session.status === "cancelled" ||
           effectiveControl.state !== "active"
         ) {
@@ -46974,9 +46975,14 @@ export async function claimSessionWorkForAttempt(
   input: ClaimSessionWorkForAttemptInput,
 ): Promise<ClaimSessionWorkForAttemptResult> {
   const { sessionId, workflowId } = input;
-  return await withWorkspaceSessionActivityRls(
+  return await retrySessionActivityRls(
     db,
     workspaceId,
+    {
+      stage: "session_attempts.claim",
+      eventTypes: ["session.turn.attempt_claimed"],
+      maxAttempts: 3,
+    },
     async (scopedDb) =>
       await withSessionActivitySavepoint(scopedDb, async (tx) => {
         const deliverPendingUpdates = async (
@@ -50003,6 +50009,405 @@ export async function peekSessionWork(
   });
 }
 
+export type FailSessionWorkBeforeAttemptClaimInput = {
+  accountId: string;
+  sessionId: string;
+  workflowId: string;
+  trigger: SessionWorkTrigger;
+  error: string;
+};
+
+export type FailSessionWorkBeforeAttemptClaimResult =
+  | { action: "failed"; turnId: string | null; events: SessionEvent[] }
+  | { action: "terminal"; turnId: null; events: [] }
+  | { action: "stale"; turnId: null; events: [] };
+
+/**
+ * Terminally settle a permanent admission failure that happened before an
+ * attempt row existed. The workflow supplies the exact trigger recorded in
+ * Temporal history; this transaction re-evaluates it under the canonical
+ * control -> workspace -> session -> turn lock order and refuses stale,
+ * paused, capacity-blocked, or concurrently claimed work. No attempt row is
+ * fabricated because provider/tool execution never started.
+ */
+export async function failSessionWorkBeforeAttemptClaim(
+  db: Database,
+  workspaceId: string,
+  input: FailSessionWorkBeforeAttemptClaimInput,
+): Promise<FailSessionWorkBeforeAttemptClaimResult> {
+  return await retrySessionActivityRls(
+    db,
+    workspaceId,
+    {
+      stage: "session_lifecycle_outbox.fail_before_attempt_claim",
+      eventTypes: ["child_terminal_result", "session.status.changed", "turn.failed"],
+      maxAttempts: 3,
+    },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const baseLocks = await lockChildLifecycleOutboxWriteRowsTx(
+          tx as unknown as Database,
+          workspaceId,
+          { sessionId: input.sessionId },
+        );
+        const session = baseLocks.session;
+        if (session.accountId !== input.accountId) {
+          throw new SessionControlInvariantError(
+            `Session ${input.sessionId} does not belong to account ${input.accountId}`,
+          );
+        }
+        if (session.status === "failed" || session.status === "cancelled") {
+          return { action: "terminal", turnId: null, events: [] } as const;
+        }
+        if (
+          session.temporalWorkflowId !== null &&
+          session.temporalWorkflowId !== input.workflowId
+        ) {
+          return { action: "stale", turnId: null, events: [] } as const;
+        }
+        const effectiveControl = await evaluateSessionControl(
+          tx as unknown as Database,
+          workspaceId,
+          input.sessionId,
+          { workspaceControl: baseLocks.control ?? undefined },
+        );
+        if (!baseLocks.workspace || effectiveControl.state !== "active") {
+          return { action: "stale", turnId: null, events: [] } as const;
+        }
+
+        // The session lock serializes this check with claim. If another worker
+        // committed ownership while the activity response was ambiguous, its
+        // attempt is authoritative and this terminal path must no-op.
+        const [liveAttempt] = await tx
+          .select({ id: schema.sessionTurnAttempts.id })
+          .from(schema.sessionTurnAttempts)
+          .where(
+            and(
+              eq(schema.sessionTurnAttempts.workspaceId, workspaceId),
+              eq(schema.sessionTurnAttempts.sessionId, input.sessionId),
+              inArray(schema.sessionTurnAttempts.state, ["claimed", "running"]),
+            ),
+          )
+          .limit(1);
+        if (liveAttempt) {
+          return { action: "stale", turnId: null, events: [] } as const;
+        }
+
+        let turn: typeof schema.sessionTurns.$inferSelect | null = null;
+        if (session.activeTurnId) {
+          const exactLocks = await lockSessionEventWriteRows(tx as unknown as Database, {
+            workspaceId,
+            controlLock: "already_locked",
+            workspaceLock: "already_locked",
+            turnIds: [session.activeTurnId],
+          });
+          turn = exactLocks.turns[0] ?? null;
+          if (!turn || turn.accountId !== session.accountId || turn.sessionId !== input.sessionId) {
+            // The claim failed on this same locked corrupt pointer. There is no
+            // safe turn identity to settle, but retrying can never repair it;
+            // fail the owning session and its session-level obligations below.
+            turn = null;
+          }
+          if (turn && isTerminalSessionTurnStatus(turn.status as SessionTurnStatus)) {
+            // Repair the corrupt session pointer without writing a second
+            // terminal event onto an already-terminal logical turn.
+            turn = null;
+          } else if (turn && input.trigger.kind === "approval") {
+            if (
+              turn.status !== "requires_action" ||
+              !(await isNewerApprovalTrigger(
+                tx as unknown as Database,
+                workspaceId,
+                input.sessionId,
+                turn.triggerEventId,
+                input.trigger.triggerEventId,
+              ))
+            ) {
+              return { action: "stale", turnId: null, events: [] } as const;
+            }
+          } else if (turn) {
+            if (turn.status === "requires_action") {
+              return { action: "stale", turnId: null, events: [] } as const;
+            }
+            if (turn.status === "waiting_capacity") {
+              const [codexWaiter] = await tx
+                .select({ id: schema.codexCapacityWaiters.id })
+                .from(schema.codexCapacityWaiters)
+                .where(
+                  and(
+                    eq(schema.codexCapacityWaiters.workspaceId, workspaceId),
+                    eq(schema.codexCapacityWaiters.sessionId, input.sessionId),
+                    eq(schema.codexCapacityWaiters.status, "waiting"),
+                  ),
+                )
+                .limit(1);
+              const xaiWaiter = await getXaiCapacityWaitForSessionInTransaction(
+                tx as unknown as Database,
+                workspaceId,
+                input.sessionId,
+              );
+              if (codexWaiter || xaiWaiter) {
+                return { action: "stale", turnId: null, events: [] } as const;
+              }
+            }
+          }
+        } else {
+          if (input.trigger.kind === "approval") {
+            return { action: "stale", turnId: null, events: [] } as const;
+          }
+          const [pendingAgentSteer] = await tx
+            .select({ id: schema.sessionSystemUpdates.id })
+            .from(schema.sessionSystemUpdates)
+            .where(
+              and(
+                eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
+                eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+                eq(schema.sessionSystemUpdates.kind, "agent_steer_instruction"),
+                eq(schema.sessionSystemUpdates.state, "pending"),
+              ),
+            )
+            .orderBy(
+              desc(schema.sessionSystemUpdates.createdAt),
+              desc(schema.sessionSystemUpdates.id),
+            )
+            .limit(1);
+          const queuedRows = await rawRows<{ id: string }>(
+            tx as unknown as Database,
+            sql`select id from session_turns
+                where workspace_id = ${workspaceId} and session_id = ${input.sessionId}
+                  and status = 'queued' and source in ('user', 'api')
+                  and (
+                    ${Boolean(pendingAgentSteer)} = false
+                    or metadata->>'delivery' = 'steer'
+                  )
+                order by position asc, created_at asc, id asc
+                limit 1`,
+          );
+          const queuedPreview = queuedRows[0];
+          if (queuedPreview) {
+            const exactLocks = await lockSessionEventWriteRows(tx as unknown as Database, {
+              workspaceId,
+              controlLock: "already_locked",
+              workspaceLock: "already_locked",
+              turnIds: [queuedPreview.id],
+            });
+            turn = exactLocks.turns[0] ?? null;
+            if (
+              !turn ||
+              turn.accountId !== session.accountId ||
+              turn.sessionId !== input.sessionId ||
+              turn.status !== "queued" ||
+              turn.activeAttemptId !== null
+            ) {
+              return { action: "stale", turnId: null, events: [] } as const;
+            }
+          } else if (!session.compactRequested) {
+            if (
+              !pendingAgentSteer &&
+              (await latestFinishedTurnHasFailureCodeTx(
+                tx as unknown as Database,
+                workspaceId,
+                input.sessionId,
+                "context_compaction_failed",
+              ))
+            ) {
+              return { action: "stale", turnId: null, events: [] } as const;
+            }
+            const [pendingUpdate] = await tx
+              .select({ id: schema.sessionSystemUpdates.id })
+              .from(schema.sessionSystemUpdates)
+              .where(
+                and(
+                  eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
+                  eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+                  eq(schema.sessionSystemUpdates.state, "pending"),
+                ),
+              )
+              .limit(1)
+              .for("update");
+            if (!pendingUpdate) {
+              return { action: "stale", turnId: null, events: [] } as const;
+            }
+          }
+        }
+
+        const now = new Date();
+        let sequence = session.lastSequence;
+        let closedToolEvents: SessionEvent[] = [];
+        if (turn) {
+          await cancelTurnInteractionInterventionsInTransaction(tx as unknown as Database, {
+            accountId: session.accountId,
+            workspaceId,
+            sessionId: input.sessionId,
+            turnId: turn.id,
+          });
+          const closedTools = await closePendingSessionToolCallsInTransaction(
+            tx as unknown as Database,
+            {
+              accountId: session.accountId,
+              workspaceId,
+              sessionId: input.sessionId,
+              turnId: turn.id,
+              reason: "turn_failed",
+              sequence,
+              now,
+            },
+          );
+          sequence = closedTools.sequence;
+          closedToolEvents = closedTools.events;
+          await tx
+            .update(schema.sessionHumanInputRequests)
+            .set({
+              status: "cancelled",
+              response: { outcome: "cancelled" },
+              respondedBy: "system:turn_failed",
+              respondedAt: now,
+              updatedAt: now,
+            })
+            .where(
+              and(
+                eq(schema.sessionHumanInputRequests.workspaceId, workspaceId),
+                eq(schema.sessionHumanInputRequests.sessionId, input.sessionId),
+                eq(schema.sessionHumanInputRequests.turnId, turn.id),
+                eq(schema.sessionHumanInputRequests.status, "pending"),
+              ),
+            );
+        }
+        await settleSessionMaintenanceInTransaction(tx as unknown as Database, {
+          accountId: session.accountId,
+          workspaceId,
+          sessionId: input.sessionId,
+        });
+        if (!turn) {
+          await tx
+            .update(schema.sessionSystemUpdates)
+            .set({ state: "failed" })
+            .where(
+              and(
+                eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
+                eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+                eq(schema.sessionSystemUpdates.state, "pending"),
+              ),
+            );
+        }
+        const values = [
+          ...(turn
+            ? [
+                {
+                  accountId: session.accountId,
+                  workspaceId,
+                  sessionId: input.sessionId,
+                  sequence: ++sequence,
+                  type: "turn.failed" as const,
+                  payload: {
+                    triggerEventId: turn.triggerEventId,
+                    code: "pre_claim_failure",
+                    error: input.error,
+                  },
+                  turnId: turn.id,
+                  turnGeneration: turn.executionGeneration,
+                  turnAttemptId: null,
+                  turnAssociation: "current" as const,
+                  occurredAt: now,
+                },
+              ]
+            : []),
+          {
+            accountId: session.accountId,
+            workspaceId,
+            sessionId: input.sessionId,
+            sequence: ++sequence,
+            type: "session.status.changed" as const,
+            payload: { status: "failed", code: "pre_claim_failure" },
+            turnId: turn?.id ?? null,
+            turnGeneration: turn?.executionGeneration ?? null,
+            turnAttemptId: null,
+            turnAssociation: turn ? ("current" as const) : null,
+            occurredAt: now,
+          },
+        ];
+        const inserted = await tx
+          .insert(schema.sessionEvents)
+          .values(withLosslessContentWriteVersion(values, "payload", "payloadCodecVersion"))
+          .returning();
+        if (turn) {
+          const failedEvent = inserted.find((event) => event.type === "turn.failed");
+          if (!failedEvent) {
+            throw new SessionControlInvariantError(
+              `Pre-claim failure for turn ${turn.id} has no terminal event`,
+            );
+          }
+          await projectSessionRealtimeDelegationTerminalInTransaction(tx as unknown as Database, {
+            accountId: session.accountId,
+            workspaceId,
+            sessionId: input.sessionId,
+            turnId: turn.id,
+            turnStatus: "failed",
+            terminalEvent: {
+              id: failedEvent.id,
+              type: "turn.failed",
+              payload: sessionEventPayloadRecord(
+                failedEvent.payload,
+                failedEvent.payloadCodecVersion,
+              ),
+            },
+            now,
+          });
+          await tx
+            .update(schema.sessionTurns)
+            .set({
+              status: "failed",
+              activeAttemptId: null,
+              version: turn.version + 1,
+              finishedAt: now,
+              updatedAt: now,
+            })
+            .where(
+              and(
+                eq(schema.sessionTurns.workspaceId, workspaceId),
+                eq(schema.sessionTurns.sessionId, input.sessionId),
+                eq(schema.sessionTurns.id, turn.id),
+              ),
+            );
+          await enqueueFailedChildOutboxForTurnTx(
+            tx as unknown as Database,
+            workspaceId,
+            session,
+            turn,
+          );
+        } else {
+          await enqueueFailedChildOutboxWithoutTurnTx(
+            tx as unknown as Database,
+            workspaceId,
+            session,
+            sequence,
+          );
+        }
+        await tx
+          .update(schema.sessions)
+          .set({
+            status: "failed",
+            activeTurnId: null,
+            compactRequested: false,
+            lastSequence: sequence,
+            queueVersion: session.queueVersion + 1,
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          );
+        return {
+          action: "failed",
+          turnId: turn?.id ?? null,
+          events: [...closedToolEvents, ...inserted.map(mapEvent)],
+        } as const;
+      }),
+  );
+}
+
 /**
  * Child lifecycle transactions discover immutable parentage only after taking
  * the control/workspace prefix. They must then lock child and parent together,
@@ -52804,14 +53209,16 @@ function queuedSteerReplacementAttemptId(metadata: Record<string, unknown>): str
   return null;
 }
 
-async function enqueueFailedChildOutboxForTurnTx(
+async function enqueueFailedChildOutboxTx(
   tx: Database,
   workspaceId: string,
-  session: Pick<typeof schema.sessions.$inferSelect, "id" | "parentSessionId" | "parentTurnId">,
-  turn: Pick<typeof schema.sessionTurns.$inferSelect, "id" | "accountId" | "sessionId">,
+  session: Pick<
+    typeof schema.sessions.$inferSelect,
+    "id" | "accountId" | "parentSessionId" | "parentTurnId"
+  >,
+  input: { turnId: string | null; dedupeKey: string },
 ): Promise<void> {
   if (!session.parentSessionId) return;
-  const dedupeKey = `child-completion:${turn.sessionId}:turn:${turn.id}`;
   const personalConnectionDelegations = session.parentTurnId
     ? await personalConnectionDelegationsForTurnInTransaction(
         tx,
@@ -52859,26 +53266,26 @@ async function enqueueFailedChildOutboxForTurnTx(
       withLosslessContentWriteVersion(
         withLosslessContentWriteVersion(
           {
-            accountId: turn.accountId,
+            accountId: session.accountId,
             workspaceId,
-            sourceSessionId: turn.sessionId,
+            sourceSessionId: session.id,
             targetSessionId: session.parentSessionId,
-            dedupeKey,
+            dedupeKey: input.dedupeKey,
             kind: "child_terminal_result",
             classification: "failure",
-            sourceId: turn.sessionId,
+            sourceId: session.id,
             summary: "Child session failed; inspect the durable child timeline.",
             payload: {
               type: "child_terminal_result",
-              childSessionId: turn.sessionId,
+              childSessionId: session.id,
               status: "failed",
-              turnId: turn.id,
+              ...(input.turnId ? { turnId: input.turnId } : {}),
             },
             lineage: {
-              childSessionId: turn.sessionId,
+              childSessionId: session.id,
               parentSessionId: session.parentSessionId,
               ...(session.parentTurnId ? { parentTurnId: session.parentTurnId } : {}),
-              turnId: turn.id,
+              ...(input.turnId ? { turnId: input.turnId } : {}),
               ...(xaiAuthoritySubjectId ? { xaiAuthoritySubjectId } : {}),
             },
             personalConnectionDelegations,
@@ -52897,6 +53304,41 @@ async function enqueueFailedChildOutboxForTurnTx(
         schema.sessionSystemUpdateOutbox.dedupeKey,
       ],
     });
+}
+
+async function enqueueFailedChildOutboxForTurnTx(
+  tx: Database,
+  workspaceId: string,
+  session: Pick<
+    typeof schema.sessions.$inferSelect,
+    "id" | "accountId" | "parentSessionId" | "parentTurnId"
+  >,
+  turn: Pick<typeof schema.sessionTurns.$inferSelect, "id" | "accountId" | "sessionId">,
+): Promise<void> {
+  if (turn.accountId !== session.accountId || turn.sessionId !== session.id) {
+    throw new SessionControlInvariantError(
+      `Failed child turn ${turn.id} lost session ${session.id} ownership`,
+    );
+  }
+  await enqueueFailedChildOutboxTx(tx, workspaceId, session, {
+    turnId: turn.id,
+    dedupeKey: `child-completion:${turn.sessionId}:turn:${turn.id}`,
+  });
+}
+
+async function enqueueFailedChildOutboxWithoutTurnTx(
+  tx: Database,
+  workspaceId: string,
+  session: Pick<
+    typeof schema.sessions.$inferSelect,
+    "id" | "accountId" | "parentSessionId" | "parentTurnId"
+  >,
+  terminalSequence: number,
+): Promise<void> {
+  await enqueueFailedChildOutboxTx(tx, workspaceId, session, {
+    turnId: null,
+    dedupeKey: `child-completion:${session.id}:pre-claim:${terminalSequence}`,
+  });
 }
 
 type ChildTerminalResultPayload = Extract<
@@ -53106,10 +53548,19 @@ export async function enqueueSessionWorkflowWakeInTransaction(
           : sql`${schema.sessionWorkflowWakeOutbox.controlRevision}`,
         reason: input.reason,
         attempts: 0,
-        // Coalescing a delayed retry must never postpone an already-due wake
-        // owned by another producer. A later revision makes the batch richer;
-        // it does not revoke the earlier delivery obligation.
-        nextAttemptAt: sql`least(${schema.sessionWorkflowWakeOutbox.nextAttemptAt}, ${nextAttemptAt.toISOString()}::timestamptz)`,
+        // Coalescing a delayed retry must never postpone an undelivered wake
+        // owned by another producer. Once every prior revision is delivered,
+        // however, this is a new obligation and must honor its own deadline;
+        // retaining the old (usually past) deadline would defeat backoff.
+        nextAttemptAt: sql`case
+          when ${schema.sessionWorkflowWakeOutbox.wakeRevision}
+            > ${schema.sessionWorkflowWakeOutbox.deliveredRevision}
+          then least(
+            ${schema.sessionWorkflowWakeOutbox.nextAttemptAt},
+            ${nextAttemptAt.toISOString()}::timestamptz
+          )
+          else ${nextAttemptAt.toISOString()}::timestamptz
+        end`,
         lastError: null,
         updatedAt: now,
       },
