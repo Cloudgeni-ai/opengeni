@@ -1718,7 +1718,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
               })()
             : {
                 kind: "direct_websocket" as const,
-                url: await client.frameStreamUrl(reference, request.targetId),
+                url: await client.frameStreamUrl(reference, request.targetId, request.stream),
                 protocols: [
                   BROWSER_CONTROL_WEBSOCKET_PROTOCOL,
                   `${BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX}${token}`,

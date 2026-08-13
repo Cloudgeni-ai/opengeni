@@ -369,8 +369,31 @@ test("settles a headed background target before returning its first observation"
         height: 2,
       },
     });
+    const compactFrames = await driver.subscribeFrames(opened.target.id, {
+      format: "jpeg",
+      quality: 55,
+      maxWidth: 320,
+      maxHeight: 240,
+      everyNthFrame: 2,
+    });
+    const compactStreamed = await compactFrames[Symbol.asyncIterator]().next();
+    expect(compactStreamed).toMatchObject({
+      done: false,
+      value: {
+        targetId: "target-2",
+        sequence: 1,
+        width: 3,
+        height: 2,
+      },
+    });
+    const captureQualities = calls
+      .filter((call) => call.method === "Page.captureScreenshot")
+      .map((call) => call.params?.quality);
+    expect(captureQualities).toContain(70);
+    expect(captureQualities).toContain(55);
     expect(calls.some((call) => call.method === "Page.captureScreenshot")).toBe(true);
     await frames.close();
+    await compactFrames.close();
   } finally {
     await driver.close();
   }

@@ -2,8 +2,15 @@ import type { ComputerSessionAttachment } from "@opengeni/sdk/interaction";
 
 const DEFAULT_TIMEOUT_MS = 20_000;
 const RAW_ENCODING = 0;
+const HEXTILE_ENCODING = 5;
+const ZRLE_ENCODING = 16;
 const DESKTOP_SIZE_ENCODING = -223;
 const LAST_RECT_ENCODING = -224;
+const HEXTILE_RAW = 1;
+const HEXTILE_BACKGROUND_SPECIFIED = 2;
+const HEXTILE_FOREGROUND_SPECIFIED = 4;
+const HEXTILE_ANY_SUBRECTS = 8;
+const HEXTILE_SUBRECTS_COLOURED = 16;
 
 export type RfbUpdate = {
   sequence: number;
@@ -40,12 +47,8 @@ type Waiter = {
 export class RfbAcceptanceProbe {
   private buffer = new Uint8Array(64 * 1024);
   private bufferedLength = 0;
-  private state:
-    | "protocol"
-    | "security_types"
-    | "security_result"
-    | "server_init"
-    | "normal" = "protocol";
+  private state: "protocol" | "security_types" | "security_result" | "server_init" | "normal" =
+    "protocol";
   private readonly queue: RfbUpdate[] = [];
   private readonly waiters: Waiter[] = [];
   private sequence = 0;
@@ -81,15 +84,19 @@ export class RfbAcceptanceProbe {
     return probe;
   }
 
-  first(timeoutMs = DEFAULT_TIMEOUT_MS): Promise<RfbUpdate> {
-    return this.waitFor(() => true, timeoutMs);
+  first(timeoutMs = DEFAULT_TIMEOUT_MS, label = "RFB first frame"): Promise<RfbUpdate> {
+    return this.waitFor(() => true, timeoutMs, label);
   }
 
-  nextChangedAfter(previous: RfbUpdate, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<RfbUpdate> {
+  nextChangedAfter(
+    previous: RfbUpdate,
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+    label = "RFB frame change",
+  ): Promise<RfbUpdate> {
     return this.waitFor(
-      (frame) =>
-        frame.sequence > previous.sequence && frame.fingerprint !== previous.fingerprint,
+      (frame) => frame.sequence > previous.sequence && frame.fingerprint !== previous.fingerprint,
       timeoutMs,
+      label,
     );
   }
 
@@ -212,11 +219,10 @@ export class RfbAcceptanceProbe {
       }
       if (this.state === "security_result") {
         if (this.bufferedLength < 4) return;
-        const status = new DataView(
-          this.buffer.buffer,
-          this.buffer.byteOffset,
-          4,
-        ).getUint32(0, false);
+        const status = new DataView(this.buffer.buffer, this.buffer.byteOffset, 4).getUint32(
+          0,
+          false,
+        );
         this.consume(4);
         if (status !== 0) throw new Error(`RFB security negotiation failed with status ${status}`);
         this.socket.send(Uint8Array.of(1));
@@ -264,11 +270,10 @@ export class RfbAcceptanceProbe {
     }
     if (type === 3) {
       if (this.bufferedLength < 8) return false;
-      const length = new DataView(
-        this.buffer.buffer,
-        this.buffer.byteOffset + 4,
-        4,
-      ).getUint32(0, false);
+      const length = new DataView(this.buffer.buffer, this.buffer.byteOffset + 4, 4).getUint32(
+        0,
+        false,
+      );
       if (this.bufferedLength < 8 + length) return false;
       this.consume(8 + length);
       return true;
@@ -288,11 +293,7 @@ export class RfbAcceptanceProbe {
     let hasPixels = false;
     for (let index = 0; index < rectangleCount; index += 1) {
       if (this.bufferedLength < offset + 12) return false;
-      const header = new DataView(
-        this.buffer.buffer,
-        this.buffer.byteOffset + offset,
-        12,
-      );
+      const header = new DataView(this.buffer.buffer, this.buffer.byteOffset + offset, 12);
       const width = header.getUint16(4, false);
       const height = header.getUint16(6, false);
       const encoding = header.getInt32(8, false);
@@ -312,13 +313,45 @@ export class RfbAcceptanceProbe {
         hasPixels = true;
         continue;
       }
+      if (encoding === HEXTILE_ENCODING) {
+        const end = hextileEndOffset({
+          buffer: this.buffer,
+          bufferedLength: this.bufferedLength,
+          offset,
+          width,
+          height,
+          bytesPerPixel: this.bytesPerPixel,
+        });
+        if (end === null) return false;
+        for (let cursor = offset; cursor < end; cursor += 1) {
+          hash = fnvByte(hash, this.buffer[cursor]!);
+        }
+        offset = end;
+        hasPixels = true;
+        continue;
+      }
+      if (encoding === ZRLE_ENCODING) {
+        if (this.bufferedLength < offset + 4) return false;
+        const compressedLength = new DataView(
+          this.buffer.buffer,
+          this.buffer.byteOffset + offset,
+          4,
+        ).getUint32(0, false);
+        if (this.bufferedLength < offset + 4 + compressedLength) return false;
+        for (let cursor = offset; cursor < offset + 4 + compressedLength; cursor += 1) {
+          hash = fnvByte(hash, this.buffer[cursor]!);
+        }
+        offset += 4 + compressedLength;
+        hasPixels = true;
+        continue;
+      }
       if (encoding === DESKTOP_SIZE_ENCODING) {
         this.width = width;
         this.height = height;
         continue;
       }
       if (encoding === LAST_RECT_ENCODING) break;
-      throw new Error(`RFB server ignored raw-only encoding request: ${encoding}`);
+      throw new Error(`RFB server ignored the bounded encoding request: ${encoding}`);
     }
     this.framebufferUpdates += 1;
     this.lastRectangleCount = rectangleCount;
@@ -338,12 +371,15 @@ export class RfbAcceptanceProbe {
   }
 
   private sendEncodings(): void {
-    const message = new Uint8Array(12);
+    const message = new Uint8Array(24);
     const view = new DataView(message.buffer);
     view.setUint8(0, 2);
-    view.setUint16(2, 2, false);
-    view.setInt32(4, RAW_ENCODING, false);
-    view.setInt32(8, DESKTOP_SIZE_ENCODING, false);
+    view.setUint16(2, 5, false);
+    view.setInt32(4, ZRLE_ENCODING, false);
+    view.setInt32(8, HEXTILE_ENCODING, false);
+    view.setInt32(12, RAW_ENCODING, false);
+    view.setInt32(16, DESKTOP_SIZE_ENCODING, false);
+    view.setInt32(20, LAST_RECT_ENCODING, false);
     this.socket.send(message);
   }
 
@@ -412,6 +448,7 @@ export class RfbAcceptanceProbe {
   private waitFor(
     predicate: (frame: RfbUpdate) => boolean,
     timeoutMs: number,
+    label: string,
   ): Promise<RfbUpdate> {
     const queued = this.queue.findIndex(predicate);
     if (queued >= 0) return Promise.resolve(this.queue.splice(queued, 1)[0]!);
@@ -427,7 +464,7 @@ export class RfbAcceptanceProbe {
           if (index >= 0) this.waiters.splice(index, 1);
           reject(
             new Error(
-              `RFB pixels did not converge within ${timeoutMs}ms: ${JSON.stringify(this.diagnostics())}`,
+              `${label} did not converge within ${timeoutMs}ms: ${JSON.stringify(this.diagnostics())}`,
             ),
           );
         }, timeoutMs),
@@ -467,6 +504,51 @@ export class RfbAcceptanceProbe {
   }
 }
 
+function hextileEndOffset(input: {
+  buffer: Uint8Array;
+  bufferedLength: number;
+  offset: number;
+  width: number;
+  height: number;
+  bytesPerPixel: number;
+}): number | null {
+  let offset = input.offset;
+  for (let tileY = 0; tileY < input.height; tileY += 16) {
+    const tileHeight = Math.min(16, input.height - tileY);
+    for (let tileX = 0; tileX < input.width; tileX += 16) {
+      const tileWidth = Math.min(16, input.width - tileX);
+      if (offset >= input.bufferedLength) return null;
+      const subencoding = input.buffer[offset++]!;
+      if ((subencoding & ~0x1f) !== 0) {
+        throw new Error(`RFB Hextile subencoding is invalid: ${subencoding}`);
+      }
+      if ((subencoding & HEXTILE_RAW) !== 0) {
+        const bytes = tileWidth * tileHeight * input.bytesPerPixel;
+        if (offset + bytes > input.bufferedLength) return null;
+        offset += bytes;
+        continue;
+      }
+      if ((subencoding & HEXTILE_BACKGROUND_SPECIFIED) !== 0) {
+        if (offset + input.bytesPerPixel > input.bufferedLength) return null;
+        offset += input.bytesPerPixel;
+      }
+      if ((subencoding & HEXTILE_FOREGROUND_SPECIFIED) !== 0) {
+        if (offset + input.bytesPerPixel > input.bufferedLength) return null;
+        offset += input.bytesPerPixel;
+      }
+      if ((subencoding & HEXTILE_ANY_SUBRECTS) === 0) continue;
+      if (offset >= input.bufferedLength) return null;
+      const count = input.buffer[offset++]!;
+      const subrectBytes =
+        2 + ((subencoding & HEXTILE_SUBRECTS_COLOURED) !== 0 ? input.bytesPerPixel : 0);
+      const bytes = count * subrectBytes;
+      if (offset + bytes > input.bufferedLength) return null;
+      offset += bytes;
+    }
+  }
+  return offset;
+}
+
 function fnvByte(hash: number, byte: number): number {
   return Math.imul((hash ^ byte) >>> 0, 0x01000193) >>> 0;
 }
@@ -482,17 +564,16 @@ async function messageBytes(value: unknown): Promise<Uint8Array> {
   throw new Error("RFB stream returned a non-binary message");
 }
 
-async function withTimeout<T>(
-  promise: Promise<T>,
-  timeoutMs: number,
-  label: string,
-): Promise<T> {
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | null = null;
   try {
     return await Promise.race([
       promise,
       new Promise<T>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+        timer = setTimeout(
+          () => reject(new Error(`${label} timed out after ${timeoutMs}ms`)),
+          timeoutMs,
+        );
       }),
     ]);
   } finally {

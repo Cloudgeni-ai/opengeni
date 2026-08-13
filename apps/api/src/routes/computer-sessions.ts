@@ -527,7 +527,11 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
                 }
               : {
                   kind: "direct_websocket" as const,
-                  url: await client.computerFrameStreamUrl(reference, request.targetId),
+                  url: await client.computerFrameStreamUrl(
+                    reference,
+                    request.targetId,
+                    request.stream,
+                  ),
                   protocols: [
                     COMPUTER_CONTROL_WEBSOCKET_PROTOCOL,
                     `${BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX}${token}`,

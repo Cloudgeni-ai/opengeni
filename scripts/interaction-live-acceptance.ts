@@ -26,13 +26,11 @@ import {
   STREAM_ROLE_CLIENT,
 } from "../packages/react/src/lib/relay-wire";
 import {
-  INTERACTION_LATENCY_BUDGETS,
+  interactionLatencyBudgetsForTransport,
+  type InteractionLatencyBudget,
   type InteractionLatencyMetric,
 } from "./interaction-acceptance-contract";
-import {
-  RfbAcceptanceProbe,
-  type RfbUpdate,
-} from "./rfb-acceptance-probe";
+import { RfbAcceptanceProbe, type RfbUpdate } from "./rfb-acceptance-probe";
 
 const RELAY_TAG_OPEN = 1;
 const RELAY_TAG_OPEN_ACK = 2;
@@ -72,16 +70,17 @@ type Receipt = {
   };
   measurements: Partial<Record<InteractionLatencyMetric, Measurement>>;
   checks: string[];
-  budgets: typeof INTERACTION_LATENCY_BUDGETS;
+  budgets: Readonly<Record<InteractionLatencyMetric, InteractionLatencyBudget>>;
 };
 
 type FrameValue = BrowserFrame | ComputerFrame;
 type ComputerVisualFrame = ComputerFrame | RfbUpdate;
 type ComputerVisualProbe = {
-  first(timeoutMs?: number): Promise<ComputerVisualFrame>;
+  first(timeoutMs?: number, label?: string): Promise<ComputerVisualFrame>;
   nextChangedAfter(
     previous: ComputerVisualFrame,
     timeoutMs?: number,
+    label?: string,
   ): Promise<ComputerVisualFrame>;
   typeAscii?(value: string): void;
   close(): void;
@@ -97,12 +96,28 @@ class FrameProbe<TFrame extends FrameValue> {
   }> = [];
   private processing = Promise.resolve();
   private closed = false;
+  private failure: Error | null = null;
+  private messagesReceived = 0;
+  private framesDecoded = 0;
 
   private constructor(
     private readonly socket: WebSocket,
     private readonly relayChannelId: string | null,
     private readonly decode: (bytes: Uint8Array) => TFrame | Promise<TFrame>,
-  ) {}
+  ) {
+    socket.addEventListener("error", () => {
+      if (!this.closed) this.fail(new Error("frame WebSocket failed"));
+    });
+    socket.addEventListener("close", (event) => {
+      if (!this.closed) {
+        this.fail(
+          new Error(
+            `frame WebSocket closed unexpectedly (code ${event.code}, reason ${JSON.stringify(event.reason)})`,
+          ),
+        );
+      }
+    });
+  }
 
   static async browser(
     attachment: BrowserSessionAttachment,
@@ -161,15 +176,20 @@ class FrameProbe<TFrame extends FrameValue> {
     return probe;
   }
 
-  async nextChangedAfter(previous: TFrame, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<TFrame> {
+  async nextChangedAfter(
+    previous: TFrame,
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+    label = "frame change",
+  ): Promise<TFrame> {
     return await this.waitFor(
       (frame) => frame.sequence > previous.sequence && !sameFrameImage(frame, previous),
       timeoutMs,
+      label,
     );
   }
 
-  async first(timeoutMs = DEFAULT_TIMEOUT_MS): Promise<TFrame> {
-    return await this.waitFor(() => true, timeoutMs);
+  async first(timeoutMs = DEFAULT_TIMEOUT_MS, label = "first frame"): Promise<TFrame> {
+    return await this.waitFor(() => true, timeoutMs, label);
   }
 
   close(): void {
@@ -235,6 +255,7 @@ class FrameProbe<TFrame extends FrameValue> {
           );
         });
         this.socket.addEventListener("message", (event) => {
+          this.messagesReceived += 1;
           this.processing = this.processing
             .then(async () => {
               const bytes = await messageBytes(event.data);
@@ -256,14 +277,12 @@ class FrameProbe<TFrame extends FrameValue> {
                 frameBytes = decodeStreamFrame(body).data;
               }
               this.push(await this.decode(frameBytes));
+              this.framesDecoded += 1;
             })
             .catch((cause) => {
               const error = cause instanceof Error ? cause : new Error(String(cause));
               reject(error);
-              for (const waiter of this.waiters.splice(0)) {
-                clearTimeout(waiter.timer);
-                waiter.reject(error);
-              }
+              this.fail(error);
             });
         });
       }),
@@ -272,9 +291,14 @@ class FrameProbe<TFrame extends FrameValue> {
     );
   }
 
-  private async waitFor(predicate: (frame: TFrame) => boolean, timeoutMs: number): Promise<TFrame> {
+  private async waitFor(
+    predicate: (frame: TFrame) => boolean,
+    timeoutMs: number,
+    label: string,
+  ): Promise<TFrame> {
     const queuedIndex = this.queue.findIndex(predicate);
     if (queuedIndex >= 0) return this.queue.splice(queuedIndex, 1)[0]!;
+    if (this.failure) throw this.failure;
     if (this.closed) throw new Error("frame probe is closed");
     return await new Promise<TFrame>((resolve, reject) => {
       const waiter = {
@@ -284,7 +308,18 @@ class FrameProbe<TFrame extends FrameValue> {
         timer: setTimeout(() => {
           const index = this.waiters.indexOf(waiter);
           if (index >= 0) this.waiters.splice(index, 1);
-          reject(new Error(`frame did not converge within ${timeoutMs}ms`));
+          reject(
+            new Error(
+              `${label} did not converge within ${timeoutMs}ms: ` +
+                JSON.stringify({
+                  readyState: this.socket.readyState,
+                  relayChannelId: this.relayChannelId,
+                  messagesReceived: this.messagesReceived,
+                  framesDecoded: this.framesDecoded,
+                  queuedFrames: this.queue.length,
+                }),
+            ),
+          );
         }, timeoutMs),
       };
       this.waiters.push(waiter);
@@ -302,6 +337,15 @@ class FrameProbe<TFrame extends FrameValue> {
     clearTimeout(waiter.timer);
     waiter.resolve(frame);
   }
+
+  private fail(error: Error): void {
+    if (this.failure || this.closed) return;
+    this.failure = error;
+    for (const waiter of this.waiters.splice(0)) {
+      clearTimeout(waiter.timer);
+      waiter.reject(error);
+    }
+  }
 }
 
 async function main(): Promise<void> {
@@ -309,9 +353,7 @@ async function main(): Promise<void> {
   const deploymentAccessKey = process.env.OPENGENI_INTERACTION_ACCEPTANCE_ACCESS_KEY?.trim();
   const client = new OpenGeniClient({
     baseUrl: args.apiUrl,
-    ...(deploymentAccessKey
-      ? { headers: { "x-opengeni-access-key": deploymentAccessKey } }
-      : {}),
+    ...(deploymentAccessKey ? { headers: { "x-opengeni-access-key": deploymentAccessKey } } : {}),
   });
   const workspaceId = args.workspaceId ?? (await defaultWorkspace(args.apiUrl));
   const checks: string[] = [];
@@ -339,6 +381,7 @@ async function main(): Promise<void> {
     : null;
   let browser: Awaited<ReturnType<typeof client.interaction.browsers.open>> | null = null;
   let browserProbe: FrameProbe<BrowserFrame> | null = null;
+  let secondaryBrowserProbe: FrameProbe<BrowserFrame> | null = null;
   let computerProbe: ComputerVisualProbe | null = null;
   let browserTransport: BrowserSessionAttachment["stream"]["kind"] | null = null;
   let computerTransport: ComputerSessionAttachment["stream"]["kind"] | null = null;
@@ -395,9 +438,43 @@ async function main(): Promise<void> {
     });
     browserTransport = browserAttachment.stream.kind;
     browserProbe = await FrameProbe.browser(browserAttachment);
-    let browserFrame = await browserProbe.first();
+    let browserFrame = await browserProbe.first(DEFAULT_TIMEOUT_MS, "browser first frame");
     record("browserFirstFrame", performance.now() - started);
     checks.push("browser.first-frame");
+
+    const secondaryBrowserAttachment = await browser.attach({
+      targetId: target.id,
+      expiresInSeconds: 120,
+      stream: {
+        format: "png",
+        maxWidth: 640,
+        maxHeight: 360,
+        everyNthFrame: 2,
+      },
+    });
+    secondaryBrowserProbe = await FrameProbe.browser(secondaryBrowserAttachment);
+    let secondaryBrowserFrame = await secondaryBrowserProbe.first(
+      DEFAULT_TIMEOUT_MS,
+      "secondary browser first frame",
+    );
+    if (
+      secondaryBrowserFrame.browserSessionId !== browser.id ||
+      secondaryBrowserFrame.targetId !== target.id ||
+      secondaryBrowserFrame.mediaType !== "image/png" ||
+      secondaryBrowserFrame.width > 640 ||
+      secondaryBrowserFrame.height > 360
+    ) {
+      throw new Error(
+        `secondary browser stream ignored its profile: ${JSON.stringify({
+          browserSessionId: secondaryBrowserFrame.browserSessionId,
+          targetId: secondaryBrowserFrame.targetId,
+          mediaType: secondaryBrowserFrame.mediaType,
+          width: secondaryBrowserFrame.width,
+          height: secondaryBrowserFrame.height,
+        })}`,
+      );
+    }
+    checks.push("browser.concurrent-stream-profiles");
 
     for (let index = 0; index < args.iterations; index += 1) {
       const value = `OPENGENI_VISIBLE_${index}_${crypto.randomUUID().slice(0, 8)}`;
@@ -419,7 +496,19 @@ async function main(): Promise<void> {
       if (receipt.state !== "completed" || !receipt.observation) {
         throw new Error(`browser action settled as ${receipt.state}`);
       }
-      const nextFrame = await browserProbe.nextChangedAfter(browserFrame);
+      const nextFrame = await browserProbe.nextChangedAfter(
+        browserFrame,
+        DEFAULT_TIMEOUT_MS,
+        `browser fill ${index} visible frame`,
+      );
+      if (index === 0) {
+        secondaryBrowserFrame = await secondaryBrowserProbe.nextChangedAfter(
+          secondaryBrowserFrame,
+          DEFAULT_TIMEOUT_MS,
+          "secondary browser fill visible frame",
+        );
+        checks.push("browser.concurrent-stream-profiles-visible");
+      }
       record("browserActionAcknowledged", acknowledged - started);
       record("browserActionVisible", performance.now() - started);
       browserFrame = nextFrame;
@@ -475,7 +564,11 @@ async function main(): Promise<void> {
     if (browserClipboardReceipt.state !== "completed" || !browserClipboardReceipt.observation) {
       throw new Error(`browser clipboard paste settled as ${browserClipboardReceipt.state}`);
     }
-    browserFrame = await browserProbe.nextChangedAfter(browserFrame);
+    browserFrame = await browserProbe.nextChangedAfter(
+      browserFrame,
+      DEFAULT_TIMEOUT_MS,
+      "browser clipboard paste visible frame",
+    );
     record("browserActionAcknowledged", browserClipboardAcknowledged - started);
     record("browserActionVisible", performance.now() - started);
     observation = browserClipboardReceipt.observation;
@@ -495,11 +588,46 @@ async function main(): Promise<void> {
         },
       }),
     );
-    browserFrame = await browserProbe.first();
+    browserFrame = await browserProbe.first(DEFAULT_TIMEOUT_MS, "browser reconnect first frame");
     record("browserReconnect", performance.now() - started);
     if (browserFrame.browserSessionId !== browser.id)
       throw new Error("browser reconnect crossed sessions");
     checks.push("browser.reconnect");
+
+    const postReconnectMarker = `OPENGENI_RECONNECT_${crypto.randomUUID().slice(0, 8)}`;
+    started = performance.now();
+    const postReconnectReceipt = await browser.act({
+      operationId: crypto.randomUUID(),
+      targetId: observation.target.id,
+      expectedTargetGeneration: observation.target.targetGeneration,
+      expectedDocumentGeneration: observation.target.documentGeneration,
+      expectedFrameId: observation.frameId,
+      action: {
+        type: "fill",
+        locator: { kind: "css", selector: "#acceptance-input" },
+        value: postReconnectMarker,
+      },
+    });
+    const postReconnectAcknowledged = performance.now();
+    if (postReconnectReceipt.state !== "completed" || !postReconnectReceipt.observation) {
+      throw new Error(`post-reconnect browser action settled as ${postReconnectReceipt.state}`);
+    }
+    [browserFrame, secondaryBrowserFrame] = await Promise.all([
+      browserProbe.nextChangedAfter(
+        browserFrame,
+        DEFAULT_TIMEOUT_MS,
+        "reconnected browser visible frame",
+      ),
+      secondaryBrowserProbe.nextChangedAfter(
+        secondaryBrowserFrame,
+        DEFAULT_TIMEOUT_MS,
+        "secondary browser remained live across peer reconnect",
+      ),
+    ]);
+    record("browserActionAcknowledged", postReconnectAcknowledged - started);
+    record("browserActionVisible", performance.now() - started);
+    observation = postReconnectReceipt.observation;
+    checks.push("browser.concurrent-stream-profile-reconnect-isolation");
 
     if (computer) {
       const targets = await computer.targets.list();
@@ -558,7 +686,7 @@ async function main(): Promise<void> {
       });
       computerTransport = computerAttachment.stream.kind;
       computerProbe = await openComputerVisualProbe(computerAttachment);
-      let computerFrame = await computerProbe.first();
+      let computerFrame = await computerProbe.first(DEFAULT_TIMEOUT_MS, "computer first frame");
       record("computerFirstFrame", performance.now() - started);
       checks.push("computer.first-frame");
 
@@ -581,13 +709,14 @@ async function main(): Promise<void> {
           `computer keyboard action settled as ${computerReceipt.state}: ${JSON.stringify(computerReceipt.error)}`,
         );
       }
-      computerFrame = await computerProbe.nextChangedAfter(computerFrame);
+      computerFrame = await computerProbe.nextChangedAfter(
+        computerFrame,
+        DEFAULT_TIMEOUT_MS,
+        "computer keyboard visible frame",
+      );
       record("computerActionAcknowledged", computerAcknowledged - started);
       record("computerActionVisible", performance.now() - started);
-      if (
-        "computerSessionId" in computerFrame &&
-        computerFrame.computerSessionId !== computer.id
-      ) {
+      if ("computerSessionId" in computerFrame && computerFrame.computerSessionId !== computer.id) {
         throw new Error("computer frame crossed sessions");
       }
       observation = await browser.observe(observation.target.id);
@@ -624,7 +753,11 @@ async function main(): Promise<void> {
         expectedTargetGeneration: currentObservation.target.targetGeneration,
         expectedObservationId: currentObservation.observationId,
         expectedFrameId: null,
-        action: { type: "clipboard", operation: "write", text: clipboardMarker },
+        action: {
+          type: "clipboard",
+          operation: "write",
+          text: clipboardMarker,
+        },
       });
       if (clipboardWriteReceipt.state !== "completed") {
         throw new Error(
@@ -664,7 +797,11 @@ async function main(): Promise<void> {
         );
       }
       const [nextComputerFrame, clipboardObservation] = await Promise.all([
-        computerProbe.nextChangedAfter(computerFrame),
+        computerProbe.nextChangedAfter(
+          computerFrame,
+          DEFAULT_TIMEOUT_MS,
+          "computer clipboard paste visible frame",
+        ),
         waitForSemanticValue(
           // The native screen action and the BrowserSession control the same
           // linked Chromium. Browser DOM semantics give an exact content proof
@@ -691,7 +828,11 @@ async function main(): Promise<void> {
       if (computerProbe.typeAscii) {
         const viewerMarker = `viewer${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
         computerProbe.typeAscii(viewerMarker);
-        computerFrame = await computerProbe.nextChangedAfter(computerFrame);
+        computerFrame = await computerProbe.nextChangedAfter(
+          computerFrame,
+          DEFAULT_TIMEOUT_MS,
+          "computer RFB keyboard visible frame",
+        );
         const viewerObservation = await waitForSemanticValue(
           () => browser!.observe(observation.target.id),
           viewerMarker,
@@ -717,13 +858,15 @@ async function main(): Promise<void> {
           },
         }),
       );
-      await computerProbe.first();
+      await computerProbe.first(DEFAULT_TIMEOUT_MS, "computer reconnect first frame");
       record("computerReconnect", performance.now() - started);
       checks.push("computer.reconnect");
     }
 
     browserProbe.close();
     browserProbe = null;
+    secondaryBrowserProbe.close();
+    secondaryBrowserProbe = null;
     computerProbe?.close();
     computerProbe = null;
     started = performance.now();
@@ -740,8 +883,9 @@ async function main(): Promise<void> {
     process.stderr.write(
       `${JSON.stringify({ measurements: Object.fromEntries([...raw].map(([metric, samples]) => [metric, measurement(samples)])) })}\n`,
     );
+    const budgets = interactionLatencyBudgetsForTransport(computerTransport);
     const budgetFailures = [...raw].flatMap(([metric, samples]) => {
-      const failure = budgetFailure(metric, samples);
+      const failure = budgetFailure(metric, samples, budgets);
       return failure ? [failure] : [];
     });
     if (budgetFailures.length > 0) {
@@ -763,7 +907,7 @@ async function main(): Promise<void> {
         [...raw].map(([metric, samples]) => [metric, measurement(samples)]),
       ),
       checks,
-      budgets: INTERACTION_LATENCY_BUDGETS,
+      budgets,
     };
     await mkdir(dirname(args.output), { recursive: true });
     await writeFile(args.output, `${JSON.stringify(receipt, null, 2)}\n`, {
@@ -772,6 +916,7 @@ async function main(): Promise<void> {
     process.stdout.write(`${JSON.stringify({ status: "passed", output: args.output, receipt })}\n`);
   } finally {
     browserProbe?.close();
+    secondaryBrowserProbe?.close();
     computerProbe?.close();
     if (browser) {
       const started = performance.now();
@@ -796,18 +941,18 @@ async function openComputerVisualProbe(
   if (attachment.stream.kind === "direct_rfb") {
     const rfb = await RfbAcceptanceProbe.open(attachment);
     return {
-      first: (timeoutMs) => rfb.first(timeoutMs),
-      nextChangedAfter: (previous, timeoutMs) =>
-        rfb.nextChangedAfter(previous as RfbUpdate, timeoutMs),
+      first: (timeoutMs, label) => rfb.first(timeoutMs, label),
+      nextChangedAfter: (previous, timeoutMs, label) =>
+        rfb.nextChangedAfter(previous as RfbUpdate, timeoutMs, label),
       typeAscii: (value) => rfb.typeAscii(value),
       close: () => rfb.close(),
     };
   }
   const encoded = await FrameProbe.computer(attachment);
   return {
-    first: (timeoutMs) => encoded.first(timeoutMs),
-    nextChangedAfter: (previous, timeoutMs) =>
-      encoded.nextChangedAfter(previous as ComputerFrame, timeoutMs),
+    first: (timeoutMs, label) => encoded.first(timeoutMs, label),
+    nextChangedAfter: (previous, timeoutMs, label) =>
+      encoded.nextChangedAfter(previous as ComputerFrame, timeoutMs, label),
     close: () => encoded.close(),
   };
 }
@@ -909,8 +1054,12 @@ function percentile(sorted: number[], fraction: number): number {
   return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * fraction) - 1))]!;
 }
 
-function budgetFailure(metric: InteractionLatencyMetric, samples: number[]): string | null {
-  const budget = INTERACTION_LATENCY_BUDGETS[metric];
+function budgetFailure(
+  metric: InteractionLatencyMetric,
+  samples: number[],
+  budgets: Readonly<Record<InteractionLatencyMetric, InteractionLatencyBudget>>,
+): string | null {
+  const budget = budgets[metric];
   const observed = measurement(samples)[budget.statistic];
   if (observed > budget.limitMs) {
     return `${metric} ${budget.statistic} ${observed.toFixed(1)}ms exceeds ${budget.limitMs}ms`;
@@ -937,13 +1086,11 @@ function findSemanticNode(
 }
 
 function semanticContainsValue(
-  semantic:
-    | {
-        kind: string;
-        roots?: InteractionSemanticNode[];
-        changed?: InteractionSemanticNode[];
-      }
-    | null,
+  semantic: {
+    kind: string;
+    roots?: InteractionSemanticNode[];
+    changed?: InteractionSemanticNode[];
+  } | null,
   value: string,
 ): boolean {
   const pending =
@@ -967,13 +1114,11 @@ function semanticContainsValue(
 }
 
 function semanticEntrySummary(
-  semantic:
-    | {
-        kind: string;
-        roots?: InteractionSemanticNode[];
-        changed?: InteractionSemanticNode[];
-      }
-    | null,
+  semantic: {
+    kind: string;
+    roots?: InteractionSemanticNode[];
+    changed?: InteractionSemanticNode[];
+  } | null,
 ): Array<{ role: string; name: string | null; value: string | null }> {
   const pending =
     semantic?.kind === "snapshot"
@@ -981,7 +1126,11 @@ function semanticEntrySummary(
       : semantic?.kind === "diff"
         ? [...(semantic.changed ?? [])]
         : [];
-  const entries: Array<{ role: string; name: string | null; value: string | null }> = [];
+  const entries: Array<{
+    role: string;
+    name: string | null;
+    value: string | null;
+  }> = [];
   while (pending.length > 0 && entries.length < 12) {
     const node = pending.shift()!;
     if (node.role === "textbox" || node.role === "entry") {
@@ -996,11 +1145,9 @@ function semanticEntrySummary(
   return entries;
 }
 
-async function waitForSemanticValue<T extends { semantic: Parameters<typeof semanticContainsValue>[0] }>(
-  observe: () => Promise<T>,
-  value: string,
-  timeoutMs: number,
-): Promise<T> {
+async function waitForSemanticValue<
+  T extends { semantic: Parameters<typeof semanticContainsValue>[0] },
+>(observe: () => Promise<T>, value: string, timeoutMs: number): Promise<T> {
   const deadline = performance.now() + timeoutMs;
   let latest = await observe();
   while (!semanticContainsValue(latest.semantic, value)) {

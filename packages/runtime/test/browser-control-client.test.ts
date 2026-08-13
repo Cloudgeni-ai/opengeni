@@ -55,9 +55,9 @@ describe("BrowserControlClient", () => {
       expect(await client.addAllowedOrigins(["https://app.opengeni.test"])).toEqual([
         "https://app.opengeni.test",
       ]);
-      await expect(
-        provisionBrowserControlClient(session, { adminToken }),
-      ).rejects.toBeInstanceOf(BrowserControlUnsupportedError);
+      await expect(provisionBrowserControlClient(session, { adminToken })).rejects.toBeInstanceOf(
+        BrowserControlUnsupportedError,
+      );
     } finally {
       server.stop(true);
     }
@@ -106,7 +106,11 @@ describe("BrowserControlClient", () => {
             expectedRegion: "NO",
             locale: "nb-NO",
             timezone: "Europe/Oslo",
-            geolocation: { latitude: 59.9139, longitude: 10.7522, accuracyMeters: 25 },
+            geolocation: {
+              latitude: 59.9139,
+              longitude: 10.7522,
+              accuracyMeters: 25,
+            },
             webRtc: "disable_non_proxied_udp",
             stability: "session",
           },
@@ -329,7 +333,11 @@ describe("BrowserControlClient", () => {
             expectedRegion: "NO",
             locale: "nb-NO",
             timezone: "Europe/Oslo",
-            geolocation: { latitude: 59.9139, longitude: 10.7522, accuracyMeters: 25 },
+            geolocation: {
+              latitude: 59.9139,
+              longitude: 10.7522,
+              accuracyMeters: 25,
+            },
             webRtc: "disable_non_proxied_udp",
             stability: "session",
           },
@@ -500,6 +508,17 @@ describe("BrowserControlClient", () => {
       ).toBe(
         `ws://127.0.0.1:${server.port}/v1/browser-sessions/${browserSessionId}/targets/${target.id}/frames?provider=fixture`,
       );
+      expect(
+        await client.frameStreamUrl({ browserSessionId, controllerGeneration }, target.id, {
+          format: "jpeg",
+          quality: 76,
+          maxWidth: 1_280,
+          maxHeight: 720,
+          everyNthFrame: 2,
+        }),
+      ).toBe(
+        `ws://127.0.0.1:${server.port}/v1/browser-sessions/${browserSessionId}/targets/${target.id}/frames?provider=fixture&format=jpeg&quality=76&maxWidth=1280&maxHeight=720&everyNthFrame=2`,
+      );
       await expect(
         client.requestForSession({
           method: "GET",
@@ -589,7 +608,10 @@ describe("BrowserControlClient", () => {
           );
         }
         if (url.pathname.endsWith("/view-grants") && request.method === "POST") {
-          const body = (await request.json()) as { grantId: string; expiresAt: string };
+          const body = (await request.json()) as {
+            grantId: string;
+            expiresAt: string;
+          };
           return success(body, 201);
         }
         if (url.pathname.endsWith("/targets") && request.method === "GET") {
@@ -648,7 +670,11 @@ describe("BrowserControlClient", () => {
           expiresAt,
         }),
       ).toEqual({ grantId, expiresAt });
-      const session = client.computerSessionClient({ reference, controlToken, viewToken });
+      const session = client.computerSessionClient({
+        reference,
+        controlToken,
+        viewToken,
+      });
       expect(await session.listTargets()).toEqual([target]);
       expect(await session.observe(target.id)).toEqual(observation);
       expect(await session.readClipboard()).toEqual(clipboard);
@@ -670,11 +696,24 @@ describe("BrowserControlClient", () => {
       expect(await client.computerFrameStreamUrl(reference, target.id)).toBe(
         `ws://127.0.0.1:${server.port}/v1/computer-sessions/${computerSessionId}/targets/${target.id}/frames?provider=fixture`,
       );
+      expect(
+        await client.computerFrameStreamUrl(reference, target.id, {
+          format: "png",
+          maxWidth: 640,
+          maxHeight: 360,
+          everyNthFrame: 3,
+        }),
+      ).toBe(
+        `ws://127.0.0.1:${server.port}/v1/computer-sessions/${computerSessionId}/targets/${target.id}/frames?provider=fixture&format=png&maxWidth=640&maxHeight=360&everyNthFrame=3`,
+      );
       await client.endComputerSession(reference, { removeState: true });
 
       expect(requests).toEqual(
         expect.arrayContaining([
-          { path: "POST /v1/computer-sessions", authorization: `Bearer ${adminToken}` },
+          {
+            path: "POST /v1/computer-sessions",
+            authorization: `Bearer ${adminToken}`,
+          },
           {
             path: `GET /v1/computer-sessions/${computerSessionId}/targets`,
             authorization: `Bearer ${viewToken}`,
@@ -874,7 +913,10 @@ describe("BrowserControlClient", () => {
       nativeAuthority,
       allowedOrigins: ["https://app.opengeni.test"],
     });
-    expect(provisioned.server).toEqual({ port: 31_337, marker: "agent:sidecar-1" });
+    expect(provisioned.server).toEqual({
+      port: 31_337,
+      marker: "agent:sidecar-1",
+    });
     expect(ensured).toEqual([
       {
         ...nativeAuthority,
@@ -884,13 +926,19 @@ describe("BrowserControlClient", () => {
     ]);
     const expiresAt = new Date(Date.now() + 60_000).toISOString();
     const relay = await provisioned.client.openRelayedFrameStream({
-      reference: { browserSessionId: randomUUID(), controllerGeneration: "controller-1" },
+      reference: {
+        browserSessionId: randomUUID(),
+        controllerGeneration: "controller-1",
+      },
       targetId: "target-1",
       viewToken,
       expiresAt,
       stream: { quality: 55, everyNthFrame: 2 },
     });
-    expect(relay?.channel).toMatchObject({ channelId: "browser-channel-1", kind: 3 });
+    expect(relay?.channel).toMatchObject({
+      channelId: "browser-channel-1",
+      kind: 3,
+    });
     expect(opened).toHaveLength(1);
     expect(opened[0]).toMatchObject({
       ...nativeAuthority,
