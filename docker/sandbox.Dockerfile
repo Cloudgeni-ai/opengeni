@@ -38,6 +38,25 @@ RUN set -eux; \
 
 FROM oven/bun:1.3.14 AS bun-runtime
 
+FROM --platform=$BUILDPLATFORM oven/bun:1.3.14 AS anydoc-runtime-builder
+
+ARG TARGETARCH
+WORKDIR /src
+COPY docker/anydoc/package.json docker/anydoc/bun.lock ./
+RUN set -eux; \
+    case "$TARGETARCH" in \
+      amd64) node_arch=x64 ;; \
+      arm64) node_arch=arm64 ;; \
+      *) echo "unsupported AnyDoc OCI architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    bun install --frozen-lockfile --production --os=linux --cpu="$node_arch"; \
+    runtime=/out/node_modules/@firecrawl; \
+    install -d -m 0755 "$runtime"; \
+    cp -a node_modules/@firecrawl/anydoc "$runtime/anydoc"; \
+    cp -a "node_modules/@firecrawl/anydoc-linux-${node_arch}-gnu" \
+      "$runtime/anydoc-linux-${node_arch}-gnu"; \
+    test "$(bun -e 'const value=await Bun.file("node_modules/@firecrawl/anydoc/package.json").json();process.stdout.write(value.version)')" = 0.1.8
+
 FROM --platform=$BUILDPLATFORM oven/bun:1.3.14 AS browserd-source-build
 
 WORKDIR /src
@@ -227,6 +246,22 @@ RUN set -eux; \
 COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
 COPY --from=bun-runtime /usr/local/bin/bun /usr/local/bin/bun
 RUN test "$(node --version)" = "v22.22.0"
+
+# Pinned native document-to-Markdown parser. The lock contains the registry
+# integrity for the JS wrapper and every target binding; the builder copies
+# only this Debian image's exact GNU binding into the final image.
+COPY --from=anydoc-runtime-builder /out /opt/opengeni/anydoc
+COPY docker/anydoc/LICENSE /usr/local/share/licenses/anydoc/LICENSE
+COPY docker/anydoc/THIRD-PARTY-NOTICES /usr/local/share/opengeni/anydoc-THIRD-PARTY-NOTICES
+RUN set -eux; \
+    chmod 0755 /opt/opengeni/anydoc/node_modules/@firecrawl/anydoc/cli.js; \
+    ln -s /opt/opengeni/anydoc/node_modules/@firecrawl/anydoc/cli.js /usr/local/bin/anydoc; \
+    test "$(anydoc --version)" = 0.1.8; \
+    printf 'name,value\nalpha,42\n' >/tmp/anydoc-smoke.csv; \
+    anydoc /tmp/anydoc-smoke.csv >/tmp/anydoc-smoke.md; \
+    grep -q alpha /tmp/anydoc-smoke.md; \
+    printf '{\\rtf1\\ansi AnyDoc smoke}' >/tmp/anydoc-smoke.rtf; \
+    anydoc /tmp/anydoc-smoke.rtf | grep -q 'AnyDoc smoke'
 
 RUN set -eux; \
     arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \

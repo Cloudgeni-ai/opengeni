@@ -8,7 +8,7 @@ everything else is machinery you receive from OpenGeni rather than choose.
 
 | Credential | Prefix / transport | Issued by | Verified by | Lifetime | Intended holder |
 | --- | --- | --- | --- | --- | --- |
-| Deployment access key | `x-opengeni-access-key` header | Operator (env) | API perimeter middleware | Static | Every caller of a key-gated deployment (coarse perimeter, not identity) |
+| Deployment access key | `x-opengeni-access-key` header | Operator (env) | API perimeter middleware | Static | Ordinary callers and deployment-only surfaces of a key-gated deployment (coarse perimeter, not identity) |
 | Product API key | `ogk_…` bearer | Workspace member via `POST /v1/workspaces/:id/api-keys` | Hash lookup (stored hashed, shown once) | Until revoked | A product/backend calling the REST API for one workspace |
 | Delegated access token | `ogd_…` bearer; domain-bound `ogd2_…` when it asserts service provenance | Host with the deployment's delegation secret (HMAC) | HMAC + embedded workspace/account/permissions | Short (embedded expiry) | An embedding host acting as one of its users; also self-minted internally for first-party MCP |
 | Managed web session | Better Auth cookie | Managed auth (email/password) | Better Auth session lookup | Session | Humans in the hosted web console |
@@ -63,9 +63,11 @@ Rules that hold across the table:
   each binding file, so a multi-day turn sees current credentials without model
   action or manifest mutation and a failed sibling refresh cannot overwrite it;
   broker route changes require a newer admitted turn.
-- **The perimeter is not identity.** The deployment access key gates who can
-  talk to a deployment at all; workspace identity and permissions always come
-  from one of the identity-bearing credentials above it.
+- **The perimeter is not identity.** The deployment access key admits ordinary
+  callers and deployment-only surfaces. A cryptographically valid first-party
+  delegated bearer may instead enter `/v1`; the normal access resolver still
+  enforces its account, workspace, subject, permission, and live-attempt scope.
+  Perimeter admission never grants workspace authority.
 - **Machine revocation is bounded, not a claimed synchronous disconnect.** A DB
   revoke immediately denies the next NATS authorization/reconnect. A connection
   that already holds a callout-minted user JWT may remain live until that JWT
