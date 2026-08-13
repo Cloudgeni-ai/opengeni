@@ -20,6 +20,11 @@ import {
   workspaceSlackReactionChannelAllowed,
 } from "@opengeni/contracts";
 import {
+  allowedFirstPartyMcpToolsForSession,
+  resolveFirstPartyMcpToolPolicy,
+  type Settings,
+} from "@opengeni/config";
+import {
   acceptSessionHumanInputResponse,
   acceptSessionApprovalDecision,
   approveSlackUserLinkAccessRequest,
@@ -152,6 +157,14 @@ export const SLACK_TASK_FIRST_PARTY_MCP_TOOLS = [
   "slack_bot_file_info",
   "slack_bot_file_content",
 ] satisfies readonly FirstPartyMcpToolName[];
+
+function slackTaskFirstPartyMcpTools(settings: Settings): FirstPartyMcpToolName[] {
+  const policy = resolveFirstPartyMcpToolPolicy(settings);
+  const connectorTools = SLACK_TASK_FIRST_PARTY_MCP_TOOLS.filter(
+    (tool) => !DEFAULT_FIRST_PARTY_MCP_TOOLS.includes(tool),
+  );
+  return allowedFirstPartyMcpToolsForSession(settings, [...policy.default, ...connectorTools]);
+}
 
 export type NormalizedSlackInteraction = {
   providerEventId: string;
@@ -1071,7 +1084,7 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
       requestedSessionId: interaction.sessionReservationId,
       initialMessage: slackInvocationPreparedEntry(preparedEntry, preparedAttachments).text,
       turnInstructions: SLACK_TASK_INSTRUCTIONS,
-      firstPartyMcpTools: [...SLACK_TASK_FIRST_PARTY_MCP_TOOLS],
+      firstPartyMcpTools: slackTaskFirstPartyMcpTools(deps.settings),
       resources: preparedAttachments.resources,
       ...(preferredModel ? { model: preferredModel } : {}),
       idempotencyKey: `slack:${entry.connectionId}:${entry.providerEventId}`,
@@ -1582,7 +1595,7 @@ async function processSlackReactionInboxEntry(
       turnInstructions: SLACK_TASK_INSTRUCTIONS,
       // The exact reacted message and bounded containing thread are already in
       // the prompt; do not expose general Slack history tools for this trigger.
-      firstPartyMcpTools: [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+      firstPartyMcpTools: resolveFirstPartyMcpToolPolicy(deps.settings).default,
       resources: preparedTask.resources,
       ...(preferredModel ? { model: preferredModel } : {}),
       // Every reaction entry converging on this route must use the same create

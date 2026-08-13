@@ -1,7 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   CreateScheduledTaskRequest,
-  DEFAULT_FIRST_PARTY_MCP_TOOLS,
   FIRST_PARTY_MCP_TOOL_NAMES,
   defaultRepositoryMountPath,
   SESSION_EVENT_RAW_DELTA_TYPES,
@@ -92,6 +91,7 @@ import {
   appendAndPublishTurnEventsFenced,
   publishDurableSessionEvents,
 } from "@opengeni/events";
+import { allowedFirstPartyMcpToolsForSession } from "@opengeni/config";
 import {
   createSignedState,
   GitHubAppConfigurationError,
@@ -622,8 +622,10 @@ export function buildOpenGeniMcpServer(
   const selectedTools =
     sessionId !== null
       ? new Set(
-          (grant.metadata?.["firstPartyMcpTools"] as FirstPartyMcpToolName[] | undefined) ??
-            DEFAULT_FIRST_PARTY_MCP_TOOLS,
+          allowedFirstPartyMcpToolsForSession(
+            deps.settings,
+            grant.metadata?.["firstPartyMcpTools"] as FirstPartyMcpToolName[] | undefined,
+          ),
         )
       : null;
   const nestedAgentDepth = grant.metadata?.["nestedAgentDepth"];
@@ -2570,7 +2572,7 @@ function registerWorkspaceArtifactTools(
     "artifacts_create",
     {
       description:
-        "Create and publish a generic static workspace artifact from a complete, self-contained HTML document with inline CSS. JavaScript and active or navigation-capable markup do not render in the MVP.",
+        "Create and publish a generic workspace artifact from a complete HTML document. The exact HTML runs in an opaque-origin sandboxed iframe with JavaScript, external resources, forms, popups, and downloads enabled, but without parent-origin authority or top-level navigation.",
       inputSchema: {
         title: z4.string().min(1).max(120),
         description: z4.string().max(2000).nullable().optional(),
@@ -2605,7 +2607,7 @@ function registerWorkspaceArtifactTools(
     "artifacts_publish",
     {
       description:
-        "Publish a new immutable static HTML/CSS version. JavaScript and active or navigation-capable markup do not render in the MVP. First read the current source and pass its version id for optimistic concurrency.",
+        "Publish a new immutable HTML version. The exact HTML runs in an opaque-origin sandboxed iframe. First read the current source and pass its version id for optimistic concurrency.",
       inputSchema: {
         artifactId: z4.string().uuid(),
         expectedCurrentVersionId: z4.string().uuid(),

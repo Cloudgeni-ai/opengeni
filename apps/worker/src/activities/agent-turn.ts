@@ -182,6 +182,7 @@ import {
 import { connectionTokenResolverForTurn } from "./mcp-credentials";
 import { buildApiIntegrationServersForTurn } from "./api-integrations";
 import {
+  allowedFirstPartyMcpToolsForSession,
   assertTurnExecutionPolicyMatchesConfigV1,
   calculateGatewayReportedCostBreakdown,
   calculateModelUsageCostBreakdown,
@@ -434,7 +435,6 @@ import {
 } from "@opengeni/runtime";
 import {
   CAPABILITY_DESCRIPTORS,
-  DEFAULT_FIRST_PARTY_MCP_TOOLS,
   evaluateWorkspaceModelPolicy,
   readTurnExecutionPolicyV1,
   resolveWorkspaceAgentHumanInputEnabled,
@@ -6904,6 +6904,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             };
           })()
         : undefined;
+      const selectedFirstPartyMcpTools = allowedFirstPartyMcpToolsForSession(
+        runSettings,
+        session.firstPartyMcpTools,
+      );
       preparedTools = await waitForTurnOperation(
         runtime.prepareTools(runSettings, turnTools, {
           accountId: input.accountId,
@@ -6930,7 +6934,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           ...(session.firstPartyMcpPermissions?.length
             ? { firstPartyPermissions: session.firstPartyMcpPermissions }
             : {}),
-          firstPartyTools: session.firstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+          firstPartyTools: selectedFirstPartyMcpTools,
           nestedAgentDepth: session.nestedAgentDepth,
           effectiveMaxNestedAgentDepth: session.effectiveMaxNestedAgentDepth,
           attemptToolDefinitions: createFirstPartyInteractionAttemptToolDefinitions({
@@ -6946,7 +6950,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             ...(session.firstPartyMcpPermissions?.length
               ? { permissions: session.firstPartyMcpPermissions }
               : {}),
-            selectedTools: session.firstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+            selectedTools: selectedFirstPartyMcpTools,
             subjectId: "worker:first-party-mcp",
             subjectLabel: "OpenGeni worker",
             ...(interactionInterventionResume

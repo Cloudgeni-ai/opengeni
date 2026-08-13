@@ -28,4 +28,21 @@ describe("first-party MCP tool selection at session creation", () => {
       "session_create",
     ]);
   });
+
+  test("deployment policy supplies top-level defaults and narrows inherited selections", () => {
+    const policy = {
+      default: ["session_get"] as const,
+      allowed: ["session_get", "goal_update"] as const,
+    };
+    expect(resolveFirstPartyMcpToolsForCreate(undefined, undefined, policy)).toEqual([
+      "session_get",
+    ]);
+    expect(
+      resolveFirstPartyMcpToolsForCreate(
+        undefined,
+        ["session_get", "session_create", "goal_update"],
+        policy,
+      ),
+    ).toEqual(["session_get", "goal_update"]);
+  });
 });

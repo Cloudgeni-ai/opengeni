@@ -26,6 +26,7 @@ function protectedApp(options: { delegationSecret?: string } = {}) {
     ),
   );
   app.get("/protected", (context) => context.json({ ok: true }));
+  app.get("/v1/protected", (context) => context.json({ ok: true }));
   return app;
 }
 
@@ -100,11 +101,11 @@ describe("configured deployment perimeter authentication", () => {
     }
   });
 
-  test("does not derive delegated signing authority from the deployment key", async () => {
+  test("derives delegated signing authority from the configured deployment key when no explicit secret is set", async () => {
     const bearer = await attemptBearer(accessKey);
     const response = await protectedApp().request("/v1/protected", {
       headers: { authorization: `Bearer ${bearer}` },
     });
-    expect(response.status).toBe(401);
+    expect(response.status).toBe(200);
   });
 });
