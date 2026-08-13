@@ -105,7 +105,7 @@ export type BrowserViewerProps = EmbeddedBrowserInteractionClientOverride & {
 type BrowserSelection = { sessionId: string; pinned: boolean } | null;
 type BrowserLaunchChoice =
   | { kind: "clean" }
-  | { kind: "profile"; identityId: string }
+  | { kind: "profile"; identityId: string; baseRevisionId?: string }
   | { kind: "attached"; device: AttachedBrowserDevice };
 type PointerStart = {
   x: number;
@@ -494,8 +494,15 @@ export function BrowserViewer({
       if (creating) return;
       const identity =
         choice.kind === "profile"
-          ? activeProfiles.find((candidate) => candidate.id === choice.identityId)
+          ? profiles.identities.find((candidate) => candidate.id === choice.identityId)
           : null;
+      if (choice.kind === "profile" && (!identity || identity.status !== "active")) {
+        onNotify?.({
+          kind: "error",
+          message: "This browser profile is no longer available. Refresh and choose another.",
+        });
+        return;
+      }
       const device = choice.kind === "attached" ? choice.device : null;
       const browserName =
         device?.profileLabel ?? device?.name ?? (identity ? `${identity.name} browser` : "Browser");
@@ -539,7 +546,14 @@ export function BrowserViewer({
                 placement: linkedComputer.placement,
               }
             : {}),
-          ...(identity ? { identityId: identity.id } : {}),
+          ...(identity
+            ? {
+                identityId: identity.id,
+                ...(choice.kind === "profile" && choice.baseRevisionId
+                  ? { baseRevisionId: choice.baseRevisionId }
+                  : {}),
+              }
+            : {}),
         });
         setSelection({ sessionId: response.session.id, pinned: true });
         if (computerViewUnavailable) {
@@ -558,7 +572,7 @@ export function BrowserViewer({
       creating,
       notifyError,
       onNotify,
-      activeProfiles,
+      profiles.identities,
       sessionId,
     ],
   );
@@ -731,6 +745,9 @@ export function BrowserViewer({
         onCreate={createBrowser}
         onSaveProfile={saveProfileVersion}
         onUpdateProfile={updateProfile}
+        onOpenProfileVersion={(identityId, baseRevisionId) =>
+          createBrowser({ kind: "profile", identityId, baseRevisionId })
+        }
         onRefresh={() => void Promise.all([registry.refresh(), attached.refresh()])}
         setupUrl={browserExtensionSetupUrl}
       />
@@ -933,6 +950,7 @@ function BrowserToolbar(props: {
     identity: BrowserIdentity,
     update: { name?: string; status?: "active" | "archived"; defaultRevisionId?: string },
   ) => Promise<boolean>;
+  onOpenProfileVersion: (identityId: string, baseRevisionId: string) => void;
   onRefresh: () => void;
   setupUrl?: string | undefined;
 }) {
@@ -994,6 +1012,7 @@ function BrowserToolbar(props: {
         saving={props.savingProfile}
         onSave={props.onSaveProfile}
         onUpdate={props.onUpdateProfile}
+        onOpenVersion={props.onOpenProfileVersion}
       />
       <button
         type="button"
@@ -1294,6 +1313,7 @@ function BrowserProfileMenu(props: {
     identity: BrowserIdentity,
     update: { name?: string; status?: "active" | "archived"; defaultRevisionId?: string },
   ) => Promise<boolean>;
+  onOpenVersion: (identityId: string, baseRevisionId: string) => void;
 }) {
   const detailsRef = useRef<HTMLDetailsElement | null>(null);
   const nameInputId = useId();
@@ -1311,6 +1331,10 @@ function BrowserProfileMenu(props: {
       setName("");
       detailsRef.current?.removeAttribute("open");
     }
+  };
+  const openVersion = (identityId: string, baseRevisionId: string) => {
+    detailsRef.current?.removeAttribute("open");
+    props.onOpenVersion(identityId, baseRevisionId);
   };
   const versionLabel = attached
     ? "live"
@@ -1376,36 +1400,49 @@ function BrowserProfileMenu(props: {
                 const isCurrent = revision.ordinal === props.baseRevisionOrdinal;
                 const materialization = revisionMaterializationSummary(revision);
                 return (
-                  <button
+                  <div
                     key={revision.id}
-                    type="button"
-                    disabled={isDefault || props.saving || props.identity?.status === "archived"}
-                    onClick={() =>
-                      void props.onUpdate(props.identity!, { defaultRevisionId: revision.id })
-                    }
-                    className="flex w-full items-center gap-2 rounded-og-sm px-2 py-1.5 text-left transition hover:bg-og-surface-2 disabled:cursor-default disabled:opacity-70"
+                    className="flex w-full items-center gap-1 rounded-og-sm transition hover:bg-og-surface-2"
                   >
-                    <span className="grid size-4 place-items-center text-og-muted">
-                      {isDefault ? <CheckIcon className="size-3.5 text-og-status-running" /> : null}
-                    </span>
-                    <span className="min-w-0 flex-1">
-                      <span className="block text-og-control text-og-fg">
-                        Version {revision.ordinal}
+                    <button
+                      type="button"
+                      disabled={props.saving || props.identity?.status === "archived"}
+                      aria-label={`Open ${props.identity!.name} version ${revision.ordinal}`}
+                      onClick={() => openVersion(props.identity!.id, revision.id)}
+                      className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left disabled:opacity-50"
+                    >
+                      <span className="grid size-4 place-items-center text-og-muted">
+                        {isCurrent ? <CheckIcon className="size-3.5 text-og-accent" /> : null}
                       </span>
-                      <span className="block truncate text-[10px] text-og-subtle">
-                        {materialization.label}
+                      <span className="min-w-0 flex-1">
+                        <span className="block text-og-control text-og-fg">
+                          Version {revision.ordinal}
+                        </span>
+                        <span className="block truncate text-[10px] text-og-subtle">
+                          {materialization.label}
+                        </span>
                       </span>
-                    </span>
-                    <span className="text-[10px] text-og-subtle">
-                      {isCurrent && isDefault
-                        ? "current · default"
-                        : isDefault
-                          ? "default"
-                          : isCurrent
-                            ? "current · Use by default"
-                            : "Use by default"}
-                    </span>
-                  </button>
+                      {isCurrent ? (
+                        <span className="text-[10px] text-og-subtle">Current</span>
+                      ) : null}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isDefault || props.saving || props.identity?.status === "archived"}
+                      aria-label={
+                        isDefault
+                          ? `${props.identity!.name} version ${revision.ordinal} is the default`
+                          : `Use ${props.identity!.name} version ${revision.ordinal} by default`
+                      }
+                      title={isDefault ? "Default version" : "Use by default"}
+                      onClick={() =>
+                        void props.onUpdate(props.identity!, { defaultRevisionId: revision.id })
+                      }
+                      className="mr-1 shrink-0 rounded-og-sm px-2 py-1 text-[10px] text-og-subtle transition hover:bg-og-surface-3 hover:text-og-fg disabled:cursor-default disabled:opacity-70"
+                    >
+                      {isDefault ? "Default" : "Make default"}
+                    </button>
+                  </div>
                 );
               })}
             </div>

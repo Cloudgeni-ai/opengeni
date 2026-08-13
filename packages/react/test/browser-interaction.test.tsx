@@ -1869,6 +1869,79 @@ describe("BrowserViewer", () => {
     await rendered.unmount();
   });
 
+  test("opens one exact saved profile version without changing the future default", async () => {
+    const secondRevisionId = "aaaaaaaa-9999-4999-8999-999999999999";
+    const createdSessionId = "aaaaaaaa-7777-4777-8777-777777777777";
+    const identity: BrowserIdentity = {
+      ...browserIdentity(),
+      version: 3,
+      defaultRevisionId: BROWSER_REVISION_ID,
+      headGeneration: 2,
+      revisionCount: 2,
+    };
+    const current: BrowserSession = {
+      ...browserSession(),
+      identityId: identity.id,
+      baseRevisionId: secondRevisionId,
+      capabilities: {
+        ...browserSession().capabilities,
+        identityPublication: true,
+        liveFrames: false,
+      },
+    };
+    const first = { ...browserRevision(identity, current), ordinal: 1 };
+    const second = { ...first, id: secondRevisionId, ordinal: 2 };
+    const createRequests: unknown[] = [];
+    const client = fakeClient({
+      listBrowserSessions: async () => ({ revision: 1, sessions: [current] }),
+      listBrowserIdentities: async () => ({ revision: 1, identities: [identity] }),
+      listBrowserRevisions: async () => ({ identity, revisions: [first, second] }),
+      createBrowserSession: async (_workspaceId, request) => {
+        createRequests.push(request);
+        return mutation({
+          ...current,
+          id: createdSessionId,
+          baseRevisionId: request.baseRevisionId ?? identity.defaultRevisionId,
+        });
+      },
+      getBrowserSession: async () => current,
+      listBrowserTargets: async () => ({
+        browserSessionId: current.id,
+        controllerGeneration: "controller-1",
+        targets: [target()],
+      }),
+      observeBrowserTarget: async () => observation(current.id, target()),
+    });
+    const rendered = await renderComponent(
+      <BrowserViewer client={client} workspaceId={WORKSPACE_ID} sessionId={SESSION_ID} />,
+    );
+    await flush(30);
+
+    const profileSummary = [...rendered.container.querySelectorAll("summary")].find((summary) =>
+      /Work\s*·\s*v2/u.test(summary.textContent ?? ""),
+    );
+    expect(profileSummary).toBeDefined();
+    await actRun(() => profileSummary!.click());
+    const openFirst = rendered.container.querySelector<HTMLButtonElement>(
+      "button[aria-label='Open Work version 1']",
+    );
+    expect(openFirst).not.toBeNull();
+    await actRun(() => openFirst!.click());
+    await flush(30);
+
+    expect(createRequests).toHaveLength(1);
+    expect(createRequests[0]).toMatchObject({
+      sessionId: SESSION_ID,
+      name: "Work browser",
+      identityId: identity.id,
+      baseRevisionId: first.id,
+      headless: false,
+      initialUrl: "https://www.google.com/",
+    });
+    expect(identity.defaultRevisionId).toBe(BROWSER_REVISION_ID);
+    await rendered.unmount();
+  });
+
   test("selects a future default version and archives a profile without changing the live browser", async () => {
     const secondRevisionId = "aaaaaaaa-9999-4999-8999-999999999999";
     let identity: BrowserIdentity = {
@@ -1946,11 +2019,10 @@ describe("BrowserViewer", () => {
     expect(rendered.container.textContent).toContain(
       "Saved browser data can be copied; a website may still expire or re-verify its own session.",
     );
-    const chooseDefault = [...rendered.container.querySelectorAll("button")].find(
-      (button) =>
-        button.textContent?.includes("Version 2") && button.textContent?.includes("Use by default"),
+    const chooseDefault = rendered.container.querySelector<HTMLButtonElement>(
+      "button[aria-label='Use Work version 2 by default']",
     );
-    expect(chooseDefault).toBeDefined();
+    expect(chooseDefault).not.toBeNull();
     await actRun(() => chooseDefault!.click());
     await flush(20);
 
