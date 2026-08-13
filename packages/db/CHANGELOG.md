@@ -1,5 +1,31 @@
 # @opengeni/db
 
+## 0.34.0
+
+### Minor Changes
+
+- 1e78f58: Replace provider presets and nullable integration identities with immutable Integration Definitions. Curated and workspace-authored integrations now share one definition-based contract, provenance model, OAuth callback, SDK route, runtime projection, and maintenance migration with no legacy API alias or fallback authority.
+- 1e78f58: Make Facet definitions and bindings authoritative throughout the Integration domain. Public routes, SDK methods, Pack components, owner identities, physical tables, persisted manifests, and runtime projections now use one Facet vocabulary with a maintenance cutover and no compatibility aliases.
+- 746bbbe: Add canonical human identities with multiple verified login bindings, revisioned and audited lifecycle operations, immediate session invalidation, fail-closed recovery and collision handling, and metadata-minimal managed identity API routes.
+- 9849e25: Add strict identifier-free xAI provider-account authority snapshots and durable
+  SuperGrok/xAI multi-account persistence with live user authority revalidation,
+  encrypted credential boundaries, fair exact-turn leases, pool-scoped pins,
+  quota/cooldown metadata, capacity waiters, immutable accepted-work snapshots,
+  FORCE RLS, and explicit runtime privilege posture.
+- 1e78f58: Make normalized Plugin, Version, Skill Facet, and component-owner records authoritative for curated and imported Skills. Add reviewed library install, list, update, preview, and uninstall contracts; preserve Pack and Plugin ownership independently; and retire every non-MCP row from the generic capability catalog and installation ledger through a collision-free maintenance migration.
+
+### Patch Changes
+
+- 1c4ac69: Preserve complete MCP tool results through the runtime, durable database settlement, and worker recovery path without changing model-visible output, including nested prefixed servers, compact approval snapshots, and bounded live-memory retention after durable capture.
+- Updated dependencies [1e78f58]
+- Updated dependencies [1e78f58]
+- Updated dependencies [746bbbe]
+- Updated dependencies [9849e25]
+- Updated dependencies [1e78f58]
+  - @opengeni/config@0.15.0
+  - @opengeni/contracts@0.47.0
+  - @opengeni/codemode@0.3.2
+
 ## 0.33.0
 
 ### Minor Changes
