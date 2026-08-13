@@ -729,7 +729,10 @@ export class MockOpenGeniClient implements SessionClientLike {
     turnId: string | null = null,
   ): SessionQueueMutationResponse {
     this.queueVersions.set(sessionId, (this.queueVersions.get(sessionId) ?? 0) + 1);
-    return { receipt: this.receipt(action, turnId), snapshot: this.queueSnapshot(sessionId) };
+    return {
+      receipt: this.receipt(action, turnId),
+      snapshot: this.queueSnapshot(sessionId),
+    };
   }
 
   private receipt(action: string, turnId: string | null) {
@@ -841,14 +844,29 @@ export class MockOpenGeniClient implements SessionClientLike {
     request: UpdateSessionGoalRequest,
   ): Promise<SessionGoal> {
     const goal = await this.getGoal(workspaceId, sessionId);
-    goal.status = request.status;
-    goal.rationale = request.rationale ?? goal.rationale;
-    goal.pausedReason = request.status === "paused" ? "api" : null;
+    if ("status" in request) {
+      goal.status = request.status;
+      goal.rationale = request.rationale ?? goal.rationale;
+      goal.pausedReason = request.status === "paused" ? "api" : null;
+    } else {
+      goal.status = "active";
+      goal.text = request.text;
+      goal.successCriteria = request.successCriteria ?? goal.successCriteria;
+      goal.mutationPolicy = request.mutationPolicy ?? goal.mutationPolicy;
+      goal.objectiveRevision += 1;
+      goal.rationale = null;
+      goal.pausedReason = null;
+    }
     goal.updatedAt = new Date().toISOString();
     this.goals.set(sessionId, goal);
-    this.bus(sessionId).append(request.status === "paused" ? "goal.paused" : "goal.resumed", {
-      goalId: goal.id,
-    });
+    this.bus(sessionId).append(
+      "status" in request
+        ? request.status === "paused"
+          ? "goal.paused"
+          : "goal.resumed"
+        : "goal.updated",
+      { goalId: goal.id },
+    );
     return { ...goal };
   }
 
@@ -883,7 +901,11 @@ export class MockOpenGeniClient implements SessionClientLike {
   async sendApprovalDecision(
     _workspaceId: string,
     sessionId: string,
-    decision: { approvalId: string; decision: "approve" | "reject"; message?: string },
+    decision: {
+      approvalId: string;
+      decision: "approve" | "reject";
+      message?: string;
+    },
   ): Promise<SessionEvent> {
     return this.bus(sessionId).append("user.approvalDecision", decision);
   }
@@ -906,7 +928,10 @@ export class MockOpenGeniClient implements SessionClientLike {
     requestId: string,
     response: SubmitHumanInputResponseRequest,
   ): Promise<SessionEvent> {
-    return this.bus(sessionId).append("user.humanInputResponse", { requestId, response });
+    return this.bus(sessionId).append("user.humanInputResponse", {
+      requestId,
+      response,
+    });
   }
 
   // --- Environments, packs, workspaces, billing (static-ish fixtures) ----------
@@ -1437,7 +1462,11 @@ export class MockOpenGeniClient implements SessionClientLike {
     if (installation) {
       this.packInstallations = [
         ...this.packInstallations.filter((candidate) => candidate.packId !== packId),
-        { ...installation, status: "disabled", version: installation.version + 1 },
+        {
+          ...installation,
+          status: "disabled",
+          version: installation.version + 1,
+        },
       ];
     }
     return {
@@ -1484,7 +1513,9 @@ export class MockOpenGeniClient implements SessionClientLike {
     options.onStateChange?.("live");
     await new Promise<void>((resolve) => {
       if (options.signal?.aborted) return resolve();
-      options.signal?.addEventListener("abort", () => resolve(), { once: true });
+      options.signal?.addEventListener("abort", () => resolve(), {
+        once: true,
+      });
     });
   }
 
@@ -1496,7 +1527,9 @@ export class MockOpenGeniClient implements SessionClientLike {
     options.onStateChange?.("live");
     await new Promise<void>((resolve) => {
       if (options.signal?.aborted) return resolve();
-      options.signal?.addEventListener("abort", () => resolve(), { once: true });
+      options.signal?.addEventListener("abort", () => resolve(), {
+        once: true,
+      });
     });
   }
 
@@ -1609,8 +1642,17 @@ export class MockOpenGeniClient implements SessionClientLike {
         sharedSessionIds: [],
         reason: null,
       },
-      Recording: { available: false, modes: [], codecs: [], reason: "tier_headless" },
-      ComputerUse: { available: false, readOnly: true, reason: "tier_headless" },
+      Recording: {
+        available: false,
+        modes: [],
+        codecs: [],
+        reason: "tier_headless",
+      },
+      ComputerUse: {
+        available: false,
+        readOnly: true,
+        reason: "tier_headless",
+      },
       negotiatedAt: new Date().toISOString(),
     };
   }
@@ -1907,7 +1949,12 @@ export class MockOpenGeniClient implements SessionClientLike {
       updatedAt: new Date().toISOString(),
     };
     this.authRuns.set(run.id, run);
-    return { run, status: "working", operationId: request.operationId, replayed: false };
+    return {
+      run,
+      status: "working",
+      operationId: request.operationId,
+      replayed: false,
+    };
   }
 
   async verifyBrowserAuthRun(
@@ -2051,7 +2098,10 @@ export class MockOpenGeniClient implements SessionClientLike {
     _workspaceId: string,
     request: CreateBrowserIdentityRequest,
   ): Promise<BrowserIdentityMutationResponse> {
-    const identity = fabricateBrowserIdentity({ id: demoUuid(), name: request.name });
+    const identity = fabricateBrowserIdentity({
+      id: demoUuid(),
+      name: request.name,
+    });
     this.browserIdentities.set(identity.id, identity);
     this.browserIdentityRevisions.set(identity.id, []);
     this.browserRevision += 1;
@@ -2103,7 +2153,10 @@ export class MockOpenGeniClient implements SessionClientLike {
   }
 
   async listBrowserSessions(): Promise<BrowserSessionListResponse> {
-    return { revision: this.browserRevision, sessions: [...this.browserSessions.values()] };
+    return {
+      revision: this.browserRevision,
+      sessions: [...this.browserSessions.values()],
+    };
   }
 
   /** Frame metadata source for the deterministic demo transport. Not part of
@@ -2527,7 +2580,10 @@ export class MockOpenGeniClient implements SessionClientLike {
   }
 
   async listComputerSessions(): Promise<ComputerSessionListResponse> {
-    return { revision: this.computerRevision, sessions: [...this.computerSessions.values()] };
+    return {
+      revision: this.computerRevision,
+      sessions: [...this.computerSessions.values()],
+    };
   }
 
   /** Frame metadata source for the deterministic Computer demo transport. */
@@ -2626,7 +2682,10 @@ export class MockOpenGeniClient implements SessionClientLike {
     if (!target) throw new Error("Computer target not found");
     if (request.action.type === "focus") {
       const focusId = request.action.targetId;
-      targets = targets.map((candidate) => ({ ...candidate, focused: candidate.id === focusId }));
+      targets = targets.map((candidate) => ({
+        ...candidate,
+        focused: candidate.id === focusId,
+      }));
       target = targets.find((candidate) => candidate.id === focusId) ?? target;
     } else if (request.action.type === "launch") {
       target = fabricateComputerTarget(computerSessionId, {
@@ -2805,7 +2864,11 @@ export class MockOpenGeniClient implements SessionClientLike {
     _sessionId: string,
     request: { path: string; content: string },
   ): Promise<FsWriteResponse> {
-    return { path: request.path, sizeBytes: request.content.length, revision: 1 };
+    return {
+      path: request.path,
+      sizeBytes: request.content.length,
+      revision: 1,
+    };
   }
 
   async fsDelete(
@@ -2894,17 +2957,42 @@ export class MockOpenGeniClient implements SessionClientLike {
               newLines: 6,
               header: "@@ -12,4 +12,6 @@ export function createServer() {",
               lines: [
-                { type: "context", oldNo: 12, newNo: 12, text: "  const app = express();" },
-                { type: "del", oldNo: 13, newNo: null, text: "  app.use(cors());" },
+                {
+                  type: "context",
+                  oldNo: 12,
+                  newNo: 12,
+                  text: "  const app = express();",
+                },
+                {
+                  type: "del",
+                  oldNo: 13,
+                  newNo: null,
+                  text: "  app.use(cors());",
+                },
                 {
                   type: "add",
                   oldNo: null,
                   newNo: 13,
                   text: "  app.use(cors({ origin: ALLOWED_ORIGINS }));",
                 },
-                { type: "add", oldNo: null, newNo: 14, text: "  app.use(helmet());" },
-                { type: "add", oldNo: null, newNo: 15, text: "  app.use(rateLimit());" },
-                { type: "context", oldNo: 14, newNo: 16, text: "  return app;" },
+                {
+                  type: "add",
+                  oldNo: null,
+                  newNo: 14,
+                  text: "  app.use(helmet());",
+                },
+                {
+                  type: "add",
+                  oldNo: null,
+                  newNo: 15,
+                  text: "  app.use(rateLimit());",
+                },
+                {
+                  type: "context",
+                  oldNo: 14,
+                  newNo: 16,
+                  text: "  return app;",
+                },
               ],
             },
           ],
@@ -2926,10 +3014,30 @@ export class MockOpenGeniClient implements SessionClientLike {
               newLines: 4,
               header: '@@ -4,2 +4,4 @@ resource "aws_instance" "api" {',
               lines: [
-                { type: "context", oldNo: 4, newNo: 4, text: '  instance_type = "t3.small"' },
-                { type: "add", oldNo: null, newNo: 5, text: "  monitoring    = true" },
-                { type: "add", oldNo: null, newNo: 6, text: "  ebs_optimized = true" },
-                { type: "context", oldNo: 5, newNo: 7, text: "  tags = local.tags" },
+                {
+                  type: "context",
+                  oldNo: 4,
+                  newNo: 4,
+                  text: '  instance_type = "t3.small"',
+                },
+                {
+                  type: "add",
+                  oldNo: null,
+                  newNo: 5,
+                  text: "  monitoring    = true",
+                },
+                {
+                  type: "add",
+                  oldNo: null,
+                  newNo: 6,
+                  text: "  ebs_optimized = true",
+                },
+                {
+                  type: "context",
+                  oldNo: 5,
+                  newNo: 7,
+                  text: "  tags = local.tags",
+                },
               ],
             },
           ],
@@ -2951,8 +3059,18 @@ export class MockOpenGeniClient implements SessionClientLike {
               newLines: 3,
               header: "@@ -0,0 +1,3 @@",
               lines: [
-                { type: "add", oldNo: null, newNo: 1, text: "export const ALLOWED_ORIGINS = [" },
-                { type: "add", oldNo: null, newNo: 2, text: '  "https://app.acme.dev",' },
+                {
+                  type: "add",
+                  oldNo: null,
+                  newNo: 1,
+                  text: "export const ALLOWED_ORIGINS = [",
+                },
+                {
+                  type: "add",
+                  oldNo: null,
+                  newNo: 2,
+                  text: '  "https://app.acme.dev",',
+                },
                 { type: "add", oldNo: null, newNo: 3, text: "];" },
               ],
             },
@@ -3028,7 +3146,13 @@ export class MockOpenGeniClient implements SessionClientLike {
   }
 
   async terminalExec(): Promise<TerminalExecResponse> {
-    return { stdout: "", stderr: "", exitCode: 0, running: false, wallTimeSeconds: 0 };
+    return {
+      stdout: "",
+      stderr: "",
+      exitCode: 0,
+      running: false,
+      wallTimeSeconds: 0,
+    };
   }
 
   async terminalPtyOpen(): Promise<PtyOpenResponse> {
@@ -3615,7 +3739,9 @@ async function runOpsChannelScript(bus: SessionBus): Promise<void> {
   // Seed the Terminal surface up-front (an interactive PTY + a populated
   // transcript) so the tab is live the moment the dock opens, instead of an
   // empty read-only void until the narrative reaches the worker.
-  bus.append("terminal.pty.started", { ptyId: "00000000-0000-4000-8000-0000000000bb" });
+  bus.append("terminal.pty.started", {
+    ptyId: "00000000-0000-4000-8000-0000000000bb",
+  });
   bus.append("terminal.pty.output.delta", {
     ptyId: "00000000-0000-4000-8000-0000000000bb",
     stream: "stdout",
@@ -3649,7 +3775,10 @@ async function runOpsChannelScript(bus: SessionBus): Promise<void> {
       id: "call-1",
       output: {
         content: [
-          { type: "text", text: JSON.stringify([{ id: WORKER_SESSION_ID, status: "idle" }]) },
+          {
+            type: "text",
+            text: JSON.stringify([{ id: WORKER_SESSION_ID, status: "idle" }]),
+          },
         ],
       },
     },
@@ -3920,6 +4049,8 @@ function fabricateGoal(sessionId: string): SessionGoal {
     pausedReason: null,
     createdBy: "agent",
     version: 1,
+    objectiveRevision: 1,
+    mutationPolicy: "preserve_intent",
     autoContinuations: 2,
     noProgressStreak: 0,
     maxAutoContinuations: 25,
@@ -3967,7 +4098,10 @@ function fabricatePack(manifest: RegisterCapabilityPackRequest): CapabilityPack 
     role: manifest.role,
     category: manifest.category,
     version: manifest.version,
-    skills: (manifest.skills ?? []).map((skill) => ({ name: skill.name, files: skill.files })),
+    skills: (manifest.skills ?? []).map((skill) => ({
+      name: skill.name,
+      files: skill.files,
+    })),
     components: (manifest.components ?? []).map((component) => ({
       ...component,
       required: component.required ?? true,
@@ -4006,7 +4140,12 @@ const DEVOPS_PACK: CapabilityPack = fabricatePack({
   role: "devops",
   category: "infrastructure",
   version: "1.2.0",
-  skills: [{ name: "drift-checks", files: [{ path: "SKILL.md", content: "# Drift checks" }] }],
+  skills: [
+    {
+      name: "drift-checks",
+      files: [{ path: "SKILL.md", content: "# Drift checks" }],
+    },
+  ],
 });
 
 function fabricateWorkspace(name: string): Workspace {
@@ -4034,7 +4173,12 @@ function fabricateWorkspace(name: string): Workspace {
 
 /* --- fleet + schedule fixtures ----------------------------------------------- */
 
-const FLEET: { id: string; status: SessionStatus; title: string; agoMinutes: number }[] = [
+const FLEET: {
+  id: string;
+  status: SessionStatus;
+  title: string;
+  agoMinutes: number;
+}[] = [
   {
     id: MANAGER_SESSION_ID,
     status: "running",
@@ -4081,7 +4225,13 @@ const SCHEDULED_TASKS: ScheduledTask[] = [
   ),
   scheduledTask(
     "Dependency upgrade sweep",
-    { type: "calendar", timeZone: "UTC", hour: 6, minute: 30, daysOfWeek: ["MONDAY"] },
+    {
+      type: "calendar",
+      timeZone: "UTC",
+      hour: 6,
+      minute: 30,
+      daysOfWeek: ["MONDAY"],
+    },
     "Open PRs for safe dependency upgrades.",
   ),
   scheduledTask(

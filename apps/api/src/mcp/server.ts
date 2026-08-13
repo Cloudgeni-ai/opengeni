@@ -35,6 +35,11 @@ import {
   UpdateScheduledTaskRequest,
   normalizeWorkspaceArtifactSlug,
   WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES,
+  SESSION_GOAL_PROGRESS_MAX_BYTES,
+  SESSION_GOAL_RATIONALE_MAX_BYTES,
+  SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES,
+  SESSION_GOAL_TEXT_MAX_BYTES,
+  sessionGoalUtf8Bytes,
 } from "@opengeni/contracts";
 import {
   countVariableSets,
@@ -76,6 +81,7 @@ import {
   searchWorkspaceMemories,
   serializeEffectiveSessionControl,
   setSessionGoalStatusWithEvent,
+  recordSessionGoalProgressWithEvent,
   setVariableSetVariable,
   updateScheduledTask,
   updateSessionGoalWithEvent,
@@ -240,6 +246,7 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   set_session_title: { sessionRequired: true, allOf: ["sessions:control"] },
   goal_set: { sessionRequired: true, allOf: ["goals:manage"] },
   goal_update: { sessionRequired: true, allOf: ["goals:manage"] },
+  goal_progress: { sessionRequired: true, allOf: ["goals:manage"] },
   goal_complete: { sessionRequired: true, allOf: ["goals:manage"] },
   goal_pause: { sessionRequired: true, allOf: ["goals:manage"] },
   memory_search: { sessionRequired: true, allOf: ["documents:search"] },
@@ -278,7 +285,10 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   browser_clipboard: { sessionRequired: true, allOf: ["sessions:read"] },
   browser_debug: { sessionRequired: true, allOf: ["sessions:read"] },
   browser_auth: { sessionRequired: true, allOf: ["sessions:control"] },
-  interaction_request_human: { sessionRequired: true, allOf: ["sessions:control"] },
+  interaction_request_human: {
+    sessionRequired: true,
+    allOf: ["sessions:control"],
+  },
   browser_identity: { sessionRequired: true, allOf: ["sessions:control"] },
   browser_publish: { sessionRequired: true, allOf: ["sessions:control"] },
   browser_lifecycle: { sessionRequired: true, allOf: ["sessions:control"] },
@@ -298,7 +308,10 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
     allOf: ["variable-sets:write", "secrets:write"],
   },
   environment_set_variable: { allOf: ["variable-sets:write", "secrets:write"] },
-  capability_catalog_search: { sessionRequired: true, allOf: ["workspace:read"] },
+  capability_catalog_search: {
+    sessionRequired: true,
+    allOf: ["workspace:read"],
+  },
   capability_authorization_request: {
     sessionRequired: true,
     allOf: ["workspace:read"],
@@ -374,14 +387,23 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   artifacts_publish: { sessionRequired: true, allOf: ["artifacts:publish"] },
   artifacts_rollback: { sessionRequired: true, allOf: ["artifacts:publish"] },
   editable_artifact_list: { sessionRequired: true, allOf: ["artifacts:read"] },
-  editable_artifact_create: { sessionRequired: true, allOf: ["artifacts:publish"] },
+  editable_artifact_create: {
+    sessionRequired: true,
+    allOf: ["artifacts:publish"],
+  },
   editable_artifact_import: {
     sessionRequired: true,
     allOf: ["artifacts:publish", "files:read"],
   },
   editable_artifact_get: { sessionRequired: true, allOf: ["artifacts:read"] },
-  editable_artifact_inspect: { sessionRequired: true, allOf: ["artifacts:read"] },
-  editable_artifact_apply: { sessionRequired: true, allOf: ["artifacts:publish"] },
+  editable_artifact_inspect: {
+    sessionRequired: true,
+    allOf: ["artifacts:read"],
+  },
+  editable_artifact_apply: {
+    sessionRequired: true,
+    allOf: ["artifacts:publish"],
+  },
   editable_artifact_export: {
     sessionRequired: true,
     allOf: ["artifacts:read"],
@@ -890,7 +912,10 @@ export function buildOpenGeniMcpServer(
             },
             { query, subreddit, limit },
           );
-          return json({ provider: result.connection.provider, posts: result.posts });
+          return json({
+            provider: result.connection.provider,
+            posts: result.posts,
+          });
         },
       );
       server.registerTool(
@@ -917,7 +942,10 @@ export function buildOpenGeniMcpServer(
             },
             { sinceId, limit },
           );
-          return json({ provider: result.connection.provider, posts: result.posts });
+          return json({
+            provider: result.connection.provider,
+            posts: result.posts,
+          });
         },
       );
       server.registerTool(
@@ -944,7 +972,10 @@ export function buildOpenGeniMcpServer(
             },
             { id, limit },
           );
-          return json({ provider: result.connection.provider, posts: result.posts });
+          return json({
+            provider: result.connection.provider,
+            posts: result.posts,
+          });
         },
       );
     }
@@ -1768,7 +1799,10 @@ function registerFikenTools(
     {
       description:
         "List the Fiken companies this workspace's Fiken connection can act on. Use the returned slug as companySlug in other fiken tools.",
-      inputSchema: { connectionId: z4.string().uuid().optional(), ...pageInputs },
+      inputSchema: {
+        connectionId: z4.string().uuid().optional(),
+        ...pageInputs,
+      },
     },
     async ({ connectionId, page, pageSize }) =>
       json(
@@ -1970,7 +2004,10 @@ function registerAtlassianTools(
   json: JsonResult,
 ): void {
   const connectionFor = async (connectionId?: string) => {
-    const authorized = await authorizedAtlassianConnectionsForGrant({ db: deps.db, grant });
+    const authorized = await authorizedAtlassianConnectionsForGrant({
+      db: deps.db,
+      grant,
+    });
     const candidates = authorized.filter(({ connection }) =>
       connectionId ? connection.id === connectionId : true,
     );
@@ -2014,7 +2051,10 @@ function registerAtlassianTools(
       return json({
         connectionId: authority.connection.id,
         account: authority.metadata.displayName,
-        items: response.items.map((item) => ({ ...item, selected: selected.has(item.id) })),
+        items: response.items.map((item) => ({
+          ...item,
+          selected: selected.has(item.id),
+        })),
       });
     },
   );
@@ -2125,20 +2165,40 @@ function registerGoalTools(
   sessionId: string,
   json: (value: unknown) => { content: Array<{ type: "text"; text: string }> },
 ): void {
+  const boundedGoalToolString = (maxBytes: number, field: string) =>
+    z4
+      .string()
+      .min(1)
+      .refine((value) => sessionGoalUtf8Bytes(value) <= maxBytes, {
+        message: `${field} exceeds ${maxBytes} UTF-8 bytes`,
+      });
+  const goalText = boundedGoalToolString(SESSION_GOAL_TEXT_MAX_BYTES, "goal text");
+  const successCriteria = boundedGoalToolString(
+    SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES,
+    "goal success criteria",
+  );
+  const goalRationale = boundedGoalToolString(SESSION_GOAL_RATIONALE_MAX_BYTES, "goal rationale");
+  const progressNote = boundedGoalToolString(SESSION_GOAL_PROGRESS_MAX_BYTES, "goal progress note");
   server.registerTool(
     "goal_set",
     {
       description:
-        "Set or replace this session's goal. While a goal is active the session keeps working: idle moments synthesize continuation turns until goal_complete or goal_pause is called. Replacing a goal reactivates it and resets the continuation budget.",
+        "Create a goal when this session has none. While active, idle moments synthesize continuation turns until goal_complete or goal_pause. To change an existing goal, use goal_update with its objective revision, a change kind, and rationale.",
       inputSchema: {
-        text: z4.string().min(1),
-        successCriteria: z4.string().min(1).optional(),
+        text: goalText,
+        successCriteria: successCriteria.optional(),
         maxAutoContinuations: z4.number().int().positive().optional(),
       },
     },
     async ({ text, successCriteria, maxAutoContinuations }) => {
       await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
       await requireSession(deps.db, grant.workspaceId, sessionId);
+      const existing = await getSessionGoal(deps.db, grant.workspaceId, sessionId);
+      if (existing) {
+        throw new Error(
+          `this session already has a goal at objective revision ${existing.objectiveRevision}; use goal_update to revise it`,
+        );
+      }
       const callerTurnId =
         typeof grant.metadata?.["turnId"] === "string"
           ? (grant.metadata["turnId"] as string)
@@ -2182,26 +2242,100 @@ function registerGoalTools(
     "goal_update",
     {
       description:
-        "Revise the session goal's text or success criteria, or record a progress note. Counts as progress for the no-progress detector; the goal stays active.",
+        "Propose or apply a semantic goal revision under the session's mutation policy. Retain the standing goal unless explicit user direction or meaningful new evidence justifies the declared refinement, adaptation, or replacement. A rewrite never counts as execution progress; use goal_progress for that.",
       inputSchema: {
-        text: z4.string().min(1).optional(),
-        successCriteria: z4.string().min(1).optional(),
-        progressNote: z4.string().min(1).optional(),
+        text: goalText.optional(),
+        successCriteria: successCriteria.nullable().optional(),
+        // Optional for rolling compatibility with the former goal_update
+        // surface. Omitted semantic metadata is classified as a refinement of
+        // the currently fenced objective; new callers should always supply it.
+        changeKind: z4.enum(["refinement", "adaptation", "replacement"]).optional(),
+        rationale: goalRationale.optional(),
+        expectedObjectiveRevision: z4.number().int().positive().optional(),
+        // Deprecated compatibility input. It is committed through the new
+        // progress operation and never makes a semantic rewrite count itself.
+        progressNote: progressNote.optional(),
         idempotencyKey: z4.string().uuid(),
       },
     },
-    async ({ text, successCriteria, progressNote, idempotencyKey }) => {
+    async ({
+      text,
+      successCriteria,
+      changeKind,
+      rationale,
+      expectedObjectiveRevision,
+      progressNote,
+      idempotencyKey,
+    }) => {
+      await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
+      if (text === undefined && successCriteria === undefined && progressNote === undefined) {
+        throw new Error("goal_update requires semantic content or a progressNote");
+      }
+      const context = exactAgentCommandContext(grant, sessionId);
+      const command = {
+        accountId: grant.accountId,
+        actor: {
+          type: "agent_attempt" as const,
+          attemptId: context.callerAttemptId,
+          sessionId: context.callerSessionId,
+          turnId: context.callerTurnId,
+          executionGeneration: context.callerExecutionGeneration,
+        },
+        operationKey: idempotencyKey,
+      };
+      const semantic =
+        text !== undefined || successCriteria !== undefined
+          ? await updateSessionGoalWithEvent(deps.db, grant.workspaceId, sessionId, {
+              ...(text !== undefined ? { text } : {}),
+              ...(successCriteria !== undefined ? { successCriteria } : {}),
+              changeKind: changeKind ?? "refinement",
+              rationale: rationale ?? "Compatibility refinement from goal_update",
+              ...(expectedObjectiveRevision !== undefined ? { expectedObjectiveRevision } : {}),
+              actor: "agent",
+              command,
+            })
+          : null;
+      const progress = progressNote
+        ? await recordSessionGoalProgressWithEvent(deps.db, grant.workspaceId, sessionId, {
+            progressNote,
+            command,
+          })
+        : null;
+      await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, [
+        ...(semantic?.events ?? []),
+        ...(progress?.events ?? []),
+      ]);
+      const goal = progress?.goal ?? semantic?.goal;
+      if (!goal) throw new Error("goal_update produced no mutation");
+      return json({
+        ...goal,
+        operationId: semantic?.operationId ?? progress?.operationId ?? null,
+        replay: Boolean(semantic?.replay || progress?.replay),
+        outcome: semantic?.outcome ?? "progress_recorded",
+        proposalId: semantic?.proposalId ?? null,
+      });
+    },
+  );
+
+  server.registerTool(
+    "goal_progress",
+    {
+      description:
+        "Record concrete progress toward the unchanged active goal. This does not change goal text, success criteria, mutation policy, or objective revision. Do not use it merely to keep the continuation loop alive.",
+      inputSchema: {
+        progressNote,
+        idempotencyKey: z4.string().uuid(),
+      },
+    },
+    async ({ progressNote, idempotencyKey }) => {
       await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
       const context = exactAgentCommandContext(grant, sessionId);
-      const { goal, events, operationId, replay } = await updateSessionGoalWithEvent(
+      const { goal, events, operationId, replay } = await recordSessionGoalProgressWithEvent(
         deps.db,
         grant.workspaceId,
         sessionId,
         {
-          ...(text !== undefined ? { text } : {}),
-          ...(successCriteria !== undefined ? { successCriteria } : {}),
-          ...(progressNote !== undefined ? { progressNote } : {}),
-          actor: "agent",
+          progressNote,
           command: {
             accountId: grant.accountId,
             actor: {
@@ -2273,7 +2407,7 @@ function registerGoalTools(
     {
       description:
         "Pause the session goal with a rationale (blocked, not productive, needs human input). No further continuation turns are synthesized until the goal is resumed or replaced.",
-      inputSchema: { rationale: z4.string().min(1) },
+      inputSchema: { rationale: goalRationale },
     },
     async ({ rationale }) => {
       await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
@@ -3908,10 +4042,16 @@ function registerWorkspaceOrchestrationTools(
               committed: true,
               outcome: controlled.replay ? "replayed" : "updated",
               changed: !controlled.replay,
-              resource: { type: "session", id: sessionId, state: effectiveControl.state },
+              resource: {
+                type: "session",
+                id: sessionId,
+                state: effectiveControl.state,
+              },
               relatedResources: [{ type: "session_command_receipt", id: controlled.receipt.id }],
               timestamp: controlled.receipt.createdAt.toISOString(),
-              idempotency: { status: controlled.replay ? "replayed" : "applied" },
+              idempotency: {
+                status: controlled.replay ? "replayed" : "applied",
+              },
               facts: { interruptionCount: controlled.interruptionCount },
               nextAction: { tool: "session_get", arguments: { sessionId } },
             }),
@@ -3970,10 +4110,16 @@ function registerWorkspaceOrchestrationTools(
               committed: true,
               outcome: controlled.replay ? "replayed" : "updated",
               changed: !controlled.replay,
-              resource: { type: "session", id: sessionId, state: effectiveControl.state },
+              resource: {
+                type: "session",
+                id: sessionId,
+                state: effectiveControl.state,
+              },
               relatedResources: [{ type: "session_command_receipt", id: controlled.receipt.id }],
               timestamp: controlled.receipt.createdAt.toISOString(),
-              idempotency: { status: controlled.replay ? "replayed" : "applied" },
+              idempotency: {
+                status: controlled.replay ? "replayed" : "applied",
+              },
               facts: { interruptionCount: controlled.interruptionCount },
               nextAction: { tool: "session_get", arguments: { sessionId } },
             }),
@@ -4469,7 +4615,11 @@ async function capabilitySetupProjection(
     }
     const installations = await listWorkspaceGitHubInstallationBindings(deps, workspaceId);
     if (githubBindingStatus(true, installations) === "bound") {
-      return { status: "ready", action: null, detail: "GitHub is connected and ready." };
+      return {
+        status: "ready",
+        action: null,
+        detail: "GitHub is connected and ready.",
+      };
     }
     return {
       status: "authorization_required",
@@ -4479,7 +4629,11 @@ async function capabilitySetupProjection(
   }
   if (item.surfaceType === "codex_apps") {
     return item.enabled
-      ? { status: "ready", action: null, detail: "Codex Apps is connected and ready." }
+      ? {
+          status: "ready",
+          action: null,
+          detail: "Codex Apps is connected and ready.",
+        }
       : {
           status: "authorization_required",
           action: "connect",
@@ -4487,7 +4641,11 @@ async function capabilitySetupProjection(
         };
   }
   if (item.enabled) {
-    return { status: "ready", action: null, detail: "This capability is already enabled." };
+    return {
+      status: "ready",
+      action: null,
+      detail: "This capability is already enabled.",
+    };
   }
   if (!item.runtime.available) {
     return {

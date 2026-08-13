@@ -280,6 +280,7 @@ import type {
   SessionEventListOptions,
   SessionEventPage,
   SessionGoal,
+  SessionGoalRevision,
   SessionHumanInputRequest,
   SessionLineageResponse,
   SessionRealtimeMutationResponse,
@@ -357,6 +358,7 @@ import type {
   UpdateKnowledgeMemoryRequest,
   UpdateScheduledTaskRequest,
   UpdateSessionGoalRequest,
+  ApplySessionGoalRevisionRequest,
   UpdateSessionRequest,
   UpdateSessionToolPolicyRequest,
   UpdateVariableSetRequest,
@@ -1886,7 +1888,10 @@ export class OpenGeniClient {
     );
     assertApiContractResponse(response);
     if (!response.ok) {
-      throw await apiErrorFromResponse(response, { method: "GET", correlationId });
+      throw await apiErrorFromResponse(response, {
+        method: "GET",
+        correlationId,
+      });
     }
     if (!response.body) {
       throw new OpenGeniApiError(response.status, "SSE response did not include a readable body");
@@ -1968,6 +1973,26 @@ export class OpenGeniClient {
     return await this.requestJson<SessionGoal>(
       "PATCH",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal`,
+      request,
+    );
+  }
+
+  async listGoalRevisions(workspaceId: string, sessionId: string): Promise<SessionGoalRevision[]> {
+    return await this.requestJson<SessionGoalRevision[]>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal/revisions`,
+    );
+  }
+
+  async applyGoalRevision(
+    workspaceId: string,
+    sessionId: string,
+    revisionId: string,
+    request: ApplySessionGoalRevisionRequest,
+  ): Promise<SessionGoal> {
+    return await this.requestJson<SessionGoal>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal/revisions/${revisionId}/apply`,
       request,
     );
   }
@@ -5132,7 +5157,10 @@ export class OpenGeniClient {
     capabilityId: string,
     instanceKey: string,
     facetKey: string,
-    options: { parentId?: string | undefined; pageToken?: string | undefined } = {},
+    options: {
+      parentId?: string | undefined;
+      pageToken?: string | undefined;
+    } = {},
   ): Promise<GoogleDriveBrowseResponse> {
     const query = new URLSearchParams();
     if (options.parentId) query.set("parentId", options.parentId);

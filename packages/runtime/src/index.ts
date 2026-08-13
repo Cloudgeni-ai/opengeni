@@ -49,6 +49,7 @@ import {
   type LatencyMode,
   type ReasoningEffort,
   type ResourceRef,
+  type SessionGoalSnapshot,
   type ToolAuthNeededPayload,
   type ToolRef,
   type VideoGenerationAcceptedReceipt,
@@ -1482,6 +1483,8 @@ export type BuildAgentOptions = {
   // runtime uses the structured governance precedence branch; absent preserves
   // the historical instruction composition byte-for-byte.
   workspaceGovernance?: string;
+  /** Standing goal frozen when this logical turn was accepted. */
+  goalSnapshot?: SessionGoalSnapshot;
   workspaceEnvironment?: WorkspaceEnvironmentContext;
   // M3 rig runtime binding (all absent ⇒ a rig-less turn, byte-for-byte today).
   //  - `rig`: renders the non-bypassable rig doctrine block in the CORE.
@@ -1693,6 +1696,23 @@ export function appendTurnInstructions(composed: string, turnInstructions?: stri
 }
 
 /**
+ * Append the standing goal accepted with this logical turn. The worker passes
+ * the persisted turn snapshot, never the mutable current goal head, so queued
+ * work and recovery cannot observe a later rewrite. A no-goal snapshot remains
+ * intentionally prompt-silent while still being durable execution authority.
+ */
+export function appendSessionGoal(composed: string, snapshot?: SessionGoalSnapshot): string {
+  if (!snapshot || snapshot.state === "none") return composed;
+  const policy =
+    snapshot.mutationPolicy === "review_changes"
+      ? "Semantic changes are proposals until a user applies them."
+      : snapshot.mutationPolicy === "preserve_intent"
+        ? "You may directly refine wording without changing intent; adaptations and replacements are proposals until a user applies them."
+        : "You may autonomously refine, adapt, or replace the goal when explicit user direction or material new evidence justifies it.";
+  return `${composed} Standing session goal (frozen at logical-turn acceptance; objective revision ${snapshot.objectiveRevision}; status ${snapshot.state}): ${snapshot.text}\nSuccess criteria: ${snapshot.successCriteria ?? "none specified"}.\nMutation policy: ${snapshot.mutationPolicy}. ${policy} Treat later ordinary messages as additional context unless they explicitly redirect this objective. Record concrete execution progress with opengeni__goal_progress; semantic goal changes use opengeni__goal_update with the expected objective revision, change kind, and rationale and do not count as progress.`;
+}
+
+/**
  * Append the durable session metadata the model otherwise cannot observe.
  * This is deliberately declarative and excludes the title text: the title is
  * user-controlled display metadata, while the agent only needs to know whether
@@ -1734,19 +1754,22 @@ function composedPersistentAgentInstructions(
     // Preserve the legacy path byte-for-byte when no structured governance
     // authority is active for this exact attempt.
     return appendPersistentSessionSettings(
-      appendTurnInstructions(
-        appendSessionInstructions(
-          appendWorkspaceMemory(
-            appendGitCredentialBindingInstructions(
-              appendCodemodeInstructions(personaAndCore, codemodeIsAvailable(options)),
-              options.gitCredentialBindings,
-              options.activeSandboxBackend,
+      appendSessionGoal(
+        appendTurnInstructions(
+          appendSessionInstructions(
+            appendWorkspaceMemory(
+              appendGitCredentialBindingInstructions(
+                appendCodemodeInstructions(personaAndCore, codemodeIsAvailable(options)),
+                options.gitCredentialBindings,
+                options.activeSandboxBackend,
+              ),
+              options.workspaceMemory,
             ),
-            options.workspaceMemory,
+            options.sessionInstructions,
           ),
-          options.sessionInstructions,
+          options.turnInstructions,
         ),
-        options.turnInstructions,
+        options.goalSnapshot,
       ),
       options.persistentSessionSettings,
     );
@@ -1759,12 +1782,15 @@ function composedPersistentAgentInstructions(
     appendGitCredentialBindingInstructions(
       appendCodemodeInstructions(
         appendPersistentSessionSettings(
-          appendTurnInstructions(
-            appendSessionInstructions(
-              appendWorkspaceGovernance(personaAndCore, options.workspaceGovernance),
-              options.sessionInstructions,
+          appendSessionGoal(
+            appendTurnInstructions(
+              appendSessionInstructions(
+                appendWorkspaceGovernance(personaAndCore, options.workspaceGovernance),
+                options.sessionInstructions,
+              ),
+              options.turnInstructions,
             ),
-            options.turnInstructions,
+            options.goalSnapshot,
           ),
           options.persistentSessionSettings,
         ),
@@ -2216,7 +2242,9 @@ export function buildOpenGeniAgent(
         : {}),
       ...(options.onComputerUseReady ? { onComputerUseReady: options.onComputerUseReady } : {}),
       ...(options.onRetainableSessionImageOutput
-        ? { onRetainableSessionImageOutput: options.onRetainableSessionImageOutput }
+        ? {
+            onRetainableSessionImageOutput: options.onRetainableSessionImageOutput,
+          }
         : {}),
       ...(options.turnCancellationSignal
         ? { turnCancellationSignal: options.turnCancellationSignal }
@@ -2859,7 +2887,9 @@ function buildAgentCapabilitiesFromComposition(
       ...(options.turnCancellationSignal ? { abortSignal: options.turnCancellationSignal } : {}),
       ...(options.onComputerUseReady ? { onReady: options.onComputerUseReady } : {}),
       ...(options.onRetainableSessionImageOutput
-        ? { onRetainableSessionImageOutput: options.onRetainableSessionImageOutput }
+        ? {
+            onRetainableSessionImageOutput: options.onRetainableSessionImageOutput,
+          }
         : {}),
       toolMode: options.computerToolMode ?? "disabled",
     });
@@ -4275,7 +4305,9 @@ export function mcpTransportErrorWithRetryMetadata(
   const classified =
     error instanceof Error
       ? (error as McpTransportError)
-      : (new Error(exactErrorMessage(error), { cause: error }) as McpTransportError);
+      : (new Error(exactErrorMessage(error), {
+          cause: error,
+        }) as McpTransportError);
   if (isMcpRequestTimeoutError(error)) {
     mcpTransportFailureKinds.set(classified, "request_timeout");
   } else if (isRawMcpTransportConnectivityError(error, options)) {
@@ -4822,7 +4854,11 @@ export class PrefixedMcpServer implements MCPServer {
       const publicError = publicMcpLifecycleError(exactError, "connect", this.registryId, {
         recoverySafeSetup: this.recoverySafeSetup,
       });
-      this.lifecycleFailures.connect = { phase: "connect", publicError, exactError };
+      this.lifecycleFailures.connect = {
+        phase: "connect",
+        publicError,
+        exactError,
+      };
       logPublicMcpLifecycleFailure(publicError);
       throw publicError;
     }
@@ -4836,7 +4872,11 @@ export class PrefixedMcpServer implements MCPServer {
     } catch (error) {
       const exactError = exactMcpLifecycleError(error);
       const publicError = publicMcpLifecycleError(exactError, "close", this.registryId);
-      this.lifecycleFailures.close = { phase: "close", publicError, exactError };
+      this.lifecycleFailures.close = {
+        phase: "close",
+        publicError,
+        exactError,
+      };
       logPublicMcpLifecycleFailure(publicError);
       throw publicError;
     }

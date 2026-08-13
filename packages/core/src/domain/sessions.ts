@@ -1342,7 +1342,9 @@ export async function createSessionForRequestWithOutcome(
     db,
     workspaceId,
     settings,
-    { subjectId: grant.subjectId },
+    {
+      subjectId: grant.subjectId,
+    },
   );
   const sessionMcpServers = hasOwnProperty(rawPayload, "mcpServers")
     ? validateSessionMcpServersForCreate(capabilityRuntimeSettings, grant, payload.mcpServers)
@@ -1480,7 +1482,9 @@ export async function createSessionForRequestWithOutcome(
   if (payload.channelId) {
     const channel = await getChannel(db, workspaceId, payload.channelId);
     if (!channel) {
-      throw new HTTPException(422, { message: `unknown channelId: ${payload.channelId}` });
+      throw new HTTPException(422, {
+        message: `unknown channelId: ${payload.channelId}`,
+      });
     }
     channelId = channel.id;
   }
@@ -1608,7 +1612,7 @@ export async function createSessionForRequestWithOutcome(
     parentSession ? parentSession.firstPartyMcpTools : undefined,
   );
   if (payload.goal) {
-    const missingGoalTools = ["goal_update", "goal_complete", "goal_pause"].filter(
+    const missingGoalTools = ["goal_update", "goal_progress", "goal_complete", "goal_pause"].filter(
       (name) => !firstPartyMcpTools.includes(name as FirstPartyMcpToolName),
     );
     if (missingGoalTools.length > 0) {

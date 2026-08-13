@@ -1500,12 +1500,12 @@ export async function reserveSessionCommandReceipt(
   if (
     identityScope === "goal_operation" &&
     (input.actor.type !== "agent_attempt" ||
-      input.action !== "goal.update" ||
+      !["goal.update", "goal.progress"].includes(input.action) ||
       input.targetSessionId === null ||
       input.targetTurnId !== null)
   ) {
     throw new SessionControlInvariantError(
-      "Target-scoped receipt identity is reserved for agent goal.update commands",
+      "Target-scoped receipt identity is reserved for agent goal commands",
     );
   }
   const actorSubjectId = input.actor.type === "agent_attempt" ? null : input.actor.subjectId;

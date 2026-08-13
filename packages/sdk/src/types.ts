@@ -527,6 +527,7 @@ export type GoalSpec = {
   text: string;
   successCriteria?: string | undefined;
   maxAutoContinuations?: number | undefined;
+  mutationPolicy?: SessionGoalMutationPolicy | undefined;
 };
 
 export type SessionMcpServerInput = {
@@ -839,12 +840,18 @@ export type AtlassianConnectionMetadata = {
   selectedSources: AtlassianSelectedSource[];
   [key: string]: unknown;
 };
-export type AtlassianOAuthStartResponse = { authorizationUrl: string; expiresAt: string };
+export type AtlassianOAuthStartResponse = {
+  authorizationUrl: string;
+  expiresAt: string;
+};
 export type AtlassianLifecycleActionRequest = {
   action: "pause" | "resume";
   expectedVersion: number;
 };
-export type AtlassianDisconnectRequest = { expectedVersion: number; idempotencyKey: string };
+export type AtlassianDisconnectRequest = {
+  expectedVersion: number;
+  idempotencyKey: string;
+};
 export type AtlassianBrowseItem = {
   id: string;
   cloudId: string;
@@ -1123,7 +1130,11 @@ export type AgentTopologySession = {
   parentSessionId: string | null;
   rootSessionId: string;
   nestedAgentDepth: number;
-  ancestorPath: Array<{ id: string; title: string | null; titleTruncated: boolean }>;
+  ancestorPath: Array<{
+    id: string;
+    title: string | null;
+    titleTruncated: boolean;
+  }>;
   status: SessionStatus;
   pause: {
     state: "active" | "paused";
@@ -1366,6 +1377,9 @@ export const SESSION_EVENT_TYPES = [
   "artifact.created",
   "goal.set",
   "goal.updated",
+  "goal.progress",
+  "goal.rewrite.proposed",
+  "goal.rewrite.rejected",
   "goal.completed",
   "goal.paused",
   "goal.resumed",
@@ -2374,6 +2388,7 @@ export type FirstPartyMcpToolName =
   | "set_session_title"
   | "goal_set"
   | "goal_update"
+  | "goal_progress"
   | "goal_complete"
   | "goal_pause"
   | "memory_search"
@@ -3360,6 +3375,39 @@ export type SessionGoalStatus = "active" | "paused" | "completed";
 
 export type SessionGoalCreatedBy = "api" | "agent" | "scheduled_task";
 
+export type SessionGoalMutationPolicy =
+  | "review_changes"
+  | "preserve_intent"
+  | "autonomous_adaptation";
+
+export type SessionGoalChangeKind = "refinement" | "adaptation" | "replacement";
+
+export type SessionGoalRevision = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  goalId: string;
+  disposition: "applied" | "proposed" | "rejected";
+  changeKind: SessionGoalChangeKind;
+  baseObjectiveRevision: number;
+  resultObjectiveRevision: number | null;
+  text: string;
+  successCriteria: string | null;
+  mutationPolicy: SessionGoalMutationPolicy;
+  rationale: string;
+  actor: "agent" | "api" | "scheduled_task";
+  actorTurnId: string | null;
+  actorAttemptId: string | null;
+  proposalId: string | null;
+  createdAt: string;
+};
+
+export type ApplySessionGoalRevisionRequest = {
+  expectedObjectiveRevision: number;
+  rationale?: string | undefined;
+};
+
 export type SessionGoalContinuationState =
   | "inactive"
   | "scheduled"
@@ -3403,6 +3451,8 @@ export type SessionGoal = {
   pausedReason: string | null;
   createdBy: SessionGoalCreatedBy;
   version: number;
+  objectiveRevision: number;
+  mutationPolicy: SessionGoalMutationPolicy;
   autoContinuations: number;
   noProgressStreak: number;
   maxAutoContinuations: number | null;
@@ -3413,10 +3463,18 @@ export type SessionGoal = {
   updatedAt: string;
 };
 
-export type UpdateSessionGoalRequest = {
-  status: "paused" | "active";
-  rationale?: string | undefined;
-};
+export type UpdateSessionGoalRequest =
+  | {
+      status: "paused" | "active";
+      rationale?: string | undefined;
+    }
+  | {
+      text: string;
+      successCriteria?: string | null | undefined;
+      mutationPolicy?: SessionGoalMutationPolicy | undefined;
+      rationale: string;
+      expectedObjectiveRevision: number;
+    };
 
 export type UpdateSessionRequest = {
   title: string;

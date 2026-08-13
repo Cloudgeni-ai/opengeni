@@ -122,6 +122,7 @@ import {
   sanitizeHistoryItemsForModel,
   projectModelInputForCapabilities,
   appendPersistentSessionSettings,
+  appendSessionGoal,
   appendSessionInstructions,
   appendWorkspaceGovernance,
   appendWorkspaceMemory,
@@ -5062,7 +5063,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                       requestPreserved: true,
                     },
                   },
-                  { type: "session.status.changed", payload: { status: "idle" } },
+                  {
+                    type: "session.status.changed",
+                    payload: { status: "idle" },
+                  },
                 ],
                 turnStatus: "cancelled",
                 sessionStatus: "idle",
@@ -5675,20 +5679,23 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         };
         const compactionInstructions = appendWorkspaceMemory(
           appendPersistentSessionSettings(
-            appendSessionInstructions(
-              appendWorkspaceGovernance(
-                composeAgentInstructions(
-                  structuredWorkspacePolicyActive
-                    ? modelRunSettings.agentInstructionsTemplate
-                    : (workspaceAgentInstructions ?? modelRunSettings.agentInstructionsTemplate),
-                  undefined,
-                  rigVersion && rigName
-                    ? { name: rigName, version: rigVersion.version }
-                    : undefined,
+            appendSessionGoal(
+              appendSessionInstructions(
+                appendWorkspaceGovernance(
+                  composeAgentInstructions(
+                    structuredWorkspacePolicyActive
+                      ? modelRunSettings.agentInstructionsTemplate
+                      : (workspaceAgentInstructions ?? modelRunSettings.agentInstructionsTemplate),
+                    undefined,
+                    rigVersion && rigName
+                      ? { name: rigName, version: rigVersion.version }
+                      : undefined,
+                  ),
+                  workspaceGovernance ?? undefined,
                 ),
-                workspaceGovernance ?? undefined,
+                session.instructions ?? undefined,
               ),
-              session.instructions ?? undefined,
+              turn.goalSnapshot,
             ),
             persistentSessionSettings,
           ),
@@ -5948,7 +5955,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // the runtime the effective backend so it builds a SandboxAgent for the
       // attached Connected Machine without mutating the session or turn record.
       if (machinePrimary && modelRunSettings.sandboxBackend === "none") {
-        modelRunSettings = { ...modelRunSettings, sandboxBackend: "selfhosted" };
+        modelRunSettings = {
+          ...modelRunSettings,
+          sandboxBackend: "selfhosted",
+        };
       }
       // The backend that can actually create a sandbox for this turn. In the
       // common path this is runSettings.sandboxBackend. A selfhosted home turn
@@ -7369,6 +7379,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           : {}),
         ...(workspaceGovernance ? { workspaceGovernance } : {}),
         ...(workspaceMemory ? { workspaceMemory } : {}),
+        goalSnapshot: turn.goalSnapshot,
         // Per-session persona tier (session > workspace > deployment default).
         // Composed system-level AFTER the workspace persona so it refines it for
         // this one session; absent ⇒ byte-identical to today's composition.

@@ -1,5 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import type { McpPersonalConnectionDelegation } from "@opengeni/contracts";
+import {
+  SESSION_GOAL_TEXT_MAX_BYTES,
+  type McpPersonalConnectionDelegation,
+} from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
   armCodexCapacityWait,
@@ -14,10 +17,13 @@ import {
   getSessionGoalWithContinuation,
   initializeSessionStartAtomically,
   listOutstandingSessionSystemUpdates,
+  listSessionGoalRevisions,
   listSessionSystemUpdatesForTurn,
   materializeGoalContinuation,
   mutateSessionControlInTransaction,
+  projectSessionGoalPromptField,
   recoverSessionDispatch,
+  recordSessionGoalProgressWithEvent,
   setSessionGoalStatusWithEvent,
   submitHumanPromptInTransaction,
   updateCodexRotationSettings,
@@ -109,7 +115,14 @@ async function runningGoalFixture(
     trigger: { kind: "next" },
   });
   if (claimed.action !== "claimed") throw new Error(`Initial turn was not claimed`);
-  return { grant, ancestor, session, initialized, turn: claimed.turn, attemptId };
+  return {
+    grant,
+    ancestor,
+    session,
+    initialized,
+    turn: claimed.turn,
+    attemptId,
+  };
 }
 
 type GoalFixture = Awaited<ReturnType<typeof runningGoalFixture>>;
@@ -205,6 +218,561 @@ async function counts(ctx: GoalFixture) {
 }
 
 describe("durable active-goal wake", () => {
+  test("the locked agent goal_set path is create-only while API redirect remains available", async () => {
+    const ctx = await runningGoalFixture();
+    await expect(
+      upsertSessionGoalWithEvent(client.db, {
+        accountId: ctx.grant.accountId,
+        workspaceId: ctx.grant.workspaceId!,
+        sessionId: ctx.session.id,
+        text: "Agent must not replace this goal",
+        createdBy: "agent",
+        actor: "agent",
+      }),
+    ).rejects.toThrow("agent goal_set is create-only");
+    expect(
+      (await getSessionGoalWithContinuation(client.db, ctx.grant.workspaceId!, ctx.session.id))
+        ?.text,
+    ).toBe("Finish the durable wake proof");
+  });
+
+  test("accepted turns freeze exact goal or no-goal authority and recovery reuses it", async () => {
+    const ctx = await runningGoalFixture();
+    expect(ctx.turn.goalSnapshot).toMatchObject({
+      state: "active",
+      text: "Finish the durable wake proof",
+      objectiveRevision: 1,
+      mutationPolicy: "preserve_intent",
+    });
+
+    await withWorkspaceSubjectRls(client.db, ctx.grant.workspaceId!, ctx.grant.subjectId, (db) =>
+      db.transaction((tx) =>
+        submitHumanPromptInTransaction(tx as unknown as typeof db, {
+          accountId: ctx.grant.accountId,
+          workspaceId: ctx.grant.workspaceId!,
+          sessionId: ctx.session.id,
+          subjectId: ctx.grant.subjectId,
+          actor: { type: "human", subjectId: ctx.grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          text: "additional context that must not redirect the goal",
+          resources: [],
+          reasoningEffortFallback: "low",
+          source: "user",
+        }),
+      ),
+    );
+    const current = await getSessionGoalWithContinuation(
+      client.db,
+      ctx.grant.workspaceId!,
+      ctx.session.id,
+    );
+    if (!current) throw new Error("goal fixture missing");
+    await updateSessionGoalWithEvent(client.db, ctx.grant.workspaceId!, ctx.session.id, {
+      text: "Redirected after both turns were accepted",
+      changeKind: "replacement",
+      rationale: "explicit API redirect",
+      expectedObjectiveRevision: current.objectiveRevision,
+      actor: "api",
+    });
+
+    const queued = await shared.admin<Array<{ goal_snapshot: Record<string, unknown> }>>`
+      select goal_snapshot from session_turns
+      where workspace_id = ${ctx.grant.workspaceId!} and session_id = ${ctx.session.id}
+        and status = 'queued'
+      order by position limit 1`;
+    expect(queued[0]?.goal_snapshot).toMatchObject({
+      state: "active",
+      text: "Finish the durable wake proof",
+      objectiveRevision: 1,
+    });
+
+    expect(
+      (
+        await recoverSessionDispatch(client.db, ctx.grant.workspaceId!, {
+          sessionId: ctx.session.id,
+          attemptId: ctx.attemptId,
+          timeoutType: "HEARTBEAT",
+          maxRedispatches: 3,
+        })
+      ).action,
+    ).toBe("recovering");
+    const recovered = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
+      sessionId: ctx.session.id,
+      workflowId: `session-${ctx.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    expect(recovered.action).toBe("claimed");
+    if (recovered.action !== "claimed") throw new Error("recovery was not claimed");
+    expect(recovered.turn.goalSnapshot).toMatchObject({
+      text: "Finish the durable wake proof",
+      objectiveRevision: 1,
+    });
+  });
+
+  test("a goal created after a no-goal turn is queued cannot leak into that turn", async () => {
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "goal-snapshot-test",
+      accountExternalId: `account-${suffix}`,
+      accountName: "Goal snapshot test",
+      workspaceExternalSource: "goal-snapshot-test",
+      workspaceExternalId: `workspace-${suffix}`,
+      workspaceName: "Goal snapshot test",
+      subjectId: `subject-${suffix}`,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const session = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "queue without a standing goal",
+      resources: [],
+      tools: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: grant.subjectId },
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const initialized = await initializeSessionStartAtomically(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      clientEventId: `initial:${session.id}`,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    if (!initialized.turn) throw new Error("initial turn missing");
+    await upsertSessionGoalWithEvent(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      text: "Created only after acceptance",
+      createdBy: "api",
+      actor: "api",
+    });
+    const [row] = await shared.admin<Array<{ goal_snapshot: Record<string, unknown> }>>`
+      select goal_snapshot from session_turns where id = ${initialized.turn.id}`;
+    expect(row?.goal_snapshot).toMatchObject({ state: "none" });
+    const claimed = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    expect(claimed.action).toBe("claimed");
+    if (claimed.action !== "claimed") throw new Error("no-goal turn was not claimed");
+    expect(claimed.turn.goalSnapshot).toMatchObject({ state: "none" });
+  });
+
+  test("legacy null snapshots reconstruct resumed lifecycle with the prior full objective", async () => {
+    const ctx = await runningGoalFixture();
+    await settleIdle(ctx);
+    await setSessionGoalStatusWithEvent(client.db, ctx.grant.workspaceId!, ctx.session.id, {
+      status: "paused",
+      rationale: "test pause",
+      pausedReason: "api",
+      event: { type: "goal.paused", actor: "api", reason: "api" },
+    });
+    await setSessionGoalStatusWithEvent(client.db, ctx.grant.workspaceId!, ctx.session.id, {
+      status: "active",
+      event: { type: "goal.resumed", actor: "api" },
+    });
+    await withWorkspaceSubjectRls(client.db, ctx.grant.workspaceId!, ctx.grant.subjectId, (db) =>
+      db.transaction((tx) =>
+        submitHumanPromptInTransaction(tx as unknown as typeof db, {
+          accountId: ctx.grant.accountId,
+          workspaceId: ctx.grant.workspaceId!,
+          sessionId: ctx.session.id,
+          subjectId: ctx.grant.subjectId,
+          actor: { type: "human", subjectId: ctx.grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          text: "work accepted after resume",
+          resources: [],
+          reasoningEffortFallback: "low",
+          source: "user",
+        }),
+      ),
+    );
+    const [queued] = await shared.admin<Array<{ id: string }>>`
+      select id from session_turns
+      where workspace_id = ${ctx.grant.workspaceId!} and session_id = ${ctx.session.id}
+        and status = 'queued'
+      order by created_at desc limit 1`;
+    if (!queued) throw new Error("post-resume turn missing");
+    await shared.admin`alter table session_turns disable trigger session_turns_goal_snapshot_immutable`;
+    try {
+      await shared.admin`update session_turns set goal_snapshot = null where id = ${queued.id}`;
+    } finally {
+      await shared.admin`alter table session_turns enable trigger session_turns_goal_snapshot_immutable`;
+    }
+    const recovered = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
+      sessionId: ctx.session.id,
+      workflowId: `session-${ctx.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    expect(recovered.action).toBe("claimed");
+    if (recovered.action !== "claimed") throw new Error("legacy turn was not reclaimed");
+    expect(recovered.turn.goalSnapshot).toMatchObject({
+      state: "active",
+      text: "Finish the durable wake proof",
+      objectiveRevision: 1,
+    });
+  });
+
+  test("oversized legacy goals remain lifecycle-safe and freeze one bounded exact projection", async () => {
+    const ctx = await runningGoalFixture();
+    await settleIdle(ctx);
+    const legacyText = `legacy-${"🙂".repeat(3_000)}`;
+    await shared.admin`alter table session_goals disable trigger session_goal_revision_before_write_trigger`;
+    await shared.admin`alter table session_goals disable trigger session_goal_revision_after_write_trigger`;
+    try {
+      await shared.admin`
+        update session_goals set text = ${legacyText}
+        where workspace_id = ${ctx.grant.workspaceId!} and session_id = ${ctx.session.id}`;
+    } finally {
+      await shared.admin`alter table session_goals enable trigger session_goal_revision_before_write_trigger`;
+      await shared.admin`alter table session_goals enable trigger session_goal_revision_after_write_trigger`;
+    }
+
+    await setSessionGoalStatusWithEvent(client.db, ctx.grant.workspaceId!, ctx.session.id, {
+      status: "paused",
+      rationale: "legacy lifecycle update remains legal",
+      pausedReason: "api",
+      event: { type: "goal.paused", actor: "api", reason: "api" },
+    });
+    await setSessionGoalStatusWithEvent(client.db, ctx.grant.workspaceId!, ctx.session.id, {
+      status: "active",
+      event: { type: "goal.resumed", actor: "api" },
+    });
+    await withWorkspaceSubjectRls(client.db, ctx.grant.workspaceId!, ctx.grant.subjectId, (db) =>
+      db.transaction((tx) =>
+        submitHumanPromptInTransaction(tx as unknown as typeof db, {
+          accountId: ctx.grant.accountId,
+          workspaceId: ctx.grant.workspaceId!,
+          sessionId: ctx.session.id,
+          subjectId: ctx.grant.subjectId,
+          actor: { type: "human", subjectId: ctx.grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          text: "accept a turn against the legacy goal",
+          resources: [],
+          reasoningEffortFallback: "low",
+          source: "user",
+        }),
+      ),
+    );
+    const [queued] = await shared.admin<Array<{ id: string; goal_snapshot: { text: string } }>>`
+      select id, goal_snapshot from session_turns
+      where workspace_id = ${ctx.grant.workspaceId!} and session_id = ${ctx.session.id}
+        and status = 'queued'
+      order by created_at desc limit 1`;
+    if (!queued) throw new Error("legacy projection turn missing");
+    const expected = projectSessionGoalPromptField(legacyText, SESSION_GOAL_TEXT_MAX_BYTES);
+    const [sqlProjection] = await shared.admin<Array<{ value: string }>>`
+      select session_goal_prompt_projection(${legacyText}, ${SESSION_GOAL_TEXT_MAX_BYTES}) as value`;
+    expect(sqlProjection?.value).toBe(expected);
+    expect(queued.goal_snapshot.text).toBe(expected);
+    expect(Buffer.byteLength(queued.goal_snapshot.text, "utf8")).toBeLessThanOrEqual(
+      SESSION_GOAL_TEXT_MAX_BYTES,
+    );
+    expect(Buffer.byteLength(queued.goal_snapshot.text, "utf8")).toBeGreaterThan(
+      SESSION_GOAL_TEXT_MAX_BYTES - 4,
+    );
+    expect(queued.goal_snapshot.text).toContain(
+      `[truncated; original UTF-8 bytes=${Buffer.byteLength(legacyText, "utf8")}]`,
+    );
+    const [canonical] = await shared.admin<Array<{ text: string }>>`
+      select text from session_goals where session_id = ${ctx.session.id}`;
+    expect(canonical?.text).toBe(legacyText);
+
+    const legacyAttemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
+      sessionId: ctx.session.id,
+      workflowId: `session-${ctx.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: legacyAttemptId,
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    expect(claimed.action).toBe("claimed");
+    if (claimed.action !== "claimed") throw new Error("legacy projection turn was not claimed");
+    expect(claimed.turn.goalSnapshot).toMatchObject({ text: expected });
+    expect(
+      (
+        await recoverSessionDispatch(client.db, ctx.grant.workspaceId!, {
+          sessionId: ctx.session.id,
+          attemptId: legacyAttemptId,
+          timeoutType: "HEARTBEAT",
+          maxRedispatches: 3,
+        })
+      ).action,
+    ).toBe("recovering");
+    const recovered = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
+      sessionId: ctx.session.id,
+      workflowId: `session-${ctx.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    expect(recovered.action).toBe("claimed");
+    if (recovered.action !== "claimed") throw new Error("legacy projection recovery failed");
+    expect(recovered.turn.goalSnapshot).toMatchObject({ text: expected });
+
+    await expect(
+      shared.admin`
+        update session_goals set text = ${`${legacyText}x`}
+        where workspace_id = ${ctx.grant.workspaceId!} and session_id = ${ctx.session.id}`,
+    ).rejects.toThrow("goal text exceeds 8192 UTF-8 bytes");
+  });
+
+  test("API redirect wakes an idle goal while policy-controlled agent changes remain fenced", async () => {
+    const ctx = await runningGoalFixture();
+    await settleIdle(ctx);
+    const original = await getSessionGoalWithContinuation(
+      client.db,
+      ctx.grant.workspaceId!,
+      ctx.session.id,
+    );
+    if (!original) throw new Error("goal fixture missing");
+    const redirected = await upsertSessionGoalWithEvent(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      text: "Explicit human redirect",
+      successCriteria: "The redirected objective is pursued",
+      mutationPolicy: "review_changes",
+      expectedObjectiveRevision: original.objectiveRevision,
+      changeKind: "replacement",
+      changeRationale: "user changed direction",
+      createdBy: "api",
+      actor: "api",
+    });
+    expect(redirected).toMatchObject({
+      replaced: true,
+      goal: { objectiveRevision: 2, mutationPolicy: "review_changes" },
+    });
+    expect(redirected.workflowWakeRevision).toBeNumber();
+    expect((await materialize(ctx)).action).toBe("continue");
+
+    const attempt = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
+      sessionId: ctx.session.id,
+      workflowId: `session-${ctx.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    expect(attempt.action).toBe("claimed");
+    if (attempt.action !== "claimed") throw new Error("redirect wake was not claimable");
+    const proposed = await updateSessionGoalWithEvent(
+      client.db,
+      ctx.grant.workspaceId!,
+      ctx.session.id,
+      {
+        text: "Agent replacement awaiting review",
+        changeKind: "replacement",
+        rationale: "new evidence suggests a different objective",
+        expectedObjectiveRevision: redirected.goal.objectiveRevision,
+        actor: "agent",
+        command: {
+          accountId: ctx.grant.accountId,
+          actor: {
+            type: "agent_attempt",
+            sessionId: ctx.session.id,
+            turnId: attempt.turn.id,
+            attemptId: attempt.turn.activeAttemptId!,
+            executionGeneration: attempt.turn.executionGeneration,
+          },
+          operationKey: crypto.randomUUID(),
+        },
+      },
+    );
+    expect(proposed).toMatchObject({
+      outcome: "proposed",
+      goal: { text: "Explicit human redirect", objectiveRevision: 2 },
+    });
+    expect(proposed.proposalId).toBeTruthy();
+    const revisions = await listSessionGoalRevisions(
+      client.db,
+      ctx.grant.workspaceId!,
+      ctx.session.id,
+    );
+    const proposal = revisions.find((revision) => revision.id === proposed.proposalId);
+    expect(proposal).toMatchObject({
+      disposition: "proposed",
+      text: "Agent replacement awaiting review",
+      baseObjectiveRevision: 2,
+    });
+    if (!proposal) throw new Error("persisted proposal missing");
+    const applied = await upsertSessionGoalWithEvent(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      text: proposal.text,
+      successCriteria: proposal.successCriteria,
+      mutationPolicy: proposal.mutationPolicy,
+      expectedObjectiveRevision: 2,
+      expectedGoalId: proposal.goalId,
+      changeKind: proposal.changeKind,
+      changeRationale: "user accepted the reviewed proposal",
+      sourceProposalId: proposal.id,
+      createdBy: "api",
+      actor: "api",
+    });
+    expect(applied.goal).toMatchObject({
+      text: "Agent replacement awaiting review",
+      objectiveRevision: 3,
+    });
+    const afterApply = await listSessionGoalRevisions(
+      client.db,
+      ctx.grant.workspaceId!,
+      ctx.session.id,
+    );
+    expect(afterApply).toContainEqual(
+      expect.objectContaining({
+        disposition: "applied",
+        resultObjectiveRevision: 3,
+        proposalId: proposal.id,
+      }),
+    );
+    expect(afterApply.find((revision) => revision.id === proposal.id)?.disposition).toBe(
+      "proposed",
+    );
+    await expect(
+      shared.admin`update session_goal_revisions set rationale = 'mutated' where id = ${proposal.id}`,
+    ).rejects.toThrow("session goal revisions are immutable");
+    await expect(
+      upsertSessionGoalWithEvent(client.db, {
+        accountId: ctx.grant.accountId,
+        workspaceId: ctx.grant.workspaceId!,
+        sessionId: ctx.session.id,
+        text: proposal.text,
+        successCriteria: proposal.successCriteria,
+        mutationPolicy: proposal.mutationPolicy,
+        expectedObjectiveRevision: 2,
+        expectedGoalId: proposal.goalId,
+        changeKind: proposal.changeKind,
+        changeRationale: "stale duplicate apply",
+        sourceProposalId: proposal.id,
+        createdBy: "api",
+        actor: "api",
+      }),
+    ).rejects.toThrow("expected 2, current 3");
+  });
+
+  test("goal progress is idempotent and does not mutate semantic or wake revisions", async () => {
+    const ctx = await runningGoalFixture();
+    const before = await getSessionGoalWithContinuation(
+      client.db,
+      ctx.grant.workspaceId!,
+      ctx.session.id,
+    );
+    if (!before) throw new Error("goal fixture missing");
+    const operationKey = crypto.randomUUID();
+    const progress = await recordSessionGoalProgressWithEvent(
+      client.db,
+      ctx.grant.workspaceId!,
+      ctx.session.id,
+      {
+        progressNote: "Implemented and verified one concrete slice",
+        command: goalCommand(ctx, {
+          attemptId: ctx.attemptId,
+          executionGeneration: ctx.turn.executionGeneration,
+          operationKey,
+        }),
+      },
+    );
+    expect(progress).toMatchObject({
+      replay: false,
+      goal: { version: before.version },
+    });
+    expect(progress.goal.objectiveRevision).toBe(before.objectiveRevision);
+    const replay = await recordSessionGoalProgressWithEvent(
+      client.db,
+      ctx.grant.workspaceId!,
+      ctx.session.id,
+      {
+        progressNote: "Implemented and verified one concrete slice",
+        command: goalCommand(ctx, {
+          attemptId: ctx.attemptId,
+          executionGeneration: ctx.turn.executionGeneration,
+          operationKey,
+        }),
+      },
+    );
+    expect(replay).toMatchObject({ replay: true, events: [] });
+  });
+
+  test("preserve-intent refinements and autonomous adaptations apply without proposal", async () => {
+    const ctx = await runningGoalFixture();
+    const refined = await updateSessionGoalWithEvent(
+      client.db,
+      ctx.grant.workspaceId!,
+      ctx.session.id,
+      {
+        text: "Finish the durable wake proof with focused verification",
+        changeKind: "refinement",
+        rationale: "clarifies the unchanged delivery intent",
+        expectedObjectiveRevision: 1,
+        actor: "agent",
+        command: goalCommand(ctx, {
+          attemptId: ctx.attemptId,
+          executionGeneration: ctx.turn.executionGeneration,
+          operationKey: crypto.randomUUID(),
+        }),
+      },
+    );
+    expect(refined).toMatchObject({
+      outcome: "applied",
+      goal: { objectiveRevision: 2 },
+    });
+
+    const autonomous = await upsertSessionGoalWithEvent(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      text: refined.goal.text,
+      successCriteria: refined.goal.successCriteria,
+      mutationPolicy: "autonomous_adaptation",
+      expectedObjectiveRevision: 2,
+      changeKind: "refinement",
+      changeRationale: "user enables autonomous adaptation",
+      createdBy: "api",
+      actor: "api",
+    });
+    const adapted = await updateSessionGoalWithEvent(
+      client.db,
+      ctx.grant.workspaceId!,
+      ctx.session.id,
+      {
+        text: "Adapt autonomously to prove the alternate durable wake path",
+        changeKind: "adaptation",
+        rationale: "the primary path is unavailable and equivalent evidence is available",
+        expectedObjectiveRevision: autonomous.goal.objectiveRevision,
+        actor: "agent",
+        command: goalCommand(ctx, {
+          attemptId: ctx.attemptId,
+          executionGeneration: ctx.turn.executionGeneration,
+          operationKey: crypto.randomUUID(),
+        }),
+      },
+    );
+    expect(adapted).toMatchObject({
+      outcome: "applied",
+      goal: { objectiveRevision: 4 },
+    });
+  });
+
   test("goal continuation freezes the exact finished causal turn authority and lineage", async () => {
     const connectionId = crypto.randomUUID();
     const ctx = await runningGoalFixture({
@@ -264,7 +832,9 @@ describe("durable active-goal wake", () => {
       ),
     );
     const [afterUnrelatedTurn] = await shared.admin<
-      Array<{ personal_connection_delegations: McpPersonalConnectionDelegation[] }>
+      Array<{
+        personal_connection_delegations: McpPersonalConnectionDelegation[];
+      }>
     >`
       select personal_connection_delegations
       from session_system_updates
@@ -312,7 +882,11 @@ describe("durable active-goal wake", () => {
     expect(
       (await getSessionGoalWithContinuation(client.db, ctx.grant.workspaceId!, ctx.session.id))
         ?.continuation,
-    ).toMatchObject({ state: "scheduled", reason: "wake_pending", lastError: null });
+    ).toMatchObject({
+      state: "scheduled",
+      reason: "wake_pending",
+      lastError: null,
+    });
   });
 
   test("concurrent evaluators and a lost COMMIT response materialize one update, event, and usage row", async () => {
@@ -519,7 +1093,11 @@ describe("durable active-goal wake", () => {
         }),
       },
     );
-    expect(replayed).toMatchObject({ replay: true, events: [], goal: { version: 2 } });
+    expect(replayed).toMatchObject({
+      replay: true,
+      events: [],
+      goal: { version: 2 },
+    });
     expect(replayed.operationId).toBeTruthy();
 
     const newer = await updateSessionGoalWithEvent(
@@ -585,7 +1163,12 @@ describe("durable active-goal wake", () => {
     ).rejects.toMatchObject({ code: "IDEMPOTENCY_KEY_REUSED" });
 
     const receipts = await shared.admin<
-      Array<{ id: string; operationKey: string; actorAttemptId: string; goalVersion: number }>
+      Array<{
+        id: string;
+        operationKey: string;
+        actorAttemptId: string;
+        goalVersion: number;
+      }>
     >`
       select id, operation_key as "operationKey", actor_attempt_id as "actorAttemptId",
              (result ->> 'goalVersion')::int as "goalVersion"
@@ -875,7 +1458,11 @@ describe("durable active-goal wake", () => {
       )?.continuation,
     ).toMatchObject({ state: "blocked", reason: "session_cancelled" });
     expect((await materialize(cancelled)).action).toBe("none");
-    expect(await counts(cancelled)).toMatchObject({ updates: 0, usage: 0, events: 0 });
+    expect(await counts(cancelled)).toMatchObject({
+      updates: 0,
+      usage: 0,
+      events: 0,
+    });
 
     const corrupt = await runningGoalFixture();
     await settleIdle(corrupt);
@@ -1080,7 +1667,11 @@ describe("durable active-goal wake", () => {
       "goal_continuation",
       "agent_steer_instruction",
     ]);
-    expect(await counts(ctx)).toMatchObject({ autoContinuations: 1, updates: 1, usage: 1 });
+    expect(await counts(ctx)).toMatchObject({
+      autoContinuations: 1,
+      updates: 1,
+      usage: 1,
+    });
   });
 
   test("active-turn event writes and agent goal mutations complete without workspace/session lock inversion", async () => {
@@ -1105,7 +1696,12 @@ describe("durable active-goal wake", () => {
         ctx.turn.id,
         ctx.turn.executionGeneration,
         ctx.attemptId,
-        [{ type: "agent.message.delta", payload: { text: "concurrent progress" } }],
+        [
+          {
+            type: "agent.message.delta",
+            payload: { text: "concurrent progress" },
+          },
+        ],
       );
       await Bun.sleep(50);
       const mutate = updateSessionGoalWithEvent(client.db, ctx.grant.workspaceId!, ctx.session.id, {
@@ -1128,7 +1724,10 @@ describe("durable active-goal wake", () => {
         {
           status: "completed",
           evidence: "concurrent mutation completed",
-          event: { type: "goal.completed", evidence: "concurrent mutation completed" },
+          event: {
+            type: "goal.completed",
+            evidence: "concurrent mutation completed",
+          },
         },
       );
       expect(statusMutation.changed).toBe(true);
@@ -1141,7 +1740,12 @@ describe("durable active-goal wake", () => {
         ctx.turn.id,
         ctx.turn.executionGeneration,
         ctx.attemptId,
-        [{ type: "agent.message.delta", payload: { text: "concurrent goal set" } }],
+        [
+          {
+            type: "agent.message.delta",
+            payload: { text: "concurrent goal set" },
+          },
+        ],
       );
       await Bun.sleep(50);
       const [setAppendResult, setMutation] = await beforeLockTimeout(
@@ -1152,8 +1756,8 @@ describe("durable active-goal wake", () => {
             workspaceId: ctx.grant.workspaceId!,
             sessionId: ctx.session.id,
             text: "replacement goal after terminal mutation",
-            createdBy: "agent",
-            actor: "agent",
+            createdBy: "api",
+            actor: "api",
           }),
         ]),
       );
@@ -1168,7 +1772,12 @@ describe("durable active-goal wake", () => {
         ctx.turn.id,
         ctx.turn.executionGeneration,
         ctx.attemptId,
-        [{ type: "agent.message.delta", payload: { text: "concurrent goal clear" } }],
+        [
+          {
+            type: "agent.message.delta",
+            payload: { text: "concurrent goal clear" },
+          },
+        ],
       );
       await Bun.sleep(50);
       const [clearAppendResult, clearMutation] = await beforeLockTimeout(
