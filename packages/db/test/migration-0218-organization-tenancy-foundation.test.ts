@@ -83,19 +83,6 @@ async function expectSqlState(action: () => Promise<unknown>, state: string): Pr
   expect(nestedPostgresSqlState(failure)).toBe(state);
 }
 
-async function expectSqlStateOneOf(
-  action: () => Promise<unknown>,
-  states: readonly string[],
-): Promise<void> {
-  let failure: unknown;
-  try {
-    await action();
-  } catch (error) {
-    failure = error;
-  }
-  expect(states).toContain(nestedPostgresSqlState(failure) ?? "");
-}
-
 describe("migration 0218 organization tenancy foundation", () => {
   test("pins the Drizzle grant index name and ordered columns to migration SQL", async () => {
     const [migration, schema] = await Promise.all([
@@ -304,18 +291,39 @@ describe("migration 0218 organization tenancy foundation", () => {
       authorityEpoch: 1,
       forkedFromSessionId: null,
     });
-    // Historical migration-only fixtures reject these direct mutations through
-    // the 0218 constraint (23514), while full-ledger fixtures reject them first
-    // through the activated session visibility policy (42501). Both paths must
-    // remain fail-closed.
-    await expectSqlStateOneOf(
+    const [sessionAuthorityFence] = await shared.admin<{ installed: boolean }[]>`
+      select exists (
+        select 1
+        from pg_trigger trigger_row
+        join pg_class table_row on table_row.oid = trigger_row.tgrelid
+        join pg_namespace namespace_row on namespace_row.oid = table_row.relnamespace
+        where namespace_row.nspname = current_schema()
+          and table_row.relname = 'sessions'
+          and trigger_row.tgname = 'sessions_authority_write_fence'
+          and not trigger_row.tgisinternal
+      ) as installed
+    `;
+    const sessionAuthorityFenceInstalled = sessionAuthorityFence?.installed === true;
+    const directSessionAuthorityMutationSqlState = sessionAuthorityFenceInstalled
+      ? "42501"
+      : "23514";
+    await expectSqlState(
       async () =>
-        await shared!.admin`
-          update sessions set visibility = 'user_private' where id = ${session.id}
-        `,
-      ["23514", "42501"],
+        sessionAuthorityFenceInstalled
+          ? await shared!.admin`
+              update sessions
+              set
+                visibility = 'user_private',
+                owner_organization_membership_id = ${membership!.id},
+                owner_subject_id = 'human:org-tenancy-owner'
+              where id = ${session.id}
+            `
+          : await shared!.admin`
+              update sessions set visibility = 'user_private' where id = ${session.id}
+            `,
+      directSessionAuthorityMutationSqlState,
     );
-    await expectSqlStateOneOf(
+    await expectSqlState(
       async () =>
         await shared!.admin`
           update sessions
@@ -326,7 +334,7 @@ describe("migration 0218 organization tenancy foundation", () => {
             forked_by_organization_membership_id = ${membership!.id}
           where id = ${session.id}
         `,
-      ["23514", "42501"],
+      directSessionAuthorityMutationSqlState,
     );
 
     await expectSqlState(
