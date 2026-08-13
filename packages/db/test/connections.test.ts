@@ -1494,6 +1494,47 @@ describe("buildConnectionTokenResolver", () => {
     expect(counts.recordUsed).toBe(0);
   });
 
+  test("accepts canonical Google userinfo scopes for Gmail shorthand requests", async () => {
+    const { deps, counts } = resolverDeps({
+      loadCredential: async () =>
+        brokerCredential({
+          id: "gmail-connection",
+          subjectId: "subject-a",
+          providerDomain: "gmail.googleapis.com",
+          kind: "oauth2",
+          credential: { access_token: "gmail-access-token", token_type: "Bearer" },
+          grantedScopes: [
+            "openid",
+            "https://www.googleapis.com/auth/userinfo.email",
+            "https://www.googleapis.com/auth/userinfo.profile",
+            "https://mail.google.com/",
+          ],
+        }),
+    });
+    const resolver = buildConnectionTokenResolver({} as Database, settings, deps);
+    const result = await resolver({
+      workspaceId: "ws_1",
+      subjectId: "subject-a",
+      serverId: "gmail-account",
+      destinationUrl: "https://gmail.googleapis.com/gmail/v1/users/me/profile",
+      credentialTarget: "http_api",
+      connectionRef: {
+        connectionId: "gmail-connection",
+        providerDomain: "gmail.googleapis.com",
+        kind: "oauth2",
+        subjectScope: "subject",
+        scopes: ["email", "profile", "openid", "https://mail.google.com/"],
+      },
+    });
+
+    expect(result).toMatchObject({
+      status: "ok",
+      connectionId: "gmail-connection",
+      headers: { authorization: "Bearer gmail-access-token" },
+    });
+    expect(counts.recordUsed).toBe(1);
+  });
+
   test("single-flight refresh coalesces concurrent forced oauth refreshes", async () => {
     let release: () => void = () => {};
     const gate = new Promise<void>((resolve) => {

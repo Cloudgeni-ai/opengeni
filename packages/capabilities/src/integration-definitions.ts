@@ -480,23 +480,23 @@ function collectGoogleMethods(
     const path = stringValue(rawMethod.path);
     const httpMethod = stringValue(rawMethod.httpMethod)?.toLowerCase();
     if (!path || !httpMethod) continue;
-    const parameters = Object.entries(
-      isRecord(rawMethod.parameters) ? rawMethod.parameters : {},
-    ).flatMap(([name, rawParameter]): Record<string, unknown>[] => {
-      if (!isRecord(rawParameter)) return [];
-      const location = rawParameter.location === "path" ? "path" : "query";
-      return [
-        {
-          name,
-          in: location,
-          required: location === "path" || rawParameter.required === true,
-          ...(stringValue(rawParameter.description)
-            ? { description: stringValue(rawParameter.description) }
-            : {}),
-          schema: convertGoogleSchema(rawParameter),
-        },
-      ];
-    });
+    const parameters = Object.entries(isRecord(rawMethod.parameters) ? rawMethod.parameters : {})
+      .sort(([left], [right]) => left.localeCompare(right))
+      .flatMap(([name, rawParameter]): Record<string, unknown>[] => {
+        if (!isRecord(rawParameter)) return [];
+        const location = rawParameter.location === "path" ? "path" : "query";
+        return [
+          {
+            name,
+            in: location,
+            required: location === "path" || rawParameter.required === true,
+            ...(stringValue(rawParameter.description)
+              ? { description: stringValue(rawParameter.description) }
+              : {}),
+            schema: convertGoogleSchema(rawParameter),
+          },
+        ];
+      });
     const requestRef = isRecord(rawMethod.request)
       ? stringValue(rawMethod.request.$ref)
       : undefined;
@@ -505,7 +505,10 @@ function collectGoogleMethods(
       : undefined;
     const operation: Record<string, unknown> = {
       operationId: stringValue(rawMethod.id) ?? fallbackId,
-      summary: stringValue(rawMethod.description) ?? stringValue(rawMethod.id) ?? fallbackId,
+      // Discovery descriptions are often full documentation paragraphs. Keep
+      // them as descriptions and use the stable method identity for the short
+      // OpenGeni tool display name.
+      summary: stringValue(rawMethod.id) ?? fallbackId,
       description: stringValue(rawMethod.description),
       parameters,
       responses: {

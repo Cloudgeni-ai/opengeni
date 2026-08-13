@@ -967,11 +967,14 @@ describe("connections routes", () => {
       expect(body.authorizationUrl).not.toContain(verifier);
       expect(JSON.stringify(state)).not.toContain(verifier);
 
-      const callback = await publicApp(client.db).request(
+      const callback = await publicApp(client.db, {
+        webBaseUrl: "http://127.0.0.1:3000",
+      }).request(
         `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(body.state)}`,
       );
       expect(callback.status).toBe(302);
       const location = callback.headers.get("location")!;
+      expect(location).toStartWith("http://127.0.0.1:3000/integrations?");
       expect(location).toContain("integration_oauth=success");
       // The success redirect carries the canonical providerDomain (not just the
       // connectionId) so the SPA can build the enable connectionRef straight from

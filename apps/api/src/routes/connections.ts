@@ -84,6 +84,7 @@ import {
 } from "../integrations/google-drive";
 import {
   completeApiIntegrationProviderOAuth,
+  isApiIntegrationProviderOAuthState,
   startApiIntegrationProviderOAuth,
 } from "../integrations/provider-oauth";
 import {
@@ -932,15 +933,22 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get("/v1/integrations/oauth/callback", async (c) => {
     assertIntegrationsEnabled();
-    const result = await completeMcpOAuthCallback(
-      { db, settings, observability, oauthCallbackDeadlineMs: deps.oauthCallbackDeadlineMs },
-      {
-        code: c.req.query("code"),
-        state: c.req.query("state"),
-        requestUrl: c.req.url,
-      },
-    );
-    return c.redirect(result.redirectTo, 302);
+    const input = {
+      ...(c.req.query("code") ? { code: c.req.query("code") } : {}),
+      ...(c.req.query("state") ? { state: c.req.query("state") } : {}),
+      ...(c.req.query("error") ? { error: c.req.query("error") } : {}),
+      requestUrl: c.req.url,
+    };
+    const result = isApiIntegrationProviderOAuthState(input.state, deps.settings)
+      ? await completeApiIntegrationProviderOAuth(deps, input)
+      : await completeMcpOAuthCallback(
+          { db, settings, observability, oauthCallbackDeadlineMs: deps.oauthCallbackDeadlineMs },
+          input,
+        );
+    const redirectTo = settings.webBaseUrl
+      ? new URL(result.redirectTo, settings.webBaseUrl).toString()
+      : result.redirectTo;
+    return c.redirect(redirectTo, 302);
   });
 
   app.get("/v1/integrations/provider-oauth/callback", async (c) => {
