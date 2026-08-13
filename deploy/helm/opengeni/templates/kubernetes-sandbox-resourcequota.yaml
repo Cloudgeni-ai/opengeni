@@ -1,0 +1,13 @@
+{{- if and .Values.kubernetesSandbox.enabled .Values.kubernetesSandbox.resourceQuota.enabled }}
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: {{ include "opengeni.fullname" . }}-sandboxes
+  namespace: {{ include "opengeni.kubernetesSandboxNamespace" . }}
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: sandbox-quota
+spec:
+  hard:
+    {{- toYaml .Values.kubernetesSandbox.resourceQuota.hard | nindent 4 }}
+{{- end }}

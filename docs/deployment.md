@@ -1320,6 +1320,16 @@ Sandbox file mount support is also backend-specific:
 | --- | --- | --- | --- | --- |
 | Docker/local in-container sandboxes | rclone mount | rclone mount | signed download materialization | signed download materialization |
 | Modal | SDK cloud bucket mount | signed download materialization | signed download materialization | signed download materialization |
+| Kubernetes | signed download materialization | signed download materialization | signed download materialization | signed download materialization |
+
+For an in-cluster, provider-free execution path, see
+[`kubernetes-sandbox.md`](kubernetes-sandbox.md). The Helm chart can install the
+controller RBAC, dedicated namespace/workload identity, NetworkPolicy, quota,
+and explicit CPU/memory/ephemeral-storage settings; this is separate from the
+choice to deploy the OpenGeni control plane itself on Kubernetes. Managed
+multi-tenant deployments must select a real isolation boundary (`runtime-class`
+for AKS Kata/GKE gVisor, or `provider-managed` for an EKS Fargate profile); the
+application rejects an ordinary `standard` Pod configuration in managed mode.
 
 ## Terraform Registry MCP Docs
 

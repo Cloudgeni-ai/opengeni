@@ -296,6 +296,7 @@ import {
   resolveWorkspacePackRuntime,
   resolveWorkspaceSkillLibraryRuntime,
   settingsWithPackSandboxImage,
+  sandboxImageForBackend,
   settingsWithRigImage,
   settingsWithRigProviderImage,
 } from "./packs";
@@ -2135,6 +2136,15 @@ export function sandboxArtifactRuntimeAdmission(
     const localDevelopmentImage = /^opengeni-sandbox:local-[0-9a-f]{12}$/u.test(image);
     if (
       runSettings.dockerImage !== image ||
+      (!/@sha256:[0-9a-f]{64}$/u.test(image) && (production || !localDevelopmentImage))
+    ) {
+      return { available: false, environment: {} };
+    }
+  } else if (backend === "kubernetes") {
+    const image = deploymentSettings.kubernetesImage;
+    const localDevelopmentImage = /^opengeni-sandbox:local(?:-[0-9a-f]{12})?$/u.test(image);
+    if (
+      runSettings.kubernetesImage !== image ||
       (!/@sha256:[0-9a-f]{64}$/u.test(image) && (production || !localDevelopmentImage))
     ) {
       return { available: false, environment: {} };
@@ -6264,6 +6274,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // proxy's first default-pointer op. A chat-only turn never calls it, so
           // no lease row, no provider box, no warm-meter interval.
         } else {
+          const groupBoxImage = sandboxImageForBackend(runSettings, groupBoxBackend);
           resolvedSandbox = await waitForTurnOperation(
             resumeBoxForTurn(
               {
@@ -6286,18 +6297,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 backend: groupBoxBackend,
                 os: session.sandboxOs,
                 environment: sandboxEnvironment,
-                // IMAGE IS SHARED STATE (B3, Modal warm-box path only): the container image
-                // this run resolves. The lease stamps it + conflicts on a live shared box
+                // IMAGE IS SHARED STATE (B3): the provider image this run resolves.
+                // The lease stamps it + conflicts on a live shared box
                 // running a DIFFERENT image (solo → durable rotation; N-holders →
-                // SandboxImageConflictError surfaced as an actionable turn error). Prefer
-                // the explicit Modal image ref, else the docker image. The selfhosted branch
-                // (establishSelfhostedTurnSession) NEVER passes
-                // an image — B3 lives only on this Modal else-branch.
-                ...((runSettings.modalImageRef ?? runSettings.dockerImage)
-                  ? {
-                      image: runSettings.modalImageRef ?? runSettings.dockerImage,
-                    }
-                  : {}),
+                // SandboxImageConflictError surfaced as an actionable turn error).
+                // Selfhosted never carries an image.
+                ...(groupBoxImage ? { image: groupBoxImage } : {}),
                 // RIG IS SHARED STATE (M3): stamp the frozen rig version so the lease
                 // conflicts on a live shared box set up under a different rig (solo
                 // durable rotation / N-holders SandboxRigConflictError). Omitted for a
@@ -7047,6 +7052,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             const lazyCodemodeToken = sandboxCodemodeToken
               ? await mintSandboxCodemodeToken(runSettings, connectionScope, codemodeAuthority)
               : undefined;
+            const groupBoxImage = sandboxImageForBackend(runSettings, groupBoxBackend);
             const provisioned = await resumeBoxForTurn(
               {
                 db,
@@ -7064,11 +7070,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 backend: groupBoxBackend,
                 os: session.sandboxOs,
                 environment: sandboxEnvironment,
-                ...((runSettings.modalImageRef ?? runSettings.dockerImage)
-                  ? {
-                      image: runSettings.modalImageRef ?? runSettings.dockerImage,
-                    }
-                  : {}),
+                ...(groupBoxImage ? { image: groupBoxImage } : {}),
               },
               "turn",
               lazyHolderId,
@@ -11153,6 +11155,9 @@ export function requiresSignedFileResourceDownloads(
   // a regression from the pre-honest-label path where the same turn ran home=modal
   // and modal's descriptor forced signed downloads.
   if (activeSandboxBackend === "selfhosted") {
+    return true;
+  }
+  if (activeSandboxBackend === "kubernetes") {
     return true;
   }
   // A nativeBucketMount backend (modal) cannot mount Azure Blob entries, so it

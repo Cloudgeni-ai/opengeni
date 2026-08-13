@@ -93,8 +93,15 @@ RUN bun packages/artifact-tool/src/runtime-cli-entry.ts doctor --json
 
 FROM artifact-runtime-base AS api
 USER root
+ARG TARGETARCH
+ARG KUBECTL_VERSION=v1.36.3
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates ffmpeg git openssh-client \
+  && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg git openssh-client \
+  && curl -fsSLo /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl" \
+  && curl -fsSLo /tmp/kubectl.sha256 "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl.sha256" \
+  && echo "$(cat /tmp/kubectl.sha256)  /usr/local/bin/kubectl" | sha256sum --check \
+  && chmod 0755 /usr/local/bin/kubectl \
+  && rm -f /tmp/kubectl.sha256 \
   && rm -rf /var/lib/apt/lists/*
 USER bun
 RUN bun scripts/build-runtime-processes.ts api
@@ -112,11 +119,14 @@ EXPOSE 8000
 CMD ["bun", "apps/api/dist/process/index.js"]
 
 FROM source-base AS worker
-# The docker sandbox backend needs the Docker CLI to talk to the mounted host
+# The Docker sandbox backend needs the Docker CLI to talk to the mounted host
 # daemon socket. Interactive/cancellable commands use the Agents SDK's
 # host-side Python PTY bridge, so Python must live in this worker image rather
-# than only inside the sandbox. The daemon remains outside this image.
+# than only inside the sandbox. Kubernetes-backed turns and control-worker lease
+# maintenance use the pinned kubectl client. Both daemons remain outside this image.
 USER root
+ARG TARGETARCH
+ARG KUBECTL_VERSION=v1.36.3
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg git gnupg openssh-client python3 \
   && install -m 0755 -d /etc/apt/keyrings \
@@ -125,6 +135,11 @@ RUN apt-get update \
   && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list \
   && apt-get update \
   && apt-get install -y --no-install-recommends docker-ce-cli \
+  && curl -fsSLo /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl" \
+  && curl -fsSLo /tmp/kubectl.sha256 "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl.sha256" \
+  && echo "$(cat /tmp/kubectl.sha256)  /usr/local/bin/kubectl" | sha256sum --check \
+  && chmod 0755 /usr/local/bin/kubectl \
+  && rm -f /tmp/kubectl.sha256 \
   && /usr/bin/python3 -c 'import pty' \
   && rm -rf /var/lib/apt/lists/*
 ENV OPENAI_AGENTS_PYTHON=/usr/bin/python3

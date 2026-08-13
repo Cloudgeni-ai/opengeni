@@ -1,0 +1,24 @@
+config:
+  OPENGENI_SANDBOX_BACKEND: kubernetes
+  # A fully qualified reference avoids inheriting global.imageRegistry. Pin it
+  # by digest for production.
+  OPENGENI_KUBERNETES_IMAGE: ghcr.io/your-org/opengeni-sandbox@sha256:replace-with-a-real-digest
+
+kubernetesSandbox:
+  enabled: true
+  # For managed untrusted code, set a cloud-supported sandboxed runtime here.
+  # The empty value is useful for local lifecycle testing, not as a hostile
+  # multi-tenant boundary.
+  runtimeClassName: ""
+  nodeSelector: {}
+  tolerations: []
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+      ephemeralStorage: 1Gi
+    limits:
+      cpu: "2"
+      memory: 4Gi
+      ephemeralStorage: 20Gi
+  workspaceSizeLimit: 10Gi

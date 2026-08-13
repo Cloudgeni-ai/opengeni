@@ -1,0 +1,12 @@
+{{- if and .Values.kubernetesSandbox.enabled .Values.kubernetesSandbox.namespaceCreate }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ include "opengeni.kubernetesSandboxNamespace" . }}
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: sandbox-namespace
+    {{- with .Values.kubernetesSandbox.namespaceLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

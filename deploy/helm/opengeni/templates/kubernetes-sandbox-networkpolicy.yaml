@@ -1,0 +1,71 @@
+{{- if and .Values.kubernetesSandbox.enabled .Values.kubernetesSandbox.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "opengeni.fullname" . }}-sandboxes
+  namespace: {{ include "opengeni.kubernetesSandboxNamespace" . }}
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: sandbox-network-policy
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: opengeni-sandbox
+      opengeni.ai/managed: "true"
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ include "opengeni.name" . }}
+              app.kubernetes.io/instance: {{ .Release.Name }}
+            matchExpressions:
+              - key: app.kubernetes.io/component
+                operator: In
+                values:
+                  - api
+                  - minio
+      ports:
+        - protocol: TCP
+          port: {{ .Values.api.containerPort }}
+        - protocol: TCP
+          port: {{ .Values.minio.service.apiPort }}
+    {{- if .Values.kubernetesSandbox.networkPolicy.allowPublicInternet }}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 0.0.0.0/8
+              - 10.0.0.0/8
+              - 100.64.0.0/10
+              - 127.0.0.0/8
+              - 169.254.0.0/16
+              - 172.16.0.0/12
+              - 192.0.0.0/24
+              - 192.168.0.0/16
+              - 198.18.0.0/15
+              - 224.0.0.0/4
+              - 240.0.0.0/4
+    {{- end }}
+    {{- with .Values.kubernetesSandbox.networkPolicy.extraEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

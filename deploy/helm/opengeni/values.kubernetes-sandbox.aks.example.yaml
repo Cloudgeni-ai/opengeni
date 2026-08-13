@@ -1,0 +1,17 @@
+config:
+  OPENGENI_SANDBOX_BACKEND: kubernetes
+  OPENGENI_KUBERNETES_IMAGE: your-registry.azurecr.io/opengeni-sandbox@sha256:replace-me
+
+kubernetesSandbox:
+  enabled: true
+  namespace: opengeni-sandboxes
+  # AKS Pod Sandboxing uses Kata Containers and a VM boundary per Pod.
+  isolationMode: runtime-class
+  runtimeClassName: kata-vm-isolation
+  nodeSelector:
+    agentpool: sandbox
+  tolerations:
+    - key: opengeni.ai/sandbox
+      operator: Equal
+      value: "true"
+      effect: NoSchedule

@@ -32,7 +32,7 @@ spec:
         {{- end }}
     spec:
       serviceAccountName: {{ include "opengeni.serviceAccountName" . }}
-      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      automountServiceAccountToken: {{ or .Values.serviceAccount.automountServiceAccountToken .Values.kubernetesSandbox.enabled }}
       terminationGracePeriodSeconds: {{ .Values.api.terminationGracePeriodSeconds }}
       {{- if $priorityClassName }}
       priorityClassName: {{ $priorityClassName | quote }}

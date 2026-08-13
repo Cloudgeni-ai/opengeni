@@ -1218,8 +1218,8 @@ export async function resumeBoxForTurn(
       });
       createdEstablished = established;
       throwIfReleasedOrCancelled();
-      // A sandbox handle is not sufficient evidence that Modal's command router
-      // is live. Do not publish a warm lease until one bounded no-op exec works.
+      // A sandbox handle is not sufficient evidence that the provider's command
+      // plane is live. Do not publish a warm lease until one bounded no-op exec works.
       // On timeout the catch below terminates the box and rolls warming -> cold,
       // so the next turn cold-creates instead of hanging forever on first use.
       await waitForSandboxExecReadiness(established, MODAL_EXEC_READINESS_TIMEOUT_MS, {

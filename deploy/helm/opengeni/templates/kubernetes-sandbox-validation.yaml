@@ -1,0 +1,25 @@
+{{- if .Values.kubernetesSandbox.enabled }}
+{{- $backend := get .Values.config "OPENGENI_SANDBOX_BACKEND" | default "" }}
+{{- $productMode := get .Values.config "OPENGENI_PRODUCT_ACCESS_MODE" | default "local" }}
+{{- $isolationMode := get .Values.config "OPENGENI_KUBERNETES_ISOLATION_MODE" | default .Values.kubernetesSandbox.isolationMode }}
+{{- $runtimeClass := get .Values.config "OPENGENI_KUBERNETES_RUNTIME_CLASS" | default .Values.kubernetesSandbox.runtimeClassName }}
+{{- $automount := get .Values.config "OPENGENI_KUBERNETES_AUTOMOUNT_SERVICE_ACCOUNT_TOKEN" | default .Values.kubernetesSandbox.automountServiceAccountToken }}
+{{- if ne $backend "kubernetes" }}
+{{- fail "kubernetesSandbox.enabled=true requires config.OPENGENI_SANDBOX_BACKEND=kubernetes" }}
+{{- end }}
+{{- if and (not .Values.kubernetesSandbox.workloadServiceAccount.create) (not .Values.kubernetesSandbox.workloadServiceAccount.name) }}
+{{- fail "kubernetesSandbox.workloadServiceAccount.name is required when create=false" }}
+{{- end }}
+{{- if and (eq $isolationMode "runtime-class") (not $runtimeClass) }}
+{{- fail "kubernetesSandbox isolationMode=runtime-class requires runtimeClassName" }}
+{{- end }}
+{{- if and (eq $isolationMode "provider-managed") $runtimeClass }}
+{{- fail "kubernetesSandbox provider-managed isolation must not set runtimeClassName" }}
+{{- end }}
+{{- if and (eq $productMode "managed") (eq $isolationMode "standard") }}
+{{- fail "managed product mode requires kubernetesSandbox.isolationMode=runtime-class or provider-managed" }}
+{{- end }}
+{{- if and (eq $productMode "managed") (eq (printf "%v" $automount) "true") }}
+{{- fail "managed Kubernetes sandboxes cannot automount a Kubernetes API token" }}
+{{- end }}
+{{- end }}

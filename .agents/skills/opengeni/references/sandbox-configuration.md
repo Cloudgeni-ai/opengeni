@@ -40,7 +40,7 @@ Separate sandbox configuration into these independent questions:
 
 ## Backend Selection
 
-Find the current backend enum (`SandboxBackend`) in `packages/contracts/src/index.ts`. Do not describe it as only Docker/Modal/local/none — the shipped enum is broader. As of this writing it has eleven members, added additively at the end (a contracts/SDK/deployment parity test pins their order): the original four (`docker`, `modal`, `local`, `none`), then six cloud backends (`daytona`, `runloop`, `e2b`, `blaxel`, `cloudflare`, `vercel`), then `selfhosted` (bring-your-own-compute — a user's own machine enrolled as a first-class sandbox; see the Connected Machine section below). Each backend is treated as an OpenAI Agents SDK sandbox client, and static per-backend metadata (tier, OS support, capabilities, lifetime, snapshot, workspace root, port exposure) lives in the `CAPABILITY_DESCRIPTORS` table in the same contracts file, so downstream code branches on that data, never a hard-coded backend name.
+Find the current backend enum (`SandboxBackend`) in `packages/contracts/src/index.ts`. Do not describe it as only Docker/Modal/local/none — the shipped enum is broader. As of this writing it has twelve members, added additively at the end (a contracts/SDK/deployment parity test pins their order): the original four (`docker`, `modal`, `local`, `none`), six cloud backends (`daytona`, `runloop`, `e2b`, `blaxel`, `cloudflare`, `vercel`), `selfhosted` (bring-your-own-compute — a user's own machine enrolled as a first-class sandbox), and `kubernetes` (one operator-owned headless Pod per durable sandbox lease). Each backend is treated as an OpenAI Agents SDK sandbox client, and static per-backend metadata (tier, OS support, capabilities, lifetime, snapshot, workspace root, port exposure) lives in the `CAPABILITY_DESCRIPTORS` table in the same contracts file, so downstream code branches on that data, never a hard-coded backend name.
 
 Typical meanings of the original four:
 
@@ -101,6 +101,22 @@ holding `REGISTRY_USERNAME` + `REGISTRY_PASSWORD`. The worker resolves that Secr
 byte-identical to the public path. Resume/attach turns never pull the image, so they are
 unaffected either way.
 
+## Kubernetes Sandbox Setup
+
+The `kubernetes` backend creates one headless Pod per durable sandbox lease and
+uses the ordinary verified tar archive path for `/workspace` recovery. It does
+not use an external provider URL or API key. In-cluster workers authenticate
+with narrow Pod/exec RBAC; out-of-cluster workers may set an absolute kubeconfig
+and optional context. CPU/memory/ephemeral-storage requests and limits are
+explicit, `/workspace` is a bounded `emptyDir`, and sandbox Pods do not
+automount a Kubernetes API token by default. RuntimeClass, node selectors, and
+tolerations support AKS Kata and GKE gVisor, while provider-managed mode covers
+an external boundary such as EKS Fargate. Managed product mode rejects ordinary
+`standard` Pod isolation. The initial backend does not expose desktop,
+interactive PTY, or provider-tunnel ports. Canonical
+operator documentation is `docs/kubernetes-sandbox.md`; implementation is
+`packages/runtime/src/sandbox/kubernetes.ts` plus the provider registration.
+
 ## Local And None
 
 `local` is a developer convenience and should be described as using the local machine as the execution environment. It is not the same isolation story as a container or remote sandbox.
@@ -109,11 +125,11 @@ unaffected either way.
 
 ## Connected Machine (`selfhosted`)
 
-The `selfhosted` backend is a **Connected Machine**: a user's own machine, enrolled through the `agent/` Rust agent, that acts as a first-class *primary* compute target rather than a backend overlay on the managed sandbox. The machine itself is the box — OpenGeni cannot snapshot the user's disk, so the descriptor is `persistable:false` and there is no cold re-create; "resume" means the enrolled agent's live subject is reachable. The whole feature is gated by `OPENGENI_SANDBOX_SELFHOSTED_ENABLED` (`sandboxSelfhostedEnabled` in config, default off); with it off the machines/enrollment routes 404 and the enum value is effectively unreachable.
+The `selfhosted` backend is a **Connected Machine**: a user's own machine, enrolled through the `agent/` Rust agent, that acts as a first-class _primary_ compute target rather than a backend overlay on the managed sandbox. The machine itself is the box — OpenGeni cannot snapshot the user's disk, so the descriptor is `persistable:false` and there is no cold re-create; "resume" means the enrolled agent's live subject is reachable. The whole feature is gated by `OPENGENI_SANDBOX_SELFHOSTED_ENABLED` (`sandboxSelfhostedEnabled` in config, default off); with it off the machines/enrollment routes 404 and the enum value is effectively unreachable.
 
 A machine-targeted turn is materially different from a cloud turn. The effective compute backend is resolved once at turn start (`resolveActiveSandboxBackend`); when it is `selfhosted`, the `machinePrimary` branch in `apps/worker/src/activities/agent-turn.ts` takes over:
 
-- **No phantom cloud box.** The worker establishes a `SelfhostedSession` directly (`establishSelfhostedTurnSession`) and does NOT call `resumeBoxForTurn` — no Modal box is created, leased, or billed. The warm-seconds meter keys off the *effective* backend, so a machine accrues zero cloud warm-time (`selfhosted` has no configured warm rate).
+- **No phantom cloud box.** The worker establishes a `SelfhostedSession` directly (`establishSelfhostedTurnSession`) and does NOT call `resumeBoxForTurn` — no Modal box is created, leased, or billed. The warm-seconds meter keys off the _effective_ backend, so a machine accrues zero cloud warm-time (`selfhosted` has no configured warm rate).
 - **No OpenGeni-minted token on the machine.** `sandboxEnvironmentForRun` is called with `skipGitHubToken` for a selfhosted-effective turn (`apps/worker/src/activities/environment.ts`), so the platform mints no GitHub App installation token and injects no git auth env. The machine uses its OWN git credentials. The token also never structurally crosses the wire — selfhosted exec does not forward the run environment onto the machine.
 - **No repo clone onto the machine.** `repositoryUsesSandboxClone` (`packages/runtime/src/index.ts`) returns false for a selfhosted effective backend, so the repository-clone lifecycle hook is skipped. A connected machine already owns its filesystem, and the clone hook would otherwise write onto the user's real disk — so the platform must never `git clone` there.
 - **Per-session working directory, not `/workspace`.** The machine runs the session under `sessions.working_dir` (added by migration `0027_session_working_dir.sql`). `packages/runtime/src/sandbox/selfhosted/session.ts` keeps a virtual `/workspace` root purely for manifest/root-delta parity with the cloud path, then `toMachinePath` re-anchors that virtual frame onto the chosen host path. An empty/NULL `workingDir` (the default) is a byte-identical no-op that resolves to the agent's launch workspace root.

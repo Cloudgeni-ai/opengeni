@@ -40,6 +40,7 @@ const CREDS: Record<SandboxBackendType, Record<string, unknown>> = {
   // selfhosted needs no per-box creds (the user's own machine over the agent's
   // enrollment) — validateCredentials is a no-op.
   selfhosted: {},
+  kubernetes: {},
 };
 
 describe("provider registry — descriptor invariants + backendId assertion", () => {
@@ -52,7 +53,7 @@ describe("provider registry — descriptor invariants + backendId assertion", ()
     expect(() => assertProviderRegistryInvariants()).not.toThrow();
   });
 
-  test("registry covers exactly the 11 backends, each self-consistent", () => {
+  test("registry covers every backend, each self-consistent", () => {
     expect(Object.keys(PROVIDER_REGISTRY).sort()).toEqual([...SandboxBackend.options].sort());
     for (const backend of SandboxBackend.options) {
       const reg = PROVIDER_REGISTRY[backend];
@@ -127,6 +128,11 @@ describe("provider registry — descriptor invariants + backendId assertion", ()
         liveInstance: "preserved",
       });
     }
+    expect(providerWorkspaceCapturePolicy("kubernetes", {})).toEqual({
+      takeover: "parallel_read",
+      strategy: "portable_tar",
+      liveInstance: "preserved",
+    });
     expect(providerWorkspaceCapturePolicy("none", {})).toBeNull();
     expect(providerWorkspaceCapturePolicy("selfhosted", {})).toBeNull();
     expect(providerWorkspaceCapturePolicy("unknown", {})).toBeNull();

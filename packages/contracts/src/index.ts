@@ -146,7 +146,7 @@ export const SessionStatus = z.enum([
 ]);
 export type SessionStatus = z.infer<typeof SessionStatus>;
 
-// 11 backends; 3-way enum parity (contracts / sdk / deployment) is pinned by
+// 12 backends; 3-way enum parity (contracts / sdk / deployment) is pinned by
 // `packages/sdk/test/contract-parity.test.ts`. Every member is ADDITIVE AT THE
 // END (the parity test pins positions): the original four, then the six cloud
 // backends, then `selfhosted` (bring-your-own-compute — a user's own machine
@@ -163,6 +163,7 @@ export const SandboxBackend = z.enum([
   "cloudflare",
   "vercel",
   "selfhosted",
+  "kubernetes",
 ]);
 export type SandboxBackend = z.infer<typeof SandboxBackend>;
 
@@ -188,6 +189,7 @@ export const SANDBOX_PROVIDER_INSTANCE_ID_FIELDS_BY_BACKEND = {
   cloudflare: ["sandboxId"],
   vercel: ["sandboxId"],
   selfhosted: ["agentId"],
+  kubernetes: ["podUid"],
 } as const satisfies Record<SandboxBackend, readonly string[]>;
 export const LEGACY_SANDBOX_PROVIDER_INSTANCE_ID_FIELDS = [
   "sandboxId",
@@ -197,6 +199,7 @@ export const LEGACY_SANDBOX_PROVIDER_INSTANCE_ID_FIELDS = [
   "containerId",
   "workspaceRootPath",
   "agentId",
+  "podUid",
 ] as const;
 
 /**
@@ -287,7 +290,7 @@ export const TERMINAL_STREAM_PORT = 7681;
 export const BROWSER_CONTROL_PORT = 7682;
 
 // The provider capability matrix (sandbox contract PART D + module 03-providers). One row per
-// backend (10 rows). v1 reachable cells are all Linux; macos/windows are seam
+// backend (12 rows). v1 reachable cells are all Linux; macos/windows are seam
 // placeholders (no enum members shipped). Reading rule: a capability cell is
 // `available:false` + a reason in the negotiated doc, never absent.
 export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor> = {
@@ -590,6 +593,31 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     workspaceRoot: "/", // agent-reported machine root (the whole machine is the sandbox)
     nativeBucketMount: false,
     persistable: false,
+    supportsRunAs: false,
+  },
+  kubernetes: {
+    backend: "kubernetes",
+    backendId: "kubernetes",
+    tier: "headless",
+    os: { supported: ["linux"], default: "linux" },
+    capabilities: {
+      FileSystem: { available: true, readOnly: false },
+      Terminal: { available: true, transport: "sse-events", pty: false },
+      Git: { available: true },
+      DesktopStream: { available: false, transport: null },
+      Recording: { available: false },
+    },
+    lifetime: {
+      requiresSnapshotRollover: false,
+      hasIdleKiller: false,
+      supportsSuspendResume: false,
+      resumeIsLockFree: true,
+    },
+    snapshot: { kind: "tar-only", hasTarFallback: true },
+    portExposure: { kind: "none", supportsOnDemandPorts: false },
+    workspaceRoot: "/workspace",
+    nativeBucketMount: false,
+    persistable: true,
     supportsRunAs: false,
   },
 };

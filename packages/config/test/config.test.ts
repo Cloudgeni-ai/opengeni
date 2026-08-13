@@ -1375,6 +1375,123 @@ describe("backend-gated sandbox required-credential validation", () => {
     }
   });
 
+  test("kubernetes uses explicit resources and needs no external provider credential", () => {
+    const settings = withEnv({ OPENGENI_SANDBOX_BACKEND: "kubernetes" }, () => getSettings());
+    expect(settings.kubernetesImage).toBe("opengeni-sandbox:local");
+    expect(settings.kubernetesCpuRequest).toBe("250m");
+    expect(settings.kubernetesCpuLimit).toBe("2");
+    expect(settings.kubernetesMemoryRequest).toBe("512Mi");
+    expect(settings.kubernetesMemoryLimit).toBe("4Gi");
+    expect(settings.kubernetesEphemeralStorageRequest).toBe("1Gi");
+    expect(settings.kubernetesEphemeralStorageLimit).toBe("20Gi");
+    expect(settings.kubernetesWorkspaceSizeLimit).toBe("10Gi");
+    expect(settings.kubernetesNodeSelectorJson).toBe("{}");
+    expect(settings.kubernetesTolerationsJson).toBe("[]");
+    expect(settings.kubernetesAutomountServiceAccountToken).toBe(false);
+    expect(settings.kubernetesIsolationMode).toBe("standard");
+    expect(requiredSandboxEnvForBackend("kubernetes")).toEqual([]);
+  });
+
+  test("managed Kubernetes sandboxes require an explicit non-standard isolation boundary", () => {
+    const managedKubernetes = {
+      OPENGENI_SANDBOX_BACKEND: "kubernetes",
+      OPENGENI_PRODUCT_ACCESS_MODE: "managed",
+      OPENGENI_PUBLIC_BASE_URL: "https://managed.example.test",
+      OPENGENI_BETTER_AUTH_SECRET: "managed-better-auth-secret",
+      OPENGENI_DELEGATION_SECRET: "managed-delegation-secret",
+    };
+    expect(() => withEnv(managedKubernetes, () => getSettings())).toThrow(
+      "Managed Kubernetes sandboxes require OPENGENI_KUBERNETES_ISOLATION_MODE=runtime-class or provider-managed",
+    );
+    expect(
+      withEnv(
+        {
+          ...managedKubernetes,
+          OPENGENI_KUBERNETES_ISOLATION_MODE: "runtime-class",
+          OPENGENI_KUBERNETES_RUNTIME_CLASS: "kata-vm-isolation",
+        },
+        () => getSettings(),
+      ).kubernetesIsolationMode,
+    ).toBe("runtime-class");
+    expect(
+      withEnv(
+        {
+          ...managedKubernetes,
+          OPENGENI_KUBERNETES_ISOLATION_MODE: "provider-managed",
+        },
+        () => getSettings(),
+      ).kubernetesIsolationMode,
+    ).toBe("provider-managed");
+    expect(() =>
+      withEnv(
+        {
+          ...managedKubernetes,
+          OPENGENI_KUBERNETES_ISOLATION_MODE: "runtime-class",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow("OPENGENI_KUBERNETES_RUNTIME_CLASS is required");
+    expect(() =>
+      withEnv(
+        {
+          ...managedKubernetes,
+          OPENGENI_KUBERNETES_ISOLATION_MODE: "provider-managed",
+          OPENGENI_KUBERNETES_AUTOMOUNT_SERVICE_ACCOUNT_TOKEN: "true",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow("Managed Kubernetes sandboxes cannot automount");
+  });
+
+  test("kubernetes rejects malformed or inverted resource bounds", () => {
+    expect(() =>
+      withEnv({ OPENGENI_KUBERNETES_CPU_REQUEST: "banana" }, () => getSettings()),
+    ).toThrow();
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_KUBERNETES_CPU_REQUEST: "3",
+          OPENGENI_KUBERNETES_CPU_LIMIT: "2",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow("OPENGENI_KUBERNETES_CPU_REQUEST must not exceed OPENGENI_KUBERNETES_CPU_LIMIT");
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_KUBERNETES_MEMORY_REQUEST: "8Gi",
+          OPENGENI_KUBERNETES_MEMORY_LIMIT: "4Gi",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow(
+      "OPENGENI_KUBERNETES_MEMORY_REQUEST must not exceed OPENGENI_KUBERNETES_MEMORY_LIMIT",
+    );
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_KUBERNETES_EPHEMERAL_STORAGE_REQUEST: "21Gi",
+          OPENGENI_KUBERNETES_EPHEMERAL_STORAGE_LIMIT: "20Gi",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow(
+      "OPENGENI_KUBERNETES_EPHEMERAL_STORAGE_REQUEST must not exceed OPENGENI_KUBERNETES_EPHEMERAL_STORAGE_LIMIT",
+    );
+    expect(() =>
+      withEnv({ OPENGENI_KUBERNETES_NODE_SELECTOR_JSON: "[]" }, () => getSettings()),
+    ).toThrow("OPENGENI_KUBERNETES_NODE_SELECTOR_JSON");
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_KUBERNETES_TOLERATIONS_JSON:
+            '[{"operator":"Exists","value":"must-not-be-present"}]',
+        },
+        () => getSettings(),
+      ),
+    ).toThrow("OPENGENI_KUBERNETES_TOLERATIONS_JSON");
+  });
+
   test("modal requires the token only when sandboxBackend=modal", () => {
     // Backend=modal WITHOUT the token → fails (gated).
     expect(() => withEnv({ OPENGENI_SANDBOX_BACKEND: "modal" }, () => getSettings())).toThrow(

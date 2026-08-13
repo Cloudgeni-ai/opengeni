@@ -9,6 +9,7 @@ const RUN_STATE_SANDBOX_PROVIDERS = new Set([
   "none",
   "runloop",
   "selfhosted",
+  "kubernetes",
   "vercel",
 ]);
 

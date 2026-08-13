@@ -15,6 +15,71 @@ serviceAccount:
   annotations: {}
   automountServiceAccountToken: false
 
+# First-party in-cluster sandbox Pods. Enable this together with
+# config.OPENGENI_SANDBOX_BACKEND=kubernetes. The API, control worker, and turn
+# worker receive a Kubernetes API token and the narrow Pod/exec Role below;
+# sandbox Pods receive no API token unless automountServiceAccountToken is
+# explicitly enabled.
+kubernetesSandbox:
+  enabled: false
+  # Empty creates/uses <release fullname>-sandboxes. Keeping untrusted code in
+  # a separate namespace makes RBAC, policy, quota, and cloud scheduling
+  # boundaries explicit.
+  namespace: ""
+  namespaceCreate: true
+  namespaceLabels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: baseline
+    pod-security.kubernetes.io/warn: baseline
+  rbac:
+    create: true
+  image:
+    repository: opengeni-sandbox
+    tag: local
+    digest: ""
+    pullPolicy: IfNotPresent
+  workloadServiceAccount:
+    create: true
+    name: ""
+    annotations: {}
+    imagePullSecrets: []
+  automountServiceAccountToken: false
+  # standard | runtime-class | provider-managed. The application rejects
+  # standard when OPENGENI_PRODUCT_ACCESS_MODE=managed.
+  isolationMode: standard
+  runtimeClassName: ""
+  priorityClassName: ""
+  nodeSelector: {}
+  tolerations: []
+  startupTimeoutSeconds: 120
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+      ephemeralStorage: 1Gi
+    limits:
+      cpu: "2"
+      memory: 4Gi
+      ephemeralStorage: 20Gi
+  workspaceSizeLimit: 10Gi
+  networkPolicy:
+    enabled: true
+    # Public egress excludes private, loopback, link-local/metadata, carrier
+    # grade NAT, multicast, and reserved IPv4 ranges. DNS and the release's API
+    # and object-store pods are allowed separately.
+    allowPublicInternet: true
+    extraEgress: []
+  resourceQuota:
+    enabled: true
+    hard:
+      pods: "100"
+      requests.cpu: "25"
+      requests.memory: 50Gi
+      requests.ephemeral-storage: 500Gi
+      limits.cpu: "200"
+      limits.memory: 400Gi
+      limits.ephemeral-storage: 2Ti
+
 # Optional release-local Pod priority tiers. They do not reserve or cap CPU or
 # memory. They tell the kubelet which OpenGeni roles to evict first when the
 # node is under pressure. `Never` keeps priority from preempting a running pod
@@ -1033,8 +1098,8 @@ nats:
 selfhosted:
   enabled: false
   # The public wss URLs the agent dials (must match the ingress hosts below).
-  natsUrl: ""   # e.g. wss://nats.opengeni.ai
-  relayUrl: ""  # e.g. wss://relay.opengeni.ai
+  natsUrl: "" # e.g. wss://nats.opengeni.ai
+  relayUrl: "" # e.g. wss://relay.opengeni.ai
   # The NATS callout account + user NAMES the control plane uses (must match the
   # nats.authCallout block). Non-secret; the seeds/passwords are in the secret.
   natsCalloutAccountName: APP

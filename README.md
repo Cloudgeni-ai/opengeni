@@ -19,7 +19,7 @@ Most agent products give you some of these; OpenGeni's premise is that organizat
 - **Self-host everything, Apache-2.0 all the way down.** The control plane, sessions API, web app, and deployment artifacts (Helm chart, reference Terraform for Azure/AWS/GCP) are open source. The durable record is a Postgres database you operate.
 - **Durable, replayable sessions as an API.** Every event lands in a Postgres event log; live streams over SSE backfill from it, so a browser reload, a new client, or an audit replays the same history.
 - **Your hardware as a first-class target.** Connected Machines run sessions on computers you enroll, with dial-out-only networking, no platform-minted credentials on your machines, loud consent-based enrollment, and one-click revocation. Off by default until an operator enables it.
-- **Governance built in, not bolted on.** Human approvals gate tool use, agents can pause durably for structured answers, credentials are brokered per session, and agent memory is a reviewed resource — agents *propose* memories, and a human or your API approves them before they become retrieval context.
+- **Governance built in, not bolted on.** Human approvals gate tool use, agents can pause durably for structured answers, credentials are brokered per session, and agent memory is a reviewed resource — agents _propose_ memories, and a human or your API approves them before they become retrieval context.
 
 ## What It Does
 
@@ -79,7 +79,7 @@ flowchart LR
     NATS["NATS Core<br/>live fanout"]
     Control["NATS control plane<br/>machine exec/RPC"]
     Relay["Stream relay<br/>pty/desktop frames"]
-    Sandbox["Managed sandbox<br/>Docker, Modal, cloud, or none"]
+    Sandbox["Managed sandbox<br/>Kubernetes, Docker, Modal, cloud, or none"]
   end
 
   Machine["Connected Machine<br/>your enrolled computer"]
@@ -232,6 +232,15 @@ rollback compatibility. The registry Secret lookup uses the configured `OPENGENI
 `OPENGENI_MODAL_TOKEN_SECRET` client, so embedded hosts do not need to also set
 standard `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` env vars or provide a
 `~/.modal.toml` profile.
+
+For self-hosted clusters, `OPENGENI_SANDBOX_BACKEND=kubernetes` provisions one
+headless sandbox Pod per durable lease without an external sandbox provider.
+The Helm chart supplies narrow turn-worker RBAC and explicit Pod CPU/memory
+and ephemeral-storage settings, a dedicated namespace, NetworkPolicy, and
+quota; sandbox Pods receive no Kubernetes API token by default. Managed mode
+requires explicit Kata/gVisor/provider-managed isolation rather than ordinary
+`runc` Pods. See
+[`docs/kubernetes-sandbox.md`](docs/kubernetes-sandbox.md).
 
 ## Deployment
 

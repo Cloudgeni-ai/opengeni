@@ -81,6 +81,7 @@
     "check:observability-render": "bun scripts/check-observability-render.ts",
     "image:build:api": "docker build --platform ${OPENGENI_IMAGE_PLATFORM:-linux/amd64} -f docker/opengeni.Dockerfile --target api -t opengeni-api:local .",
     "image:build:worker": "docker build --platform ${OPENGENI_IMAGE_PLATFORM:-linux/amd64} -f docker/opengeni.Dockerfile --target worker -t opengeni-worker:local .",
+    "sandbox:benchmark:kubernetes": "bun scripts/benchmark-kubernetes-sandbox.ts",
     "image:build:web": "docker build --platform ${OPENGENI_IMAGE_PLATFORM:-linux/amd64} -f docker/opengeni.Dockerfile --target web -t opengeni-web:local .",
     "build": "bun run build:packages && cd apps/api && bun run build && cd ../worker && bun run build && cd ../web && bun run build && cd ../.. && bun run build:runtime-processes",
     "build:packages": "bun scripts/build-publishable-packages.ts",

@@ -361,13 +361,14 @@ describe("SDK / contracts parity", () => {
       "cloudflare",
       "vercel",
       "selfhosted",
+      "kubernetes",
     ];
     const contracts = [...ContractSandboxBackend.options].sort();
     const deployment = [...DeploymentSandboxBackend.options].sort();
     const sdk = [...sdkBackends].sort();
     expect(contracts).toEqual(deployment);
     expect(contracts).toEqual(sdk);
-    expect(contracts).toHaveLength(11);
+    expect(contracts).toHaveLength(12);
   });
 
   test("contract-parsed payloads are assignable to SDK types (compile-time)", () => {

@@ -1,0 +1,11 @@
+config:
+  OPENGENI_SANDBOX_BACKEND: kubernetes
+  OPENGENI_KUBERNETES_IMAGE: europe-docker.pkg.dev/your-project/opengeni/opengeni-sandbox@sha256:replace-me
+
+kubernetesSandbox:
+  enabled: true
+  namespace: opengeni-sandboxes
+  # GKE Sandbox applies its required gVisor node affinity and toleration when
+  # this RuntimeClass is selected.
+  isolationMode: runtime-class
+  runtimeClassName: gvisor

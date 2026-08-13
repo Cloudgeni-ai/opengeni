@@ -60,6 +60,7 @@ import type { Context } from "@temporalio/activity";
 import type { ControlActivityServices } from "./types";
 import {
   rigProviderImageSourceImage,
+  sandboxImageForBackend,
   settingsWithPackSandboxImage,
   settingsWithRigImage,
 } from "./sandbox-images";
@@ -501,7 +502,7 @@ export async function runWithOwnedRigVerificationSandbox<T>(
       holderId,
       subjectId: null,
       backend: input.settings.sandboxBackend,
-      image: input.settings.modalImageRef ?? input.settings.dockerImage,
+      image: sandboxImageForBackend(input.settings, input.settings.sandboxBackend),
       rigVersionId: input.rigVersionId,
       leaseTtlMs: RIG_VERIFICATION_OWNER_TTL_MS,
       warmingLeaseTtlMs: RIG_VERIFICATION_OWNER_TTL_MS,

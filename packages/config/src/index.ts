@@ -195,6 +195,28 @@ export const McpServerConnectionRefSchema = z
   });
 export type McpServerConnectionRef = z.infer<typeof McpServerConnectionRefSchema>;
 
+const KubernetesNodeSelectorSchema = z.record(z.string().min(1).max(253), z.string().max(63));
+const KubernetesTolerationSchema = z
+  .object({
+    key: z.string().min(1).max(253).optional(),
+    operator: z.enum(["Exists", "Equal"]).optional(),
+    value: z.string().max(63).optional(),
+    effect: z.enum(["NoSchedule", "PreferNoSchedule", "NoExecute"]).optional(),
+    tolerationSeconds: z.number().int().nonnegative().optional(),
+  })
+  .strict()
+  .superRefine((toleration, context) => {
+    if ((toleration.operator ?? "Equal") === "Exists" && toleration.value !== undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["value"],
+        message: "value must be omitted when operator is Exists",
+      });
+    }
+  });
+const KubernetesTolerationsSchema = z.array(KubernetesTolerationSchema).max(32);
+export type KubernetesToleration = z.infer<typeof KubernetesTolerationSchema>;
+
 const SettingsSchema = z.object({
   serviceName: z.string().default("opengeni"),
   environment: z.string().default("local"),
@@ -599,6 +621,57 @@ const SettingsSchema = z.object({
   // sides. The Agents SDK materializes the workspace here before bind-mounting it
   // into the sandbox container.
   dockerWorkspaceBaseDir: z.string().min(1).optional(),
+  // First-party Kubernetes sandbox backend. The worker creates one Pod per
+  // sandbox and addresses it by immutable Pod UID. In-cluster auth uses the
+  // turn worker's projected service-account token; kubeconfig/context are for
+  // local or externally hosted workers.
+  kubernetesImage: z.string().min(1).default("opengeni-sandbox:local"),
+  kubernetesNamespace: z.string().min(1).optional(),
+  kubernetesKubeconfig: z.string().min(1).optional(),
+  kubernetesContext: z.string().min(1).optional(),
+  kubernetesKubectlPath: z.string().min(1).default("kubectl"),
+  kubernetesImagePullPolicy: z.enum(["Always", "IfNotPresent", "Never"]).default("IfNotPresent"),
+  kubernetesServiceAccount: z.string().min(1).optional(),
+  kubernetesAutomountServiceAccountToken: EnvBoolean.default(false),
+  // `standard` is portable lifecycle execution only. Managed multi-tenant
+  // deployments must explicitly select a runtime-class VM/userspace boundary
+  // or provider-managed isolation such as EKS Fargate.
+  kubernetesIsolationMode: z
+    .enum(["standard", "runtime-class", "provider-managed"])
+    .default("standard"),
+  kubernetesRuntimeClass: z.string().min(1).optional(),
+  kubernetesPriorityClass: z.string().min(1).optional(),
+  kubernetesNodeSelectorJson: z.string().default("{}"),
+  kubernetesTolerationsJson: z.string().default("[]"),
+  kubernetesStartupTimeoutSeconds: z.coerce.number().int().positive().max(1_800).default(120),
+  kubernetesCpuRequest: z
+    .string()
+    .regex(/^(?:[1-9]\d*(?:\.\d+)?|0\.\d+|[1-9]\d*m)$/u)
+    .default("250m"),
+  kubernetesCpuLimit: z
+    .string()
+    .regex(/^(?:[1-9]\d*(?:\.\d+)?|0\.\d+|[1-9]\d*m)$/u)
+    .default("2"),
+  kubernetesMemoryRequest: z
+    .string()
+    .regex(/^[1-9]\d*(?:Ki|Mi|Gi|Ti)$/u)
+    .default("512Mi"),
+  kubernetesMemoryLimit: z
+    .string()
+    .regex(/^[1-9]\d*(?:Ki|Mi|Gi|Ti)$/u)
+    .default("4Gi"),
+  kubernetesEphemeralStorageRequest: z
+    .string()
+    .regex(/^[1-9]\d*(?:Ki|Mi|Gi|Ti)$/u)
+    .default("1Gi"),
+  kubernetesEphemeralStorageLimit: z
+    .string()
+    .regex(/^[1-9]\d*(?:Ki|Mi|Gi|Ti)$/u)
+    .default("20Gi"),
+  kubernetesWorkspaceSizeLimit: z
+    .string()
+    .regex(/^[1-9]\d*(?:Ki|Mi|Gi|Ti)$/u)
+    .default("10Gi"),
   modalAppName: z.string().default("opengeni-sandbox"),
   modalImageRef: z.string().optional(),
   // Provider-native immutable Modal image ID for the exact logical
@@ -1781,6 +1854,7 @@ export const SANDBOX_REQUIRED_ENV: Record<
 > = {
   // docker/local/none need no credentials (local dev container / in-process / off).
   docker: [],
+  kubernetes: [],
   local: [],
   none: [],
   modal: [
@@ -1995,6 +2069,29 @@ export function getSettings(): Settings {
     dockerExposedPorts: optional("OPENGENI_DOCKER_EXPOSED_PORTS"),
     dockerNetwork: optional("OPENGENI_DOCKER_NETWORK"),
     dockerWorkspaceBaseDir: optional("OPENGENI_DOCKER_WORKSPACE_BASE_DIR"),
+    kubernetesImage: optional("OPENGENI_KUBERNETES_IMAGE"),
+    kubernetesNamespace: optional("OPENGENI_KUBERNETES_NAMESPACE"),
+    kubernetesKubeconfig: optional("OPENGENI_KUBERNETES_KUBECONFIG"),
+    kubernetesContext: optional("OPENGENI_KUBERNETES_CONTEXT"),
+    kubernetesKubectlPath: optional("OPENGENI_KUBERNETES_KUBECTL_PATH"),
+    kubernetesImagePullPolicy: optional("OPENGENI_KUBERNETES_IMAGE_PULL_POLICY"),
+    kubernetesServiceAccount: optional("OPENGENI_KUBERNETES_SERVICE_ACCOUNT"),
+    kubernetesAutomountServiceAccountToken: optional(
+      "OPENGENI_KUBERNETES_AUTOMOUNT_SERVICE_ACCOUNT_TOKEN",
+    ),
+    kubernetesIsolationMode: optional("OPENGENI_KUBERNETES_ISOLATION_MODE"),
+    kubernetesRuntimeClass: optional("OPENGENI_KUBERNETES_RUNTIME_CLASS"),
+    kubernetesPriorityClass: optional("OPENGENI_KUBERNETES_PRIORITY_CLASS"),
+    kubernetesNodeSelectorJson: optional("OPENGENI_KUBERNETES_NODE_SELECTOR_JSON"),
+    kubernetesTolerationsJson: optional("OPENGENI_KUBERNETES_TOLERATIONS_JSON"),
+    kubernetesStartupTimeoutSeconds: optional("OPENGENI_KUBERNETES_STARTUP_TIMEOUT_SECONDS"),
+    kubernetesCpuRequest: optional("OPENGENI_KUBERNETES_CPU_REQUEST"),
+    kubernetesCpuLimit: optional("OPENGENI_KUBERNETES_CPU_LIMIT"),
+    kubernetesMemoryRequest: optional("OPENGENI_KUBERNETES_MEMORY_REQUEST"),
+    kubernetesMemoryLimit: optional("OPENGENI_KUBERNETES_MEMORY_LIMIT"),
+    kubernetesEphemeralStorageRequest: optional("OPENGENI_KUBERNETES_EPHEMERAL_STORAGE_REQUEST"),
+    kubernetesEphemeralStorageLimit: optional("OPENGENI_KUBERNETES_EPHEMERAL_STORAGE_LIMIT"),
+    kubernetesWorkspaceSizeLimit: optional("OPENGENI_KUBERNETES_WORKSPACE_SIZE_LIMIT"),
     modalAppName: optional("OPENGENI_MODAL_APP_NAME"),
     modalImageRef: optional("OPENGENI_MODAL_IMAGE_REF"),
     modalImageId: optional("OPENGENI_MODAL_IMAGE_ID"),
@@ -4540,6 +4637,56 @@ function firstPartyFilesMcpServerUrl(mcpUrl: string): string {
   return `${mcpUrl.replace(/\/+$/, "")}/files`;
 }
 
+function kubernetesCpuMillicores(value: string): number {
+  if (value.endsWith("m")) return Number(value.slice(0, -1));
+  return Number(value) * 1_000;
+}
+
+function kubernetesMemoryKibibytes(value: string): number {
+  const match = /^(\d+)(Ki|Mi|Gi|Ti)$/u.exec(value);
+  if (!match) return Number.NaN;
+  const units = { Ki: 1, Mi: 1024, Gi: 1024 ** 2, Ti: 1024 ** 3 } as const;
+  return Number(match[1]) * units[match[2] as keyof typeof units];
+}
+
+export function parseKubernetesNodeSelectorJson(raw: string): Record<string, string> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`OPENGENI_KUBERNETES_NODE_SELECTOR_JSON must be valid JSON: ${message}`, {
+      cause: error,
+    });
+  }
+  const result = KubernetesNodeSelectorSchema.safeParse(parsed);
+  if (!result.success) {
+    throw new Error(
+      `OPENGENI_KUBERNETES_NODE_SELECTOR_JSON must be an object of string labels: ${result.error.message}`,
+    );
+  }
+  return result.data;
+}
+
+export function parseKubernetesTolerationsJson(raw: string): KubernetesToleration[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`OPENGENI_KUBERNETES_TOLERATIONS_JSON must be valid JSON: ${message}`, {
+      cause: error,
+    });
+  }
+  const result = KubernetesTolerationsSchema.safeParse(parsed);
+  if (!result.success) {
+    throw new Error(
+      `OPENGENI_KUBERNETES_TOLERATIONS_JSON must be an array of Kubernetes tolerations: ${result.error.message}`,
+    );
+  }
+  return result.data;
+}
+
 function validateSettings(settings: Settings): void {
   temporalConnectionOptions(settings);
   if (settings.productAccessMode === "managed") {
@@ -4755,6 +4902,71 @@ function validateSettings(settings: Settings): void {
     ) {
       throw new Error(
         `${required.env} is required when OPENGENI_SANDBOX_BACKEND=${settings.sandboxBackend}`,
+      );
+    }
+  }
+  if (
+    kubernetesCpuMillicores(settings.kubernetesCpuRequest) >
+    kubernetesCpuMillicores(settings.kubernetesCpuLimit)
+  ) {
+    throw new Error(
+      "OPENGENI_KUBERNETES_CPU_REQUEST must not exceed OPENGENI_KUBERNETES_CPU_LIMIT",
+    );
+  }
+  if (
+    kubernetesMemoryKibibytes(settings.kubernetesMemoryRequest) >
+    kubernetesMemoryKibibytes(settings.kubernetesMemoryLimit)
+  ) {
+    throw new Error(
+      "OPENGENI_KUBERNETES_MEMORY_REQUEST must not exceed OPENGENI_KUBERNETES_MEMORY_LIMIT",
+    );
+  }
+  if (
+    kubernetesMemoryKibibytes(settings.kubernetesEphemeralStorageRequest) >
+    kubernetesMemoryKibibytes(settings.kubernetesEphemeralStorageLimit)
+  ) {
+    throw new Error(
+      "OPENGENI_KUBERNETES_EPHEMERAL_STORAGE_REQUEST must not exceed OPENGENI_KUBERNETES_EPHEMERAL_STORAGE_LIMIT",
+    );
+  }
+  if (
+    kubernetesMemoryKibibytes(settings.kubernetesWorkspaceSizeLimit) >
+    kubernetesMemoryKibibytes(settings.kubernetesEphemeralStorageLimit)
+  ) {
+    throw new Error(
+      "OPENGENI_KUBERNETES_WORKSPACE_SIZE_LIMIT must not exceed OPENGENI_KUBERNETES_EPHEMERAL_STORAGE_LIMIT",
+    );
+  }
+  parseKubernetesNodeSelectorJson(settings.kubernetesNodeSelectorJson);
+  parseKubernetesTolerationsJson(settings.kubernetesTolerationsJson);
+  if (settings.sandboxBackend === "kubernetes") {
+    if (settings.kubernetesIsolationMode === "runtime-class" && !settings.kubernetesRuntimeClass) {
+      throw new Error(
+        "OPENGENI_KUBERNETES_RUNTIME_CLASS is required when OPENGENI_KUBERNETES_ISOLATION_MODE=runtime-class",
+      );
+    }
+    if (
+      settings.kubernetesIsolationMode === "provider-managed" &&
+      settings.kubernetesRuntimeClass
+    ) {
+      throw new Error(
+        "OPENGENI_KUBERNETES_RUNTIME_CLASS must be omitted when OPENGENI_KUBERNETES_ISOLATION_MODE=provider-managed",
+      );
+    }
+    if (
+      settings.productAccessMode === "managed" &&
+      settings.kubernetesIsolationMode === "standard"
+    ) {
+      throw new Error(
+        "Managed Kubernetes sandboxes require OPENGENI_KUBERNETES_ISOLATION_MODE=runtime-class or provider-managed",
+      );
+    }
+    if (
+      settings.productAccessMode === "managed" &&
+      settings.kubernetesAutomountServiceAccountToken
+    ) {
+      throw new Error(
+        "Managed Kubernetes sandboxes cannot automount the Kubernetes API service-account token",
       );
     }
   }

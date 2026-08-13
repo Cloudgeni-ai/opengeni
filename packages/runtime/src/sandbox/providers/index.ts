@@ -18,6 +18,7 @@ import { daytonaProvider } from "./daytona";
 import { dockerProvider } from "./docker";
 import { e2bProvider } from "./e2b";
 import { localProvider } from "./local";
+import { kubernetesProvider } from "./kubernetes";
 import { modalProvider } from "./modal";
 import { noneProvider } from "./none";
 import { runloopProvider } from "./runloop";
@@ -41,6 +42,7 @@ export const PROVIDER_REGISTRY: Record<SandboxBackend, ProviderRegistration> = {
   cloudflare: cloudflareProvider,
   vercel: vercelProvider,
   selfhosted: selfhostedProvider,
+  kubernetes: kubernetesProvider,
 };
 
 // Stub settings carrying every per-provider credential, used ONLY by the
@@ -61,6 +63,9 @@ const ASSERTION_STUB_SETTINGS = {
   cloudflareWorkerUrl: "https://stub.example.com",
   vercelToken: "stub",
   vercelProjectId: "stub",
+  kubernetesImage: "opengeni-sandbox:local",
+  kubernetesNodeSelectorJson: "{}",
+  kubernetesTolerationsJson: "[]",
 } as unknown as Settings;
 
 /**

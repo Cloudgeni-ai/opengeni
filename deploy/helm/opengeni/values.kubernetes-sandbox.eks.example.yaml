@@ -1,0 +1,22 @@
+config:
+  OPENGENI_SANDBOX_BACKEND: kubernetes
+  OPENGENI_KUBERNETES_IMAGE: 111122223333.dkr.ecr.eu-west-1.amazonaws.com/opengeni-sandbox@sha256:replace-me
+
+kubernetesSandbox:
+  enabled: true
+  # Create an EKS Fargate profile selecting this namespace before installation.
+  # Fargate schedules one Pod per node and supplies the isolation boundary;
+  # there is no RuntimeClass value to set in this profile.
+  namespace: opengeni-sandboxes
+  isolationMode: provider-managed
+  # EKS Fargate uses guaranteed QoS. Keep CPU and memory requests equal to
+  # limits and select a supported Fargate size.
+  resources:
+    requests:
+      cpu: "1"
+      memory: 4Gi
+      ephemeralStorage: 20Gi
+    limits:
+      cpu: "1"
+      memory: 4Gi
+      ephemeralStorage: 20Gi

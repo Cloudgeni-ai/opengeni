@@ -32,7 +32,7 @@ export type DependencyMode = z.infer<typeof DependencyMode>;
 export const StorageApi = z.enum(["s3-compatible", "aws-s3", "azure-blob", "gcs"]);
 export type StorageApi = z.infer<typeof StorageApi>;
 
-// Mirror of `@opengeni/contracts` SandboxBackend (11 values; every member is
+// Mirror of `@opengeni/contracts` SandboxBackend (12 values; every member is
 // additive at the end). 3-way enum parity is pinned by the SDK contract-parity
 // test.
 export const SandboxBackend = z.enum([
@@ -47,6 +47,7 @@ export const SandboxBackend = z.enum([
   "cloudflare",
   "vercel",
   "selfhosted",
+  "kubernetes",
 ]);
 export type SandboxBackend = z.infer<typeof SandboxBackend>;
 
@@ -121,6 +122,32 @@ export const SANDBOX_REQUIRED_ENV: Record<SandboxBackend, SandboxEnvBackendSpec>
   // over the agent's enrollment; the enrollment-signing + relay-token secrets are
   // deployment-level (a runtime secret), not per-active-backend required creds.
   selfhosted: { required: [], optional: [] },
+  kubernetes: {
+    required: [],
+    optional: [
+      "OPENGENI_KUBERNETES_IMAGE",
+      "OPENGENI_KUBERNETES_NAMESPACE",
+      "OPENGENI_KUBERNETES_KUBECONFIG",
+      "OPENGENI_KUBERNETES_CONTEXT",
+      "OPENGENI_KUBERNETES_KUBECTL_PATH",
+      "OPENGENI_KUBERNETES_IMAGE_PULL_POLICY",
+      "OPENGENI_KUBERNETES_SERVICE_ACCOUNT",
+      "OPENGENI_KUBERNETES_AUTOMOUNT_SERVICE_ACCOUNT_TOKEN",
+      "OPENGENI_KUBERNETES_ISOLATION_MODE",
+      "OPENGENI_KUBERNETES_RUNTIME_CLASS",
+      "OPENGENI_KUBERNETES_PRIORITY_CLASS",
+      "OPENGENI_KUBERNETES_NODE_SELECTOR_JSON",
+      "OPENGENI_KUBERNETES_TOLERATIONS_JSON",
+      "OPENGENI_KUBERNETES_STARTUP_TIMEOUT_SECONDS",
+      "OPENGENI_KUBERNETES_CPU_REQUEST",
+      "OPENGENI_KUBERNETES_CPU_LIMIT",
+      "OPENGENI_KUBERNETES_MEMORY_REQUEST",
+      "OPENGENI_KUBERNETES_MEMORY_LIMIT",
+      "OPENGENI_KUBERNETES_EPHEMERAL_STORAGE_REQUEST",
+      "OPENGENI_KUBERNETES_EPHEMERAL_STORAGE_LIMIT",
+      "OPENGENI_KUBERNETES_WORKSPACE_SIZE_LIMIT",
+    ],
+  },
 };
 
 // sandbox workspace runtime env (the desktop/Channel-A feature rollout). These are

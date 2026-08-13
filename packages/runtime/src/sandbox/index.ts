@@ -159,6 +159,12 @@ export {
   type RevalidateModalOrphanTermination,
 } from "./providers/modal";
 export {
+  KubernetesSandboxClient,
+  KubernetesSandboxSession,
+  type KubernetesSandboxClientOptions,
+  type KubernetesSandboxSessionState,
+} from "./kubernetes";
+export {
   selectBackend,
   sdkBackendIdForSandboxBackend,
   sandboxBackendForSdkBackendId,
@@ -1208,14 +1214,19 @@ type ResumeCapableClient = {
    * or prove it unavailable without creating anything. */
   resumeExact?: (state: unknown) => Promise<unknown>;
   create?: (manifest?: unknown, options?: unknown) => Promise<unknown>;
+  /** Provider-specific creation seam that publishes immutable identity before
+   * readiness/setup. The callback must complete before provider setup continues. */
+  createWithEarlyIdentity?: (
+    manifest: unknown,
+    onCreated: (session: unknown) => Promise<void>,
+  ) => Promise<unknown>;
 };
 
 /**
  * Per-provider NotFound discriminator. The @openai/agents-extensions
- * `isProviderSandboxNotFoundError` / `assertResumeRecreateAllowed` helpers live
- * under `@openai/agents-extensions/sandbox/shared`, which is NOT an exported
- * subpath (the package `exports` map only exposes `./sandbox/<provider>`), so we
- * re-implement the discrimination here by inspecting the thrown error shape.
+ * `isProviderSandboxNotFoundError` / `assertResumeRecreateAllowed` helpers are
+ * provider-adapter details, so OpenGeni keeps its durable-lifecycle
+ * discrimination here by inspecting the thrown error shape.
  *
  * "Box no longer running" (the box was reaped / idled out / 24h-ceiling) is the
  * ONLY error that licenses a cold-restore via create(). Every other resume
@@ -1643,8 +1654,33 @@ export async function establishSandboxSessionFromEnvelope(
     let createdClient = client;
     const createStarted = Date.now();
     let restored: Awaited<ReturnType<NonNullable<typeof client.create>>>;
+    let earlyIdentityPersisted = false;
     try {
-      restored = await client.create!({ manifest: createManifest });
+      if (client.createWithEarlyIdentity && opts.onSandboxCreated) {
+        restored = await client.createWithEarlyIdentity(
+          { manifest: createManifest },
+          async (session) => {
+            const sessionState = (session as { state?: unknown }).state;
+            const instanceId = readInstanceId(backend, session);
+            if (!instanceId) {
+              throw new SandboxConfigError(
+                backend,
+                `Sandbox backend "${backend}" created a handle without its declared provider identity`,
+              );
+            }
+            await opts.onSandboxCreated!({
+              client,
+              session,
+              sessionState,
+              instanceId,
+              backendId: client.backendId,
+            });
+            earlyIdentityPersisted = true;
+          },
+        );
+      } else {
+        restored = await client.create!({ manifest: createManifest });
+      }
       recordSandboxCreateMetric(
         opts.metrics,
         client.backendId,
@@ -1726,7 +1762,7 @@ export async function establishSandboxSessionFromEnvelope(
       instanceId: restoredInstanceId,
       backendId: createdClient.backendId,
     };
-    if (opts.onSandboxCreated) {
+    if (opts.onSandboxCreated && !earlyIdentityPersisted) {
       try {
         await opts.onSandboxCreated(established);
       } catch (createCallbackError) {

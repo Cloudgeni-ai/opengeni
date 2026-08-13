@@ -36,6 +36,14 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 {{- end -}}
 
+{{- define "opengeni.kubernetesSandboxNamespace" -}}
+{{- default (printf "%s-sandboxes" (include "opengeni.fullname" .) | trunc 63 | trimSuffix "-") .Values.kubernetesSandbox.namespace -}}
+{{- end -}}
+
+{{- define "opengeni.kubernetesSandboxServiceAccountName" -}}
+{{- default (printf "%s-sandbox-workload" (include "opengeni.fullname" .) | trunc 63 | trimSuffix "-") .Values.kubernetesSandbox.workloadServiceAccount.name -}}
+{{- end -}}
+
 {{- define "opengeni.priorityClassName" -}}
 {{- $explicit := .explicit | default "" -}}
 {{- if $explicit -}}

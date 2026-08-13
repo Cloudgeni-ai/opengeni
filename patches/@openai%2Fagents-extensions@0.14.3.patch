@@ -360,3 +360,37 @@ index 41969fcc87d854f799f4819442f863ad4b8c4f5a..e067e448504e7d9bb842942d977082f9
  }
  async function createRunloopClient(options) {
      try {
+diff --git a/package.json b/package.json
+index 5f36230..5b3f583 100644
+--- a/package.json
++++ b/package.json
+@@ -66,6 +66,16 @@
+       "require": "./dist/sandbox/vercel/index.js",
+       "import": "./dist/sandbox/vercel/index.mjs"
+     },
++    "./sandbox/shared": {
++      "types": "./dist/sandbox/shared/index.d.ts",
++      "require": "./dist/sandbox/shared/index.js",
++      "import": "./dist/sandbox/shared/index.mjs"
++    },
++    "./sandbox/shared/in-container-mounts": {
++      "types": "./dist/sandbox/shared/inContainerMounts.d.ts",
++      "require": "./dist/sandbox/shared/inContainerMounts.js",
++      "import": "./dist/sandbox/shared/inContainerMounts.mjs"
++    },
+     "./experimental/codex": {
+       "types": "./dist/experimental/codex/index.d.ts",
+       "require": "./dist/experimental/codex/index.js",
+@@ -169,6 +179,12 @@
+       "sandbox/vercel": [
+         "dist/sandbox/vercel/index.d.ts"
+       ],
++      "sandbox/shared": [
++        "dist/sandbox/shared/index.d.ts"
++      ],
++      "sandbox/shared/in-container-mounts": [
++        "dist/sandbox/shared/inContainerMounts.d.ts"
++      ],
+       "ai-sdk": [
+         "dist/ai-sdk/index.d.ts"
+       ],

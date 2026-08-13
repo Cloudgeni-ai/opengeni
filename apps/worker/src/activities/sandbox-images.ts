@@ -17,6 +17,7 @@ export function settingsWithPackSandboxImage(
     ...settings,
     dockerImage: sandboxImage,
     modalImageRef: sandboxImage,
+    kubernetesImage: sandboxImage,
     modalImageId: sandboxProviderImages?.modal?.imageId,
   };
 }
@@ -27,6 +28,7 @@ export function settingsWithRigImage(settings: Settings, rigImage: string | null
     ...settings,
     dockerImage: rigImage,
     modalImageRef: rigImage,
+    kubernetesImage: rigImage,
     // A logical rig image invalidates a lower-precedence pack/deployment
     // provider ID. A verified version-bound provider ID is applied separately
     // after this precedence step.
@@ -39,6 +41,14 @@ export function rigProviderImageSourceImage(
   backend: SandboxBackend,
 ): string | null {
   if (backend === "modal") return settings.modalImageId ?? settings.modalImageRef ?? null;
+  if (backend === "docker") return settings.dockerImage ?? null;
+  if (backend === "kubernetes") return settings.kubernetesImage ?? null;
+  return null;
+}
+
+export function sandboxImageForBackend(settings: Settings, backend: SandboxBackend): string | null {
+  if (backend === "modal") return settings.modalImageRef ?? settings.dockerImage ?? null;
+  if (backend === "kubernetes") return settings.kubernetesImage ?? null;
   if (backend === "docker") return settings.dockerImage ?? null;
   return null;
 }

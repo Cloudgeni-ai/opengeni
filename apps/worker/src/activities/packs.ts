@@ -17,6 +17,7 @@ import {
 export {
   resolveRigProviderImageSelection,
   rigProviderImageSourceImage,
+  sandboxImageForBackend,
   settingsWithPackSandboxImage,
   settingsWithRigImage,
   settingsWithRigProviderImage,

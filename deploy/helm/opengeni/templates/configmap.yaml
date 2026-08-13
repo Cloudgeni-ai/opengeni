@@ -45,5 +45,61 @@ data:
   OPENGENI_SELFHOSTED_NATS_CALLOUT_USER: {{ .Values.selfhosted.natsCalloutUser | quote }}
   {{- end }}
   {{- end }}
+  {{- if .Values.kubernetesSandbox.enabled }}
+  {{- if not (hasKey .Values.config "OPENGENI_KUBERNETES_IMAGE") }}
+  OPENGENI_KUBERNETES_IMAGE: {{ include "opengeni.image" (dict "root" . "image" .Values.kubernetesSandbox.image) | quote }}
+  {{- end }}
+  {{- if not (hasKey .Values.config "OPENGENI_KUBERNETES_NAMESPACE") }}
+  OPENGENI_KUBERNETES_NAMESPACE: {{ include "opengeni.kubernetesSandboxNamespace" . | quote }}
+  {{- end }}
+  {{- if not (hasKey .Values.config "OPENGENI_KUBERNETES_IMAGE_PULL_POLICY") }}
+  OPENGENI_KUBERNETES_IMAGE_PULL_POLICY: {{ .Values.kubernetesSandbox.image.pullPolicy | quote }}
+  {{- end }}
+  {{- if not (hasKey .Values.config "OPENGENI_KUBERNETES_AUTOMOUNT_SERVICE_ACCOUNT_TOKEN") }}
+  OPENGENI_KUBERNETES_AUTOMOUNT_SERVICE_ACCOUNT_TOKEN: {{ .Values.kubernetesSandbox.automountServiceAccountToken | quote }}
+  {{- end }}
+  {{- if not (hasKey .Values.config "OPENGENI_KUBERNETES_ISOLATION_MODE") }}
+  OPENGENI_KUBERNETES_ISOLATION_MODE: {{ .Values.kubernetesSandbox.isolationMode | quote }}
+  {{- end }}
+  {{- if and .Values.kubernetesSandbox.runtimeClassName (not (hasKey .Values.config "OPENGENI_KUBERNETES_RUNTIME_CLASS")) }}
+  OPENGENI_KUBERNETES_RUNTIME_CLASS: {{ .Values.kubernetesSandbox.runtimeClassName | quote }}
+  {{- end }}
+  {{- if and .Values.kubernetesSandbox.priorityClassName (not (hasKey .Values.config "OPENGENI_KUBERNETES_PRIORITY_CLASS")) }}
+  OPENGENI_KUBERNETES_PRIORITY_CLASS: {{ .Values.kubernetesSandbox.priorityClassName | quote }}
+  {{- end }}
+  {{- if not (hasKey .Values.config "OPENGENI_KUBERNETES_NODE_SELECTOR_JSON") }}
+  OPENGENI_KUBERNETES_NODE_SELECTOR_JSON: {{ .Values.kubernetesSandbox.nodeSelector | toJson | quote }}
+  {{- end }}
+  {{- if not (hasKey .Values.config "OPENGENI_KUBERNETES_TOLERATIONS_JSON") }}
+  OPENGENI_KUBERNETES_TOLERATIONS_JSON: {{ .Values.kubernetesSandbox.tolerations | toJson | quote }}
+  {{- end }}
+  {{- if not (hasKey .Values.config "OPENGENI_KUBERNETES_STARTUP_TIMEOUT_SECONDS") }}
+  OPENGENI_KUBERNETES_STARTUP_TIMEOUT_SECONDS: {{ .Values.kubernetesSandbox.startupTimeoutSeconds | quote }}
+  {{- end }}
+  {{- if not (hasKey .Values.config "OPENGENI_KUBERNETES_CPU_REQUEST") }}
+  OPENGENI_KUBERNETES_CPU_REQUEST: {{ .Values.kubernetesSandbox.resources.requests.cpu | quote }}
+  {{- end }}
+  {{- if not (hasKey .Values.config "OPENGENI_KUBERNETES_CPU_LIMIT") }}
+  OPENGENI_KUBERNETES_CPU_LIMIT: {{ .Values.kubernetesSandbox.resources.limits.cpu | quote }}
+  {{- end }}
+  {{- if not (hasKey .Values.config "OPENGENI_KUBERNETES_MEMORY_REQUEST") }}
+  OPENGENI_KUBERNETES_MEMORY_REQUEST: {{ .Values.kubernetesSandbox.resources.requests.memory | quote }}
+  {{- end }}
+  {{- if not (hasKey .Values.config "OPENGENI_KUBERNETES_MEMORY_LIMIT") }}
+  OPENGENI_KUBERNETES_MEMORY_LIMIT: {{ .Values.kubernetesSandbox.resources.limits.memory | quote }}
+  {{- end }}
+  {{- if not (hasKey .Values.config "OPENGENI_KUBERNETES_EPHEMERAL_STORAGE_REQUEST") }}
+  OPENGENI_KUBERNETES_EPHEMERAL_STORAGE_REQUEST: {{ .Values.kubernetesSandbox.resources.requests.ephemeralStorage | quote }}
+  {{- end }}
+  {{- if not (hasKey .Values.config "OPENGENI_KUBERNETES_EPHEMERAL_STORAGE_LIMIT") }}
+  OPENGENI_KUBERNETES_EPHEMERAL_STORAGE_LIMIT: {{ .Values.kubernetesSandbox.resources.limits.ephemeralStorage | quote }}
+  {{- end }}
+  {{- if not (hasKey .Values.config "OPENGENI_KUBERNETES_WORKSPACE_SIZE_LIMIT") }}
+  OPENGENI_KUBERNETES_WORKSPACE_SIZE_LIMIT: {{ .Values.kubernetesSandbox.workspaceSizeLimit | quote }}
+  {{- end }}
+  {{- if not (hasKey .Values.config "OPENGENI_KUBERNETES_SERVICE_ACCOUNT") }}
+  OPENGENI_KUBERNETES_SERVICE_ACCOUNT: {{ include "opengeni.kubernetesSandboxServiceAccountName" . | quote }}
+  {{- end }}
+  {{- end }}
   OPENGENI_OBSERVABILITY_STRUCTURED_LOGS: {{ .Values.observability.structuredLogs | quote }}
   OPENGENI_OBSERVABILITY_METRICS_ENABLED: {{ ((.Values.observability).metrics).enabled | quote }}

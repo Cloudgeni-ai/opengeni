@@ -1,0 +1,16 @@
+# Replace the namespace and security-group ID before applying. The security
+# group is the EKS Fargate egress boundary because AWS VPC CNI NetworkPolicy is
+# not enforced on Fargate Pods.
+apiVersion: vpcresources.k8s.aws/v1beta1
+kind: SecurityGroupPolicy
+metadata:
+  name: opengeni-sandboxes
+  namespace: opengeni-sandboxes
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: opengeni-sandbox
+      opengeni.ai/managed: "true"
+  securityGroups:
+    groupIds:
+      - sg-replace-with-dedicated-sandbox-security-group
