@@ -14,16 +14,23 @@ Canonical implementation:
 ## Strict envelope, flexible content
 
 Every returned record has a stable opaque id, kind, authority kind, source and
-index provenance, active lifecycle state, honest quality signals, and links.
+index provenance, active lifecycle state, honest quality signals, links, and
+explicit projection-loss facts.
 Current Document evidence is `sourced`; freshness follows the source update or
 index time, while conflict remains explicitly `not_evaluated` until normalized
 claim review is activated. The Markdown body, summary, topics, and source
 metadata remain flexible so varied company information does not need one rigid
-taxonomy. The agent projection deliberately omits personal subject ids,
+taxonomy, but the model-facing envelope is not unbounded: title, body, summary,
+topic strings/count, source strings, metadata depth/item count/serialized bytes,
+and link count have deterministic UTF-8/item limits. `projection.truncated` and
+its sorted `fields` list identify every field that was shortened or omitted, so
+the boundary never silently presents a partial value as complete. Metadata keys
+are projected in stable lexical order. The agent projection deliberately omits personal subject ids,
 ingestion workspace/base/file ids, and metadata about a linked record that was
 not independently authorized. A source URI is copied only from the
 already-authorized record and only within the Knowledge envelope's 8 KiB bound;
-an oversized value is omitted rather than partially disclosed.
+an oversized value is omitted rather than emitted as an invalid partial URI,
+with `provenance.source.uri` recorded in the projection facts.
 
 Documents and chunks are evidence, not instructions. Their contents cannot
 activate a preference, policy, Skill, company profile, or Memory record.

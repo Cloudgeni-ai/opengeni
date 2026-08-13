@@ -1771,6 +1771,7 @@ describe("contracts", () => {
                 },
               },
             ],
+            projection: { truncated: false, fields: [] },
           },
           retrieval: {
             score: 0.75,

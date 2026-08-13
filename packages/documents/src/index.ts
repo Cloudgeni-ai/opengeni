@@ -34,6 +34,9 @@ import { createHash } from "node:crypto";
 import { and, asc, desc, eq, gt, inArray, isNotNull, or, sql, type SQL } from "drizzle-orm";
 import type OpenAI from "openai";
 import { KNOWLEDGE_BROWSE_CURSOR_MAX_CHARS } from "@opengeni/contracts";
+import { projectKnowledgeRecord } from "./knowledge-projection";
+
+export { projectKnowledgeRecord } from "./knowledge-projection";
 
 export const DEFAULT_DOCUMENT_PARSER = "liteparse";
 export const DEFAULT_DOCUMENT_EMBEDDING_MODEL = "text-embedding-3-large";
@@ -2131,25 +2134,28 @@ function parseKnowledgeRecordId(value: string): {
 
 function knowledgeDocumentRecord(document: typeof schema.documents.$inferSelect): KnowledgeRecord {
   if (!document.indexedAt) throw new Error(`Ready document is missing indexed_at: ${document.id}`);
+  const projected = projectKnowledgeRecord({
+    title: document.title,
+    body: document.summary,
+    summary: document.summary,
+    topics: document.topics,
+    metadata: { parser: document.parser, chunkCount: document.chunkCount },
+    source: knowledgeSource(document),
+  });
   return {
     id: `document:${document.id}`,
     kind: "document",
-    title: document.title,
-    content: {
-      format: "markdown",
-      body: document.summary,
-      summary: document.summary,
-      topics: cleanStringArray(document.topics),
-      metadata: { parser: document.parser, chunkCount: document.chunkCount },
-    },
+    title: projected.title,
+    content: projected.content,
     authority: { kind: normalizeDocumentAuthorityKind(document.authorityKind) },
     provenance: {
-      source: knowledgeSource(document),
+      source: projected.source,
       indexedAt: document.indexedAt.toISOString(),
     },
     lifecycle: { state: "active", updatedAt: document.updatedAt.toISOString() },
     quality: knowledgeQuality(document),
-    links: knowledgeSourceLinks(document.sourceUri),
+    links: knowledgeSourceLinks(projected.source.uri),
+    projection: projected.projection,
   };
 }
 
@@ -2158,35 +2164,38 @@ function knowledgeChunkRecord(
   chunk: typeof schema.documentChunks.$inferSelect,
 ): KnowledgeRecord {
   if (!document.indexedAt) throw new Error(`Ready document is missing indexed_at: ${document.id}`);
+  const projected = projectKnowledgeRecord({
+    title: document.title,
+    body: chunk.text,
+    summary: document.summary,
+    topics: document.topics,
+    metadata: { ...chunk.metadata, chunkIndex: chunk.chunkIndex },
+    source: knowledgeSource(document),
+  });
   return {
     id: `document_chunk:${chunk.id}`,
     kind: "document_chunk",
-    title: document.title,
-    content: {
-      format: "markdown",
-      body: chunk.text,
-      summary: document.summary,
-      topics: cleanStringArray(document.topics),
-      metadata: { ...chunk.metadata, chunkIndex: chunk.chunkIndex },
-    },
+    title: projected.title,
+    content: projected.content,
     authority: { kind: normalizeDocumentAuthorityKind(document.authorityKind) },
     provenance: {
-      source: knowledgeSource(document),
+      source: projected.source,
       indexedAt: document.indexedAt.toISOString(),
     },
     lifecycle: { state: "active", updatedAt: document.updatedAt.toISOString() },
     quality: knowledgeQuality(document),
     links: [
       { relation: "parent", target: { kind: "knowledge", id: `document:${document.id}` } },
-      ...knowledgeSourceLinks(document.sourceUri),
+      ...knowledgeSourceLinks(projected.source.uri),
     ],
+    projection: projected.projection,
   };
 }
 
 function knowledgeSource(document: typeof schema.documents.$inferSelect) {
   return {
     kind: normalizeKnowledgeSourceKind(document.sourceKind),
-    uri: modelVisibleKnowledgeSourceUri(document.sourceUri),
+    uri: document.sourceUri,
     externalId: document.sourceExternalId,
     title: document.sourceTitle,
     author: document.sourceAuthor,
@@ -2209,15 +2218,7 @@ function knowledgeQuality(
 }
 
 function knowledgeSourceLinks(sourceUri: string | null): KnowledgeRecord["links"] {
-  const uri = modelVisibleKnowledgeSourceUri(sourceUri);
-  return uri ? [{ relation: "source", target: { kind: "external", uri } }] : [];
-}
-
-function modelVisibleKnowledgeSourceUri(value: string | null): string | null {
-  // source_uri is already model-visible on authorized Document search results.
-  // Bound it at this new envelope rather than emitting an unbounded duplicate.
-  if (!value || Buffer.byteLength(value, "utf8") > 8_192) return null;
-  return value;
+  return sourceUri ? [{ relation: "source", target: { kind: "external", uri: sourceUri } }] : [];
 }
 
 async function vectorSearchDocuments(

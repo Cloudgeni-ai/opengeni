@@ -3,6 +3,65 @@ import { z } from "zod";
 export const KNOWLEDGE_BROWSE_CURSOR_MAX_CHARS = 1_024;
 export const KNOWLEDGE_BROWSE_DEFAULT_LIMIT = 20;
 export const KNOWLEDGE_BROWSE_MAX_LIMIT = 50;
+export const KNOWLEDGE_TITLE_MAX_BYTES = 1_024;
+export const KNOWLEDGE_BODY_MAX_BYTES = 16 * 1_024;
+export const KNOWLEDGE_SUMMARY_MAX_BYTES = 4 * 1_024;
+export const KNOWLEDGE_TOPIC_MAX_BYTES = 256;
+export const KNOWLEDGE_TOPICS_MAX_ITEMS = 32;
+export const KNOWLEDGE_METADATA_MAX_BYTES = 8 * 1_024;
+export const KNOWLEDGE_METADATA_MAX_ITEMS = 64;
+export const KNOWLEDGE_METADATA_MAX_DEPTH = 4;
+export const KNOWLEDGE_SOURCE_STRING_MAX_BYTES = 2_048;
+export const KNOWLEDGE_SOURCE_URI_MAX_BYTES = 8_192;
+
+const utf8Bytes = (value: string): number => new TextEncoder().encode(value).byteLength;
+const boundedUtf8 = (maxBytes: number) =>
+  z.string().superRefine((value, ctx) => {
+    if (utf8Bytes(value) > maxBytes) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `must be at most ${maxBytes} UTF-8 bytes` });
+    }
+  });
+
+function boundedJson(value: unknown): boolean {
+  let items = 0;
+  let valid = true;
+  const visit = (candidate: unknown, depth: number): void => {
+    if (!valid || ++items > KNOWLEDGE_METADATA_MAX_ITEMS || depth > KNOWLEDGE_METADATA_MAX_DEPTH) {
+      valid = false;
+      return;
+    }
+    if (
+      candidate === null ||
+      typeof candidate === "boolean" ||
+      (typeof candidate === "number" && Number.isFinite(candidate))
+    ) {
+      return;
+    }
+    if (typeof candidate === "string") {
+      if (utf8Bytes(candidate) > KNOWLEDGE_SOURCE_STRING_MAX_BYTES) valid = false;
+      return;
+    }
+    if (Array.isArray(candidate)) {
+      for (const item of candidate) visit(item, depth + 1);
+      return;
+    }
+    if (typeof candidate === "object") {
+      for (const [key, item] of Object.entries(candidate as Record<string, unknown>)) {
+        if (utf8Bytes(key) > KNOWLEDGE_TOPIC_MAX_BYTES) valid = false;
+        visit(item, depth + 1);
+      }
+      return;
+    }
+    valid = false;
+  };
+  visit(value, 0);
+  if (!valid) return false;
+  try {
+    return utf8Bytes(JSON.stringify(value)) <= KNOWLEDGE_METADATA_MAX_BYTES;
+  } catch {
+    return false;
+  }
+}
 
 export const KnowledgeRecordId = z
   .string()
@@ -30,13 +89,13 @@ export const KnowledgeSource = z.object({
     "web",
     "other",
   ]),
-  uri: z.string().min(1).max(8_192).nullable(),
-  externalId: z.string().nullable(),
-  title: z.string().nullable(),
-  author: z.string().nullable(),
+  uri: boundedUtf8(KNOWLEDGE_SOURCE_URI_MAX_BYTES).pipe(z.string().min(1)).nullable(),
+  externalId: boundedUtf8(KNOWLEDGE_SOURCE_STRING_MAX_BYTES).nullable(),
+  title: boundedUtf8(KNOWLEDGE_SOURCE_STRING_MAX_BYTES).nullable(),
+  author: boundedUtf8(KNOWLEDGE_SOURCE_STRING_MAX_BYTES).nullable(),
   createdAt: z.string().nullable(),
   updatedAt: z.string().nullable(),
-  version: z.string().nullable(),
+  version: boundedUtf8(KNOWLEDGE_SOURCE_STRING_MAX_BYTES).nullable(),
 });
 export type KnowledgeSource = z.infer<typeof KnowledgeSource>;
 
@@ -47,7 +106,7 @@ export const KnowledgeLinkTarget = z.discriminatedUnion("kind", [
   }),
   z.object({
     kind: z.literal("external"),
-    uri: z.string().min(1).max(8_192),
+    uri: boundedUtf8(KNOWLEDGE_SOURCE_URI_MAX_BYTES).pipe(z.string().min(1)),
   }),
 ]);
 export type KnowledgeLinkTarget = z.infer<typeof KnowledgeLinkTarget>;
@@ -68,13 +127,17 @@ export type KnowledgeLink = z.infer<typeof KnowledgeLink>;
 export const KnowledgeRecord = z.object({
   id: KnowledgeRecordId,
   kind: KnowledgeRecordKind,
-  title: z.string(),
+  title: boundedUtf8(KNOWLEDGE_TITLE_MAX_BYTES),
   content: z.object({
     format: z.literal("markdown"),
-    body: z.string().nullable(),
-    summary: z.string().nullable(),
-    topics: z.array(z.string()),
-    metadata: z.record(z.string(), z.unknown()),
+    body: boundedUtf8(KNOWLEDGE_BODY_MAX_BYTES).nullable(),
+    summary: boundedUtf8(KNOWLEDGE_SUMMARY_MAX_BYTES).nullable(),
+    topics: z
+      .array(boundedUtf8(KNOWLEDGE_TOPIC_MAX_BYTES))
+      .max(KNOWLEDGE_TOPICS_MAX_ITEMS),
+    metadata: z.record(z.string(), z.unknown()).refine(boundedJson, {
+      message: "knowledge metadata exceeds its JSON projection boundary",
+    }),
   }),
   authority: KnowledgeAuthority,
   provenance: z.object({
@@ -91,7 +154,26 @@ export const KnowledgeRecord = z.object({
     conflict: z.literal("not_evaluated"),
     correction: z.literal("current_source_version"),
   }),
-  links: z.array(KnowledgeLink),
+  links: z.array(KnowledgeLink).max(8),
+  projection: z.object({
+    truncated: z.boolean(),
+    fields: z
+      .array(
+        z.enum([
+          "title",
+          "content.body",
+          "content.summary",
+          "content.topics",
+          "content.metadata",
+          "provenance.source.uri",
+          "provenance.source.externalId",
+          "provenance.source.title",
+          "provenance.source.author",
+          "provenance.source.version",
+        ]),
+      )
+      .max(10),
+  }),
 });
 export type KnowledgeRecord = z.infer<typeof KnowledgeRecord>;
 
