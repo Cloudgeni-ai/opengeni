@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { buildSchemaContract } from "./release-schema-contract";
@@ -110,7 +110,16 @@ describe("release schema contract", () => {
   });
 
   test("preserves published host-export history and appends the forward repair", async () => {
-    const sourceContract = await buildSchemaContract();
+    const completeSourceContract = await buildSchemaContract();
+    const transitionReaper = completeSourceContract.migrations.find(
+      (migration) => migration.path === "0237_interaction_transition_reaper.sql",
+    );
+    const sourceContract = transitionReaper
+      ? await contractWithoutMigration(transitionReaper.path)
+      : completeSourceContract;
+    if (transitionReaper) {
+      expect(transitionReaper).toMatchObject({ deploymentMode: "maintenance" });
+    }
     const migrations = new Map(
       sourceContract.migrations.map((migration) => [migration.path, migration]),
     );
@@ -1053,6 +1062,17 @@ describe("release schema contract", () => {
     });
   });
 });
+
+async function contractWithoutMigration(excludedPath: string) {
+  const source = join(import.meta.dir, "../packages/db/drizzle");
+  const directory = await mkdtemp(join(tmpdir(), "opengeni-schema-contract-filtered-"));
+  directories.push(directory);
+  for (const entry of await readdir(source, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith(".sql") || entry.name === excludedPath) continue;
+    await copyFile(join(source, entry.name), join(directory, entry.name));
+  }
+  return await buildSchemaContract(directory);
+}
 
 async function fixture(files: Array<[string, string]>): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "opengeni-schema-contract-"));

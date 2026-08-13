@@ -82,6 +82,7 @@ import {
   deriveComputerViewGrantToken,
 } from "../browser-controller-authority";
 import { withCachedController } from "../controller-data-plane";
+import { withInteractionHolderHeartbeat } from "../interaction-holder-heartbeat";
 import { allowedCorsOrigin } from "../http/cors";
 import { observeComputerActionResult, observeLifecycleResult } from "../interaction-metrics";
 import { withChannelA, withChannelARead, type ChannelAOperation } from "../sandbox/channel-a";
@@ -197,7 +198,17 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
             prepared.session.id,
             request.operationId,
             placement.placementInstanceId,
-          );
+          ).catch(async (error: unknown) => {
+            if (interactionHeld) {
+              await releaseInteractionHolder(
+                grant,
+                workspaceId,
+                prepared!.session.id,
+                placement.placement,
+              ).catch(() => undefined);
+            }
+            throw error;
+          });
           const preparedSession = prepared.session;
           const controllerGeneration = requireOperationGeneration(record);
           const adminToken = deriveBrowserControllerAdminToken({
@@ -226,12 +237,28 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
               adminToken,
               origin,
               async (client) =>
-                await client.createComputerSession({
-                  computerSessionId: preparedSession.id,
-                  controllerGeneration,
-                  tokenGeneration: record.tokenGeneration,
-                  ...tokens,
-                }),
+                await withInteractionHolderHeartbeat(
+                  deps,
+                  {
+                    grant,
+                    workspaceId,
+                    sandboxGroupId:
+                      placement.placement.kind === "sandbox_group"
+                        ? placement.placement.sandboxGroupId
+                        : null,
+                    holderId: interactionHolderId(preparedSession.id),
+                    operationId: request.operationId,
+                    resourceId: preparedSession.id,
+                    controllerGeneration,
+                  },
+                  async () =>
+                    await client.createComputerSession({
+                      computerSessionId: preparedSession.id,
+                      controllerGeneration,
+                      tokenGeneration: record.tokenGeneration,
+                      ...tokens,
+                    }),
+                ),
             );
             await cacheComputerControllerPlacement(grant, workspaceId, placement).catch(
               () => placement,
@@ -661,12 +688,28 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
             });
             const client = await provisionController(grant, record, placement, origin);
             try {
-              await client.endComputerSession(
+              await withInteractionHolderHeartbeat(
+                deps,
                 {
-                  computerSessionId,
+                  grant,
+                  workspaceId,
+                  sandboxGroupId:
+                    placement.placement.kind === "sandbox_group"
+                      ? placement.placement.sandboxGroupId
+                      : null,
+                  holderId: interactionHolderId(computerSessionId),
+                  operationId: request.operationId,
+                  resourceId: computerSessionId,
                   controllerGeneration: binding.controllerGeneration,
                 },
-                { removeState: true },
+                async () =>
+                  await client.endComputerSession(
+                    {
+                      computerSessionId,
+                      controllerGeneration: binding.controllerGeneration,
+                    },
+                    { removeState: true },
+                  ),
               );
             } catch (error) {
               if (!(error instanceof BrowserControlRequestError && error.status === 404)) {

@@ -34858,15 +34858,22 @@ export async function reapStaleLeaseHoldersGlobal(
     idleGraceMs: number;
   },
 ): Promise<ReapDrainable[]> {
-  // Interaction holders represent durable BrowserSession/ComputerSession
-  // ownership, not a viewer presence lease. The installed legacy SQL function
-  // conflates its TTL with the React viewer heartbeat, so passing a positive
-  // value can destroy a healthy controller whenever its panel is hidden. End,
-  // loss and force-drain paths release these holders authoritatively; disable
-  // timestamp reaping until the global function is lifecycle-only as well.
+  // Active interaction holders represent durable BrowserSession/ComputerSession
+  // ownership, not viewer presence, and therefore never expire by timestamp.
+  // A separate lifecycle-aware function settles only stale starting/restoring/
+  // suspending/ending transitions. API controller mutations pulse their holder
+  // while in flight, so the transition TTL detects an abandoned caller rather
+  // than imposing a maximum duration on profile capture or restore.
   const rows = await db.transaction(async (txRaw) => {
     const tx = txRaw as unknown as Database;
     await tx.execute(sql`select set_config('opengeni.sandbox_recovery_protocol_v2', '1', true)`);
+    if (input.interactionHolderTtlMs && input.interactionHolderTtlMs > 0) {
+      await tx.execute(sql`
+        select opengeni_private.reap_stale_interaction_transitions(
+          ${input.interactionHolderTtlMs}
+        )
+      `);
+    }
     return await rawRows<{
       workspace_id: string;
       sandbox_group_id: string;
@@ -34879,6 +34886,8 @@ export async function reapStaleLeaseHoldersGlobal(
         from opengeni_private.reap_sandbox_leases(
           ${input.viewerHolderTtlMs},
           ${input.turnHolderTtlMs ?? 0},
+          -- The legacy argument is intentionally zero: its timestamp branch
+          -- includes healthy active controllers. Transitional expiry ran above.
           ${0},
           ${input.idleGraceMs}
         )
