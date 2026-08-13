@@ -726,7 +726,10 @@ A lost provider is rematerialized by one cold-to-warming winner. Under the lease
 row lock it selects one versioned archive revision. A native Modal revision must
 match its immutable current artifact receipt, source mutation generation, and
 canonical provider-workspace binding; the exact authenticated client embedded
-in the created session must match that binding before hydration. A real tar
+in the created session must match that binding before hydration. The verified
+native artifact also pins the restore client's workspace-persistence mode; the
+process default governs only archive-free creations and cannot invalidate an
+older selected revision. A real tar
 revision instead carries byte/hash plus deterministic content-tree metadata.
 Repeated starts with the same rematerialization id are idempotent; rivals and
 stale progress/commit writes are fenced. Native restore trusts Modal's snapshot

@@ -669,8 +669,9 @@ const SettingsSchema = z.object({
   // /workspace FILE PERSISTENCE across warm/cold cycles. Directory snapshots
   // preserve only the durable user workspace, so provider recovery does not
   // restore an entire machine image or replace the selected rig/base image.
-  // Existing serialized sessions retain their original persistence mode and
-  // remain recoverable; this default governs newly created Modal sandboxes.
+  // Cold restore derives the mode from its verified native artifact, so existing
+  // serialized sessions remain recoverable; this default governs archive-free
+  // Modal creations only.
   // `snapshot_filesystem` remains available for explicit compatibility and
   // immutable rig-image materialization. `tar` is the portable fallback.
   modalWorkspacePersistence: z

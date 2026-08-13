@@ -1521,6 +1521,47 @@ async function terminateCreatedSandbox(
   }
 }
 
+type ModalNativeWorkspacePersistence = "snapshot_filesystem" | "snapshot_directory";
+
+function modalWorkspacePersistenceForRestore(
+  archive: VerifiedWorkspaceArchive | null,
+): ModalNativeWorkspacePersistence | null {
+  if (archive?.kind !== "provider_snapshot") return null;
+  const snapshot = archive.nativeSnapshot;
+  if (!snapshot) {
+    throw new WorkspaceArchiveIntegrityError(
+      "native_snapshot_reference_invalid",
+      `selected native snapshot archive revision ${archive.descriptor.revision} has no decoded provider receipt`,
+    );
+  }
+  const expected =
+    snapshot.provider === "modal_snapshot_filesystem"
+      ? "snapshot_filesystem"
+      : snapshot.provider === "modal_snapshot_directory"
+        ? "snapshot_directory"
+        : null;
+  if (!expected) return null;
+  if (snapshot.workspacePersistence !== undefined && snapshot.workspacePersistence !== expected) {
+    throw new WorkspaceArchiveIntegrityError(
+      "native_snapshot_reference_invalid",
+      `selected Modal snapshot archive revision ${archive.descriptor.revision} has inconsistent persistence metadata`,
+    );
+  }
+  return expected;
+}
+
+function settingsForWorkspaceArchiveRestore(
+  backend: SandboxBackend,
+  settings: Settings,
+  archive: VerifiedWorkspaceArchive | null,
+): Settings {
+  if (backend !== "modal") return settings;
+  const workspacePersistence = modalWorkspacePersistenceForRestore(archive);
+  return workspacePersistence && settings.modalWorkspacePersistence !== workspacePersistence
+    ? { ...settings, modalWorkspacePersistence: workspacePersistence }
+    : settings;
+}
+
 /**
  * Establish from one recovery envelope under an explicit creation policy. The
  * envelope is the lease's box-identity descriptor (the same per-turn `_sandbox`
@@ -1640,14 +1681,32 @@ export async function establishSandboxSessionFromEnvelope(
       workspaceArchiveBase64,
       workspaceArchiveMetadata,
     );
-    let createdClient = client;
+    // The selected native artifact is the durable authority for its restore
+    // protocol. The process setting governs new sandboxes only: a mode rollout
+    // must not make an older, verified Modal snapshot impossible to hydrate.
+    const restoreSettings = settingsForWorkspaceArchiveRestore(backend, settings, workspaceArchive);
+    const restoreClient =
+      restoreSettings === settings
+        ? client
+        : ((opts.clientFactory ?? createSandboxClientForBackend)(
+            backend,
+            restoreSettings,
+            environment,
+          ) as ResumeCapableClient | undefined);
+    if (!restoreClient?.create) {
+      throw new SandboxConfigError(
+        backend,
+        `Sandbox backend "${backend}" does not support fresh archive restoration`,
+      );
+    }
+    let createdClient = restoreClient;
     const createStarted = Date.now();
-    let restored: Awaited<ReturnType<NonNullable<typeof client.create>>>;
+    let restored: Awaited<ReturnType<NonNullable<typeof restoreClient.create>>>;
     try {
-      restored = await client.create!({ manifest: createManifest });
+      restored = await restoreClient.create({ manifest: createManifest });
       recordSandboxCreateMetric(
         opts.metrics,
-        client.backendId,
+        restoreClient.backendId,
         createImageSource,
         "completed",
         createStarted,
@@ -1655,7 +1714,7 @@ export async function establishSandboxSessionFromEnvelope(
     } catch (error) {
       recordSandboxCreateMetric(
         opts.metrics,
-        client.backendId,
+        restoreClient.backendId,
         createImageSource,
         "failed",
         createStarted,
@@ -1663,19 +1722,24 @@ export async function establishSandboxSessionFromEnvelope(
       if (
         createImageSource !== "provider_immutable" ||
         backend !== "modal" ||
-        !isProviderSandboxNotFoundError(client.backendId, error)
+        !isProviderSandboxNotFoundError(restoreClient.backendId, error)
       ) {
         throw error;
       }
-      const fallbackSettings =
+      const fallbackBaseSettings =
         opts.logicalFallbackSettings ??
         (settings.modalImageRef ? { ...settings, modalImageId: undefined } : null);
-      if (!fallbackSettings) {
+      if (!fallbackBaseSettings) {
         // An ID-only logical base is supported. Without the exact pre-selection
         // settings, clearing the optimized ID would silently boot Modal's
         // default image, so fail closed instead of changing the rig base.
         throw error;
       }
+      const fallbackSettings = settingsForWorkspaceArchiveRestore(
+        backend,
+        fallbackBaseSettings,
+        workspaceArchive,
+      );
       await ensureModalRegistryImage(fallbackSettings);
       const fallbackClient = (opts.clientFactory ?? createSandboxClientForBackend)(
         backend,
@@ -1758,7 +1822,7 @@ export async function establishSandboxSessionFromEnvelope(
         throw new WorkspaceArchiveIntegrityError(
           "archive_hydration_failed",
           `failed to hydrate selected workspace archive revision ${workspaceArchive.descriptor.revision}`,
-          { retryable: true },
+          { retryable: true, cause: error },
         );
       }
       // hydrateWorkspace may replace the provider box (Modal's native snapshot
