@@ -160,6 +160,14 @@ function fakeSlack(
       released: Promise<void>;
     }
   >();
+  const privateFileRedirectAfterFetch = new Map<
+    string,
+    {
+      channelId: string;
+      signalEntered: () => void;
+      released: Promise<void>;
+    }
+  >();
   const pauseChannelInfoAfterFile = (fileId: string, channelId: string): SlackPostPause => {
     if (channelInfoPauseAfterFile.has(fileId)) {
       throw new Error("Slack post-file channel-info pause already exists");
@@ -173,6 +181,29 @@ function fakeSlack(
       signalReleased = resolve;
     });
     channelInfoPauseAfterFile.set(fileId, { channelId, signalEntered, released });
+    return {
+      entered,
+      release: () => {
+        signalReleased();
+      },
+    };
+  };
+  const redirectPrivateFileThenPausePolicy = (
+    fileId: string,
+    channelId: string,
+  ): SlackPostPause => {
+    if (privateFileRedirectAfterFetch.has(fileId)) {
+      throw new Error("Slack private-file redirect pause already exists");
+    }
+    let signalEntered!: () => void;
+    let signalReleased!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      signalEntered = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      signalReleased = resolve;
+    });
+    privateFileRedirectAfterFetch.set(fileId, { channelId, signalEntered, released });
     return {
       entered,
       release: () => {
@@ -228,6 +259,17 @@ function fakeSlack(
     if (url.hostname === "files.slack.com") {
       const fileId = url.pathname.split("/").filter(Boolean).at(-2) ?? "";
       privateFileFetches.push(fileId);
+      const redirectPause = privateFileRedirectAfterFetch.get(fileId);
+      if (redirectPause) {
+        privateFileRedirectAfterFetch.delete(fileId);
+        nextChannelInfoPause = redirectPause;
+        return new Response(null, {
+          status: 302,
+          headers: {
+            location: `https://files.slack.com/files-pri/${fileId}/redirected-download`,
+          },
+        });
+      }
       const file = privateFiles.get(fileId);
       return file
         ? new Response(file.bytes, { headers: { "content-type": file.contentType } })
@@ -491,6 +533,7 @@ function fakeSlack(
     channelAccessFailures,
     pauseBeforePost,
     pauseChannelInfoAfterFile,
+    redirectPrivateFileThenPausePolicy,
   };
 }
 
@@ -5215,6 +5258,119 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(value.slack.privateFileFetches).toHaveLength(0);
     expect(objectStore.objects.size).toBe(0);
     expect(await interactions(value.owner.workspaceId)).toHaveLength(0);
+    const [inbox] = await shared!.admin<{ status: string; last_error_code: string | null }[]>`
+      select status, last_error_code
+      from slack_interaction_inbox
+      where workspace_id = ${value.owner.workspaceId}`;
+    expect(inbox).toEqual({
+      status: "failed",
+      last_error_code: "slack_shared_policy_changed_before_read",
+    });
+  });
+
+  test("shared image import revalidates policy before a redirected byte fetch", async () => {
+    if (!available) return;
+    const channelId = "C_SHARED_IMAGE_REDIRECT_DRIFT";
+    const partnerTeamId = "T_PARTNER_IMAGE_REDIRECT_DRIFT";
+    const value = await fixture({
+      sharedChannels: [channelId],
+      externalOwnerTeamId: partnerTeamId,
+    });
+    const objectStore = reactionObjectStorage();
+    Reflect.set(value.deps, "objectStorage", objectStore.storage);
+    const fileId = "F_SHARED_IMAGE_REDIRECT_DRIFT";
+    value.slack.privateFiles.set(fileId, {
+      channelId,
+      filename: "must-not-follow.png",
+      contentType: "image/png",
+      bytes: fixturePng(),
+    });
+    const policyUpdate = await updateSlackTaskPolicy(client.db, {
+      accountId: value.owner.accountId,
+      workspaceId: value.owner.workspaceId,
+      policy: {
+        allowedTeamIds: [value.teamId, partnerTeamId],
+        allowedConversationIds: [channelId],
+        allowGuestInitiators: false,
+        allowExternalInitiators: true,
+        allowMpim: false,
+        sharedConversationMode: "private_handoff",
+        resultPublicationMode: "never",
+      },
+      expectedCurrentRevisionId: null,
+      expectedActivationVersion: 0,
+      actorSubjectId: value.owner.subjectId,
+      principalKind: "human_session",
+      reason: "Authorize the exact shared image handoff",
+    });
+    const messageTimestamp = "1731000011.000001";
+    value.slack.channelHistories.set(channelId, {
+      messages: [
+        {
+          ts: messageTimestamp,
+          user: value.ownerSlackUserId,
+          text: `<@${value.botUserId}> inspect this privately`,
+          files: [
+            {
+              id: fileId,
+              name: "must-not-follow.png",
+              title: "Must not follow",
+            },
+          ],
+        },
+      ],
+    });
+    const pause = value.slack.redirectPrivateFileThenPausePolicy(fileId, channelId);
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_SHARED_IMAGE_REDIRECT_DRIFT_${crypto.randomUUID()}`,
+          event: {
+            type: "app_mention",
+            user: value.ownerSlackUserId,
+            channel: channelId,
+            ts: messageTimestamp,
+            text: `<@${value.botUserId}> inspect this privately`,
+            files: [
+              {
+                id: fileId,
+                name: "must-not-follow.png",
+                title: "Must not follow",
+              },
+            ],
+          },
+        })
+      ).status,
+    ).toBe(200);
+    const draining = drainAll(value.deps);
+    await pause.entered;
+    expect(value.slack.privateFileFetches).toEqual([fileId]);
+    await updateSlackTaskPolicy(client.db, {
+      accountId: value.owner.accountId,
+      workspaceId: value.owner.workspaceId,
+      policy: {
+        ...policyUpdate.revision.policy,
+        sharedConversationMode: "deny",
+      },
+      expectedCurrentRevisionId: policyUpdate.revision.id,
+      expectedActivationVersion: policyUpdate.head.activationVersion,
+      actorSubjectId: value.owner.subjectId,
+      principalKind: "human_session",
+      reason: "Revoke the shared handoff before the redirected file fetch",
+    });
+    pause.release();
+    await draining;
+
+    expect(value.slack.calls.filter((call) => call.method === "files.info")).toHaveLength(1);
+    expect(value.slack.privateFileFetches).toEqual([fileId]);
+    expect(objectStore.objects.size).toBe(0);
+    expect(await interactions(value.owner.workspaceId)).toHaveLength(0);
+    const [sessionCount] = await shared!.admin<{ count: number }[]>`
+      select count(*)::int as count
+      from sessions
+      where workspace_id = ${value.owner.workspaceId}`;
+    expect(sessionCount?.count ?? 0).toBe(0);
     const [inbox] = await shared!.admin<{ status: string; last_error_code: string | null }[]>`
       select status, last_error_code
       from slack_interaction_inbox

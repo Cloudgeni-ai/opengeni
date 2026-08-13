@@ -737,8 +737,11 @@ export class OpenGeniSlackBotClient {
       ) {
         throw new SlackBotProviderError("invalid_file_size");
       }
-      await authorizeSharedRead?.();
-      const response = await this.fetchPrivateFile(input.downloadUrl, "file.content.read");
+      const response = await this.fetchPrivateFile(
+        input.downloadUrl,
+        "file.content.read",
+        authorizeSharedRead,
+      );
       const responseContentType = normalizedContentType(response.headers.get("content-type"));
       if (!SLACK_REACTION_IMAGE_MIME_TYPES.has(responseContentType)) {
         await response.body?.cancel().catch(() => undefined);
@@ -1494,8 +1497,9 @@ export class OpenGeniSlackBotClient {
   private async fetchPrivateFile(
     url: URL,
     operation: "file.info" | "file.content.read",
+    authorizeBeforeFetch?: () => Promise<void>,
   ): Promise<Response> {
-    const response = await this.fetchPrivateFileOnce(url, operation);
+    const response = await this.fetchPrivateFileOnce(url, operation, authorizeBeforeFetch);
     if (response.status < 300 || response.status >= 400) {
       return response;
     }
@@ -1516,12 +1520,13 @@ export class OpenGeniSlackBotClient {
     } catch {
       throw new SlackBotProviderError("invalid_file_redirect");
     }
-    return await this.fetchPrivateFileOnce(redirected, operation);
+    return await this.fetchPrivateFileOnce(redirected, operation, authorizeBeforeFetch);
   }
 
   private async fetchPrivateFileOnce(
     url: URL,
     operation: "file.info" | "file.content.read",
+    authorizeBeforeFetch?: () => Promise<void>,
   ): Promise<Response> {
     try {
       assertPrivateSlackFileUrl(url);
@@ -1529,6 +1534,7 @@ export class OpenGeniSlackBotClient {
       throw new SlackBotProviderError("invalid_file_url");
     }
     const headers = await this.headersForDestination(operation, url.toString());
+    await authorizeBeforeFetch?.();
     let response: Response;
     try {
       response = await this.fetchImpl(url, {
