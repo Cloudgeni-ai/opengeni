@@ -80,7 +80,7 @@
     "operator:sandbox-reaper-hold": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; bun scripts/operator/sandbox-reaper-hold.ts",
     "acceptance:workbench-live": "bun scripts/workbench-live-acceptance.ts",
     "acceptance:interaction-live": "bun scripts/interaction-live-acceptance.ts",
-    "acceptance:interaction-identity-live": "bun scripts/interaction-identity-live-acceptance.ts",
+    "acceptance:interaction-identity-live": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; bun scripts/interaction-identity-live-acceptance.ts",
     "fixture:interaction-ui-live": "bun scripts/interaction-ui-live-fixture.ts",
     "acceptance:interaction-ui-live": "bun scripts/interaction-ui-live-acceptance.ts",
     "check:generated-fonts": "bun scripts/generate-noto-jp-loader.ts --check",
