@@ -5402,6 +5402,7 @@ export async function runAgentStream(
         : input;
   const environment = overrides.sandboxEnvironment ?? collectSandboxEnvironment(settings);
   const codemodeTokenFile = codemodeTokenFileForAgent(agent, environment);
+  const codemodeUrl = environment.OPENGENI_CODEMODE_URL;
   const genesisTitleInputFilter = takeGenesisTitleInputFilter(agent);
   if (overrides.onRunCredentialSessionReady && !overrides.runCredentialSessionId) {
     throw new Error("runCredentialSessionId is required when run credential setup is enabled");
@@ -5428,13 +5429,13 @@ export async function runAgentStream(
       ? withRunCredentialsSession(session as SandboxSessionLike, overrides.runCredentialSessionId)
       : (session as SandboxSessionLike);
     const agentSession = codemodeTokenFile
-      ? withCodemodeTokenSession(credentialAgentSession, codemodeTokenFile)
+      ? withCodemodeTokenSession(credentialAgentSession, codemodeTokenFile, codemodeUrl)
       : credentialAgentSession;
     const credentialSetupSession = overrides.runCredentialSessionId
       ? withRunCredentialsSession(setupSession, overrides.runCredentialSessionId)
       : setupSession;
     const decoratedSetupSession = codemodeTokenFile
-      ? withCodemodeTokenSession(credentialSetupSession, codemodeTokenFile)
+      ? withCodemodeTokenSession(credentialSetupSession, codemodeTokenFile, codemodeUrl)
       : credentialSetupSession;
     // Platform setup (manifest-env pin + beforeAgentStart hooks + file downloads)
     // against the UN-proxied established box — the ONE-TRUTH helper shared with the
@@ -5522,7 +5523,7 @@ export async function runAgentStream(
         )
       : resourceClient;
     const codemodeResourceClient = codemodeTokenFile
-      ? withCodemodeTokenClient(credentialResourceClient, codemodeTokenFile)
+      ? withCodemodeTokenClient(credentialResourceClient, codemodeTokenFile, codemodeUrl)
       : credentialResourceClient;
     const decoratedClient = withSandboxLifecycleHooks(
       codemodeResourceClient,
@@ -5600,7 +5601,7 @@ export async function runAgentStream(
       : resourceClient;
   const codemodeClient =
     credentialClient && codemodeTokenFile
-      ? withCodemodeTokenClient(credentialClient, codemodeTokenFile)
+      ? withCodemodeTokenClient(credentialClient, codemodeTokenFile, codemodeUrl)
       : credentialClient;
   // TOKEN-BROKER (B1): the per-turn git token seed, forwarded OFF-MANIFEST so the
   // repository-clone hook seeds it to the box's token file before the clone.

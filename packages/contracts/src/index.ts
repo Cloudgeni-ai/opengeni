@@ -12780,6 +12780,15 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
         }),
       )
       .default([]),
+    firstPartyMcpTools: z
+      .object({
+        default: z.array(FirstPartyMcpToolName),
+        allowed: z.array(FirstPartyMcpToolName),
+      })
+      .default({
+        default: [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+        allowed: [...FIRST_PARTY_MCP_TOOL_NAMES],
+      }),
     fileUploads: z.object({
       enabled: z.boolean(),
       maxSizeBytes: z.number().int().positive(),

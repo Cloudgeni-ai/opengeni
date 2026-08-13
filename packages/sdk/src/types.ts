@@ -3006,6 +3006,13 @@ export type ClientConfig = {
   defaultReasoningEffort: ReasoningEffort;
   allowedReasoningEfforts: ReasoningEffort[];
   mcpServers: { id: string; name: string }[];
+  /** Deployment defaults and hard maximum for built-in OpenGeni session tools. */
+  firstPartyMcpTools?:
+    | {
+        default: FirstPartyMcpToolName[];
+        allowed: FirstPartyMcpToolName[];
+      }
+    | undefined;
   fileUploads: { enabled: boolean; maxSizeBytes: number };
   /** Native browser microphone capture + server-side transcription capability. */
   voiceInput?: ClientVoiceInputConfig | undefined;

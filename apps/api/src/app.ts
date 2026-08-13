@@ -3,6 +3,7 @@ import {
   configuredAllowedModels,
   configuredAllowedReasoningEfforts,
   configuredModels,
+  resolveFirstPartyMcpToolPolicy,
   withCodexCatalogProvider,
   withXaiSubscriptionCatalogProvider,
 } from "@opengeni/config";
@@ -147,7 +148,7 @@ export {
 export { workflowIdForSession } from "@opengeni/core";
 export { replaySessionEvents, sseSessionStream, sseWorkspaceControlStream } from "./http/sse";
 
-export const API_MAX_REQUEST_BODY_BYTES = 8 * 1024 * 1024;
+export const API_MAX_REQUEST_BODY_BYTES = 32 * 1024 * 1024;
 
 /** Effective Hono bodyLimit — API JSON ceiling or voice multipart + multipart overhead. */
 export function apiRequestBodyLimitBytes(settings: {
@@ -500,6 +501,7 @@ export function createAppComposition(deps: AppDependencies): {
           id: server.id,
           name: server.name ?? server.id,
         })),
+        firstPartyMcpTools: resolveFirstPartyMcpToolPolicy(deps.settings),
         fileUploads: {
           enabled: objectStorage !== null,
           maxSizeBytes: objectStorage?.maxSinglePutSizeBytes ?? 5_000_000_000,

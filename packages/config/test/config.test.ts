@@ -917,7 +917,7 @@ describe("sandbox preparation profiles", () => {
     expect(local.ogtoolPackageSpec).toBeUndefined();
     expect(stableSandboxEnvironmentForRun(local, {}, { workspaceId: "ws-1" })).toMatchObject({
       OPENGENI_CODEMODE_TOKEN_FILE: "/workspace/.opengeni/codemode-token",
-      OPENGENI_CODEMODE_URL: "http://127.0.0.1:8000/v1/workspaces/ws-1/codemode",
+      OPENGENI_CODEMODE_URL: "http://host.docker.internal:8000/v1/workspaces/ws-1/codemode",
     });
 
     const configured = withEnv(
@@ -932,7 +932,7 @@ describe("sandbox preparation profiles", () => {
     expect(configured.codemodeMaxCallsPerTurn).toBe(17);
     expect(stableSandboxEnvironmentForRun(configured, {}, { workspaceId: "ws-1" })).toMatchObject({
       OPENGENI_CODEMODE_TOKEN_FILE: "/workspace/.opengeni/codemode-token",
-      OPENGENI_CODEMODE_URL: "http://127.0.0.1:8000/v1/workspaces/ws-1/codemode",
+      OPENGENI_CODEMODE_URL: "http://host.docker.internal:8000/v1/workspaces/ws-1/codemode",
       OPENGENI_OGTOOL_PACKAGE_SPEC: "@opengeni/ogtool@0.1.0",
     });
 
@@ -998,17 +998,51 @@ describe("sandbox preparation profiles", () => {
     expect(env).toEqual({});
   });
 
-  test("resolves a local-only first-party delegation secret without weakening configured mode", async () => {
+  test("resolves first-party delegation from explicit, configured shared-key, or local mode", async () => {
     const { resolveFirstPartyDelegationSecret } = await import("../src/index");
     const local = withEnv({}, () => getSettings());
-    const configured = withEnv({ OPENGENI_PRODUCT_ACCESS_MODE: "configured" }, () => getSettings());
+    const configured = withEnv(
+      {
+        OPENGENI_PRODUCT_ACCESS_MODE: "configured",
+        OPENGENI_AUTH_REQUIRED: "true",
+        OPENGENI_ACCESS_KEY: "configured-shared-key",
+      },
+      () => getSettings(),
+    );
     const explicit = withEnv({ OPENGENI_DELEGATION_SECRET: "operator-secret" }, () =>
       getSettings(),
     );
 
     expect(resolveFirstPartyDelegationSecret(local)).toBeTruthy();
-    expect(resolveFirstPartyDelegationSecret(configured)).toBeUndefined();
+    expect(resolveFirstPartyDelegationSecret(configured)).toBe("configured-shared-key");
     expect(resolveFirstPartyDelegationSecret(explicit)).toBe("operator-secret");
+  });
+
+  test("parses deployment first-party tool defaults and allowed ceiling", async () => {
+    const { resolveFirstPartyMcpToolPolicy } = await import("../src/index");
+    const settings = withEnv(
+      {
+        OPENGENI_DEFAULT_FIRST_PARTY_MCP_TOOLS: "session_get,goal_update",
+        OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS: '["session_get","goal_update","goal_pause"]',
+      },
+      () => getSettings(),
+    );
+    expect(resolveFirstPartyMcpToolPolicy(settings)).toEqual({
+      default: ["session_get", "goal_update"],
+      allowed: ["session_get", "goal_update", "goal_pause"],
+    });
+  });
+
+  test("rejects defaults outside the deployment first-party tool ceiling", () => {
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_DEFAULT_FIRST_PARTY_MCP_TOOLS: "session_get,session_create",
+          OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS: "session_get",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow("must be a subset");
   });
 
   test("does not duplicate a custom files MCP profile", () => {

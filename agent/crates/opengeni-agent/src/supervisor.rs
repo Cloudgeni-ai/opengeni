@@ -254,6 +254,8 @@ pub struct SupervisorLink<P: Platform> {
     pub platform: Arc<P>,
     /// Workspace-scoped control-plane credentials.
     pub credentials: StoredCredentials,
+    /// Authoritative deployment origin persisted by a non-legacy enrollment.
+    pub api_url: Option<String>,
 }
 
 impl<P: Platform> Clone for SupervisorLink<P> {
@@ -262,6 +264,7 @@ impl<P: Platform> Clone for SupervisorLink<P> {
             connection_id: self.connection_id.clone(),
             platform: self.platform.clone(),
             credentials: self.credentials.clone(),
+            api_url: self.api_url.clone(),
         }
     }
 }
@@ -278,7 +281,15 @@ impl<P: Platform> SupervisorLink<P> {
             connection_id: connection_id.into(),
             platform,
             credentials,
+            api_url: None,
         }
+    }
+
+    /// Attach the deployment origin that this exact link enrolled against.
+    #[must_use]
+    pub fn with_api_url(mut self, api_url: impl Into<String>) -> Self {
+        self.api_url = Some(api_url.into());
+        self
     }
 }
 
@@ -288,6 +299,7 @@ struct WorkspaceLink<P: Platform> {
     connection_id: String,
     platform: Arc<P>,
     creds: StoredCredentials,
+    api_url: Option<String>,
     epoch: Arc<EpochCell>,
     shutdown: ShutdownSignal,
     /// The CURRENT generation's bulk frame channel (op-frame publishes ride a
@@ -304,6 +316,7 @@ impl<P: Platform> WorkspaceLink<P> {
             connection_id: definition.connection_id,
             platform: definition.platform,
             creds: definition.credentials,
+            api_url: definition.api_url,
             epoch: Arc::new(EpochCell::default()),
             shutdown: ShutdownSignal::default(),
             bulk_tx: Arc::new(std::sync::RwLock::new(None)),
@@ -847,7 +860,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             return;
         };
         let max_payload = client.server_info().max_payload;
-        let request = match ControlRequest::decode(message.payload.as_ref()) {
+        let mut request = match ControlRequest::decode(message.payload.as_ref()) {
             Ok(request) => request,
             Err(decode_error) => {
                 error!(error = %decode_error, "undecodable ControlRequest");
@@ -862,6 +875,13 @@ impl<P: Platform + 'static> Supervisor<P> {
                 return;
             }
         };
+        if let Some(api_url) = link.api_url.as_deref() {
+            crate::codemode::bind_connection_origin(
+                &mut request,
+                api_url,
+                &link.creds.workspace_id,
+            );
+        }
         let request_id = request.request_id.clone();
         let label = op_label(&request);
         match classify(&request) {

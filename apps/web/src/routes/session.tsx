@@ -87,7 +87,8 @@ import { createWorkspaceRetainedArtifactLoader } from "@/lib/retained-artifact-l
 import { createSessionRetainedScreenshotLoader } from "@/lib/retained-screenshot-loader";
 import { createWorkspaceRetainedVideoLoader } from "@/lib/retained-video-loader";
 import {
-  firstPartySessionToolOptions,
+  clientFirstPartyMcpToolPolicy,
+  firstPartySessionToolOptionsFor,
   isIntelligenceEffort,
   sessionPolicyPickerIds,
   toolsForPolicySelection,
@@ -917,6 +918,9 @@ function SessionChatPane(props: {
   const attachments = useFileAttachments();
   const repositories = useFollowUpRepositories(props.session);
   const { effortForSession, latencyMode } = context;
+  const firstPartyToolOptions = firstPartySessionToolOptionsFor(
+    clientFirstPartyMcpToolPolicy(context.clientConfig).allowed,
+  );
   const selectableSessionMcpServers = context.toolMcpServers;
   const selectableToolIds = useMemo(
     () => selectableSessionMcpServers.map((server) => server.id),
@@ -1456,7 +1460,7 @@ function SessionChatPane(props: {
                 disabled={terminal || composer.sending}
                 fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
                 servers={selectableSessionMcpServers}
-                firstPartyTools={firstPartySessionToolOptions}
+                firstPartyTools={firstPartyToolOptions}
                 selection={durableToolSelection}
                 toolsDisabled={
                   composer.sending || terminal || durableToolsSaving || !durableToolsHydrated
@@ -1531,7 +1535,7 @@ function SessionChatPane(props: {
                 <SessionToolPicker
                   menuSide="top"
                   servers={selectableSessionMcpServers}
-                  firstPartyTools={firstPartySessionToolOptions}
+                  firstPartyTools={firstPartyToolOptions}
                   selection={durableToolSelection}
                   triggerClassName="max-sm:hidden"
                   disabled={

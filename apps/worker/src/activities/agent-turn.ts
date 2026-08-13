@@ -183,6 +183,7 @@ import {
 import { connectionTokenResolverForTurn } from "./mcp-credentials";
 import { buildApiIntegrationServersForTurn } from "./api-integrations";
 import {
+  allowedFirstPartyMcpToolsForSession,
   assertTurnExecutionPolicyMatchesConfigV1,
   calculateGatewayReportedCostBreakdown,
   calculateModelUsageCostBreakdown,
@@ -437,7 +438,6 @@ import {
 } from "@opengeni/runtime";
 import {
   CAPABILITY_DESCRIPTORS,
-  DEFAULT_FIRST_PARTY_MCP_TOOLS,
   evaluateWorkspaceModelPolicy,
   readTurnExecutionPolicyV1,
   resolveWorkspaceAgentHumanInputEnabled,
@@ -2344,6 +2344,21 @@ export function hostedWebSearchForTurn(
   deploymentWebSearchEnabled: boolean,
 ): boolean {
   return resolvedModel?.configured.hostedWebSearch ?? deploymentWebSearchEnabled;
+}
+
+/**
+ * Image generation is an optional connected-account capability. A delegated
+ * subscription may still authorize the text model without carrying the local
+ * credential identity required for paid image operations; that must narrow the
+ * tool catalog, not reject an otherwise valid turn.
+ */
+export function connectedSubscriptionImageGenerationAuthority<T>(
+  credentialContext: T | null | undefined,
+  credentialId: string | null | undefined,
+): { credentialContext: T; credentialId: string } | null {
+  if (credentialContext == null || typeof credentialId !== "string" || credentialId.length === 0)
+    return null;
+  return { credentialContext, credentialId };
 }
 
 /** Direct OpenAI hosted image IDs are reusable only by the exact API credential. */
@@ -6919,6 +6934,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             };
           })()
         : undefined;
+      const selectedFirstPartyMcpTools = allowedFirstPartyMcpToolsForSession(
+        runSettings,
+        session.firstPartyMcpTools,
+      );
       preparedTools = await waitForTurnOperation(
         runtime.prepareTools(runSettings, turnTools, {
           accountId: input.accountId,
@@ -6945,7 +6964,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           ...(session.firstPartyMcpPermissions?.length
             ? { firstPartyPermissions: session.firstPartyMcpPermissions }
             : {}),
-          firstPartyTools: session.firstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+          firstPartyTools: selectedFirstPartyMcpTools,
           nestedAgentDepth: session.nestedAgentDepth,
           effectiveMaxNestedAgentDepth: session.effectiveMaxNestedAgentDepth,
           attemptToolDefinitions: createFirstPartyInteractionAttemptToolDefinitions({
@@ -6961,7 +6980,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             ...(session.firstPartyMcpPermissions?.length
               ? { permissions: session.firstPartyMcpPermissions }
               : {}),
-            selectedTools: session.firstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+            selectedTools: selectedFirstPartyMcpTools,
             subjectId: "worker:first-party-mcp",
             subjectLabel: "OpenGeni worker",
             ...(interactionInterventionResume
@@ -7074,13 +7093,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         }
 
         if (resolvedModel?.provider.kind === "codex-subscription") {
-          const codexImageContext = codexContext;
-          const codexImageCredentialId = effectiveCodexCredentialId;
-          if (!codexImageContext || !codexImageCredentialId) {
-            throw new CodexReloginRequired(
-              "Codex image generation requires a connected subscription account",
-            );
-          }
+          const imageAuthority = connectedSubscriptionImageGenerationAuthority(
+            codexContext,
+            effectiveCodexCredentialId,
+          );
+          if (!imageAuthority) return {};
           return {
             imageGeneration: {
               kind: "provider_adapter",
@@ -7097,8 +7114,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   toolCallId,
                   prompt,
                   references: resolvedReferences,
-                  credentialId: codexImageCredentialId,
-                  codexContext: codexImageContext,
+                  credentialId: imageAuthority.credentialId,
+                  codexContext: imageAuthority.credentialContext,
                   ...(runtimeCancellationSignal ? { abortSignal: runtimeCancellationSignal } : {}),
                 });
                 generatedImageReceiptsByArtifactId.set(receipt.artifact.artifactId, receipt);
@@ -7110,11 +7127,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         }
 
         if (resolvedModel?.provider.kind === "xai-subscription") {
-          const xaiImageContext = xaiRequestContext;
-          const xaiImageCredentialId = effectiveXaiCredentialId;
-          if (!xaiImageContext || !xaiImageCredentialId) {
-            throw new Error("SuperGrok image generation requires a connected subscription account");
-          }
+          const imageAuthority = connectedSubscriptionImageGenerationAuthority(
+            xaiRequestContext,
+            effectiveXaiCredentialId,
+          );
+          if (!imageAuthority) return {};
           return {
             imageGeneration: {
               kind: "provider_adapter",
@@ -7131,8 +7148,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   toolCallId,
                   prompt,
                   references: resolvedReferences,
-                  credentialId: xaiImageCredentialId,
-                  xaiContext: xaiImageContext,
+                  credentialId: imageAuthority.credentialId,
+                  xaiContext: imageAuthority.credentialContext,
                   ...(runtimeCancellationSignal ? { abortSignal: runtimeCancellationSignal } : {}),
                 });
                 generatedImageReceiptsByArtifactId.set(receipt.artifact.artifactId, receipt);
