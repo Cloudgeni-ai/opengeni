@@ -9,8 +9,10 @@ import {
   createDb,
   createSession,
   initializeSessionStartAtomically,
+  mutateSessionControlInTransaction,
   mutateWorkspaceControlInTransaction,
   withWorkspaceRls,
+  withWorkspaceSessionActivityRls,
 } from "../src/index";
 
 const migrationPath = join(
@@ -143,6 +145,248 @@ async function readRecoveryPredicate(sessionId: string) {
   return row;
 }
 
+type InitializedSession = Awaited<ReturnType<typeof createInitializedSession>>;
+
+async function markWakeDelivered(sessionId: string) {
+  await shared.admin`
+    update session_workflow_wake_outbox
+    set delivered_revision = wake_revision,
+        next_attempt_at = now() - interval '1 hour',
+        attempts = 1,
+        last_error = 'initial wake was already delivered'
+    where session_id = ${sessionId}`;
+}
+
+async function finishInitialTurn(fixture: InitializedSession) {
+  await shared.admin`
+    update session_turns
+    set status = 'completed',
+        active_attempt_id = null,
+        started_at = coalesce(started_at, now()),
+        finished_at = now()
+    where workspace_id = ${fixture.grant.workspaceId!}
+      and id = ${fixture.turn.id}`;
+  await shared.admin`
+    update sessions
+    set status = 'idle',
+        active_turn_id = null
+    where workspace_id = ${fixture.grant.workspaceId!}
+      and id = ${fixture.session.id}`;
+}
+
+async function configureApprovalWait(fixture: InitializedSession, withResponse: boolean) {
+  await shared.admin`
+    update session_turns
+    set status = 'requires_action',
+        active_attempt_id = null
+    where workspace_id = ${fixture.grant.workspaceId!}
+      and id = ${fixture.turn.id}`;
+  await shared.admin`
+    update sessions
+    set status = 'requires_action',
+        active_turn_id = ${fixture.turn.id}
+    where workspace_id = ${fixture.grant.workspaceId!}
+      and id = ${fixture.session.id}`;
+  if (!withResponse) return;
+  const [event] = await shared.admin<Array<{ sequence: number }>>`
+    insert into session_events (
+      account_id,
+      workspace_id,
+      session_id,
+      turn_id,
+      turn_generation,
+      sequence,
+      type,
+      payload
+    )
+    select
+      ${fixture.grant.accountId},
+      ${fixture.grant.workspaceId!},
+      ${fixture.session.id},
+      ${fixture.turn.id},
+      turn_row.execution_generation,
+      session_row.last_sequence + 1,
+      'user.approvalDecision',
+      jsonb_build_object('approvalId', 'migration-0238-test', 'decision', 'approve')
+    from sessions session_row
+    join session_turns turn_row
+      on turn_row.workspace_id = session_row.workspace_id
+     and turn_row.session_id = session_row.id
+     and turn_row.id = ${fixture.turn.id}
+    where session_row.workspace_id = ${fixture.grant.workspaceId!}
+      and session_row.id = ${fixture.session.id}
+    returning sequence`;
+  if (!event) throw new Error("Approval response event was not inserted");
+  await shared.admin`
+    update sessions
+    set last_sequence = ${event.sequence}
+    where workspace_id = ${fixture.grant.workspaceId!}
+      and id = ${fixture.session.id}`;
+}
+
+async function configureCapacityWait(fixture: InitializedSession, withWaiter: boolean) {
+  await shared.admin`
+    update session_turns
+    set status = 'waiting_capacity',
+        active_attempt_id = null,
+        execution_generation = greatest(execution_generation, 1)
+    where workspace_id = ${fixture.grant.workspaceId!}
+      and id = ${fixture.turn.id}`;
+  await shared.admin`
+    update sessions
+    set status = 'waiting_capacity',
+        active_turn_id = ${fixture.turn.id}
+    where workspace_id = ${fixture.grant.workspaceId!}
+      and id = ${fixture.session.id}`;
+  if (!withWaiter) return;
+  await shared.admin`
+    insert into codex_capacity_waiters (
+      account_id,
+      workspace_id,
+      session_id,
+      blocked_turn_id,
+      blocked_turn_generation,
+      workflow_id,
+      next_check_at,
+      reset_kind
+    )
+    select
+      ${fixture.grant.accountId},
+      ${fixture.grant.workspaceId!},
+      ${fixture.session.id},
+      ${fixture.turn.id},
+      turn_row.execution_generation,
+      session_row.temporal_workflow_id,
+      now() + interval '1 hour',
+      'authoritative'
+    from sessions session_row
+    join session_turns turn_row
+      on turn_row.workspace_id = session_row.workspace_id
+     and turn_row.session_id = session_row.id
+     and turn_row.id = ${fixture.turn.id}
+    where session_row.workspace_id = ${fixture.grant.workspaceId!}
+      and session_row.id = ${fixture.session.id}`;
+}
+
+async function configurePendingSystemUpdate(fixture: InitializedSession) {
+  const operationId = crypto.randomUUID();
+  await finishInitialTurn(fixture);
+  await shared.admin`
+    insert into session_system_updates (
+      account_id,
+      workspace_id,
+      session_id,
+      kind,
+      classification,
+      source_id,
+      dedupe_key,
+      summary,
+      payload,
+      lineage
+    ) values (
+      ${fixture.grant.accountId},
+      ${fixture.grant.workspaceId!},
+      ${fixture.session.id},
+      'agent_message',
+      'info',
+      ${`migration-0238:${operationId}`},
+      ${`migration-0238:${operationId}`},
+      'durable update awaiting claim',
+      jsonb_build_object(
+        'type', 'agent_message',
+        'text', 'durable update awaiting claim',
+        'operationId', (${operationId})::text
+      ),
+      '{}'::jsonb
+    )`;
+  await shared.admin`
+    update sessions
+    set status = 'queued'
+    where workspace_id = ${fixture.grant.workspaceId!}
+      and id = ${fixture.session.id}`;
+}
+
+async function pauseSession(fixture: InitializedSession) {
+  await withWorkspaceSessionActivityRls(client.db, fixture.grant.workspaceId!, (db) =>
+    mutateSessionControlInTransaction(db, {
+      accountId: fixture.grant.accountId,
+      workspaceId: fixture.grant.workspaceId!,
+      sessionId: fixture.session.id,
+      actor: { type: "human", subjectId: fixture.grant.subjectId },
+      operationKey: `migration-0238-pause:${crypto.randomUUID()}`,
+      action: "pause",
+      reason: "migration recovery regression",
+    }),
+  );
+}
+
+async function pauseWorkspace(fixture: InitializedSession) {
+  await withWorkspaceRls(client.db, fixture.grant.workspaceId!, (db) =>
+    db.transaction((tx) =>
+      mutateWorkspaceControlInTransaction(tx as unknown as typeof db, {
+        accountId: fixture.grant.accountId,
+        workspaceId: fixture.grant.workspaceId!,
+        actor: { type: "human", subjectId: fixture.grant.subjectId },
+        operationKey: `migration-0238-workspace-pause:${crypto.randomUUID()}`,
+        action: "pause",
+        reason: "migration recovery regression",
+      }),
+    ),
+  );
+}
+
+async function recordContextCompactionFailure(fixture: InitializedSession) {
+  const [event] = await shared.admin<Array<{ sequence: number }>>`
+    insert into session_events (
+      account_id,
+      workspace_id,
+      session_id,
+      turn_id,
+      turn_generation,
+      sequence,
+      type,
+      payload
+    )
+    select
+      ${fixture.grant.accountId},
+      ${fixture.grant.workspaceId!},
+      ${fixture.session.id},
+      ${fixture.turn.id},
+      turn_row.execution_generation,
+      session_row.last_sequence + 1,
+      'turn.failed',
+      jsonb_build_object('code', 'context_compaction_failed')
+    from sessions session_row
+    join session_turns turn_row
+      on turn_row.workspace_id = session_row.workspace_id
+     and turn_row.session_id = session_row.id
+     and turn_row.id = ${fixture.turn.id}
+    where session_row.workspace_id = ${fixture.grant.workspaceId!}
+      and session_row.id = ${fixture.session.id}
+    returning sequence`;
+  if (!event) throw new Error("Context compaction failure event was not inserted");
+  await shared.admin`
+    update sessions
+    set last_sequence = ${event.sequence}
+    where workspace_id = ${fixture.grant.workspaceId!}
+      and id = ${fixture.session.id}`;
+}
+
+async function expectWakeSeeded(
+  fixture: InitializedSession,
+  before: Awaited<ReturnType<typeof readWake>>,
+) {
+  const after = await readWake(fixture.session.id);
+  expect(after).toMatchObject({
+    wakeRevision: String(Number(before.wakeRevision) + 1),
+    deliveredRevision: before.wakeRevision,
+    reason: "unclaimed_attempt_recovery_cutover",
+    attempts: 0,
+    lastError: null,
+  });
+  expect(after.nextAttemptAt.getTime()).toBeGreaterThan(Date.now() + 58_000);
+}
+
 describe("migration 0238 unclaimed session recovery", () => {
   test("seeds exact recovering and delivered-wake queued orphans without touching healthy queued work", async () => {
     const orphaned = await createInitializedSession("recover this orphaned turn");
@@ -273,5 +517,63 @@ describe("migration 0238 unclaimed session recovery", () => {
     });
     expect(after.nextAttemptAt.getTime()).toBeGreaterThanOrEqual(startedAt + 59_000);
     expect(after.nextAttemptAt.getTime()).toBeLessThanOrEqual(finishedAt + 61_000);
+  });
+
+  test("repairs every durable work shape admitted before an attempt is created", async () => {
+    const approval = await createInitializedSession("resume this accepted approval");
+    const releasedCapacity = await createInitializedSession("resume this released capacity wait");
+    const compaction = await createInitializedSession("run this requested compaction");
+    const systemUpdate = await createInitializedSession("deliver this pending internal update");
+
+    await configureApprovalWait(approval, true);
+    await configureCapacityWait(releasedCapacity, false);
+    await finishInitialTurn(compaction);
+    await shared.admin`
+      update sessions
+      set compact_requested = true
+      where workspace_id = ${compaction.grant.workspaceId!}
+        and id = ${compaction.session.id}`;
+    await configurePendingSystemUpdate(systemUpdate);
+    for (const fixture of [approval, releasedCapacity, compaction, systemUpdate]) {
+      await markWakeDelivered(fixture.session.id);
+    }
+
+    const before = await Promise.all(
+      [approval, releasedCapacity, compaction, systemUpdate].map((fixture) =>
+        readWake(fixture.session.id),
+      ),
+    );
+    await applyMigration();
+
+    await expectWakeSeeded(approval, before[0]!);
+    await expectWakeSeeded(releasedCapacity, before[1]!);
+    await expectWakeSeeded(compaction, before[2]!);
+    await expectWakeSeeded(systemUpdate, before[3]!);
+  });
+
+  test("leaves held, paused, and already-pending work unchanged", async () => {
+    const approvalWait = await createInitializedSession("wait for an approval response");
+    const capacityWait = await createInitializedSession("wait for provider capacity");
+    const paused = await createInitializedSession("leave this directly paused turn alone");
+    const workspacePaused = await createInitializedSession("leave this paused workspace alone");
+    const compactionHold = await createInitializedSession("hold after compaction failure");
+    const healthy = await createInitializedSession("leave this pending wake alone");
+
+    await configureApprovalWait(approvalWait, false);
+    await configureCapacityWait(capacityWait, true);
+    await pauseSession(paused);
+    await pauseWorkspace(workspacePaused);
+    await configurePendingSystemUpdate(compactionHold);
+    await recordContextCompactionFailure(compactionHold);
+    for (const fixture of [approvalWait, capacityWait, paused, workspacePaused, compactionHold]) {
+      await markWakeDelivered(fixture.session.id);
+    }
+
+    const fixtures = [approvalWait, capacityWait, paused, workspacePaused, compactionHold, healthy];
+    const before = await Promise.all(fixtures.map((fixture) => readWake(fixture.session.id)));
+    await applyMigration();
+    const after = await Promise.all(fixtures.map((fixture) => readWake(fixture.session.id)));
+
+    expect(after).toEqual(before);
   });
 });

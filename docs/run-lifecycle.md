@@ -540,10 +540,13 @@ failure activity and follows the bounded re-peek path even when a rolling legacy
 activity worker returned void; an already-completed history replays its original
 close. The upgraded activity derives the stable workflow id and leaves the same
 durable restart obligation. Migration 0238 seeds that obligation for
-already-recovering active turns whose `active_attempt_id` is null and
-active-workspace queued no-attempt turns whose existing initial wake revision
-was fully delivered. Healthy queued turns with an undelivered wake, or with no
-wake because their workspace is paused, remain untouched.
+already-recovering active turns whose `active_attempt_id` is null and for every
+effectively active pre-attempt claim shape whose existing wake revision was
+fully delivered: queued turns, accepted approval responses, released capacity
+waits, manual compaction, and pending internal updates. The cutover mirrors
+runtime's recursive session/workspace control algebra and excludes live
+attempts, unanswered approvals, real capacity waiters, compaction-failure holds,
+paused work, and healthy undelivered wakes.
 
 After a reviewed release reaches staging, run the dry-by-default event-ordering invariant canary
 with `bun run canary:session-event-ordering`. Execution requires
