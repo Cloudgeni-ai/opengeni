@@ -373,6 +373,7 @@ Core endpoints:
 - `GET /healthz`
 - `GET /v1/config/client`
 - `GET /v1/access/me`
+- `GET /v1/organization-memberships` (managed-human self membership and personal-workspace identity)
 - `GET /v1/workspaces`
 - `POST /v1/workspaces`
 - `POST /v1/workspaces/:workspaceId/sessions`

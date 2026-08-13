@@ -1129,6 +1129,28 @@ export const OrganizationMembershipProjection = z.object({
 export type OrganizationMembershipProjection = z.infer<typeof OrganizationMembershipProjection>;
 
 /**
+ * Exact active-membership facts returned by managed-human login provisioning.
+ * Retention is intentionally absent because the narrow provisioning capability
+ * neither reads nor mutates offboarding policy.
+ */
+export const ManagedOrganizationMembershipProjection = z.object({
+  id: z.string().uuid(),
+  organizationId: z.string().uuid(),
+  status: z.literal("active"),
+  personalWorkspaceId: z.string().uuid(),
+});
+export type ManagedOrganizationMembershipProjection = z.infer<
+  typeof ManagedOrganizationMembershipProjection
+>;
+
+export const ListManagedOrganizationMembershipsResponse = z.object({
+  memberships: z.array(ManagedOrganizationMembershipProjection),
+});
+export type ListManagedOrganizationMembershipsResponse = z.infer<
+  typeof ListManagedOrganizationMembershipsResponse
+>;
+
+/**
  * Opaque user-resource authority projection. Ownership is represented by the
  * server-issued authority id, never a raw subject or membership id.
  */

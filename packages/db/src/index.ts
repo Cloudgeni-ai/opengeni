@@ -40,6 +40,7 @@ import type {
   HostUsageExport,
   HostUsageExportBatch,
   ManagedAccount,
+  ManagedOrganizationMembershipProjection,
   McpPersonalConnectionDelegation,
   Permission,
   PackInstallation,
@@ -1330,6 +1331,22 @@ export async function ensureManagedAccessForUser(
     name: string;
   },
 ): Promise<AccessContext> {
+  return (await ensureManagedAccessForUserWithOrganizationMemberships(db, input)).accessContext;
+}
+
+export type ManagedAccessProvisioningResult = {
+  accessContext: AccessContext;
+  organizationMemberships: ManagedOrganizationMembershipProjection[];
+};
+
+export async function ensureManagedAccessForUserWithOrganizationMemberships(
+  db: Database,
+  input: {
+    userId: string;
+    email: string;
+    name: string;
+  },
+): Promise<ManagedAccessProvisioningResult> {
   const subjectId = `user:${input.userId}`;
   const subjectLabel = input.email || input.name;
   return await db.transaction(async (tx) => {
@@ -1575,28 +1592,38 @@ export async function ensureManagedAccessForUser(
       .where(eq(schema.workspaceMemberships.subjectId, subjectId))
       .orderBy(desc(schema.workspaces.createdAt));
     return {
-      mode: "managed",
-      subjectId,
-      subjectLabel,
-      accountGrants: [
-        {
-          accountId: account.id,
-          subjectId,
-          subjectLabel,
-          role: "owner",
-          permissions: allAccountPermissions,
-        },
-      ],
-      workspaceGrants: memberships.map((row) => ({
-        workspaceId: row.workspace.id,
-        accountId: row.workspace.accountId,
+      accessContext: {
+        mode: "managed",
         subjectId,
         subjectLabel,
-        permissions: row.membership.permissions as Permission[],
-        principalKind: "human_session",
-      })),
-      defaultAccountId: account.id,
-      defaultWorkspaceId: defaultWorkspace.id,
+        accountGrants: [
+          {
+            accountId: account.id,
+            subjectId,
+            subjectLabel,
+            role: "owner",
+            permissions: allAccountPermissions,
+          },
+        ],
+        workspaceGrants: memberships.map((row) => ({
+          workspaceId: row.workspace.id,
+          accountId: row.workspace.accountId,
+          subjectId,
+          subjectLabel,
+          permissions: row.membership.permissions as Permission[],
+          principalKind: "human_session",
+        })),
+        defaultAccountId: account.id,
+        defaultWorkspaceId: defaultWorkspace.id,
+      },
+      organizationMemberships: [
+        {
+          id: provisionedMembership.organization_membership_id,
+          organizationId: account.id,
+          status: "active",
+          personalWorkspaceId: provisionedMembership.personal_workspace_id,
+        },
+      ],
     };
   });
 }

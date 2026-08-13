@@ -306,6 +306,7 @@ describe("OpenGeniClient access + workspaces", () => {
       return jsonResponse({ id: WORKSPACE_ID, name: "Ops" });
     });
     await client.getAccessContext();
+    await client.listOrganizationMemberships();
     await client.listWorkspaces();
     await client.createWorkspace({ name: "Ops" });
     await client.getWorkspace(WORKSPACE_ID);
@@ -316,6 +317,7 @@ describe("OpenGeniClient access + workspaces", () => {
     expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
       [
         "GET /v1/access/me",
+        "GET /v1/organization-memberships",
         "GET /v1/workspaces",
         "POST /v1/workspaces",
         `GET /v1/workspaces/${WORKSPACE_ID}`,
@@ -323,11 +325,11 @@ describe("OpenGeniClient access + workspaces", () => {
         `PUT /v1/workspaces/${WORKSPACE_ID}/default-rig`,
       ],
     );
-    expect(JSON.parse(requests[4]!.body!)).toEqual({
+    expect(JSON.parse(requests[5]!.body!)).toEqual({
       name: "Ops 2",
       slug: null,
     });
-    expect(JSON.parse(requests[5]!.body!)).toEqual({
+    expect(JSON.parse(requests[6]!.body!)).toEqual({
       rigId: "22222222-2222-4222-8222-222222222222",
     });
   });

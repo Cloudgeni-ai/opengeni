@@ -3157,6 +3157,17 @@ export type AccessContext = {
   defaultWorkspaceId: string | null;
 };
 
+export type ManagedOrganizationMembership = {
+  id: string;
+  organizationId: string;
+  status: "active";
+  personalWorkspaceId: string;
+};
+
+export type ListManagedOrganizationMembershipsResponse = {
+  memberships: ManagedOrganizationMembership[];
+};
+
 export type Workspace = {
   id: string;
   accountId: string;
