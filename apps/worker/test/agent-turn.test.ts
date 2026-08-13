@@ -56,6 +56,7 @@ import {
   createCompactionModelUsageEventState,
   createModelResponseEventState,
   createTurnSandboxProvisioner,
+  detachedSessionEventFanoutCloseReason,
   drainAttemptOwnedSandboxWriters,
   releaseTurnSandboxAfterWriterDrain,
   emitModelCallUsage,
@@ -2810,6 +2811,62 @@ describe("lazy sandbox provisioner single-flight", () => {
 });
 
 describe("worker shutdown preemption", () => {
+  test("closes detached fanout for success, failure, cancellation, and graceful shutdown", () => {
+    expect(
+      detachedSessionEventFanoutCloseReason({
+        activityStatus: "idle",
+        activityError: undefined,
+        finalizationError: undefined,
+        cancellationReason: undefined,
+      }),
+    ).toBe("activity_completed");
+    expect(
+      detachedSessionEventFanoutCloseReason({
+        activityStatus: "idle",
+        activityError: new Error("stream failed"),
+        finalizationError: undefined,
+        cancellationReason: undefined,
+      }),
+    ).toBe("activity_failed");
+    expect(
+      detachedSessionEventFanoutCloseReason({
+        activityStatus: "cancelled",
+        activityError: undefined,
+        finalizationError: undefined,
+        cancellationReason: new Error("paused"),
+      }),
+    ).toBe("activity_cancelled");
+    expect(
+      detachedSessionEventFanoutCloseReason({
+        activityStatus: "cancelled",
+        activityError: undefined,
+        finalizationError: undefined,
+        cancellationReason: new CancelledFailure("WORKER_SHUTDOWN"),
+      }),
+    ).toBe("worker_shutdown");
+  });
+
+  test("marks tool-output continuation only after accepted append and before the next model request", async () => {
+    const source = await Bun.file(
+      new URL("../src/activities/agent-turn.ts", import.meta.url),
+    ).text();
+    const appendBoundary = source.indexOf(
+      "const appended = await appendAndPublishTurnEventsFenced(",
+    );
+    const toolOutputBoundary = source.indexOf(
+      "if (containsToolOutput && appended.events.length > 0)",
+      appendBoundary,
+    );
+    const modelRequestBoundary = source.indexOf(
+      "agentLoopPhaseTracker.recordModelRequestStart(observability)",
+      toolOutputBoundary,
+    );
+
+    expect(appendBoundary).toBeGreaterThan(-1);
+    expect(toolOutputBoundary).toBeGreaterThan(appendBoundary);
+    expect(modelRequestBoundary).toBeGreaterThan(toolOutputBoundary);
+  });
+
   test("classifies only WORKER_SHUTDOWN cancellations as graceful preemption", () => {
     expect(isWorkerShutdownCancellation(new CancelledFailure("WORKER_SHUTDOWN"))).toBe(true);
     // Workflow-requested Pause/Steer cancellation keeps its control path.

@@ -11,6 +11,7 @@ import {
   recordSessionEventPublishLatency,
   AgentLoopPhaseTracker,
   recordAgentLoopPhaseDuration,
+  recordDetachedSessionEventFanoutOutcome,
   StreamTimingMetrics,
 } from "../src/observability-metrics";
 
@@ -185,6 +186,25 @@ describe("agent-loop phase timing", () => {
     expect(metrics).toMatch(
       /opengeni_agent_loop_phase_duration_seconds_count\{[^}]*phase="tool_output_to_model_continuation"[^}]*\} 1\b/,
     );
+  });
+
+  test("accounts detached fanout with only succeeded, failed, timed_out, and dropped labels", async () => {
+    const observability = worker();
+    for (const outcome of ["succeeded", "failed", "timed_out", "dropped"] as const) {
+      recordDetachedSessionEventFanoutOutcome(observability, {
+        outcome,
+        durationSeconds: 0.01,
+      });
+    }
+
+    const metrics = await observability.prometheusMetrics();
+    for (const outcome of ["succeeded", "failed", "timed_out", "dropped"] as const) {
+      expect(metrics).toMatch(
+        new RegExp(
+          `opengeni_session_event_detached_fanout_total\\{[^}]*outcome="${outcome}"[^}]*\\} 1\\b`,
+        ),
+      );
+    }
   });
 
   test("consumes each phase marker once and retains the earliest tool-output boundary", async () => {

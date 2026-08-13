@@ -1036,7 +1036,7 @@ export function recordAgentLoopPhaseDuration(
 export function recordDetachedSessionEventFanoutOutcome(
   observability: Observability,
   input: {
-    outcome: "published" | "failed" | "timed_out" | "dropped";
+    outcome: "succeeded" | "failed" | "timed_out" | "dropped";
     durationSeconds: number;
   },
 ): void {

@@ -113,6 +113,7 @@ import {
   appendAndPublishTurnEventsFenced,
   createDetachedSessionEventFanout,
   publishDurableSessionEvents,
+  type DetachedSessionEventFanoutCloseReason,
 } from "@opengeni/events";
 import { sandboxLeaseTelemetryKey, sandboxOperationMetricObserver } from "@opengeni/observability";
 import {
@@ -2799,6 +2800,24 @@ export async function finalizeDurableTurnOpStreams(
   }
 }
 
+export function detachedSessionEventFanoutCloseReason(input: {
+  activityStatus: RunAgentTurnResult["status"] | "unknown";
+  activityError: unknown;
+  finalizationError: unknown;
+  cancellationReason: unknown;
+}): DetachedSessionEventFanoutCloseReason {
+  if (isWorkerShutdownCancellation(input.cancellationReason)) return "worker_shutdown";
+  if (input.activityStatus === "cancelled") return "activity_cancelled";
+  if (
+    input.activityStatus === "failed" ||
+    input.activityError !== undefined ||
+    input.finalizationError !== undefined
+  ) {
+    return "activity_failed";
+  }
+  return "activity_completed";
+}
+
 export function createRunAgentTurnActivity(services: () => Promise<ActivityServices>) {
   const modelCheckpointMemoryCollector = createModelCheckpointMemoryCollector();
   // Keep a distinct cooldown for terminal collection. A collection at the
@@ -2896,11 +2915,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     );
     const sandboxOperationObserver = sandboxOperationMetricObserver(observability);
     const detachedLifecycleFanout = createDetachedSessionEventFanout(bus, {
+      closeTimeoutMs: 250,
       onPublishOutcome: ({ outcome, durationSeconds }) => {
         recordSessionEventPublishLatency(observability, { durationSeconds });
         recordDetachedSessionEventFanoutOutcome(observability, { outcome, durationSeconds });
       },
     });
+    const publishActivitySessionEvents = async (
+      events: Parameters<typeof publishDurableSessionEvents>[3],
+    ): Promise<void> => {
+      await detachedLifecycleFanout.publishAwaited(input.workspaceId, input.sessionId, events);
+    };
     const agentLoopPhaseTracker = new AgentLoopPhaseTracker();
     let isCodexTurn = false;
     let isXaiTurn = false;
@@ -4282,9 +4307,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             event.type === "rig.setup.skipped" ||
             event.type === "agent.toolCall.output",
         );
-        if (events.some((event) => event.type === "agent.toolCall.output")) {
-          agentLoopPhaseTracker.markToolOutput();
-        }
+        const containsToolOutput = events.some((event) => event.type === "agent.toolCall.output");
         const inputs = events.map((event) => ({
           ...event,
           payload: event.payload,
@@ -4315,13 +4338,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               recordSessionEventPublishLatency(observability, {
                 durationSeconds,
               }),
-            ...(detached
-              ? { fanout: "detached" as const, detachedFanout: detachedLifecycleFanout }
-              : {}),
+            fanout: detached ? ("detached" as const) : ("awaited" as const),
+            detachedFanout: detachedLifecycleFanout,
           },
         );
         if (inputs.length > 0 && !appended.accepted) {
           throw new TurnAttemptFencedError("turn execution generation was fenced");
+        }
+        if (containsToolOutput && appended.events.length > 0) {
+          // Measure from the accepted durable structural-output boundary to the
+          // next actual model request. The append itself has its own phase and
+          // must not be double-counted here.
+          agentLoopPhaseTracker.markToolOutput();
         }
         if (inputs.length > 0) {
           turnLifecycleMetricsFor(observability).progress(turnId!);
@@ -4433,7 +4461,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             await abandonActiveRecording("recording row was unavailable during turn settlement");
           }
         }
-        await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, result.events);
+        await publishActivitySessionEvents(result.events);
         activityContext?.heartbeat({
           ...heartbeatDetails,
           phase: "events_published",
@@ -4843,12 +4871,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             },
           });
           if (armed.action === "waiting") {
-            await publishDurableSessionEvents(
-              bus,
-              input.workspaceId,
-              input.sessionId,
-              armed.events,
-            );
+            await publishActivitySessionEvents(armed.events);
             turnMetricOutcome = "recovering";
             activityStatus = "waiting_capacity";
             return claimedResult({
@@ -4956,12 +4979,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             failurePayload,
           });
           if (armed.action === "waiting") {
-            await publishDurableSessionEvents(
-              bus,
-              input.workspaceId,
-              input.sessionId,
-              armed.events,
-            );
+            await publishActivitySessionEvents(armed.events);
             turnMetricOutcome = "recovering";
             activityStatus = "waiting_capacity";
             return claimedResult({
@@ -5184,12 +5202,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             },
           });
           if (armed.action === "waiting") {
-            await publishDurableSessionEvents(
-              bus,
-              input.workspaceId,
-              input.sessionId,
-              armed.events,
-            );
+            await publishActivitySessionEvents(armed.events);
             turnMetricOutcome = "recovering";
             activityStatus = "waiting_capacity";
             return claimedResult({
@@ -5748,14 +5761,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               })
           : undefined;
       const publishCompactionLiveEvents = async (events: SessionEvent[]) => {
-        await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, events);
+        await publishActivitySessionEvents(events);
       };
       const publishCompactionOutcomeEvents = async (events: SessionEvent[]) => {
         // `compaction.started` was already fanout via publishCompactionLiveEvents.
-        await publishDurableSessionEvents(
-          bus,
-          input.workspaceId,
-          input.sessionId,
+        await publishActivitySessionEvents(
           events.filter((event) => event.type !== "session.context.compaction.started"),
         );
       };
@@ -8214,7 +8224,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           throw new Error("Generated video materialization could not enter recovery");
         }
         acknowledgeRecoveryQuiescence();
-        await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
+        await publishActivitySessionEvents(recovery.events);
         activityStatus = "recovering";
         turnMetricOutcome = "recovering";
         return claimedResult({ status: "recovering", continueDelayMs: 1_000 });
@@ -9322,12 +9332,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             return claimedResult({ status: "cancelled" });
           }
           acknowledgeRecoveryQuiescence();
-          await publishDurableSessionEvents(
-            bus,
-            input.workspaceId,
-            input.sessionId,
-            recovery.events,
-          );
+          await publishActivitySessionEvents(recovery.events);
           activityStatus = "recovering";
           turnMetricOutcome = "recovering";
           return claimedResult({
@@ -9371,12 +9376,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             return claimedResult({ status: "cancelled" });
           }
           acknowledgeRecoveryQuiescence();
-          await publishDurableSessionEvents(
-            bus,
-            input.workspaceId,
-            input.sessionId,
-            recovery.events,
-          );
+          await publishActivitySessionEvents(recovery.events);
           activityStatus = "recovering";
           turnMetricOutcome = "recovering";
           return claimedResult({
@@ -9423,12 +9423,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             return claimedResult({ status: "cancelled" });
           }
           acknowledgeRecoveryQuiescence();
-          await publishDurableSessionEvents(
-            bus,
-            input.workspaceId,
-            input.sessionId,
-            recovery.events,
-          );
+          await publishActivitySessionEvents(recovery.events);
           activityStatus = "recovering";
           turnMetricOutcome = "recovering";
           return claimedResult({ status: "recovering" });
@@ -9576,12 +9571,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             outcome: settlement.action,
           },
         });
-        await publishDurableSessionEvents(
-          bus,
-          input.workspaceId,
-          input.sessionId,
-          settlement.events,
-        );
+        await publishActivitySessionEvents(settlement.events);
         activityError = error;
         if (settlement.action === "failed") {
           activityStatus = "failed";
@@ -9634,7 +9624,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           return claimedResult({ status: "cancelled" });
         }
         acknowledgeRecoveryQuiescence();
-        await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
+        await publishActivitySessionEvents(recovery.events);
         activityStatus = "recovering";
         turnMetricOutcome = "recovering";
         return claimedResult({ status: "recovering" });
@@ -9790,12 +9780,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             });
             if (settlement.action === "recovering") {
               codexLeaseHeld = false;
-              await publishDurableSessionEvents(
-                bus,
-                input.workspaceId,
-                input.sessionId,
-                settlement.events,
-              );
+              await publishActivitySessionEvents(settlement.events);
               observability.observeHistogram({
                 name: "opengeni_codex_failover_recovery_seconds",
                 help: "Time from credential refusal to durable same-turn recovery.",
@@ -9895,7 +9880,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         if (armed.action === "waiting") {
           xaiLeaseHeld = false;
           xaiCredentialQuarantined = true;
-          await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, armed.events);
+          await publishActivitySessionEvents(armed.events);
           const evaluated = await reconcileXaiCapacityWait(db, {
             accountId: input.accountId,
             workspaceId: input.workspaceId,
@@ -9905,12 +9890,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             now,
           });
           if (evaluated.events.length > 0) {
-            await publishDurableSessionEvents(
-              bus,
-              input.workspaceId,
-              input.sessionId,
-              evaluated.events,
-            );
+            await publishActivitySessionEvents(evaluated.events);
           }
           activityError = error;
           if (evaluated.action === "resumed") {
@@ -9953,7 +9933,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           return claimedResult({ status: "cancelled" });
         }
         acknowledgeRecoveryQuiescence();
-        await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
+        await publishActivitySessionEvents(recovery.events);
         activityStatus = "recovering";
         turnMetricOutcome = "recovering";
         activityError = error;
@@ -10183,12 +10163,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               : {}),
           });
           if (armed.action === "waiting") {
-            await publishDurableSessionEvents(
-              bus,
-              input.workspaceId,
-              input.sessionId,
-              armed.events,
-            );
+            await publishActivitySessionEvents(armed.events);
             turnMetricOutcome = "recovering";
             activityStatus = "waiting_capacity";
             activityError = error;
@@ -10371,12 +10346,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         }
         if (recovery.action === "recovering") {
           acknowledgeRecoveryQuiescence();
-          await publishDurableSessionEvents(
-            bus,
-            input.workspaceId,
-            input.sessionId,
-            recovery.events,
-          );
+          await publishActivitySessionEvents(recovery.events);
           turnMetricOutcome = "recovering";
           activityStatus = "recovering";
           activityError = error;
@@ -10448,12 +10418,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             return claimedResult({ status: "cancelled" });
           }
           acknowledgeRecoveryQuiescence();
-          await publishDurableSessionEvents(
-            bus,
-            input.workspaceId,
-            input.sessionId,
-            recovery.events,
-          );
+          await publishActivitySessionEvents(recovery.events);
           turnMetricOutcome = "recovering";
           activityStatus = "recovering";
           activityError = error;
@@ -10648,10 +10613,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 }
               : {}),
             publishEvents: async (events) => {
-              await waitForTurnFinalizerStep(
-                publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, events),
-                finalizerSignal,
-              );
+              await waitForTurnFinalizerStep(publishActivitySessionEvents(events), finalizerSignal);
             },
             signalProof: signalSessionAttemptQuiesced,
             heartbeat: (attempt, retryMs) => {
@@ -10720,6 +10682,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 ...event,
                 turnId: turnId ?? null,
               })),
+              {
+                fanout: "awaited",
+                detachedFanout: detachedLifecycleFanout,
+              },
             ).catch(() => undefined),
             finalizerSignal,
           );
@@ -10869,7 +10835,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             objectStorage,
             settings,
             publish: async (events) => {
-              await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, events);
+              await publishActivitySessionEvents(events);
             },
             session: setupBoxSession as ChannelASession,
             openReadSession: async () =>
@@ -11033,6 +10999,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             cancellationSignal?.reason ?? new Error("TURN_ATTEMPT_FINALIZED"),
           );
         }
+        const detachedFanoutCloseReason = detachedSessionEventFanoutCloseReason({
+          activityStatus,
+          activityError,
+          finalizationError,
+          cancellationReason: cancellationSignal?.reason,
+        });
+        await detachedLifecycleFanout.close(detachedFanoutCloseReason);
         cancellationSignal?.removeEventListener("abort", noteCancellationRequested);
         const completedAt = performance.now();
         const durationSeconds = (completedAt - activityStarted) / 1000;
