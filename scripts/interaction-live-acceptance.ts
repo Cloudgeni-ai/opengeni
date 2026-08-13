@@ -861,12 +861,18 @@ async function main(): Promise<void> {
           `computer keyboard action settled as ${computerReceipt.state}: ${JSON.stringify(computerReceipt.error)}; lastObservation=${JSON.stringify(computerObservation.target)}; currentTarget=${JSON.stringify(currentTargets?.targets.find((candidate) => candidate.id === computerObservation.target.id) ?? null)}; focusedTargets=${JSON.stringify(currentTargets?.targets.filter((candidate) => candidate.focused) ?? [])}`,
         );
       }
+      let keyboardVisibleAt: number | null = null;
       const [keyboardFrameResult, keyboardStateResult] = await Promise.allSettled([
-        computerProbe.nextChangedAfter(
-          computerFrame,
-          DEFAULT_TIMEOUT_MS,
-          "computer keyboard visible frame",
-        ),
+        computerProbe
+          .nextChangedAfter(
+            computerFrame,
+            DEFAULT_TIMEOUT_MS,
+            "computer keyboard visible frame",
+          )
+          .then((frame) => {
+            keyboardVisibleAt = performance.now();
+            return frame;
+          }),
         waitForSemanticValue(() => browser!.observe(observation.target.id), marker, 2_000),
       ]);
       if (keyboardStateResult.status === "rejected") throw keyboardStateResult.reason;
@@ -880,7 +886,10 @@ async function main(): Promise<void> {
       }
       computerFrame = keyboardFrameResult.value;
       record("computerActionAcknowledged", computerAcknowledged - keyboardStarted);
-      record("computerActionVisible", performance.now() - keyboardStarted);
+      record(
+        "computerActionVisible",
+        (keyboardVisibleAt ?? performance.now()) - keyboardStarted,
+      );
       if ("computerSessionId" in computerFrame && computerFrame.computerSessionId !== computer.id) {
         throw new Error("computer frame crossed sessions");
       }
@@ -999,12 +1008,18 @@ async function main(): Promise<void> {
           `computer clipboard paste settled as ${pasteReceipt.state}: ${JSON.stringify(pasteReceipt.error)}`,
         );
       }
+      let pasteVisibleAt: number | null = null;
       const [nextComputerFrame, clipboardObservation] = await Promise.all([
-        computerProbe.nextChangedAfter(
-          computerFrame,
-          DEFAULT_TIMEOUT_MS,
-          "computer clipboard paste visible frame",
-        ),
+        computerProbe
+          .nextChangedAfter(
+            computerFrame,
+            DEFAULT_TIMEOUT_MS,
+            "computer clipboard paste visible frame",
+          )
+          .then((frame) => {
+            pasteVisibleAt = performance.now();
+            return frame;
+          }),
         waitForSemanticValue(
           // The native screen action and the BrowserSession control the same
           // linked Chromium. Browser DOM semantics give an exact content proof
@@ -1017,7 +1032,7 @@ async function main(): Promise<void> {
       ]);
       computerFrame = nextComputerFrame;
       record("computerActionAcknowledged", pasteAcknowledged - pasteStarted);
-      record("computerActionVisible", performance.now() - pasteStarted);
+      record("computerActionVisible", (pasteVisibleAt ?? performance.now()) - pasteStarted);
       if (!semanticContainsValue(clipboardObservation.semantic, clipboardMarker)) {
         throw new Error(
           `computer semantic state did not converge to the pasted clipboard value: ${JSON.stringify(semanticEntrySummary(clipboardObservation.semantic))}`,
