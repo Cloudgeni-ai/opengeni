@@ -25,10 +25,12 @@ describe("artifact authoring sessions", () => {
     expect(opening).not.toContain("artifacts_create");
     expect(instructions).toContain("call artifacts_create yourself in this same session");
     expect(instructions).toContain("Do not create, spawn, or delegate to another session");
-    expect(instructions).toContain("static HTML and inline CSS only");
+    expect(instructions).toContain("exact HTML");
+    expect(instructions).toContain("opaque-origin sandboxed iframe");
     expect(instructions).toContain("JavaScript");
     expect(instructions).toContain("network requests");
     expect(instructions).toContain("downloads");
+    expect(instructions).toContain("cannot access OpenGeni credentials");
   });
 
   test("edit reads and publishes the exact artifact without orchestration tools", () => {

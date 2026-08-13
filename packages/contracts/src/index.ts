@@ -800,6 +800,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "set_session_title",
   "goal_set",
   "goal_update",
+  "goal_progress",
   "goal_complete",
   "goal_pause",
   "memory_search",
@@ -807,6 +808,9 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "memory_correct",
   "preference_registry_summary",
   "preference_registry_get",
+  "task_notes_list",
+  "task_note_save",
+  "task_note_archive",
   "sandboxes_list",
   "sandbox_attach",
   "sandbox_swap",
@@ -1710,12 +1714,17 @@ export const DEFAULT_WORKSPACE_SLACK_REACTION_SUMMON_SETTINGS = {
   channelPolicy: { mode: "bot_member" },
 } as const satisfies WorkspaceSlackReactionSummonSettings;
 
+export const WorkspaceMemoryPromptMode = z.enum(["legacy_standing", "retrieval_only"]);
+export type WorkspaceMemoryPromptMode = z.infer<typeof WorkspaceMemoryPromptMode>;
+
 // Validates the KNOWN keys of workspaces.settings; passthrough keeps unknown
-// (future) keys rather than stripping them. memoryEnabled defaults off;
+// (future) keys rather than stripping them. memoryEnabled defaults off and the
+// reversible Memory V1 containment rollout defaults to legacy standing context;
 // voiceInput defaults to enabled when the deployment has a provider.
 export const WorkspaceSettingsSchema = z
   .object({
     memoryEnabled: z.boolean().optional(),
+    memoryPromptMode: WorkspaceMemoryPromptMode.optional(),
     /** Preferred workspace voice-input toggle. */
     voiceInput: WorkspaceVoiceInputSettings.optional(),
     /**
@@ -1743,6 +1752,12 @@ export type WorkspaceSettings = z.infer<typeof WorkspaceSettingsSchema>;
 export function resolveWorkspaceMemoryEnabled(settings: unknown): boolean {
   const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
   return parsed.success ? parsed.data.memoryEnabled === true : false;
+}
+
+/** Reversible Memory V1 prompt rollout. Absent preserves legacy composition. */
+export function resolveWorkspaceMemoryPromptMode(settings: unknown): WorkspaceMemoryPromptMode {
+  const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
+  return parsed.success ? (parsed.data.memoryPromptMode ?? "legacy_standing") : "legacy_standing";
 }
 
 /** Default Codex compaction mode for new Codex sessions (remote_v2 when unset). */
@@ -1815,6 +1830,7 @@ export function workspaceSlackReactionChannelAllowed(
 export const UpdateWorkspaceSettingsRequest = z
   .object({
     memoryEnabled: z.boolean().optional(),
+    memoryPromptMode: WorkspaceMemoryPromptMode.optional(),
     voiceInput: WorkspaceVoiceInputSettings.optional(),
     /** @deprecated Prefer `voiceInput`. Kept for one compatibility release. */
     transcription: WorkspaceTranscriptionPolicy.optional(),
@@ -4605,6 +4621,86 @@ export type SessionGoalStatus = z.infer<typeof SessionGoalStatus>;
 export const SessionGoalCreatedBy = z.enum(["api", "agent", "scheduled_task"]);
 export type SessionGoalCreatedBy = z.infer<typeof SessionGoalCreatedBy>;
 
+export const SessionGoalMutationPolicy = z.enum([
+  "review_changes",
+  "preserve_intent",
+  "autonomous_adaptation",
+]);
+export type SessionGoalMutationPolicy = z.infer<typeof SessionGoalMutationPolicy>;
+
+export const SessionGoalChangeKind = z.enum(["refinement", "adaptation", "replacement"]);
+export type SessionGoalChangeKind = z.infer<typeof SessionGoalChangeKind>;
+
+export const SESSION_GOAL_TEXT_MAX_BYTES = 8 * 1024;
+export const SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES = 8 * 1024;
+export const SESSION_GOAL_RATIONALE_MAX_BYTES = 2 * 1024;
+export const SESSION_GOAL_PROGRESS_MAX_BYTES = 4 * 1024;
+
+export function sessionGoalUtf8Bytes(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
+}
+
+function boundedSessionGoalString(maxBytes: number, field: string) {
+  return z
+    .string()
+    .min(1)
+    .refine((value) => sessionGoalUtf8Bytes(value) <= maxBytes, {
+      message: `${field} exceeds ${maxBytes} UTF-8 bytes`,
+    });
+}
+
+const SessionGoalTextWrite = boundedSessionGoalString(SESSION_GOAL_TEXT_MAX_BYTES, "goal text");
+const SessionGoalSuccessCriteriaWrite = boundedSessionGoalString(
+  SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES,
+  "goal success criteria",
+);
+const SessionGoalRationaleWrite = boundedSessionGoalString(
+  SESSION_GOAL_RATIONALE_MAX_BYTES,
+  "goal rationale",
+);
+
+export const SessionGoalSnapshot = z.discriminatedUnion("state", [
+  z.object({ state: z.literal("none"), capturedAt: z.string() }),
+  z.object({
+    state: z.enum(["active", "paused", "completed"]),
+    goalId: z.string().uuid(),
+    objectiveRevision: z.number().int().positive(),
+    text: SessionGoalTextWrite,
+    successCriteria: SessionGoalSuccessCriteriaWrite.nullable(),
+    mutationPolicy: SessionGoalMutationPolicy,
+    capturedAt: z.string(),
+  }),
+]);
+export type SessionGoalSnapshot = z.infer<typeof SessionGoalSnapshot>;
+
+export const SessionGoalRevision = z.object({
+  id: z.string().uuid(),
+  accountId: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  sessionId: z.string().uuid(),
+  goalId: z.string().uuid(),
+  disposition: z.enum(["applied", "proposed", "rejected"]),
+  changeKind: SessionGoalChangeKind,
+  baseObjectiveRevision: z.number().int().nonnegative(),
+  resultObjectiveRevision: z.number().int().positive().nullable(),
+  text: z.string().min(1),
+  successCriteria: z.string().nullable(),
+  mutationPolicy: SessionGoalMutationPolicy,
+  rationale: z.string().min(1),
+  actor: z.enum(["agent", "api", "scheduled_task"]),
+  actorTurnId: z.string().uuid().nullable(),
+  actorAttemptId: z.string().uuid().nullable(),
+  proposalId: z.string().uuid().nullable(),
+  createdAt: z.string(),
+});
+export type SessionGoalRevision = z.infer<typeof SessionGoalRevision>;
+
+export const ApplySessionGoalRevisionRequest = z.object({
+  expectedObjectiveRevision: z.number().int().positive(),
+  rationale: SessionGoalRationaleWrite.optional(),
+});
+export type ApplySessionGoalRevisionRequest = z.infer<typeof ApplySessionGoalRevisionRequest>;
+
 export const SessionGoalPausedReason = z.enum([
   "agent",
   "user_pause",
@@ -4663,6 +4759,8 @@ export const SessionGoal = z.object({
   pausedReason: z.string().nullable(),
   createdBy: SessionGoalCreatedBy,
   version: z.number().int().positive(),
+  objectiveRevision: z.number().int().positive(),
+  mutationPolicy: SessionGoalMutationPolicy,
   autoContinuations: z.number().int().nonnegative(),
   noProgressStreak: z.number().int().nonnegative(),
   maxAutoContinuations: z.number().int().positive().nullable(),
@@ -4676,16 +4774,26 @@ export const SessionGoal = z.object({
 export type SessionGoal = z.infer<typeof SessionGoal>;
 
 export const GoalSpec = z.object({
-  text: z.string().min(1),
-  successCriteria: z.string().min(1).optional(),
+  text: SessionGoalTextWrite,
+  successCriteria: SessionGoalSuccessCriteriaWrite.optional(),
   maxAutoContinuations: z.number().int().positive().optional(),
+  mutationPolicy: SessionGoalMutationPolicy.optional(),
 });
 export type GoalSpec = z.infer<typeof GoalSpec>;
 
-export const UpdateSessionGoalRequest = z.object({
-  status: z.enum(["paused", "active"]),
-  rationale: z.string().min(1).optional(),
-});
+export const UpdateSessionGoalRequest = z.union([
+  z.object({
+    status: z.enum(["paused", "active"]),
+    rationale: SessionGoalRationaleWrite.optional(),
+  }),
+  z.object({
+    text: SessionGoalTextWrite,
+    successCriteria: SessionGoalSuccessCriteriaWrite.nullable().optional(),
+    mutationPolicy: SessionGoalMutationPolicy.optional(),
+    rationale: SessionGoalRationaleWrite,
+    expectedObjectiveRevision: z.number().int().positive(),
+  }),
+]);
 export type UpdateSessionGoalRequest = z.infer<typeof UpdateSessionGoalRequest>;
 
 export const UpdateSessionRequest = z.object({
@@ -6768,47 +6876,48 @@ export const CreateScheduledTaskRequest = /* @__PURE__ */ z.union([
 ]);
 export type CreateScheduledTaskRequest = z.infer<typeof CreateScheduledTaskRequest>;
 
-export const UpdateScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias({
-  name: z.string().min(1).optional(),
-  schedule: ScheduledTaskScheduleSpec.optional(),
-  runMode: ScheduledTaskRunMode.optional(),
-  overlapPolicy: ScheduledTaskOverlapPolicy.optional(),
-  action: ScheduledTaskAction.optional(),
-  targetSessionId: z.string().uuid().nullable().optional(),
-  agentConfig: ScheduledTaskAgentConfig.optional(),
-  status: ScheduledTaskStatus.optional(),
-  variableSetId: z.string().uuid().nullable().optional(),
-  environmentId: z.string().uuid().nullable().optional(),
-  // The rig each run binds to (M3); null clears it. Its active version is
-  // resolved per fire, so an update takes effect on the next dispatch.
-  rigId: z.string().uuid().nullable().optional(),
-  metadata: z.record(z.string(), z.unknown()).optional(),
-}).superRefine((value, context) => {
-  if (value.targetSessionId && value.runMode && value.runMode !== "existing_session") {
-    context.addIssue({
-      code: "custom",
-      path: ["targetSessionId"],
-      message: "targetSessionId requires runMode=existing_session",
-    });
-  }
-  if (value.runMode === "existing_session" && value.targetSessionId === null) {
-    context.addIssue({
-      code: "custom",
-      path: ["targetSessionId"],
-      message: "targetSessionId cannot be null when runMode=existing_session",
-    });
-  }
-  if (
-    value.agentConfig?.goal &&
-    (value.runMode === "existing_session" || Boolean(value.targetSessionId))
-  ) {
-    context.addIssue({
-      code: "custom",
-      path: ["agentConfig", "goal"],
-      message: "agentConfig.goal cannot be used with an existing-session target",
-    });
-  }
-});
+export const UpdateScheduledTaskRequest =
+  /* @__PURE__ */ withVariableSetIdAlias({
+    name: z.string().min(1).optional(),
+    schedule: ScheduledTaskScheduleSpec.optional(),
+    runMode: ScheduledTaskRunMode.optional(),
+    overlapPolicy: ScheduledTaskOverlapPolicy.optional(),
+    action: ScheduledTaskAction.optional(),
+    targetSessionId: z.string().uuid().nullable().optional(),
+    agentConfig: ScheduledTaskAgentConfig.optional(),
+    status: ScheduledTaskStatus.optional(),
+    variableSetId: z.string().uuid().nullable().optional(),
+    environmentId: z.string().uuid().nullable().optional(),
+    // The rig each run binds to (M3); null clears it. Its active version is
+    // resolved per fire, so an update takes effect on the next dispatch.
+    rigId: z.string().uuid().nullable().optional(),
+    metadata: z.record(z.string(), z.unknown()).optional(),
+  }).superRefine((value, context) => {
+    if (value.targetSessionId && value.runMode && value.runMode !== "existing_session") {
+      context.addIssue({
+        code: "custom",
+        path: ["targetSessionId"],
+        message: "targetSessionId requires runMode=existing_session",
+      });
+    }
+    if (value.runMode === "existing_session" && value.targetSessionId === null) {
+      context.addIssue({
+        code: "custom",
+        path: ["targetSessionId"],
+        message: "targetSessionId cannot be null when runMode=existing_session",
+      });
+    }
+    if (
+      value.agentConfig?.goal &&
+      (value.runMode === "existing_session" || Boolean(value.targetSessionId))
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["agentConfig", "goal"],
+        message: "agentConfig.goal cannot be used with an existing-session target",
+      });
+    }
+  });
 export type UpdateScheduledTaskRequest = z.infer<typeof UpdateScheduledTaskRequest>;
 
 /**
@@ -8114,7 +8223,10 @@ const IntegrationFacetJsonObject = z.record(z.string(), z.unknown()).superRefine
     return;
   }
   if (new TextEncoder().encode(serialized).byteLength > 131_072) {
-    ctx.addIssue({ code: "custom", message: "must not exceed 131072 UTF-8 bytes" });
+    ctx.addIssue({
+      code: "custom",
+      message: "must not exceed 131072 UTF-8 bytes",
+    });
   }
 });
 
@@ -8245,7 +8357,12 @@ export const IntegrationFacetRemovalResult = z
 export type IntegrationFacetRemovalResult = z.infer<typeof IntegrationFacetRemovalResult>;
 
 export const IntegrationSource = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("definition"), definitionId: z.string().min(1).max(128) }).strict(),
+  z
+    .object({
+      kind: z.literal("definition"),
+      definitionId: z.string().min(1).max(128),
+    })
+    .strict(),
   z
     .object({
       kind: z.literal("openapi"),
@@ -8503,7 +8620,11 @@ export const PluginManifest = z
       .array(
         z.discriminatedUnion("kind", [
           z
-            .object({ key: PluginComponentKey, kind: z.literal("skill"), url: z.string().url() })
+            .object({
+              key: PluginComponentKey,
+              kind: z.literal("skill"),
+              url: z.string().url(),
+            })
             .strict(),
           z
             .object({
@@ -8604,7 +8725,12 @@ export const InstallPluginRequest = z
     expectedManifestDigest: z.string().regex(/^[0-9a-f]{64}$/),
     expectedComponents: z
       .array(
-        z.object({ key: PluginComponentKey, digest: z.string().regex(/^[0-9a-f]{64}$/) }).strict(),
+        z
+          .object({
+            key: PluginComponentKey,
+            digest: z.string().regex(/^[0-9a-f]{64}$/),
+          })
+          .strict(),
       )
       .min(1)
       .max(64),
@@ -8980,6 +9106,9 @@ export const SessionEventType = z.enum([
   "artifact.created",
   "goal.set",
   "goal.updated",
+  "goal.progress",
+  "goal.rewrite.proposed",
+  "goal.rewrite.rejected",
   "goal.completed",
   "goal.paused",
   "goal.resumed",
@@ -9183,6 +9312,9 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "user.humanInputResponse",
     "goal.set",
     "goal.updated",
+    "goal.progress",
+    "goal.rewrite.proposed",
+    "goal.rewrite.rejected",
     "goal.completed",
     "goal.paused",
     "goal.resumed",
@@ -12648,6 +12780,15 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
         }),
       )
       .default([]),
+    firstPartyMcpTools: z
+      .object({
+        default: z.array(FirstPartyMcpToolName),
+        allowed: z.array(FirstPartyMcpToolName),
+      })
+      .default({
+        default: [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+        allowed: [...FIRST_PARTY_MCP_TOOL_NAMES],
+      }),
     fileUploads: z.object({
       enabled: z.boolean(),
       maxSizeBytes: z.number().int().positive(),
@@ -12789,4 +12930,6 @@ export * from "./workspace-learning-policy";
 export * from "./workspace-state";
 export * from "./preference-registry";
 export * from "./scoped-knowledge";
+export * from "./knowledge";
+export * from "./task-notes";
 export * from "./canonical-human-identities";

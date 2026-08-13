@@ -87,6 +87,7 @@ import {
   SandboxImageConflictError,
   ActiveSessionHistoryLimitExceededError,
   ApprovalRunStateLimitExceededError,
+  isRetryableDatabaseTransportFailure,
   isSessionEventPersistenceError,
   getEnrollment,
   abandonRecordingForTurnAttempt,
@@ -126,6 +127,7 @@ import {
   sanitizeHistoryItemsForModel,
   projectModelInputForCapabilities,
   appendPersistentSessionSettings,
+  appendSessionGoal,
   appendSessionInstructions,
   appendWorkspaceGovernance,
   appendWorkspaceMemory,
@@ -182,6 +184,7 @@ import {
 import { connectionTokenResolverForTurn } from "./mcp-credentials";
 import { buildApiIntegrationServersForTurn } from "./api-integrations";
 import {
+  allowedFirstPartyMcpToolsForSession,
   assertTurnExecutionPolicyMatchesConfigV1,
   calculateGatewayReportedCostBreakdown,
   calculateModelUsageCostBreakdown,
@@ -342,6 +345,7 @@ import {
 import type {
   TurnActivityServices as ActivityServices,
   EscapedMcpTimeoutRecoveryDetail,
+  PreClaimFailureDetail,
   RunAgentTurnInput,
   RunAgentTurnResult,
   SessionAttemptQuiescenceProof,
@@ -349,6 +353,8 @@ import type {
 import {
   ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_MESSAGE,
   ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_TYPE,
+  PRE_CLAIM_FAILURE_MESSAGE,
+  PRE_CLAIM_FAILURE_TYPE,
 } from "./types";
 import {
   resumeBoxForTurn,
@@ -376,6 +382,7 @@ import {
   recordModelCacheTokens,
   recordModelInputTokens,
   recordModelRequestPhase,
+  recordCompanyBrainContributions,
   recordSessionEventAppendLatency,
   recordSessionEventPublishLatency,
   runtimeMetricsHooksForObservability,
@@ -383,6 +390,7 @@ import {
   turnLifecycleMetricsFor,
   type TurnOutcome,
 } from "../observability-metrics";
+import { buildCompanyBrainContributionReceipt } from "../model-context-contributions";
 import {
   beginRecording,
   discardUnpublishedRecording,
@@ -434,10 +442,10 @@ import {
 } from "@opengeni/runtime";
 import {
   CAPABILITY_DESCRIPTORS,
-  DEFAULT_FIRST_PARTY_MCP_TOOLS,
   evaluateWorkspaceModelPolicy,
   readTurnExecutionPolicyV1,
   resolveWorkspaceAgentHumanInputEnabled,
+  resolveWorkspaceMemoryPromptMode,
   resourceMountPath,
   VideoGenerationRejectedResult,
   type LatencyMode,
@@ -697,6 +705,52 @@ export function escapedMcpTimeoutRecoveryFailure(input: {
     type: ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_TYPE,
     nonRetryable: true,
     details: [input.detail],
+  });
+}
+
+/**
+ * Convert the atomic claim transaction's failure into a small, stable
+ * Temporal wire contract. The original error remains in activity diagnostics,
+ * but SQL text, parameters, and arbitrary invariant messages never enter
+ * workflow history. Contention and operational database unavailability are
+ * safe to re-read after backoff because the claim transaction contains no
+ * model/tool effects; permanent database and state failures require terminal
+ * settlement.
+ */
+export function preClaimAdmissionFailure(error: unknown): ApplicationFailure {
+  const persistenceFailure = isSessionEventPersistenceError(error) ? error : null;
+  const sqlState = persistenceFailure?.details.sqlState ?? null;
+  const rawTransportFailure = sqlState === null && isRetryableDatabaseTransportFailure(error);
+  // The database transaction itself retries only the two contention failures
+  // proven safe for immediate replay. Once the activity has failed, the
+  // workflow may also retry operational outages after a durable re-read and
+  // bounded delay. Unknown driver/database failures stay recoverable because
+  // they commonly represent a lost connection; known constraint, auth, and
+  // application SQLSTATEs are permanent and must not create an infinite loop.
+  const retryable = Boolean(
+    rawTransportFailure ||
+    (persistenceFailure &&
+      (sqlState === null ||
+        sqlState.startsWith("08") ||
+        sqlState.startsWith("40") ||
+        sqlState.startsWith("53") ||
+        sqlState === "55P03" ||
+        sqlState === "57014" ||
+        sqlState === "57P01" ||
+        sqlState === "57P02" ||
+        sqlState === "57P03" ||
+        sqlState.startsWith("58"))),
+  );
+  const detail: PreClaimFailureDetail = {
+    disposition: retryable ? "retryable" : "permanent",
+    code:
+      persistenceFailure?.details.code ?? (rawTransportFailure ? "db_failure" : "claim_invariant"),
+  };
+  return ApplicationFailure.create({
+    message: PRE_CLAIM_FAILURE_MESSAGE,
+    type: PRE_CLAIM_FAILURE_TYPE,
+    nonRetryable: true,
+    details: [detail],
   });
 }
 
@@ -2340,6 +2394,21 @@ export function hostedWebSearchForTurn(
   deploymentWebSearchEnabled: boolean,
 ): boolean {
   return resolvedModel?.configured.hostedWebSearch ?? deploymentWebSearchEnabled;
+}
+
+/**
+ * Image generation is an optional connected-account capability. A delegated
+ * subscription may still authorize the text model without carrying the local
+ * credential identity required for paid image operations; that must narrow the
+ * tool catalog, not reject an otherwise valid turn.
+ */
+export function connectedSubscriptionImageGenerationAuthority<T>(
+  credentialContext: T | null | undefined,
+  credentialId: string | null | undefined,
+): { credentialContext: T; credentialId: string } | null {
+  if (credentialContext == null || typeof credentialId !== "string" || credentialId.length === 0)
+    return null;
+  return { credentialContext, credentialId };
 }
 
 /** Direct OpenAI hosted image IDs are reusable only by the exact API credential. */
@@ -4054,7 +4123,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // only exists in the RunState blob), never through a swapped trigger.
     let triggerType: string | null = null;
     try {
-      const session = await requireSession(db, input.workspaceId, input.sessionId);
       const claim = await claimSessionWorkForAttempt(db, input.workspaceId, {
         sessionId: input.sessionId,
         workflowId: input.workflowId,
@@ -4069,6 +4137,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       }
       const turn = claim.turn;
       turnId = turn.id;
+      // Establish durable attempt ownership before any later read can fail.
+      // Therefore every failure with no turnId came from the one atomic claim
+      // transaction and can be classified without conflating ordinary runtime
+      // or transport failures with admission failures.
+      const session = await requireSession(db, input.workspaceId, input.sessionId);
       executionGeneration = turn.executionGeneration;
       providerRecoveryCount = providerRecoveryCountFromMetadata(turn.metadata);
       let installedApiIntegrations: readonly ApiIntegrationRuntime[] = [];
@@ -5268,12 +5341,20 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (!workspace) throw new Error(`Workspace not found: ${input.workspaceId}`);
       const workspaceAgentInstructions = workspace.agentInstructions;
       const agentHumanInputEnabled = resolveWorkspaceAgentHumanInputEnabled(workspace.settings);
+      const memoryPromptMode = resolveWorkspaceMemoryPromptMode(workspace.settings);
       assertWorkspaceHumanInputAllowed(agentHumanInputEnabled, "resume", humanInputResume !== null);
-      const workspaceGovernance = renderWorkspaceGovernanceContext({
-        companyProfile: companyProfileSnapshot,
-        instructionPolicy: instructionPolicySnapshot,
-        preferences: preferenceSnapshot,
-      });
+      const companyProfileIncluded =
+        memoryPromptMode === "legacy_standing" || session.nestedAgentDepth === 0;
+      const workspaceGovernance = renderWorkspaceGovernanceContext(
+        {
+          companyProfile: companyProfileSnapshot,
+          instructionPolicy: instructionPolicySnapshot,
+          preferences: preferenceSnapshot,
+        },
+        {
+          includeCompanyProfile: companyProfileIncluded,
+        },
+      );
       const structuredWorkspacePolicyActive =
         hasActiveWorkspaceInstructionPolicy(instructionPolicySnapshot);
       const workspaceMemory = await resolveWorkspaceMemoryBlock(db, input.workspaceId);
@@ -5716,20 +5797,23 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         };
         const compactionInstructions = appendWorkspaceMemory(
           appendPersistentSessionSettings(
-            appendSessionInstructions(
-              appendWorkspaceGovernance(
-                composeAgentInstructions(
-                  structuredWorkspacePolicyActive
-                    ? modelRunSettings.agentInstructionsTemplate
-                    : (workspaceAgentInstructions ?? modelRunSettings.agentInstructionsTemplate),
-                  undefined,
-                  rigVersion && rigName
-                    ? { name: rigName, version: rigVersion.version }
-                    : undefined,
+            appendSessionGoal(
+              appendSessionInstructions(
+                appendWorkspaceGovernance(
+                  composeAgentInstructions(
+                    structuredWorkspacePolicyActive
+                      ? modelRunSettings.agentInstructionsTemplate
+                      : (workspaceAgentInstructions ?? modelRunSettings.agentInstructionsTemplate),
+                    undefined,
+                    rigVersion && rigName
+                      ? { name: rigName, version: rigVersion.version }
+                      : undefined,
+                  ),
+                  workspaceGovernance ?? undefined,
                 ),
-                workspaceGovernance ?? undefined,
+                session.instructions ?? undefined,
               ),
-              session.instructions ?? undefined,
+              turn.goalSnapshot,
             ),
             persistentSessionSettings,
           ),
@@ -6904,6 +6988,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             };
           })()
         : undefined;
+      const selectedFirstPartyMcpTools = allowedFirstPartyMcpToolsForSession(
+        runSettings,
+        session.firstPartyMcpTools,
+      );
       preparedTools = await waitForTurnOperation(
         runtime.prepareTools(runSettings, turnTools, {
           accountId: input.accountId,
@@ -6930,7 +7018,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           ...(session.firstPartyMcpPermissions?.length
             ? { firstPartyPermissions: session.firstPartyMcpPermissions }
             : {}),
-          firstPartyTools: session.firstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+          firstPartyTools: selectedFirstPartyMcpTools,
           nestedAgentDepth: session.nestedAgentDepth,
           effectiveMaxNestedAgentDepth: session.effectiveMaxNestedAgentDepth,
           attemptToolDefinitions: createFirstPartyInteractionAttemptToolDefinitions({
@@ -6946,7 +7034,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             ...(session.firstPartyMcpPermissions?.length
               ? { permissions: session.firstPartyMcpPermissions }
               : {}),
-            selectedTools: session.firstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+            selectedTools: selectedFirstPartyMcpTools,
             subjectId: "worker:first-party-mcp",
             subjectLabel: "OpenGeni worker",
             ...(interactionInterventionResume
@@ -7059,13 +7147,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         }
 
         if (resolvedModel?.provider.kind === "codex-subscription") {
-          const codexImageContext = codexContext;
-          const codexImageCredentialId = effectiveCodexCredentialId;
-          if (!codexImageContext || !codexImageCredentialId) {
-            throw new CodexReloginRequired(
-              "Codex image generation requires a connected subscription account",
-            );
-          }
+          const imageAuthority = connectedSubscriptionImageGenerationAuthority(
+            codexContext,
+            effectiveCodexCredentialId,
+          );
+          if (!imageAuthority) return {};
           return {
             imageGeneration: {
               kind: "provider_adapter",
@@ -7082,8 +7168,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   toolCallId,
                   prompt,
                   references: resolvedReferences,
-                  credentialId: codexImageCredentialId,
-                  codexContext: codexImageContext,
+                  credentialId: imageAuthority.credentialId,
+                  codexContext: imageAuthority.credentialContext,
                   ...(runtimeCancellationSignal ? { abortSignal: runtimeCancellationSignal } : {}),
                 });
                 generatedImageReceiptsByArtifactId.set(receipt.artifact.artifactId, receipt);
@@ -7095,11 +7181,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         }
 
         if (resolvedModel?.provider.kind === "xai-subscription") {
-          const xaiImageContext = xaiRequestContext;
-          const xaiImageCredentialId = effectiveXaiCredentialId;
-          if (!xaiImageContext || !xaiImageCredentialId) {
-            throw new Error("SuperGrok image generation requires a connected subscription account");
-          }
+          const imageAuthority = connectedSubscriptionImageGenerationAuthority(
+            xaiRequestContext,
+            effectiveXaiCredentialId,
+          );
+          if (!imageAuthority) return {};
           return {
             imageGeneration: {
               kind: "provider_adapter",
@@ -7116,8 +7202,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   toolCallId,
                   prompt,
                   references: resolvedReferences,
-                  credentialId: xaiImageCredentialId,
-                  xaiContext: xaiImageContext,
+                  credentialId: imageAuthority.credentialId,
+                  xaiContext: imageAuthority.credentialContext,
                   ...(runtimeCancellationSignal ? { abortSignal: runtimeCancellationSignal } : {}),
                 });
                 generatedImageReceiptsByArtifactId.set(receipt.artifact.artifactId, receipt);
@@ -7356,6 +7442,23 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             outcome,
           }),
       };
+      const runtimeSkillActivations = [
+        ...installedSkillRuntime.activations,
+        ...packRuntime.skillActivations,
+        ...session.skills.map((skill) => ({
+          source: "session" as const,
+          id: `session:${session.id}:${skill.name}`,
+          artifact: {
+            name: skill.name,
+            description: skill.description ?? null,
+            files: skill.files.map((file) => ({
+              path: file.path,
+              content: file.content,
+            })),
+          },
+          reason: "attached to session",
+        })),
+      ];
       const agent = runtime.buildAgent(modelRunSettings, turnResources, {
         reasoningEffort: turn.reasoningEffort,
         latencyMode: turnExecutionPolicy.latencyMode,
@@ -7472,34 +7575,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           await maybeStartOnTurnRecording(resolvedSandbox, activeSandboxBackend);
         },
         onRetainableSessionImageOutput: retainSessionImageAtToolBoundary,
-        ...(packRuntime.skillActivations.length > 0 ||
-        session.skills.length > 0 ||
-        installedSkillRuntime.activations.length > 0
-          ? {
-              skillActivations: [
-                ...installedSkillRuntime.activations,
-                ...packRuntime.skillActivations,
-                ...session.skills.map((skill) => ({
-                  source: "session" as const,
-                  id: `session:${session.id}:${skill.name}`,
-                  artifact: {
-                    name: skill.name,
-                    description: skill.description ?? null,
-                    files: skill.files.map((file) => ({
-                      path: file.path,
-                      content: file.content,
-                    })),
-                  },
-                  reason: "attached to session",
-                })),
-              ],
-            }
+        ...(runtimeSkillActivations.length > 0
+          ? { skillActivations: runtimeSkillActivations }
           : {}),
         ...(!structuredWorkspacePolicyActive && workspaceAgentInstructions
           ? { instructionsTemplate: workspaceAgentInstructions }
           : {}),
         ...(workspaceGovernance ? { workspaceGovernance } : {}),
         ...(workspaceMemory ? { workspaceMemory } : {}),
+        goalSnapshot: turn.goalSnapshot,
         // Per-session persona tier (session > workspace > deployment default).
         // Composed system-level AFTER the workspace persona so it refines it for
         // this one session; absent ⇒ byte-identical to today's composition.
@@ -7771,6 +7855,40 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           },
         );
       }
+      let companyBrainContributionReceiptRecorded = false;
+      const recordCompanyBrainContributionReceiptOnce = (): void => {
+        if (companyBrainContributionReceiptRecorded) return;
+        companyBrainContributionReceiptRecorded = true;
+        try {
+          const companyBrainContributionReceipt = buildCompanyBrainContributionReceipt({
+            attemptId: input.attemptId,
+            turnId: turn.id,
+            nestedAgentDepth: session.nestedAgentDepth,
+            memoryPromptMode,
+            instructionPolicy: instructionPolicySnapshot,
+            workspaceAgentInstructions,
+            preferences: preferenceSnapshot,
+            companyProfile: companyProfileSnapshot,
+            companyProfileIncluded,
+            workspaceMemory,
+            skillActivations: runtimeSkillActivations,
+          });
+          recordCompanyBrainContributions(observability, companyBrainContributionReceipt);
+          observability.info("model context contribution receipt", {
+            attemptId: companyBrainContributionReceipt.attemptId,
+            turnId: companyBrainContributionReceipt.turnId,
+            sessionRole: companyBrainContributionReceipt.sessionRole,
+            memoryPromptMode: companyBrainContributionReceipt.memoryPromptMode,
+            instructionPolicySnapshotId:
+              companyBrainContributionReceipt.instructionPolicySnapshotId,
+            preferenceSnapshotId: companyBrainContributionReceipt.preferenceSnapshotId,
+            companyProfileSnapshotId: companyBrainContributionReceipt.companyProfileSnapshotId,
+            contributions: JSON.stringify(companyBrainContributionReceipt.contributions),
+          });
+        } catch {
+          // Observability must never change model execution semantics.
+        }
+      };
       const agentInstructions = typeof agent.instructions === "string" ? agent.instructions : "";
       const compactSummarizer = compactionSummarizerFor(
         agentInstructions.trim() ? agentInstructions : undefined,
@@ -8301,6 +8419,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // provider may have accepted work even if no response/event follows.
           // Escaped MCP setup timeouts are automatically recoverable only
           // before this line.
+          recordCompanyBrainContributionReceiptOnce();
           modelRequestStarted = true;
           return await runtime.runStream(agent, runInput!, modelRunSettings, {
             signal: runtimeCancellationSignal,
@@ -10372,7 +10491,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       }
       activityStatus = "failed";
       activityError = error;
-      if (!publish || !turnId || !turnStartedPublished) {
+      if (!turnId) {
+        throw preClaimAdmissionFailure(error);
+      }
+      if (!publish || !turnStartedPublished) {
         throw error;
       }
       // A partial/malformed stream may have emitted assistant/tool items (and

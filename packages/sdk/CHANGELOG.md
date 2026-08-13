@@ -1,5 +1,27 @@
 # @opengeni/sdk
 
+## 0.57.0
+
+### Minor Changes
+
+- 478d7fe: Add explicit, bounded root-task-tree coordination note tools with exact-attempt authority, private-session visibility, expiry, immutable create/archive receipts, and safe retry semantics.
+- 478d7fe: Add a reversible workspace memory prompt mode that removes the legacy standing memory block, keeps preference observations out of agent behavioral authority, contains company-profile context for child agents, and reports metadata-only model-context contribution telemetry.
+- 478d7fe: Persist exact accepted-turn goal authority, separate semantic goal revisions
+  from execution progress, and add policy-controlled rewrite proposals with API,
+  SDK, MCP, and runtime support.
+
+### Patch Changes
+
+- d86610d: Run published HTML artifacts as exact source in an opaque-origin sandbox, raise their UTF-8 ceiling to 4 MiB, and expose reusable React rendering. Add deployment-configurable default and allowed built-in session tools plus configured shared-key delegation fallback.
+- Updated dependencies [d86610d]
+- Updated dependencies [d86610d]
+- Updated dependencies [478d7fe]
+- Updated dependencies [d86610d]
+- Updated dependencies [478d7fe]
+- Updated dependencies [478d7fe]
+- Updated dependencies [478d7fe]
+  - @opengeni/contracts@0.50.0
+
 ## 0.56.0
 
 ### Minor Changes

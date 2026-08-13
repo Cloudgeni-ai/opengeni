@@ -390,6 +390,56 @@ describe("transactional session workflow wake outbox", () => {
     });
   });
 
+  test("starts a delivered row at the new deadline while preserving an earlier pending wake", async () => {
+    const ctx = await fixture();
+    const alreadyDue = new Date(Date.now() - 60_000);
+    const deliveredRevision = await enqueueSessionWorkflowWake(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      temporalWorkflowId: `session-${ctx.session.id}`,
+      reason: "already-delivered",
+      notBefore: alreadyDue,
+    });
+    await markSessionWorkflowWakeDelivered(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      temporalWorkflowId: `session-${ctx.session.id}`,
+      wakeRevision: deliveredRevision,
+    });
+
+    const firstDeadline = new Date(Date.now() + 60_000);
+    const pendingRevision = await enqueueSessionWorkflowWake(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      temporalWorkflowId: `session-${ctx.session.id}`,
+      reason: "delayed-recovery",
+      notBefore: firstDeadline,
+    });
+    expect(await wakeRow(ctx.grant.workspaceId!, ctx.session.id)).toMatchObject({
+      wakeRevision: pendingRevision,
+      deliveredRevision,
+      nextAttemptAt: firstDeadline,
+    });
+
+    const laterDeadline = new Date(firstDeadline.getTime() + 60_000);
+    const coalescedRevision = await enqueueSessionWorkflowWake(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      temporalWorkflowId: `session-${ctx.session.id}`,
+      reason: "later-recovery",
+      notBefore: laterDeadline,
+    });
+    expect(await wakeRow(ctx.grant.workspaceId!, ctx.session.id)).toMatchObject({
+      wakeRevision: coalescedRevision,
+      deliveredRevision,
+      nextAttemptAt: firstDeadline,
+    });
+  });
+
   test("a stale acknowledgement cannot clear retry state owned by a newer revision", async () => {
     const ctx = await fixture();
     const first = await send(ctx, "first");

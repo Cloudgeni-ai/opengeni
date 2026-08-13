@@ -188,8 +188,12 @@ ARG TERRAFORM_VERSION=1.13.3
 ARG TTYD_VERSION=1.7.7
 ARG TARGETARCH
 ARG OPENGENI_CHROMIUM_VERSION=151.0.7922.108-1~deb13u1
+ARG OPENGENI_DEBIAN_SECURITY_SNAPSHOT=20260809T010020Z
 
 RUN set -eux; \
+    printf '%s\n' \
+      "deb [check-valid-until=no signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] https://snapshot.debian.org/archive/debian-security/${OPENGENI_DEBIAN_SECURITY_SNAPSHOT} trixie-security main" \
+      > /etc/apt/sources.list.d/opengeni-chromium-snapshot.list; \
     packages=" \
         bash \
         ca-certificates \
@@ -227,13 +231,17 @@ RUN set -eux; \
         rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/partial/*; \
         apt-get update \
         && apt-get install -y --download-only --no-install-recommends \
-            $packages "chromium=${OPENGENI_CHROMIUM_VERSION}" \
+            $packages \
+            "chromium=${OPENGENI_CHROMIUM_VERSION}" \
+            "chromium-common=${OPENGENI_CHROMIUM_VERSION}" \
         && break; \
         if [ "$attempt" = "3" ]; then exit 1; fi; \
         sleep $((attempt * 5)); \
     done; \
     apt-get install -y --no-install-recommends \
-        $packages "chromium=${OPENGENI_CHROMIUM_VERSION}"; \
+        $packages \
+        "chromium=${OPENGENI_CHROMIUM_VERSION}" \
+        "chromium-common=${OPENGENI_CHROMIUM_VERSION}"; \
     rm -rf /var/lib/apt/lists/*; \
     install -d -m 0755 /etc/opengeni; \
     printf '%s\n' /usr/lib/chromium/chromium > /etc/opengeni/browser-engine; \

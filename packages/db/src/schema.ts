@@ -7,6 +7,9 @@ import type {
   McpServerConnectionRef,
   RigProviderImages,
   SessionMcpApprovalPolicy,
+  SessionGoalChangeKind,
+  SessionGoalMutationPolicy,
+  SessionGoalSnapshot,
   SlackUserLinkAccessRequest,
   TimelineAnnotation,
   XaiProviderAccountAuthoritySnapshotV1,
@@ -4532,6 +4535,10 @@ export const sessionTurns = pgTable(
     // causal turn's value while retaining a service initiator. Null means the
     // turn has no human preference authority.
     initiatingHumanSubjectId: text("initiating_human_subject_id"),
+    // Exact goal authority frozen when the logical turn is accepted. The
+    // migration trigger fills this for old and rolling writers; claim only
+    // reconstructs legacy nulls from events as-of created_at.
+    goalSnapshot: jsonb("goal_snapshot").$type<SessionGoalSnapshot>(),
     // Immutable exact personal MCP authority for this logical turn. Recovery,
     // approval, retries, and Codemode reuse this row; no runtime may infer
     // broader authority from the session creator or mutable session state.
@@ -5645,6 +5652,13 @@ export const sessionGoals = pgTable(
     pausedReason: text("paused_reason"), // agent | user_pause | api | no_progress | max_auto_continuations | limits
     createdBy: text("created_by").notNull().default("api"), // api | agent | scheduled_task
     version: integer("version").notNull().default(1), // bumped on every set/update; progress signal
+    // Semantic objective changes use a separate fence. `version` remains the
+    // established lifecycle/wake identity for continuation compatibility.
+    objectiveRevision: integer("objective_revision").notNull().default(1),
+    mutationPolicy: text("mutation_policy")
+      .$type<SessionGoalMutationPolicy>()
+      .notNull()
+      .default("preserve_intent"),
     autoContinuations: integer("auto_continuations").notNull().default(0),
     noProgressStreak: integer("no_progress_streak").notNull().default(0),
     maxAutoContinuations: integer("max_auto_continuations"), // per-goal override; a configured settings cap (if any) remains the hard ceiling
@@ -5683,6 +5697,88 @@ export const sessionGoals = pgTable(
     continuationRevisionValid: check(
       "session_goals_continuation_revision_check",
       sql`${table.continuationWakeRevision} >= 0 and ${table.continuationObservedRevision} >= 0 and ${table.continuationObservedRevision} <= ${table.continuationWakeRevision} and ${table.continuationWakeRevision} <= 9007199254740991 and ${table.continuationObservedRevision} <= 9007199254740991`,
+    ),
+  }),
+);
+
+/**
+ * Immutable semantic goal history. A proposal is never model-visible until a
+ * later applied row references it; rejection is another immutable decision
+ * row rather than mutation of the original proposal.
+ */
+export const sessionGoalRevisions = pgTable(
+  "session_goal_revisions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    goalId: uuid("goal_id").notNull(),
+    disposition: text("disposition").$type<"applied" | "proposed" | "rejected">().notNull(),
+    changeKind: text("change_kind").$type<SessionGoalChangeKind>().notNull(),
+    baseObjectiveRevision: integer("base_objective_revision").notNull(),
+    resultObjectiveRevision: integer("result_objective_revision"),
+    text: text("text").notNull(),
+    successCriteria: text("success_criteria"),
+    mutationPolicy: text("mutation_policy").$type<SessionGoalMutationPolicy>().notNull(),
+    rationale: text("rationale").notNull(),
+    actor: text("actor").$type<"agent" | "api" | "scheduled_task">().notNull(),
+    actorTurnId: uuid("actor_turn_id"),
+    actorAttemptId: uuid("actor_attempt_id"),
+    proposalId: uuid("proposal_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "session_goal_revisions_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceSession: foreignKey({
+      name: "session_goal_revisions_workspace_session_fk",
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("cascade"),
+    actorTurn: foreignKey({
+      name: "session_goal_revisions_actor_turn_fk",
+      columns: [table.workspaceId, table.actorTurnId],
+      foreignColumns: [sessionTurns.workspaceId, sessionTurns.id],
+    }).onDelete("restrict"),
+    actorAttempt: foreignKey({
+      name: "session_goal_revisions_actor_attempt_fk",
+      columns: [table.workspaceId, table.actorAttemptId],
+      foreignColumns: [sessionTurnAttempts.workspaceId, sessionTurnAttempts.id],
+    }).onDelete("restrict"),
+    proposal: foreignKey({
+      name: "session_goal_revisions_proposal_fk",
+      columns: [table.workspaceId, table.proposalId],
+      foreignColumns: [table.workspaceId, table.id],
+    }).onDelete("restrict"),
+    appliedRevision: uniqueIndex("session_goal_revisions_applied_revision_uq")
+      .on(table.workspaceId, table.goalId, table.resultObjectiveRevision)
+      .where(sql`${table.disposition} = 'applied'`),
+    goalTimeline: index("session_goal_revisions_goal_timeline_idx").on(
+      table.workspaceId,
+      table.goalId,
+      table.createdAt,
+      table.id,
+    ),
+    dispositionValid: check(
+      "session_goal_revisions_disposition_chk",
+      sql`${table.disposition} in ('applied', 'proposed', 'rejected')`,
+    ),
+    changeKindValid: check(
+      "session_goal_revisions_change_kind_chk",
+      sql`${table.changeKind} in ('refinement', 'adaptation', 'replacement')`,
+    ),
+    policyValid: check(
+      "session_goal_revisions_policy_chk",
+      sql`${table.mutationPolicy} in ('review_changes', 'preserve_intent', 'autonomous_adaptation')`,
+    ),
+    revisionShape: check(
+      "session_goal_revisions_revision_shape_chk",
+      sql`(${table.disposition} = 'applied' and ${table.resultObjectiveRevision} = ${table.baseObjectiveRevision} + 1)
+        or (${table.disposition} in ('proposed', 'rejected') and ${table.resultObjectiveRevision} is null)`,
     ),
   }),
 );
@@ -9270,6 +9366,7 @@ export * from "./slack-task-policy-schema";
 export * from "./preference-registry-schema";
 export * from "./memory-governance-schema";
 export * from "./scoped-knowledge-schema";
+export * from "./task-notes-schema";
 export * from "./knowledge-source-sync-schema";
 export * from "./transcription-recordings-schema";
 export * from "./interaction-schema";

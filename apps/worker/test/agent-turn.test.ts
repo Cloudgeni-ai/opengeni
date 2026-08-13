@@ -63,6 +63,7 @@ import {
   escapedMcpTimeoutRecoveryFailure,
   filterUnmaterializedSandboxFileDownloads,
   finalizeDurableTurnOpStreams,
+  connectedSubscriptionImageGenerationAuthority,
   historyRowsToAppend,
   hostedWebSearchForTurn,
   isLazySandboxProvisionRetryable,
@@ -82,6 +83,7 @@ import {
   processCompactionModelUsageEvent,
   processModelResponseTerminalEvent,
   persistOrSignalSessionAttemptQuiescence,
+  preClaimAdmissionFailure,
   PROVIDER_BACKPRESSURE_DELAY_MS,
   providerRecoveryCountFromMetadata,
   providerRetryAfterMs,
@@ -3768,6 +3770,76 @@ describe("transient provider error classifier", () => {
     expect(agentRunFailurePayload(mandatory).retryable).toBeUndefined();
   });
 
+  test("exports only retry-safe admission truth to Temporal history", () => {
+    const deadlock = new SessionEventPersistenceError({
+      code: "db_deadlock",
+      sqlState: "40P01",
+      stage: "session_attempts.claim",
+      eventTypes: ["session.turn.attempt_claimed"],
+      correlationId: "corr-preclaim",
+      attempts: 3,
+      retryOutcome: "exhausted",
+      database: { table: "session_turn_attempts" },
+    });
+    expect(preClaimAdmissionFailure(deadlock)).toMatchObject({
+      type: "OpenGeniPreClaimFailure",
+      nonRetryable: true,
+      details: [{ disposition: "retryable", code: "db_deadlock" }],
+    });
+    const connectionLoss = new SessionEventPersistenceError({
+      code: "db_failure",
+      sqlState: "08006",
+      stage: "session_attempts.claim",
+      eventTypes: ["session.turn.attempt_claimed"],
+      correlationId: "corr-connection-loss",
+      attempts: 1,
+      retryOutcome: "not_retryable",
+      database: {},
+    });
+    expect(preClaimAdmissionFailure(connectionLoss)).toMatchObject({
+      details: [{ disposition: "retryable", code: "db_failure" }],
+    });
+    const rawConnectionLoss = Object.assign(new Error("SECRET socket detail"), {
+      code: "CONNECTION_CLOSED",
+      errno: "CONNECTION_CLOSED",
+    });
+    expect(preClaimAdmissionFailure(rawConnectionLoss)).toMatchObject({
+      details: [{ disposition: "retryable", code: "db_failure" }],
+    });
+    expect(JSON.stringify(preClaimAdmissionFailure(rawConnectionLoss))).not.toContain("SECRET");
+    expect(
+      preClaimAdmissionFailure(
+        Object.assign(new Error("SECRET nested socket detail"), {
+          cause: { code: "ECONNRESET" },
+        }),
+      ),
+    ).toMatchObject({
+      details: [{ disposition: "retryable", code: "db_failure" }],
+    });
+    const constraint = new SessionEventPersistenceError({
+      code: "db_failure",
+      sqlState: "23505",
+      stage: "session_attempts.claim",
+      eventTypes: ["session.turn.attempt_claimed"],
+      correlationId: "corr-constraint",
+      attempts: 1,
+      retryOutcome: "not_retryable",
+      database: { constraint: "session_turn_attempts_pkey" },
+    });
+    expect(preClaimAdmissionFailure(constraint)).toMatchObject({
+      details: [{ disposition: "permanent", code: "db_failure" }],
+    });
+    expect(preClaimAdmissionFailure(new Error("SECRET malformed metadata"))).toMatchObject({
+      type: "OpenGeniPreClaimFailure",
+      nonRetryable: true,
+      message: "Agent turn admission failed before attempt claim.",
+      details: [{ disposition: "permanent", code: "claim_invariant" }],
+    });
+    expect(
+      JSON.stringify(preClaimAdmissionFailure(new Error("SECRET malformed metadata"))),
+    ).not.toContain("SECRET");
+  });
+
   test("retains an exact database cause internally but sanitizes the session payload", async () => {
     const syntheticValue = ["synthetic", "worker", "db", "123456"].join("-");
     const source = Object.assign(new Error(`Failed query containing ${syntheticValue}`), {
@@ -4264,6 +4336,21 @@ describe("hostedWebSearchForTurn (provider support)", () => {
   test("applies the deployment capability gate to the legacy built-in path", () => {
     expect(hostedWebSearchForTurn(null, true)).toBe(true);
     expect(hostedWebSearchForTurn(null, false)).toBe(false);
+  });
+});
+
+describe("connectedSubscriptionImageGenerationAuthority", () => {
+  test("omits the optional tool when delegated model authority has no connected credential", () => {
+    expect(connectedSubscriptionImageGenerationAuthority({}, null)).toBeNull();
+    expect(connectedSubscriptionImageGenerationAuthority(null, "credential-id")).toBeNull();
+  });
+
+  test("exposes the optional tool only with both execution context and credential identity", () => {
+    const context = { getToken: true };
+    expect(connectedSubscriptionImageGenerationAuthority(context, "credential-id")).toEqual({
+      credentialContext: context,
+      credentialId: "credential-id",
+    });
   });
 });
 

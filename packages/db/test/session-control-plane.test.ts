@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "
 import {
   SESSION_EVENT_RAW_DELTA_TYPES,
   SESSION_EVENT_PAYLOAD_MAX_BYTES,
+  SESSION_GOAL_TEXT_MAX_BYTES,
   boundSessionEventPayload,
   sessionEventJsonBytes,
   sessionEventPayloadTruncation,
@@ -648,7 +649,10 @@ describe("clean session control plane", () => {
   test("session discovery is compact-by-query and cursor-stable", async () => {
     const { grant, session: first } = await fixture();
     const hugeTitle = "界😀".repeat(100_000);
-    const hugeGoal = "goal-😀".repeat(100_000);
+    const goalChunk = "goal-😀";
+    const hugeGoal = goalChunk.repeat(
+      Math.floor(SESSION_GOAL_TEXT_MAX_BYTES / Buffer.byteLength(goalChunk, "utf8")),
+    );
     const second = await createSession(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId!,
@@ -712,7 +716,7 @@ describe("clean session control plane", () => {
     expect(Array.from(projectedSecond.title!)).toHaveLength(200);
     expect(projectedSecond.titleOriginalChars).toBe(200_000);
     expect(Array.from(projectedThird.goal!.text)).toHaveLength(600);
-    expect(projectedThird.goal?.textOriginalChars).toBe(600_000);
+    expect(projectedThird.goal?.textOriginalChars).toBe(Array.from(hugeGoal).length);
     expect(projectedThird.effectiveControl).toEqual({
       state: "paused",
       primaryBlocker: {

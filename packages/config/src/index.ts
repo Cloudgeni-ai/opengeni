@@ -1,12 +1,15 @@
 import {
   BillingMode,
   CAPABILITY_DESCRIPTORS,
+  DEFAULT_FIRST_PARTY_MCP_TOOLS,
   Entitlements,
   EntitlementsMode,
   LatencyMode,
   MAX_NESTED_AGENT_DEPTH,
   ProductAccessMode,
   ReasoningEffort,
+  FIRST_PARTY_MCP_TOOL_NAMES,
+  FirstPartyMcpToolName,
   SandboxBackend,
   SessionMcpApprovalPolicy,
   SEEDANCE_2_5_MODEL_ID,
@@ -17,6 +20,7 @@ import {
   type TurnExecutionModelSourceV1,
   type TurnExecutionReasoningSourceV1,
   type VideoGenerationResolution,
+  type FirstPartyMcpToolName as FirstPartyMcpToolNameType,
 } from "@opengeni/contracts";
 import { CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS } from "@opengeni/codex";
 import {
@@ -74,6 +78,38 @@ const EnvBoolean = z.preprocess((value) => {
   }
   return value;
 }, z.boolean());
+
+const EnvFirstPartyMcpTools = z.preprocess(
+  (value) => {
+    if (typeof value !== "string") return value;
+    const source = value.trim();
+    if (!source) return undefined;
+    if (source.startsWith("[")) {
+      try {
+        return JSON.parse(source);
+      } catch {
+        return value;
+      }
+    }
+    return source.split(",").map((entry) => entry.trim());
+  },
+  z
+    .array(FirstPartyMcpToolName)
+    .superRefine((tools, context) => {
+      const seen = new Set<FirstPartyMcpToolNameType>();
+      for (const [index, tool] of tools.entries()) {
+        if (seen.has(tool)) {
+          context.addIssue({
+            code: "custom",
+            message: "first-party MCP tool lists must not contain duplicates",
+            path: [index],
+          });
+        }
+        seen.add(tool);
+      }
+    })
+    .optional(),
+);
 
 export const sandboxPreparationProfiles: Record<string, { env: string[]; hooks: string[] }> = {
   none: {
@@ -299,6 +335,8 @@ const SettingsSchema = z.object({
   staticEntitlementsJson: z.string().default("{}"),
   staticUsageLimitsJson: z.string().default("{}"),
   delegationSecret: z.string().optional(),
+  defaultFirstPartyMcpTools: EnvFirstPartyMcpTools,
+  allowedFirstPartyMcpTools: EnvFirstPartyMcpTools,
   // sandbox workspace scoped stream-token HMAC secret (sandbox contract §C.3 / stream-token availability contract).
   // When unset, the API falls back to `delegationSecret` (the same HMAC envelope
   // family, `ogs_` vs `ogd_` prefix). REQUIRED-WHEN-DESKTOP, but the absence of
@@ -1923,6 +1961,8 @@ export function getSettings(): Settings {
     staticEntitlementsJson: optional("OPENGENI_STATIC_ENTITLEMENTS_JSON"),
     staticUsageLimitsJson: optional("OPENGENI_STATIC_USAGE_LIMITS_JSON"),
     delegationSecret: optional("OPENGENI_DELEGATION_SECRET"),
+    defaultFirstPartyMcpTools: optional("OPENGENI_DEFAULT_FIRST_PARTY_MCP_TOOLS"),
+    allowedFirstPartyMcpTools: optional("OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS"),
     streamTokenSecret: optional("OPENGENI_STREAM_TOKEN_SECRET"),
     streamControlEnabled: optional("OPENGENI_STREAM_CONTROL_ENABLED"),
     codemodeMaxCallsPerTurn: optional("OPENGENI_CODEMODE_MAX_CALLS_PER_TURN"),
@@ -2228,10 +2268,42 @@ const LOCAL_FIRST_PARTY_DELEGATION_SECRET = "opengeni-local-first-party-delegati
 export function resolveFirstPartyDelegationSecret(settings: Settings): string | undefined {
   const explicit = settings.delegationSecret?.trim();
   if (explicit) return explicit;
+  const configuredAccessKey = settings.accessKey?.trim();
+  if (settings.productAccessMode === "configured" && settings.authRequired && configuredAccessKey) {
+    return configuredAccessKey;
+  }
   return settings.productAccessMode === "local" &&
     (settings.environment === "local" || settings.environment === "test")
     ? LOCAL_FIRST_PARTY_DELEGATION_SECRET
     : undefined;
+}
+
+export type FirstPartyMcpToolPolicy = {
+  default: FirstPartyMcpToolNameType[];
+  allowed: FirstPartyMcpToolNameType[];
+};
+
+/** Resolve the deployment's session-tool defaults and hard execution ceiling. */
+export function resolveFirstPartyMcpToolPolicy(
+  settings: Pick<Settings, "defaultFirstPartyMcpTools" | "allowedFirstPartyMcpTools">,
+): FirstPartyMcpToolPolicy {
+  const allowed = settings.allowedFirstPartyMcpTools ?? [...FIRST_PARTY_MCP_TOOL_NAMES];
+  const allowedSet = new Set(allowed);
+  const defaults = settings.defaultFirstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS];
+  return {
+    default: defaults.filter((tool) => allowedSet.has(tool)),
+    allowed: [...allowed],
+  };
+}
+
+/** Apply the deployment ceiling to an existing durable session selection. */
+export function allowedFirstPartyMcpToolsForSession(
+  settings: Pick<Settings, "defaultFirstPartyMcpTools" | "allowedFirstPartyMcpTools">,
+  selected: readonly FirstPartyMcpToolNameType[] | null | undefined,
+): FirstPartyMcpToolNameType[] {
+  const policy = resolveFirstPartyMcpToolPolicy(settings);
+  const allowed = new Set(policy.allowed);
+  return [...(selected ?? policy.default)].filter((tool) => allowed.has(tool));
 }
 
 /**
@@ -4592,6 +4664,8 @@ function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
               "list_document_bases",
               "list_indexed_documents",
               "knowledge_search",
+              "knowledge_get",
+              "knowledge_browse",
               "knowledge_fetch",
               "memory_search",
               "memory_propose",
@@ -4685,6 +4759,17 @@ function firstPartyFilesMcpServerUrl(mcpUrl: string): string {
 
 function validateSettings(settings: Settings): void {
   temporalConnectionOptions(settings);
+  const allowedFirstPartyMcpTools = new Set(
+    settings.allowedFirstPartyMcpTools ?? FIRST_PARTY_MCP_TOOL_NAMES,
+  );
+  const disallowedDefaults = (settings.defaultFirstPartyMcpTools ?? []).filter(
+    (tool) => !allowedFirstPartyMcpTools.has(tool),
+  );
+  if (disallowedDefaults.length > 0) {
+    throw new Error(
+      `OPENGENI_DEFAULT_FIRST_PARTY_MCP_TOOLS must be a subset of OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS: ${disallowedDefaults.join(", ")}`,
+    );
+  }
   if (settings.productAccessMode === "managed") {
     if (!settings.publicBaseUrl) {
       throw new Error(

@@ -528,6 +528,7 @@ export type GoalSpec = {
   text: string;
   successCriteria?: string | undefined;
   maxAutoContinuations?: number | undefined;
+  mutationPolicy?: SessionGoalMutationPolicy | undefined;
 };
 
 export type SessionMcpServerInput = {
@@ -1377,6 +1378,9 @@ export const SESSION_EVENT_TYPES = [
   "artifact.created",
   "goal.set",
   "goal.updated",
+  "goal.progress",
+  "goal.rewrite.proposed",
+  "goal.rewrite.rejected",
   "goal.completed",
   "goal.paused",
   "goal.resumed",
@@ -2385,6 +2389,7 @@ export type FirstPartyMcpToolName =
   | "set_session_title"
   | "goal_set"
   | "goal_update"
+  | "goal_progress"
   | "goal_complete"
   | "goal_pause"
   | "memory_search"
@@ -2392,6 +2397,9 @@ export type FirstPartyMcpToolName =
   | "memory_correct"
   | "preference_registry_summary"
   | "preference_registry_get"
+  | "task_notes_list"
+  | "task_note_save"
+  | "task_note_archive"
   | "sandboxes_list"
   | "sandbox_attach"
   | "sandbox_swap"
@@ -2998,6 +3006,13 @@ export type ClientConfig = {
   defaultReasoningEffort: ReasoningEffort;
   allowedReasoningEfforts: ReasoningEffort[];
   mcpServers: { id: string; name: string }[];
+  /** Deployment defaults and hard maximum for built-in OpenGeni session tools. */
+  firstPartyMcpTools?:
+    | {
+        default: FirstPartyMcpToolName[];
+        allowed: FirstPartyMcpToolName[];
+      }
+    | undefined;
   fileUploads: { enabled: boolean; maxSizeBytes: number };
   /** Native browser microphone capture + server-side transcription capability. */
   voiceInput?: ClientVoiceInputConfig | undefined;
@@ -3202,6 +3217,8 @@ export type Workspace = {
 
 export type WorkspaceSettings = {
   memoryEnabled?: boolean | undefined;
+  /** Reversible Memory V1 prompt composition rollout. */
+  memoryPromptMode?: "legacy_standing" | "retrieval_only" | undefined;
   voiceInput?: WorkspaceVoiceInputSettings | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   maxNestedAgentDepth?: number | null | undefined;
@@ -3236,6 +3253,7 @@ export type WorkspaceVoiceInputSettings = {
 
 export type UpdateWorkspaceSettingsRequest = {
   memoryEnabled?: boolean | undefined;
+  memoryPromptMode?: "legacy_standing" | "retrieval_only" | undefined;
   voiceInput?: WorkspaceVoiceInputSettings | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   maxNestedAgentDepth?: number | null | undefined;
@@ -3368,6 +3386,39 @@ export type SessionGoalStatus = "active" | "paused" | "completed";
 
 export type SessionGoalCreatedBy = "api" | "agent" | "scheduled_task";
 
+export type SessionGoalMutationPolicy =
+  | "review_changes"
+  | "preserve_intent"
+  | "autonomous_adaptation";
+
+export type SessionGoalChangeKind = "refinement" | "adaptation" | "replacement";
+
+export type SessionGoalRevision = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  goalId: string;
+  disposition: "applied" | "proposed" | "rejected";
+  changeKind: SessionGoalChangeKind;
+  baseObjectiveRevision: number;
+  resultObjectiveRevision: number | null;
+  text: string;
+  successCriteria: string | null;
+  mutationPolicy: SessionGoalMutationPolicy;
+  rationale: string;
+  actor: "agent" | "api" | "scheduled_task";
+  actorTurnId: string | null;
+  actorAttemptId: string | null;
+  proposalId: string | null;
+  createdAt: string;
+};
+
+export type ApplySessionGoalRevisionRequest = {
+  expectedObjectiveRevision: number;
+  rationale?: string | undefined;
+};
+
 export type SessionGoalContinuationState =
   | "inactive"
   | "scheduled"
@@ -3411,6 +3462,8 @@ export type SessionGoal = {
   pausedReason: string | null;
   createdBy: SessionGoalCreatedBy;
   version: number;
+  objectiveRevision: number;
+  mutationPolicy: SessionGoalMutationPolicy;
   autoContinuations: number;
   noProgressStreak: number;
   maxAutoContinuations: number | null;
@@ -3421,10 +3474,18 @@ export type SessionGoal = {
   updatedAt: string;
 };
 
-export type UpdateSessionGoalRequest = {
-  status: "paused" | "active";
-  rationale?: string | undefined;
-};
+export type UpdateSessionGoalRequest =
+  | {
+      status: "paused" | "active";
+      rationale?: string | undefined;
+    }
+  | {
+      text: string;
+      successCriteria?: string | null | undefined;
+      mutationPolicy?: SessionGoalMutationPolicy | undefined;
+      rationale: string;
+      expectedObjectiveRevision: number;
+    };
 
 export type UpdateSessionRequest = {
   title: string;

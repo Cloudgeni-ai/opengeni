@@ -5,9 +5,14 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 const fakeDb = {};
 const searchInputs: unknown[] = [];
 const listInputs: unknown[] = [];
+const getInputs: unknown[] = [];
+const browseInputs: unknown[] = [];
 const realDocuments = await import("@opengeni/documents");
 const realSearchEffectiveDocuments = realDocuments.searchEffectiveDocuments;
+const realSearchEffectiveKnowledge = realDocuments.searchEffectiveKnowledge;
 const realListEffectiveIndexedDocuments = realDocuments.listEffectiveIndexedDocuments;
+const realGetEffectiveKnowledgeRecord = realDocuments.getEffectiveKnowledgeRecord;
+const realBrowseEffectiveKnowledge = realDocuments.browseEffectiveKnowledge;
 
 mock.module("@opengeni/documents", () => ({
   ...realDocuments,
@@ -16,6 +21,13 @@ mock.module("@opengeni/documents", () => ({
       if (args[0] !== fakeDb) return await realSearchEffectiveDocuments(...args);
       searchInputs.push(args[1]);
       return [];
+    },
+  ),
+  searchEffectiveKnowledge: mock(
+    async (...args: Parameters<typeof realSearchEffectiveKnowledge>) => {
+      if (args[0] !== fakeDb) return await realSearchEffectiveKnowledge(...args);
+      searchInputs.push(args[1]);
+      return { results: [] };
     },
   ),
   listEffectiveIndexedDocuments: mock(
@@ -27,6 +39,20 @@ mock.module("@opengeni/documents", () => ({
         nextCheckpoint: "checkpoint-2",
         hasMore: false,
       };
+    },
+  ),
+  getEffectiveKnowledgeRecord: mock(
+    async (...args: Parameters<typeof realGetEffectiveKnowledgeRecord>) => {
+      if (args[0] !== fakeDb) return await realGetEffectiveKnowledgeRecord(...args);
+      getInputs.push(args[1]);
+      return null;
+    },
+  ),
+  browseEffectiveKnowledge: mock(
+    async (...args: Parameters<typeof realBrowseEffectiveKnowledge>) => {
+      if (args[0] !== fakeDb) return await realBrowseEffectiveKnowledge(...args);
+      browseInputs.push(args[1]);
+      return { records: [], nextCursor: null, hasMore: false };
     },
   ),
 }));
@@ -115,6 +141,61 @@ test("docs MCP binds effective retrieval to its immutable initiating subject", a
         mode: "keyword",
         initiatingSubjectId: "user:initiator",
         surface: "agent",
+      },
+    ]);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test("docs MCP rebinds Knowledge fetch and browse to its immutable initiating subject", async () => {
+  const server = buildDocumentsMcpServer(
+    fakeDb as never,
+    "11111111-1111-4111-8111-111111111111",
+    "22222222-2222-4222-8222-222222222222",
+    {} as never,
+    { initiatingSubjectId: "user:initiator" },
+  );
+  const client = new Client({ name: "knowledge-navigation-scope-test", version: "1" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  try {
+    const id = "document:33333333-3333-4333-8333-333333333333";
+    const getResult = await client.callTool({
+      name: "knowledge_get",
+      arguments: { id, initiatingSubjectId: "user:forged" },
+    });
+    expect(getResult.isError).toBe(true);
+    const browseResult = await client.callTool({
+      name: "knowledge_browse",
+      arguments: {
+        parentId: id,
+        cursor: "cursor-1",
+        limit: 17,
+        initiatingSubjectId: "user:forged",
+      },
+    });
+    const text = browseResult.content.find((entry) => entry.type === "text");
+    if (!text || text.type !== "text") throw new Error("missing MCP text result");
+    expect(JSON.parse(text.text)).toEqual({ records: [], nextCursor: null, hasMore: false });
+    expect(getInputs).toEqual([
+      {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        initiatingSubjectId: "user:initiator",
+        id,
+      },
+    ]);
+    expect(browseInputs).toEqual([
+      {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        initiatingSubjectId: "user:initiator",
+        parentId: id,
+        cursor: "cursor-1",
+        limit: 17,
       },
     ]);
   } finally {

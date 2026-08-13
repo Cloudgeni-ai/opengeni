@@ -8,6 +8,7 @@ import type {
   ToolRef,
 } from "@/types";
 import {
+  DEFAULT_FIRST_PARTY_MCP_TOOLS,
   FIRST_PARTY_MCP_TOOL_NAMES,
   defaultRepositoryMountPath,
   mergeResourceRefs,
@@ -51,6 +52,26 @@ export const firstPartySessionToolOptions = FIRST_PARTY_MCP_TOOL_NAMES.map((id) 
   id,
   name: FIRST_PARTY_ACTION_LABELS[id] ?? firstPartyToolLabel(id),
 }));
+
+export function clientFirstPartyMcpToolPolicy(config: Pick<ClientConfig, "firstPartyMcpTools">): {
+  default: FirstPartyMcpToolName[];
+  allowed: FirstPartyMcpToolName[];
+} {
+  return (
+    config.firstPartyMcpTools ?? {
+      default: [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+      allowed: [...FIRST_PARTY_MCP_TOOL_NAMES],
+    }
+  );
+}
+
+export function firstPartySessionToolOptionsFor(
+  allowed: readonly FirstPartyMcpToolName[] | undefined,
+): Array<{ id: FirstPartyMcpToolName; name: string }> {
+  if (!allowed) return firstPartySessionToolOptions;
+  const allowedSet = new Set(allowed);
+  return firstPartySessionToolOptions.filter((option) => allowedSet.has(option.id));
+}
 
 function firstPartyToolLabel(id: FirstPartyMcpToolName): string {
   const label = id.replaceAll("_", " ");

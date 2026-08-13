@@ -111,6 +111,23 @@ describe("release schema contract", () => {
 
   test("preserves published host-export history and appends the forward repair", async () => {
     const completeSourceContract = await buildSchemaContract();
+    const companyBrainMigrationPaths = [
+      "0238_goal_persistence_policy.sql",
+      "0239_task_tree_notes.sql",
+    ].filter((path) =>
+      completeSourceContract.migrations.some((migration) => migration.path === path),
+    );
+    const companyBrainMigrations = new Map(
+      completeSourceContract.migrations.map((migration) => [migration.path, migration]),
+    );
+    const goalPersistence = companyBrainMigrations.get("0238_goal_persistence_policy.sql");
+    if (goalPersistence) {
+      expect(goalPersistence).toMatchObject({ deploymentMode: "rolling" });
+    }
+    const taskTreeNotes = companyBrainMigrations.get("0239_task_tree_notes.sql");
+    if (taskTreeNotes) {
+      expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
+    }
     const appendedMigrationPaths = [
       "0237_interaction_transition_reaper.sql",
       "0238_supergrok_realtime_model.sql",
@@ -118,9 +135,10 @@ describe("release schema contract", () => {
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
+    const forwardMigrationPaths = [...companyBrainMigrationPaths, ...appendedMigrationPaths];
     const sourceContract =
-      appendedMigrationPaths.length > 0
-        ? await contractWithoutMigrations(appendedMigrationPaths)
+      forwardMigrationPaths.length > 0
+        ? await contractWithoutMigrations(forwardMigrationPaths)
         : completeSourceContract;
     const transitionReaper = completeSourceContract.migrations.find(
       (migration) => migration.path === "0237_interaction_transition_reaper.sql",
@@ -149,6 +167,11 @@ describe("release schema contract", () => {
     );
     const sessionVisibilityContractHash = (includesActivation: boolean): string | null => {
       if (!migrations.has("0236_session_visibility_slack_policy.sql")) return null;
+      if (migrations.has("0238_recover_unclaimed_session_turns.sql")) {
+        return includesActivation
+          ? "67209db60dbc5556cd8ec6bd89fdc037ecf12f27a16ceb2739d179b623126b0b"
+          : "da3ec4154e52954b78e1712b75b9b58211a4731aa82fad9e6615afd3ea9f325f";
+      }
       if (migrations.has("0228_interaction_controller_data_plane.sql")) {
         return includesActivation
           ? "2f0bfa7a465e47bbca27a79cc594f953e59a94e42ff704ab11e258523d19ad42"
@@ -443,43 +466,46 @@ describe("release schema contract", () => {
         (migrations.has("0235_canonical_human_login_bindings.sql") ? 1 : 0) +
         (migrations.has("0236_browser_identity_lifecycle.sql") ? 1 : 0) +
         (migrations.has("0225_session_visibility_fork_activation.sql") ? 1 : 0) +
-        (migrations.has("0236_session_visibility_slack_policy.sql") ? 1 : 0),
+        (migrations.has("0236_session_visibility_slack_policy.sql") ? 1 : 0) +
+        (migrations.has("0238_recover_unclaimed_session_turns.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(sessionVisibilityContractHash(false) ?? currentMainContractHash);
     expect(contract.latestMigration).toBe(
-      migrations.has("0236_session_visibility_slack_policy.sql")
-        ? "0236_session_visibility_slack_policy.sql"
-        : migrations.has("0235_canonical_human_login_bindings.sql")
-          ? "0235_canonical_human_login_bindings.sql"
-          : migrations.has("0234_xai_subscription_authority.sql")
-            ? "0234_xai_subscription_authority.sql"
-            : migrations.has("0233_skill_and_integration_authority_cutover.sql")
-              ? "0233_skill_and_integration_authority_cutover.sql"
-              : migrations.has("0232_integration_facet_authority_cutover.sql")
-                ? "0232_integration_facet_authority_cutover.sql"
-                : migrations.has("0231_integration_definition_identity_cutover.sql")
-                  ? "0231_integration_definition_identity_cutover.sql"
-                  : migrations.has("0230_user_scoped_variable_sets_rigs.sql")
-                    ? "0230_user_scoped_variable_sets_rigs.sql"
-                    : migrations.has("0228_slack_task_policy.sql")
-                      ? "0228_slack_task_policy.sql"
-                      : migrations.has("0229_slack_inbox_file_fact.sql")
-                        ? "0229_slack_inbox_file_fact.sql"
-                        : migrations.has("0227_slack_native_actions.sql")
-                          ? "0227_slack_native_actions.sql"
-                          : migrations.has("0224_slack_post_outcome_reconciliation.sql")
-                            ? "0224_slack_post_outcome_reconciliation.sql"
-                            : migrations.has("0223_sessions_channel_fk_validate.sql")
-                              ? "0223_sessions_channel_fk_validate.sql"
-                              : migrations.has("0221_sessions_channel_index.sql")
-                                ? "0221_sessions_channel_index.sql"
-                                : migrations.has("0220_memory_slack_append_only_cascade.sql")
-                                  ? "0220_memory_slack_append_only_cascade.sql"
-                                  : migrations.has("0219_site_auth_maintenance_sessions.sql")
-                                    ? "0219_site_auth_maintenance_sessions.sql"
-                                    : migrations.has("0218_organization_tenancy_foundation.sql")
-                                      ? "0218_organization_tenancy_foundation.sql"
-                                      : "0217_capability_definition_delete_authority.sql",
+      migrations.has("0238_recover_unclaimed_session_turns.sql")
+        ? "0238_recover_unclaimed_session_turns.sql"
+        : migrations.has("0236_session_visibility_slack_policy.sql")
+          ? "0236_session_visibility_slack_policy.sql"
+          : migrations.has("0235_canonical_human_login_bindings.sql")
+            ? "0235_canonical_human_login_bindings.sql"
+            : migrations.has("0234_xai_subscription_authority.sql")
+              ? "0234_xai_subscription_authority.sql"
+              : migrations.has("0233_skill_and_integration_authority_cutover.sql")
+                ? "0233_skill_and_integration_authority_cutover.sql"
+                : migrations.has("0232_integration_facet_authority_cutover.sql")
+                  ? "0232_integration_facet_authority_cutover.sql"
+                  : migrations.has("0231_integration_definition_identity_cutover.sql")
+                    ? "0231_integration_definition_identity_cutover.sql"
+                    : migrations.has("0230_user_scoped_variable_sets_rigs.sql")
+                      ? "0230_user_scoped_variable_sets_rigs.sql"
+                      : migrations.has("0228_slack_task_policy.sql")
+                        ? "0228_slack_task_policy.sql"
+                        : migrations.has("0229_slack_inbox_file_fact.sql")
+                          ? "0229_slack_inbox_file_fact.sql"
+                          : migrations.has("0227_slack_native_actions.sql")
+                            ? "0227_slack_native_actions.sql"
+                            : migrations.has("0224_slack_post_outcome_reconciliation.sql")
+                              ? "0224_slack_post_outcome_reconciliation.sql"
+                              : migrations.has("0223_sessions_channel_fk_validate.sql")
+                                ? "0223_sessions_channel_fk_validate.sql"
+                                : migrations.has("0221_sessions_channel_index.sql")
+                                  ? "0221_sessions_channel_index.sql"
+                                  : migrations.has("0220_memory_slack_append_only_cascade.sql")
+                                    ? "0220_memory_slack_append_only_cascade.sql"
+                                    : migrations.has("0219_site_auth_maintenance_sessions.sql")
+                                      ? "0219_site_auth_maintenance_sessions.sql"
+                                      : migrations.has("0218_organization_tenancy_foundation.sql")
+                                        ? "0218_organization_tenancy_foundation.sql"
+                                        : "0217_capability_definition_delete_authority.sql",
     );
     expect(migrations.get("0214_session_activity_commit_gate.sql")).toMatchObject({
       sha256: "26c84bc34bc51d19f9532cf3f2c64a649f100a724cb73d968e17e7c4ecf8de36",
@@ -658,6 +684,12 @@ describe("release schema contract", () => {
     if (migrations.has("0236_session_visibility_slack_policy.sql")) {
       expect(migrations.get("0236_session_visibility_slack_policy.sql")).toMatchObject({
         sha256: "64f9beb146d973cc0a6ab9f8cdef29955ef9edb68ecc9b07756eda5414709299",
+        deploymentMode: "rolling",
+      });
+    }
+    if (migrations.has("0238_recover_unclaimed_session_turns.sql")) {
+      expect(migrations.get("0238_recover_unclaimed_session_turns.sql")).toMatchObject({
+        sha256: "7d63ad62f2dc91f8c5de87b95a35a366d4b23d4fc76f320b5376ef2412a2002d",
         deploymentMode: "rolling",
       });
     }

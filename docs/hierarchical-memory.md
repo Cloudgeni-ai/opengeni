@@ -1,11 +1,11 @@
 # Hierarchical memory foundation
 
 This document is the canonical current contract for the database/domain
-foundation beneath composable workspace knowledge memory. The first slice is
-storage and governance only: it adds typed scopes, namespaces, labels,
-relationships, lifecycle evidence, deterministic apply/revert operations, and
-FORCE-RLS enforcement. It does **not** add or change HTTP, SDK, MCP, worker
-retrieval/injection, prompt composition, automatic learning, or UI behavior.
+foundation beneath composable workspace knowledge memory. The storage slice
+adds typed scopes, namespaces, labels, relationships, lifecycle evidence,
+deterministic apply/revert operations, and FORCE-RLS enforcement. A later
+reversible containment slice changes only how the legacy V1 surface contributes
+to model context; it does not adopt the final scoped selector or write router.
 
 ## Data model
 
@@ -134,21 +134,49 @@ afterward. The cutover replaces the old workspace-global visible-text unique
 index with the typed-scope-local index; old writers neither understand the new
 selectors nor recognize the replacement constraint name.
 
-## Explicitly later slices
+## V1 compatibility and reversible containment
 
-This foundation intentionally leaves these surfaces unchanged:
+The typed foundation still leaves these surfaces for later slices:
 
-- HTTP, SDK, MCP, and UI contracts;
-- worker retrieval, ranking, injection, and prompt composition;
+- typed-selector adoption in HTTP, SDK, MCP, and UI contracts;
+- typed-selector-aware worker retrieval and ranking;
 - automatic learning/activation;
 - release and deployment execution.
 
-Workspace Memory V1 continues to own existing agent retrieval/write surfaces
-until a later contract/runtime slice adopts typed selectors. The structured
-preference registry remains the only active preference authority, and workspace
-instruction policies remain the only charter/policy authority. A
-`knowledge_memories.kind = preference` row is legacy knowledge observation, not
-a preference-registry record or instruction-policy activation.
+Workspace Memory V1 continues to own the existing data, correction, export, and
+write surfaces until a later contract/runtime slice adopts typed selectors. The
+workspace setting `memoryPromptMode` controls a reversible model-context
+candidate:
+
+- absent or `legacy_standing` preserves the existing pinned/recency working-set
+  block and agent search behavior;
+- `retrieval_only` removes that broad standing block from every agent prompt;
+- in `retrieval_only`, first-party agent `memory_search` excludes legacy
+  `kind = preference` rows, while authorized human search, audit, correction,
+  export, and the canonical rows remain unchanged;
+- in `retrieval_only`, child sessions omit the company profile from governance
+  composition, but roots retain it and all children retain mandatory instruction
+  policy plus always-visible structured preference and Skill descriptors.
+
+This setting is stored in the existing workspace settings JSON, defaults to the
+legacy path, and can be rolled back without a database migration. It does not
+create session notes, select typed scopes, change memory writes, or activate
+observations as policy. The structured preference registry remains the only
+active preference authority, and workspace instruction policies remain the only
+charter/policy authority. A `knowledge_memories.kind = preference` row is legacy
+knowledge observation, not a preference-registry record or instruction-policy
+activation.
+
+At the ordinary model-request boundary, the worker emits content-free,
+exact-attempt contribution telemetry for mandatory rules, guide/Skill
+descriptors, company profile, and the legacy standing block when present. The
+structured log carries the exact attempt plus the already-durable policy,
+preference, and company-profile snapshot ids, root/child role, inclusion reason,
+authority class, UTF-8 bytes, and an estimated token count. Prometheus receives
+only bounded category/source/reason/scope/role/mode labels and token estimates.
+No memory or preference content enters telemetry. A new durable contribution
+receipt is intentionally deferred to the final selector architecture rather
+than introducing a competing ledger here.
 
 Canonical source anchors:
 

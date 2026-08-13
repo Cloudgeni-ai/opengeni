@@ -13,6 +13,7 @@ import {
   getSession,
   getSessionGoal,
   getSessionHistoryItems,
+  listSessionGoalRevisions,
   listSessionEvents,
   listSessionTurns,
   nestedPostgresSqlState,
@@ -462,6 +463,16 @@ describe("migration 0225 session visibility and fork activation", () => {
     expect(ownerProjection.history).toHaveLength(1);
     expect(ownerProjection.turns).toHaveLength(1);
     expect(ownerProjection.goal?.text).toBe("private goal");
+    const ownerGoalRevisions = await withSessionRlsActorContext(
+      { subjectId: value.ownerSubjectId },
+      () => listSessionGoalRevisions(client!.db, value.ownerGrant.workspaceId, value.session.id),
+    );
+    expect(ownerGoalRevisions).toHaveLength(1);
+    expect(ownerGoalRevisions[0]).toMatchObject({
+      sessionId: value.session.id,
+      disposition: "applied",
+      text: "private goal",
+    });
 
     const nonOwnerProjection = await withSessionRlsActorContext(
       { subjectId: value.otherSubjectId },
@@ -498,6 +509,7 @@ describe("migration 0225 session visibility and fork activation", () => {
             history: number;
             turns: number;
             goals: number;
+            goalRevisions: number;
             mcpServers: number;
           }[]
         >`
@@ -507,6 +519,7 @@ describe("migration 0225 session visibility and fork activation", () => {
             (select count(*)::int from session_history_items where session_id = ${value.session.id}) as history,
             (select count(*)::int from session_turns where session_id = ${value.session.id}) as turns,
             (select count(*)::int from session_goals where session_id = ${value.session.id}) as goals,
+            (select count(*)::int from session_goal_revisions where session_id = ${value.session.id}) as "goalRevisions",
             (select count(*)::int from session_mcp_servers where session_id = ${value.session.id}) as "mcpServers"
         `;
       });
@@ -516,11 +529,27 @@ describe("migration 0225 session visibility and fork activation", () => {
         history: 0,
         turns: 0,
         goals: 0,
+        goalRevisions: 0,
         mcpServers: 0,
       });
     } finally {
       await app.end();
     }
+
+    await transitionSessionVisibility(client.db, {
+      workspaceId: value.ownerGrant.workspaceId,
+      sessionId: value.session.id,
+      actorSubjectId: value.ownerSubjectId,
+      targetVisibility: "workspace_shared",
+      expectedAuthorityEpoch: 2,
+      operationKey: `reshare:${crypto.randomUUID()}`,
+    });
+    const sharedGoalRevisions = await withSessionRlsActorContext(
+      { subjectId: value.otherSubjectId },
+      () => listSessionGoalRevisions(client!.db, value.ownerGrant.workspaceId, value.session.id),
+    );
+    expect(sharedGoalRevisions).toHaveLength(1);
+    expect(sharedGoalRevisions[0]?.sessionId).toBe(value.session.id);
   });
 
   test("denies a suspended owner and rejects direct authority writes", async () => {
@@ -619,7 +648,11 @@ describe("migration 0225 session visibility and fork activation", () => {
       select visibility, owner_organization_membership_id as "ownerId", authority_epoch as epoch
       from sessions where id = ${legacy.id}
     `;
-    expect(legacyRow).toEqual({ visibility: "workspace_shared", ownerId: null, epoch: 1 });
+    expect(legacyRow).toEqual({
+      visibility: "workspace_shared",
+      ownerId: null,
+      epoch: 1,
+    });
 
     const ownedRace = await Promise.allSettled([
       transitionSessionVisibility(client.db, {

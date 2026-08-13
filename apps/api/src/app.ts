@@ -3,6 +3,7 @@ import {
   configuredAllowedModels,
   configuredAllowedReasoningEfforts,
   configuredModels,
+  resolveFirstPartyMcpToolPolicy,
   withCodexCatalogProvider,
   withXaiSubscriptionCatalogProvider,
 } from "@opengeni/config";
@@ -14,6 +15,7 @@ import {
   OPENGENI_API_CONTRACT_REVISION,
   OPENGENI_CORRELATION_HEADER,
   resolveWorkspaceMemoryEnabled,
+  resolveWorkspaceMemoryPromptMode,
   VOICE_INPUT_ACCEPTED_MIME_TYPES,
   TRANSCRIPTION_RECORDING_PROVIDER_SEGMENT_SECONDS,
   type AccessGrant,
@@ -146,7 +148,7 @@ export {
 export { workflowIdForSession } from "@opengeni/core";
 export { replaySessionEvents, sseSessionStream, sseWorkspaceControlStream } from "./http/sse";
 
-export const API_MAX_REQUEST_BODY_BYTES = 8 * 1024 * 1024;
+export const API_MAX_REQUEST_BODY_BYTES = 32 * 1024 * 1024;
 
 /** Effective Hono bodyLimit — API JSON ceiling or voice multipart + multipart overhead. */
 export function apiRequestBodyLimitBytes(settings: {
@@ -499,6 +501,7 @@ export function createAppComposition(deps: AppDependencies): {
           id: server.id,
           name: server.name ?? server.id,
         })),
+        firstPartyMcpTools: resolveFirstPartyMcpToolPolicy(deps.settings),
         fileUploads: {
           enabled: objectStorage !== null,
           maxSizeBytes: objectStorage?.maxSinglePutSizeBytes ?? 5_000_000_000,
@@ -591,12 +594,14 @@ export function createAppComposition(deps: AppDependencies): {
       }
       const workspace = await getWorkspace(routeDeps.db, workspaceId);
       const workspaceMemoryEnabled = resolveWorkspaceMemoryEnabled(workspace?.settings);
+      const workspaceMemoryPromptMode = resolveWorkspaceMemoryPromptMode(workspace?.settings);
       const transport = new WebStandardStreamableHTTPServerTransport({
         enableJsonResponse: true,
       });
       const mcp = buildOpenGeniMcpServer(routeDeps, grant, {
         requestOrigin: new URL(c.req.url).origin,
         workspaceMemoryEnabled,
+        workspaceMemoryPromptMode,
       });
       await mcp.connect(transport);
       return await transport.handleRequest(boundedRequest);
