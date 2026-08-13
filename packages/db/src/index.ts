@@ -38541,13 +38541,13 @@ export async function persistSandboxProviderLossObservation(
           terminate_outcome,
           destruction_correlation_id, destruction_observed_at, not_found_observed_at
         )
-        select ${input.receiptId}::uuid, account_id, workspace_id, session_id, admission_id, claim_id, actor_kind, actor_id,
+        select ${input.receiptId}::uuid, account_id, workspace_id, session_id, admission_id, claim.id, actor_kind, actor_id,
           operation, turn_id, attempt_id, execution_generation, holder_kind, holder_id,
           lease_id, sandbox_group_id, lease_epoch, workspace_generation, provider_backend,
           provider_instance_id, route_kind, route_target_id, route_epoch,
           ${input.terminateOutcome}, ${input.destructionCorrelationId}, now(), now()
-        from sandbox_provider_loss_teardown_claims
-        where id = ${input.claimId}::uuid
+        from sandbox_provider_loss_teardown_claims claim
+        where claim.id = ${input.claimId}::uuid
         returning id
       `);
       return inserted[0]

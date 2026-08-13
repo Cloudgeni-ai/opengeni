@@ -16,6 +16,26 @@ import { migrate } from "../src/migrate";
 
 const migrationName = "0240_sandbox_provider_loss_receipts.sql";
 
+async function expectSqlState(operation: PromiseLike<unknown>, code: string): Promise<void> {
+  let failure: unknown;
+  try {
+    await operation;
+  } catch (error) {
+    failure = error;
+  }
+  const seen = new Set<unknown>();
+  let current = failure;
+  while (typeof current === "object" && current !== null && !seen.has(current)) {
+    seen.add(current);
+    if ("code" in current && typeof current.code === "string") {
+      expect(current.code).toBe(code);
+      return;
+    }
+    current = "cause" in current ? current.cause : undefined;
+  }
+  expect(failure).toMatchObject({ code });
+}
+
 describe("0240 provider-loss receipt protocol", () => {
   test("installs the distinct claim/receipt state machine and hard fences", async () => {
     const shared = await acquireSharedTestDatabase("migration-0240-provider-loss-receipts");
@@ -116,18 +136,20 @@ describe("0240 provider-loss receipt protocol", () => {
       ).toContain("unknown");
 
       const triggers = await shared.admin<{ name: string; tableName: string }[]>`
-        select trigger_name as name, event_object_table as "tableName"
-        from information_schema.triggers
-        where trigger_name in (
-          'sandbox_provider_loss_claim_mutation_guard',
-          'sandbox_provider_loss_receipt_mutation_guard',
-          'sandbox_provider_loss_claim_admission_fence',
-          'sandbox_provider_loss_claim_holder_fence',
-          'sandbox_provider_loss_claim_retained_process_fence',
-          'sandbox_provider_loss_lease_mutation_fence',
-          'sandbox_provider_loss_lease_delete_fence'
-        )
-        order by trigger_name
+        select trigger.tgname as name, target.relname as "tableName"
+        from pg_trigger trigger
+        join pg_class target on target.oid = trigger.tgrelid
+        where not trigger.tgisinternal
+          and trigger.tgname in (
+            'sandbox_provider_loss_claim_mutation_guard',
+            'sandbox_provider_loss_receipt_mutation_guard',
+            'sandbox_provider_loss_claim_admission_fence',
+            'sandbox_provider_loss_claim_holder_fence',
+            'sandbox_provider_loss_claim_retained_process_fence',
+            'sandbox_provider_loss_lease_mutation_fence',
+            'sandbox_provider_loss_lease_delete_fence'
+          )
+        order by trigger.tgname
       `;
       expect(Array.from(triggers)).toEqual([
         {
@@ -136,14 +158,14 @@ describe("0240 provider-loss receipt protocol", () => {
         },
         { name: "sandbox_provider_loss_claim_holder_fence", tableName: "sandbox_lease_holders" },
         {
+          name: "sandbox_provider_loss_claim_mutation_guard",
+          tableName: "sandbox_provider_loss_teardown_claims",
+        },
+        {
           name: "sandbox_provider_loss_claim_retained_process_fence",
           tableName: "sandbox_retained_processes",
         },
         { name: "sandbox_provider_loss_lease_delete_fence", tableName: "sandbox_leases" },
-        {
-          name: "sandbox_provider_loss_claim_mutation_guard",
-          tableName: "sandbox_provider_loss_teardown_claims",
-        },
         { name: "sandbox_provider_loss_lease_mutation_fence", tableName: "sandbox_leases" },
         {
           name: "sandbox_provider_loss_receipt_mutation_guard",
@@ -151,29 +173,73 @@ describe("0240 provider-loss receipt protocol", () => {
         },
       ]);
 
-      const functions = await shared.admin<Array<{ source: string }>>`
-        select pg_get_functiondef(p.oid) as source
+      const functions = await shared.admin<
+        Array<{
+          name: string;
+          source: string;
+          appExecute: boolean;
+          dispatcherExecute: boolean;
+          publicExecute: boolean;
+        }>
+      >`
+        select p.proname as name,
+               pg_get_functiondef(p.oid) as source,
+               has_function_privilege('opengeni_app', p.oid, 'EXECUTE') as "appExecute",
+               exists (
+                 select 1
+                 from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
+                 join pg_roles role on role.oid = acl.grantee
+                 where role.rolname = 'opengeni_artifact_outbox_dispatcher'
+                   and acl.privilege_type = 'EXECUTE'
+               ) as "dispatcherExecute",
+               exists (
+                 select 1
+                 from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
+                 where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
+               ) as "publicExecute"
         from pg_proc p
         join pg_namespace n on n.oid = p.pronamespace
         where n.nspname = 'opengeni_private'
           and p.proname in (
             'guard_provider_loss_claim_mutation',
             'guard_provider_loss_receipt_mutation',
+            'guard_provider_loss_claim_fence',
             'guard_provider_loss_lease_mutation'
           )
+        order by p.proname
       `;
-      expect(functions).toHaveLength(3);
+      expect(functions.map((fn) => fn.name)).toEqual([
+        "guard_provider_loss_claim_fence",
+        "guard_provider_loss_claim_mutation",
+        "guard_provider_loss_lease_mutation",
+        "guard_provider_loss_receipt_mutation",
+      ]);
       for (const fn of functions) {
+        expect(fn.appExecute).toBe(false);
+        expect(fn.dispatcherExecute).toBe(false);
+        expect(fn.publicExecute).toBe(false);
         expect(fn.source).not.toContain("NEW.* IS DISTINCT FROM OLD");
-        expect(fn.source).toContain("consumed_at");
       }
       const leaseMutationFunction = functions.find((fn) =>
         fn.source.includes("guard_provider_loss_lease_mutation"),
       );
       expect(leaseMutationFunction?.source).toContain("TG_OP = 'DELETE'");
       expect(leaseMutationFunction?.source).toContain("RETURN OLD");
-      expect(leaseMutationFunction?.source).toContain("OLD.lease_id");
+      expect(leaseMutationFunction?.source).toContain("claim.lease_id = OLD.id");
       expect(leaseMutationFunction?.source).toContain("sandbox_provider_loss_claim_id");
+      const mutationFunctions = functions.filter((fn) => fn.name.endsWith("_mutation"));
+      expect(mutationFunctions).toHaveLength(3);
+      for (const fn of mutationFunctions) {
+        expect(fn.source).toContain("consumed_at");
+      }
+      const [leaseMutationTrigger] = await shared.admin<Array<{ definition: string }>>`
+        select pg_get_triggerdef(oid) as definition
+        from pg_trigger
+        where tgname = 'sandbox_provider_loss_lease_mutation_fence'
+          and not tgisinternal
+      `;
+      expect(leaseMutationTrigger?.definition).toContain("BEFORE UPDATE ON");
+      expect(leaseMutationTrigger?.definition).not.toContain("UPDATE OF");
       const securityFunctions = await shared.admin<
         {
           name: string;
@@ -253,11 +319,11 @@ describe("0240 provider-loss receipt protocol", () => {
         insert into session_turns
           (account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
            status, source, position, prompt, resources, tools, model, reasoning_effort,
-           sandbox_backend, metadata, lineage)
+           sandbox_backend, execution_generation, metadata, lineage)
         values
           (${account!.id}, ${workspace!.id}, ${session.id}, ${turnEvent[0]!.id},
            ${`session-${session.id}`}, 'completed', 'user', 0, 'provider-loss e2e',
-           '[]'::jsonb, '[]'::jsonb, 'test-model', 'medium', 'modal', '{}'::jsonb, '{}'::jsonb)
+           '[]'::jsonb, '[]'::jsonb, 'test-model', 'medium', 'modal', 1, '{}'::jsonb, '{}'::jsonb)
         returning id, execution_generation`;
       const attemptId = randomUUID();
       await shared.admin`
@@ -334,11 +400,12 @@ describe("0240 provider-loss receipt protocol", () => {
            ${pendingInterruption!.id}, ${attemptId}, 'steer', 2)`;
       expect((await claimProviderLossTeardown(app.db, claimInput)).status).toBe("not_eligible");
       await shared.admin`
-        delete from session_attempt_interruptions where id = ${pendingAttemptInterruptionId}::uuid;
+        delete from session_attempt_interruptions where id = ${pendingAttemptInterruptionId}::uuid`;
+      await shared.admin`
         delete from session_command_receipts where id = ${pendingCommandId}::uuid`;
 
       await shared.admin`
-        update session_turn_attempts set state = 'running', closed_at = null
+        update session_turn_attempts set state = 'running', outcome = null, closed_at = null
         where id = ${attemptId}::uuid`;
       expect((await claimProviderLossTeardown(app.db, claimInput)).status).toBe("not_eligible");
       await shared.admin`
@@ -435,23 +502,170 @@ describe("0240 provider-loss receipt protocol", () => {
 
       await shared.admin`
         update sandbox_leases set updated_at = now() where id = ${leaseId}::uuid`;
+      await shared.admin`
+        update sandbox_leases set
+          archive_capture_id = archive_capture_id,
+          archive_capture_operation_id = archive_capture_operation_id,
+          archive_capture_provider_request_id = archive_capture_provider_request_id,
+          archive_capture_provider_replay_safe = archive_capture_provider_replay_safe,
+          archive_capture_takeover_safe = archive_capture_takeover_safe,
+          archive_capture_attempt = archive_capture_attempt,
+          archive_capture_generation = archive_capture_generation,
+          archive_capture_started_at = archive_capture_started_at,
+          archive_capture_deadline_at = archive_capture_deadline_at,
+          archive_capture_published_at = archive_capture_published_at,
+          reaper_hold_id = reaper_hold_id,
+          reaper_hold_until = reaper_hold_until,
+          reaper_hold_reason = reaper_hold_reason,
+          rotation_requested_at = rotation_requested_at,
+          rotation_reason = rotation_reason
+        where id = ${leaseId}::uuid`;
 
-      await expect(shared.admin`
+      await expectSqlState(
+        shared.admin`
         update sandbox_leases
         set lease_epoch = 8
         where id = ${leaseId}::uuid
-      `).rejects.toMatchObject({ code: "55000" });
-      await expect(shared.admin`
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
+        update sandbox_leases
+        set archive_capture_id = ${randomUUID()}::uuid
+        where id = ${leaseId}::uuid
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
+        update sandbox_leases
+        set archive_capture_operation_id = ${randomUUID()}::uuid
+        where id = ${leaseId}::uuid
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
+        update sandbox_leases
+        set archive_capture_provider_request_id = ${randomUUID()}::uuid
+        where id = ${leaseId}::uuid
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
+        update sandbox_leases
+        set archive_capture_provider_replay_safe = true
+        where id = ${leaseId}::uuid
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
+        update sandbox_leases
+        set archive_capture_takeover_safe = true
+        where id = ${leaseId}::uuid
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
+        update sandbox_leases
+        set archive_capture_attempt = 1
+        where id = ${leaseId}::uuid
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
+        update sandbox_leases
+        set archive_capture_generation = workspace_generation
+        where id = ${leaseId}::uuid
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
+        update sandbox_leases
+        set archive_capture_started_at = now()
+        where id = ${leaseId}::uuid
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
+        update sandbox_leases
+        set archive_capture_deadline_at = now() + interval '1 minute'
+        where id = ${leaseId}::uuid
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
+        update sandbox_leases
+        set archive_capture_published_at = now()
+        where id = ${leaseId}::uuid
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
+        update sandbox_leases
+        set reaper_hold_id = ${randomUUID()}::uuid
+        where id = ${leaseId}::uuid
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
+        update sandbox_leases
+        set reaper_hold_until = now() + interval '1 minute'
+        where id = ${leaseId}::uuid
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
+        update sandbox_leases
+        set reaper_hold_reason = 'provider-loss-forbidden-hold'
+        where id = ${leaseId}::uuid
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
+        update sandbox_leases
+        set rotation_requested_at = now()
+        where id = ${leaseId}::uuid
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
+        update sandbox_leases
+        set rotation_reason = 'operator'
+        where id = ${leaseId}::uuid
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
         delete from sandbox_leases where id = ${leaseId}::uuid
-      `).rejects.toMatchObject({ code: "55000" });
-      await expect(shared.admin`
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
         insert into sandbox_lease_holders
           (account_id, workspace_id, lease_id, kind, holder_id, subject_id)
         values
           (${account!.id}, ${workspace!.id}, ${leaseId}, 'viewer', 'provider-loss-fenced-holder', ${session.id})
-      `).rejects.toMatchObject({ code: "55000" });
+      `,
+        "55000",
+      );
 
-      await expect(
+      await expectSqlState(
         withRlsContext(app.db, { accountId: account!.id, workspaceId: workspace!.id }, async (db) =>
           db.execute(sql`
             insert into sandbox_lease_holders
@@ -461,8 +675,10 @@ describe("0240 provider-loss receipt protocol", () => {
                'provider-loss-app-role-fenced-holder', ${session.id}::uuid)
           `),
         ),
-      ).rejects.toMatchObject({ code: "55000" });
-      await expect(shared.admin`
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
         insert into sandbox_workspace_mutation_admissions
           (id, account_id, workspace_id, lease_id, sandbox_group_id, session_id,
            actor_kind, actor_id, holder_kind, holder_id, lease_epoch, provider_backend,
@@ -472,8 +688,11 @@ describe("0240 provider-loss receipt protocol", () => {
           (${randomUUID()}, ${account!.id}, ${workspace!.id}, ${leaseId}, ${session.sandboxGroupId},
            ${session.id}, 'direct', ${randomUUID()}, 'direct', 'provider-loss-fenced-admission',
            7, 'modal', ${providerInstanceId}, 'home', null, 0, 2, 'provider-loss-fenced')
-      `).rejects.toMatchObject({ code: "55000" });
-      await expect(shared.admin`
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
         insert into sandbox_retained_processes
           (id, account_id, workspace_id, session_id, lease_id, sandbox_group_id,
            parent_admission_id, holder_id, owner_actor_kind, owner_actor_id,
@@ -483,7 +702,9 @@ describe("0240 provider-loss receipt protocol", () => {
           (${randomUUID()}, ${account!.id}, ${workspace!.id}, ${session.id}, ${leaseId},
            ${session.sandboxGroupId}, ${admissionId}, 'provider-loss-fenced-process', 'direct',
            ${randomUUID()}, 7, 'modal', ${providerInstanceId}, 'home', null, 0, 1)
-      `).rejects.toMatchObject({ code: "55000" });
+      `,
+        "55000",
+      );
 
       const consumeInput = {
         accountId: account!.id,
@@ -576,6 +797,21 @@ describe("0240 provider-loss receipt protocol", () => {
       expect(state?.claim_consumed_at).toBeTruthy();
       expect(state?.receipt_consumed_at).toBeTruthy();
       expect(state).toMatchObject({ liveness: "cold", lease_epoch: 8 });
+
+      await shared.admin`
+        update sandbox_leases set
+          rotation_requested_at = now(),
+          rotation_reason = 'operator'
+        where id = ${leaseId}::uuid`;
+      const [releasedLease] = await shared.admin<
+        Array<{ rotationRequestedAt: Date | null; rotationReason: string | null }>
+      >`
+        select rotation_requested_at as "rotationRequestedAt",
+               rotation_reason as "rotationReason"
+        from sandbox_leases
+        where id = ${leaseId}::uuid`;
+      expect(releasedLease?.rotationRequestedAt).toBeInstanceOf(Date);
+      expect(releasedLease?.rotationReason).toBe("operator");
     } finally {
       await app.close();
       await shared.release();

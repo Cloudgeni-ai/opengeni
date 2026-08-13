@@ -367,6 +367,18 @@ BEGIN
     OR NEW.lease_epoch IS DISTINCT FROM OLD.lease_epoch
     OR NEW.refcount IS DISTINCT FROM OLD.refcount
     OR NEW.archive_capture_id IS DISTINCT FROM OLD.archive_capture_id
+    OR NEW.archive_capture_operation_id IS DISTINCT FROM OLD.archive_capture_operation_id
+    OR NEW.archive_capture_provider_request_id IS DISTINCT FROM OLD.archive_capture_provider_request_id
+    OR NEW.archive_capture_provider_replay_safe IS DISTINCT FROM OLD.archive_capture_provider_replay_safe
+    OR NEW.archive_capture_takeover_safe IS DISTINCT FROM OLD.archive_capture_takeover_safe
+    OR NEW.archive_capture_attempt IS DISTINCT FROM OLD.archive_capture_attempt
+    OR NEW.archive_capture_generation IS DISTINCT FROM OLD.archive_capture_generation
+    OR NEW.archive_capture_started_at IS DISTINCT FROM OLD.archive_capture_started_at
+    OR NEW.archive_capture_deadline_at IS DISTINCT FROM OLD.archive_capture_deadline_at
+    OR NEW.archive_capture_published_at IS DISTINCT FROM OLD.archive_capture_published_at
+    OR NEW.reaper_hold_id IS DISTINCT FROM OLD.reaper_hold_id
+    OR NEW.reaper_hold_until IS DISTINCT FROM OLD.reaper_hold_until
+    OR NEW.reaper_hold_reason IS DISTINCT FROM OLD.reaper_hold_reason
     OR NEW.rotation_requested_at IS DISTINCT FROM OLD.rotation_requested_at
     OR NEW.rotation_reason IS DISTINCT FROM OLD.rotation_reason
   ) AND NOT (
@@ -374,6 +386,21 @@ BEGIN
     AND NEW.instance_id IS NULL
     AND NEW.refcount = 0
     AND NEW.lease_epoch = OLD.lease_epoch + 1
+    AND NEW.archive_capture_id IS NULL
+    AND NEW.archive_capture_operation_id IS NULL
+    AND NEW.archive_capture_provider_request_id IS NULL
+    AND NEW.archive_capture_provider_replay_safe = false
+    AND NEW.archive_capture_takeover_safe = false
+    AND NEW.archive_capture_attempt IS NULL
+    AND NEW.archive_capture_generation IS NULL
+    AND NEW.archive_capture_started_at IS NULL
+    AND NEW.archive_capture_deadline_at IS NULL
+    AND NEW.archive_capture_published_at IS NULL
+    AND NEW.reaper_hold_id IS NULL
+    AND NEW.reaper_hold_until IS NULL
+    AND NEW.reaper_hold_reason IS NULL
+    AND NEW.rotation_requested_at IS NULL
+    AND NEW.rotation_reason IS NULL
     AND atomic_claim_id IS NOT NULL
     AND atomic_claim_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
     AND EXISTS (
@@ -402,13 +429,25 @@ BEGIN
     'ALTER FUNCTION opengeni_private.guard_provider_loss_lease_mutation() SECURITY DEFINER SET search_path = pg_catalog, %I',
     data_schema
   );
+  REVOKE EXECUTE ON FUNCTION opengeni_private.guard_provider_loss_claim_mutation() FROM PUBLIC;
+  REVOKE EXECUTE ON FUNCTION opengeni_private.guard_provider_loss_receipt_mutation() FROM PUBLIC;
   REVOKE EXECUTE ON FUNCTION opengeni_private.guard_provider_loss_claim_fence() FROM PUBLIC;
   REVOKE EXECUTE ON FUNCTION opengeni_private.guard_provider_loss_lease_mutation() FROM PUBLIC;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
+    REVOKE EXECUTE ON FUNCTION opengeni_private.guard_provider_loss_claim_mutation()
+      FROM opengeni_app;
+    REVOKE EXECUTE ON FUNCTION opengeni_private.guard_provider_loss_receipt_mutation()
+      FROM opengeni_app;
+    REVOKE EXECUTE ON FUNCTION opengeni_private.guard_provider_loss_claim_fence()
+      FROM opengeni_app;
+    REVOKE EXECUTE ON FUNCTION opengeni_private.guard_provider_loss_lease_mutation()
+      FROM opengeni_app;
+  END IF;
 END
 $security$;
 
 CREATE TRIGGER sandbox_provider_loss_lease_mutation_fence
-BEFORE UPDATE OF liveness, instance_id, lease_epoch, refcount ON sandbox_leases
+BEFORE UPDATE ON sandbox_leases
 FOR EACH ROW EXECUTE FUNCTION opengeni_private.guard_provider_loss_lease_mutation();
 
 CREATE TRIGGER sandbox_provider_loss_lease_delete_fence
