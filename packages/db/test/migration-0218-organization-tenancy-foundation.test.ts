@@ -1,5 +1,4 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,12 +19,6 @@ const migrationPath = join(
   dirname(fileURLToPath(import.meta.url)),
   "../drizzle/0218_organization_tenancy_foundation.sql",
 );
-const currentLedgerHasSessionVisibilityForkActivation = existsSync(
-  join(
-    dirname(fileURLToPath(import.meta.url)),
-    "../drizzle/0225_session_visibility_fork_activation.sql",
-  ),
-);
 const schemaPath = join(dirname(fileURLToPath(import.meta.url)), "../src/schema.ts");
 const tenancyTables = [
   "organization_memberships",
@@ -38,8 +31,10 @@ const tenancyTables = [
 // reflects migration 0219's managed-human lifecycle activation instead.
 const historicalTenancySystemOnlyPolicy = "organization_tenancy_system_only";
 const currentLedgerTenancyLifecyclePolicy = "organization_tenancy_lifecycle";
-const currentLedgerTenancyLifecycleExpression =
+const managedHumanTenancyLifecycleExpression =
   "(current_setting('opengeni.organization_tenancy_lifecycle'::text, true) = 'managed_human_provisioning'::text)";
+const sessionVisibilityTenancyLifecycleExpression =
+  "(current_setting('opengeni.organization_tenancy_lifecycle'::text, true) = ANY (ARRAY['managed_human_provisioning'::text, 'session_visibility_activation'::text]))";
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
@@ -86,6 +81,19 @@ async function expectSqlState(action: () => Promise<unknown>, state: string): Pr
     failure = error;
   }
   expect(nestedPostgresSqlState(failure)).toBe(state);
+}
+
+async function expectSqlStateOneOf(
+  action: () => Promise<unknown>,
+  states: readonly string[],
+): Promise<void> {
+  let failure: unknown;
+  try {
+    await action();
+  } catch (error) {
+    failure = error;
+  }
+  expect(states).toContain(nestedPostgresSqlState(failure) ?? "");
 }
 
 describe("migration 0218 organization tenancy foundation", () => {
@@ -296,14 +304,18 @@ describe("migration 0218 organization tenancy foundation", () => {
       authorityEpoch: 1,
       forkedFromSessionId: null,
     });
-    await expectSqlState(
+    // Historical migration-only fixtures reject these direct mutations through
+    // the 0218 constraint (23514), while full-ledger fixtures reject them first
+    // through the activated session visibility policy (42501). Both paths must
+    // remain fail-closed.
+    await expectSqlStateOneOf(
       async () =>
         await shared!.admin`
           update sessions set visibility = 'user_private' where id = ${session.id}
         `,
-      currentLedgerHasSessionVisibilityForkActivation ? "42501" : "23514",
+      ["23514", "42501"],
     );
-    await expectSqlState(
+    await expectSqlStateOneOf(
       async () =>
         await shared!.admin`
           update sessions
@@ -314,7 +326,7 @@ describe("migration 0218 organization tenancy foundation", () => {
             forked_by_organization_membership_id = ${membership!.id}
           where id = ${session.id}
         `,
-      currentLedgerHasSessionVisibilityForkActivation ? "42501" : "23514",
+      ["23514", "42501"],
     );
 
     await expectSqlState(
@@ -502,20 +514,27 @@ describe("migration 0218 organization tenancy foundation", () => {
     // narrowly scoped owner-only policies; their own migration tests own those
     // contracts, while the direct app privilege checks below remain deny-all.
     expect([...policyRows]).toEqual(
-      [...tenancyTables].sort().map((tableName) => ({
-        tableName,
-        rlsEnabled: true,
-        rlsForced: true,
-        policyCount: 1,
-        policyNames: [currentLedgerTenancyLifecyclePolicy],
-        policyCommands: ["*"],
-        usingExpressions: [currentLedgerTenancyLifecycleExpression],
-        checkExpressions: [currentLedgerTenancyLifecycleExpression],
-        appSelect: false,
-        appInsert: false,
-        appUpdate: false,
-        appDelete: false,
-      })),
+      [...tenancyTables].sort().map((tableName) => {
+        const lifecycleExpression =
+          tableName === "organization_memberships" ||
+          tableName === "organization_user_resource_grants"
+            ? sessionVisibilityTenancyLifecycleExpression
+            : managedHumanTenancyLifecycleExpression;
+        return {
+          tableName,
+          rlsEnabled: true,
+          rlsForced: true,
+          policyCount: 1,
+          policyNames: [currentLedgerTenancyLifecyclePolicy],
+          policyCommands: ["*"],
+          usingExpressions: [lifecycleExpression],
+          checkExpressions: [lifecycleExpression],
+          appSelect: false,
+          appInsert: false,
+          appUpdate: false,
+          appDelete: false,
+        };
+      }),
     );
 
     const app = postgres(shared.appUrl, { max: 1 });
