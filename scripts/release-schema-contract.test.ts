@@ -114,13 +114,13 @@ describe("release schema contract", () => {
     const completeMigrations = new Map(
       completeSourceContract.migrations.map((migration) => [migration.path, migration]),
     );
-    expect(completeMigrations.get("0238_sandbox_provider_loss_receipts.sql")).toMatchObject({
+    expect(completeMigrations.get("0240_sandbox_provider_loss_receipts.sql")).toMatchObject({
       sha256: "6b9c438798a7ff93d84a45fb5bdb8e6a657a320bb9f345a274770aa1fc418c51",
       deploymentMode: "rolling",
     });
     const appendedMigrationPaths = [
       "0237_interaction_transition_reaper.sql",
-      "0238_sandbox_provider_loss_receipts.sql",
+      "0240_sandbox_provider_loss_receipts.sql",
       "0238_supergrok_realtime_model.sql",
       "0239_supergrok_video_funding.sql",
     ].filter((path) =>

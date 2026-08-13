@@ -14,14 +14,14 @@ import {
 } from "../src";
 import { migrate } from "../src/migrate";
 
-const migrationName = "0238_sandbox_provider_loss_receipts.sql";
+const migrationName = "0240_sandbox_provider_loss_receipts.sql";
 
-describe("0238 provider-loss receipt protocol", () => {
+describe("0240 provider-loss receipt protocol", () => {
   test("installs the distinct claim/receipt state machine and hard fences", async () => {
-    const shared = await acquireSharedTestDatabase("migration-0238-provider-loss-receipts");
+    const shared = await acquireSharedTestDatabase("migration-0240-provider-loss-receipts");
     if (!shared) {
       if (process.env.OPENGENI_REQUIRE_REAL_DB === "1") {
-        throw new Error("[migration-0238] PostgreSQL is required but unavailable");
+        throw new Error("[migration-0240] PostgreSQL is required but unavailable");
       }
       return;
     }
@@ -201,10 +201,10 @@ describe("0238 provider-loss receipt protocol", () => {
   }, 180_000);
 
   test("claims and consumes a NULL-quiesced superseded renewal exactly once", async () => {
-    const shared = await acquireSharedTestDatabase("migration-0238-provider-loss-receipts-e2e");
+    const shared = await acquireSharedTestDatabase("migration-0240-provider-loss-receipts-e2e");
     if (!shared) {
       if (process.env.OPENGENI_REQUIRE_REAL_DB === "1") {
-        throw new Error("[migration-0238-e2e] PostgreSQL is required but unavailable");
+        throw new Error("[migration-0240-e2e] PostgreSQL is required but unavailable");
       }
       return;
     }
@@ -212,9 +212,9 @@ describe("0238 provider-loss receipt protocol", () => {
     try {
       await migrate(shared.adminUrl);
       const [account] = await shared.admin<{ id: string }[]>`
-        insert into managed_accounts (name) values ('migration-0238-e2e-account') returning id`;
+        insert into managed_accounts (name) values ('migration-0240-e2e-account') returning id`;
       const [workspace] = await shared.admin<{ id: string }[]>`
-        insert into workspaces (account_id, name) values (${account!.id}, 'migration-0238-e2e-workspace') returning id`;
+        insert into workspaces (account_id, name) values (${account!.id}, 'migration-0240-e2e-workspace') returning id`;
       await shared.admin`
         insert into workspace_inference_controls (workspace_id, account_id)
         values (${workspace!.id}, ${account!.id})`;
