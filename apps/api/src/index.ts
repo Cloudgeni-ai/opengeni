@@ -310,6 +310,18 @@ export async function startApi() {
   // (anonymous connect — the bus default).
   const controlPlaneAuth = resolveNatsControlPlaneAuth(settings);
   try {
+    // Browser, Computer, Terminal, and Files can cold-create the home sandbox
+    // directly from this API process. Resolve the same private-registry Modal
+    // image before the API becomes reachable so the first human interaction
+    // does not pay the provider import/build latency. This mirrors the turn
+    // worker's startup boundary and is a no-op for provider-native image IDs,
+    // public images, and non-Modal backends.
+    const { ensureModalRegistryImage } = await import("@opengeni/runtime/sandbox");
+    await retryStartupDependency(
+      "Modal private-registry image",
+      () => ensureModalRegistryImage(settings),
+      { ...retryOptions, onRetry },
+    );
     await retryStartupDependency(
       "PostgreSQL runtime posture",
       () => assertRuntimeDatabasePosture(dbClient.db, databasePosture),
