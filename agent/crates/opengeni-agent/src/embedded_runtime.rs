@@ -62,9 +62,8 @@ fn create_private_directory(path: &Path) -> PlatformResult<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).map_err(
-            |error| PlatformError::from_io("secure embedded runtime directory", &error),
-        )?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| PlatformError::from_io("secure embedded runtime directory", &error))?;
     }
     Ok(())
 }
@@ -120,8 +119,7 @@ mod tests {
         let directory = browserd.parent().expect("runtime directory");
         assert_eq!(std::fs::read(&browserd).expect("browserd"), BROWSERD);
         assert_eq!(
-            std::fs::read(directory.join(companion_name("agent-browser")))
-                .expect("agent-browser"),
+            std::fs::read(directory.join(companion_name("agent-browser"))).expect("agent-browser"),
             AGENT_BROWSER
         );
         assert_eq!(

@@ -17,8 +17,8 @@ import {
 } from "@opengeni/interaction";
 import {
   LatestComputerFrameSubscription,
+  computerFrameStreamProfileKey,
   normalizeComputerFrameStreamOptions,
-  sameComputerFrameOptions,
   type ComputerFrameStreamOptions,
   type ComputerFrameSubscription,
   type ComputerImageFrame,
@@ -34,14 +34,25 @@ import {
   type ComputerNativeTransport,
 } from "./computer-native-client";
 
+const MAX_FRAME_PROFILES_PER_TARGET = 8;
 const MAX_FRAME_SUBSCRIBERS_PER_TARGET = 32;
 const FRAME_INTERVAL_MS = 100;
 
-type TargetFrameStream = {
+type TargetFrameProfile = {
+  key: string;
   options: NormalizedComputerFrameStreamOptions;
   subscriptions: Map<string, LatestComputerFrameSubscription>;
   sequence: number;
   stopped: boolean;
+  done: Promise<void> | null;
+};
+
+type TargetFrameGroup = {
+  profiles: Map<string, TargetFrameProfile>;
+  sourceClient: ComputerNativeTransport | null;
+  sourceKey: string | null;
+  sourceTransition: Promise<void>;
+  stopping: boolean;
   done: Promise<void> | null;
 };
 
@@ -64,7 +75,7 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
   private readonly clientFactory: (() => Promise<ComputerNativeTransport>) | undefined;
   private recovery: Promise<ComputerNativeTransport> | null = null;
   private readonly now: () => Date;
-  private readonly frameStreams = new Map<string, TargetFrameStream>();
+  private readonly frameStreams = new Map<string, TargetFrameGroup>();
   private closed = false;
 
   constructor(options: NativeComputerDriverOptions) {
@@ -162,30 +173,53 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
   ): Promise<ComputerFrameSubscription> {
     this.assertOpen();
     const normalized = normalizeComputerFrameStreamOptions(options);
-    let stream = this.frameStreams.get(targetId);
-    if (stream?.stopped) {
-      await stream.done;
-      stream = this.frameStreams.get(targetId);
+    let group = this.frameStreams.get(targetId);
+    while (group?.stopping) {
+      await group.done;
+      group = this.frameStreams.get(targetId);
+    }
+    if (!group) {
+      group = {
+        profiles: new Map(),
+        sourceClient: null,
+        sourceKey: null,
+        sourceTransition: Promise.resolve(),
+        stopping: false,
+        done: null,
+      };
+      this.frameStreams.set(targetId, group);
+    }
+    const key = computerFrameStreamProfileKey(normalized);
+    let profile = group.profiles.get(key);
+    if (profile?.stopped) {
+      await profile.done;
+      profile = group.profiles.get(key);
     }
     let created = false;
-    if (stream && !sameComputerFrameOptions(stream.options, normalized)) {
-      throw new InteractionControllerError(
-        "operation_conflict",
-        "computer target already has a differently configured frame stream",
-      );
-    }
-    if (!stream) {
-      stream = {
+    if (!profile) {
+      if (group.profiles.size >= MAX_FRAME_PROFILES_PER_TARGET) {
+        throw new InteractionControllerError(
+          "resource_unavailable",
+          "computer target frame-profile bound was reached",
+          true,
+        );
+      }
+      profile = {
+        key,
         options: normalized,
         subscriptions: new Map(),
         sequence: 0,
         stopped: false,
         done: null,
       };
-      this.frameStreams.set(targetId, stream);
+      group.profiles.set(key, profile);
       created = true;
     }
-    if (stream.subscriptions.size >= MAX_FRAME_SUBSCRIBERS_PER_TARGET) {
+    const subscriptionCount = [...group.profiles.values()].reduce(
+      (sum, candidate) => sum + candidate.subscriptions.size,
+      0,
+    );
+    if (subscriptionCount >= MAX_FRAME_SUBSCRIBERS_PER_TARGET) {
       throw new InteractionControllerError(
         "resource_unavailable",
         "computer target frame-subscriber bound was reached",
@@ -194,22 +228,22 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
     }
     const subscriptionId = randomUUID();
     const subscription = new LatestComputerFrameSubscription(async () => {
-      this.releaseFrameSubscription(targetId, subscriptionId);
+      this.releaseFrameSubscription(targetId, key, subscriptionId);
     });
-    stream.subscriptions.set(subscriptionId, subscription);
-    if (created) stream.done = this.runFrameStream(targetId, stream);
+    profile.subscriptions.set(subscriptionId, subscription);
+    if (created) profile.done = this.runFrameStream(targetId, group, profile);
     return subscription;
   }
 
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    const streams = [...this.frameStreams.values()];
-    const subscriptions = streams.flatMap((stream) => {
-      stream.stopped = true;
-      return [...stream.subscriptions.values()];
+    const groups = [...this.frameStreams.entries()];
+    const profiles = groups.flatMap(([, group]) => [...group.profiles.values()]);
+    const subscriptions = profiles.flatMap((profile) => {
+      profile.stopped = true;
+      return [...profile.subscriptions.values()];
     });
-    this.frameStreams.clear();
     await Promise.allSettled(subscriptions.map(async (subscription) => await subscription.close()));
     // Let each producer observe `stopped` and send its explicit StopCapture
     // request before closing the native RPC pipe. Otherwise the helper retains
@@ -217,10 +251,17 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
     // its kill timeout and making an ordinary ComputerSession end exceed the
     // placement gateway deadline.
     await Promise.allSettled(
-      streams.map(async (stream) => {
-        if (stream.done) await stream.done;
+      profiles.map(async (profile) => {
+        if (profile.done) await profile.done;
       }),
     );
+    await Promise.allSettled(
+      groups.map(async ([targetId, group]) => {
+        if (!group.stopping) this.beginStopFrameGroup(targetId, group);
+        if (group.done) await group.done;
+      }),
+    );
+    this.frameStreams.clear();
     await this.recovery?.catch(() => undefined);
     await this.client.close();
   }
@@ -250,76 +291,133 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
     });
   }
 
-  private async runFrameStream(targetId: string, stream: TargetFrameStream): Promise<void> {
+  private async runFrameStream(
+    targetId: string,
+    group: TargetFrameGroup,
+    profile: TargetFrameProfile,
+  ): Promise<void> {
     const captureOptions: NativeComputerCaptureOptions = {
-      format: stream.options.format,
-      quality: stream.options.quality,
-      maxWidth: stream.options.maxWidth,
-      maxHeight: stream.options.maxHeight,
+      format: profile.options.format,
+      quality: profile.options.quality,
+      maxWidth: profile.options.maxWidth,
+      maxHeight: profile.options.maxHeight,
     };
     let recoveryAttempted = false;
     try {
-      while (!this.closed && !stream.stopped && stream.subscriptions.size > 0) {
-        const client = await this.activeClient();
-        let started = false;
+      while (!this.closed && !profile.stopped && profile.subscriptions.size > 0) {
+        let client = await this.activeClient();
         try {
-          await client.startCapture(targetId, captureOptions);
-          started = true;
-          while (!this.closed && !stream.stopped && stream.subscriptions.size > 0) {
+          client = await this.ensureFrameSource(targetId, group);
+          while (!this.closed && !profile.stopped && profile.subscriptions.size > 0) {
             const native = await client.capture(targetId, captureOptions);
-            stream.sequence += 1;
+            profile.sequence += 1;
             if (
-              native.width > stream.options.maxWidth ||
-              native.height > stream.options.maxHeight
+              native.width > profile.options.maxWidth ||
+              native.height > profile.options.maxHeight
             ) {
               throw new InteractionControllerError(
                 "driver_failed",
                 "native frame did not honor the requested stream dimensions",
               );
             }
-            const sequenced = this.projectFrame(native, stream.sequence);
-            for (const subscription of stream.subscriptions.values()) subscription.push(sequenced);
-            await delay(FRAME_INTERVAL_MS * stream.options.everyNthFrame);
+            const sequenced = this.projectFrame(native, profile.sequence);
+            for (const subscription of profile.subscriptions.values()) subscription.push(sequenced);
+            await delay(FRAME_INTERVAL_MS * profile.options.everyNthFrame);
           }
           return;
         } catch (error) {
           if (
             !recoveryAttempted &&
             !this.closed &&
-            !stream.stopped &&
-            stream.subscriptions.size > 0 &&
+            !profile.stopped &&
+            profile.subscriptions.size > 0 &&
             recoverableNativeFailure(error)
           ) {
             recoveryAttempted = true;
             await this.recoverClient(client);
+            group.sourceClient = null;
+            group.sourceKey = null;
             continue;
           }
           throw error;
-        } finally {
-          if (started) {
-            try {
-              await client.stopCapture(targetId);
-            } catch {
-              // Closing/replacing the helper is an equivalent teardown fence.
-            }
-          }
         }
       }
     } catch (error) {
-      stream.stopped = true;
+      profile.stopped = true;
       const failure = error instanceof Error ? error : new Error(String(error));
-      for (const subscription of stream.subscriptions.values()) subscription.fail(failure);
+      for (const subscription of profile.subscriptions.values()) subscription.fail(failure);
     } finally {
-      stream.stopped = true;
-      if (this.frameStreams.get(targetId) === stream) this.frameStreams.delete(targetId);
+      profile.stopped = true;
+      if (group.profiles.get(profile.key) === profile) group.profiles.delete(profile.key);
+      if (group.profiles.size === 0 && this.frameStreams.get(targetId) === group) {
+        this.beginStopFrameGroup(targetId, group);
+      }
     }
   }
 
-  private releaseFrameSubscription(targetId: string, subscriptionId: string): void {
-    const stream = this.frameStreams.get(targetId);
-    if (!stream) return;
-    stream.subscriptions.delete(subscriptionId);
-    if (stream.subscriptions.size === 0) stream.stopped = true;
+  private releaseFrameSubscription(
+    targetId: string,
+    profileKey: string,
+    subscriptionId: string,
+  ): void {
+    const profile = this.frameStreams.get(targetId)?.profiles.get(profileKey);
+    if (!profile) return;
+    profile.subscriptions.delete(subscriptionId);
+    if (profile.subscriptions.size === 0) profile.stopped = true;
+  }
+
+  private async ensureFrameSource(
+    targetId: string,
+    group: TargetFrameGroup,
+  ): Promise<ComputerNativeTransport> {
+    const transition = group.sourceTransition.catch(() => undefined).then(async () => {
+      this.assertOpen();
+      if (group.stopping) throw new Error("computer frame source is stopping");
+      const activeProfiles = [...group.profiles.values()].filter(
+        (profile) => !profile.stopped && profile.subscriptions.size > 0,
+      );
+      if (activeProfiles.length === 0) throw new Error("computer frame source has no viewers");
+      const client = await this.activeClient();
+      const sourceOptions: NativeComputerCaptureOptions = {
+        format: "png",
+        quality: 100,
+        maxWidth: Math.max(...activeProfiles.map((profile) => profile.options.maxWidth)),
+        maxHeight: Math.max(...activeProfiles.map((profile) => profile.options.maxHeight)),
+      };
+      const sourceKey = [
+        sourceOptions.format,
+        sourceOptions.quality,
+        sourceOptions.maxWidth,
+        sourceOptions.maxHeight,
+      ].join(":");
+      if (group.sourceClient === client && group.sourceKey === sourceKey) return;
+      await client.startCapture(targetId, sourceOptions);
+      group.sourceClient = client;
+      group.sourceKey = sourceKey;
+    });
+    group.sourceTransition = transition;
+    await transition;
+    if (!group.sourceClient) throw new Error("computer frame source did not start");
+    return group.sourceClient;
+  }
+
+  private beginStopFrameGroup(targetId: string, group: TargetFrameGroup): void {
+    if (group.stopping) return;
+    group.stopping = true;
+    group.done = group.sourceTransition
+      .catch(() => undefined)
+      .then(async () => {
+        if (group.sourceClient) {
+          try {
+            await group.sourceClient.stopCapture(targetId);
+          } catch {
+            // Closing/replacing the helper is an equivalent teardown fence.
+          }
+        }
+      })
+      .finally(() => {
+        if (this.frameStreams.get(targetId) === group) this.frameStreams.delete(targetId);
+      });
   }
 
   private projectFrame(frame: NativeComputerFrame, sequence: number): ComputerImageFrame {
