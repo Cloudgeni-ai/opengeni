@@ -116,6 +116,19 @@ describe("0117 durable sandbox recovery generations (real PostgreSQL)", () => {
         "sandbox_workspace_mutation_admissions_lease_scope_fk",
       ]);
 
+      const admissionAuthorityColumns = await admin<Array<{ name: string; nullable: string }>>`
+          select column_name as name, is_nullable as nullable
+          from information_schema.columns
+          where table_schema = current_schema()
+            and table_name = 'sandbox_workspace_mutation_admissions'
+            and column_name in ('turn_id', 'attempt_id', 'execution_generation')
+          order by column_name`;
+      expect([...admissionAuthorityColumns]).toEqual([
+        { name: "attempt_id", nullable: "YES" },
+        { name: "execution_generation", nullable: "YES" },
+        { name: "turn_id", nullable: "YES" },
+      ]);
+
       const [rls] = await admin<Array<{ admissionsForced: boolean; processesForced: boolean }>>`
           select
             (select relforcerowsecurity from pg_class

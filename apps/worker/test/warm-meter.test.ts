@@ -262,6 +262,10 @@ describe("P2.1 reaper-tick warm metering + force-drain (real lease + RLS, spied 
     const spy = makeTerminateSpy();
     const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(settings), {
       terminateBox: spy.fn,
+      // This fixture uses a durable Modal-shaped lease without a live provider.
+      // Declare that synthetic provider ready so the provider-loss probe does
+      // not short-circuit the normal terminateBox seam under test.
+      probeDrainableProvider: async () => "ready",
     });
 
     const ws = await freshWorkspace();

@@ -4865,9 +4865,9 @@ export const sessionAttemptCodemodeCalls = pgTable(
     accountId: uuid("account_id").notNull(),
     workspaceId: uuid("workspace_id").notNull(),
     sessionId: uuid("session_id").notNull(),
-    turnId: uuid("turn_id"),
-    attemptId: uuid("attempt_id"),
-    executionGeneration: integer("execution_generation"),
+    turnId: uuid("turn_id").notNull(),
+    attemptId: uuid("attempt_id").notNull(),
+    executionGeneration: integer("execution_generation").notNull(),
     catalogDigest: text("catalog_digest").notNull(),
     requestDigest: text("request_digest").notNull(),
     serverId: text("server_id").notNull(),
@@ -6669,9 +6669,9 @@ export const sandboxWorkspaceMutationAdmissions = pgTable(
     actorId: uuid("actor_id").notNull(),
     // Exact turn authority is present only for actor_kind='turn'. Direct HTTP
     // requests and retained processes never invent a turn or quiescence owner.
-    turnId: uuid("turn_id").notNull(),
-    attemptId: uuid("attempt_id").notNull(),
-    executionGeneration: integer("execution_generation").notNull(),
+    turnId: uuid("turn_id"),
+    attemptId: uuid("attempt_id"),
+    executionGeneration: integer("execution_generation"),
     holderKind: text("holder_kind", {
       enum: sandboxWorkspaceMutationHolderKindValues,
     }).notNull(),
