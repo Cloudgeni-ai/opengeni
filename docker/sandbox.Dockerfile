@@ -26,8 +26,9 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src/agent
-COPY agent .
 ARG TARGETPLATFORM
+RUN xx-apt-get install -y --no-install-recommends xx-c-essentials
+COPY agent .
 RUN set -eux; \
     rust_target="$(xx-cargo --print-target-triple)"; \
     xx-cargo build --locked --release --target-dir /src/agent/target -p opengeni-computer-native; \

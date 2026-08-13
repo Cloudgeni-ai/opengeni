@@ -19,7 +19,12 @@ function keepsComputerNativeBuildOnTheNativeRunner(source: string): boolean {
     "FROM --platform=$BUILDPLATFORM tonistiigi/xx:1.9.0@sha256:c64defb9ed5a91eacb37f96ccc3d4cd72521c4bd18d5442905b95e2226b0e707 AS xx";
   const stage = computerNativeStage(source);
   const target = stage.indexOf("ARG TARGETPLATFORM");
-  const triple = stage.indexOf('rust_target="$(xx-cargo --print-target-triple)"', target);
+  const targetLibraries = stage.indexOf(
+    "RUN xx-apt-get install -y --no-install-recommends xx-c-essentials",
+    target,
+  );
+  const sourceCopy = stage.indexOf("COPY agent .", targetLibraries);
+  const triple = stage.indexOf('rust_target="$(xx-cargo --print-target-triple)"', sourceCopy);
   const build = stage.indexOf(
     "xx-cargo build --locked --release --target-dir /src/agent/target -p opengeni-computer-native",
     triple,
@@ -35,7 +40,9 @@ function keepsComputerNativeBuildOnTheNativeRunner(source: string): boolean {
     stage.includes("COPY --from=xx / /") &&
     stage.includes("apt-get install -y --no-install-recommends clang lld") &&
     target >= 0 &&
-    triple > target &&
+    targetLibraries > target &&
+    sourceCopy > targetLibraries &&
+    triple > sourceCopy &&
     build > triple &&
     install > build &&
     verify > install &&
@@ -59,9 +66,14 @@ describe("sandbox native computer image build contract", () => {
       "    file /out/opengeni-computer-native",
     );
     const unlockedBuild = source.replace("xx-cargo build --locked", "xx-cargo build");
+    const missingTargetLibraries = source.replace(
+      "RUN xx-apt-get install -y --no-install-recommends xx-c-essentials\n",
+      "",
+    );
 
     expect(keepsComputerNativeBuildOnTheNativeRunner(emulatedStage)).toBe(false);
     expect(keepsComputerNativeBuildOnTheNativeRunner(unverifiedOutput)).toBe(false);
     expect(keepsComputerNativeBuildOnTheNativeRunner(unlockedBuild)).toBe(false);
+    expect(keepsComputerNativeBuildOnTheNativeRunner(missingTargetLibraries)).toBe(false);
   });
 });
