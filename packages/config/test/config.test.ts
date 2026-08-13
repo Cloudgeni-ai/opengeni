@@ -915,7 +915,7 @@ describe("sandbox preparation profiles", () => {
     expect(local.ogtoolPackageSpec).toBeUndefined();
     expect(stableSandboxEnvironmentForRun(local, {}, { workspaceId: "ws-1" })).toMatchObject({
       OPENGENI_CODEMODE_TOKEN_FILE: "/workspace/.opengeni/codemode-token",
-      OPENGENI_CODEMODE_URL: "http://127.0.0.1:8000/v1/workspaces/ws-1/codemode",
+      OPENGENI_CODEMODE_URL: "http://host.docker.internal:8000/v1/workspaces/ws-1/codemode",
     });
 
     const configured = withEnv(
@@ -930,7 +930,7 @@ describe("sandbox preparation profiles", () => {
     expect(configured.codemodeMaxCallsPerTurn).toBe(17);
     expect(stableSandboxEnvironmentForRun(configured, {}, { workspaceId: "ws-1" })).toMatchObject({
       OPENGENI_CODEMODE_TOKEN_FILE: "/workspace/.opengeni/codemode-token",
-      OPENGENI_CODEMODE_URL: "http://127.0.0.1:8000/v1/workspaces/ws-1/codemode",
+      OPENGENI_CODEMODE_URL: "http://host.docker.internal:8000/v1/workspaces/ws-1/codemode",
       OPENGENI_OGTOOL_PACKAGE_SPEC: "@opengeni/ogtool@0.1.0",
     });
 

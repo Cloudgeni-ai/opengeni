@@ -4644,11 +4644,30 @@ export function firstPartyMcpWorkspaceUrl(settings: Settings, workspaceId: strin
 }
 
 export function codemodeWorkspaceUrl(settings: Settings, workspaceId: string): string {
-  const url = new URL(firstPartyMcpWorkspaceUrl(settings, workspaceId));
-  if (!url.pathname.endsWith("/mcp")) {
-    throw new Error("First-party MCP URL cannot be projected to the Codemode endpoint");
+  if (settings.opengeniMcpUrl) {
+    const url = new URL(firstPartyMcpWorkspaceUrl(settings, workspaceId));
+    if (!url.pathname.endsWith("/mcp")) {
+      throw new Error("First-party MCP URL cannot be projected to the Codemode endpoint");
+    }
+    url.pathname = `${url.pathname.slice(0, -4)}/codemode`;
+    return url.toString();
   }
-  url.pathname = `${url.pathname.slice(0, -4)}/codemode`;
+
+  // Codemode executes inside the selected placement, not beside the worker.
+  // Local Docker reaches the host through Docker's canonical host alias; an
+  // in-process local sandbox uses loopback; remote managed providers use the
+  // deployment's public origin. `OPENGENI_MCP_URL` above remains the explicit
+  // escape hatch for mounted deployments and local remote-provider tunnels.
+  const executionOrigin =
+    settings.sandboxBackend === "docker"
+      ? `http://host.docker.internal:${settings.apiPort}`
+      : settings.sandboxBackend === "local"
+        ? `http://127.0.0.1:${settings.apiPort}`
+        : (settings.publicBaseUrl ?? `http://127.0.0.1:${settings.apiPort}`);
+  const url = new URL(executionOrigin);
+  url.pathname = `${url.pathname.replace(/\/+$/u, "")}/v1/workspaces/${workspaceId}/codemode`;
+  url.search = "";
+  url.hash = "";
   return url.toString();
 }
 
