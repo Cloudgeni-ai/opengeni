@@ -581,6 +581,84 @@ async function main(): Promise<void> {
     observation = browserClipboardReceipt.observation;
     checks.push("browser.clipboard-roundtrip-visible");
 
+    const dialogMarker = `DIALOG_${crypto.randomUUID().slice(0, 8)}`;
+    const dialogOpenReceipt = await browser.act({
+      operationId: crypto.randomUUID(),
+      targetId: observation.target.id,
+      expectedTargetGeneration: observation.target.targetGeneration,
+      expectedDocumentGeneration: observation.target.documentGeneration,
+      expectedFrameId: observation.frameId,
+      action: {
+        type: "click",
+        locator: { kind: "css", selector: "#acceptance-dialog" },
+      },
+    });
+    if (dialogOpenReceipt.state !== "completed" || !dialogOpenReceipt.observation) {
+      throw new Error(`browser dialog open settled as ${dialogOpenReceipt.state}`);
+    }
+    if (
+      dialogOpenReceipt.observation.dialog?.type !== "prompt" ||
+      dialogOpenReceipt.observation.dialog.message !== "Acceptance value?"
+    ) {
+      throw new Error(
+        `browser prompt was not exposed causally: ${JSON.stringify(dialogOpenReceipt.observation.dialog)}`,
+      );
+    }
+    const dialogTargetId = dialogOpenReceipt.observation.target.id;
+    observation = dialogOpenReceipt.observation;
+    const dialogHandleReceipt = await browser.act({
+      operationId: crypto.randomUUID(),
+      targetId: observation.target.id,
+      expectedTargetGeneration: observation.target.targetGeneration,
+      expectedDocumentGeneration: observation.target.documentGeneration,
+      expectedFrameId: observation.frameId,
+      action: { type: "handle_dialog", response: "accept", promptText: dialogMarker },
+    });
+    if (dialogHandleReceipt.state !== "completed" || !dialogHandleReceipt.observation) {
+      throw new Error(
+        `browser dialog handling settled as ${dialogHandleReceipt.state}: ${JSON.stringify(dialogHandleReceipt.error)}`,
+      );
+    }
+    if (
+      dialogHandleReceipt.observation.target.id !== dialogTargetId ||
+      dialogHandleReceipt.observation.dialog !== null ||
+      !semanticContainsValue(dialogHandleReceipt.observation.semantic, dialogMarker)
+    ) {
+      throw new Error(
+        `browser dialog handling replaced or failed to settle the target: ${JSON.stringify({
+          before: dialogTargetId,
+          after: dialogHandleReceipt.observation.target.id,
+          dialog: dialogHandleReceipt.observation.dialog,
+        })}`,
+      );
+    }
+    observation = dialogHandleReceipt.observation;
+    checks.push("browser.dialog-causal-stable-target");
+
+    const staleTargetReceipt = await browser.act({
+      operationId: crypto.randomUUID(),
+      targetId: observation.target.id,
+      expectedTargetGeneration: `${observation.target.targetGeneration}-stale`,
+      expectedDocumentGeneration: observation.target.documentGeneration,
+      expectedFrameId: observation.frameId,
+      action: {
+        type: "fill",
+        locator: { kind: "css", selector: "#acceptance-input" },
+        value: "MUST_NOT_DISPATCH",
+      },
+    });
+    if (staleTargetReceipt.state !== "failed" || staleTargetReceipt.error?.code !== "target_stale") {
+      throw new Error(
+        `stale browser target fence settled unexpectedly: ${JSON.stringify(staleTargetReceipt)}`,
+      );
+    }
+    const postStaleObservation = await browser.observe(observation.target.id);
+    if (semanticContainsValue(postStaleObservation.semantic, "MUST_NOT_DISPATCH")) {
+      throw new Error("stale browser action changed page state");
+    }
+    observation = postStaleObservation;
+    checks.push("browser.stale-target-definite-no-dispatch");
+
     started = performance.now();
     browserProbe.close();
     browserProbe = await FrameProbe.browser(
@@ -1099,10 +1177,7 @@ async function main(): Promise<void> {
       const failure = budgetFailure(metric, samples, budgets);
       return failure ? [failure] : [];
     });
-    if (budgetFailures.length > 0) {
-      throw new Error(`latency budgets exceeded: ${budgetFailures.join("; ")}`);
-    }
-    checks.push("latency.budgets");
+    if (budgetFailures.length === 0) checks.push("latency.budgets");
 
     const receipt: Receipt = {
       schemaVersion: "opengeni/interaction-live-acceptance/v1",
@@ -1124,6 +1199,11 @@ async function main(): Promise<void> {
     await writeFile(args.output, `${JSON.stringify(receipt, null, 2)}\n`, {
       mode: 0o600,
     });
+    if (budgetFailures.length > 0) {
+      throw new Error(
+        `latency budgets exceeded: ${budgetFailures.join("; ")} (receipt: ${args.output})`,
+      );
+    }
     process.stdout.write(`${JSON.stringify({ status: "passed", output: args.output, receipt })}\n`);
   } finally {
     browserProbe?.close();
@@ -1299,7 +1379,7 @@ function budgetFailure(
 }
 
 function fixtureUrl(): string {
-  const html = `<!doctype html><meta charset="utf-8"><title>OpenGeni Interaction Acceptance</title><style>body{font:24px system-ui;background:#10151d;color:#fff;padding:48px}input{font:24px;padding:16px;width:720px}#state{margin-top:24px}</style><h1>Interaction acceptance</h1><input id="acceptance-input" aria-label="Acceptance input" autofocus><div id="state">ready</div><script>const input=document.querySelector("#acceptance-input");const state=document.querySelector("#state");input.addEventListener("input",()=>{state.textContent=input.value;let hash=0;for(const char of input.value)hash=(Math.imul(hash,31)+char.charCodeAt(0))>>>0;document.body.style.background="hsl("+(hash%360)+" 58% 24%)"});</script>`;
+  const html = `<!doctype html><meta charset="utf-8"><title>OpenGeni Interaction Acceptance</title><style>body{font:24px system-ui;background:#10151d;color:#fff;padding:48px}input{font:24px;padding:16px;width:720px}button{font:18px system-ui;margin-top:20px;padding:12px 18px}#state,#dialog-state{margin-top:24px}</style><h1>Interaction acceptance</h1><input id="acceptance-input" aria-label="Acceptance input" autofocus><div id="state">ready</div><button id="acceptance-dialog">Open acceptance prompt</button><div id="dialog-state">dialog ready</div><script>const input=document.querySelector("#acceptance-input");const state=document.querySelector("#state");const dialogState=document.querySelector("#dialog-state");input.addEventListener("input",()=>{state.textContent=input.value;let hash=0;for(const char of input.value)hash=(Math.imul(hash,31)+char.charCodeAt(0))>>>0;document.body.style.background="hsl("+(hash%360)+" 58% 24%)"});document.querySelector("#acceptance-dialog").addEventListener("click",()=>{const value=window.prompt("Acceptance value?","ready");dialogState.textContent=value===null?"dialog dismissed":value});</script>`;
   return `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
 }
 

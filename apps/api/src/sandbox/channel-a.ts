@@ -76,7 +76,12 @@ import {
   type EstablishedSandboxSession,
   type RoutingSandboxSession,
 } from "@opengeni/runtime/sandbox";
-import { relayConfigFromSettings, wrapChannelABoxWithRouting } from "@opengeni/core";
+import {
+  providerSettingsForSessionSandboxRuntime,
+  relayConfigFromSettings,
+  resolveSessionSandboxRuntime,
+  wrapChannelABoxWithRouting,
+} from "@opengeni/core";
 import { establishApiSandboxSpawner } from "./rematerialize";
 
 export type ChannelAServices = {
@@ -677,6 +682,12 @@ async function withChannelAOperation<T>(
     }
   }
 
+  // One session has one logical runtime across turns and every API-direct
+  // surface. Without this, Terminal/Files/Browser/Computer/viewers could rearm
+  // a stale deployment image after the worker had resolved a newer Pack/Rig or
+  // deployment image for the same durable sandbox group.
+  const sandboxRuntime = await resolveSessionSandboxRuntime(db, settings, session);
+
   const release = async (): Promise<void> => {
     await releaseLeaseHolder(db, {
       accountId,
@@ -705,6 +716,8 @@ async function withChannelAOperation<T>(
       subjectId: session.id,
       backend: session.sandboxBackend,
       os: session.sandboxOs,
+      image: sandboxRuntime.image,
+      rigVersionId: session.rigVersionId,
       leaseTtlMs,
       warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
       captureWaitMs: sandboxLifecycleTransitionWaitMs(settings),
@@ -759,7 +772,7 @@ async function withChannelAOperation<T>(
   ): Promise<{ established: EstablishedSandboxSession; cacheKey: string }> => {
     const cacheKey = establishedHandleCacheKey(workspaceId, session.id, live);
     const establish = () =>
-      establishSandboxSessionFromEnvelope(settings, live.resumeState, {
+      establishSandboxSessionFromEnvelope(sandboxRuntime.settings, live.resumeState, {
         sessionId: session.id,
         recovery: "resume-only",
         backendOverride: session.sandboxBackend,
@@ -814,9 +827,13 @@ async function withChannelAOperation<T>(
       // resume_state is the lease's authoritative box descriptor; the session
       // `_sandbox` envelope is only the per-session fallback.
       try {
+        const providerSettings = await providerSettingsForSessionSandboxRuntime(
+          sandboxRuntime,
+          session.sandboxBackend,
+        );
         const result = await establishApiSandboxSpawner({
           db,
-          settings,
+          settings: providerSettings,
           accountId,
           workspaceId,
           sandboxGroupId,

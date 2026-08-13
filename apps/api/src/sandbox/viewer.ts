@@ -76,7 +76,11 @@ import {
   type EstablishedSandboxSession,
   type NatsRequestConnection,
 } from "@opengeni/runtime/sandbox";
-import { relayConfigFromSettings } from "@opengeni/core";
+import {
+  providerSettingsForSessionSandboxRuntime,
+  relayConfigFromSettings,
+  resolveSessionSandboxRuntime,
+} from "@opengeni/core";
 import { establishApiSandboxSpawner } from "./rematerialize";
 import { establishCachedChannelAHandle } from "./channel-a";
 
@@ -197,6 +201,7 @@ export async function attachViewer(
   const viewerId = input.viewerId ?? crypto.randomUUID();
   const leaseTtlMs = settings.sandboxLeaseTtlMs;
   const sandboxGroupId = session.sandboxGroupId;
+  const sandboxRuntime = await resolveSessionSandboxRuntime(db, settings, session);
 
   const release = async (): Promise<void> => {
     await releaseLeaseHolder(db, {
@@ -220,6 +225,8 @@ export async function attachViewer(
       subjectId: session.id,
       backend: session.sandboxBackend,
       os: session.sandboxOs,
+      image: sandboxRuntime.image,
+      rigVersionId: session.rigVersionId,
       leaseTtlMs,
       warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
       captureWaitMs: sandboxLifecycleTransitionWaitMs(settings),
@@ -272,6 +279,10 @@ export async function attachViewer(
       // the SDK's validateNoEnvironmentDelta (otherwise: "Live sandbox sessions
       // cannot change manifest environment variables").
       const environment = await sessionAttachEnvironment(services, workspaceId, session);
+      const providerSettings = await providerSettingsForSessionSandboxRuntime(
+        sandboxRuntime,
+        session.sandboxBackend,
+      );
       // Prefer the COLD lease's preserved resume_state when it carries a persisted
       // /workspace snapshot (confirmDrainCold keeps a minimal archive-only envelope
       // across draining->cold). establishSandboxSessionFromEnvelope cold-creates a
@@ -280,7 +291,7 @@ export async function attachViewer(
       // session envelope (a never-warmed cold start).
       const result = await establishApiSandboxSpawner({
         db,
-        settings,
+        settings: providerSettings,
         accountId,
         workspaceId,
         sandboxGroupId,
@@ -358,7 +369,7 @@ export async function attachViewer(
     let observed: EstablishedSandboxSession | undefined;
     try {
       const establish = services.establishSandboxSession ?? establishSandboxSessionFromEnvelope;
-      observed = await establish(settings, live.resumeState, {
+      observed = await establish(sandboxRuntime.settings, live.resumeState, {
         sessionId: session.id,
         recovery: "resume-only",
         backendOverride: session.sandboxBackend,

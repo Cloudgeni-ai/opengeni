@@ -142,6 +142,7 @@ import {
   recordWorkspaceUsage,
   requireLimit,
   relayConfigFromSettings,
+  resolveSessionSandboxRuntime,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
   type ApiRouteDeps,
@@ -3520,6 +3521,7 @@ async function ensureInteractionHolder(
   if (!placement.lease?.instanceId) {
     throw new BrowserSessionStateError("BrowserSession lease placement is unavailable");
   }
+  const sandboxRuntime = await resolveSessionSandboxRuntime(deps.db, deps.settings, sourceSession);
   const acquired = await acquireLease(deps.db, {
     accountId: grant.accountId,
     workspaceId: sourceSession.workspaceId,
@@ -3529,8 +3531,8 @@ async function ensureInteractionHolder(
     subjectId: sourceSession.id,
     backend: placement.lease.backend,
     os: placement.lease.os,
-    image: placement.lease.image,
-    rigVersionId: placement.lease.rigVersionId,
+    image: sandboxRuntime.image,
+    rigVersionId: sourceSession.rigVersionId,
     leaseTtlMs: deps.settings.sandboxLeaseTtlMs,
     expectedEpoch: placement.lease.leaseEpoch,
     waitSignal,

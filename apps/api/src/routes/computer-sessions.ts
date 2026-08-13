@@ -52,6 +52,7 @@ import {
   requireAccessGrant,
   requireSessionAuthorization,
   relayConfigFromSettings,
+  resolveSessionSandboxRuntime,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
   type ApiRouteDeps,
@@ -1141,6 +1142,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
     if (!placement.lease?.instanceId) {
       throw new ComputerSessionStateError("ComputerSession lease placement is unavailable");
     }
+    const sandboxRuntime = await resolveSessionSandboxRuntime(deps.db, deps.settings, sourceSession);
     const acquired = await acquireLease(deps.db, {
       accountId: grant.accountId,
       workspaceId: sourceSession.workspaceId,
@@ -1150,8 +1152,8 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
       subjectId: sourceSession.id,
       backend: placement.lease.backend,
       os: placement.lease.os,
-      image: placement.lease.image,
-      rigVersionId: placement.lease.rigVersionId,
+      image: sandboxRuntime.image,
+      rigVersionId: sourceSession.rigVersionId,
       leaseTtlMs: deps.settings.sandboxLeaseTtlMs,
       expectedEpoch: placement.lease.leaseEpoch,
       waitSignal,
