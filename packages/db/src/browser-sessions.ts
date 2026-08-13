@@ -1247,10 +1247,7 @@ export async function touchInteractionOperation(
           eq(schema.interactionOperations.operationId, input.operationId),
           eq(schema.interactionOperations.resourceId, input.resourceId),
           eq(schema.interactionOperations.state, "dispatched"),
-          eq(
-            schema.interactionOperations.controllerGeneration,
-            input.controllerGeneration,
-          ),
+          eq(schema.interactionOperations.controllerGeneration, input.controllerGeneration),
         ),
       )
       .returning({ operationId: schema.interactionOperations.operationId });

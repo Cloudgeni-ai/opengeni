@@ -1326,9 +1326,7 @@ describe("durable BrowserSession lifecycle", () => {
       where workspace_id = ${abandoned.workspaceId}
         and holder_id = ${abandonedHolder}`;
     expect(abandonedHolderCount?.count).toBe(0);
-    const [abandonedLease] = await shared!.admin<
-      { liveness: string; refcount: number }[]
-    >`
+    const [abandonedLease] = await shared!.admin<{ liveness: string; refcount: number }[]>`
       select liveness, refcount
       from sandbox_leases
       where workspace_id = ${abandoned.workspaceId}

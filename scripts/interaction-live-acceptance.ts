@@ -864,11 +864,7 @@ async function main(): Promise<void> {
       let keyboardVisibleAt: number | null = null;
       const [keyboardFrameResult, keyboardStateResult] = await Promise.allSettled([
         computerProbe
-          .nextChangedAfter(
-            computerFrame,
-            DEFAULT_TIMEOUT_MS,
-            "computer keyboard visible frame",
-          )
+          .nextChangedAfter(computerFrame, DEFAULT_TIMEOUT_MS, "computer keyboard visible frame")
           .then((frame) => {
             keyboardVisibleAt = performance.now();
             return frame;
@@ -886,10 +882,7 @@ async function main(): Promise<void> {
       }
       computerFrame = keyboardFrameResult.value;
       record("computerActionAcknowledged", computerAcknowledged - keyboardStarted);
-      record(
-        "computerActionVisible",
-        (keyboardVisibleAt ?? performance.now()) - keyboardStarted,
-      );
+      record("computerActionVisible", (keyboardVisibleAt ?? performance.now()) - keyboardStarted);
       if ("computerSessionId" in computerFrame && computerFrame.computerSessionId !== computer.id) {
         throw new Error("computer frame crossed sessions");
       }
