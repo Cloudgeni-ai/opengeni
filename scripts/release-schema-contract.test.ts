@@ -169,15 +169,44 @@ describe("release schema contract", () => {
     if (modelContextCutover) {
       expect(modelContextCutover).toMatchObject({ deploymentMode: "maintenance" });
     }
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0240_enrollment_connection_authority.sql",
+      ),
+    ).toMatchObject({
+      sha256: "5dd85b5f7bf5940a397cb67938b82e2b902a0529872a3d7158b7cfcfc04e885c",
+      deploymentMode: "rolling",
+    });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0241_enrollment_agent_runtime.sql",
+      ),
+    ).toMatchObject({
+      sha256: "a13ddf193d04fbc5beac33f33641358f2486eef88744e06f3bfeb02366761da7",
+      deploymentMode: "rolling",
+    });
     const migrations = new Map(
       sourceContract.migrations.map((migration) => [migration.path, migration]),
     );
     const sessionVisibilityContractHash = (includesActivation: boolean): string | null => {
       if (!migrations.has("0236_session_visibility_slack_policy.sql")) return null;
+      if (
+        migrations.has("0243_google_drive_object_acl_authority.sql") &&
+        migrations.has("0241_enrollment_agent_runtime.sql")
+      ) {
+        return includesActivation
+          ? "619dd36aeccd97091f053c691d1ae57dcf1bae3ec6f274d0789401a7e57529ea"
+          : "9afefe94fdadc2f1f85f3fafe6811242b922376c4c01eeb607f3414c0bcce9e4";
+      }
       if (migrations.has("0243_google_drive_object_acl_authority.sql")) {
         return includesActivation
           ? "8d30a981d2a744a263e660ab21eeaa0a1071e7afe71b771bbc81151a79330fa4"
           : "2a39ec3cb579dad4f4fc17040cac665b88b39f24871a2462b17286d3925a4378";
+      }
+      if (migrations.has("0241_enrollment_agent_runtime.sql")) {
+        return includesActivation
+          ? "903aaca7cdc6880795488542605f2e007ae184b36209c24fbe06b5b190f96067"
+          : "677d05fd674a19f95b329b6381a8a2d79884df8c71c22614e22622d55f4a193a";
       }
       if (migrations.has("0238_recover_unclaimed_session_turns.sql")) {
         return includesActivation
@@ -480,48 +509,35 @@ describe("release schema contract", () => {
         (migrations.has("0225_session_visibility_fork_activation.sql") ? 1 : 0) +
         (migrations.has("0236_session_visibility_slack_policy.sql") ? 1 : 0) +
         (migrations.has("0238_recover_unclaimed_session_turns.sql") ? 1 : 0) +
+        (migrations.has("0240_enrollment_connection_authority.sql") ? 1 : 0) +
+        (migrations.has("0241_enrollment_agent_runtime.sql") ? 1 : 0) +
         (migrations.has("0243_google_drive_object_acl_authority.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(sessionVisibilityContractHash(false) ?? currentMainContractHash);
-    expect(contract.latestMigration).toBe(
-      migrations.has("0243_google_drive_object_acl_authority.sql")
-        ? "0243_google_drive_object_acl_authority.sql"
-        : migrations.has("0238_recover_unclaimed_session_turns.sql")
-          ? "0238_recover_unclaimed_session_turns.sql"
-          : migrations.has("0236_session_visibility_slack_policy.sql")
-            ? "0236_session_visibility_slack_policy.sql"
-            : migrations.has("0235_canonical_human_login_bindings.sql")
-              ? "0235_canonical_human_login_bindings.sql"
-              : migrations.has("0234_xai_subscription_authority.sql")
-                ? "0234_xai_subscription_authority.sql"
-                : migrations.has("0233_skill_and_integration_authority_cutover.sql")
-                  ? "0233_skill_and_integration_authority_cutover.sql"
-                  : migrations.has("0232_integration_facet_authority_cutover.sql")
-                    ? "0232_integration_facet_authority_cutover.sql"
-                    : migrations.has("0231_integration_definition_identity_cutover.sql")
-                      ? "0231_integration_definition_identity_cutover.sql"
-                      : migrations.has("0230_user_scoped_variable_sets_rigs.sql")
-                        ? "0230_user_scoped_variable_sets_rigs.sql"
-                        : migrations.has("0228_slack_task_policy.sql")
-                          ? "0228_slack_task_policy.sql"
-                          : migrations.has("0229_slack_inbox_file_fact.sql")
-                            ? "0229_slack_inbox_file_fact.sql"
-                            : migrations.has("0227_slack_native_actions.sql")
-                              ? "0227_slack_native_actions.sql"
-                              : migrations.has("0224_slack_post_outcome_reconciliation.sql")
-                                ? "0224_slack_post_outcome_reconciliation.sql"
-                                : migrations.has("0223_sessions_channel_fk_validate.sql")
-                                  ? "0223_sessions_channel_fk_validate.sql"
-                                  : migrations.has("0221_sessions_channel_index.sql")
-                                    ? "0221_sessions_channel_index.sql"
-                                    : migrations.has("0220_memory_slack_append_only_cascade.sql")
-                                      ? "0220_memory_slack_append_only_cascade.sql"
-                                      : migrations.has("0219_site_auth_maintenance_sessions.sql")
-                                        ? "0219_site_auth_maintenance_sessions.sql"
-                                        : migrations.has("0218_organization_tenancy_foundation.sql")
-                                          ? "0218_organization_tenancy_foundation.sql"
-                                          : "0217_capability_definition_delete_authority.sql",
-    );
+    const latestCompatibleMigration = [
+      "0243_google_drive_object_acl_authority.sql",
+      "0241_enrollment_agent_runtime.sql",
+      "0240_enrollment_connection_authority.sql",
+      "0238_recover_unclaimed_session_turns.sql",
+      "0236_session_visibility_slack_policy.sql",
+      "0235_canonical_human_login_bindings.sql",
+      "0234_xai_subscription_authority.sql",
+      "0233_skill_and_integration_authority_cutover.sql",
+      "0232_integration_facet_authority_cutover.sql",
+      "0231_integration_definition_identity_cutover.sql",
+      "0230_user_scoped_variable_sets_rigs.sql",
+      "0228_slack_task_policy.sql",
+      "0229_slack_inbox_file_fact.sql",
+      "0227_slack_native_actions.sql",
+      "0224_slack_post_outcome_reconciliation.sql",
+      "0223_sessions_channel_fk_validate.sql",
+      "0221_sessions_channel_index.sql",
+      "0220_memory_slack_append_only_cascade.sql",
+      "0219_site_auth_maintenance_sessions.sql",
+      "0218_organization_tenancy_foundation.sql",
+      "0217_capability_definition_delete_authority.sql",
+    ].find((path) => migrations.has(path));
+    expect(contract.latestMigration).toBe(latestCompatibleMigration);
     expect(migrations.get("0214_session_activity_commit_gate.sql")).toMatchObject({
       sha256: "26c84bc34bc51d19f9532cf3f2c64a649f100a724cb73d968e17e7c4ecf8de36",
       deploymentMode: "maintenance",

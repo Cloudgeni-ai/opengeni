@@ -120,7 +120,8 @@ describe("local artifact runtime stack contract", () => {
     expect(netcatCapabilityCheck).toBeGreaterThan(-1);
     expect(netcatProbe).toBeGreaterThan(netcatCapabilityCheck);
     expect(netcatProbe).toBeGreaterThan(-1);
-    expect(lsofFallback).toBeGreaterThan(netcatProbe);
+    expect(source).toContain('! (echo >"/dev/tcp/127.0.0.1/$1")');
+    expect(lsofFallback).toBe(-1);
   });
 
   test("can advertise a remote-reachable development relay while binding it locally", async () => {
