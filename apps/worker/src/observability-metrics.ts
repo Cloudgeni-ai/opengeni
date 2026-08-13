@@ -947,7 +947,8 @@ export type TurnSandboxEstablishReason =
   | "machine_primary"
   | "backend_none"
   | "initial_run_credentials"
-  | "generated_video_files";
+  | "generated_video_files"
+  | "signed_file_resources";
 
 const TURN_STARTUP_PHASE_BUCKETS = [
   0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 120,

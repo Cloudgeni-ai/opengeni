@@ -111,9 +111,12 @@ describe("local artifact runtime stack contract", () => {
 
   test("probes local ports without walking unhealthy mounted filesystems", async () => {
     const source = await Bun.file(scriptPath).text();
+    const netcatCapabilityCheck = source.indexOf("nc_help=");
     const netcatProbe = source.indexOf("nc -z -w 1 127.0.0.1");
     const lsofFallback = source.indexOf("lsof -nP -iTCP");
 
+    expect(netcatCapabilityCheck).toBeGreaterThan(-1);
+    expect(netcatProbe).toBeGreaterThan(netcatCapabilityCheck);
     expect(netcatProbe).toBeGreaterThan(-1);
     expect(lsofFallback).toBeGreaterThan(netcatProbe);
   });
@@ -122,6 +125,9 @@ describe("local artifact runtime stack contract", () => {
     const source = await Bun.file(scriptPath).text();
 
     expect(source).toContain('if [ -n "${OPENGENI_RELAY_BIND:-}" ]; then');
+    expect(source).toContain('explicit_relay_port="$(relay_bind_available');
+    expect(source).toContain('port_claimed "$explicit_relay_port"');
+    expect(source).toContain("OPENGENI_RELAY_BIND must be host:port");
     expect(source).toContain("start_local_relay=1");
     expect(source).toContain("export OPENGENI_RELAY_BIND OPENGENI_RELAY_TOKEN_SECRET");
   });

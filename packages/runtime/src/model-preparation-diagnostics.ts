@@ -233,9 +233,8 @@ export function recordModelPreparationManifestInventory(
     ) {
       for (const _entry of manifest.iterEntries()) count += 1;
     }
-  } catch (error) {
+  } catch {
     outcome = "failed";
-    throw error;
   } finally {
     recordModelPreparationMeasurement({
       phase,

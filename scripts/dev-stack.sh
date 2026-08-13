@@ -221,11 +221,23 @@ if [ -f .env.runtime ] &&
   reuse_runtime_ports=1
 fi
 
+netcat_probe_supported=0
+if command -v nc >/dev/null 2>&1; then
+  # `nc` is not one implementation: some installed variants reject `-z` or
+  # `-w`. Prove both flags once from its own help before trusting an exit status;
+  # an option-parse failure must use the fallback probes below.
+  nc_help="$(nc -h 2>&1 || true)"
+  if printf '%s\n' "$nc_help" | grep -Eq '(^|[[:space:]])-z([[:space:],]|$)' &&
+    printf '%s\n' "$nc_help" | grep -Eq '(^|[[:space:]])-w([[:space:],]|$)'; then
+    netcat_probe_supported=1
+  fi
+fi
+
 port_available() {
   # `lsof` can block for tens of seconds on macOS when an unrelated filesystem
   # mount is unhealthy. A loopback connect probe answers the question this
   # startup path needs without walking process file tables or mounted volumes.
-  if command -v nc >/dev/null 2>&1; then
+  if [ "$netcat_probe_supported" = "1" ]; then
     ! nc -z -w 1 127.0.0.1 "$1" >/dev/null 2>&1
     return
   fi
@@ -242,6 +254,30 @@ port_available() {
     return
   fi
   ! (echo >"/dev/tcp/127.0.0.1/$1") >/dev/null 2>&1
+}
+
+# Validate and briefly claim the exact configured address, rather than assuming
+# a loopback port probe represents a Tailscale address or another local bind.
+relay_bind_available() {
+  OPENGENI_LOCAL_RELAY_BIND="$1" bun -e '
+    import { createServer } from "node:net";
+    const value = Bun.env.OPENGENI_LOCAL_RELAY_BIND?.trim() ?? "";
+    const bracketed = value.match(/^\[([^\]]+)]:(\d+)$/);
+    const plain = value.match(/^([^:]+):(\d+)$/);
+    const match = bracketed ?? plain;
+    if (!match) throw new Error("OPENGENI_RELAY_BIND must be host:port (IPv6 must use brackets)");
+    const port = Number(match[2]);
+    if (!Number.isSafeInteger(port) || port < 1 || port > 65535) {
+      throw new Error("OPENGENI_RELAY_BIND port must be between 1 and 65535");
+    }
+    const server = createServer();
+    await new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen({ host: match[1], port, exclusive: true }, resolve);
+    });
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    process.stdout.write(String(port));
+  '
 }
 
 # Ports already claimed by this run (avoids MinIO data/console sharing one bind).
@@ -349,7 +385,21 @@ if [ "${OPENGENI_SANDBOX_BACKEND:-docker}" = "modal" ]; then
   choose_port OPENGENI_SANDBOX_EDGE_PORT 10080
 fi
 if [ "${OPENGENI_SANDBOX_SELFHOSTED_ENABLED:-false}" = "true" ]; then
-  choose_port OPENGENI_RELAY_HOST_PORT 8280
+  if [ -n "${OPENGENI_RELAY_BIND:-}" ]; then
+    if ! explicit_relay_port="$(relay_bind_available "$OPENGENI_RELAY_BIND")"; then
+      echo "Configured OPENGENI_RELAY_BIND=${OPENGENI_RELAY_BIND} is invalid or unavailable." >&2
+      exit 1
+    fi
+    if port_claimed "$explicit_relay_port"; then
+      echo "Configured OPENGENI_RELAY_BIND=${OPENGENI_RELAY_BIND} conflicts with another local service." >&2
+      exit 1
+    fi
+    OPENGENI_RELAY_HOST_PORT="$explicit_relay_port"
+    export OPENGENI_RELAY_HOST_PORT
+    claim_port "$explicit_relay_port"
+  else
+    choose_port OPENGENI_RELAY_HOST_PORT 8280
+  fi
 fi
 
 pids=()

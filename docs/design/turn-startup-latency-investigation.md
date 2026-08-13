@@ -3,7 +3,7 @@
 Status: active experiment on `codex/investigate-turn-startup-latency`.
 
 Current-main audit: `origin/main` at
-`9f20a56d13cc7286097f35de0dc936c18c429ba8` (2026-08-13). None of the
+`478d7fe8feed740ae155fdc5cf7f253f2606bbb4` (2026-08-13). None of the
 startup-phase metrics, the local lazy-provision defaults, or the stale-Docker
 error repair in this experiment are present there. The sandbox Dockerfile still
 has both broad `COPY . .` build stages.
@@ -40,12 +40,12 @@ model time separately.
 | UI visibility | Confirmed | “Waiting for first step” hides queue reason and pre-model phase progress. | Surface queued/admitted/startup phase and elapsed time from durable low-cardinality milestones. |
 | Local port discovery | Confirmed and reproduced | macOS `lsof` blocked about 20 seconds per probe on an unhealthy OrbStack NFS mount. | Prefer bounded loopback `nc`; retain fallbacks. |
 | Host filesystem health | Confirmed symptom, broader cause unproven | The full repository gate later reported OrbStack NFS `resource temporarily unavailable` while the unchanged Channel-A real-local-box suite accumulated four 26–42 second filesystem/Git failures in a narrow rerun. The worktree itself is on APFS, so the exact cross-mount causal chain is not yet proven. | Keep this separate from turn latency. Add host/mount health to local diagnostics; do not weaken Channel-A confinement or inflate its timeouts to conceal an unhealthy machine. |
-| Remote local-development endpoints | Confirmed and reproduced | Default local enrollment advertises loopback endpoints and binds the relay to loopback, so a remote Connected Machine cannot reach it. | Allow an explicit local relay bind and advertise the Mac's Tailscale API/NATS/relay endpoints. |
+| Remote local-development endpoints | Confirmed and reproduced | Default local enrollment advertises loopback endpoints and binds the relay to loopback, so a remote Connected Machine cannot reach it. | Allow an explicit local relay bind, validate and briefly claim its exact address before startup, and advertise the Mac's Tailscale API/NATS/relay endpoints. |
 | Cold sandbox image build | Confirmed, separate | The first local stack boot builds a large sandbox image and tool runtimes. | Treat as environment setup, cache it, and exclude it from per-turn latency. |
 | Local image rebuild invalidation | Confirmed and reproduced | An ordinary worker/runtime edit invalidates two broad `COPY . .` stages. The latest restart spent about 63 seconds in Docker and about 94 seconds before the full stack was ready; dependency install, artifact-runtime preparation, and multi-gigabyte source copies reran. | Replace broad source dependencies with an exact image-input closure or a content-addressed local image admission receipt. Never skip a build on `HEAD` alone because dirty relevant source must invalidate it. |
 | Exact-head artifact runtime | Confirmed, separate | No successful hosted artifact existed for this main SHA, so local standalone Office artifact operations are disabled. | Record as environment parity; it is not evidence of a turn-start bottleneck. |
 | Provider timing semantics | Confirmed | The existing request `headers` duration begins before the durable `agent.model.request started` append, so it includes audit persistence and is not a pure provider-network measurement. | Keep the durable-before-fetch fence, but report request preparation, start audit, and post-audit provider wait separately. |
-| Lazy sandbox policy | Confirmed defect and fixed locally | Current main leaves lazy provisioning off by default. The first attempted dev fix also used the plausible but wrong `_ENABLED` suffix; config actually reads `OPENGENI_SANDBOX_LAZY_PROVISION`. The new bounded policy-reason metric exposed this immediately as `eager/lazy_disabled`. | Local dev now exports and persists the exact config key plus ownership. Keep the reason metric. Production enablement needs its own staged rollout because credentials and generated-video inputs intentionally remain eager. |
+| Lazy sandbox policy | Confirmed defect and fixed locally | Current main leaves lazy provisioning off by default. The first attempted dev fix also used the plausible but wrong `_ENABLED` suffix; config actually reads `OPENGENI_SANDBOX_LAZY_PROVISION`. The new bounded policy-reason metric exposed this immediately as `eager/lazy_disabled`. | Local dev now exports and persists the exact config key plus ownership. Keep the reason metric. Production enablement needs its own staged rollout because credentials, generated-video inputs, and signed file resources intentionally remain eager. |
 | Stale local Docker identity | Confirmed defect and fixed locally | A resumed session can retain a deleted container id. Docker emits `Error response from daemon: No such container`, but current main only recognizes `Error: No such container`, so the typed recovery path is skipped and the raw error reaches the user. | Accept only the exact container id with either known Docker prefix, then reuse the existing typed unavailable-instance recovery. |
 
 ## Measured local results
@@ -125,9 +125,9 @@ same-session workspace continuity.
 ### Verification state
 
 After rebasing onto the current `origin/main`, the focused changed-path suites
-reported 473 passes, 8 intentional skips, and 0 failures. Worker, runtime,
-Codex, and Codemode typechecks passed; the development-stack shell syntax and
-diff checks also passed.
+reported 716 passes and 0 failures. Worker, runtime, Codex, and Codemode
+typechecks passed; the development-stack shell syntax, formatting, and diff
+checks also passed.
 
 The pre-rebase full `bun prep` reached 9,152 passes and 5 failures across 1,006
 test files. The observed failures were confined to the unchanged Channel-A
@@ -141,7 +141,7 @@ branch without evidence. Hosted CI remains the clean-environment arbiter.
 | Keep / fix | Item | Why |
 | --- | --- | --- |
 | Fix | Recompile identical tool validators every turn | Pure repeated CPU; bounded content-addressed reuse preserves authority. |
-| Fix | Keep local lazy provisioning disabled accidentally | Pure pre-model waste for chat-only turns. Use the exact config key, retain eager exceptions for credentials/video, and expose the bounded reason. |
+| Fix | Keep local lazy provisioning disabled accidentally | Pure pre-model waste for chat-only turns. Use the exact config key, retain eager exceptions for credentials/video/signed files, and expose the bounded reason. |
 | Fix | Let a deleted Docker id escape as a raw inspect error | It prevents the existing typed recovery path; the matcher can remain exact and fail closed. |
 | Fix separately | Rebuild the full sandbox image after unrelated worker edits | It adds about a minute to every instrumentation restart and discourages rigorous testing. Use an exact content closure, not a stale image shortcut. |
 | Investigate then likely fix | Re-project and serialize the full tool surface for every request | Still 0.45–0.80 seconds warm and larger for cold/outlier runs. Any cache must remain attempt-safe. |
@@ -152,7 +152,7 @@ branch without evidence. Hosted CI remains the clean-environment arbiter.
 | Keep | Request wire normalization | Measured below 1 ms. |
 | Keep | Required MCP fail-closed behavior | Security/correctness invariant; optimize implementation, not semantics. |
 | Keep | Exact attempt catalog and durable start audit | Required fencing and forensic truth. Optimize their mechanics, never remove them. |
-| Keep | Eager provisioning for resolved run credentials and generated-video inputs | Those bytes must be materialized into one exact leased box before execution. The new reason metric makes this cost explicit. |
+| Keep | Eager provisioning for resolved run credentials, generated-video inputs, and signed file resources | Those bytes must be materialized into one exact leased box before the first model boundary so failures are represented in model input. The new reason metric makes this cost explicit. |
 | Keep | 5-minute NATS auth-callout JWT | It is a scoped transport credential, not the 30-day enrollment identity. Test reconnect behavior; do not lengthen it merely to hide churn. |
 | Separate | Provider/model response time | Variable and externally controlled; never charge it to local startup work. |
 
@@ -195,6 +195,10 @@ servers, long history, NATS expiry boundaries, and concurrent workers.
 
 - Same-session turns remain ordered.
 - Required MCP servers fail closed.
+- Startup diagnostics fail open: an observer or legacy manifest inventory failure
+  is recorded as failed but can never block provider dispatch.
+- Soft file-download failures keep their model-facing failure note and are also
+  reported as failed startup materialization, never as a successful phase.
 - The exact attempt tool catalog remains frozen and durable.
 - Events remain durable before live publication.
 - File writes remain hash-verified, atomic, and read-only.

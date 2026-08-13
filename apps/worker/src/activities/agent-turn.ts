@@ -733,6 +733,12 @@ export function filterUnmaterializedSandboxFileDownloads(
   return downloads.filter((download) => !materializedFileIds.has(download.fileId));
 }
 
+export function sandboxFileMaterializationOutcome(
+  failures: readonly SandboxFileDownloadFailure[],
+): "completed" | "failed" {
+  return failures.length === 0 ? "completed" : "failed";
+}
+
 /** Fixed-length one-way tenant correlation for metrics/alerts; never a raw id. */
 export function codexWorkspaceMetricKey(workspaceId: string): string {
   return createHash("sha256").update(workspaceId).digest("hex").slice(0, 12);
@@ -2008,6 +2014,7 @@ export function sandboxEstablishPolicyDecision(input: {
   sandboxBackend: Settings["sandboxBackend"];
   hasInitialRunCredentialMaterial: boolean;
   generatedVideoFileCount: number;
+  hasSignedFileResources: boolean;
 }): { policy: "eager" | "on-demand"; reason: TurnSandboxEstablishReason } {
   if (!input.lazyEnabled) return { policy: "eager", reason: "lazy_disabled" };
   if (input.machinePrimary) return { policy: "eager", reason: "machine_primary" };
@@ -2017,6 +2024,13 @@ export function sandboxEstablishPolicyDecision(input: {
   }
   if (input.generatedVideoFileCount > 0) {
     return { policy: "eager", reason: "generated_video_files" };
+  }
+  // Signed file downloads must finish before the first model boundary so any
+  // integrity/download failure is present in the prepared input. Deferring the
+  // box until the first tool call would make that first request advertise a
+  // path whose materialization outcome is not known yet.
+  if (input.hasSignedFileResources) {
+    return { policy: "eager", reason: "signed_file_resources" };
   }
   return { policy: "on-demand", reason: "eligible" };
 }
@@ -6226,6 +6240,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // provisioner entirely, which previously skipped materialization.
         hasInitialRunCredentialMaterial: initialRunCredentialMaterial !== null,
         generatedVideoFileCount: requiredGeneratedVideoFiles.length,
+        hasSignedFileResources:
+          requiresSignedFileResourceDownloads(
+            runSettings,
+            activeSandboxBackend ?? groupBoxBackend,
+          ) && turnResources.some((resource) => resource.kind === "file"),
       });
       const establishPolicy = establishDecision.policy;
       recordTurnSandboxEstablishPolicy(observability, {
@@ -7867,6 +7886,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                       image: runSettings.modalImageRef ?? runSettings.dockerImage,
                     }
                   : {}),
+                // The lazy acquire must enforce the same frozen rig authority
+                // as the eager acquire; otherwise a warm box for another rig
+                // can bypass the shared-state conflict/rotation fence.
+                ...(rigVersion ? { rigVersionId: rigVersion.id } : {}),
               },
               "turn",
               lazyHolderId,
@@ -8384,6 +8407,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 ),
             );
             fileMaterializationFailures = materialized.failures;
+            fileMaterializationOutcome = sandboxFileMaterializationOutcome(materialized.failures);
             const failedFileIds = new Set(materialized.failures.map((failure) => failure.fileId));
             const succeededFileIds = downloadsToMaterialize
               .map((download) => download.fileId)
@@ -8622,6 +8646,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // calling runStreamAttempt again; resetting this state there would reuse
       // the first no-response-ID fallback key and suppress a real model call.
       const modelResponseState = createModelResponseEventState(claimedModelUsageSourceKeys);
+      let preModelTotalRecorded = false;
       const runStreamAttempt = async (): Promise<RunAgentTurnResult> => {
         if (!runInput) {
           throw new Error("Run input was not prepared");
@@ -8722,12 +8747,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const providerDispatchStartedAt = performance.now();
           let providerDispatchOutcome: "completed" | "failed" = "completed";
           try {
-            recordTurnPreModelTotal(observability, {
-              provider: turnExecutionPolicy.providerId,
-              backend: activeSandboxBackend ?? groupBoxBackend,
-              outcome: "completed",
-              durationSeconds: (performance.now() - preModelStartedAt) / 1_000,
-            });
+            // This histogram describes turn startup through the first provider
+            // dispatch. Context-compaction recovery re-enters runStreamAttempt;
+            // recording again would fold the prior request and compaction into a
+            // bogus second "startup" sample.
+            if (!preModelTotalRecorded) {
+              preModelTotalRecorded = true;
+              recordTurnPreModelTotal(observability, {
+                provider: turnExecutionPolicy.providerId,
+                backend: activeSandboxBackend ?? groupBoxBackend,
+                outcome: "completed",
+                durationSeconds: (performance.now() - preModelStartedAt) / 1_000,
+              });
+            }
             modelRequestStarted = true;
             return await runtime.runStream(agent, runInput!, modelRunSettings, {
               signal: runtimeCancellationSignal,

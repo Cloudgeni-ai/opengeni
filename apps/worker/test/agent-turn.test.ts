@@ -91,6 +91,7 @@ import {
   resolveActiveSandboxBackend,
   runMandatoryHistoryPersistenceStep,
   sandboxEstablishPolicyDecision,
+  sandboxFileMaterializationOutcome,
   safeErrorDiagnostic,
   sandboxArtifactRuntimeAdmission,
   sandboxDeadlineRotationRecoveryDelayMs,
@@ -2552,6 +2553,20 @@ describe("on-turn recording gate (selfhosted machines have no in-box capture plu
 });
 
 describe("lazy sandbox provisioner single-flight", () => {
+  test("file materialization metrics fail when any download fails softly", () => {
+    expect(sandboxFileMaterializationOutcome([])).toBe("completed");
+    expect(
+      sandboxFileMaterializationOutcome([
+        {
+          fileId: "file-1",
+          filename: "input.pdf",
+          path: "/workspace/input.pdf",
+          reason: "provider returned unavailable",
+        },
+      ]),
+    ).toBe("failed");
+  });
+
   test("establish policy reports the first bounded eager reason", () => {
     const base = {
       lazyEnabled: true,
@@ -2559,6 +2574,7 @@ describe("lazy sandbox provisioner single-flight", () => {
       sandboxBackend: "docker" as const,
       hasInitialRunCredentialMaterial: false,
       generatedVideoFileCount: 0,
+      hasSignedFileResources: false,
     };
 
     expect(sandboxEstablishPolicyDecision(base)).toEqual({
@@ -2583,6 +2599,10 @@ describe("lazy sandbox provisioner single-flight", () => {
     expect(sandboxEstablishPolicyDecision({ ...base, generatedVideoFileCount: 1 })).toEqual({
       policy: "eager",
       reason: "generated_video_files",
+    });
+    expect(sandboxEstablishPolicyDecision({ ...base, hasSignedFileResources: true })).toEqual({
+      policy: "eager",
+      reason: "signed_file_resources",
     });
   });
 
