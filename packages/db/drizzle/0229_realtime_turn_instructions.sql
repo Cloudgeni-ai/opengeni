@@ -67,6 +67,8 @@ BEGIN
 END
 $function$;
 
+REVOKE ALL ON FUNCTION opengeni_private.enforce_turn_instructions_protocol_v1() FROM PUBLIC;
+
 CREATE TRIGGER sessions_turn_instructions_protocol_v1_guard
 BEFORE INSERT OR UPDATE OF initial_turn_instructions ON "sessions"
 FOR EACH ROW EXECUTE FUNCTION opengeni_private.enforce_turn_instructions_protocol_v1();

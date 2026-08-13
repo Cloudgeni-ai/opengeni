@@ -28,6 +28,9 @@ describe("migration 0229 realtime turn instructions", () => {
     expect(source).toContain("sessions_turn_instructions_protocol_v1_guard");
     expect(source).toContain("session_turns_turn_instructions_protocol_v1_guard");
     expect(source).toContain("session_realtime_entries_turn_instructions_protocol_v1_guard");
+    expect(source).toContain(
+      "REVOKE ALL ON FUNCTION opengeni_private.enforce_turn_instructions_protocol_v1() FROM PUBLIC",
+    );
 
     const blank = await acquireBlankTestDatabase("migration-0229-realtime-turn-instructions");
     if (!blank) return;
@@ -70,6 +73,26 @@ describe("migration 0229 realtime turn instructions", () => {
         "session_turns_turn_instructions_protocol_v1_guard",
         "sessions_turn_instructions_protocol_v1_guard",
       ]);
+
+      const [guardRoutine] = await sql<Array<{ appExecute: boolean; publicExecute: boolean }>>`
+        select
+          has_function_privilege(
+            'opengeni_app',
+            'opengeni_private.enforce_turn_instructions_protocol_v1()'::regprocedure,
+            'EXECUTE'
+          ) as "appExecute",
+          exists (
+            select 1
+            from pg_proc procedure,
+              lateral aclexplode(
+                coalesce(procedure.proacl, acldefault('f', procedure.proowner))
+              ) acl
+            where procedure.oid =
+                'opengeni_private.enforce_turn_instructions_protocol_v1()'::regprocedure
+              and acl.grantee = 0
+              and acl.privilege_type = 'EXECUTE'
+          ) as "publicExecute"`;
+      expect(guardRoutine).toEqual({ appExecute: false, publicExecute: false });
 
       const client = createDb(blank.databaseUrl, { max: 2 });
       const appUrl = new URL(blank.databaseUrl);
