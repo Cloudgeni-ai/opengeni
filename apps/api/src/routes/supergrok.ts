@@ -14,7 +14,7 @@ import {
   getXaiSubscriptionAccountAuthoritySnapshot,
   listXaiSubscriptionAccountsMetadata,
   materializeXaiCredentialForRun,
-  refreshXaiSubscriptionCredential,
+  refreshXaiSubscriptionCredentialSerialized,
   renameXaiSubscriptionAccount,
   resolveXaiProviderAccountAuthoritySnapshotForAcceptance,
   setActiveXaiCredential,
@@ -260,35 +260,47 @@ async function materializedAuthContext(
       clientVersion: XAI_CLIENT_VERSION,
       getToken: async () => tokenSnapshot(),
       refresh: async () => {
-        if (!credential.secret.refreshToken) {
+        const observedAccessToken = credential.secret.accessToken;
+        const observedRefreshToken = credential.secret.refreshToken;
+        if (!observedRefreshToken) {
           throw new XaiSubscriptionError(
             "relogin_required",
             "The SuperGrok connection cannot be refreshed",
           );
         }
-        const tokens = await refreshXaiToken(credential.secret.refreshToken, {
-          fetch: (deps.xaiFetch ?? fetch) as XaiFetch,
-        });
-        credential = await refreshXaiSubscriptionCredential(deps.db, {
+        const result = await refreshXaiSubscriptionCredentialSerialized(deps.db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
           subjectId: input.subjectId,
           credentialId: input.credentialId,
           authoritySnapshot: input.authoritySnapshot,
           encryptionKey,
-          secret: {
-            version: 1,
-            accessToken: tokens.accessToken,
-            refreshToken: tokens.refreshToken,
+          observedAccessToken,
+          observedRefreshToken,
+          refresh: async (current) => {
+            const refreshToken = current.secret.refreshToken;
+            if (!refreshToken) {
+              throw new XaiSubscriptionError(
+                "relogin_required",
+                "The SuperGrok connection cannot be refreshed",
+              );
+            }
+            const tokens = await refreshXaiToken(refreshToken, {
+              fetch: (deps.xaiFetch ?? fetch) as XaiFetch,
+            });
+            return {
+              secret: {
+                version: 1,
+                accessToken: tokens.accessToken,
+                refreshToken: tokens.refreshToken,
+              },
+              expiresAt:
+                xaiAccessTokenExpiry(tokens.accessToken) ??
+                new Date(Date.now() + tokens.expiresInSeconds * 1_000),
+            };
           },
-          providerAccountId: credential.providerAccountId,
-          label: credential.label,
-          accountEmail: credential.accountEmail,
-          planType: credential.planType,
-          expiresAt:
-            xaiAccessTokenExpiry(tokens.accessToken) ??
-            new Date(Date.now() + tokens.expiresInSeconds * 1_000),
         });
+        credential = result.credential;
         return tokenSnapshot();
       },
     },
@@ -501,7 +513,6 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
     let valid = false;
-    let liveSlugs = new Set<string>();
     try {
       const auth = await materializedAuthContext(deps, {
         accountId: authority.accountId,
@@ -510,26 +521,23 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
         credentialId: active.id,
         authoritySnapshot: authority.snapshot,
       });
-      liveSlugs = new Set(
-        (
-          await fetchXaiSubscriptionModels({
-            context: auth.context,
-            ...(deps.xaiFetch ? { fetch: deps.xaiFetch } : {}),
-          })
-        ).map((model) => model.slug),
-      );
+      await fetchXaiSubscriptionModels({
+        context: auth.context,
+        ...(deps.xaiFetch ? { fetch: deps.xaiFetch } : {}),
+      });
       valid = true;
     } catch {
       valid = false;
     }
-    const catalog = configuredModels(withXaiSubscriptionCatalogProvider(deps.settings))
-      .filter(
-        (model) =>
-          model.credentialSource.kind === "connected_subscription" &&
-          model.credentialSource.provider === "xai" &&
-          liveSlugs.has(model.id.replace(/^supergrok\//, "")),
-      )
-      .map(projectClientModel);
+    const catalog = valid
+      ? configuredModels(withXaiSubscriptionCatalogProvider(deps.settings))
+          .filter(
+            (model) =>
+              model.credentialSource.kind === "connected_subscription" &&
+              model.credentialSource.provider === "xai",
+          )
+          .map(projectClientModel)
+      : [];
     return c.json({
       connected: true,
       valid,

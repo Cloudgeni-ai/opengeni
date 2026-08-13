@@ -5,6 +5,7 @@ import {
   policyProviderIdForModel,
   resolveTurnExecutionPolicyV1,
   WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
+  XAI_SUBSCRIPTION_MODEL_ID_PREFIX,
   type Settings,
 } from "@opengeni/config";
 import {
@@ -949,6 +950,16 @@ export function canonicalConfiguredModel(
   // actual connection (an unconnected workspace fails the turn with a clear
   // "no Codex subscription connected" error rather than a misleading 422 here).
   if (settings.codexSubscriptionEnabled && canonicalModel.startsWith(CODEX_MODEL_ID_PREFIX)) {
+    return canonicalModel;
+  }
+  // SuperGrok subscription models are also discovered per workspace rather
+  // than stored in the deployment-global allow-list. Connection availability
+  // is enforced by the workspace policy and worker; this edge guard only needs
+  // to admit the product-model namespace when the feature is enabled.
+  if (
+    settings.supergrokSubscriptionEnabled &&
+    canonicalModel.startsWith(XAI_SUBSCRIPTION_MODEL_ID_PREFIX)
+  ) {
     return canonicalModel;
   }
   if (canonicalModel.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX)) {

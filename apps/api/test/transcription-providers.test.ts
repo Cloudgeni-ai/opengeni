@@ -284,6 +284,92 @@ describe("transcription providers", () => {
     }
   });
 
+  test("uses the connected SuperGrok account for xAI speech-to-text", async () => {
+    const active = spyOn(dbModule, "workspaceXaiSubscriptionActive").mockResolvedValue(true);
+    const authority = spyOn(
+      dbModule,
+      "resolveXaiProviderAccountAuthoritySnapshotForAcceptance",
+    ).mockResolvedValue({ version: 1, scope: "workspace" });
+    const selected = spyOn(dbModule, "selectXaiCredentialForUse").mockResolvedValue({
+      credentialId: "xai-credential",
+      rotationEnabled: true,
+      accounts: [],
+    });
+    const materialized = spyOn(dbModule, "materializeXaiCredentialForRun").mockResolvedValue({
+      id: "xai-credential",
+      scope: "workspace",
+      providerAccountId: "xai-user",
+      label: "Jørgen Sandhaug",
+      accountEmail: "jorgen@example.com",
+      planType: "SuperGrok",
+      status: "active",
+      allocatorEnabled: true,
+      version: 1,
+      allocatorVersion: 1,
+      allocatorUpdatedAt: null,
+      expiresAt: null,
+      lastRefreshAt: null,
+      lastError: null,
+      quotaUsedPercent: null,
+      quotaResetAt: null,
+      quotaCheckedAt: null,
+      exhaustedUntil: null,
+      selectionCount: 0,
+      lastSelectedAt: null,
+      connectedBySubjectId: "user:human",
+      secret: {
+        version: 1,
+        accessToken: "xai-access",
+        refreshToken: "xai-refresh",
+      },
+      authoritySnapshot: { version: 1, scope: "workspace" },
+    });
+    try {
+      let request: Request | undefined;
+      const service = createTranscriptionService({
+        settings: testSettings({
+          supergrokSubscriptionEnabled: true,
+          environmentsEncryptionKey: Buffer.alloc(32, 17).toString("base64"),
+          voiceInputProviderOrder: "supergrok-subscription,openai",
+        }),
+        db: {} as never,
+        fetch: async (input, init) => {
+          request = new Request(input, init);
+          return Response.json({ text: "fra SuperGrok", language: "no" });
+        },
+      });
+      const result = await service.transcribe({
+        workspaceId: "workspace",
+        accountId: "account",
+        subjectId: "user:human",
+        audio,
+        mimeType: "audio/webm",
+        requestId: "stt-request",
+      });
+
+      expect(result).toMatchObject({
+        text: "fra SuperGrok",
+        languages: ["no"],
+        providerId: "supergrok-subscription",
+      });
+      expect(request?.url).toBe("https://api.x.ai/v1/stt");
+      expect(request?.headers.get("authorization")).toBe("Bearer xai-access");
+      expect(request?.headers.get("x-grok-session-id")).toBe("stt-request");
+      if (!request) throw new Error("SuperGrok transcription request missing");
+      const form = await request.formData();
+      expect((form.get("file") as File).name).toBe("audio.webm");
+      expect(selected).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ shardKey: "stt-request" }),
+      );
+    } finally {
+      active.mockRestore();
+      authority.mockRestore();
+      selected.mockRestore();
+      materialized.mockRestore();
+    }
+  });
+
   test("falls through to OpenAI when Codex is not attached to the workspace", async () => {
     const accounts = spyOn(dbModule, "listCodexAccountStatuses").mockResolvedValue([]);
     try {

@@ -360,6 +360,21 @@ export function searchMcpTools(
   const searchable = availableTools.filter((tool) =>
     isSearchableMcpFunctionTool(tool, mcpServerIds),
   );
+  return searchToolPool(searchable, rawArguments);
+}
+
+/**
+ * Rank and byte-bound an already-authorized tool pool.
+ *
+ * Provider-neutral dispatch uses this for every ordinary function tool because
+ * those providers have no native deferred-tool registry. The Codex/OpenAI
+ * paths keep their narrower MCP selection before entering this shared bound.
+ */
+export function searchToolPool(availableTools: Tool[], rawArguments: unknown): Tool[] {
+  const searchable = availableTools.filter(
+    (tool): tool is Tool & { name: string } =>
+      tool.type === "function" && typeof (tool as { name?: unknown }).name === "string",
+  );
   if (searchable.length === 0) return [];
   const { query, limit } = parseSearchArgs(rawArguments);
   const ranked = bm25RankTools(searchable, query, limit);

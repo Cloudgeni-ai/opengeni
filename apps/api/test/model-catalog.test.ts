@@ -14,7 +14,7 @@ describe("workspace model catalog availability", () => {
       codexSubscriptionActive: false,
       xaiSubscriptionActive: false,
     });
-    const blocked = unavailable.models.find((model) => model.id === "supergrok/grok-4.5")!;
+    const blocked = unavailable.models.find((model) => model.id === "supergrok/grok-4.6")!;
     expect(blocked).toMatchObject({
       provider: "supergrok",
       providerLabel: "SuperGrok",
@@ -29,7 +29,7 @@ describe("workspace model catalog availability", () => {
       codexSubscriptionActive: false,
       xaiSubscriptionActive: true,
     });
-    expect(available.models.find((model) => model.id === "supergrok/grok-4.5")).toMatchObject({
+    expect(available.models.find((model) => model.id === "supergrok/grok-4.6")).toMatchObject({
       credentialReadiness: { status: "ready", basis: "connection" },
       availability: { status: "unknown", selectable: true },
     });
@@ -652,6 +652,8 @@ describe("workspace model catalog route discipline", () => {
     expect(handler).toContain('"workspace:read"');
     expect(handler.indexOf("getWorkspaceModelPolicy")).toBeGreaterThan(grant);
     expect(handler.indexOf("workspaceCodexSubscriptionActive")).toBeGreaterThan(grant);
+    expect(handler.indexOf("workspaceXaiSubscriptionActive")).toBeGreaterThan(grant);
+    expect(handler).toContain("xaiSubscriptionActive,");
     expect(handler).toContain('"private, no-store"');
   });
 });

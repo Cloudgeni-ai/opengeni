@@ -12,6 +12,7 @@ import {
   codexRealtimeAdmissionAllowed,
   type RealtimeModelOption,
   type SessionRealtimeControllerFactory,
+  useRealtimeModelSelection,
   useSessionRealtime,
 } from "../src/realtime/realtime-control";
 import type { SessionRealtimeController } from "@opengeni/sdk/realtime";
@@ -432,6 +433,69 @@ describe("ordinary session Codex realtime control", () => {
     );
     expect(container.textContent).toContain("Connected Codex");
     expect(container.textContent).not.toContain("GPT Realtime 2.1");
+  });
+
+  test("loads and selects a connected SuperGrok realtime model", async () => {
+    const client = {
+      getWorkspaceRealtimeModelCatalog: async () => ({
+        models: [
+          {
+            id: "gpt-live-1-boulder-alpha",
+            label: "Codex Live",
+            provider: "Connected Codex",
+            description: "Deep session integration",
+            available: true,
+            unavailableReason: null,
+            recommended: false,
+          },
+          {
+            id: "supergrok/grok-voice-think-fast-2.0",
+            label: "Grok Voice",
+            provider: "Connected SuperGrok",
+            description: "Fast native Grok speech-to-speech",
+            available: true,
+            unavailableReason: null,
+            recommended: true,
+          },
+        ],
+      }),
+    } as unknown as OpenGeniClient;
+
+    function Harness() {
+      const selection = useRealtimeModelSelection({
+        client,
+        workspaceId: "11111111-1111-4111-8111-111111111111",
+        codexConnected: true,
+      });
+      return (
+        <div>
+          <output data-testid="selected-realtime-model">{selection.selectedModel.id}</output>
+          {selection.models.map((model) => (
+            <button key={model.id} type="button" onClick={() => selection.selectModel(model.id)}>
+              {model.provider}: {model.label}
+            </button>
+          ))}
+        </div>
+      );
+    }
+
+    await act(async () => root.render(<Harness />));
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+      if (container.textContent?.includes("Connected SuperGrok")) break;
+    }
+
+    const grok = [...container.querySelectorAll("button")].find((button) =>
+      button.textContent?.includes("Connected SuperGrok"),
+    );
+    expect(grok).not.toBeUndefined();
+    await act(async () => grok?.click());
+    expect(container.querySelector('[data-testid="selected-realtime-model"]')?.textContent).toBe(
+      "supergrok/grok-voice-think-fast-2.0",
+    );
+    expect(
+      localStorage.getItem("opengeni:realtime-model:11111111-1111-4111-8111-111111111111"),
+    ).toBe("supergrok/grok-voice-think-fast-2.0");
   });
 
   test("configures the voice model picker below the new-session composer", async () => {

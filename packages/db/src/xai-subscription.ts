@@ -51,6 +51,7 @@ export type XaiCredentialForRun = XaiSubscriptionAccountMetadata & {
 
 export type XaiCredentialLeaseResult = {
   credentialId: string | null;
+  rotationEnabled: boolean;
   reused: boolean;
   holderId: string | null;
   generation: number | null;
@@ -59,6 +60,19 @@ export type XaiCredentialLeaseResult = {
 };
 
 export const XAI_CREDENTIAL_LEASE_TTL_MS = 5 * 60_000;
+
+/** Stable session sharding, matching Codex's cache-affinity contract. */
+export function xaiCredentialShardIndex(sessionId: string, candidateCount: number): number {
+  if (!Number.isSafeInteger(candidateCount) || candidateCount <= 0) {
+    throw new Error("xAI shard candidate count must be positive");
+  }
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < sessionId.length; index += 1) {
+    hash ^= sessionId.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0) % candidateCount;
+}
 
 type XaiCredentialMetadataRow = Pick<
   typeof schema.xaiSubscriptionCredentials.$inferSelect,
@@ -440,6 +454,40 @@ export async function listXaiSubscriptionAccountsMetadata(
   });
 }
 
+/**
+ * Metadata-only readiness check for the SuperGrok model catalog.
+ *
+ * Like Codex, allocator eligibility is runtime scheduling state, not connection
+ * readiness. With rotation enabled any healthy account makes the rail ready;
+ * with rotation disabled the explicit active account is authoritative.
+ */
+export async function workspaceXaiSubscriptionActive(
+  db: Database,
+  settings: { readonly supergrokSubscriptionEnabled: boolean },
+  workspaceId: string,
+  subjectId: string,
+): Promise<boolean> {
+  if (!settings.supergrokSubscriptionEnabled) return false;
+  const authoritySnapshot = await resolveXaiProviderAccountAuthoritySnapshotForAcceptance(db, {
+    workspaceId,
+    subjectId,
+  });
+  const [accounts, rotation] = await Promise.all([
+    listXaiSubscriptionAccountsMetadata(db, { workspaceId, subjectId }),
+    getXaiRotationSettings(db, { workspaceId, subjectId, authoritySnapshot }),
+  ]);
+  const activeCredentialId = rotation?.activeCredentialId ?? null;
+  const now = new Date();
+  const eligible = (account: XaiSubscriptionAccountMetadata) =>
+    account.status === "active" &&
+    account.allocatorEnabled &&
+    (!account.exhaustedUntil || account.exhaustedUntil <= now);
+  if (rotation?.rotationEnabled !== false) {
+    return accounts.some(eligible);
+  }
+  return accounts.some((account) => account.id === activeCredentialId && eligible(account));
+}
+
 export async function getXaiSubscriptionAccountMetadata(
   db: Database,
   input: { workspaceId: string; subjectId: string; credentialId: string },
@@ -686,33 +734,6 @@ export async function renameXaiSubscriptionAccount(
   });
 }
 
-export async function refreshXaiSubscriptionCredential(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    subjectId: string;
-    credentialId: string;
-    authoritySnapshot: XaiAuthoritySnapshot;
-    encryptionKey: Uint8Array;
-    secret: XaiCredentialSecretV1;
-    providerAccountId?: string | null;
-    label?: string | null;
-    accountEmail?: string | null;
-    planType?: string | null;
-    expiresAt?: Date | null;
-  },
-): Promise<XaiCredentialForRun> {
-  const updated = await upsertXaiSubscriptionCredential(db, input);
-  return await materializeXaiCredentialForRun(db, {
-    workspaceId: input.workspaceId,
-    subjectId: input.subjectId,
-    credentialId: updated.account.id,
-    authoritySnapshot: updated.authoritySnapshot,
-    encryptionKey: input.encryptionKey,
-  });
-}
-
 export async function disconnectXaiSubscriptionCredential(
   db: Database,
   input: {
@@ -782,16 +803,132 @@ export async function materializeXaiCredentialForRun(
   });
 }
 
+export type XaiSerializedCredentialRefreshResult = {
+  credential: XaiCredentialForRun;
+  refreshed: boolean;
+};
+
+/**
+ * Refresh one connected xAI account under a database row lock.
+ *
+ * OAuth refresh tokens may rotate. Multiple sessions are allowed to share the
+ * same account, so an unlocked read-refresh-write sequence can make one
+ * successful refresh invalidate every other in-flight refresh. This operation
+ * re-reads the secret after acquiring the lock and skips the provider call when
+ * another request already installed a newer token pair.
+ */
+export async function refreshXaiSubscriptionCredentialSerialized(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+    credentialId: string;
+    authoritySnapshot: XaiAuthoritySnapshot;
+    encryptionKey: Uint8Array;
+    observedAccessToken: string | undefined;
+    observedRefreshToken: string | undefined;
+    refresh: (current: XaiCredentialForRun) => Promise<{
+      secret: XaiCredentialSecretV1;
+      expiresAt: Date | null;
+    }>;
+  },
+): Promise<XaiSerializedCredentialRefreshResult> {
+  const snapshot = XaiProviderAccountAuthoritySnapshotV1.parse(input.authoritySnapshot);
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scopedDb) => {
+    const authorized = await rawRows<{ id: string }>(
+      scopedDb,
+      sql`select id from revalidate_xai_subscription_authority(
+        ${input.workspaceId}::uuid,
+        ${input.subjectId},
+        ${input.credentialId}::uuid,
+        ${JSON.stringify(snapshot)}::jsonb
+      )`,
+    );
+    if (!authorized[0]) throw new Error("xAI provider-account authority is no longer active");
+
+    const [row] = await scopedDb
+      .select({
+        ...xaiCredentialMetadataColumns,
+        credentialEncrypted: schema.xaiSubscriptionCredentials.credentialEncrypted,
+      })
+      .from(schema.xaiSubscriptionCredentials)
+      .where(
+        and(
+          eq(schema.xaiSubscriptionCredentials.accountId, input.accountId),
+          eq(schema.xaiSubscriptionCredentials.workspaceId, input.workspaceId),
+          eq(schema.xaiSubscriptionCredentials.id, input.credentialId),
+          eq(schema.xaiSubscriptionCredentials.status, "active"),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!row) throw new Error("xAI credential is unavailable");
+
+    const currentSecret = parseSecret(
+      decryptEnvironmentValue(input.encryptionKey, row.credentialEncrypted),
+    );
+    const current: XaiCredentialForRun = {
+      ...metadataFromRow(row),
+      secret: currentSecret,
+      authoritySnapshot: snapshot,
+    };
+    if (
+      currentSecret.accessToken !== input.observedAccessToken ||
+      currentSecret.refreshToken !== input.observedRefreshToken
+    ) {
+      return { credential: current, refreshed: false };
+    }
+
+    const next = await input.refresh(current);
+    assertSecret(next.secret);
+    const credentialEncrypted = encryptEnvironmentValue(
+      input.encryptionKey,
+      JSON.stringify(next.secret),
+    );
+    const [updated] = await scopedDb
+      .update(schema.xaiSubscriptionCredentials)
+      .set({
+        credentialEncrypted,
+        expiresAt: next.expiresAt,
+        lastRefreshAt: new Date(),
+        status: "active",
+        lastError: null,
+        version: sql`${schema.xaiSubscriptionCredentials.version} + 1`,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(schema.xaiSubscriptionCredentials.accountId, input.accountId),
+          eq(schema.xaiSubscriptionCredentials.workspaceId, input.workspaceId),
+          eq(schema.xaiSubscriptionCredentials.id, input.credentialId),
+        ),
+      )
+      .returning(xaiCredentialMetadataColumns);
+    if (!updated) throw new Error("xAI credential refresh lost its authority fence");
+    return {
+      credential: {
+        ...metadataFromRow(updated),
+        secret: next.secret,
+        authoritySnapshot: snapshot,
+      },
+      refreshed: true,
+    };
+  });
+}
+
 export async function acquireXaiCredentialLease(
   db: Database,
   input: {
     accountId: string;
     workspaceId: string;
     subjectId: string;
+    sessionId: string;
     turnId: string;
     holderId: string;
     authoritySnapshot: XaiAuthoritySnapshot;
     pinnedCredentialId?: string | null;
+    pinSource?: "manual" | "policy" | null;
     now?: Date;
     leaseTtlMs?: number;
   },
@@ -890,6 +1027,7 @@ export async function acquireXaiCredentialLease(
             .where(eq(schema.xaiSubscriptionCredentials.workspaceId, input.workspaceId));
           return {
             credentialId: updated!.credentialId,
+            rotationEnabled: settings.rotationEnabled,
             reused: true,
             holderId: updated!.holderId,
             generation: updated!.generation,
@@ -915,38 +1053,31 @@ export async function acquireXaiCredentialLease(
             ),
           )
           .orderBy(
-            asc(schema.xaiSubscriptionCredentials.selectionCount),
-            asc(schema.xaiSubscriptionCredentials.lastSelectedAt),
             asc(schema.xaiSubscriptionCredentials.createdAt),
             asc(schema.xaiSubscriptionCredentials.id),
           );
-        const activeLeaseRows = await tx
-          .select({ credentialId: schema.xaiCredentialLeases.credentialId })
-          .from(schema.xaiCredentialLeases)
-          .where(
-            and(
-              eq(schema.xaiCredentialLeases.workspaceId, input.workspaceId),
-              gt(schema.xaiCredentialLeases.leasedUntil, now),
-            ),
-          );
-        const activelyLeasedCredentialIds = new Set(
-          activeLeaseRows.map((lease) => lease.credentialId),
-        );
         const eligible = candidates.filter(
           (candidate) =>
             candidate.status === "active" &&
             candidate.allocatorEnabled &&
-            (!candidate.exhaustedUntil || candidate.exhaustedUntil <= now) &&
-            !activelyLeasedCredentialIds.has(candidate.id),
+            (!candidate.exhaustedUntil || candidate.exhaustedUntil <= now),
         );
-        const selected = input.pinnedCredentialId
+        const pinned = input.pinnedCredentialId
           ? eligible.find((candidate) => candidate.id === input.pinnedCredentialId)
-          : settings.rotationEnabled || settings.activeCredentialId === null
-            ? eligible[0]
+          : undefined;
+        const pinIsManual = input.pinnedCredentialId && input.pinSource !== "policy";
+        const selected = pinIsManual
+          ? pinned
+          : settings.rotationEnabled
+            ? (pinned ??
+              (eligible.length > 0
+                ? eligible[xaiCredentialShardIndex(input.sessionId, eligible.length)]
+                : undefined))
             : eligible.find((candidate) => candidate.id === settings.activeCredentialId);
         if (!selected) {
           return {
             credentialId: null,
+            rotationEnabled: settings.rotationEnabled,
             reused: false,
             holderId: null,
             generation: null,
@@ -975,21 +1106,132 @@ export async function acquireXaiCredentialLease(
             updatedAt: now,
           })
           .where(eq(schema.xaiSubscriptionCredentials.id, selected.id));
-        await tx
-          .update(schema.xaiRotationSettings)
-          .set({
-            activeCredentialId: selected.id,
-            fairnessCursor: sql`${schema.xaiRotationSettings.fairnessCursor} + 1`,
-            version: sql`${schema.xaiRotationSettings.version} + 1`,
-            updatedAt: now,
-          })
-          .where(eq(schema.xaiRotationSettings.id, settings.id));
+        // A session policy/manual home must never move the workspace-global
+        // active pointer. A missing pointer is bootstrapped once for rotation-off
+        // fallback and UI state, but healthy sharded turns never churn it.
+        if (settings.activeCredentialId === null) {
+          await tx
+            .update(schema.xaiRotationSettings)
+            .set({
+              activeCredentialId: selected.id,
+              version: sql`${schema.xaiRotationSettings.version} + 1`,
+              updatedAt: now,
+            })
+            .where(eq(schema.xaiRotationSettings.id, settings.id));
+        }
         return {
           credentialId: selected.id,
+          rotationEnabled: settings.rotationEnabled,
           reused: false,
           holderId: lease!.holderId,
           generation: lease!.generation,
           leasedUntil: lease!.leasedUntil,
+          accounts: candidates.map(metadataFromRow),
+        };
+      }),
+  );
+}
+
+/**
+ * Select an authorized connected account for a non-turn operation (voice,
+ * transcription, media). Rotation uses the same stable session/request shard
+ * as turns, but does not create a capacity lease: one account may serve many
+ * concurrent upstream sessions just like Codex subscriptions.
+ */
+export async function selectXaiCredentialForUse(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+    authoritySnapshot: XaiAuthoritySnapshot;
+    shardKey: string;
+    pinnedCredentialId?: string | null;
+    pinSource?: "manual" | "policy" | null;
+    now?: Date;
+  },
+): Promise<{
+  credentialId: string | null;
+  rotationEnabled: boolean;
+  accounts: XaiSubscriptionAccountMetadata[];
+}> {
+  const snapshot = XaiProviderAccountAuthoritySnapshotV1.parse(input.authoritySnapshot);
+  const now = input.now ?? new Date();
+  return await withWorkspaceSubjectRls(
+    db,
+    input.workspaceId,
+    input.subjectId,
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const ownerMembershipId = await resolveXaiPoolOwnerMembershipId(tx, {
+          workspaceId: input.workspaceId,
+          subjectId: input.subjectId,
+          authoritySnapshot: snapshot,
+        });
+        await tx
+          .insert(schema.xaiRotationSettings)
+          .values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            authorityScope: snapshot.scope,
+            ownerOrganizationMembershipId: ownerMembershipId,
+          })
+          .onConflictDoNothing();
+        const [settings] = await tx
+          .select()
+          .from(schema.xaiRotationSettings)
+          .where(
+            and(
+              eq(schema.xaiRotationSettings.workspaceId, input.workspaceId),
+              eq(schema.xaiRotationSettings.authorityScope, snapshot.scope),
+              ownerMembershipId === null
+                ? isNull(schema.xaiRotationSettings.ownerOrganizationMembershipId)
+                : eq(schema.xaiRotationSettings.ownerOrganizationMembershipId, ownerMembershipId),
+            ),
+          )
+          .limit(1);
+        if (!settings) throw new Error("xAI rotation settings are unavailable");
+        const candidates = await tx
+          .select(xaiCredentialAllocationColumns)
+          .from(schema.xaiSubscriptionCredentials)
+          .where(
+            and(
+              eq(schema.xaiSubscriptionCredentials.workspaceId, input.workspaceId),
+              eq(schema.xaiSubscriptionCredentials.accountId, input.accountId),
+              eq(schema.xaiSubscriptionCredentials.authorityScope, snapshot.scope),
+              ownerMembershipId === null
+                ? isNull(schema.xaiSubscriptionCredentials.ownerOrganizationMembershipId)
+                : eq(
+                    schema.xaiSubscriptionCredentials.ownerOrganizationMembershipId,
+                    ownerMembershipId,
+                  ),
+            ),
+          )
+          .orderBy(
+            asc(schema.xaiSubscriptionCredentials.createdAt),
+            asc(schema.xaiSubscriptionCredentials.id),
+          );
+        const eligible = candidates.filter(
+          (candidate) =>
+            candidate.status === "active" &&
+            candidate.allocatorEnabled &&
+            (!candidate.exhaustedUntil || candidate.exhaustedUntil <= now),
+        );
+        const pinned = input.pinnedCredentialId
+          ? eligible.find((candidate) => candidate.id === input.pinnedCredentialId)
+          : undefined;
+        const selected =
+          input.pinnedCredentialId && input.pinSource !== "policy"
+            ? pinned
+            : settings.rotationEnabled
+              ? (pinned ??
+                (eligible.length > 0
+                  ? eligible[xaiCredentialShardIndex(input.shardKey, eligible.length)]
+                  : undefined))
+              : eligible.find((candidate) => candidate.id === settings.activeCredentialId);
+        return {
+          credentialId: selected?.id ?? null,
+          rotationEnabled: settings.rotationEnabled,
           accounts: candidates.map(metadataFromRow),
         };
       }),
@@ -1007,79 +1249,18 @@ export async function releaseXaiCredentialLease(
   },
 ): Promise<boolean> {
   return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scopedDb) => {
-    return await scopedDb.transaction(async (tx) => {
-      const [lease] = await tx
-        .select()
-        .from(schema.xaiCredentialLeases)
-        .where(
-          and(
-            eq(schema.xaiCredentialLeases.workspaceId, input.workspaceId),
-            eq(schema.xaiCredentialLeases.turnId, input.turnId),
-            eq(schema.xaiCredentialLeases.holderId, input.holderId),
-            eq(schema.xaiCredentialLeases.generation, input.generation),
-          ),
-        )
-        .for("update")
-        .limit(1);
-      if (!lease) return false;
-      const deleted = await tx
-        .delete(schema.xaiCredentialLeases)
-        .where(eq(schema.xaiCredentialLeases.id, lease.id))
-        .returning({ id: schema.xaiCredentialLeases.id });
-      if (deleted.length !== 1) return false;
-      const now = new Date();
-      const waiters = await tx
-        .update(schema.xaiCapacityWaiters)
-        .set({
-          wakeRevision: sql`${schema.xaiCapacityWaiters.wakeRevision} + 1`,
-          lastWakeReason: "xai_credential_lease_released",
-          nextCheckAt: now,
-          updatedAt: now,
-        })
-        .where(
-          and(
-            eq(schema.xaiCapacityWaiters.workspaceId, input.workspaceId),
-            eq(schema.xaiCapacityWaiters.status, "waiting"),
-            eq(schema.xaiCapacityWaiters.authorityScope, lease.authorityScope),
-            lease.ownerOrganizationMembershipId === null
-              ? isNull(schema.xaiCapacityWaiters.ownerOrganizationMembershipId)
-              : eq(
-                  schema.xaiCapacityWaiters.ownerOrganizationMembershipId,
-                  lease.ownerOrganizationMembershipId,
-                ),
-          ),
-        )
-        .returning({
-          accountId: schema.xaiCapacityWaiters.accountId,
-          sessionId: schema.xaiCapacityWaiters.sessionId,
-          workflowId: schema.xaiCapacityWaiters.workflowId,
-        });
-      for (const waiter of waiters) {
-        await tx
-          .insert(schema.sessionWorkflowWakeOutbox)
-          .values({
-            accountId: waiter.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: waiter.sessionId,
-            temporalWorkflowId: waiter.workflowId,
-            reason: "xai_capacity",
-            nextAttemptAt: now,
-          })
-          .onConflictDoUpdate({
-            target: schema.sessionWorkflowWakeOutbox.sessionId,
-            set: {
-              temporalWorkflowId: waiter.workflowId,
-              wakeRevision: sql`${schema.sessionWorkflowWakeOutbox.wakeRevision} + 1`,
-              reason: "xai_capacity",
-              attempts: 0,
-              nextAttemptAt: sql`least(${schema.sessionWorkflowWakeOutbox.nextAttemptAt}, ${now.toISOString()}::timestamptz)`,
-              lastError: null,
-              updatedAt: now,
-            },
-          });
-      }
-      return true;
-    });
+    const deleted = await scopedDb
+      .delete(schema.xaiCredentialLeases)
+      .where(
+        and(
+          eq(schema.xaiCredentialLeases.workspaceId, input.workspaceId),
+          eq(schema.xaiCredentialLeases.turnId, input.turnId),
+          eq(schema.xaiCredentialLeases.holderId, input.holderId),
+          eq(schema.xaiCredentialLeases.generation, input.generation),
+        ),
+      )
+      .returning({ id: schema.xaiCredentialLeases.id });
+    return deleted.length === 1;
   });
 }
 
@@ -1456,7 +1637,8 @@ export async function setXaiSessionAccountPin(
     authoritySnapshot: XaiAuthoritySnapshot;
     credentialId: string | null;
     pinSource: "manual" | "policy" | null;
-    expectedVersion?: number;
+    /** undefined = unconditional human write; null = row must not exist. */
+    expectedVersion?: number | null;
   },
 ): Promise<typeof schema.xaiSessionAccountPins.$inferSelect> {
   const snapshot = XaiProviderAccountAuthoritySnapshotV1.parse(input.authoritySnapshot);
@@ -1474,27 +1656,6 @@ export async function setXaiSessionAccountPin(
         authorityScope: snapshot.scope,
         ownerMembershipId,
       });
-    }
-    const [current] = await scopedDb
-      .select()
-      .from(schema.xaiSessionAccountPins)
-      .where(
-        and(
-          eq(schema.xaiSessionAccountPins.workspaceId, input.workspaceId),
-          eq(schema.xaiSessionAccountPins.sessionId, input.sessionId),
-          eq(schema.xaiSessionAccountPins.authorityScope, snapshot.scope),
-          ownerMembershipId === null
-            ? isNull(schema.xaiSessionAccountPins.ownerOrganizationMembershipId)
-            : eq(schema.xaiSessionAccountPins.ownerOrganizationMembershipId, ownerMembershipId),
-        ),
-      )
-      .limit(1);
-    if (
-      current &&
-      input.expectedVersion !== undefined &&
-      current.version !== input.expectedVersion
-    ) {
-      throw new Error("xAI session pin changed");
     }
     const [row] = await scopedDb
       .insert(schema.xaiSessionAccountPins)
@@ -1520,9 +1681,18 @@ export async function setXaiSessionAccountPin(
           version: sql`${schema.xaiSessionAccountPins.version} + 1`,
           updatedAt: new Date(),
         },
+        ...(input.expectedVersion !== undefined
+          ? {
+              setWhere:
+                input.expectedVersion === null
+                  ? sql`false`
+                  : eq(schema.xaiSessionAccountPins.version, input.expectedVersion),
+            }
+          : {}),
       })
       .returning();
-    return row!;
+    if (!row) throw new Error("xAI session pin changed");
+    return row;
   });
 }
 

@@ -66,6 +66,7 @@ export function projectSessionRealtimeLifecycle(
 
 function realtimeModel(value: unknown): SessionRealtimeModel | null {
   return value === "gpt-live-1-boulder-alpha" ||
+    value === "supergrok/grok-voice-think-fast-2.0" ||
     value === "opengeni-gateway/openai/gpt-realtime-2.1" ||
     value === "opengeni-gateway/openai/gpt-realtime-mini" ||
     value === "opengeni-gateway/xai/grok-voice-think-fast-2.0" ||

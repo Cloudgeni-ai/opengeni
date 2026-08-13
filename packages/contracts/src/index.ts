@@ -4992,6 +4992,7 @@ export type SyncSessionRealtimeLedgerResponse = z.infer<typeof SyncSessionRealti
 
 export const SessionRealtimeModel = z.enum([
   "gpt-live-1-boulder-alpha",
+  "supergrok/grok-voice-think-fast-2.0",
   "opengeni-gateway/openai/gpt-realtime-2.1",
   "opengeni-gateway/openai/gpt-realtime-mini",
   "opengeni-gateway/xai/grok-voice-think-fast-2.0",
@@ -5004,7 +5005,7 @@ export type SessionRealtimeModel = z.infer<typeof SessionRealtimeModel>;
 export const WorkspaceRealtimeModelCatalogItem = z.object({
   id: SessionRealtimeModel,
   label: z.string().min(1),
-  provider: z.enum(["OpenGeni", "Connected Codex", "Your Gateway"]),
+  provider: z.enum(["OpenGeni", "Connected Codex", "Connected SuperGrok", "Your Gateway"]),
   description: z.string().min(1),
   available: z.boolean(),
   unavailableReason: z.string().nullable(),

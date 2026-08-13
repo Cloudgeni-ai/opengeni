@@ -8,6 +8,7 @@ import {
   markVideoGenerationRetaining,
   markVideoGenerationSubmissionIntent,
   mediaGenerationResultForStoredOperation,
+  rescheduleVideoGenerationOperation,
   settleVideoGenerationFailure,
   settleVideoGenerationReady,
   updateWorkspaceVideoGenerationPolicy,
@@ -146,6 +147,26 @@ async function managedFixture(creditMicros: number) {
 }
 
 describe("durable video generation operation", () => {
+  test("persists a connected SuperGrok video policy", async () => {
+    if (!available) return;
+    const { grant } = await baseFixture();
+    const policy = await updateWorkspaceVideoGenerationPolicy(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: grant.subjectId,
+      expectedRevision: 0,
+      fundingSource: "supergrok_subscription",
+      enabledModelIds: ["xai/grok-imagine-video-1.5"],
+      defaultModelId: "xai/grok-imagine-video-1.5",
+    });
+    expect(policy).toMatchObject({
+      revision: 1,
+      fundingSource: "supergrok_subscription",
+      enabledModelIds: ["xai/grok-imagine-video-1.5"],
+      defaultModelId: "xai/grok-imagine-video-1.5",
+    });
+  });
+
   test("does not require an encryption key when no workspace Gateway credential exists", async () => {
     if (!available) return;
     const { grant } = await baseFixture();
@@ -299,6 +320,14 @@ describe("durable video generation operation", () => {
       operationId,
       requestDigest,
     });
+    await rescheduleVideoGenerationOperation(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      operationId,
+      requestDigest,
+      nextReconcileAt: new Date(),
+      error: "transient retention error",
+    });
     const settled = await settleVideoGenerationReady(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -322,6 +351,7 @@ describe("durable video generation operation", () => {
     expect(settled.artifact.id).toBe(artifactId);
     expect(settled.artifact.primaryFileId).toBe(fileId);
     expect(settled.artifact.id).not.toBe(fileId);
+    expect(settled.operation.lastError).toBeNull();
     const retained = await getGeneratedVideoArtifact(client.db, grant.workspaceId, artifactId);
     expect(retained?.file.id).toBe(fileId);
     const terminal = await mediaGenerationResultForStoredOperation(client.db, settled.operation);

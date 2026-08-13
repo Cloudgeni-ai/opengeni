@@ -1,4 +1,8 @@
-import { GENERATED_VIDEO_MAX_BYTES, type GenerateVideoToolInput } from "@opengeni/contracts";
+import {
+  GENERATED_VIDEO_MAX_BYTES,
+  type GenerateVideoToolInput,
+  type VideoGenerationRejectedCode,
+} from "@opengeni/contracts";
 import type { SealedVideoReference, SealedVideoReferenceRole } from "@opengeni/core";
 import type { ObjectStorage } from "@opengeni/storage";
 import {
@@ -25,6 +29,19 @@ export type InspectedSandboxVideoReference = Readonly<{
   sizeBytes: number;
   sha256: string;
 }>;
+
+export type VideoReferenceInputErrorCode = VideoGenerationRejectedCode;
+
+/** A deterministic, pre-admission tool-input error. No video operation exists yet. */
+export class VideoReferenceInputError extends Error {
+  readonly code: VideoReferenceInputErrorCode;
+
+  constructor(code: VideoReferenceInputErrorCode, message: string) {
+    super(message);
+    this.name = "VideoReferenceInputError";
+    this.code = code;
+  }
+}
 
 export function videoReferencePaths(
   request: GenerateVideoToolInput,
@@ -56,7 +73,12 @@ export async function inspectSandboxVideoReferences(input: {
       workdir: "/workspace",
       maxOutputTokens: 4_096,
     });
-    if (result.exitCode !== 0) throw new Error("Video reference is not a stable workspace file");
+    if (result.exitCode !== 0) {
+      throw new VideoReferenceInputError(
+        "reference_not_stable",
+        "The video reference must be an existing regular file at the exact /workspace path returned by the preceding tool.",
+      );
+    }
     const [sizeText, sha256, prefixBase64] = result.stdout.trim().split("\t");
     const sizeBytes = Number(sizeText);
     if (
@@ -64,18 +86,29 @@ export async function inspectSandboxVideoReferences(input: {
       sizeBytes <= 0 ||
       !/^[0-9a-f]{64}$/u.test(sha256 ?? "")
     ) {
-      throw new Error("Video reference inspection returned invalid metadata");
+      throw new VideoReferenceInputError(
+        "reference_not_stable",
+        "The video reference changed or could not be read safely. Use the exact current /workspace path and try again.",
+      );
     }
     const prefix = Buffer.from(prefixBase64 ?? "", "base64");
     const contentType = sniffContentType(prefix);
     const maxBytes =
       reference.role === "video_reference" ? MAX_VIDEO_REFERENCE_BYTES : MAX_IMAGE_REFERENCE_BYTES;
-    if (sizeBytes > maxBytes) throw new Error("Video reference exceeds the supported size");
+    if (sizeBytes > maxBytes) {
+      throw new VideoReferenceInputError(
+        "reference_too_large",
+        "The video reference exceeds the supported size for this source mode.",
+      );
+    }
     if (
       (reference.role === "video_reference" && contentType !== "video/mp4") ||
       (reference.role !== "video_reference" && !contentType.startsWith("image/"))
     ) {
-      throw new Error("Video reference media type does not match its semantic role");
+      throw new VideoReferenceInputError(
+        "reference_media_type_mismatch",
+        "The video reference media type does not match the selected source mode.",
+      );
     }
     inspected.push({
       ordinal,
@@ -136,7 +169,10 @@ export async function uploadAndVerifyVideoReferences(input: {
     });
     try {
       if (reference.role === "video_reference") {
-        await validateVideoReference({ path: verified.path, ffprobePath: input.ffprobePath });
+        await validateVideoReference({
+          path: verified.path,
+          ffprobePath: input.ffprobePath,
+        });
       } else {
         const image = await validateImageReference(verified.path);
         if (image.contentType !== reference.contentType) {
@@ -169,25 +205,16 @@ export function videoReferenceStagingKey(input: {
 function inspectCommand(path: string): string {
   return [
     "set -euo pipefail",
-    `requested=${shellQuote(path)}`,
-    'case "$requested" in /workspace/*) ;; *) exit 41 ;; esac',
-    'case "$requested" in *"/../"*|*"/./"*|*/..|*/.) exit 42 ;; esac',
-    'resolved=$(realpath -e -- "$requested")',
-    '[ "$resolved" = "$requested" ] || exit 43',
-    'exec 3<"$resolved"',
-    'fd_path=$(realpath -e -- "/proc/$$/fd/3" 2>/dev/null || realpath -e -- "/dev/fd/3")',
-    'case "$fd_path" in /workspace/*) ;; *) exit 44 ;; esac',
-    '[ -f "/proc/$$/fd/3" ] 2>/dev/null || [ -f "/dev/fd/3" ] || exit 45',
-    'fd=/proc/$$/fd/3; [ -e "$fd" ] || fd=/dev/fd/3',
-    'before=$(stat -Lc "%d:%i:%s:%Y" -- "$fd" 2>/dev/null || stat -f "%d:%i:%z:%m" "$fd")',
-    'size=$(stat -Lc "%s" -- "$fd" 2>/dev/null || stat -f "%z" "$fd")',
-    "sha=$(sha256sum -- \"$fd\" 2>/dev/null | awk '{print $1}' || shasum -a 256 \"$fd\" | awk '{print $1}')",
+    ...stableWorkspaceFilePrelude(path, { nonCanonical: 43, invalidFile: 45 }),
+    'sha=$(video_reference_sha256 "$fd")',
     'exec 3<&-; exec 3<"$resolved"',
     'fd=/proc/$$/fd/3; [ -e "$fd" ] || fd=/dev/fd/3',
-    'reopened=$(stat -Lc "%d:%i:%s:%Y" -- "$fd" 2>/dev/null || stat -f "%d:%i:%z:%m" "$fd")',
+    'reopened=$(video_reference_stat_identity "$fd")',
     '[ "$before" = "$reopened" ] || exit 46',
+    '[ "$(video_reference_stat_content_identity "$resolved")" = "$(video_reference_stat_content_identity "$fd")" ] || exit 46',
+    '[ "$(realpath -- "$requested")" = "$expected" ] || exit 46',
     'prefix=$(dd if="$fd" bs=32 count=1 2>/dev/null | base64 | tr -d "\\r\\n")',
-    'after=$(stat -Lc "%d:%i:%s:%Y" -- "$fd" 2>/dev/null || stat -f "%d:%i:%z:%m" "$fd")',
+    'after=$(video_reference_stat_identity "$fd")',
     '[ "$before" = "$after" ] || exit 46',
     'printf "%s\\t%s\\t%s\\n" "$size" "$sha" "$prefix"',
   ].join("\n");
@@ -203,26 +230,83 @@ function uploadCommand(
     .join(" ");
   return [
     "set -euo pipefail",
-    `requested=${shellQuote(reference.path)}`,
-    'resolved=$(realpath -e -- "$requested")',
-    '[ "$resolved" = "$requested" ] || exit 51',
-    'exec 3<"$resolved"',
-    'fd_path=$(realpath -e -- "/proc/$$/fd/3" 2>/dev/null || realpath -e -- "/dev/fd/3")',
-    'case "$fd_path" in /workspace/*) ;; *) exit 52 ;; esac',
-    'fd=/proc/$$/fd/3; [ -e "$fd" ] || fd=/dev/fd/3',
-    'before=$(stat -Lc "%d:%i:%s:%Y" -- "$fd" 2>/dev/null || stat -f "%d:%i:%z:%m" "$fd")',
-    'size=$(stat -Lc "%s" -- "$fd" 2>/dev/null || stat -f "%z" "$fd")',
+    ...stableWorkspaceFilePrelude(reference.path, {
+      nonCanonical: 51,
+      invalidFile: 52,
+    }),
     `[ "$size" = ${shellQuote(String(reference.sizeBytes))} ] || exit 53`,
-    "sha=$(sha256sum -- \"$fd\" 2>/dev/null | awk '{print $1}' || shasum -a 256 \"$fd\" | awk '{print $1}')",
+    'sha=$(video_reference_sha256 "$fd")',
     `[ "$sha" = ${shellQuote(reference.sha256)} ] || exit 54`,
     'exec 3<&-; exec 3<"$resolved"',
     'fd=/proc/$$/fd/3; [ -e "$fd" ] || fd=/dev/fd/3',
-    'reopened=$(stat -Lc "%d:%i:%s:%Y" -- "$fd" 2>/dev/null || stat -f "%d:%i:%z:%m" "$fd")',
+    'reopened=$(video_reference_stat_identity "$fd")',
     '[ "$before" = "$reopened" ] || exit 55',
+    '[ "$(video_reference_stat_content_identity "$resolved")" = "$(video_reference_stat_content_identity "$fd")" ] || exit 55',
+    '[ "$(realpath -- "$requested")" = "$expected" ] || exit 55',
     `curl --silent --show-error --fail --connect-timeout 20 --max-time ${UPLOAD_TIMEOUT_SECONDS} --request PUT ${headers} --upload-file "$fd" --output /dev/null ${shellQuote(upload.url)}`,
-    'after=$(stat -Lc "%d:%i:%s:%Y" -- "$fd" 2>/dev/null || stat -f "%d:%i:%z:%m" "$fd")',
+    'after=$(video_reference_stat_identity "$fd")',
     '[ "$before" = "$after" ] || exit 56',
   ].join("\n");
+}
+
+function stableWorkspaceFilePrelude(
+  path: string,
+  exitCodes: { nonCanonical: number; invalidFile: number },
+): string[] {
+  const requested = workspaceRelativeReferencePath(path);
+  return [
+    `requested=${shellQuote(requested)}`,
+    "root=$(pwd -P)",
+    'expected="$root/${requested#./}"',
+    'resolved=$(realpath -- "$requested")',
+    `[ "$resolved" = "$expected" ] || exit ${exitCodes.nonCanonical}`,
+    `[ -f "$resolved" ] || exit ${exitCodes.invalidFile}`,
+    'exec 3<"$resolved"',
+    'fd=/proc/$$/fd/3; [ -e "$fd" ] || fd=/dev/fd/3',
+    `[ -f "$fd" ] || exit ${exitCodes.invalidFile}`,
+    "video_reference_platform=$(uname -s)",
+    'if [ "$video_reference_platform" = Darwin ]; then',
+    '  video_reference_stat_identity() { stat -f "%d:%i:%z:%m" "$1"; }',
+    '  video_reference_stat_content_identity() { stat -f "%i:%z:%m" "$1"; }',
+    '  video_reference_stat_size() { stat -f "%z" "$1"; }',
+    "else",
+    '  video_reference_stat_identity() { stat -Lc "%d:%i:%s:%Y" -- "$1"; }',
+    '  video_reference_stat_content_identity() { stat -Lc "%d:%i:%s:%Y" -- "$1"; }',
+    '  video_reference_stat_size() { stat -Lc "%s" -- "$1"; }',
+    "fi",
+    "video_reference_sha256() {",
+    "  if command -v sha256sum >/dev/null 2>&1; then",
+    "    sha256sum \"$1\" | awk '{print $1}'",
+    "  else",
+    "    shasum -a 256 \"$1\" | awk '{print $1}'",
+    "  fi",
+    "}",
+    'if [ "$video_reference_platform" != Darwin ]; then',
+    '  fd_path=$(realpath -- "$fd")',
+    `  [ "$fd_path" = "$expected" ] || exit ${exitCodes.invalidFile}`,
+    "fi",
+    `[ "$(video_reference_stat_content_identity "$resolved")" = "$(video_reference_stat_content_identity "$fd")" ] || exit ${exitCodes.invalidFile}`,
+    `[ "$(realpath -- "$requested")" = "$expected" ] || exit ${exitCodes.invalidFile}`,
+    'before=$(video_reference_stat_identity "$fd")',
+    'size=$(video_reference_stat_size "$fd")',
+  ];
+}
+
+function workspaceRelativeReferencePath(path: string): string {
+  if (!path.startsWith("/workspace/") || /[\0\r\n]/u.test(path)) {
+    throw new VideoReferenceInputError(
+      "invalid_reference_path",
+      "Video references must use an exact file path under /workspace.",
+    );
+  }
+  const segments = path.slice("/workspace/".length).split("/");
+  if (segments.some((segment) => segment.length === 0 || segment === "." || segment === "..")) {
+    throw new VideoReferenceInputError(
+      "invalid_reference_path",
+      "Video references must use a canonical file path under /workspace.",
+    );
+  }
+  return `./${segments.join("/")}`;
 }
 
 function sniffContentType(prefix: Uint8Array): string {
@@ -245,7 +329,10 @@ function sniffContentType(prefix: Uint8Array): string {
   if (prefix.byteLength >= 12 && Buffer.from(prefix.subarray(4, 8)).toString("ascii") === "ftyp") {
     return "video/mp4";
   }
-  throw new Error("Video reference has an unsupported media signature");
+  throw new VideoReferenceInputError(
+    "unsupported_reference_media",
+    "The video reference is not a supported PNG, JPEG, WebP, or MP4 file.",
+  );
 }
 
 function shellQuote(value: string): string {

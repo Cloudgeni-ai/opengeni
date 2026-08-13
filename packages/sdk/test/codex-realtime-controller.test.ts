@@ -1456,6 +1456,64 @@ describe("Codex realtime browser controller", () => {
     await controller.stop();
   });
 
+  test("turns a microphone prompt that never resolves into a user-retryable device failure", async () => {
+    const timers = timerFixture();
+    let current = mode();
+    const controller = createCodexRealtimeController({
+      workspaceId: WORKSPACE_ID,
+      sessionId: SESSION_ID,
+      storage: storageFixture(),
+      randomUUID: uuidSource(),
+      negotiationTimeoutMs: 20,
+      reconnectBackoffMs: [10],
+      getUserMedia: async () => await new Promise<MediaStream>(() => undefined),
+      ...timers,
+      client: {
+        beginSessionRealtime: async (_workspaceId, _sessionId, request) => {
+          current = mode({
+            operationId: request.operationId,
+            browserInstanceId: request.browserInstanceId,
+          });
+          return { mode: current, replay: false };
+        },
+        negotiateCodexRealtimeWebrtc: async () => {
+          throw new Error("provider negotiation must not start without a microphone");
+        },
+        activateCodexRealtimeConnection: async () => {
+          throw new Error("activation must not start without a microphone");
+        },
+        heartbeatSessionRealtime: async () => ({ mode: current, replay: false }),
+        syncSessionRealtimeLedger: async () => ({ accepted: [], outbound: [] }),
+        endSessionRealtime: async () => ({
+          mode: mode({
+            ...current,
+            state: "ended",
+            version: current.version + 1,
+            endedAt: "2026-07-29T07:01:00.000Z",
+            endReason: "user_stop",
+          }),
+          replay: false,
+        }),
+      },
+    });
+
+    const starting = controller.start();
+    await eventually(() => timers.timeoutDelays().includes(20), "startup timeout was not armed");
+    timers.runTimeout(20);
+    await expect(starting).rejects.toThrow(
+      "Microphone did not become available before voice startup timed out",
+    );
+    expect(controller.snapshot()).toMatchObject({
+      status: "recovering",
+      microphone: "acquisition_failed",
+      reconnectAttempt: 0,
+      diagnostic: { kind: "device_failure", recoverable: true },
+      error: "Microphone did not become available before voice startup timed out",
+    });
+    expect(timers.timeoutDelays()).not.toContain(10);
+    await controller.stop();
+  });
+
   test("aborts a data channel that misses the 20-second open deadline and fences late open", async () => {
     const browser = browserFixture({ initialEventsReadyState: "connecting" });
     const timers = timerFixture();

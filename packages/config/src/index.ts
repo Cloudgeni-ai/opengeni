@@ -29,15 +29,15 @@ import {
   CODEX_PROVIDER_ID,
 } from "@opengeni/codex/constants";
 import {
-  XAI_SUBSCRIPTION_FALLBACK_MODEL_SLUGS,
+  XAI_SUBSCRIPTION_MODEL_SLUGS,
   XAI_SUBSCRIPTION_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
   XAI_SUBSCRIPTION_MODEL_CONTEXT_WINDOW_TOKENS,
   XAI_SUBSCRIPTION_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
   XAI_SUBSCRIPTION_MODEL_ID_PREFIX,
   XAI_SUBSCRIPTION_PROVIDER_ID,
   XAI_SUBSCRIPTION_PROXY_BASE_URL,
-  type XaiSubscriptionModelMetadata,
 } from "@opengeni/xai-subscription";
+export { XAI_SUBSCRIPTION_MODEL_ID_PREFIX } from "@opengeni/xai-subscription";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 
@@ -486,10 +486,12 @@ const SettingsSchema = z.object({
     .default(24 * 60 * 60),
   voiceInputFfmpegPath: z.string().trim().min(1).max(1024).default("ffmpeg"),
   // Preferred provider order (comma-separated ids). First configured+ready wins.
-  // Codex subscription STT is preferred by default when subscription routing is
-  // enabled; operators can put openai/azure-openai first explicitly.
-  // Supported: openai, azure-openai, codex-subscription.
-  voiceInputProviderOrder: z.string().default("codex-subscription,openai,azure-openai"),
+  // Connected subscription STT is preferred by default; operators can put
+  // openai/azure-openai first explicitly.
+  // Supported: supergrok-subscription, codex-subscription, openai, azure-openai.
+  voiceInputProviderOrder: z
+    .string()
+    .default("supergrok-subscription,codex-subscription,openai,azure-openai"),
   // OpenAI public /v1/audio/transcriptions path. Reuses OPENGENI_OPENAI_API_KEY
   // when voiceInputOpenaiApiKey is unset. Default model is gpt-transcribe.
   voiceInputOpenaiEnabled: EnvBoolean.default(true),
@@ -1057,7 +1059,11 @@ export type Settings = z.infer<typeof SettingsSchema>;
 export type McpServerConfig = Settings["mcpServers"][number];
 
 /** Declarative voice-input transcription provider ids. */
-export type VoiceInputProviderId = "openai" | "azure-openai" | "codex-subscription";
+export type VoiceInputProviderId =
+  | "openai"
+  | "azure-openai"
+  | "codex-subscription"
+  | "supergrok-subscription";
 
 export type VoiceInputProviderConfig =
   | {
@@ -1079,6 +1085,11 @@ export type VoiceInputProviderConfig =
   | {
       id: "codex-subscription";
       kind: "codex-subscription";
+      experimental: true;
+    }
+  | {
+      id: "supergrok-subscription";
+      kind: "supergrok-subscription";
       experimental: true;
     };
 
@@ -1116,7 +1127,10 @@ export function resolveVoiceInputProviderRegistry(settings: Settings): VoiceInpu
     .map((part) => part.trim())
     .filter(
       (part): part is VoiceInputProviderId =>
-        part === "openai" || part === "azure-openai" || part === "codex-subscription",
+        part === "openai" ||
+        part === "azure-openai" ||
+        part === "codex-subscription" ||
+        part === "supergrok-subscription",
     );
   const seen = new Set<VoiceInputProviderId>();
   const providers: VoiceInputProviderConfig[] = [];
@@ -1204,6 +1218,15 @@ export function resolveVoiceInputProviderRegistry(settings: Settings): VoiceInpu
         kind: "codex-subscription",
         experimental: true,
       });
+      continue;
+    }
+    if (id === "supergrok-subscription") {
+      if (!settings.supergrokSubscriptionEnabled) continue;
+      providers.push({
+        id: "supergrok-subscription",
+        kind: "supergrok-subscription",
+        experimental: true,
+      });
     }
   }
   return providers;
@@ -1212,7 +1235,8 @@ export function resolveVoiceInputProviderRegistry(settings: Settings): VoiceInpu
 /** True when the deployment has at least one supported (non-experimental) provider. */
 export function voiceInputDeploymentConfigured(settings: Settings): boolean {
   return resolveVoiceInputProviderRegistry(settings).some(
-    (provider) => provider.kind !== "codex-subscription",
+    (provider) =>
+      provider.kind !== "codex-subscription" && provider.kind !== "supergrok-subscription",
   );
 }
 
@@ -1604,6 +1628,7 @@ export const VERCEL_AI_GATEWAY_CONNECTION_DOMAIN = "ai-gateway.vercel.sh" as con
 export const VERCEL_AI_GATEWAY_CONNECTION_ROLE = "vercel_ai_gateway" as const;
 
 export const CODEX_REALTIME_MODEL_ID = "gpt-live-1-boulder-alpha" as const;
+export const SUPERGROK_REALTIME_MODEL_ID = "supergrok/grok-voice-think-fast-2.0" as const;
 export const OPENGENI_REALTIME_MODEL_ID_PREFIX = "opengeni-gateway/" as const;
 export const WORKSPACE_REALTIME_MODEL_ID_PREFIX = "workspace-gateway/" as const;
 
@@ -2694,12 +2719,17 @@ const GPT56_FAST_BILLING_MULTIPLIER_BPS = 20_000;
 /**
  * Product display label for catalog/picker UI.
  * Same string for OpenAI and Codex copies of a slug (`gpt-5.6-luna` and
- * `codex/gpt-5.6-luna` → `GPT-5.6 Luna`). Non-gpt ids pass through unchanged.
+ * `codex/gpt-5.6-luna` → `GPT-5.6 Luna`). Curated Grok slugs receive the same
+ * product casing; other ids pass through unchanged.
  */
 export function productLabelForModelId(modelId: string): string {
   const slug = modelId.startsWith(CODEX_MODEL_ID_PREFIX)
     ? modelId.slice(CODEX_MODEL_ID_PREFIX.length)
     : modelId;
+  const grokMatch = /^grok-(\d+(?:\.\d+)?)$/i.exec(slug);
+  if (grokMatch) {
+    return `Grok ${grokMatch[1]}`;
+  }
   const match = /^(gpt-\d+(?:\.\d+)?)(?:-(.+))?$/i.exec(slug);
   if (!match) {
     return slug;
@@ -2718,14 +2748,16 @@ export function productLabelForModelId(modelId: string): string {
 }
 
 /**
- * Curated compact product labels for dense UI. Only known GPT family slugs;
- * everything else returns null so callers fall back to the full `label`.
+ * Curated compact product labels for dense UI. Unknown model slugs return null
+ * so callers fall back to the full `label`.
  */
 export function productShortLabelForModelId(modelId: string): string | null {
   const slug = modelId.startsWith(CODEX_MODEL_ID_PREFIX)
     ? modelId.slice(CODEX_MODEL_ID_PREFIX.length)
     : modelId;
   switch (slug) {
+    case "grok-4.6":
+      return "4.6";
     case "gpt-5.6-sol":
       return "5.6 Sol";
     case "gpt-5.6-terra":
@@ -2804,7 +2836,7 @@ export function isDirectOpenAiApiBaseUrl(baseUrl: string | undefined): boolean {
 
 /**
  * Map OpenGeni latency mode to the provider `service_tier` wire value.
- * Azure and Codex ChatGPT accept `priority`; OpenAI API accepts `fast` (alias of priority).
+ * Azure, Codex ChatGPT, and xAI accept `priority`; OpenAI API accepts `fast`.
  * Standard omits the field.
  */
 export function serviceTierForLatencyMode(
@@ -2814,7 +2846,11 @@ export function serviceTierForLatencyMode(
   if (latencyMode === "standard") {
     return undefined;
   }
-  if (providerId === "azure" || providerId === CODEX_PROVIDER_ID) {
+  if (
+    providerId === "azure" ||
+    providerId === CODEX_PROVIDER_ID ||
+    providerId === XAI_SUBSCRIPTION_PROVIDER_ID
+  ) {
     return "priority";
   }
   return "fast";
@@ -3092,51 +3128,47 @@ export function withCodexCatalogProvider(settings: Settings): Settings {
 }
 
 /**
- * Static SuperGrok product catalogue plus optional live `/models-v2` limits.
+ * Static SuperGrok product catalogue, matching the Codex subscription seam.
  * The overlay never contains a concrete account id or bearer; selection and
  * per-turn credential freeze remain worker/DB responsibilities.
  */
-export function withXaiSubscriptionCatalogProvider(
-  settings: Settings,
-  liveModels: readonly XaiSubscriptionModelMetadata[] = [],
-): Settings {
+export function withXaiSubscriptionCatalogProvider(settings: Settings): Settings {
   const providers = parseModelProvidersJson(settings.modelProvidersJson);
   if (providers.some((provider) => provider.id === XAI_SUBSCRIPTION_PROVIDER_ID)) {
     return settings;
   }
-  const liveBySlug = new Map(liveModels.map((model) => [model.slug, model]));
-  const slugs = uniqueValues([
-    ...XAI_SUBSCRIPTION_FALLBACK_MODEL_SLUGS,
-    ...liveModels.filter((model) => model.apiBackend === "responses").map((model) => model.slug),
-  ]);
   const provider: RegistryProvider = {
     kind: "xai-subscription",
     id: XAI_SUBSCRIPTION_PROVIDER_ID,
     label: "SuperGrok (xAI subscription)",
     api: "responses",
     baseUrl: XAI_SUBSCRIPTION_PROXY_BASE_URL,
-    models: slugs.map((slug) => {
-      const live = liveBySlug.get(slug);
+    models: XAI_SUBSCRIPTION_MODEL_SLUGS.map((slug) => {
       const capabilities = legacyModelCapabilities(settings, {
         reasoningEffort: true,
         hostedWebSearch: true,
       });
+      capabilities.reasoning.efforts = ["low", "medium", "high", "xhigh"];
+      capabilities.reasoning.defaultEffort = "high";
+      capabilities.latencyModes = [
+        { id: "standard", upstream: "supported", runnable: true },
+        { id: "fast", upstream: "supported", runnable: true },
+      ];
       capabilities.hostedTools.xSearch = { upstream: "supported", runnable: true };
       capabilities.hostedTools.imageGeneration = { upstream: "supported", runnable: true };
       return {
         id: `${XAI_SUBSCRIPTION_MODEL_ID_PREFIX}${slug}`,
         upstreamModelId: slug,
-        label: live?.name ?? productLabelForModelId(slug),
+        label: productLabelForModelId(slug),
+        ...(productShortLabelForModelId(slug)
+          ? { shortLabel: productShortLabelForModelId(slug)! }
+          : {}),
         reasoningEffort: true,
         hostedWebSearch: true,
         capabilities,
-        contextWindowTokens:
-          live?.contextWindowTokens ?? XAI_SUBSCRIPTION_MODEL_CONTEXT_WINDOW_TOKENS,
-        effectiveContextWindowTokens:
-          live?.effectiveContextWindowTokens ??
-          XAI_SUBSCRIPTION_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
-        autoCompactTokenLimit:
-          live?.autoCompactTokenLimit ?? XAI_SUBSCRIPTION_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
+        contextWindowTokens: XAI_SUBSCRIPTION_MODEL_CONTEXT_WINDOW_TOKENS,
+        effectiveContextWindowTokens: XAI_SUBSCRIPTION_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
+        autoCompactTokenLimit: XAI_SUBSCRIPTION_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
         toolOutputTruncationTokens: settings.modelToolOutputTruncationTokens,
       };
     }),
