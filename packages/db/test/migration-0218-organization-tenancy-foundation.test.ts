@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,6 +19,12 @@ import {
 const migrationPath = join(
   dirname(fileURLToPath(import.meta.url)),
   "../drizzle/0218_organization_tenancy_foundation.sql",
+);
+const currentLedgerHasSessionVisibilityForkActivation = existsSync(
+  join(
+    dirname(fileURLToPath(import.meta.url)),
+    "../drizzle/0225_session_visibility_fork_activation.sql",
+  ),
 );
 const schemaPath = join(dirname(fileURLToPath(import.meta.url)), "../src/schema.ts");
 const tenancyTables = [
@@ -294,7 +301,7 @@ describe("migration 0218 organization tenancy foundation", () => {
         await shared!.admin`
           update sessions set visibility = 'user_private' where id = ${session.id}
         `,
-      "23514",
+      currentLedgerHasSessionVisibilityForkActivation ? "42501" : "23514",
     );
     await expectSqlState(
       async () =>
@@ -307,7 +314,7 @@ describe("migration 0218 organization tenancy foundation", () => {
             forked_by_organization_membership_id = ${membership!.id}
           where id = ${session.id}
         `,
-      "23514",
+      currentLedgerHasSessionVisibilityForkActivation ? "42501" : "23514",
     );
 
     await expectSqlState(
