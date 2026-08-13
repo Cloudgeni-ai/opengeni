@@ -59,6 +59,7 @@ function workerItem(overrides: Partial<WorkerItem>): WorkerItem {
     action: "spawn",
     prompt: "do something",
     workerSessionId: "sess-abc123",
+    failure: null,
     status: "failed",
     occurredAt: new Date(0).toISOString(),
     ...overrides,
@@ -810,6 +811,7 @@ function cancelledWorkerItem(overrides: Partial<WorkerItem> = {}): WorkerItem {
     action: "spawn",
     prompt: "do something",
     workerSessionId: null,
+    failure: null,
     status: "cancelled",
     occurredAt: new Date(0).toISOString(),
     ...overrides,
@@ -1007,13 +1009,21 @@ describe("WorkerRow — cancelled status (explicit)", () => {
   });
 
   test("failed spawn still shows 'Worker spawn failed' — cancelled fix does not regress failed", async () => {
-    const item = workerItem({ action: "spawn" });
+    const item = workerItem({
+      action: "spawn",
+      failure: {
+        code: "nested_agent_depth_exceeded",
+        message: "Nested-agent depth 4 exceeds effective limit 3.",
+      },
+    });
     const r = await renderComponent(<ActivityRail items={[item]} />);
     await flush();
 
     const text = r.container.textContent ?? "";
     expect(text.toLowerCase()).toContain("fail");
     expect(text).not.toContain("Worker interrupted");
+    expect(text).toContain("nested_agent_depth_exceeded");
+    expect(text).toContain("Nested-agent depth 4 exceeds effective limit 3.");
     await r.unmount();
   });
 });

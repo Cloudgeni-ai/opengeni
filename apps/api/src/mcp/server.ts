@@ -104,6 +104,7 @@ import {
 } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { AnySchema, ZodRawShapeCompat } from "@modelcontextprotocol/sdk/server/zod-compat.js";
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
+import { HTTPException } from "hono/http-exception";
 import * as z4 from "zod/v4";
 import {
   hasLiteralPermission,
@@ -116,6 +117,8 @@ import {
   requireLiveAgentAttemptAuthorization,
   requireSessionAuthorization,
   requireSessionAuthorizationListScope,
+  SessionAuthorizationDeniedError,
+  SessionAuthorizationUnavailableError,
   saveWorkspaceMemoryWithSlackPublication,
   searchCapabilityCatalogItems,
   type ResolvedSessionAuthorization,
@@ -222,6 +225,117 @@ export type McpServerOptions = {
   requestOrigin?: string | null;
   workspaceMemoryEnabled?: boolean | undefined;
 };
+
+const ORCHESTRATION_FAILURE_CODE_MAX_LENGTH = 128;
+const ORCHESTRATION_FAILURE_MESSAGE_MAX_UTF8_BYTES = 1_024;
+
+type OrchestrationToolName = "session_create" | "session_send_message";
+
+function boundedOrchestrationFailureMessage(value: string): string {
+  const normalized = value.replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
+  if (!normalized) return "OpenGeni could not complete the request.";
+  const encoded = new TextEncoder().encode(normalized);
+  if (encoded.byteLength <= ORCHESTRATION_FAILURE_MESSAGE_MAX_UTF8_BYTES) return normalized;
+  let end = ORCHESTRATION_FAILURE_MESSAGE_MAX_UTF8_BYTES;
+  while (end > 0 && (encoded[end]! & 0xc0) === 0x80) end -= 1;
+  return new TextDecoder().decode(encoded.slice(0, end)).trim();
+}
+
+function orchestrationFailureCode(tool: OrchestrationToolName, error: HTTPException): string {
+  const suffix =
+    error.status === 401
+      ? "unauthenticated"
+      : error.status === 403
+        ? "forbidden"
+        : error.status === 404
+          ? "not_found"
+          : error.status === 409
+            ? "conflict"
+            : error.status === 429
+              ? "limit_exceeded"
+              : error.status >= 500
+                ? "unavailable"
+                : "rejected";
+  return `${tool}_${suffix}`.slice(0, ORCHESTRATION_FAILURE_CODE_MAX_LENGTH);
+}
+
+function orchestrationFailureEnvelope(tool: OrchestrationToolName, error: unknown) {
+  if (error instanceof SessionSpawnDeniedError) {
+    const denial = sessionSpawnDenialEnvelope(error);
+    return {
+      error: {
+        ...denial.error,
+        message: boundedOrchestrationFailureMessage(denial.error.message),
+      },
+    };
+  }
+  if (error instanceof HTTPException) {
+    return {
+      error: {
+        code: orchestrationFailureCode(tool, error),
+        message:
+          error.status >= 500
+            ? "OpenGeni is temporarily unavailable — retry."
+            : boundedOrchestrationFailureMessage(error.message),
+      },
+    };
+  }
+  if (error instanceof SessionAuthorizationDeniedError) {
+    return {
+      error: {
+        code: `${tool}_not_found_or_denied`,
+        message: "Session not found or access denied.",
+      },
+    };
+  }
+  if (error instanceof SessionAuthorizationUnavailableError) {
+    return {
+      error: {
+        code: `${tool}_authorization_unavailable`,
+        message: "Session authorization is temporarily unavailable — retry.",
+      },
+    };
+  }
+  const typedCode =
+    error && typeof error === "object" && "code" in error
+      ? (error as { code?: unknown }).code
+      : null;
+  const knownFailure =
+    typedCode === "CALLER_STALE"
+      ? ["caller_stale", "The calling session no longer owns this attempt."]
+      : typedCode === "CALLER_INTERRUPTED"
+        ? ["caller_interrupted", "The calling session was interrupted before delivery."]
+        : typedCode === "TARGET_NOT_VERTICAL"
+          ? ["target_not_vertical", "Agents may message only their parent or immediate children."]
+          : typedCode === "CONTROL_CHANGED"
+            ? ["conflict", "The target session control state changed; refresh and retry."]
+            : typedCode === "IDEMPOTENCY_KEY_REUSED"
+              ? ["idempotency_key_reused", "The idempotency key was reused with different input."]
+              : null;
+  if (knownFailure) {
+    return {
+      error: {
+        code: `${tool}_${knownFailure[0]}`,
+        message: knownFailure[1],
+      },
+    };
+  }
+  return {
+    error: {
+      code: `${tool}_failed`,
+      message: "OpenGeni could not complete the request.",
+    },
+  };
+}
+
+function orchestrationFailureResult(tool: OrchestrationToolName, error: unknown) {
+  const envelope = orchestrationFailureEnvelope(tool, error);
+  return {
+    content: [{ type: "text" as const, text: JSON.stringify(envelope, null, 2) }],
+    structuredContent: envelope,
+    isError: true as const,
+  };
+}
 
 type FirstPartyToolAuthorization = {
   sessionRequired?: true;
@@ -512,6 +626,15 @@ export function buildOpenGeniMcpServer(
             DEFAULT_FIRST_PARTY_MCP_TOOLS,
         )
       : null;
+  const nestedAgentDepth = grant.metadata?.["nestedAgentDepth"];
+  const effectiveMaxNestedAgentDepth = grant.metadata?.["effectiveMaxNestedAgentDepth"];
+  // Optional claims keep rolling deployments compatible. When both trusted
+  // facts are present, an exhausted session does not receive an unusable spawn
+  // tool; stale/legacy callers still meet the authoritative DB admission gate.
+  const sessionCreateVisible =
+    typeof nestedAgentDepth !== "number" ||
+    typeof effectiveMaxNestedAgentDepth !== "number" ||
+    nestedAgentDepth < effectiveMaxNestedAgentDepth;
   const server = new PolicyMcpServer(grant, sessionId, selectedTools);
   // set_session_title names the agent's OWN session — pure session metadata,
   // not a goal operation — so it is available on every session, gated only on
@@ -586,7 +709,15 @@ export function buildOpenGeniMcpServer(
   // never returned through a model-visible MCP tool. A user DEMOTES a specific
   // session by setting a narrower session.firstPartyMcpPermissions (capped to
   // the creator's own grant); operators still cap what any session can be given.
-  registerWorkspaceOrchestrationTools(server, deps, grant, can, sessionId, json);
+  registerWorkspaceOrchestrationTools(
+    server,
+    deps,
+    grant,
+    can,
+    sessionId,
+    sessionCreateVisible,
+    json,
+  );
   registerVariableSetTools(server, deps, grant, can, sessionId, json);
   if (sessionId !== null && can("workspace:read")) {
     registerCapabilityDiscoveryTools(server, deps, grant, sessionId, json);
@@ -3431,6 +3562,7 @@ function registerWorkspaceOrchestrationTools(
   grant: AccessGrant,
   can: (permission: Permission) => boolean,
   callerSessionId: string | null,
+  sessionCreateVisible: boolean,
   json: JsonResult,
 ): void {
   if (can("sessions:read")) {
@@ -3630,135 +3762,94 @@ function registerWorkspaceOrchestrationTools(
     );
   }
 
-  if (can("sessions:create")) {
+  if (can("sessions:create") && sessionCreateVisible) {
+    const sessionCreateInput = z4
+      .object({
+        initialMessage: z4.string().min(1),
+        instructions: z4.string().min(1).max(32768).optional(),
+        goal: z4.unknown().optional(),
+        resources: z4.array(z4.unknown()).optional(),
+        tools: z4.array(z4.unknown()).optional(),
+        mcpServers: z4.array(z4.unknown()).optional(),
+        variableSetId: z4.string().uuid().optional(),
+        environmentId: z4.string().uuid().optional(),
+        rigId: z4.string().uuid().optional(),
+        model: z4
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Model for the worker. Omit to inherit the exact calling turn's model, including its Codex subscription billing path.",
+          ),
+        reasoningEffort: z4
+          .string()
+          .optional()
+          .describe("Omit to inherit the exact calling turn's reasoning effort."),
+        latencyMode: z4
+          .enum(["standard", "priority", "fast"])
+          .optional()
+          .describe("Omit to inherit the exact calling turn's latency mode."),
+        sandboxBackend: z4.string().optional(),
+        // Model-only structural coupling: workingDir cannot exist without a
+        // targetSandboxId because both live inside one optional object. The
+        // handler maps this back to the stable public REST/SDK request fields.
+        machineTarget: z4
+          .object({
+            targetSandboxId: z4.string().uuid(),
+            workingDir: z4.string().optional(),
+          })
+          .strict()
+          .optional(),
+        metadata: z4.record(z4.string(), z4.unknown()).optional(),
+        idempotencyKey: z4.string().min(1).max(200).optional(),
+        firstPartyMcpPermissions: z4
+          .array(z4.string())
+          .optional()
+          .describe(
+            "Optional first-party capability set for the child. Omit to inherit this session's effective permissions. An explicit set may only narrow capabilities held by this session. A goal-bearing child requires goals:manage in the resulting set; creation fails rather than adding it implicitly.",
+          ),
+        firstPartyMcpTools: z4
+          .array(z4.enum(FIRST_PARTY_MCP_TOOL_NAMES))
+          .optional()
+          .describe(
+            "Exact model-visible first-party tool selection for the child. Omit to inherit this session's effective selection. To create a non-delegating leaf, provide a selection that omits session_create. This does not grant permissions.",
+          ),
+        // Omission is the ordinary safe sharing path. Literal "shared" remains
+        // available to advanced REST/SDK callers but is intentionally absent
+        // from the model surface because it turns compatibility drift into a
+        // deterministic failure instead of the omission path's safe own-box fallback.
+        sandbox: z4
+          .union([z4.literal("new"), z4.object({ groupId: z4.string().uuid() })])
+          .optional(),
+      })
+      .strict();
     server.registerTool(
       "session_create",
       {
         description:
-          "Spawn a new agent session (a worker) with an initial message and optional goal, resources (e.g. repositories from github_repositories_list), tools, and variable set attachment. VariableSet attachment happens at creation only — it cannot be added to a running session — and requires the variable-sets:use permission. When targetSandboxId names a machine, workingDir sets the working directory (cwd) the spawned session runs under on that machine.",
-        inputSchema: {
-          initialMessage: z4.string().min(1),
-          // Per-session agent persona/system instructions for the spawned worker
-          // (a per-agent-type prompt). Delivered system-level, composed AFTER the
-          // workspace persona; never shown in the worker's timeline. Trimmed,
-          // non-empty, max 32768 chars (re-validated by the contracts schema).
-          instructions: z4.string().min(1).max(32768).optional(),
-          goal: z4.unknown().optional(),
-          resources: z4.array(z4.unknown()).optional(),
-          tools: z4.array(z4.unknown()).optional(),
-          // Per-session third-party MCP servers. Credential header values are
-          // accepted only at create and never appear in responses/events.
-          mcpServers: z4.array(z4.unknown()).optional(),
-          variableSetId: z4.string().uuid().optional(),
-          // Deprecated alias of variableSetId (rename back-compat); declared so MCP
-          // validation doesn't strip it before createSessionForRequest maps it.
-          environmentId: z4.string().uuid().optional(),
-          // Bind the spawned session to a rig (freezes its active version);
-          // declared so MCP validation doesn't strip it before the domain reads it.
-          rigId: z4.string().uuid().optional(),
-          model: z4
-            .string()
-            .min(1)
-            .optional()
-            .describe(
-              "Model for the worker. Omit to inherit the exact calling turn's model, including its Codex subscription billing path.",
-            ),
-          reasoningEffort: z4
-            .string()
-            .optional()
-            .describe("Omit to inherit the exact calling turn's reasoning effort."),
-          latencyMode: z4
-            .enum(["standard", "priority", "fast"])
-            .optional()
-            .describe("Omit to inherit the exact calling turn's latency mode."),
-          sandboxBackend: z4.string().optional(),
-          // Create-time machine targeting: an enrolled sandbox id (from
-          // sandboxes_list) to run the spawned session on. Seeds the active-sandbox
-          // pointer at creation so the FIRST turn lands on the chosen machine
-          // (race-free). Ownership + liveness are validated in the domain via the
-          // same path as sandbox_swap; an unowned/offline/unknown target 422s.
-          targetSandboxId: z4.string().uuid().optional(),
-          // The working directory (cwd) for a machine target: the path/cwd base the
-          // spawned session's agent exec, terminal, and file dock run under. A
-          // workspace_root-relative subdir or an absolute machine path. Only valid
-          // WITH targetSandboxId (workingDir alone 422s); omitted ⇒ workspace_root.
-          workingDir: z4.string().optional(),
-          metadata: z4.record(z4.string(), z4.unknown()).optional(),
-          // Workspace-scoped CREATE idempotency key: a retried session_create with
-          // the same key returns the already-spawned worker instead of a duplicate.
-          idempotencyKey: z4.string().min(1).max(200).optional(),
-          // Per-session/agent descendant policy. Reductions need only create;
-          // increases are authorized server-side with workspace:admin.
-          maxNestedAgentDepth: z4.number().int().nonnegative().optional(),
-          // First-party MCP token permissions for the spawned session; every
-          // permission must be held by this grant (validated in the domain).
-          // A goal requires goals:manage in the resulting set; it is never
-          // silently added beyond the inherited or explicit authority.
-          firstPartyMcpPermissions: z4
-            .array(z4.string())
-            .optional()
-            .describe(
-              "Optional first-party capability set for the child. Omit to inherit this session's effective permissions. An explicit set may only narrow capabilities held by this session. A goal-bearing child requires goals:manage in the resulting set; creation fails rather than adding it implicitly.",
-            ),
-          firstPartyMcpTools: z4
-            .array(z4.enum(FIRST_PARTY_MCP_TOOL_NAMES))
-            .optional()
-            .describe(
-              "Exact model-visible first-party tool selection for the child. Omit to inherit this session's effective selection. This does not grant permissions.",
-            ),
-          // Shared-sandbox placement (addendum 05 §D). OMIT (default) to SHARE the
-          // creator's box — one filesystem/repo/desktop, N independent conversations;
-          // this is the SAFE DEFAULT. Pass "new" for a fresh isolated box (a different
-          // repo set or a genuinely separate filesystem), or {groupId} (a sibling
-          // session's `sandboxGroupId` from a prior session_create response) to join
-          // that specific sibling's box.
-          // Shared state must be compatible: a shared box requires the SAME image
-          // (rejected at the lease layer, B3) and — because the box's variable set is
-          // fixed at creation under the current mechanics — the SAME workspace
-          // VariableSet. The domain layer is env-aware: an inherited default with a
-          // different variableSetId silently gets its OWN box (the spawn still works),
-          // while an explicit shared/{groupId} with a mismatched variableSet 422s at
-          // create. When the VariableSet is eventually evicted from the box manifest
-          // (per-exec, like the git token), the env check dissolves on its own.
-          // The description below is what the AGENT sees (this comment is invisible to
-          // it); keep the two in sync.
-          sandbox: z4
-            .union([
-              z4.literal("shared"),
-              z4.literal("new"),
-              z4.object({ groupId: z4.string().uuid() }),
-            ])
-            .describe(
-              "Sandbox placement. OMIT (default) to SHARE the creator's box — one filesystem/repo/desktop, N independent conversations; this is the safe default. If the new session attaches a DIFFERENT variableSet than the creator's box, the platform automatically gives it its own box (the box variable set is fixed at creation), so omitting stays safe. Pass 'new' for a fresh isolated box (different repo set or a genuinely separate filesystem). Pass {groupId} to join a specific sibling's box — requires the same variableSet (a mismatch is rejected at create) and the same image (a conflicting image is rejected when the box warms).",
-            )
-            .optional(),
-          // The parent (manager) session is auto-inferred from the caller's
-          // worker-signed sessionId claim, so a spawned worker's completion wakes
-          // its manager automatically. There is deliberately no caller-supplied
-          // parent parameter: it would let a sessions:create grant target an
-          // arbitrary session's wake channel without sessions:control on it.
-        },
+          "Spawn a new agent session (a worker). Omit sandbox for the safe default: compatible children share the creator's box, while a different Variable Set or Rig gets its own compatible box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget. To create a non-delegating leaf, pass a narrowed firstPartyMcpTools list that omits session_create; do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
+        inputSchema: sessionCreateInput,
       },
       async (args) => {
         try {
           if (callerSessionId !== null) {
             await authorizeFirstPartySession(deps, grant, callerSessionId, "session.child.create");
           }
-          const result = await createSessionForRequestWithOutcome(
-            deps,
-            grant,
-            grant.workspaceId,
-            args,
-          );
-          return json(sessionCreateMutationReceipt(result, Boolean(args.idempotencyKey)));
+          const { machineTarget, ...request } = args;
+          const result = await createSessionForRequestWithOutcome(deps, grant, grant.workspaceId, {
+            ...request,
+            ...(machineTarget
+              ? {
+                  targetSandboxId: machineTarget.targetSandboxId,
+                  ...(machineTarget.workingDir !== undefined
+                    ? { workingDir: machineTarget.workingDir }
+                    : {}),
+                }
+              : {}),
+          });
+          return json(sessionCreateMutationReceipt(result, Boolean(request.idempotencyKey)));
         } catch (error) {
-          if (error instanceof SessionSpawnDeniedError) {
-            return {
-              ...json(sessionSpawnDenialEnvelope(error)),
-              isError: true,
-            };
-          }
-          throw error;
+          return orchestrationFailureResult("session_create", error);
         }
       },
     );
@@ -3780,81 +3871,87 @@ function registerWorkspaceOrchestrationTools(
         },
       },
       async ({ sessionId: targetSessionId, text, idempotencyKey, mcpCredentialUpdates }) => {
-        await authorizeFirstPartySession(deps, grant, targetSessionId, "session.append");
-        if (callerSessionId !== null) {
-          if ((mcpCredentialUpdates?.length ?? 0) > 0) {
-            throw new Error("internal session updates cannot change MCP credentials");
+        try {
+          await authorizeFirstPartySession(deps, grant, targetSessionId, "session.append");
+          if (callerSessionId !== null) {
+            if ((mcpCredentialUpdates?.length ?? 0) > 0) {
+              throw new HTTPException(422, {
+                message: "internal session updates cannot change MCP credentials",
+              });
+            }
+            const result = await sendAgentSessionMessage(
+              deps,
+              exactAgentCommandContext(grant, callerSessionId),
+              { targetSessionId, text, idempotencyKey },
+            );
+            return json(
+              mcpMutationReceipt({
+                operation: "session_send_message",
+                committed: true,
+                outcome: result.replay ? "replayed" : "accepted",
+                changed: !result.replay,
+                resource: {
+                  type: "session_system_update",
+                  id: result.updateId,
+                  state: result.effectiveState,
+                },
+                relatedResources: [{ type: "session", id: targetSessionId }],
+                timestamp: result.receipt.createdAt.toISOString(),
+                idempotency: { status: result.replay ? "replayed" : "applied" },
+                facts: {
+                  delivery: "coalesced_internal_update",
+                  wakeRequested: result.wakeRevision !== null,
+                  resumeRequired: result.effectiveState === "paused",
+                },
+                nextAction: {
+                  tool: "session_get",
+                  arguments: { sessionId: targetSessionId },
+                },
+              }),
+            );
           }
-          const result = await sendAgentSessionMessage(
+          const { accepted, turn, replay } = await acceptSessionUserMessageWithOutcome(
             deps,
-            exactAgentCommandContext(grant, callerSessionId),
-            { targetSessionId, text, idempotencyKey },
+            grant,
+            grant.workspaceId,
+            targetSessionId,
+            {
+              text,
+              delivery: "send",
+              origin: "operator",
+              clientEventId: idempotencyKey,
+              mcpCredentialUpdates: (mcpCredentialUpdates ?? []).map((update) =>
+                SessionMcpCredentialUpdateInput.parse(update),
+              ),
+            },
           );
           return json(
             mcpMutationReceipt({
               operation: "session_send_message",
               committed: true,
-              outcome: result.replay ? "replayed" : "accepted",
-              changed: !result.replay,
+              outcome: replay ? "replayed" : "accepted",
+              changed: !replay,
               resource: {
-                type: "session_system_update",
-                id: result.updateId,
-                state: result.effectiveState,
+                type: "session_turn",
+                id: turn.id,
+                version: turn.version,
+                state: turn.status,
               },
-              relatedResources: [{ type: "session", id: targetSessionId }],
-              timestamp: result.receipt.createdAt.toISOString(),
-              idempotency: { status: result.replay ? "replayed" : "applied" },
-              facts: {
-                delivery: "coalesced_internal_update",
-                wakeRequested: result.wakeRevision !== null,
-                resumeRequired: result.effectiveState === "paused",
-              },
+              relatedResources: [
+                { type: "session", id: targetSessionId },
+                { type: "session_event", id: accepted.id, state: accepted.type },
+              ],
+              timestamp: accepted.occurredAt,
+              idempotency: { status: replay ? "replayed" : "applied" },
               nextAction: {
                 tool: "session_get",
                 arguments: { sessionId: targetSessionId },
               },
             }),
           );
+        } catch (error) {
+          return orchestrationFailureResult("session_send_message", error);
         }
-        const { accepted, turn, replay } = await acceptSessionUserMessageWithOutcome(
-          deps,
-          grant,
-          grant.workspaceId,
-          targetSessionId,
-          {
-            text,
-            delivery: "send",
-            origin: "operator",
-            clientEventId: idempotencyKey,
-            mcpCredentialUpdates: (mcpCredentialUpdates ?? []).map((update) =>
-              SessionMcpCredentialUpdateInput.parse(update),
-            ),
-          },
-        );
-        return json(
-          mcpMutationReceipt({
-            operation: "session_send_message",
-            committed: true,
-            outcome: replay ? "replayed" : "accepted",
-            changed: !replay,
-            resource: {
-              type: "session_turn",
-              id: turn.id,
-              version: turn.version,
-              state: turn.status,
-            },
-            relatedResources: [
-              { type: "session", id: targetSessionId },
-              { type: "session_event", id: accepted.id, state: accepted.type },
-            ],
-            timestamp: accepted.occurredAt,
-            idempotency: { status: replay ? "replayed" : "applied" },
-            nextAction: {
-              tool: "session_get",
-              arguments: { sessionId: targetSessionId },
-            },
-          }),
-        );
       },
     );
 
