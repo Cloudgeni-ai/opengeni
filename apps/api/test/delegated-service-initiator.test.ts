@@ -12,14 +12,17 @@ import {
   createDb,
   getSession,
   listSessionTurns,
+  withRlsContext,
   type DbClient,
 } from "@opengeni/db";
+import * as dbSchema from "@opengeni/db/schema";
 import {
   acquireSharedTestDatabase,
   MemoryEventBus,
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
+import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { registerSessionRoutes } from "../src/routes/sessions";
 
@@ -134,10 +137,19 @@ describe("delegated service initiator API", () => {
       { method: "POST", headers: trustedHeaders, body: JSON.stringify(createBody) },
     );
     expect(createdResponse.status).toBe(202);
-    const created = (await createdResponse.json()) as { id: string };
-    expect((await listSessionTurns(client.db, grant.workspaceId!, created.id))[0]).toMatchObject({
-      turnInstructions: "organization profile revision 7",
-    });
+    const created = (await createdResponse.json()) as {
+      id: string;
+      initialTurnId: string | null;
+    };
+    expect(created.initialTurnId).not.toBeNull();
+    expect(
+      await getStoredTurnInstructions(
+        grant.accountId,
+        grant.workspaceId!,
+        created.id,
+        created.initialTurnId!,
+      ),
+    ).toBe("organization profile revision 7");
 
     const sendBody = {
       type: "user.message",
@@ -159,11 +171,15 @@ describe("delegated service initiator API", () => {
       { method: "POST", headers: trustedHeaders, body: JSON.stringify(sendBody) },
     );
     expect(acceptedSend.status).toBe(202);
+    const sent = (await acceptedSend.json()) as { id: string };
     expect(
-      (await listSessionTurns(client.db, grant.workspaceId!, created.id)).at(-1),
-    ).toMatchObject({
-      turnInstructions: "organization profile revision 8",
-    });
+      await getStoredTurnInstructionsForTriggerEvent(
+        grant.accountId,
+        grant.workspaceId!,
+        created.id,
+        sent.id,
+      ),
+    ).toBe("organization profile revision 8");
 
     const steerBody = {
       text: "Replace direction with the newest host context",
@@ -182,11 +198,15 @@ describe("delegated service initiator API", () => {
       { method: "POST", headers: trustedHeaders, body: JSON.stringify(steerBody) },
     );
     expect(acceptedSteer.status).toBe(202);
+    const steered = (await acceptedSteer.json()) as { turn: { id: string } };
     expect(
-      (await listSessionTurns(client.db, grant.workspaceId!, created.id)).at(-1),
-    ).toMatchObject({
-      turnInstructions: "organization profile revision 9",
-    });
+      await getStoredTurnInstructions(
+        grant.accountId,
+        grant.workspaceId!,
+        created.id,
+        steered.turn.id,
+      ),
+    ).toBe("organization profile revision 9");
 
     const selfAuthorizingToken = randomApiKeyToken();
     await createApiKey(client.db, {
@@ -412,6 +432,50 @@ describe("delegated service initiator API", () => {
     });
   });
 });
+
+async function getStoredTurnInstructions(
+  accountId: string,
+  workspaceId: string,
+  sessionId: string,
+  turnId: string,
+) {
+  return await withRlsContext(client.db, { accountId, workspaceId }, async (scopedDb) => {
+    const [turn] = await scopedDb
+      .select({ turnInstructions: dbSchema.sessionTurns.turnInstructions })
+      .from(dbSchema.sessionTurns)
+      .where(
+        and(
+          eq(dbSchema.sessionTurns.workspaceId, workspaceId),
+          eq(dbSchema.sessionTurns.sessionId, sessionId),
+          eq(dbSchema.sessionTurns.id, turnId),
+        ),
+      )
+      .limit(1);
+    return turn?.turnInstructions ?? null;
+  });
+}
+
+async function getStoredTurnInstructionsForTriggerEvent(
+  accountId: string,
+  workspaceId: string,
+  sessionId: string,
+  triggerEventId: string,
+) {
+  return await withRlsContext(client.db, { accountId, workspaceId }, async (scopedDb) => {
+    const [turn] = await scopedDb
+      .select({ turnInstructions: dbSchema.sessionTurns.turnInstructions })
+      .from(dbSchema.sessionTurns)
+      .where(
+        and(
+          eq(dbSchema.sessionTurns.workspaceId, workspaceId),
+          eq(dbSchema.sessionTurns.sessionId, sessionId),
+          eq(dbSchema.sessionTurns.triggerEventId, triggerEventId),
+        ),
+      )
+      .limit(1);
+    return turn?.turnInstructions ?? null;
+  });
+}
 
 async function sha256Hex(value: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
