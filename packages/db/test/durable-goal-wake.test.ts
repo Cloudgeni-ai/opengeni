@@ -432,16 +432,12 @@ describe("durable active-goal wake", () => {
     const ctx = await runningGoalFixture();
     await settleIdle(ctx);
     const legacyText = `legacy-${"🙂".repeat(3_000)}`;
-    await shared.admin`alter table session_goals disable trigger session_goal_revision_before_write_trigger`;
-    await shared.admin`alter table session_goals disable trigger session_goal_revision_after_write_trigger`;
-    try {
-      await shared.admin`
+    await shared.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`
         update session_goals set text = ${legacyText}
         where workspace_id = ${ctx.grant.workspaceId!} and session_id = ${ctx.session.id}`;
-    } finally {
-      await shared.admin`alter table session_goals enable trigger session_goal_revision_before_write_trigger`;
-      await shared.admin`alter table session_goals enable trigger session_goal_revision_after_write_trigger`;
-    }
+    });
 
     await setSessionGoalStatusWithEvent(client.db, ctx.grant.workspaceId!, ctx.session.id, {
       status: "paused",
