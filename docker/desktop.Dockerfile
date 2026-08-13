@@ -120,6 +120,7 @@ ARG TTYD_VERSION=1.7.7
 ARG NODE_MAJOR=20
 ARG TARGETARCH
 ARG OPENGENI_CHROMIUM_VERSION=151.0.7922.108-1~deb13u1
+ARG OPENGENI_DEBIAN_SECURITY_SNAPSHOT=20260809T010020Z
 
 # noninteractive + a fixed TZ on EVERY apt layer (mandatory — see header).
 ENV DEBIAN_FRONTEND=noninteractive
@@ -130,6 +131,9 @@ ENV LC_ALL=C.UTF-8
 # ---- Layer 1: headless tool layer (parity with docker/sandbox.Dockerfile) ----
 RUN set -eux; \
     export DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC; \
+    printf '%s\n' \
+      "deb [check-valid-until=no signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] https://snapshot.debian.org/archive/debian-security/${OPENGENI_DEBIAN_SECURITY_SNAPSHOT} trixie-security main" \
+      > /etc/apt/sources.list.d/opengeni-chromium-snapshot.list; \
     base_packages=" \
         bash ca-certificates coreutils curl gpg git jq openssh-client \
         fuse3 procps rclone ripgrep unzip wget python3 python3-pip python3-venv \
@@ -238,7 +242,8 @@ RUN set -eux; \
         for attempt in 1 2 3; do \
             rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/partial/*; \
             apt-get update && apt-get install -y --no-install-recommends \
-                "chromium=${OPENGENI_CHROMIUM_VERSION}" && break; \
+                "chromium=${OPENGENI_CHROMIUM_VERSION}" \
+                "chromium-common=${OPENGENI_CHROMIUM_VERSION}" && break; \
             if [ "$attempt" = "3" ]; then exit 1; fi; sleep $((attempt * 5)); \
         done; \
         BROWSER_BIN="${OPENGENI_BROWSER_BIN_ARM64}"; \
