@@ -295,16 +295,38 @@ const BrowserPublishInput = z
     advanceDefault: z.boolean().optional(),
   })
   .strict();
-const BrowserIdentityInput = z.discriminatedUnion("operation", [
-  z.object({ operation: z.literal("list"), includeArchived: z.boolean().optional() }).strict(),
-  z.object({ operation: z.literal("get"), identityId: z.string().uuid() }).strict(),
-  z.object({ operation: z.literal("create"), name: z.string().trim().min(1).max(200) }).strict(),
-  z.object({ operation: z.literal("revisions"), identityId: z.string().uuid() }).strict(),
-]);
+const BrowserIdentityInput = z
+  .discriminatedUnion("operation", [
+    z.object({ operation: z.literal("list"), includeArchived: z.boolean().optional() }).strict(),
+    z.object({ operation: z.literal("get"), identityId: z.string().uuid() }).strict(),
+    z.object({ operation: z.literal("create"), name: z.string().trim().min(1).max(200) }).strict(),
+    z
+      .object({
+        operation: z.literal("update"),
+        identityId: z.string().uuid(),
+        expectedVersion: z.number().int().positive(),
+        name: z.string().trim().min(1).max(200).optional(),
+        status: z.enum(["active", "archived"]).optional(),
+        defaultRevisionId: z.string().uuid().optional(),
+      })
+      .strict(),
+    z.object({ operation: z.literal("revisions"), identityId: z.string().uuid() }).strict(),
+  ])
+  .superRefine((value, context) => {
+    if (
+      value.operation === "update" &&
+      value.name === undefined &&
+      value.status === undefined &&
+      value.defaultRevisionId === undefined
+    ) {
+      context.addIssue({ code: "custom", message: "browser identity update is empty" });
+    }
+  });
 const BrowserIdentityOutput = z.discriminatedUnion("operation", [
   z.object({ operation: z.literal("list"), result: BrowserIdentityListResponse }).strict(),
   z.object({ operation: z.literal("get"), result: BrowserIdentity }).strict(),
   z.object({ operation: z.literal("create"), result: BrowserIdentityMutationResponse }).strict(),
+  z.object({ operation: z.literal("update"), result: BrowserIdentityMutationResponse }).strict(),
   z.object({ operation: z.literal("revisions"), result: BrowserRevisionListResponse }).strict(),
 ]);
 const BrowserLifecycleInput = z
@@ -760,7 +782,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "identity"],
     title: "Manage reusable browser identities",
     description:
-      "List, inspect, create, or list immutable revisions of reusable BrowserIdentities. Live browser state changes only through explicit browser_publish; identities are never mutated automatically.",
+      "List, inspect, create, update, or list immutable revisions of reusable BrowserIdentities. Update can rename, archive/restore, or select the default revision for browsers opened later; it never changes a live browser. Live browser state changes only through explicit browser_publish.",
     input: BrowserIdentityInput,
     output: BrowserIdentityOutput,
     readOnly: false,
@@ -784,6 +806,20 @@ export function createInteractionAttemptToolDefinitions(
         return {
           operation: value.operation,
           result: await input.transport.listBrowserRevisions(input.workspaceId, value.identityId),
+        };
+      }
+      if (value.operation === "update") {
+        return {
+          operation: value.operation,
+          result: await input.transport.updateBrowserIdentity(input.workspaceId, value.identityId, {
+            operationId: context.operationId,
+            expectedVersion: value.expectedVersion,
+            ...(value.name !== undefined ? { name: value.name } : {}),
+            ...(value.status !== undefined ? { status: value.status } : {}),
+            ...(value.defaultRevisionId !== undefined
+              ? { defaultRevisionId: value.defaultRevisionId }
+              : {}),
+          }),
         };
       }
       return {

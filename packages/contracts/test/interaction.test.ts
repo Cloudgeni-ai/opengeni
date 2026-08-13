@@ -32,6 +32,7 @@ import {
   InteractionError,
   PublishBrowserRevisionRequest,
   ReportAuthRunRequest,
+  UpdateBrowserIdentityRequest,
 } from "../src";
 
 const browserSessionId = "11111111-1111-4111-8111-111111111111";
@@ -730,6 +731,7 @@ describe("interaction contracts", () => {
       workspaceId: "99999999-9999-4999-8999-999999999999",
       name: "Work",
       status: "active",
+      version: 1,
       defaultRevisionId: revisionId,
       headGeneration: 4,
       revisionCount: 4,
@@ -738,6 +740,23 @@ describe("interaction contracts", () => {
       updatedAt: "2026-08-09T12:00:01.000Z",
     });
     expect(identity.name).toBe("Work");
+    expect(
+      UpdateBrowserIdentityRequest.parse({
+        operationId,
+        expectedVersion: identity.version,
+        defaultRevisionId: revisionId,
+      }),
+    ).toEqual({
+      operationId,
+      expectedVersion: 1,
+      defaultRevisionId: revisionId,
+    });
+    expect(
+      UpdateBrowserIdentityRequest.safeParse({
+        operationId,
+        expectedVersion: identity.version,
+      }).success,
+    ).toBe(false);
 
     const revision = BrowserRevision.parse({
       id: revisionId,

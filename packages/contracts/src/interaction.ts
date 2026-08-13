@@ -510,6 +510,7 @@ export const BrowserIdentity = z
     workspaceId: z.string().uuid(),
     name: z.string().trim().min(1).max(200),
     status: BrowserIdentityStatus,
+    version: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
     defaultRevisionId: z.string().uuid().nullable(),
     headGeneration: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
     revisionCount: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
@@ -1482,6 +1483,24 @@ export const CreateBrowserIdentityRequest = z
   })
   .strict();
 export type CreateBrowserIdentityRequest = z.infer<typeof CreateBrowserIdentityRequest>;
+
+export const UpdateBrowserIdentityRequest = z
+  .object({
+    operationId: z.string().uuid(),
+    expectedVersion: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    name: z.string().trim().min(1).max(200).optional(),
+    status: BrowserIdentityStatus.optional(),
+    defaultRevisionId: z.string().uuid().optional(),
+  })
+  .strict()
+  .refine(
+    (value) =>
+      value.name !== undefined ||
+      value.status !== undefined ||
+      value.defaultRevisionId !== undefined,
+    { message: "browser identity update is empty" },
+  );
+export type UpdateBrowserIdentityRequest = z.infer<typeof UpdateBrowserIdentityRequest>;
 
 export const BrowserIdentityMutationResponse = z
   .object({

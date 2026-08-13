@@ -338,6 +338,59 @@ describe("interaction attempt tools", () => {
     expect(result.structuredContent).toEqual(clipboard);
   });
 
+  test("updates a BrowserIdentity through the shared durable operation", async () => {
+    const identityId = randomUUID();
+    const operationId = randomUUID();
+    let received:
+      | { workspaceId: string; identityId: string; request: Record<string, unknown> }
+      | undefined;
+    const identity = {
+      id: identityId,
+      accountId,
+      workspaceId,
+      name: "Work",
+      status: "archived" as const,
+      version: 8,
+      defaultRevisionId: null,
+      headGeneration: 0,
+      revisionCount: 0,
+      createdBySubjectId: "user:test",
+      createdAt: now,
+      updatedAt: now,
+    };
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        updateBrowserIdentity: async (receivedWorkspaceId, receivedIdentityId, request) => {
+          received = {
+            workspaceId: receivedWorkspaceId,
+            identityId: receivedIdentityId,
+            request,
+          };
+          return { identity, operationId: request.operationId, replayed: false };
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_identity"],
+      permissions: ["sessions:control"],
+    });
+
+    const result = await definitions[0]!.execute(
+      { operation: "update", identityId, expectedVersion: 7, status: "archived" },
+      { operationId, caller: { kind: "model", subjectId: "model:test" } },
+    );
+
+    expect(received).toEqual({
+      workspaceId,
+      identityId,
+      request: { operationId, expectedVersion: 7, status: "archived" },
+    });
+    expect(result.structuredContent).toEqual({
+      operation: "update",
+      result: { identity, operationId, replayed: false },
+    });
+  });
+
   test("routes browser auth discovery through the canonical typed transport", async () => {
     let includeArchived: boolean | undefined;
     const definitions = createInteractionAttemptToolDefinitions({

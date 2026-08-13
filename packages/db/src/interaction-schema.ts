@@ -87,6 +87,7 @@ export const browserIdentities = pgTable(
     status: text("status", { enum: ["active", "archived"] })
       .notNull()
       .default("active"),
+    version: bigint("version", { mode: "number" }).notNull().default(1),
     defaultRevisionId: uuid("default_revision_id"),
     headGeneration: bigint("head_generation", { mode: "number" }).notNull().default(0),
     revisionCount: bigint("revision_count", { mode: "number" }).notNull().default(0),
@@ -118,9 +119,9 @@ export const browserIdentities = pgTable(
       sql`octet_length(${table.name}) between 1 and 200
         and ${table.name} = btrim(${table.name})
         and octet_length(${table.createdBySubjectId}) between 1 and 1024
+        and ${table.version} > 0
         and ${table.headGeneration} >= 0
         and ${table.revisionCount} >= 0
-        and ${table.headGeneration} <= ${table.revisionCount}
         and (
           (${table.headGeneration} = 0 and ${table.defaultRevisionId} is null)
           or (${table.headGeneration} > 0 and ${table.defaultRevisionId} is not null)
@@ -1435,6 +1436,7 @@ export const interactionResourceOperations = pgTable(
     workspaceId: uuid("workspace_id").notNull(),
     resourceKind: text("resource_kind", {
       enum: [
+        "browser_identity",
         "network_route",
         "site_auth_connection",
         "auth_run",

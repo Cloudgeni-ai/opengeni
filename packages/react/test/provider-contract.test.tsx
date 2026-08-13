@@ -40,7 +40,7 @@ describe("OpenGeniProvider deployment contract", () => {
             occurredAt: "2026-08-13T00:00:00.000Z",
           };
           await new Promise<void>((resolve) =>
-            options.signal?.addEventListener("abort", () => resolve(), { once: true }),
+            options?.signal?.addEventListener("abort", () => resolve(), { once: true }),
           );
         })();
       },

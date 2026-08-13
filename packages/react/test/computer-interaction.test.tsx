@@ -208,11 +208,7 @@ function rfbAttachment(targetId: string): ComputerSessionAttachment {
     stream: {
       kind: "direct_rfb",
       url: "wss://computer.example.test/v1/rfb",
-      protocols: [
-        "binary",
-        "opengeni.computer.rfb.v1",
-        "opengeni.auth.super-secret",
-      ],
+      protocols: ["binary", "opengeni.computer.rfb.v1", "opengeni.auth.super-secret"],
     },
     expiresAt: new Date(Date.now() + 120_000).toISOString(),
   };
@@ -702,6 +698,69 @@ describe("ComputerViewer", () => {
     expect(actions[0]).toMatchObject({
       action: { type: "semantic", locator: { kind: "ref", ref: "e1" }, action: "invoke" },
     });
+    await rendered.unmount();
+  });
+
+  test("verifies the native clipboard before issuing a paste keystroke", async () => {
+    const currentTarget = target();
+    const actions: Array<ComputerActionReceipt["state"] | string> = [];
+    let clipboardText: string | null = null;
+    const client = fakeClient({
+      listComputerSessions: async () => ({ revision: 1, sessions: [computerSession()] }),
+      getComputerSession: async () => computerSession(),
+      listComputerTargets: async () => ({
+        computerSessionId: COMPUTER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        targets: [currentTarget],
+      }),
+      observeComputerTarget: async () => observation(currentTarget),
+      attachComputerSession: async (_workspaceId, _computerSessionId, request) =>
+        attachment(request.targetId),
+      readComputerClipboard: async () => {
+        actions.push("read");
+        return {
+          computerSessionId: COMPUTER_SESSION_ID,
+          controllerGeneration: "controller-1",
+          text: clipboardText,
+          truncated: false,
+          observedAt: NOW,
+        };
+      },
+      actInComputer: async (_workspaceId, _computerSessionId, request) => {
+        const action = request.action;
+        if (action.type === "clipboard") {
+          actions.push(action.operation);
+          if (action.operation === "write" && action.text !== undefined) {
+            clipboardText = action.text;
+          }
+        }
+        return receipt(observation(currentTarget), request.operationId);
+      },
+    });
+    const rendered = await renderComponent(
+      <ComputerViewer
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        webSocketFactory={(url, protocols) =>
+          new FakeComputerSocket(url, protocols) as unknown as ComputerFrameWebSocket
+        }
+      />,
+    );
+    await flush(40);
+    const keyboard = rendered.container.querySelector<HTMLTextAreaElement>(
+      "textarea[aria-label='Computer keyboard input']",
+    );
+    expect(keyboard).not.toBeNull();
+    const paste = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(paste, "clipboardData", {
+      value: { getData: (type: string) => (type === "text/plain" ? "exact native paste" : "") },
+    });
+    await actRun(() => keyboard!.dispatchEvent(paste));
+    await flush(20);
+
+    expect(paste.defaultPrevented).toBe(true);
+    expect(actions).toEqual(["write", "read", "paste"]);
     await rendered.unmount();
   });
 });

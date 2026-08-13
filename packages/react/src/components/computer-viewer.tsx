@@ -1,5 +1,6 @@
 import type {
   ComputerAction,
+  ComputerClipboard,
   ComputerFrame,
   ComputerObservation,
   ComputerSession,
@@ -301,6 +302,26 @@ export function ComputerViewer({
     [computer, notifyError, perform, rfbStream],
   );
 
+  const pasteIntoRfb = useCallback(
+    (text: string): boolean => {
+      if (!rfbStream || computer.session?.capabilities?.clipboard !== true) return false;
+      // Keep paste on the canonical ComputerSession action path. RFB
+      // ClientCutText synchronization varies by server and can acknowledge a
+      // local paste without ever updating the remote graphical seat. These two
+      // awaited actions run against the exact selected ComputerSession/target.
+      // Read-after-write is the causal readiness barrier on X11: clipboard
+      // ownership is asynchronous, so a successful write response alone does
+      // not prove that the graphical seat can already serve the selection.
+      void (async () => {
+        await perform({ type: "clipboard", operation: "write", text }, null);
+        assertExactComputerClipboard(await computer.readClipboard(), text);
+        await perform({ type: "clipboard", operation: "paste" }, null);
+      })().catch((cause) => notifyError(cause, "Could not paste into the computer."));
+      return true;
+    },
+    [computer.session?.capabilities?.clipboard, notifyError, perform, rfbStream],
+  );
+
   if (!enabled) return null;
   if (registry.loading && liveSessions.length === 0) {
     return (
@@ -406,6 +427,8 @@ export function ComputerViewer({
                   interactive
                   showControlToggle={false}
                   webSocketProtocols={rfbStream.protocols}
+                  onPasteText={pasteIntoRfb}
+                  targetPlatform={computer.session?.platform ?? null}
                   className="h-full"
                 />
               </div>
@@ -746,7 +769,7 @@ function ComputerViewport(props: {
   backgroundActions: boolean;
   clipboardEnabled: boolean;
   onAction: (action: ComputerAction, frame: ComputerFrame | null) => Promise<void>;
-  onReadClipboard: () => Promise<{ text: string | null }>;
+  onReadClipboard: () => Promise<ComputerClipboard>;
   onReconnect: () => void;
   onError: (cause: unknown) => void;
 }) {
@@ -1075,6 +1098,7 @@ function ComputerViewport(props: {
     flushPendingClick();
     const text = event.clipboardData.getData("text/plain");
     enqueue({ type: "clipboard", operation: "write", text }, null, async () => {
+      assertExactComputerClipboard(await readClipboardRef.current(), text);
       await actionRef.current({ type: "clipboard", operation: "paste" }, null);
     });
   };
@@ -1161,6 +1185,12 @@ function ComputerViewport(props: {
       ) : null}
     </div>
   );
+}
+
+function assertExactComputerClipboard(clipboard: ComputerClipboard, expected: string): void {
+  if (clipboard.truncated || clipboard.text !== expected) {
+    throw new Error("Computer clipboard did not accept the exact pasted text");
+  }
 }
 
 function ComputerViewportFallback(props: {

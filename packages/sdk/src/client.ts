@@ -96,6 +96,7 @@ import {
   type SiteAuthConnectionMutationResponse,
   type StartAuthRunRequest,
   type UpdateNetworkRouteRequest,
+  type UpdateBrowserIdentityRequest,
   type UpdateSiteAuthConnectionRequest,
   type VerifyAuthRunRequest,
   type WorkspaceInteractionRevisionEvent,
@@ -1845,10 +1846,7 @@ export class OpenGeniClient {
    * Multiplex workspace control and interaction invalidations over one HTTP
    * connection while retaining an independent durable cursor for each domain.
    */
-  streamWorkspaceLiveEvents(
-    workspaceId: string,
-    options: WorkspaceLiveStreamOptions = {},
-  ) {
+  streamWorkspaceLiveEvents(workspaceId: string, options: WorkspaceLiveStreamOptions = {}) {
     return streamWorkspaceLiveEvents(this.workspaceLiveStreamTransport(workspaceId), options);
   }
 
@@ -2808,6 +2806,21 @@ export class OpenGeniClient {
     return await this.requestJson<BrowserIdentityMutationResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/browser-identities`,
+      request,
+      {},
+      options,
+    );
+  }
+
+  async updateBrowserIdentity(
+    workspaceId: string,
+    identityId: string,
+    request: UpdateBrowserIdentityRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserIdentityMutationResponse> {
+    return await this.requestJson<BrowserIdentityMutationResponse>(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/browser-identities/${encodeURIComponent(identityId)}`,
       request,
       {},
       options,

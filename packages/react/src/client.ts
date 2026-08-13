@@ -133,6 +133,7 @@ export type SessionClientLike = Pick<
   | "listBrowserIdentities"
   | "getBrowserIdentity"
   | "createBrowserIdentity"
+  | "updateBrowserIdentity"
   | "listBrowserRevisions"
   | "listBrowserSessions"
   | "getBrowserSession"
@@ -186,9 +187,7 @@ export type SessionClientLike = Pick<
   | "terminalPtyResize"
   | "terminalPtyClose"
 > &
-  Partial<
-    Pick<OpenGeniClient, "createVideoArtifactPlaybackSource" | "streamWorkspaceLiveEvents">
-  >;
+  Partial<Pick<OpenGeniClient, "createVideoArtifactPlaybackSource" | "streamWorkspaceLiveEvents">>;
 
 /**
  * Tenant-safe client surface required by the session-only React entry.
@@ -296,6 +295,7 @@ export type EmbeddedBrowserInteractionClientLike = Pick<
   | "listBrowserIdentities"
   | "getBrowserIdentity"
   | "createBrowserIdentity"
+  | "updateBrowserIdentity"
   | "listBrowserRevisions"
   | "listBrowserSessions"
   | "getBrowserSession"

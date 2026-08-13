@@ -41,6 +41,7 @@ import type {
   SiteAuthConnection,
   SiteAuthConnectionListResponse,
   StartAuthRunRequest,
+  UpdateBrowserIdentityRequest,
   VerifyAuthRunRequest,
 } from "@opengeni/contracts";
 import type { CodemodeCallOptions, CodemodeClient } from "./index";
@@ -224,6 +225,23 @@ export class CodemodeBrowserIdentityCollection {
       operation: "revisions";
       result: BrowserRevisionListResponse;
     }>(this.client, PATH.browserIdentity, { operation: "revisions", identityId }, callOptions);
+    return response.result;
+  }
+
+  async update(
+    identityId: string,
+    update: Omit<UpdateBrowserIdentityRequest, "operationId">,
+    callOptions: CodemodeCallOptions = {},
+  ): Promise<BrowserIdentityMutationResponse> {
+    const response = await callStructured<{
+      operation: "update";
+      result: BrowserIdentityMutationResponse;
+    }>(
+      this.client,
+      PATH.browserIdentity,
+      { operation: "update", identityId, ...update },
+      callOptions,
+    );
     return response.result;
   }
 }

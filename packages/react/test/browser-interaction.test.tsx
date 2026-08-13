@@ -165,6 +165,7 @@ function browserIdentity(): BrowserIdentity {
     workspaceId: WORKSPACE_ID,
     name: "Work",
     status: "active",
+    version: 1,
     defaultRevisionId: null,
     headGeneration: 0,
     revisionCount: 0,
@@ -942,7 +943,10 @@ describe("BrowserViewer", () => {
     expect(browserKey(event("Meta", { metaKey: true }))).toBeNull();
     expect(browserKey(event("Control", { ctrlKey: true }))).toBeNull();
     expect(browserKey(event("Alt", { altKey: true }))).toBeNull();
-    expect(browserKey(event("a", { metaKey: true }))).toBe("Meta+a");
+    expect(browserKey(event("a", { metaKey: true }), "mac")).toBe("Mod+a");
+    expect(browserKey(event("a", { ctrlKey: true }), "mac")).toBe("Control+a");
+    expect(browserKey(event("a", { ctrlKey: true }), "other")).toBe("Mod+a");
+    expect(browserKey(event("a", { metaKey: true }), "other")).toBe("Meta+a");
   });
 
   test("opens actionable runtime and page diagnostics without leaving the browser", async () => {
@@ -1546,6 +1550,7 @@ describe("BrowserViewer", () => {
           defaultRevisionId: revision.id,
           headGeneration: 1,
           revisionCount: 1,
+          version: identity.version + 1,
         };
         current = {
           ...current,
@@ -1641,6 +1646,7 @@ describe("BrowserViewer", () => {
             defaultRevisionId: revision.id,
             headGeneration: 1,
             revisionCount: 1,
+            version: emptyIdentity.version + 1,
           },
           revision,
           outcome: "saved_as_default",
@@ -1753,6 +1759,106 @@ describe("BrowserViewer", () => {
     });
     expect(createRequests[0]).not.toHaveProperty("baseRevisionId");
     expect(rendered.container.textContent).toMatch(/Work\s*·\s*v1/u);
+    await rendered.unmount();
+  });
+
+  test("selects a future default version and archives a profile without changing the live browser", async () => {
+    const secondRevisionId = "aaaaaaaa-9999-4999-8999-999999999999";
+    let identity: BrowserIdentity = {
+      ...browserIdentity(),
+      version: 3,
+      defaultRevisionId: BROWSER_REVISION_ID,
+      headGeneration: 1,
+      revisionCount: 2,
+    };
+    const current: BrowserSession = {
+      ...browserSession(),
+      identityId: identity.id,
+      baseRevisionId: secondRevisionId,
+      capabilities: {
+        ...browserSession().capabilities,
+        identityPublication: true,
+        liveFrames: false,
+      },
+    };
+    const first = { ...browserRevision(identity, current), ordinal: 1 };
+    const second = { ...first, id: secondRevisionId, ordinal: 2 };
+    const updates: unknown[] = [];
+    const currentTarget = target();
+    const client = fakeClient({
+      listBrowserSessions: async () => ({ revision: 1, sessions: [current] }),
+      listBrowserIdentities: async () => ({ revision: 1, identities: [identity] }),
+      listBrowserRevisions: async () => ({ identity, revisions: [first, second] }),
+      updateBrowserIdentity: async (_workspaceId, identityId, request) => {
+        updates.push({ identityId, ...request });
+        const defaultChanged =
+          request.defaultRevisionId !== undefined &&
+          request.defaultRevisionId !== identity.defaultRevisionId;
+        identity = {
+          ...identity,
+          ...(request.status !== undefined ? { status: request.status } : {}),
+          ...(request.defaultRevisionId !== undefined
+            ? { defaultRevisionId: request.defaultRevisionId }
+            : {}),
+          headGeneration: identity.headGeneration + (defaultChanged ? 1 : 0),
+          version: identity.version + 1,
+        };
+        return { identity, operationId: request.operationId, replayed: false };
+      },
+      getBrowserSession: async () => current,
+      listBrowserTargets: async () => ({
+        browserSessionId: current.id,
+        controllerGeneration: "controller-1",
+        targets: [currentTarget],
+      }),
+      observeBrowserTarget: async () => observation(current.id, currentTarget),
+    });
+    const notifications: string[] = [];
+    const rendered = await renderComponent(
+      <BrowserViewer
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        onNotify={(notification) => notifications.push(notification.message)}
+      />,
+    );
+    await flush(30);
+
+    const profileSummary = [...rendered.container.querySelectorAll("summary")].find((summary) =>
+      /Work\s*·\s*v2/u.test(summary.textContent ?? ""),
+    );
+    expect(profileSummary).toBeDefined();
+    await actRun(() => profileSummary!.click());
+    const chooseDefault = [...rendered.container.querySelectorAll("button")].find(
+      (button) =>
+        button.textContent?.includes("Version 2") && button.textContent?.includes("Use by default"),
+    );
+    expect(chooseDefault).toBeDefined();
+    await actRun(() => chooseDefault!.click());
+    await flush(20);
+
+    expect(updates[0]).toMatchObject({
+      identityId: identity.id,
+      expectedVersion: 3,
+      defaultRevisionId: secondRevisionId,
+    });
+    expect(current.baseRevisionId).toBe(secondRevisionId);
+    expect(notifications).toContain("Work version 2 will open by default in future browsers.");
+
+    const archive = [...rendered.container.querySelectorAll("button")].find(
+      (button) => button.textContent?.trim() === "Hide from new browsers",
+    );
+    expect(archive).toBeDefined();
+    await actRun(() => archive!.click());
+    await flush(20);
+    expect(updates[1]).toMatchObject({
+      identityId: identity.id,
+      expectedVersion: 4,
+      status: "archived",
+    });
+    expect(rendered.container.textContent).toContain(
+      "Hidden from new browsers. This already-open browser is unchanged.",
+    );
     await rendered.unmount();
   });
 

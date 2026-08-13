@@ -74,6 +74,7 @@ import type {
   UpdateRigRequest,
   ProposeRigChangeRequest,
   PublishBrowserRevisionRequest,
+  UpdateBrowserIdentityRequest,
   PublishBrowserRevisionResponse,
   ReportAuthRunRequest,
   ResolveInteractionInterventionRequest,
@@ -2057,6 +2058,40 @@ export class MockOpenGeniClient implements SessionClientLike {
     return { identity, operationId: request.operationId, replayed: false };
   }
 
+  async updateBrowserIdentity(
+    _workspaceId: string,
+    identityId: string,
+    request: UpdateBrowserIdentityRequest,
+  ): Promise<BrowserIdentityMutationResponse> {
+    const current = await this.getBrowserIdentity(WORKSPACE_ID, identityId);
+    if (current.version !== request.expectedVersion) throw new Error("BrowserIdentity changed");
+    if (
+      request.defaultRevisionId &&
+      !(this.browserIdentityRevisions.get(identityId) ?? []).some(
+        (revision) => revision.id === request.defaultRevisionId,
+      )
+    ) {
+      throw new Error("Browser revision not found");
+    }
+    const defaultChanged =
+      request.defaultRevisionId !== undefined &&
+      request.defaultRevisionId !== current.defaultRevisionId;
+    const identity: BrowserIdentity = {
+      ...current,
+      ...(request.name !== undefined ? { name: request.name } : {}),
+      ...(request.status !== undefined ? { status: request.status } : {}),
+      ...(request.defaultRevisionId !== undefined
+        ? { defaultRevisionId: request.defaultRevisionId }
+        : {}),
+      headGeneration: current.headGeneration + (defaultChanged ? 1 : 0),
+      version: current.version + 1,
+      updatedAt: new Date().toISOString(),
+    };
+    this.browserIdentities.set(identity.id, identity);
+    this.browserRevision += 1;
+    return { identity, operationId: request.operationId, replayed: false };
+  }
+
   async listBrowserRevisions(
     _workspaceId: string,
     identityId: string,
@@ -2391,6 +2426,7 @@ export class MockOpenGeniClient implements SessionClientLike {
       defaultRevisionId: advanceDefault ? revision.id : identity.defaultRevisionId,
       headGeneration: identity.headGeneration + (advanceDefault ? 1 : 0),
       revisionCount: identity.revisionCount + 1,
+      version: identity.version + 1,
       updatedAt: new Date().toISOString(),
     };
     this.browserIdentityRevisions.set(identity.id, [...prior, revision]);
@@ -3385,6 +3421,7 @@ function fabricateBrowserIdentity(overrides: Partial<BrowserIdentity> = {}): Bro
     workspaceId: WORKSPACE_ID,
     name: "Signed-in work",
     status: "active",
+    version: 1,
     defaultRevisionId: null,
     headGeneration: 0,
     revisionCount: 0,
