@@ -6876,6 +6876,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             ? { firstPartyPermissions: session.firstPartyMcpPermissions }
             : {}),
           firstPartyTools: session.firstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+          nestedAgentDepth: session.nestedAgentDepth,
+          effectiveMaxNestedAgentDepth: session.effectiveMaxNestedAgentDepth,
           attemptToolDefinitions: createFirstPartyInteractionAttemptToolDefinitions({
             settings: runSettings,
             scope: {
