@@ -340,6 +340,7 @@ export function createCodexRealtimeController(
   let recoveryTerminal = false;
   let mutationTail = Promise.resolve();
   let connectionTask: Promise<void> | null = null;
+  const acceptedDelegationItemIds = new Set<string>();
 
   const publish = (patch: Partial<CodexRealtimeControllerSnapshot>): void => {
     state = { ...state, ...patch };
@@ -914,6 +915,7 @@ export function createCodexRealtimeController(
           await syncForGeneration(targetGeneration, activated.mode.id, request),
         randomUUID,
         ...(options.getModelContext ? { getModelContext: options.getModelContext } : {}),
+        acceptedDelegationItemIds,
         onSnapshot: (nextBridge) => {
           if (active?.generation === targetGeneration) publish({ bridge: nextBridge });
         },

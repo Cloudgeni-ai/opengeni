@@ -35,6 +35,7 @@ export const CODEX_REALTIME_V3_PENDING_MAX_ENTRIES = 256;
 export const CODEX_REALTIME_V3_PENDING_MAX_BYTES = 16 * 1024 * 1024;
 const REALTIME_DELEGATION_TRANSCRIPT_MAX_BYTES = 65_536;
 const REALTIME_DELEGATION_INPUT_MAX_BYTES = 65_536;
+const REALTIME_MODEL_CONTEXT_MAX_CHARACTERS = 32_768;
 
 export type CodexRealtimeV3BridgeFatal = {
   code: "pending_overflow";
@@ -74,6 +75,8 @@ export type CodexRealtimeV3BridgeOptions = {
   randomUUID?: (() => string) | undefined;
   /** Model-visible application context captured once for each durable message-bearing entry. */
   getModelContext?: (() => string | undefined) | undefined;
+  /** Controller-lifetime delegation identities shared across provider connection rotations. */
+  acceptedDelegationItemIds?: Set<string> | undefined;
   /** The controller installs its activation FIFO first, then enables this listener synchronously. */
   listen?: boolean | undefined;
   onSnapshot?: ((snapshot: CodexRealtimeV3BridgeSnapshot) => void) | undefined;
@@ -127,12 +130,26 @@ export function createCodexRealtimeV3Bridge(
   const clientReceivedSequences = new Set<number>();
   const sentSequences = new Set<number>();
   const finalizedTurnIds = new Set<string>();
+  const acceptedDelegationItemIds = options.acceptedDelegationItemIds ?? new Set<string>();
   let transcriptSinceDelegation: FinalizedTranscript[] = [];
   let pendingDelegationUserTranscript: { delegationItemId: string; text: string } | null = null;
   const randomUUID = options.randomUUID ?? defaultRandomUUID;
   const currentModelContext = (): string | undefined => {
-    const context = options.getModelContext?.()?.trim();
-    return context ? context : undefined;
+    let context: string | undefined;
+    try {
+      context = options.getModelContext?.()?.trim();
+    } catch {
+      lastError =
+        "Realtime model context callback failed; the provider message continued without application context";
+      return undefined;
+    }
+    if (!context) return undefined;
+    if (context.length > REALTIME_MODEL_CONTEXT_MAX_CHARACTERS) {
+      lastError =
+        "Realtime model context exceeded the 32768-character limit; the provider message continued without application context";
+      return undefined;
+    }
+    return context;
   };
 
   const snapshot = (): CodexRealtimeV3BridgeSnapshot => ({
@@ -351,33 +368,39 @@ export function createCodexRealtimeV3Bridge(
       // These events are provider UI deltas. `turn.done` is the single
       // authoritative finalized transcript persisted below.
     } else if (event.type === "delegation.created") {
-      activeDelegationId = event.delegationItemId;
-      const transcript = delegationTranscript(transcriptSinceDelegation, event.inputTranscript);
-      const coveredTurnIds = transcriptSinceDelegation.map((entry) => entry.turnId);
-      const modelContext = currentModelContext();
-      durable = enqueue({
-        operationId: randomUUID(),
-        kind: "delegation_call",
-        providerEventId: event.providerEventId,
-        delegationItemId: event.delegationItemId,
-        text: renderRealtimeDelegationInput(event.inputTranscript, transcript),
-        payload: {
-          offsetMs: event.offsetMs,
-          inputTranscript: event.inputTranscript,
-          transcriptFenceTurnIds: coveredTurnIds,
-        },
-        ...(modelContext ? { modelContext } : {}),
-      });
-      if (durable) {
-        const alreadyFinalized = transcriptSinceDelegation.some(
-          (entry) =>
-            entry.role === "user" &&
-            normalizedTranscript(entry.text) === normalizedTranscript(event.inputTranscript),
-        );
-        pendingDelegationUserTranscript = alreadyFinalized
-          ? null
-          : { delegationItemId: event.delegationItemId, text: event.inputTranscript };
-        transcriptSinceDelegation = [];
+      if (acceptedDelegationItemIds.has(event.delegationItemId)) {
+        ignoredEventCount += 1;
+        lastIgnoredEventType = event.type;
+      } else {
+        const transcript = delegationTranscript(transcriptSinceDelegation, event.inputTranscript);
+        const coveredTurnIds = transcriptSinceDelegation.map((entry) => entry.turnId);
+        const modelContext = currentModelContext();
+        durable = enqueue({
+          operationId: randomUUID(),
+          kind: "delegation_call",
+          providerEventId: event.providerEventId,
+          delegationItemId: event.delegationItemId,
+          text: renderRealtimeDelegationInput(event.inputTranscript, transcript),
+          payload: {
+            offsetMs: event.offsetMs,
+            inputTranscript: event.inputTranscript,
+            transcriptFenceTurnIds: coveredTurnIds,
+          },
+          ...(modelContext ? { modelContext } : {}),
+        });
+        if (durable) {
+          acceptedDelegationItemIds.add(event.delegationItemId);
+          activeDelegationId = event.delegationItemId;
+          const alreadyFinalized = transcriptSinceDelegation.some(
+            (entry) =>
+              entry.role === "user" &&
+              normalizedTranscript(entry.text) === normalizedTranscript(event.inputTranscript),
+          );
+          pendingDelegationUserTranscript = alreadyFinalized
+            ? null
+            : { delegationItemId: event.delegationItemId, text: event.inputTranscript };
+          transcriptSinceDelegation = [];
+        }
       }
     } else if (event.type === "output_audio.delta") {
       speaking = true;

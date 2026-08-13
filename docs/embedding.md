@@ -71,7 +71,6 @@ substituted in. Exact-message application context does not enter this prefix.
 - **Workspace `agentInstructions`** (`Workspace.agentInstructions`, set at workspace create/update) — the white-label persona for _every_ session in a workspace. Use it for stable, tenant-wide branding/behavior. It may embed the `{{core}}` marker to place the non-bypassable CORE; if it omits the marker, CORE is appended.
 - **Per-session `instructions`** (`CreateSessionRequest.instructions`) — an optional, per-_session_ refinement layered after the workspace persona. Use it to deliver a **per-agent-type prompt** (reviewer vs. planner vs. fixer) when many personas share one workspace, without minting a workspace per persona. It is org-visible metadata (returned on the session record, exposed like `title`/`goal`), never a timeline event, and carries system-level authority.
 - **Per-message `modelContext`** (`CreateSessionRequest.modelContext`,
-For realtime voice, SDK/React hosts may provide `getModelContext`; OpenGeni captures its current value once when each durable delegation or finalized transcript entry is created, without restarting the controller when the callback changes.
   `SendMessageInput.modelContext`, and supported realtime inbound entries) —
   optional application context for one exact accepted message. OpenGeni stores
   it with the accepted turn/realtime entry, includes it as a separate
@@ -79,7 +78,12 @@ For realtime voice, SDK/React hosts may provide `getModelContext`; OpenGeni capt
   it through queueing, steering, retry, approval resume, worker recovery, and
   realtime handoff. Standard timeline rendering displays only the visible
   message text; full event/audit reads retain `modelContext`. It is **not**
-  secret, private, privileged, or system-level authority.
+  secret, private, privileged, or system-level authority. For realtime voice,
+  SDK/React hosts may provide `getModelContext`; OpenGeni captures its current
+  bounded value once when each durable delegation or finalized transcript entry
+  is created, without restarting the controller when the callback changes. A
+  failing or oversized callback omits only that entry's context and does not
+  discard or block the provider message.
 - **Preallocated session identity** (`CreateSessionRequest.requestedSessionId`) — an optional UUID an embedding host may persist in its own projection before calling OpenGeni. OpenGeni creates that exact session and rejects collisions with `409`, so the initial worker claim cannot outrun the host link. Pair retries with the same workspace-scoped `idempotencyKey`; a replay that changes the UUID is rejected. The UUID is identity/correlation only and grants no access.
 
 Use workspace `agentInstructions` for stable tenant-wide behavior and session

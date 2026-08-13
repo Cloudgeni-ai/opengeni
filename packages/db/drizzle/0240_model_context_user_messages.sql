@@ -31,6 +31,7 @@ $model_context_writer_drain_before_lock$;
 LOCK TABLE "sessions" IN ACCESS EXCLUSIVE MODE;
 LOCK TABLE "session_turns" IN ACCESS EXCLUSIVE MODE;
 LOCK TABLE "session_realtime_entries" IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE "slack_interactions" IN ACCESS EXCLUSIVE MODE;
 
 DO $model_context_writer_drain_after_lock$
 BEGIN
@@ -75,6 +76,47 @@ $model_context_live_turn_guard$;
 -- not be rewritten into later persistent history. Only queued turns cross the
 -- cutover into the new same-message semantics; live/resumable turns are rejected
 -- above so no attempt can straddle both representations.
+
+-- Slack safety restrictions formerly rode the same legacy per-turn prefix. Move
+-- them to durable session-level authority before that prefix is removed. Match
+-- the reservation identity as well as bound routes so a create-before-bind crash
+-- cannot strand an existing Slack session without its safety policy. Preserve any
+-- pre-existing session persona exactly, and fail rather than truncate it.
+DO $model_context_slack_session_policy$
+DECLARE
+  slack_policy CONSTANT text := $slack_policy$This session is an OpenGeni Slack task surface. Treat Slack message and thread context as task-local unless a separate explicit authorized user action says otherwise. Execute direct, safe, sufficiently specified requests immediately. Ask one concise clarifying question only when materially required information is missing or the requested action is risky, irreversible, or authorization-sensitive. Do not write Slack context to Documents, Knowledge, Memory, preferences, Workspace Charter, instructions, or policy unless a separate explicit authorized user action requests it. Never expose private reasoning, credentials, secrets, raw logs, or unbounded output. Keep user-visible output concise, bounded, and safe to send back to Slack.$slack_policy$;
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM "sessions" session_row
+    WHERE EXISTS (
+      SELECT 1
+      FROM "slack_interactions" interaction
+      WHERE interaction."session_reservation_id" = session_row."id"
+    )
+      AND NULLIF(btrim(session_row."instructions"), '') IS NOT NULL
+      AND position(slack_policy in session_row."instructions") = 0
+      AND char_length(session_row."instructions") + 2 + char_length(slack_policy) > 32768
+  )
+  THEN
+    RAISE EXCEPTION
+      'model-context activation cannot append Slack session safety instructions within the session instruction bound'
+      USING ERRCODE = '22001';
+  END IF;
+
+  UPDATE "sessions" session_row
+  SET "instructions" = CASE
+    WHEN NULLIF(btrim(session_row."instructions"), '') IS NULL THEN slack_policy
+    WHEN position(slack_policy in session_row."instructions") > 0 THEN session_row."instructions"
+    ELSE session_row."instructions" || E'\n\n' || slack_policy
+  END
+  WHERE EXISTS (
+    SELECT 1
+    FROM "slack_interactions" interaction
+    WHERE interaction."session_reservation_id" = session_row."id"
+  );
+END
+$model_context_slack_session_policy$;
 
 ALTER TABLE "sessions"
   RENAME COLUMN "initial_turn_instructions" TO "initial_model_context";

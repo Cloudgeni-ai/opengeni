@@ -74,6 +74,7 @@ function bridgeOptions(input: {
   sync(request: SyncSessionRealtimeLedgerRequest): Promise<SyncSessionRealtimeLedgerResponse>;
   randomUUID?: () => string;
   getModelContext?: () => string | undefined;
+  acceptedDelegationItemIds?: Set<string>;
   onFatal?: (fatal: { code: "pending_overflow"; message: string }) => void;
 }) {
   return {
@@ -86,6 +87,7 @@ function bridgeOptions(input: {
     sync: input.sync,
     randomUUID: input.randomUUID ?? uuidSource(),
     getModelContext: input.getModelContext,
+    acceptedDelegationItemIds: input.acceptedDelegationItemIds,
     onFatal: input.onFatal,
   };
 }
@@ -198,6 +200,108 @@ describe("Codex realtime V3 bridge", () => {
       modelContext: "second route context",
     });
     bridge.close();
+  });
+
+  test("continues durable messages without context when the host callback fails or exceeds its bound", async () => {
+    const requests: SyncSessionRealtimeLedgerRequest[] = [];
+    let mode: "throw" | "oversized" | "valid" = "throw";
+    const bridge = createCodexRealtimeV3Bridge(
+      bridgeOptions({
+        getModelContext: () => {
+          if (mode === "throw") throw new Error("host route unavailable");
+          return mode === "oversized" ? "x".repeat(32_769) : "current route context";
+        },
+        sync: async (request) => {
+          requests.push(request);
+          return { accepted: [], outbound: [] };
+        },
+      }),
+    );
+
+    await bridge.ingest(transcript(1, "callback failure still persists"));
+    expect(bridge.snapshot().lastError).toContain("callback failed");
+    mode = "oversized";
+    await bridge.ingest(transcript(2, "oversized context still persists"));
+    expect(bridge.snapshot().lastError).toContain("32768-character limit");
+    mode = "valid";
+    await bridge.ingest(transcript(3, "later valid context persists"));
+
+    const entries = requests.flatMap((request) => request.entries ?? []);
+    expect(entries).toEqual([
+      expect.objectContaining({ text: "callback failure still persists" }),
+      expect.objectContaining({ text: "oversized context still persists" }),
+      expect.objectContaining({
+        text: "later valid context persists",
+        modelContext: "current route context",
+      }),
+    ]);
+    expect(entries[0]).not.toHaveProperty("modelContext");
+    expect(entries[1]).not.toHaveProperty("modelContext");
+    bridge.close();
+  });
+
+  test("ignores duplicate delegation ids across bridge rotations without resampling host context", async () => {
+    const firstRequests: SyncSessionRealtimeLedgerRequest[] = [];
+    const secondRequests: SyncSessionRealtimeLedgerRequest[] = [];
+    const acceptedDelegationItemIds = new Set<string>();
+    let context = "first route context";
+    let contextReads = 0;
+    const getModelContext = () => {
+      contextReads += 1;
+      return context;
+    };
+    const delegation = (providerEventId: string) =>
+      JSON.stringify({
+        type: "delegation.created",
+        event_id: providerEventId,
+        item: {
+          id: "duplicate-delegation",
+          type: "delegation",
+          target: "client",
+          content: [{ type: "input_text", text: "delegate once" }],
+        },
+      });
+    const first = createCodexRealtimeV3Bridge(
+      bridgeOptions({
+        getModelContext,
+        acceptedDelegationItemIds,
+        sync: async (request) => {
+          firstRequests.push(request);
+          return { accepted: [], outbound: [] };
+        },
+      }),
+    );
+
+    await first.ingest(delegation("delegation-original"));
+    first.close();
+    context = "changed route context";
+    const second = createCodexRealtimeV3Bridge(
+      bridgeOptions({
+        getModelContext,
+        acceptedDelegationItemIds,
+        sync: async (request) => {
+          secondRequests.push(request);
+          return { accepted: [], outbound: [] };
+        },
+      }),
+    );
+    await second.ingest(delegation("delegation-duplicate"));
+
+    expect(firstRequests.flatMap((request) => request.entries ?? [])).toEqual([
+      expect.objectContaining({
+        kind: "delegation_call",
+        providerEventId: "delegation-original",
+        delegationItemId: "duplicate-delegation",
+        modelContext: "first route context",
+      }),
+    ]);
+    expect(secondRequests).toEqual([]);
+    expect(contextReads).toBe(1);
+    expect(second.snapshot()).toMatchObject({
+      ignoredEventCount: 1,
+      lastIgnoredEventType: "delegation.created",
+    });
+    second.close();
   });
 
   test("persists one finalized transcript per turn and ignores live transcript deltas", async () => {
