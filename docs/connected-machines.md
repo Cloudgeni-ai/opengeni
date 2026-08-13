@@ -156,14 +156,18 @@ sit above normal workloads (including 100 concurrent command requests). Linux
 puts the supervisor and each operation in separate cgroup-v2 leaves for accounting
 and systemd-oomd selection. Before moving itself, the supervisor stamps its own leaf
 with systemd-oomd's `user.oomd_avoid=1` marker; if that preference cannot be
-established, it stays in the unit cgroup. Cgroup placement alone does not change
+established, it stays in the unit cgroup. systemd-oomd honors the marker only when
+the monitored ancestor and candidate cgroup have the same owner, so host policy
+must preserve that ownership relationship. Cgroup placement alone does not change
 host-wide kernel OOM victim selection: the generated service requests a negative
 supervisor `OOMScoreAdjust`, startup reports the effective `/proc` value because an
-unprivileged user manager may clamp it, and command descendants are raised to
-`+500`. The generated systemd
+unprivileged user manager may clamp it, and a pre-exec hook raises commands to
+`+500` before user code can fork descendants. The generated systemd
 unit explicitly clears stale aggregate resource limits and enables accounting
 without a parent `MemoryHigh`; the default operation leaf has no memory maximum or
-throttle. At spawn, the agent stops the command's process group, moves its direct
+throttle. Each operation leaf sets `memory.oom.group=1`, so a memcg OOM terminates
+the complete operation instead of leaving sibling descendants with partial state.
+At spawn, the agent stops the command's process group, moves its direct
 roots, then repeatedly drains any same-group descendants still inherited in the
 supervisor leaf into the same operation leaf before resuming it. Correctness does
 not depend on synchronous stop-signal delivery: after a parent moves, future

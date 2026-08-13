@@ -264,12 +264,12 @@ impl OpCgroups {
 
     /// Places one exec's processes into a fresh `op-<n>` memory leaf and returns a
     /// teardown handle. `pids` is the requested child plus the #344 group anchor —
-    /// both are moved so the whole op shares one memory fate.
+    /// both are moved so the operation is accounted and selected as one unit.
     ///
-    /// Best-effort by contract: a failure to create the leaf, stamp a cap, or move
-    /// a PID (e.g. the process already exited) is logged once and the op keeps
-    /// running in the service cgroup. Returns a handle whenever the leaf exists (so
-    /// it is torn down), or `None` when the leaf could not be created.
+    /// Best-effort by contract: a failure to create the leaf, stamp a setting, or
+    /// move a PID (e.g. the process already exited) is logged once and the op keeps
+    /// running with the containment that succeeded. Returns a handle whenever the
+    /// leaf exists (so it is torn down), or `None` when the leaf could not be created.
     #[cfg(target_os = "linux")]
     pub(crate) fn place_op(&self, pids: &[u32]) -> Option<OpCgroupHandle> {
         let op_id = self.next_op.fetch_add(1, Ordering::Relaxed);
@@ -280,6 +280,15 @@ impl OpCgroups {
                 dir.display()
             ));
             return None;
+        }
+
+        // If this leaf is selected by a memcg OOM, kill the complete operation
+        // instead of leaving sibling descendants running with partial state.
+        if let Err(error) = std::fs::write(dir.join("memory.oom.group"), "1") {
+            self.note_fallback(format_args!(
+                "cannot set memory.oom.group on {}: {error}",
+                dir.display()
+            ));
         }
 
         // Optional per-op caps (default: unset). A failing cap is non-fatal: the
@@ -335,9 +344,9 @@ impl OpCgroups {
     #[cfg(target_os = "linux")]
     fn note_fallback(&self, reason: std::fmt::Arguments<'_>) {
         if !self.fallback_logged.swap(true, Ordering::Relaxed) {
-            tracing::info!(
+            tracing::warn!(
                 %reason,
-                "per-op OOM cgroup placement degraded; continuing to serve in the service cgroup (logged once)"
+                "per-op OOM containment partially degraded; continuing to serve (logged once)"
             );
         }
     }
@@ -468,9 +477,10 @@ pub fn establish_oom_isolation(config: OpCgroupConfig) -> Option<Arc<OpCgroups>>
     //    from systemd-oomd,
     //    move ourselves into it, then delegate the memory controller to sibling
     //    op leaves. `ManagedOOMPreference=avoid` lives as an xattr on the service
-    //    cgroup and is not inherited by this child. Stamping the actual leaf
-    //    before the move is load-bearing: without it systemd-oomd can select and
-    //    kill the supervisor while leaving command siblings alive.
+    //    cgroup and is not inherited by this child. Stamp the actual leaf before
+    //    the move. systemd-oomd honors it only when the monitored ancestor and the
+    //    candidate have the same cgroup owner; host policy must preserve that
+    //    ownership relationship.
     let supervisor_dir = service_dir.join(SUPERVISOR_LEAF);
     if let Err(error) = create_dir_idempotent(&supervisor_dir) {
         tracing::info!(%error, dir = %supervisor_dir.display(), "OOM cgroup isolation unavailable: cannot create the supervisor leaf; serving without per-op isolation");
@@ -594,8 +604,8 @@ fn create_dir_idempotent(dir: &Path) -> std::io::Result<()> {
 
 /// The `oom_score_adj` stamped on every exec child. A positive bias makes the
 /// kernel's GLOBAL OOM killer sacrifice a runaway child (and its descendants,
-/// which inherit the value on fork) before the supervisor, which stays at its
-/// default. Raising the value is unprivileged-legal; the mid-range 500 is a strong
+/// which inherit the value on fork) before the supervisor, whose effective bias
+/// is reported separately. Raising the value is unprivileged-legal; 500 is a strong
 /// bias without pinning the child as the unconditional first victim.
 #[cfg(target_os = "linux")]
 const EXEC_OOM_SCORE_ADJ: i32 = 500;
@@ -641,6 +651,15 @@ fn parse_oom_score_adj(value: &str) -> Option<i32> {
 #[cfg(target_os = "linux")]
 static OOM_SCORE_ADJ_WARNED: AtomicBool = AtomicBool::new(false);
 
+/// Installs an async-signal-safe pre-exec hook that raises the forked process's
+/// own OOM bias before user code can run or fork. The post-spawn write below is
+/// retained as a best-effort verification/fallback, but is no longer the only
+/// protection on hosts without delegated cgroups.
+#[cfg(target_os = "linux")]
+pub(crate) fn configure_exec_oom_score_adj_before_exec(command: &mut tokio::process::Command) {
+    opengeni_agent_linux_ffi::configure_oom_score_adj_before_exec(command);
+}
+
 /// Raises `/proc/<pid>/oom_score_adj` on a freshly-spawned exec child so the kernel
 /// OOM killer prefers it over the control supervisor (issue #345). Composes with
 /// the per-op cgroup: this biases the GLOBAL kernel OOM killer, the cgroup gives
@@ -651,7 +670,7 @@ pub(crate) fn raise_exec_oom_score_adj(pid: u32) {
     let path = format!("/proc/{pid}/oom_score_adj");
     if let Err(error) = std::fs::write(&path, EXEC_OOM_SCORE_ADJ.to_string()) {
         if !OOM_SCORE_ADJ_WARNED.swap(true, Ordering::Relaxed) {
-            tracing::info!(
+            tracing::warn!(
                 %error,
                 pid,
                 target = EXEC_OOM_SCORE_ADJ,

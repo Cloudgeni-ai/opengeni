@@ -1,0 +1,26 @@
+[package]
+name = "opengeni-agent-linux-ffi"
+description = "Linux-only leaf FFI for the OpenGeni agent's async-signal-safe pre-exec hardening."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# This leaf crate is the complete audited unsafe boundary for Linux pre-exec.
+# Every caller keeps the workspace-wide `unsafe_code = "forbid"` posture.
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+doc_markdown = "allow"
+
+[dependencies]
+tokio = { workspace = true, features = ["process"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
