@@ -4,10 +4,12 @@ import type { AgentTopologySession } from "@opengeni/sdk";
 import {
   AGENT_DIAGRAM_NODE_HEIGHT,
   AGENT_DIAGRAM_NODE_WIDTH,
+  agentHasMatchingDescendants,
   buildAgentTopology,
   filterAgentTopology,
   layoutAgentTopologyDiagram,
   limitAgentTopology,
+  mergeAgentTopologySessions,
   summarizeAgentTopology,
 } from "./agent-topology";
 
@@ -62,7 +64,10 @@ describe("agent topology", () => {
 
   test("active filtering retains the ancestor path", () => {
     const root = session("root");
-    const child = session("child", { parentSessionId: "root", status: "running" });
+    const child = session("child", {
+      parentSessionId: "root",
+      status: "running",
+    });
     const filtered = filterAgentTopology(buildAgentTopology([root, child]), "active", "");
     expect(filtered[0]?.session.id).toBe("root");
     expect(filtered[0]?.children[0]?.session.id).toBe("child");
@@ -74,6 +79,34 @@ describe("agent topology", () => {
     root.children.totalDescendants = 1;
     const filtered = filterAgentTopology(buildAgentTopology([root]), "active", "");
     expect(filtered.map((node) => node.session.id)).toEqual(["root"]);
+  });
+
+  test("uses server aggregates to decide which filtered branches should open automatically", () => {
+    const root = session("root");
+    root.children.directChildren = 4;
+    root.children.runningDescendants = 1;
+    root.children.pausedDescendants = 2;
+    expect(agentHasMatchingDescendants(root, "all")).toBe(true);
+    expect(agentHasMatchingDescendants(root, "active")).toBe(true);
+    expect(agentHasMatchingDescendants(root, "paused")).toBe(true);
+    expect(agentHasMatchingDescendants(root, "attention")).toBe(false);
+    expect(agentHasMatchingDescendants(root, "failed")).toBe(false);
+  });
+
+  test("keeps previously paged agents when the first page refreshes", () => {
+    const rootA = session("root-a");
+    const rootB = session("root-b");
+    const child = session("child", { parentSessionId: "root-a" });
+    const refreshedRootA = { ...rootA, title: "refreshed" };
+    expect(mergeAgentTopologySessions([rootA, rootB, child], [refreshedRootA], 200)).toEqual([
+      refreshedRootA,
+      rootB,
+      child,
+    ]);
+    expect(mergeAgentTopologySessions([rootA], [rootB, child], 2).map((item) => item.id)).toEqual([
+      "root-a",
+      "root-b",
+    ]);
   });
 
   test("summarizes paused work separately from active statuses", () => {

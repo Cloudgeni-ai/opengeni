@@ -89,6 +89,20 @@ export function summarizeAgentTopology(sessions: AgentTopologySession[]): AgentT
   return summary;
 }
 
+/** Merge a refreshed or paged compact response without dropping prior pages. */
+export function mergeAgentTopologySessions(
+  current: AgentTopologySession[],
+  incoming: AgentTopologySession[],
+  maxSessions: number,
+): AgentTopologySession[] {
+  const sessions = new Map(current.map((session) => [session.id, session]));
+  for (const session of incoming) {
+    if (sessions.size >= maxSessions && !sessions.has(session.id)) break;
+    sessions.set(session.id, session);
+  }
+  return [...sessions.values()];
+}
+
 function compareAgentSessions(left: AgentTopologySession, right: AgentTopologySession): number {
   const activeDelta = Number(isActiveAgent(right)) - Number(isActiveAgent(left));
   if (activeDelta !== 0) return activeDelta;
@@ -104,7 +118,12 @@ export function buildAgentTopology(sessions: AgentTopologySession[]): AgentTopol
   const unique = new Map(sessions.map((session) => [session.id, session]));
   const nodes = new Map<string, AgentTopologyNode>();
   for (const session of unique.values()) {
-    nodes.set(session.id, { session, children: [], detached: false, cycle: false });
+    nodes.set(session.id, {
+      session,
+      children: [],
+      detached: false,
+      cycle: false,
+    });
   }
 
   const roots: AgentTopologyNode[] = [];
@@ -179,6 +198,25 @@ export function agentMatchesFilter(
     (!isPausedAgent(session) && session.status === "failed") ||
     session.children.failedDescendants > 0
   );
+}
+
+/** Whether expanding this node can reveal a descendant selected by the current filter. */
+export function agentHasMatchingDescendants(
+  session: AgentTopologySession,
+  filter: AgentTopologyFilter,
+): boolean {
+  if (filter === "all") return session.children.directChildren > 0;
+  if (filter === "active") {
+    return (
+      session.children.runningDescendants +
+        session.children.queuedDescendants +
+        session.children.attentionDescendants >
+      0
+    );
+  }
+  if (filter === "attention") return session.children.attentionDescendants > 0;
+  if (filter === "paused") return session.children.pausedDescendants > 0;
+  return session.children.failedDescendants > 0;
 }
 
 /** Keep ancestors of matching nodes so filtered results retain their branch context. */
