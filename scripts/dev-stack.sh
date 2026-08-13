@@ -42,6 +42,20 @@ export OPENGENI_SANDBOX_DESKTOP_ENABLED
 export OPENGENI_SANDBOX_DESKTOP_INTERACTIVE
 export OPENGENI_COMPUTER_USE_ENABLED
 
+# Local development must exercise the same durable same-session ownership path
+# as managed deployments. The config-library defaults stay fail-closed, while
+# an explicit false remains authoritative for legacy-path regression tests.
+# Lazy provisioning keeps sandbox creation/resume off the first-model critical
+# path; the first actual sandbox operation establishes the box single-flight.
+if [ -z "${OPENGENI_SANDBOX_OWNERSHIP_ENABLED:-}" ]; then
+  OPENGENI_SANDBOX_OWNERSHIP_ENABLED=true
+fi
+if [ -z "${OPENGENI_SANDBOX_LAZY_PROVISION:-}" ]; then
+  OPENGENI_SANDBOX_LAZY_PROVISION=true
+fi
+export OPENGENI_SANDBOX_OWNERSHIP_ENABLED
+export OPENGENI_SANDBOX_LAZY_PROVISION
+
 # The Modal SDK natively supports MODAL_TOKEN_* and ~/.modal.toml, while the
 # deployment-facing OpenGeni config intentionally requires explicit credentials.
 # Bridge those standard local sources for this dev process only; never persist
@@ -179,14 +193,42 @@ reuse_runtime_ports=0
 if [ -f .env.runtime ] &&
   [ "$(sed -n 's/^COMPOSE_PROJECT_NAME=//p' .env.runtime | tail -1)" = "$COMPOSE_PROJECT_NAME" ] &&
   [ -n "$(docker compose ps -q 2>/dev/null)" ]; then
-  set -a
-  # shellcheck disable=SC1091
-  . ./.env.runtime
-  set +a
+  # Reuse only generated port assignments. Sourcing the whole runtime file
+  # resurrects stale derived URLs and silently overrides newer operator values
+  # from .env (notably remote-reachable Connected Machine endpoints).
+  for runtime_port_var in \
+    OPENGENI_POSTGRES_HOST_PORT \
+    OPENGENI_NATS_HOST_PORT \
+    OPENGENI_NATS_MONITOR_HOST_PORT \
+    OPENGENI_TEMPORAL_HOST_PORT \
+    OPENGENI_MINIO_HOST_PORT \
+    OPENGENI_MINIO_CONSOLE_HOST_PORT \
+    OPENGENI_API_PORT \
+    OPENGENI_WORKER_HTTP_PORT \
+    OPENGENI_TURN_WORKER_HTTP_PORT \
+    OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT \
+    OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT \
+    OPENGENI_WEB_PORT \
+    OPENGENI_RELAY_HOST_PORT; do
+    runtime_port_value="$(
+      sed -n "s/^${runtime_port_var}=//p" .env.runtime | tail -1
+    )"
+    if [ -n "$runtime_port_value" ]; then
+      printf -v "$runtime_port_var" '%s' "$runtime_port_value"
+      export "$runtime_port_var"
+    fi
+  done
   reuse_runtime_ports=1
 fi
 
 port_available() {
+  # `lsof` can block for tens of seconds on macOS when an unrelated filesystem
+  # mount is unhealthy. A loopback connect probe answers the question this
+  # startup path needs without walking process file tables or mounted volumes.
+  if command -v nc >/dev/null 2>&1; then
+    ! nc -z -w 1 127.0.0.1 "$1" >/dev/null 2>&1
+    return
+  fi
   if command -v lsof >/dev/null 2>&1; then
     ! lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1
     return
@@ -584,7 +626,19 @@ if [ "${OPENGENI_SANDBOX_SELFHOSTED_ENABLED:-false}" = "true" ] &&
       process.stdout.write(`${url.hostname}\t${port}\n`);
     '
   )
-  if [ "$relay_hostname" = "127.0.0.1" ] || [ "$relay_hostname" = "localhost" ]; then
+  if [ -n "${OPENGENI_RELAY_BIND:-}" ]; then
+    # An operator may advertise this development relay through a non-loopback
+    # interface (for example the host's Tailscale address) while binding the
+    # process to 0.0.0.0. Treat an explicit bind as ownership of the local relay
+    # instead of assuming every non-loopback URL belongs to an external service.
+    OPENGENI_RELAY_TOKEN_SECRET="${OPENGENI_SELFHOSTED_RELAY_TOKEN_SECRET:-${OPENGENI_STREAM_TOKEN_SECRET:-${OPENGENI_DELEGATION_SECRET:-}}}"
+    if [ -z "$OPENGENI_RELAY_TOKEN_SECRET" ]; then
+      echo "Connected-machine local relay requires OPENGENI_SELFHOSTED_RELAY_TOKEN_SECRET or OPENGENI_STREAM_TOKEN_SECRET." >&2
+      exit 1
+    fi
+    export OPENGENI_RELAY_BIND OPENGENI_RELAY_TOKEN_SECRET
+    start_local_relay=1
+  elif [ "$relay_hostname" = "127.0.0.1" ] || [ "$relay_hostname" = "localhost" ]; then
     OPENGENI_RELAY_BIND="127.0.0.1:${relay_port}"
     OPENGENI_RELAY_TOKEN_SECRET="${OPENGENI_SELFHOSTED_RELAY_TOKEN_SECRET:-${OPENGENI_STREAM_TOKEN_SECRET:-${OPENGENI_DELEGATION_SECRET:-}}}"
     if [ -z "$OPENGENI_RELAY_TOKEN_SECRET" ]; then
@@ -721,6 +775,8 @@ fi
   printf 'OPENGENI_DOCKER_NETWORK=%s\n' "${OPENGENI_DOCKER_NETWORK}"
   printf 'OPENGENI_DOCKER_IMAGE=%s\n' "${OPENGENI_DOCKER_IMAGE:-opengeni-sandbox:local}"
   printf 'OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED=%s\n' "${OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED:-false}"
+  printf 'OPENGENI_SANDBOX_OWNERSHIP_ENABLED=%s\n' "${OPENGENI_SANDBOX_OWNERSHIP_ENABLED}"
+  printf 'OPENGENI_SANDBOX_LAZY_PROVISION=%s\n' "${OPENGENI_SANDBOX_LAZY_PROVISION}"
   printf 'OPENGENI_POSTGRES_HOST_PORT=%s\n' "${OPENGENI_POSTGRES_HOST_PORT}"
   printf 'OPENGENI_NATS_HOST_PORT=%s\n' "${OPENGENI_NATS_HOST_PORT}"
   printf 'OPENGENI_NATS_MONITOR_HOST_PORT=%s\n' "${OPENGENI_NATS_MONITOR_HOST_PORT}"

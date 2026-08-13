@@ -85,7 +85,53 @@ export type TurnInputOptions = {
   materializeSerializedRunState?: (serialized: string) => Promise<string>;
   projectModelHistory?: ModelHistoryAttachmentProjector;
   loadActiveHistory?: typeof getActiveSessionHistoryItemsPaged;
+  /** Bounded critical-path timings; telemetry failures never affect preparation. */
+  onPreparationPhase?: (measurement: HistoryPreparationPhaseMeasurement) => void;
 };
+
+export type HistoryPreparationPhase =
+  | "system_update_load"
+  | "current_attachment_resolution"
+  | "durable_history_load"
+  | "sandbox_envelope_load"
+  | "canonical_projection"
+  | "provider_projection"
+  | "attachment_ref_projection"
+  | "screenshot_materialization"
+  | "model_attachment_projection"
+  | "runtime_input_assembly"
+  | "artifact_candidate_scan";
+
+export type HistoryPreparationPhaseMeasurement = {
+  phase: HistoryPreparationPhase;
+  outcome: "completed" | "failed";
+  durationSeconds: number;
+};
+
+async function measureHistoryPreparationPhase<T>(
+  options: Pick<TurnInputOptions, "onPreparationPhase">,
+  phase: HistoryPreparationPhase,
+  operation: () => T | Promise<T>,
+): Promise<T> {
+  const startedAt = performance.now();
+  let outcome: HistoryPreparationPhaseMeasurement["outcome"] = "completed";
+  try {
+    return await operation();
+  } catch (error) {
+    outcome = "failed";
+    throw error;
+  } finally {
+    try {
+      options.onPreparationPhase?.({
+        phase,
+        outcome,
+        durationSeconds: (performance.now() - startedAt) / 1_000,
+      });
+    } catch {
+      // Diagnostics must not change durable history or provider input.
+    }
+  }
+}
 
 export const MAX_INLINE_MODEL_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 
@@ -378,11 +424,16 @@ export async function turnInput(
   if (!trigger) {
     throw new Error("Missing trigger event");
   }
-  const updates = await listSessionSystemUpdatesForTurn(
-    db,
-    trigger.workspaceId,
-    trigger.sessionId,
-    options.turnId,
+  const updates = await measureHistoryPreparationPhase(
+    options,
+    "system_update_load",
+    async () =>
+      await listSessionSystemUpdatesForTurn(
+        db,
+        trigger.workspaceId,
+        trigger.sessionId,
+        options.turnId,
+      ),
   );
   if (updates.length > 0) {
     const historyItemIds = new Set(
@@ -413,10 +464,10 @@ export async function turnInput(
       throw new Error("user.message payload is missing text and annotations");
     }
     const resources = Array.isArray(payload.resources) ? (payload.resources as ResourceRef[]) : [];
-    const fileAttachments = await resolveUserMessageFileAttachments(
-      db,
-      trigger.workspaceId,
-      resources,
+    const fileAttachments = await measureHistoryPreparationPhase(
+      options,
+      "current_attachment_resolution",
+      async () => await resolveUserMessageFileAttachments(db, trigger.workspaceId, resources),
     );
     const attachmentContext = userMessageAttachmentsContext(fileAttachments);
     return await messageInput(
@@ -432,6 +483,7 @@ export async function turnInput(
       options.materializeModelHistory,
       options.projectModelHistory,
       options.loadActiveHistory,
+      options,
     );
   }
   if (trigger.type === "system.update.delivered") {
@@ -451,6 +503,7 @@ export async function turnInput(
       options.materializeModelHistory,
       options.projectModelHistory,
       options.loadActiveHistory,
+      options,
     );
   }
   if (trigger.type === "user.approvalDecision") {
@@ -536,46 +589,85 @@ async function messageInput(
   materializeModelHistory?: ModelHistoryAttachmentProjector,
   projectModelHistory?: ModelHistoryAttachmentProjector,
   loadActiveHistory: typeof getActiveSessionHistoryItemsPaged = getActiveSessionHistoryItemsPaged,
+  preparationOptions: Pick<TurnInputOptions, "onPreparationPhase"> = {},
 ): Promise<PreparedTurnInput> {
-  const stored = await loadActiveHistory(db, trigger.workspaceId, trigger.sessionId);
-  const envelope = await getSandboxSessionEnvelope(db, trigger.workspaceId, trigger.sessionId);
-  const canonicalView = projectRejectedProviderArtifacts(stored);
-  const canonicalProviderView = projectCanonicalHistory
-    ? await projectCanonicalHistory(canonicalView)
-    : canonicalView;
-  const providerView = projectHistoryForProvider(canonicalProviderView, providerApi);
-  const referencedHistory = withCurrentUserAttachmentRefs(providerView, currentAttachmentRefs);
-  const materializedHistory = materializeModelHistory
-    ? await materializeModelHistory(referencedHistory)
-    : referencedHistory;
-  const historyItems = projectModelHistory
-    ? await projectModelHistory(materializedHistory)
-    : materializedHistory;
-  const prepared = await runtime.prepareInput(agent, {
-    kind: "message",
-    ...(text ? { text } : {}),
-    ...(internalContext ? { internalContext } : {}),
-    historyItems: historyItems as any,
-    sandboxEnvelope: envelope,
-    ...(projectModelHistory ? { modelInputAlreadyProjected: true } : {}),
-  });
-  const preparedItems = Array.isArray(prepared.input)
-    ? new Set(prepared.input)
-    : new Set<unknown>();
+  const [stored, envelope] = await Promise.all([
+    measureHistoryPreparationPhase(preparationOptions, "durable_history_load", async () =>
+      loadActiveHistory(db, trigger.workspaceId, trigger.sessionId),
+    ),
+    measureHistoryPreparationPhase(preparationOptions, "sandbox_envelope_load", async () =>
+      getSandboxSessionEnvelope(db, trigger.workspaceId, trigger.sessionId),
+    ),
+  ]);
+  const canonicalView = await measureHistoryPreparationPhase(
+    preparationOptions,
+    "canonical_projection",
+    async () => {
+      const active = projectRejectedProviderArtifacts(stored);
+      return projectCanonicalHistory ? await projectCanonicalHistory(active) : active;
+    },
+  );
+  const providerView = await measureHistoryPreparationPhase(
+    preparationOptions,
+    "provider_projection",
+    () => projectHistoryForProvider(canonicalView, providerApi),
+  );
+  const referencedHistory = await measureHistoryPreparationPhase(
+    preparationOptions,
+    "attachment_ref_projection",
+    () => withCurrentUserAttachmentRefs(providerView, currentAttachmentRefs),
+  );
+  const materializedHistory = await measureHistoryPreparationPhase(
+    preparationOptions,
+    "screenshot_materialization",
+    async () =>
+      materializeModelHistory
+        ? await materializeModelHistory(referencedHistory)
+        : referencedHistory,
+  );
+  const historyItems = await measureHistoryPreparationPhase(
+    preparationOptions,
+    "model_attachment_projection",
+    async () =>
+      projectModelHistory ? await projectModelHistory(materializedHistory) : materializedHistory,
+  );
+  const prepared = await measureHistoryPreparationPhase(
+    preparationOptions,
+    "runtime_input_assembly",
+    async () =>
+      await runtime.prepareInput(agent, {
+        kind: "message",
+        ...(text ? { text } : {}),
+        ...(internalContext ? { internalContext } : {}),
+        historyItems: historyItems as any,
+        sandboxEnvelope: envelope,
+        ...(projectModelHistory ? { modelInputAlreadyProjected: true } : {}),
+      }),
+  );
+  const providerArtifactCandidates = await measureHistoryPreparationPhase(
+    preparationOptions,
+    "artifact_candidate_scan",
+    () => {
+      const preparedItems = Array.isArray(prepared.input)
+        ? new Set(prepared.input)
+        : new Set<unknown>();
+      return {
+        knownHistoryItemIds: stored.map((row) => row.id),
+        historyItemIds: stored
+          .filter(
+            (row) =>
+              row.providerArtifactInvalidatedAt === null &&
+              hasOpaqueProviderArtifact(row.item) &&
+              preparedItems.has(row.item),
+          )
+          .map((row) => row.id),
+      };
+    },
+  );
   return {
     input: prepared,
     persistedHistoryCount: prepared.persistedHistoryCount,
-    providerArtifactCandidates: {
-      knownHistoryItemIds: stored.map((row) => row.id),
-      historyItemIds: stored
-        .filter(
-          (row) =>
-            row.providerArtifactInvalidatedAt === null &&
-            hasOpaqueProviderArtifact(row.item) &&
-            preparedItems.has(row.item),
-        )
-        .map((row) => row.id),
-    },
+    providerArtifactCandidates,
   };
 }
 

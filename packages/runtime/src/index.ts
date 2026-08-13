@@ -239,6 +239,15 @@ import {
   incrementalModelInputProjectionFilter,
 } from "./model-input";
 import {
+  recordModelPreparationManifestInventory,
+  recordModelPreparationMeasurement,
+  withModelPreparationClientDiagnostics,
+  withModelPreparationObserver,
+  withModelPreparationSessionDiagnostics,
+  type ModelPreparationMeasurement,
+  type ModelPreparationPhase,
+} from "./model-preparation-diagnostics";
+import {
   HUMAN_INPUT_TOOL_NAME,
   modelResponseUsageFromResponse,
   serializeApprovals,
@@ -278,6 +287,10 @@ export {
 } from "./skill-library";
 
 export type { RuntimeMetricsHooks } from "./metrics";
+export type {
+  ModelPreparationMeasurement,
+  ModelPreparationPhase,
+} from "./model-preparation-diagnostics";
 export {
   CodexSubscriptionUnavailableError,
   MultiProviderModelProvider,
@@ -2947,6 +2960,19 @@ export type LocalMcpServerRegistration = {
   resolvedConnectionId?: string;
 };
 
+export type ToolPreparationPhase =
+  | "server_construction"
+  | "required_connect"
+  | "optional_connect"
+  | "attempt_catalog_build"
+  | "attempt_catalog_persist";
+
+export type ToolPreparationPhaseMeasurement = {
+  phase: ToolPreparationPhase;
+  outcome: "completed" | "failed";
+  durationSeconds: number;
+};
+
 export type PrepareToolsOptions = {
   accountId?: string;
   workspaceId?: string;
@@ -2994,6 +3020,8 @@ export type PrepareToolsOptions = {
   attemptToolCatalogGeneration?: number;
   /** Durable host seam; completion is required before the model can run. */
   onAttemptToolCatalog?: (catalog: AttemptToolCatalog) => Promise<void> | void;
+  /** Bounded critical-path timings; telemetry failures never affect preparation. */
+  onPreparationPhase?: (measurement: ToolPreparationPhaseMeasurement) => void;
   /**
    * Already-authorized in-process tools (for example Browser/Computer
    * interaction operations). They are projected into the same model MCP list
@@ -3001,6 +3029,31 @@ export type PrepareToolsOptions = {
    */
   attemptToolDefinitions?: readonly AttemptToolDefinition[];
 };
+
+async function measureToolPreparationPhase<T>(
+  options: PrepareToolsOptions,
+  phase: ToolPreparationPhase,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const startedAt = performance.now();
+  let outcome: ToolPreparationPhaseMeasurement["outcome"] = "completed";
+  try {
+    return await operation();
+  } catch (error) {
+    outcome = "failed";
+    throw error;
+  } finally {
+    try {
+      options.onPreparationPhase?.({
+        phase,
+        outcome,
+        durationSeconds: (performance.now() - startedAt) / 1_000,
+      });
+    } catch {
+      // Diagnostics must not change MCP authority or lifecycle behavior.
+    }
+  }
+}
 
 type ConnectedMcpServerBatch = Awaited<ReturnType<typeof connectMcpServers>>;
 
@@ -3125,10 +3178,11 @@ export async function prepareAgentTools(
   const useBunNativeFetch = options.mcpFetchImpl === undefined && !!process.versions.bun;
   const mcpFetchImpl =
     options.mcpFetchImpl ?? (useBunNativeFetch ? globalThis.fetch.bind(globalThis) : undiciFetch);
-  const servers = await boundedParallelMap(
-    tools,
-    MCP_MAX_CONCURRENT_SERVER_OPERATIONS,
-    async (tool, index) => {
+  const servers = await measureToolPreparationPhase(
+    options,
+    "server_construction",
+    async () =>
+      await boundedParallelMap(tools, MCP_MAX_CONCURRENT_SERVER_OPERATIONS, async (tool, index) => {
       const config = registry.get(tool.id);
       if (!config) {
         throw new Error(`Unknown MCP server id: ${tool.id}`);
@@ -3160,7 +3214,8 @@ export async function prepareAgentTools(
           timeoutMs: config.timeoutMs,
         };
       }
-      const url = firstPartyMcpServerUrlForRun(settings, config, options.workspaceId) ?? config.url;
+        const url =
+          firstPartyMcpServerUrlForRun(settings, config, options.workspaceId) ?? config.url;
       const firstParty = isFirstPartyMcpServer(settings, config);
       const baseFetch = isCodexAppsMcpServer(config)
         ? codexAppsSanitizingFetch(mcpFetchImpl, codexConnectorNamespaces)
@@ -3177,7 +3232,13 @@ export async function prepareAgentTools(
       const fetchImpl = isCodexAppsMcpServer(config)
         ? codexAppsAuthFetch(guardedFetch, settings, options)
         : config.connectionRef
-          ? connectionBrokerFetch(guardedFetch, config, options, resolvedMcpConnectionIds, optional)
+            ? connectionBrokerFetch(
+                guardedFetch,
+                config,
+                options,
+                resolvedMcpConnectionIds,
+                optional,
+              )
           : firstParty
             ? firstPartyAuthFetch(guardedFetch, settings, options)
             : guardedFetch;
@@ -3267,7 +3328,7 @@ export async function prepareAgentTools(
         optional,
         timeoutMs: config.timeoutMs,
       };
-    },
+      }),
   );
   const requiredEntries = servers.filter((entry) => !entry.bestEffort);
   const bestEffortEntries = servers.filter((entry) => entry.bestEffort);
@@ -3284,20 +3345,27 @@ export async function prepareAgentTools(
       .filter((server): server is PrefixedMcpServer => server instanceof PrefixedMcpServer)
       .map((server) => server.registryId),
   );
-  const connectedRequired = await connectMcpServersInBatches(requiredServers, {
+  const connectedRequired = await measureToolPreparationPhase(
+    options,
+    "required_connect",
+    async () =>
+      await connectMcpServersInBatches(requiredServers, {
     strict: true,
     connectTimeoutMs: mcpOuterConnectTimeoutMs(requiredEntries.map((entry) => entry.timeoutMs)),
-  });
+      }),
+  );
   let connectedBestEffort: ConnectedMcpServerBatches | null = null;
   try {
-    connectedBestEffort = bestEffortServers.length
+    connectedBestEffort = await measureToolPreparationPhase(options, "optional_connect", async () =>
+      bestEffortServers.length
       ? await connectMcpServersInBatches(bestEffortServers, {
           strict: false,
           connectTimeoutMs: mcpOuterConnectTimeoutMs(
             bestEffortEntries.map((entry) => entry.timeoutMs),
           ),
         })
-      : null;
+        : null,
+    );
   } catch (error) {
     await connectedRequired.close().catch(() => undefined);
     throw error;
@@ -3334,16 +3402,18 @@ export async function prepareAgentTools(
           options.subjectId ?? "worker:mcp-model",
         )
       : null;
-    attemptToolEnvironment = await prepareAttemptToolEnvironment(
-      activeMcpServers,
-      registry,
+    attemptToolEnvironment = await measureToolPreparationPhase(
       options,
+      "attempt_catalog_build",
+      async () => await prepareAttemptToolEnvironment(activeMcpServers, registry, options),
     );
     if (attemptToolEnvironment && localToolServer) {
       localToolServer.bindAttemptToolEnvironment(attemptToolEnvironment);
     }
     if (attemptToolEnvironment) {
-      await options.onAttemptToolCatalog?.(attemptToolEnvironment.catalog);
+      await measureToolPreparationPhase(options, "attempt_catalog_persist", async () => {
+        await options.onAttemptToolCatalog?.(attemptToolEnvironment!.catalog);
+      });
     }
   } catch (error) {
     await localToolServer?.close().catch(() => undefined);
@@ -4914,9 +4984,26 @@ export class PrefixedMcpServer implements MCPServer {
     this.aggregateToolBudget?.remove(this.aggregateSourceId);
   }
 
-  listTools(): Promise<RuntimeMcpTool[]> {
+  async listTools(): Promise<RuntimeMcpTool[]> {
+    const startedAt = performance.now();
+    let outcome: "completed" | "failed" = "completed";
+    let count: number | undefined;
+    try {
     this.frozenTools ??= this.loadAndFreezeTools();
-    return this.frozenTools;
+      const tools = await this.frozenTools;
+      count = tools.length;
+      return tools;
+    } catch (error) {
+      outcome = "failed";
+      throw error;
+    } finally {
+      recordModelPreparationMeasurement({
+        phase: "mcp_tools_snapshot",
+        outcome,
+        durationSeconds: (performance.now() - startedAt) / 1_000,
+        ...(count === undefined ? {} : { count }),
+      });
+    }
   }
 
   freezeTools(): Promise<RuntimeMcpTool[]> {
@@ -5257,6 +5344,8 @@ export async function prepareRunInput(
 export type RunAgentStreamOptions = {
   /** Abort the provider/tool loop when the owning activity is cancelled. */
   signal?: AbortSignal;
+  /** Nonblocking phase measurements for request preparation before provider I/O. */
+  onModelPreparationPhase?: (measurement: ModelPreparationMeasurement) => void;
   sandboxClient?: unknown;
   sandboxEnvironment?: Record<string, string>;
   onRuntimeEvent?: (event: NormalizedRuntimeEvent) => Promise<void> | void;
@@ -5386,6 +5475,30 @@ function modelModalityProjectionFilterForAgent(
     },
     initialInputAlreadyProjected,
   );
+}
+
+function measuredModelInputFilter(
+  phase: ModelPreparationPhase,
+  filter: CallModelInputFilter | undefined,
+): CallModelInputFilter | undefined {
+  if (!filter) return undefined;
+  return async (args) => {
+    const startedAt = performance.now();
+    let outcome: "completed" | "failed" = "completed";
+    try {
+      return await filter(args);
+    } catch (error) {
+      outcome = "failed";
+      throw error;
+    } finally {
+      recordModelPreparationMeasurement({
+        phase,
+        outcome,
+        durationSeconds: (performance.now() - startedAt) / 1_000,
+        count: args.modelData.input.length,
+      });
+    }
+  };
 }
 
 export async function runAgentStream(
@@ -5532,14 +5645,25 @@ export async function runAgentStream(
     );
     const ownedFilter = composeCallModelInputFilters(
       [
-        baseModelInputFilterForSettings(settings),
-        genesisTitleInputFilter,
-        overrides.callModelInputFilter,
+        measuredModelInputFilter("input_filter_base", baseModelInputFilterForSettings(settings)),
+        measuredModelInputFilter("input_filter_genesis", genesisTitleInputFilter),
+        measuredModelInputFilter("input_filter_host", overrides.callModelInputFilter),
         // A caller filter may synthesize model input. Re-apply the idempotent
         // canonical bound at the literal final seam before accounting/provider
         // serialization so no extension can bypass the policy.
+        measuredModelInputFilter(
+          "input_filter_tool_output",
         boundModelToolOutputsFilterForSettings(settings),
-        modelModalityProjectionFilterForAgent(agent, prepared.modelInputAlreadyProjected === true),
+        ),
+        measuredModelInputFilter(
+          "input_filter_modality",
+          modelModalityProjectionFilterForAgent(
+            agent,
+            prepared.modelInputAlreadyProjected === true,
+          ),
+        ),
+        measuredModelInputFilter(
+          "input_filter_context",
         contextRobustnessFilterForSettings(settings, {
           throwOnCompactionNeeded: Boolean(
             overrides.contextCompactionSignal || overrides.contextCompactionRequested,
@@ -5553,6 +5677,7 @@ export async function runAgentStream(
               }
             : {}),
         }),
+        ),
       ].filter((f): f is CallModelInputFilter => Boolean(f)),
     );
     const ownedRunOptions: Parameters<typeof run>[2] = {
@@ -5566,10 +5691,20 @@ export async function runAgentStream(
     };
     ownedRunOptions.sandbox = {
       client: decoratedClient,
-      session: agentSession,
+      session: withModelPreparationSessionDiagnostics(agentSession),
       ...(sessionState ? { sessionState } : {}),
     } as SandboxRunConfig;
-    return await runScopedRunner(settings, agent).run(agent, prepared.input, ownedRunOptions);
+    return await withModelPreparationObserver(overrides.onModelPreparationPhase, () => {
+      recordModelPreparationManifestInventory(
+        "sandbox_agent_manifest_inventory",
+        (agent as { defaultManifest?: Manifest }).defaultManifest,
+      );
+      recordModelPreparationManifestInventory(
+        "sandbox_session_manifest_inventory",
+        (agentSession as { state?: { manifest?: Manifest } }).state?.manifest,
+      );
+      return runScopedRunner(settings, agent).run(agent, prepared.input, ownedRunOptions);
+    });
   }
 
   const rawClient = overrides.sandboxClient ?? createSandboxClient(settings, environment);
@@ -5654,11 +5789,19 @@ export async function runAgentStream(
   // pass an SDK session and reconciles durable truth from the untouched input.
   const callModelInputFilter = composeCallModelInputFilters(
     [
-      baseModelInputFilterForSettings(settings),
-      genesisTitleInputFilter,
-      overrides.callModelInputFilter,
+      measuredModelInputFilter("input_filter_base", baseModelInputFilterForSettings(settings)),
+      measuredModelInputFilter("input_filter_genesis", genesisTitleInputFilter),
+      measuredModelInputFilter("input_filter_host", overrides.callModelInputFilter),
+      measuredModelInputFilter(
+        "input_filter_tool_output",
       boundModelToolOutputsFilterForSettings(settings),
+      ),
+      measuredModelInputFilter(
+        "input_filter_modality",
       modelModalityProjectionFilterForAgent(agent, prepared.modelInputAlreadyProjected === true),
+      ),
+      measuredModelInputFilter(
+        "input_filter_context",
       contextRobustnessFilterForSettings(settings, {
         throwOnCompactionNeeded: Boolean(
           overrides.contextCompactionSignal || overrides.contextCompactionRequested,
@@ -5670,6 +5813,7 @@ export async function runAgentStream(
           ? { contextCompactionRequested: overrides.contextCompactionRequested }
           : {}),
       }),
+      ),
     ].filter((f): f is CallModelInputFilter => Boolean(f)),
   );
   const runOptions: Parameters<typeof run>[2] = {
@@ -5687,11 +5831,17 @@ export async function runAgentStream(
   };
   if (client) {
     runOptions.sandbox = {
-      client,
+      client: withModelPreparationClientDiagnostics(client),
       ...(sandboxSessionState ? { sessionState: sandboxSessionState } : {}),
     } as SandboxRunConfig;
   }
-  return await runScopedRunner(settings, agent).run(agent, prepared.input, runOptions);
+  return await withModelPreparationObserver(overrides.onModelPreparationPhase, () => {
+    recordModelPreparationManifestInventory(
+      "sandbox_agent_manifest_inventory",
+      (agent as { defaultManifest?: Manifest }).defaultManifest,
+    );
+    return runScopedRunner(settings, agent).run(agent, prepared.input, runOptions);
+  });
 }
 
 function appendSandboxFileDownloadFailureNote(

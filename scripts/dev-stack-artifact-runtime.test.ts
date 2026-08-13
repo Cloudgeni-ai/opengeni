@@ -109,6 +109,32 @@ describe("local artifact runtime stack contract", () => {
     expect(source).toContain("bash scripts/run-development-relay.sh");
   });
 
+  test("probes local ports without walking unhealthy mounted filesystems", async () => {
+    const source = await Bun.file(scriptPath).text();
+    const netcatProbe = source.indexOf("nc -z -w 1 127.0.0.1");
+    const lsofFallback = source.indexOf("lsof -nP -iTCP");
+
+    expect(netcatProbe).toBeGreaterThan(-1);
+    expect(lsofFallback).toBeGreaterThan(netcatProbe);
+  });
+
+  test("can advertise a remote-reachable development relay while binding it locally", async () => {
+    const source = await Bun.file(scriptPath).text();
+
+    expect(source).toContain('if [ -n "${OPENGENI_RELAY_BIND:-}" ]; then');
+    expect(source).toContain("start_local_relay=1");
+    expect(source).toContain("export OPENGENI_RELAY_BIND OPENGENI_RELAY_TOKEN_SECRET");
+  });
+
+  test("reuses generated ports without restoring stale derived runtime settings", async () => {
+    const source = await Bun.file(scriptPath).text();
+
+    expect(source).not.toContain(". ./.env.runtime");
+    expect(source).toContain("for runtime_port_var in");
+    expect(source).toContain("OPENGENI_RELAY_HOST_PORT");
+    expect(source).toContain('sed -n "s/^${runtime_port_var}=//p" .env.runtime');
+  });
+
   test("enables interactive Browser and Computer surfaces locally by default", async () => {
     const source = await Bun.file(scriptPath).text();
 
@@ -120,6 +146,20 @@ describe("local artifact runtime stack contract", () => {
       expect(source).toContain(`if [ -z "\${${setting}:-}" ]; then`);
       expect(source).toContain(`${setting}=true`);
       expect(source).toContain(`export ${setting}`);
+    }
+  });
+
+  test("uses durable lazy sandbox ownership locally by default", async () => {
+    const source = await Bun.file(scriptPath).text();
+
+    for (const setting of [
+      "OPENGENI_SANDBOX_OWNERSHIP_ENABLED",
+      "OPENGENI_SANDBOX_LAZY_PROVISION",
+    ]) {
+      expect(source).toContain(`if [ -z "\${${setting}:-}" ]; then`);
+      expect(source).toContain(`${setting}=true`);
+      expect(source).toContain(`export ${setting}`);
+      expect(source).toContain(`printf '${setting}=%s\\n'`);
     }
   });
 
