@@ -156,6 +156,20 @@ async function beforeLockTimeout<T>(work: Promise<T>): Promise<T> {
   return completed as T;
 }
 
+async function expectRejectionContaining(
+  work: PromiseLike<unknown>,
+  expectedMessage: string,
+): Promise<void> {
+  let rejection: unknown;
+  try {
+    await work;
+  } catch (error) {
+    rejection = error;
+  }
+  expect(rejection).toBeInstanceOf(Error);
+  expect((rejection as Error).message).toContain(expectedMessage);
+}
+
 async function settleIdle(ctx: GoalFixture) {
   const settled = await applySessionTurnSettlement(client.db, ctx.grant.workspaceId!, {
     sessionId: ctx.session.id,
@@ -524,11 +538,12 @@ describe("durable active-goal wake", () => {
     if (recovered.action !== "claimed") throw new Error("legacy projection recovery failed");
     expect(recovered.turn.goalSnapshot).toMatchObject({ text: expected });
 
-    await expect(
+    await expectRejectionContaining(
       shared.admin`
         update session_goals set text = ${`${legacyText}x`}
         where workspace_id = ${ctx.grant.workspaceId!} and session_id = ${ctx.session.id}`,
-    ).rejects.toThrow("goal text exceeds 8192 UTF-8 bytes");
+      "goal text exceeds 8192 UTF-8 bytes",
+    );
   });
 
   test("API redirect wakes an idle goal while policy-controlled agent changes remain fenced", async () => {
@@ -644,12 +659,14 @@ describe("durable active-goal wake", () => {
     expect(afterApply.find((revision) => revision.id === proposal.id)?.disposition).toBe(
       "proposed",
     );
-    await expect(
+    await expectRejectionContaining(
       shared.admin`update session_goal_revisions set rationale = 'mutated' where id = ${proposal.id}`,
-    ).rejects.toThrow("session goal revisions are immutable");
-    await expect(
+      "session goal revisions are immutable",
+    );
+    await expectRejectionContaining(
       shared.admin`delete from session_goal_revisions where id = ${proposal.id}`,
-    ).rejects.toThrow("session goal revisions are immutable");
+      "session goal revisions are immutable",
+    );
     await expect(
       upsertSessionGoalWithEvent(client.db, {
         accountId: ctx.grant.accountId,
