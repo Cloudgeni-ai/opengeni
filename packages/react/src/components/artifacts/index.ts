@@ -4,6 +4,11 @@ export {
   type ArtifactSurfaceProps,
 } from "./artifact-surface";
 export {
+  PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX,
+  PublishedHtmlArtifactFrame,
+  type PublishedHtmlArtifactFrameProps,
+} from "./published-html-artifact-frame";
+export {
   SpreadsheetArtifactSurface,
   SpreadsheetGrid,
   SpreadsheetProjectionGrid,

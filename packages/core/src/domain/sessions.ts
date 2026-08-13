@@ -2,6 +2,7 @@ import { CODEX_MODEL_ID_PREFIX, isCodexBilledModel } from "@opengeni/codex";
 import {
   canonicalizeConfiguredModelId,
   configuredAllowedModels,
+  resolveFirstPartyMcpToolPolicy,
   policyProviderIdForModel,
   resolveTurnExecutionPolicyV1,
   WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
@@ -155,10 +156,18 @@ export class SessionSpawnDeniedError extends Error {
 export function resolveFirstPartyMcpToolsForCreate(
   requested: FirstPartyMcpToolName[] | undefined,
   parentStored: FirstPartyMcpToolName[] | null | undefined,
+  policy: {
+    default: readonly FirstPartyMcpToolName[];
+    allowed: readonly FirstPartyMcpToolName[];
+  } = {
+    default: DEFAULT_FIRST_PARTY_MCP_TOOLS,
+    allowed: FIRST_PARTY_MCP_TOOL_NAMES,
+  },
 ): FirstPartyMcpToolName[] {
   if (requested !== undefined) return [...requested];
-  if (parentStored === undefined) return [...DEFAULT_FIRST_PARTY_MCP_TOOLS];
-  return [...(parentStored ?? DEFAULT_FIRST_PARTY_MCP_TOOLS)];
+  const allowed = new Set(policy.allowed);
+  const inherited = parentStored === undefined ? policy.default : (parentStored ?? policy.default);
+  return [...inherited].filter((tool) => allowed.has(tool));
 }
 
 function sessionSpawnDeniedMessage(denial: SessionSpawnDenial): string {
@@ -1614,9 +1623,19 @@ export async function createSessionForRequestWithOutcome(
   // Tool visibility is independent from permission authority. A child that
   // omits the field inherits the parent's exact effective selection; a
   // top-level omission selects the safe non-connector default catalog.
+  const deploymentFirstPartyMcpToolPolicy = resolveFirstPartyMcpToolPolicy(settings);
+  const disallowedFirstPartyMcpTool = payload.firstPartyMcpTools?.find(
+    (tool) => !deploymentFirstPartyMcpToolPolicy.allowed.includes(tool),
+  );
+  if (disallowedFirstPartyMcpTool) {
+    throw new HTTPException(422, {
+      message: `first-party MCP tool is disabled by deployment policy: ${disallowedFirstPartyMcpTool}`,
+    });
+  }
   const firstPartyMcpTools = resolveFirstPartyMcpToolsForCreate(
     payload.firstPartyMcpTools,
     parentSession ? parentSession.firstPartyMcpTools : undefined,
+    deploymentFirstPartyMcpToolPolicy,
   );
   if (payload.goal) {
     const missingGoalTools = ["goal_update", "goal_complete", "goal_pause"].filter(
@@ -2385,11 +2404,20 @@ export async function updateSessionToolPolicy(
   const explicitRequestedFirstPartyTools = explicitRequest
     ? [...explicitRequest.firstPartyMcpTools]
     : null;
+  const deploymentFirstPartyMcpToolPolicy = resolveFirstPartyMcpToolPolicy(deps.settings);
+  const disallowedFirstPartyMcpTool = explicitRequestedFirstPartyTools?.find(
+    (tool) => !deploymentFirstPartyMcpToolPolicy.allowed.includes(tool),
+  );
+  if (disallowedFirstPartyMcpTool) {
+    throw new HTTPException(422, {
+      message: `first-party MCP tool is disabled by deployment policy: ${disallowedFirstPartyMcpTool}`,
+    });
+  }
   const workspaceDefaultTools = withFirstPartyTools(
     withDefaultEnabledCapabilityMcpTools([], deps.settings, capabilityRuntimeSettings),
     runtimeSettings,
   );
-  const workspaceDefaultFirstPartyTools = [...FIRST_PARTY_MCP_TOOL_NAMES];
+  const workspaceDefaultFirstPartyTools = [...deploymentFirstPartyMcpToolPolicy.default];
   const events = await appendSessionEventsWithLockedSessionUpdate(
     deps.db,
     grant.workspaceId,
@@ -2421,9 +2449,12 @@ export async function updateSessionToolPolicy(
             : parent.tools,
           runtimeSettings,
         );
+        const deploymentAllowedFirstPartyMcpTools = new Set(
+          deploymentFirstPartyMcpToolPolicy.allowed,
+        );
         const parentFirstPartyMcpTools = [
-          ...(parent.firstPartyMcpTools ?? DEFAULT_FIRST_PARTY_MCP_TOOLS),
-        ];
+          ...(parent.firstPartyMcpTools ?? deploymentFirstPartyMcpToolPolicy.default),
+        ].filter((tool) => deploymentAllowedFirstPartyMcpTools.has(tool));
         if (requestedMode === "workspace_default") {
           if (!parentTracksWorkspaceDefaults) {
             throw new HTTPException(403, {
@@ -2477,7 +2508,8 @@ export async function updateSessionToolPolicy(
       const unchanged =
         stableJson({
           tools: session.tools,
-          firstPartyMcpTools: session.firstPartyMcpTools ?? DEFAULT_FIRST_PARTY_MCP_TOOLS,
+          firstPartyMcpTools:
+            session.firstPartyMcpTools ?? deploymentFirstPartyMcpToolPolicy.default,
           policy: currentPolicy,
         }) ===
         stableJson({
@@ -2498,7 +2530,7 @@ export async function updateSessionToolPolicy(
               before: toolPolicyAuditSnapshot(
                 session,
                 session.tools,
-                [...(session.firstPartyMcpTools ?? DEFAULT_FIRST_PARTY_MCP_TOOLS)],
+                [...(session.firstPartyMcpTools ?? deploymentFirstPartyMcpToolPolicy.default)],
                 currentPolicy,
               ),
               after: toolPolicyAuditSnapshot(
