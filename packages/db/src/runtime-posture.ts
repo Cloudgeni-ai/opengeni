@@ -68,6 +68,19 @@ const CANONICAL_HUMAN_IDENTITY_AUTHORITY_TABLES = [
   "canonical_human_login_bindings",
   "canonical_human_identity_operations",
 ] as const;
+const SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE =
+  "session_private_actor_visible(uuid, uuid, uuid, text)";
+const SESSION_REFERENCE_VISIBLE_ROUTINE = "session_reference_visible(uuid, uuid, uuid)";
+const TRANSITION_SESSION_VISIBILITY_ROUTINE =
+  "transition_session_visibility(uuid, uuid, uuid, text, text, integer, text, text)";
+const FORK_SESSION_CONTENT_ROUTINE =
+  "fork_session_content(uuid, uuid, uuid, text, uuid, text, text, text)";
+const SESSION_AUTHORITY_ROUTINES = new Set<string>([
+  FORK_SESSION_CONTENT_ROUTINE,
+  SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE,
+  SESSION_REFERENCE_VISIBLE_ROUTINE,
+  TRANSITION_SESSION_VISIBILITY_ROUTINE,
+]);
 const XAI_CREATE_CREDENTIAL_ROUTINE =
   "create_xai_subscription_credential(uuid, uuid, text, text, text, text, text, text, text, timestamp with time zone)";
 const XAI_DISCONNECT_CREDENTIAL_ROUTINE =
@@ -87,17 +100,29 @@ const XAI_AUTHORITY_TABLES = [
 ] as const;
 
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
+  FORK_SESSION_CONTENT_ROUTINE,
   XAI_AUTHORITY_LIVE_ROUTINE,
   XAI_CREATE_CREDENTIAL_ROUTINE,
   XAI_DISCONNECT_CREDENTIAL_ROUTINE,
   KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE,
   MANAGED_HUMAN_PERSONAL_WORKSPACE_ROUTINE,
   ...CANONICAL_HUMAN_IDENTITY_ROUTINES,
+  SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE,
+  SESSION_REFERENCE_VISIBLE_ROUTINE,
+  TRANSITION_SESSION_VISIBILITY_ROUTINE,
   XAI_POOL_VISIBLE_ROUTINE,
   XAI_RESOLVE_POOL_ROUTINE,
   XAI_REVALIDATE_CREDENTIAL_ROUTINE,
   XAI_SNAPSHOT_VALIDATOR_ROUTINE,
 ] as const;
+
+export const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES = [
+  SESSION_REFERENCE_VISIBLE_ROUTINE,
+  XAI_SNAPSHOT_VALIDATOR_ROUTINE,
+] as const;
+const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINE_SET = new Set<string>(
+  RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES,
+);
 
 /**
  * The complete standalone tenant-table contract. Adding or removing a
@@ -279,6 +304,7 @@ export const FORCE_RLS_TABLES = [
   "session_system_updates",
   "session_turn_attempts",
   "session_turns",
+  "session_visibility_write_capabilities",
   "session_workflow_wake_outbox",
   "sessions",
   "site_auth_connections",
@@ -626,6 +652,7 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "organization_user_resource_authorities",
   "organization_user_resource_grants",
   "organization_user_retention_policies",
+  "session_visibility_write_capabilities",
 ] as const;
 
 export type RuntimeTableDmlPrivilege = "SELECT" | "INSERT" | "UPDATE" | "DELETE";
@@ -1210,7 +1237,13 @@ export function evaluateRuntimeDatabasePosture(
       continue;
     }
     const routine = matches[0]!;
-    if (!routine.securityDefiner && routine.name !== XAI_SNAPSHOT_VALIDATOR_ROUTINE) {
+    if (RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINE_SET.has(routine.name)) {
+      if (routine.securityDefiner) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} must be SECURITY INVOKER`,
+        );
+      }
+    } else if (!routine.securityDefiner) {
       violations.push(`target-schema runtime capability ${routine.name} is not SECURITY DEFINER`);
     }
     if (routine.name === KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE) {
@@ -1266,6 +1299,13 @@ export function evaluateRuntimeDatabasePosture(
       } else if (routine.owner !== authorityTables[0]!.owner) {
         violations.push(
           `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
+        );
+      }
+    } else if (SESSION_AUTHORITY_ROUTINES.has(routine.name)) {
+      const authorityOwner = tableByName.get("sessions")?.owner ?? targetSchemaOwner;
+      if (authorityOwner && routine.owner !== authorityOwner) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match session authority owner ${authorityOwner}`,
         );
       }
     } else if (routine.name === XAI_SNAPSHOT_VALIDATOR_ROUTINE) {

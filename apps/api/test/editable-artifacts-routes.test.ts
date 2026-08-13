@@ -10,6 +10,7 @@ import {
   type EditableArtifactApplicationPort,
   type EditableArtifactOfficeImportPort,
 } from "@opengeni/core";
+import { getTableName, type SQL } from "drizzle-orm";
 import { Hono } from "hono";
 
 import {
@@ -125,40 +126,115 @@ function routeFixture(
 }
 
 function sessionAuthorizationDb(privateSessionOwner?: string) {
-  let operation = 0;
+  type QueryBuilder = {
+    from(table: unknown): QueryBuilder;
+    where(): QueryBuilder;
+    limit(): Promise<Record<string, unknown>[]>;
+  };
   type FakeDatabase = {
     transaction<T>(execute: (transaction: FakeDatabase) => Promise<T>): Promise<T>;
-    execute(): Promise<Record<string, unknown>[]>;
+    execute(query: SQL): Promise<Record<string, unknown>[]>;
+    select(fields?: Record<string, unknown>): QueryBuilder;
+  };
+  const select = (fields?: Record<string, unknown>): QueryBuilder => {
+    const selected = new Set(Object.keys(fields ?? {}));
+    let tableName: string | null = null;
+    const builder: QueryBuilder = {
+      from: (table) => {
+        tableName = getTableName(table as never);
+        return builder;
+      },
+      where: () => builder,
+      limit: async () => {
+        if (tableName === "workspaces" && selected.size === 1 && selected.has("accountId")) {
+          return [{ accountId: ACCOUNT_ID }];
+        }
+        if (
+          tableName === "sessions" &&
+          selected.has("sessionId") &&
+          selected.has("rootSessionId") &&
+          selected.has("visibility") &&
+          selected.has("ownerSubjectId")
+        ) {
+          return [
+            {
+              sessionId: SESSION_ID,
+              rootSessionId: SESSION_ID,
+              visibility: privateSessionOwner ? "user_private" : "workspace_shared",
+              ownerSubjectId: privateSessionOwner ?? null,
+            },
+          ];
+        }
+        if (tableName === "sessions" && selected.size === 0 && privateSessionOwner) {
+          return [];
+        }
+        throw new Error("Unexpected editable artifact route select projection");
+      },
+    };
+    return builder;
+  };
+  const transaction = (): FakeDatabase => {
+    const rls = { accountId: "", workspaceId: "" };
+    return {
+      transaction: async <T>(execute: (nested: FakeDatabase) => Promise<T>): Promise<T> =>
+        await execute(transaction()),
+      execute: async (query): Promise<Record<string, unknown>[]> => {
+        const text = sqlText(query);
+        if (text.includes("set_config('opengeni.account_id'")) {
+          rls.accountId = ACCOUNT_ID;
+          return [];
+        }
+        if (text.includes("set_config('opengeni.workspace_id'")) {
+          rls.workspaceId = WORKSPACE_ID;
+          return [];
+        }
+        if (
+          text.includes("set_config('opengeni.lossless_content_writer'") ||
+          text.includes("set_config('opengeni.sandbox_recovery_protocol_v2'")
+        ) {
+          return [];
+        }
+        if (
+          text.includes("current_setting('opengeni.account_id'") &&
+          text.includes("current_setting('opengeni.workspace_id'")
+        ) {
+          return [{ account_id: rls.accountId, workspace_id: rls.workspaceId }];
+        }
+        if (
+          query.usedTables.includes("sessions") &&
+          query.usedTables.includes("slack_interactions") &&
+          text.includes('session.root_session_id as "rootSessionId"')
+        ) {
+          expect(rls).toEqual({ accountId: ACCOUNT_ID, workspaceId: WORKSPACE_ID });
+          return [];
+        }
+        throw new Error("Unexpected editable artifact route database operation");
+      },
+      select,
+    };
   };
   const db: FakeDatabase = {
-    async transaction<T>(execute: (transaction: FakeDatabase) => Promise<T>): Promise<T> {
-      operation = 0;
-      return await execute(db);
+    async transaction<T>(execute: (scoped: FakeDatabase) => Promise<T>): Promise<T> {
+      return await execute(transaction());
     },
     async execute(): Promise<Record<string, unknown>[]> {
-      operation += 1;
-      if (operation <= 4) return [];
-      if (operation === 5) {
-        return [{ account_id: ACCOUNT_ID, workspace_id: WORKSPACE_ID }];
-      }
-      if (operation === 6) {
-        return privateSessionOwner
-          ? [
-              {
-                rootSessionId: SESSION_ID,
-                parentSessionId: null,
-                depth: 0,
-                cycle: false,
-                owningSubjectId: privateSessionOwner,
-                visibility: "private",
-              },
-            ]
-          : [];
-      }
-      throw new Error("Unexpected editable artifact route database operation");
+      throw new Error("Unexpected unscoped editable artifact route database operation");
+    },
+    select(fields?: Record<string, unknown>): QueryBuilder {
+      return select(fields);
     },
   };
   return db as never;
+}
+
+function sqlText(query: SQL): string {
+  return query.queryChunks
+    .flatMap((chunk) =>
+      typeof chunk === "object" && chunk !== null && "value" in chunk
+        ? (chunk.value as readonly string[])
+        : [],
+    )
+    .join("");
 }
 
 function preparedOfficeImport(modality: "document" | "spreadsheet" | "presentation") {

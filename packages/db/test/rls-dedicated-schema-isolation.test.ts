@@ -16,6 +16,7 @@ import {
   prepareRetainedScreenshotArtifact,
   PROTECTED_NO_DIRECT_DML_TABLES,
   RUNTIME_FULL_DML_TABLES,
+  RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES,
   RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
   rlsStrategyFor,
   setSubjectRlsContext,
@@ -302,7 +303,9 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
         owner: "postgres",
         execute: true,
         publicExecute: false,
-        securityDefiner: name !== "xai_provider_account_authority_snapshot_v1_valid(jsonb)",
+        securityDefiner: !(RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES as readonly string[]).includes(
+          name,
+        ),
       })).sort((left, right) => left.name.localeCompare(right.name)),
     );
     expect(posture.tables.filter((table) => table.rlsEnabled)).toHaveLength(
