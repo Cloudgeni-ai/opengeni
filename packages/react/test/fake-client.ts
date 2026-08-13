@@ -33,7 +33,11 @@ export function fakeClient(partial: Partial<SessionClientLike>): SessionClientLi
         fileUploads: { enabled: false, maxSizeBytes: 0 },
         productAccessMode: "local",
         auth: { mode: "none" },
-        structuredServices: { fileSystem: false, git: false, terminalEvents: false },
+        structuredServices: {
+          fileSystem: false,
+          git: false,
+          terminalEvents: false,
+        },
       }) as never,
     getComposerDraft: async () => emptyDraft,
     listEvents: async () => [],
@@ -60,7 +64,9 @@ export function fakeClient(partial: Partial<SessionClientLike>): SessionClientLi
         request.requests.map(async (item) => ({
           status: await target.gitStatus(workspaceId, sessionId, item.status, options),
           ...(item.diff
-            ? { diff: await target.gitDiff(workspaceId, sessionId, item.diff, options) }
+            ? {
+                diff: await target.gitDiff(workspaceId, sessionId, item.diff, options),
+              }
             : {}),
         })),
       ),
@@ -127,6 +133,8 @@ export function fakeGoal(overrides: Partial<SessionGoal> = {}): SessionGoal {
     pausedReason: null,
     createdBy: "api",
     version: 1,
+    objectiveRevision: 1,
+    mutationPolicy: "preserve_intent",
     autoContinuations: 3,
     noProgressStreak: 1,
     maxAutoContinuations: null,

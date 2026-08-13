@@ -1,5 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
+  SESSION_GOAL_PROGRESS_MAX_BYTES,
+  SESSION_GOAL_RATIONALE_MAX_BYTES,
+  SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES,
+  SESSION_GOAL_TEXT_MAX_BYTES,
+  SessionGoalSnapshot,
+  sessionGoalUtf8Bytes,
+} from "@opengeni/contracts";
+import {
   cancelUnacceptedVideoGenerationsForToolCallsInTransaction,
   markVideoGenerationAcceptedInTransaction,
   markVideoGenerationTerminalUpdateInTransaction,
@@ -70,7 +78,10 @@ import type {
   SessionEventSemanticClass,
   SessionEventType,
   SessionGoal,
+  SessionGoalChangeKind,
   SessionGoalCreatedBy,
+  SessionGoalMutationPolicy,
+  SessionGoalRevision,
   SessionGoalStatus,
   SessionHumanInputRequest,
   LineageNode,
@@ -102,6 +113,7 @@ import type {
   VariableSetSecret,
   VariableSetVariableMetadata,
   WorkspaceMember,
+  WorkspaceMemoryPromptMode,
   WorkspaceRegisteredPack,
   Channel,
   Rig,
@@ -171,6 +183,7 @@ import {
   resolveWorkspaceCodexCompactionDefault,
   type LatencyMode,
   resolveWorkspaceMemoryEnabled,
+  resolveWorkspaceMemoryPromptMode,
   RigChange as RigChangeContract,
   RigProviderImage as RigProviderImageContract,
   SessionGoal as SessionGoalContract,
@@ -338,6 +351,7 @@ export * from "./memory-governance";
 export * from "./memory-slack-delivery";
 export * from "./scoped-knowledge";
 export * from "./knowledge-source-sync";
+export * from "./task-notes";
 export * from "./generated-images";
 export * from "./slack-user-link-access";
 export * from "./video-generation";
@@ -4346,6 +4360,7 @@ export type SessionTurnForExecution = SessionTurn & {
   /** Worker-only causal authority; never inferred from the current worker. */
   initiatingHumanSubjectId: string | null;
   xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1;
+  goalSnapshot: SessionGoalSnapshot;
 };
 
 export async function createFileUpload(
@@ -4469,7 +4484,11 @@ export async function prepareGeneratedWorkspaceFile(
           .limit(1);
         if (existing) {
           assertGeneratedWorkspaceFileMatches(existing.file, existing.upload, input);
-          return { file: mapFile(existing.file), uploadId: existing.upload.id, created: false };
+          return {
+            file: mapFile(existing.file),
+            uploadId: existing.upload.id,
+            created: false,
+          };
         }
 
         const [file] = await tx
@@ -8523,7 +8542,10 @@ export async function getOrCreateSlackInteraction(
   return await withRlsContext(db, input, async (scopedDb) => {
     const [created] = await scopedDb
       .insert(schema.slackInteractions)
-      .values({ ...input, initiatingSlackUserId: input.initiatingSlackUserId ?? null })
+      .values({
+        ...input,
+        initiatingSlackUserId: input.initiatingSlackUserId ?? null,
+      })
       .onConflictDoNothing()
       .returning();
     if (created) return { created: true, interaction: mapSlackInteraction(created) };
@@ -10206,7 +10228,10 @@ export async function getSlackBotPostOperation(
 }
 
 export type ClaimSlackBotUpdateOperationResult =
-  | { kind: "claimed" | "in_progress" | "completed"; operation: SlackBotUpdateOperation }
+  | {
+      kind: "claimed" | "in_progress" | "completed";
+      operation: SlackBotUpdateOperation;
+    }
   | { kind: "conflict" | "connection_not_found" };
 
 export async function claimSlackBotUpdateOperation(
@@ -10266,7 +10291,11 @@ export async function claimSlackBotUpdateOperation(
             ],
           })
           .returning();
-        if (created) return { kind: "claimed", operation: mapSlackBotUpdateOperation(created) };
+        if (created)
+          return {
+            kind: "claimed",
+            operation: mapSlackBotUpdateOperation(created),
+          };
         const [existing] = await tx
           .select()
           .from(schema.slackBotUpdateOperations)
@@ -10289,7 +10318,10 @@ export async function claimSlackBotUpdateOperation(
           return { kind: "conflict" } as const;
         }
         if (existing.status === "completed") {
-          return { kind: "completed", operation: mapSlackBotUpdateOperation(existing) };
+          return {
+            kind: "completed",
+            operation: mapSlackBotUpdateOperation(existing),
+          };
         }
         const [reclaimed] = await tx
           .update(schema.slackBotUpdateOperations)
@@ -10311,8 +10343,14 @@ export async function claimSlackBotUpdateOperation(
           )
           .returning();
         return reclaimed
-          ? { kind: "claimed", operation: mapSlackBotUpdateOperation(reclaimed) }
-          : { kind: "in_progress", operation: mapSlackBotUpdateOperation(existing) };
+          ? {
+              kind: "claimed",
+              operation: mapSlackBotUpdateOperation(reclaimed),
+            }
+          : {
+              kind: "in_progress",
+              operation: mapSlackBotUpdateOperation(existing),
+            };
       }),
   );
 }
@@ -11662,6 +11700,8 @@ export type WorkspaceMemorySearchInput = {
   kind?: KnowledgeMemoryKind | undefined;
   limit?: number | undefined;
   mode?: WorkspaceMemorySearchMode | undefined;
+  /** Agent-only containment. Human audit/search callers omit this. */
+  agentPromptMode?: WorkspaceMemoryPromptMode | undefined;
 };
 
 export type WorkspaceMemorySearchResult = {
@@ -12291,6 +12331,11 @@ export async function searchWorkspaceMemories(
     eq(schema.knowledgeMemories.workspaceId, workspaceId),
     inArray(schema.knowledgeMemories.status, agentVisibleMemoryStatuses),
   ];
+  if (input.agentPromptMode === "retrieval_only") {
+    // Legacy preference-kind rows remain canonical and human-searchable, but
+    // they are observations rather than structured preference authority.
+    baseConditions.push(ne(schema.knowledgeMemories.kind, "preference"));
+  }
   if (input.kind) {
     baseConditions.push(eq(schema.knowledgeMemories.kind, input.kind));
   }
@@ -12452,7 +12497,11 @@ export async function resolveWorkspaceMemoryBlock(
     .from(schema.workspaces)
     .where(eq(schema.workspaces.id, workspaceId))
     .limit(1);
-  if (!workspace || !resolveWorkspaceMemoryEnabled(workspace.settings)) {
+  if (
+    !workspace ||
+    !resolveWorkspaceMemoryEnabled(workspace.settings) ||
+    resolveWorkspaceMemoryPromptMode(workspace.settings) === "retrieval_only"
+  ) {
     return null;
   }
   const records = await withWorkspaceRls(
@@ -13004,7 +13053,9 @@ export async function getScheduledTaskXaiProviderAccountAuthoritySnapshot(
 ): Promise<XaiProviderAccountAuthoritySnapshotV1> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
-      .select({ snapshot: schema.scheduledTasks.xaiProviderAccountAuthoritySnapshot })
+      .select({
+        snapshot: schema.scheduledTasks.xaiProviderAccountAuthoritySnapshot,
+      })
       .from(schema.scheduledTasks)
       .where(
         and(
@@ -18914,7 +18965,10 @@ export async function armXaiCapacityWait(
                   sessionId: input.sessionId,
                   sequence: ++sequence,
                   type: "session.status.changed",
-                  payload: { status: "waiting_capacity", reason: "xai_capacity" },
+                  payload: {
+                    status: "waiting_capacity",
+                    reason: "xai_capacity",
+                  },
                   turnId: input.turnId,
                   turnGeneration: turn.executionGeneration,
                   turnAttemptId: input.attemptId,
@@ -19130,7 +19184,10 @@ async function supersedeXaiCapacityWaitInTransaction(
     )
     .returning({ id: schema.sessions.id });
   if (!updatedSession) throw new Error("xAI capacity session changed during supersession");
-  return { waiter: mapXaiCapacityWaiter(updated), events: inserted.map(mapEvent) };
+  return {
+    waiter: mapXaiCapacityWaiter(updated),
+    events: inserted.map(mapEvent),
+  };
 }
 
 export async function reconcileXaiCapacityWait(
@@ -19259,7 +19316,11 @@ export async function reconcileXaiCapacityWait(
           } as const;
         }
         if (effectiveControl?.state !== "active" || effectiveControl.settlement !== null) {
-          return { action: "paused", waiter: mapXaiCapacityWaiter(waiter), events: [] } as const;
+          return {
+            action: "paused",
+            waiter: mapXaiCapacityWaiter(waiter),
+            events: [],
+          } as const;
         }
         let supersedeReason: string | null = null;
         if (session.status === "cancelled") {
@@ -19417,7 +19478,11 @@ export async function reconcileXaiCapacityWait(
             )
             .returning();
           if (!updated) return { action: "stale", waiter: null, events: [] } as const;
-          return { action: "waiting", waiter: mapXaiCapacityWaiter(updated), events: [] } as const;
+          return {
+            action: "waiting",
+            waiter: mapXaiCapacityWaiter(updated),
+            events: [],
+          } as const;
         }
 
         const inserted = await tx
@@ -23579,7 +23644,9 @@ async function xaiProviderAccountAuthoritySnapshotForTurnInTransaction(
   turnId: string,
 ): Promise<XaiProviderAccountAuthoritySnapshotV1> {
   const [row] = await db
-    .select({ snapshot: schema.sessionTurns.xaiProviderAccountAuthoritySnapshot })
+    .select({
+      snapshot: schema.sessionTurns.xaiProviderAccountAuthoritySnapshot,
+    })
     .from(schema.sessionTurns)
     .where(
       and(
@@ -28819,7 +28886,10 @@ export async function setSessionLastInputTokensForTurnAttempt(
       if (!fence.allowed) return false;
       await tx
         .update(schema.sessions)
-        .set({ lastInputTokens: input.lastInputTokens, updatedAt: new Date() })
+        .set({
+          lastInputTokens: input.lastInputTokens,
+          updatedAt: new Date(),
+        })
         .where(
           and(
             eq(schema.sessions.workspaceId, input.workspaceId),
@@ -43570,6 +43640,12 @@ export type CreateSessionGoalInput = {
   text: string;
   successCriteria?: string | null;
   maxAutoContinuations?: number | null;
+  mutationPolicy?: SessionGoalMutationPolicy;
+  expectedObjectiveRevision?: number;
+  expectedGoalId?: string;
+  changeKind?: SessionGoalChangeKind;
+  changeRationale?: string;
+  sourceProposalId?: string;
   createdBy: SessionGoalCreatedBy;
 };
 
@@ -43590,6 +43666,7 @@ export async function createSessionGoal(
           text: input.text,
           successCriteria: input.successCriteria ?? null,
           maxAutoContinuations: input.maxAutoContinuations ?? null,
+          mutationPolicy: input.mutationPolicy ?? "preserve_intent",
           createdBy: input.createdBy,
         })
         .returning();
@@ -43938,6 +44015,21 @@ export async function upsertSessionGoal(
   db: Database,
   input: CreateSessionGoalInput,
 ): Promise<{ goal: SessionGoal; replaced: boolean }> {
+  assertSessionGoalFieldBytes(input.text, SESSION_GOAL_TEXT_MAX_BYTES, "goal text");
+  if (input.successCriteria !== null && input.successCriteria !== undefined) {
+    assertSessionGoalFieldBytes(
+      input.successCriteria,
+      SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES,
+      "goal success criteria",
+    );
+  }
+  if (input.changeRationale) {
+    assertSessionGoalFieldBytes(
+      input.changeRationale,
+      SESSION_GOAL_RATIONALE_MAX_BYTES,
+      "goal rationale",
+    );
+  }
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -43963,6 +44055,7 @@ export async function upsertSessionGoal(
             text: input.text,
             successCriteria: input.successCriteria ?? null,
             maxAutoContinuations: input.maxAutoContinuations ?? null,
+            mutationPolicy: input.mutationPolicy ?? "preserve_intent",
             createdBy: input.createdBy,
           })
           .returning();
@@ -43971,6 +44064,37 @@ export async function upsertSessionGoal(
         }
         return { goal: mapSessionGoal(row), replaced: false };
       }
+      if (
+        input.expectedObjectiveRevision !== undefined &&
+        existing.objectiveRevision !== input.expectedObjectiveRevision
+      ) {
+        throw new SessionControlConflictError(
+          `goal objective revision changed: expected ${input.expectedObjectiveRevision}, current ${existing.objectiveRevision}`,
+        );
+      }
+      if (input.expectedGoalId !== undefined && existing.id !== input.expectedGoalId) {
+        throw new SessionControlConflictError(
+          `goal identity changed: expected ${input.expectedGoalId}, current ${existing.id}`,
+        );
+      }
+      if (input.changeKind) {
+        await scopedDb.execute(
+          sql`select set_config('opengeni.goal_change_kind', ${input.changeKind}, true)`,
+        );
+      }
+      if (input.changeRationale) {
+        await scopedDb.execute(
+          sql`select set_config('opengeni.goal_change_rationale', ${input.changeRationale}, true)`,
+        );
+      }
+      if (input.sourceProposalId) {
+        await scopedDb.execute(
+          sql`select set_config('opengeni.goal_change_proposal_id', ${input.sourceProposalId}, true)`,
+        );
+      }
+      await scopedDb.execute(
+        sql`select set_config('opengeni.goal_change_actor', ${input.createdBy === "scheduled_task" ? "scheduled_task" : input.createdBy === "agent" ? "agent" : "api"}, true)`,
+      );
       const [row] = await scopedDb
         .update(schema.sessionGoals)
         .set({
@@ -43978,6 +44102,7 @@ export async function upsertSessionGoal(
           text: input.text,
           successCriteria: input.successCriteria ?? null,
           maxAutoContinuations: input.maxAutoContinuations ?? null,
+          mutationPolicy: input.mutationPolicy ?? existing.mutationPolicy,
           evidence: null,
           rationale: null,
           pausedReason: null,
@@ -44009,7 +44134,27 @@ export async function upsertSessionGoal(
 export async function upsertSessionGoalWithEvent(
   db: Database,
   input: CreateSessionGoalInput & { actor: "agent" | "api" },
-): Promise<{ goal: SessionGoal; replaced: boolean; events: SessionEvent[] }> {
+): Promise<{
+  goal: SessionGoal;
+  replaced: boolean;
+  workflowWakeRevision: number | null;
+  events: SessionEvent[];
+}> {
+  assertSessionGoalFieldBytes(input.text, SESSION_GOAL_TEXT_MAX_BYTES, "goal text");
+  if (input.successCriteria !== null && input.successCriteria !== undefined) {
+    assertSessionGoalFieldBytes(
+      input.successCriteria,
+      SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES,
+      "goal success criteria",
+    );
+  }
+  if (input.changeRationale) {
+    assertSessionGoalFieldBytes(
+      input.changeRationale,
+      SESSION_GOAL_RATIONALE_MAX_BYTES,
+      "goal rationale",
+    );
+  }
   return await withSessionActivityRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -44023,6 +44168,26 @@ export async function upsertSessionGoalWithEvent(
         const session = locks.sessions[0];
         if (!locks.control || !locks.workspace || !session) {
           throw new Error(`Session not found: ${input.sessionId}`);
+        }
+        if (input.actor === "agent") {
+          const [existing] = await tx
+            .select({
+              objectiveRevision: schema.sessionGoals.objectiveRevision,
+            })
+            .from(schema.sessionGoals)
+            .where(
+              and(
+                eq(schema.sessionGoals.workspaceId, input.workspaceId),
+                eq(schema.sessionGoals.sessionId, input.sessionId),
+              ),
+            )
+            .for("update")
+            .limit(1);
+          if (existing) {
+            throw new SessionControlConflictError(
+              `agent goal_set is create-only; goal exists at objective revision ${existing.objectiveRevision}`,
+            );
+          }
         }
         const result = await upsertSessionGoal(tx, input);
         const now = new Date();
@@ -44043,6 +44208,8 @@ export async function upsertSessionGoalWithEvent(
                     ? { successCriteria: result.goal.successCriteria }
                     : {}),
                   version: result.goal.version,
+                  objectiveRevision: result.goal.objectiveRevision,
+                  mutationPolicy: result.goal.mutationPolicy,
                   actor: input.actor,
                   replaced: result.replaced,
                 },
@@ -44058,14 +44225,102 @@ export async function upsertSessionGoalWithEvent(
           .update(schema.sessions)
           .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
           .where(eq(schema.sessions.id, input.sessionId));
-        return { ...result, events: [mapEvent(event)] };
+        const effectiveControl = await evaluateSessionControl(
+          tx,
+          input.workspaceId,
+          input.sessionId,
+          { lock: "none" },
+        );
+        const workflowWakeRevision =
+          input.actor === "api" &&
+          session.status !== "cancelled" &&
+          session.activeTurnId === null &&
+          effectiveControl.state === "active"
+            ? await enqueueSessionWorkflowWakeInTransaction(tx, {
+                accountId: session.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                temporalWorkflowId: session.temporalWorkflowId ?? `session-${input.sessionId}`,
+                reason: result.replaced ? "goal_redirected" : "goal_set",
+              })
+            : null;
+        return { ...result, workflowWakeRevision, events: [mapEvent(event)] };
       }),
   );
 }
 
+function mapSessionGoalRevision(
+  row: typeof schema.sessionGoalRevisions.$inferSelect,
+): SessionGoalRevision {
+  return {
+    id: row.id,
+    accountId: row.accountId,
+    workspaceId: row.workspaceId,
+    sessionId: row.sessionId,
+    goalId: row.goalId,
+    disposition: row.disposition,
+    changeKind: row.changeKind,
+    baseObjectiveRevision: row.baseObjectiveRevision,
+    resultObjectiveRevision: row.resultObjectiveRevision,
+    text: row.text,
+    successCriteria: row.successCriteria,
+    mutationPolicy: row.mutationPolicy,
+    rationale: row.rationale,
+    actor: row.actor,
+    actorTurnId: row.actorTurnId,
+    actorAttemptId: row.actorAttemptId,
+    proposalId: row.proposalId,
+    createdAt: row.createdAt.toISOString(),
+  };
+}
+
+export async function listSessionGoalRevisions(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<SessionGoalRevision[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select()
+      .from(schema.sessionGoalRevisions)
+      .where(
+        and(
+          eq(schema.sessionGoalRevisions.workspaceId, workspaceId),
+          eq(schema.sessionGoalRevisions.sessionId, sessionId),
+        ),
+      )
+      .orderBy(desc(schema.sessionGoalRevisions.createdAt), desc(schema.sessionGoalRevisions.id));
+    return rows.map(mapSessionGoalRevision);
+  });
+}
+
+export async function getSessionGoalRevision(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  revisionId: string,
+): Promise<SessionGoalRevision | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.sessionGoalRevisions)
+      .where(
+        and(
+          eq(schema.sessionGoalRevisions.workspaceId, workspaceId),
+          eq(schema.sessionGoalRevisions.sessionId, sessionId),
+          eq(schema.sessionGoalRevisions.id, revisionId),
+        ),
+      )
+      .limit(1);
+    return row ? mapSessionGoalRevision(row) : null;
+  });
+}
+
 /**
- * goal_update semantics: revise text/criteria without changing status. The
- * version bump counts as progress for the no-progress detector.
+ * Low-level semantic goal revision. The established lifecycle version still
+ * advances so stale continuation updates are cancelled, while the migration
+ * trigger advances the separate objective revision. A semantic rewrite is not
+ * execution progress and therefore never resets the no-progress streak.
  */
 export async function updateSessionGoal(
   db: Database,
@@ -44074,16 +44329,27 @@ export async function updateSessionGoal(
   input: {
     text?: string;
     successCriteria?: string | null;
+    mutationPolicy?: SessionGoalMutationPolicy;
   },
 ): Promise<SessionGoal> {
+  if (input.text !== undefined) {
+    assertSessionGoalFieldBytes(input.text, SESSION_GOAL_TEXT_MAX_BYTES, "goal text");
+  }
+  if (input.successCriteria !== null && input.successCriteria !== undefined) {
+    assertSessionGoalFieldBytes(
+      input.successCriteria,
+      SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES,
+      "goal success criteria",
+    );
+  }
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
       .update(schema.sessionGoals)
       .set({
         ...(input.text !== undefined ? { text: input.text } : {}),
         ...(input.successCriteria !== undefined ? { successCriteria: input.successCriteria } : {}),
+        ...(input.mutationPolicy !== undefined ? { mutationPolicy: input.mutationPolicy } : {}),
         version: sql`${schema.sessionGoals.version} + 1`,
-        noProgressStreak: 0,
         updatedAt: new Date(),
       })
       .where(
@@ -44113,7 +44379,12 @@ export async function updateSessionGoalWithEvent(
   input: {
     text?: string;
     successCriteria?: string | null;
+    mutationPolicy?: SessionGoalMutationPolicy;
+    /** @deprecated A semantic rewrite never counts as progress; use goal_progress. */
     progressNote?: string;
+    changeKind?: SessionGoalChangeKind;
+    rationale?: string;
+    expectedObjectiveRevision?: number;
     actor: "agent" | "api";
     command?: {
       accountId: string;
@@ -44126,7 +44397,33 @@ export async function updateSessionGoalWithEvent(
   events: SessionEvent[];
   operationId: string | null;
   replay: boolean;
+  outcome: "applied" | "proposed";
+  proposalId: string | null;
 }> {
+  if (input.text !== undefined) {
+    assertSessionGoalFieldBytes(input.text, SESSION_GOAL_TEXT_MAX_BYTES, "goal text");
+  }
+  if (input.successCriteria !== null && input.successCriteria !== undefined) {
+    assertSessionGoalFieldBytes(
+      input.successCriteria,
+      SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES,
+      "goal success criteria",
+    );
+  }
+  if (input.rationale) {
+    assertSessionGoalFieldBytes(
+      input.rationale,
+      SESSION_GOAL_RATIONALE_MAX_BYTES,
+      "goal rationale",
+    );
+  }
+  if (input.progressNote) {
+    assertSessionGoalFieldBytes(
+      input.progressNote,
+      SESSION_GOAL_PROGRESS_MAX_BYTES,
+      "goal progress note",
+    );
+  }
   return await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) =>
     withSessionActivitySavepoint(scopedDb, async (tx) => {
       const locks = await lockSessionEventWriteRows(tx, {
@@ -44151,7 +44448,11 @@ export async function updateSessionGoalWithEvent(
             canonicalRequestHash: canonicalSessionCommandHash({
               text: input.text ?? null,
               successCriteria: input.successCriteria ?? null,
+              mutationPolicy: input.mutationPolicy ?? null,
               progressNote: input.progressNote ?? null,
+              changeKind: input.changeKind ?? null,
+              rationale: input.rationale ?? null,
+              expectedObjectiveRevision: input.expectedObjectiveRevision ?? null,
             }),
             identityScope: "goal_operation",
           })
@@ -44175,6 +44476,11 @@ export async function updateSessionGoalWithEvent(
           events: [],
           operationId: reserved.receipt.id,
           replay: true,
+          outcome: reserved.receipt.result.outcome === "proposed" ? "proposed" : "applied",
+          proposalId:
+            typeof reserved.receipt.result.proposalId === "string"
+              ? reserved.receipt.result.proposalId
+              : null,
         };
       }
 
@@ -44203,6 +44509,177 @@ export async function updateSessionGoalWithEvent(
       if (existing.status === "completed") {
         throw new Error("session goal is completed; use goal_set to start a new goal");
       }
+      const changeKind = input.changeKind ?? "refinement";
+      const rationale = input.rationale?.trim() || "Goal revision requested";
+      const expectedObjectiveRevision =
+        input.expectedObjectiveRevision ?? existing.objectiveRevision;
+      if (existing.objectiveRevision !== expectedObjectiveRevision) {
+        throw new SessionControlConflictError(
+          `goal objective revision changed: expected ${expectedObjectiveRevision}, current ${existing.objectiveRevision}`,
+        );
+      }
+      const nextText = input.text ?? existing.text;
+      const nextSuccessCriteria =
+        input.successCriteria !== undefined ? input.successCriteria : existing.successCriteria;
+      const nextMutationPolicy = input.mutationPolicy ?? existing.mutationPolicy;
+      const semanticChangeRequested =
+        input.text !== undefined ||
+        input.successCriteria !== undefined ||
+        input.mutationPolicy !== undefined;
+      if (!semanticChangeRequested) {
+        if (!input.progressNote) {
+          throw new Error("goal_update requires semantic content or a progress note");
+        }
+        const goal = mapSessionGoal(existing);
+        const now = new Date();
+        const [event] = await tx
+          .insert(schema.sessionEvents)
+          .values(
+            withLosslessContentWriteVersion(
+              {
+                accountId: session.accountId,
+                workspaceId,
+                sessionId,
+                turnId: input.command?.actor.turnId ?? null,
+                turnGeneration: input.command?.actor.executionGeneration ?? null,
+                turnAttemptId: input.command?.actor.attemptId ?? null,
+                turnAssociation: input.command ? "current" : null,
+                sequence: session.lastSequence + 1,
+                type: "goal.progress",
+                payload: {
+                  goalId: goal.id,
+                  objectiveRevision: goal.objectiveRevision,
+                  progressNote: input.progressNote,
+                  actor: input.actor,
+                  compatibilitySource: "goal.update",
+                },
+                occurredAt: now,
+              },
+              "payload",
+              "payloadCodecVersion",
+            ),
+          )
+          .returning();
+        if (!event) throw new Error("Failed to append compatibility goal.progress event");
+        await tx
+          .update(schema.sessions)
+          .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
+          .where(eq(schema.sessions.id, sessionId));
+        if (reserved) {
+          await updateSessionCommandReceiptResult(tx, reserved.receipt.id, {
+            result: {
+              goal,
+              goalVersion: goal.version,
+              eventId: event.id,
+              outcome: "applied",
+            },
+          });
+        }
+        return {
+          goal,
+          events: [mapEvent(event)],
+          operationId: reserved?.receipt.id ?? null,
+          replay: false,
+          outcome: "applied",
+          proposalId: null,
+        };
+      }
+      const shouldApply =
+        input.actor === "api" ||
+        existing.mutationPolicy === "autonomous_adaptation" ||
+        (existing.mutationPolicy === "preserve_intent" && changeKind === "refinement");
+      if (!shouldApply) {
+        const [proposal] = await tx
+          .insert(schema.sessionGoalRevisions)
+          .values({
+            accountId: session.accountId,
+            workspaceId,
+            sessionId,
+            goalId: existing.id,
+            disposition: "proposed",
+            changeKind,
+            baseObjectiveRevision: existing.objectiveRevision,
+            resultObjectiveRevision: null,
+            text: nextText,
+            successCriteria: nextSuccessCriteria,
+            mutationPolicy: nextMutationPolicy,
+            rationale,
+            actor: input.actor,
+            actorTurnId: input.command?.actor.turnId ?? null,
+            actorAttemptId: input.command?.actor.attemptId ?? null,
+          })
+          .returning({ id: schema.sessionGoalRevisions.id });
+        if (!proposal) throw new Error("Failed to persist goal rewrite proposal");
+        const now = new Date();
+        const [event] = await tx
+          .insert(schema.sessionEvents)
+          .values(
+            withLosslessContentWriteVersion(
+              {
+                accountId: session.accountId,
+                workspaceId,
+                sessionId,
+                turnId: input.command?.actor.turnId ?? null,
+                turnGeneration: input.command?.actor.executionGeneration ?? null,
+                turnAttemptId: input.command?.actor.attemptId ?? null,
+                turnAssociation: input.command ? "current" : null,
+                sequence: session.lastSequence + 1,
+                type: "goal.rewrite.proposed",
+                payload: {
+                  goalId: existing.id,
+                  proposalId: proposal.id,
+                  baseObjectiveRevision: existing.objectiveRevision,
+                  changeKind,
+                  rationale,
+                  actor: input.actor,
+                },
+                occurredAt: now,
+              },
+              "payload",
+              "payloadCodecVersion",
+            ),
+          )
+          .returning();
+        if (!event) throw new Error("Failed to append goal.rewrite.proposed event");
+        await tx
+          .update(schema.sessions)
+          .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
+          .where(eq(schema.sessions.id, sessionId));
+        const goal = mapSessionGoal(existing);
+        if (reserved) {
+          await updateSessionCommandReceiptResult(tx, reserved.receipt.id, {
+            result: {
+              goal,
+              goalVersion: goal.version,
+              eventId: event.id,
+              outcome: "proposed",
+              proposalId: proposal.id,
+            },
+          });
+        }
+        return {
+          goal,
+          events: [mapEvent(event)],
+          operationId: reserved?.receipt.id ?? null,
+          replay: false,
+          outcome: "proposed",
+          proposalId: proposal.id,
+        };
+      }
+
+      await tx.execute(sql`select set_config('opengeni.goal_change_kind', ${changeKind}, true)`);
+      await tx.execute(
+        sql`select set_config('opengeni.goal_change_rationale', ${rationale}, true)`,
+      );
+      await tx.execute(sql`select set_config('opengeni.goal_change_actor', ${input.actor}, true)`);
+      if (input.command) {
+        await tx.execute(
+          sql`select set_config('opengeni.goal_change_turn_id', ${input.command.actor.turnId}, true)`,
+        );
+        await tx.execute(
+          sql`select set_config('opengeni.goal_change_attempt_id', ${input.command.actor.attemptId}, true)`,
+        );
+      }
       const [updated] = await tx
         .update(schema.sessionGoals)
         .set({
@@ -44210,8 +44687,9 @@ export async function updateSessionGoalWithEvent(
           ...(input.successCriteria !== undefined
             ? { successCriteria: input.successCriteria }
             : {}),
+          ...(input.mutationPolicy !== undefined ? { mutationPolicy: input.mutationPolicy } : {}),
           version: existing.version + 1,
-          noProgressStreak: 0,
+          objectiveRevision: existing.objectiveRevision + 1,
           updatedAt: new Date(),
         })
         .where(eq(schema.sessionGoals.id, existing.id))
@@ -44227,6 +44705,10 @@ export async function updateSessionGoalWithEvent(
               accountId: session.accountId,
               workspaceId,
               sessionId,
+              turnId: input.command?.actor.turnId ?? null,
+              turnGeneration: input.command?.actor.executionGeneration ?? null,
+              turnAttemptId: input.command?.actor.attemptId ?? null,
+              turnAssociation: input.command ? "current" : null,
               sequence: session.lastSequence + 1,
               type: "goal.updated",
               payload: {
@@ -44235,6 +44717,9 @@ export async function updateSessionGoalWithEvent(
                 ...(goal.successCriteria ? { successCriteria: goal.successCriteria } : {}),
                 ...(input.progressNote ? { progressNote: input.progressNote } : {}),
                 version: goal.version,
+                objectiveRevision: goal.objectiveRevision,
+                changeKind,
+                rationale,
                 actor: input.actor,
               },
               occurredAt: now,
@@ -44255,6 +44740,7 @@ export async function updateSessionGoalWithEvent(
             goal,
             goalVersion: goal.version,
             eventId: event.id,
+            outcome: "applied",
           },
         });
       }
@@ -44262,6 +44748,142 @@ export async function updateSessionGoalWithEvent(
         goal,
         events: [mapEvent(event)],
         operationId: reserved?.receipt.id ?? null,
+        replay: false,
+        outcome: "applied",
+        proposalId: null,
+      };
+    }),
+  );
+}
+
+/**
+ * Record execution progress without changing goal semantics or either goal
+ * revision. The attempt-fenced operation receipt makes a recovered tool call
+ * converge on the original event instead of manufacturing progress twice.
+ */
+export async function recordSessionGoalProgressWithEvent(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  input: {
+    progressNote: string;
+    command: {
+      accountId: string;
+      actor: Extract<SessionCommandActor, { type: "agent_attempt" }>;
+      operationKey: string;
+    };
+  },
+): Promise<{
+  goal: SessionGoal;
+  events: SessionEvent[];
+  operationId: string;
+  replay: boolean;
+}> {
+  assertSessionGoalFieldBytes(
+    input.progressNote,
+    SESSION_GOAL_PROGRESS_MAX_BYTES,
+    "goal progress note",
+  );
+  return await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) =>
+    withSessionActivitySavepoint(scopedDb, async (tx) => {
+      const locks = await lockSessionEventWriteRows(tx, {
+        workspaceId,
+        controlLock: "share",
+        sessionIds: [sessionId],
+      });
+      const session = locks.sessions[0];
+      if (!locks.control || !locks.workspace || !session) {
+        throw new Error(`Session not found: ${sessionId}`);
+      }
+      const reserved = await reserveSessionCommandReceipt(tx, {
+        accountId: input.command.accountId,
+        workspaceId,
+        actor: input.command.actor,
+        action: "goal.progress",
+        targetSessionId: sessionId,
+        targetTurnId: null,
+        operationKey: input.command.operationKey,
+        canonicalRequestHash: canonicalSessionCommandHash({
+          progressNote: input.progressNote,
+        }),
+        identityScope: "goal_operation",
+      });
+      if (reserved.replay) {
+        const parsed = SessionGoalContract.safeParse(reserved.receipt.result.goal);
+        if (!parsed.success) {
+          throw new SessionControlInvariantError(
+            `Goal progress receipt ${reserved.receipt.id} has no valid committed result`,
+          );
+        }
+        return {
+          goal: parsed.data,
+          events: [],
+          operationId: reserved.receipt.id,
+          replay: true,
+        };
+      }
+      await assertAgentCommandAuthorityInTransaction(tx, {
+        workspaceId,
+        actor: input.command.actor,
+        targetSessionId: sessionId,
+        action: "goal",
+      });
+      const [existing] = await tx
+        .select()
+        .from(schema.sessionGoals)
+        .where(
+          and(
+            eq(schema.sessionGoals.workspaceId, workspaceId),
+            eq(schema.sessionGoals.sessionId, sessionId),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      if (!existing) throw new Error("this session has no goal; use goal_set first");
+      if (existing.status !== "active") {
+        throw new Error("session goal is not active; progress cannot be recorded");
+      }
+      const goal = mapSessionGoal(existing);
+      const now = new Date();
+      const [event] = await tx
+        .insert(schema.sessionEvents)
+        .values(
+          withLosslessContentWriteVersion(
+            {
+              accountId: session.accountId,
+              workspaceId,
+              sessionId,
+              turnId: input.command.actor.turnId,
+              turnGeneration: input.command.actor.executionGeneration,
+              turnAttemptId: input.command.actor.attemptId,
+              turnAssociation: "current",
+              sequence: session.lastSequence + 1,
+              type: "goal.progress",
+              payload: {
+                goalId: goal.id,
+                objectiveRevision: goal.objectiveRevision,
+                progressNote: input.progressNote,
+                actor: "agent",
+              },
+              occurredAt: now,
+            },
+            "payload",
+            "payloadCodecVersion",
+          ),
+        )
+        .returning();
+      if (!event) throw new Error("Failed to append goal.progress event");
+      await tx
+        .update(schema.sessions)
+        .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
+        .where(eq(schema.sessions.id, sessionId));
+      await updateSessionCommandReceiptResult(tx, reserved.receipt.id, {
+        result: { goal, eventId: event.id },
+      });
+      return {
+        goal,
+        events: [mapEvent(event)],
+        operationId: reserved.receipt.id,
         replay: false,
       };
     }),
@@ -44467,6 +45089,13 @@ export async function setSessionGoalStatusWithEvent(
   workflowWakeRevision: number | null;
   events: SessionEvent[];
 }> {
+  if (input.rationale) {
+    assertSessionGoalFieldBytes(
+      input.rationale,
+      SESSION_GOAL_RATIONALE_MAX_BYTES,
+      "goal rationale",
+    );
+  }
   return await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) =>
     withSessionActivitySavepoint(scopedDb, async (tx) => {
       const locks = await lockSessionEventWriteRows(tx, {
@@ -44508,6 +45137,8 @@ export async function setSessionGoalStatusWithEvent(
                   ? { successCriteria: result.goal.successCriteria }
                   : {}),
                 version: result.goal.version,
+                objectiveRevision: result.goal.objectiveRevision,
+                mutationPolicy: result.goal.mutationPolicy,
                 actor: input.event.actor,
               };
       const now = new Date();
@@ -44767,9 +45398,9 @@ export async function evaluateGoalContinuation(
                 ),
               );
             rotatedFailover = Number(rotatedFailures) > 0;
-            const [{ toolCalls } = { toolCalls: 0 }] = await tx
+            const [{ executionToolCalls } = { executionToolCalls: 0 }] = await tx
               .select({
-                toolCalls: sql<number>`count(*)::int`,
+                executionToolCalls: sql<number>`count(*)::int`,
               })
               .from(schema.sessionEvents)
               .where(
@@ -44777,11 +45408,25 @@ export async function evaluateGoalContinuation(
                   eq(schema.sessionEvents.workspaceId, input.workspaceId),
                   eq(schema.sessionEvents.turnId, row.lastContinuationTurnId),
                   eq(schema.sessionEvents.type, "agent.toolCall.created"),
+                  // Goal administration is not execution progress. A semantic
+                  // rewrite/proposal must never reset the detector merely by
+                  // calling its own control tool; goal_progress is counted
+                  // only from its committed, attempt-fenced event below.
+                  sql`coalesce(${schema.sessionEvents.payload} ->> 'name', '')
+                    !~ '(^|__)goal_(set|update|progress)$'`,
                 ),
               );
-            const goalRevised =
-              row.versionAtLastContinuation !== null && row.version > row.versionAtLastContinuation;
-            if (Number(toolCalls) > 0 || goalRevised) {
+            const [{ progressEvents } = { progressEvents: 0 }] = await tx
+              .select({ progressEvents: sql<number>`count(*)::int` })
+              .from(schema.sessionEvents)
+              .where(
+                and(
+                  eq(schema.sessionEvents.workspaceId, input.workspaceId),
+                  eq(schema.sessionEvents.turnId, row.lastContinuationTurnId),
+                  eq(schema.sessionEvents.type, "goal.progress"),
+                ),
+              );
+            if (Number(executionToolCalls) > 0 || Number(progressEvents) > 0) {
               noProgressStreak = 0;
             } else {
               // A turn that died on retryable provider backpressure says nothing
@@ -45421,6 +46066,8 @@ function mapSessionGoal(row: typeof schema.sessionGoals.$inferSelect): SessionGo
     pausedReason: row.pausedReason,
     createdBy: row.createdBy as SessionGoal["createdBy"],
     version: row.version,
+    objectiveRevision: row.objectiveRevision,
+    mutationPolicy: row.mutationPolicy,
     autoContinuations: row.autoContinuations,
     noProgressStreak: row.noProgressStreak,
     maxAutoContinuations: row.maxAutoContinuations,
@@ -45443,6 +46090,7 @@ export type InitializeSessionStartInput = {
     text: string;
     successCriteria?: string | null;
     maxAutoContinuations?: number | null;
+    mutationPolicy?: SessionGoalMutationPolicy;
   } | null;
   consumeNewSessionDraft?: {
     subjectId: string;
@@ -45537,6 +46185,7 @@ export async function initializeSessionStartAtomically(
               text: input.goal.text,
               successCriteria: input.goal.successCriteria ?? null,
               maxAutoContinuations: input.goal.maxAutoContinuations ?? null,
+              mutationPolicy: input.goal.mutationPolicy ?? "preserve_intent",
               createdBy: "api",
             })
             .returning();
@@ -45592,6 +46241,8 @@ export async function initializeSessionStartAtomically(
                                 ? { successCriteria: goal.successCriteria }
                                 : {}),
                               version: goal.version,
+                              objectiveRevision: goal.objectiveRevision,
+                              mutationPolicy: goal.mutationPolicy,
                               actor: "api",
                               replaced: false,
                             },
@@ -45703,6 +46354,8 @@ export async function initializeSessionStartAtomically(
                               ? { successCriteria: goal.successCriteria }
                               : {}),
                             version: goal.version,
+                            objectiveRevision: goal.objectiveRevision,
+                            mutationPolicy: goal.mutationPolicy,
                             actor: "api",
                             replaced: false,
                           },
@@ -46174,6 +46827,140 @@ export type ClaimSessionWorkForAttemptResult =
       action: "unclaimed";
       reason: "gate-closed" | "no-work" | "stale-approval" | "control-pending";
     };
+
+function assertSessionGoalFieldBytes(value: string, maxBytes: number, field: string): void {
+  const actualBytes = sessionGoalUtf8Bytes(value);
+  if (actualBytes > maxBytes) {
+    throw new Error(`${field} exceeds ${maxBytes} UTF-8 bytes (received ${actualBytes})`);
+  }
+}
+
+/**
+ * Bound legacy exact goal content only at the immutable model-context snapshot
+ * boundary. The canonical goal/revision remains byte-for-byte unchanged.
+ */
+export function projectSessionGoalPromptField(value: string, maxBytes: number): string {
+  const original = Buffer.from(value, "utf8");
+  if (original.byteLength <= maxBytes) return value;
+  const marker = `\n[truncated; original UTF-8 bytes=${original.byteLength}]`;
+  const markerBytes = Buffer.byteLength(marker, "utf8");
+  const prefixBudget = Math.max(0, maxBytes - markerBytes);
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  let prefix = "";
+  for (let end = prefixBudget; end >= Math.max(0, prefixBudget - 3); end -= 1) {
+    try {
+      prefix = decoder.decode(original.subarray(0, end));
+      break;
+    } catch {
+      // Move to the prior UTF-8 code-point boundary (at most three bytes).
+    }
+  }
+  return `${prefix}${marker}`;
+}
+
+async function goalSnapshotForAcceptedTurnInTransaction(
+  tx: Database,
+  row: typeof schema.sessionTurns.$inferSelect,
+): Promise<SessionGoalSnapshot> {
+  if (row.goalSnapshot !== null) {
+    return SessionGoalSnapshot.parse(row.goalSnapshot);
+  }
+
+  // Only rolling-legacy rows can be null. Reconstruct from immutable timeline
+  // evidence at the logical turn's accepted_at boundary, never from the mutable
+  // current goal head. This also freezes an explicit no-goal result.
+  const [lifecycle] = await tx
+    .select({
+      type: schema.sessionEvents.type,
+      payload: schema.sessionEvents.payload,
+    })
+    .from(schema.sessionEvents)
+    .where(
+      and(
+        eq(schema.sessionEvents.workspaceId, row.workspaceId),
+        eq(schema.sessionEvents.sessionId, row.sessionId),
+        inArray(schema.sessionEvents.type, [
+          "goal.set",
+          "goal.paused",
+          "goal.resumed",
+          "goal.completed",
+          "goal.cleared",
+        ]),
+        lte(schema.sessionEvents.occurredAt, row.createdAt),
+      ),
+    )
+    .orderBy(desc(schema.sessionEvents.occurredAt), desc(schema.sessionEvents.sequence))
+    .limit(1);
+  const [objective] = await tx
+    .select({ payload: schema.sessionEvents.payload })
+    .from(schema.sessionEvents)
+    .where(
+      and(
+        eq(schema.sessionEvents.workspaceId, row.workspaceId),
+        eq(schema.sessionEvents.sessionId, row.sessionId),
+        // Lifecycle events such as resume intentionally carry no objective
+        // text. Resolve semantics only from full objective-bearing events;
+        // the independent lifecycle query above supplies paused/active state.
+        inArray(schema.sessionEvents.type, ["goal.set", "goal.updated"]),
+        lte(schema.sessionEvents.occurredAt, row.createdAt),
+      ),
+    )
+    .orderBy(desc(schema.sessionEvents.occurredAt), desc(schema.sessionEvents.sequence))
+    .limit(1);
+  const capturedAt = row.createdAt.toISOString();
+  const payload = objective?.payload as Record<string, unknown> | undefined;
+  const lifecycleType = lifecycle?.type;
+  const state =
+    lifecycleType === "goal.paused"
+      ? "paused"
+      : lifecycleType === "goal.completed"
+        ? "completed"
+        : lifecycleType === "goal.cleared" || !lifecycleType
+          ? "none"
+          : "active";
+  const snapshot: SessionGoalSnapshot =
+    state === "none" ||
+    typeof payload?.goalId !== "string" ||
+    typeof payload.text !== "string" ||
+    payload.text.length === 0
+      ? { state: "none", capturedAt }
+      : {
+          state,
+          goalId: payload.goalId,
+          objectiveRevision:
+            typeof payload.objectiveRevision === "number" &&
+            Number.isInteger(payload.objectiveRevision) &&
+            payload.objectiveRevision > 0
+              ? payload.objectiveRevision
+              : 1,
+          text: projectSessionGoalPromptField(payload.text, SESSION_GOAL_TEXT_MAX_BYTES),
+          successCriteria:
+            typeof payload.successCriteria === "string"
+              ? projectSessionGoalPromptField(
+                  payload.successCriteria,
+                  SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES,
+                )
+              : null,
+          mutationPolicy:
+            payload.mutationPolicy === "review_changes" ||
+            payload.mutationPolicy === "autonomous_adaptation"
+              ? payload.mutationPolicy
+              : "preserve_intent",
+          capturedAt,
+        };
+  await tx
+    .update(schema.sessionTurns)
+    .set({ goalSnapshot: snapshot })
+    .where(
+      and(
+        eq(schema.sessionTurns.workspaceId, row.workspaceId),
+        eq(schema.sessionTurns.id, row.id),
+        isNull(schema.sessionTurns.goalSnapshot),
+      ),
+    );
+  row.goalSnapshot = snapshot;
+  return snapshot;
+}
 
 /**
  * Claim and register one inference attempt after a turn worker has accepted the
@@ -46710,6 +47497,7 @@ export async function claimSessionWorkForAttempt(
               `Session ${sessionId} points to invalid active turn ownership ${session.activeTurnId}`,
             );
           }
+          await goalSnapshotForAcceptedTurnInTransaction(tx as unknown as Database, activeTurn);
           const parsedDispatch = readTurnDispatchMetadata(activeTurn?.metadata);
           if (parsedDispatch.kind === "malformed") {
             throw new Error(`Malformed turn dispatch metadata: ${parsedDispatch.reason}`);
@@ -46977,6 +47765,9 @@ export async function claimSessionWorkForAttempt(
           throw new Error(
             `Queued turn ${queuedTurnRow.id} does not belong to session ${sessionId}`,
           );
+        }
+        if (queuedTurnRow) {
+          await goalSnapshotForAcceptedTurnInTransaction(tx as unknown as Database, queuedTurnRow);
         }
         const queuedTurn = queuedTurnRow
           ? {
@@ -51761,7 +52552,9 @@ export async function getActiveSessionTurnForExecution(
         ),
       )
       .limit(1);
-    return row ? mapSessionTurnForExecution(row.turn) : null;
+    if (!row) return null;
+    await goalSnapshotForAcceptedTurnInTransaction(scopedDb, row.turn);
+    return mapSessionTurnForExecution(row.turn);
   });
 }
 
@@ -51813,7 +52606,9 @@ export async function getSessionTurnForAttempt(
         ),
       )
       .limit(1);
-    return row ? mapSessionTurnForExecution(row.turn) : null;
+    if (!row) return null;
+    await goalSnapshotForAcceptedTurnInTransaction(scopedDb, row.turn);
+    return mapSessionTurnForExecution(row.turn);
   });
 }
 
@@ -53626,7 +54421,11 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
   attemptId: string,
   inputs: AppendEventInput[],
   mutate: (tx: Database) => Promise<boolean>,
-): Promise<{ events: SessionEvent[]; accepted: boolean; mutationApplied: boolean }> {
+): Promise<{
+  events: SessionEvent[];
+  accepted: boolean;
+  mutationApplied: boolean;
+}> {
   if (inputs.length === 0) {
     throw new Error("Atomic attempt mutation requires a timeline projection event");
   }
@@ -54517,6 +55316,7 @@ function mapSessionTurnForExecution(
     xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1.parse(
       row.xaiProviderAccountAuthoritySnapshot,
     ),
+    goalSnapshot: SessionGoalSnapshot.parse(row.goalSnapshot),
   };
 }
 

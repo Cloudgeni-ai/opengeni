@@ -4,6 +4,7 @@ import { testSettings } from "@opengeni/testing";
 import {
   recordBatchFlush,
   recordContextCompaction,
+  recordCompanyBrainContributions,
   recordModelInputTokens,
   recordModelRequestPhase,
   recordSessionEventAppendLatency,
@@ -237,5 +238,34 @@ describe("context-pressure signals", () => {
     expect(metrics).toMatch(
       /opengeni_context_compactions_total\{[^}]*trigger="operator"[^}]*\} 1\b/,
     );
+  });
+
+  test("Company Brain exposure metrics use only bounded classification labels", async () => {
+    const observability = worker();
+    recordCompanyBrainContributions(observability, {
+      attemptId: crypto.randomUUID(),
+      turnId: crypto.randomUUID(),
+      sessionRole: "child",
+      memoryPromptMode: "retrieval_only",
+      instructionPolicySnapshotId: crypto.randomUUID(),
+      preferenceSnapshotId: null,
+      companyProfileSnapshotId: crypto.randomUUID(),
+      contributions: [
+        {
+          category: "mandatory_rule",
+          source: "workspace_instruction_policy",
+          inclusionReason: "active_instruction_policy",
+          authorityScope: "workspace",
+          utf8Bytes: 40,
+          estimatedTokens: 10,
+        },
+      ],
+    });
+
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toContain('category="mandatory_rule"');
+    expect(metrics).toContain('session_role="child"');
+    expect(metrics).toContain('memory_prompt_mode="retrieval_only"');
+    expect(metrics).not.toContain("attemptId");
   });
 });

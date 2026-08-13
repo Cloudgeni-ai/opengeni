@@ -883,6 +883,8 @@ describe("sandbox preparation profiles", () => {
         "list_document_bases",
         "list_indexed_documents",
         "knowledge_search",
+        "knowledge_get",
+        "knowledge_browse",
         "knowledge_fetch",
         "memory_search",
         "memory_propose",

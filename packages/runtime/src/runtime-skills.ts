@@ -76,8 +76,18 @@ export type EffectiveSkillSelection = Readonly<{
 export type RuntimeSkillComposition = Readonly<{
   lazySource: LocalDirLazySkillSource;
   selections: readonly EffectiveSkillSelection[];
+  /** Exact always-visible catalog descriptors for explicitly activated Skills. */
+  configuredDescriptors: readonly RuntimeSkillDescriptor[];
   configuredNames: readonly string[];
   nativeToolNames: readonly string[];
+}>;
+
+export type RuntimeSkillDescriptor = Readonly<{
+  id: string;
+  name: string;
+  source: RuntimeSkillActivation["source"];
+  reason: string;
+  description: string;
 }>;
 
 type ValidatedRuntimeSkillActivation = Readonly<{
@@ -161,6 +171,17 @@ export function composeRuntimeSkills(
       ),
       ...effectiveActivations.map((activation) => selectionForActivation(activation)),
     ]),
+    configuredDescriptors: Object.freeze(
+      effectiveActivations.map(({ activation }) =>
+        Object.freeze({
+          id: activation.id,
+          name: activation.artifact.name,
+          source: activation.source,
+          reason: activation.reason,
+          description: runtimeSkillDescription(activation.artifact),
+        }),
+      ),
+    ),
     configuredNames: Object.freeze(
       effectiveActivations.map(({ activation }) => activation.artifact.name),
     ),

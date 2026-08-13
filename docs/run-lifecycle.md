@@ -293,6 +293,17 @@ skill substrate, and memory. Documents and RAG evidence never become policy,
 and full preference bodies require explicit retrieval. When no structured
 governance applies, the legacy prompt bytes remain unchanged.
 
+The workspace `memoryPromptMode` is resolved at each accepted attempt from the
+existing settings JSON. Its default `legacy_standing` keeps the prior prompt
+path. Opt-in `retrieval_only` removes the broad Memory V1 working-set block and
+legacy preference-kind agent retrieval; canonical rows and human surfaces are
+unchanged. A root still receives the bounded company profile, while a child
+omits it and retains mandatory instruction policy plus the always-visible
+structured preference and configured Skill descriptors. At the ordinary model
+request boundary, metadata-only telemetry records the exact attempt, existing
+governance snapshot ids, inclusion reason, authority class, root/child role,
+UTF-8 size, and estimated tokens without recording content.
+
 Approval, capacity wait, worker recovery, and Pause/Resume create newer
 attempts for the **same logical turn**, so they must replay the original policy
 rather than resolve or overwrite it; they also reuse the accepted governance
@@ -886,6 +897,14 @@ and approval id before invocation. The approved transition admits the provider
 once; a replay after execution started is recorded as outcome-unknown, and a
 replay after completion is rejected as already executed. Recovery may therefore
 re-enter the SDK approval step without issuing the MCP request again.
+
+Root-task-tree note tools follow that same no-ambiguous-replay boundary. Their
+operation receipts bind the exact accepted turn, attempt, execution generation,
+root tree, and input. The same attempt/input may replay its durable receipt, but
+a recovered successor attempt cannot claim or reissue the predecessor's
+operation UUID. Notes remain an explicit retrieval surface and are never
+composed into recovery history or ordinary prompts. See
+[`company-brain-write-routing.md`](company-brain-write-routing.md).
 
 Resource-based turn workers use that exact graceful path only as emergency
 memory protection. Temporal's cgroup-aware slot tuner closes new admission at

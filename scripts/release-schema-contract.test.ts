@@ -111,6 +111,23 @@ describe("release schema contract", () => {
 
   test("preserves published host-export history and appends the forward repair", async () => {
     const completeSourceContract = await buildSchemaContract();
+    const companyBrainMigrationPaths = [
+      "0238_goal_persistence_policy.sql",
+      "0239_task_tree_notes.sql",
+    ].filter((path) =>
+      completeSourceContract.migrations.some((migration) => migration.path === path),
+    );
+    const companyBrainMigrations = new Map(
+      completeSourceContract.migrations.map((migration) => [migration.path, migration]),
+    );
+    const goalPersistence = companyBrainMigrations.get("0238_goal_persistence_policy.sql");
+    if (goalPersistence) {
+      expect(goalPersistence).toMatchObject({ deploymentMode: "rolling" });
+    }
+    const taskTreeNotes = companyBrainMigrations.get("0239_task_tree_notes.sql");
+    if (taskTreeNotes) {
+      expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
+    }
     const appendedMigrationPaths = [
       "0237_interaction_transition_reaper.sql",
       "0238_supergrok_realtime_model.sql",
@@ -118,9 +135,10 @@ describe("release schema contract", () => {
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
+    const forwardMigrationPaths = [...companyBrainMigrationPaths, ...appendedMigrationPaths];
     const sourceContract =
-      appendedMigrationPaths.length > 0
-        ? await contractWithoutMigrations(appendedMigrationPaths)
+      forwardMigrationPaths.length > 0
+        ? await contractWithoutMigrations(forwardMigrationPaths)
         : completeSourceContract;
     const transitionReaper = completeSourceContract.migrations.find(
       (migration) => migration.path === "0237_interaction_transition_reaper.sql",

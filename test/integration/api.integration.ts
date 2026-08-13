@@ -906,6 +906,7 @@ describe("API component integration", () => {
 
     const grant = {
       ...baseGrant,
+      principalKind: "agent_attempt" as const,
       metadata: {
         delegated: true,
         sessionId: session.id,
@@ -948,13 +949,26 @@ describe("API component integration", () => {
     expect(pausedGoal.resource.state).toBe("paused");
     expect(JSON.stringify(pausedGoal)).not.toContain("waiting on upstream fix");
 
-    const replacedGoal = await callMcpTool<McpMutationReceiptType>(mcp, "goal_set", {
+    await expect(
+      callMcpTool(mcp, "goal_set", {
+        text: "upstream fixed; finish the job",
+      }),
+    ).rejects.toThrow("use goal_update to revise it");
+    const revisedWhilePaused = await callMcpTool<{
+      version: number;
+      text: string;
+      outcome: string;
+    }>(mcp, "goal_update", {
       text: "upstream fixed; finish the job",
+      expectedObjectiveRevision: 2,
+      changeKind: "refinement",
+      rationale: "the upstream blocker cleared without changing the objective",
+      idempotencyKey: crypto.randomUUID(),
     });
-    expect(replacedGoal).toMatchObject({
-      outcome: "updated",
-      resource: { state: "active" },
-      facts: { replaced: true },
+    expect(revisedWhilePaused).toMatchObject({
+      version: 4,
+      text: "upstream fixed; finish the job",
+      outcome: "applied",
     });
 
     const completedGoal = await callMcpTool<McpMutationReceiptType>(mcp, "goal_complete", {
@@ -975,7 +989,14 @@ describe("API component integration", () => {
     const events = await listSessionEvents(dbClient.db, baseGrant.workspaceId, session.id);
     expect(
       events.filter((event) => event.type.startsWith("goal.")).map((event) => event.type),
-    ).toEqual(["goal.set", "goal.updated", "goal.paused", "goal.set", "goal.completed"]);
+    ).toEqual([
+      "goal.set",
+      "goal.updated",
+      "goal.progress",
+      "goal.paused",
+      "goal.updated",
+      "goal.completed",
+    ]);
     expect((await getSessionGoal(dbClient.db, baseGrant.workspaceId, session.id))?.status).toBe(
       "completed",
     );
@@ -10032,6 +10053,7 @@ describe("API component integration", () => {
     }
     const liveGrant = {
       ...grant,
+      principalKind: "agent_attempt" as const,
       metadata: {
         delegated: true,
         sessionId: session.id,
@@ -10076,6 +10098,7 @@ describe("API component integration", () => {
     const foreignGrant = await bootstrapMcpGrant(dbClient.db);
     const wrongWorkspace = buildOpenGeniMcpServer(mcpDeps, {
       ...foreignGrant,
+      principalKind: "agent_attempt" as const,
       metadata: liveGrant.metadata,
     });
     await expect(
