@@ -994,6 +994,9 @@
 :where(.og-root).max-h-28,:where(.og-root) .max-h-28 {
     max-height: calc(var(--spacing) * 28);
   }
+:where(.og-root).max-h-40,:where(.og-root) .max-h-40 {
+    max-height: calc(var(--spacing) * 40);
+  }
 :where(.og-root).max-h-48,:where(.og-root) .max-h-48 {
     max-height: calc(var(--spacing) * 48);
   }
