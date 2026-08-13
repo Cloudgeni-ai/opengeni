@@ -115,7 +115,7 @@ describe("release schema contract", () => {
       completeSourceContract.migrations.map((migration) => [migration.path, migration]),
     );
     expect(completeMigrations.get("0238_sandbox_provider_loss_receipts.sql")).toMatchObject({
-      sha256: "23430286a1f965b6651e96d7573892a6a15048f079f78122e41450c03a4055f5",
+      sha256: "6b9c438798a7ff93d84a45fb5bdb8e6a657a320bb9f345a274770aa1fc418c51",
       deploymentMode: "rolling",
     });
     const transitionReaper = completeSourceContract.migrations.find(

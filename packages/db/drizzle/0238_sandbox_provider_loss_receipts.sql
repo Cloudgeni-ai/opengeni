@@ -418,6 +418,11 @@ FOR EACH ROW EXECUTE FUNCTION opengeni_private.guard_provider_loss_lease_mutatio
 DO $grants$
 DECLARE data_schema text := current_schema();
 BEGIN
+  EXECUTE format(
+    'REVOKE ALL ON TABLE %I.sandbox_provider_loss_teardown_claims, %I.sandbox_provider_loss_receipts FROM PUBLIC',
+    data_schema,
+    data_schema
+  );
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
     EXECUTE format(
       'GRANT SELECT, INSERT, UPDATE ON TABLE %I.sandbox_provider_loss_teardown_claims TO opengeni_app',

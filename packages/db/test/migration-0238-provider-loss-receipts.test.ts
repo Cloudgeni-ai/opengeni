@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase } from "@opengeni/testing";
 import { randomUUID } from "node:crypto";
-import postgres from "postgres";
+import { sql } from "drizzle-orm";
 
 import {
   acquireLease,
@@ -10,6 +10,7 @@ import {
   createDb,
   createSession,
   persistSandboxProviderLossObservation,
+  withRlsContext,
 } from "../src";
 import { migrate } from "../src/migrate";
 
@@ -179,6 +180,18 @@ describe("0238 provider-loss receipt protocol", () => {
       await shared.admin`
         insert into workspace_inference_controls (workspace_id, account_id)
         values (${workspace!.id}, ${account!.id})`;
+
+      const cleanAcquire = await acquireLease(app.db, {
+        accountId: account!.id,
+        workspaceId: workspace!.id,
+        sandboxGroupId: randomUUID(),
+        kind: "turn",
+        holderId: "provider-loss-acl-cold-to-warming",
+        backend: "modal",
+        leaseTtlMs: 45_000,
+      });
+      expect(cleanAcquire.role).toBe("spawner");
+      expect(cleanAcquire.lease.liveness).toBe("warming");
 
       const session = await createSession(app.db, {
         accountId: account!.id,
@@ -399,6 +412,18 @@ describe("0238 provider-loss receipt protocol", () => {
         values
           (${account!.id}, ${workspace!.id}, ${leaseId}, 'viewer', 'provider-loss-fenced-holder', ${session.id})
       `).rejects.toMatchObject({ code: "55000" });
+
+      await expect(
+        withRlsContext(app.db, { accountId: account!.id, workspaceId: workspace!.id }, async (db) =>
+          db.execute(sql`
+            insert into sandbox_lease_holders
+              (account_id, workspace_id, lease_id, kind, holder_id, subject_id)
+            values
+              (${account!.id}, ${workspace!.id}, ${leaseId}::uuid, 'viewer',
+               'provider-loss-app-role-fenced-holder', ${session.id}::uuid)
+          `),
+        ),
+      ).rejects.toMatchObject({ code: "55000" });
       await expect(shared.admin`
         insert into sandbox_workspace_mutation_admissions
           (id, account_id, workspace_id, lease_id, sandbox_group_id, session_id,
