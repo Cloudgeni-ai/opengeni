@@ -8137,6 +8137,7 @@ export type SlackInteractionInboxEntry = {
   slackThreadTs: string | null;
   triggerKind: SlackInteractionTriggerKind;
   text: string;
+  hasFiles: boolean;
   status: "pending" | "processing" | "processed" | "failed";
   claimHolderId: string | null;
   claimExpiresAt: Date | null;
@@ -9331,6 +9332,7 @@ function mapSlackInteractionInbox(
     slackThreadTs: slackRowNullableString(row, "slackThreadTs", "slack_thread_ts"),
     triggerKind: slackRowString(row, "triggerKind", "trigger_kind") as SlackInteractionTriggerKind,
     text: slackRowString(row, "text", "text"),
+    hasFiles: slackRowBoolean(row, "hasFiles", "has_files"),
     status: slackRowString(row, "status", "status") as SlackInteractionInboxEntry["status"],
     claimHolderId: slackRowNullableString(row, "claimHolderId", "claim_holder_id"),
     claimExpiresAt: slackRowNullableDate(row, "claimExpiresAt", "claim_expires_at"),
@@ -9454,6 +9456,16 @@ function slackRowValue(row: Record<string, unknown>, camelKey: string, snakeKey:
 function slackRowString(row: Record<string, unknown>, camelKey: string, snakeKey: string): string {
   const value = slackRowValue(row, camelKey, snakeKey);
   if (typeof value !== "string") throw new Error(`Slack row omitted ${snakeKey}`);
+  return value;
+}
+
+function slackRowBoolean(
+  row: Record<string, unknown>,
+  camelKey: string,
+  snakeKey: string,
+): boolean {
+  const value = slackRowValue(row, camelKey, snakeKey);
+  if (typeof value !== "boolean") throw new Error(`Slack row malformed ${snakeKey}`);
   return value;
 }
 

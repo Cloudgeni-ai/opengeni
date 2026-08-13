@@ -10,9 +10,9 @@ import {
 } from "../src";
 import { migrate } from "../src/migrate";
 
-const migrationUrl = new URL("../drizzle/0229_realtime_turn_instructions.sql", import.meta.url);
+const migrationUrl = new URL("../drizzle/0237_realtime_turn_instructions.sql", import.meta.url);
 
-describe("migration 0229 realtime turn instructions", () => {
+describe("migration 0237 realtime turn instructions", () => {
   test("adds bounded private guidance only to turn-bearing provider entries", async () => {
     const source = await readFile(migrationUrl, "utf8");
     expect(source.split(/\r?\n/u, 1)[0]).toBe("-- deployment-mode: rolling");
@@ -32,9 +32,12 @@ describe("migration 0229 realtime turn instructions", () => {
       "REVOKE ALL ON FUNCTION opengeni_private.enforce_turn_instructions_protocol_v1() FROM PUBLIC",
     );
 
-    const blank = await acquireBlankTestDatabase("migration-0229-realtime-turn-instructions");
+    const blank = await acquireBlankTestDatabase("migration-0237-realtime-turn-instructions");
     if (!blank) return;
-    const sql = postgres(blank.databaseUrl, { max: 1, onnotice: () => undefined });
+    const sql = postgres(blank.databaseUrl, {
+      max: 1,
+      onnotice: () => undefined,
+    });
     try {
       await migrate(blank.databaseUrl);
       const [column] = await sql<Array<{ dataType: string; nullable: string }>>`
@@ -98,7 +101,10 @@ describe("migration 0229 realtime turn instructions", () => {
       const appUrl = new URL(blank.databaseUrl);
       appUrl.username = "opengeni_app";
       appUrl.password = "apppw";
-      const legacyApp = postgres(appUrl.toString(), { max: 1, onnotice: () => undefined });
+      const legacyApp = postgres(appUrl.toString(), {
+        max: 1,
+        onnotice: () => undefined,
+      });
       try {
         const suffix = crypto.randomUUID();
         const access = await bootstrapWorkspace(client.db, {

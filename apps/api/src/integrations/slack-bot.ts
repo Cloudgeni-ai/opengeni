@@ -503,6 +503,9 @@ export class OpenGeniSlackBotClient {
     threadTimestamp: string;
     limit?: number;
     cursor?: string;
+    oldest?: string;
+    latest?: string;
+    inclusive?: boolean;
     authorizeRead?: () => Promise<void>;
   }) {
     return await this.withAudit("thread_replies.read", async (headers) => {
@@ -513,6 +516,9 @@ export class OpenGeniSlackBotClient {
         ts: input.threadTimestamp,
         limit: String(boundedInt(input.limit, MAX_THREAD_PAGE, 50)),
         ...(input.cursor ? { cursor: input.cursor } : {}),
+        ...(input.oldest ? { oldest: input.oldest } : {}),
+        ...(input.latest ? { latest: input.latest } : {}),
+        ...((input.oldest || input.latest) && input.inclusive ? { inclusive: "true" } : {}),
       });
       return {
         channel: info,

@@ -316,7 +316,7 @@ defaults to and should remain `opengeni_app` for standalone deployments.
 ### Embedding-host turn-instructions key
 
 An embedding host that sends hidden per-turn `turnInstructions` needs a second,
-server-only workspace API key. Provision it after migration 0229 and before
+server-only workspace API key. Provision it after migration 0237 and before
 enabling the host feature. The operator command uses the restricted
 `OPENGENI_DATABASE_URL` with exact account/workspace RLS scope and works through
 a non-superuser, non-`BYPASSRLS` identity; it neither consumes the
