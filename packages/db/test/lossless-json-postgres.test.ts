@@ -794,6 +794,12 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       callId,
       output: { type: "text", text: unsafeText },
     };
+    const eventOutput = {
+      content: [{ type: "text", text: unsafeText }],
+      structuredContent: { exactCommand },
+      isError: false,
+      vendorReceipt: { id: unsafeText },
+    };
     expect(
       await registerPendingSessionToolCall(app.db, {
         accountId: grant.accountId,
@@ -817,6 +823,7 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
         attemptId,
         callId,
         resultItem,
+        eventOutput,
       }),
     ).toEqual({ accepted: true, recorded: true });
     const [pending] = await withWorkspaceRls(app.db, workspaceId, (db) =>
@@ -826,14 +833,19 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
           callItemCodecVersion: schema.sessionPendingToolCalls.callItemCodecVersion,
           resultItem: schema.sessionPendingToolCalls.resultItem,
           resultItemCodecVersion: schema.sessionPendingToolCalls.resultItemCodecVersion,
+          eventOutput: schema.sessionPendingToolCalls.eventOutput,
+          eventOutputCodecVersion: schema.sessionPendingToolCalls.eventOutputCodecVersion,
         })
         .from(schema.sessionPendingToolCalls)
         .where(eq(schema.sessionPendingToolCalls.callId, callId)),
     );
+    if (!pending?.eventOutput) throw new Error("Pending tool event output was not retained");
     expect({
-      callItem: fromPostgresLosslessJson(pending!.callItem, pending!.callItemCodecVersion),
-      resultItem: fromPostgresLosslessJson(pending!.resultItem, pending!.resultItemCodecVersion),
-    }).toEqual({ callItem, resultItem });
+      callItem: fromPostgresLosslessJson(pending.callItem, pending.callItemCodecVersion),
+      resultItem: fromPostgresLosslessJson(pending.resultItem, pending.resultItemCodecVersion),
+      eventOutput: fromPostgresLosslessJson(pending.eventOutput, pending.eventOutputCodecVersion)
+        .value,
+    }).toEqual({ callItem, resultItem, eventOutput });
     const [rawPending] = await shared.admin<
       Array<{ callType: string | null; resultType: string | null }>
     >`
@@ -843,6 +855,22 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       callType: "function_call",
       resultType: "function_call_result",
     });
+    const legacyApp = postgres(shared.appUrl, { max: 1, onnotice: () => undefined });
+    try {
+      await expect(
+        legacyApp.begin(async (sql) => {
+          await sql`select set_config('opengeni.account_id', ${grant.accountId}, true)`;
+          await sql`select set_config('opengeni.workspace_id', ${workspaceId}, true)`;
+          await sql`delete from session_pending_tool_calls where call_id = ${callId}`;
+        }),
+      ).rejects.toThrow("rich pending tool output requires a v1-aware settlement worker");
+    } finally {
+      await legacyApp.end();
+    }
+    const [retainedAfterLegacyDelete] = await shared.admin<Array<{ eventOutput: unknown | null }>>`
+      select event_output as "eventOutput"
+      from session_pending_tool_calls where call_id = ${callId}`;
+    expect(retainedAfterLegacyDelete?.eventOutput).not.toBeNull();
 
     const settled = await withWorkspaceRls(app.db, workspaceId, (db) =>
       db.transaction(async (tx) => {
@@ -868,6 +896,12 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       }),
     );
     expect(settled.closed).toBe(1);
+    expect(settled.events).toContainEqual(
+      expect.objectContaining({
+        type: "agent.toolCall.output",
+        payload: expect.objectContaining({ id: callId, output: eventOutput }),
+      }),
+    );
     const settledHistory = await withWorkspaceRls(app.db, workspaceId, (db) =>
       db
         .select({

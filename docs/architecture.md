@@ -144,7 +144,11 @@ projections use the same protocol-JSON boundary as canonical history before
 strict lossless storage. JavaScript-only `undefined` object properties are
 omitted without mutating the SDK item; undefined array entries and every other
 non-JSON graph still fail with an exact path. The database codec remains strict
-and never silently repairs arbitrary callers.
+and never silently repairs arbitrary callers. Completed pending tool receipts
+retain the model-facing SDK result item separately from the exact
+`agent.toolCall.output` audit value, allowing worker-death recovery to publish
+the same complete event projection as the live path without exposing its extra
+MCP fields to later model requests.
 
 Generated image bytes are permanent workspace artifacts, not another memory
 store. Native provider base64 is replaced before durable history/event/RunState

@@ -468,6 +468,13 @@ without mutating the SDK object, while undefined array entries and every other
 non-JSON graph fail with the exact offending path. The lossless database codec
 stays strict rather than silently changing arbitrary input.
 
+A completed pending tool receipt retains two deliberately separate lossless
+projections: the bounded SDK result item that may become model-visible history,
+and the exact `agent.toolCall.output` value used by the durable audit event.
+Normal publication and crash recovery consume the same retained event value, so
+recovery cannot reconstruct a poorer MCP result from model-facing content or
+drop open protocol extension fields.
+
 Before a personal MCP is attached, the worker/Codemode boundary revalidates the
 delegation's exact workspace membership, connection id, provider domain, kind,
 owner subject, and active status. A missing, revoked, transferred, or otherwise

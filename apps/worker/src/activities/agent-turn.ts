@@ -115,6 +115,8 @@ import {
   normalizeModelCallUsage,
   normalizeSdkEvent,
   normalizeProtocolJsonValue,
+  compactMcpResultCustomDataRunState,
+  releaseMcpResultCustomDataFromSdkEvent,
   projectHistoryForProvider,
   restoreGenericDispatchHistoryItems,
   sanitizeHistoryItemsForModel,
@@ -3837,6 +3839,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         compactRetainedScreenshotRunState(serialized, retainedScreenshotReceiptsByCallId),
         generatedImageReceiptsByProviderItemId,
       );
+    const compactApprovalRunState = (serialized: string): string =>
+      compactMcpResultCustomDataRunState(compactMediaRunState(serialized));
     // Explicit image-producing tools cross the durable session-media boundary.
     // Incidental frames returned by click/scroll actions remain unretained; an
     // intentional computer_screenshot or view_image result must never be lost
@@ -8267,6 +8271,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             let stableToolCallIdsToClear: string[] | null = null;
             let completedCurrentToolBatch = false;
             let retainedScreenshotMetadata: RetainedArtifactMetadata | null = null;
+            let normalizedSdkEvents: ReturnType<typeof normalizeSdkEvent> | null = null;
             const generatedImage = generatedImageFromSdkEvent(next.value);
             if (isCompletedGeneratedImageSdkEvent(next.value) && !generatedImage) {
               throw new Error(
@@ -8439,6 +8444,30 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   retainedScreenshotMetadata,
                 );
               }
+              normalizedSdkEvents = normalizeSdkEvent(
+                durableSdkEvent as typeof next.value,
+                retainedScreenshotMetadata
+                  ? {
+                      toolOutputOverride: retainedScreenshotMetadata,
+                      retainedOutputEvidence: retainedScreenshotMetadata.available
+                        ? retainedScreenshotMetadata
+                        : {
+                            available: false,
+                            reason: retainedScreenshotMetadata.reason,
+                          },
+                    }
+                  : {},
+              );
+              const normalizedToolOutput = normalizedSdkEvents.find(
+                (event) =>
+                  event.type === "agent.toolCall.output" &&
+                  (event.payload as { id?: unknown }).id === completedToolCall.callId,
+              )?.payload as { output?: unknown } | undefined;
+              if (!normalizedToolOutput || !Object.hasOwn(normalizedToolOutput, "output")) {
+                throw new Error(
+                  `Completed SDK tool call ${completedToolCall.callId} produced no durable output projection`,
+                );
+              }
               const durableResultItem = retainedScreenshotMetadata
                 ? (compactRetainedScreenshotHistory(
                     [completedToolCall.resultItem],
@@ -8460,6 +8489,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 callId: completedToolCall.callId,
                 modelToolOutputTruncationTokens: modelRunSettings.modelToolOutputTruncationTokens,
                 resultItem: durableResultItem as Record<string, unknown>,
+                eventOutput: normalizedToolOutput.output,
                 ...(videoGenerationAcceptancesByCallId.has(completedToolCall.callId)
                   ? {
                       videoGenerationAcceptance: videoGenerationAcceptancesByCallId.get(
@@ -8514,24 +8544,31 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 completedCurrentToolBatch = currentBatchIsStable;
               }
             }
-            const normalized = normalizeSdkEvent(
-              durableSdkEvent as typeof next.value,
-              retainedScreenshotMetadata
-                ? {
-                    toolOutputOverride: retainedScreenshotMetadata,
-                    retainedOutputEvidence: retainedScreenshotMetadata.available
-                      ? retainedScreenshotMetadata
-                      : {
-                          available: false,
-                          reason: retainedScreenshotMetadata.reason,
-                        },
-                  }
-                : {},
-            );
+            const normalized =
+              normalizedSdkEvents ??
+              normalizeSdkEvent(
+                durableSdkEvent as typeof next.value,
+                retainedScreenshotMetadata
+                  ? {
+                      toolOutputOverride: retainedScreenshotMetadata,
+                      retainedOutputEvidence: retainedScreenshotMetadata.available
+                        ? retainedScreenshotMetadata
+                        : {
+                            available: false,
+                            reason: retainedScreenshotMetadata.reason,
+                          },
+                    }
+                  : {},
+              );
             for (const event of normalized) {
               streamTiming.onEvent(event.type);
               await batcher.push(event);
             }
+            // Structural tool-output events await their durable append before
+            // push returns. The complete result is now retained in the event
+            // row and pending-call recovery receipt, so release only our
+            // duplicate live SDK marker before a long turn accumulates it.
+            releaseMcpResultCustomDataFromSdkEvent(durableSdkEvent);
             if (stableToolCallIdsToClear) {
               const cleared = await clearDurablePendingSessionToolCalls(db, {
                 accountId: input.accountId,
@@ -8761,7 +8798,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               sessionStatus: "requires_action",
               activeTurnId,
               runState: {
-                serializedRunState: compactMediaRunState(stream.state.toString()),
+                serializedRunState: compactApprovalRunState(stream.state.toString()),
                 pendingApprovals,
                 humanInputRequests: humanInputRequests.map(
                   ({ isNew: _isNew, ...request }) => request,

@@ -1,5 +1,24 @@
 # @opengeni/runtime
 
+## 0.21.0
+
+### Minor Changes
+
+- 1e78f58: Replace implicit optional Skill bundles and parallel Pack/session materialization paths with one explicit, provenance-bearing runtime Skill activation model. Curated Skills now require workspace installation, Pack ownership, or exact session selection; native artifact and video Skills remain available only with their matching executable tool surfaces.
+
+### Patch Changes
+
+- 1c4ac69: Preserve complete MCP tool results through the runtime, durable database settlement, and worker recovery path without changing model-visible output, including nested prefixed servers, compact approval snapshots, and bounded live-memory retention after durable capture.
+- Updated dependencies [1e78f58]
+- Updated dependencies [1e78f58]
+- Updated dependencies [746bbbe]
+- Updated dependencies [9849e25]
+- Updated dependencies [1e78f58]
+  - @opengeni/config@0.15.0
+  - @opengeni/contracts@0.47.0
+  - @opengeni/sdk@0.54.0
+  - @opengeni/codemode@0.3.2
+
 ## 0.20.1
 
 ### Patch Changes
