@@ -239,6 +239,13 @@ export class LinuxVirtualComputerEnvironmentAllocator implements ComputerEnviron
           // cadence is both visually correct and materially less reconnect-prone.
           "-wait",
           "50",
+          // ComputerSession changes can originate through semantic/native
+          // control rather than the RFB client. Disable x11vnc's deep-idle
+          // screen-blank throttle (two ~1.5 s sleeps) so the first externally
+          // driven change after an idle viewer is streamed immediately. Normal
+          // nap behavior and the bounded 50 ms polling cadence remain enabled.
+          "-sb",
+          "0",
           "-xkb",
           "-noxdamage",
           "-noxfixes",
