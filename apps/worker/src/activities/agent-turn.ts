@@ -2767,6 +2767,10 @@ export async function finalizeDurableTurnOpStreams(
 
 export function createRunAgentTurnActivity(services: () => Promise<ActivityServices>) {
   const modelCheckpointMemoryCollector = createModelCheckpointMemoryCollector();
+  // Keep a distinct cooldown for terminal collection. A collection at the
+  // final model checkpoint happens while the activity still owns its complete
+  // turn graph and must not suppress collection after that graph is released.
+  const turnCompletionMemoryCollector = createModelCheckpointMemoryCollector();
   return async function runAgentTurn(input: RunAgentTurnInput): Promise<RunAgentTurnResult> {
     const {
       settings,
@@ -4250,6 +4254,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         if (inputs.length > 0 && !appended.accepted) {
           throw new TurnAttemptFencedError("turn execution generation was fenced");
         }
+        if (inputs.length > 0) {
+          turnLifecycleMetricsFor(observability).progress(turnId!);
+        }
         activityContext?.heartbeat({
           ...heartbeatDetails,
           phase: "events_published",
@@ -4343,6 +4350,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           turnMetricOutcome = "cancelled";
           return false;
         }
+        turnLifecycleMetricsFor(observability).progress(turnId!);
         if (recordingForSettlement && preparedRecording) {
           if (result.recordingMutationApplied) {
             activeRecording = null;
@@ -8329,6 +8337,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               currentToolBatchCallIds = new Set<string>();
               currentToolBatchCompletedCallIds = new Set<string>();
               await reconcileConversationTruth();
+              turnLifecycleMetricsFor(observability).progress(turnId!);
               modelCheckpointMemoryCollector.schedule(observability);
               try {
                 await ensureRunAllowed(
@@ -10831,6 +10840,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               ? safeErrorForTelemetry(finalizationError ?? activityError)
               : undefined,
         });
+        // This timer runs only after the activity promise and its full turn
+        // stack unwind. Checkpoint collection alone cannot reclaim objects that
+        // remain strongly reachable until this terminal boundary.
+        turnCompletionMemoryCollector.schedule(observability);
         assertPhysicalToolQuiescenceForCancellation({
           acknowledgeQuiescence,
           physicalToolQuiescenceConfirmed,

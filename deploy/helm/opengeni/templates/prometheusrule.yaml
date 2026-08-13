@@ -116,12 +116,12 @@ spec:
               opengeni:node_exporter_instance:info
             )
         - alert: OpenGeniTurnStuck
-          expr: opengeni_turn_oldest_inflight_age_seconds > 900
+          expr: opengeni_turn_oldest_no_progress_age_seconds > 900
           for: 5m
           labels:
             severity: critical
           annotations:
-            summary: OpenGeni has an agent turn stuck for more than 15 minutes
+            summary: OpenGeni has an agent turn without durable progress for more than 15 minutes
         - alert: OpenGeniSandboxCreateFailureRatio
           expr: |
             (

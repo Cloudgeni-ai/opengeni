@@ -248,7 +248,7 @@ export function turnLifecycleMetricsFor(observability: Observability): TurnLifec
 }
 
 export class TurnLifecycleMetrics {
-  private readonly startedTurns = new Map<string, number>();
+  private readonly turns = new Map<string, { startedAt: number; lastProgressAt: number }>();
   private timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
@@ -257,15 +257,22 @@ export class TurnLifecycleMetrics {
   ) {}
 
   start(turnId: string): void {
-    this.startedTurns.set(turnId, this.now());
+    const now = this.now();
+    this.turns.set(turnId, { startedAt: now, lastProgressAt: now });
     this.ensureTimer();
     this.refreshGauges();
   }
 
+  progress(turnId: string): void {
+    const turn = this.turns.get(turnId);
+    if (!turn) return;
+    turn.lastProgressAt = this.now();
+  }
+
   finish(turnId: string, outcome: TurnOutcome | null, durationSeconds?: number): void {
-    const startedAt = this.startedTurns.get(turnId);
+    const startedAt = this.turns.get(turnId)?.startedAt;
     if (startedAt !== undefined) {
-      this.startedTurns.delete(turnId);
+      this.turns.delete(turnId);
     }
     if (outcome) {
       const observedDuration =
@@ -284,7 +291,7 @@ export class TurnLifecycleMetrics {
       });
     }
     this.refreshGauges();
-    if (this.startedTurns.size === 0) {
+    if (this.turns.size === 0) {
       this.stopTimer();
     }
   }
@@ -293,30 +300,44 @@ export class TurnLifecycleMetrics {
     this.observability.setGauge({
       name: "opengeni_turns_inflight",
       help: "Current number of in-flight agent turns in this worker process.",
-      value: this.startedTurns.size,
+      value: this.turns.size,
     });
     this.observability.setGauge({
       name: "opengeni_turn_oldest_inflight_age_seconds",
       help: "Age in seconds of the oldest in-flight agent turn in this worker process.",
       value: this.oldestInflightAgeSeconds(),
     });
+    this.observability.setGauge({
+      name: "opengeni_turn_oldest_no_progress_age_seconds",
+      help: "Seconds since durable progress for the least recently progressing in-flight turn.",
+      value: this.oldestNoProgressAgeSeconds(),
+    });
   }
 
   stop(): void {
-    this.startedTurns.clear();
+    this.turns.clear();
     this.refreshGauges();
     this.stopTimer();
   }
 
   private oldestInflightAgeSeconds(): number {
-    if (this.startedTurns.size === 0) {
+    if (this.turns.size === 0) {
       return 0;
     }
     let oldest = Number.POSITIVE_INFINITY;
-    for (const startedAt of this.startedTurns.values()) {
+    for (const { startedAt } of this.turns.values()) {
       oldest = Math.min(oldest, startedAt);
     }
     return Math.max(0, (this.now() - oldest) / 1000);
+  }
+
+  private oldestNoProgressAgeSeconds(): number {
+    if (this.turns.size === 0) return 0;
+    let leastRecentProgress = Number.POSITIVE_INFINITY;
+    for (const { lastProgressAt } of this.turns.values()) {
+      leastRecentProgress = Math.min(leastRecentProgress, lastProgressAt);
+    }
+    return Math.max(0, (this.now() - leastRecentProgress) / 1000);
   }
 
   private ensureTimer(): void {
