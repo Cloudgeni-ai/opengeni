@@ -102,6 +102,14 @@ describe("attached browser endpoint registry", () => {
     });
     expect(created).toMatchObject({ accepted: true, changed: true });
     const initial = await listAttachedBrowserDevices(client.db, scope);
+    expect(initial.bridges).toHaveLength(1);
+    expect(initial.bridges[0]).toMatchObject({
+      enrollmentId: scope.enrollmentId,
+      state: "offline",
+      bridgeGeneration: "bridge-1",
+      inventoryRevision: 1,
+      connectedProfileCount: 2,
+    });
     expect(initial.devices.map((entry) => entry.id).sort()).toEqual([firstId, secondId].sort());
     expect(initial.devices.every((entry) => entry.state === "connected")).toBe(true);
 
@@ -141,6 +149,11 @@ describe("attached browser endpoint registry", () => {
     expect(changed.changed).toBe(true);
     expect(changed.revision).toBeGreaterThan(created.revision);
     const live = await listAttachedBrowserDevices(client.db, scope);
+    expect(live.bridges[0]).toMatchObject({
+      bridgeGeneration: "bridge-1",
+      inventoryRevision: 2,
+      connectedProfileCount: 1,
+    });
     expect(live.devices).toHaveLength(1);
     expect(live.devices[0]).toMatchObject({
       id: firstId,

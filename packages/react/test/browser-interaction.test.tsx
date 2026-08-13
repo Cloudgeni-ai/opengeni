@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { StreamFrame, StreamOpen, StreamOpenAck } from "@opengeni/agent-proto";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import type {
+  AttachedBrowserBridge,
   AttachedBrowserDevice,
   BrowserActionReceipt,
   BrowserDownload,
@@ -97,6 +98,17 @@ function attachedBrowserDevice(): AttachedBrowserDevice {
     disconnectedAt: null,
     createdAt: NOW,
     updatedAt: NOW,
+  };
+}
+
+function attachedBrowserBridge(): AttachedBrowserBridge {
+  return {
+    enrollmentId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    state: "online",
+    bridgeGeneration: "bridge-generation-1",
+    inventoryRevision: 4,
+    connectedProfileCount: 0,
+    lastSeenAt: NOW,
   };
 }
 
@@ -451,11 +463,12 @@ class FakeBrowserSocket {
 describe("BrowserSession React resources", () => {
   test("discovers connected Chrome profile endpoints through the public client", async () => {
     const device = attachedBrowserDevice();
+    const bridge = attachedBrowserBridge();
     const calls: unknown[] = [];
     const client = fakeClient({
       listAttachedBrowsers: async (_workspaceId, options) => {
         calls.push(options);
-        return { revision: 7, devices: [device] };
+        return { revision: 7, bridges: [bridge], devices: [device] };
       },
     });
     const hook = await renderHook(
@@ -470,6 +483,7 @@ describe("BrowserSession React resources", () => {
     await flush(20);
 
     expect(hook.result.current.revision).toBe(7);
+    expect(hook.result.current.bridges).toEqual([bridge]);
     expect(hook.result.current.devices).toEqual([device]);
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({ includeDisconnected: false });
@@ -2185,7 +2199,7 @@ describe("BrowserViewer", () => {
       placement: InteractionPlacement | undefined;
     }> = [];
     const client = fakeClient({
-      listAttachedBrowsers: async () => ({ revision: 4, devices: [device] }),
+      listAttachedBrowsers: async () => ({ revision: 4, bridges: [], devices: [device] }),
       listBrowserSessions: async () => ({ revision: 1, sessions: [] }),
       listBrowserIdentities: async () => ({ revision: 1, identities: [] }),
       createBrowserSession: async (_workspaceId, request) => {
@@ -2244,6 +2258,39 @@ describe("BrowserViewer", () => {
     ]);
     expect(rendered.container.textContent).toContain("Your browser");
     expect(rendered.container.textContent).toContain("live");
+    await rendered.unmount();
+  });
+
+  test("offers attached-Chrome setup when the machine bridge has no connected profile", async () => {
+    const client = fakeClient({
+      listAttachedBrowsers: async () => ({
+        revision: 4,
+        bridges: [attachedBrowserBridge()],
+        devices: [],
+      }),
+      listBrowserSessions: async () => ({ revision: 1, sessions: [] }),
+      listBrowserIdentities: async () => ({ revision: 1, identities: [] }),
+    });
+    const rendered = await renderComponent(
+      <BrowserViewer
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        browserExtensionSetupUrl="/browser-extension-setup.html"
+      />,
+    );
+    await flush(30);
+
+    const launchSummary = rendered.container.querySelector<HTMLElement>(
+      "summary[aria-label='New browser']",
+    );
+    expect(launchSummary).not.toBeNull();
+    await actRun(() => launchSummary!.click());
+    const setup = [...(launchSummary!.closest("details")?.querySelectorAll("a") ?? [])].find(
+      (link) => link.textContent?.includes("Connect this Chrome profile"),
+    );
+    expect(setup?.getAttribute("href")).toBe("/browser-extension-setup.html");
+    expect(setup?.textContent).toContain("Machine agent ready");
     await rendered.unmount();
   });
 });

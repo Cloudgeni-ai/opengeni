@@ -1,4 +1,5 @@
 import type {
+  AttachedBrowserBridge,
   AttachedBrowserDevice,
   BrowserAction,
   BrowserActionReceipt,
@@ -96,6 +97,9 @@ export type BrowserViewerProps = EmbeddedBrowserInteractionClientOverride & {
     | undefined;
   /** Navigate to the exact linked ComputerSession; never a lookalike desktop. */
   onOpenComputer?: ((computerSessionId: string) => void) | undefined;
+  /** Host-owned install/setup surface for attaching an existing Chrome profile.
+   * The machine bridge remains discoverable even when this URL is omitted. */
+  browserExtensionSetupUrl?: string | undefined;
 };
 
 type BrowserSelection = { sessionId: string; pinned: boolean } | null;
@@ -137,10 +141,15 @@ export function BrowserViewer({
   renderEmpty,
   createLinkedComputer,
   onOpenComputer,
+  browserExtensionSetupUrl,
   ...override
 }: BrowserViewerProps) {
   const registry = useBrowserSessions({ ...override, sessionId, enabled });
   const attached = useAttachedBrowsers({ ...override, enabled });
+  const onlineAttachedBridges = useMemo(
+    () => attached.bridges.filter((bridge) => bridge.state === "online"),
+    [attached.bridges],
+  );
   const profiles = useBrowserIdentities({ ...override, enabled, includeArchived: true });
   const siteAuth = useSiteAuthConnections({
     ...override,
@@ -677,12 +686,14 @@ export function BrowserViewer({
             A browser appears here when this agent—or another agent in the workspace—opens one.
           </p>
           <BrowserLaunchMenu
+            attachedBridges={onlineAttachedBridges}
             attachedDevices={attached.devices}
             identities={profiles.identities}
             creating={creating}
             mutatingProfile={savingProfile}
             onCreate={createBrowser}
             onRestore={(identity) => updateProfile(identity, { status: "active" })}
+            setupUrl={browserExtensionSetupUrl}
             prominent
           />
           {registry.error ? (
@@ -702,6 +713,7 @@ export function BrowserViewer({
         relevantSessionIds={new Set(relevant.map((session) => session.id))}
         selectedSessionId={selection?.sessionId ?? null}
         identities={profiles.identities}
+        attachedBridges={onlineAttachedBridges}
         attachedDevices={attached.devices}
         selectedProfile={selectedProfile}
         baseRevisionOrdinal={baseRevisionOrdinal}
@@ -720,6 +732,7 @@ export function BrowserViewer({
         onSaveProfile={saveProfileVersion}
         onUpdateProfile={updateProfile}
         onRefresh={() => void Promise.all([registry.refresh(), attached.refresh()])}
+        setupUrl={browserExtensionSetupUrl}
       />
       <InteractionInterventionBanner
         interventions={selectedInterventions}
@@ -901,6 +914,7 @@ function BrowserToolbar(props: {
   sessions: BrowserSession[];
   relevantSessionIds: Set<string>;
   selectedSessionId: string | null;
+  attachedBridges: AttachedBrowserBridge[];
   attachedDevices: AttachedBrowserDevice[];
   identities: BrowserIdentity[];
   selectedProfile: BrowserIdentity | null;
@@ -920,6 +934,7 @@ function BrowserToolbar(props: {
     update: { name?: string; status?: "active" | "archived"; defaultRevisionId?: string },
   ) => Promise<boolean>;
   onRefresh: () => void;
+  setupUrl?: string | undefined;
 }) {
   const detailsRef = useRef<HTMLDetailsElement | null>(null);
   const selected = props.sessions.find((session) => session.id === props.selectedSessionId);
@@ -989,12 +1004,14 @@ function BrowserToolbar(props: {
         <RefreshCwIcon className={cn("size-3.5", props.refreshing && "animate-spin")} />
       </button>
       <BrowserLaunchMenu
+        attachedBridges={props.attachedBridges}
         attachedDevices={props.attachedDevices}
         identities={props.identities}
         creating={props.creating}
         mutatingProfile={props.savingProfile}
         onCreate={props.onCreate}
         onRestore={(identity) => props.onUpdateProfile(identity, { status: "active" })}
+        setupUrl={props.setupUrl}
       />
     </div>
   );
@@ -1084,12 +1101,14 @@ function BrowserSessionGroup(props: {
 }
 
 function BrowserLaunchMenu(props: {
+  attachedBridges: AttachedBrowserBridge[];
   attachedDevices: AttachedBrowserDevice[];
   identities: BrowserIdentity[];
   creating: boolean;
   mutatingProfile: boolean;
   onCreate: (choice?: BrowserLaunchChoice) => void;
   onRestore: (identity: BrowserIdentity) => Promise<boolean>;
+  setupUrl?: string | undefined;
   prominent?: boolean;
 }) {
   const detailsRef = useRef<HTMLDetailsElement | null>(null);
@@ -1132,7 +1151,7 @@ function BrowserLaunchMenu(props: {
           props.prominent ? "left-1/2 top-10 -translate-x-1/2" : "right-0 top-8",
         )}
       >
-        {props.attachedDevices.length > 0 ? (
+        {props.attachedDevices.length > 0 || props.attachedBridges.length > 0 ? (
           <div className="pb-1">
             <p className="px-2 pb-1 pt-1 text-[10px] font-medium uppercase tracking-[0.12em] text-og-subtle">
               Connected Chrome
@@ -1157,12 +1176,48 @@ function BrowserLaunchMenu(props: {
                 <span className="size-1.5 shrink-0 rounded-full bg-og-status-running" />
               </button>
             ))}
+            {props.attachedBridges.length > 0 ? (
+              props.setupUrl ? (
+                <a
+                  href={props.setupUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  onClick={() => detailsRef.current?.removeAttribute("open")}
+                  className="flex w-full items-center gap-2 rounded-og-sm px-2 py-2 text-left transition hover:bg-og-surface-2"
+                >
+                  <PlusIcon className="size-3.5 shrink-0 text-og-muted" />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-og-control text-og-fg">
+                      {props.attachedDevices.length > 0
+                        ? "Connect another Chrome profile"
+                        : "Connect this Chrome profile"}
+                    </span>
+                    <span className="block truncate text-og-xs text-og-subtle">
+                      Machine agent ready · install extension once
+                    </span>
+                  </span>
+                </a>
+              ) : (
+                <div className="flex w-full items-center gap-2 px-2 py-2 text-left">
+                  <MonitorIcon className="size-3.5 shrink-0 text-og-muted" />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-og-control text-og-fg">
+                      Chrome connection ready
+                    </span>
+                    <span className="block text-og-xs leading-4 text-og-subtle">
+                      Install the OpenGeni Browser extension in the profile you want to use.
+                    </span>
+                  </span>
+                </div>
+              )
+            ) : null}
           </div>
         ) : null}
         <p
           className={cn(
             "px-2 pb-1 pt-1 text-[10px] font-medium uppercase tracking-[0.12em] text-og-subtle",
-            props.attachedDevices.length > 0 && "border-t border-og-border",
+            (props.attachedDevices.length > 0 || props.attachedBridges.length > 0) &&
+              "border-t border-og-border",
           )}
         >
           Open isolated browser

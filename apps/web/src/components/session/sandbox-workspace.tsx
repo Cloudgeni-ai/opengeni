@@ -52,6 +52,7 @@ export function SessionWorkspace(props: {
       onCollapsedChange={props.onCollapsedChange}
       {...(props.mobileLeadingControl ? { mobileLeadingControl: props.mobileLeadingControl } : {})}
       autoSaveId="og.session.dock"
+      browserExtensionSetupUrl="/browser-extension-setup.html"
       onNotify={notify}
     />
   );

@@ -364,9 +364,25 @@ export const AttachedBrowserDevice = z
   });
 export type AttachedBrowserDevice = z.infer<typeof AttachedBrowserDevice>;
 
+/** One enrolled machine agent currently reporting its browser-bridge inventory.
+ * A bridge with zero devices is operational but has no Chrome profile connected
+ * through the OpenGeni extension yet. */
+export const AttachedBrowserBridge = z
+  .object({
+    enrollmentId: z.string().uuid(),
+    state: z.enum(["online", "offline"]),
+    bridgeGeneration: opaqueGeneration,
+    inventoryRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    connectedProfileCount: z.number().int().nonnegative().max(10_000),
+    lastSeenAt: z.string().datetime({ offset: true }),
+  })
+  .strict();
+export type AttachedBrowserBridge = z.infer<typeof AttachedBrowserBridge>;
+
 export const AttachedBrowserDeviceListResponse = z
   .object({
     revision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    bridges: z.array(AttachedBrowserBridge).max(10_000),
     devices: z.array(AttachedBrowserDevice).max(10_000),
   })
   .strict();

@@ -2069,7 +2069,7 @@ export class MockOpenGeniClient implements SessionClientLike {
     _workspaceId: string,
     _options: AttachedBrowserDeviceListOptions = {},
   ): Promise<AttachedBrowserDeviceListResponse> {
-    return { revision: this.browserRevision, devices: [] };
+    return { revision: this.browserRevision, bridges: [], devices: [] };
   }
 
   async getAttachedBrowser(

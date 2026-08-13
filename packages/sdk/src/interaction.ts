@@ -149,8 +149,18 @@ export type AttachedBrowserDevice = {
   updatedAt: string;
 };
 
+export type AttachedBrowserBridge = {
+  enrollmentId: string;
+  state: "online" | "offline";
+  bridgeGeneration: string;
+  inventoryRevision: number;
+  connectedProfileCount: number;
+  lastSeenAt: string;
+};
+
 export type AttachedBrowserDeviceListResponse = {
   revision: number;
+  bridges: AttachedBrowserBridge[];
   devices: AttachedBrowserDevice[];
 };
 

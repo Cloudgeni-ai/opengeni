@@ -1,4 +1,4 @@
-import { cp, mkdir, rm } from "node:fs/promises";
+import { cp, mkdir, readFile, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -23,3 +23,23 @@ if (!result.success) {
 for (const file of ["manifest.json", "popup.html", "popup.css"]) {
   await cp(resolve(root, file), resolve(output, file));
 }
+
+// Chrome deliberately requires an explicit user install for an ordinary
+// existing profile. Ship one deterministic unpacked-extension archive for the
+// first-party setup surface; production may replace that link with the Chrome
+// Web Store without changing the React contract.
+const installFiles = [
+  "manifest.json",
+  "popup.html",
+  "popup.css",
+  "popup.js",
+  "service-worker.js",
+] as const;
+const archiveEntries: Record<string, Uint8Array> = {};
+for (const file of installFiles) {
+  archiveEntries[`opengeni-browser-extension/${file}`] = await readFile(resolve(output, file));
+}
+await Bun.write(
+  resolve(output, "opengeni-browser-extension.tar"),
+  await new Bun.Archive(archiveEntries).bytes(),
+);

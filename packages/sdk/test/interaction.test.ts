@@ -334,7 +334,7 @@ describe("BrowserSession SDK", () => {
         calls.push(url);
         return url.endsWith(`/${ATTACHED_BROWSER_ID}`)
           ? json(device)
-          : json({ revision: 9, devices: [device] });
+          : json({ revision: 9, bridges: [], devices: [device] });
       },
     });
 
