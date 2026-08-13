@@ -43,6 +43,7 @@ nix = { workspace = true }
 command-group = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+opengeni-agent-linux-ffi = { path = "../opengeni-agent-linux-ffi" }
 x11rb = { workspace = true }
 xattr = { workspace = true }
 
