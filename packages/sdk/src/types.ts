@@ -3191,6 +3191,8 @@ export type Workspace = {
 
 export type WorkspaceSettings = {
   memoryEnabled?: boolean | undefined;
+  /** Reversible Memory V1 prompt composition rollout. */
+  memoryPromptMode?: "legacy_standing" | "retrieval_only" | undefined;
   voiceInput?: WorkspaceVoiceInputSettings | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   maxNestedAgentDepth?: number | null | undefined;
@@ -3225,6 +3227,7 @@ export type WorkspaceVoiceInputSettings = {
 
 export type UpdateWorkspaceSettingsRequest = {
   memoryEnabled?: boolean | undefined;
+  memoryPromptMode?: "legacy_standing" | "retrieval_only" | undefined;
   voiceInput?: WorkspaceVoiceInputSettings | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   maxNestedAgentDepth?: number | null | undefined;

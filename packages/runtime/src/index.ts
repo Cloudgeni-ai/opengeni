@@ -225,6 +225,7 @@ export {
   type RuntimeSkillArtifact,
   type RuntimeSkillArtifactFile,
   type RuntimeSkillComposition,
+  type RuntimeSkillDescriptor,
   type SessionSkillActivation,
 } from "./runtime-skills";
 import { appendWorkspaceGovernance } from "./workspace-governance";

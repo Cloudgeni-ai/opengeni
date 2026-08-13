@@ -30,6 +30,7 @@ import {
   type SessionAuthorizationActor,
   type SessionAuthorizationSurface,
   type Session,
+  type WorkspaceMemoryPromptMode,
   type ScheduledTask,
   UpdateScheduledTaskRequest,
   normalizeWorkspaceArtifactSlug,
@@ -221,6 +222,7 @@ export type McpServerOptions = {
   // tools use it only when no configured public base URL is available.
   requestOrigin?: string | null;
   workspaceMemoryEnabled?: boolean | undefined;
+  workspaceMemoryPromptMode?: WorkspaceMemoryPromptMode | undefined;
 };
 
 type FirstPartyToolAuthorization = {
@@ -540,7 +542,14 @@ export function buildOpenGeniMcpServer(
     registerGoalTools(server, deps, grant, sessionId, json);
   }
   if (sessionId !== null && options.workspaceMemoryEnabled === true) {
-    registerMemoryTools(server, deps, grant, sessionId, json);
+    registerMemoryTools(
+      server,
+      deps,
+      grant,
+      sessionId,
+      json,
+      options.workspaceMemoryPromptMode ?? "legacy_standing",
+    );
   }
   if (sessionId !== null && exactAgentAttemptClaims(grant) !== null) {
     registerPreferenceRegistryTools(server, deps, grant, json);
@@ -2694,6 +2703,7 @@ function registerMemoryTools(
   grant: AccessGrant,
   sessionId: string,
   json: JsonResult,
+  promptMode: WorkspaceMemoryPromptMode,
 ): void {
   const publicationActor = async () => {
     const actor = await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId);
@@ -2709,7 +2719,10 @@ function registerMemoryTools(
   server.registerTool(
     "memory_search",
     {
-      description: MEMORY_SEARCH_TOOL_DESCRIPTION,
+      description:
+        promptMode === "retrieval_only"
+          ? `${MEMORY_SEARCH_TOOL_DESCRIPTION} Legacy preference-kind records are excluded here because structured preferences are the only behavioral authority.`
+          : MEMORY_SEARCH_TOOL_DESCRIPTION,
       inputSchema: {
         query: z4.string().min(1),
         kind: MemoryKindSchema.optional(),
@@ -2725,6 +2738,7 @@ function registerMemoryTools(
             query,
             ...(kind ? { kind } : {}),
             ...(limit ? { limit } : {}),
+            agentPromptMode: promptMode,
           },
           deps.getDocumentServices().embedder,
         ),
@@ -2734,7 +2748,10 @@ function registerMemoryTools(
   server.registerTool(
     "memory_save",
     {
-      description: MEMORY_SAVE_TOOL_DESCRIPTION,
+      description:
+        promptMode === "retrieval_only"
+          ? `${MEMORY_SAVE_TOOL_DESCRIPTION} A preference-kind save is retained only as a legacy observation and cannot become behavioral authority; use the structured preference proposal surface for behavioral guidance.`
+          : MEMORY_SAVE_TOOL_DESCRIPTION,
       inputSchema: {
         text: z4.string().min(1),
         kind: MemoryKindSchema,

@@ -102,6 +102,7 @@ import type {
   VariableSetSecret,
   VariableSetVariableMetadata,
   WorkspaceMember,
+  WorkspaceMemoryPromptMode,
   WorkspaceRegisteredPack,
   Channel,
   Rig,
@@ -171,6 +172,7 @@ import {
   resolveWorkspaceCodexCompactionDefault,
   type LatencyMode,
   resolveWorkspaceMemoryEnabled,
+  resolveWorkspaceMemoryPromptMode,
   RigChange as RigChangeContract,
   RigProviderImage as RigProviderImageContract,
   SessionGoal as SessionGoalContract,
@@ -11662,6 +11664,8 @@ export type WorkspaceMemorySearchInput = {
   kind?: KnowledgeMemoryKind | undefined;
   limit?: number | undefined;
   mode?: WorkspaceMemorySearchMode | undefined;
+  /** Agent-only containment. Human audit/search callers omit this. */
+  agentPromptMode?: WorkspaceMemoryPromptMode | undefined;
 };
 
 export type WorkspaceMemorySearchResult = {
@@ -12291,6 +12295,11 @@ export async function searchWorkspaceMemories(
     eq(schema.knowledgeMemories.workspaceId, workspaceId),
     inArray(schema.knowledgeMemories.status, agentVisibleMemoryStatuses),
   ];
+  if (input.agentPromptMode === "retrieval_only") {
+    // Legacy preference-kind rows remain canonical and human-searchable, but
+    // they are observations rather than structured preference authority.
+    baseConditions.push(ne(schema.knowledgeMemories.kind, "preference"));
+  }
   if (input.kind) {
     baseConditions.push(eq(schema.knowledgeMemories.kind, input.kind));
   }
@@ -12452,7 +12461,11 @@ export async function resolveWorkspaceMemoryBlock(
     .from(schema.workspaces)
     .where(eq(schema.workspaces.id, workspaceId))
     .limit(1);
-  if (!workspace || !resolveWorkspaceMemoryEnabled(workspace.settings)) {
+  if (
+    !workspace ||
+    !resolveWorkspaceMemoryEnabled(workspace.settings) ||
+    resolveWorkspaceMemoryPromptMode(workspace.settings) === "retrieval_only"
+  ) {
     return null;
   }
   const records = await withWorkspaceRls(

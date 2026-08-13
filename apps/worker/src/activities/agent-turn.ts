@@ -369,6 +369,7 @@ import {
   recordModelCacheTokens,
   recordModelInputTokens,
   recordModelRequestPhase,
+  recordCompanyBrainContributions,
   recordSessionEventAppendLatency,
   recordSessionEventPublishLatency,
   runtimeMetricsHooksForObservability,
@@ -376,6 +377,7 @@ import {
   turnLifecycleMetricsFor,
   type TurnOutcome,
 } from "../observability-metrics";
+import { buildCompanyBrainContributionReceipt } from "../model-context-contributions";
 import {
   beginRecording,
   discardUnpublishedRecording,
@@ -431,6 +433,7 @@ import {
   evaluateWorkspaceModelPolicy,
   readTurnExecutionPolicyV1,
   resolveWorkspaceAgentHumanInputEnabled,
+  resolveWorkspaceMemoryPromptMode,
   resourceMountPath,
   type LatencyMode,
   type ResourceRef,
@@ -5216,12 +5219,20 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (!workspace) throw new Error(`Workspace not found: ${input.workspaceId}`);
       const workspaceAgentInstructions = workspace.agentInstructions;
       const agentHumanInputEnabled = resolveWorkspaceAgentHumanInputEnabled(workspace.settings);
+      const memoryPromptMode = resolveWorkspaceMemoryPromptMode(workspace.settings);
       assertWorkspaceHumanInputAllowed(agentHumanInputEnabled, "resume", humanInputResume !== null);
-      const workspaceGovernance = renderWorkspaceGovernanceContext({
-        companyProfile: companyProfileSnapshot,
-        instructionPolicy: instructionPolicySnapshot,
-        preferences: preferenceSnapshot,
-      });
+      const companyProfileIncluded =
+        memoryPromptMode === "legacy_standing" || session.nestedAgentDepth === 0;
+      const workspaceGovernance = renderWorkspaceGovernanceContext(
+        {
+          companyProfile: companyProfileSnapshot,
+          instructionPolicy: instructionPolicySnapshot,
+          preferences: preferenceSnapshot,
+        },
+        {
+          includeCompanyProfile: companyProfileIncluded,
+        },
+      );
       const structuredWorkspacePolicyActive =
         hasActiveWorkspaceInstructionPolicy(instructionPolicySnapshot);
       const workspaceMemory = await resolveWorkspaceMemoryBlock(db, input.workspaceId);
@@ -7217,6 +7228,23 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             outcome,
           }),
       };
+      const runtimeSkillActivations = [
+        ...installedSkillRuntime.activations,
+        ...packRuntime.skillActivations,
+        ...session.skills.map((skill) => ({
+          source: "session" as const,
+          id: `session:${session.id}:${skill.name}`,
+          artifact: {
+            name: skill.name,
+            description: skill.description ?? null,
+            files: skill.files.map((file) => ({
+              path: file.path,
+              content: file.content,
+            })),
+          },
+          reason: "attached to session",
+        })),
+      ];
       const agent = runtime.buildAgent(modelRunSettings, turnResources, {
         reasoningEffort: turn.reasoningEffort,
         latencyMode: turnExecutionPolicy.latencyMode,
@@ -7333,28 +7361,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           await maybeStartOnTurnRecording(resolvedSandbox, activeSandboxBackend);
         },
         onRetainableSessionImageOutput: retainSessionImageAtToolBoundary,
-        ...(packRuntime.skillActivations.length > 0 ||
-        session.skills.length > 0 ||
-        installedSkillRuntime.activations.length > 0
-          ? {
-              skillActivations: [
-                ...installedSkillRuntime.activations,
-                ...packRuntime.skillActivations,
-                ...session.skills.map((skill) => ({
-                  source: "session" as const,
-                  id: `session:${session.id}:${skill.name}`,
-                  artifact: {
-                    name: skill.name,
-                    description: skill.description ?? null,
-                    files: skill.files.map((file) => ({
-                      path: file.path,
-                      content: file.content,
-                    })),
-                  },
-                  reason: "attached to session",
-                })),
-              ],
-            }
+        ...(runtimeSkillActivations.length > 0
+          ? { skillActivations: runtimeSkillActivations }
           : {}),
         ...(!structuredWorkspacePolicyActive && workspaceAgentInstructions
           ? { instructionsTemplate: workspaceAgentInstructions }
@@ -7632,6 +7640,40 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           },
         );
       }
+      let companyBrainContributionReceiptRecorded = false;
+      const recordCompanyBrainContributionReceiptOnce = (): void => {
+        if (companyBrainContributionReceiptRecorded) return;
+        companyBrainContributionReceiptRecorded = true;
+        try {
+          const companyBrainContributionReceipt = buildCompanyBrainContributionReceipt({
+            attemptId: input.attemptId,
+            turnId: turn.id,
+            nestedAgentDepth: session.nestedAgentDepth,
+            memoryPromptMode,
+            instructionPolicy: instructionPolicySnapshot,
+            workspaceAgentInstructions,
+            preferences: preferenceSnapshot,
+            companyProfile: companyProfileSnapshot,
+            companyProfileIncluded,
+            workspaceMemory,
+            skillActivations: runtimeSkillActivations,
+          });
+          recordCompanyBrainContributions(observability, companyBrainContributionReceipt);
+          observability.info("model context contribution receipt", {
+            attemptId: companyBrainContributionReceipt.attemptId,
+            turnId: companyBrainContributionReceipt.turnId,
+            sessionRole: companyBrainContributionReceipt.sessionRole,
+            memoryPromptMode: companyBrainContributionReceipt.memoryPromptMode,
+            instructionPolicySnapshotId:
+              companyBrainContributionReceipt.instructionPolicySnapshotId,
+            preferenceSnapshotId: companyBrainContributionReceipt.preferenceSnapshotId,
+            companyProfileSnapshotId: companyBrainContributionReceipt.companyProfileSnapshotId,
+            contributions: JSON.stringify(companyBrainContributionReceipt.contributions),
+          });
+        } catch {
+          // Observability must never change model execution semantics.
+        }
+      };
       const agentInstructions = typeof agent.instructions === "string" ? agent.instructions : "";
       const compactSummarizer = compactionSummarizerFor(
         agentInstructions.trim() ? agentInstructions : undefined,
@@ -8162,6 +8204,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // provider may have accepted work even if no response/event follows.
           // Escaped MCP setup timeouts are automatically recoverable only
           // before this line.
+          recordCompanyBrainContributionReceiptOnce();
           modelRequestStarted = true;
           return await runtime.runStream(agent, runInput!, modelRunSettings, {
             signal: runtimeCancellationSignal,

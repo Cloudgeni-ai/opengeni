@@ -226,6 +226,25 @@ describe("exact-attempt workspace governance prompt", () => {
     expect(withEmptyCompanySnapshot).not.toContain("Active organization and workspace governance");
   });
 
+  test("can omit the company profile for a contained child without weakening rules or descriptors", () => {
+    const governance = renderWorkspaceGovernanceContext(
+      {
+        companyProfile: companyProfileSnapshot(),
+        instructionPolicy: policySnapshot([
+          policyEntry({ kind: "policy", scope: "global", content: "MANDATORY_RULE" }),
+        ]),
+        preferences: preferenceSnapshot([descriptor("workspace", "GUIDE")]),
+      },
+      { includeCompanyProfile: false },
+    );
+
+    expect(governance).not.toContain("COMPANY_IDENTITY_SENTINEL");
+    expect(governance).not.toContain("COMPANY_GOAL_SENTINEL");
+    expect(governance).not.toContain("Company-profile snapshot evidence");
+    expect(governance).toContain("MANDATORY_RULE");
+    expect(governance).toContain("GUIDE descriptor sentinel");
+  });
+
   test("is absent when no policy or preference descriptor is active", () => {
     expect(renderWorkspaceGovernanceContext({ instructionPolicy: policySnapshot([]) })).toBeNull();
   });
