@@ -25,6 +25,7 @@ import {
   fakeFileDiff,
 } from "./sandbox-fixtures";
 import { OpenGeniProvider } from "../src/provider";
+import { OpenGeniContext, type OpenGeniContextValue } from "../src/session-context";
 import type { MachinesResponse } from "../src/types/machines";
 import {
   useSandboxWorkspaceTabs,
@@ -353,6 +354,62 @@ describe("workbench surface allowlist", () => {
 // ── Refinement 1: prewarm gated to intent ────────────────────────────────────
 
 describe("workbench prewarm gating (Refinement 1)", () => {
+  test("workspace interaction lifecycle changes refresh the truthful machine liveness", async () => {
+    let warm = false;
+    let capabilityReads = 0;
+    const { client } = coldClient({
+      getStreamCapabilities: async () => {
+        capabilityReads += 1;
+        return warm ? fakeCapabilities({ liveness: "warm" }) : fakeColdCapabilities();
+      },
+    });
+    const result = { current: undefined as unknown as UseSandboxWorkspaceTabsResult };
+
+    function Harness({ revision }: { revision: number | null }) {
+      const context: OpenGeniContextValue = {
+        client,
+        workspaceId: WORKSPACE_ID,
+        workspaceControlEvent: null,
+        workspaceControlConnectionState: "idle",
+        workspaceInteractionEvent:
+          revision === null
+            ? null
+            : {
+                workspaceId: WORKSPACE_ID,
+                sequence: revision,
+                revision,
+                type: "workspace.interaction.changed",
+                occurredAt: "2026-08-13T10:00:00.000Z",
+              },
+        workspaceInteractionConnectionState: "live",
+        registerSessionReconciler: () => () => undefined,
+        reconcileSession: async () => undefined,
+      };
+      return (
+        <OpenGeniContext.Provider value={context}>
+          <Probe />
+        </OpenGeniContext.Provider>
+      );
+    }
+
+    function Probe() {
+      result.current = useSandboxWorkspaceTabs({ sessionId: SESSION_ID, events: [] });
+      return null;
+    }
+
+    const rendered = await renderComponent(<Harness revision={null} />);
+    await flush(60);
+    expect(result.current.machine.chip.state).toBe("offline");
+    const coldReads = capabilityReads;
+
+    warm = true;
+    await rendered.rerender(<Harness revision={1} />);
+    await flush(60);
+    expect(capabilityReads).toBeGreaterThan(coldReads);
+    expect(result.current.machine.chip).toEqual({ state: "live", label: "Live", asOf: null });
+    await rendered.unmount();
+  });
+
   test("pending capability negotiation cannot replay captured history into Channel-A", async () => {
     const historicalEvents = [
       fakeEvent(1, "git.changed", { revision: 3 }),

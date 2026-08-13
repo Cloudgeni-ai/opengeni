@@ -305,7 +305,7 @@ function emptyWarmIntents(sessionId: string): SessionWarmIntents {
 export function useSandboxWorkspaceTabs(
   options: UseSandboxWorkspaceTabsOptions,
 ): UseSandboxWorkspaceTabsResult {
-  const { client, workspaceId } = useOpenGeni(options);
+  const { client, workspaceId, workspaceInteractionEvent } = useOpenGeni(options);
   const {
     sessionId,
     events,
@@ -452,6 +452,17 @@ export function useSandboxWorkspaceTabs(
     }
     provisioningRef.current = { sessionId, provisioning };
   }, [sessionId, provisioning, renegotiate]);
+
+  // BrowserSession and ComputerSession lifecycles use the same placement lease
+  // as files/terminal/desktop, but are workspace resources rather than session
+  // events. Re-read the capability document on their canonical workspace
+  // invalidation so the one machine chip cannot remain "Offline" beside a live
+  // browser/computer (or remain "Live" after the final interaction holder ends).
+  // This is a read-only negotiation: it never acquires a holder or wakes a box.
+  useEffect(() => {
+    if (workspaceInteractionEvent?.workspaceId !== workspaceId) return;
+    renegotiate();
+  }, [workspaceId, workspaceInteractionEvent, renegotiate]);
 
   // The cold-paint data source: the latest turn-end capture, fetched with a single
   // api round-trip on mount (no machine). Feeds the Files tree + the Changes/Git
