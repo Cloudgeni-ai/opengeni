@@ -223,9 +223,11 @@ kube-prometheus-stack:
       - kube_horizontalpodautoscaler_spec_min_replicas
       - kube_horizontalpodautoscaler_status_current_replicas
       - kube_horizontalpodautoscaler_status_desired_replicas
+      - kube_cronjob_status_last_successful_time
       - kube_job_failed
       - kube_job_owner
       - kube_job_status_active
+      - kube_job_status_failed
       - kube_job_status_start_time
       - kube_namespace_status_phase
       - kube_node_info
