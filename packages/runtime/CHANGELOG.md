@@ -1,5 +1,16 @@
 # @opengeni/runtime
 
+## 0.23.1
+
+### Patch Changes
+
+- 944be7f: Reduce and attribute turn startup latency with lazy sandbox defaults for local development, bounded validator reuse, parallel durable input reads, exact stale-Docker recovery, and low-cardinality worker, runtime, credential, and provider preparation diagnostics.
+- Updated dependencies [944be7f]
+  - @opengeni/codemode@0.4.2
+  - @opengeni/codex@0.2.17
+  - @opengeni/config@0.16.2
+  - @opengeni/sdk@0.57.0
+
 ## 0.23.0
 
 ### Minor Changes
