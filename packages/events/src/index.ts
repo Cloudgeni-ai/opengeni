@@ -403,6 +403,13 @@ export function createDetachedSessionEventFanout(
     }
   };
 
+  const drain = async (): Promise<void> => {
+    const current = active;
+    if (!current) return;
+    await current;
+    await drain();
+  };
+
   return {
     enqueue(workspaceId, sessionId, events) {
       if (events.length === 0) return;
@@ -418,11 +425,7 @@ export function createDetachedSessionEventFanout(
       active = pump();
       void active.catch(() => undefined);
     },
-    async drain() {
-      while (active) {
-        await active;
-      }
-    },
+    drain,
   };
 }
 
