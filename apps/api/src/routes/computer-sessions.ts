@@ -464,6 +464,28 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         "computer.attach",
         async ({ client, sessionClient, record, binding, placement }) => {
           if (origin) await client.addAllowedOrigins([origin]);
+          const reference = {
+            computerSessionId,
+            controllerGeneration: binding.controllerGeneration,
+          };
+          const target = (await sessionClient.listTargets()).find(
+            (candidate) => candidate.id === request.targetId,
+          );
+          if (!target) {
+            throw new BrowserControlRequestError(404, {
+              code: "target_not_found",
+              message: "computer target does not exist",
+              retryable: false,
+            });
+          }
+          if (target.kind === "app") {
+            throw new BrowserControlRequestError(409, {
+              code: "unsupported",
+              message:
+                "application targets support semantic control but do not provide a visual stream; select a window or screen",
+              retryable: false,
+            });
+          }
           const grantId = randomUUID();
           const expiresAt = new Date(Date.now() + request.expiresInSeconds * 1_000).toISOString();
           const token = deriveComputerViewGrantToken({
@@ -478,21 +500,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
             grantId,
             expiresAt,
           });
-          const reference = {
-            computerSessionId,
-            controllerGeneration: binding.controllerGeneration,
-          };
           await client.createComputerViewGrant(reference, { grantId, token, expiresAt });
-          const target = (await sessionClient.listTargets()).find(
-            (candidate) => candidate.id === request.targetId,
-          );
-          if (!target) {
-            throw new BrowserControlRequestError(404, {
-              code: "target_not_found",
-              message: "computer target does not exist",
-              retryable: false,
-            });
-          }
           const relaySecret = placement.session.openComputerFrames
             ? resolveStreamTokenSecret(deps.settings)
             : null;
@@ -1547,9 +1555,9 @@ function interactionFailure(error: unknown) {
 }
 
 function computerRouteError(error: unknown): HTTPException {
-  if (error instanceof HTTPException) return error;
   const connectedMachineError = interactionControlApiError(error, "computer");
   if (connectedMachineError) return connectedMachineError;
+  if (error instanceof HTTPException) return error;
   if (error instanceof ComputerSessionNotFoundError) {
     return new HTTPException(404, { message: error.message, cause: error });
   }

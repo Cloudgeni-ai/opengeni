@@ -358,8 +358,9 @@ pub(super) fn launch_application(application_id: &str) -> Result<(), MacFfiError
 pub(super) fn run_background_application(
     application_bundle: &str,
     arguments: &[String],
+    pid_file: Option<&std::path::Path>,
 ) -> Result<(), MacFfiError> {
-    ax::run_background_application(application_bundle, arguments)
+    ax::run_background_application(application_bundle, arguments, pid_file)
 }
 
 /// Capture the main display as pixel-sized RGBA via a one-shot `SCScreenshotManager`.

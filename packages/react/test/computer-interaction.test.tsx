@@ -379,6 +379,43 @@ describe("ComputerSession React resources", () => {
     });
     await hook.unmount();
   });
+
+  test("prefers a capturable macOS screen over a focused semantic-only application", async () => {
+    const applicationTarget = { ...target("app-1", "app"), focused: true };
+    const screenTarget = target("screen-1", "screen");
+    const observed: string[] = [];
+    const client = fakeClient({
+      getComputerSession: async () => ({
+        ...computerSession(),
+        platform: "macos",
+        adapter: "opengeni.macos.ax-sck.v1",
+      }),
+      listComputerTargets: async () => ({
+        computerSessionId: COMPUTER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        targets: [applicationTarget, screenTarget],
+      }),
+      observeComputerTarget: async (_workspaceId, _computerSessionId, targetId) => {
+        observed.push(targetId);
+        return observation(targetId === screenTarget.id ? screenTarget : applicationTarget);
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useComputerSession({
+          client,
+          workspaceId: WORKSPACE_ID,
+          computerSessionId: COMPUTER_SESSION_ID,
+          pollIntervalMs: 60_000,
+        }),
+      undefined,
+    );
+    await flush(20);
+
+    expect(hook.result.current.selectedTarget?.id).toBe(screenTarget.id);
+    expect(observed).toEqual([screenTarget.id]);
+    await hook.unmount();
+  });
 });
 
 describe("ComputerSession frame stream", () => {
@@ -554,6 +591,36 @@ describe("ComputerViewer", () => {
     expect(computerKey(event("Control", { ctrlKey: true }))).toBeNull();
     expect(computerKey(event("Alt", { altKey: true }))).toBeNull();
     expect(computerKey(event("a", { metaKey: true }))).toBe("Meta+a");
+  });
+
+  test("keeps semantic-only application targets out of the frame attachment path", async () => {
+    const applicationTarget = { ...target("app-1", "app"), focused: true };
+    let attachmentCalls = 0;
+    const client = fakeClient({
+      listComputerSessions: async () => ({ revision: 1, sessions: [computerSession()] }),
+      getComputerSession: async () => ({
+        ...computerSession(),
+        platform: "macos",
+        adapter: "opengeni.macos.ax-sck.v1",
+      }),
+      listComputerTargets: async () => ({
+        computerSessionId: COMPUTER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        targets: [applicationTarget],
+      }),
+      observeComputerTarget: async () => observation(applicationTarget),
+      attachComputerSession: async (_workspaceId, _computerSessionId, request) => {
+        attachmentCalls += 1;
+        return attachment(request.targetId);
+      },
+    });
+    const rendered = await renderComponent(
+      <ComputerViewer client={client} workspaceId={WORKSPACE_ID} sessionId={SESSION_ID} />,
+    );
+    await flush(40);
+
+    expect(attachmentCalls).toBe(0);
+    await rendered.unmount();
   });
 
   test("renders a typed connected-machine startup failure with truthful retry copy", async () => {

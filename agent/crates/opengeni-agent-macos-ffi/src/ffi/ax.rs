@@ -7,6 +7,8 @@
 )]
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fs;
+use std::path::Path;
 use std::sync::{mpsc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -1257,6 +1259,7 @@ pub(super) fn launch_application(application_id: &str) -> Result<(), MacFfiError
 pub(super) fn run_background_application(
     application_bundle: &str,
     arguments: &[String],
+    pid_file: Option<&Path>,
 ) -> Result<(), MacFfiError> {
     if application_bundle.trim().is_empty() {
         return Err(MacFfiError::Invalid(
@@ -1322,11 +1325,18 @@ pub(super) fn run_background_application(
             ));
         }
     };
-    NSRunningApplication::runningApplicationWithProcessIdentifier(process_id).ok_or_else(|| {
-        MacFfiError::OutcomeUnknown(
-            "launched background application disappeared before supervision".to_string(),
-        )
-    })?;
+    let launched = NSRunningApplication::runningApplicationWithProcessIdentifier(process_id)
+        .ok_or_else(|| {
+            MacFfiError::OutcomeUnknown(
+                "launched background application disappeared before supervision".to_string(),
+            )
+        })?;
+    if let Some(path) = pid_file {
+        if let Err(error) = write_background_browser_pid(path, process_id) {
+            let _ = launched.terminate();
+            return Err(error);
+        }
+    }
 
     // Chrome can activate its first native window after LaunchServices has
     // already completed. Keep the exact prior foreground owner authoritative
@@ -1374,7 +1384,42 @@ pub(super) fn run_background_application(
             Duration::from_millis(250)
         });
     }
+    if let Some(path) = pid_file {
+        clear_background_browser_pid(path, process_id);
+    }
     Ok(())
+}
+
+fn write_background_browser_pid(path: &Path, process_id: i32) -> Result<(), MacFfiError> {
+    let parent = path.parent().ok_or_else(|| {
+        MacFfiError::Invalid("background browser PID file has no parent directory".to_string())
+    })?;
+    fs::create_dir_all(parent).map_err(|error| {
+        MacFfiError::OutcomeUnknown(format!(
+            "could not create background browser PID directory: {error}"
+        ))
+    })?;
+    let temporary = path.with_extension(format!("pid.tmp-{}", std::process::id()));
+    fs::write(&temporary, format!("{process_id}\n")).map_err(|error| {
+        MacFfiError::OutcomeUnknown(format!(
+            "could not write background browser PID file: {error}"
+        ))
+    })?;
+    fs::rename(&temporary, path).map_err(|error| {
+        let _ = fs::remove_file(&temporary);
+        MacFfiError::OutcomeUnknown(format!(
+            "could not publish background browser PID file: {error}"
+        ))
+    })
+}
+
+fn clear_background_browser_pid(path: &Path, process_id: i32) {
+    let Ok(value) = fs::read_to_string(path) else {
+        return;
+    };
+    if value.trim() == process_id.to_string() {
+        let _ = fs::remove_file(path);
+    }
 }
 
 fn target_root(

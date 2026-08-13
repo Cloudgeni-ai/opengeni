@@ -5,6 +5,7 @@ import {
   type InteractionControlFailureCode,
 } from "@opengeni/contracts";
 import { SelfhostedControlError } from "@opengeni/runtime/sandbox";
+import { HTTPException } from "hono/http-exception";
 import { ApiHttpError } from "./api-error";
 
 export type InteractionControlSurface = "browser" | "computer";
@@ -20,22 +21,29 @@ export function interactionControlApiError(
   error: unknown,
   surface: InteractionControlSurface,
 ): ApiHttpError | null {
-  if (!(error instanceof SelfhostedControlError)) return null;
-  const controlFailureCode = publicControlFailureCode(error.code);
+  const controlError =
+    error instanceof SelfhostedControlError
+      ? error
+      : error instanceof HTTPException && error.cause instanceof SelfhostedControlError
+        ? error.cause
+        : null;
+  if (!controlError) return null;
+  const controlFailureCode = publicControlFailureCode(controlError.code);
   const details = InteractionControlFailureDetails.parse({
     interactionLayer: "connected_machine",
     interactionSurface: surface,
     controlFailureCode,
-    ...(safeControlRequestId(error.controlRequestId)
-      ? { controlRequestId: error.controlRequestId }
+    ...(safeControlRequestId(controlError.controlRequestId)
+      ? { controlRequestId: controlError.controlRequestId }
       : {}),
   });
-  const ruling = publicControlFailureRuling(error, surface, controlFailureCode);
+  const ruling = publicControlFailureRuling(controlError, surface, controlFailureCode);
   return new ApiHttpError(ruling.status, {
     code: ruling.code,
     message: ruling.message,
-    retryable: error.retryable,
-    outcomeUnknown: error.code === AgentErrorCode.ERROR_CODE_TIMEOUT && !error.neverSent,
+    retryable: controlError.retryable,
+    outcomeUnknown:
+      controlError.code === AgentErrorCode.ERROR_CODE_TIMEOUT && !controlError.neverSent,
     details,
   });
 }

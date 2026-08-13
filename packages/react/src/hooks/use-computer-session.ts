@@ -432,9 +432,9 @@ function chooseTarget(
   return (
     targets.find((target) => target.focused && target.kind === "window") ??
     targets.find((target) => target.kind === "window") ??
+    targets.find((target) => target.kind === "screen") ??
     targets.find((target) => target.focused && target.kind === "app") ??
     targets.find((target) => target.kind === "app") ??
-    targets.find((target) => target.kind === "screen") ??
     targets[0] ??
     null
   );

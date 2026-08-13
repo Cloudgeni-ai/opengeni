@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { ErrorCode as AgentErrorCode } from "@opengeni/agent-proto";
 import { SelfhostedControlError } from "@opengeni/runtime/sandbox";
 import { testSettings } from "@opengeni/testing";
+import { HTTPException } from "hono/http-exception";
 import { createApp } from "../src/app";
 import {
   interactionControlApiError,
@@ -49,6 +50,31 @@ describe("connected-machine interaction control errors", () => {
     expect(JSON.stringify(projected)).not.toContain("PRIVATE");
     expect(JSON.stringify(projected)).not.toContain("/Users/person");
     expect(JSON.stringify(projected)).not.toContain("secret");
+  });
+
+  test("projects an offline Channel-A preflight preserved as an HTTP cause", () => {
+    const inner = controlError(AgentErrorCode.ERROR_CODE_AGENT_OFFLINE, {
+      reason: "agent_offline",
+      agentOffline: true,
+      neverSent: true,
+      controlRequestId: null,
+    });
+    const projected = interactionControlApiError(
+      new HTTPException(409, {
+        message: "Connected Machine has no live runner connection",
+        cause: inner,
+      }),
+      "browser",
+    );
+    expect(projected).not.toBeNull();
+    expect(projected!.status).toBe(503);
+    expect(projected!.retryable).toBe(false);
+    expect(projected!.outcomeUnknown).toBe(false);
+    expect(projected!.details).toEqual({
+      interactionLayer: "connected_machine",
+      interactionSurface: "browser",
+      controlFailureCode: "agent_offline",
+    });
   });
 
   test("preserves timeout uncertainty and both correlation layers in the API envelope", async () => {

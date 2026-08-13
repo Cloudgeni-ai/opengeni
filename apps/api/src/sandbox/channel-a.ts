@@ -66,7 +66,10 @@ import {
   ChannelAValidationError,
   BrowserControlRequestError,
   BrowserControlTransportError,
+  SelfhostedControlError,
+  agentErrorToControlError,
   codemodeTokenFileFromEnvironment,
+  offlineAgentError,
   withCodemodeTokenSession,
   withRunCredentialsSession,
   type ChannelASession,
@@ -600,9 +603,12 @@ async function withChannelAOperation<T>(
       }
       const enrollment = await getLiveEnrollmentConnection(db, workspaceId, sandbox.enrollmentId);
       if (!enrollment?.connectionInstanceId) {
-        throw new HTTPException(409, {
-          message: "Connected Machine has no live runner connection",
-        });
+        // Preserve causal machine liveness through Channel-A. Generic callers
+        // retain the established 409 mapping below; Browser/Computer callers can
+        // project the same bounded `agent_offline` contract as control RPC.
+        throw agentErrorToControlError(
+          offlineAgentError("Connected Machine has no live runner connection", true),
+        );
       }
       const built = await buildSelfhostedBackendSession({
         workspaceId,
@@ -1017,6 +1023,8 @@ export function mapChannelAError(error: unknown, waitSignal?: AbortSignal): unkn
     return new HTTPException(409, { message: error.message });
   if (error instanceof SandboxProviderReadLockUnavailableError)
     return new HTTPException(503, { message: error.message });
+  if (error instanceof SelfhostedControlError && error.agentOffline)
+    return new HTTPException(409, { message: error.message, cause: error });
   if (error instanceof ChannelAUnavailableError)
     return new HTTPException(503, { message: error.message });
   if (error instanceof ChannelAValidationError)

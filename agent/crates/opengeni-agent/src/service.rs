@@ -232,12 +232,7 @@ fn install_launchd(spec: &ServiceSpec, restart: bool) -> Result<(), String> {
     let loaded_program_matches = loaded_definition
         .as_deref()
         .is_some_and(|output| launchd_loaded_program_matches(output, &spec.binary_path));
-    match launchd_install_action(
-        loaded,
-        restart,
-        definition_changed,
-        loaded_program_matches,
-    ) {
+    match launchd_install_action(loaded, restart, definition_changed, loaded_program_matches) {
         LaunchdInstallAction::KeepLoaded => {}
         LaunchdInstallAction::Reload => {
             // launchd caches a loaded job's definition. Rewriting the plist and
@@ -251,20 +246,10 @@ fn install_launchd(spec: &ServiceSpec, restart: bool) -> Result<(), String> {
                     return Err(error);
                 }
             }
-            activate_launchd_definition(
-                &domain,
-                &target,
-                &plist_path,
-                &spec.binary_path,
-            )?;
+            activate_launchd_definition(&domain, &target, &plist_path, &spec.binary_path)?;
         }
         LaunchdInstallAction::Bootstrap => {
-            activate_launchd_definition(
-                &domain,
-                &target,
-                &plist_path,
-                &spec.binary_path,
-            )?;
+            activate_launchd_definition(&domain, &target, &plist_path, &spec.binary_path)?;
         }
     }
     println!(

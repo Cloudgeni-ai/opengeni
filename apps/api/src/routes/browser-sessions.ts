@@ -176,6 +176,7 @@ import {
   deriveBrowserNetworkRouteAuthorityDigest,
   deriveBrowserSessionControllerTokens,
   deriveBrowserViewGrantToken,
+  deriveComputerSessionControllerTokens,
 } from "../browser-controller-authority";
 import { withCachedController } from "../controller-data-plane";
 import { withInteractionHolderHeartbeat } from "../interaction-holder-heartbeat";
@@ -402,12 +403,6 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
             });
             const preparedSession = prepared.session;
             const controllerGeneration = requireOperationGeneration(record);
-            const linkedComputer = await requireLinkedComputerBinding(
-              deps,
-              grant,
-              prepared.session,
-              placement,
-            );
             const adminToken = deriveBrowserControllerAdminToken({
               rootSecret: authority,
               accountId: grant.accountId,
@@ -433,8 +428,15 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
                 placement,
                 adminToken,
                 origin,
-                async (client) =>
-                  await withInteractionHolderHeartbeat(
+                async (client) => {
+                  const linkedComputer = await ensureLinkedComputerController(
+                    deps,
+                    grant,
+                    preparedSession,
+                    placement,
+                    client,
+                  );
+                  return await withInteractionHolderHeartbeat(
                     deps,
                     {
                       grant,
@@ -458,7 +460,8 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
                         ...(request.initialUrl ? { initialUrl: request.initialUrl } : {}),
                         ...(restore ? { restore } : {}),
                       }),
-                  ),
+                  );
+                },
               );
               await cacheBrowserControllerPlacement(grant, workspaceId, placement).catch(
                 () => placement,
@@ -2304,12 +2307,6 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
               throw error;
             });
             const controllerGeneration = requireOperationGeneration(record);
-            const linkedComputer = await requireLinkedComputerBinding(
-              deps,
-              grant,
-              prepared.session,
-              placement,
-            );
             const adminToken = deriveBrowserControllerAdminToken({
               rootSecret: authority,
               accountId: grant.accountId,
@@ -2333,6 +2330,13 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
               ...(origin ? { allowedOrigins: [origin] } : {}),
             });
             try {
+              const linkedComputer = await ensureLinkedComputerController(
+                deps,
+                grant,
+                prepared.session,
+                placement,
+                client,
+              );
               await withInteractionHolderHeartbeat(
                 deps,
                 {
@@ -3004,11 +3008,12 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
     client: BrowserControlClient,
     tokens: ReturnType<typeof deriveBrowserSessionControllerTokens>,
   ): Promise<void> {
-    const linkedComputer = await requireLinkedComputerBinding(
+    const linkedComputer = await ensureLinkedComputerController(
       routeDeps,
       grant,
       record.session,
       placement,
+      client,
     );
     const networkRoute = await resolveActiveBrowserNetworkRouteLaunch({
       deps: routeDeps,
@@ -3237,11 +3242,12 @@ function assertCreateReplay(
   }
 }
 
-async function requireLinkedComputerBinding(
+async function ensureLinkedComputerController(
   deps: ApiRouteDeps,
   grant: AccessGrant,
   browser: BrowserSessionValue,
   placement: BrowserPlacement,
+  client: BrowserControlClient,
 ): Promise<{ computerSessionId: string; controllerGeneration: string } | null> {
   if (!browser.linkedComputerSessionId) return null;
   const record = await getComputerSessionControlRecord(deps.db, {
@@ -3259,10 +3265,42 @@ async function requireLinkedComputerBinding(
       "Linked ComputerSession is not active on the browser placement",
     );
   }
-  return {
+  const reference = {
     computerSessionId: record.session.id,
     controllerGeneration: record.session.controller.controllerGeneration,
   };
+  const tokens = deriveComputerSessionControllerTokens({
+    rootSecret: browserAuthorityRoot(deps),
+    accountId: grant.accountId,
+    workspaceId: browser.workspaceId,
+    placement: record.session.placement,
+    placementInstanceId: placement.placementInstanceId,
+    computerSessionId: record.session.id,
+    controllerGeneration: record.session.controller.controllerGeneration,
+    tokenGeneration: record.tokenGeneration,
+  });
+  const sessionClient = client.computerSessionClient({ reference, ...tokens });
+  try {
+    await sessionClient.heartbeat();
+  } catch (error) {
+    if (!isMissingLinkedComputerControllerSession(error)) throw error;
+    await client.createComputerSession({
+      ...reference,
+      tokenGeneration: record.tokenGeneration,
+      ...tokens,
+    });
+  }
+  return reference;
+}
+
+function isMissingLinkedComputerControllerSession(error: unknown): boolean {
+  if (!(error instanceof BrowserControlRequestError)) return false;
+  if (error.status === 401 && error.error.code === "permission_denied") return true;
+  return (
+    error.status === 404 &&
+    error.error.code === "resource_not_found" &&
+    ["computer session not found", "computer session is not active"].includes(error.error.message)
+  );
 }
 
 async function requireBrowserRevisionRestoreAuthority(
@@ -4455,9 +4493,9 @@ async function recordBrowserDownloadFileUsage(
 }
 
 function browserRouteError(error: unknown): HTTPException {
-  if (error instanceof HTTPException) return error;
   const connectedMachineError = interactionControlApiError(error, "browser");
   if (connectedMachineError) return connectedMachineError;
+  if (error instanceof HTTPException) return error;
   if (error instanceof BrowserSessionNotFoundError) {
     return new HTTPException(404, { message: error.message, cause: error });
   }

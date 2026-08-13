@@ -193,7 +193,12 @@ export function ComputerViewer({
     ...override,
     computerSessionId: selection?.sessionId ?? null,
     targetId: computer.selectedTarget?.id ?? null,
-    enabled: enabled && selection !== null && controllerReady && computer.selectedTarget !== null,
+    enabled:
+      enabled &&
+      selection !== null &&
+      controllerReady &&
+      computer.selectedTarget !== null &&
+      isComputerFrameTarget(computer.selectedTarget),
     stream: {
       format: "jpeg",
       quality: 78,
@@ -714,6 +719,10 @@ function isRenderableComputerView(target: ComputerTarget): boolean {
   // targets. Keep those available to tools, but do not present them as visual
   // desktop tabs when they cannot form a useful live view.
   return target.bounds.width >= 160 && target.bounds.height >= 90;
+}
+
+function isComputerFrameTarget(target: ComputerTarget): boolean {
+  return target.kind === "window" || target.kind === "screen";
 }
 
 function ComputerLifecyclePanel(props: {
