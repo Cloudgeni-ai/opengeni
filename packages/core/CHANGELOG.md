@@ -1,5 +1,22 @@
 # @opengeni/core
 
+## 0.27.3
+
+### Patch Changes
+
+- 14aa2ad: Show elapsed UTC-hour buckets for the Insights Today range while retaining UTC-day buckets for longer ranges.
+- Updated dependencies [14aa2ad]
+- Updated dependencies [27a8789]
+- Updated dependencies [40248f9]
+  - @opengeni/contracts@0.49.1
+  - @opengeni/db@0.35.2
+  - @opengeni/runtime@0.22.1
+  - @opengeni/config@0.16.1
+  - @opengeni/documents@0.5.38
+  - @opengeni/events@0.3.109
+  - @opengeni/observability@0.7.5
+  - @opengeni/storage@0.2.93
+
 ## 0.27.2
 
 ### Patch Changes

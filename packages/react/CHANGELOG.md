@@ -1,5 +1,11 @@
 # @opengeni/react
 
+## 0.56.1
+
+### Patch Changes
+
+- @opengeni/sdk@0.56.1
+
 ## 0.56.0
 
 ### Minor Changes
