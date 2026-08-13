@@ -1085,7 +1085,8 @@ async function contractWithoutMigrations(excludedPaths: string[]) {
   const directory = await mkdtemp(join(tmpdir(), "opengeni-schema-contract-filtered-"));
   directories.push(directory);
   for (const entry of await readdir(source, { withFileTypes: true })) {
-    if (!entry.isFile() || !entry.name.endsWith(".sql") || excludedPaths.includes(entry.name)) continue;
+    if (!entry.isFile() || !entry.name.endsWith(".sql") || excludedPaths.includes(entry.name))
+      continue;
     await copyFile(join(source, entry.name), join(directory, entry.name));
   }
   return await buildSchemaContract(directory);

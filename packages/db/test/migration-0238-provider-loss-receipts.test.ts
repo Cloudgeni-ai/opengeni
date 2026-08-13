@@ -48,7 +48,9 @@ describe("0238 provider-loss receipt protocol", () => {
         { relname: "sandbox_provider_loss_teardown_claims", relforcerowsecurity: true },
       ]);
 
-      const columns = await shared.admin<{ tableName: string; columnName: string; dataType: string }[]>`
+      const columns = await shared.admin<
+        { tableName: string; columnName: string; dataType: string }[]
+      >`
         select table_name as "tableName", column_name as "columnName", data_type as "dataType"
         from information_schema.columns
         where table_name in (
@@ -59,12 +61,32 @@ describe("0238 provider-loss receipt protocol", () => {
         order by table_name, column_name
       `;
       expect(Array.from(columns)).toEqual([
-        { tableName: "sandbox_provider_loss_receipts", columnName: "admission_id", dataType: "uuid" },
+        {
+          tableName: "sandbox_provider_loss_receipts",
+          columnName: "admission_id",
+          dataType: "uuid",
+        },
         { tableName: "sandbox_provider_loss_receipts", columnName: "claim_id", dataType: "uuid" },
-        { tableName: "sandbox_provider_loss_receipts", columnName: "consumed_at", dataType: "timestamp with time zone" },
-        { tableName: "sandbox_provider_loss_receipts", columnName: "terminate_outcome", dataType: "text" },
-        { tableName: "sandbox_provider_loss_teardown_claims", columnName: "admission_id", dataType: "uuid" },
-        { tableName: "sandbox_provider_loss_teardown_claims", columnName: "consumed_at", dataType: "timestamp with time zone" },
+        {
+          tableName: "sandbox_provider_loss_receipts",
+          columnName: "consumed_at",
+          dataType: "timestamp with time zone",
+        },
+        {
+          tableName: "sandbox_provider_loss_receipts",
+          columnName: "terminate_outcome",
+          dataType: "text",
+        },
+        {
+          tableName: "sandbox_provider_loss_teardown_claims",
+          columnName: "admission_id",
+          dataType: "uuid",
+        },
+        {
+          tableName: "sandbox_provider_loss_teardown_claims",
+          columnName: "consumed_at",
+          dataType: "timestamp with time zone",
+        },
       ]);
 
       const constraints = await shared.admin<Array<{ name: string; definition: string }>>`
@@ -89,9 +111,9 @@ describe("0238 provider-loss receipt protocol", () => {
       expect(constraints.find((row) => row.name.endsWith("outcome_check"))?.definition).toContain(
         "unknown",
       );
-      expect(constraints.find((row) => row.name.endsWith("settlement_check"))?.definition).toContain(
-        "unknown",
-      );
+      expect(
+        constraints.find((row) => row.name.endsWith("settlement_check"))?.definition,
+      ).toContain("unknown");
 
       const triggers = await shared.admin<{ name: string; tableName: string }[]>`
         select trigger_name as name, event_object_table as "tableName"
@@ -108,13 +130,25 @@ describe("0238 provider-loss receipt protocol", () => {
         order by trigger_name
       `;
       expect(Array.from(triggers)).toEqual([
-        { name: "sandbox_provider_loss_claim_admission_fence", tableName: "sandbox_workspace_mutation_admissions" },
+        {
+          name: "sandbox_provider_loss_claim_admission_fence",
+          tableName: "sandbox_workspace_mutation_admissions",
+        },
         { name: "sandbox_provider_loss_claim_holder_fence", tableName: "sandbox_lease_holders" },
-        { name: "sandbox_provider_loss_claim_retained_process_fence", tableName: "sandbox_retained_processes" },
+        {
+          name: "sandbox_provider_loss_claim_retained_process_fence",
+          tableName: "sandbox_retained_processes",
+        },
         { name: "sandbox_provider_loss_lease_delete_fence", tableName: "sandbox_leases" },
-        { name: "sandbox_provider_loss_claim_mutation_guard", tableName: "sandbox_provider_loss_teardown_claims" },
+        {
+          name: "sandbox_provider_loss_claim_mutation_guard",
+          tableName: "sandbox_provider_loss_teardown_claims",
+        },
         { name: "sandbox_provider_loss_lease_mutation_fence", tableName: "sandbox_leases" },
-        { name: "sandbox_provider_loss_receipt_mutation_guard", tableName: "sandbox_provider_loss_receipts" },
+        {
+          name: "sandbox_provider_loss_receipt_mutation_guard",
+          tableName: "sandbox_provider_loss_receipts",
+        },
       ]);
 
       const functions = await shared.admin<Array<{ source: string }>>`
@@ -133,16 +167,20 @@ describe("0238 provider-loss receipt protocol", () => {
         expect(fn.source).not.toContain("NEW.* IS DISTINCT FROM OLD");
         expect(fn.source).toContain("consumed_at");
       }
-      const leaseMutationFunction = functions.find((fn) => fn.source.includes("guard_provider_loss_lease_mutation"));
+      const leaseMutationFunction = functions.find((fn) =>
+        fn.source.includes("guard_provider_loss_lease_mutation"),
+      );
       expect(leaseMutationFunction?.source).toContain("TG_OP = 'DELETE'");
       expect(leaseMutationFunction?.source).toContain("RETURN OLD");
       expect(leaseMutationFunction?.source).toContain("OLD.lease_id");
       expect(leaseMutationFunction?.source).toContain("sandbox_provider_loss_claim_id");
-      const securityFunctions = await shared.admin<{
-        name: string;
-        securityDefiner: boolean;
-        config: string[] | null;
-      }[]>`
+      const securityFunctions = await shared.admin<
+        {
+          name: string;
+          securityDefiner: boolean;
+          config: string[] | null;
+        }[]
+      >`
         select p.proname as name,
                p.prosecdef as "securityDefiner",
                p.proconfig as config
@@ -513,14 +551,16 @@ describe("0238 provider-loss receipt protocol", () => {
         admissionId,
       });
 
-      const [state] = await shared.admin<{
-        provider_outcome: string | null;
-        settled_at: Date | null;
-        claim_consumed_at: Date | null;
-        receipt_consumed_at: Date | null;
-        liveness: string;
-        lease_epoch: number;
-      }[]>`
+      const [state] = await shared.admin<
+        {
+          provider_outcome: string | null;
+          settled_at: Date | null;
+          claim_consumed_at: Date | null;
+          receipt_consumed_at: Date | null;
+          liveness: string;
+          lease_epoch: number;
+        }[]
+      >`
         select admission.provider_outcome, admission.settled_at,
                claim.consumed_at as claim_consumed_at,
                receipt.consumed_at as receipt_consumed_at,

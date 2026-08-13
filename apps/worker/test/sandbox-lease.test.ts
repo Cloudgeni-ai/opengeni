@@ -613,12 +613,14 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       operationId: crypto.randomUUID(),
     };
     const expectRepairDeferred = async () => {
-      const [state] = await admin<{
-        provider_outcome: string | null;
-        admission_settled: Date | null;
-        claim_consumed: Date | null;
-        receipt_id: string | null;
-      }[]>`
+      const [state] = await admin<
+        {
+          provider_outcome: string | null;
+          admission_settled: Date | null;
+          claim_consumed: Date | null;
+          receipt_id: string | null;
+        }[]
+      >`
         select admission.provider_outcome,
                admission.settled_at as admission_settled,
                claim.consumed_at as claim_consumed,
@@ -661,13 +663,15 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       status: "terminated",
     });
     expect(terminateCalls).toBe(0);
-    const [state] = await admin<{
-      liveness: string;
-      provider_outcome: string | null;
-      admission_settled: Date | null;
-      claim_consumed: Date | null;
-      receipt_consumed: Date | null;
-    }[]>`
+    const [state] = await admin<
+      {
+        liveness: string;
+        provider_outcome: string | null;
+        admission_settled: Date | null;
+        claim_consumed: Date | null;
+        receipt_consumed: Date | null;
+      }[]
+    >`
       select lease.liveness, admission.provider_outcome,
              admission.settled_at as admission_settled,
              claim.consumed_at as claim_consumed,

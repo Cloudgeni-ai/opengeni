@@ -35115,21 +35115,21 @@ async function confirmDrainColdInTransaction(
   tx: Database,
   input: ConfirmDrainColdInput,
 ): Promise<{ wentCold: boolean }> {
-        // draining->cold: the box is terminated, so EVERY live-box field is cleared
-        // (instance_id / data-plane URLs). resume_state, however, is NOT blindly
-        // nulled — if the reaper PERSISTED a /workspace snapshot onto it
-        // (persistDrainSnapshot folds the archive at resume_state.sessionState.
-        // workspaceArchive BEFORE this CAS, in the SAME sweep), nulling it here would
-        // immediately destroy the snapshot the next cold-restore must replay — the
-        // file-persistence bug. So we PRESERVE a MINIMAL archive-only envelope
-        // `{ backendId, sessionState: { workspaceArchive } }` (dropping the dead box's
-        // providerState/sandboxId — the box is gone, resume-by-id would only fail) and
-        // KEEP resume_backend_id so cold-restore knows which client to hydrate with.
-        // No archive (a non-persisted drain, or a 'none'/tar config that stored none)
-        // -> resume_state is nulled as before. The archive then rides the COLD lease's
-        // resume_state until the next spawner reads + hydrates it; it is re-superseded
-        // (GC'd) on the next drain and finally cleared on workspace teardown.
-        const observedRows = await tx.execute<LeaseRow & { reaper_hold_active: boolean }>(sql`
+  // draining->cold: the box is terminated, so EVERY live-box field is cleared
+  // (instance_id / data-plane URLs). resume_state, however, is NOT blindly
+  // nulled — if the reaper PERSISTED a /workspace snapshot onto it
+  // (persistDrainSnapshot folds the archive at resume_state.sessionState.
+  // workspaceArchive BEFORE this CAS, in the SAME sweep), nulling it here would
+  // immediately destroy the snapshot the next cold-restore must replay — the
+  // file-persistence bug. So we PRESERVE a MINIMAL archive-only envelope
+  // `{ backendId, sessionState: { workspaceArchive } }` (dropping the dead box's
+  // providerState/sandboxId — the box is gone, resume-by-id would only fail) and
+  // KEEP resume_backend_id so cold-restore knows which client to hydrate with.
+  // No archive (a non-persisted drain, or a 'none'/tar config that stored none)
+  // -> resume_state is nulled as before. The archive then rides the COLD lease's
+  // resume_state until the next spawner reads + hydrates it; it is re-superseded
+  // (GC'd) on the next drain and finally cleared on workspace teardown.
+  const observedRows = await tx.execute<LeaseRow & { reaper_hold_active: boolean }>(sql`
           select *,
             (reaper_hold_id is not null and reaper_hold_until > now())
               as reaper_hold_active
@@ -35137,39 +35137,39 @@ async function confirmDrainColdInTransaction(
           where workspace_id = ${input.workspaceId}
             and sandbox_group_id = ${input.sandboxGroupId}
         `);
-        const observed = observedRows[0];
-        if (
-          !observed ||
-          observed.liveness !== "draining" ||
-          observed.reaper_hold_active ||
-          observed.refcount !== 0 ||
-          Number(observed.lease_epoch) !== input.expectedEpoch ||
-          observed.archive_capture_id !== (input.expectedCaptureId ?? null) ||
-          (input.providerLossLeaseId !== undefined && observed.id !== input.providerLossLeaseId) ||
-          (input.providerLossProviderInstanceId !== undefined &&
-            observed.instance_id !== input.providerLossProviderInstanceId)
-        ) {
-          return { wentCold: false };
+  const observed = observedRows[0];
+  if (
+    !observed ||
+    observed.liveness !== "draining" ||
+    observed.reaper_hold_active ||
+    observed.refcount !== 0 ||
+    Number(observed.lease_epoch) !== input.expectedEpoch ||
+    observed.archive_capture_id !== (input.expectedCaptureId ?? null) ||
+    (input.providerLossLeaseId !== undefined && observed.id !== input.providerLossLeaseId) ||
+    (input.providerLossProviderInstanceId !== undefined &&
+      observed.instance_id !== input.providerLossProviderInstanceId)
+  ) {
+    return { wentCold: false };
+  }
+  const blockerScope =
+    input.providerMissingBeforeCapture && observed.instance_id
+      ? {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          leaseId: observed.id,
+          sandboxGroupId: input.sandboxGroupId,
+          lostEpoch: input.expectedEpoch,
+          lostInstanceId: observed.instance_id,
         }
-        const blockerScope =
-          input.providerMissingBeforeCapture && observed.instance_id
-            ? {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                leaseId: observed.id,
-                sandboxGroupId: input.sandboxGroupId,
-                lostEpoch: input.expectedEpoch,
-                lostInstanceId: observed.instance_id,
-              }
-            : null;
-        // Provider loss settles process/admission/PTY rows before taking the
-        // lease lock, matching the canonical blocker -> lease lock order used
-        // by retained-process settlement. Revalidate the lease after locking
-        // the entire exact provider-owned blocker set.
-        if (blockerScope) {
-          await lockExactLostProviderWorkspaceBlockersTx(tx, blockerScope);
-        }
-        const locked = await tx.execute<LeaseRow & { reaper_hold_active: boolean }>(sql`
+      : null;
+  // Provider loss settles process/admission/PTY rows before taking the
+  // lease lock, matching the canonical blocker -> lease lock order used
+  // by retained-process settlement. Revalidate the lease after locking
+  // the entire exact provider-owned blocker set.
+  if (blockerScope) {
+    await lockExactLostProviderWorkspaceBlockersTx(tx, blockerScope);
+  }
+  const locked = await tx.execute<LeaseRow & { reaper_hold_active: boolean }>(sql`
           select *,
             (reaper_hold_id is not null and reaper_hold_until > now())
               as reaper_hold_active
@@ -35178,113 +35178,113 @@ async function confirmDrainColdInTransaction(
             and sandbox_group_id = ${input.sandboxGroupId}
           for update
         `);
-        const row = locked[0];
-        if (
-          !row ||
-          row.id !== observed.id ||
-          row.liveness !== "draining" ||
-          row.reaper_hold_active ||
-          row.refcount !== 0 ||
-          Number(row.lease_epoch) !== input.expectedEpoch ||
-          row.archive_capture_id !== (input.expectedCaptureId ?? null) ||
-          (blockerScope && row.instance_id !== blockerScope.lostInstanceId) ||
-          (input.providerLossLeaseId !== undefined && row.id !== input.providerLossLeaseId) ||
-          (input.providerLossProviderInstanceId !== undefined &&
-            row.instance_id !== input.providerLossProviderInstanceId)
-        ) {
-          return { wentCold: false };
+  const row = locked[0];
+  if (
+    !row ||
+    row.id !== observed.id ||
+    row.liveness !== "draining" ||
+    row.reaper_hold_active ||
+    row.refcount !== 0 ||
+    Number(row.lease_epoch) !== input.expectedEpoch ||
+    row.archive_capture_id !== (input.expectedCaptureId ?? null) ||
+    (blockerScope && row.instance_id !== blockerScope.lostInstanceId) ||
+    (input.providerLossLeaseId !== undefined && row.id !== input.providerLossLeaseId) ||
+    (input.providerLossProviderInstanceId !== undefined &&
+      row.instance_id !== input.providerLossProviderInstanceId)
+  ) {
+    return { wentCold: false };
+  }
+  const current = recoveryStateFromLeaseRow(row);
+  const hasArchive = current.archive.status !== "none";
+  const archiveComplete = hasCompleteWorkspaceArchive(row);
+  const now = new Date().toISOString();
+  const lateArchiveCapture =
+    input.providerMissingBeforeCapture &&
+    row.archive_capture_id !== null &&
+    row.archive_capture_provider_request_id !== null &&
+    row.archive_capture_generation !== null &&
+    row.archive_capture_published_at === null &&
+    row.instance_id !== null
+      ? {
+          version: 1 as const,
+          captureId: row.archive_capture_id,
+          providerRequestId: row.archive_capture_provider_request_id,
+          sourceLeaseId: row.id,
+          sourceLeaseEpoch: Number(row.lease_epoch),
+          sourceInstanceId: row.instance_id,
+          sourceWorkspaceGeneration: Number(row.archive_capture_generation),
+          recordedAt: now,
         }
-        const current = recoveryStateFromLeaseRow(row);
-        const hasArchive = current.archive.status !== "none";
-        const archiveComplete = hasCompleteWorkspaceArchive(row);
-        const now = new Date().toISOString();
-        const lateArchiveCapture =
-          input.providerMissingBeforeCapture &&
-          row.archive_capture_id !== null &&
-          row.archive_capture_provider_request_id !== null &&
-          row.archive_capture_generation !== null &&
-          row.archive_capture_published_at === null &&
-          row.instance_id !== null
-            ? {
-                version: 1 as const,
-                captureId: row.archive_capture_id,
-                providerRequestId: row.archive_capture_provider_request_id,
-                sourceLeaseId: row.id,
-                sourceLeaseEpoch: Number(row.lease_epoch),
-                sourceInstanceId: row.instance_id,
-                sourceWorkspaceGeneration: Number(row.archive_capture_generation),
-                recordedAt: now,
-              }
-            : null;
-        const restoreStatus: SandboxRestoreStatus =
-          current.archive.status === "available" && archiveComplete
-            ? "pending"
-            : hasArchive
-              ? "degraded"
-              : input.providerMissingBeforeCapture
-                ? "unrecoverable"
-                : "not_required";
-        const recovery: SandboxRecoveryState = {
-          provider: {
-            status: input.providerMissingBeforeCapture ? "missing" : "not_created",
-            instanceId: input.providerMissingBeforeCapture ? row.instance_id : null,
-            observedAt: now,
-            ...(input.providerMissingBeforeCapture
-              ? { diagnostic: "provider_not_found_before_workspace_capture" }
-              : {}),
-          },
-          archive: current.archive,
-          restore: {
-            status: restoreStatus,
-            rematerializationId: null,
-            selectedRevision: current.archive.current?.revision ?? null,
-            startedAt: null,
-            completedAt: now,
-            ...(restoreStatus === "degraded"
-              ? {
-                  failureCode:
-                    current.archive.status === "available"
-                      ? "archive_generation_mismatch"
-                      : "archive_unverified",
-                  retryable: false,
-                }
-              : restoreStatus === "unrecoverable"
-                ? { failureCode: "archive_unavailable", retryable: false }
-                : {}),
-          },
-          workspace: {
-            status:
-              restoreStatus === "pending"
-                ? "not_ready"
-                : restoreStatus === "degraded"
-                  ? "degraded"
-                  : restoreStatus === "unrecoverable"
-                    ? "unrecoverable"
-                    : "unknown",
-            verifiedRevision: null,
-            verifiedAt: null,
-          },
-          ...(lateArchiveCapture ? { lateArchiveCapture } : {}),
-        };
-        const preserveRecovery = hasArchive || restoreStatus === "unrecoverable";
-        const resumeStateJson = preserveRecovery
-          ? JSON.stringify(archiveOnlyResumeState(row, recovery))
-          : null;
-        // Migration 0184 also enforces exact teardown ownership at the table
-        // boundary so a pre-0184 confirm cannot erase a newer worker's claim.
-        // Set the receipt transaction-locally only after the locked row passed
-        // every CAS guard; the trigger compares it with OLD.archive_capture_id.
-        if (input.expectedCaptureId) {
-          await tx.execute(
-            sql`select set_config('opengeni.sandbox_drain_capture_id', ${input.expectedCaptureId}, true)`,
-          );
-        }
-        if (input.providerLossClaimId) {
-          await tx.execute(
-            sql`select set_config('opengeni.sandbox_provider_loss_claim_id', ${input.providerLossClaimId}, true)`,
-          );
-        }
-        const rows = await tx.execute<{ id: string }>(sql`
+      : null;
+  const restoreStatus: SandboxRestoreStatus =
+    current.archive.status === "available" && archiveComplete
+      ? "pending"
+      : hasArchive
+        ? "degraded"
+        : input.providerMissingBeforeCapture
+          ? "unrecoverable"
+          : "not_required";
+  const recovery: SandboxRecoveryState = {
+    provider: {
+      status: input.providerMissingBeforeCapture ? "missing" : "not_created",
+      instanceId: input.providerMissingBeforeCapture ? row.instance_id : null,
+      observedAt: now,
+      ...(input.providerMissingBeforeCapture
+        ? { diagnostic: "provider_not_found_before_workspace_capture" }
+        : {}),
+    },
+    archive: current.archive,
+    restore: {
+      status: restoreStatus,
+      rematerializationId: null,
+      selectedRevision: current.archive.current?.revision ?? null,
+      startedAt: null,
+      completedAt: now,
+      ...(restoreStatus === "degraded"
+        ? {
+            failureCode:
+              current.archive.status === "available"
+                ? "archive_generation_mismatch"
+                : "archive_unverified",
+            retryable: false,
+          }
+        : restoreStatus === "unrecoverable"
+          ? { failureCode: "archive_unavailable", retryable: false }
+          : {}),
+    },
+    workspace: {
+      status:
+        restoreStatus === "pending"
+          ? "not_ready"
+          : restoreStatus === "degraded"
+            ? "degraded"
+            : restoreStatus === "unrecoverable"
+              ? "unrecoverable"
+              : "unknown",
+      verifiedRevision: null,
+      verifiedAt: null,
+    },
+    ...(lateArchiveCapture ? { lateArchiveCapture } : {}),
+  };
+  const preserveRecovery = hasArchive || restoreStatus === "unrecoverable";
+  const resumeStateJson = preserveRecovery
+    ? JSON.stringify(archiveOnlyResumeState(row, recovery))
+    : null;
+  // Migration 0184 also enforces exact teardown ownership at the table
+  // boundary so a pre-0184 confirm cannot erase a newer worker's claim.
+  // Set the receipt transaction-locally only after the locked row passed
+  // every CAS guard; the trigger compares it with OLD.archive_capture_id.
+  if (input.expectedCaptureId) {
+    await tx.execute(
+      sql`select set_config('opengeni.sandbox_drain_capture_id', ${input.expectedCaptureId}, true)`,
+    );
+  }
+  if (input.providerLossClaimId) {
+    await tx.execute(
+      sql`select set_config('opengeni.sandbox_provider_loss_claim_id', ${input.providerLossClaimId}, true)`,
+    );
+  }
+  const rows = await tx.execute<{ id: string }>(sql`
         update sandbox_leases set
           liveness = 'cold',
           instance_id = null,
@@ -35320,17 +35320,17 @@ async function confirmDrainColdInTransaction(
           and archive_capture_id is not distinct from ${input.expectedCaptureId ?? null}::uuid
         returning id
       `);
-        if (rows.length !== 1) {
-          return { wentCold: false };
-        }
-        if (blockerScope) {
-          await settleExactLostProviderWorkspaceBlockersTx(tx, {
-            ...blockerScope,
-            providerLossAdmissionId: input.providerLossAdmissionId,
-          });
-        }
-        if (rows.length === 1 && input.providerLossAdmissionId !== undefined) {
-          const settledAdmission = await tx.execute<{ id: string }>(sql`
+  if (rows.length !== 1) {
+    return { wentCold: false };
+  }
+  if (blockerScope) {
+    await settleExactLostProviderWorkspaceBlockersTx(tx, {
+      ...blockerScope,
+      providerLossAdmissionId: input.providerLossAdmissionId,
+    });
+  }
+  if (rows.length === 1 && input.providerLossAdmissionId !== undefined) {
+    const settledAdmission = await tx.execute<{ id: string }>(sql`
             update sandbox_workspace_mutation_admissions
             set provider_outcome = 'unknown', settled_at = now()
             where id = ${input.providerLossAdmissionId}::uuid
@@ -35344,23 +35344,23 @@ async function confirmDrainColdInTransaction(
               and settled_at is null
             returning id
           `);
-          if (settledAdmission.length !== 1) {
-            throw new Error("Provider-loss admission settlement CAS failed");
-          }
-        }
-        if (
-          input.providerLossAdmissionId !== undefined ||
-          input.providerLossReceiptId !== undefined ||
-          input.providerLossClaimId !== undefined
-        ) {
-          if (
-            input.providerLossAdmissionId === undefined ||
-            input.providerLossReceiptId === undefined ||
-            input.providerLossClaimId === undefined
-          ) {
-            throw new Error("Provider-loss receipt identity is incomplete");
-          }
-          const receiptConsumed = await tx.execute<{ id: string }>(sql`
+    if (settledAdmission.length !== 1) {
+      throw new Error("Provider-loss admission settlement CAS failed");
+    }
+  }
+  if (
+    input.providerLossAdmissionId !== undefined ||
+    input.providerLossReceiptId !== undefined ||
+    input.providerLossClaimId !== undefined
+  ) {
+    if (
+      input.providerLossAdmissionId === undefined ||
+      input.providerLossReceiptId === undefined ||
+      input.providerLossClaimId === undefined
+    ) {
+      throw new Error("Provider-loss receipt identity is incomplete");
+    }
+    const receiptConsumed = await tx.execute<{ id: string }>(sql`
             update sandbox_provider_loss_receipts
             set consumed_at = now()
             where id = ${input.providerLossReceiptId}::uuid
@@ -35371,10 +35371,10 @@ async function confirmDrainColdInTransaction(
               and consumed_at is null
             returning id
           `);
-          if (receiptConsumed.length !== 1) {
-            throw new Error("Provider-loss receipt consumption CAS failed");
-          }
-          const claimConsumed = await tx.execute<{ id: string }>(sql`
+    if (receiptConsumed.length !== 1) {
+      throw new Error("Provider-loss receipt consumption CAS failed");
+    }
+    const claimConsumed = await tx.execute<{ id: string }>(sql`
             update sandbox_provider_loss_teardown_claims
             set consumed_at = now()
             where id = ${input.providerLossClaimId}::uuid
@@ -35384,11 +35384,11 @@ async function confirmDrainColdInTransaction(
               and consumed_at is null
             returning id
           `);
-          if (claimConsumed.length !== 1) {
-            throw new Error("Provider-loss claim consumption CAS failed");
-          }
-        }
-        return { wentCold: true };
+    if (claimConsumed.length !== 1) {
+      throw new Error("Provider-loss claim consumption CAS failed");
+    }
+  }
+  return { wentCold: true };
 }
 
 export async function confirmDrainCold(
@@ -38118,8 +38118,10 @@ export async function claimProviderLossTeardown(
             )
           order by admission.id
         `);
-        if (candidates.length === 0) return { status: "not_eligible", reason: "admission_missing" } as const;
-        if (candidates.length !== 1) return { status: "not_eligible", reason: "later_admission" } as const;
+        if (candidates.length === 0)
+          return { status: "not_eligible", reason: "admission_missing" } as const;
+        if (candidates.length !== 1)
+          return { status: "not_eligible", reason: "later_admission" } as const;
         const admission = candidates[0]!;
 
         await lockSessionEventWriteRows(tx, {
@@ -38139,7 +38141,9 @@ export async function claimProviderLossTeardown(
           order by id
           for update
         `);
-        const lockedAdmission = lockedAdmissions.find((row: AdmissionIdentityRow) => row.id === admission.id);
+        const lockedAdmission = lockedAdmissions.find(
+          (row: AdmissionIdentityRow) => row.id === admission.id,
+        );
         if (!lockedAdmission) {
           return { status: "not_eligible", reason: "admission_missing" } as const;
         }
@@ -38151,7 +38155,8 @@ export async function claimProviderLossTeardown(
           openAdmissions.length !== 1 ||
           openAdmissions[0]!.id !== lockedAdmission.id ||
           lockedAdmissions.some(
-            (row: AdmissionIdentityRow) => Number(row.workspace_generation) > Number(lockedAdmission.workspace_generation),
+            (row: AdmissionIdentityRow) =>
+              Number(row.workspace_generation) > Number(lockedAdmission.workspace_generation),
           )
         ) {
           return { status: "not_eligible", reason: "later_admission" } as const;
@@ -38164,7 +38169,8 @@ export async function claimProviderLossTeardown(
             and provider_instance_id = ${input.expectedInstanceId} and state = 'active'
           for update
         `);
-        if (activeProcesses.length) return { status: "not_eligible", reason: "active_process" } as const;
+        if (activeProcesses.length)
+          return { status: "not_eligible", reason: "active_process" } as const;
         const openPtys = await tx.execute<{ id: string }>(sql`
           select id from sandbox_pty_sessions
           where account_id = ${input.accountId} and workspace_id = ${input.workspaceId}
@@ -38179,7 +38185,8 @@ export async function claimProviderLossTeardown(
             and lease_id = ${lease.id} and kind = 'process'
           for update
         `);
-        if (processHolders.length) return { status: "not_eligible", reason: "process_holder" } as const;
+        if (processHolders.length)
+          return { status: "not_eligible", reason: "process_holder" } as const;
         const holders = await tx.execute<{ id: string }>(sql`
           select id from sandbox_lease_holders
           where account_id = ${input.accountId} and workspace_id = ${input.workspaceId}
@@ -38213,13 +38220,27 @@ export async function claimProviderLossTeardown(
         }
 
         const existingClaims = await tx.execute<{
-          id: string; admission_id: string; account_id: string; workspace_id: string;
-          session_id: string; turn_id: string; attempt_id: string;
-          execution_generation: number | string; lease_id: string; sandbox_group_id: string;
-          lease_epoch: number | string; workspace_generation: number | string;
-          provider_backend: string; provider_instance_id: string; route_kind: string;
-          route_target_id: string | null; route_epoch: number | string; operation: string;
-          holder_id: string; claimed_at: Date | string; consumed_at: Date | string | null;
+          id: string;
+          admission_id: string;
+          account_id: string;
+          workspace_id: string;
+          session_id: string;
+          turn_id: string;
+          attempt_id: string;
+          execution_generation: number | string;
+          lease_id: string;
+          sandbox_group_id: string;
+          lease_epoch: number | string;
+          workspace_generation: number | string;
+          provider_backend: string;
+          provider_instance_id: string;
+          route_kind: string;
+          route_target_id: string | null;
+          route_epoch: number | string;
+          operation: string;
+          holder_id: string;
+          claimed_at: Date | string;
+          consumed_at: Date | string | null;
         }>(sql`
           select * from sandbox_provider_loss_teardown_claims
           where admission_id = ${lockedAdmission.id}
@@ -38227,7 +38248,8 @@ export async function claimProviderLossTeardown(
         `);
         const existing = existingClaims[0];
         if (existing) {
-          if (existing.consumed_at) return { status: "not_eligible", reason: "claim_race" } as const;
+          if (existing.consumed_at)
+            return { status: "not_eligible", reason: "claim_race" } as const;
           const exact =
             existing.id === input.claimId &&
             existing.account_id === lockedAdmission.account_id &&
@@ -38239,13 +38261,15 @@ export async function claimProviderLossTeardown(
             existing.operation === lockedAdmission.operation &&
             existing.turn_id === lockedAdmission.turn_id &&
             existing.attempt_id === lockedAdmission.attempt_id &&
-            Number(existing.execution_generation) === Number(lockedAdmission.execution_generation) &&
+            Number(existing.execution_generation) ===
+              Number(lockedAdmission.execution_generation) &&
             existing.holder_kind === lockedAdmission.holder_kind &&
             existing.holder_id === lockedAdmission.holder_id &&
             existing.lease_id === lockedAdmission.lease_id &&
             existing.sandbox_group_id === lockedAdmission.sandbox_group_id &&
             Number(existing.lease_epoch) === Number(lockedAdmission.lease_epoch) &&
-            Number(existing.workspace_generation) === Number(lockedAdmission.workspace_generation) &&
+            Number(existing.workspace_generation) ===
+              Number(lockedAdmission.workspace_generation) &&
             existing.provider_backend === lockedAdmission.provider_backend &&
             existing.provider_instance_id === lockedAdmission.provider_instance_id &&
             existing.route_kind === lockedAdmission.route_kind &&
@@ -38275,19 +38299,35 @@ export async function claimProviderLossTeardown(
               routeEpoch: Number(existing.route_epoch),
               operation: existing.operation,
               holderId: existing.holder_id,
-              claimedAt: existing.claimed_at instanceof Date ? existing.claimed_at : new Date(existing.claimed_at),
+              claimedAt:
+                existing.claimed_at instanceof Date
+                  ? existing.claimed_at
+                  : new Date(existing.claimed_at),
             },
           };
         }
 
         const claimed = await tx.execute<{
-          id: string; admission_id: string; account_id: string; workspace_id: string;
-          session_id: string; turn_id: string; attempt_id: string;
-          execution_generation: number | string; lease_id: string; sandbox_group_id: string;
-          lease_epoch: number | string; workspace_generation: number | string;
-          provider_backend: string; provider_instance_id: string; route_kind: string;
-          route_target_id: string | null; route_epoch: number | string; operation: string;
-          holder_id: string; claimed_at: Date | string;
+          id: string;
+          admission_id: string;
+          account_id: string;
+          workspace_id: string;
+          session_id: string;
+          turn_id: string;
+          attempt_id: string;
+          execution_generation: number | string;
+          lease_id: string;
+          sandbox_group_id: string;
+          lease_epoch: number | string;
+          workspace_generation: number | string;
+          provider_backend: string;
+          provider_instance_id: string;
+          route_kind: string;
+          route_target_id: string | null;
+          route_epoch: number | string;
+          operation: string;
+          holder_id: string;
+          claimed_at: Date | string;
         }>(sql`
           insert into sandbox_provider_loss_teardown_claims (
             id, account_id, workspace_id, session_id, admission_id, actor_kind, actor_id,
@@ -38386,7 +38426,14 @@ export async function readSandboxProviderLossReceipt(
 export type PersistSandboxProviderLossObservationResult =
   | { status: "persisted"; receiptId: string }
   | { status: "already_persisted"; receiptId: string }
-  | { status: "rejected"; reason: "claim_missing" | "provider_identity_mismatch" | "not_found_not_authoritative" | "wrong_terminate_outcome" };
+  | {
+      status: "rejected";
+      reason:
+        | "claim_missing"
+        | "provider_identity_mismatch"
+        | "not_found_not_authoritative"
+        | "wrong_terminate_outcome";
+    };
 
 /** Persist evidence only after the provider action returned and an independent
  * control-plane read reported the exact instance as not_found. Timestamps come
@@ -38664,7 +38711,8 @@ export async function consumeSandboxProviderLossReceipt(
           receipt.lease_id !== input.leaseId ||
           Number(receipt.lease_epoch) !== input.leaseEpoch ||
           receipt.provider_instance_id !== input.providerInstanceId
-        ) return { status: "rejected", reason: "identity_mismatch" } as const;
+        )
+          return { status: "rejected", reason: "identity_mismatch" } as const;
 
         await lockSessionEventWriteRows(tx, {
           workspaceId: input.workspaceId,
@@ -38771,7 +38819,13 @@ export async function consumeSandboxProviderLossReceipt(
         if (activeProcesses.length || openPtys.length || holders.length) {
           return { status: "rejected", reason: "blocker_present" } as const;
         }
-        const claims = await tx.execute<AdmissionIdentityRow & { claim_id: string; claimed_at: Date | string; consumed_at: Date | string | null }>(sql`
+        const claims = await tx.execute<
+          AdmissionIdentityRow & {
+            claim_id: string;
+            claimed_at: Date | string;
+            consumed_at: Date | string | null;
+          }
+        >(sql`
           select *
           from sandbox_provider_loss_teardown_claims
           where id = ${input.claimId}::uuid
