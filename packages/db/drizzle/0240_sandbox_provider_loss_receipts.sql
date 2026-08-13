@@ -336,12 +336,57 @@ CREATE TRIGGER sandbox_provider_loss_claim_retained_process_fence
 BEFORE INSERT OR UPDATE ON sandbox_retained_processes
 FOR EACH ROW EXECUTE FUNCTION opengeni_private.guard_provider_loss_claim_fence();
 
+-- pgcrypto is installed into public for standalone databases and into the data
+-- schema for embedded databases. Bind the exact extension schema into a private
+-- helper once so the SECURITY DEFINER trigger never depends on caller search_path.
+DO $provider_loss_transition_sha256$
+DECLARE
+  extension_schema text;
+BEGIN
+  SELECT namespace.nspname
+  INTO extension_schema
+  FROM pg_extension extension
+  JOIN pg_namespace namespace ON namespace.oid = extension.extnamespace
+  WHERE extension.extname = 'pgcrypto';
+
+  IF extension_schema IS NULL THEN
+    RAISE EXCEPTION 'pgcrypto is required for provider-loss transition binding'
+      USING ERRCODE = '55000';
+  END IF;
+
+  EXECUTE format(
+    $function$
+      CREATE OR REPLACE FUNCTION opengeni_private.provider_loss_transition_sha256(value jsonb)
+      RETURNS text
+      LANGUAGE sql
+      IMMUTABLE
+      STRICT
+      PARALLEL SAFE
+      SET search_path = pg_catalog
+      AS $body$
+        SELECT pg_catalog.encode(
+          %I.digest(pg_catalog.convert_to(value::text, 'UTF8'), 'sha256'),
+          'hex'
+        )
+      $body$
+    $function$,
+    extension_schema
+  );
+END
+$provider_loss_transition_sha256$;
+
 CREATE OR REPLACE FUNCTION opengeni_private.guard_provider_loss_lease_mutation()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 DECLARE
   atomic_claim_id text := nullif(current_setting('opengeni.sandbox_provider_loss_claim_id', true), '');
+  atomic_transition_sha256 text := nullif(
+    current_setting('opengeni.sandbox_provider_loss_transition_sha256', true),
+    ''
+  );
+  old_row jsonb;
+  new_row jsonb;
 BEGIN
   IF TG_OP = 'DELETE' THEN
     IF EXISTS (
@@ -356,59 +401,166 @@ BEGIN
     RETURN OLD;
   END IF;
 
-  IF EXISTS (
+  IF NOT EXISTS (
     SELECT 1
     FROM sandbox_provider_loss_teardown_claims claim
     WHERE claim.lease_id = OLD.id
       AND claim.consumed_at IS NULL
-  ) AND (
-    NEW.liveness IS DISTINCT FROM OLD.liveness
-    OR NEW.instance_id IS DISTINCT FROM OLD.instance_id
-    OR NEW.lease_epoch IS DISTINCT FROM OLD.lease_epoch
-    OR NEW.refcount IS DISTINCT FROM OLD.refcount
-    OR NEW.archive_capture_id IS DISTINCT FROM OLD.archive_capture_id
-    OR NEW.archive_capture_operation_id IS DISTINCT FROM OLD.archive_capture_operation_id
-    OR NEW.archive_capture_provider_request_id IS DISTINCT FROM OLD.archive_capture_provider_request_id
-    OR NEW.archive_capture_provider_replay_safe IS DISTINCT FROM OLD.archive_capture_provider_replay_safe
-    OR NEW.archive_capture_takeover_safe IS DISTINCT FROM OLD.archive_capture_takeover_safe
-    OR NEW.archive_capture_attempt IS DISTINCT FROM OLD.archive_capture_attempt
-    OR NEW.archive_capture_generation IS DISTINCT FROM OLD.archive_capture_generation
-    OR NEW.archive_capture_started_at IS DISTINCT FROM OLD.archive_capture_started_at
-    OR NEW.archive_capture_deadline_at IS DISTINCT FROM OLD.archive_capture_deadline_at
-    OR NEW.archive_capture_published_at IS DISTINCT FROM OLD.archive_capture_published_at
-    OR NEW.reaper_hold_id IS DISTINCT FROM OLD.reaper_hold_id
-    OR NEW.reaper_hold_until IS DISTINCT FROM OLD.reaper_hold_until
-    OR NEW.reaper_hold_reason IS DISTINCT FROM OLD.reaper_hold_reason
-    OR NEW.rotation_requested_at IS DISTINCT FROM OLD.rotation_requested_at
-    OR NEW.rotation_reason IS DISTINCT FROM OLD.rotation_reason
-  ) AND NOT (
-    NEW.liveness = 'cold'
-    AND NEW.instance_id IS NULL
-    AND NEW.refcount = 0
-    AND NEW.lease_epoch = OLD.lease_epoch + 1
-    AND NEW.archive_capture_id IS NULL
-    AND NEW.archive_capture_operation_id IS NULL
-    AND NEW.archive_capture_provider_request_id IS NULL
-    AND NEW.archive_capture_provider_replay_safe = false
-    AND NEW.archive_capture_takeover_safe = false
-    AND NEW.archive_capture_attempt IS NULL
-    AND NEW.archive_capture_generation IS NULL
-    AND NEW.archive_capture_started_at IS NULL
-    AND NEW.archive_capture_deadline_at IS NULL
-    AND NEW.archive_capture_published_at IS NULL
-    AND NEW.reaper_hold_id IS NULL
-    AND NEW.reaper_hold_until IS NULL
-    AND NEW.reaper_hold_reason IS NULL
-    AND NEW.rotation_requested_at IS NULL
-    AND NEW.rotation_reason IS NULL
-    AND atomic_claim_id IS NOT NULL
+  ) THEN
+    RETURN NEW;
+  END IF;
+
+  -- Compare the trigger tuples as JSONB rather than naming columns through the
+  -- trigger record. Migration 0240 can therefore be installed while an older
+  -- rolling schema still lacks fields added by 0184/0186, and future lease
+  -- columns are fenced by default instead of silently falling outside a list.
+  old_row := to_jsonb(OLD);
+  new_row := to_jsonb(NEW);
+
+  -- Timestamp-only touches and assignments that leave the row unchanged are
+  -- harmless while the claim is live. Every actual field mutation other than
+  -- updated_at must be the exact atomic draining -> cold consumption below.
+  IF (new_row - 'updated_at') IS NOT DISTINCT FROM (old_row - 'updated_at') THEN
+    RETURN NEW;
+  END IF;
+
+  IF NOT (
+    atomic_claim_id IS NOT NULL
     AND atomic_claim_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+    AND atomic_transition_sha256 IS NOT NULL
+    AND atomic_transition_sha256 ~ '^[0-9a-f]{64}$'
+    AND atomic_transition_sha256 = opengeni_private.provider_loss_transition_sha256(
+      jsonb_build_object(
+        'resumeBackendId', new_row -> 'resume_backend_id',
+        'resumeState', new_row -> 'resume_state'
+      )
+    )
     AND EXISTS (
       SELECT 1
       FROM sandbox_provider_loss_teardown_claims claim
       WHERE claim.id = atomic_claim_id::uuid
-        AND claim.lease_id = OLD.id
+        AND claim.account_id::text = old_row ->> 'account_id'
+        AND claim.workspace_id::text = old_row ->> 'workspace_id'
+        AND claim.lease_id::text = old_row ->> 'id'
+        AND claim.sandbox_group_id::text = old_row ->> 'sandbox_group_id'
+        AND claim.lease_epoch = (old_row ->> 'lease_epoch')::integer
+        AND claim.workspace_generation = (old_row ->> 'workspace_generation')::integer
+        AND claim.provider_backend = old_row ->> 'backend'
+        AND claim.provider_instance_id = old_row ->> 'instance_id'
         AND claim.consumed_at IS NULL
+    )
+    AND new_row ->> 'liveness' = 'cold'
+    AND new_row -> 'instance_id' = 'null'::jsonb
+    AND (new_row ->> 'refcount')::integer = 0
+    AND (new_row ->> 'lease_epoch')::integer = (old_row ->> 'lease_epoch')::integer + 1
+    AND new_row -> 'data_plane_url' = 'null'::jsonb
+    AND new_row -> 'terminal_data_plane_url' = 'null'::jsonb
+    AND (
+      NOT (new_row ? 'controller_data_plane_url')
+      OR new_row -> 'controller_data_plane_url' = 'null'::jsonb
+    )
+    AND new_row -> 'provider_created_at' = 'null'::jsonb
+    AND new_row -> 'provider_deadline_at' = 'null'::jsonb
+    AND new_row -> 'archive_capture_id' = 'null'::jsonb
+    AND (
+      NOT (new_row ? 'archive_capture_operation_id')
+      OR new_row -> 'archive_capture_operation_id' = 'null'::jsonb
+    )
+    AND (
+      NOT (new_row ? 'archive_capture_provider_request_id')
+      OR new_row -> 'archive_capture_provider_request_id' = 'null'::jsonb
+    )
+    AND (
+      NOT (new_row ? 'archive_capture_provider_replay_safe')
+      OR new_row -> 'archive_capture_provider_replay_safe' = 'false'::jsonb
+    )
+    AND (
+      NOT (new_row ? 'archive_capture_takeover_safe')
+      OR new_row -> 'archive_capture_takeover_safe' = 'false'::jsonb
+    )
+    AND (
+      NOT (new_row ? 'archive_capture_attempt')
+      OR new_row -> 'archive_capture_attempt' = 'null'::jsonb
+    )
+    AND new_row -> 'archive_capture_generation' = 'null'::jsonb
+    AND new_row -> 'archive_capture_started_at' = 'null'::jsonb
+    AND new_row -> 'archive_capture_deadline_at' = 'null'::jsonb
+    AND (
+      NOT (new_row ? 'archive_capture_published_at')
+      OR new_row -> 'archive_capture_published_at' = 'null'::jsonb
+    )
+    AND (
+      NOT (new_row ? 'reaper_hold_id')
+      OR new_row -> 'reaper_hold_id' = 'null'::jsonb
+    )
+    AND (
+      NOT (new_row ? 'reaper_hold_until')
+      OR new_row -> 'reaper_hold_until' = 'null'::jsonb
+    )
+    AND (
+      NOT (new_row ? 'reaper_hold_reason')
+      OR new_row -> 'reaper_hold_reason' = 'null'::jsonb
+    )
+    AND new_row -> 'rotation_requested_at' = 'null'::jsonb
+    AND new_row -> 'rotation_reason' = 'null'::jsonb
+    AND (
+      new_row - ARRAY[
+        'liveness',
+        'instance_id',
+        'data_plane_url',
+        'terminal_data_plane_url',
+        'controller_data_plane_url',
+        'lease_epoch',
+        'archive_capture_id',
+        'archive_capture_operation_id',
+        'archive_capture_provider_request_id',
+        'archive_capture_provider_replay_safe',
+        'archive_capture_takeover_safe',
+        'archive_capture_attempt',
+        'archive_capture_generation',
+        'archive_capture_started_at',
+        'archive_capture_deadline_at',
+        'archive_capture_published_at',
+        'reaper_hold_id',
+        'reaper_hold_until',
+        'reaper_hold_reason',
+        'resume_backend_id',
+        'resume_state',
+        'provider_created_at',
+        'provider_deadline_at',
+        'rotation_requested_at',
+        'rotation_reason',
+        'updated_at'
+      ]::text[]
+    ) IS NOT DISTINCT FROM (
+      old_row - ARRAY[
+        'liveness',
+        'instance_id',
+        'data_plane_url',
+        'terminal_data_plane_url',
+        'controller_data_plane_url',
+        'lease_epoch',
+        'archive_capture_id',
+        'archive_capture_operation_id',
+        'archive_capture_provider_request_id',
+        'archive_capture_provider_replay_safe',
+        'archive_capture_takeover_safe',
+        'archive_capture_attempt',
+        'archive_capture_generation',
+        'archive_capture_started_at',
+        'archive_capture_deadline_at',
+        'archive_capture_published_at',
+        'reaper_hold_id',
+        'reaper_hold_until',
+        'reaper_hold_reason',
+        'resume_backend_id',
+        'resume_state',
+        'provider_created_at',
+        'provider_deadline_at',
+        'rotation_requested_at',
+        'rotation_reason',
+        'updated_at'
+      ]::text[]
     )
   ) THEN
     RAISE EXCEPTION 'provider-loss teardown claim fences lease lifecycle mutation'
@@ -433,7 +585,10 @@ BEGIN
   REVOKE EXECUTE ON FUNCTION opengeni_private.guard_provider_loss_receipt_mutation() FROM PUBLIC;
   REVOKE EXECUTE ON FUNCTION opengeni_private.guard_provider_loss_claim_fence() FROM PUBLIC;
   REVOKE EXECUTE ON FUNCTION opengeni_private.guard_provider_loss_lease_mutation() FROM PUBLIC;
+  REVOKE EXECUTE ON FUNCTION opengeni_private.provider_loss_transition_sha256(jsonb) FROM PUBLIC;
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
+    GRANT EXECUTE ON FUNCTION opengeni_private.provider_loss_transition_sha256(jsonb)
+      TO opengeni_app;
     REVOKE EXECUTE ON FUNCTION opengeni_private.guard_provider_loss_claim_mutation()
       FROM opengeni_app;
     REVOKE EXECUTE ON FUNCTION opengeni_private.guard_provider_loss_receipt_mutation()

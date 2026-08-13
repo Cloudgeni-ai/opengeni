@@ -16,6 +16,56 @@ import { migrate } from "../src/migrate";
 
 const migrationName = "0240_sandbox_provider_loss_receipts.sql";
 
+const claimTimestampOnlyColumns = ["updated_at"] as const;
+const claimExactAtomicTransitionColumns = [
+  "archive_capture_attempt",
+  "archive_capture_deadline_at",
+  "archive_capture_generation",
+  "archive_capture_id",
+  "archive_capture_operation_id",
+  "archive_capture_provider_replay_safe",
+  "archive_capture_provider_request_id",
+  "archive_capture_published_at",
+  "archive_capture_started_at",
+  "archive_capture_takeover_safe",
+  "controller_data_plane_url",
+  "data_plane_url",
+  "instance_id",
+  "lease_epoch",
+  "liveness",
+  "provider_created_at",
+  "provider_deadline_at",
+  "reaper_hold_id",
+  "reaper_hold_reason",
+  "reaper_hold_until",
+  "resume_backend_id",
+  "resume_state",
+  "rotation_reason",
+  "rotation_requested_at",
+  "terminal_data_plane_url",
+] as const;
+const claimInvariantColumns = [
+  "account_id",
+  "archive_generation",
+  "backend",
+  "created_at",
+  "current_checkpoint_artifact_id",
+  "expires_at",
+  "id",
+  "image",
+  "last_meter_at",
+  "last_meter_tick",
+  "os",
+  "previous_checkpoint_artifact_id",
+  "refcount",
+  "rig_version_id",
+  "sandbox_group_id",
+  "turn_holders",
+  "viewer_holders",
+  "workspace_generation",
+  "workspace_id",
+] as const;
+
 async function expectSqlState(operation: PromiseLike<unknown>, code: string): Promise<void> {
   let failure: unknown;
   try {
@@ -227,6 +277,54 @@ describe("0240 provider-loss receipt protocol", () => {
       expect(leaseMutationFunction?.source).toContain("RETURN OLD");
       expect(leaseMutationFunction?.source).toContain("claim.lease_id = OLD.id");
       expect(leaseMutationFunction?.source).toContain("sandbox_provider_loss_claim_id");
+      expect(leaseMutationFunction?.source).toContain("sandbox_provider_loss_transition_sha256");
+      expect(leaseMutationFunction?.source).toContain("old_row := to_jsonb(OLD)");
+      expect(leaseMutationFunction?.source).toContain("new_row := to_jsonb(NEW)");
+      expect(leaseMutationFunction?.source).not.toContain("NEW.archive_capture_takeover_safe");
+      const [transitionDigestFunction] = await shared.admin<
+        Array<{ appExecute: boolean; publicExecute: boolean; source: string }>
+      >`
+        select
+          has_function_privilege(
+            'opengeni_app',
+            'opengeni_private.provider_loss_transition_sha256(jsonb)',
+            'EXECUTE'
+          ) as "appExecute",
+          exists (
+            select 1
+            from pg_proc function
+            cross join lateral aclexplode(
+              coalesce(function.proacl, acldefault('f', function.proowner))
+            ) acl
+            where function.oid =
+              'opengeni_private.provider_loss_transition_sha256(jsonb)'::regprocedure
+              and acl.grantee = 0
+              and acl.privilege_type = 'EXECUTE'
+          ) as "publicExecute",
+          pg_get_functiondef(
+            'opengeni_private.provider_loss_transition_sha256(jsonb)'::regprocedure
+          ) as source
+      `;
+      expect(transitionDigestFunction).toMatchObject({
+        appExecute: true,
+        publicExecute: false,
+      });
+      expect(transitionDigestFunction?.source).toContain("digest(");
+      expect(transitionDigestFunction?.source).toContain("SET search_path TO 'pg_catalog'");
+      const leaseColumns = await shared.admin<Array<{ columnName: string }>>`
+        select column_name as "columnName"
+        from information_schema.columns
+        where table_schema = current_schema()
+          and table_name = 'sandbox_leases'
+        order by column_name
+      `;
+      expect(leaseColumns.map((column) => column.columnName)).toEqual(
+        [
+          ...claimTimestampOnlyColumns,
+          ...claimExactAtomicTransitionColumns,
+          ...claimInvariantColumns,
+        ].sort(),
+      );
       const mutationFunctions = functions.filter((fn) => fn.name.endsWith("_mutation"));
       expect(mutationFunctions).toHaveLength(3);
       for (const fn of mutationFunctions) {
@@ -356,10 +454,10 @@ describe("0240 provider-loss receipt protocol", () => {
       await shared.admin`
         insert into sandbox_leases
           (id, account_id, workspace_id, sandbox_group_id, liveness, backend,
-           instance_id, lease_epoch, refcount, expires_at)
+           instance_id, lease_epoch, workspace_generation, refcount, expires_at)
         values
           (${leaseId}, ${account!.id}, ${workspace!.id}, ${session.sandboxGroupId}, 'draining',
-           'modal', ${providerInstanceId}, 7, 0, now() - interval '1 second')`;
+           'modal', ${providerInstanceId}, 7, 1, 0, now() - interval '1 second')`;
       const admissionId = randomUUID();
       await shared.admin`
         insert into sandbox_workspace_mutation_admissions
@@ -532,9 +630,281 @@ describe("0240 provider-loss receipt protocol", () => {
       await expectSqlState(
         shared.admin`
         update sandbox_leases
+        set id = ${randomUUID()}::uuid
+        where id = ${leaseId}::uuid
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
+        update sandbox_leases
+        set account_id = ${randomUUID()}::uuid
+        where id = ${leaseId}::uuid
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
+        update sandbox_leases
+        set workspace_id = ${randomUUID()}::uuid
+        where id = ${leaseId}::uuid
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
+        update sandbox_leases
+        set sandbox_group_id = ${randomUUID()}::uuid
+        where id = ${leaseId}::uuid
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
+        update sandbox_leases
+        set liveness = 'warm'
+        where id = ${leaseId}::uuid
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
+        update sandbox_leases
+        set refcount = 1
+        where id = ${leaseId}::uuid
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
+        update sandbox_leases
+        set turn_holders = 1
+        where id = ${leaseId}::uuid
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
+        update sandbox_leases
+        set viewer_holders = 1
+        where id = ${leaseId}::uuid
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
+        update sandbox_leases
+        set instance_id = 'modal-provider-loss-forbidden-instance'
+        where id = ${leaseId}::uuid
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
+        update sandbox_leases
+        set backend = 'docker'
+        where id = ${leaseId}::uuid
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
+        update sandbox_leases
+        set os = 'darwin'
+        where id = ${leaseId}::uuid
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
+        update sandbox_leases
+        set image = 'provider-loss-forbidden-image'
+        where id = ${leaseId}::uuid
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
+        update sandbox_leases
+        set rig_version_id = ${randomUUID()}::uuid
+        where id = ${leaseId}::uuid
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
+        update sandbox_leases
+        set data_plane_url = 'https://forbidden.example/data'
+        where id = ${leaseId}::uuid
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
+        update sandbox_leases
+        set terminal_data_plane_url = 'https://forbidden.example/terminal'
+        where id = ${leaseId}::uuid
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
+        update sandbox_leases
+        set controller_data_plane_url = 'https://forbidden.example/controller'
+        where id = ${leaseId}::uuid
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
+        update sandbox_leases
+        set workspace_generation = workspace_generation + 1
+        where id = ${leaseId}::uuid
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
+        update sandbox_leases
+        set archive_generation = workspace_generation
+        where id = ${leaseId}::uuid
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
+        update sandbox_leases
+        set resume_backend_id = 'modal'
+        where id = ${leaseId}::uuid
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
+        update sandbox_leases
+        set resume_state = '{"forged":true}'::jsonb
+        where id = ${leaseId}::uuid
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
+        update sandbox_leases
+        set provider_created_at = now()
+        where id = ${leaseId}::uuid
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
+        update sandbox_leases
+        set provider_deadline_at = now() + interval '1 minute'
+        where id = ${leaseId}::uuid
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
+        update sandbox_leases
+        set current_checkpoint_artifact_id = ${randomUUID()}::uuid
+        where id = ${leaseId}::uuid
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
+        update sandbox_leases
+        set previous_checkpoint_artifact_id = ${randomUUID()}::uuid
+        where id = ${leaseId}::uuid
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
+        update sandbox_leases
+        set last_meter_tick = last_meter_tick + 1
+        where id = ${leaseId}::uuid
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
+        update sandbox_leases
+        set last_meter_at = now()
+        where id = ${leaseId}::uuid
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
+        update sandbox_leases
+        set expires_at = expires_at + interval '1 minute'
+        where id = ${leaseId}::uuid
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
+        update sandbox_leases
+        set created_at = created_at - interval '1 second'
+        where id = ${leaseId}::uuid
+      `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin`
+        update sandbox_leases
         set archive_capture_id = ${randomUUID()}::uuid
         where id = ${leaseId}::uuid
       `,
+        "55000",
+      );
+      await expectSqlState(
+        shared.admin.begin(async (tx) => {
+          await tx`
+            select set_config(
+              'opengeni.sandbox_provider_loss_claim_id', ${claimId}, true
+            )`;
+          await tx`
+            select set_config(
+              'opengeni.sandbox_provider_loss_transition_sha256',
+              opengeni_private.provider_loss_transition_sha256(
+                jsonb_build_object(
+                  'resumeBackendId', 'modal'::text,
+                  'resumeState', '{}'::jsonb
+                )
+              ),
+              true
+            )`;
+          await tx`
+            update sandbox_leases set
+              liveness = 'cold',
+              instance_id = null,
+              data_plane_url = null,
+              terminal_data_plane_url = null,
+              controller_data_plane_url = null,
+              lease_epoch = lease_epoch + 1,
+              resume_backend_id = 'modal',
+              resume_state = '{}'::jsonb,
+              provider_created_at = null,
+              provider_deadline_at = null,
+              rotation_requested_at = null,
+              rotation_reason = null,
+              archive_capture_id = null,
+              archive_capture_operation_id = null,
+              archive_capture_provider_request_id = null,
+              archive_capture_provider_replay_safe = false,
+              archive_capture_takeover_safe = false,
+              archive_capture_attempt = null,
+              archive_capture_generation = null,
+              archive_capture_started_at = null,
+              archive_capture_deadline_at = null,
+              archive_capture_published_at = null,
+              backend = 'docker',
+              updated_at = now()
+            where id = ${leaseId}::uuid
+          `;
+        }),
         "55000",
       );
       await expectSqlState(

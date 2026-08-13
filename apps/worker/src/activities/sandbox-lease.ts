@@ -2034,20 +2034,22 @@ async function terminateDrainableBox(
     (lease.resumeBackendId ?? lease.backend) as string,
   );
   if (lease.instanceId && durableBackend === "modal") {
-    const providerState = await probeDrainableProvider(settings, lease);
-    if (providerState === "missing") {
-      const repaired = await repairLegacyProviderLossAdmission(
-        db,
-        settings,
-        accountId,
-        row.workspaceId,
-        lease,
-        observability,
-        inspectProviderLifecycle,
-      );
-      if (repaired) {
-        return true;
-      }
+    // The legacy provider-loss path must establish its exact durable admission
+    // claim before any provider read. A blanket readiness probe here would
+    // bypass the existing capture-owner ordering for ordinary drains and would
+    // duplicate the typed missing-provider probe used by the general stale-
+    // admission path below.
+    const repaired = await repairLegacyProviderLossAdmission(
+      db,
+      settings,
+      accountId,
+      row.workspaceId,
+      lease,
+      observability,
+      inspectProviderLifecycle,
+    );
+    if (repaired) {
+      return true;
     }
   }
   let captureClaim:

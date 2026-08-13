@@ -261,6 +261,7 @@ type LeaseFixture = {
   turnHolders?: number;
   viewerHolders?: number;
   leaseEpoch?: number;
+  workspaceGeneration?: number;
   expiresInMs?: number; // relative to now(); negative = already lapsed
   instanceId?: string | null;
   backend?: string;
@@ -283,11 +284,12 @@ async function insertLease(
     insert into sandbox_leases (
       account_id, workspace_id, sandbox_group_id, liveness, refcount,
       turn_holders, viewer_holders, instance_id, backend, lease_epoch,
-      resume_backend_id, resume_state, expires_at
+      workspace_generation, resume_backend_id, resume_state, expires_at
     ) values (
       ${ids.accountId}, ${ids.workspaceId}, ${ids.groupId}, ${f.liveness},
       ${f.refcount ?? 0}, ${f.turnHolders ?? 0}, ${f.viewerHolders ?? 0},
       ${f.instanceId ?? null}, ${f.backend ?? "local"}, ${f.leaseEpoch ?? 1},
+      ${f.workspaceGeneration ?? 0},
       ${f.resumeBackendId ?? null},
       ${f.resumeState ? JSON.stringify(f.resumeState) : null}::text::jsonb,
       now() + (${String(f.expiresInMs ?? 60_000)} || ' milliseconds')::interval
@@ -535,6 +537,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       liveness: "draining",
       refcount: 0,
       leaseEpoch,
+      workspaceGeneration: 1,
       expiresInMs: -1_000,
       instanceId,
       backend: "modal",

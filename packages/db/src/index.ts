@@ -35354,9 +35354,9 @@ async function confirmDrainColdInTransaction(
     ...(lateArchiveCapture ? { lateArchiveCapture } : {}),
   };
   const preserveRecovery = hasArchive || restoreStatus === "unrecoverable";
-  const resumeStateJson = preserveRecovery
-    ? JSON.stringify(archiveOnlyResumeState(row, recovery))
-    : null;
+  const resumeState = preserveRecovery ? archiveOnlyResumeState(row, recovery) : null;
+  const resumeStateJson = resumeState ? JSON.stringify(resumeState) : null;
+  const resumeBackendId = preserveRecovery ? (row.resume_backend_id ?? row.backend) : null;
   // Migration 0184 also enforces exact teardown ownership at the table
   // boundary so a pre-0184 confirm cannot erase a newer worker's claim.
   // Set the receipt transaction-locally only after the locked row passed
@@ -35370,6 +35370,18 @@ async function confirmDrainColdInTransaction(
     await tx.execute(
       sql`select set_config('opengeni.sandbox_provider_loss_claim_id', ${input.providerLossClaimId}, true)`,
     );
+    await tx.execute(sql`
+      select set_config(
+        'opengeni.sandbox_provider_loss_transition_sha256',
+        opengeni_private.provider_loss_transition_sha256(
+          jsonb_build_object(
+            'resumeBackendId', ${resumeBackendId}::text,
+            'resumeState', ${resumeStateJson}::jsonb
+          )
+        ),
+        true
+      )
+    `);
   }
   const rows = await tx.execute<{ id: string }>(sql`
         update sandbox_leases set
@@ -35383,7 +35395,7 @@ async function confirmDrainColdInTransaction(
           reaper_hold_until = null,
           reaper_hold_reason = null,
           resume_state = ${resumeStateJson}::jsonb,
-          resume_backend_id = case when ${preserveRecovery} then coalesce(resume_backend_id, backend) else null end,
+          resume_backend_id = ${resumeBackendId},
           provider_created_at = null,
           provider_deadline_at = null,
           rotation_requested_at = null,
@@ -38294,6 +38306,8 @@ export async function claimProviderLossTeardown(
           lockedLease.workspace_id !== input.workspaceId ||
           lockedLease.sandbox_group_id !== input.sandboxGroupId ||
           Number(lockedLease.lease_epoch) !== input.expectedEpoch ||
+          Number(lockedLease.workspace_generation) !==
+            Number(lockedAdmission.workspace_generation) ||
           lockedLease.instance_id !== input.expectedInstanceId ||
           lockedLease.backend !== "modal" ||
           lockedLease.liveness !== "draining" ||
