@@ -541,9 +541,7 @@ impl AtspiComputerAdapter {
         if record.target.kind == NativeTargetKind::Window {
             let windows = self.desktop.as_ref()?.windows().await.ok()?;
             record.x11_window = correlate_x11_window(&record.target, &windows);
-            if record.x11_window.is_none() {
-                return None;
-            }
+            record.x11_window.as_ref()?;
         }
         Some(record)
     }
@@ -1295,7 +1293,7 @@ impl AtspiComputerAdapter {
                 )
             })?;
         validate_live_frame_bounds(captured.width, captured.height, options)?;
-        let (width, height, bytes) = encode_live_jpeg(captured, options.quality)?;
+        let (width, height, bytes) = encode_live_jpeg(&captured, options.quality)?;
         self.finish_window_capture(record, window, width, height, "image/jpeg", bytes)
             .await
     }
@@ -1648,7 +1646,7 @@ impl ComputerAdapter for AtspiComputerAdapter {
                     )
                 })?;
                 validate_live_frame_bounds(captured.width, captured.height, options)?;
-                let (width, height, bytes) = encode_live_jpeg(captured, options.quality)?;
+                let (width, height, bytes) = encode_live_jpeg(&captured, options.quality)?;
                 let sequence = self.frame_sequence.fetch_add(1, Ordering::Relaxed) + 1;
                 let frame_id = format!("f_{}_{}", self.incarnation.simple(), sequence);
                 *self.latest_screen_frame.write().await = Some(frame_id.clone());
@@ -1758,6 +1756,7 @@ impl ComputerAdapter for AtspiComputerAdapter {
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn dispatch(
         &self,
         command: &NativeActionCommand,
@@ -1915,7 +1914,7 @@ fn validate_live_frame_bounds(
 }
 
 fn encode_live_jpeg(
-    frame: LinuxRgbaFrame,
+    frame: &LinuxRgbaFrame,
     quality: u8,
 ) -> NativeAdapterResult<(u32, u32, Vec<u8>)> {
     let mut rgb = Vec::with_capacity(frame.rgba.len() / 4 * 3);
@@ -2648,7 +2647,11 @@ Gtk.main()
             NativeSemanticAction::SetValue,
             Some(NativeActionValue::String("hello from AT-SPI".to_string())),
         );
-        let after_value = adapter.dispatch(&set_value).await.expect("set entry value");
+        let after_value = adapter
+            .dispatch(&set_value)
+            .await
+            .expect("set entry value")
+            .expect("semantic set-value returns a settlement observation");
         assert!(has_text(&after_value.roots, "hello from AT-SPI"));
 
         let stale = command(&initial, entry_ref, NativeSemanticAction::Focus, None);
@@ -2660,7 +2663,11 @@ Gtk.main()
 
         let apply_ref = find_ref(&after_value.roots, "Apply").expect("button ref");
         let invoke = command(&after_value, apply_ref, NativeSemanticAction::Invoke, None);
-        let after_invoke = adapter.dispatch(&invoke).await.expect("invoke button");
+        let after_invoke = adapter
+            .dispatch(&invoke)
+            .await
+            .expect("invoke button")
+            .expect("semantic invoke returns a settlement observation");
         assert!(
             has_text(&after_invoke.roots, "Applied: hello from AT-SPI"),
             "updated label absent from observation: {:#?}",
@@ -2677,7 +2684,8 @@ Gtk.main()
         let after_pixel_value = adapter
             .dispatch(&set_pixel_value)
             .await
-            .expect("set value before pixel click");
+            .expect("set value before pixel click")
+            .expect("semantic set-value returns a settlement observation");
         let button_bounds = find_bounds(&after_pixel_value.roots, "Apply").expect("button bounds");
         let window_bounds = after_pixel_value
             .target
