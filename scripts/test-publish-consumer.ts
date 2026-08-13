@@ -363,11 +363,27 @@ try {
       "packages/config",
       "packages/contracts",
       "packages/network",
+      "packages/xai-subscription",
     ].map((directory) => stageTarball(directory, stagingRoot, tarballRoot, versions)),
   );
   const runtimeLocalDependencyFiles = Object.fromEntries(
     runtimeLocalDependencies.map(({ manifest, tarball }) => [manifest.name, `file:${tarball}`]),
   );
+  const expectedRuntimeWorkspaceDependencies = Object.keys(runtime.manifest.dependencies ?? {})
+    .filter((name) => versions.has(name))
+    .sort();
+  const stagedRuntimeWorkspaceDependencies = [
+    sdk.manifest.name,
+    ...runtimeLocalDependencies.map(({ manifest }) => manifest.name),
+  ].sort();
+  if (
+    JSON.stringify(stagedRuntimeWorkspaceDependencies) !==
+    JSON.stringify(expectedRuntimeWorkspaceDependencies)
+  ) {
+    throw new Error(
+      `runtime package closure staged ${stagedRuntimeWorkspaceDependencies.join(", ")}; expected ${expectedRuntimeWorkspaceDependencies.join(", ")}`,
+    );
+  }
   const contracts = runtimeLocalDependencies.find(
     ({ manifest }) => manifest.name === "@opengeni/contracts",
   );

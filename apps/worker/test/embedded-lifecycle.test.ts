@@ -5,7 +5,11 @@ import { join, resolve as resolvePath } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createObservability } from "@opengeni/observability";
 import { testSettings } from "@opengeni/testing";
-import type { Database } from "@opengeni/db";
+import {
+  RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
+  RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES,
+  type Database,
+} from "@opengeni/db";
 import {
   createOpenGeniWorker,
   resolveOpenGeniWorkflowDefinition,
@@ -400,62 +404,15 @@ describe("embedded worker lifecycle contract", () => {
           can_trigger: false,
         })),
       ],
-      [
-        {
-          name: "fork_session_content(uuid, uuid, uuid, text, uuid, text, text, text)",
-          owner: "opengeni_migrator",
-          can_execute: true,
-          public_execute: false,
-          security_definer: true,
-        },
-        {
-          name: "session_private_actor_visible(uuid, uuid, uuid, text)",
-          owner: "opengeni_migrator",
-          can_execute: true,
-          public_execute: false,
-          security_definer: true,
-        },
-        {
-          name: "knowledge_source_sync_lock_authority(uuid, uuid, uuid)",
-          owner: "opengeni_migrator",
-          can_execute: true,
-          public_execute: false,
-          security_definer: true,
-        },
-        {
-          name: "ensure_managed_human_personal_workspace(uuid, text, uuid)",
-          owner: "opengeni_migrator",
-          can_execute: true,
-          public_execute: false,
-          security_definer: true,
-        },
-        ...[
-          "ensure_canonical_human_identity(text, text)",
-          "validate_canonical_human_session(text, text, boolean)",
-          "get_canonical_human_identity_projection(text)",
-          "apply_canonical_human_identity_operation(uuid, text, bigint, text, uuid, text, text, text)",
-        ].map((name) => ({
+      RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.map((name) => ({
+        name,
+        owner: "opengeni_migrator",
+        can_execute: true,
+        public_execute: false,
+        security_definer: !(RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES as readonly string[]).includes(
           name,
-          owner: "opengeni_migrator",
-          can_execute: true,
-          public_execute: false,
-          security_definer: true,
-        })),
-        {
-          name: "session_reference_visible(uuid, uuid, uuid)",
-          owner: "opengeni_migrator",
-          can_execute: true,
-          public_execute: false,
-          security_definer: false,
-        },
-        {
-          name: "transition_session_visibility(uuid, uuid, uuid, text, text, integer, text, text)",
-          owner: "opengeni_migrator",
-          can_execute: true,
-          public_execute: false,
-          security_definer: true,
-        },
-      ],
+        ),
+      })),
       [
         {
           name: "workspace_rls_visible(uuid, uuid)",
@@ -500,16 +457,7 @@ describe("embedded worker lifecycle contract", () => {
       ],
     })();
     expect((catalogResults[6] as Array<{ name: string }>).map((routine) => routine.name)).toEqual([
-      "fork_session_content(uuid, uuid, uuid, text, uuid, text, text, text)",
-      "session_private_actor_visible(uuid, uuid, uuid, text)",
-      "knowledge_source_sync_lock_authority(uuid, uuid, uuid)",
-      "ensure_managed_human_personal_workspace(uuid, text, uuid)",
-      "ensure_canonical_human_identity(text, text)",
-      "validate_canonical_human_session(text, text, boolean)",
-      "get_canonical_human_identity_projection(text)",
-      "apply_canonical_human_identity_operation(uuid, text, bigint, text, uuid, text, text, text)",
-      "session_reference_visible(uuid, uuid, uuid)",
-      "transition_session_visibility(uuid, uuid, uuid, text, text, integer, text, text)",
+      ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
     ]);
     expect(catalogQueries).toBe(catalogResults.length);
     expect(directExecutions).toBe(0);

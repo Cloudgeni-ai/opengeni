@@ -27,6 +27,21 @@ export class CodexSubscriptionUnavailableError extends Error {
 }
 
 /**
+ * A `supergrok/<slug>` turn reached model routing without the workspace's
+ * synthetic xAI subscription provider. Refuse the built-in fallback so the
+ * internal namespace can never become an Azure/OpenAI deployment name.
+ */
+export class XaiSubscriptionUnavailableError extends Error {
+  constructor(modelName: string) {
+    super(
+      `SuperGrok subscription model "${modelName}" is unavailable: no active xAI/SuperGrok subscription is connected for this workspace. ` +
+        `Connect (or reconnect) a SuperGrok subscription in Settings, then retry.`,
+    );
+    this.name = "XaiSubscriptionUnavailableError";
+  }
+}
+
+/**
  * The workspace's model policy blocks the provider/model this turn resolved
  * to. Thrown at the worker's post-resolution gate INSTEAD of running the turn
  * on the blocked provider — a policy-restricted workspace (e.g. fail-closed to

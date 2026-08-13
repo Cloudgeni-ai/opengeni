@@ -18,7 +18,7 @@ describe("0132/0133 session realtime ledger migrations", () => {
     const [ledger] = await shared.admin<{ hasSessionVisibilityPolicy: boolean }[]>`
       select exists (
         select 1 from schema_migrations
-        where name = '0234_session_visibility_slack_policy.sql'
+        where name = '0236_session_visibility_slack_policy.sql'
       ) as "hasSessionVisibilityPolicy"`;
     const expectedPolicyCount = ledger?.hasSessionVisibilityPolicy ? 2 : 1;
     const rows = await shared.admin<

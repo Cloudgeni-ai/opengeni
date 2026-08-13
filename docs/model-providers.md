@@ -110,6 +110,7 @@ derives both from the provider kind:
 | Built-in or registry API key | deployment | deployment | OpenGeni credits |
 | Azure without an API key | deployment Azure AD bearer | deployment | OpenGeni credits |
 | Connected Codex subscription | connected subscription | connected subscription | external |
+| Connected SuperGrok/xAI subscription | connected subscription | connected subscription | external |
 
 `workspace_connection` is a reserved normalized contract. Generic JSON does
 not enable workspace BYOK; that requires a separately reviewed encrypted
@@ -182,7 +183,7 @@ within the same credential class therefore does not invalidate an accepted
 turn. Changing executable provider identity does.
 
 Credential identity is also not a conversation-history compatibility boundary.
-Changing the selected Codex subscription does not rewrite canonical history or
+Changing the selected Codex or SuperGrok subscription does not rewrite canonical history or
 a saved approval `RunState`. Responses providers receive canonical structured
 items directly. Chat Completions receives one request-local transcript view for
 canonical record types that its SDK converter cannot represent; that view is
@@ -190,6 +191,11 @@ never persisted. Historical `tool_search` calls/outputs remain inert completed
 facts. A session frozen to `remote_v2` compaction admits only Codex models;
 portable sessions may use any supported route whose request adapter can express
 their canonical history.
+
+SuperGrok models use the `supergrok/` product namespace and the curated
+`supergrok-subscription` provider. The xAI API-key rail remains separate. See
+[`supergrok-subscription.md`](supergrok-subscription.md) for account authority,
+allocator, lease, and durable capacity-wait semantics.
 
 ## Canonicalization and compatibility
 

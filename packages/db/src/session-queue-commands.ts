@@ -1,4 +1,6 @@
 import {
+  WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+  XaiProviderAccountAuthoritySnapshotV1,
   DraftTimelineAnnotations,
   McpPersonalConnectionDelegations,
   TimelineAnnotations,
@@ -62,6 +64,7 @@ import {
   initiatorFromStorage,
   type FrozenTurnInitiator,
 } from "./turn-initiator";
+import { resolveXaiProviderAccountAuthoritySnapshotForAcceptanceInTransaction } from "./xai-subscription";
 
 type SessionEventInsertWithPayload = typeof schema.sessionEvents.$inferInsert & {
   payload: unknown;
@@ -234,6 +237,43 @@ async function personalConnectionDelegationsForAgentActor(
   return parsed.data.map((delegation) => ({ ...delegation }));
 }
 
+async function xaiAuthorityForAgentActor(
+  db: Database,
+  workspaceId: string,
+  actor: Extract<SessionCommandActor, { type: "agent_attempt" }>,
+): Promise<{
+  snapshot: ReturnType<typeof XaiProviderAccountAuthoritySnapshotV1.parse>;
+  subjectId: string | null;
+}> {
+  const [row] = await db
+    .select({
+      snapshot: schema.sessionTurns.xaiProviderAccountAuthoritySnapshot,
+      initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
+      initiatorKind: schema.sessionTurns.initiatorKind,
+      initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
+    })
+    .from(schema.sessionTurns)
+    .where(
+      and(
+        eq(schema.sessionTurns.workspaceId, workspaceId),
+        eq(schema.sessionTurns.sessionId, actor.sessionId),
+        eq(schema.sessionTurns.id, actor.turnId),
+      ),
+    )
+    .limit(1);
+  if (!row) {
+    throw new SessionControlInvariantError(
+      `Agent xAI authority turn not found: ${actor.sessionId}/${actor.turnId}`,
+    );
+  }
+  return {
+    snapshot: XaiProviderAccountAuthoritySnapshotV1.parse(row.snapshot),
+    subjectId:
+      row.initiatingHumanSubjectId ??
+      (row.initiatorKind === "subject" ? row.initiatorSubjectId : null),
+  };
+}
+
 async function lockSession(
   db: Database,
   workspaceId: string,
@@ -399,7 +439,10 @@ export async function supersedeSessionCurrentDirectionInTransaction(
             turnId: current.id,
             turnGeneration: current.executionGeneration,
             turnAssociation: "current",
-            payload: { requestId: request.id, response: { outcome: "cancelled" } },
+            payload: {
+              requestId: request.id,
+              response: { outcome: "cancelled" },
+            },
             occurredAt: now,
           })),
           "payload",
@@ -459,6 +502,17 @@ export async function supersedeSessionCurrentDirectionInTransaction(
           eq(schema.codexCapacityWaiters.sessionId, input.sessionId),
           eq(schema.codexCapacityWaiters.blockedTurnId, current.id),
           eq(schema.codexCapacityWaiters.status, "waiting"),
+        ),
+      );
+    await db
+      .update(schema.xaiCapacityWaiters)
+      .set({ status: "superseded", lastWakeReason: "steer", updatedAt: now })
+      .where(
+        and(
+          eq(schema.xaiCapacityWaiters.workspaceId, input.workspaceId),
+          eq(schema.xaiCapacityWaiters.sessionId, input.sessionId),
+          eq(schema.xaiCapacityWaiters.blockedTurnId, current.id),
+          eq(schema.xaiCapacityWaiters.status, "waiting"),
         ),
       );
   }
@@ -1659,6 +1713,15 @@ export async function submitHumanPromptInTransaction(
       input.subjectLabel,
     );
   }
+  const xaiProviderAccountAuthoritySnapshot = editedSourceTurn
+    ? XaiProviderAccountAuthoritySnapshotV1.parse(
+        editedSourceTurn.xaiProviderAccountAuthoritySnapshot,
+      )
+    : input.actor.type === "human"
+      ? await resolveXaiProviderAccountAuthoritySnapshotForAcceptanceInTransaction(db, {
+          workspaceId: input.workspaceId,
+        })
+      : WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1;
   const acceptedEventId = crypto.randomUUID();
   const turnId = crypto.randomUUID();
   const workflowId = session.temporalWorkflowId ?? `session-${session.id}`;
@@ -1737,6 +1800,7 @@ export async function submitHumanPromptInTransaction(
           personalConnectionDelegations: editedSourceTurn
             ? editedSourceTurn.personalConnectionDelegations
             : (input.personalConnectionDelegations ?? []),
+          xaiProviderAccountAuthoritySnapshot,
           createdAt: now,
           updatedAt: now,
         },
@@ -2090,6 +2154,7 @@ export async function sendAgentMessageInTransaction(
     input.workspaceId,
     input.actor,
   );
+  const xaiAuthority = await xaiAuthorityForAgentActor(db, input.workspaceId, input.actor);
   const session = await lockSession(db, input.workspaceId, input.targetSessionId);
   if (session.status === "cancelled") {
     throw new QueueCommandConflictError(
@@ -2131,8 +2196,10 @@ export async function sendAgentMessageInTransaction(
               callerTurnId: input.actor.turnId,
               callerAttemptId: input.actor.attemptId,
               callerExecutionGeneration: input.actor.executionGeneration,
+              ...(xaiAuthority.subjectId ? { xaiAuthoritySubjectId: xaiAuthority.subjectId } : {}),
             },
             personalConnectionDelegations,
+            xaiProviderAccountAuthoritySnapshot: xaiAuthority.snapshot,
             state: "pending",
           },
           "summary",
@@ -2297,6 +2364,7 @@ export async function steerAgentSessionInTransaction(
     input.workspaceId,
     input.actor,
   );
+  const xaiAuthority = await xaiAuthorityForAgentActor(db, input.workspaceId, input.actor);
   const resumed = await autoResumeSessionBranchInTransaction(db, {
     workspaceId: input.workspaceId,
     sessionId: input.targetSessionId,
@@ -2358,8 +2426,10 @@ export async function steerAgentSessionInTransaction(
               callerTurnId: input.actor.turnId,
               callerAttemptId: input.actor.attemptId,
               callerExecutionGeneration: input.actor.executionGeneration,
+              ...(xaiAuthority.subjectId ? { xaiAuthoritySubjectId: xaiAuthority.subjectId } : {}),
             },
             personalConnectionDelegations,
+            xaiProviderAccountAuthoritySnapshot: xaiAuthority.snapshot,
             state: "pending",
           },
           "summary",

@@ -23,6 +23,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 | Advanced in-process embedding & ports | `docs/embedding.md` | `README.md` and `CONTRIBUTING.md` should not present it as the default customer path. |
 | Run lifecycle | `docs/run-lifecycle.md` | `AGENTS.md`, `.agents/skills/opengeni/SKILL.md`, architecture summaries should link. |
 | Codex subscription rotation | `docs/codex-subscription-rotation.md` | `docs/run-lifecycle.md`, `docs/architecture.md`, and operator notes should link instead of restating allocator/failure semantics. |
+| SuperGrok/xAI subscription authority and rotation | `docs/supergrok-subscription.md` | `docs/run-lifecycle.md`, `docs/architecture.md`, provider/operator docs, SDK/React docs, and UI copy should link instead of restating authority or capacity semantics. |
 | Per-session MCP servers | `docs/session-mcp-servers.md` | `docs/architecture.md`, SDK/client examples should link instead of restating credential semantics. |
 | Connected machines | `docs/connected-machines.md` | `README.md`, `AGENTS.md`, client docs and skills should link. |
 | Deployment | `docs/deployment.md` | `README.md`, `AGENTS.md`, Helm/Terraform notes should link. |

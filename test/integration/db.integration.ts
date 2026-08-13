@@ -2888,6 +2888,11 @@ async function createRlsAppRole(
   await db.execute(
     dbSql.raw(`GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO "${role}"`),
   );
+  // Match the runtime role's exact target-schema-local capabilities. These
+  // functions are intentionally excluded from the broad private helper grant
+  // and remain unavailable to PUBLIC. The session reference helper and xAI
+  // validator are invoker-rights; the latter evaluates immutable snapshot
+  // CHECK constraints on ordinary session inserts.
   await db.execute(
     dbSql.raw(
       `GRANT EXECUTE ON FUNCTION public.session_private_actor_visible(uuid, uuid, uuid, text) TO "${role}"`,
@@ -2898,12 +2903,14 @@ async function createRlsAppRole(
       `GRANT EXECUTE ON FUNCTION public.session_reference_visible(uuid, uuid, uuid) TO "${role}"`,
     ),
   );
-  // Match the runtime role's exact target-schema-local capability. This public
-  // SECURITY DEFINER function is intentionally excluded from the broad private
-  // helper grant and remains unavailable to PUBLIC.
   await db.execute(
     dbSql.raw(
       `GRANT EXECUTE ON FUNCTION public.lock_nested_agent_depth_configuration() TO "${role}"`,
+    ),
+  );
+  await db.execute(
+    dbSql.raw(
+      `GRANT EXECUTE ON FUNCTION public.xai_provider_account_authority_snapshot_v1_valid(jsonb) TO "${role}"`,
     ),
   );
   const url = new URL(ownerUrl);

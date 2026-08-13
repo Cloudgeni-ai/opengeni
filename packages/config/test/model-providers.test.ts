@@ -25,6 +25,7 @@ import {
   selectModelPricing,
   serviceTierForLatencyMode,
   withCodexCatalogProvider,
+  withXaiSubscriptionCatalogProvider,
   withWorkspaceGatewayCatalogProvider,
   withWorkspaceGatewayCredential,
   OPENGENI_GATEWAY_MODELS,
@@ -640,6 +641,64 @@ describe("productShortLabelForModelId", () => {
 });
 
 describe("configuredModels", () => {
+  test("SuperGrok catalog is a distinct externally billed xAI subscription rail", () => {
+    const base = withEnv(
+      {
+        OPENGENI_OPENAI_API_KEY: "sk-test",
+        OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED: "true",
+      },
+      () => getSettings(),
+    );
+    const settings = withXaiSubscriptionCatalogProvider(base, [
+      {
+        slug: "grok-4.5",
+        name: "Grok 4.5 Live",
+        contextWindowTokens: 300_000,
+        effectiveContextWindowTokens: 285_000,
+        autoCompactTokenLimit: 240_000,
+        maxCompletionTokens: 16_384,
+        apiBackend: "responses",
+      },
+    ]);
+    const resolved = resolveModelProvider(settings, "supergrok/grok-4.5")!;
+    expect(resolved.provider).toMatchObject({
+      id: "supergrok-subscription",
+      kind: "xai-subscription",
+      api: "responses",
+      baseUrl: "https://cli-chat-proxy.grok.com/v1",
+    });
+    expect(resolved.model).toMatchObject({
+      id: "supergrok/grok-4.5",
+      upstreamModelId: "grok-4.5",
+      label: "Grok 4.5 Live",
+      contextWindowTokens: 300_000,
+      effectiveContextWindowTokens: 285_000,
+      autoCompactTokenLimit: 240_000,
+      credentialSource: { kind: "connected_subscription", provider: "xai" },
+      billing: { upstreamPayer: "connected_subscription", metering: "external" },
+    });
+    expect(resolved.model.capabilities.hostedTools.webSearch.runnable).toBe(true);
+    expect(resolved.model.capabilities.hostedTools.xSearch.runnable).toBe(true);
+    expect(resolved.model.capabilities.hostedTools.imageGeneration.runnable).toBe(true);
+  });
+
+  test("the built-in never claims a supergrok/ id", () => {
+    const base = withEnv(
+      {
+        OPENGENI_OPENAI_API_KEY: "sk-test",
+        OPENGENI_OPENAI_MODEL: "gpt-5.6-sol",
+      },
+      () => getSettings(),
+    );
+    const settings = withXaiSubscriptionCatalogProvider({
+      ...base,
+      openaiModel: "supergrok/grok-4.5",
+    });
+    const matches = configuredModels(settings).filter((model) => model.id === "supergrok/grok-4.5");
+    expect(matches).toHaveLength(1);
+    expect(matches[0]!.providerId).toBe("supergrok-subscription");
+  });
+
   test("Codex catalog overlay uses the same product labels as OpenAI", () => {
     const settings = withEnv(
       {
@@ -1657,6 +1716,10 @@ function withEnv<T>(env: NodeJS.ProcessEnv, fn: () => T): T {
 }
 
 describe("policyProviderIdForModel", () => {
+  test("supergrok/ id attributes to the subscription provider even on base settings", () => {
+    const settings = withEnv({ OPENGENI_OPENAI_API_KEY: "sk-test" }, () => getSettings());
+    expect(policyProviderIdForModel(settings, "supergrok/grok-4.5")).toBe("supergrok-subscription");
+  });
   // The attribution the workspace model policy evaluates MUST agree with the
   // real router on every path — especially the two that historically leaked:
   // a codex/ id evaluated against BASE settings (no overlay injected), and an

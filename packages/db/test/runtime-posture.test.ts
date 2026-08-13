@@ -11,6 +11,8 @@ import {
   RUNTIME_READ_ONLY_TABLES,
   RUNTIME_READ_UPDATE_TABLES,
   RUNTIME_TABLE_PRIVILEGES,
+  RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
+  RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES,
   type RuntimeDatabasePosture,
   type RuntimeDatabasePostureOptions,
   type RuntimeTablePosture,
@@ -53,6 +55,31 @@ function canonicalHumanIdentityAuthorityTables(): RuntimeTablePosture[] {
     "canonical_human_identity_operations",
     "canonical_human_identity_subjects",
     "canonical_human_login_bindings",
+  ].map((name) => ({
+    name,
+    owner: "opengeni_migrator",
+    rlsEnabled: false,
+    rlsForced: false,
+    rlsActive: false,
+    policyCount: 0,
+    artifactOutboxDispatcherPolicy: false,
+    artifactMaterializerPolicy: false,
+    select: false,
+    insert: false,
+    update: false,
+    delete: false,
+    truncate: false,
+    references: false,
+    trigger: false,
+  }));
+}
+
+function xaiAuthorityTables(): RuntimeTablePosture[] {
+  return [
+    "organization_memberships",
+    "organization_user_resource_authorities",
+    "workspace_memberships",
+    "xai_subscription_credentials",
   ].map((name) => ({
     name,
     owner: "opengeni_migrator",
@@ -124,82 +151,19 @@ function safePosture(): RuntimeDatabasePosture {
         references: false,
         trigger: false,
       },
-      {
-        name: "sessions",
-        owner: "opengeni_migrator",
-        rlsEnabled: false,
-        rlsForced: false,
-        rlsActive: false,
-        policyCount: 0,
-        artifactOutboxDispatcherPolicy: false,
-        artifactMaterializerPolicy: false,
-        select: false,
-        insert: false,
-        update: false,
-        delete: false,
-        truncate: false,
-        references: false,
-        trigger: false,
-      },
       ...knowledgeAuthorityTables(),
       ...canonicalHumanIdentityAuthorityTables(),
+      ...xaiAuthorityTables(),
     ],
-    targetRoutines: [
-      {
-        name: "fork_session_content(uuid, uuid, uuid, text, uuid, text, text, text)",
-        owner: "opengeni_migrator",
-        execute: true,
-        publicExecute: false,
-        securityDefiner: true,
-      },
-      {
-        name: "knowledge_source_sync_lock_authority(uuid, uuid, uuid)",
-        owner: "opengeni_migrator",
-        execute: true,
-        publicExecute: false,
-        securityDefiner: true,
-      },
-      {
-        name: "ensure_managed_human_personal_workspace(uuid, text, uuid)",
-        owner: "opengeni_migrator",
-        execute: true,
-        publicExecute: false,
-        securityDefiner: true,
-      },
-      ...[
-        "ensure_canonical_human_identity(text, text)",
-        "validate_canonical_human_session(text, text, boolean)",
-        "get_canonical_human_identity_projection(text)",
-        "apply_canonical_human_identity_operation(uuid, text, bigint, text, uuid, text, text, text)",
-      ].map((name) => ({
+    targetRoutines: RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.map((name) => ({
+      name,
+      owner: "opengeni_migrator",
+      execute: true,
+      publicExecute: false,
+      securityDefiner: !(RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES as readonly string[]).includes(
         name,
-        owner: "opengeni_migrator",
-        execute: true,
-        publicExecute: false,
-        securityDefiner: true,
-      })),
-      {
-        name: "session_private_actor_visible(uuid, uuid, uuid, text)",
-        owner: "opengeni_migrator",
-        execute: true,
-        publicExecute: false,
-        securityDefiner: true,
-      },
-      {
-        name: "session_reference_visible(uuid, uuid, uuid)",
-        owner: "opengeni_migrator",
-        execute: true,
-        publicExecute: false,
-        securityDefiner: false,
-      },
-      {
-        name: "transition_session_visibility(uuid, uuid, uuid, text, text, integer, text, text)",
-        owner: "opengeni_migrator",
-        execute: true,
-        publicExecute: false,
-        securityDefiner: true,
-      },
-    ],
+      ),
+    })),
     privateRoutines: [
       {
         name: "workspace_rls_visible(uuid, uuid)",
@@ -215,11 +179,6 @@ describe("runtime database posture evaluator", () => {
   test("freezes the unique, sorted current-ledger table privilege classes", () => {
     const hasOpe121SlackPublicationLedger = FORCE_RLS_TABLES.includes("memory_slack_publications");
     if (hasOpe121SlackPublicationLedger) {
-      const sessionVisibilityProtectedTableDelta = FORCE_RLS_TABLES.includes(
-        "session_visibility_write_capabilities",
-      )
-        ? 1
-        : 0;
       const hasCurrentMainActivityLedger = new Set<string>(FORCE_RLS_TABLES).has(
         "slack_user_link_access_request_operations",
       );
@@ -232,40 +191,35 @@ describe("runtime database posture evaluator", () => {
         .sort();
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 226],
+            [FORCE_RLS_TABLES, 232],
             [NON_RLS_RUNTIME_TABLES, 11],
-            [RUNTIME_FULL_DML_TABLES, 133],
+            [RUNTIME_FULL_DML_TABLES, 138],
             [RUNTIME_READ_ONLY_TABLES, 17],
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 42],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 29],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 15],
-            [RUNTIME_DML_TABLES, 222],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 16],
+            [RUNTIME_DML_TABLES, 227],
           ] as const)
         : ([
-            [FORCE_RLS_TABLES, 177],
+            [FORCE_RLS_TABLES, 183],
             [NON_RLS_RUNTIME_TABLES, 11],
-            [RUNTIME_FULL_DML_TABLES, 107],
+            [RUNTIME_FULL_DML_TABLES, 112],
             [RUNTIME_READ_ONLY_TABLES, 16],
             [readUpdateTables, 0],
             [RUNTIME_READ_INSERT_TABLES, 38],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 12],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 15],
-            [RUNTIME_DML_TABLES, 173],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 16],
+            [RUNTIME_DML_TABLES, 178],
           ] as const);
       for (const [tables, length] of contracts) {
-        const protectedTableDelta =
-          tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
-            ? sessionVisibilityProtectedTableDelta
-            : 0;
-        expect(tables).toHaveLength(length + protectedTableDelta);
+        expect(tables).toHaveLength(length);
         expect(new Set(tables).size).toBe(tables.length);
         expect([...tables].sort()).toEqual([...tables]);
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount =
-        (hasCurrentMainActivityLedger ? 237 : 188) + sessionVisibilityProtectedTableDelta;
+      const tableCount = hasCurrentMainActivityLedger ? 243 : 194;
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount,
       );
@@ -324,27 +278,25 @@ describe("runtime database posture evaluator", () => {
     }
 
     const contracts = [
-      [FORCE_RLS_TABLES, 201],
+      [FORCE_RLS_TABLES, 207],
       [NON_RLS_RUNTIME_TABLES, 11],
-      [RUNTIME_FULL_DML_TABLES, 128],
+      [RUNTIME_FULL_DML_TABLES, 133],
       [RUNTIME_READ_ONLY_TABLES, 14],
       [RUNTIME_READ_UPDATE_TABLES, 1],
       [RUNTIME_READ_INSERT_TABLES, 41],
       [RUNTIME_READ_INSERT_UPDATE_TABLES, 18],
-      [PROTECTED_NO_DIRECT_DML_TABLES, 15],
-      [RUNTIME_DML_TABLES, 202],
+      [PROTECTED_NO_DIRECT_DML_TABLES, 16],
+      [RUNTIME_DML_TABLES, 207],
     ] as const;
     for (const [tables, length] of contracts) {
-      const protectedTableDelta =
-        tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES ? 1 : 0;
-      expect(tables).toHaveLength(length + protectedTableDelta);
+      expect(tables).toHaveLength(length);
       expect(new Set(tables).size).toBe(tables.length);
       expect([...tables].sort()).toEqual([...tables]);
     }
 
     expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-    expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(218);
-    expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(213);
+    expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(223);
+    expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(218);
     expect(RUNTIME_TABLE_PRIVILEGES.editable_artifact_session_links).toEqual([
       "SELECT",
       "INSERT",
@@ -379,6 +331,17 @@ describe("runtime database posture evaluator", () => {
   test("accepts public-schema authority owned by the two protected tables", () => {
     const posture = safePosture();
     posture.schemas[0]!.owner = "pg_database_owner";
+    for (const routine of posture.targetRoutines) {
+      if (
+        routine.name === "fork_session_content(uuid, uuid, uuid, text, uuid, text, text, text)" ||
+        routine.name === "session_private_actor_visible(uuid, uuid, uuid, text)" ||
+        routine.name === "session_reference_visible(uuid, uuid, uuid)" ||
+        routine.name ===
+          "transition_session_visibility(uuid, uuid, uuid, text, text, integer, text, text)"
+      ) {
+        routine.owner = "pg_database_owner";
+      }
+    }
 
     expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
   });
@@ -449,6 +412,16 @@ describe("runtime database posture evaluator", () => {
       expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain(table);
       expect(RUNTIME_TABLE_PRIVILEGES[table]).toBeUndefined();
     }
+  });
+
+  test("rejects xAI authority routine and table owner mismatch", () => {
+    const posture = safePosture();
+    posture.tables.find((table) => table.name === "xai_subscription_credentials")!.owner =
+      "another_owner";
+
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "target-schema runtime capability create_xai_subscription_credential(uuid, uuid, text, text, text, text, text, text, text, timestamp with time zone) authority table owners do not match: organization_memberships=opengeni_migrator, organization_user_resource_authorities=opengeni_migrator, workspace_memberships=opengeni_migrator, xai_subscription_credentials=another_owner",
+    );
   });
 
   test("rejects bypass, inheritance, ownership, memberships, and inactive RLS", () => {

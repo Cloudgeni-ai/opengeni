@@ -451,10 +451,11 @@ describe("migration 0219 managed-human organization provisioning", () => {
         has_table_privilege('opengeni_app', c.oid, 'DELETE') as "appDelete"
       from pg_class c
       join pg_namespace n on n.oid = c.relnamespace
-      join pg_policy p on p.polrelid = c.oid
+      join pg_policy p
+        on p.polrelid = c.oid
+        and p.polname = 'organization_tenancy_lifecycle'
       where n.nspname = current_schema()
         and c.relname = any(${shared.admin.array([...tenancyTables])})
-        and p.polname = 'organization_tenancy_lifecycle'
       order by c.relname
     `;
     expect(policyRows).toHaveLength(tenancyTables.length);
