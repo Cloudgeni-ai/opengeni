@@ -65,7 +65,11 @@ import { cn } from "../lib/cn";
 import { copyTextToClipboard } from "../lib/clipboard";
 import { formatBytes } from "../lib/format";
 import type { EmbeddedBrowserInteractionClientOverride } from "../session-context";
-import { browserKey } from "./browser-input";
+import {
+  browserKey,
+  HUMAN_BROWSER_HOME_URL,
+  normalizeBrowserAddress,
+} from "./browser-input";
 import { InteractionInterventionBanner } from "./interaction-intervention-banner";
 
 export type BrowserViewerNotification = {
@@ -499,6 +503,7 @@ export function BrowserViewer({
           // through browser_open; if an agent creates one it is still visible in
           // the shared BrowserSession switcher.
           headless: false,
+          initialUrl: HUMAN_BROWSER_HOME_URL,
           ...(device
             ? {
                 placement: {
@@ -747,7 +752,7 @@ export function BrowserViewer({
             }
             onOpen={() =>
               void browser
-                .openTarget()
+                .openTarget(HUMAN_BROWSER_HOME_URL)
                 .catch((cause) => notifyError(cause, "Could not open a tab."))
             }
           />
@@ -2584,18 +2589,6 @@ function browserPoint(
     x: Math.max(0, pixelX / frame.deviceScaleFactor),
     y: Math.max(0, pixelY / frame.deviceScaleFactor),
   };
-}
-
-function normalizeBrowserAddress(value: string): string | null {
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-  const candidate = /^[a-z][a-z0-9+.-]*:/iu.test(trimmed) ? trimmed : `https://${trimmed}`;
-  try {
-    const url = new URL(candidate);
-    return ["http:", "https:", "about:"].includes(url.protocol) ? url.href : null;
-  } catch {
-    return null;
-  }
 }
 
 function semanticNodes(roots: readonly InteractionSemanticNode[]): InteractionSemanticNode[] {
