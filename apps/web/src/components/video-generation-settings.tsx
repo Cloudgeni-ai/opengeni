@@ -8,6 +8,11 @@ import { Select } from "@/components/ui/select";
 import { useAppContext } from "@/context";
 
 const SEEDANCE_2_5 = "bytedance/seedance-2.5";
+const GROK_IMAGINE_VIDEO_1_5 = "xai/grok-imagine-video-1.5";
+
+function modelForFunding(source: VideoGenerationFundingSource): string {
+  return source === "supergrok_subscription" ? GROK_IMAGINE_VIDEO_1_5 : SEEDANCE_2_5;
+}
 
 export function VideoGenerationPreferenceRow({
   workspaceId,
@@ -35,7 +40,7 @@ export function VideoGenerationPreferenceRow({
     return () => controller.abort();
   }, [client, refreshKey, workspaceId]);
 
-  const enabled = settings?.policy.enabledModelIds.includes(SEEDANCE_2_5) === true;
+  const enabled = settings?.policy.enabledModelIds.length === 1;
   const selectedFundingSource =
     settings?.fundingOptions.find(
       (option) => option.source === settings.policy.fundingSource && option.available,
@@ -46,9 +51,10 @@ export function VideoGenerationPreferenceRow({
   const selectedFunding = settings?.fundingOptions.find(
     (option) => option.source === selectedFundingSource,
   );
+  const selectedModelId = modelForFunding(selectedFundingSource);
   const available =
     selectedFunding?.available === true &&
-    settings?.availableModels.some((model) => model.modelId === SEEDANCE_2_5) === true;
+    settings?.availableModels.some((model) => model.modelId === selectedModelId) === true;
 
   async function updatePolicy(fundingSource: VideoGenerationFundingSource, nextEnabled: boolean) {
     if (!settings || !canManage || saving) return;
@@ -57,8 +63,8 @@ export function VideoGenerationPreferenceRow({
       const policy = await client.updateVideoGenerationPolicy(workspaceId, {
         expectedRevision: settings.policy.revision,
         fundingSource,
-        enabledModelIds: nextEnabled ? [SEEDANCE_2_5] : [],
-        defaultModelId: nextEnabled ? SEEDANCE_2_5 : null,
+        enabledModelIds: nextEnabled ? [modelForFunding(fundingSource)] : [],
+        defaultModelId: nextEnabled ? modelForFunding(fundingSource) : null,
       });
       setSettings((current) => (current ? { ...current, policy } : current));
       return policy;
@@ -86,7 +92,9 @@ export function VideoGenerationPreferenceRow({
       toast.success(
         fundingSource === "opengeni_credits"
           ? "Video generation will use OpenGeni credits"
-          : "Video generation will use your Gateway",
+          : fundingSource === "supergrok_subscription"
+            ? "Video generation will use SuperGrok"
+            : "Video generation will use your Gateway",
       );
     } catch (error) {
       toast.error("Couldn't update video generation funding", {
@@ -103,7 +111,7 @@ export function VideoGenerationPreferenceRow({
         failed
           ? "Video generation settings are unavailable."
           : !settings
-            ? "Loading Seedance 2.5 availability…"
+            ? "Loading video generation availability…"
             : selectedFunding?.available
               ? selectedFunding.description
               : (selectedFunding?.unavailableReason ?? "No video funding route is configured.")

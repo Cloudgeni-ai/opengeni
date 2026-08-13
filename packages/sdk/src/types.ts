@@ -148,6 +148,7 @@ export type SyncSessionRealtimeLedgerResponse = {
 
 export type SessionRealtimeModel =
   | "gpt-live-1-boulder-alpha"
+  | "supergrok/grok-voice-think-fast-2.0"
   | "opengeni-gateway/openai/gpt-realtime-2.1"
   | "opengeni-gateway/openai/gpt-realtime-mini"
   | "opengeni-gateway/xai/grok-voice-think-fast-2.0"
@@ -158,7 +159,7 @@ export type SessionRealtimeModel =
 export type WorkspaceRealtimeModelCatalogItem = {
   id: SessionRealtimeModel;
   label: string;
-  provider: "OpenGeni" | "Connected Codex" | "Your Gateway";
+  provider: "OpenGeni" | "Connected Codex" | "Connected SuperGrok" | "Your Gateway";
   description: string;
   available: boolean;
   unavailableReason: string | null;
@@ -4230,7 +4231,10 @@ export type UpdateVideoGenerationPolicyRequest = {
   defaultModelId: string | null;
 };
 
-export type VideoGenerationFundingSource = "opengeni_credits" | "workspace_gateway";
+export type VideoGenerationFundingSource =
+  | "opengeni_credits"
+  | "workspace_gateway"
+  | "supergrok_subscription";
 
 export type VideoGenerationFundingOption = {
   source: VideoGenerationFundingSource;

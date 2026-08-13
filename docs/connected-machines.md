@@ -95,6 +95,13 @@ Rules to keep in mind:
   target the backend is the machine itself, so leave it off (or `"none"`) and
   point at the machine with `targetSandboxId`.
 
+The model-facing first-party `session_create` tool makes the dependency
+structural: it accepts an optional `machineTarget` object containing required
+`targetSandboxId` plus optional `workingDir`, then maps that object to the stable
+flat REST/SDK fields above. Consequently the model cannot generate a standalone
+`workingDir`. This is a model-contract hardening only; existing REST/SDK callers
+continue to use the flat fields.
+
 ## Discover machines + metrics
 
 `listMachines` returns the workspace fleet plus the active-sandbox pointer. Pass

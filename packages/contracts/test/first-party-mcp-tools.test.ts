@@ -130,4 +130,62 @@ describe("first-party MCP tool-name contract", () => {
       }).success,
     ).toBe(false);
   });
+
+  test("accepts paired agent-attempt depth claims and rejects partial or non-agent claims", () => {
+    const base = {
+      accountId: crypto.randomUUID(),
+      workspaceId: crypto.randomUUID(),
+      subjectId: "worker:first-party-mcp",
+      permissions: ["sessions:create" as const],
+      principalKind: "agent_attempt" as const,
+      sessionId: crypto.randomUUID(),
+      turnId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      executionGeneration: 1,
+      exp: Math.floor(Date.now() / 1000) + 60,
+    };
+    expect(
+      DelegatedAccessTokenPayload.safeParse({
+        ...base,
+        nestedAgentDepth: 2,
+        effectiveMaxNestedAgentDepth: 3,
+      }).success,
+    ).toBe(true);
+    expect(
+      DelegatedAccessTokenPayload.safeParse({
+        ...base,
+        nestedAgentDepth: 2,
+      }).success,
+    ).toBe(false);
+    expect(
+      DelegatedAccessTokenPayload.safeParse({
+        ...base,
+        principalKind: "service",
+        sessionId: undefined,
+        turnId: undefined,
+        attemptId: undefined,
+        executionGeneration: undefined,
+        nestedAgentDepth: 0,
+        effectiveMaxNestedAgentDepth: 3,
+      }).success,
+    ).toBe(false);
+  });
+
+  test("preserves advanced public session-create compatibility outside the model surface", () => {
+    const targetSandboxId = crypto.randomUUID();
+    expect(
+      CreateSessionRequest.parse({
+        initialMessage: "advanced public caller",
+        maxNestedAgentDepth: 0,
+        sandbox: "shared",
+        targetSandboxId,
+        workingDir: "/srv/worktree",
+      }),
+    ).toMatchObject({
+      maxNestedAgentDepth: 0,
+      sandbox: "shared",
+      targetSandboxId,
+      workingDir: "/srv/worktree",
+    });
+  });
 });

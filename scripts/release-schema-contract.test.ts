@@ -110,15 +110,15 @@ describe("release schema contract", () => {
   });
 
   test("preserves published host-export history and appends the forward repair", async () => {
-    const sourceWithCompanyBrain = await buildSchemaContract();
+    const completeSourceContract = await buildSchemaContract();
     const companyBrainMigrationPaths = [
       "0238_goal_persistence_policy.sql",
       "0239_task_tree_notes.sql",
     ].filter((path) =>
-      sourceWithCompanyBrain.migrations.some((migration) => migration.path === path),
+      completeSourceContract.migrations.some((migration) => migration.path === path),
     );
     const companyBrainMigrations = new Map(
-      sourceWithCompanyBrain.migrations.map((migration) => [migration.path, migration]),
+      completeSourceContract.migrations.map((migration) => [migration.path, migration]),
     );
     const goalPersistence = companyBrainMigrations.get("0238_goal_persistence_policy.sql");
     if (goalPersistence) {
@@ -128,34 +128,49 @@ describe("release schema contract", () => {
     if (taskTreeNotes) {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
-    const transitionReaper = sourceWithCompanyBrain.migrations.find(
-      (migration) => migration.path === "0237_interaction_transition_reaper.sql",
+    const appendedMigrationPaths = [
+      "0237_interaction_transition_reaper.sql",
+      "0238_supergrok_realtime_model.sql",
+      "0239_supergrok_video_funding.sql",
+    ].filter((path) =>
+      completeSourceContract.migrations.some((migration) => migration.path === path),
     );
-    const forwardMigrationPaths = [
-      ...companyBrainMigrationPaths,
-      ...(transitionReaper ? [transitionReaper.path] : []),
-    ];
+    const forwardMigrationPaths = [...companyBrainMigrationPaths, ...appendedMigrationPaths];
     const sourceContract =
       forwardMigrationPaths.length > 0
         ? await contractWithoutMigrations(forwardMigrationPaths)
-        : sourceWithCompanyBrain;
+        : completeSourceContract;
+    const transitionReaper = completeSourceContract.migrations.find(
+      (migration) => migration.path === "0237_interaction_transition_reaper.sql",
+    );
     if (transitionReaper) {
       expect(transitionReaper).toMatchObject({ deploymentMode: "maintenance" });
     }
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0238_supergrok_realtime_model.sql",
+      ),
+    ).toMatchObject({
+      sha256: "1992505e5994cbef2d650b0eebae2a6c033b567ecbb9cf27301846c500dea66a",
+      deploymentMode: "rolling",
+    });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0239_supergrok_video_funding.sql",
+      ),
+    ).toMatchObject({
+      sha256: "fbe4c79cb20c809767dad12e697ab6ad1becfc8b03eb314cbda38d6069a258f1",
+      deploymentMode: "rolling",
+    });
     const migrations = new Map(
       sourceContract.migrations.map((migration) => [migration.path, migration]),
     );
     const sessionVisibilityContractHash = (includesActivation: boolean): string | null => {
       if (!migrations.has("0236_session_visibility_slack_policy.sql")) return null;
       if (migrations.has("0228_interaction_controller_data_plane.sql")) {
-        if (migrations.has("0230_user_scoped_variable_sets_rigs.sql")) {
-          return includesActivation
-            ? "2f0bfa7a465e47bbca27a79cc594f953e59a94e42ff704ab11e258523d19ad42"
-            : "712d1680b4aa6e22346fc2f2ef33458543e8fcd0025b5d793d996ef5ec586452";
-        }
         return includesActivation
-          ? "cd849d761b5d79454d213a3c26d5d20ab0906db3ba1462866dfa7893f2ff417b"
-          : "71ec3a7b1a61c681eba76d88d22dae8e1f3c3d1f194f1732e1b5ba4ffe703238";
+          ? "2f0bfa7a465e47bbca27a79cc594f953e59a94e42ff704ab11e258523d19ad42"
+          : "712d1680b4aa6e22346fc2f2ef33458543e8fcd0025b5d793d996ef5ec586452";
       }
       if (migrations.has("0229_slack_inbox_file_fact.sql")) {
         return includesActivation
@@ -620,12 +635,10 @@ describe("release schema contract", () => {
         deploymentMode: "rolling",
       });
     }
-    if (migrations.has("0230_user_scoped_variable_sets_rigs.sql")) {
-      expect(migrations.get("0230_user_scoped_variable_sets_rigs.sql")).toMatchObject({
-        sha256: "560adbe658efa212ec44ad18f6af22ac874568d60a331beddae4102d00a09e5f",
-        deploymentMode: "rolling",
-      });
-    }
+    expect(migrations.get("0230_user_scoped_variable_sets_rigs.sql")).toMatchObject({
+      sha256: "560adbe658efa212ec44ad18f6af22ac874568d60a331beddae4102d00a09e5f",
+      deploymentMode: "rolling",
+    });
     expect(migrations.get("0226_personal_codex_authority_foundation.sql")).toMatchObject({
       sha256: "34b72f6ab031596c90f2f35957c707aaf013c2f52aee8ca92a70fdb8ab9cb9ce",
       deploymentMode: "rolling",

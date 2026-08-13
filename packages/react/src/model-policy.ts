@@ -1,6 +1,10 @@
 import type { ClientModel, ReasoningEffort, WorkspaceModelCatalogModel } from "@opengeni/sdk";
 
-export type PickerBillingClass = "opengeni_credits" | "codex_subscription" | "byok";
+export type PickerBillingClass =
+  | "opengeni_credits"
+  | "codex_subscription"
+  | "supergrok_subscription"
+  | "byok";
 
 export type PickerModelRow<TCatalog extends ClientModel = WorkspaceModelCatalogModel> = {
   id: string;
@@ -21,12 +25,14 @@ export type LatencyModeId = "standard" | "priority" | "fast";
 const BILLING_CLASS_ORDER: PickerBillingClass[] = [
   "opengeni_credits",
   "codex_subscription",
+  "supergrok_subscription",
   "byok",
 ];
 
 const BILLING_CLASS_LABELS: Record<PickerBillingClass, string> = {
   opengeni_credits: "OpenGeni",
   codex_subscription: "Codex",
+  supergrok_subscription: "SuperGrok",
   byok: "Your Gateway",
 };
 
@@ -41,6 +47,9 @@ const AVAILABILITY_REASON_LABELS: Record<string, string> = {
 };
 
 export function billingClassForModel(model: ClientModel): PickerBillingClass {
+  if (model.source === "supergrok") {
+    return "supergrok_subscription";
+  }
   if (model.source === "codex") {
     return "codex_subscription";
   }
@@ -48,7 +57,9 @@ export function billingClassForModel(model: ClientModel): PickerBillingClass {
     return "byok";
   }
   if (model.credentialSource?.kind === "connected_subscription") {
-    return "codex_subscription";
+    return model.credentialSource.provider === "xai"
+      ? "supergrok_subscription"
+      : "codex_subscription";
   }
   if (model.credentialSource?.kind === "workspace_connection") {
     return "byok";
@@ -135,7 +146,9 @@ export function payerSummaryForModel(model: ClientModel): string {
     return "OpenGeni credits · automatic managed route";
   }
   if (billing.upstreamPayer === "connected_subscription") {
-    return "Codex subscription · external billing";
+    return model.source === "supergrok"
+      ? "SuperGrok subscription · external billing"
+      : "Codex subscription · external billing";
   }
   if (billing.upstreamPayer === "workspace") {
     return "Billed to your AI Gateway";
@@ -149,7 +162,9 @@ export function advancedSourceSummary(model: ClientModel): string | null {
     return null;
   }
   if (source.kind === "connected_subscription") {
-    return "Connected Codex subscription";
+    return source.provider === "xai"
+      ? "Connected SuperGrok subscription"
+      : "Connected Codex subscription";
   }
   if (source.kind === "workspace_connection") {
     return "Workspace AI Gateway";

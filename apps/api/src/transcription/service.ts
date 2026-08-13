@@ -14,6 +14,7 @@ import type { Database } from "@opengeni/db";
 import { createAzureOpenAiTranscriptionProvider } from "./providers/azure-openai";
 import { createCodexSubscriptionTranscriptionProvider } from "./providers/codex-subscription";
 import { createOpenAiTranscriptionProvider } from "./providers/openai";
+import { createXaiSubscriptionTranscriptionProvider } from "./providers/xai-subscription";
 
 export function createTranscriptionService(input: {
   settings: Settings;
@@ -45,6 +46,12 @@ export function createTranscriptionService(input: {
             db: input.db,
             ...(input.codexFetch ? { fetch: input.codexFetch } : {}),
             ...(input.probeCodex ? { probe: input.probeCodex } : {}),
+          });
+        case "supergrok-subscription":
+          return createXaiSubscriptionTranscriptionProvider({
+            settings: input.settings,
+            db: input.db,
+            ...(input.fetch ? { fetch: input.fetch } : {}),
           });
         default:
           throw new Error("Unsupported voice-input provider.");
@@ -95,8 +102,14 @@ export function createTranscriptionService(input: {
         });
       }
       const provider = request.providerId
-        ? await exactAvailable(providers, request.providerId, { workspaceId: request.workspaceId })
-        : await firstAvailable(providers, { workspaceId: request.workspaceId });
+        ? await exactAvailable(providers, request.providerId, {
+            workspaceId: request.workspaceId,
+            subjectId: request.subjectId,
+          })
+        : await firstAvailable(providers, {
+            workspaceId: request.workspaceId,
+            subjectId: request.subjectId,
+          });
       if (!provider) {
         throw new TranscriptionServiceError({
           code: "unavailable",
@@ -131,6 +144,8 @@ export function createTranscriptionService(input: {
           mimeType,
           filename: filenameForMimeType(mimeType),
           workspaceId: request.workspaceId,
+          accountId: request.accountId,
+          subjectId: request.subjectId,
           requestId: request.requestId,
           signal: deadline.signal,
         });

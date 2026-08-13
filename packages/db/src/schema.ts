@@ -624,6 +624,13 @@ export const workspaceVariableSets = pgTable(
       .references(() => workspaces.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
     description: text("description"),
+    // Migration 0230 is schema-only: all shipped CRUD continues to omit these
+    // fields and therefore remains workspace-scoped. A later activation slice
+    // must provide the complete owner authority and runtime protocol.
+    authorityScope: text("authority_scope").notNull().default("workspace"),
+    authorityId: uuid("authority_id"),
+    ownerOrganizationMembershipId: uuid("owner_organization_membership_id"),
+    originWorkspaceId: uuid("origin_workspace_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -636,6 +643,33 @@ export const workspaceVariableSets = pgTable(
       table.workspaceId,
       table.createdAt,
     ),
+    authorityShape: check(
+      "workspace_variable_sets_authority_shape_check",
+      sql`(
+          ${table.authorityScope} = 'workspace'
+          and ${table.authorityId} is null
+          and ${table.ownerOrganizationMembershipId} is null
+        ) or (
+          ${table.authorityScope} = 'user'
+          and ${table.authorityId} is not null
+          and ${table.ownerOrganizationMembershipId} is not null
+        )`,
+    ),
+    authorityScopeValid: check(
+      "workspace_variable_sets_authority_scope_check",
+      sql`${table.authorityScope} in ('workspace', 'user')`,
+    ),
+    authority: foreignKey({
+      name: "workspace_variable_sets_authority_fk",
+      columns: [table.authorityId, table.accountId, table.ownerOrganizationMembershipId],
+      foreignColumns: [
+        organizationUserResourceAuthorities.id,
+        organizationUserResourceAuthorities.accountId,
+        organizationUserResourceAuthorities.organizationMembershipId,
+      ],
+    }).onDelete("restrict"),
+    // PostgreSQL's column-subset SET NULL action preserves account_id; Drizzle
+    // cannot represent that action, so migration 0230 owns the origin FK.
   }),
 );
 
@@ -2904,6 +2938,7 @@ export const sessionRealtimeModes = pgTable(
       "session_realtime_modes_model_check",
       sql`${table.model} in (
         'gpt-live-1-boulder-alpha',
+        'supergrok/grok-voice-think-fast-2.0',
         'opengeni-gateway/openai/gpt-realtime-2.1',
         'opengeni-gateway/openai/gpt-realtime-mini',
         'opengeni-gateway/xai/grok-voice-think-fast-2.0',
@@ -3649,7 +3684,7 @@ export const workspaceVideoGenerationPolicies = pgTable(
     ),
     fundingSourceValid: check(
       "workspace_video_generation_policies_funding_source_chk",
-      sql`${table.fundingSource} in ('opengeni_credits', 'workspace_gateway')`,
+      sql`${table.fundingSource} in ('opengeni_credits', 'workspace_gateway', 'supergrok_subscription')`,
     ),
   }),
 );
@@ -3822,11 +3857,15 @@ export const videoGenerationOperations = pgTable(
               and ((${table.status} in ('provider_failed','cancelled_before_submit','outcome_unknown','retention_failed')
                     and ${table.creditState} = 'refunded')
                 or (${table.status} not in ('provider_failed','cancelled_before_submit','outcome_unknown','retention_failed')
-                    and ${table.creditState} = 'debited')))))`,
+                    and ${table.creditState} = 'debited'))))
+        or (${table.fundingSource} = 'supergrok_subscription'
+          and ${table.connectionId} is null
+          and ${table.pricedCostMicros} = 0
+          and ${table.creditState} = 'not_applicable'))`,
     ),
     fundingValuesValid: check(
       "video_generation_operations_funding_values_chk",
-      sql`${table.fundingSource} in ('opengeni_credits','workspace_gateway')
+      sql`${table.fundingSource} in ('opengeni_credits','workspace_gateway','supergrok_subscription')
         and ${table.pricedCostMicros} between 0 and 1000000000
         and ${table.creditState} in ('not_applicable','debited','refunded')`,
     ),
@@ -9184,12 +9223,44 @@ export const rigs = pgTable(
     description: text("description"),
     // Attribution string: 'user:<subject>' | 'session:<id>' | 'system'.
     createdBy: text("created_by"),
+    // Inert migration-0230 identity foundation. Existing DAO/API/runtime paths
+    // omit these fields and keep their historical workspace authority.
+    authorityScope: text("authority_scope").notNull().default("workspace"),
+    authorityId: uuid("authority_id"),
+    ownerOrganizationMembershipId: uuid("owner_organization_membership_id"),
+    originWorkspaceId: uuid("origin_workspace_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
     workspaceName: uniqueIndex("rigs_workspace_name_idx").on(table.workspaceId, table.name),
     workspaceCreated: index("rigs_workspace_created_idx").on(table.workspaceId, table.createdAt),
+    authorityShape: check(
+      "rigs_authority_shape_check",
+      sql`(
+          ${table.authorityScope} = 'workspace'
+          and ${table.authorityId} is null
+          and ${table.ownerOrganizationMembershipId} is null
+        ) or (
+          ${table.authorityScope} = 'user'
+          and ${table.authorityId} is not null
+          and ${table.ownerOrganizationMembershipId} is not null
+        )`,
+    ),
+    authorityScopeValid: check(
+      "rigs_authority_scope_check",
+      sql`${table.authorityScope} in ('workspace', 'user')`,
+    ),
+    authority: foreignKey({
+      name: "rigs_authority_fk",
+      columns: [table.authorityId, table.accountId, table.ownerOrganizationMembershipId],
+      foreignColumns: [
+        organizationUserResourceAuthorities.id,
+        organizationUserResourceAuthorities.accountId,
+        organizationUserResourceAuthorities.organizationMembershipId,
+      ],
+    }).onDelete("restrict"),
+    // Migration 0230 owns the origin-workspace FK's column-subset SET NULL.
   }),
 );
 

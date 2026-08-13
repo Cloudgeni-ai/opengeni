@@ -362,12 +362,18 @@ export function registerResumableTranscriptionRoutes(app: Hono, deps: ApiRouteDe
         if (
           !deps.objectStorage ||
           !service ||
-          !(await service.available({ workspaceId: authority.workspaceId }))
+          !(await service.available({
+            workspaceId: authority.workspaceId,
+            subjectId: authority.subjectId,
+          }))
         ) {
           return c.json({ code: "unavailable" }, 503);
         }
         const selectedProvider = service.selectProvider
-          ? await service.selectProvider({ workspaceId: authority.workspaceId })
+          ? await service.selectProvider({
+              workspaceId: authority.workspaceId,
+              subjectId: authority.subjectId,
+            })
           : "host";
         if (!selectedProvider) return c.json({ code: "unavailable" }, 503);
         attemptId = correlationId(c);
@@ -418,6 +424,7 @@ export function registerResumableTranscriptionRoutes(app: Hono, deps: ApiRouteDe
         const result = await service.transcribe({
           workspaceId: authority.workspaceId,
           accountId: authority.accountId,
+          subjectId: authority.subjectId,
           audio: stored.bytes,
           mimeType: "audio/wav",
           durationSeconds: claim.segment.durationMilliseconds / 1_000,

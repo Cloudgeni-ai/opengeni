@@ -713,9 +713,9 @@ describe("accepted turn execution identity", () => {
     expect(
       turnExecutionPolicyBillingIdentity({
         ...base,
-        productModelId: "supergrok/grok-4.5",
+        productModelId: "supergrok/grok-4.6",
         providerId: "supergrok-subscription",
-        upstreamModelId: "grok-4.5",
+        upstreamModelId: "grok-4.6",
         credentialSource: { kind: "connected_subscription", provider: "xai" },
         billing: { upstreamPayer: "connected_subscription", metering: "external" },
       }),

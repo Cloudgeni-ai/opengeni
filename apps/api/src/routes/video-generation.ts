@@ -10,10 +10,12 @@ import {
   getWorkspaceVideoGenerationPolicy,
   updateWorkspaceVideoGenerationPolicy,
   VideoGenerationConflictError,
+  workspaceXaiSubscriptionActive,
 } from "@opengeni/db";
 import {
   requireAccessGrant,
   VIDEO_GENERATION_MODEL_CATALOG,
+  videoGenerationModelSupportsFundingSource,
   videoGenerationCapabilitiesForPolicy,
   type ApiRouteDeps,
 } from "@opengeni/core";
@@ -23,14 +25,16 @@ import { HTTPException } from "hono/http-exception";
 export function registerVideoGenerationRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/video-generation", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    const [policy, connection] = await Promise.all([
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const [policy, connection, supergrokConfigured] = await Promise.all([
       getWorkspaceVideoGenerationPolicy(deps.db, workspaceId),
       getWorkspaceVercelAiGatewayConnectionMetadata(deps.db, workspaceId),
+      workspaceXaiSubscriptionActive(deps.db, deps.settings, workspaceId, grant.subjectId),
     ]);
     const fundingOptions = videoGenerationFundingOptions({
       managedConfigured: managedVideoGenerationConfigured(deps),
       workspaceGatewayConfigured: connection !== null,
+      supergrokConfigured,
     });
     const selectedFunding = fundingOptions.find((option) => option.source === policy.fundingSource);
     const capabilities =
@@ -56,10 +60,14 @@ export function registerVideoGenerationRoutes(app: Hono, deps: ApiRouteDeps): vo
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
     const payload = UpdateVideoGenerationPolicyRequest.parse(await c.req.json());
-    const connection = await getWorkspaceVercelAiGatewayConnectionMetadata(deps.db, workspaceId);
+    const [connection, supergrokConfigured] = await Promise.all([
+      getWorkspaceVercelAiGatewayConnectionMetadata(deps.db, workspaceId),
+      workspaceXaiSubscriptionActive(deps.db, deps.settings, workspaceId, grant.subjectId),
+    ]);
     const fundingOptions = videoGenerationFundingOptions({
       managedConfigured: managedVideoGenerationConfigured(deps),
       workspaceGatewayConfigured: connection !== null,
+      supergrokConfigured,
     });
     const selectedFunding = fundingOptions.find(
       (option) => option.source === payload.fundingSource,
@@ -67,6 +75,15 @@ export function registerVideoGenerationRoutes(app: Hono, deps: ApiRouteDeps): vo
     if (payload.enabledModelIds.length > 0 && !selectedFunding?.available) {
       throw new HTTPException(422, {
         message: selectedFunding?.unavailableReason ?? "Video generation funding is unavailable",
+      });
+    }
+    if (
+      payload.enabledModelIds.some(
+        (modelId) => !videoGenerationModelSupportsFundingSource(modelId, payload.fundingSource),
+      )
+    ) {
+      throw new HTTPException(422, {
+        message: "The selected video model is unavailable for this funding source",
       });
     }
     try {
@@ -96,7 +113,10 @@ export function registerVideoGenerationRoutes(app: Hono, deps: ApiRouteDeps): vo
       workspaceId,
       c.req.param("operationId"),
     );
-    if (!summary) throw new HTTPException(404, { message: "video generation operation not found" });
+    if (!summary)
+      throw new HTTPException(404, {
+        message: "video generation operation not found",
+      });
     return c.json(VideoGenerationOperationSummary.parse(summary));
   });
 }
@@ -108,6 +128,7 @@ function managedVideoGenerationConfigured(deps: ApiRouteDeps): boolean {
 function videoGenerationFundingOptions(input: {
   managedConfigured: boolean;
   workspaceGatewayConfigured: boolean;
+  supergrokConfigured: boolean;
 }) {
   return [
     {
@@ -118,6 +139,15 @@ function videoGenerationFundingOptions(input: {
       unavailableReason: input.managedConfigured
         ? null
         : "OpenGeni-managed video generation is not configured.",
+    },
+    {
+      source: "supergrok_subscription" as const,
+      label: "SuperGrok",
+      description: "Uses your connected SuperGrok subscription.",
+      available: input.supergrokConfigured,
+      unavailableReason: input.supergrokConfigured
+        ? null
+        : "Connect an eligible SuperGrok account first.",
     },
     {
       source: "workspace_gateway" as const,

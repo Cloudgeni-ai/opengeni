@@ -9,14 +9,33 @@ type GatewayServerEvent = Record<string, unknown> & { type: string };
 
 const AUDIO_SAMPLE_RATE = 24_000;
 const DELEGATION_TOOL = "delegate_to_session";
+type RealtimeDialect = "gateway" | "xai";
 
 export function createGatewayRealtimeTransportStarter(): RealtimeControllerTransportStarter {
+  return createWebsocketRealtimeTransportStarter("gateway");
+}
+
+export function createXaiSubscriptionRealtimeTransportStarter(): RealtimeControllerTransportStarter {
+  return createWebsocketRealtimeTransportStarter("xai");
+}
+
+function createWebsocketRealtimeTransportStarter(
+  dialect: RealtimeDialect,
+): RealtimeControllerTransportStarter {
   return async (input) => {
     const client = input.client as CodexRealtimeControllerClient;
-    if (!client.negotiateGatewayRealtime) {
-      throw new Error("The OpenGeni client does not support AI Gateway realtime");
+    const negotiate =
+      dialect === "xai"
+        ? client.negotiateXaiSubscriptionRealtime?.bind(client)
+        : client.negotiateGatewayRealtime?.bind(client);
+    if (!negotiate) {
+      throw new Error(
+        dialect === "xai"
+          ? "The OpenGeni client does not support connected SuperGrok realtime"
+          : "The OpenGeni client does not support AI Gateway realtime",
+      );
     }
-    const answer = await client.negotiateGatewayRealtime(
+    const answer = await negotiate(
       input.workspaceId,
       input.sessionId,
       {
@@ -32,16 +51,22 @@ export function createGatewayRealtimeTransportStarter(): RealtimeControllerTrans
     );
     throwIfAborted(input.signal);
 
-    const websocket = new WebSocket(answer.url, [
-      "ai-gateway-realtime.v1",
-      `ai-gateway-auth.${answer.token}`,
-    ]);
+    const websocket = new WebSocket(
+      answer.url,
+      dialect === "xai"
+        ? [`xai-client-secret.${answer.token}`]
+        : ["ai-gateway-realtime.v1", `ai-gateway-auth.${answer.token}`],
+    );
     const channel = new GatewayRealtimeDataChannel((payload) =>
-      handleBridgeOutbound(websocket, payload),
+      handleBridgeOutbound(websocket, payload, dialect),
     );
     input.onEventsCreated(channel.asRtcDataChannel());
     const audio = new GatewayRealtimeAudio({
-      onAudio: (encoded) => send(websocket, { type: "input-audio-append", audio: encoded }),
+      onAudio: (encoded) =>
+        send(websocket, {
+          type: dialect === "xai" ? "input_audio_buffer.append" : "input-audio-append",
+          audio: encoded,
+        }),
       onAudibleOutputState: input.onAudibleOutputState,
     });
     let stopped = false;
@@ -62,8 +87,9 @@ export function createGatewayRealtimeTransportStarter(): RealtimeControllerTrans
         return;
       }
       if (!isRecord(parsed) || typeof parsed.type !== "string") return;
-      handleGatewayEvent({
+      handleRealtimeEvent({
         event: parsed as GatewayServerEvent,
+        dialect,
         channel,
         websocket,
         audio,
@@ -84,56 +110,6 @@ export function createGatewayRealtimeTransportStarter(): RealtimeControllerTrans
     websocket.addEventListener("close", onClose);
     websocket.addEventListener("error", onError);
 
-    await waitForWebSocketOpen(websocket, input.signal);
-    channel.open();
-    send(websocket, {
-      type: "session-update",
-      config: {
-        instructions: answer.instructions,
-        outputModalities: ["audio"],
-        inputAudioFormat: { type: "audio/pcm", rate: AUDIO_SAMPLE_RATE },
-        outputAudioFormat: { type: "audio/pcm", rate: AUDIO_SAMPLE_RATE },
-        inputAudioTranscription: {},
-        outputAudioTranscription: {},
-        turnDetection: {
-          type: "server-vad",
-          prefixPaddingMs: 300,
-          silenceDurationMs: 500,
-        },
-        tools: [
-          {
-            type: "function",
-            name: DELEGATION_TOOL,
-            description:
-              "Pass execution work, actions, and session tasks to the underlying session agent. Include the complete standalone request and relevant conversational context.",
-            parameters: {
-              type: "object",
-              properties: {
-                request: {
-                  type: "string",
-                  description: "Complete standalone task for the session agent",
-                },
-              },
-              required: ["request"],
-              additionalProperties: false,
-            },
-          },
-        ],
-      },
-    });
-    for (const item of answer.initialItems) {
-      send(websocket, {
-        type: "conversation-item-create",
-        item: {
-          type: "text-message",
-          role: "user",
-          text: `<session_initial_item role="${item.role}">\n${item.text}\n</session_initial_item>`,
-        },
-      });
-    }
-    await audio.startCapture(input.media);
-    input.onConnectionHealth("connected");
-
     const stop = (): void => {
       if (stopped) return;
       stopped = true;
@@ -152,6 +128,41 @@ export function createGatewayRealtimeTransportStarter(): RealtimeControllerTrans
       }
     };
     input.signal.addEventListener("abort", stop, { once: true });
+
+    try {
+      await waitForWebSocketOpen(websocket, input.signal);
+      channel.open();
+      send(
+        websocket,
+        dialect === "xai"
+          ? xaiSessionUpdate(answer.instructions)
+          : gatewaySessionUpdate(answer.instructions),
+      );
+      for (const item of answer.initialItems) {
+        const text = `<session_initial_item role="${item.role}">\n${item.text}\n</session_initial_item>`;
+        send(
+          websocket,
+          dialect === "xai"
+            ? {
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "user",
+                  content: [{ type: "input_text", text }],
+                },
+              }
+            : {
+                type: "conversation-item-create",
+                item: { type: "text-message", role: "user", text },
+              },
+        );
+      }
+      await audio.startCapture(input.media);
+      input.onConnectionHealth("connected");
+    } catch (error) {
+      stop();
+      throw error;
+    }
 
     return {
       peerConnection: null as unknown as RTCPeerConnection,
@@ -174,8 +185,73 @@ export function createGatewayRealtimeTransportStarter(): RealtimeControllerTrans
   };
 }
 
-function handleGatewayEvent(input: {
+function delegationTool(): Record<string, unknown> {
+  return {
+    type: "function",
+    name: DELEGATION_TOOL,
+    description:
+      "Pass execution work, actions, and session tasks to the underlying session agent. Include the complete standalone request and relevant conversational context.",
+    parameters: {
+      type: "object",
+      properties: {
+        request: {
+          type: "string",
+          description: "Complete standalone task for the session agent",
+        },
+      },
+      required: ["request"],
+      additionalProperties: false,
+    },
+  };
+}
+
+function gatewaySessionUpdate(instructions: string): GatewayClientEvent {
+  return {
+    type: "session-update",
+    config: {
+      instructions,
+      outputModalities: ["audio"],
+      inputAudioFormat: { type: "audio/pcm", rate: AUDIO_SAMPLE_RATE },
+      outputAudioFormat: { type: "audio/pcm", rate: AUDIO_SAMPLE_RATE },
+      inputAudioTranscription: {},
+      outputAudioTranscription: {},
+      turnDetection: {
+        type: "server-vad",
+        prefixPaddingMs: 300,
+        silenceDurationMs: 500,
+      },
+      tools: [delegationTool()],
+    },
+  };
+}
+
+function xaiSessionUpdate(instructions: string): GatewayClientEvent {
+  return {
+    type: "session.update",
+    session: {
+      instructions,
+      voice: "eve",
+      reasoning: { effort: "high" },
+      turn_detection: {
+        type: "server_vad",
+        prefix_padding_ms: 300,
+        silence_duration_ms: 500,
+      },
+      audio: {
+        input: {
+          format: { type: "audio/pcm", rate: AUDIO_SAMPLE_RATE },
+          transcription: { model: "grok-transcribe" },
+        },
+        output: { format: { type: "audio/pcm", rate: AUDIO_SAMPLE_RATE } },
+      },
+      tools: [delegationTool()],
+    },
+  };
+}
+
+function handleRealtimeEvent(input: {
   event: GatewayServerEvent;
+  dialect: RealtimeDialect;
   channel: GatewayRealtimeDataChannel;
   websocket: WebSocket;
   audio: GatewayRealtimeAudio;
@@ -185,8 +261,10 @@ function handleGatewayEvent(input: {
 }): void {
   const event = input.event;
   const eventId = providerEventId(event);
-  if (event.type === "session-created") {
-    const sessionId = stringValue(event.sessionId) ?? `gateway-${crypto.randomUUID()}`;
+  if (event.type === "session-created" || event.type === "session.created") {
+    const session = isRecord(event.session) ? event.session : null;
+    const sessionId =
+      stringValue(event.sessionId) ?? stringValue(session?.id) ?? `realtime-${crypto.randomUUID()}`;
     input.channel.providerEvent({
       type: "session.started",
       event_id: eventId,
@@ -194,23 +272,36 @@ function handleGatewayEvent(input: {
     });
     return;
   }
-  if (event.type === "speech-started") {
+  if (event.type === "speech-started" || event.type === "input_audio_buffer.speech_started") {
     const itemId = input.getCurrentOutputItemId();
     if (itemId && input.audio.isPlaying()) {
       const audioEndMs = input.audio.playbackOffsetMs();
       input.audio.stopPlayback();
-      send(input.websocket, {
-        type: "conversation-item-truncate",
-        itemId,
-        contentIndex: 0,
-        audioEndMs: Math.max(0, Math.round(audioEndMs)),
-      });
+      send(
+        input.websocket,
+        input.dialect === "xai"
+          ? {
+              type: "conversation.item.truncate",
+              item_id: itemId,
+              content_index: 0,
+              audio_end_ms: Math.max(0, Math.round(audioEndMs)),
+            }
+          : {
+              type: "conversation-item-truncate",
+              itemId,
+              contentIndex: 0,
+              audioEndMs: Math.max(0, Math.round(audioEndMs)),
+            },
+      );
     }
     return;
   }
-  if (event.type === "input-transcription-completed") {
+  if (
+    event.type === "input-transcription-completed" ||
+    event.type === "conversation.item.input_audio_transcription.completed"
+  ) {
     const transcript = stringValue(event.transcript) ?? "";
-    const itemId = stringValue(event.itemId) ?? crypto.randomUUID();
+    const itemId = stringValue(event.itemId) ?? stringValue(event.item_id) ?? crypto.randomUUID();
     if (transcript.trim()) {
       input.channel.providerEvent({
         type: "turn.done",
@@ -220,17 +311,27 @@ function handleGatewayEvent(input: {
     }
     return;
   }
-  if (event.type === "audio-delta") {
+  if (
+    event.type === "audio-delta" ||
+    event.type === "response.output_audio.delta" ||
+    event.type === "response.audio.delta"
+  ) {
     const delta = stringValue(event.delta);
     if (!delta) return;
-    const itemId = stringValue(event.itemId);
+    const itemId = stringValue(event.itemId) ?? stringValue(event.item_id);
     if (itemId) input.setCurrentOutputItemId(itemId);
     input.audio.play(delta);
     input.channel.providerEvent({ type: "output_audio.delta", event_id: eventId, audio: delta });
     return;
   }
-  if (event.type === "audio-transcript-done" || event.type === "text-done") {
-    const itemId = stringValue(event.itemId) ?? crypto.randomUUID();
+  if (
+    event.type === "audio-transcript-done" ||
+    event.type === "text-done" ||
+    event.type === "response.output_audio_transcript.done" ||
+    event.type === "response.audio_transcript.done" ||
+    event.type === "response.output_text.done"
+  ) {
+    const itemId = stringValue(event.itemId) ?? stringValue(event.item_id) ?? crypto.randomUUID();
     const transcript = stringValue(event.transcript) ?? stringValue(event.text) ?? "";
     if (transcript.trim() && !input.finalizedAssistantItems.has(itemId)) {
       input.finalizedAssistantItems.add(itemId);
@@ -242,21 +343,27 @@ function handleGatewayEvent(input: {
     }
     return;
   }
-  if (event.type === "audio-done") return;
-  if (event.type === "function-call-arguments-done") {
-    const callId = stringValue(event.callId) ?? stringValue(event.itemId) ?? crypto.randomUUID();
+  if (event.type === "audio-done" || event.type === "response.output_audio.done") return;
+  if (
+    event.type === "function-call-arguments-done" ||
+    event.type === "response.function_call_arguments.done"
+  ) {
+    const callId =
+      stringValue(event.callId) ??
+      stringValue(event.call_id) ??
+      stringValue(event.itemId) ??
+      stringValue(event.item_id) ??
+      crypto.randomUUID();
     const name = stringValue(event.name);
     if (name !== DELEGATION_TOOL) {
-      send(input.websocket, {
-        type: "conversation-item-create",
-        item: {
-          type: "function-call-output",
-          callId,
-          name,
-          output: JSON.stringify({ error: "Unsupported realtime tool" }),
-        },
-      });
-      send(input.websocket, { type: "response-create" });
+      sendFunctionOutput(
+        input.websocket,
+        input.dialect,
+        callId,
+        name,
+        JSON.stringify({ error: "Unsupported realtime tool" }),
+      );
+      sendResponseCreate(input.websocket, input.dialect);
       return;
     }
     const request = delegationRequest(stringValue(event.arguments) ?? "");
@@ -273,10 +380,12 @@ function handleGatewayEvent(input: {
     return;
   }
   if (event.type === "error") {
+    const nested = isRecord(event.error) ? event.error : null;
     input.channel.providerEvent({
       type: "error",
       event_id: eventId,
-      message: stringValue(event.message) ?? "AI Gateway realtime provider error",
+      message:
+        stringValue(event.message) ?? stringValue(nested?.message) ?? "Realtime provider error",
     });
   }
 }
@@ -335,6 +444,7 @@ class GatewayRealtimeDataChannel extends EventTarget {
 function handleBridgeOutbound(
   websocket: WebSocket,
   messages: Array<Record<string, unknown>>,
+  dialect: RealtimeDialect,
 ): void {
   const groups = new Map<
     string,
@@ -361,16 +471,14 @@ function handleBridgeOutbound(
   }
   for (const group of groups.values()) {
     if (group.type === "delegation.context.append" && group.id && group.channel === "speakable") {
-      send(websocket, {
-        type: "conversation-item-create",
-        item: {
-          type: "function-call-output",
-          callId: group.id,
-          name: DELEGATION_TOOL,
-          output: JSON.stringify({ result: group.text }),
-        },
-      });
-      send(websocket, { type: "response-create" });
+      sendFunctionOutput(
+        websocket,
+        dialect,
+        group.id,
+        DELEGATION_TOOL,
+        JSON.stringify({ result: group.text }),
+      );
+      sendResponseCreate(websocket, dialect);
       continue;
     }
     const wrapper =
@@ -379,16 +487,50 @@ function handleBridgeOutbound(
           ? "execution_progress"
           : "execution_result"
         : "session_update";
-    send(websocket, {
-      type: "conversation-item-create",
-      item: {
-        type: "text-message",
-        role: "user",
-        text: `<${wrapper}>\n${group.text}\n</${wrapper}>`,
-      },
-    });
-    if (group.channel === "speakable") send(websocket, { type: "response-create" });
+    const text = `<${wrapper}>\n${group.text}\n</${wrapper}>`;
+    send(
+      websocket,
+      dialect === "xai"
+        ? {
+            type: "conversation.item.create",
+            item: {
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text }],
+            },
+          }
+        : {
+            type: "conversation-item-create",
+            item: { type: "text-message", role: "user", text },
+          },
+    );
+    if (group.channel === "speakable") sendResponseCreate(websocket, dialect);
   }
+}
+
+function sendFunctionOutput(
+  websocket: WebSocket,
+  dialect: RealtimeDialect,
+  callId: string,
+  name: string | null,
+  output: string,
+): void {
+  send(
+    websocket,
+    dialect === "xai"
+      ? {
+          type: "conversation.item.create",
+          item: { type: "function_call_output", call_id: callId, output },
+        }
+      : {
+          type: "conversation-item-create",
+          item: { type: "function-call-output", callId, name, output },
+        },
+  );
+}
+
+function sendResponseCreate(websocket: WebSocket, dialect: RealtimeDialect): void {
+  send(websocket, { type: dialect === "xai" ? "response.create" : "response-create" });
 }
 
 class GatewayRealtimeAudio {
@@ -560,6 +702,7 @@ function providerEventId(event: Record<string, unknown>): string {
   const raw = isRecord(event.raw) ? event.raw : null;
   return (
     stringValue(event.eventId) ??
+    stringValue(event.event_id) ??
     stringValue(raw?.event_id) ??
     stringValue(raw?.id) ??
     crypto.randomUUID()

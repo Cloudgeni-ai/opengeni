@@ -51,7 +51,7 @@ export function xaiSubscriptionFetch(base: XaiFetchLike): XaiFetchLike {
       : normalizeXaiSubscriptionRequestBody(parsed, context.resolveModel, context.hostedSearch);
     const model =
       handedOffModel ??
-      (typeof normalizedBody.model === "string" ? normalizedBody.model : "grok-4.5");
+      (typeof normalizedBody.model === "string" ? normalizedBody.model : "grok-4.6");
 
     const send = async (refresh: boolean): Promise<Response> => {
       const token = refresh ? await context.refresh() : await context.getToken();

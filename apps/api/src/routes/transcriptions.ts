@@ -18,7 +18,7 @@ export function registerTranscriptionRoutes(app: Hono, deps: ApiRouteDeps): void
       return c.json({ code: "policy_blocked" }, 403);
     }
     const service = deps.transcription;
-    if (!service || !(await service.available())) {
+    if (!service || !(await service.available({ workspaceId, subjectId: grant.subjectId }))) {
       return c.json({ code: "unavailable" }, 503);
     }
     try {
@@ -26,6 +26,7 @@ export function registerTranscriptionRoutes(app: Hono, deps: ApiRouteDeps): void
       const result = await service.transcribe({
         workspaceId,
         accountId: grant.accountId,
+        subjectId: grant.subjectId,
         audio: body.audio,
         mimeType: body.mimeType,
         durationSeconds: body.durationSeconds,

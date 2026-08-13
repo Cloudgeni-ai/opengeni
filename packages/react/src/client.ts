@@ -253,6 +253,7 @@ export type EmbeddedRealtimeSessionClientLike = Pick<
   | "heartbeatSessionRealtime"
   | "negotiateCodexRealtimeWebrtc"
   | "negotiateGatewayRealtime"
+  | "negotiateXaiSubscriptionRealtime"
   | "activateCodexRealtimeConnection"
   | "syncSessionRealtimeLedger"
   | "endSessionRealtime"

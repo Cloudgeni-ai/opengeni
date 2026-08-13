@@ -35,3 +35,23 @@ describe("assertConfiguredModel — codex subscription models", () => {
     expect(() => assertConfiguredModel(testSettings(), "gpt-5.6-sol")).not.toThrow();
   });
 });
+
+describe("assertConfiguredModel — SuperGrok subscription models", () => {
+  test("rejects a SuperGrok model when the feature is disabled", () => {
+    expect(() =>
+      assertConfiguredModel(
+        testSettings({ supergrokSubscriptionEnabled: false }),
+        "supergrok/grok-4.6",
+      ),
+    ).toThrow(HTTPException);
+  });
+
+  test("accepts Grok 4.6 when the feature is enabled", () => {
+    expect(() =>
+      assertConfiguredModel(
+        testSettings({ supergrokSubscriptionEnabled: true }),
+        "supergrok/grok-4.6",
+      ),
+    ).not.toThrow();
+  });
+});

@@ -52,8 +52,8 @@ import {
   type SessionGoalSnapshot,
   type ToolAuthNeededPayload,
   type ToolRef,
-  type VideoGenerationAcceptedReceipt,
   type VideoGenerationCapabilities,
+  type VideoGenerationToolResult,
 } from "@opengeni/contracts";
 import {
   MCP_MAX_CONCURRENT_SERVER_OPERATIONS,
@@ -1407,7 +1407,7 @@ export type BuildAgentOptions = {
     execute: (
       input: import("@opengeni/contracts").GenerateVideoToolInput,
       context: { toolCallId: string },
-    ) => Promise<VideoGenerationAcceptedReceipt>;
+    ) => Promise<VideoGenerationToolResult>;
   };
   encryptedReasoning?: boolean;
   structuredToolTransport?: boolean;
@@ -2054,7 +2054,7 @@ export function buildOpenGeniAgent(
     ? agentTool({
         name: "get_video_generation_capabilities",
         description:
-          "Return the video-generation models and exact source, duration, resolution, aspect-ratio, and audio capabilities currently enabled for this workspace. Call when choosing a model or reference mode; availability is runtime state and is never encoded in the generate_video schema.",
+          "Return the video-generation models and exact source, duration, resolution, aspect-ratio, and audio capabilities currently enabled for this workspace. Call immediately before generate_video, then select a listed model and source mode; availability is runtime state and is never encoded in the generate_video schema.",
         parameters: GetVideoGenerationCapabilitiesToolInput,
         errorFunction: null,
         execute: async () => {
@@ -2068,7 +2068,7 @@ export function buildOpenGeniAgent(
     ? agentTool({
         name: "generate_video",
         description:
-          "Start one durable asynchronous video generation. Use exact /workspace paths for any references and call once per intentionally distinct result. The accepted receipt means work continues independently; a later platform update provides the terminal result. Never retry automatically after failure or uncertainty.",
+          "Start one durable asynchronous video generation after get_video_generation_capabilities. Match the selected model's exact source mode: omit references for text-to-video, provide one exact /workspace image path for image-to-video, or provide one exact /workspace video path for video editing. Call once per intentionally distinct result. An accepted result means work continues independently and must never be retried automatically. A rejected result means no operation or provider request was created; correct the stated reference problem and call again only with corrected input.",
         parameters: GenerateVideoToolInput,
         errorFunction: null,
         execute: async (input, _context, details) => {
@@ -2215,7 +2215,13 @@ export function buildOpenGeniAgent(
 
   const skillComposition = composeRuntimeSkills(options.skillActivations ?? [], {
     editableArtifacts: editableArtifactToolsAvailable,
-    videoGeneration: Boolean(options.videoGeneration),
+    // A connected machine owns its filesystem, and its session deliberately
+    // does not materialize host-local lazy entries. Advertising this bundled
+    // skill there makes load_skill report a path that does not exist. Keep the
+    // executable tools (whose descriptions contain the full short workflow),
+    // but expose the filesystem-backed helper only where it can be delivered.
+    videoGeneration:
+      Boolean(options.videoGeneration) && options.activeSandboxBackend !== "selfhosted",
   });
   const runAs = sandboxRunAs(settings);
   const agent = new SandboxAgent({
@@ -2331,10 +2337,11 @@ export function buildOpenGeniAgent(
  *
  * Codex stays on its existing native `defer_loading` implementation. Direct
  * OpenAI/Azure keep full real tools in Runner's execution registry while a model
- * wrapper omits searchable schemas from the provider request and native client
- * tool_search discloses the same objects. Generic providers receive only stable
- * ordinary tool_search/tool_invoke schemas; valid dispatcher calls are rewritten
- * back to the real runtime tool before Runner handles approval and execution.
+ * wrapper omits searchable MCP schemas from the provider request and native
+ * client tool_search discloses the same objects. Generic providers receive only
+ * stable ordinary tool_search/tool_invoke schemas; every function tool stays in
+ * Runner's registry and valid dispatcher calls are rewritten back to the real
+ * runtime tool before Runner handles approval and execution.
  */
 function maybeInstallLazyToolTransport(
   agent: Agent<any, any>,
@@ -2964,6 +2971,10 @@ export type PrepareToolsOptions = {
   // Exact model-visible catalog selection for the broad first-party server.
   // Permissions are signed separately and remain the authorization boundary.
   firstPartyTools?: FirstPartyMcpToolName[];
+  // Trusted root-relative depth facts for model-visible catalog shaping. These
+  // are signed into the delegated token as a pair; DB admission is unchanged.
+  nestedAgentDepth?: number;
+  effectiveMaxNestedAgentDepth?: number;
   resolveCredential?: (
     input: ResolveConnectionCredentialInput,
   ) => Promise<ResolveConnectionCredentialResult>;
@@ -4436,6 +4447,12 @@ async function signFirstPartyDelegatedBearer(
   if (hasAnyAttemptClaim && !hasExactAttemptClaims) {
     return null;
   }
+  const depthClaims = [options.nestedAgentDepth, options.effectiveMaxNestedAgentDepth];
+  const hasAnyDepthClaim = depthClaims.some((claim) => claim !== undefined);
+  const hasExactDepthClaims = depthClaims.every((claim) => claim !== undefined);
+  if (hasAnyDepthClaim && (!hasExactDepthClaims || !hasExactAttemptClaims)) {
+    return null;
+  }
   return await signDelegatedAccessToken(delegationSecret, {
     accountId: options.accountId,
     workspaceId: options.workspaceId,
@@ -4444,6 +4461,12 @@ async function signFirstPartyDelegatedBearer(
     permissions: options.firstPartyPermissions ?? [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS],
     principalKind: hasExactAttemptClaims ? "agent_attempt" : "service",
     firstPartyMcpTools: options.firstPartyTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+    ...(hasExactDepthClaims
+      ? {
+          nestedAgentDepth: options.nestedAgentDepth!,
+          effectiveMaxNestedAgentDepth: options.effectiveMaxNestedAgentDepth!,
+        }
+      : {}),
     ...(hasExactAttemptClaims
       ? {
           sessionId: options.sessionId!,

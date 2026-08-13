@@ -103,11 +103,19 @@ describe("model-policy", () => {
         credentialSource: { kind: "connected_subscription", provider: "codex" },
         billing: { upstreamPayer: "connected_subscription", metering: "external" },
       }),
+      catalogModel({
+        id: "supergrok/grok-4.6",
+        label: "Grok 4.6",
+        source: "supergrok",
+        credentialSource: { kind: "connected_subscription", provider: "xai" },
+        billing: { upstreamPayer: "connected_subscription", metering: "external" },
+      }),
     ]);
     const groups = groupPickerRowsByBillingClass(rows);
     expect(groups.map((group) => group.billingClass)).toEqual([
       "opengeni_credits",
       "codex_subscription",
+      "supergrok_subscription",
     ]);
   });
 

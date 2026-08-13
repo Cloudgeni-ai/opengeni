@@ -2001,6 +2001,11 @@ export const DelegatedAccessTokenPayload = z
     // Model-visible first-party tool selection for a worker-bound session.
     // This is visibility only; permissions remain the authorization boundary.
     firstPartyMcpTools: z.array(FirstPartyMcpToolName).optional(),
+    // Trusted root-relative depth facts frozen when the worker prepares this
+    // attempt. They shape only the model-visible tool catalog; the database
+    // remains authoritative for admission and concurrent policy changes.
+    nestedAgentDepth: NestedAgentDepthValue.optional(),
+    effectiveMaxNestedAgentDepth: NestedAgentDepthValue.optional(),
     // The turn making the call (the caller's identity), HMAC-signed by the worker
     // at turn setup. Lets a tool classify WHO is calling from the token itself,
     // instead of racily re-reading the session's live active_turn_id — e.g. the
@@ -2021,6 +2026,23 @@ export const DelegatedAccessTokenPayload = z
       payload.executionGeneration,
     ];
     const exactAttemptClaimCount = exactAttemptClaims.filter((value) => value !== undefined).length;
+    const depthClaimCount = [payload.nestedAgentDepth, payload.effectiveMaxNestedAgentDepth].filter(
+      (value) => value !== undefined,
+    ).length;
+    if (depthClaimCount !== 0 && depthClaimCount !== 2) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["nestedAgentDepth"],
+        message: "nested-agent depth claims must be supplied together",
+      });
+    }
+    if (depthClaimCount > 0 && payload.principalKind !== "agent_attempt") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["principalKind"],
+        message: "nested-agent depth claims require an agent_attempt principal",
+      });
+    }
     if (
       payload.principalKind === "human_session" &&
       (exactAttemptClaimCount !== 0 || payload.serviceInitiator !== undefined)
@@ -2677,9 +2699,9 @@ export type InsightsModelUsageRow = z.infer<typeof InsightsModelUsageRow>;
 
 export const InsightsSeriesPoint = z.object({
   label: z.string().min(1),
-  /** Day-bucketed sum of usage_events.model.cost (workspace-wide) or filtered facts when provider/model set. */
+  /** UTC hour/day-bucketed sum of usage_events.model.cost (workspace-wide) or filtered facts when provider/model set. */
   modelCostUsd: z.number().nonnegative(),
-  /** Day-bucketed hypothetical provider-rate USD for calls with captured pricing. */
+  /** UTC hour/day-bucketed hypothetical provider-rate USD for calls with captured pricing. */
   estimatedProviderUsd: z.number().nonnegative(),
   estimatedProviderCostKnownCalls: z.number().int().nonnegative(),
   warmSeconds: z.number().nonnegative(),
@@ -5100,6 +5122,7 @@ export type SyncSessionRealtimeLedgerResponse = z.infer<typeof SyncSessionRealti
 
 export const SessionRealtimeModel = z.enum([
   "gpt-live-1-boulder-alpha",
+  "supergrok/grok-voice-think-fast-2.0",
   "opengeni-gateway/openai/gpt-realtime-2.1",
   "opengeni-gateway/openai/gpt-realtime-mini",
   "opengeni-gateway/xai/grok-voice-think-fast-2.0",
@@ -5112,7 +5135,7 @@ export type SessionRealtimeModel = z.infer<typeof SessionRealtimeModel>;
 export const WorkspaceRealtimeModelCatalogItem = z.object({
   id: SessionRealtimeModel,
   label: z.string().min(1),
-  provider: z.enum(["OpenGeni", "Connected Codex", "Your Gateway"]),
+  provider: z.enum(["OpenGeni", "Connected Codex", "Connected SuperGrok", "Your Gateway"]),
   description: z.string().min(1),
   available: z.boolean(),
   unavailableReason: z.string().nullable(),

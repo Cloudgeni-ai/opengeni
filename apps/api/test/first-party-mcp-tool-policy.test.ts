@@ -13,6 +13,7 @@ import { INTERACTION_ATTEMPT_TOOL_NAMES } from "@opengeni/runtime";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { ApiRouteDeps } from "@opengeni/core";
+import { HTTPException } from "hono/http-exception";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import { buildFilesMcpServer } from "../src/mcp/files";
 
@@ -72,6 +73,7 @@ function deps(): ApiRouteDeps {
 function grant(
   permissions: AccessGrant["permissions"],
   firstPartyMcpTools?: FirstPartyMcpToolName[],
+  depth?: { nestedAgentDepth: number; effectiveMaxNestedAgentDepth: number },
 ): AccessGrant {
   return {
     accountId,
@@ -85,6 +87,7 @@ function grant(
       attemptId,
       executionGeneration: 1,
       ...(firstPartyMcpTools !== undefined ? { firstPartyMcpTools } : {}),
+      ...(depth ?? {}),
     },
   };
 }
@@ -95,6 +98,29 @@ function registeredToolNames(server: unknown): string[] {
   )
     .filter((name) => !name.startsWith("__opengeni_empty_"))
     .sort();
+}
+
+async function callRegisteredTool(
+  server: unknown,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<{
+  isError?: boolean;
+  structuredContent?: { error?: { code?: string; message?: string } };
+}> {
+  const tool = (
+    server as {
+      _registeredTools?: Record<
+        string,
+        { handler: (args: Record<string, unknown>, extra: unknown) => Promise<unknown> }
+      >;
+    }
+  )._registeredTools?.[name];
+  if (!tool) throw new Error(`MCP tool not registered: ${name}`);
+  return (await tool.handler(args, {})) as {
+    isError?: boolean;
+    structuredContent?: { error?: { code?: string; message?: string } };
+  };
 }
 
 describe("first-party MCP tool visibility policy", () => {
@@ -145,6 +171,146 @@ describe("first-party MCP tool visibility policy", () => {
 
     const admitted = buildOpenGeniMcpServer(deps(), grant(["sessions:create"], ["session_create"]));
     expect(registeredToolNames(admitted)).toEqual(["session_create"]);
+  });
+
+  test("trusted exhausted depth hides session_create while legacy and remaining-depth grants retain it", () => {
+    const legacy = buildOpenGeniMcpServer(deps(), grant(["sessions:create"], ["session_create"]));
+    const remaining = buildOpenGeniMcpServer(
+      deps(),
+      grant(["sessions:create"], ["session_create"], {
+        nestedAgentDepth: 2,
+        effectiveMaxNestedAgentDepth: 3,
+      }),
+    );
+    const exhausted = buildOpenGeniMcpServer(
+      deps(),
+      grant(["sessions:create"], ["session_create"], {
+        nestedAgentDepth: 3,
+        effectiveMaxNestedAgentDepth: 3,
+      }),
+    );
+
+    expect(registeredToolNames(legacy)).toEqual(["session_create"]);
+    expect(registeredToolNames(remaining)).toEqual(["session_create"]);
+    expect(registeredToolNames(exhausted)).toEqual([]);
+  });
+
+  test("model-facing session_create omits absolute depth and literal shared traps", async () => {
+    let databaseTouches = 0;
+    const routeDeps = deps();
+    routeDeps.db = new Proxy(
+      {},
+      {
+        get() {
+          databaseTouches += 1;
+          throw new Error("invalid model request reached storage");
+        },
+      },
+    ) as ApiRouteDeps["db"];
+    const server = buildOpenGeniMcpServer(
+      routeDeps,
+      grant(["sessions:create"], ["session_create"], {
+        nestedAgentDepth: 1,
+        effectiveMaxNestedAgentDepth: 3,
+      }),
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "session-create-schema-test", version: "1" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      const tool = (await client.listTools()).tools.find(
+        (candidate) => candidate.name === "session_create",
+      );
+      expect(tool?.description).toContain("non-delegating leaf");
+      expect(tool?.description).toContain("do not use a child-local depth override");
+      const serialized = JSON.stringify(tool?.inputSchema);
+      expect(serialized).not.toContain("maxNestedAgentDepth");
+      expect(serialized).not.toContain('"const":"shared"');
+      expect(serialized).not.toContain('"enum":["shared"');
+      expect(serialized).toContain("machineTarget");
+      expect(serialized).toContain("targetSandboxId");
+      expect(serialized).toContain("workingDir");
+      expect(serialized).toContain('"required":["targetSandboxId"]');
+      for (const arguments_ of [
+        { initialMessage: "bad cwd", workingDir: "/tmp" },
+        {
+          initialMessage: "bad shared variable set",
+          variableSetId: crypto.randomUUID(),
+          sandbox: "shared",
+        },
+        {
+          initialMessage: "bad shared rig",
+          rigId: crypto.randomUUID(),
+          sandbox: "shared",
+        },
+        { initialMessage: "bad depth", maxNestedAgentDepth: 0 },
+      ]) {
+        const result = await client.callTool({ name: "session_create", arguments: arguments_ });
+        expect(result).toMatchObject({ isError: true });
+      }
+      expect(databaseTouches).toBe(0);
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
+  });
+
+  test("orchestration failures return bounded structured code and message", async () => {
+    const rawMessage = `invalid\u0000 request ${"🧪".repeat(600)}`;
+    const routeDeps = deps();
+    routeDeps.db = new Proxy(
+      {},
+      {
+        get() {
+          throw new HTTPException(422, { message: rawMessage });
+        },
+      },
+    ) as ApiRouteDeps["db"];
+    const server = buildOpenGeniMcpServer(
+      routeDeps,
+      grant(["sessions:create", "sessions:control"], ["session_create", "session_send_message"], {
+        nestedAgentDepth: 1,
+        effectiveMaxNestedAgentDepth: 3,
+      }),
+    );
+
+    const create = await callRegisteredTool(server, "session_create", {
+      initialMessage: "work",
+    });
+    expect(create.isError).toBe(true);
+    expect(create.structuredContent?.error?.code).toBe("session_create_rejected");
+    expect(create.structuredContent?.error?.message).not.toContain("\u0000");
+    expect(create.structuredContent?.error?.message).not.toContain("�");
+    expect(
+      new TextEncoder().encode(create.structuredContent?.error?.message ?? "").byteLength,
+    ).toBeLessThanOrEqual(1_024);
+
+    routeDeps.db = new Proxy(
+      {},
+      {
+        get() {
+          throw new HTTPException(409, { message: "target session is no longer writable" });
+        },
+      },
+    ) as ApiRouteDeps["db"];
+    const messageServer = buildOpenGeniMcpServer(
+      routeDeps,
+      grant(["sessions:control"], ["session_send_message"]),
+    );
+    const message = await callRegisteredTool(messageServer, "session_send_message", {
+      sessionId: crypto.randomUUID(),
+      text: "status",
+      idempotencyKey: crypto.randomUUID(),
+    });
+    expect(message).toMatchObject({
+      isError: true,
+      structuredContent: {
+        error: {
+          code: "session_send_message_conflict",
+          message: "target session is no longer writable",
+        },
+      },
+    });
   });
 
   test("the broad catalog excludes compatibility-only and local first-party tools", () => {

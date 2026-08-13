@@ -262,7 +262,7 @@ describe("Vercel AI Gateway request fence", () => {
 // (settingsWithCodexCredential → withCodexProvider) injects into runSettings for
 // a workspace with an ACTIVE Codex subscription. Mirrors capabilities.ts.
 const CODEX_TURN_MODEL = `${CODEX_MODEL_ID_PREFIX}gpt-5.6-sol`;
-const XAI_TURN_MODEL = `${XAI_SUBSCRIPTION_MODEL_ID_PREFIX}grok-4.5`;
+const XAI_TURN_MODEL = `${XAI_SUBSCRIPTION_MODEL_ID_PREFIX}grok-4.6`;
 
 type PinnedResponsesModule = {
   getInputItems: (input: unknown[]) => unknown[];
@@ -326,7 +326,7 @@ function xaiProviderJson(): string {
       label: "SuperGrok subscription",
       api: "responses",
       baseUrl: XAI_SUBSCRIPTION_PROXY_BASE_URL,
-      models: [{ id: XAI_TURN_MODEL, label: "Grok 4.5", reasoningEffort: true }],
+      models: [{ id: XAI_TURN_MODEL, label: "Grok 4.6", reasoningEffort: true }],
     },
   ]);
 }
@@ -1219,7 +1219,7 @@ describe("buildModelInstance — chat vs responses Model selection per provider 
       }
     });
     expect(capturedBody).toMatchObject({
-      model: "grok-4.5",
+      model: "grok-4.6",
       stream: true,
       store: false,
       include: ["reasoning.encrypted_content"],

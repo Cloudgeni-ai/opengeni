@@ -1,4 +1,4 @@
-// Verified against xAI's public OIDC discovery document and Grok Build 1.0.1.
+// Verified against xAI's public OIDC discovery document and Grok Build 1.0.3.
 
 export const XAI_OAUTH_ISSUER = "https://auth.x.ai";
 export const XAI_OAUTH_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828";
@@ -20,20 +20,20 @@ export const XAI_DEVICE_CODE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:devi
 export const XAI_SUBSCRIPTION_PROXY_BASE_URL = "https://cli-chat-proxy.grok.com/v1";
 export const XAI_PUBLIC_API_BASE_URL = "https://api.x.ai/v1";
 export const XAI_TOKEN_AUTH_HEADER_VALUE = "xai-grok-cli";
-export const XAI_CLIENT_VERSION = "1.0.1";
+export const XAI_CLIENT_VERSION = "1.0.3";
 export const XAI_CLIENT_MODE = "opengeni";
 
 export const XAI_SUBSCRIPTION_PROVIDER_ID = "supergrok-subscription";
 export const XAI_SUBSCRIPTION_MODEL_ID_PREFIX = "supergrok/";
-export const XAI_SUBSCRIPTION_FALLBACK_MODEL_SLUGS = ["grok-4.5"] as const;
+export const XAI_SUBSCRIPTION_MODEL_SLUGS = ["grok-4.6"] as const;
 
-// Grok Build's explicit fallback when live /models-v2 metadata is unavailable.
-export const XAI_SUBSCRIPTION_MODEL_CONTEXT_WINDOW_TOKENS = 256_000;
+// Static product limits used by the OpenGeni catalog, matching the Codex seam.
+export const XAI_SUBSCRIPTION_MODEL_CONTEXT_WINDOW_TOKENS = 500_000;
 export const XAI_SUBSCRIPTION_EFFECTIVE_CONTEXT_PERCENT = 95;
 export const XAI_SUBSCRIPTION_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS = Math.floor(
   (XAI_SUBSCRIPTION_MODEL_CONTEXT_WINDOW_TOKENS * XAI_SUBSCRIPTION_EFFECTIVE_CONTEXT_PERCENT) / 100,
 );
-export const XAI_SUBSCRIPTION_AUTO_COMPACTION_PERCENT = 85;
+export const XAI_SUBSCRIPTION_AUTO_COMPACTION_PERCENT = 80;
 export const XAI_SUBSCRIPTION_MODEL_AUTO_COMPACT_TOKEN_LIMIT = Math.floor(
   (XAI_SUBSCRIPTION_MODEL_CONTEXT_WINDOW_TOKENS * XAI_SUBSCRIPTION_AUTO_COMPACTION_PERCENT) / 100,
 );

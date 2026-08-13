@@ -1060,6 +1060,22 @@ export class OpenGeniClient {
     );
   }
 
+  /** Mint a short-lived browser token from a connected SuperGrok account. */
+  async negotiateXaiSubscriptionRealtime(
+    workspaceId: string,
+    sessionId: string,
+    request: GatewayRealtimeConnectRequest,
+    options: { signal?: AbortSignal | undefined } = {},
+  ): Promise<GatewayRealtimeConnectResponse> {
+    return await this.requestJson<GatewayRealtimeConnectResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/realtime/supergrok`,
+      request,
+      {},
+      { signal: options.signal },
+    );
+  }
+
   /** Promote a negotiated connection only after its browser data channel is ready. */
   async activateCodexRealtimeConnection(
     workspaceId: string,
