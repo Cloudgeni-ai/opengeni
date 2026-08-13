@@ -358,16 +358,6 @@ BEGIN
         AND turn_value.session_id = NEW.session_id
       FOR SHARE;
 
-      IF NEW.execution_generation <= 0
-        OR NEW.authority_visibility IS DISTINCT FROM session_row.visibility
-        OR NEW.authority_epoch IS DISTINCT FROM session_row.authority_epoch
-        OR NEW.authority_owner_organization_membership_id
-          IS DISTINCT FROM session_row.owner_organization_membership_id
-      THEN
-        RAISE EXCEPTION 'personal-resource admission requires the exact session authority'
-          USING ERRCODE = '42501';
-      END IF;
-
       SELECT count(*)::integer INTO resource_total
       FROM (
         SELECT DISTINCT selected.resource_kind, selected.resource_id
@@ -405,6 +395,16 @@ BEGIN
           AND transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
           AND capability_kind = 'admit';
         RETURN NEW;
+      END IF;
+
+      IF NEW.execution_generation <= 0
+        OR NEW.authority_visibility IS DISTINCT FROM session_row.visibility
+        OR NEW.authority_epoch IS DISTINCT FROM session_row.authority_epoch
+        OR NEW.authority_owner_organization_membership_id
+          IS DISTINCT FROM session_row.owner_organization_membership_id
+      THEN
+        RAISE EXCEPTION 'personal-resource admission requires the exact session authority'
+          USING ERRCODE = '42501';
       END IF;
 
       initiating_subject := coalesce(

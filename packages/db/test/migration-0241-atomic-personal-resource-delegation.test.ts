@@ -143,6 +143,12 @@ describe("migration 0241 atomic personal-resource delegation", () => {
     expect(source).toContain(
       "NEW.authority_owner_organization_membership_id\n          IS DISTINCT FROM session_row.owner_organization_membership_id",
     );
+    const selectionCountIndex = source.indexOf("SELECT count(*)::integer INTO resource_total");
+    const emptySelectionIndex = source.indexOf("IF resource_total = 0 THEN");
+    const authorityFenceIndex = source.indexOf("IF NEW.execution_generation <= 0");
+    expect(selectionCountIndex).toBeGreaterThan(-1);
+    expect(emptySelectionIndex).toBeGreaterThan(selectionCountIndex);
+    expect(authorityFenceIndex).toBeGreaterThan(emptySelectionIndex);
     expect(source).toContain("authority.status = 'active'");
     expect(source).toContain("authority.revoked_at IS NULL");
 
@@ -366,6 +372,100 @@ describe("migration 0241 atomic personal-resource delegation", () => {
         await app.end({ timeout: 5 });
         await admin.end({ timeout: 5 });
       }
+    }
+  }, 180_000);
+
+  test("admits an ordinary attempt with no selected personal resources or personal authority", async () => {
+    const blank = await acquireBlankTestDatabase("migration-0241-empty-personal-selection");
+    if (!blank) return;
+
+    await migrate(blank.databaseUrl);
+    const sql = postgres(blank.databaseUrl, {
+      max: 4,
+      prepare: false,
+      onnotice: () => undefined,
+    });
+    try {
+      const [account] = await sql<Array<{ id: string }>>`
+        insert into managed_accounts (name)
+        values ('empty personal selection account')
+        returning id
+      `;
+      const [workspace] = await sql<Array<{ id: string }>>`
+        insert into workspaces (account_id, name)
+        values (${account!.id}, 'empty personal selection workspace')
+        returning id
+      `;
+      const sessionId = crypto.randomUUID();
+      const turnId = crypto.randomUUID();
+      const attemptId = crypto.randomUUID();
+
+      await sql`
+        insert into sessions (
+          id, account_id, workspace_id, initial_message, model,
+          sandbox_backend, sandbox_group_id, status, tool_policy
+        ) values (
+          ${sessionId}, ${account!.id}, ${workspace!.id}, 'ordinary attempt',
+          'codex/gpt-5.6-sol', 'modal', ${sessionId}, 'running',
+          jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
+        )
+      `;
+      await sql`
+        insert into session_turns (
+          id, account_id, workspace_id, session_id, trigger_event_id,
+          temporal_workflow_id, status, position, prompt, model,
+          reasoning_effort, sandbox_backend, active_attempt_id
+        ) values (
+          ${turnId}, ${account!.id}, ${workspace!.id}, ${sessionId}, ${crypto.randomUUID()},
+          'ordinary-workflow', 'running', 1, 'ordinary attempt', 'codex/gpt-5.6-sol',
+          'low', 'modal', ${attemptId}
+        )
+      `;
+      await sql`
+        insert into session_turn_attempts (
+          id, account_id, workspace_id, session_id, turn_id, execution_generation,
+          state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
+          verified_control_revision, mcp_approval_policies
+        ) values (
+          ${attemptId}, ${account!.id}, ${workspace!.id}, ${sessionId}, ${turnId}, 0,
+          'running', 'ordinary-workflow', 'ordinary-run', 'ordinary-activity', 0,
+          '{}'::jsonb
+        )
+      `;
+
+      const [attempt] = await sql<
+        Array<{
+          authorityOwnerOrganizationMembershipId: string | null;
+          authorityVisibility: string;
+          executionGeneration: number;
+        }>
+      >`
+        select
+          authority_owner_organization_membership_id as "authorityOwnerOrganizationMembershipId",
+          authority_visibility as "authorityVisibility",
+          execution_generation as "executionGeneration"
+        from session_turn_attempts
+        where id = ${attemptId}
+      `;
+      expect(attempt).toEqual({
+        authorityOwnerOrganizationMembershipId: null,
+        authorityVisibility: "workspace_shared",
+        executionGeneration: 0,
+      });
+
+      for (const table of [
+        "session_attempt_personal_resource_admissions",
+        "session_attempt_personal_resource_snapshots",
+        "personal_resource_once_consumption_receipts",
+      ] as const) {
+        const [row] = await sql.unsafe<Array<{ count: number }>>(
+          `select count(*)::int as count from ${table} where attempt_id = $1`,
+          [attemptId],
+        );
+        expect(row?.count).toBe(0);
+      }
+    } finally {
+      await sql.end({ timeout: 5 });
     }
   }, 180_000);
 
@@ -670,7 +770,7 @@ describe("migration 0241 atomic personal-resource delegation", () => {
       await admin`
         select * from transition_session_visibility(
           ${drift.account}, ${drift.targetWorkspace}, ${drift.session},
-          ${drift.subject}, 'user_private', 1, ${`ope-232-${crypto.randomUUID()}`},
+          ${drift.subject}, 'user_private', 1, ${`delegation-${crypto.randomUUID()}`},
           'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
         )
       `;
@@ -752,7 +852,7 @@ async function createFixture(
 ): Promise<FixtureIds> {
   const subject = `human:${crypto.randomUUID()}`;
   const [account] = await sql<Array<{ id: string }>>`
-    insert into managed_accounts (name) values (${`ope-232-${crypto.randomUUID()}`}) returning id
+    insert into managed_accounts (name) values (${`delegation-${crypto.randomUUID()}`}) returning id
   `;
   const [personalWorkspace] = await sql<Array<{ id: string }>>`
     insert into workspaces (account_id, name)
