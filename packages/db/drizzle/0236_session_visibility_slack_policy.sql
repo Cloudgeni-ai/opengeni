@@ -40,7 +40,9 @@ BEGIN
 
   FOREACH target_table IN ARRAY ARRAY[
     'slack_interaction_action_handles',
-    'slack_shared_task_origins'
+    'slack_shared_task_origins',
+    'xai_capacity_waiters',
+    'xai_session_account_pins'
   ]
   LOOP
     IF pg_catalog.to_regclass(pg_catalog.format('%I.%I', data_schema, target_table)) IS NULL THEN

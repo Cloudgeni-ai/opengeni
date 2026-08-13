@@ -117,8 +117,8 @@ describe("release schema contract", () => {
     const sessionVisibilityContractHash = (includesActivation: boolean): string | null => {
       if (!migrations.has("0236_session_visibility_slack_policy.sql")) return null;
       return includesActivation
-        ? "940848d8acfeef4c3abaa4a872fcf319fd07e37de963f0d227dc9ef5534f7918"
-        : "275ead40d2c01e8e933a8b1a5e8c8eb0b228b2ae6fa376d5fabc4a6b85ba25e4";
+        ? "0a3c326f21e67422bdc84e9409d72b489aac967e18b08fbc7a410aab51cb17af"
+        : "d54a4ac5b800e0c0578e7fce7d1a09cea1dbed87d3b13bf722549fea0bdc031e";
     };
     const currentMainContractHash = migrations.has("0235_canonical_human_login_bindings.sql")
       ? migrations.has("0234_xai_subscription_authority.sql")
@@ -187,7 +187,7 @@ describe("release schema contract", () => {
         deploymentMode: "rolling",
       });
       expect(migrations.get("0236_session_visibility_slack_policy.sql")).toMatchObject({
-        sha256: "e9ea17bd8d573aa8a774d102d4d291db0056f6d85c3c54af6ae0a14bd423d696",
+        sha256: "64f9beb146d973cc0a6ab9f8cdef29955ef9edb68ecc9b07756eda5414709299",
         deploymentMode: "rolling",
       });
 
@@ -592,7 +592,7 @@ describe("release schema contract", () => {
     }
     if (migrations.has("0236_session_visibility_slack_policy.sql")) {
       expect(migrations.get("0236_session_visibility_slack_policy.sql")).toMatchObject({
-        sha256: "e9ea17bd8d573aa8a774d102d4d291db0056f6d85c3c54af6ae0a14bd423d696",
+        sha256: "64f9beb146d973cc0a6ab9f8cdef29955ef9edb68ecc9b07756eda5414709299",
         deploymentMode: "rolling",
       });
     }
