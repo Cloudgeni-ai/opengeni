@@ -222,6 +222,11 @@ impl RelayChannel {
     }
 
     /// Test seam for the same reconnect/adoption logic over an injected transport.
+    ///
+    /// # Errors
+    ///
+    /// Returns the typed registration, protocol, or transport error produced by
+    /// opening the replacement channel.
     #[cfg(any(test, feature = "test-support"))]
     pub async fn reconnect_on(&mut self, transport: Box<dyn RelayTransport>) -> StreamResult<()> {
         let resumed = Self::open_on(transport, self.config.clone(), self.recv_next_seq).await?;

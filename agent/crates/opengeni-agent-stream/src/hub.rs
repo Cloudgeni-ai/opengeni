@@ -455,6 +455,7 @@ impl RelayHub {
 /// Spawns the supervised PTY pump: run the pump; on a retryable transport drop,
 /// reconnect (full-jitter) + resume; stop on a clean PTY exit or a terminal error.
 /// De-registers the pty control entry on exit.
+#[allow(clippy::too_many_arguments)]
 fn spawn_pty_pump(
     mut process: PtyProcess,
     mut channel: RelayChannel,

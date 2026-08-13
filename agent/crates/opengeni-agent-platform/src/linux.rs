@@ -197,6 +197,11 @@ impl LinuxDesktop {
 
     /// Captures the complete screen as tightly packed RGBA8 without an
     /// intermediate image encode. Intended for a placement-local live encoder.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed platform failure when the display cannot be queried or
+    /// the X11 capture task cannot complete.
     pub async fn capture_rgba(&self) -> PlatformResult<LinuxRgbaFrame> {
         let this = self.clone();
         tokio::task::spawn_blocking(move || this.capture_rgba_blocking())
@@ -206,6 +211,11 @@ impl LinuxDesktop {
 
     /// Captures one XComposite-backed window as RGBA8, including while it is
     /// occluded, without an intermediate PNG encode.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed platform failure if the window disappeared, Composite
+    /// capture fails, or the X11 capture task cannot complete.
     pub async fn capture_window_rgba(&self, window_id: u32) -> PlatformResult<LinuxRgbaFrame> {
         let this = self.clone();
         tokio::task::spawn_blocking(move || this.capture_window_rgba_blocking(window_id))
@@ -319,7 +329,8 @@ impl LinuxDesktop {
     /// Captures the root window via `GetImage` and PNG-encodes it. Runs on the
     /// blocking pool (x11rb is synchronous).
     fn capture_blocking(&self) -> PlatformResult<CapturedFrame> {
-        encode_captured_png(self.capture_rgba_blocking()?)
+        let frame = self.capture_rgba_blocking()?;
+        encode_captured_png(&frame)
     }
 
     fn capture_rgba_blocking(&self) -> PlatformResult<LinuxRgbaFrame> {
@@ -367,7 +378,8 @@ impl LinuxDesktop {
     }
 
     fn capture_window_blocking(&self, window_id: u32) -> PlatformResult<CapturedFrame> {
-        encode_captured_png(self.capture_window_rgba_blocking(window_id)?)
+        let frame = self.capture_window_rgba_blocking(window_id)?;
+        encode_captured_png(&frame)
     }
 
     fn capture_window_rgba_blocking(&self, window_id: u32) -> PlatformResult<LinuxRgbaFrame> {
@@ -939,6 +951,11 @@ fn named_key_to_keysym(name: &str) -> Option<u32> {
 /// Preflights one X11 named key or chord before an operation is durably marked
 /// dispatched. This is the same parser used by injection, so invalid input is a
 /// definite client failure rather than an ambiguous post-dispatch outcome.
+///
+/// # Errors
+///
+/// Returns an unsupported-input failure when the key or chord is empty,
+/// ambiguous, repeated, or unavailable through the X11 mapping.
 pub fn validate_linux_named_key_chord(name: &str) -> PlatformResult<()> {
     parse_named_key_chord(name).map(|_| ())
 }
@@ -1140,7 +1157,7 @@ fn capture_drawable_rgba(
     })
 }
 
-fn encode_captured_png(frame: LinuxRgbaFrame) -> PlatformResult<CapturedFrame> {
+fn encode_captured_png(frame: &LinuxRgbaFrame) -> PlatformResult<CapturedFrame> {
     let png = encode_png(&frame.rgba, frame.width, frame.height)?;
     Ok(CapturedFrame {
         png,

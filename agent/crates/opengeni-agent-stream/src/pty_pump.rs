@@ -193,6 +193,7 @@ pub async fn run(
 /// relay (or, defensively, on an immediate PTY EOF that produced no output) — the
 /// loop is already selecting on `channel.recv()` by then, so inbound keystrokes are
 /// received the instant a consumer sends them.
+#[allow(clippy::too_many_arguments)]
 async fn pump_loop(
     process: &mut PtyProcess,
     channel: &mut RelayChannel,

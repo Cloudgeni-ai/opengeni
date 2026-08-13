@@ -597,6 +597,7 @@ async fn appkit_swiftui_modal_canvas_hang_and_background_are_causal() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires installed Google Chrome plus local macOS Screen Recording and Accessibility grants"]
+#[allow(clippy::too_many_lines)]
 async fn chromium_accessibility_and_window_capture_are_causal() {
     let _fixture_guard = LIVE_FIXTURES.lock().await;
     let frontmost = FrontmostRestore::capture();

@@ -462,7 +462,7 @@ mod tests {
 
     use super::{NativeAction, NativeActionCommand};
 
-    fn command(action: serde_json::Value) -> serde_json::Value {
+    fn command(action: &serde_json::Value) -> serde_json::Value {
         json!({
             "targetId": "screen:1",
             "expectedTargetGeneration": "generation-1",
@@ -474,7 +474,7 @@ mod tests {
 
     #[test]
     fn public_camel_case_actions_are_the_native_wire_contract() {
-        let launch: NativeActionCommand = serde_json::from_value(command(json!({
+        let launch: NativeActionCommand = serde_json::from_value(command(&json!({
             "type": "launch",
             "applicationId": "com.apple.TextEdit",
         })))
@@ -484,7 +484,7 @@ mod tests {
             NativeAction::Launch { application_id } if application_id == "com.apple.TextEdit"
         ));
 
-        let focus: NativeActionCommand = serde_json::from_value(command(json!({
+        let focus: NativeActionCommand = serde_json::from_value(command(&json!({
             "type": "focus",
             "targetId": "window:2",
         })))
