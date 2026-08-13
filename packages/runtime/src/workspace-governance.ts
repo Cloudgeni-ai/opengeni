@@ -17,6 +17,11 @@ export type WorkspaceGovernanceContext = {
   companyProfile?: ResolvedCompanyProfileSnapshot | null;
 };
 
+export type WorkspaceGovernanceRenderOptions = {
+  /** Child containment may omit organization knowledge without weakening policy. */
+  includeCompanyProfile?: boolean;
+};
+
 export class CompanyProfilePromptLimitError extends Error {
   readonly name = "CompanyProfilePromptLimitError";
   readonly code = "COMPANY_PROFILE_PROMPT_LIMIT";
@@ -57,9 +62,13 @@ export function hasActiveWorkspaceInstructionPolicy(
  */
 export function renderWorkspaceGovernanceContext(
   context: WorkspaceGovernanceContext,
+  options: WorkspaceGovernanceRenderOptions = {},
 ): string | null {
   const preferences = context.preferences?.descriptors ?? [];
-  const companyProfile = context.companyProfile?.profile ? context.companyProfile : null;
+  const companyProfile =
+    options.includeCompanyProfile !== false && context.companyProfile?.profile
+      ? context.companyProfile
+      : null;
   if (
     context.instructionPolicy.entries.length === 0 &&
     preferences.length === 0 &&

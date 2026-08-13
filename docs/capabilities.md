@@ -139,6 +139,28 @@ token when the provider omits a replacement, and CAS-update or duplicate-safe
 create the normal encrypted Connection. Emulator-backed tests are merge proof;
 provider-live consent remains a separately labeled operational check.
 
+In the web control center, curated Definitions enter that flow through one
+reusable three-step connection journey. The account step gives every sibling
+account a human label and explains the consequences of Personal and Workspace
+ownership; users without integration-management permission may open the
+journey but receive administrator remediation instead of a mutation action. The
+access step describes reviewed agent use cases and permissions in plain
+language. Exact OAuth scopes and the provider domain remain available under
+progressive **Technical details**, rather than becoming the default interface.
+The review step repeats the provider, label, ownership, and capabilities before
+the user continues to the provider consent screen.
+
+The journey descriptor is presentation metadata only: it cannot grant scopes,
+select a Connection, or replace the Definition and Connection authority above.
+Its deterministic web reducer resets between account attempts and ignores stale
+submission outcomes. The existing controller still mints and preserves the
+exact instance key across a failed-start retry, owns the OAuth return path, and
+performs callback preview/install for that exact instance. The shared shell owns
+navigation, cancellation, accessible focus and progress semantics, loading, and
+safe errors; future thin provider adapters may add reviewed resource pickers or
+provider details without turning the shell into a generic schema form or
+changing the backend lifecycle.
+
 The normalized rows store the protocol-compiled revision, tools, Integration
 and API Facets, Facet installations, and owners under FORCE RLS. They are the
 only Integration Definition installation authority; generic API catalog and

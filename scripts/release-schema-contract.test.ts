@@ -118,6 +118,23 @@ describe("release schema contract", () => {
       sha256: "2873e0d744868a0d7d7db3b8fae336f8e4400a4617e10f11b5904dc01a5c1a18",
       deploymentMode: "rolling",
     });
+    const companyBrainMigrationPaths = [
+      "0238_goal_persistence_policy.sql",
+      "0239_task_tree_notes.sql",
+    ].filter((path) =>
+      completeSourceContract.migrations.some((migration) => migration.path === path),
+    );
+    const companyBrainMigrations = new Map(
+      completeSourceContract.migrations.map((migration) => [migration.path, migration]),
+    );
+    const goalPersistence = companyBrainMigrations.get("0238_goal_persistence_policy.sql");
+    if (goalPersistence) {
+      expect(goalPersistence).toMatchObject({ deploymentMode: "rolling" });
+    }
+    const taskTreeNotes = companyBrainMigrations.get("0239_task_tree_notes.sql");
+    if (taskTreeNotes) {
+      expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
+    }
     const appendedMigrationPaths = [
       "0237_interaction_transition_reaper.sql",
       "0240_sandbox_provider_loss_receipts.sql",
@@ -126,9 +143,10 @@ describe("release schema contract", () => {
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
+    const forwardMigrationPaths = [...companyBrainMigrationPaths, ...appendedMigrationPaths];
     const sourceContract =
-      appendedMigrationPaths.length > 0
-        ? await contractWithoutMigrations(appendedMigrationPaths)
+      forwardMigrationPaths.length > 0
+        ? await contractWithoutMigrations(forwardMigrationPaths)
         : completeSourceContract;
     const transitionReaper = completeSourceContract.migrations.find(
       (migration) => migration.path === "0237_interaction_transition_reaper.sql",

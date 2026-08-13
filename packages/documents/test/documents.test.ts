@@ -5,10 +5,12 @@ import {
   RecursiveTextChunker,
   canViewDocument,
   chunkText,
+  decodeKnowledgeBrowseCursor,
   decodeDocumentIndexCheckpoint,
   deterministicEmbedding,
   documentOpenAIEmbeddingConfig,
   encodeDocumentIndexCheckpoint,
+  encodeKnowledgeBrowseCursor,
   heuristicCuration,
   parseCurationOutcome,
   parseDocumentBytes,
@@ -17,6 +19,41 @@ import {
 } from "../src";
 
 describe("documents", () => {
+  test("binds opaque Knowledge browse cursors to subject, parent, and filters", () => {
+    const scope = {
+      accountId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      initiatingSubjectId: "user:owner",
+      parentId: null,
+      topic: "security",
+      sourceKinds: ["document"] as const,
+    };
+    const cursor = encodeKnowledgeBrowseCursor(scope, 42n);
+    expect(decodeKnowledgeBrowseCursor(cursor, scope)).toBe(42n);
+    expect(() =>
+      decodeKnowledgeBrowseCursor(cursor, { ...scope, initiatingSubjectId: "user:other" }),
+    ).toThrow("different scope");
+    expect(() =>
+      decodeKnowledgeBrowseCursor(cursor, {
+        ...scope,
+        parentId: "document:33333333-3333-4333-8333-333333333333",
+      }),
+    ).toThrow("different scope");
+    expect(() => decodeKnowledgeBrowseCursor(cursor, { ...scope, topic: "finance" })).toThrow(
+      "different scope",
+    );
+    expect(() => decodeKnowledgeBrowseCursor("not-a-cursor", scope)).toThrow(
+      "invalid knowledge browse cursor",
+    );
+    expect(() => decodeKnowledgeBrowseCursor("a".repeat(1_025), scope)).toThrow(
+      "invalid knowledge browse cursor",
+    );
+    const oversized = encodeKnowledgeBrowseCursor(scope, 9_223_372_036_854_775_808n);
+    expect(() => decodeKnowledgeBrowseCursor(oversized, scope)).toThrow(
+      "invalid knowledge browse cursor",
+    );
+  });
+
   test("round-trips document index checkpoints only within their frozen authority scope", () => {
     const scope = {
       accountId: "11111111-1111-4111-8111-111111111111",

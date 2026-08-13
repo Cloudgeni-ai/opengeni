@@ -640,7 +640,10 @@ describe("SDK / contracts parity", () => {
       pinned: false,
       status: "archived",
     };
-    const settings: UpdateWorkspaceSettingsRequest = { memoryEnabled: true };
+    const settings: UpdateWorkspaceSettingsRequest = {
+      memoryEnabled: true,
+      memoryPromptMode: "retrieval_only",
+    };
     expect(ContractCreateKnowledgeMemoryRequest.safeParse(create).success).toBe(true);
     expect(ContractUpdateKnowledgeMemoryRequest.safeParse(update).success).toBe(true);
     expect(ContractUpdateWorkspaceSettingsRequest.safeParse(settings).success).toBe(true);

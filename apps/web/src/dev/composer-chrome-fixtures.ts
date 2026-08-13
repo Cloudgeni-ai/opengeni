@@ -199,6 +199,8 @@ function galleryGoalRecord(overrides: Partial<SessionGoal> = {}): SessionGoal {
     pausedReason: null,
     createdBy: "api",
     version: 4,
+    objectiveRevision: 2,
+    mutationPolicy: "preserve_intent",
     autoContinuations: 12,
     noProgressStreak: 0,
     maxAutoContinuations: null,
@@ -354,8 +356,16 @@ function catalogModel(
 }
 
 export const galleryModelRows: PickerModelRow[] = projectPickerRows([
-  catalogModel({ id: "gpt-5.6-sol", label: "GPT-5.6 Sol", shortLabel: "5.6 Sol" }),
-  catalogModel({ id: "gpt-5.6-luna", label: "GPT-5.6 Luna", shortLabel: "5.6 Luna" }),
+  catalogModel({
+    id: "gpt-5.6-sol",
+    label: "GPT-5.6 Sol",
+    shortLabel: "5.6 Sol",
+  }),
+  catalogModel({
+    id: "gpt-5.6-luna",
+    label: "GPT-5.6 Luna",
+    shortLabel: "5.6 Luna",
+  }),
 ]);
 
 /** 52 first-party + 1 MCP = 53; leave two off → Tools · 51/53. */
@@ -456,7 +466,9 @@ export function chromeScenarios(): ChromeScenario[] {
   const fifteenIdleAgents = Array.from({ length: 15 }, (_, index) =>
     galleryAgentNode(index, {
       title: index === 0 ? "Primary worker" : `Worker ${index + 1}`,
-      metadata: { title: index === 0 ? "Primary worker" : `Worker ${index + 1}` },
+      metadata: {
+        title: index === 0 ? "Primary worker" : `Worker ${index + 1}`,
+      },
       status: "idle",
     }),
   );
