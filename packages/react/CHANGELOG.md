@@ -1,14 +1,5 @@
 # @opengeni/react
 
-## 0.56.1
-
-### Patch Changes
-
-- 4e23e52: Prevent deterministic model-generated worker-spawn failures, hide exhausted nested-agent creation, and show bounded structured session orchestration diagnostics in worker timeline rows while preserving the advanced public REST/SDK create contract.
-- 219d690: Run published HTML artifacts as exact source in an opaque-origin sandbox, raise their UTF-8 ceiling to 4 MiB, and expose reusable React rendering. Add deployment-configurable default and allowed built-in session tools plus configured shared-key delegation fallback.
-- Updated dependencies [219d690]
-  - @opengeni/sdk@0.56.1
-
 ## 0.56.0
 
 ### Minor Changes

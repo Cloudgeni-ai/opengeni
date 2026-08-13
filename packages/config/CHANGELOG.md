@@ -1,15 +1,5 @@
 # @opengeni/config
 
-## 0.16.1
-
-### Patch Changes
-
-- 219d690: Run published HTML artifacts as exact source in an opaque-origin sandbox, raise their UTF-8 ceiling to 4 MiB, and expose reusable React rendering. Add deployment-configurable default and allowed built-in session tools plus configured shared-key delegation fallback.
-- Updated dependencies [4e23e52]
-- Updated dependencies [14aa2ad]
-- Updated dependencies [219d690]
-  - @opengeni/contracts@0.49.1
-
 ## 0.16.0
 
 ### Minor Changes
