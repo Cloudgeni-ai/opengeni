@@ -18,6 +18,7 @@ import {
   OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE,
   RunContext,
   RunRawModelStreamEvent,
+  RunState,
   getAllMcpTools,
   getLogger,
   invalidateServerToolsCache,
@@ -47,6 +48,7 @@ import {
   buildOpenGeniAgent,
   HUMAN_INPUT_TOOL_NAME,
   buildManifest,
+  compactMcpResultCustomDataRunState,
   composeAgentInstructions,
   connectMcpServersInBatches,
   coreInstructions,
@@ -78,6 +80,8 @@ import {
   modelResponseUsageFromResponse,
   normalizeSdkEvent,
   normalizeToolOutputForEvent,
+  OPENGENI_INNER_MCP_CUSTOM_DATA_KEY,
+  OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY,
   PrefixedMcpServer,
   prepareRunInput,
   runAgentStream,
@@ -99,6 +103,7 @@ import {
   serializeHumanInputRequests,
   serializeInteractionInterventionRequests,
   refreshCodemodeTokenFile,
+  releaseMcpResultCustomDataFromSdkEvent,
   withStructuredViewImageFunctionResults,
   sandboxCommandExitCode,
   sandboxArtifactRuntimeDoctorHooks,
@@ -112,6 +117,7 @@ import {
   type ResolveConnectionCredentialResult,
   type ConnectorActionPolicyHooks,
 } from "../src/index";
+import { McpResultCustomDataBridge } from "../src/mcp-result-custom-data";
 
 import { Manifest } from "@openai/agents/sandbox";
 import { createAttemptToolEnvironment } from "@opengeni/codemode";
@@ -1257,6 +1263,102 @@ describe("runtime event normalization", () => {
     expect(Object.hasOwn(output, "structuredContent")).toBe(true);
   });
 
+  test("prefers a validated complete MCP result marker while preserving explicit false", () => {
+    const [event] = normalizeSdkEvent({
+      type: "run_item_stream_event",
+      item: {
+        id: "item-mcp-result",
+        type: "tool_call_output_item",
+        rawItem: { callId: "call-mcp-result", type: "function_call_result" },
+        output: { type: "text", text: "model-visible content" },
+        customData: {
+          [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: {
+            content: [{ type: "text", text: "model-visible content" }],
+            structuredContent: { receiptId: "receipt-1" },
+            isError: false,
+            _meta: { providerTrace: "trace-1" },
+          },
+        },
+      },
+    } as any);
+
+    expect(event?.type).toBe("agent.toolCall.output");
+    expect((event!.payload as { output?: unknown }).output).toEqual({
+      content: [{ type: "text", text: "model-visible content" }],
+      structuredContent: { receiptId: "receipt-1" },
+      isError: false,
+      _meta: { providerTrace: "trace-1" },
+    });
+  });
+
+  test("preserves explicit MCP errors and does not invent a missing outcome", () => {
+    const events = [true, undefined].map((isError, index) => {
+      const result = {
+        content: [{ type: "text", text: `result-${index}` }],
+        ...(isError === undefined ? {} : { isError }),
+      };
+      return normalizeSdkEvent({
+        type: "run_item_stream_event",
+        item: {
+          id: `item-mcp-outcome-${index}`,
+          type: "tool_call_output_item",
+          rawItem: { callId: `call-mcp-outcome-${index}`, type: "function_call_result" },
+          output: result.content[0],
+          customData: { [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: result },
+        },
+      } as any)[0];
+    });
+
+    const failed = (events[0]!.payload as { output: Record<string, unknown> }).output;
+    const unknown = (events[1]!.payload as { output: Record<string, unknown> }).output;
+    expect(failed.isError).toBe(true);
+    expect(Object.hasOwn(unknown, "isError")).toBe(false);
+  });
+
+  test("trusted tool output overrides take precedence over retained MCP custom data", () => {
+    const override = { type: "generated_image", artifactId: "artifact-1" };
+    const [event] = normalizeSdkEvent(
+      {
+        type: "run_item_stream_event",
+        item: {
+          id: "item-override",
+          type: "tool_call_output_item",
+          rawItem: { callId: "call-override", type: "function_call_result" },
+          output: { type: "text", text: "model output" },
+          customData: {
+            [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: {
+              content: [{ type: "text", text: "retained result" }],
+              isError: false,
+            },
+          },
+        },
+      } as any,
+      { toolOutputOverride: override },
+    );
+
+    expect((event!.payload as { output?: unknown }).output).toEqual(override);
+  });
+
+  test("ignores invalid MCP result markers and falls back to the SDK output", () => {
+    const fallback = { type: "text", text: "sdk output" };
+    const [event] = normalizeSdkEvent({
+      type: "run_item_stream_event",
+      item: {
+        id: "item-invalid-mcp-result",
+        type: "tool_call_output_item",
+        rawItem: { callId: "call-invalid-mcp-result", type: "function_call_result" },
+        output: fallback,
+        customData: {
+          [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: {
+            content: [{ type: "unsupported", value: "not MCP content" }],
+          },
+        },
+      },
+    } as any);
+
+    expect((event!.payload as { output?: unknown }).output).toEqual(fallback);
+  });
+
   test("compacts a codex computer_screenshot Uint8Array output to a non-retained media fact", () => {
     const pngBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
     const [event] = normalizeSdkEvent({
@@ -1409,6 +1511,51 @@ describe("runtime event normalization", () => {
         content: [{ type: "text", text: "delivery failed" }],
       };
       expect(normalizeToolOutputForEvent(mcp)).toEqual(mcp);
+    });
+
+    test("MCP result media blocks become content-free previews without losing result fields", () => {
+      const normalized = normalizeToolOutputForEvent({
+        content: [
+          { type: "text", text: "capture" },
+          { type: "image", data: "aGk=", mimeType: "image/png" },
+          { type: "audio", data: "aGk=", mimeType: "audio/wav" },
+          {
+            type: "resource",
+            resource: {
+              uri: "file:///capture.bin",
+              blob: "aGk=",
+              mimeType: "application/octet-stream",
+            },
+          },
+        ],
+        structuredContent: { captureId: "capture-1" },
+        isError: false,
+        _meta: { providerTrace: "trace-1" },
+      });
+      expect(normalized).toEqual({
+        content: [
+          { type: "text", text: "capture" },
+          expect.objectContaining({
+            type: "media_preview",
+            mediaType: "image/png",
+            inlineBytes: 2,
+          }),
+          expect.objectContaining({
+            type: "media_preview",
+            mediaType: "audio/wav",
+            inlineBytes: 2,
+          }),
+          expect.objectContaining({
+            type: "media_preview",
+            mediaType: "application/octet-stream",
+            inlineBytes: 2,
+          }),
+        ],
+        structuredContent: { captureId: "capture-1" },
+        isError: false,
+        _meta: { providerTrace: "trace-1" },
+      });
+      expect(JSON.stringify(normalized)).not.toContain("aGk=");
     });
   });
 
@@ -4464,6 +4611,779 @@ describe("runtime event normalization", () => {
     );
   });
 
+  test("PrefixedMcpServer preserves the complete legacy callTool result and callToolResult", async () => {
+    const fullResult = {
+      content: [{ type: "text" as const, text: "model-visible content" }],
+      structuredContent: { receiptId: "receipt-1" },
+      isError: false,
+      _meta: { providerTrace: "trace-1" },
+    };
+    const inner: MCPServer = {
+      name: "rich-inner",
+      cacheToolsList: false,
+      async connect() {},
+      async close() {},
+      async listTools() {
+        return [
+          {
+            name: "inspect",
+            description: "Inspect one item.",
+            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+          },
+        ];
+      },
+      async callTool() {
+        return fullResult.content;
+      },
+      async callToolResult() {
+        return fullResult;
+      },
+      async invalidateToolsCache() {},
+    };
+    const wrapped = new PrefixedMcpServer(inner, "rich");
+
+    expect(await wrapped.callTool("rich__inspect", {})).toEqual(fullResult);
+    expect(await wrapped.callToolResult("rich__inspect", {})).toEqual(fullResult);
+  });
+
+  test("the Agents SDK preserves prefixed MCP model output and retains the audit result as custom data", async () => {
+    const fullResult = {
+      content: [{ type: "text" as const, text: "model-visible content" }],
+      structuredContent: { receiptId: "receipt-1", structuredOnly: true },
+      isError: false,
+      _meta: { providerTrace: "trace-1" },
+      vendorReceipt: { id: "vendor-receipt-1", committed: true },
+    };
+    const innerContexts: Array<{
+      serverName: string;
+      toolName: string;
+      arguments: Record<string, unknown> | null;
+      resultMeta: Record<string, unknown> | undefined;
+      toolOutput: unknown;
+    }> = [];
+    const inner: MCPServer = {
+      name: "rich-inner",
+      cacheToolsList: false,
+      customDataExtractor: async (context) => {
+        innerContexts.push({
+          serverName: context.serverName,
+          toolName: context.toolName,
+          arguments: context.arguments,
+          resultMeta: context.resultMeta,
+          toolOutput: context.toolOutput,
+        });
+        return { innerReceipt: "inner-1" };
+      },
+      async connect() {},
+      async close() {},
+      async listTools() {
+        return [
+          {
+            name: "inspect",
+            description: "Inspect one item.",
+            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+          },
+        ];
+      },
+      async callTool() {
+        return fullResult.content;
+      },
+      async callToolResult() {
+        return fullResult;
+      },
+      async invalidateToolsCache() {},
+    };
+    const wrapped = new PrefixedMcpServer(inner, "rich");
+    const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false });
+    const model = new ScriptedModel([
+      {
+        output: [scriptedFunctionCall("rich__inspect", {}, "rich-call")],
+      },
+      { outputText: "done" },
+    ]);
+    const agent = buildOpenGeniAgent(settings, [], {
+      model,
+      hostedWebSearch: false,
+      mcpServers: [wrapped],
+    });
+
+    const result = await runAgentStream(agent, "Inspect it", settings);
+    const streamed: any[] = [];
+    for await (const event of result.toStream()) streamed.push(event);
+    await result.completed;
+
+    const outputEvent = streamed.find(
+      (event) =>
+        event.type === "run_item_stream_event" && event.item?.type === "tool_call_output_item",
+    );
+    expect(outputEvent?.item.output).toEqual(fullResult);
+    expect(outputEvent?.item.customData).toEqual({
+      [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: fullResult,
+      [OPENGENI_INNER_MCP_CUSTOM_DATA_KEY]: { innerReceipt: "inner-1" },
+    });
+    expect(innerContexts).toEqual([
+      {
+        serverName: "rich-inner",
+        toolName: "inspect",
+        arguments: {},
+        resultMeta: { providerTrace: "trace-1" },
+        toolOutput: fullResult.content[0],
+      },
+    ]);
+
+    const [durable] = normalizeSdkEvent(outputEvent);
+    expect((durable!.payload as { output?: unknown }).output).toEqual(fullResult);
+
+    const secondRequest = JSON.stringify(model.requests[1]?.input);
+    expect(secondRequest).toContain("model-visible content");
+    expect(secondRequest).toContain("structuredOnly");
+    expect(secondRequest).toContain("providerTrace");
+    expect(secondRequest).toContain("vendor-receipt-1");
+  });
+
+  test("rejects MCP result values the Agents SDK custom-data boundary would rewrite", async () => {
+    const bridge = new McpResultCustomDataBridge();
+
+    await expect(
+      bridge.captureResult(null, async () => ({
+        content: [{ type: "text" as const, text: "negative zero" }],
+        structuredContent: { exactValue: -0 },
+      })),
+    ).rejects.toThrow(
+      'Protocol JSON value at $.mcpResult["structuredContent"]["exactValue"] must be a finite number other than negative zero',
+    );
+  });
+
+  test("releases only the live MCP audit marker after durable event capture", async () => {
+    const fullResult = {
+      content: [{ type: "text" as const, text: "release after durable capture" }],
+      structuredContent: { receiptId: "release-receipt-1" },
+      isError: false,
+      _meta: { providerTrace: "release-trace-1" },
+    };
+    const inner: MCPServer = {
+      name: "release-inner",
+      cacheToolsList: false,
+      customDataExtractor: async () => ({ innerReceipt: "retain-inner-1" }),
+      async connect() {},
+      async close() {},
+      async listTools() {
+        return [
+          {
+            name: "inspect",
+            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+          },
+        ];
+      },
+      async callTool() {
+        return fullResult.content;
+      },
+      async callToolResult() {
+        return fullResult;
+      },
+      async invalidateToolsCache() {},
+    };
+    const wrapped = new PrefixedMcpServer(inner, "release");
+    const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false });
+    const model = new ScriptedModel([
+      { output: [scriptedFunctionCall("release__inspect", {}, "release-call")] },
+      { outputText: "done" },
+    ]);
+    const agent = buildOpenGeniAgent(settings, [], {
+      model,
+      hostedWebSearch: false,
+      mcpServers: [wrapped],
+    });
+
+    const result = await runAgentStream(agent, "Inspect it", settings);
+    const streamed: any[] = [];
+    for await (const event of result.toStream()) streamed.push(event);
+    await result.completed;
+
+    const outputEvent = streamed.find(
+      (event) =>
+        event.type === "run_item_stream_event" && event.item?.type === "tool_call_output_item",
+    );
+    const [durable] = normalizeSdkEvent(outputEvent);
+    expect((durable!.payload as { output?: unknown }).output).toEqual(fullResult);
+    expect(result.state.toString()).toContain(OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY);
+
+    expect(releaseMcpResultCustomDataFromSdkEvent(outputEvent)).toBe(true);
+    expect(outputEvent.item.customData).toEqual({
+      [OPENGENI_INNER_MCP_CUSTOM_DATA_KEY]: { innerReceipt: "retain-inner-1" },
+    });
+    expect(result.state.toString()).not.toContain(OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY);
+    expect(result.state.toString()).toContain("retain-inner-1");
+    expect(releaseMcpResultCustomDataFromSdkEvent(outputEvent)).toBe(false);
+  });
+
+  test("nested prefixed servers preserve one exact result marker and the innermost custom data", async () => {
+    const fullResult = {
+      content: [{ type: "text" as const, text: "nested model-visible content" }],
+      structuredContent: { receiptId: "nested-receipt-1" },
+      isError: false,
+      _meta: { providerTrace: "nested-trace-1" },
+      vendorReceipt: { id: "nested-vendor-1" },
+    };
+    const base: MCPServer = {
+      name: "nested-base",
+      cacheToolsList: false,
+      customDataExtractor: async () => ({ baseReceipt: "base-1" }),
+      async connect() {},
+      async close() {},
+      async listTools() {
+        return [
+          {
+            name: "inspect",
+            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+          },
+        ];
+      },
+      async callTool() {
+        return fullResult.content;
+      },
+      async callToolResult() {
+        return fullResult;
+      },
+      async invalidateToolsCache() {},
+    };
+    const inner = new PrefixedMcpServer(base, "inner");
+    const outer = new PrefixedMcpServer(inner, "outer");
+    const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false });
+    const model = new ScriptedModel([
+      { output: [scriptedFunctionCall("outer__inner__inspect", {}, "nested-call")] },
+      { outputText: "done" },
+    ]);
+    const agent = buildOpenGeniAgent(settings, [], {
+      model,
+      hostedWebSearch: false,
+      mcpServers: [outer],
+    });
+
+    const result = await runAgentStream(agent, "Inspect it", settings);
+    const streamed: any[] = [];
+    for await (const event of result.toStream()) streamed.push(event);
+    await result.completed;
+
+    const outputEvent = streamed.find(
+      (event) =>
+        event.type === "run_item_stream_event" && event.item?.type === "tool_call_output_item",
+    );
+    expect(outputEvent?.item.output).toEqual(fullResult);
+    expect(outputEvent?.item.customData).toEqual({
+      [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: fullResult,
+      [OPENGENI_INNER_MCP_CUSTOM_DATA_KEY]: { baseReceipt: "base-1" },
+    });
+  });
+
+  test("an ordinary inner extractor may own OpenGeni-looking custom-data keys", async () => {
+    const fullResult = {
+      content: [{ type: "text" as const, text: "caller-owned marker content" }],
+      isError: false,
+    };
+    const callerOwnedCustomData = {
+      [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: { callerOwned: true },
+      callerReceipt: "retain-caller-marker",
+    };
+    const inner: MCPServer = {
+      name: "caller-marker-inner",
+      cacheToolsList: false,
+      customDataExtractor: async () => callerOwnedCustomData,
+      async connect() {},
+      async close() {},
+      async listTools() {
+        return [
+          {
+            name: "inspect",
+            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+          },
+        ];
+      },
+      async callTool() {
+        return fullResult.content;
+      },
+      async callToolResult() {
+        return fullResult;
+      },
+      async invalidateToolsCache() {},
+    };
+    const wrapped = new PrefixedMcpServer(inner, "caller_marker");
+    const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false });
+    const model = new ScriptedModel([
+      { output: [scriptedFunctionCall("caller_marker__inspect", {}, "caller-marker-call")] },
+      { outputText: "done" },
+    ]);
+    const agent = buildOpenGeniAgent(settings, [], {
+      model,
+      hostedWebSearch: false,
+      mcpServers: [wrapped],
+    });
+
+    const result = await runAgentStream(agent, "Inspect it", settings);
+    const streamed: any[] = [];
+    for await (const event of result.toStream()) streamed.push(event);
+    await result.completed;
+
+    const outputEvent = streamed.find(
+      (event) =>
+        event.type === "run_item_stream_event" && event.item?.type === "tool_call_output_item",
+    );
+    expect(outputEvent?.item.customData).toEqual({
+      [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: fullResult,
+      [OPENGENI_INNER_MCP_CUSTOM_DATA_KEY]: callerOwnedCustomData,
+    });
+    expect(releaseMcpResultCustomDataFromSdkEvent(outputEvent)).toBe(true);
+    expect(outputEvent?.item.customData).toEqual({
+      [OPENGENI_INNER_MCP_CUSTOM_DATA_KEY]: callerOwnedCustomData,
+    });
+  });
+
+  test("a custom server may freeze its clean arguments after a successful call", async () => {
+    const fullResult = {
+      content: [{ type: "text" as const, text: "frozen arguments accepted" }],
+      structuredContent: { receiptId: "frozen-arguments-1" },
+      isError: false,
+    };
+    const receivedArguments: Array<Record<string, unknown> | null> = [];
+    const inner: MCPServer = {
+      name: "freezing-arguments-inner",
+      cacheToolsList: false,
+      async connect() {},
+      async close() {},
+      async listTools() {
+        return [
+          {
+            name: "commit",
+            inputSchema: {
+              type: "object",
+              properties: { value: { type: "string" } },
+              required: ["value"],
+              additionalProperties: false,
+            },
+          },
+        ];
+      },
+      async callTool(_toolName, args) {
+        receivedArguments.push(args);
+        if (args) Object.freeze(args);
+        return fullResult.content;
+      },
+      async callToolResult(_toolName, args) {
+        receivedArguments.push(args);
+        if (args) Object.freeze(args);
+        return fullResult;
+      },
+      async invalidateToolsCache() {},
+    };
+    const wrapped = new PrefixedMcpServer(inner, "freezing_arguments");
+    const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false });
+    const model = new ScriptedModel([
+      {
+        output: [
+          scriptedFunctionCall(
+            "freezing_arguments__commit",
+            { value: "committed" },
+            "freezing-arguments-call",
+          ),
+        ],
+      },
+      { outputText: "done" },
+    ]);
+    const agent = buildOpenGeniAgent(settings, [], {
+      model,
+      hostedWebSearch: false,
+      mcpServers: [wrapped],
+    });
+
+    const result = await runAgentStream(agent, "Commit it", settings);
+    const streamed: any[] = [];
+    for await (const event of result.toStream()) streamed.push(event);
+    await result.completed;
+
+    const outputEvent = streamed.find(
+      (event) =>
+        event.type === "run_item_stream_event" && event.item?.type === "tool_call_output_item",
+    );
+    expect(outputEvent?.item.output).toEqual(fullResult);
+    expect(outputEvent?.item.customData).toEqual({
+      [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: fullResult,
+    });
+    expect(receivedArguments).toEqual([{ value: "committed" }]);
+    expect(Object.isFrozen(receivedArguments[0])).toBe(true);
+  });
+
+  test("the Agents SDK preserves structured-content-only prefixed MCP model output", async () => {
+    const fullResult = {
+      content: [],
+      structuredContent: { structuredOnly: true },
+      isError: false,
+      _meta: { providerTrace: "structured-only-trace" },
+    };
+    const inner: MCPServer = {
+      name: "structured-only-inner",
+      cacheToolsList: false,
+      async connect() {},
+      async close() {},
+      async listTools() {
+        return [
+          {
+            name: "inspect",
+            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+          },
+        ];
+      },
+      async callTool() {
+        return fullResult.content;
+      },
+      async callToolResult() {
+        return fullResult;
+      },
+      async invalidateToolsCache() {},
+    };
+    const wrapped = new PrefixedMcpServer(inner, "structured_only");
+    const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false });
+    const model = new ScriptedModel([
+      { output: [scriptedFunctionCall("structured_only__inspect", {}, "structured-call")] },
+      { outputText: "done" },
+    ]);
+    const agent = buildOpenGeniAgent(settings, [], {
+      model,
+      hostedWebSearch: false,
+      mcpServers: [wrapped],
+    });
+
+    const result = await runAgentStream(agent, "Inspect it", settings);
+    for await (const _event of result.toStream()) {
+      // Consume the stream so the second model request is available.
+    }
+    await result.completed;
+
+    const secondRequest = JSON.stringify(model.requests[1]?.input);
+    expect(secondRequest).toContain("structuredOnly");
+    expect(secondRequest).toContain("structured-only-trace");
+  });
+
+  test("a prefixed server forwards the inner SDK structured-content projection to its extractor", async () => {
+    const fullResult = {
+      content: [{ type: "text" as const, text: "fallback content" }],
+      structuredContent: { receiptId: "structured-receipt-1" },
+      isError: false,
+    };
+    const innerToolOutputs: unknown[] = [];
+    const inner: MCPServer = {
+      name: "structured-inner",
+      cacheToolsList: false,
+      useStructuredContent: true,
+      customDataExtractor: async (context) => {
+        innerToolOutputs.push(context.toolOutput);
+        return { retained: true };
+      },
+      async connect() {},
+      async close() {},
+      async listTools() {
+        return [
+          {
+            name: "inspect",
+            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+          },
+        ];
+      },
+      async callTool() {
+        return fullResult.content;
+      },
+      async callToolResult() {
+        return fullResult;
+      },
+      async invalidateToolsCache() {},
+    };
+    const wrapped = new PrefixedMcpServer(inner, "structured");
+    const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false });
+    const model = new ScriptedModel([
+      { output: [scriptedFunctionCall("structured__inspect", {}, "structured-inner-call")] },
+      { outputText: "done" },
+    ]);
+    const agent = buildOpenGeniAgent(settings, [], {
+      model,
+      hostedWebSearch: false,
+      mcpServers: [wrapped],
+    });
+
+    const result = await runAgentStream(agent, "Inspect it", settings);
+    for await (const _event of result.toStream()) {
+      // Consume the stream so the custom-data extractor runs.
+    }
+    await result.completed;
+
+    expect(innerToolOutputs).toEqual([JSON.stringify(fullResult.structuredContent)]);
+  });
+
+  test("a prefixed inner extractor cannot mutate the retained MCP result", async () => {
+    const fullResult = {
+      content: [{ type: "text" as const, text: "immutable content" }],
+      structuredContent: { receipt: { id: "structured-1" } },
+      isError: false,
+      _meta: { trace: { id: "trace-1" } },
+    };
+    const inner: MCPServer = {
+      name: "mutating-inner",
+      cacheToolsList: false,
+      customDataExtractor: async (context) => {
+        (context.resultMeta!.trace as { id: string }).id = "mutated-trace";
+        (context.structuredContent!.receipt as { id: string }).id = "mutated-structured";
+        (context.toolOutput as { text: string }).text = "mutated content";
+        return { retained: true };
+      },
+      async connect() {},
+      async close() {},
+      async listTools() {
+        return [
+          {
+            name: "inspect",
+            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+          },
+        ];
+      },
+      async callTool() {
+        return fullResult.content;
+      },
+      async callToolResult() {
+        return fullResult;
+      },
+      async invalidateToolsCache() {},
+    };
+    const wrapped = new PrefixedMcpServer(inner, "mutating");
+    const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false });
+    const model = new ScriptedModel([
+      { output: [scriptedFunctionCall("mutating__inspect", {}, "mutating-call")] },
+      { outputText: "done" },
+    ]);
+    const agent = buildOpenGeniAgent(settings, [], {
+      model,
+      hostedWebSearch: false,
+      mcpServers: [wrapped],
+    });
+
+    const result = await runAgentStream(agent, "Inspect it", settings);
+    const streamed: any[] = [];
+    for await (const event of result.toStream()) streamed.push(event);
+    await result.completed;
+
+    const outputEvent = streamed.find(
+      (event) =>
+        event.type === "run_item_stream_event" && event.item?.type === "tool_call_output_item",
+    );
+    expect(outputEvent?.item.output).toEqual(fullResult);
+    expect(outputEvent?.item.customData).toEqual({
+      [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: fullResult,
+      [OPENGENI_INNER_MCP_CUSTOM_DATA_KEY]: { retained: true },
+    });
+  });
+
+  test("a prefixed inner extractor applies the SDK custom-data normalization boundary", async () => {
+    const extractorResults: unknown[] = [{}, { retained: true }, ["invalid"]];
+    const inner: MCPServer = {
+      name: "normalized-inner",
+      cacheToolsList: false,
+      customDataExtractor: async () => extractorResults.shift() as Record<string, unknown>,
+      async connect() {},
+      async close() {},
+      async listTools() {
+        return [
+          {
+            name: "inspect",
+            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+          },
+        ];
+      },
+      async callTool() {
+        return [{ type: "text" as const, text: "content" }];
+      },
+      async callToolResult() {
+        return { content: [{ type: "text" as const, text: "content" }] };
+      },
+      async invalidateToolsCache() {},
+    };
+    const wrapped = new PrefixedMcpServer(inner, "normalized");
+    const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false });
+
+    const runOnce = async (callId: string) => {
+      const model = new ScriptedModel([
+        { output: [scriptedFunctionCall("normalized__inspect", {}, callId)] },
+        { outputText: "done" },
+      ]);
+      const agent = buildOpenGeniAgent(settings, [], {
+        model,
+        hostedWebSearch: false,
+        mcpServers: [wrapped],
+      });
+      const result = await runAgentStream(agent, "Inspect it", settings);
+      const streamed: any[] = [];
+      for await (const event of result.toStream()) streamed.push(event);
+      await result.completed;
+      return streamed.find(
+        (event) =>
+          event.type === "run_item_stream_event" && event.item?.type === "tool_call_output_item",
+      );
+    };
+
+    const empty = await runOnce("normalized-empty");
+    expect(empty?.item.customData).toEqual({
+      [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: {
+        content: [{ type: "text", text: "content" }],
+      },
+    });
+    const retained = await runOnce("normalized-retained");
+    expect(retained?.item.customData).toEqual({
+      [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: {
+        content: [{ type: "text", text: "content" }],
+      },
+      [OPENGENI_INNER_MCP_CUSTOM_DATA_KEY]: { retained: true },
+    });
+    await expect(runOnce("normalized-invalid")).rejects.toThrow(
+      "customDataExtractor must return an object or null.",
+    );
+  });
+
+  test("a prefixed inner extractor mirrors the SDK sparse-array JSON boundary", async () => {
+    const sparse = new Array(2);
+    const inner: MCPServer = {
+      name: "sparse-inner",
+      cacheToolsList: false,
+      customDataExtractor: async () => ({ sparse }),
+      async connect() {},
+      async close() {},
+      async listTools() {
+        return [
+          {
+            name: "inspect",
+            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+          },
+        ];
+      },
+      async callTool() {
+        return [{ type: "text" as const, text: "content" }];
+      },
+      async callToolResult() {
+        return { content: [{ type: "text" as const, text: "content" }] };
+      },
+      async invalidateToolsCache() {},
+    };
+    const wrapped = new PrefixedMcpServer(inner, "sparse");
+    const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false });
+    const model = new ScriptedModel([
+      { output: [scriptedFunctionCall("sparse__inspect", {}, "sparse-call")] },
+      { outputText: "done" },
+    ]);
+    const agent = buildOpenGeniAgent(settings, [], {
+      model,
+      hostedWebSearch: false,
+      mcpServers: [wrapped],
+    });
+
+    const result = await runAgentStream(agent, "Inspect it", settings);
+    const streamed: any[] = [];
+    for await (const event of result.toStream()) streamed.push(event);
+    await result.completed;
+
+    const outputEvent = streamed.find(
+      (event) =>
+        event.type === "run_item_stream_event" && event.item?.type === "tool_call_output_item",
+    );
+    expect(outputEvent?.item.customData).toEqual({
+      [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: {
+        content: [{ type: "text", text: "content" }],
+      },
+      [OPENGENI_INNER_MCP_CUSTOM_DATA_KEY]: { sparse: [null, null] },
+    });
+  });
+
+  test("approval RunState compaction removes only the redundant MCP result marker", async () => {
+    const largeText = "x".repeat(1_047_000);
+    const fullResult = {
+      content: [{ type: "text" as const, text: largeText }],
+      isError: false,
+      _meta: { providerTrace: "large-trace-1" },
+    };
+    const inner: MCPServer = {
+      name: "large-inner",
+      cacheToolsList: false,
+      customDataExtractor: async () => ({ innerReceipt: "keep-me" }),
+      async connect() {},
+      async close() {},
+      async listTools() {
+        return [
+          {
+            name: "inspect",
+            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+          },
+          {
+            name: "mutate",
+            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+          },
+        ];
+      },
+      async callTool(toolName) {
+        return toolName === "inspect"
+          ? fullResult.content
+          : [{ type: "text" as const, text: "mutated" }];
+      },
+      async callToolResult(toolName) {
+        return toolName === "inspect"
+          ? fullResult
+          : { content: [{ type: "text" as const, text: "mutated" }] };
+      },
+      async invalidateToolsCache() {},
+    };
+    const wrapped = new PrefixedMcpServer(inner, "large");
+    const settings = testSettings({
+      sandboxBackend: "none",
+      webSearchEnabled: false,
+      mcpServers: [
+        {
+          id: "large",
+          name: "Large result",
+          url: "https://large.invalid/mcp",
+          cacheToolsList: false,
+          requireApproval: ["mutate"],
+        },
+      ],
+    });
+    const model = new ScriptedModel([
+      {
+        output: [
+          scriptedFunctionCall("large__inspect", {}, "large-inspect-call"),
+          scriptedFunctionCall("large__mutate", {}, "large-mutate-call"),
+        ],
+      },
+    ]);
+    const agent = buildOpenGeniAgent(settings, [], {
+      model,
+      hostedWebSearch: false,
+      mcpServers: [wrapped],
+    });
+
+    const result = await runAgentStream(agent, "Inspect then mutate", settings);
+    for await (const _event of result.toStream()) {
+      // Drain the completed inspect result before the approval interruption.
+    }
+    await result.completed;
+    expect(result.interruptions).toHaveLength(1);
+
+    const serialized = result.state.toString();
+    expect(serialized).toContain(OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY);
+    expect(Buffer.byteLength(serialized, "utf8")).toBeGreaterThan(3 * 1024 * 1024);
+
+    const compacted = compactMcpResultCustomDataRunState(serialized);
+    expect(compacted).not.toContain(OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY);
+    expect(compacted).toContain(OPENGENI_INNER_MCP_CUSTOM_DATA_KEY);
+    expect(compacted).toContain("keep-me");
+    expect(compacted).toContain("large-trace-1");
+    expect(Buffer.byteLength(compacted, "utf8")).toBeLessThan(3 * 1024 * 1024);
+
+    const resumed = await RunState.fromString(agent, compacted);
+    expect(resumed.getInterruptions()).toHaveLength(1);
+  });
+
   test("connects to real Streamable HTTP MCP servers with prefixes and allowed tool filtering", async () => {
     const mcp = startTestMcpServer();
     const prepared = await prepareAgentTools(
@@ -5240,9 +6160,12 @@ describe("runtime event normalization", () => {
       },
     );
     try {
-      const result = await prepared.mcpServers[0]!.callTool("cap-uncertain__search_documents", {
-        query: "do not duplicate",
-      });
+      const result = await prepared.mcpServers[0]!.callToolResult!(
+        "cap-uncertain__search_documents",
+        {
+          query: "do not duplicate",
+        },
+      );
       expect(result).toMatchObject({ isError: true });
       const text = JSON.stringify(result);
       expect(text).toMatch(/outcome uncertain/i);
@@ -5305,7 +6228,7 @@ describe("runtime event normalization", () => {
     );
     try {
       await prepared.mcpServers[0]!.listTools();
-      const result = await prepared.mcpServers[0]!.callTool("cap-scoped__search_documents", {
+      const result = await prepared.mcpServers[0]!.callToolResult!("cap-scoped__search_documents", {
         query: "scope",
       });
       expect(result).toMatchObject({ isError: true });
@@ -5370,9 +6293,12 @@ describe("runtime event normalization", () => {
       // invocation isolation degrades the tool-call failure to an isError result
       // the model sees rather than throwing out of the turn — and it must still
       // NOT be misclassified as an auth-needed.
-      const result = await prepared.mcpServers[0]!.callTool("cap-forbidden__search_documents", {
-        query: "scope",
-      });
+      const result = await prepared.mcpServers[0]!.callToolResult!(
+        "cap-forbidden__search_documents",
+        {
+          query: "scope",
+        },
+      );
       expect(result).toMatchObject({ isError: true });
       expect(authNeeded).toEqual([]);
     } finally {
@@ -5428,9 +6354,12 @@ describe("runtime event normalization", () => {
     );
     try {
       await prepared.mcpServers[0]!.listTools();
-      const result = await prepared.mcpServers[0]!.callTool("cap-auth-needed__search_documents", {
-        query: "auth",
-      });
+      const result = await prepared.mcpServers[0]!.callToolResult!(
+        "cap-auth-needed__search_documents",
+        {
+          query: "auth",
+        },
+      );
       expect(result).toMatchObject({
         isError: true,
         content: [
@@ -5881,7 +6810,7 @@ describe("runtime event normalization", () => {
       expect(prepared.mcpServers).toHaveLength(1);
       await prepared.mcpServers[0]!.listTools();
       authorized = false;
-      const result = await prepared.mcpServers[0]!.callTool("codex_apps__search_documents", {
+      const result = await prepared.mcpServers[0]!.callToolResult!("codex_apps__search_documents", {
         query: "must-not-run",
       });
       expect(result).toMatchObject({ isError: true });
@@ -6854,7 +7783,7 @@ describe("runtime event normalization", () => {
       const cap = prepared.mcpServers.find((server) => runtimeMcpServerId(server) === "cap")!;
       const docs = prepared.mcpServers.find((server) => runtimeMcpServerId(server) === "docs")!;
       await cap.listTools();
-      const result = await cap.callTool("cap__search_documents", {
+      const result = await cap.callToolResult!("cap__search_documents", {
         query: "x",
       });
       expect(result).toMatchObject({ isError: true });
@@ -6920,7 +7849,7 @@ describe("runtime event normalization", () => {
         )!;
         const docs = prepared.mcpServers.find((server) => runtimeMcpServerId(server) === "docs")!;
         await flakySrv.listTools(); // fine — only tools/call 401s
-        const result = await flakySrv.callTool("flaky__search_documents", {
+        const result = await flakySrv.callToolResult!("flaky__search_documents", {
           query: "x",
         });
         expect(result).toMatchObject({ isError: true });
@@ -6993,7 +7922,7 @@ describe("runtime event normalization", () => {
       try {
         const flakySrv = prepared.mcpServers[0]!;
         await flakySrv.listTools(); // fine — only tools/call 500s
-        const result = await flakySrv.callTool("flaky__search_documents", {
+        const result = await flakySrv.callToolResult!("flaky__search_documents", {
           query: "x",
         });
         expect(result).toMatchObject({ isError: true });

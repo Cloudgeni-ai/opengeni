@@ -27624,6 +27624,8 @@ export async function recordPendingSessionToolCallResult(
   db: Database,
   input: Omit<PendingSessionToolCallInput, "callType" | "callItem"> & {
     resultItem: Record<string, unknown>;
+    /** Exact agent.toolCall.output value, separate from model-facing history. */
+    eventOutput?: unknown;
     /** Commit a durable async-video acceptance fence with this exact result. */
     videoGenerationAcceptance?: {
       operationId: string;
@@ -27684,18 +27686,27 @@ export async function recordPendingSessionToolCallResult(
         ) {
           throw new Error(`SDK tool result does not settle ${pending.callType}:${input.callId}`);
         }
+        const resultUpdate = withLosslessContentWriteVersion(
+          {
+            resultItem: input.resultItem,
+            resultRecordedAt: new Date(),
+          },
+          "resultItem",
+          "resultItemCodecVersion",
+        );
+        const update = Object.hasOwn(input, "eventOutput")
+          ? withLosslessContentWriteVersion(
+              {
+                ...resultUpdate,
+                eventOutput: { value: input.eventOutput },
+              },
+              "eventOutput",
+              "eventOutputCodecVersion",
+            )
+          : resultUpdate;
         const recorded = await tx
           .update(schema.sessionPendingToolCalls)
-          .set(
-            withLosslessContentWriteVersion(
-              {
-                resultItem: input.resultItem,
-                resultRecordedAt: new Date(),
-              },
-              "resultItem",
-              "resultItemCodecVersion",
-            ),
-          )
+          .set(update)
           .where(
             and(
               eq(schema.sessionPendingToolCalls.id, pending.id),
