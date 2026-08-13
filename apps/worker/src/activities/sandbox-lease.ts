@@ -2046,14 +2046,7 @@ async function terminateDrainableBox(
         inspectProviderLifecycle,
       );
       if (repaired) {
-        const { wentCold } = await confirmDrainCold(db, {
-          accountId,
-          workspaceId: row.workspaceId,
-          sandboxGroupId: row.sandboxGroupId,
-          expectedEpoch: row.leaseEpoch,
-          providerMissingBeforeCapture: true,
-        });
-        return wentCold;
+        return true;
       }
     }
   }

@@ -340,6 +340,8 @@ CREATE OR REPLACE FUNCTION opengeni_private.guard_provider_loss_lease_mutation()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
+DECLARE
+  atomic_claim_id text := nullif(current_setting('opengeni.sandbox_provider_loss_claim_id', true), '');
 BEGIN
   IF TG_OP = 'DELETE' THEN
     IF EXISTS (
@@ -367,6 +369,20 @@ BEGIN
     OR NEW.archive_capture_id IS DISTINCT FROM OLD.archive_capture_id
     OR NEW.rotation_requested_at IS DISTINCT FROM OLD.rotation_requested_at
     OR NEW.rotation_reason IS DISTINCT FROM OLD.rotation_reason
+  ) AND NOT (
+    NEW.liveness = 'cold'
+    AND NEW.instance_id IS NULL
+    AND NEW.refcount = 0
+    AND NEW.lease_epoch = OLD.lease_epoch + 1
+    AND atomic_claim_id IS NOT NULL
+    AND atomic_claim_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+    AND EXISTS (
+      SELECT 1
+      FROM sandbox_provider_loss_teardown_claims claim
+      WHERE claim.id = atomic_claim_id::uuid
+        AND claim.lease_id = OLD.id
+        AND claim.consumed_at IS NULL
+    )
   ) THEN
     RAISE EXCEPTION 'provider-loss teardown claim fences lease lifecycle mutation'
       USING ERRCODE = '55000';
@@ -374,6 +390,22 @@ BEGIN
   RETURN NEW;
 END;
 $$;
+
+DO $security$
+DECLARE data_schema text := current_schema();
+BEGIN
+  EXECUTE format(
+    'ALTER FUNCTION opengeni_private.guard_provider_loss_claim_fence() SECURITY DEFINER SET search_path = pg_catalog, %I',
+    data_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION opengeni_private.guard_provider_loss_lease_mutation() SECURITY DEFINER SET search_path = pg_catalog, %I',
+    data_schema
+  );
+  REVOKE EXECUTE ON FUNCTION opengeni_private.guard_provider_loss_claim_fence() FROM PUBLIC;
+  REVOKE EXECUTE ON FUNCTION opengeni_private.guard_provider_loss_lease_mutation() FROM PUBLIC;
+END
+$security$;
 
 CREATE TRIGGER sandbox_provider_loss_lease_mutation_fence
 BEFORE UPDATE OF liveness, instance_id, lease_epoch, refcount ON sandbox_leases

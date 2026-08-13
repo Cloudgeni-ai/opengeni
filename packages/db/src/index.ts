@@ -33568,6 +33568,7 @@ async function settleExactLostProviderWorkspaceBlockersTx(
     sandboxGroupId: string;
     lostEpoch: number;
     lostInstanceId: string;
+    providerLossAdmissionId?: string | undefined;
   },
 ): Promise<LostProviderWorkspaceSettlement> {
   const lostProcesses = await tx
@@ -33594,22 +33595,26 @@ async function settleExactLostProviderWorkspaceBlockersTx(
       holderId: schema.sandboxRetainedProcesses.holderId,
     });
 
-  const rejectedAdmissions = await tx
-    .update(schema.sandboxWorkspaceMutationAdmissions)
-    .set({ providerOutcome: "rejected", settledAt: new Date() })
-    .where(
-      and(
-        eq(schema.sandboxWorkspaceMutationAdmissions.accountId, input.accountId),
-        eq(schema.sandboxWorkspaceMutationAdmissions.workspaceId, input.workspaceId),
-        eq(schema.sandboxWorkspaceMutationAdmissions.leaseId, input.leaseId),
-        eq(schema.sandboxWorkspaceMutationAdmissions.sandboxGroupId, input.sandboxGroupId),
-        eq(schema.sandboxWorkspaceMutationAdmissions.leaseEpoch, input.lostEpoch),
-        eq(schema.sandboxWorkspaceMutationAdmissions.providerInstanceId, input.lostInstanceId),
-        isNull(schema.sandboxWorkspaceMutationAdmissions.settledAt),
-      ),
-    )
-    .returning({ id: schema.sandboxWorkspaceMutationAdmissions.id });
-
+  const rejectedAdmissions = await tx.execute<{ id: string }>(sql`
+    update sandbox_workspace_mutation_admissions
+    set provider_outcome = case
+          when id = ${input.providerLossAdmissionId ?? null}::uuid then 'unknown'
+          else 'rejected'
+        end,
+        settled_at = now()
+    where account_id = ${input.accountId}
+      and workspace_id = ${input.workspaceId}
+      and lease_id = ${input.leaseId}::uuid
+      and sandbox_group_id = ${input.sandboxGroupId}::uuid
+      and lease_epoch = ${input.lostEpoch}
+      and provider_instance_id = ${input.lostInstanceId}
+      and settled_at is null
+      and (
+        ${input.providerLossAdmissionId ?? null}::uuid is null
+        or id <> ${input.providerLossAdmissionId ?? null}::uuid
+      )
+    returning id
+  `);
   const closedPtys = await tx
     .update(schema.sandboxPtySessions)
     .set({ status: "closed", closedAt: new Date() })
@@ -33645,21 +33650,23 @@ async function settleExactLostProviderWorkspaceBlockersTx(
           )
           .returning({ holderId: schema.sandboxLeaseHolders.holderId });
 
-  await tx.execute(sql`
-    update sandbox_leases as lease set
-      refcount = counts.total,
-      turn_holders = counts.turns,
-      viewer_holders = counts.viewers,
-      updated_at = now()
-    from (
-      select count(*)::int as total,
-        count(*) filter (where kind = 'turn')::int as turns,
-        count(*) filter (where kind = 'viewer')::int as viewers
-      from sandbox_lease_holders
-      where lease_id = ${input.leaseId}
-    ) as counts
-    where lease.id = ${input.leaseId}
-  `);
+  if (input.providerLossAdmissionId === undefined) {
+    await tx.execute(sql`
+      update sandbox_leases as lease set
+        refcount = counts.total,
+        turn_holders = counts.turns,
+        viewer_holders = counts.viewers,
+        updated_at = now()
+      from (
+        select count(*)::int as total,
+          count(*) filter (where kind = 'turn')::int as turns,
+          count(*) filter (where kind = 'viewer')::int as viewers
+        from sandbox_lease_holders
+        where lease_id = ${input.leaseId}
+      ) as counts
+      where lease.id = ${input.leaseId}
+    `);
+  }
 
   return {
     processesLost: lostProcesses.length,
@@ -35085,33 +35092,29 @@ export async function reArmDrainingLease(
   );
 }
 
+type ConfirmDrainColdInput = {
+  accountId: string;
+  workspaceId: string;
+  sandboxGroupId: string;
+  expectedEpoch: number;
+  expectedCaptureId?: string;
+  providerMissingBeforeCapture?: boolean;
+  providerLossAdmissionId?: string | undefined;
+  providerLossReceiptId?: string;
+  providerLossClaimId?: string;
+  providerLossLeaseId?: string;
+  providerLossProviderInstanceId?: string;
+};
+
 // §4.8 — the reaper's final teardown commit (D3). Called AFTER the caller issued
 // provider stop() on instance_id. The exact capture id is the durable teardown
 // claim: holder admission cannot re-arm after that claim is acquired, and a
 // recovered/replaced claim makes an older worker's final commit a no-op. The
 // liveness/refcount/epoch checks remain defense-in-depth for pre-claim races.
-export async function confirmDrainCold(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sandboxGroupId: string;
-    expectedEpoch: number;
-    /** Exact durable teardown ownership. Omission asserts that no claim exists;
-     *  a replaced, newly installed, or expired claim always fences this commit. */
-    expectedCaptureId?: string;
-    /** Definitive provider NotFound before this drain could capture /workspace.
-     *  With no durable archive this must become typed unrecoverable, never a
-     *  clean cold lease that can expose an empty replacement. */
-    providerMissingBeforeCapture?: boolean;
-  },
+async function confirmDrainColdInTransaction(
+  tx: Database,
+  input: ConfirmDrainColdInput,
 ): Promise<{ wentCold: boolean }> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) =>
-      await scopedDb.transaction(async (txRaw) => {
-        const tx = txRaw as unknown as Database;
         // draining->cold: the box is terminated, so EVERY live-box field is cleared
         // (instance_id / data-plane URLs). resume_state, however, is NOT blindly
         // nulled — if the reaper PERSISTED a /workspace snapshot onto it
@@ -35141,7 +35144,10 @@ export async function confirmDrainCold(
           observed.reaper_hold_active ||
           observed.refcount !== 0 ||
           Number(observed.lease_epoch) !== input.expectedEpoch ||
-          observed.archive_capture_id !== (input.expectedCaptureId ?? null)
+          observed.archive_capture_id !== (input.expectedCaptureId ?? null) ||
+          (input.providerLossLeaseId !== undefined && observed.id !== input.providerLossLeaseId) ||
+          (input.providerLossProviderInstanceId !== undefined &&
+            observed.instance_id !== input.providerLossProviderInstanceId)
         ) {
           return { wentCold: false };
         }
@@ -35181,12 +35187,12 @@ export async function confirmDrainCold(
           row.refcount !== 0 ||
           Number(row.lease_epoch) !== input.expectedEpoch ||
           row.archive_capture_id !== (input.expectedCaptureId ?? null) ||
-          (blockerScope && row.instance_id !== blockerScope.lostInstanceId)
+          (blockerScope && row.instance_id !== blockerScope.lostInstanceId) ||
+          (input.providerLossLeaseId !== undefined && row.id !== input.providerLossLeaseId) ||
+          (input.providerLossProviderInstanceId !== undefined &&
+            row.instance_id !== input.providerLossProviderInstanceId)
         ) {
           return { wentCold: false };
-        }
-        if (blockerScope) {
-          await settleExactLostProviderWorkspaceBlockersTx(tx, blockerScope);
         }
         const current = recoveryStateFromLeaseRow(row);
         const hasArchive = current.archive.status !== "none";
@@ -35273,6 +35279,11 @@ export async function confirmDrainCold(
             sql`select set_config('opengeni.sandbox_drain_capture_id', ${input.expectedCaptureId}, true)`,
           );
         }
+        if (input.providerLossClaimId) {
+          await tx.execute(
+            sql`select set_config('opengeni.sandbox_provider_loss_claim_id', ${input.providerLossClaimId}, true)`,
+          );
+        }
         const rows = await tx.execute<{ id: string }>(sql`
         update sandbox_leases set
           liveness = 'cold',
@@ -35309,8 +35320,88 @@ export async function confirmDrainCold(
           and archive_capture_id is not distinct from ${input.expectedCaptureId ?? null}::uuid
         returning id
       `);
-        return { wentCold: rows.length > 0 };
-      }),
+        if (rows.length !== 1) {
+          return { wentCold: false };
+        }
+        if (blockerScope) {
+          await settleExactLostProviderWorkspaceBlockersTx(tx, {
+            ...blockerScope,
+            providerLossAdmissionId: input.providerLossAdmissionId,
+          });
+        }
+        if (rows.length === 1 && input.providerLossAdmissionId !== undefined) {
+          const settledAdmission = await tx.execute<{ id: string }>(sql`
+            update sandbox_workspace_mutation_admissions
+            set provider_outcome = 'unknown', settled_at = now()
+            where id = ${input.providerLossAdmissionId}::uuid
+              and account_id = ${input.accountId}
+              and workspace_id = ${input.workspaceId}
+              and lease_id = ${row.id}
+              and sandbox_group_id = ${input.sandboxGroupId}::uuid
+              and lease_epoch = ${input.expectedEpoch}
+              and provider_instance_id = ${input.providerLossProviderInstanceId}::text
+              and provider_outcome is null
+              and settled_at is null
+            returning id
+          `);
+          if (settledAdmission.length !== 1) {
+            throw new Error("Provider-loss admission settlement CAS failed");
+          }
+        }
+        if (
+          input.providerLossAdmissionId !== undefined ||
+          input.providerLossReceiptId !== undefined ||
+          input.providerLossClaimId !== undefined
+        ) {
+          if (
+            input.providerLossAdmissionId === undefined ||
+            input.providerLossReceiptId === undefined ||
+            input.providerLossClaimId === undefined
+          ) {
+            throw new Error("Provider-loss receipt identity is incomplete");
+          }
+          const receiptConsumed = await tx.execute<{ id: string }>(sql`
+            update sandbox_provider_loss_receipts
+            set consumed_at = now()
+            where id = ${input.providerLossReceiptId}::uuid
+              and account_id = ${input.accountId}
+              and workspace_id = ${input.workspaceId}
+              and admission_id = ${input.providerLossAdmissionId}::uuid
+              and claim_id = ${input.providerLossClaimId}::uuid
+              and consumed_at is null
+            returning id
+          `);
+          if (receiptConsumed.length !== 1) {
+            throw new Error("Provider-loss receipt consumption CAS failed");
+          }
+          const claimConsumed = await tx.execute<{ id: string }>(sql`
+            update sandbox_provider_loss_teardown_claims
+            set consumed_at = now()
+            where id = ${input.providerLossClaimId}::uuid
+              and account_id = ${input.accountId}
+              and workspace_id = ${input.workspaceId}
+              and admission_id = ${input.providerLossAdmissionId}::uuid
+              and consumed_at is null
+            returning id
+          `);
+          if (claimConsumed.length !== 1) {
+            throw new Error("Provider-loss claim consumption CAS failed");
+          }
+        }
+        return { wentCold: true };
+}
+
+export async function confirmDrainCold(
+  db: Database,
+  input: ConfirmDrainColdInput,
+): Promise<{ wentCold: boolean }> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) =>
+        confirmDrainColdInTransaction(txRaw as unknown as Database, input),
+      ),
   );
 }
 
@@ -38405,7 +38496,16 @@ export async function persistSandboxProviderLossObservation(
 export type ConsumeSandboxProviderLossReceiptResult =
   | { status: "consumed"; admissionId: string }
   | { status: "already_consumed"; admissionId: string }
-  | { status: "rejected"; reason: "receipt_missing" | "identity_mismatch" | "blocker_present" | "later_admission" | "admission_not_open" };
+  | {
+      status: "rejected";
+      reason:
+        | "receipt_missing"
+        | "identity_mismatch"
+        | "blocker_present"
+        | "later_admission"
+        | "admission_not_open"
+        | "partial_consumption";
+    };
 
 /** Consume exactly one receipt and change exactly one admission to unknown.
  * The provider is never called here and no other admission is bulk-settled. */
@@ -38485,7 +38585,80 @@ export async function consumeSandboxProviderLossReceipt(
         `);
         const receipt = receipts[0];
         if (!receipt) return { status: "rejected", reason: "receipt_missing" } as const;
-        if (receipt.consumed_at) return { status: "already_consumed", admissionId: receipt.admission_id } as const;
+        if (receipt.consumed_at) {
+          const committed = await tx.execute<{
+            receipt_consumed_at: Date | string | null;
+            claim_consumed_at: Date | string | null;
+            provider_outcome: string | null;
+            admission_settled_at: Date | string | null;
+            lease_id: string;
+            sandbox_group_id: string;
+            lease_epoch: number | string;
+            liveness: string;
+            instance_id: string | null;
+            data_plane_url: string | null;
+            terminal_data_plane_url: string | null;
+            controller_data_plane_url: string | null;
+            recovery_provider_status: string | null;
+            recovery_provider_instance_id: string | null;
+          }>(sql`
+            select
+              receipt.consumed_at as receipt_consumed_at,
+              claim.consumed_at as claim_consumed_at,
+              admission.provider_outcome,
+              admission.settled_at as admission_settled_at,
+              lease.id as lease_id,
+              lease.sandbox_group_id,
+              lease.lease_epoch,
+              lease.liveness,
+              lease.instance_id,
+              lease.data_plane_url,
+              lease.terminal_data_plane_url,
+              lease.controller_data_plane_url,
+              lease.resume_state #>> '{opengeniRecovery,provider,status}' as recovery_provider_status,
+              lease.resume_state #>> '{opengeniRecovery,provider,instanceId}' as recovery_provider_instance_id
+            from sandbox_provider_loss_receipts receipt
+            join sandbox_provider_loss_teardown_claims claim
+              on claim.id = receipt.claim_id
+             and claim.account_id = receipt.account_id
+             and claim.workspace_id = receipt.workspace_id
+             and claim.admission_id = receipt.admission_id
+            join sandbox_workspace_mutation_admissions admission
+              on admission.id = receipt.admission_id
+             and admission.account_id = receipt.account_id
+             and admission.workspace_id = receipt.workspace_id
+            join sandbox_leases lease
+              on lease.id = receipt.lease_id
+             and lease.account_id = receipt.account_id
+             and lease.workspace_id = receipt.workspace_id
+            where receipt.id = ${input.receiptId}::uuid
+              and receipt.account_id = ${input.accountId}
+              and receipt.workspace_id = ${input.workspaceId}
+              and receipt.claim_id = ${input.claimId}::uuid
+              and receipt.admission_id = ${input.admissionId}::uuid
+          `);
+          const committedRow = committed[0];
+          if (
+            !committedRow ||
+            !committedRow.receipt_consumed_at ||
+            !committedRow.claim_consumed_at ||
+            committedRow.provider_outcome !== "unknown" ||
+            !committedRow.admission_settled_at ||
+            committedRow.lease_id !== input.leaseId ||
+            committedRow.sandbox_group_id !== receipt.sandbox_group_id ||
+            Number(committedRow.lease_epoch) !== input.leaseEpoch + 1 ||
+            committedRow.liveness !== "cold" ||
+            committedRow.instance_id !== null ||
+            committedRow.data_plane_url !== null ||
+            committedRow.terminal_data_plane_url !== null ||
+            committedRow.controller_data_plane_url !== null ||
+            committedRow.recovery_provider_status !== "missing" ||
+            committedRow.recovery_provider_instance_id !== input.providerInstanceId
+          ) {
+            return { status: "rejected", reason: "partial_consumption" } as const;
+          }
+          return { status: "already_consumed", admissionId: receipt.admission_id } as const;
+        }
         if (
           receipt.admission_id !== input.admissionId ||
           receipt.lease_id !== input.leaseId ||
@@ -38655,42 +38828,21 @@ export async function consumeSandboxProviderLossReceipt(
         if (!lockedReceipts[0] || lockedReceipts[0].consumed_at) {
           return { status: "rejected", reason: "receipt_missing" } as const;
         }
-        const leases = await tx.execute<LeaseRow>(sql`
-          select * from sandbox_leases
-          where id = ${input.leaseId}::uuid
-          for update
-        `);
-        const lease = leases[0];
-        if (
-          !lease ||
-          lease.account_id !== input.accountId ||
-          lease.workspace_id !== input.workspaceId ||
-          lease.sandbox_group_id !== receipt.sandbox_group_id ||
-          Number(lease.lease_epoch) !== input.leaseEpoch ||
-          lease.instance_id !== input.providerInstanceId ||
-          lease.liveness !== "draining" ||
-          Number(lease.refcount) !== 0
-        ) {
+        const cold = await confirmDrainColdInTransaction(tx, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sandboxGroupId: receipt.sandbox_group_id,
+          expectedEpoch: input.leaseEpoch,
+          providerMissingBeforeCapture: true,
+          providerLossAdmissionId: input.admissionId,
+          providerLossReceiptId: input.receiptId,
+          providerLossClaimId: input.claimId,
+          providerLossLeaseId: input.leaseId,
+          providerLossProviderInstanceId: input.providerInstanceId,
+        });
+        if (!cold.wentCold) {
           return { status: "rejected", reason: "identity_mismatch" } as const;
         }
-        await tx.execute(sql`
-          update sandbox_provider_loss_receipts
-          set consumed_at = now()
-          where id = ${input.receiptId}::uuid
-            and consumed_at is null
-        `);
-        await tx.execute(sql`
-          update sandbox_provider_loss_teardown_claims
-          set consumed_at = now()
-          where id = ${input.claimId}::uuid
-            and consumed_at is null
-        `);
-        await tx.execute(sql`
-          update sandbox_workspace_mutation_admissions
-          set provider_outcome = 'unknown', settled_at = now()
-          where id = ${input.admissionId}::uuid
-            and provider_outcome is null and settled_at is null
-        `);
         return { status: "consumed", admissionId: input.admissionId } as const;
       }),
   );

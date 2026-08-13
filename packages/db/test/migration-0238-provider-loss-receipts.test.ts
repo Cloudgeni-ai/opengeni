@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import postgres from "postgres";
 
 import {
+  acquireLease,
   claimProviderLossTeardown,
   consumeSandboxProviderLossReceipt,
   createDb,
@@ -135,6 +136,26 @@ describe("0238 provider-loss receipt protocol", () => {
       expect(leaseMutationFunction?.source).toContain("TG_OP = 'DELETE'");
       expect(leaseMutationFunction?.source).toContain("RETURN OLD");
       expect(leaseMutationFunction?.source).toContain("OLD.lease_id");
+      expect(leaseMutationFunction?.source).toContain("sandbox_provider_loss_claim_id");
+      const securityFunctions = await shared.admin<{
+        name: string;
+        securityDefiner: boolean;
+        config: string[] | null;
+      }[]>`
+        select p.proname as name,
+               p.prosecdef as "securityDefiner",
+               p.proconfig as config
+        from pg_proc p
+        join pg_namespace n on n.oid = p.pronamespace
+        where n.nspname = 'opengeni_private'
+          and p.proname in ('guard_provider_loss_claim_fence', 'guard_provider_loss_lease_mutation')
+        order by p.proname
+      `;
+      expect(securityFunctions).toHaveLength(2);
+      for (const fn of securityFunctions) {
+        expect(fn.securityDefiner).toBe(true);
+        expect(fn.config?.some((entry) => entry.startsWith("search_path=pg_catalog,"))).toBe(true);
+      }
     } finally {
       await shared.release();
     }
@@ -411,10 +432,57 @@ describe("0238 provider-loss receipt protocol", () => {
         leaseEpoch: 7,
         providerInstanceId,
       };
-      expect(await consumeSandboxProviderLossReceipt(app.db, consumeInput)).toEqual({
-        status: "consumed",
-        admissionId,
+      let releaseLeaseLock!: () => void;
+      let leaseLockReady!: () => void;
+      const leaseLockReleased = new Promise<void>((resolve) => {
+        releaseLeaseLock = resolve;
       });
+      const leaseLocked = new Promise<void>((resolve) => {
+        leaseLockReady = resolve;
+      });
+      const leaseLock = shared.admin.begin(async (tx) => {
+        await tx`select id from sandbox_leases where id = ${leaseId}::uuid for update`;
+        leaseLockReady();
+        await leaseLockReleased;
+      });
+      await leaseLocked;
+
+      const waitForLeaseLockWaiters = async (minimum: number): Promise<void> => {
+        const deadline = Date.now() + 5_000;
+        while (Date.now() < deadline) {
+          const [waiters] = await shared.admin<{ count: number }[]>`
+            select count(*)::int as count
+            from pg_stat_activity
+            where datname = current_database()
+              and pid <> pg_backend_pid()
+              and wait_event_type = 'Lock'
+              and query ilike '%sandbox_leases%'
+          `;
+          if ((waiters?.count ?? 0) >= minimum) return;
+          await Bun.sleep(10);
+        }
+        throw new Error(`timed out waiting for ${minimum} lease lock waiter(s)`);
+      };
+
+      const consuming = consumeSandboxProviderLossReceipt(app.db, consumeInput);
+      await waitForLeaseLockWaiters(1);
+      const acquiring = acquireLease(app.db, {
+        accountId: account!.id,
+        workspaceId: workspace!.id,
+        sandboxGroupId: session.sandboxGroupId,
+        kind: "turn",
+        holderId: "provider-loss-race-acquire",
+        backend: "modal",
+        leaseTtlMs: 45_000,
+      });
+      await waitForLeaseLockWaiters(2);
+      releaseLeaseLock();
+      await leaseLock;
+
+      expect(await consuming).toEqual({ status: "consumed", admissionId });
+      const racedAcquire = await acquiring;
+      expect(racedAcquire.role).not.toBe("spawner");
+      expect(racedAcquire.role).not.toBe("rearmed");
       expect(await consumeSandboxProviderLossReceipt(app.db, consumeInput)).toEqual({
         status: "already_consumed",
         admissionId,
@@ -425,22 +493,24 @@ describe("0238 provider-loss receipt protocol", () => {
         settled_at: Date | null;
         claim_consumed_at: Date | null;
         receipt_consumed_at: Date | null;
+        liveness: string;
+        lease_epoch: number;
       }[]>`
         select admission.provider_outcome, admission.settled_at,
                claim.consumed_at as claim_consumed_at,
-               receipt.consumed_at as receipt_consumed_at
+               receipt.consumed_at as receipt_consumed_at,
+               lease.liveness,
+               lease.lease_epoch
         from sandbox_workspace_mutation_admissions admission
         join sandbox_provider_loss_teardown_claims claim on claim.id = ${claimId}::uuid
         join sandbox_provider_loss_receipts receipt on receipt.id = ${receiptId}::uuid
+        join sandbox_leases lease on lease.id = ${leaseId}::uuid
         where admission.id = ${admissionId}::uuid`;
       expect(state).toMatchObject({ provider_outcome: "unknown" });
       expect(state?.settled_at).toBeTruthy();
       expect(state?.claim_consumed_at).toBeTruthy();
       expect(state?.receipt_consumed_at).toBeTruthy();
-      await shared.admin`
-        update sandbox_leases
-        set liveness = 'cold', instance_id = null, lease_epoch = 8
-        where id = ${leaseId}::uuid`;
+      expect(state).toMatchObject({ liveness: "cold", lease_epoch: 8 });
     } finally {
       await app.close();
       await shared.release();
