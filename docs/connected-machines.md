@@ -58,7 +58,8 @@ bun run agent:local-runtime:run
 
 The command builds browserd, the pinned agent-browser driver, and
 computer-native first, hashes them into one development generation, then embeds
-that exact closure in the Rust agent. This is the supported local path: copying
+that exact closure in the Rust agent. On macOS it also enables the same real
+ScreenCaptureKit/CGEvent desktop feature as the release build. This is the supported local path: copying
 an agent binary next to arbitrary helpers can create a protocol-skewed runtime
 that production installation and managed updates deliberately forbid.
 

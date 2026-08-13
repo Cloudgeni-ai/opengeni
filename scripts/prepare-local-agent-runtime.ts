@@ -102,7 +102,9 @@ export async function prepareLocalAgentRuntime(): Promise<PreparedRuntime> {
     agentBrowser: await sha256File(agentBrowser),
     computerNative: await sha256File(computerNative),
   };
-  await run(["cargo", "build", "--release", "-p", "opengeni-agent"], agentRoot, {
+  const agentBuild = ["cargo", "build", "--release", "-p", "opengeni-agent"];
+  if (process.platform === "darwin") agentBuild.push("--features", "macos-desktop");
+  await run(agentBuild, agentRoot, {
     OPENGENI_EMBEDDED_BROWSERD: browserd,
     OPENGENI_EMBEDDED_AGENT_BROWSER: agentBrowser,
     OPENGENI_EMBEDDED_COMPUTER_NATIVE: computerNative,
