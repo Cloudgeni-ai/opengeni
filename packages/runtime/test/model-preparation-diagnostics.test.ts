@@ -9,7 +9,7 @@ describe("model preparation diagnostics", () => {
   test("manifest inventory remains fail-open when iteration throws", () => {
     const measurements: ModelPreparationMeasurement[] = [];
     const manifest = {
-      *iterEntries(): Generator<never, void, unknown> {
+      iterEntries(): Generator<never, void, unknown> {
         throw new Error("legacy manifest cannot normalize an entry");
       },
     };
