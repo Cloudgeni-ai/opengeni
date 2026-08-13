@@ -162,7 +162,11 @@ must preserve that ownership relationship. Cgroup placement alone does not chang
 host-wide kernel OOM victim selection: the generated service requests a negative
 supervisor `OOMScoreAdjust`, startup reports the effective `/proc` value because an
 unprivileged user manager may clamp it, and a pre-exec hook raises commands to
-`+500` before user code can fork descendants. The generated systemd
+`+500` before user code can fork descendants. Work delegated over a socket to an
+external privileged daemon (for example, a container build) is not a descendant
+of the command: the daemon chooses that workload's cgroup and OOM score. Operators
+must configure such delegated workloads so they are not more protected from
+global OOM selection than the supervisor. The generated systemd
 unit explicitly clears stale aggregate resource limits and enables accounting
 without a parent `MemoryHigh`; the default operation leaf has no memory maximum or
 throttle. Each operation leaf sets `memory.oom.group=1`, so a memcg OOM terminates
@@ -171,7 +175,8 @@ At spawn, the agent stops the command's process group, moves its direct
 roots, then repeatedly drains any same-group descendants still inherited in the
 supervisor leaf into the same operation leaf before resuming it. Correctness does
 not depend on synchronous stop-signal delivery: after a parent moves, future
-children inherit its operation leaf. This closes the post-spawn fork race. A
+process descendants inherit its operation leaf. Daemon-mediated work remains
+subject to the external-daemon boundary above. This closes the post-spawn fork race. A
 same-group fork storm that keeps creating escaped descendants during this tiny
 pre-containment window is terminated only after crossing a PID breaker derived
 from that machine's process ceiling; it cannot wedge command admission forever.
