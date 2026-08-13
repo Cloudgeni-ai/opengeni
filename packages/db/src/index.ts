@@ -348,7 +348,7 @@ export * from "./persistence-errors";
 export * from "./runtime-posture";
 export * from "./capability-integrations";
 export * from "./integration-bindings";
-export * from "./integration-features";
+export * from "./integration-facets";
 export * from "./insights";
 export { memoryTextForStorage } from "./memory-domain";
 // Re-exported so external consumers can `import { migrate } from "@opengeni/db"`.
@@ -4010,7 +4010,7 @@ export type CreateCapabilityCatalogItemInput = {
   accountId: string;
   workspaceId: string;
   id: string;
-  kind: Exclude<CapabilityKind, "pack">;
+  kind: "mcp";
   source: CapabilitySource;
   name: string;
   description?: string | null;
@@ -4091,7 +4091,7 @@ export type EnableCapabilityInstallationInput = {
   accountId: string;
   workspaceId: string;
   capabilityId: string;
-  kind: CapabilityKind;
+  kind: "mcp";
   config?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
 };
@@ -4102,13 +4102,18 @@ export type InstallPortableSkillInput = {
   subjectId: string;
   capabilityId: string;
   pluginKey: string;
-  source: "github" | "skills_sh" | "pack";
+  source: "library" | "github" | "skills_sh" | "pack";
   sourceUrl: string;
   repositoryUrl: string;
+  version?: string;
   sourceCommit: string;
   sourcePath: string;
   name: string;
   description: string;
+  category?: string;
+  tags?: string[];
+  provenance?: "platform" | "deployment" | "registry" | "workspace";
+  sourceProvenance?: string;
   contentSha256: string;
   totalBytes: number;
   license?: string | null;
@@ -4123,6 +4128,7 @@ export type InstallPortableSkillInput = {
 };
 
 export type InstalledPortableSkill = {
+  created: boolean;
   capabilityId: string;
   pluginId: string;
   pluginVersionId: string;
@@ -4130,7 +4136,8 @@ export type InstalledPortableSkill = {
   pluginInstallationId: string;
   facetInstallationId: string;
   installationVersion: number;
-  source: "github" | "skills_sh" | "pack";
+  source: "library" | "github" | "skills_sh" | "pack";
+  version: string;
   sourceUrl: string;
   sourceCommit: string;
   contentSha256: string;
@@ -4139,6 +4146,8 @@ export type InstalledPortableSkill = {
 
 export type PortableSkillRuntime = {
   capabilityId: string;
+  source: "library" | "github" | "skills_sh" | "pack";
+  version: string;
   name: string;
   description: string;
   sourceUrl: string;
@@ -4146,6 +4155,30 @@ export type PortableSkillRuntime = {
   sourcePath: string;
   contentSha256: string;
   files: Array<{ path: string; content: string }>;
+};
+
+export type InstalledSkillSummary = {
+  capabilityId: string;
+  pluginKey: string;
+  installationVersion: number;
+  name: string;
+  description: string;
+  category: string;
+  tags: string[];
+  provenance: string;
+  source: "library" | "github" | "skills_sh" | "pack";
+  version: string;
+  sourceUrl: string;
+  repositoryUrl: string;
+  sourceCommit: string;
+  sourcePath: string;
+  contentSha256: string;
+  fileCount: number;
+  totalBytes: number;
+  license: string | null;
+  installedAt: string;
+  updatedAt: string;
+  owners: PortableSkillOwner[];
 };
 
 export type PortableSkillOwner = {
@@ -6235,10 +6268,10 @@ export async function getCapabilityCatalogItem(
 }
 
 /**
- * Install one immutable, already-validated portable Skill through the v2
- * Plugin/facet ownership model and dual-write the v1 compatibility projection.
- * Repeating the same exact source is idempotent; changing a commit's content
- * fails instead of silently rewriting immutable history.
+ * Install one immutable, already-validated Skill through the authoritative
+ * Plugin/Skill-Facet ownership model. Repeating the same exact source is
+ * idempotent; changing a commit's content fails instead of silently rewriting
+ * immutable history.
  */
 export async function installPortableSkill(
   db: Database,
@@ -6253,6 +6286,7 @@ export async function installPortableSkill(
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
         const now = new Date();
+        const version = input.version ?? input.sourceCommit;
         await lockCapabilityComponentIdentity(
           tx as unknown as Database,
           input.workspaceId,
@@ -6278,9 +6312,9 @@ export async function installPortableSkill(
               workspaceId: input.workspaceId,
               name: input.name,
               description: input.description,
-              category: "skills",
-              tags: ["skill", "imported", input.source],
-              provenance: "workspace",
+              category: input.category ?? "skills",
+              tags: input.tags ?? ["skill", "imported", input.source],
+              provenance: input.provenance ?? "workspace",
             })
             .returning();
         } else if (plugin.accountId !== input.accountId) {
@@ -6291,6 +6325,9 @@ export async function installPortableSkill(
             .set({
               name: input.name,
               description: input.description,
+              category: input.category ?? "skills",
+              tags: input.tags ?? ["skill", "imported", input.source],
+              provenance: input.provenance ?? "workspace",
               updatedAt: now,
             })
             .where(eq(schema.capabilityPlugins.id, plugin.id))
@@ -6304,8 +6341,10 @@ export async function installPortableSkill(
           source: input.source,
           sourceUrl: input.sourceUrl,
           repositoryUrl: input.repositoryUrl,
+          version,
           sourceCommit: input.sourceCommit,
           sourcePath: input.sourcePath,
+          ...(input.sourceProvenance ? { sourceProvenance: input.sourceProvenance } : {}),
           contentSha256: input.contentSha256,
           fileCount: input.files.length,
           totalBytes: input.totalBytes,
@@ -6317,15 +6356,13 @@ export async function installPortableSkill(
           .where(
             and(
               eq(schema.capabilityPluginVersions.pluginId, plugin.id),
-              eq(schema.capabilityPluginVersions.version, input.sourceCommit),
+              eq(schema.capabilityPluginVersions.version, version),
             ),
           )
           .for("update")
           .limit(1);
         if (versionByName && versionByName.manifestDigest !== manifestDigest) {
-          throw new Error(
-            `Portable Skill source commit ${input.sourceCommit} conflicts with immutable stored content`,
-          );
+          throw new Error(`Skill version ${version} conflicts with immutable stored content`);
         }
         let pluginVersion = versionByName;
         if (!pluginVersion) {
@@ -6333,7 +6370,7 @@ export async function installPortableSkill(
             .insert(schema.capabilityPluginVersions)
             .values({
               pluginId: plugin.id,
-              version: input.sourceCommit,
+              version,
               manifestDigest,
               manifest,
               status: "published",
@@ -6414,13 +6451,41 @@ export async function installPortableSkill(
           )
           .for("update")
           .limit(1);
+        const owner = input.owner ?? {
+          kind: "direct" as const,
+          id: input.capabilityId,
+          removable: true,
+        };
+        const [existingOwner] = pluginInstallation
+          ? await tx
+              .select({ id: schema.capabilityComponentOwners.id })
+              .from(schema.capabilityComponentOwners)
+              .innerJoin(
+                schema.capabilityFacetInstallations,
+                eq(
+                  schema.capabilityFacetInstallations.id,
+                  schema.capabilityComponentOwners.facetInstallationId,
+                ),
+              )
+              .where(
+                and(
+                  eq(
+                    schema.capabilityFacetInstallations.pluginInstallationId,
+                    pluginInstallation.id,
+                  ),
+                  eq(schema.capabilityComponentOwners.ownerKind, owner.kind),
+                  eq(schema.capabilityComponentOwners.ownerId, owner.id),
+                ),
+              )
+              .limit(1)
+          : [];
         const changesInstalledVersion = Boolean(
           pluginInstallation &&
           pluginInstallation.status !== "disabled" &&
           (pluginInstallation.pluginVersionId !== pluginVersion.id ||
             pluginInstallation.status !== "active"),
         );
-        const directInstall = !input.owner || input.owner.kind === "direct";
+        const directInstall = owner.kind === "direct";
         if (changesInstalledVersion && directInstall) {
           if (input.expectedInstallationVersion === undefined) {
             throw new PortableSkillInstallationVersionRequiredError(
@@ -6441,8 +6506,8 @@ export async function installPortableSkill(
             pluginKey: input.pluginKey,
             pluginInstallationId: pluginInstallation.id,
             owner: {
-              kind: input.owner?.kind ?? "direct",
-              id: input.owner?.id ?? input.capabilityId,
+              kind: owner.kind,
+              id: owner.id,
             },
           });
         }
@@ -6514,91 +6579,14 @@ export async function installPortableSkill(
             accountId: input.accountId,
             workspaceId: input.workspaceId,
             facetInstallationId: facetInstallation.id,
-            ownerKind: input.owner?.kind ?? "direct",
-            ownerId: input.owner?.id ?? input.capabilityId,
-            removable: input.owner?.removable ?? true,
+            ownerKind: owner.kind,
+            ownerId: owner.id,
+            removable: owner.removable,
           })
           .onConflictDoNothing();
 
-        const compatibilityMetadata = {
-          platformVersion: 2,
-          source: input.source,
-          sourceUrl: input.sourceUrl,
-          repositoryUrl: input.repositoryUrl,
-          sourceCommit: input.sourceCommit,
-          sourcePath: input.sourcePath,
-          contentSha256: input.contentSha256,
-          pluginId: plugin.id,
-          pluginVersionId: pluginVersion.id,
-          facetId: facet.id,
-          provenance: "workspace_import",
-        };
-        await tx
-          .insert(schema.capabilityCatalogItems)
-          .values({
-            id: input.capabilityId,
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            kind: "skill",
-            source: "manual",
-            name: input.name,
-            description: input.description,
-            category: "skills",
-            tags: ["skill", "imported", input.source],
-            homepageUrl: input.repositoryUrl,
-            installUrl: input.sourceUrl,
-            provenance: "workspace_import",
-            tier: "community",
-            metadata: compatibilityMetadata,
-            updatedAt: now,
-          })
-          .onConflictDoUpdate({
-            target: [schema.capabilityCatalogItems.workspaceId, schema.capabilityCatalogItems.id],
-            set: {
-              name: input.name,
-              description: input.description,
-              tags: ["skill", "imported", input.source],
-              homepageUrl: input.repositoryUrl,
-              installUrl: input.sourceUrl,
-              provenance: "workspace_import",
-              tier: "community",
-              metadata: compatibilityMetadata,
-              updatedAt: now,
-            },
-          });
-        const compatibilityInstallationMetadata = {
-          ...compatibilityMetadata,
-          pluginInstallationId: pluginInstallation.id,
-          facetInstallationId: facetInstallation.id,
-        };
-        await tx
-          .insert(schema.capabilityInstallations)
-          .values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            capabilityId: input.capabilityId,
-            kind: "skill",
-            status: "active",
-            config: { sourceCommit: input.sourceCommit },
-            metadata: compatibilityInstallationMetadata,
-            enabledAt: now,
-            updatedAt: now,
-          })
-          .onConflictDoUpdate({
-            target: [
-              schema.capabilityInstallations.workspaceId,
-              schema.capabilityInstallations.capabilityId,
-            ],
-            set: {
-              status: "active",
-              config: { sourceCommit: input.sourceCommit },
-              metadata: compatibilityInstallationMetadata,
-              enabledAt: now,
-              updatedAt: now,
-            },
-          });
-
         return {
+          created: !existingOwner,
           capabilityId: input.capabilityId,
           pluginId: plugin.id,
           pluginVersionId: pluginVersion.id,
@@ -6607,6 +6595,7 @@ export async function installPortableSkill(
           facetInstallationId: facetInstallation.id,
           installationVersion: pluginInstallation.version,
           source: input.source,
+          version,
           sourceUrl: input.sourceUrl,
           sourceCommit: input.sourceCommit,
           contentSha256: input.contentSha256,
@@ -6616,7 +6605,7 @@ export async function installPortableSkill(
   );
 }
 
-/** Return exact text artifacts for active v2 Skill installations. */
+/** Return exact text artifacts for active authoritative Skill installations. */
 export async function listInstalledPortableSkills(
   db: Database,
   workspaceId: string,
@@ -6626,6 +6615,8 @@ export async function listInstalledPortableSkills(
       .select({
         capabilityId: schema.capabilitySkillFacets.capabilityId,
         facetId: schema.capabilitySkillFacets.facetId,
+        manifest: schema.capabilityPluginVersions.manifest,
+        version: schema.capabilityPluginVersions.version,
         name: schema.capabilitySkillFacets.name,
         description: schema.capabilitySkillFacets.description,
         sourceUrl: schema.capabilitySkillFacets.sourceUrl,
@@ -6636,6 +6627,13 @@ export async function listInstalledPortableSkills(
         content: schema.capabilitySkillFiles.content,
       })
       .from(schema.capabilityPluginInstallations)
+      .innerJoin(
+        schema.capabilityPluginVersions,
+        eq(
+          schema.capabilityPluginVersions.id,
+          schema.capabilityPluginInstallations.pluginVersionId,
+        ),
+      )
       .innerJoin(
         schema.capabilityFacetInstallations,
         eq(
@@ -6667,6 +6665,7 @@ export async function listInstalledPortableSkills(
       .orderBy(asc(schema.capabilitySkillFacets.name), asc(schema.capabilitySkillFiles.path));
     const skills = new Map<string, PortableSkillRuntime>();
     for (const row of rows) {
+      const source = skillSourceFromManifest(row.manifest, row.capabilityId);
       const existing = skills.get(row.facetId);
       if (existing) {
         existing.files.push({ path: row.path, content: row.content });
@@ -6674,6 +6673,8 @@ export async function listInstalledPortableSkills(
       }
       skills.set(row.facetId, {
         capabilityId: row.capabilityId,
+        source,
+        version: row.version,
         name: row.name,
         description: row.description,
         sourceUrl: row.sourceUrl,
@@ -6684,6 +6685,135 @@ export async function listInstalledPortableSkills(
       });
     }
     return [...skills.values()];
+  });
+}
+
+/** Return secret-free lifecycle summaries from the authoritative Skill ledger. */
+export async function listInstalledSkills(
+  db: Database,
+  workspaceId: string,
+): Promise<InstalledSkillSummary[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({
+        facetInstallationId: schema.capabilityFacetInstallations.id,
+        capabilityId: schema.capabilitySkillFacets.capabilityId,
+        pluginKey: schema.capabilityPlugins.pluginKey,
+        pluginName: schema.capabilityPlugins.name,
+        pluginDescription: schema.capabilityPlugins.description,
+        category: schema.capabilityPlugins.category,
+        tags: schema.capabilityPlugins.tags,
+        provenance: schema.capabilityPlugins.provenance,
+        manifest: schema.capabilityPluginVersions.manifest,
+        version: schema.capabilityPluginVersions.version,
+        installationVersion: schema.capabilityPluginInstallations.version,
+        installedAt: schema.capabilityPluginInstallations.installedAt,
+        updatedAt: schema.capabilityPluginInstallations.updatedAt,
+        sourceUrl: schema.capabilitySkillFacets.sourceUrl,
+        sourceCommit: schema.capabilitySkillFacets.sourceCommit,
+        sourcePath: schema.capabilitySkillFacets.sourcePath,
+        contentSha256: schema.capabilitySkillFacets.contentSha256,
+        fileCount: schema.capabilitySkillFacets.fileCount,
+        totalBytes: schema.capabilitySkillFacets.totalBytes,
+        license: schema.capabilitySkillFacets.license,
+        ownerKind: schema.capabilityComponentOwners.ownerKind,
+        ownerId: schema.capabilityComponentOwners.ownerId,
+        ownerRemovable: schema.capabilityComponentOwners.removable,
+      })
+      .from(schema.capabilityPluginInstallations)
+      .innerJoin(
+        schema.capabilityPlugins,
+        eq(schema.capabilityPlugins.id, schema.capabilityPluginInstallations.pluginId),
+      )
+      .innerJoin(
+        schema.capabilityPluginVersions,
+        eq(
+          schema.capabilityPluginVersions.id,
+          schema.capabilityPluginInstallations.pluginVersionId,
+        ),
+      )
+      .innerJoin(
+        schema.capabilityFacetInstallations,
+        eq(
+          schema.capabilityFacetInstallations.pluginInstallationId,
+          schema.capabilityPluginInstallations.id,
+        ),
+      )
+      .innerJoin(
+        schema.capabilitySkillFacets,
+        eq(schema.capabilitySkillFacets.facetId, schema.capabilityFacetInstallations.facetId),
+      )
+      .innerJoin(
+        schema.capabilityComponentOwners,
+        eq(
+          schema.capabilityComponentOwners.facetInstallationId,
+          schema.capabilityFacetInstallations.id,
+        ),
+      )
+      .where(
+        and(
+          eq(schema.capabilityPluginInstallations.workspaceId, workspaceId),
+          eq(schema.capabilityPluginInstallations.status, "active"),
+          eq(schema.capabilityFacetInstallations.status, "active"),
+          effectiveCapabilityOwnerSql(
+            schema.capabilityComponentOwners.ownerKind,
+            schema.capabilityComponentOwners.ownerId,
+          ),
+        ),
+      )
+      .orderBy(
+        asc(schema.capabilityPlugins.name),
+        asc(schema.capabilityComponentOwners.ownerKind),
+        asc(schema.capabilityComponentOwners.ownerId),
+      );
+    const summaries = new Map<string, InstalledSkillSummary>();
+    for (const row of rows) {
+      const source = skillSourceFromManifest(row.manifest, row.capabilityId);
+      const owner = portableSkillOwner(row.ownerKind, row.ownerId, row.ownerRemovable);
+      const existing = summaries.get(row.facetInstallationId);
+      if (existing) {
+        if (
+          !existing.owners.some(
+            (candidate) => candidate.kind === owner.kind && candidate.id === owner.id,
+          )
+        ) {
+          existing.owners.push(owner);
+        }
+        continue;
+      }
+      const repositoryUrl = row.manifest.repositoryUrl;
+      const sourceProvenance = row.manifest.sourceProvenance;
+      summaries.set(row.facetInstallationId, {
+        capabilityId: row.capabilityId,
+        pluginKey: row.pluginKey,
+        installationVersion: row.installationVersion,
+        name: row.pluginName,
+        description: row.pluginDescription ?? "",
+        category: row.category,
+        tags: [...row.tags],
+        provenance:
+          typeof sourceProvenance === "string" && sourceProvenance.length > 0
+            ? sourceProvenance
+            : row.provenance,
+        source,
+        version: row.version,
+        sourceUrl: row.sourceUrl,
+        repositoryUrl:
+          typeof repositoryUrl === "string" && repositoryUrl.length > 0
+            ? repositoryUrl
+            : row.sourceUrl,
+        sourceCommit: row.sourceCommit,
+        sourcePath: row.sourcePath,
+        contentSha256: row.contentSha256,
+        fileCount: row.fileCount,
+        totalBytes: row.totalBytes,
+        license: row.license,
+        installedAt: row.installedAt.toISOString(),
+        updatedAt: row.updatedAt.toISOString(),
+        owners: [owner],
+      });
+    }
+    return [...summaries.values()];
   });
 }
 
@@ -6806,15 +6936,6 @@ export async function uninstallPortableSkill(
             updatedAt: now,
           })
           .where(eq(schema.capabilityPluginInstallations.id, context.pluginInstallationId));
-        await tx
-          .update(schema.capabilityInstallations)
-          .set({ status: "disabled", updatedAt: now })
-          .where(
-            and(
-              eq(schema.capabilityInstallations.workspaceId, input.workspaceId),
-              eq(schema.capabilityInstallations.capabilityId, input.capabilityId),
-            ),
-          );
         return {
           capabilityId: input.capabilityId,
           status: "uninstalled",
@@ -6910,6 +7031,24 @@ async function portableSkillOwners(
     }
     return { kind: row.kind, id: row.id, removable: row.removable };
   });
+}
+
+function portableSkillOwner(kind: string, id: string, removable: boolean): PortableSkillOwner {
+  if (kind !== "direct" && kind !== "plugin" && kind !== "pack" && kind !== "migration") {
+    throw new Error(`Unknown Skill owner kind: ${kind}`);
+  }
+  return { kind, id, removable };
+}
+
+function skillSourceFromManifest(
+  manifestValue: Record<string, unknown>,
+  capabilityId: string,
+): InstalledSkillSummary["source"] {
+  const source = manifestValue.source;
+  if (source === "library" || source === "github" || source === "skills_sh" || source === "pack") {
+    return source;
+  }
+  throw new Error(`Installed Skill ${capabilityId} has invalid immutable source metadata`);
 }
 
 export async function enableCapabilityInstallation(
@@ -7395,13 +7534,13 @@ export async function persistProviderOAuthConnection(
         ) {
           return null;
         }
-        const existingPresetIds = Array.isArray(existing.metadata.authorizedPresetIds)
-          ? existing.metadata.authorizedPresetIds.filter(
+        const existingDefinitionIds = Array.isArray(existing.metadata.authorizedDefinitionIds)
+          ? existing.metadata.authorizedDefinitionIds.filter(
               (value): value is string => typeof value === "string",
             )
           : [];
-        const incomingPresetIds = Array.isArray(input.metadata?.authorizedPresetIds)
-          ? input.metadata.authorizedPresetIds.filter(
+        const incomingDefinitionIds = Array.isArray(input.metadata?.authorizedDefinitionIds)
+          ? input.metadata.authorizedDefinitionIds.filter(
               (value): value is string => typeof value === "string",
             )
           : [];
@@ -7420,10 +7559,10 @@ export async function persistProviderOAuthConnection(
           metadata: {
             ...existing.metadata,
             ...(input.metadata ?? {}),
-            ...(existingPresetIds.length > 0 || incomingPresetIds.length > 0
+            ...(existingDefinitionIds.length > 0 || incomingDefinitionIds.length > 0
               ? {
-                  authorizedPresetIds: [
-                    ...new Set([...existingPresetIds, ...incomingPresetIds]),
+                  authorizedDefinitionIds: [
+                    ...new Set([...existingDefinitionIds, ...incomingDefinitionIds]),
                   ].sort(),
                 }
               : {}),
@@ -53700,3 +53839,4 @@ export * from "./browser-auth";
 export * from "./browser-downloads";
 export * from "./attached-browser-devices";
 export * from "./interaction-revisions";
+export * from "./canonical-human-identities";

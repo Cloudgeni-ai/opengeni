@@ -294,7 +294,7 @@ import {
   mergeRigDefaultVariableSetEnvironment,
   rigProviderImageSourceImage,
   resolveWorkspacePackRuntime,
-  resolveWorkspaceSkillLibraryRuntime,
+  resolveWorkspaceInstalledSkillRuntime,
   settingsWithPackSandboxImage,
   settingsWithRigImage,
   settingsWithRigProviderImage,
@@ -4877,9 +4877,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // Resolved after turn.started so a composition conflict (two enabled
       // packs declaring images) fails the turn with its plain error instead
       // of failing the activity opaquely.
-      const [packRuntime, skillLibraryRuntime] = await Promise.all([
+      const [packRuntime, installedSkillRuntime] = await Promise.all([
         resolveWorkspacePackRuntime(db, input.workspaceId),
-        resolveWorkspaceSkillLibraryRuntime(db, input.workspaceId),
+        resolveWorkspaceInstalledSkillRuntime(db, input.workspaceId),
       ]);
       // RIG BINDING (M3): load the session's FROZEN rig version (resolved+frozen
       // at create). Everything rig-derived below (image precedence, env default
@@ -6485,11 +6485,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         }
         await publish!([{ type: "tool.auth_needed", payload }], true);
       };
-      const selectedApiIntegrationIds = new Set(turnTools.map((tool) => tool.id));
+      const selectedApiIntegrationServerIds = new Set(turnTools.map((tool) => tool.id));
       const localMcpServers = buildApiIntegrationServersForTurn({
         settings: runSettings,
         integrations: installedApiIntegrations.filter((integration) =>
-          selectedApiIntegrationIds.has(integration.serverId),
+          selectedApiIntegrationServerIds.has(integration.serverId),
         ),
         authority: {
           accountId: input.accountId,
@@ -6983,12 +6983,27 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           await maybeStartOnTurnRecording(resolvedSandbox, activeSandboxBackend);
         },
         onRetainableSessionImageOutput: retainSessionImageAtToolBoundary,
-        ...(packRuntime.skills.length > 0 ? { packSkills: packRuntime.skills } : {}),
-        ...(session.skills.length > 0 ? { sessionSkills: session.skills } : {}),
-        ...(skillLibraryRuntime.skillLibrarySkills.length > 0
+        ...(packRuntime.skillActivations.length > 0 ||
+        session.skills.length > 0 ||
+        installedSkillRuntime.activations.length > 0
           ? {
-              skillLibrarySkills: skillLibraryRuntime.skillLibrarySkills,
-              skillLibrarySelections: skillLibraryRuntime.skillLibrarySelections,
+              skillActivations: [
+                ...installedSkillRuntime.activations,
+                ...packRuntime.skillActivations,
+                ...session.skills.map((skill) => ({
+                  source: "session" as const,
+                  id: `session:${session.id}:${skill.name}`,
+                  artifact: {
+                    name: skill.name,
+                    description: skill.description ?? null,
+                    files: skill.files.map((file) => ({
+                      path: file.path,
+                      content: file.content,
+                    })),
+                  },
+                  reason: "attached to session",
+                })),
+              ],
             }
           : {}),
         ...(!structuredWorkspacePolicyActive && workspaceAgentInstructions

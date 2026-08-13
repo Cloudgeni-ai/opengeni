@@ -1515,6 +1515,149 @@ function assertSuccessfulCheck(checks, name, sha) {
   });
 }
 
+function actionsJobIdentity(check, name, sha) {
+  invariant(check?.head_sha === sha, `${name} is bound to another commit`);
+  assertGitHubActionsApp(check?.app, name);
+  const checkId = assertPositiveInteger(check?.id, `${name} check-run ID`);
+  const checkSuiteId = assertPositiveInteger(check?.check_suite?.id, `${name} check-suite ID`);
+  const detailsUrl = assertString(check?.details_url, `${name} details URL`);
+  const parsedDetailsUrl = new URL(detailsUrl);
+  invariant(
+    parsedDetailsUrl.origin === RELEASE_AUTOMATION_CONTRACT.serverUrl &&
+      parsedDetailsUrl.search === "" &&
+      parsedDetailsUrl.hash === "",
+    `${name} details URL is not an exact GitHub Actions job URL`,
+  );
+  const match = parsedDetailsUrl.pathname.match(
+    new RegExp(
+      `^/${RELEASE_AUTOMATION_CONTRACT.repository}/actions/runs/` +
+        `([1-9][0-9]*)/job/([1-9][0-9]*)$`,
+    ),
+  );
+  invariant(match !== null, `${name} details URL is not an exact GitHub Actions job URL`);
+  const runId = assertPositiveInteger(match[1], `${name} workflow run ID`);
+  const jobId = assertPositiveInteger(match[2], `${name} workflow job ID`);
+  invariant(checkId === jobId, `${name} check-run ID differs from its workflow job URL`);
+  return { check, checkId, checkSuiteId, detailsUrl, jobId, runId };
+}
+
+async function paginatedWorkflowAttemptJobs(api, runId, runAttempt) {
+  const rows = [];
+  for (let page = 1; page <= maximumPages; page += 1) {
+    const value = await api.get(
+      repositoryPath(
+        `/actions/runs/${runId}/attempts/${runAttempt}/jobs?per_page=${recordsPerPage}&page=${page}`,
+      ),
+    );
+    invariant(Array.isArray(value?.jobs), "workflow-attempt job listing is invalid");
+    rows.push(...value.jobs);
+    if (value.jobs.length < recordsPerPage) return rows;
+  }
+  throw new Error(`workflow-attempt job listing exceeded ${maximumPages * recordsPerPage} records`);
+}
+
+async function verifySuccessfulSourceChecks(api, checks, names, sha) {
+  // GitHub failed-job reruns retain historical check runs under one workflow
+  // run/check suite. Bind to that provider-owned run, then require its latest
+  // attempt and exact aggregate jobs to be successful instead of trusting a
+  // timestamp-selected check or rejecting legitimate retry history outright.
+  const identitiesByName = new Map();
+  const allIdentities = [];
+  for (const name of names) {
+    const selected = checks.filter((check) => check?.name === name);
+    invariant(selected.length > 0, `${name} check run is missing on ${sha}`);
+    const identities = selected.map((check) => actionsJobIdentity(check, name, sha));
+    identitiesByName.set(name, identities);
+    allIdentities.push(...identities);
+  }
+
+  const runIds = new Set(allIdentities.map((identity) => identity.runId));
+  invariant(runIds.size === 1, "required source checks do not share one workflow run");
+  const checkSuiteIds = new Set(allIdentities.map((identity) => identity.checkSuiteId));
+  invariant(checkSuiteIds.size === 1, "required source checks do not share one check suite");
+  const runId = allIdentities[0].runId;
+  const checkSuiteId = allIdentities[0].checkSuiteId;
+  const run = record(
+    await api.get(repositoryPath(`/actions/runs/${runId}`)),
+    "required source workflow run",
+  );
+  invariant(run.id === runId, "required source workflow run ID changed");
+  invariant(
+    run.check_suite_id === checkSuiteId,
+    "required source workflow run check-suite identity changed",
+  );
+  invariant(run.event === "push", "required source workflow run was not triggered by a push");
+  invariant(
+    run.path === RELEASE_AUTOMATION_CONTRACT.ciWorkflowPath,
+    "required source checks did not execute the CI workflow",
+  );
+  invariant(
+    run.head_branch === RELEASE_AUTOMATION_CONTRACT.defaultBranch,
+    "required source workflow branch changed",
+  );
+  invariant(run.head_sha === sha, "required source workflow run is bound to another commit");
+  invariant(
+    run.repository?.full_name === RELEASE_AUTOMATION_CONTRACT.repository &&
+      run.head_repository?.full_name === RELEASE_AUTOMATION_CONTRACT.repository,
+    "required source workflow repository changed",
+  );
+  invariant(
+    run.html_url ===
+      `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}` +
+        `/actions/runs/${runId}`,
+    "required source workflow URL changed",
+  );
+  const runAttempt = assertPositiveInteger(run.run_attempt, "required source workflow attempt");
+  invariant(
+    run.status === "completed" && run.conclusion === "success",
+    "required source workflow did not complete successfully",
+  );
+
+  const jobs = await paginatedWorkflowAttemptJobs(api, runId, runAttempt);
+  return names.map((name) => {
+    const selectedJobs = jobs.filter((job) => job?.name === name);
+    invariant(
+      selectedJobs.length === 1,
+      `${name} is not represented by exactly one job in the authoritative workflow attempt`,
+    );
+    const job = selectedJobs[0];
+    const jobId = assertPositiveInteger(job?.id, `${name} authoritative workflow job ID`);
+    invariant(
+      job.status === "completed" && job.conclusion === "success",
+      `${name} did not complete successfully in the authoritative workflow attempt`,
+    );
+    invariant(
+      job.html_url ===
+        `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}` +
+          `/actions/runs/${runId}/job/${jobId}`,
+      `${name} authoritative workflow job URL changed`,
+    );
+    invariant(
+      job.check_run_url ===
+        `${RELEASE_AUTOMATION_CONTRACT.apiUrl}/repos/${RELEASE_AUTOMATION_CONTRACT.repository}` +
+          `/check-runs/${jobId}`,
+      `${name} authoritative workflow job check-run URL changed`,
+    );
+    const latest = identitiesByName.get(name).filter((identity) => identity.jobId === jobId);
+    invariant(
+      latest.length === 1,
+      `${name} authoritative workflow job is not represented by exactly one check run`,
+    );
+    invariant(
+      latest[0].check.status === "completed" && latest[0].check.conclusion === "success",
+      `${name} authoritative check run did not complete successfully`,
+    );
+    return Object.freeze({
+      name,
+      appSlug: RELEASE_AUTOMATION_CONTRACT.githubActionsApp.slug,
+      appId: RELEASE_AUTOMATION_CONTRACT.githubActionsApp.id,
+      workflowRunId: runId,
+      workflowRunAttempt: runAttempt,
+      workflowJobId: jobId,
+    });
+  });
+}
+
 function assertSuccessfulCheckRun(check, name, sha, externalId) {
   invariant(check !== undefined, `${name} canonical check run is missing on ${sha}`);
   invariant(check?.name === name, `${name} canonical check has another name`);
@@ -1865,7 +2008,12 @@ export async function verifyApprovedMerge(options = {}) {
     api.get(repositoryPath(`/git/ref/tags/${controllerTag}`)),
     api.get(repositoryPath(`/releases/tags/${controllerTag}`)),
   ]);
-  await assertReleaseMainRef(api, initialMain, context.sourceSha, "initial release main");
+  const initialMainSha = await assertReleaseMainRef(
+    api,
+    initialMain,
+    context.sourceSha,
+    "initial release main",
+  );
   const controller = assertCommit(
     controllerValue,
     context.controllerSha,
@@ -1907,10 +2055,23 @@ export async function verifyApprovedMerge(options = {}) {
     "pull-request timeline",
   );
   assertProviderMergeEvent(timeline, context.sourceSha, pullIdentity);
-  invariant(
-    context.controllerSha === pullIdentity.baseSha,
-    "release controller SHA differs from the exact reviewed base SHA",
-  );
+  const controllerIsReviewedBase = context.controllerSha === pullIdentity.baseSha;
+  if (!controllerIsReviewedBase) {
+    await assertSourceAncestorOfCurrentMain(
+      api,
+      context.sourceSha,
+      context.controllerSha,
+      "release controller",
+      "admitted source",
+    );
+    await assertSourceAncestorOfCurrentMain(
+      api,
+      context.controllerSha,
+      initialMainSha,
+      "initial release main",
+      "release controller",
+    );
+  }
   const [base, head] = await Promise.all([
     api
       .get(repositoryPath(`/git/commits/${pullIdentity.baseSha}`))
@@ -1919,10 +2080,12 @@ export async function verifyApprovedMerge(options = {}) {
       .get(repositoryPath(`/git/commits/${pullIdentity.headSha}`))
       .then((value) => assertCommit(value, pullIdentity.headSha, "reviewed head commit")),
   ]);
-  invariant(
-    controller.treeSha === base.treeSha,
-    "release controller tree differs from the exact reviewed base tree",
-  );
+  if (controllerIsReviewedBase) {
+    invariant(
+      controller.treeSha === base.treeSha,
+      "release controller tree differs from the exact reviewed base tree",
+    );
+  }
   invariant(
     source.treeSha === head.treeSha,
     "release source tree differs from the exact reviewed head",
@@ -2041,11 +2204,28 @@ export async function verifyApprovedMerge(options = {}) {
     fetchImpl: options.fetchImpl ?? globalThis.fetch,
     logger,
   });
-  const requiredSourceChecks = RELEASE_AUTOMATION_CONTRACT.checks.requiredSource.map((name) =>
-    assertSuccessfulCheck(sourceChecks, name, context.sourceSha),
+  const requiredSourceChecks = await verifySuccessfulSourceChecks(
+    api,
+    sourceChecks,
+    RELEASE_AUTOMATION_CONTRACT.checks.requiredSource,
+    context.sourceSha,
   );
   const terminalMain = await api.get(repositoryPath("/git/ref/heads/main"));
-  await assertReleaseMainRef(api, terminalMain, context.sourceSha, "terminal release main");
+  const terminalMainSha = await assertReleaseMainRef(
+    api,
+    terminalMain,
+    context.sourceSha,
+    "terminal release main",
+  );
+  if (!controllerIsReviewedBase) {
+    await assertSourceAncestorOfCurrentMain(
+      api,
+      context.controllerSha,
+      terminalMainSha,
+      "terminal release main",
+      "release controller",
+    );
+  }
 
   const provenance = {
     version: 2,

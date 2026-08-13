@@ -27,9 +27,12 @@ import {
 import {
   API_INTEGRATION_OAUTH_CREDENTIAL_ROLE,
   ApiIntegrationOAuthConnectionMetadata,
-  IntegrationFeatureMutationResult,
+  IntegrationFacetMutationResult,
 } from "@opengeni/contracts";
-import { GOOGLE_DRIVE_PRESET, providerDomainForPreset } from "@opengeni/capabilities";
+import {
+  GOOGLE_DRIVE_INTEGRATION_DEFINITION,
+  integrationDefinitionProviderDomain,
+} from "@opengeni/capabilities";
 import {
   captureScheduledTaskRestoreState,
   createValidatedScheduledTask,
@@ -42,7 +45,7 @@ import {
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
   buildConnectionTokenResolver,
-  configureIntegrationFeature,
+  configureIntegrationFacet,
   appendKnowledgeSourceAclVersion,
   deauthorizeKnowledgeSourceRetrieval,
   ConnectionDisconnectGenerationError,
@@ -58,7 +61,7 @@ import {
   getWorkspaceGrant,
   listKnowledgeSourceSyncTasksForConnection,
   loadConnectionCredentialForBroker,
-  listIntegrationInstanceFeatures,
+  listIntegrationInstanceFacets,
   transitionConnectionState,
   updateConnection,
   updateScheduledTask,
@@ -731,19 +734,19 @@ export async function browseGoogleDrive(
   });
 }
 
-export async function browseGoogleDriveIntegrationSource(
+export async function browseGoogleDriveFacetSource(
   deps: ApiRouteDeps,
   input: {
     workspaceId: string;
     subjectId: string;
     capabilityId: string;
     instanceKey: string;
-    featureKey: string;
+    facetKey: string;
     parentId: string;
     pageToken?: string | undefined;
   },
 ) {
-  const context = await requireGoogleDriveIntegrationFeature(deps, input);
+  const context = await requireGoogleDriveIntegrationFacet(deps, input);
   return await browseGoogleDrive(deps, {
     workspaceId: input.workspaceId,
     subjectId: input.subjectId,
@@ -753,7 +756,7 @@ export async function browseGoogleDriveIntegrationSource(
   });
 }
 
-export async function saveGoogleDriveIntegrationSource(
+export async function saveGoogleDriveFacetSource(
   deps: ApiRouteDeps,
   input: {
     accountId: string;
@@ -761,19 +764,19 @@ export async function saveGoogleDriveIntegrationSource(
     subjectId: string;
     capabilityId: string;
     instanceKey: string;
-    featureKey: string;
+    facetKey: string;
     payload: unknown;
     canManageOrganizationDestination: boolean;
     canManageWorkspaceDestination: boolean;
     canManagePersonalDestination: boolean;
   },
-): Promise<IntegrationFeatureMutationResult> {
+): Promise<IntegrationFacetMutationResult> {
   const parsedPayload = SaveGoogleDriveIntegrationSourceRequest.safeParse(input.payload);
   if (!parsedPayload.success) {
     throw new HTTPException(400, { message: "invalid Google Drive source selection" });
   }
   const payload = parsedPayload.data;
-  const context = await requireGoogleDriveIntegrationFeature(deps, input);
+  const context = await requireGoogleDriveIntegrationFacet(deps, input);
   const documentDestination = googleDriveDocumentDestination(input, payload);
   const verifiedSources = await verifyGoogleDriveSources(deps, {
     workspaceId: input.workspaceId,
@@ -811,16 +814,16 @@ export async function saveGoogleDriveIntegrationSource(
     syncCadence: payload.syncCadence,
     readPolicy: payload.readPolicy,
   });
-  return IntegrationFeatureMutationResult.parse(
-    await configureIntegrationFeature(deps.db, {
+  return IntegrationFacetMutationResult.parse(
+    await configureIntegrationFacet(deps.db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       subjectId: input.subjectId,
       capabilityId: input.capabilityId,
       instanceKey: input.instanceKey,
-      featureKey: input.featureKey,
+      facetKey: input.facetKey,
       displayName:
-        context.feature.binding?.displayName ?? `${input.instanceKey} — Google Drive content`,
+        context.facet.binding?.displayName ?? `${input.instanceKey} — Google Drive content`,
       config,
       ...(payload.expectedVersion !== undefined
         ? { expectedVersion: payload.expectedVersion }
@@ -932,30 +935,30 @@ export async function saveGoogleDriveSource(
   return updated;
 }
 
-async function requireGoogleDriveIntegrationFeature(
+async function requireGoogleDriveIntegrationFacet(
   deps: ApiRouteDeps,
   input: {
     workspaceId: string;
     subjectId: string;
     capabilityId: string;
     instanceKey: string;
-    featureKey: string;
+    facetKey: string;
   },
 ) {
-  const instance = await listIntegrationInstanceFeatures(
+  const instance = await listIntegrationInstanceFacets(
     deps.db,
     input.workspaceId,
     input.subjectId,
     input.capabilityId,
     input.instanceKey,
   );
-  const feature = instance.features.find(
-    (candidate) => candidate.definition.featureKey === input.featureKey,
+  const facet = instance.facets.find(
+    (candidate) => candidate.definition.facetKey === input.facetKey,
   );
   if (
-    !feature ||
-    feature.definition.kind !== "knowledge_source" ||
-    feature.definition.capabilities.provider !== "google-drive"
+    !facet ||
+    facet.definition.kind !== "knowledge_source" ||
+    facet.definition.capabilities.provider !== "google-drive"
   ) {
     throw new HTTPException(404, { message: "Google Drive knowledge source not found" });
   }
@@ -972,7 +975,7 @@ async function requireGoogleDriveIntegrationFeature(
     throw new HTTPException(404, { message: "Google Drive Connection not found" });
   }
   await requireGoogleDriveApiConnection(deps, connection, input.subjectId);
-  return { instance, feature, connection };
+  return { instance, facet, connection };
 }
 
 function googleDriveDocumentDestination(
@@ -1531,7 +1534,9 @@ async function requireGoogleDriveApiConnection(
 ): Promise<GoogleDriveApiConnection> {
   const legacy = GoogleDriveConnectionMetadata.safeParse(connection.metadata);
   const integration = ApiIntegrationOAuthConnectionMetadata.safeParse(connection.metadata);
-  const genericProviderDomain = providerDomainForPreset(GOOGLE_DRIVE_PRESET);
+  const genericProviderDomain = integrationDefinitionProviderDomain(
+    GOOGLE_DRIVE_INTEGRATION_DEFINITION,
+  );
   const authority: GoogleDriveApiConnection | null =
     connection.kind === "oauth2" &&
     connection.subjectId === subjectId &&
@@ -1544,7 +1549,7 @@ async function requireGoogleDriveApiConnection(
           integration.success &&
           integration.data.credentialRole === API_INTEGRATION_OAUTH_CREDENTIAL_ROLE &&
           integration.data.providerFamily === "google" &&
-          integration.data.authorizedPresetIds.includes(GOOGLE_DRIVE_PRESET.id)
+          integration.data.authorizedDefinitionIds.includes(GOOGLE_DRIVE_INTEGRATION_DEFINITION.id)
         ? { kind: "integration", connection, metadata: integration.data }
         : null;
   if (!authority) {

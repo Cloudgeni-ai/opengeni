@@ -1,5 +1,11 @@
 # @opengeni/codex
 
+## 0.2.16
+
+### Patch Changes
+
+- 73d34d6: Fence provider model-request terminal outcomes and expose bounded request lifecycle diagnostics for headers, first byte, and semantic completion.
+
 ## 0.2.15
 
 ### Patch Changes

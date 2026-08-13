@@ -10,7 +10,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 | Maintainer | `CONTRIBUTING.md`, `docs/architecture.md`, topic docs | Contributors changing code, packages, workflows, or release mechanics. |
 | Repo agent | `AGENTS.md`, `.agents/skills/opengeni/SKILL.md`, this map | Coding agents working in this repository. |
 | Integration agent | `.agents/skills/opengeni-client/SKILL.md` and its references | Customer-side coding agents choosing and implementing a product integration shape. |
-| Product agent | Bundled skills in `packages/runtime/src/bundled_hashicorp_terraform_skills` and curated entries in `packages/runtime/src/bundled_skill_library` | Versioned product content; not covered by this freshness system. |
+| Product agent | Curated opt-in Skills in `packages/runtime/src/curated_skill_library` plus native tool-bound Skills in `packages/runtime/src/bundled_artifact_skills` and `packages/runtime/src/bundled_video_skills` | Versioned product content; not covered by this freshness system. |
 | Operator | `docs/deployment.md`, deployment contracts and chart docs | People deploying and operating OpenGeni. |
 | Record | `docs/design/**` | Public-safe point-in-time architecture and product-design records; never raw operator evidence. |
 

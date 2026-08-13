@@ -30,6 +30,9 @@ const ALLOWED_RUNTIME_SUBPATHS = new Set([
   "@opengeni/runtime/gmail-rest-mcp",
   "@opengeni/runtime/mcp-network",
   "@opengeni/runtime/sandbox",
+  // Immutable curated Skill metadata/artifact reader. This leaf imports only
+  // Node filesystem/crypto utilities and does not import the agent loop.
+  "@opengeni/runtime/skill-library",
 ]);
 
 function importSpecifiersOf(source: string): string[] {

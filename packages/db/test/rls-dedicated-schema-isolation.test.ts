@@ -297,6 +297,20 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
     expect(posture.ownedRelations).toEqual([]);
     expect(posture.targetRoutines).toEqual([
       {
+        name: "apply_canonical_human_identity_operation(uuid, text, bigint, text, uuid, text, text, text)",
+        owner: "postgres",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+      },
+      {
+        name: "ensure_canonical_human_identity(text, text)",
+        owner: "postgres",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+      },
+      {
         name: "ensure_managed_human_personal_workspace(uuid, text, uuid)",
         owner: "postgres",
         execute: true,
@@ -304,7 +318,21 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
         securityDefiner: true,
       },
       {
+        name: "get_canonical_human_identity_projection(text)",
+        owner: "postgres",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+      },
+      {
         name: "knowledge_source_sync_lock_authority(uuid, uuid, uuid)",
+        owner: "postgres",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+      },
+      {
+        name: "validate_canonical_human_session(text, text, boolean)",
         owner: "postgres",
         execute: true,
         publicExecute: false,

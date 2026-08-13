@@ -377,6 +377,28 @@ describe("embedded worker lifecycle contract", () => {
           can_references: false,
           can_trigger: false,
         })),
+        ...[
+          "canonical_human_identities",
+          "canonical_human_identity_subjects",
+          "canonical_human_login_bindings",
+          "canonical_human_identity_operations",
+        ].map((name) => ({
+          name,
+          owner: "opengeni_migrator",
+          rls_enabled: true,
+          rls_forced: true,
+          rls_active: true,
+          policy_count: 1,
+          artifact_outbox_dispatcher_policy: false,
+          artifact_materializer_policy: false,
+          can_select: false,
+          can_insert: false,
+          can_update: false,
+          can_delete: false,
+          can_truncate: false,
+          can_references: false,
+          can_trigger: false,
+        })),
       ],
       [
         {
@@ -393,6 +415,18 @@ describe("embedded worker lifecycle contract", () => {
           public_execute: false,
           security_definer: true,
         },
+        ...[
+          "ensure_canonical_human_identity(text, text)",
+          "validate_canonical_human_session(text, text, boolean)",
+          "get_canonical_human_identity_projection(text)",
+          "apply_canonical_human_identity_operation(uuid, text, bigint, text, uuid, text, text, text)",
+        ].map((name) => ({
+          name,
+          owner: "opengeni_migrator",
+          can_execute: true,
+          public_execute: false,
+          security_definer: true,
+        })),
       ],
       [
         {
@@ -423,13 +457,27 @@ describe("embedded worker lifecycle contract", () => {
       rlsStrategy: "force",
       expectedRole: "opengeni_app",
       targetSchema: "public",
-      protectedTables: [],
+      protectedTables: [
+        "canonical_human_identities",
+        "canonical_human_identity_subjects",
+        "canonical_human_login_bindings",
+        "canonical_human_identity_operations",
+      ],
       tablePrivileges: {},
-      protectedNoDirectDmlTables: [],
+      protectedNoDirectDmlTables: [
+        "canonical_human_identities",
+        "canonical_human_identity_subjects",
+        "canonical_human_login_bindings",
+        "canonical_human_identity_operations",
+      ],
     })();
     expect((catalogResults[6] as Array<{ name: string }>).map((routine) => routine.name)).toEqual([
       "knowledge_source_sync_lock_authority(uuid, uuid, uuid)",
       "ensure_managed_human_personal_workspace(uuid, text, uuid)",
+      "ensure_canonical_human_identity(text, text)",
+      "validate_canonical_human_session(text, text, boolean)",
+      "get_canonical_human_identity_projection(text)",
+      "apply_canonical_human_identity_operation(uuid, text, bigint, text, uuid, text, text, text)",
     ]);
     expect(catalogQueries).toBe(catalogResults.length);
     expect(directExecutions).toBe(0);

@@ -182,7 +182,10 @@ describe("Skill and Plugin control center browser acceptance", () => {
       const skillCard = page.locator('[data-source-package-kind="skill"]');
       await skillCard.getByRole("button", { name: "Remove" }).click();
       dialog = page.getByRole("dialog");
-      await expectText(dialog, "1 other owner will retain the runtime Skill");
+      await expectText(
+        dialog,
+        "The runtime Skill will be removed because no other owner retains it",
+      );
       await dialog.getByRole("button", { name: "Remove direct Skill" }).click();
       await expectHidden(page.locator('[data-source-package-kind="skill"]'));
       expect(state.skillRemoveRequests.at(-1)).toMatchObject({
@@ -299,11 +302,14 @@ async function installApi(page: Page, state: UiState): Promise<void> {
     if (url.pathname === `/v1/workspaces/${workspaceId}/sessions`) {
       return json({ sessions: [], pinned: [], pinnedTruncated: false, nextCursor: null });
     }
-    if (url.pathname === `/v1/workspaces/${workspaceId}/integrations/presets`) {
-      return json({ presets: [] });
+    if (url.pathname === `/v1/workspaces/${workspaceId}/integrations/definitions`) {
+      return json({ definitions: [] });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/integrations`) {
       return json({ integrations: [] });
+    }
+    if (request.method() === "GET" && url.pathname === `/v1/workspaces/${workspaceId}/skills`) {
+      return json({ skills: state.skillInstalled ? [installedSkillSummary(state)] : [] });
     }
     if (request.method() === "GET" && url.pathname === `/v1/workspaces/${workspaceId}/plugins`) {
       return json({ plugins: state.pluginInstalled ? [installedPlugin(state)] : [] });
@@ -361,8 +367,10 @@ async function installApi(page: Page, state: UiState): Promise<void> {
       state.skillInstalled = false;
       return json({
         capabilityId: skillCapabilityId,
-        status: "retained_by_other_owners",
-        remainingOwners: [{ kind: "plugin", id: pluginKey, removable: true }],
+        status: state.pluginInstalled ? "retained_by_other_owners" : "uninstalled",
+        remainingOwners: state.pluginInstalled
+          ? [{ kind: "plugin", id: pluginInstallationId, removable: true }]
+          : [],
       });
     }
     if (
@@ -560,6 +568,39 @@ function installedSkill(state: UiState) {
   };
 }
 
+const pluginInstallationId = "00000000-0000-4000-8000-000000000729";
+
+function installedSkillSummary(state: UiState) {
+  return {
+    capabilityId: skillCapabilityId,
+    pluginKey: "skill/acme/skills/release-operator",
+    installationVersion: state.skillInstallationVersion,
+    name: "release-operator",
+    description: "Release safely with immutable operational instructions.",
+    category: "skills",
+    tags: ["skill", "release"],
+    provenance: "workspace_import",
+    source: "github",
+    version: "0.0.0",
+    sourceUrl: skillUrl,
+    repositoryUrl: "https://github.com/acme/skills",
+    sourceCommit: "a".repeat(40),
+    sourcePath: "release-operator",
+    contentSha256: "b".repeat(64),
+    fileCount: 2,
+    totalBytes: 1_280,
+    license: null,
+    installedAt: "2026-08-11T00:00:00.000Z",
+    updatedAt: "2026-08-11T00:00:00.000Z",
+    owners: [
+      { kind: "direct", id: skillCapabilityId, removable: true },
+      ...(state.pluginInstalled
+        ? [{ kind: "plugin", id: pluginInstallationId, removable: true } as const]
+        : []),
+    ],
+  };
+}
+
 function installedPlugin(state: UiState) {
   return {
     pluginKey,
@@ -674,7 +715,7 @@ function installedPluginResult(state: UiState) {
     version: "2.0.0",
     pluginId: "00000000-0000-4000-8000-000000000727",
     pluginVersionId: "00000000-0000-4000-8000-000000000728",
-    pluginInstallationId: "00000000-0000-4000-8000-000000000729",
+    pluginInstallationId,
     installationVersion: state.pluginInstallationVersion,
     componentCount: 3,
     status: "installed",
@@ -682,13 +723,16 @@ function installedPluginResult(state: UiState) {
 }
 
 function skillUninstallPreview(state: UiState) {
+  const remainingOwners = state.pluginInstalled
+    ? [{ kind: "plugin", id: pluginInstallationId, removable: true } as const]
+    : [];
   return {
     capabilityId: skillCapabilityId,
     installed: state.skillInstalled,
     installationVersion: state.skillInstalled ? state.skillInstallationVersion : null,
     directOwner: { kind: "direct", id: skillCapabilityId, removable: true },
-    remainingOwners: [{ kind: "plugin", id: pluginKey, removable: true }],
-    removesRuntimeSkill: false,
+    remainingOwners,
+    removesRuntimeSkill: remainingOwners.length === 0,
   };
 }
 

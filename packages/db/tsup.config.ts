@@ -30,6 +30,7 @@ export default defineConfig({
     schema: "src/schema.ts",
     migrate: "src/migrate.ts",
     "provision-roles": "src/provision-roles.ts",
+    "canonical-human-identities": "src/canonical-human-identities.ts",
     "editable-artifacts": "src/editable-artifacts.ts",
     "editable-artifact-durable-export": "src/editable-artifact-durable-export.ts",
     "video-generation": "src/video-generation.ts",

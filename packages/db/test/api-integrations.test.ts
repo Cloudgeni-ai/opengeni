@@ -5,21 +5,21 @@ import postgres from "postgres";
 import {
   ApiIntegrationInstallationVersionConflictError,
   bootstrapWorkspace,
-  configureIntegrationFeature,
+  configureIntegrationFacet,
   createConnection,
   createDb,
   deleteWorkspace,
   getApiIntegrationUninstallPreview,
   getConnectionMetadata,
   installApiIntegration,
-  IntegrationFeatureBindingVersionConflictError,
-  IntegrationFeatureConfigError,
-  IntegrationFeatureNotFoundError,
-  IntegrationFeatureOperationIdempotencyError,
-  listIntegrationInstanceFeatures,
+  IntegrationFacetBindingVersionConflictError,
+  IntegrationFacetConfigError,
+  IntegrationFacetNotFoundError,
+  IntegrationFacetOperationIdempotencyError,
+  listIntegrationInstanceFacets,
   listInstalledApiIntegrations,
-  removeIntegrationFeature,
-  setIntegrationFeatureLifecycle,
+  removeIntegrationFacet,
+  setIntegrationFacetLifecycle,
   uninstallApiIntegration,
   type DbClient,
   type InstallApiIntegrationInput,
@@ -103,6 +103,8 @@ function integrationInput(connectionId?: string, suffix = "inventory"): InstallA
     description: "Read and update inventory.",
     category: "operations",
     tags: ["inventory", "openapi"],
+    definitionId: suffix,
+    definitionProvenance: "workspace",
     providerDomain: "inventory.example.com",
     protocol: "openapi",
     baseUrl: "https://inventory.example.com/v1/",
@@ -116,7 +118,7 @@ function integrationInput(connectionId?: string, suffix = "inventory"): InstallA
     revision: {
       id: "openapi:111111111111111111111111",
       protocol: "openapi",
-      integrationId: "inventory",
+      definitionId: suffix,
       contentSha256: "1".repeat(64),
       source: { url: "https://inventory.example.com/openapi.json" },
       title: "Inventory API",
@@ -366,7 +368,7 @@ describe("API Integration persistence", () => {
          'pack', 'pack:inventory-operations', false)
     `;
     await shared.admin`
-      insert into integration_feature_binding_owners
+      insert into integration_facet_binding_owners
         (account_id, workspace_id, binding_id, owner_kind, owner_id, removable)
       values
         (${first.accountId}, ${first.workspaceId}, ${installed.instanceId},
@@ -427,6 +429,7 @@ describe("API Integration persistence", () => {
     const inventoryBase = integrationInput(financeConnection.id, "linear-like-graphql");
     const base: InstallApiIntegrationInput = {
       ...inventoryBase,
+      definitionId: "linear-like-graphql",
       name: "Linear-like GraphQL",
       description: "Deterministic issue-tracker GraphQL emulator.",
       providerDomain: "linear.example.test",
@@ -438,7 +441,7 @@ describe("API Integration persistence", () => {
       revision: {
         id: "graphql:111111111111111111111111",
         protocol: "graphql",
-        integrationId: "linear-like-graphql",
+        definitionId: "linear-like-graphql",
         contentSha256: "1".repeat(64),
         source: { url: "https://linear.example.test/graphql" },
         title: "Linear-like GraphQL",
@@ -630,7 +633,7 @@ describe("API Integration persistence", () => {
       workspaceId: first.workspaceId,
       providerDomain: "drive.example.test",
       kind: "oauth2",
-      credentialEncrypted: "google-drive-feature-encrypted-bundle",
+      credentialEncrypted: "google-drive-facet-encrypted-bundle",
       grantedScopes: ["files.read"],
       createdBySubjectId: first.subjectId,
     });
@@ -644,9 +647,9 @@ describe("API Integration persistence", () => {
       authScheme: { kind: "oauth2" },
       requiredScopes: ["files.read"],
       instanceKey: "finance",
-      featureDefinitions: [
+      facetDefinitions: [
         {
-          featureKey: "drive-content",
+          facetKey: "drive-content",
           kind: "knowledge_source",
           configSchema: {
             type: "object",
@@ -677,7 +680,7 @@ describe("API Integration persistence", () => {
           },
         },
         {
-          featureKey: "account-identity",
+          facetKey: "account-identity",
           kind: "identity_link",
           configSchema: {
             type: "object",
@@ -699,7 +702,7 @@ describe("API Integration persistence", () => {
     };
     const installed = await installApiIntegration(client.db, googleInput);
     expect(
-      await listIntegrationInstanceFeatures(
+      await listIntegrationInstanceFacets(
         client.db,
         first.workspaceId,
         first.subjectId,
@@ -711,26 +714,26 @@ describe("API Integration persistence", () => {
       instanceKey: "finance",
       providerDomain: "drive.example.test",
       connectionId: googleConnection.id,
-      features: [
+      facets: [
         {
-          definition: { featureKey: "account-identity", kind: "identity_link" },
+          definition: { facetKey: "account-identity", kind: "identity_link" },
           binding: null,
         },
         {
-          definition: { featureKey: "drive-content", kind: "knowledge_source" },
+          definition: { facetKey: "drive-content", kind: "knowledge_source" },
           binding: null,
         },
       ],
     });
 
     const configureKey = crypto.randomUUID();
-    const configured = await configureIntegrationFeature(client.db, {
+    const configured = await configureIntegrationFacet(client.db, {
       accountId: first.accountId,
       workspaceId: first.workspaceId,
       subjectId: first.subjectId,
       capabilityId: googleInput.capabilityId,
       instanceKey: "finance",
-      featureKey: "drive-content",
+      facetKey: "drive-content",
       displayName: "Finance source",
       config: {
         sources: [
@@ -753,13 +756,13 @@ describe("API Integration persistence", () => {
       },
     });
     expect(
-      await configureIntegrationFeature(client.db, {
+      await configureIntegrationFacet(client.db, {
         accountId: first.accountId,
         workspaceId: first.workspaceId,
         subjectId: first.subjectId,
         capabilityId: googleInput.capabilityId,
         instanceKey: "finance",
-        featureKey: "drive-content",
+        facetKey: "drive-content",
         displayName: "Finance source",
         config: {
           sources: [
@@ -774,33 +777,33 @@ describe("API Integration persistence", () => {
       }),
     ).toEqual(configured);
     await expect(
-      configureIntegrationFeature(client.db, {
+      configureIntegrationFacet(client.db, {
         accountId: first.accountId,
         workspaceId: first.workspaceId,
         subjectId: first.subjectId,
         capabilityId: googleInput.capabilityId,
         instanceKey: "finance",
-        featureKey: "drive-content",
+        facetKey: "drive-content",
         displayName: "Different source",
         config: { sources: [{ sourceId: "folder:other", sourceKind: "folder" }] },
         idempotencyKey: configureKey,
       }),
-    ).rejects.toBeInstanceOf(IntegrationFeatureOperationIdempotencyError);
+    ).rejects.toBeInstanceOf(IntegrationFacetOperationIdempotencyError);
     await expect(
-      configureIntegrationFeature(client.db, {
+      configureIntegrationFacet(client.db, {
         accountId: first.accountId,
         workspaceId: first.workspaceId,
         subjectId: first.subjectId,
         capabilityId: googleInput.capabilityId,
         instanceKey: "finance",
-        featureKey: "drive-content",
+        facetKey: "drive-content",
         displayName: "Invalid source",
         config: {
           sources: [{ sourceId: "folder:bad", sourceKind: "unsupported" }],
         },
         idempotencyKey: crypto.randomUUID(),
       }),
-    ).rejects.toBeInstanceOf(IntegrationFeatureConfigError);
+    ).rejects.toBeInstanceOf(IntegrationFacetConfigError);
 
     const upgraded = await installApiIntegration(client.db, {
       ...googleInput,
@@ -811,15 +814,15 @@ describe("API Integration persistence", () => {
         contentSha256: "2".repeat(64),
       },
     });
-    const afterUpgrade = await listIntegrationInstanceFeatures(
+    const afterUpgrade = await listIntegrationInstanceFacets(
       client.db,
       first.workspaceId,
       first.subjectId,
       googleInput.capabilityId,
       installed.instanceKey,
     );
-    const upgradedSource = afterUpgrade.features.find(
-      (feature) => feature.definition.featureKey === "drive-content",
+    const upgradedSource = afterUpgrade.facets.find(
+      (facet) => facet.definition.facetKey === "drive-content",
     )!.binding!;
     expect(upgradedSource).toMatchObject({
       id: configured.binding.id,
@@ -836,13 +839,13 @@ describe("API Integration persistence", () => {
       },
     });
 
-    const paused = await setIntegrationFeatureLifecycle(client.db, {
+    const paused = await setIntegrationFacetLifecycle(client.db, {
       accountId: first.accountId,
       workspaceId: first.workspaceId,
       subjectId: first.subjectId,
       capabilityId: googleInput.capabilityId,
       instanceKey: "finance",
-      featureKey: "drive-content",
+      facetKey: "drive-content",
       action: "pause",
       expectedVersion: upgradedSource.version,
       idempotencyKey: crypto.randomUUID(),
@@ -852,25 +855,25 @@ describe("API Integration persistence", () => {
       binding: { status: "paused" },
     });
     await expect(
-      setIntegrationFeatureLifecycle(client.db, {
+      setIntegrationFacetLifecycle(client.db, {
         accountId: first.accountId,
         workspaceId: first.workspaceId,
         subjectId: first.subjectId,
         capabilityId: googleInput.capabilityId,
         instanceKey: "finance",
-        featureKey: "drive-content",
+        facetKey: "drive-content",
         action: "resume",
         expectedVersion: upgradedSource.version,
         idempotencyKey: crypto.randomUUID(),
       }),
-    ).rejects.toBeInstanceOf(IntegrationFeatureBindingVersionConflictError);
-    const resumed = await setIntegrationFeatureLifecycle(client.db, {
+    ).rejects.toBeInstanceOf(IntegrationFacetBindingVersionConflictError);
+    const resumed = await setIntegrationFacetLifecycle(client.db, {
       accountId: first.accountId,
       workspaceId: first.workspaceId,
       subjectId: first.subjectId,
       capabilityId: googleInput.capabilityId,
       instanceKey: "finance",
-      featureKey: "drive-content",
+      facetKey: "drive-content",
       action: "resume",
       expectedVersion: paused.binding.version,
       idempotencyKey: crypto.randomUUID(),
@@ -879,13 +882,13 @@ describe("API Integration persistence", () => {
       status: "active",
       binding: { status: "active" },
     });
-    const removed = await removeIntegrationFeature(client.db, {
+    const removed = await removeIntegrationFacet(client.db, {
       accountId: first.accountId,
       workspaceId: first.workspaceId,
       subjectId: first.subjectId,
       capabilityId: googleInput.capabilityId,
       instanceKey: "finance",
-      featureKey: "drive-content",
+      facetKey: "drive-content",
       expectedVersion: resumed.binding.version,
       idempotencyKey: crypto.randomUUID(),
     });
@@ -900,7 +903,7 @@ describe("API Integration persistence", () => {
       workspaceId: first.workspaceId,
       providerDomain: "onedrive.example.test",
       kind: "oauth2",
-      credentialEncrypted: "onedrive-feature-encrypted-bundle",
+      credentialEncrypted: "onedrive-facet-encrypted-bundle",
       grantedScopes: ["files.read"],
       createdBySubjectId: first.subjectId,
     });
@@ -914,9 +917,9 @@ describe("API Integration persistence", () => {
       authScheme: { kind: "oauth2" },
       requiredScopes: ["files.read"],
       instanceKey: "legal",
-      featureDefinitions: [
+      facetDefinitions: [
         {
-          featureKey: "drive-content",
+          facetKey: "drive-content",
           kind: "knowledge_source",
           configSchema: {
             type: "object",
@@ -948,13 +951,13 @@ describe("API Integration persistence", () => {
       },
     };
     await installApiIntegration(client.db, microsoftInput);
-    const microsoftFeature = await configureIntegrationFeature(client.db, {
+    const microsoftFeature = await configureIntegrationFacet(client.db, {
       accountId: first.accountId,
       workspaceId: first.workspaceId,
       subjectId: first.subjectId,
       capabilityId: microsoftInput.capabilityId,
       instanceKey: "legal",
-      featureKey: "drive-content",
+      facetKey: "drive-content",
       displayName: "Legal library",
       config: { sourceId: "library:legal", sourceKind: "shared_library" },
       idempotencyKey: crypto.randomUUID(),
@@ -965,14 +968,14 @@ describe("API Integration persistence", () => {
       config: { sourceId: "library:legal", sourceKind: "shared_library" },
     });
     await expect(
-      listIntegrationInstanceFeatures(
+      listIntegrationInstanceFacets(
         client.db,
         second.workspaceId,
         second.subjectId,
         googleInput.capabilityId,
         installed.instanceKey,
       ),
-    ).rejects.toBeInstanceOf(IntegrationFeatureNotFoundError);
+    ).rejects.toBeInstanceOf(IntegrationFacetNotFoundError);
     expect(upgraded.installationVersion).toBeGreaterThan(installed.installationVersion);
   }, 60_000);
 });

@@ -56,10 +56,23 @@ const MANAGED_HUMAN_PERSONAL_WORKSPACE_AUTHORITY_TABLES = [
   "organization_user_resource_authorities",
   "organization_user_resource_grants",
 ] as const;
+const CANONICAL_HUMAN_IDENTITY_ROUTINES = [
+  "ensure_canonical_human_identity(text, text)",
+  "validate_canonical_human_session(text, text, boolean)",
+  "get_canonical_human_identity_projection(text)",
+  "apply_canonical_human_identity_operation(uuid, text, bigint, text, uuid, text, text, text)",
+] as const;
+const CANONICAL_HUMAN_IDENTITY_AUTHORITY_TABLES = [
+  "canonical_human_identities",
+  "canonical_human_identity_subjects",
+  "canonical_human_login_bindings",
+  "canonical_human_identity_operations",
+] as const;
 
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE,
   MANAGED_HUMAN_PERSONAL_WORKSPACE_ROUTINE,
+  ...CANONICAL_HUMAN_IDENTITY_ROUTINES,
 ] as const;
 
 /**
@@ -82,6 +95,10 @@ export const FORCE_RLS_TABLES = [
   "browser_sessions",
   "browser_state_artifacts",
   "browser_state_uploads",
+  "canonical_human_identities",
+  "canonical_human_identity_operations",
+  "canonical_human_identity_subjects",
+  "canonical_human_login_bindings",
   "capability_api_facets",
   "capability_catalog_items",
   "capability_component_owners",
@@ -149,9 +166,9 @@ export const FORCE_RLS_TABLES = [
   "host_export_outbox",
   "image_generation_operations",
   "import_batches",
-  "integration_feature_binding_owners",
-  "integration_feature_bindings",
-  "integration_feature_facets",
+  "integration_facet_binding_owners",
+  "integration_facet_bindings",
+  "integration_facet_definitions",
   "integration_oauth_state_nonces",
   "integration_spec_revisions",
   "integration_tools",
@@ -361,8 +378,8 @@ export const RUNTIME_FULL_DML_TABLES = [
   "github_installations",
   "image_generation_operations",
   "import_batches",
-  "integration_feature_binding_owners",
-  "integration_feature_bindings",
+  "integration_facet_binding_owners",
+  "integration_facet_bindings",
   "integration_oauth_clients",
   "integration_oauth_state_nonces",
   "knowledge_memories",
@@ -542,7 +559,7 @@ export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
   "computer_sessions",
   "editable_artifact_session_links",
   "editable_artifacts",
-  "integration_feature_facets",
+  "integration_facet_definitions",
   "integration_spec_revisions",
   "integration_tools",
   "interaction_interventions",
@@ -560,6 +577,10 @@ export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
  * The ordinary application role must have no direct table privileges on them.
  */
 export const PROTECTED_NO_DIRECT_DML_TABLES = [
+  "canonical_human_identities",
+  "canonical_human_identity_operations",
+  "canonical_human_identity_subjects",
+  "canonical_human_login_bindings",
   "editable_artifact_live_tickets",
   "editable_artifact_scope_authorization_heads",
   "host_export_config",
@@ -1193,6 +1214,24 @@ export function evaluateRuntimeDatabasePosture(
       } else if (authorityTables[0] && routine.owner !== authorityTables[0].owner) {
         violations.push(
           `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0].owner}`,
+        );
+      }
+    } else if ((CANONICAL_HUMAN_IDENTITY_ROUTINES as readonly string[]).includes(routine.name)) {
+      const authorityTables = CANONICAL_HUMAN_IDENTITY_AUTHORITY_TABLES.filter((tableName) =>
+        tableByName.has(tableName),
+      ).map((tableName) => tableByName.get(tableName)!);
+      const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+      if (authorityTables.length !== CANONICAL_HUMAN_IDENTITY_AUTHORITY_TABLES.length) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} canonical identity authority tables are missing`,
+        );
+      } else if (authorityOwners.size !== 1) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
+        );
+      } else if (routine.owner !== authorityTables[0]!.owner) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
         );
       }
     } else if (targetSchemaOwner && routine.owner !== targetSchemaOwner) {

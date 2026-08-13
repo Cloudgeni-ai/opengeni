@@ -17,9 +17,9 @@ import {
 } from "./capability-integrations";
 import { withRlsContext, withWorkspaceRls, type Database } from "./database";
 import {
-  addIntegrationFeatureBindingOwner,
-  removeIntegrationFeatureBindingOwner,
-  removeIntegrationFeatureBindingOwnersForOwner,
+  addIntegrationFacetBindingOwner,
+  removeIntegrationFacetBindingOwner,
+  removeIntegrationFacetBindingOwnersForOwner,
 } from "./integration-bindings";
 import * as schema from "./schema";
 
@@ -224,7 +224,7 @@ export async function adoptPackComponentReferences(
             retainedFacetInstallationIds.push(facetInstallationId);
           }
           for (const bindingId of target.bindingIds) {
-            await addIntegrationFeatureBindingOwner(tx, bindingId, {
+            await addIntegrationFacetBindingOwner(tx, bindingId, {
               accountId: input.accountId,
               workspaceId: input.workspaceId,
               owner: { kind: "pack", id: input.packInstallationId, removable: true },
@@ -402,13 +402,13 @@ export async function finalizePackComponentOwnership(
         }
         const retainedBindings = new Set(input.retainedBindingIds);
         const ownedBindings = await tx
-          .select({ bindingId: schema.integrationFeatureBindingOwners.bindingId })
-          .from(schema.integrationFeatureBindingOwners)
+          .select({ bindingId: schema.integrationFacetBindingOwners.bindingId })
+          .from(schema.integrationFacetBindingOwners)
           .where(
             and(
-              eq(schema.integrationFeatureBindingOwners.workspaceId, input.workspaceId),
-              eq(schema.integrationFeatureBindingOwners.ownerKind, "pack"),
-              eq(schema.integrationFeatureBindingOwners.ownerId, input.packInstallationId),
+              eq(schema.integrationFacetBindingOwners.workspaceId, input.workspaceId),
+              eq(schema.integrationFacetBindingOwners.ownerKind, "pack"),
+              eq(schema.integrationFacetBindingOwners.ownerId, input.packInstallationId),
             ),
           );
         for (const bindingId of [
@@ -418,7 +418,7 @@ export async function finalizePackComponentOwnership(
               .filter((ownedBindingId) => !retainedBindings.has(ownedBindingId)),
           ),
         ]) {
-          await removeIntegrationFeatureBindingOwner(tx, {
+          await removeIntegrationFacetBindingOwner(tx, {
             workspaceId: input.workspaceId,
             bindingId,
             owner: { kind: "pack", id: input.packInstallationId },
@@ -505,18 +505,18 @@ async function previewPackComponentReleaseInRlsContext(
       bindingIds.length === 0
         ? []
         : await scopedDb
-            .select({ id: schema.integrationFeatureBindingOwners.id })
-            .from(schema.integrationFeatureBindingOwners)
+            .select({ id: schema.integrationFacetBindingOwners.id })
+            .from(schema.integrationFacetBindingOwners)
             .where(
               and(
-                inArray(schema.integrationFeatureBindingOwners.bindingId, bindingIds),
+                inArray(schema.integrationFacetBindingOwners.bindingId, bindingIds),
                 effectiveCapabilityOwnerSql(
-                  schema.integrationFeatureBindingOwners.ownerKind,
-                  schema.integrationFeatureBindingOwners.ownerId,
+                  schema.integrationFacetBindingOwners.ownerKind,
+                  schema.integrationFacetBindingOwners.ownerId,
                 ),
                 or(
-                  ne(schema.integrationFeatureBindingOwners.ownerKind, "pack"),
-                  ne(schema.integrationFeatureBindingOwners.ownerId, packInstallationId),
+                  ne(schema.integrationFacetBindingOwners.ownerKind, "pack"),
+                  ne(schema.integrationFacetBindingOwners.ownerId, packInstallationId),
                 ),
               ),
             )
@@ -546,7 +546,7 @@ export async function releasePackComponents(
           input.workspaceId,
           input.packInstallationId,
         );
-        await removeIntegrationFeatureBindingOwnersForOwner(tx, {
+        await removeIntegrationFacetBindingOwnersForOwner(tx, {
           workspaceId: input.workspaceId,
           owner: { kind: "pack", id: input.packInstallationId },
         });
@@ -597,7 +597,7 @@ async function resolvePackComponentTargets(
     } else if (reference.kind === "integration") {
       targets.push(await resolveIntegrationReference(db, workspaceId, reference, integrations));
     } else {
-      targets.push(await resolveFeatureReference(db, workspaceId, reference, integrations));
+      targets.push(await resolveFacetReference(db, workspaceId, reference, integrations));
     }
   }
   return targets;
@@ -655,13 +655,13 @@ async function resolvePluginReference(
     ? []
     : (
         await db
-          .select({ id: schema.integrationFeatureBindingOwners.bindingId })
-          .from(schema.integrationFeatureBindingOwners)
+          .select({ id: schema.integrationFacetBindingOwners.bindingId })
+          .from(schema.integrationFacetBindingOwners)
           .where(
             and(
-              eq(schema.integrationFeatureBindingOwners.workspaceId, workspaceId),
-              eq(schema.integrationFeatureBindingOwners.ownerKind, "plugin"),
-              eq(schema.integrationFeatureBindingOwners.ownerId, row.pluginInstallationId),
+              eq(schema.integrationFacetBindingOwners.workspaceId, workspaceId),
+              eq(schema.integrationFacetBindingOwners.ownerKind, "plugin"),
+              eq(schema.integrationFacetBindingOwners.ownerId, row.pluginInstallationId),
             ),
           )
       ).map((entry) => entry.id);
@@ -781,10 +781,10 @@ async function resolveIntegrationReference(
   };
 }
 
-async function resolveFeatureReference(
+async function resolveFacetReference(
   db: Database,
   workspaceId: string,
-  reference: Extract<CapabilityPackComponentReference, { kind: "feature" }>,
+  reference: Extract<CapabilityPackComponentReference, { kind: "facet" }>,
   integrations: readonly ApiIntegrationRuntime[],
 ): Promise<ResolvedPackComponentTarget> {
   const integration = integrations.find(
@@ -793,7 +793,7 @@ async function resolveFeatureReference(
       candidate.instanceKey === reference.instanceKey,
   );
   if (!integration) {
-    return missingTarget(reference, "feature", reference.capabilityId, reference.configDigest);
+    return missingTarget(reference, "facet", reference.capabilityId, reference.configDigest);
   }
   const [integrationFacetInstallationId] = await integrationFacetInstallationIds(
     db,
@@ -801,29 +801,29 @@ async function resolveFeatureReference(
     "integration",
   );
   if (!integrationFacetInstallationId) {
-    return missingTarget(reference, "feature", reference.capabilityId, reference.configDigest);
+    return missingTarget(reference, "facet", reference.capabilityId, reference.configDigest);
   }
   const [binding] = await db
     .select({
-      id: schema.integrationFeatureBindings.id,
-      config: schema.integrationFeatureBindings.config,
-      status: schema.integrationFeatureBindings.status,
-      displayName: schema.integrationFeatureBindings.displayName,
+      id: schema.integrationFacetBindings.id,
+      config: schema.integrationFacetBindings.config,
+      status: schema.integrationFacetBindings.status,
+      displayName: schema.integrationFacetBindings.displayName,
     })
-    .from(schema.integrationFeatureBindings)
+    .from(schema.integrationFacetBindings)
     .innerJoin(
-      schema.integrationFeatureFacets,
-      eq(schema.integrationFeatureFacets.id, schema.integrationFeatureBindings.featureFacetId),
+      schema.integrationFacetDefinitions,
+      eq(schema.integrationFacetDefinitions.id, schema.integrationFacetBindings.facetDefinitionId),
     )
     .where(
       and(
-        eq(schema.integrationFeatureBindings.workspaceId, workspaceId),
+        eq(schema.integrationFacetBindings.workspaceId, workspaceId),
         eq(
-          schema.integrationFeatureBindings.integrationFacetInstallationId,
+          schema.integrationFacetBindings.integrationFacetInstallationId,
           integrationFacetInstallationId,
         ),
-        eq(schema.integrationFeatureFacets.featureKey, reference.featureKey),
-        eq(schema.integrationFeatureBindings.bindingKey, reference.bindingKey),
+        eq(schema.integrationFacetDefinitions.facetKey, reference.facetKey),
+        eq(schema.integrationFacetBindings.bindingKey, reference.bindingKey),
       ),
     )
     .limit(1);
@@ -835,20 +835,20 @@ async function resolveFeatureReference(
   return {
     resolution: {
       key: reference.key,
-      kind: "feature",
+      kind: "facet",
       capabilityId: reference.capabilityId,
       required: reference.required,
       status: !binding ? "missing" : exact ? "ready" : "mismatch",
       expectedDigest: reference.configDigest,
       actualDigest,
       resolvedId: exact ? binding.id : null,
-      label: binding?.displayName ?? reference.featureKey,
+      label: binding?.displayName ?? reference.facetKey,
     },
     facetInstallationIds: exact ? [integrationFacetInstallationId] : [],
     bindingIds: exact ? [binding.id] : [],
     metadata: {
       instanceKey: reference.instanceKey,
-      featureKey: reference.featureKey,
+      facetKey: reference.facetKey,
       bindingKey: reference.bindingKey,
     },
   };
@@ -926,7 +926,7 @@ function mapStoredPackComponent(
     row.kind !== "plugin" &&
     row.kind !== "skill" &&
     row.kind !== "integration" &&
-    row.kind !== "feature" &&
+    row.kind !== "facet" &&
     row.kind !== "inline_skill"
   ) {
     throw new Error(`Unknown Pack component kind: ${row.kind}`);

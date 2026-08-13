@@ -24,19 +24,19 @@ import { useAppContext } from "@/context";
 import { hasAccountPermission } from "@/lib/permissions";
 import type {
   ApiIntegrationInstallationSummary,
-  ApiIntegrationPresetSummary,
+  IntegrationDefinitionSummary,
   ConnectionMetadata,
   ConnectionOwnership,
 } from "@/types";
 
 const CALLBACK_KEYS = [
   "integration_oauth",
-  "presetId",
+  "definitionId",
   "connectionId",
   "providerDomain",
   "ownership",
   "reason",
-  "api_integration_preset",
+  "api_integration_definition",
   "api_integration_instance",
   "api_integration_name",
   "api_integration_ownership",
@@ -44,7 +44,7 @@ const CALLBACK_KEYS = [
 ] as const;
 
 type PendingIntegrationOAuth = {
-  presetId: string;
+  definitionId: string;
   instanceKey: string;
   displayName: string;
   ownership: ConnectionOwnership;
@@ -63,7 +63,7 @@ export function apiIntegrationOAuthReturnPath(
 ): string {
   const params = new URLSearchParams(currentSearch);
   for (const key of CALLBACK_KEYS) params.delete(key);
-  params.set("api_integration_preset", pending.presetId);
+  params.set("api_integration_definition", pending.definitionId);
   params.set("api_integration_instance", pending.instanceKey);
   params.set("api_integration_name", pending.displayName);
   params.set("api_integration_ownership", pending.ownership);
@@ -83,13 +83,13 @@ export function pendingApiIntegrationOAuth(search: string):
   | null {
   const params = new URLSearchParams(search);
   const outcome = params.get("integration_oauth");
-  const presetId = params.get("api_integration_preset");
+  const definitionId = params.get("api_integration_definition");
   const instanceKey = params.get("api_integration_instance");
   const displayName = params.get("api_integration_name");
   const ownership = params.get("api_integration_ownership");
   if (
     !outcome ||
-    !presetId ||
+    !definitionId ||
     !instanceKey ||
     !displayName ||
     (ownership !== "personal" && ownership !== "workspace")
@@ -100,7 +100,7 @@ export function pendingApiIntegrationOAuth(search: string):
   const expected = rawExpected ? Number(rawExpected) : undefined;
   return {
     outcome,
-    presetId,
+    definitionId,
     instanceKey,
     displayName,
     ownership,
@@ -117,8 +117,8 @@ export function IntegrationControlCenter({
   connections,
   canManage,
   onChanged,
-  presetIds,
-  excludedPresetIds,
+  definitionIds,
+  excludedDefinitionIds,
   showCustomApis = true,
   embedded = false,
 }: {
@@ -126,8 +126,8 @@ export function IntegrationControlCenter({
   connections: ConnectionMetadata[] | null;
   canManage: boolean;
   onChanged: () => void | Promise<void>;
-  presetIds?: string[];
-  excludedPresetIds?: string[];
+  definitionIds?: string[];
+  excludedDefinitionIds?: string[];
   showCustomApis?: boolean;
   embedded?: boolean;
 }) {
@@ -144,11 +144,11 @@ export function IntegrationControlCenter({
     workspaceGrant &&
     hasAccountPermission(context.accessContext, workspaceGrant.accountId, "account:admin"),
   );
-  const [presets, setPresets] = useState<ApiIntegrationPresetSummary[]>([]);
+  const [definitions, setDefinitions] = useState<IntegrationDefinitionSummary[]>([]);
   const [instances, setInstances] = useState<ApiIntegrationInstallationSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [setupPreset, setSetupPreset] = useState<ApiIntegrationPresetSummary | null>(null);
+  const [setupDefinition, setSetupDefinition] = useState<IntegrationDefinitionSummary | null>(null);
   const [displayName, setDisplayName] = useState("");
   const [ownership, setOwnership] = useState<ConnectionOwnership>("personal");
   const [busyKey, setBusyKey] = useState<string | null>(null);
@@ -166,11 +166,11 @@ export function IntegrationControlCenter({
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [presetResponse, installedResponse] = await Promise.all([
-        client.listApiIntegrationPresets(workspaceId),
+      const [definitionResponse, installedResponse] = await Promise.all([
+        client.listIntegrationDefinitions(workspaceId),
         client.listApiIntegrations(workspaceId),
       ]);
-      setPresets(presetResponse.presets);
+      setDefinitions(definitionResponse.definitions);
       setInstances(installedResponse.integrations);
       setLoadError(null);
     } catch (error) {
@@ -199,7 +199,7 @@ export function IntegrationControlCenter({
     setCallbackBusy(true);
     setBusyKey(pending.instanceKey);
     void (async () => {
-      const source = { kind: "preset" as const, presetId: pending.presetId };
+      const source = { kind: "definition" as const, definitionId: pending.definitionId };
       const preview = await client.previewApiIntegration(workspaceId, {
         source,
         connectionId: pending.connectionId!,
@@ -236,38 +236,38 @@ export function IntegrationControlCenter({
       });
   }, [client, load, onChanged, workspaceId]);
 
-  const instancesByPreset = useMemo(() => {
+  const instancesByDefinition = useMemo(() => {
     const grouped = new Map<string, ApiIntegrationInstallationSummary[]>();
     for (const instance of instances) {
-      if (!instance.presetId) continue;
-      const current = grouped.get(instance.presetId) ?? [];
+      if (instance.definitionProvenance !== "curated") continue;
+      const current = grouped.get(instance.definitionId) ?? [];
       current.push(instance);
-      grouped.set(instance.presetId, current);
+      grouped.set(instance.definitionId, current);
     }
     return grouped;
   }, [instances]);
 
   const customInstances = useMemo(
-    () => instances.filter((instance) => instance.presetId === null),
+    () => instances.filter((instance) => instance.definitionProvenance === "workspace"),
     [instances],
   );
-  const visiblePresets = useMemo(() => {
-    const included = presetIds ? new Set(presetIds) : null;
-    const excluded = excludedPresetIds ? new Set(excludedPresetIds) : null;
-    return presets.filter(
-      (preset) => (!included || included.has(preset.id)) && !excluded?.has(preset.id),
+  const visibleDefinitions = useMemo(() => {
+    const included = definitionIds ? new Set(definitionIds) : null;
+    const excluded = excludedDefinitionIds ? new Set(excludedDefinitionIds) : null;
+    return definitions.filter(
+      (definition) => (!included || included.has(definition.id)) && !excluded?.has(definition.id),
     );
-  }, [excludedPresetIds, presetIds, presets]);
+  }, [excludedDefinitionIds, definitionIds, definitions]);
 
-  function openSetup(preset: ApiIntegrationPresetSummary) {
-    const count = instancesByPreset.get(preset.id)?.length ?? 0;
-    setSetupPreset(preset);
-    setDisplayName(count === 0 ? preset.name : `${preset.name} — Account ${count + 1}`);
+  function openSetup(definition: IntegrationDefinitionSummary) {
+    const count = instancesByDefinition.get(definition.id)?.length ?? 0;
+    setSetupDefinition(definition);
+    setDisplayName(count === 0 ? definition.name : `${definition.name} — Account ${count + 1}`);
     setOwnership("personal");
   }
 
   async function startOAuth(
-    preset: ApiIntegrationPresetSummary,
+    definition: IntegrationDefinitionSummary,
     input: {
       instanceKey: string;
       displayName: string;
@@ -282,7 +282,7 @@ export function IntegrationControlCenter({
         window.location.pathname,
         window.location.search,
         {
-          presetId: preset.id,
+          definitionId: definition.id,
           instanceKey: input.instanceKey,
           displayName: input.displayName,
           ownership: input.ownership,
@@ -292,7 +292,7 @@ export function IntegrationControlCenter({
         },
       );
       const response = await client.startApiIntegrationOAuth(workspaceId, {
-        presetId: preset.id,
+        definitionId: definition.id,
         ownership: input.ownership,
         returnPath,
         ...(input.connectionId ? { connectionId: input.connectionId } : {}),
@@ -308,12 +308,16 @@ export function IntegrationControlCenter({
   }
 
   async function reconnect(instance: ApiIntegrationInstallationSummary) {
-    const preset = presets.find((candidate) => candidate.id === instance.presetId);
-    if (!preset || !instance.connectionId || instance.ownership === "none") {
+    if (instance.definitionProvenance !== "curated") {
+      toast.error("This workspace Definition uses its own Connection setup");
+      return;
+    }
+    const definition = definitions.find((candidate) => candidate.id === instance.definitionId);
+    if (!definition || !instance.connectionId || instance.ownership === "none") {
       toast.error("This instance cannot be reconnected automatically");
       return;
     }
-    await startOAuth(preset, {
+    await startOAuth(definition, {
       instanceKey: instance.instanceKey,
       displayName: instance.displayName,
       ownership: instance.ownership,
@@ -514,10 +518,10 @@ export function IntegrationControlCenter({
   }
 
   function connectSetup() {
-    if (!setupPreset || !displayName.trim() || !canManage) return;
-    const preset = setupPreset;
-    setSetupPreset(null);
-    void startOAuth(preset, {
+    if (!setupDefinition || !displayName.trim() || !canManage) return;
+    const definition = setupDefinition;
+    setSetupDefinition(null);
+    void startOAuth(definition, {
       instanceKey: `account-${crypto.randomUUID()}`,
       displayName: displayName.trim(),
       ownership,
@@ -537,8 +541,8 @@ export function IntegrationControlCenter({
       <IntegrationControlCenterView
         client={client}
         workspaceId={workspaceId}
-        presets={visiblePresets}
-        instancesByPreset={instancesByPreset}
+        definitions={visibleDefinitions}
+        instancesByDefinition={instancesByDefinition}
         customInstances={showCustomApis ? customInstances : []}
         connections={connections}
         loading={loading}
@@ -549,7 +553,7 @@ export function IntegrationControlCenter({
         canManageOrganizationDestination={canManageOrganizationDestination}
         busyKey={busyKey}
         callbackBusy={callbackBusy}
-        setupPreset={setupPreset}
+        setupDefinition={setupDefinition}
         displayName={displayName}
         ownership={ownership}
         removeTarget={removeTarget}
@@ -560,7 +564,7 @@ export function IntegrationControlCenter({
         onOpenSetup={openSetup}
         onReconnect={(instance) => void reconnect(instance)}
         onPreviewRemove={(instance) => void previewRemove(instance)}
-        onSetupClose={() => setSetupPreset(null)}
+        onSetupClose={() => setSetupDefinition(null)}
         onDisplayNameChange={setDisplayName}
         onOwnershipChange={setOwnership}
         onConnectSetup={connectSetup}

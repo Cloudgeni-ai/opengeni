@@ -97,7 +97,7 @@ export function curatedSkillProvenance(item: CapabilityCatalogItem): CuratedSkil
 }
 
 export type CapabilityFormState = {
-  kind: Exclude<CapabilityKind, "pack">;
+  kind: "mcp";
   name: string;
   description: string;
   category: string;
@@ -206,6 +206,7 @@ export type RequiredHeaderField = {
 
 export type CapabilityConnectPlan =
   | { mode: "enable" }
+  | { mode: "dedicated" }
   | { mode: "social_oauth"; provider: "x" | "reddit" }
   | { mode: "fiken_api_token" }
   | {
@@ -231,9 +232,10 @@ export function capabilityConnectPlan(item: CapabilityCatalogItem): CapabilityCo
   if (item.surfaceType === "first_party_fiken") {
     return { mode: "fiken_api_token" };
   }
-  // Non-runtime kinds and MCPs with no auth just enable directly.
+  // Every non-MCP concept owns a dedicated lifecycle. The generic catalog
+  // plan is only allowed to connect or enable MCP servers.
   if (item.kind !== "mcp") {
-    return { mode: "enable" };
+    return { mode: "dedicated" };
   }
   const providerDomain =
     item.providerDomain ?? domainFromUrl(item.mcpUrl ?? item.endpointUrl) ?? "";
@@ -843,9 +845,14 @@ export function capabilityFilterLabel(kind: CapabilityFilter): string {
 }
 
 export function createInputFromCatalogItem(item: CapabilityCatalogItem): CreateCapabilityInput {
+  if (item.kind !== "mcp") {
+    throw new Error(
+      `${capabilityKindLabel(item.kind)} catalog items must use their dedicated install flow`,
+    );
+  }
   return {
     id: item.id,
-    kind: item.kind as Exclude<CapabilityKind, "pack">,
+    kind: item.kind,
     source: item.source,
     name: item.name,
     ...(item.description ? { description: item.description } : {}),
@@ -859,23 +866,17 @@ export function createInputFromCatalogItem(item: CapabilityCatalogItem): CreateC
   };
 }
 
-/**
- * Kind-aware validation for the "Add custom" dialog. Only MCP servers need an
- * endpoint URL — that field is hidden for every other kind (the user's explicit
- * complaint was being asked for an endpoint when enabling a skill).
- */
+/** Validate the MCP-only "Add custom" dialog. */
 export function capabilityFormError(form: CapabilityFormState): string | null {
   if (!form.name.trim()) {
     return "Give it a name.";
   }
-  if (form.kind === "mcp") {
-    const url = form.endpointUrl.trim();
-    if (!url) {
-      return "Enter the MCP server URL.";
-    }
-    if (!isLikelyUrl(url)) {
-      return "Enter a valid URL, including https://.";
-    }
+  const url = form.endpointUrl.trim();
+  if (!url) {
+    return "Enter the MCP server URL.";
+  }
+  if (!isLikelyUrl(url)) {
+    return "Enter a valid URL, including https://.";
   }
   return null;
 }

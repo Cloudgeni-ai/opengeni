@@ -3,6 +3,7 @@ import { signDelegatedAccessToken } from "@opengeni/contracts";
 import type { ApiRouteDeps, GitHubSkillSourceClient } from "@opengeni/core";
 import { bootstrapWorkspace, createDb, deleteWorkspace, type DbClient } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
+import { listSkillLibraryEntries } from "@opengeni/runtime";
 import {
   acquireSharedTestDatabase,
   testSettings,
@@ -127,6 +128,93 @@ async function request(path: string, init: RequestInit = {}): Promise<Response> 
 }
 
 describe("portable Skill routes", () => {
+  test("installs and lists an exact reviewed curated-library Skill", async () => {
+    if (!available) return;
+    const entry = listSkillLibraryEntries()[0]!;
+    const encodedLibraryId = encodeURIComponent(entry.id);
+
+    const drifted = await request(`/skills/library/${encodedLibraryId}/install`, {
+      method: "POST",
+      body: JSON.stringify({
+        expectedVersion: entry.version,
+        expectedContentSha256: "0".repeat(64),
+      }),
+    });
+    expect(drifted.status).toBe(409);
+
+    const installedResponse = await request(`/skills/library/${encodedLibraryId}/install`, {
+      method: "POST",
+      body: JSON.stringify({
+        expectedVersion: entry.version,
+        expectedContentSha256: entry.contentSha256,
+      }),
+    });
+    expect(installedResponse.status).toBe(201);
+    const installed = await installedResponse.json();
+    expect(installed).toMatchObject({
+      capabilityId: `skill:${entry.id}`,
+      source: "library",
+      version: entry.version,
+      sourceCommit: entry.sourceCommit,
+      contentSha256: entry.contentSha256,
+      status: "installed",
+    });
+
+    const listedResponse = await request("/skills");
+    expect(listedResponse.status).toBe(200);
+    expect(await listedResponse.json()).toEqual({
+      skills: [
+        expect.objectContaining({
+          capabilityId: `skill:${entry.id}`,
+          pluginKey: `skill/library/${entry.id}`,
+          installationVersion: installed.installationVersion,
+          source: "library",
+          version: entry.version,
+          sourceCommit: entry.sourceCommit,
+          contentSha256: entry.contentSha256,
+          owners: [
+            {
+              kind: "direct",
+              id: `skill:${entry.id}`,
+              removable: true,
+            },
+          ],
+        }),
+      ],
+    });
+
+    const replayedResponse = await request(`/skills/library/${encodedLibraryId}/install`, {
+      method: "POST",
+      body: JSON.stringify({
+        expectedVersion: entry.version,
+        expectedContentSha256: entry.contentSha256,
+      }),
+    });
+    expect(replayedResponse.status).toBe(200);
+    expect(await replayedResponse.json()).toMatchObject({
+      capabilityId: `skill:${entry.id}`,
+      installationVersion: installed.installationVersion,
+      source: "library",
+      version: entry.version,
+    });
+
+    const updatedResponse = await request(`/skills/library/${encodedLibraryId}/install`, {
+      method: "POST",
+      body: JSON.stringify({
+        expectedVersion: entry.version,
+        expectedContentSha256: entry.contentSha256,
+        expectedInstallationVersion: installed.installationVersion,
+      }),
+    });
+    expect(updatedResponse.status).toBe(200);
+    expect(await updatedResponse.json()).toMatchObject({
+      capabilityId: `skill:${entry.id}`,
+      installationVersion: installed.installationVersion,
+      source: "library",
+      version: entry.version,
+    });
+  }, 60_000);
+
   test("previews exact content, fences source drift, installs, and OCC-uninstalls", async () => {
     if (!available) return;
     const sourceUrl = "https://skills.sh/acme/skills/release-operator";

@@ -17,10 +17,8 @@ import {
   emptyCapabilityForm,
   type CapabilityFormState,
 } from "@/lib/capabilities";
-import type { CapabilityKind } from "@/types";
 
-type AddableKind = Exclude<CapabilityKind, "pack">;
-export const ADD_CUSTOM_CATALOG_KINDS: AddableKind[] = ["mcp"];
+export const ADD_CUSTOM_CATALOG_KINDS = ["mcp"] as const;
 
 /**
  * Legacy catalog creation is now MCP-only. Skills, Plugins, OpenAPI, and

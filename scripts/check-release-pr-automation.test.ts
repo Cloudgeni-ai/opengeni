@@ -40,6 +40,9 @@ const runAttempt = 2;
 const recoveryRunId = 790;
 const recoveryRunAttempt = 3;
 const releaseHeadReleaseId = 7654321;
+const sourceCiRunId = 654321;
+const sourceCiRunAttempt = 1;
+const sourceCiCheckSuiteId = 876543;
 
 function recoveredSourceAdmissionExternalId(
   workflowRunId = recoveryRunId,
@@ -87,6 +90,41 @@ function releaseHeadRelease(sha = headSha) {
     html_url:
       `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}` +
       `/releases/tag/${tagName}`,
+  };
+}
+
+function sourceCiCheck(name: string, index: number, overrides: Record<string, unknown> = {}) {
+  const jobId = Number(overrides.id ?? 7000 + index);
+  return {
+    id: jobId,
+    name,
+    head_sha: mergeSha,
+    status: "completed",
+    conclusion: "success",
+    external_id: `source-ci-${jobId}`,
+    details_url:
+      `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}` +
+      `/actions/runs/${sourceCiRunId}/job/${jobId}`,
+    check_suite: { id: sourceCiCheckSuiteId },
+    app: RELEASE_AUTOMATION_CONTRACT.githubActionsApp,
+    ...overrides,
+  };
+}
+
+function sourceCiJob(name: string, index: number, overrides: Record<string, unknown> = {}) {
+  const jobId = Number(overrides.id ?? 7000 + index);
+  return {
+    id: jobId,
+    name,
+    status: "completed",
+    conclusion: "success",
+    html_url:
+      `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}` +
+      `/actions/runs/${sourceCiRunId}/job/${jobId}`,
+    check_run_url:
+      `${RELEASE_AUTOMATION_CONTRACT.apiUrl}/repos/${RELEASE_AUTOMATION_CONTRACT.repository}` +
+      `/check-runs/${jobId}`,
+    ...overrides,
   };
 }
 
@@ -2042,6 +2080,7 @@ function approvalFixture(
     mergeCommitSha?: string;
     pullHeadSha?: string;
     sourceTreeSha?: string;
+    controllerSha?: string;
     controllerTreeSha?: string;
     controllerRefSha?: string | null;
     controllerRelease?: Record<string, unknown> | null;
@@ -2049,6 +2088,8 @@ function approvalFixture(
     terminalMainSha?: string;
     sourceAncestorMainShas?: string[];
     sourceAncestorTotalCommitsByMainSha?: Record<string, number | null>;
+    controllerAncestorMainShas?: string[];
+    controllerAncestorTotalCommitsByMainSha?: Record<string, number | null>;
     reviewCommit?: string;
     reviewState?: string;
     reviewTime?: string;
@@ -2064,6 +2105,8 @@ function approvalFixture(
     sourceChecks?: Array<Record<string, unknown>>;
     historicalHeadChecks?: Array<Record<string, unknown>>;
     historicalSourceChecks?: Array<Record<string, unknown>>;
+    sourceRun?: Record<string, unknown>;
+    sourceAttemptJobs?: Array<Record<string, unknown>>;
     releaseHeadRefSha?: string | null;
     release?: Record<string, unknown> | null;
     reviewedBaseSha?: string;
@@ -2076,6 +2119,7 @@ function approvalFixture(
   const mergeMethod = options.mergeMethod ?? "merge";
   const pullHeadSha = options.pullHeadSha ?? headSha;
   const reviewedBaseSha = options.reviewedBaseSha ?? baseSha;
+  const retainedControllerSha = options.controllerSha ?? controllerSha;
   const pullCommitCount = mergeMethod === "single" ? 1 : 2;
   const sourceParents =
     mergeMethod === "merge"
@@ -2173,9 +2217,9 @@ function approvalFixture(
         tree: { sha: baseTreeSha },
         parents: [{ sha: "1".repeat(40) }],
       });
-    if (method === "GET" && url.pathname === `${prefix}/git/commits/${controllerSha}`)
+    if (method === "GET" && url.pathname === `${prefix}/git/commits/${retainedControllerSha}`)
       return response({
-        sha: controllerSha,
+        sha: retainedControllerSha,
         tree: { sha: options.controllerTreeSha ?? baseTreeSha },
         parents: [{ sha: "3".repeat(40) }],
       });
@@ -2316,6 +2360,41 @@ function approvalFixture(
             },
       );
     }
+    const controllerMainComparisonPrefix = `${prefix}/compare/${retainedControllerSha}...`;
+    if (
+      options.controllerSha !== undefined &&
+      method === "GET" &&
+      url.pathname.startsWith(controllerMainComparisonPrefix)
+    ) {
+      const observedMainSha = url.pathname.slice(controllerMainComparisonPrefix.length);
+      const retained = options.controllerAncestorMainShas?.includes(observedMainSha) ?? false;
+      return response(
+        retained
+          ? {
+              status: "ahead",
+              base_commit: { sha: retainedControllerSha },
+              merge_base_commit: { sha: retainedControllerSha },
+              ahead_by: 1,
+              behind_by: 0,
+              total_commits: Object.prototype.hasOwnProperty.call(
+                options.controllerAncestorTotalCommitsByMainSha ?? {},
+                observedMainSha,
+              )
+                ? options.controllerAncestorTotalCommitsByMainSha?.[observedMainSha]
+                : 1,
+              commits: [{ sha: observedMainSha, parents: [{ sha: retainedControllerSha }] }],
+            }
+          : {
+              status: "diverged",
+              base_commit: { sha: retainedControllerSha },
+              merge_base_commit: { sha: "6".repeat(40) },
+              ahead_by: 1,
+              behind_by: 1,
+              total_commits: 1,
+              commits: [{ sha: observedMainSha, parents: [{ sha: "6".repeat(40) }] }],
+            },
+      );
+    }
     if (method === "GET" && url.pathname === `${prefix}/pulls/${pullNumber}/reviews`)
       return response([review]);
     if (method === "GET" && url.pathname === `${prefix}/pulls/${pullNumber}/reviews/9001`)
@@ -2323,29 +2402,60 @@ function approvalFixture(
         ...review,
         user: options.reviewDetailReviewer ?? review.user,
       });
+    if (method === "GET" && url.pathname === `${prefix}/actions/runs/${sourceCiRunId}`)
+      return response(
+        options.sourceRun ?? {
+          id: sourceCiRunId,
+          run_attempt: sourceCiRunAttempt,
+          status: "completed",
+          conclusion: "success",
+          event: "push",
+          path: RELEASE_AUTOMATION_CONTRACT.ciWorkflowPath,
+          head_sha: mergeSha,
+          head_branch: RELEASE_AUTOMATION_CONTRACT.defaultBranch,
+          check_suite_id: sourceCiCheckSuiteId,
+          html_url:
+            `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}` +
+            `/actions/runs/${sourceCiRunId}`,
+          repository: { full_name: RELEASE_AUTOMATION_CONTRACT.repository },
+          head_repository: { full_name: RELEASE_AUTOMATION_CONTRACT.repository },
+        },
+      );
+    if (
+      method === "GET" &&
+      url.pathname === `${prefix}/actions/runs/${sourceCiRunId}/attempts/${sourceCiRunAttempt}/jobs`
+    )
+      return response({
+        total_count: (options.sourceAttemptJobs ?? []).length,
+        jobs:
+          options.sourceAttemptJobs ??
+          RELEASE_AUTOMATION_CONTRACT.checks.requiredSource.map((name, index) =>
+            sourceCiJob(name, index),
+          ),
+      });
     if (
       method === "GET" &&
       url.pathname ===
-        `${prefix}/git/ref/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${controllerSha}`
+        `${prefix}/git/ref/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${retainedControllerSha}`
     ) {
       if (options.controllerRefSha === null)
         return response({ message: "missing controller ref" }, 404);
       return response({
-        ref: `refs/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${controllerSha}`,
+        ref: `refs/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${retainedControllerSha}`,
         object: {
           type: "commit",
-          sha: options.controllerRefSha ?? controllerSha,
+          sha: options.controllerRefSha ?? retainedControllerSha,
         },
       });
     }
     if (
       method === "GET" &&
       url.pathname ===
-        `${prefix}/releases/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${controllerSha}`
+        `${prefix}/releases/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${retainedControllerSha}`
     )
       return options.controllerRelease === null
         ? response({ message: "missing controller release" }, 404)
-        : response(options.controllerRelease ?? releaseHeadRelease(controllerSha));
+        : response(options.controllerRelease ?? releaseHeadRelease(retainedControllerSha));
     if (
       method === "GET" &&
       url.pathname ===
@@ -2382,8 +2492,8 @@ function approvalFixture(
       return response({
         check_runs: [
           ...(options.sourceChecks ??
-            RELEASE_AUTOMATION_CONTRACT.checks.requiredSource.map((name) =>
-              successfulCheck(name, mergeSha),
+            RELEASE_AUTOMATION_CONTRACT.checks.requiredSource.map((name, index) =>
+              sourceCiCheck(name, index),
             )),
           ...(url.searchParams.get("filter") === "all"
             ? (options.historicalSourceChecks ?? [])
@@ -2412,18 +2522,71 @@ describe("release approval provenance", () => {
     ).rejects.toThrow("not running from the retained controller ref");
   });
 
-  test("rejects a retained controller that is not the exact reviewed base commit", async () => {
+  test("accepts a retained controller after the source on protected main ancestry", async () => {
+    const retainedControllerSha = "4".repeat(40);
+    const initialMainSha = "5".repeat(40);
+    const terminalMainSha = "6".repeat(40);
     const fixture = approvalFixture({
-      mergeMethod: "squash",
-      reviewedBaseSha: "9".repeat(40),
+      controllerSha: retainedControllerSha,
+      controllerTreeSha: "7".repeat(40),
+      initialMainSha,
+      terminalMainSha,
+      sourceAncestorMainShas: [retainedControllerSha, initialMainSha, terminalMainSha],
+      controllerAncestorMainShas: [initialMainSha, terminalMainSha],
     });
     await expect(
       verifyApprovedMerge({
-        env: approvalEnv(),
+        env: approvalEnv({
+          GITHUB_REF:
+            `refs/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}` + retainedControllerSha,
+          GITHUB_SHA: retainedControllerSha,
+          GITHUB_WORKFLOW_SHA: retainedControllerSha,
+          RELEASE_CONTROLLER_SHA: retainedControllerSha,
+        }),
         fetchImpl: fixture.fetchImpl,
         logger: { log() {} },
       }),
-    ).rejects.toThrow("release controller SHA differs from the exact reviewed base SHA");
+    ).resolves.toEqual(
+      expect.objectContaining({
+        controller: expect.objectContaining({
+          sha: retainedControllerSha,
+          treeSha: "7".repeat(40),
+        }),
+      }),
+    );
+  });
+
+  test("rejects a retained controller outside the admitted source to protected main chain", async () => {
+    const retainedControllerSha = "4".repeat(40);
+    const initialMainSha = "5".repeat(40);
+    const env = approvalEnv({
+      GITHUB_REF:
+        `refs/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}` + retainedControllerSha,
+      GITHUB_SHA: retainedControllerSha,
+      GITHUB_WORKFLOW_SHA: retainedControllerSha,
+      RELEASE_CONTROLLER_SHA: retainedControllerSha,
+    });
+    await expect(
+      verifyApprovedMerge({
+        env,
+        fetchImpl: approvalFixture({
+          controllerSha: retainedControllerSha,
+          initialMainSha,
+          sourceAncestorMainShas: [initialMainSha],
+        }).fetchImpl,
+      }),
+    ).rejects.toThrow("release controller is not ahead of the admitted source");
+
+    await expect(
+      verifyApprovedMerge({
+        env,
+        fetchImpl: approvalFixture({
+          controllerSha: retainedControllerSha,
+          initialMainSha,
+          sourceAncestorMainShas: [retainedControllerSha, initialMainSha],
+        }).fetchImpl,
+      }),
+    ).rejects.toThrow("initial release main is not ahead of the release controller");
   });
 
   test("requires immutable retained evidence for the workflow controller", async () => {
@@ -2972,12 +3135,107 @@ describe("release approval provenance", () => {
         env: approvalEnv(),
         fetchImpl: approvalFixture({
           sourceChecks: RELEASE_AUTOMATION_CONTRACT.checks.requiredSource.map((name, index) => ({
-            ...success(name, mergeSha),
+            ...sourceCiCheck(name, index),
             conclusion: index === 0 ? "failure" : "success",
           })),
         }).fetchImpl,
       }),
-    ).rejects.toThrow("did not complete successfully");
+    ).rejects.toThrow("authoritative check run did not complete successfully");
+  });
+
+  test("accepts official failed-job retry history when the latest CI attempt succeeds", async () => {
+    const latestChecks = RELEASE_AUTOMATION_CONTRACT.checks.requiredSource.map((name, index) =>
+      sourceCiCheck(name, index, { id: 7100 + index }),
+    );
+    const historicalChecks = RELEASE_AUTOMATION_CONTRACT.checks.requiredSource.map((name, index) =>
+      sourceCiCheck(name, index, {
+        id: 7000 + index,
+        conclusion: index === 0 ? "failure" : "success",
+      }),
+    );
+    const fixture = approvalFixture({
+      sourceChecks: latestChecks,
+      historicalSourceChecks: historicalChecks,
+      sourceRun: {
+        id: sourceCiRunId,
+        run_attempt: sourceCiRunAttempt,
+        status: "completed",
+        conclusion: "success",
+        event: "push",
+        path: RELEASE_AUTOMATION_CONTRACT.ciWorkflowPath,
+        head_sha: mergeSha,
+        head_branch: RELEASE_AUTOMATION_CONTRACT.defaultBranch,
+        check_suite_id: sourceCiCheckSuiteId,
+        html_url:
+          `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}` +
+          `/actions/runs/${sourceCiRunId}`,
+        repository: { full_name: RELEASE_AUTOMATION_CONTRACT.repository },
+        head_repository: { full_name: RELEASE_AUTOMATION_CONTRACT.repository },
+      },
+      sourceAttemptJobs: RELEASE_AUTOMATION_CONTRACT.checks.requiredSource.map((name, index) =>
+        sourceCiJob(name, index, { id: 7100 + index }),
+      ),
+    });
+
+    const result = await verifyApprovedMerge({
+      env: approvalEnv(),
+      fetchImpl: fixture.fetchImpl,
+      logger: { log() {} },
+    });
+
+    expect(result.requiredSourceChecks).toEqual(
+      RELEASE_AUTOMATION_CONTRACT.checks.requiredSource.map((name, index) => ({
+        name,
+        appSlug: RELEASE_AUTOMATION_CONTRACT.githubActionsApp.slug,
+        appId: RELEASE_AUTOMATION_CONTRACT.githubActionsApp.id,
+        workflowRunId: sourceCiRunId,
+        workflowRunAttempt: sourceCiRunAttempt,
+        workflowJobId: 7100 + index,
+      })),
+    );
+  });
+
+  test("rejects failed latest CI attempts and source checks from another workflow run", async () => {
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: approvalFixture({
+          sourceRun: {
+            id: sourceCiRunId,
+            run_attempt: sourceCiRunAttempt,
+            status: "completed",
+            conclusion: "failure",
+            event: "push",
+            path: RELEASE_AUTOMATION_CONTRACT.ciWorkflowPath,
+            head_sha: mergeSha,
+            head_branch: RELEASE_AUTOMATION_CONTRACT.defaultBranch,
+            check_suite_id: sourceCiCheckSuiteId,
+            html_url:
+              `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}` +
+              `/actions/runs/${sourceCiRunId}`,
+            repository: { full_name: RELEASE_AUTOMATION_CONTRACT.repository },
+            head_repository: { full_name: RELEASE_AUTOMATION_CONTRACT.repository },
+          },
+        }).fetchImpl,
+      }),
+    ).rejects.toThrow("required source workflow did not complete successfully");
+
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: approvalFixture({
+          historicalSourceChecks: [
+            sourceCiCheck(RELEASE_AUTOMATION_CONTRACT.checks.requiredSource[0], 50, {
+              id: 8050,
+              details_url:
+                `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}` +
+                "/actions/runs/999999/job/8050",
+              check_suite: { id: 999999 },
+            }),
+          ],
+        }).fetchImpl,
+      }),
+    ).rejects.toThrow("required source checks do not share one workflow run");
   });
 
   test("requires the immutable reviewed-head evidence ref", async () => {

@@ -1323,7 +1323,7 @@ describe("OpenGeniClient capabilities", () => {
       url: "https://api.example.test/openapi.json",
     };
     const capabilityId = "api:openapi:example-deadbeef1234";
-    await client.listApiIntegrationPresets(WORKSPACE_ID);
+    await client.listIntegrationDefinitions(WORKSPACE_ID);
     await client.previewApiIntegration(WORKSPACE_ID, { source });
     await client.installApiIntegration(WORKSPACE_ID, {
       source,
@@ -1337,13 +1337,13 @@ describe("OpenGeniClient capabilities", () => {
       expectedInstallationVersion: 4,
       expectedInstanceVersion: 2,
     });
-    await client.listIntegrationFeatures(WORKSPACE_ID, capabilityId, "finance");
-    await client.configureIntegrationFeature(WORKSPACE_ID, capabilityId, "finance", "mail-inbox", {
+    await client.listIntegrationFacets(WORKSPACE_ID, capabilityId, "finance");
+    await client.configureIntegrationFacet(WORKSPACE_ID, capabilityId, "finance", "mail-inbox", {
       displayName: "Finance inbox",
       config: { unreadOnly: true },
       idempotencyKey: "00000000-0000-4000-8000-000000000301",
     });
-    await client.browseGoogleDriveIntegrationSource(
+    await client.browseGoogleDriveFacetSource(
       WORKSPACE_ID,
       capabilityId,
       "finance",
@@ -1353,7 +1353,7 @@ describe("OpenGeniClient capabilities", () => {
         pageToken: "next page",
       },
     );
-    await client.saveGoogleDriveIntegrationSource(
+    await client.saveGoogleDriveFacetSource(
       WORKSPACE_ID,
       capabilityId,
       "finance",
@@ -1375,34 +1375,34 @@ describe("OpenGeniClient capabilities", () => {
         idempotencyKey: "00000000-0000-4000-8000-000000000305",
       },
     );
-    await client.pauseIntegrationFeature(WORKSPACE_ID, capabilityId, "finance", "mail-inbox", {
+    await client.pauseIntegrationFacet(WORKSPACE_ID, capabilityId, "finance", "mail-inbox", {
       expectedVersion: 1,
       idempotencyKey: "00000000-0000-4000-8000-000000000302",
     });
-    await client.resumeIntegrationFeature(WORKSPACE_ID, capabilityId, "finance", "mail-inbox", {
+    await client.resumeIntegrationFacet(WORKSPACE_ID, capabilityId, "finance", "mail-inbox", {
       expectedVersion: 2,
       idempotencyKey: "00000000-0000-4000-8000-000000000303",
     });
-    await client.removeIntegrationFeature(WORKSPACE_ID, capabilityId, "finance", "mail-inbox", {
+    await client.removeIntegrationFacet(WORKSPACE_ID, capabilityId, "finance", "mail-inbox", {
       expectedVersion: 3,
       idempotencyKey: "00000000-0000-4000-8000-000000000304",
     });
 
     expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
       [
-        `GET /v1/workspaces/${WORKSPACE_ID}/integrations/presets`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/integrations/definitions`,
         `POST /v1/workspaces/${WORKSPACE_ID}/integrations/preview`,
         `POST /v1/workspaces/${WORKSPACE_ID}/integrations/install`,
         `GET /v1/workspaces/${WORKSPACE_ID}/integrations`,
         `GET /v1/workspaces/${WORKSPACE_ID}/integrations/api%3Aopenapi%3Aexample-deadbeef1234/instances/finance/uninstall-preview`,
         `DELETE /v1/workspaces/${WORKSPACE_ID}/integrations/api%3Aopenapi%3Aexample-deadbeef1234/instances/finance`,
-        `GET /v1/workspaces/${WORKSPACE_ID}/integrations/api%3Aopenapi%3Aexample-deadbeef1234/instances/finance/features`,
-        `PUT /v1/workspaces/${WORKSPACE_ID}/integrations/api%3Aopenapi%3Aexample-deadbeef1234/instances/finance/features/mail-inbox`,
-        `GET /v1/workspaces/${WORKSPACE_ID}/integrations/api%3Aopenapi%3Aexample-deadbeef1234/instances/finance/features/drive-content/browse`,
-        `PUT /v1/workspaces/${WORKSPACE_ID}/integrations/api%3Aopenapi%3Aexample-deadbeef1234/instances/finance/features/drive-content/source`,
-        `POST /v1/workspaces/${WORKSPACE_ID}/integrations/api%3Aopenapi%3Aexample-deadbeef1234/instances/finance/features/mail-inbox/pause`,
-        `POST /v1/workspaces/${WORKSPACE_ID}/integrations/api%3Aopenapi%3Aexample-deadbeef1234/instances/finance/features/mail-inbox/resume`,
-        `DELETE /v1/workspaces/${WORKSPACE_ID}/integrations/api%3Aopenapi%3Aexample-deadbeef1234/instances/finance/features/mail-inbox`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/integrations/api%3Aopenapi%3Aexample-deadbeef1234/instances/finance/facets`,
+        `PUT /v1/workspaces/${WORKSPACE_ID}/integrations/api%3Aopenapi%3Aexample-deadbeef1234/instances/finance/facets/mail-inbox`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/integrations/api%3Aopenapi%3Aexample-deadbeef1234/instances/finance/facets/drive-content/browse`,
+        `PUT /v1/workspaces/${WORKSPACE_ID}/integrations/api%3Aopenapi%3Aexample-deadbeef1234/instances/finance/facets/drive-content/source`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/integrations/api%3Aopenapi%3Aexample-deadbeef1234/instances/finance/facets/mail-inbox/pause`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/integrations/api%3Aopenapi%3Aexample-deadbeef1234/instances/finance/facets/mail-inbox/resume`,
+        `DELETE /v1/workspaces/${WORKSPACE_ID}/integrations/api%3Aopenapi%3Aexample-deadbeef1234/instances/finance/facets/mail-inbox`,
       ],
     );
     expect(JSON.parse(requests[1]!.body!)).toEqual({ source });

@@ -87,7 +87,7 @@ import { registerComputerSessionRoutes } from "./routes/computer-sessions";
 import { registerGitHubRoutes } from "./routes/github";
 import { registerInstallRoutes } from "./routes/install";
 import { registerApiIntegrationRoutes } from "./routes/api-integrations";
-import { registerIntegrationFeatureRoutes } from "./routes/integration-features";
+import { registerIntegrationFacetRoutes } from "./routes/integration-facets";
 import { registerInteractionResourceRoutes } from "./routes/interaction-resources";
 import { registerPackRoutes } from "./routes/packs";
 import { registerPluginRoutes } from "./routes/plugins";
@@ -108,6 +108,7 @@ import { registerInsightsRoutes } from "./routes/insights";
 import { registerTranscriptionRoutes } from "./routes/transcriptions";
 import { registerEditableArtifactRoutes } from "./routes/editable-artifacts";
 import { registerVideoGenerationRoutes } from "./routes/video-generation";
+import { registerCanonicalHumanIdentityRoutes } from "./routes/canonical-human-identities";
 import { projectClientModel } from "./model-catalog";
 import { createTranscriptionService } from "./transcription/service";
 import { createFfmpegTranscriptionSegmenter } from "./transcription/segmenter";
@@ -648,7 +649,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerConnectionRoutes(app, routeDeps);
   registerCapabilityRoutes(app, routeDeps);
   registerApiIntegrationRoutes(app, routeDeps);
-  registerIntegrationFeatureRoutes(app, routeDeps);
+  registerIntegrationFacetRoutes(app, routeDeps);
   registerCatalogAssetRoutes(app, routeDeps);
   registerEnrollmentRoutes(app, routeDeps);
   registerMachineRoutes(app, routeDeps);
@@ -664,6 +665,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerTranscriptionRoutes(app, routeDeps);
   registerEditableArtifactRoutes(app, routeDeps);
   registerVideoGenerationRoutes(app, routeDeps);
+  registerCanonicalHumanIdentityRoutes(app, routeDeps);
   registerSlackInteractionRoutes(app, routeDeps);
 
   app.notFound((c) => {
@@ -1434,8 +1436,8 @@ const routeLabelPatterns: Array<{
     label: "/v1/workspaces/:workspaceId/integrations/install",
   },
   {
-    pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/presets$/,
-    label: "/v1/workspaces/:workspaceId/integrations/presets",
+    pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/definitions$/,
+    label: "/v1/workspaces/:workspaceId/integrations/definitions",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+\/uninstall-preview$/,
@@ -1444,36 +1446,36 @@ const routeLabelPatterns: Array<{
   },
   {
     pattern:
-      /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+\/features\/[^/]+\/browse$/,
+      /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+\/facets\/[^/]+\/browse$/,
     label:
-      "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey/browse",
+      "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey/browse",
   },
   {
     pattern:
-      /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+\/features\/[^/]+\/source$/,
+      /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+\/facets\/[^/]+\/source$/,
     label:
-      "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey/source",
+      "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey/source",
   },
   {
     pattern:
-      /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+\/features\/[^/]+\/pause$/,
+      /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+\/facets\/[^/]+\/pause$/,
     label:
-      "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey/pause",
+      "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey/pause",
   },
   {
     pattern:
-      /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+\/features\/[^/]+\/resume$/,
+      /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+\/facets\/[^/]+\/resume$/,
     label:
-      "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey/resume",
+      "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey/resume",
   },
   {
-    pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+\/features\/[^/]+$/,
+    pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+\/facets\/[^/]+$/,
     label:
-      "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey",
+      "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey",
   },
   {
-    pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+\/features$/,
-    label: "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features",
+    pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+\/facets$/,
+    label: "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+$/,
