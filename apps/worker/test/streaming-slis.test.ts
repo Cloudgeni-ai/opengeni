@@ -11,7 +11,7 @@ import {
   recordSessionEventPublishLatency,
   recordTurnSandboxEstablishPolicy,
   recordTurnStartupPhase,
-  recordTurnPreModelTotal,
+  recordTurnWorkerPreparationTotal,
   StreamTimingMetrics,
   turnStartupCountBucket,
 } from "../src/observability-metrics";
@@ -223,9 +223,9 @@ describe("turn startup phase diagnostics", () => {
     );
   });
 
-  test("records the non-overlapping pre-model total separately from leaf phases", async () => {
+  test("records worker preparation separately from lazy request phases", async () => {
     const observability = worker();
-    recordTurnPreModelTotal(observability, {
+    recordTurnWorkerPreparationTotal(observability, {
       provider: "codex-subscription",
       backend: "docker",
       outcome: "completed",
@@ -234,7 +234,7 @@ describe("turn startup phase diagnostics", () => {
 
     const metrics = await observability.prometheusMetrics();
     expect(metrics).toMatch(
-      /opengeni_turn_pre_model_duration_seconds_sum\{[^}]*backend="docker"[^}]*outcome="completed"[^}]*provider="codex-subscription"[^}]*\} 1\.4\b/,
+      /opengeni_turn_worker_preparation_duration_seconds_sum\{[^}]*backend="docker"[^}]*outcome="completed"[^}]*provider="codex-subscription"[^}]*\} 1\.4\b/,
     );
   });
 

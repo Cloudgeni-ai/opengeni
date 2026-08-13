@@ -383,7 +383,7 @@ import {
   recordSessionEventPublishLatency,
   recordTurnSandboxEstablishPolicy,
   recordTurnStartupPhase,
-  recordTurnPreModelTotal,
+  recordTurnWorkerPreparationTotal,
   runtimeMetricsHooksForObservability,
   StreamTimingMetrics,
   turnLifecycleMetricsFor,
@@ -4480,7 +4480,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         count: 2,
       });
       turnStartedPublished = true;
-      const preModelStartedAt = performance.now();
+      const workerPreparationStartedAt = performance.now();
 
       // Multi-account (P1): resolve the effective Codex account for this turn
       // (session-pin > workspace active) and stamp it on the session so the
@@ -8646,7 +8646,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // calling runStreamAttempt again; resetting this state there would reuse
       // the first no-response-ID fallback key and suppress a real model call.
       const modelResponseState = createModelResponseEventState(claimedModelUsageSourceKeys);
-      let preModelTotalRecorded = false;
+      let workerPreparationTotalRecorded = false;
       const runStreamAttempt = async (): Promise<RunAgentTurnResult> => {
         if (!runInput) {
           throw new Error("Run input was not prepared");
@@ -8747,17 +8747,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const providerDispatchStartedAt = performance.now();
           let providerDispatchOutcome: "completed" | "failed" = "completed";
           try {
-            // This histogram describes turn startup through the first provider
-            // dispatch. Context-compaction recovery re-enters runStreamAttempt;
-            // recording again would fold the prior request and compaction into a
-            // bogus second "startup" sample.
-            if (!preModelTotalRecorded) {
-              preModelTotalRecorded = true;
-              recordTurnPreModelTotal(observability, {
+            // This histogram describes worker preparation until the first entry
+            // into the runtime. Lazy SDK request preparation and the durable
+            // model-request audit happen after this boundary and have their own
+            // phase metrics. Context-compaction recovery re-enters
+            // runStreamAttempt; recording again would fold the prior request and
+            // compaction into a bogus second startup sample.
+            if (!workerPreparationTotalRecorded) {
+              workerPreparationTotalRecorded = true;
+              recordTurnWorkerPreparationTotal(observability, {
                 provider: turnExecutionPolicy.providerId,
                 backend: activeSandboxBackend ?? groupBoxBackend,
                 outcome: "completed",
-                durationSeconds: (performance.now() - preModelStartedAt) / 1_000,
+                durationSeconds: (performance.now() - workerPreparationStartedAt) / 1_000,
               });
             }
             modelRequestStarted = true;

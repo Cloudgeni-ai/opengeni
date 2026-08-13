@@ -1,12 +1,12 @@
 # Turn startup latency investigation
 
-Status: active experiment on `codex/investigate-turn-startup-latency`.
+Status: completed implementation experiment; retained as a measurement record.
 
-Current-main audit: `origin/main` at
+Baseline audit: `origin/main` was
 `478d7fe8feed740ae155fdc5cf7f253f2606bbb4` (2026-08-13). None of the
 startup-phase metrics, the local lazy-provision defaults, or the stale-Docker
-error repair in this experiment are present there. The sandbox Dockerfile still
-has both broad `COPY . .` build stages.
+error repair in this experiment were present in that baseline. The sandbox
+Dockerfile had both broad `COPY . .` build stages.
 
 ## Goal
 
@@ -108,7 +108,9 @@ reported `eager/lazy_disabled` and paid:
 After exporting the exact `OPENGENI_SANDBOX_LAZY_PROVISION=true` key:
 
 - nine consecutive Luna turns all reported `on-demand/eligible`;
-- average total pre-model work was 0.368 seconds (`3.313 / 9`);
+- average worker preparation before entering the runtime was 0.368 seconds
+  (`3.313 / 9`); lazy SDK request preparation and the durable request-start
+  audit were measured separately and are not included in that number;
 - average sandbox-establish bookkeeping was 0.020 milliseconds
   (`0.000176 / 9`);
 - zero Docker sandboxes were created by those chat-only turns;
@@ -124,10 +126,10 @@ same-session workspace continuity.
 
 ### Verification state
 
-After rebasing onto the current `origin/main`, the focused changed-path suites
-reported 716 passes and 0 failures. Worker, runtime, Codex, and Codemode
-typechecks passed; the development-stack shell syntax, formatting, and diff
-checks also passed.
+After the experiment branch was rebased onto the then-current `origin/main`, the
+focused changed-path suites reported 716 passes and 0 failures. Worker, runtime,
+Codex, and Codemode typechecks passed; the development-stack shell syntax,
+formatting, and diff checks also passed.
 
 The pre-rebase full `bun prep` reached 9,152 passes and 5 failures across 1,006
 test files. The observed failures were confined to the unchanged Channel-A
@@ -158,7 +160,7 @@ branch without evidence. Hosted CI remains the clean-environment arbiter.
 
 ## Required instrumentation
 
-One end-to-end pre-model histogram/span family with low-cardinality phase labels:
+One worker-preparation total plus a phase family with low-cardinality labels:
 
 1. queue/admission and reason
 2. turn claim
@@ -169,6 +171,11 @@ One end-to-end pre-model histogram/span family with low-cardinality phase labels
 7. history read, deserialize, sanitize/project, attachment materialize
 8. agent construction
 9. provider dispatch
+
+The worker-preparation total intentionally ends when control enters the runtime.
+Lazy SDK request preparation, the durable model-request audit, and provider wait
+remain separate phase observations; calling the worker-only slice an end-to-end
+pre-model total would understate real non-model latency.
 
 Implemented phase splits now cover tool server construction, required/optional
 connect, catalog build/persist, detailed history preparation, SDK sandbox/client

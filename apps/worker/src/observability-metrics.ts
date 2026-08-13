@@ -1020,7 +1020,7 @@ export function recordTurnSandboxEstablishPolicy(
   });
 }
 
-export function recordTurnPreModelTotal(
+export function recordTurnWorkerPreparationTotal(
   observability: Observability,
   input: {
     provider: string;
@@ -1030,8 +1030,8 @@ export function recordTurnPreModelTotal(
   },
 ): void {
   observability.observeHistogram({
-    name: "opengeni_turn_pre_model_duration_seconds",
-    help: "Total turn duration from the durable turn-start boundary to provider dispatch.",
+    name: "opengeni_turn_worker_preparation_duration_seconds",
+    help: "Worker preparation from the durable turn-start boundary until entering the runtime; lazy SDK request preparation and model-request audit are separate phases.",
     buckets: TURN_STARTUP_PHASE_BUCKETS,
     labels: {
       provider: input.provider,
