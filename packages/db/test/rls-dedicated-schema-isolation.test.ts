@@ -521,11 +521,16 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
         )
       ORDER BY procedure.proname`;
     expect(taskNoteFunctions).toHaveLength(6);
+    const appExecutableTaskNoteFunctions = new Set([
+      "archive_task_note_for_attempt",
+      "create_task_note_for_attempt",
+      "list_task_notes_for_attempt",
+    ]);
     for (const routine of taskNoteFunctions) {
       expect(routine.securityDefiner).toBe(true);
       expect(routine.publicExecute).toBe(false);
       expect(routine.settings).toContain(`search_path=${SCHEMA}, pg_catalog`);
-      expect(routine.appExecute).toBe(!routine.name.startsWith("guard_"));
+      expect(routine.appExecute).toBe(appExecutableTaskNoteFunctions.has(routine.name));
     }
   });
 

@@ -1,5 +1,5 @@
 -- deployment-mode: rolling
--- OPE-225: freeze the exact goal projection on each accepted logical turn and
+-- Freeze the exact goal projection on each accepted logical turn and
 -- separate semantic objective revisions from the established continuation
 -- lifecycle version/wake ledger.
 
@@ -198,7 +198,7 @@ INSERT INTO "session_goal_revisions" (
 SELECT
   goal."account_id", goal."workspace_id", goal."session_id", goal."id",
   'applied', 'replacement', 0, 1, goal."text", goal."success_criteria",
-  goal."mutation_policy", 'Existing goal captured at OPE-225 activation',
+  goal."mutation_policy", 'Existing goal captured during policy activation',
   CASE
     WHEN goal."created_by" = 'scheduled_task' THEN 'scheduled_task'
     WHEN goal."created_by" = 'agent' THEN 'agent'

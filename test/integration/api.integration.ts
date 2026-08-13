@@ -10066,6 +10066,7 @@ describe("API component integration", () => {
     const foreignGrant = await bootstrapMcpGrant(dbClient.db);
     const wrongWorkspace = buildOpenGeniMcpServer(mcpDeps, {
       ...foreignGrant,
+      principalKind: "agent_attempt" as const,
       metadata: liveGrant.metadata,
     });
     await expect(
