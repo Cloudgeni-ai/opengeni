@@ -113,7 +113,9 @@ describe("release schema contract", () => {
     const completeSourceContract = await buildSchemaContract();
     const forwardMigrationPaths = [
       "0237_interaction_transition_reaper.sql",
+      "0238_supergrok_realtime_model.sql",
       "0238_goal_persistence_policy.sql",
+      "0239_supergrok_video_funding.sql",
       "0239_task_tree_notes.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
@@ -129,9 +131,23 @@ describe("release schema contract", () => {
     if (transitionReaper) {
       expect(transitionReaper).toMatchObject({ deploymentMode: "maintenance" });
     }
+    const superGrokRealtime = completeMigrations.get("0238_supergrok_realtime_model.sql");
+    if (superGrokRealtime) {
+      expect(superGrokRealtime).toMatchObject({
+        sha256: "1992505e5994cbef2d650b0eebae2a6c033b567ecbb9cf27301846c500dea66a",
+        deploymentMode: "rolling",
+      });
+    }
     const goalPersistence = completeMigrations.get("0238_goal_persistence_policy.sql");
     if (goalPersistence) {
       expect(goalPersistence).toMatchObject({ deploymentMode: "rolling" });
+    }
+    const superGrokVideoFunding = completeMigrations.get("0239_supergrok_video_funding.sql");
+    if (superGrokVideoFunding) {
+      expect(superGrokVideoFunding).toMatchObject({
+        sha256: "fbe4c79cb20c809767dad12e697ab6ad1becfc8b03eb314cbda38d6069a258f1",
+        deploymentMode: "rolling",
+      });
     }
     const taskTreeNotes = completeMigrations.get("0239_task_tree_notes.sql");
     if (taskTreeNotes) {
@@ -1088,14 +1104,13 @@ describe("release schema contract", () => {
   });
 });
 
-async function contractWithoutMigrations(excludedPaths: string[]) {
+async function contractWithoutMigrations(excludedPaths: readonly string[]) {
   const source = join(import.meta.dir, "../packages/db/drizzle");
   const directory = await mkdtemp(join(tmpdir(), "opengeni-schema-contract-filtered-"));
   directories.push(directory);
+  const excluded = new Set(excludedPaths);
   for (const entry of await readdir(source, { withFileTypes: true })) {
-    if (!entry.isFile() || !entry.name.endsWith(".sql") || excludedPaths.includes(entry.name)) {
-      continue;
-    }
+    if (!entry.isFile() || !entry.name.endsWith(".sql") || excluded.has(entry.name)) continue;
     await copyFile(join(source, entry.name), join(directory, entry.name));
   }
   return await buildSchemaContract(directory);
