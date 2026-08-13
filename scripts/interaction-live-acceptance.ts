@@ -232,7 +232,7 @@ class FrameProbe<TFrame extends FrameValue> {
     timeoutMs: number,
   ): Promise<void> {
     await withTimeout(
-      new Promise<void>((resolve, reject) => {
+      new Promise<void>((accept, reject) => {
         let relayAccepted = relay === null;
         const onError = () => reject(new Error("frame WebSocket failed to connect"));
         const onClose = () => {
@@ -242,7 +242,7 @@ class FrameProbe<TFrame extends FrameValue> {
         this.socket.addEventListener("close", onClose, { once: true });
         this.socket.addEventListener("open", () => {
           if (!relay) {
-            resolve();
+            accept();
             return;
           }
           this.socket.send(
@@ -272,7 +272,7 @@ class FrameProbe<TFrame extends FrameValue> {
                     throw new Error(ack.error?.message ?? "relay rejected frame stream");
                   }
                   relayAccepted = true;
-                  resolve();
+                  accept();
                   return;
                 }
                 if (tag === RELAY_TAG_CLOSE) {
@@ -307,10 +307,10 @@ class FrameProbe<TFrame extends FrameValue> {
     if (queuedIndex >= 0) return this.queue.splice(queuedIndex, 1)[0]!;
     if (this.failure) throw this.failure;
     if (this.closed) throw new Error("frame probe is closed");
-    return await new Promise<TFrame>((resolve, reject) => {
+    return await new Promise<TFrame>((accept, reject) => {
       const waiter = {
         predicate,
-        resolve,
+        resolve: accept,
         reject,
         timer: setTimeout(() => {
           const index = this.waiters.indexOf(waiter);

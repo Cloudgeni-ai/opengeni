@@ -319,7 +319,7 @@ export function ComputerViewer({
       })().catch((cause) => notifyError(cause, "Could not paste into the computer."));
       return true;
     },
-    [computer.session?.capabilities?.clipboard, notifyError, perform, rfbStream],
+    [computer, notifyError, perform, rfbStream],
   );
 
   if (!enabled) return null;

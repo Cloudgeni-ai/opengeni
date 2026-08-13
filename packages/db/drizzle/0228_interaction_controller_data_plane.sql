@@ -9,6 +9,6 @@ ALTER TABLE "sandbox_leases"
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
-    GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO opengeni_app;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE sandbox_leases TO opengeni_app;
   END IF;
 END $$;

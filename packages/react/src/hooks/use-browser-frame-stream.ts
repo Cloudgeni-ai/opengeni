@@ -212,7 +212,8 @@ export function useBrowserFrameStream(
       if (decodingFrame) return;
       decodingFrame = true;
       try {
-        while (!disposed && pendingFrame) {
+        while (pendingFrame) {
+          if (disposed) break;
           const pending = pendingFrame;
           pendingFrame = null;
           const { bytes, source } = pending;
@@ -225,7 +226,8 @@ export function useBrowserFrameStream(
             throw new Error("browser frame belongs to a stale controller");
           }
           const key = `${browserSessionId}:${targetId}:${frame.controllerGeneration}:${frame.targetGeneration}:${frame.documentGeneration}`;
-          if (latestRef.current.key === key && frame.sequence <= latestRef.current.sequence) continue;
+          if (latestRef.current.key === key && frame.sequence <= latestRef.current.sequence)
+            continue;
           latestRef.current = { key, sequence: frame.sequence };
           failures = 0;
           setResult((current) => ({

@@ -203,7 +203,8 @@ export function useComputerFrameStream(
       if (decodingFrame) return;
       decodingFrame = true;
       try {
-        while (!disposed && pendingFrame) {
+        while (pendingFrame) {
+          if (disposed) break;
           const pending = pendingFrame;
           pendingFrame = null;
           const { bytes, source } = pending;
@@ -216,7 +217,8 @@ export function useComputerFrameStream(
             throw new Error("computer frame belongs to a stale controller");
           }
           const key = `${computerSessionId}:${targetId}:${frame.controllerGeneration}:${frame.targetGeneration}`;
-          if (latestRef.current.key === key && frame.sequence <= latestRef.current.sequence) continue;
+          if (latestRef.current.key === key && frame.sequence <= latestRef.current.sequence)
+            continue;
           latestRef.current = { key, sequence: frame.sequence };
           // A real decoded frame—not merely a socket handshake—is the recovery
           // boundary. Resetting on `open` caused a dead producer to reconnect

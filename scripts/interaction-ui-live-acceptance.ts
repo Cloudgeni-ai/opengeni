@@ -392,11 +392,11 @@ try {
 }
 
 async function waitForPaintedCanvas(
-  page: Page,
+  playwrightPage: Page,
   canvas: import("playwright").Locator,
 ): Promise<void> {
   await canvas.waitFor({ state: "visible", timeout: 7_500 });
-  await page.waitForFunction(
+  await playwrightPage.waitForFunction(
     (selector) => {
       const element = document.querySelector(selector);
       return element instanceof HTMLCanvasElement && element.width > 0 && element.height > 0;
@@ -422,12 +422,12 @@ async function clickCanvasFraction(
   await canvas.page().mouse.click(box.x + box.width * xFraction, box.y + box.height * yFraction);
 }
 
-async function copyThroughComposer(page: Page, value: string): Promise<void> {
-  const composer = page.getByRole("textbox", { name: "Message the agent", exact: true });
+async function copyThroughComposer(playwrightPage: Page, value: string): Promise<void> {
+  const composer = playwrightPage.getByRole("textbox", { name: "Message the agent", exact: true });
   await composer.fill(value);
   await composer.press("Meta+A");
   await composer.press("Meta+C");
-  const copied = await page.evaluate(() => navigator.clipboard.readText());
+  const copied = await playwrightPage.evaluate(() => navigator.clipboard.readText());
   if (copied !== value)
     throw new Error("browser did not place the exact composer selection on clipboard");
   await composer.fill("");
@@ -444,23 +444,23 @@ async function ensureDesktopControl(desktop: import("playwright").Locator): Prom
 }
 
 async function currentBrowserObservation(
-  browser: BrowserSessionResource,
+  resource: BrowserSessionResource,
 ): Promise<BrowserObservation> {
-  const targets = await browser.tabs.list();
+  const targets = await resource.tabs.list();
   const target = targets.targets.find((candidate) => candidate.selected) ?? targets.targets[0];
   if (!target) throw new Error("UI fixture browser has no page target");
-  return await browser.observe(target.id);
+  return await resource.observe(target.id);
 }
 
 async function focusAcceptanceInput(
-  browser: BrowserSessionResource,
+  resource: BrowserSessionResource,
   observation: BrowserObservation,
 ): Promise<void> {
   const node = findSemanticNode(
     observation,
     (candidate) => candidate.role === "textbox" && candidate.name === "Acceptance input",
   );
-  const receipt = await browser.act({
+  const receipt = await resource.act({
     operationId: crypto.randomUUID(),
     targetId: observation.target.id,
     expectedTargetGeneration: observation.target.targetGeneration,
@@ -485,10 +485,10 @@ function findSemanticNode(
   throw new Error("acceptance input is missing from the semantic tree");
 }
 
-async function waitForBrowserValue(browser: BrowserSessionResource, value: string): Promise<void> {
+async function waitForBrowserValue(resource: BrowserSessionResource, value: string): Promise<void> {
   const deadline = performance.now() + 5_000;
   while (true) {
-    const observation = await currentBrowserObservation(browser);
+    const observation = await currentBrowserObservation(resource);
     if (hasExactSemanticText(observation, value)) return;
     if (performance.now() >= deadline)
       throw new Error(`UI input did not reach exact DOM state: ${value}`);
@@ -507,25 +507,25 @@ function hasExactSemanticText(observation: BrowserObservation, value: string): b
 }
 
 async function browserContainsWithin(
-  browser: BrowserSessionResource,
+  resource: BrowserSessionResource,
   value: string,
   timeoutMs: number,
 ): Promise<boolean> {
   const deadline = performance.now() + timeoutMs;
   while (performance.now() < deadline) {
-    if (semanticText(await currentBrowserObservation(browser)).includes(value)) return true;
+    if (semanticText(await currentBrowserObservation(resource)).includes(value)) return true;
     await Bun.sleep(50);
   }
   return false;
 }
 
 async function waitForSelectedTarget(
-  browser: BrowserSessionResource,
+  resource: BrowserSessionResource,
   targetId: string,
 ): Promise<void> {
   const deadline = performance.now() + 5_000;
   while (true) {
-    const targets = await browser.tabs.list();
+    const targets = await resource.tabs.list();
     if (targets.targets.some((target) => target.id === targetId && target.selected)) return;
     if (performance.now() >= deadline)
       throw new Error(`UI did not select browser target ${targetId}`);
