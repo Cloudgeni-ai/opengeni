@@ -13,10 +13,7 @@
    -------------------------------------------------------------------------- */
 import { describe, expect, test } from "bun:test";
 import { act, type ReactElement, type ReactNode } from "react";
-import type {
-  GetWorkspaceCaptureResponse,
-  WorkspaceCaptureManifest,
-} from "@opengeni/sdk";
+import type { GetWorkspaceCaptureResponse, WorkspaceCaptureManifest } from "@opengeni/sdk";
 import { registerDom, renderComponent, flush } from "./render-hook";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import type { SessionClientLike } from "../src/client";
@@ -28,10 +25,6 @@ import {
   fakeFileDiff,
 } from "./sandbox-fixtures";
 import { OpenGeniProvider } from "../src/provider";
-import {
-  OpenGeniContext,
-  type OpenGeniContextValue,
-} from "../src/session-context";
 import type { MachinesResponse } from "../src/types/machines";
 import {
   useSandboxWorkspaceTabs,
@@ -57,13 +50,8 @@ const SECOND_SESSION_ID = "33333333-3333-4333-8333-333333333333";
 async function renderTabsHook(
   client: SessionClientLike,
   options: Omit<UseSandboxWorkspaceTabsOptions, "client" | "workspaceId">,
-): Promise<{
-  result: { current: UseSandboxWorkspaceTabsResult };
-  unmount: () => Promise<void>;
-}> {
-  const result = {
-    current: undefined as unknown as UseSandboxWorkspaceTabsResult,
-  };
+): Promise<{ result: { current: UseSandboxWorkspaceTabsResult }; unmount: () => Promise<void> }> {
+  const result = { current: undefined as unknown as UseSandboxWorkspaceTabsResult };
   function Harness() {
     result.current = useSandboxWorkspaceTabs(options);
     return null;
@@ -72,10 +60,7 @@ async function renderTabsHook(
   return { result, unmount: rendered.unmount };
 }
 
-function withProvider(
-  client: SessionClientLike,
-  children: ReactNode,
-): ReactElement {
+function withProvider(client: SessionClientLike, children: ReactNode): ReactElement {
   return (
     <OpenGeniProvider client={client} workspaceId={WORKSPACE_ID}>
       {children}
@@ -105,9 +90,7 @@ function fakeManifest(fileCount: number): WorkspaceCaptureManifest {
                 newStart: 1,
                 newLines: 2,
                 header: "@@ -1 +1,2 @@",
-                lines: [
-                  { type: "add" as const, oldNo: null, newNo: 2, text: "x" },
-                ],
+                lines: [{ type: "add" as const, oldNo: null, newNo: 2, text: "x" }],
               },
             ],
           },
@@ -182,9 +165,7 @@ function fakeManifest(fileCount: number): WorkspaceCaptureManifest {
   };
 }
 
-function captureAvailable(
-  manifest: WorkspaceCaptureManifest,
-): GetWorkspaceCaptureResponse {
+function captureAvailable(manifest: WorkspaceCaptureManifest): GetWorkspaceCaptureResponse {
   return {
     available: true,
     revision: manifest.revision,
@@ -250,9 +231,7 @@ describe("workbench surface allowlist", () => {
     });
     await flush(30);
 
-    expect(hook.result.current.tabs.map((tab) => tab.id)).toEqual([
-      WORKBENCH_TAB_BROWSER,
-    ]);
+    expect(hook.result.current.tabs.map((tab) => tab.id)).toEqual([WORKBENCH_TAB_BROWSER]);
     expect(hook.result.current.machine.enabled).toBe(false);
     expect(calls).toEqual({ capabilities: 0, capture: 0, machines: 0 });
     await hook.unmount();
@@ -263,11 +242,7 @@ describe("workbench surface allowlist", () => {
     const hook = await renderTabsHook(client, {
       sessionId: SESSION_ID,
       events: [],
-      surfaces: [
-        WORKBENCH_TAB_CHANGES,
-        WORKBENCH_TAB_FILES,
-        WORKBENCH_TAB_TERMINAL,
-      ],
+      surfaces: [WORKBENCH_TAB_CHANGES, WORKBENCH_TAB_FILES, WORKBENCH_TAB_TERMINAL],
     });
     await flush(60);
 
@@ -276,9 +251,7 @@ describe("workbench surface allowlist", () => {
       WORKBENCH_TAB_FILES,
       WORKBENCH_TAB_TERMINAL,
     ]);
-    expect(
-      hook.result.current.tabs.some((tab) => tab.id === WORKBENCH_TAB_DESKTOP),
-    ).toBe(false);
+    expect(hook.result.current.tabs.some((tab) => tab.id === WORKBENCH_TAB_DESKTOP)).toBe(false);
     expect(spy.attachCalls).toBe(0);
     await hook.unmount();
   });
@@ -333,9 +306,7 @@ describe("workbench surface allowlist", () => {
       });
       await flush(60);
 
-      expect(hook.result.current.tabs.map((tab) => tab.id)).toEqual([
-        expectedTab,
-      ]);
+      expect(hook.result.current.tabs.map((tab) => tab.id)).toEqual([expectedTab]);
       expect(hook.result.current.defaultTab).toBeNull();
       expect(hook.result.current.machine.enabled).toBe(true);
       expect(captureCalls).toBe(0);
@@ -353,9 +324,7 @@ describe("workbench surface allowlist", () => {
     });
     await flush(60);
 
-    expect(hook.result.current.tabs.map((tab) => tab.id)).toEqual([
-      WORKBENCH_TAB_FILES,
-    ]);
+    expect(hook.result.current.tabs.map((tab) => tab.id)).toEqual([WORKBENCH_TAB_FILES]);
     expect(hook.result.current.defaultTab).toBe(WORKBENCH_TAB_FILES);
     await hook.unmount();
   });
@@ -372,9 +341,7 @@ describe("workbench surface allowlist", () => {
     });
     await flush(60);
 
-    expect(hook.result.current.tabs.map((tab) => tab.id)).toEqual([
-      WORKBENCH_TAB_CHANGES,
-    ]);
+    expect(hook.result.current.tabs.map((tab) => tab.id)).toEqual([WORKBENCH_TAB_CHANGES]);
     const changes = hook.result.current.tabs[0]!.content as ReactElement<{
       onOpenFile?: (path: string) => void;
     }>;
@@ -386,73 +353,6 @@ describe("workbench surface allowlist", () => {
 // ── Refinement 1: prewarm gated to intent ────────────────────────────────────
 
 describe("workbench prewarm gating (Refinement 1)", () => {
-  test("workspace interaction lifecycle changes refresh the truthful machine liveness", async () => {
-    let warm = false;
-    let capabilityReads = 0;
-    const { client } = coldClient({
-      getStreamCapabilities: async () => {
-        capabilityReads += 1;
-        return warm
-          ? fakeCapabilities({ liveness: "warm" })
-          : fakeColdCapabilities();
-      },
-    });
-    const result = {
-      current: undefined as unknown as UseSandboxWorkspaceTabsResult,
-    };
-
-    function Harness({ revision }: { revision: number | null }) {
-      const context: OpenGeniContextValue = {
-        client,
-        workspaceId: WORKSPACE_ID,
-        workspaceControlEvent: null,
-        workspaceControlConnectionState: "idle",
-        workspaceInteractionEvent:
-          revision === null
-            ? null
-            : {
-                workspaceId: WORKSPACE_ID,
-                sequence: revision,
-                revision,
-                type: "workspace.interaction.changed",
-                occurredAt: "2026-08-13T10:00:00.000Z",
-              },
-        workspaceInteractionConnectionState: "open",
-        registerSessionReconciler: () => () => undefined,
-        reconcileSession: async () => undefined,
-      };
-      return (
-        <OpenGeniContext.Provider value={context}>
-          <Probe />
-        </OpenGeniContext.Provider>
-      );
-    }
-
-    function Probe() {
-      result.current = useSandboxWorkspaceTabs({
-        sessionId: SESSION_ID,
-        events: [],
-      });
-      return null;
-    }
-
-    const rendered = await renderComponent(<Harness revision={null} />);
-    await flush(60);
-    expect(result.current.machine.chip.state).toBe("offline");
-    const coldReads = capabilityReads;
-
-    warm = true;
-    await rendered.rerender(<Harness revision={1} />);
-    await flush(60);
-    expect(capabilityReads).toBeGreaterThan(coldReads);
-    expect(result.current.machine.chip).toEqual({
-      state: "live",
-      label: "Live",
-      asOf: null,
-    });
-    await rendered.unmount();
-  });
-
   test("pending capability negotiation cannot replay captured history into Channel-A", async () => {
     const historicalEvents = [
       fakeEvent(1, "git.changed", { revision: 3 }),
@@ -460,14 +360,12 @@ describe("workbench prewarm gating (Refinement 1)", () => {
     ];
 
     for (const initialTab of [WORKBENCH_TAB_CHANGES, WORKBENCH_TAB_FILES]) {
-      let resolveCapabilities: (
-        value: ReturnType<typeof fakeColdCapabilities>,
-      ) => void = () => {};
-      const capabilitiesPromise = new Promise<
-        ReturnType<typeof fakeColdCapabilities>
-      >((resolve) => {
-        resolveCapabilities = resolve;
-      });
+      let resolveCapabilities: (value: ReturnType<typeof fakeColdCapabilities>) => void = () => {};
+      const capabilitiesPromise = new Promise<ReturnType<typeof fakeColdCapabilities>>(
+        (resolve) => {
+          resolveCapabilities = resolve;
+        },
+      );
       const reads = {
         fsList: 0,
         fsListBatch: 0,
@@ -480,33 +378,23 @@ describe("workbench prewarm gating (Refinement 1)", () => {
         getWorkspaceCapture: async () => captureAvailable(fakeManifest(1)),
         fsList: async () => {
           reads.fsList += 1;
-          throw new Error(
-            "unsettled capabilities must not list the provider filesystem",
-          );
+          throw new Error("unsettled capabilities must not list the provider filesystem");
         },
         fsListBatch: async () => {
           reads.fsListBatch += 1;
-          throw new Error(
-            "unsettled capabilities must not batch-list the provider filesystem",
-          );
+          throw new Error("unsettled capabilities must not batch-list the provider filesystem");
         },
         gitStatus: async () => {
           reads.gitStatus += 1;
-          throw new Error(
-            "unsettled capabilities must not query provider Git status",
-          );
+          throw new Error("unsettled capabilities must not query provider Git status");
         },
         gitDiff: async () => {
           reads.gitDiff += 1;
-          throw new Error(
-            "unsettled capabilities must not query a provider Git diff",
-          );
+          throw new Error("unsettled capabilities must not query a provider Git diff");
         },
         gitReadBatch: async () => {
           reads.gitReadBatch += 1;
-          throw new Error(
-            "unsettled capabilities must not batch-read provider Git",
-          );
+          throw new Error("unsettled capabilities must not batch-read provider Git");
         },
       });
       const hook = await renderTabsHook(client, {
@@ -536,19 +424,13 @@ describe("workbench prewarm gating (Refinement 1)", () => {
         gitDiff: 0,
         gitReadBatch: 0,
       });
-      const changes = hook.result.current.tabs.find(
-        (tab) => tab.id === WORKBENCH_TAB_CHANGES,
-      );
-      const files = hook.result.current.tabs.find(
-        (tab) => tab.id === WORKBENCH_TAB_FILES,
-      );
+      const changes = hook.result.current.tabs.find((tab) => tab.id === WORKBENCH_TAB_CHANGES);
+      const files = hook.result.current.tabs.find((tab) => tab.id === WORKBENCH_TAB_FILES);
       expect(
-        (changes!.content as ReactElement<{ git: { source: string | null } }>)
-          .props.git.source,
+        (changes!.content as ReactElement<{ git: { source: string | null } }>).props.git.source,
       ).toBe("capture");
       expect(
-        (files!.content as ReactElement<{ files: { source: string | null } }>)
-          .props.files.source,
+        (files!.content as ReactElement<{ files: { source: string | null } }>).props.files.source,
       ).toBe("capture");
       await hook.unmount();
     }
@@ -556,19 +438,15 @@ describe("workbench prewarm gating (Refinement 1)", () => {
 
   test("cold capability negotiation cannot race a pending capture into Channel-A reads", async () => {
     let resolveCapture: (value: GetWorkspaceCaptureResponse) => void = () => {};
-    const capturePromise = new Promise<GetWorkspaceCaptureResponse>(
-      (resolve) => {
-        resolveCapture = resolve;
-      },
-    );
+    const capturePromise = new Promise<GetWorkspaceCaptureResponse>((resolve) => {
+      resolveCapture = resolve;
+    });
     const reads = { fsList: 0, gitStatus: 0, gitDiff: 0 };
     const { client } = coldClient({
       getWorkspaceCapture: () => capturePromise,
       fsList: async () => {
         reads.fsList += 1;
-        throw new Error(
-          "cold pending capture must not list the live filesystem",
-        );
+        throw new Error("cold pending capture must not list the live filesystem");
       },
       gitStatus: async () => {
         reads.gitStatus += 1;
@@ -579,10 +457,7 @@ describe("workbench prewarm gating (Refinement 1)", () => {
         throw new Error("cold pending capture must not query a live Git diff");
       },
     });
-    const hook = await renderTabsHook(client, {
-      sessionId: SESSION_ID,
-      events: [],
-    });
+    const hook = await renderTabsHook(client, { sessionId: SESSION_ID, events: [] });
 
     // Capabilities have resolved cold, but the independent capture request is
     // deliberately still in flight. Neither working-tree nor staged hooks may
@@ -597,21 +472,15 @@ describe("workbench prewarm gating (Refinement 1)", () => {
     await flush(60);
     expect(reads).toEqual({ fsList: 0, gitStatus: 0, gitDiff: 0 });
     expect(hook.result.current.defaultTab).toBe(WORKBENCH_TAB_CHANGES);
-    const changes = hook.result.current.tabs.find(
-      (tab) => tab.id === WORKBENCH_TAB_CHANGES,
-    );
-    const files = hook.result.current.tabs.find(
-      (tab) => tab.id === WORKBENCH_TAB_FILES,
-    );
+    const changes = hook.result.current.tabs.find((tab) => tab.id === WORKBENCH_TAB_CHANGES);
+    const files = hook.result.current.tabs.find((tab) => tab.id === WORKBENCH_TAB_FILES);
     expect(changes).toBeDefined();
     expect(files).toBeDefined();
     expect(
-      (changes!.content as ReactElement<{ git: { source: string | null } }>)
-        .props.git.source,
+      (changes!.content as ReactElement<{ git: { source: string | null } }>).props.git.source,
     ).toBe("capture");
     expect(
-      (files!.content as ReactElement<{ files: { source: string | null } }>)
-        .props.files.source,
+      (files!.content as ReactElement<{ files: { source: string | null } }>).props.files.source,
     ).toBe("capture");
     await hook.unmount();
   });
@@ -620,18 +489,13 @@ describe("workbench prewarm gating (Refinement 1)", () => {
     const historicalEvents = [
       fakeEvent(1, "git.changed", { revision: 3 }),
       fakeEvent(2, "fs.changed", {
-        changes: [
-          { path: "app.py", kind: "modified", isDir: false, sizeBytes: 10 },
-        ],
+        changes: [{ path: "app.py", kind: "modified", isDir: false, sizeBytes: 10 }],
         source: "agent",
         revision: 3,
         leaseEpoch: 1,
       }),
       fakeEvent(3, "agent.toolCall.output", {}),
-      fakeEvent(4, "sandbox.command.output.delta", {
-        stream: "stdout",
-        chunk: "done\n",
-      }),
+      fakeEvent(4, "sandbox.command.output.delta", { stream: "stdout", chunk: "done\n" }),
     ];
 
     for (const initialTab of [WORKBENCH_TAB_CHANGES, WORKBENCH_TAB_FILES]) {
@@ -643,19 +507,14 @@ describe("workbench prewarm gating (Refinement 1)", () => {
         gitReadBatch: 0,
       };
       const { client, spy } = coldClient({
-        getStreamCapabilities: async () =>
-          fakeCapabilities({ liveness: "draining" }),
+        getStreamCapabilities: async () => fakeCapabilities({ liveness: "draining" }),
         fsList: async () => {
           reads.fsList += 1;
-          throw new Error(
-            "draining review must not list the provider filesystem",
-          );
+          throw new Error("draining review must not list the provider filesystem");
         },
         fsListBatch: async () => {
           reads.fsListBatch += 1;
-          throw new Error(
-            "draining review must not batch-list the provider filesystem",
-          );
+          throw new Error("draining review must not batch-list the provider filesystem");
         },
         gitStatus: async () => {
           reads.gitStatus += 1;
@@ -687,19 +546,13 @@ describe("workbench prewarm gating (Refinement 1)", () => {
         gitReadBatch: 0,
       });
       expect(spy.attachCalls).toBe(0);
-      const changes = hook.result.current.tabs.find(
-        (tab) => tab.id === WORKBENCH_TAB_CHANGES,
-      );
-      const files = hook.result.current.tabs.find(
-        (tab) => tab.id === WORKBENCH_TAB_FILES,
-      );
+      const changes = hook.result.current.tabs.find((tab) => tab.id === WORKBENCH_TAB_CHANGES);
+      const files = hook.result.current.tabs.find((tab) => tab.id === WORKBENCH_TAB_FILES);
       expect(
-        (changes!.content as ReactElement<{ git: { source: string | null } }>)
-          .props.git.source,
+        (changes!.content as ReactElement<{ git: { source: string | null } }>).props.git.source,
       ).toBe("capture");
       expect(
-        (files!.content as ReactElement<{ files: { source: string | null } }>)
-          .props.files.source,
+        (files!.content as ReactElement<{ files: { source: string | null } }>).props.files.source,
       ).toBe("capture");
       await hook.unmount();
     }
@@ -707,10 +560,7 @@ describe("workbench prewarm gating (Refinement 1)", () => {
 
   test("a cold dock mount browsing capture-served surfaces warms NO box", async () => {
     const { client, spy } = coldClient();
-    const hook = await renderTabsHook(client, {
-      sessionId: SESSION_ID,
-      events: [],
-    });
+    const hook = await renderTabsHook(client, { sessionId: SESSION_ID, events: [] });
     // Well past the negotiate + capture GET: nothing asked for a box.
     await flush(60);
     expect(spy.attachCalls).toBe(0);
@@ -727,15 +577,11 @@ describe("workbench prewarm gating (Refinement 1)", () => {
       getWorkspaceCapture: async () => ({ available: false }),
       fsList: async () => {
         reads.fsList += 1;
-        throw new Error(
-          "resting workspace must not list files before explicit wake",
-        );
+        throw new Error("resting workspace must not list files before explicit wake");
       },
       gitStatus: async () => {
         reads.gitStatus += 1;
-        throw new Error(
-          "resting workspace must not query Git before explicit wake",
-        );
+        throw new Error("resting workspace must not query Git before explicit wake");
       },
       gitDiff: async () => {
         reads.gitDiff += 1;
@@ -757,8 +603,8 @@ describe("workbench prewarm gating (Refinement 1)", () => {
     expect(reads).toEqual({ fsList: 0, gitStatus: 0, gitDiff: 0 });
     expect(spy.attachCalls).toBe(0);
     expect(rendered.container.textContent).toContain("Workspace is resting");
-    const wake = Array.from(rendered.container.querySelectorAll("button")).find(
-      (button) => button.textContent?.includes("Open live workspace"),
+    const wake = Array.from(rendered.container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Open live workspace"),
     );
     expect(wake).toBeDefined();
     await act(async () => {
@@ -851,35 +697,25 @@ describe("workbench prewarm gating (Refinement 1)", () => {
 
     expect(spy.attachCalls).toBe(0);
     expect(rendered.container.textContent).toContain("Waking workspace");
-    expect(rendered.container.textContent).not.toContain(
-      "Workspace is resting",
-    );
+    expect(rendered.container.textContent).not.toContain("Workspace is resting");
     expect(rendered.container.textContent).not.toContain("Open live workspace");
     expect(
-      rendered.container.querySelector(
-        '[role="status"][aria-label="Machine: Waking…"]',
-      ),
+      rendered.container.querySelector('[role="status"][aria-label="Machine: Waking…"]'),
     ).not.toBeNull();
     await rendered.unmount();
   });
 
   test("an explicit Files live intent warms the box exactly once", async () => {
     const { client, spy } = coldClient();
-    const hook = await renderTabsHook(client, {
-      sessionId: SESSION_ID,
-      events: [],
-    });
+    const hook = await renderTabsHook(client, { sessionId: SESSION_ID, events: [] });
     await flush(60);
     expect(spy.attachCalls).toBe(0);
     // Reach the Files tab's idempotent live-intent callback. The packaged UI
     // invokes the same intent from its explicit wake gates.
-    const filesTab = hook.result.current.tabs.find(
-      (t) => t.id === WORKBENCH_TAB_FILES,
-    );
+    const filesTab = hook.result.current.tabs.find((t) => t.id === WORKBENCH_TAB_FILES);
     expect(filesTab).toBeDefined();
-    const onEditIntent = (
-      filesTab!.content as ReactElement<{ onEditIntent: () => void }>
-    ).props.onEditIntent;
+    const onEditIntent = (filesTab!.content as ReactElement<{ onEditIntent: () => void }>).props
+      .onEditIntent;
     expect(typeof onEditIntent).toBe("function");
     await act(async () => {
       onEditIntent();
@@ -892,21 +728,14 @@ describe("workbench prewarm gating (Refinement 1)", () => {
 
   test("activating the terminal warms the box (interactive PTY intent)", async () => {
     const { client, spy } = coldClient();
-    const hook = await renderTabsHook(client, {
-      sessionId: SESSION_ID,
-      events: [],
-    });
+    const hook = await renderTabsHook(client, { sessionId: SESSION_ID, events: [] });
     await flush(60);
     expect(spy.attachCalls).toBe(0);
-    const terminalTab = hook.result.current.tabs.find(
-      (t) => t.id === "terminal",
-    );
+    const terminalTab = hook.result.current.tabs.find((t) => t.id === "terminal");
     expect(terminalTab).toBeDefined();
     // content = <div><SandboxTerminal onActivate=… /></div>
     const inner = (
-      terminalTab!.content as ReactElement<{
-        children: ReactElement<{ onActivate: () => void }>;
-      }>
+      terminalTab!.content as ReactElement<{ children: ReactElement<{ onActivate: () => void }> }>
     ).props.children;
     const onActivate = inner.props.onActivate;
     await act(async () => {
@@ -927,13 +756,10 @@ describe("workbench prewarm gating (Refinement 1)", () => {
     });
     await flush(60);
     expect(spy.attachCalls).toBe(0);
-    const changes = hook.result.current.tabs.find(
-      (tab) => tab.id === WORKBENCH_TAB_CHANGES,
-    );
+    const changes = hook.result.current.tabs.find((tab) => tab.id === WORKBENCH_TAB_CHANGES);
     expect(changes).toBeDefined();
-    const onOpenFile = (
-      changes!.content as ReactElement<{ onOpenFile: (path: string) => void }>
-    ).props.onOpenFile;
+    const onOpenFile = (changes!.content as ReactElement<{ onOpenFile: (path: string) => void }>)
+      .props.onOpenFile;
     await act(async () => {
       onOpenFile("large/output.json");
     });
@@ -945,9 +771,7 @@ describe("workbench prewarm gating (Refinement 1)", () => {
 
   test("switching sessions clears prior warm intent instead of prewarming the new session", async () => {
     const { client, spy } = coldClient();
-    const result = {
-      current: undefined as unknown as UseSandboxWorkspaceTabsResult,
-    };
+    const result = { current: undefined as unknown as UseSandboxWorkspaceTabsResult };
     function Harness({ sessionId }: { sessionId: string }) {
       result.current = useSandboxWorkspaceTabs({ sessionId, events: [] });
       return null;
@@ -956,32 +780,24 @@ describe("workbench prewarm gating (Refinement 1)", () => {
       withProvider(client, <Harness sessionId={SESSION_ID} />),
     );
     await flush(60);
-    const firstFiles = result.current.tabs.find(
-      (tab) => tab.id === WORKBENCH_TAB_FILES,
-    );
+    const firstFiles = result.current.tabs.find((tab) => tab.id === WORKBENCH_TAB_FILES);
     expect(firstFiles).toBeDefined();
-    const firstEditIntent = (
-      firstFiles!.content as ReactElement<{ onEditIntent: () => void }>
-    ).props.onEditIntent;
+    const firstEditIntent = (firstFiles!.content as ReactElement<{ onEditIntent: () => void }>)
+      .props.onEditIntent;
     await act(async () => {
       firstEditIntent();
     });
     await flush(60);
     expect(spy.attachCalls).toBe(1);
 
-    await rendered.rerender(
-      withProvider(client, <Harness sessionId={SECOND_SESSION_ID} />),
-    );
+    await rendered.rerender(withProvider(client, <Harness sessionId={SECOND_SESSION_ID} />));
     await flush(60);
     expect(spy.attachCalls).toBe(1);
 
-    const secondFiles = result.current.tabs.find(
-      (tab) => tab.id === WORKBENCH_TAB_FILES,
-    );
+    const secondFiles = result.current.tabs.find((tab) => tab.id === WORKBENCH_TAB_FILES);
     expect(secondFiles).toBeDefined();
-    const secondEditIntent = (
-      secondFiles!.content as ReactElement<{ onEditIntent: () => void }>
-    ).props.onEditIntent;
+    const secondEditIntent = (secondFiles!.content as ReactElement<{ onEditIntent: () => void }>)
+      .props.onEditIntent;
     await act(async () => {
       secondEditIntent();
     });
@@ -1005,9 +821,7 @@ describe("capture-driven default tab (Refinement 2)", () => {
           changedFileCount: 0,
           reason: "commit",
         }),
-        fakeEvent(2, "workspace.revision.captured", {
-          stats: { fileCount: 0 },
-        }),
+        fakeEvent(2, "workspace.revision.captured", { stats: { fileCount: 0 } }),
       ]),
     ).toBe(WORKBENCH_TAB_CHANGES);
     expect(
@@ -1020,9 +834,7 @@ describe("capture-driven default tab (Refinement 2)", () => {
           changedFileCount: 0,
           reason: "worktree",
         }),
-        fakeEvent(2, "workspace.revision.captured", {
-          stats: { fileCount: 0 },
-        }),
+        fakeEvent(2, "workspace.revision.captured", { stats: { fileCount: 0 } }),
       ]),
     ).toBe(WORKBENCH_TAB_FILES);
 
@@ -1059,23 +871,15 @@ describe("capture-driven default tab (Refinement 2)", () => {
     const empty = coldClient({
       getWorkspaceCapture: async () => captureAvailable(fakeManifest(0)),
     });
-    const emptyHook = await renderTabsHook(empty.client, {
-      sessionId: SESSION_ID,
-      events: [],
-    });
+    const emptyHook = await renderTabsHook(empty.client, { sessionId: SESSION_ID, events: [] });
     await flush();
     expect(emptyHook.result.current.defaultTab).toBe(WORKBENCH_TAB_FILES);
     await emptyHook.unmount();
   });
 
   test("no capture at all → default Files (fileCount resolves 0)", async () => {
-    const { client } = coldClient({
-      getWorkspaceCapture: async () => ({ available: false }),
-    });
-    const hook = await renderTabsHook(client, {
-      sessionId: SESSION_ID,
-      events: [],
-    });
+    const { client } = coldClient({ getWorkspaceCapture: async () => ({ available: false }) });
+    const hook = await renderTabsHook(client, { sessionId: SESSION_ID, events: [] });
     await flush();
     expect(hook.result.current.defaultTab).toBe(WORKBENCH_TAB_FILES);
     await hook.unmount();
@@ -1098,10 +902,7 @@ describe("capture-driven default tab (Refinement 2)", () => {
       }),
       gitDiff: async () => ({ files: diff, revision: 1 }),
     });
-    const hook = await renderTabsHook(client, {
-      sessionId: SESSION_ID,
-      events: [],
-    });
+    const hook = await renderTabsHook(client, { sessionId: SESSION_ID, events: [] });
     await flush();
     expect(hook.result.current.defaultTab).toBe(WORKBENCH_TAB_CHANGES);
     await hook.unmount();
@@ -1123,10 +924,7 @@ describe("capture-driven default tab (Refinement 2)", () => {
       }),
       gitDiff: async () => ({ files: [], revision: 1 }),
     });
-    const hook = await renderTabsHook(client, {
-      sessionId: SESSION_ID,
-      events: [],
-    });
+    const hook = await renderTabsHook(client, { sessionId: SESSION_ID, events: [] });
     await flush();
     expect(hook.result.current.defaultTab).toBe(WORKBENCH_TAB_FILES);
     await hook.unmount();
@@ -1156,21 +954,15 @@ describe("capture-driven default tab (Refinement 2)", () => {
         return { files: diff, revision: 1 };
       },
     });
-    const hook = await renderTabsHook(client, {
-      sessionId: SESSION_ID,
-      events: [],
-    });
+    const hook = await renderTabsHook(client, { sessionId: SESSION_ID, events: [] });
     await flush(60);
 
     expect(comparisons).toContain("origin/HEAD");
     expect(comparisons).toContain("HEAD");
     expect(hook.result.current.defaultTab).toBe(WORKBENCH_TAB_CHANGES);
-    const changes = hook.result.current.tabs.find(
-      (tab) => tab.id === WORKBENCH_TAB_CHANGES,
-    );
+    const changes = hook.result.current.tabs.find((tab) => tab.id === WORKBENCH_TAB_CHANGES);
     expect(
-      (changes?.content as ReactElement<{ comparison: string }> | undefined)
-        ?.props.comparison,
+      (changes?.content as ReactElement<{ comparison: string }> | undefined)?.props.comparison,
     ).toBe("working");
     await hook.unmount();
   });
@@ -1191,22 +983,15 @@ describe("capture-driven default tab (Refinement 2)", () => {
       }),
       gitDiff: async () => ({ files: [fakeFileDiff()], revision: 2 }),
     });
-    const hook = await renderTabsHook(client, {
-      sessionId: SESSION_ID,
-      events: [],
-    });
+    const hook = await renderTabsHook(client, { sessionId: SESSION_ID, events: [] });
     await flush();
     expect(hook.result.current.defaultTab).toBe(WORKBENCH_TAB_CHANGES);
     await hook.unmount();
   });
 
   test("a fast empty capture cannot latch Files before warm capability negotiation", async () => {
-    let resolveCapabilities: (
-      value: ReturnType<typeof fakeCapabilities>,
-    ) => void = () => {};
-    const capabilitiesPromise = new Promise<
-      ReturnType<typeof fakeCapabilities>
-    >((resolve) => {
+    let resolveCapabilities: (value: ReturnType<typeof fakeCapabilities>) => void = () => {};
+    const capabilitiesPromise = new Promise<ReturnType<typeof fakeCapabilities>>((resolve) => {
       resolveCapabilities = resolve;
     });
     const { client } = coldClient({
@@ -1224,10 +1009,7 @@ describe("capture-driven default tab (Refinement 2)", () => {
       }),
       gitDiff: async () => ({ files: [fakeFileDiff()], revision: 2 }),
     });
-    const hook = await renderTabsHook(client, {
-      sessionId: SESSION_ID,
-      events: [],
-    });
+    const hook = await renderTabsHook(client, { sessionId: SESSION_ID, events: [] });
     await flush();
     expect(hook.result.current.defaultTab).toBeNull();
     await act(async () => resolveCapabilities(fakeCapabilities()));
@@ -1252,10 +1034,7 @@ describe("capture-driven default tab (Refinement 2)", () => {
       }),
       gitDiff: async () => ({ files: [], revision: 2 }),
     });
-    const hook = await renderTabsHook(client, {
-      sessionId: SESSION_ID,
-      events: [],
-    });
+    const hook = await renderTabsHook(client, { sessionId: SESSION_ID, events: [] });
     await flush();
     expect(hook.result.current.defaultTab).toBe(WORKBENCH_TAB_FILES);
     await hook.unmount();
@@ -1268,10 +1047,7 @@ describe("capture-driven default tab (Refinement 2)", () => {
       },
       getWorkspaceCapture: async () => ({ available: false }),
     });
-    const hook = await renderTabsHook(client, {
-      sessionId: SESSION_ID,
-      events: [],
-    });
+    const hook = await renderTabsHook(client, { sessionId: SESSION_ID, events: [] });
     await flush();
     expect(hook.result.current.defaultTab).toBe(WORKBENCH_TAB_CHANGES);
     await hook.unmount();
@@ -1294,18 +1070,11 @@ describe("capture-driven default tab (Refinement 2)", () => {
 
   test("defaultTab is null until the capture GET first resolves (no premature commit)", async () => {
     let resolveCapture: (value: GetWorkspaceCaptureResponse) => void = () => {};
-    const capturePromise = new Promise<GetWorkspaceCaptureResponse>(
-      (resolve) => {
-        resolveCapture = resolve;
-      },
-    );
-    const { client } = coldClient({
-      getWorkspaceCapture: () => capturePromise,
+    const capturePromise = new Promise<GetWorkspaceCaptureResponse>((resolve) => {
+      resolveCapture = resolve;
     });
-    const hook = await renderTabsHook(client, {
-      sessionId: SESSION_ID,
-      events: [],
-    });
+    const { client } = coldClient({ getWorkspaceCapture: () => capturePromise });
+    const hook = await renderTabsHook(client, { sessionId: SESSION_ID, events: [] });
     await flush();
     // The capture GET is still in flight — no default committed yet.
     expect(hook.result.current.defaultTab).toBeNull();
@@ -1322,9 +1091,7 @@ describe("capture-driven default tab (Refinement 2)", () => {
       getWorkspaceCapture: async (_workspaceId, sessionId) =>
         captureAvailable(fakeManifest(sessionId === SESSION_ID ? 2 : 0)),
     });
-    const result = {
-      current: undefined as unknown as UseSandboxWorkspaceTabsResult,
-    };
+    const result = { current: undefined as unknown as UseSandboxWorkspaceTabsResult };
     function Harness({ sessionId }: { sessionId: string }) {
       result.current = useSandboxWorkspaceTabs({ sessionId, events: [] });
       return null;
@@ -1335,9 +1102,7 @@ describe("capture-driven default tab (Refinement 2)", () => {
     await flush();
     expect(result.current.defaultTab).toBe(WORKBENCH_TAB_CHANGES);
 
-    await rendered.rerender(
-      withProvider(client, <Harness sessionId={SECOND_SESSION_ID} />),
-    );
+    await rendered.rerender(withProvider(client, <Harness sessionId={SECOND_SESSION_ID} />));
     await flush();
     expect(result.current.defaultTab).toBe(WORKBENCH_TAB_FILES);
     await rendered.unmount();
@@ -1348,22 +1113,15 @@ describe("capture-driven default tab (Refinement 2)", () => {
 
 describe("SandboxWorkspace capture-driven default renders with no content switch", () => {
   function selectedTabText(container: HTMLElement): string {
-    return (
-      container.querySelector('[role="tab"][aria-selected="true"]')
-        ?.textContent ?? ""
-    );
+    return container.querySelector('[role="tab"][aria-selected="true"]')?.textContent ?? "";
   }
 
   test("pure embedder, changes present: Changes is the selected tab before AND after resolve", async () => {
     let resolveCapture: (value: GetWorkspaceCaptureResponse) => void = () => {};
-    const capturePromise = new Promise<GetWorkspaceCaptureResponse>(
-      (resolve) => {
-        resolveCapture = resolve;
-      },
-    );
-    const { client } = coldClient({
-      getWorkspaceCapture: () => capturePromise,
+    const capturePromise = new Promise<GetWorkspaceCaptureResponse>((resolve) => {
+      resolveCapture = resolve;
     });
+    const { client } = coldClient({ getWorkspaceCapture: () => capturePromise });
     const rendered = await renderComponent(
       withProvider(
         client,
@@ -1413,14 +1171,10 @@ describe("SandboxWorkspace capture-driven default renders with no content switch
       getStreamCapabilities: async () => fakeCapabilities(),
       getWorkspaceCapture: async () => captureAvailable(fakeManifest(1)),
       gitStatus: async () => {
-        throw new Error(
-          "OpenGeni API 503: Workspace files are temporarily unavailable",
-        );
+        throw new Error("OpenGeni API 503: Workspace files are temporarily unavailable");
       },
       fsList: async () => {
-        throw new Error(
-          "OpenGeni API 503: Workspace files are temporarily unavailable",
-        );
+        throw new Error("OpenGeni API 503: Workspace files are temporarily unavailable");
       },
     });
     const rendered = await renderComponent(
@@ -1437,13 +1191,9 @@ describe("SandboxWorkspace capture-driven default renders with no content switch
     await flush();
 
     expect(selectedTabText(rendered.container)).toContain("Changes");
-    const degraded = rendered.container.querySelector(
-      "[data-opengeni-changes-degraded]",
-    );
+    const degraded = rendered.container.querySelector("[data-opengeni-changes-degraded]");
     expect(degraded?.getAttribute("role")).toBe("status");
-    expect(degraded?.textContent).toContain(
-      "Showing the latest captured revision",
-    );
+    expect(degraded?.textContent).toContain("Showing the latest captured revision");
     expect(rendered.container.textContent).toContain("app.py");
     await rendered.unmount();
   });
@@ -1464,9 +1214,9 @@ describe("SandboxWorkspace capture-driven default renders with no content switch
       );
     const rendered = await renderComponent(workspace(SESSION_ID));
     await flush();
-    const filesTab = [
-      ...rendered.container.querySelectorAll<HTMLElement>('[role="tab"]'),
-    ].find((element) => element.textContent?.includes("Files"));
+    const filesTab = [...rendered.container.querySelectorAll<HTMLElement>('[role="tab"]')].find(
+      (element) => element.textContent?.includes("Files"),
+    );
     expect(filesTab).toBeDefined();
     await act(async () => {
       filesTab!.dispatchEvent(new MouseEvent("click", { bubbles: true }));

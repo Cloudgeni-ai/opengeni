@@ -60,11 +60,7 @@ import type { MachineView } from "../types/machines";
 import { SandboxFiles } from "./sandbox-files";
 import { WorkbenchChanges } from "./workbench-changes";
 import { SandboxTerminal, type XtermTheme } from "./sandbox-terminal";
-import {
-  WorkspaceDock,
-  type WorkspaceDockProps,
-  type WorkspaceTab,
-} from "./workspace-dock";
+import { WorkspaceDock, type WorkspaceDockProps, type WorkspaceTab } from "./workspace-dock";
 
 const LazyBrowserViewer = lazy(async () => {
   const viewers = await import("./interactive-workbench-viewers");
@@ -129,13 +125,7 @@ function captureDegradedMessage(reason: string): string {
   }
 }
 
-function WorkbenchTabLabel({
-  icon,
-  children,
-}: {
-  icon: ReactNode;
-  children: ReactNode;
-}) {
+function WorkbenchTabLabel({ icon, children }: { icon: ReactNode; children: ReactNode }) {
   return (
     <span className="inline-flex items-center gap-1.5">
       <span className="[&>svg]:size-3.5" aria-hidden>
@@ -150,10 +140,7 @@ function WorkbenchSurfaceLoading({ name }: { name: "Browser" | "Computer" }) {
   return (
     <CenteredState
       icon={
-        <LoaderCircleIcon
-          className="size-5 animate-spin motion-reduce:animate-none"
-          aria-hidden
-        />
+        <LoaderCircleIcon className="size-5 animate-spin motion-reduce:animate-none" aria-hidden />
       }
     >
       <p className="text-og-sm font-medium text-og-fg">Opening {name}</p>
@@ -181,8 +168,7 @@ export function initialWorkspaceTab(
   for (const event of events ?? []) {
     if (event.type !== "workspace.revision.captured") continue;
     if (event.sequence <= bestSeq) continue;
-    const stats = (event.payload as { stats?: { fileCount?: number } } | null)
-      ?.stats;
+    const stats = (event.payload as { stats?: { fileCount?: number } } | null)?.stats;
     bestSeq = event.sequence;
     bestFileCount = typeof stats?.fileCount === "number" ? stats.fileCount : 0;
   }
@@ -196,8 +182,7 @@ export function initialWorkspaceTab(
     const payload = event.payload as { ahead?: number; reason?: string } | null;
     latestGitSeq = event.sequence;
     committedOnly =
-      (typeof payload?.ahead === "number" && payload.ahead > 0) ||
-      payload?.reason === "commit";
+      (typeof payload?.ahead === "number" && payload.ahead > 0) || payload?.reason === "commit";
   }
   return committedOnly ? WORKBENCH_TAB_CHANGES : WORKBENCH_TAB_FILES;
 }
@@ -320,8 +305,7 @@ function emptyWarmIntents(sessionId: string): SessionWarmIntents {
 export function useSandboxWorkspaceTabs(
   options: UseSandboxWorkspaceTabsOptions,
 ): UseSandboxWorkspaceTabsResult {
-  const { client, workspaceId, workspaceInteractionEvent } =
-    useOpenGeni(options);
+  const { client, workspaceId } = useOpenGeni(options);
   const {
     sessionId,
     events,
@@ -353,14 +337,8 @@ export function useSandboxWorkspaceTabs(
         name,
         ...(placement ? { placement } : {}),
       });
-      if (
-        response.operation.state !== "completed" ||
-        response.session.lifecycle !== "active"
-      ) {
-        throw new Error(
-          response.operation.error?.message ??
-            "The computer could not be opened.",
-        );
+      if (response.operation.state !== "completed" || response.session.lifecycle !== "active") {
+        throw new Error(response.operation.error?.message ?? "The computer could not be opened.");
       }
       return {
         id: response.session.id,
@@ -370,8 +348,7 @@ export function useSandboxWorkspaceTabs(
     [client, sessionId, workspaceId],
   );
   const workspaceDataEnabled = changesEnabled || filesEnabled;
-  const machineSurfaceEnabled =
-    workspaceDataEnabled || terminalEnabled || desktopEnabled;
+  const machineSurfaceEnabled = workspaceDataEnabled || terminalEnabled || desktopEnabled;
   // Do not speculatively activate both remote workspace surfaces while the dock
   // is still resolving its selected tab. Modal calls cannot be cancelled after
   // dispatch, so that transient state otherwise creates an aborted duplicate
@@ -379,29 +356,23 @@ export function useSandboxWorkspaceTabs(
   const resolvedActiveTab = activeTab ?? initialTab;
   const changesActive = resolvedActiveTab === WORKBENCH_TAB_CHANGES;
   const filesActive = resolvedActiveTab === WORKBENCH_TAB_FILES;
-  const surfaceIdentity = WORKBENCH_SURFACES.filter((surface) =>
-    surfaceSet.has(surface),
-  ).join(",");
+  const surfaceIdentity = WORKBENCH_SURFACES.filter((surface) => surfaceSet.has(surface)).join(",");
 
   // The two box-warming INTENTS, each off by default and each
   // flipped true by a genuine user action (never on mount, never on a passive
   // capture glance): terminal engagement (`onActivate`) and a deliberate
   // live-file open/edit in Files. Browsing capture-served
   // Changes/Files warms nothing — that is the whole point of Refinement 1.
-  const [storedWarmIntents, setStoredWarmIntents] =
-    useState<SessionWarmIntents>(() => emptyWarmIntents(sessionId));
+  const [storedWarmIntents, setStoredWarmIntents] = useState<SessionWarmIntents>(() =>
+    emptyWarmIntents(sessionId),
+  );
   const warmIntents =
-    storedWarmIntents.sessionId === sessionId
-      ? storedWarmIntents
-      : emptyWarmIntents(sessionId);
+    storedWarmIntents.sessionId === sessionId ? storedWarmIntents : emptyWarmIntents(sessionId);
   const { warmTerminal, warmFiles } = warmIntents;
   const requestWarmIntent = useCallback(
     (intent: Exclude<keyof SessionWarmIntents, "sessionId">) => {
       setStoredWarmIntents((previous) => {
-        const current =
-          previous.sessionId === sessionId
-            ? previous
-            : emptyWarmIntents(sessionId);
+        const current = previous.sessionId === sessionId ? previous : emptyWarmIntents(sessionId);
         return current[intent] ? current : { ...current, [intent]: true };
       });
     },
@@ -448,11 +419,9 @@ export function useSandboxWorkspaceTabs(
   // Mutations are live-only. A capture is a review artifact, never a writable
   // surrogate for a sleeping machine; the user must deliberately open the live
   // workspace before create/rename/delete/edit controls appear.
-  const filesEditable =
-    fileSystemOn && !fsReadOnly && sandboxAcceptsLiveIo(liveness);
+  const filesEditable = fileSystemOn && !fsReadOnly && sandboxAcceptsLiveIo(liveness);
   const gitOn = capabilities?.Git.available ?? false;
-  const terminalOn =
-    terminalEnabled && (capabilities?.Terminal.transport ?? null) !== null;
+  const terminalOn = terminalEnabled && (capabilities?.Terminal.transport ?? null) !== null;
   // A descriptor-only pty-ws cell intentionally has no short-lived URL until
   // terminal intent acquires one. Do not mistake that grant boundary for a
   // legacy HTTP PTY and eagerly open a second terminal. The fallback exists only
@@ -478,26 +447,11 @@ export function useSandboxWorkspaceTabs(
   const provisioningRef = useRef({ sessionId, provisioning });
   useEffect(() => {
     const previous = provisioningRef.current;
-    if (
-      previous.sessionId === sessionId &&
-      previous.provisioning &&
-      !provisioning
-    ) {
+    if (previous.sessionId === sessionId && previous.provisioning && !provisioning) {
       renegotiate();
     }
     provisioningRef.current = { sessionId, provisioning };
   }, [sessionId, provisioning, renegotiate]);
-
-  // BrowserSession and ComputerSession lifecycles use the same placement lease
-  // as files/terminal/desktop, but are workspace resources rather than session
-  // events. Re-read the capability document on their canonical workspace
-  // invalidation so the one machine chip cannot remain "Offline" beside a live
-  // browser/computer (or remain "Live" after the final interaction holder ends).
-  // This is a read-only negotiation: it never acquires a holder or wakes a box.
-  useEffect(() => {
-    if (workspaceInteractionEvent?.workspaceId !== workspaceId) return;
-    renegotiate();
-  }, [workspaceId, workspaceInteractionEvent, renegotiate]);
 
   // The cold-paint data source: the latest turn-end capture, fetched with a single
   // api round-trip on mount (no machine). Feeds the Files tree + the Changes/Git
@@ -516,8 +470,7 @@ export function useSandboxWorkspaceTabs(
   // to avoid. Wait until the capture request has conclusively resolved. A warm
   // workspace never waits on this server-side snapshot.
   const capturePending =
-    !liveWorkspaceExpected &&
-    (captureState.fileCount === null || captureState.loading);
+    !liveWorkspaceExpected && (captureState.fileCount === null || captureState.loading);
   const repoPaths = useMemo(() => {
     const advertised = capabilities?.Git.repos ?? [];
     if (advertised.length > 0) return advertised;
@@ -535,8 +488,7 @@ export function useSandboxWorkspaceTabs(
   }
   useEffect(() => {
     const reason = captureState.degradedReason;
-    if (!reason || notifiedCaptureDegradedReason.current.reason === reason)
-      return;
+    if (!reason || notifiedCaptureDegradedReason.current.reason === reason) return;
     notifiedCaptureDegradedReason.current = { sessionId, reason };
     onNotify?.({ kind: "error", message: captureDegradedMessage(reason) });
   }, [sessionId, captureState.degradedReason, onNotify]);
@@ -545,9 +497,7 @@ export function useSandboxWorkspaceTabs(
     events,
     // No passive Channel-A reads while cold, even after a conclusive capture
     // miss. A missing capture gets an explicit "Open live workspace" gate.
-    enabled:
-      filesEnabled &&
-      (captureAvailable || (fileSystemOn && liveWorkspaceExpected)),
+    enabled: filesEnabled && (captureAvailable || (fileSystemOn && liveWorkspaceExpected)),
     active: filesActive,
     repoPaths,
     liveness: liveIoLiveness,
@@ -578,19 +528,16 @@ export function useSandboxWorkspaceTabs(
         ? "branch"
         : "working";
   const setChangesComparison = useCallback(
-    (value: SandboxGitComparison) =>
-      setStoredChangesComparison({ sessionId, value }),
+    (value: SandboxGitComparison) => setStoredChangesComparison({ sessionId, value }),
     [sessionId],
   );
   const git = useSandboxGit(sessionId, {
     events,
     enabled:
       changesComparison === "working"
-        ? workspaceDataEnabled &&
-          (captureAvailable || (gitOn && liveWorkspaceExpected))
+        ? workspaceDataEnabled && (captureAvailable || (gitOn && liveWorkspaceExpected))
         : changesComparison === "branch"
-          ? workspaceDataEnabled &&
-            (captureSupportsBranch || (gitOn && liveWorkspaceExpected))
+          ? workspaceDataEnabled && (captureSupportsBranch || (gitOn && liveWorkspaceExpected))
           : workspaceDataEnabled && gitOn && liveWorkspaceExpected,
     // Before the dock chooses its source-driven default, Git is the sole probe
     // that may need to resolve that choice on a live workspace. Files remains
@@ -614,17 +561,10 @@ export function useSandboxWorkspaceTabs(
       // user-selected Branch view remains selected and surfaces its real error.
       setStoredChangesComparison({ sessionId, value: "working" });
     }
-  }, [
-    changesComparison,
-    git.error,
-    sessionId,
-    storedChangesComparison?.sessionId,
-  ]);
+  }, [changesComparison, git.error, sessionId, storedChangesComparison?.sessionId]);
   // Token-derived xterm theme; re-derive on a `data-og-theme` flip. Generic — it
   // belongs in the package (an embedder's theme toggle drives it too).
-  const [xtermTheme, setXtermTheme] = useState<XtermTheme | undefined>(
-    undefined,
-  );
+  const [xtermTheme, setXtermTheme] = useState<XtermTheme | undefined>(undefined);
   useEffect(() => {
     if (!terminalEnabled || typeof document === "undefined") return;
     const derive = () => setXtermTheme(xtermThemeFromTokens());
@@ -646,8 +586,7 @@ export function useSandboxWorkspaceTabs(
     capabilitiesState: caps.state,
     activeMachineState: activeMachine?.state ?? null,
     activeIsSelfhosted: activeMachine?.kind === "selfhosted",
-    wantsWarm:
-      (terminalEnabled && warmTerminal) || (workspaceDataEnabled && warmFiles),
+    wantsWarm: (terminalEnabled && warmTerminal) || (workspaceDataEnabled && warmFiles),
     capturedAt: captureState.capturedAt,
   });
   const workspaceWaking = chip.state === "waking";
@@ -672,22 +611,15 @@ export function useSandboxWorkspaceTabs(
     !liveWorkspaceExpected && (liveness !== undefined || caps.error !== null);
   const captureHasChanges =
     (captureState.fileCount ?? 0) > 0 ||
-    (captureState.capture?.repos.some(
-      (repo) => (repo.branchDiff?.length ?? 0) > 0,
-    ) ??
-      false);
+    (captureState.capture?.repos.some((repo) => (repo.branchDiff?.length ?? 0) > 0) ?? false);
   const captureUnavailable =
-    (captureState.fileCount === 0 && !captureHasChanges) ||
-    captureState.error !== null;
+    (captureState.fileCount === 0 && !captureHasChanges) || captureState.error !== null;
   const implicitBranchFallbackPending =
     changesComparison === "branch" &&
     git.error !== null &&
     storedChangesComparison?.sessionId !== sessionId;
   if (defaultTabRef.current.value === null) {
-    if (
-      initialTab &&
-      (!isWorkbenchSurface(initialTab) || surfaceSet.has(initialTab))
-    ) {
+    if (initialTab && (!isWorkbenchSurface(initialTab) || surfaceSet.has(initialTab))) {
       defaultTabRef.current.value = initialTab;
     } else if (git.source === "live") {
       defaultTabRef.current.value = sourceDrivenDefaultTab(
@@ -710,37 +642,17 @@ export function useSandboxWorkspaceTabs(
       captureUnavailable &&
       initialWorkspaceTab(events) === WORKBENCH_TAB_CHANGES
     ) {
-      defaultTabRef.current.value = sourceDrivenDefaultTab(
-        true,
-        changesEnabled,
-        filesEnabled,
-      );
+      defaultTabRef.current.value = sourceDrivenDefaultTab(true, changesEnabled, filesEnabled);
     } else if (captureUnavailable && caps.error) {
       // The Changes surface owns the truthful sandbox-unavailable state + retry.
       // Files would misleadingly describe this as a missing filesystem.
-      defaultTabRef.current.value = sourceDrivenDefaultTab(
-        true,
-        changesEnabled,
-        filesEnabled,
-      );
-    } else if (
-      captureIsAuthoritative &&
-      captureState.fileCount !== null &&
-      captureUnavailable
-    ) {
+      defaultTabRef.current.value = sourceDrivenDefaultTab(true, changesEnabled, filesEnabled);
+    } else if (captureIsAuthoritative && captureState.fileCount !== null && captureUnavailable) {
       // No durable review surface exists and the machine is resting. Files owns
       // the explicit wake gate; do not issue a live Git probe merely to choose a
       // tab.
-      defaultTabRef.current.value = sourceDrivenDefaultTab(
-        false,
-        changesEnabled,
-        filesEnabled,
-      );
-    } else if (
-      captureState.available &&
-      git.error &&
-      captureState.fileCount !== null
-    ) {
+      defaultTabRef.current.value = sourceDrivenDefaultTab(false, changesEnabled, filesEnabled);
+    } else if (captureState.available && git.error && captureState.fileCount !== null) {
       // A warm live read failed but the durable capture is intact: retain an
       // immediate, deterministic review surface instead of hanging unresolved.
       defaultTabRef.current.value = sourceDrivenDefaultTab(
@@ -748,18 +660,10 @@ export function useSandboxWorkspaceTabs(
         changesEnabled,
         filesEnabled,
       );
-    } else if (
-      captureUnavailable &&
-      git.error &&
-      !implicitBranchFallbackPending
-    ) {
+    } else if (captureUnavailable && git.error && !implicitBranchFallbackPending) {
       // No capture and live Git failed: Files is the least surprising fallback
       // after the implicit branch-to-working fallback has also had its chance.
-      defaultTabRef.current.value = sourceDrivenDefaultTab(
-        false,
-        changesEnabled,
-        filesEnabled,
-      );
+      defaultTabRef.current.value = sourceDrivenDefaultTab(false, changesEnabled, filesEnabled);
     }
   }
   // null only during the brief pre-first-resolve window (no host override yet).
@@ -772,11 +676,7 @@ export function useSandboxWorkspaceTabs(
     if (changesEnabled)
       list.push({
         id: WORKBENCH_TAB_CHANGES,
-        label: (
-          <WorkbenchTabLabel icon={<GitCompareArrowsIcon />}>
-            Changes
-          </WorkbenchTabLabel>
-        ),
+        label: <WorkbenchTabLabel icon={<GitCompareArrowsIcon />}>Changes</WorkbenchTabLabel>,
         badge: dirtyCount > 0 ? <DirtyBadge count={dirtyCount} /> : undefined,
         content: (
           <ChangesTabBody
@@ -808,9 +708,7 @@ export function useSandboxWorkspaceTabs(
     if (filesEnabled)
       list.push({
         id: WORKBENCH_TAB_FILES,
-        label: (
-          <WorkbenchTabLabel icon={<FileCode2Icon />}>Files</WorkbenchTabLabel>
-        ),
+        label: <WorkbenchTabLabel icon={<FileCode2Icon />}>Files</WorkbenchTabLabel>,
         content: (
           <SandboxFiles
             key={sessionId}
@@ -818,10 +716,7 @@ export function useSandboxWorkspaceTabs(
             git={git}
             fileSystemAvailable={fileSystemOn || captureAvailable}
             editable={
-              filesEditable &&
-              files.source === "live" &&
-              files.error === null &&
-              !files.loading
+              filesEditable && files.source === "live" && files.error === null && !files.loading
             }
             workspaceResting={
               !liveWorkspaceExpected &&
@@ -830,16 +725,13 @@ export function useSandboxWorkspaceTabs(
               !captureAvailable &&
               !workspaceWaking
             }
-            workspaceWaking={
-              !liveWorkspaceExpected && !captureAvailable && workspaceWaking
-            }
+            workspaceWaking={!liveWorkspaceExpected && !captureAvailable && workspaceWaking}
             liveWorkspaceReady={liveWorkspaceExpected}
             onWakeWorkspace={() => requestWarmIntent("warmFiles")}
             {...(requestedFilePath
               ? {
                   requestedPath: requestedFilePath,
-                  ...(requestedFileRequestId !== null &&
-                  requestedFileRequestId !== undefined
+                  ...(requestedFileRequestId !== null && requestedFileRequestId !== undefined
                     ? { requestedPathRequestId: requestedFileRequestId }
                     : {}),
                   requestedPathReady: sandboxAcceptsLiveIo(liveness),
@@ -857,11 +749,7 @@ export function useSandboxWorkspaceTabs(
     if (terminalOn) {
       list.push({
         id: WORKBENCH_TAB_TERMINAL,
-        label: (
-          <WorkbenchTabLabel icon={<SquareTerminalIcon />}>
-            Terminal
-          </WorkbenchTabLabel>
-        ),
+        label: <WorkbenchTabLabel icon={<SquareTerminalIcon />}>Terminal</WorkbenchTabLabel>,
         content: (
           <div className="h-full bg-og-bg p-1">
             <SandboxTerminal
@@ -886,9 +774,7 @@ export function useSandboxWorkspaceTabs(
     if (browserEnabled) {
       list.push({
         id: WORKBENCH_TAB_BROWSER,
-        label: (
-          <WorkbenchTabLabel icon={<Globe2Icon />}>Browser</WorkbenchTabLabel>
-        ),
+        label: <WorkbenchTabLabel icon={<Globe2Icon />}>Browser</WorkbenchTabLabel>,
         content: (
           <Suspense fallback={<WorkbenchSurfaceLoading name="Browser" />}>
             <LazyBrowserViewer
@@ -907,12 +793,8 @@ export function useSandboxWorkspaceTabs(
               enabled={workspaceVisible}
               onNotify={onNotify}
               {...(desktopEnabled ? { createLinkedComputer } : {})}
-              {...(onOpenComputerSession
-                ? { onOpenComputer: onOpenComputerSession }
-                : {})}
-              {...(browserWebSocketFactory
-                ? { webSocketFactory: browserWebSocketFactory }
-                : {})}
+              {...(onOpenComputerSession ? { onOpenComputer: onOpenComputerSession } : {})}
+              {...(browserWebSocketFactory ? { webSocketFactory: browserWebSocketFactory } : {})}
               className="h-full"
             />
           </Suspense>
@@ -925,9 +807,7 @@ export function useSandboxWorkspaceTabs(
     if (desktopEnabled) {
       list.push({
         id: WORKBENCH_TAB_DESKTOP,
-        label: (
-          <WorkbenchTabLabel icon={<MonitorIcon />}>Computer</WorkbenchTabLabel>
-        ),
+        label: <WorkbenchTabLabel icon={<MonitorIcon />}>Computer</WorkbenchTabLabel>,
         content: (
           <Suspense fallback={<WorkbenchSurfaceLoading name="Computer" />}>
             <LazyComputerViewer
@@ -943,9 +823,7 @@ export function useSandboxWorkspaceTabs(
               onNotify={onNotify}
               requestedComputerSessionId={requestedComputerSessionId}
               requestedComputerRequestId={requestedComputerRequestId}
-              {...(computerWebSocketFactory
-                ? { webSocketFactory: computerWebSocketFactory }
-                : {})}
+              {...(computerWebSocketFactory ? { webSocketFactory: computerWebSocketFactory } : {})}
               className="h-full"
             />
           </Suspense>
@@ -1092,18 +970,12 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
   } | null>(null);
   const nextFileRequestId = useRef(0);
   const nextComputerRequestId = useRef(0);
-  const selectedTab =
-    storedSelection?.sessionId === sessionId ? storedSelection.tab : null;
-  const activeTabHint =
-    selectedTab ?? initialTab ?? leadingTabs?.[0]?.id ?? null;
+  const selectedTab = storedSelection?.sessionId === sessionId ? storedSelection.tab : null;
+  const activeTabHint = selectedTab ?? initialTab ?? leadingTabs?.[0]?.id ?? null;
   const openFile = useCallback(
     (path: string) => {
       nextFileRequestId.current += 1;
-      setRequestedFile({
-        sessionId,
-        path,
-        requestId: nextFileRequestId.current,
-      });
+      setRequestedFile({ sessionId, path, requestId: nextFileRequestId.current });
       setStoredSelection({ sessionId, tab: WORKBENCH_TAB_FILES });
     },
     [sessionId],
@@ -1137,20 +1009,14 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
     ...(onNotify ? { onNotify } : {}),
     ...(browserWebSocketFactory ? { browserWebSocketFactory } : {}),
     ...(computerWebSocketFactory ? { computerWebSocketFactory } : {}),
-    requestedFilePath:
-      requestedFile?.sessionId === sessionId ? requestedFile.path : null,
-    requestedFileRequestId:
-      requestedFile?.sessionId === sessionId ? requestedFile.requestId : null,
+    requestedFilePath: requestedFile?.sessionId === sessionId ? requestedFile.path : null,
+    requestedFileRequestId: requestedFile?.sessionId === sessionId ? requestedFile.requestId : null,
     onOpenFile: openFile,
     onOpenComputerSession: openComputer,
     requestedComputerSessionId:
-      requestedComputer?.sessionId === sessionId
-        ? requestedComputer.computerSessionId
-        : null,
+      requestedComputer?.sessionId === sessionId ? requestedComputer.computerSessionId : null,
     requestedComputerRequestId:
-      requestedComputer?.sessionId === sessionId
-        ? requestedComputer.requestId
-        : null,
+      requestedComputer?.sessionId === sessionId ? requestedComputer.requestId : null,
   });
 
   // A user's tab click wins forever; before that we follow the source-driven
@@ -1158,16 +1024,10 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
   // we pass no controlled tab, so the dock renders its own first-tab fallback
   // (Changes) — whose body is a connecting/loading state until the capture lands,
   // so committing the real default at first-resolve produces no CONTENT switch.
-  const tabs: WorkspaceTab[] = [
-    ...(leadingTabs ?? []),
-    ...workbenchTabs,
-    ...(trailingTabs ?? []),
-  ];
+  const tabs: WorkspaceTab[] = [...(leadingTabs ?? []), ...workbenchTabs, ...(trailingTabs ?? [])];
   const preferredTab = selectedTab ?? defaultTab;
   const activeTab =
-    preferredTab && tabs.some((tab) => tab.id === preferredTab)
-      ? preferredTab
-      : tabs[0]?.id;
+    preferredTab && tabs.some((tab) => tab.id === preferredTab) ? preferredTab : tabs[0]?.id;
   const selectTab = useCallback(
     (tab: string) => setStoredSelection({ sessionId, tab }),
     [sessionId],
@@ -1210,8 +1070,7 @@ function DirtyBadge({ count }: { count: number }) {
 
 function chipDotClass(state: MachineChip["state"]): string {
   if (state === "live") return "bg-og-status-running";
-  if (state === "waking")
-    return "bg-og-status-idle animate-pulse motion-reduce:animate-none";
+  if (state === "waking") return "bg-og-status-idle animate-pulse motion-reduce:animate-none";
   return "bg-og-fg-subtle";
 }
 
@@ -1228,10 +1087,7 @@ function MachineStateChip({ chip }: { chip: MachineChip }) {
       className="inline-flex min-h-7 min-w-0 items-center gap-1.5 px-2 py-1 text-og-xs font-medium text-og-fg-muted max-[1023px]:min-h-11 pointer-coarse:min-h-11"
     >
       <span
-        className={cn(
-          "size-1.5 shrink-0 rounded-full",
-          chipDotClass(chip.state),
-        )}
+        className={cn("size-1.5 shrink-0 rounded-full", chipDotClass(chip.state))}
         aria-hidden
       />
       <span className="min-w-0 max-w-[11rem] truncate">{chip.label}</span>
@@ -1240,13 +1096,7 @@ function MachineStateChip({ chip }: { chip: MachineChip }) {
 }
 
 /** A minimal token-styled action button (the package has no app Button import). */
-function DockActionButton({
-  onClick,
-  children,
-}: {
-  onClick: () => void;
-  children: ReactNode;
-}) {
+function DockActionButton({ onClick, children }: { onClick: () => void; children: ReactNode }) {
   return (
     <button
       type="button"
@@ -1344,10 +1194,7 @@ function ChangesTabContent({
             data-opengeni-changes-degraded
             className="flex shrink-0 items-center gap-2 border-b border-og-status-running/30 bg-og-status-running/10 px-2 py-1.5 text-og-xs text-og-fg-muted"
           >
-            <TriangleAlertIcon
-              className="size-3.5 shrink-0 text-og-status-running"
-              aria-hidden
-            />
+            <TriangleAlertIcon className="size-3.5 shrink-0 text-og-status-running" aria-hidden />
             <span className="min-w-0 flex-1">
               {git.source === "capture"
                 ? "Live changes are temporarily unavailable. Showing the latest captured revision."
@@ -1360,10 +1207,7 @@ function ChangesTabContent({
               className="inline-flex min-h-7 shrink-0 items-center gap-1 rounded-og-sm border border-og-border bg-og-surface-1 px-2 font-medium text-og-fg transition-colors hover:border-og-border-strong focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:min-h-11"
             >
               <RefreshCwIcon
-                className={cn(
-                  "size-3",
-                  git.loading && "animate-spin motion-reduce:animate-none",
-                )}
+                className={cn("size-3", git.loading && "animate-spin motion-reduce:animate-none")}
                 aria-hidden
               />
               Retry
@@ -1385,17 +1229,10 @@ function ChangesTabContent({
 
   if (capabilitiesError && !captureAvailable) {
     return (
-      <CenteredState
-        icon={<TriangleAlertIcon className="size-5" aria-hidden />}
-        tone="danger"
-      >
+      <CenteredState icon={<TriangleAlertIcon className="size-5" aria-hidden />} tone="danger">
         <p className="text-og-sm font-medium text-og-fg">Sandbox unavailable</p>
-        <p
-          data-contrast-audited
-          className="text-og-sm leading-5 text-og-fg-muted"
-        >
-          {capabilitiesError.message ||
-            "Couldn't reach the sandbox for this session."}
+        <p data-contrast-audited className="text-og-sm leading-5 text-og-fg-muted">
+          {capabilitiesError.message || "Couldn't reach the sandbox for this session."}
         </p>
         <DockActionButton onClick={onRetry}>
           <RefreshCwIcon className="size-3" />
@@ -1419,9 +1256,7 @@ function ChangesTabContent({
           />
         }
       >
-        <p className="text-og-sm font-medium text-og-fg">
-          Connecting workspace
-        </p>
+        <p className="text-og-sm font-medium text-og-fg">Connecting workspace</p>
         <p className="text-og-sm leading-5 text-og-fg-subtle">
           Looking for the latest files and changes…
         </p>
@@ -1429,10 +1264,7 @@ function ChangesTabContent({
     );
   }
 
-  if (
-    !liveWorkspaceExpected &&
-    (comparison !== "working" || !captureAvailable)
-  ) {
+  if (!liveWorkspaceExpected && (comparison !== "working" || !captureAvailable)) {
     return (
       <CenteredState
         icon={
@@ -1479,18 +1311,13 @@ function ChangesTabContent({
         }
       >
         <p className="text-og-sm font-medium text-og-fg">Loading workspace</p>
-        <p className="text-og-sm leading-5 text-og-fg-subtle">
-          Reading the current working tree…
-        </p>
+        <p className="text-og-sm leading-5 text-og-fg-subtle">Reading the current working tree…</p>
       </CenteredState>
     );
   }
 
   return (
-    <CenteredState
-      icon={<CircleCheckIcon className="size-5" aria-hidden />}
-      tone="success"
-    >
+    <CenteredState icon={<CircleCheckIcon className="size-5" aria-hidden />} tone="success">
       <p className="text-og-sm font-medium text-og-fg">
         {comparison === "branch"
           ? "No branch changes"
@@ -1530,10 +1357,8 @@ function CenteredState({
           <span
             className={cn(
               "grid size-10 place-items-center rounded-og-lg border bg-og-surface-1 shadow-sm",
-              tone === "success" &&
-                "border-og-status-idle/30 text-og-status-idle",
-              tone === "danger" &&
-                "border-og-status-failed/30 text-og-status-failed",
+              tone === "success" && "border-og-status-idle/30 text-og-status-idle",
+              tone === "danger" && "border-og-status-failed/30 text-og-status-failed",
               tone === "neutral" && "border-og-border text-og-fg-muted",
             )}
           >
