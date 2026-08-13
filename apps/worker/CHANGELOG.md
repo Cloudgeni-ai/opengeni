@@ -1,5 +1,31 @@
 # @opengeni/worker-bundle
 
+## 0.20.0
+
+### Minor Changes
+
+- 478d7fe: Persist exact accepted-turn goal authority, separate semantic goal revisions
+  from execution progress, and add policy-controlled rewrite proposals with API,
+  SDK, MCP, and runtime support.
+
+### Patch Changes
+
+- Updated dependencies [478d7fe]
+- Updated dependencies [478d7fe]
+- Updated dependencies [478d7fe]
+- Updated dependencies [478d7fe]
+  - @opengeni/contracts@0.50.0
+  - @opengeni/db@0.36.0
+  - @opengeni/runtime@0.23.0
+  - @opengeni/config@0.16.2
+  - @opengeni/documents@0.5.39
+  - @opengeni/codemode@0.4.2
+  - @opengeni/core@0.27.4
+  - @opengeni/events@0.3.110
+  - @opengeni/github@0.4.57
+  - @opengeni/observability@0.7.6
+  - @opengeni/storage@0.2.94
+
 ## 0.19.4
 
 ### Patch Changes
