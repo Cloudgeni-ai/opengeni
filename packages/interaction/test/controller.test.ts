@@ -267,6 +267,7 @@ describe("BrowserInteractionController", () => {
     const queuedReceipt = await queued;
     expect(queuedReceipt.state).toBe("failed");
     expect(queuedReceipt.error?.code).toBe("document_stale");
+    expect(queuedReceipt.error?.retryable).toBe(true);
     expect(calls).toEqual([operationId(1)]);
   });
 

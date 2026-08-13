@@ -722,7 +722,18 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       // Chromium does not emit Page.screencastFrame for a background tab in a
       // headed browser. Seed every subscriber from the same target-scoped CDP
       // surface so attachment readiness never depends on focusing Chrome.
-      await this.captureFallbackFrame(targetId, configured.screencast);
+      let seedFailure: unknown;
+      for (let attempt = 0; attempt < FRAME_CAPTURE_FAILURE_LIMIT; attempt += 1) {
+        try {
+          await this.captureFallbackFrame(targetId, configured.screencast);
+          seedFailure = undefined;
+          break;
+        } catch (error) {
+          seedFailure = error;
+          if (attempt + 1 < FRAME_CAPTURE_FAILURE_LIMIT) await delay(25 * (attempt + 1));
+        }
+      }
+      if (seedFailure !== undefined) throw seedFailure;
       frameStreamDiagnostic("browser.frame.subscribe.seeded", {
         browserSessionId: this.browserSessionId,
         targetId,
@@ -1865,7 +1876,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const state = this.states.get(targetId);
     if (!state) return;
     for (const screencast of state.screencasts.values()) {
-      if (Date.now() - screencast.lastFrameAt < 50) continue;
       void this.captureFallbackFrame(targetId, screencast).catch(() => {
         // The regular fallback loop owns recovery. This eager capture exists only
         // to make an accepted input visible without waiting for its idle cadence.

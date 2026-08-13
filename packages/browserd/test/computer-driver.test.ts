@@ -74,6 +74,7 @@ describe("NativeComputerDriver", () => {
       await driver.close();
     }
     expect(transport.closed).toBe(true);
+    expect(transport.stoppedCaptures).toBe(1);
   });
 
   test("preserves definite native lock failures in public receipts", async () => {
@@ -203,6 +204,7 @@ class FixtureNativeTransport implements ComputerNativeTransport {
   targetsError: Error | null = null;
   dispatchObservation: ReturnType<typeof observation> | null = observation("observation-2");
   closed = false;
+  stoppedCaptures = 0;
 
   async capabilities(): Promise<ComputerSessionCapabilities> {
     return this.handshake.capabilities;
@@ -234,7 +236,9 @@ class FixtureNativeTransport implements ComputerNativeTransport {
     if (this.startCaptureError) throw this.startCaptureError;
   }
 
-  async stopCapture(): Promise<void> {}
+  async stopCapture(): Promise<void> {
+    this.stoppedCaptures += 1;
+  }
 
   async clipboard() {
     return { text: "fixture clipboard", truncated: false };

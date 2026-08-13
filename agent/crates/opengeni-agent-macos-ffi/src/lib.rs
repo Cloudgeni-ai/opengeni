@@ -822,8 +822,8 @@ pub fn launch_application(application_id: &str) -> Result<(), MacFfiError> {
 ///
 /// The call remains blocked for the launched application's lifetime. This is
 /// intentional: browser supervisors use the helper process as their exact
-/// lifecycle fence. The new application is hidden during its bounded startup
-/// window, while a later explicit [`focus_target`] remains free to reveal it.
+/// lifecycle fence. The new application remains capturable behind the user's
+/// foreground app, while a later explicit [`focus_target`] can reveal it.
 ///
 /// # Errors
 ///

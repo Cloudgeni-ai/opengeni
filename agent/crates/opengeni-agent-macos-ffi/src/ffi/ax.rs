@@ -16,8 +16,8 @@ use accessibility_sys::{
     kAXDescriptionAttribute, kAXElementBusyAttribute, kAXEnabledAttribute,
     kAXErrorNotificationAlreadyRegistered, kAXErrorSuccess, kAXExpandedAttribute,
     kAXFocusedAttribute, kAXFocusedUIElementChangedNotification,
-    kAXFocusedWindowChangedNotification, kAXHelpAttribute, kAXIdentifierAttribute,
-    kAXLabelValueAttribute, kAXLayoutChangedNotification, kAXMainAttribute,
+    kAXFocusedWindowChangedNotification, kAXFrontmostAttribute, kAXHelpAttribute,
+    kAXIdentifierAttribute, kAXLabelValueAttribute, kAXLayoutChangedNotification, kAXMainAttribute,
     kAXMainWindowChangedNotification, kAXMinimizedAttribute, kAXPositionAttribute,
     kAXRoleAttribute, kAXSecureTextFieldSubrole, kAXSelectedAttribute,
     kAXSelectedChildrenChangedNotification, kAXSizeAttribute, kAXSubroleAttribute,
@@ -1030,6 +1030,7 @@ pub(super) fn focus_target(target: &MacTargetInfo) -> Result<(), MacFfiError> {
     })?;
     let application = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
         .ok_or_else(|| MacFfiError::TargetStale("application is no longer running".to_string()))?;
+    let application_element = AxElement::application(pid);
     // Resolve and verify the exact window before the first foreground side
     // effect. A stale selector therefore remains a definite safe rejection.
     let window = if target.kind == MacTargetKind::Window {
@@ -1038,18 +1039,67 @@ pub(super) fn focus_target(target: &MacTargetInfo) -> Result<(), MacFfiError> {
     } else {
         None
     };
-    #[allow(deprecated)]
-    let options = NSApplicationActivationOptions::ActivateAllWindows
-        | NSApplicationActivationOptions::ActivateIgnoringOtherApps;
-    if !application.activateWithOptions(options) {
-        return Err(MacFfiError::OutcomeUnknown(
-            "AppKit did not confirm application activation".to_string(),
-        ));
+    let was_application_frontmost = application_element
+        .bool_attribute(kAXFrontmostAttribute)
+        .ok()
+        .is_some_and(bool::from);
+    let was_window_main = window.as_ref().is_none_or(|window| {
+        window
+            .bool_attribute(kAXMainAttribute)
+            .ok()
+            .is_some_and(bool::from)
+    });
+    // AXFrontmost below is the exact per-PID foreground primitive. AppKit's
+    // activateWithOptions is bundle-oriented and can synchronously stall for a
+    // full second (especially with multiple Chrome processes), so using both
+    // was slower and less exact. Unhide only restores a genuinely hidden app.
+    if application.isHidden() {
+        let _ = application.unhide();
     }
-    if let Some(window) = window {
-        window.perform_action("AXRaise").map_err(|error| {
-            MacFfiError::OutcomeUnknown(format!("AXRaise could not be confirmed: {error}"))
+    set_bool_attribute(&application_element, kAXFrontmostAttribute, true).map_err(|error| {
+        MacFfiError::OutcomeUnknown(format!(
+            "Accessibility could not make the exact process frontmost: {error}"
+        ))
+    })?;
+    if let Some(window) = window.as_ref() {
+        set_bool_attribute(window, kAXMainAttribute, true).map_err(|error| {
+            MacFfiError::OutcomeUnknown(format!(
+                "Accessibility could not make the exact window main: {error}"
+            ))
         })?;
+        if !was_application_frontmost || !was_window_main {
+            window.perform_action("AXRaise").map_err(|error| {
+                MacFfiError::OutcomeUnknown(format!("AXRaise could not be confirmed: {error}"))
+            })?;
+        }
+    }
+    // NSRunningApplication.isActive can lag (and conflate another Chrome
+    // instance with the same bundle) when this helper has no AppKit run loop.
+    // Accessibility is the exact per-PID/per-window authority used above, so
+    // confirm those synchronous attributes rather than waiting on workspace
+    // bookkeeping before the atomic input operation continues.
+    let deadline = Instant::now() + Duration::from_millis(500);
+    loop {
+        let application_frontmost = application_element
+            .bool_attribute(kAXFrontmostAttribute)
+            .ok()
+            .is_some_and(bool::from);
+        let window_main = window.as_ref().is_none_or(|window| {
+            window
+                .bool_attribute(kAXMainAttribute)
+                .ok()
+                .is_some_and(bool::from)
+        });
+        if application_frontmost && window_main {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err(MacFfiError::OutcomeUnknown(
+                "Accessibility accepted focus but the exact process/window did not confirm it within 500ms"
+                    .to_string(),
+            ));
+        }
+        thread::sleep(Duration::from_millis(5));
     }
     Ok(())
 }
@@ -1189,30 +1239,51 @@ pub(super) fn run_background_application(
         )
     })?;
 
-    // Chrome can create and activate its first native window after
-    // LaunchServices has already completed. Keep the exact new process hidden
-    // across that bounded startup phase and restore only the app that owned the
-    // foreground before launch. Later explicit ComputerSession focus is not
-    // intercepted, so users can deliberately reveal this managed browser.
-    let conceal_until = Instant::now() + Duration::from_secs(5);
+    // Chrome can activate its first native window after LaunchServices has
+    // already completed. Keep the exact prior foreground owner authoritative
+    // until that first window exists, but do not hide Chrome: hidden windows
+    // are unavailable to ScreenCaptureKit and headed CDP frame capture can
+    // throttle. Ending the guard on this causal boundary also ensures a later
+    // explicit Computer focus is never undone by a blind startup timer.
+    let guard_until = Instant::now() + Duration::from_secs(5);
+    let application_element =
+        super::accessibility_trusted().then(|| AxElement::application(process_id));
+    let mut guarding_startup = true;
+    let mut first_window_seen_at = None;
     while let Some(application) =
         NSRunningApplication::runningApplicationWithProcessIdentifier(process_id)
     {
-        if Instant::now() < conceal_until {
-            let _ = application.hide();
-            if application.isActive() {
-                if let Some(prior) = prior_frontmost.as_ref().filter(|prior| {
-                    !prior.isTerminated() && prior.processIdentifier() != process_id
-                }) {
-                    #[allow(deprecated)]
-                    let options = NSApplicationActivationOptions::ActivateIgnoringOtherApps;
-                    let _ = prior.activateWithOptions(options);
-                }
-            }
-            thread::sleep(Duration::from_millis(20));
-        } else {
-            thread::sleep(Duration::from_millis(250));
+        let first_window_exists = application_element.as_ref().is_some_and(|element| {
+            element
+                .windows_bounded(1)
+                .ok()
+                .is_some_and(|(windows, _)| !windows.is_empty())
+        });
+        if first_window_exists && first_window_seen_at.is_none() {
+            first_window_seen_at = Some(Instant::now());
         }
+        if guarding_startup && application.isActive() {
+            if let Some(prior) = prior_frontmost
+                .as_ref()
+                .filter(|prior| !prior.isTerminated() && prior.processIdentifier() != process_id)
+            {
+                #[allow(deprecated)]
+                let options = NSApplicationActivationOptions::ActivateIgnoringOtherApps;
+                let _ = prior.activateWithOptions(options);
+            }
+        }
+        if guarding_startup
+            && (first_window_seen_at
+                .is_some_and(|seen_at| seen_at.elapsed() >= Duration::from_millis(250))
+                || Instant::now() >= guard_until)
+        {
+            guarding_startup = false;
+        }
+        thread::sleep(if guarding_startup {
+            Duration::from_millis(20)
+        } else {
+            Duration::from_millis(250)
+        });
     }
     Ok(())
 }

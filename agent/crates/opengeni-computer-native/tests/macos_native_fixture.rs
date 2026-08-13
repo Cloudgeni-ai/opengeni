@@ -8,8 +8,9 @@ use std::time::{Duration, Instant};
 
 use opengeni_computer_native::{
     open_native_adapter, ComputerAdapter, NativeAction, NativeActionCommand, NativeActionValue,
-    NativeAdapterErrorCode, NativeLocator, NativeNodeValue, NativeObservation,
-    NativeSemanticAction, NativeSemanticNode, NativeTarget, NativeTargetKind,
+    NativeAdapterErrorCode, NativeCaptureOptions, NativeFrameFormat, NativeKeyboardAction,
+    NativeLocator, NativeNodeValue, NativeObservation, NativeSemanticAction, NativeSemanticNode,
+    NativeTarget, NativeTargetKind,
 };
 
 static LIVE_FIXTURES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -78,10 +79,8 @@ impl FrontmostRestore {
             });
         Self { process_id }
     }
-}
 
-impl Drop for FrontmostRestore {
-    fn drop(&mut self) {
+    fn restore_now(&self) {
         let Some(process_id) = self.process_id else {
             return;
         };
@@ -89,6 +88,12 @@ impl Drop for FrontmostRestore {
             "tell application \"System Events\" to set frontmost of first application process whose unix id is {process_id} to true"
         );
         let _ = Command::new("osascript").args(["-e", &script]).output();
+    }
+}
+
+impl Drop for FrontmostRestore {
+    fn drop(&mut self) {
+        self.restore_now();
     }
 }
 
@@ -547,15 +552,37 @@ async fn appkit_swiftui_modal_canvas_hang_and_background_are_causal() {
         .expect("fixture target remains observable after closing modal");
     assert!(!has_text(&observation, "Fixture modal question"));
 
-    let hang_ref = find_identifier(&observation, "fixture-hang").r#ref.clone();
-    let hung = adapter
-        .dispatch(&semantic_command(
-            &observation,
-            &hang_ref,
-            NativeSemanticAction::Invoke,
-            None,
-        ))
-        .await;
+    let mut hang_observation = observation;
+    let mut hung = None;
+    for attempt in 0..3 {
+        let hang_ref = find_identifier(&hang_observation, "fixture-hang")
+            .r#ref
+            .clone();
+        let result = adapter
+            .dispatch(&semantic_command(
+                &hang_observation,
+                &hang_ref,
+                NativeSemanticAction::Invoke,
+                None,
+            ))
+            .await;
+        if attempt < 2
+            && result.as_ref().err().is_some_and(|error| {
+                error.code == NativeAdapterErrorCode::ObservationStale
+                    && error.retryable
+                    && !error.dispatched
+            })
+        {
+            hang_observation = adapter
+                .observe(&application.id)
+                .await
+                .expect("refresh fixture before hang action");
+            continue;
+        }
+        hung = Some(result);
+        break;
+    }
+    let hung = hung.expect("bounded hang action attempt");
     if let Err(error) = hung {
         assert_eq!(error.code, NativeAdapterErrorCode::OutcomeUnknown);
         assert!(error.dispatched);
@@ -572,10 +599,28 @@ async fn appkit_swiftui_modal_canvas_hang_and_background_are_causal() {
 #[ignore = "requires installed Google Chrome plus local macOS Screen Recording and Accessibility grants"]
 async fn chromium_accessibility_and_window_capture_are_causal() {
     let _fixture_guard = LIVE_FIXTURES.lock().await;
-    let _frontmost = FrontmostRestore::capture();
+    let frontmost = FrontmostRestore::capture();
     let _chromium = launch_chromium_fixture();
     let adapter = open_native_adapter().await.expect("open macOS adapter");
     let (_application, window) = chromium_targets(adapter.as_ref()).await;
+    let initial_frame = adapter
+        .capture(&window.id)
+        .await
+        .expect("capture initial Chromium window");
+    let live_options = NativeCaptureOptions {
+        format: NativeFrameFormat::Jpeg,
+        quality: 72,
+        max_width: 1_280,
+        max_height: 720,
+    };
+    adapter
+        .start_capture_stream(&window.id, live_options)
+        .await
+        .expect("start isolated Chromium live stream");
+    let initial_live_frame = adapter
+        .capture_stream(&window.id, live_options)
+        .await
+        .expect("capture first isolated Chromium live frame");
     let mut observation = adapter
         .observe(&window.id)
         .await
@@ -636,5 +681,129 @@ async fn chromium_accessibility_and_window_capture_are_causal() {
         .capture(&window.id)
         .await
         .expect("capture isolated Chromium window");
+    assert_ne!(
+        initial_frame.sha256, frame.sha256,
+        "independent Chromium capture did not reflect the semantic mutation"
+    );
     assert_canvas_pixels(&frame.bytes);
+
+    let focus_command = NativeActionCommand {
+        target_id: observation.target.id.clone(),
+        expected_target_generation: observation.target.target_generation.clone(),
+        expected_observation_id: Some(observation.observation_id.clone()),
+        expected_frame_id: None,
+        action: NativeAction::Focus {
+            target_id: observation.target.id.clone(),
+        },
+    };
+    observation = adapter
+        .dispatch(&focus_command)
+        .await
+        .expect("focus exact isolated Chromium window")
+        .expect("Chromium remains observable after focus");
+    let refreshed_input_ref = observation
+        .roots
+        .iter()
+        .flat_map(|root| {
+            let mut flattened = Vec::new();
+            nodes(std::slice::from_ref(root), &mut flattened);
+            flattened
+        })
+        .find(|node| {
+            node.identifier.as_deref() == Some("chromium-input")
+                || node.name.as_deref() == Some("Chromium input")
+                || (node.role == "text_field"
+                    && node.description.as_deref() == Some("Chromium input"))
+        })
+        .expect("Chromium input after focus")
+        .r#ref
+        .clone();
+    observation = adapter
+        .dispatch(&semantic_command(
+            &observation,
+            &refreshed_input_ref,
+            NativeSemanticAction::Focus,
+            None,
+        ))
+        .await
+        .expect("focus isolated Chromium input")
+        .expect("Chromium remains observable after input focus");
+    // Model the user's ordinary app reclaiming the physical seat between two
+    // remote requests. Raw input must validate, focus this exact Chromium PID
+    // and inject without yielding to caller code.
+    frontmost.restore_now();
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let keyboard_marker = "native-keyboard-value";
+    let keyboard_command = NativeActionCommand {
+        target_id: observation.target.id.clone(),
+        expected_target_generation: observation.target.target_generation.clone(),
+        expected_observation_id: None,
+        expected_frame_id: None,
+        action: NativeAction::Keyboard {
+            action: NativeKeyboardAction::Type,
+            value: keyboard_marker.to_string(),
+        },
+    };
+    let mut keyboard_result = None;
+    let mut successful_keyboard_elapsed = None;
+    for attempt in 0..10 {
+        let attempt_started = Instant::now();
+        let result = adapter.dispatch(&keyboard_command).await;
+        let should_retry = result
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.retryable && !error.dispatched && attempt < 9);
+        if result.is_ok() {
+            successful_keyboard_elapsed = Some(attempt_started.elapsed());
+        }
+        keyboard_result = Some(result);
+        if !should_retry {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25 * (attempt + 1))).await;
+    }
+    let keyboard_observation = keyboard_result
+        .expect("keyboard attempt")
+        .expect("type into exact isolated Chromium window");
+    assert!(
+        keyboard_observation.is_none(),
+        "raw keyboard receipt must not synchronously rebuild the AX tree"
+    );
+    let keyboard_elapsed = successful_keyboard_elapsed.expect("successful keyboard timing");
+    assert!(
+        keyboard_elapsed <= Duration::from_millis(750),
+        "exact Chromium keyboard dispatch exceeded the connected-machine budget: {keyboard_elapsed:?}"
+    );
+    let observation_after_keyboard = adapter
+        .observe(&window.id)
+        .await
+        .expect("observe Chromium after keyboard input");
+    let mut keyboard_nodes = Vec::new();
+    nodes(&observation_after_keyboard.roots, &mut keyboard_nodes);
+    assert!(
+        keyboard_nodes.into_iter().any(|node| {
+            matches!(&node.value, Some(NativeNodeValue::Text(value)) if value.contains(keyboard_marker))
+        }),
+        "raw keyboard input did not reach the isolated Chromium field: {:#?}",
+        observation_summary(&observation_after_keyboard)
+    );
+    let live_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let current = adapter
+            .capture_stream(&window.id, live_options)
+            .await
+            .expect("capture changed isolated Chromium live frame");
+        if current.sha256 != initial_live_frame.sha256 {
+            break;
+        }
+        assert!(
+            Instant::now() < live_deadline,
+            "ScreenCaptureKit live stream did not reflect the Chromium mutation"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    adapter
+        .stop_capture_stream(&window.id)
+        .await
+        .expect("stop isolated Chromium live stream");
 }

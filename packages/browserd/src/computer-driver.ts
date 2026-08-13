@@ -204,12 +204,23 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    const subscriptions = [...this.frameStreams.values()].flatMap((stream) => {
+    const streams = [...this.frameStreams.values()];
+    const subscriptions = streams.flatMap((stream) => {
       stream.stopped = true;
       return [...stream.subscriptions.values()];
     });
     this.frameStreams.clear();
     await Promise.allSettled(subscriptions.map(async (subscription) => await subscription.close()));
+    // Let each producer observe `stopped` and send its explicit StopCapture
+    // request before closing the native RPC pipe. Otherwise the helper retains
+    // ScreenCaptureKit streams during EOF teardown, forcing the client through
+    // its kill timeout and making an ordinary ComputerSession end exceed the
+    // placement gateway deadline.
+    await Promise.allSettled(
+      streams.map(async (stream) => {
+        if (stream.done) await stream.done;
+      }),
+    );
     await this.recovery?.catch(() => undefined);
     await this.client.close();
   }

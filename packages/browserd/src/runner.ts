@@ -343,9 +343,9 @@ async function managedBrowserLaunch(
       : undefined;
   if (!helper) return { executablePath: executable };
   await access(helper, constants.X_OK);
-  // The packaged helper stays alive for Chrome's full lifetime while using
-  // LaunchServices' background+hidden flags. This preserves agent-browser's
-  // DevToolsActivePort/child-process handshake without activating Chrome.
+  // The packaged helper stays alive for Chrome's full lifetime while using a
+  // non-activating LaunchServices launch. This preserves agent-browser's
+  // DevToolsActivePort/child-process handshake and keeps the window capturable.
   return {
     executablePath: helper,
     backgroundBrowserExecutable: executable,

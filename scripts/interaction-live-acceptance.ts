@@ -103,6 +103,7 @@ class FrameProbe<TFrame extends FrameValue> {
   private constructor(
     private readonly socket: WebSocket,
     private readonly relayChannelId: string | null,
+    private readonly streamLabel: "browser" | "computer",
     private readonly decode: (bytes: Uint8Array) => TFrame | Promise<TFrame>,
   ) {
     socket.addEventListener("error", () => {
@@ -132,6 +133,7 @@ class FrameProbe<TFrame extends FrameValue> {
     const probe = new FrameProbe(
       socket,
       stream.kind === "relay" ? stream.channel.channelId : null,
+      "browser",
       decodeBrowserFrameMessage,
     );
     await probe.open(
@@ -162,6 +164,7 @@ class FrameProbe<TFrame extends FrameValue> {
     const probe = new FrameProbe(
       socket,
       stream.kind === "relay" ? stream.channel.channelId : null,
+      "computer",
       decodeComputerFrameMessage,
     );
     await probe.open(
@@ -272,7 +275,11 @@ class FrameProbe<TFrame extends FrameValue> {
                   resolve();
                   return;
                 }
-                if (tag === RELAY_TAG_CLOSE) throw new Error("relay frame source closed");
+                if (tag === RELAY_TAG_CLOSE) {
+                  throw new Error(
+                    `${this.streamLabel} relay frame source closed (${this.relayChannelId ?? "direct"})`,
+                  );
+                }
                 if (tag !== RELAY_TAG_FRAME || !relayAccepted) return;
                 frameBytes = decodeStreamFrame(body).data;
               }
@@ -632,11 +639,19 @@ async function main(): Promise<void> {
     if (computer) {
       const targets = await computer.targets.list();
       const computerTarget =
+        targets.targets.find(
+          (candidate) =>
+            candidate.kind === "window" &&
+            candidate.title.startsWith("OpenGeni Interaction Acceptance"),
+        ) ??
         targets.targets.find((candidate) => candidate.kind === "window" && candidate.focused) ??
         targets.targets.find((candidate) => candidate.kind === "app" && candidate.focused) ??
         targets.targets[0];
+      const isMacBrowserWindow = computerTarget?.applicationId === "com.google.Chrome";
       const frameTarget =
-        targets.targets.find((candidate) => candidate.kind === "screen") ?? computerTarget;
+        (isMacBrowserWindow ? computerTarget : undefined) ??
+        targets.targets.find((candidate) => candidate.kind === "screen") ??
+        computerTarget;
       if (!computerTarget || !frameTarget) throw new Error("computer opened without a target");
       started = performance.now();
       let computerObservation = await computer.observe(computerTarget.id);
@@ -646,31 +661,143 @@ async function main(): Promise<void> {
         computerObservation = await computer.observe(computerTarget.id);
         record("computerObserve", performance.now() - started);
       }
-      const inputNode = findSemanticNode(computerObservation.semantic, (node) => {
-        return (
-          node.role === "entry" &&
-          node.name === "Acceptance input" &&
-          node.actions.includes("focus")
+      let inputNode: InteractionSemanticNode;
+      try {
+        inputNode = findSemanticNode(computerObservation.semantic, (node) => {
+          return (
+            (node.role === "entry" || node.role === "text_field") &&
+            (node.name === "Acceptance input" || node.description === "Acceptance input") &&
+            node.actions.includes("focus") &&
+            node.actions.includes("set_value")
+          );
+        });
+      } catch {
+        throw new Error(
+          `computer target ${JSON.stringify(computerTarget)} did not expose the acceptance input; targets=${JSON.stringify(targets.targets)} semantic=${JSON.stringify(semanticEntrySummary(computerObservation.semantic))}`,
         );
-      });
-      const focusReceipt = await computer.act({
-        operationId: crypto.randomUUID(),
-        targetId: computerObservation.target.id,
-        expectedTargetGeneration: computerObservation.target.targetGeneration,
-        expectedObservationId: computerObservation.observationId,
-        expectedFrameId: computerObservation.frameId,
-        action: {
-          type: "semantic",
-          locator: { kind: "ref", ref: inputNode.ref },
-          action: "focus",
-        },
-      });
+      }
+      if (isMacBrowserWindow) {
+        if (computerTarget.focused) {
+          throw new Error("managed macOS browser stole foreground focus before explicit control");
+        }
+        const backgroundMarker = `background${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
+        const backgroundReceipt = await acceptanceStep(
+          "computer background semantic value",
+          async () =>
+            computer.act({
+              operationId: crypto.randomUUID(),
+              targetId: computerObservation.target.id,
+              expectedTargetGeneration: computerObservation.target.targetGeneration,
+              expectedObservationId: computerObservation.observationId,
+              expectedFrameId: computerObservation.frameId,
+              action: {
+                type: "semantic",
+                locator: { kind: "ref", ref: inputNode.ref },
+                action: "set_value",
+                value: backgroundMarker,
+              },
+            }),
+        );
+        if (backgroundReceipt.state !== "completed" || !backgroundReceipt.observation) {
+          throw new Error(
+            `macOS background semantic action settled as ${backgroundReceipt.state}: ${JSON.stringify(backgroundReceipt.error)}`,
+          );
+        }
+        const browserAfterBackground = await waitForSemanticValue(
+          () => browser!.observe(observation.target.id),
+          backgroundMarker,
+          2_000,
+        );
+        if (!semanticContainsValue(browserAfterBackground.semantic, backgroundMarker)) {
+          throw new Error("macOS background semantic action did not reach browser state");
+        }
+        const afterBackgroundTargets = await computer.targets.list();
+        const afterBackgroundTarget = afterBackgroundTargets.targets.find(
+          (candidate) => candidate.id === computerTarget.id,
+        );
+        if (!afterBackgroundTarget || afterBackgroundTarget.focused) {
+          throw new Error("macOS background semantic action stole foreground focus");
+        }
+        computerObservation = backgroundReceipt.observation;
+        inputNode = findSemanticNode(computerObservation.semantic, (node) => {
+          return (
+            (node.role === "entry" || node.role === "text_field") &&
+            (node.name === "Acceptance input" || node.description === "Acceptance input") &&
+            node.actions.includes("focus") &&
+            node.actions.includes("set_value")
+          );
+        });
+        checks.push("computer.background-semantic-exact", "computer.background-no-focus-steal");
+      }
+      if (isMacBrowserWindow) {
+        const targetFocusReceipt = await acceptanceStep("computer target focus", async () =>
+          computer.act({
+            operationId: crypto.randomUUID(),
+            targetId: computerObservation.target.id,
+            expectedTargetGeneration: computerObservation.target.targetGeneration,
+            expectedObservationId: computerObservation.observationId,
+            expectedFrameId: computerObservation.frameId,
+            action: { type: "focus", targetId: computerObservation.target.id },
+          }),
+        );
+        if (targetFocusReceipt.state !== "completed" || !targetFocusReceipt.observation) {
+          throw new Error(
+            `computer target focus settled as ${targetFocusReceipt.state}: ${JSON.stringify(targetFocusReceipt.error)}`,
+          );
+        }
+        computerObservation = targetFocusReceipt.observation;
+        inputNode = findSemanticNode(computerObservation.semantic, (node) => {
+          return (
+            (node.role === "entry" || node.role === "text_field") &&
+            (node.name === "Acceptance input" || node.description === "Acceptance input") &&
+            node.actions.includes("focus") &&
+            node.actions.includes("set_value")
+          );
+        });
+        checks.push("computer.explicit-target-focus");
+      }
+      let focusReceipt;
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        computerObservation = await computer.observe(computerObservation.target.id);
+        inputNode = findSemanticNode(computerObservation.semantic, (node) => {
+          return (
+            (node.role === "entry" || node.role === "text_field") &&
+            (node.name === "Acceptance input" || node.description === "Acceptance input") &&
+            node.actions.includes("focus") &&
+            node.actions.includes("set_value")
+          );
+        });
+        focusReceipt = await acceptanceStep("computer semantic focus", async () =>
+          computer.act({
+            operationId: crypto.randomUUID(),
+            targetId: computerObservation.target.id,
+            expectedTargetGeneration: computerObservation.target.targetGeneration,
+            expectedObservationId: computerObservation.observationId,
+            expectedFrameId: computerObservation.frameId,
+            action: {
+              type: "semantic",
+              locator: { kind: "ref", ref: inputNode.ref },
+              action: "focus",
+            },
+          }),
+        );
+        if (focusReceipt.state === "completed") break;
+        if (
+          !["observation_stale", "selector_stale", "target_stale"].includes(
+            focusReceipt.error?.code ?? "",
+          ) ||
+          attempt === 4
+        ) {
+          break;
+        }
+        await Bun.sleep(25 * (attempt + 1));
+      }
       if (focusReceipt.state !== "completed") {
         throw new Error(
           `computer semantic focus settled as ${focusReceipt.state}: ${JSON.stringify(focusReceipt.error)}`,
         );
       }
-      const controlObservation = await computer.observe(frameTarget.id);
+      let controlObservation = await computer.observe(frameTarget.id);
       checks.push("computer.semantic-observation", "computer.semantic-focus");
 
       started = performance.now();
@@ -689,37 +816,71 @@ async function main(): Promise<void> {
       let computerFrame = await computerProbe.first(DEFAULT_TIMEOUT_MS, "computer first frame");
       record("computerFirstFrame", performance.now() - started);
       checks.push("computer.first-frame");
+      controlObservation = await computer.observe(frameTarget.id);
 
       // The native X11 adapter types keysyms directly; lowercase alphanumeric
       // input proves exact text without conflating the assertion with Shift or
       // keyboard-layout translation.
       const marker = `native${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
-      started = performance.now();
-      const computerReceipt = await computer.act({
-        operationId: crypto.randomUUID(),
-        targetId: controlObservation.target.id,
-        expectedTargetGeneration: controlObservation.target.targetGeneration,
-        expectedObservationId: controlObservation.observationId,
-        expectedFrameId: controlObservation.frameId,
-        action: { type: "keyboard", action: "type", value: marker },
-      });
+      let computerReceipt;
+      let keyboardStarted = performance.now();
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        controlObservation = await computer.observe(frameTarget.id);
+        const attemptStarted = performance.now();
+        computerReceipt = await acceptanceStep("computer keyboard type", async () =>
+          computer.act({
+            operationId: crypto.randomUUID(),
+            targetId: controlObservation.target.id,
+            expectedTargetGeneration: controlObservation.target.targetGeneration,
+            expectedObservationId: controlObservation.observationId,
+            expectedFrameId: null,
+            action: { type: "keyboard", action: "type", value: marker },
+          }),
+        );
+        logComputerAttempt(
+          "keyboard",
+          attempt,
+          performance.now() - attemptStarted,
+          computerReceipt,
+        );
+        if (computerReceipt.state === "completed") {
+          keyboardStarted = attemptStarted;
+          break;
+        }
+        if (!computerReceipt.error?.retryable || attempt === 4) break;
+        await Bun.sleep(25 * (attempt + 1));
+      }
       const computerAcknowledged = performance.now();
-      if (computerReceipt.state !== "completed") {
+      if (!computerReceipt || computerReceipt.state !== "completed") {
+        const currentTargets = await computer.targets.list().catch(() => null);
         throw new Error(
-          `computer keyboard action settled as ${computerReceipt.state}: ${JSON.stringify(computerReceipt.error)}`,
+          `computer keyboard action settled as ${computerReceipt.state}: ${JSON.stringify(computerReceipt.error)}; lastObservation=${JSON.stringify(computerObservation.target)}; currentTarget=${JSON.stringify(currentTargets?.targets.find((candidate) => candidate.id === computerObservation.target.id) ?? null)}; focusedTargets=${JSON.stringify(currentTargets?.targets.filter((candidate) => candidate.focused) ?? [])}`,
         );
       }
-      computerFrame = await computerProbe.nextChangedAfter(
-        computerFrame,
-        DEFAULT_TIMEOUT_MS,
-        "computer keyboard visible frame",
-      );
-      record("computerActionAcknowledged", computerAcknowledged - started);
-      record("computerActionVisible", performance.now() - started);
+      const [keyboardFrameResult, keyboardStateResult] = await Promise.allSettled([
+        computerProbe.nextChangedAfter(
+          computerFrame,
+          DEFAULT_TIMEOUT_MS,
+          "computer keyboard visible frame",
+        ),
+        waitForSemanticValue(() => browser!.observe(observation.target.id), marker, 2_000),
+      ]);
+      if (keyboardStateResult.status === "rejected") throw keyboardStateResult.reason;
+      if (keyboardFrameResult.status === "rejected") {
+        throw new Error(
+          "computer keyboard reached exact DOM state but not the live window stream",
+          {
+            cause: keyboardFrameResult.reason,
+          },
+        );
+      }
+      computerFrame = keyboardFrameResult.value;
+      record("computerActionAcknowledged", computerAcknowledged - keyboardStarted);
+      record("computerActionVisible", performance.now() - keyboardStarted);
       if ("computerSessionId" in computerFrame && computerFrame.computerSessionId !== computer.id) {
         throw new Error("computer frame crossed sessions");
       }
-      observation = await browser.observe(observation.target.id);
+      observation = keyboardStateResult.value;
       const copiedKeyboardValue = await browser.act({
         operationId: crypto.randomUUID(),
         targetId: observation.target.id,
@@ -747,18 +908,20 @@ async function main(): Promise<void> {
 
       const clipboardMarker = `NATIVE_PASTE_${crypto.randomUUID().slice(0, 8)}_Ω`;
       let currentObservation = computerReceipt.observation ?? controlObservation;
-      const clipboardWriteReceipt = await computer.act({
-        operationId: crypto.randomUUID(),
-        targetId: currentObservation.target.id,
-        expectedTargetGeneration: currentObservation.target.targetGeneration,
-        expectedObservationId: currentObservation.observationId,
-        expectedFrameId: null,
-        action: {
-          type: "clipboard",
-          operation: "write",
-          text: clipboardMarker,
-        },
-      });
+      const clipboardWriteReceipt = await acceptanceStep("computer clipboard write", async () =>
+        computer.act({
+          operationId: crypto.randomUUID(),
+          targetId: currentObservation.target.id,
+          expectedTargetGeneration: currentObservation.target.targetGeneration,
+          expectedObservationId: currentObservation.observationId,
+          expectedFrameId: null,
+          action: {
+            type: "clipboard",
+            operation: "write",
+            text: clipboardMarker,
+          },
+        }),
+      );
       if (clipboardWriteReceipt.state !== "completed") {
         throw new Error(
           `computer clipboard write settled as ${clipboardWriteReceipt.state}: ${JSON.stringify(clipboardWriteReceipt.error)}`,
@@ -769,27 +932,63 @@ async function main(): Promise<void> {
       if (nativeClipboard.text !== clipboardMarker || nativeClipboard.truncated) {
         throw new Error("computer clipboard read did not match the exact written value");
       }
-      const selectReceipt = await computer.act({
-        operationId: crypto.randomUUID(),
-        targetId: currentObservation.target.id,
-        expectedTargetGeneration: currentObservation.target.targetGeneration,
-        expectedObservationId: currentObservation.observationId,
-        expectedFrameId: null,
-        action: { type: "keyboard", action: "press", value: "Control+a" },
-      });
+      let selectReceipt;
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        const attemptStarted = performance.now();
+        selectReceipt = await acceptanceStep("computer select all", async () =>
+          computer.act({
+            operationId: crypto.randomUUID(),
+            targetId: currentObservation.target.id,
+            expectedTargetGeneration: currentObservation.target.targetGeneration,
+            expectedObservationId: currentObservation.observationId,
+            expectedFrameId: null,
+            action: {
+              type: "keyboard",
+              action: "press",
+              value: isMacBrowserWindow ? "Meta+a" : "Control+a",
+            },
+          }),
+        );
+        logComputerAttempt(
+          "select-all",
+          attempt,
+          performance.now() - attemptStarted,
+          selectReceipt,
+        );
+        if (selectReceipt.state === "completed") break;
+        if (!selectReceipt.error?.retryable || attempt === 4) break;
+        currentObservation = await computer.observe(currentObservation.target.id);
+        await Bun.sleep(25 * (attempt + 1));
+      }
       if (selectReceipt.state !== "completed") {
-        throw new Error(`computer select-all settled as ${selectReceipt.state}`);
+        throw new Error(
+          `computer select-all settled as ${selectReceipt.state}: ${JSON.stringify(selectReceipt.error)}`,
+        );
       }
       currentObservation = selectReceipt.observation ?? currentObservation;
-      started = performance.now();
-      const pasteReceipt = await computer.act({
-        operationId: crypto.randomUUID(),
-        targetId: currentObservation.target.id,
-        expectedTargetGeneration: currentObservation.target.targetGeneration,
-        expectedObservationId: currentObservation.observationId,
-        expectedFrameId: null,
-        action: { type: "clipboard", operation: "paste" },
-      });
+      let pasteReceipt;
+      let pasteStarted = performance.now();
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        const attemptStarted = performance.now();
+        pasteReceipt = await acceptanceStep("computer clipboard paste", async () =>
+          computer.act({
+            operationId: crypto.randomUUID(),
+            targetId: currentObservation.target.id,
+            expectedTargetGeneration: currentObservation.target.targetGeneration,
+            expectedObservationId: currentObservation.observationId,
+            expectedFrameId: null,
+            action: { type: "clipboard", operation: "paste" },
+          }),
+        );
+        logComputerAttempt("paste", attempt, performance.now() - attemptStarted, pasteReceipt);
+        if (pasteReceipt.state === "completed") {
+          pasteStarted = attemptStarted;
+          break;
+        }
+        if (!pasteReceipt.error?.retryable || attempt === 4) break;
+        currentObservation = await computer.observe(currentObservation.target.id);
+        await Bun.sleep(25 * (attempt + 1));
+      }
       const pasteAcknowledged = performance.now();
       if (pasteReceipt.state !== "completed") {
         throw new Error(
@@ -813,8 +1012,8 @@ async function main(): Promise<void> {
         ),
       ]);
       computerFrame = nextComputerFrame;
-      record("computerActionAcknowledged", pasteAcknowledged - started);
-      record("computerActionVisible", performance.now() - started);
+      record("computerActionAcknowledged", pasteAcknowledged - pasteStarted);
+      record("computerActionVisible", performance.now() - pasteStarted);
       if (!semanticContainsValue(clipboardObservation.semantic, clipboardMarker)) {
         throw new Error(
           `computer semantic state did not converge to the pasted clipboard value: ${JSON.stringify(semanticEntrySummary(clipboardObservation.semantic))}`,
@@ -1050,8 +1249,28 @@ function measurement(samples: number[]): Measurement {
   };
 }
 
+function logComputerAttempt(
+  action: string,
+  attempt: number,
+  elapsedMs: number,
+  receipt: { state: string; error?: { code?: string; retryable?: boolean } | null },
+): void {
+  process.stderr.write(
+    `${JSON.stringify({ event: "acceptance.computer-action", action, attempt, elapsedMs, state: receipt.state, errorCode: receipt.error?.code ?? null, retryable: receipt.error?.retryable ?? null })}\n`,
+  );
+}
+
 function percentile(sorted: number[], fraction: number): number {
   return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * fraction) - 1))]!;
+}
+
+async function acceptanceStep<T>(label: string, operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`${label} failed: ${message}`, { cause: error });
+  }
 }
 
 function budgetFailure(
