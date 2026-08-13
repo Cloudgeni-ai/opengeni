@@ -266,10 +266,10 @@ impl OpCgroups {
     /// teardown handle. `pids` is the requested child plus the #344 group anchor —
     /// both are moved so the operation is accounted and selected as one unit.
     ///
-    /// Best-effort by contract: a failure to create the leaf, stamp a cap, or move
-    /// a PID (e.g. the process already exited) is logged once and the op keeps
-    /// running in the service cgroup. Returns a handle whenever the leaf exists (so
-    /// it is torn down), or `None` when the leaf could not be created.
+    /// Best-effort by contract: a failure to create the leaf, stamp a setting, or
+    /// move a PID (e.g. the process already exited) is logged once and the op keeps
+    /// running with the containment that succeeded. Returns a handle whenever the
+    /// leaf exists (so it is torn down), or `None` when the leaf could not be created.
     #[cfg(target_os = "linux")]
     pub(crate) fn place_op(&self, pids: &[u32]) -> Option<OpCgroupHandle> {
         let op_id = self.next_op.fetch_add(1, Ordering::Relaxed);
@@ -346,7 +346,7 @@ impl OpCgroups {
         if !self.fallback_logged.swap(true, Ordering::Relaxed) {
             tracing::warn!(
                 %reason,
-                "per-op OOM cgroup placement degraded; continuing to serve in the service cgroup (logged once)"
+                "per-op OOM containment partially degraded; continuing to serve (logged once)"
             );
         }
     }
