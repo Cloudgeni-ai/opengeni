@@ -107,6 +107,39 @@ describe("NativeComputerDriver", () => {
     }
   });
 
+  test("preserves a typed native diagnosis when dispatch outcome is unknown", async () => {
+    const transport = new FixtureNativeTransport();
+    transport.dispatchError = new NativeComputerError(
+      "outcome_unknown",
+      "The exact macOS window did not confirm focus",
+      false,
+      true,
+    );
+    const driver = new NativeComputerDriver({
+      computerSessionId,
+      controllerGeneration,
+      client: transport,
+    });
+    const controller = new ComputerInteractionController({
+      computerSessionId,
+      controllerGeneration,
+      driver,
+    });
+    try {
+      expect(await controller.run(command())).toMatchObject({
+        state: "outcome_unknown",
+        dispatchedAt: expect.any(String),
+        error: {
+          code: "outcome_unknown",
+          message: "The exact macOS window did not confirm focus",
+          retryable: false,
+        },
+      });
+    } finally {
+      await driver.close();
+    }
+  });
+
   test("settles a successful target-replacing action without fabricating an observation", async () => {
     const transport = new FixtureNativeTransport();
     transport.dispatchObservation = null;
@@ -252,6 +285,7 @@ class FixtureNativeTransport implements ComputerNativeTransport {
   startCaptureError: Error | null = null;
   targetsError: Error | null = null;
   dispatchObservation: ReturnType<typeof observation> | null = observation("observation-2");
+  dispatchError: Error | null = null;
   closed = false;
   stoppedCaptures = 0;
   startedCaptureOptions: NativeComputerCaptureOptions[] = [];
@@ -308,6 +342,7 @@ class FixtureNativeTransport implements ComputerNativeTransport {
 
   async dispatch(nativeCommand: NativeComputerActionCommand) {
     this.dispatched = nativeCommand;
+    if (this.dispatchError) throw this.dispatchError;
     return this.dispatchObservation;
   }
 

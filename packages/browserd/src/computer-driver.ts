@@ -13,6 +13,7 @@ import {
 import {
   InteractionControllerError,
   InteractionDefiniteDriverError,
+  InteractionOutcomeUnknownDriverError,
   type ComputerInteractionDriver,
 } from "@opengeni/interaction";
 import {
@@ -130,12 +131,12 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
       const observation = await (await this.activeClient()).dispatch(nativeCommand(command));
       return observation === null ? null : this.projectObservation(observation);
     } catch (error) {
-      if (error instanceof NativeComputerError && !error.dispatched) {
-        throw new InteractionDefiniteDriverError(
-          interactionErrorCode(error.code),
-          error.message,
-          error.retryable,
-        );
+      if (error instanceof NativeComputerError) {
+        const code = interactionErrorCode(error.code);
+        if (!error.dispatched) {
+          throw new InteractionDefiniteDriverError(code, error.message, error.retryable);
+        }
+        throw new InteractionOutcomeUnknownDriverError(code, error.message, false);
       }
       throw error;
     }
