@@ -288,6 +288,144 @@ export type EventBus = {
   close: () => Promise<void>;
 };
 
+export type DetachedSessionEventFanoutOutcome = "published" | "failed" | "timed_out" | "dropped";
+
+export type DetachedSessionEventFanout = {
+  enqueue: (workspaceId: string, sessionId: string, events: SessionEvent[]) => void;
+  drain: () => Promise<void>;
+};
+
+export type DetachedSessionEventFanoutOptions = {
+  timeoutMs?: number;
+  timeoutScheduler?: (callback: () => void, timeoutMs: number) => () => void;
+  onPublishOutcome?: (input: {
+    outcome: DetachedSessionEventFanoutOutcome;
+    durationSeconds: number;
+    count: number;
+  }) => void;
+};
+
+/**
+ * Run one bounded, best-effort live fanout queue independently of the caller.
+ *
+ * The queue is deliberately tiny: one active publish and one pending batch.
+ * A third batch is dropped from LIVE delivery, never from the durable ledger.
+ * This is safe only for events whose DB append is already authoritative and
+ * whose consumers replay/gap-fill from Postgres. The caller must retain awaited
+ * publication for control/recovery, model-memory, and tool-call creation
+ * events. A worker may opt structural tool output into this path only after
+ * its durable pending-call/history reconciliation has completed.
+ */
+export function createDetachedSessionEventFanout(
+  bus: Pick<EventBus, "publish">,
+  options: DetachedSessionEventFanoutOptions = {},
+): DetachedSessionEventFanout {
+  const timeoutMs = Math.max(1, Math.floor(options.timeoutMs ?? PUBLISH_FLUSH_TIMEOUT_MS));
+  const scheduleTimeout =
+    options.timeoutScheduler ??
+    ((callback: () => void, delayMs: number) => {
+      const timer = setTimeout(callback, delayMs);
+      return () => clearTimeout(timer);
+    });
+  let active: Promise<void> | null = null;
+  let pending: { workspaceId: string; sessionId: string; events: SessionEvent[] } | null = null;
+
+  const emitOutcome = (
+    outcome: DetachedSessionEventFanoutOutcome,
+    startedAt: number,
+    count: number,
+  ): void => {
+    try {
+      options.onPublishOutcome?.({
+        outcome,
+        durationSeconds: Math.max(0, (performance.now() - startedAt) / 1000),
+        count,
+      });
+    } catch {
+      // Detached telemetry must never affect the durable event path.
+    }
+  };
+
+  const publishOne = async (item: {
+    workspaceId: string;
+    sessionId: string;
+    events: SessionEvent[];
+  }): Promise<void> => {
+    const startedAt = performance.now();
+    let cancelTimeout: (() => void) | undefined;
+    let timedOut = false;
+    let publish: Promise<void>;
+    try {
+      publish = Promise.resolve(bus.publish(item.workspaceId, item.sessionId, item.events));
+    } catch (error) {
+      publish = Promise.reject(error);
+    }
+    // The timeout bounds the accounting/observation path, not the underlying
+    // provider promise. We still await that exact promise before starting the
+    // next batch so a late reconnect cannot deliver later sequences out of order.
+    void publish.catch(() => undefined);
+    const timeout = new Promise<never>((_, reject) => {
+      cancelTimeout = scheduleTimeout(() => {
+        timedOut = true;
+        reject(new Error("detached session event fanout timed out"));
+      }, timeoutMs);
+    });
+    try {
+      await Promise.race([publish, timeout]);
+      emitOutcome("published", startedAt, item.events.length);
+    } catch {
+      emitOutcome(timedOut ? "timed_out" : "failed", startedAt, item.events.length);
+    } finally {
+      cancelTimeout?.();
+    }
+    if (timedOut) {
+      // Keep the single detached worker pinned to this exact provider promise.
+      // The caller already returned after durable append, while this wait keeps
+      // a late reconnect from delivering a later sequence out of order.
+      await publish.catch(() => undefined);
+    }
+  };
+
+  const pump = async (): Promise<void> => {
+    try {
+      for (;;) {
+        const item = pending;
+        pending = null;
+        if (!item) return;
+        await publishOne(item);
+      }
+    } finally {
+      active = null;
+      if (pending) {
+        active = pump();
+        void active.catch(() => undefined);
+      }
+    }
+  };
+
+  return {
+    enqueue(workspaceId, sessionId, events) {
+      if (events.length === 0) return;
+      if (active) {
+        if (pending) {
+          emitOutcome("dropped", performance.now(), events.length);
+          return;
+        }
+        pending = { workspaceId, sessionId, events };
+        return;
+      }
+      pending = { workspaceId, sessionId, events };
+      active = pump();
+      void active.catch(() => undefined);
+    },
+    async drain() {
+      while (active) {
+        await active;
+      }
+    },
+  };
+}
+
 /**
  * Connect the event bus + control-plane request/reply over ONE managed NATS
  * connection. `auth` is the PRIVILEGED control-plane login (M-AUTH): when the
@@ -630,20 +768,25 @@ export async function appendAndPublishTurnEventsFenced(
   executionGeneration: number,
   attemptId: string,
   events: AppendEventInput[],
-  observe?: AppendPublishObserver,
+  observe?: AppendPublishObserver & {
+    fanout?: "awaited" | "detached";
+    detachedFanout?: DetachedSessionEventFanout;
+    appendSessionEventsForTurnAttempt?: typeof appendSessionEventsForTurnAttempt;
+  },
 ): Promise<{ events: SessionEvent[]; accepted: boolean }> {
   const appendStartedAt = performance.now();
-  const result = await appendSessionEventsForTurnAttempt(
-    db,
-    workspaceId,
-    sessionId,
-    turnId,
-    executionGeneration,
-    attemptId,
-    events,
-  );
+  const result = await (
+    observe?.appendSessionEventsForTurnAttempt ?? appendSessionEventsForTurnAttempt
+  )(db, workspaceId, sessionId, turnId, executionGeneration, attemptId, events);
   observeSince(observe?.onAppend, appendStartedAt, result.events.length);
   if (result.events.length === 0) return result;
+  if (observe?.fanout === "detached") {
+    if (!observe.detachedFanout) {
+      throw new Error("Detached session event fanout is not configured");
+    }
+    observe.detachedFanout.enqueue(workspaceId, sessionId, result.events);
+    return result;
+  }
   const publishStartedAt = performance.now();
   try {
     await bus.publish(workspaceId, sessionId, result.events);

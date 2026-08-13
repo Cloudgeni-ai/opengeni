@@ -39,7 +39,13 @@ audit receipt, `agent_run.created` usage fact, and workflow-wake outbox revision
 commit together. The response is built from those returned committed rows.
 NATS and workspace-control fanout plus the immediate Temporal wake attempt are
 scheduled only after commit and are not response-holding; durable event replay
-and the wake outbox recover their failures.
+and the wake outbox recover their failures. Within a worker turn, the same
+durable-first rule permits only the explicitly allowlisted noncritical lifecycle
+and structural tool-output live fanout to detach behind the attempt-fenced append;
+control, recovery, authorization, model, tool-call creation, and terminal
+settlement events remain awaited. The bounded detached queue is a live-delivery
+optimization, not a second source of truth: reconnect and sequence gap-fill use
+the committed event rows.
 
 The same ordinary session can add and remove a realtime voice
 conversational transport without creating a second session, queue, or workflow.
