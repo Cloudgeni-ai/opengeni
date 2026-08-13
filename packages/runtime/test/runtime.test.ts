@@ -8461,6 +8461,21 @@ describe("runtime Skill activation", () => {
     );
   });
 
+  test("the document parser guidance is an exact opt-in curated artifact", () => {
+    const loaded = loadSkillLibrarySkill("document-parsing", "1.0.0");
+    expect(loaded.entry).toMatchObject({
+      category: "documents",
+      license: "MIT",
+      contentSha256: "5494b5bbb1629001dad8ab823afb2401efc7a6e76679644d211df8a5164f9d1a",
+    });
+    expect(loaded.skill.files).toEqual([
+      expect.objectContaining({
+        path: "SKILL.md",
+        content: expect.stringContaining("preinstalled `anydoc` CLI"),
+      }),
+    ]);
+  });
+
   test("pack skills join the explicit skill index", () => {
     const source = composeRuntimeSkills([packActivation(infraSkill)]).lazySource;
     const sourceDir = source.source as {

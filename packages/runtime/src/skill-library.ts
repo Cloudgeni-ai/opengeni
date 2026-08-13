@@ -91,6 +91,29 @@ const skillLibraryEntries: readonly SkillLibraryEntry[] = Object.freeze([
     relativePath: "checkov",
   }),
   Object.freeze({
+    id: "document-parsing",
+    name: "document-parsing",
+    version: "1.0.0",
+    description:
+      "Extract readable Markdown from local office documents, ebooks, CSV files, and text-based PDFs with the pinned AnyDoc runtime.",
+    category: "documents",
+    tags: Object.freeze(["skill", "documents", "parsing", "markdown", "opt-in"]),
+    contentSha256: "5494b5bbb1629001dad8ab823afb2401efc7a6e76679644d211df8a5164f9d1a",
+    sourceCommit: "4e3089b1ed43404241a303109f81e2c7933040b2",
+    sourceUrl:
+      "https://github.com/firecrawl/anydoc/tree/4e3089b1ed43404241a303109f81e2c7933040b2/skills/convert-documents-to-markdown",
+    provenance:
+      "OpenGeni-authored guidance adapted for the pinned Firecrawl AnyDoc runtime; reviewed immutable opt-in entry.",
+    license: "MIT",
+    documentationUrl: "https://github.com/firecrawl/anydoc/tree/v0.1.8",
+    compatibility: Object.freeze({
+      runtime: "openai-agents-skills",
+      minimumSkillCapabilityVersion: "0.13.3",
+    }),
+    upgrade: Object.freeze({ policy: "immutable-replacement", supersedes: null }),
+    relativePath: "document-parsing",
+  }),
+  Object.freeze({
     id: "refactor-module",
     name: "refactor-module",
     version: "0.0.1",
