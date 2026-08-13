@@ -285,7 +285,7 @@ CREATE OR REPLACE FUNCTION guard_task_note_mutation()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = public, pg_catalog
+SET search_path FROM CURRENT
 AS $$
 DECLARE
   has_capability boolean;
@@ -363,7 +363,7 @@ CREATE OR REPLACE FUNCTION guard_task_note_event_mutation()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = public, pg_catalog
+SET search_path FROM CURRENT
 AS $$
 DECLARE
   note_row task_notes%ROWTYPE;
@@ -452,7 +452,7 @@ CREATE OR REPLACE FUNCTION resolve_task_note_attempt_authority(
 )
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = public, pg_catalog
+SET search_path FROM CURRENT
 AS $$
 DECLARE
   resolved_root_id uuid;
@@ -624,7 +624,7 @@ CREATE OR REPLACE FUNCTION create_task_note_for_attempt(
 )
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = public, pg_catalog
+SET search_path FROM CURRENT
 AS $$
 DECLARE
   authority record;
@@ -755,7 +755,7 @@ CREATE OR REPLACE FUNCTION archive_task_note_for_attempt(
 )
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = public, pg_catalog
+SET search_path FROM CURRENT
 AS $$
 DECLARE
   authority record;
@@ -883,7 +883,7 @@ CREATE OR REPLACE FUNCTION list_task_notes_for_attempt(
 )
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = public, pg_catalog
+SET search_path FROM CURRENT
 AS $$
 DECLARE
   authority record;
@@ -923,6 +923,37 @@ EXCEPTION WHEN OTHERS THEN
   RAISE;
 END;
 $$;
+
+DO $task_note_search_paths$
+DECLARE
+  data_schema text := current_schema();
+BEGIN
+  EXECUTE format(
+    'ALTER FUNCTION %1$I.guard_task_note_mutation() SET search_path = %1$I, pg_catalog',
+    data_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %1$I.guard_task_note_event_mutation() SET search_path = %1$I, pg_catalog',
+    data_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %1$I.resolve_task_note_attempt_authority(uuid,uuid,uuid,uuid,uuid,integer) SET search_path = %1$I, pg_catalog',
+    data_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %1$I.create_task_note_for_attempt(uuid,uuid,uuid,uuid,uuid,integer,uuid,text,text,integer) SET search_path = %1$I, pg_catalog',
+    data_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %1$I.archive_task_note_for_attempt(uuid,uuid,uuid,uuid,uuid,integer,uuid,uuid,integer,text) SET search_path = %1$I, pg_catalog',
+    data_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %1$I.list_task_notes_for_attempt(uuid,uuid,uuid,uuid,uuid,integer,boolean,integer) SET search_path = %1$I, pg_catalog',
+    data_schema
+  );
+END
+$task_note_search_paths$;
 
 REVOKE ALL ON "task_notes" FROM PUBLIC;
 REVOKE ALL ON "task_note_events" FROM PUBLIC;
