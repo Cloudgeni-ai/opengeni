@@ -84,6 +84,7 @@ import {
 import { withCachedController } from "../controller-data-plane";
 import { withInteractionHolderHeartbeat } from "../interaction-holder-heartbeat";
 import { allowedCorsOrigin } from "../http/cors";
+import { interactionControlApiError } from "../http/interaction-control-error";
 import { observeComputerActionResult, observeLifecycleResult } from "../interaction-metrics";
 import { withChannelA, withChannelARead, type ChannelAOperation } from "../sandbox/channel-a";
 
@@ -510,10 +511,14 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
               ...(request.stream ? { stream: request.stream } : {}),
             });
           } catch (error) {
+            const publicFailure = interactionControlApiError(error, "computer");
             console.error("computer frame relay open failed", {
               computerSessionId,
               targetId: request.targetId,
-              failure: error instanceof Error ? error.message : String(error),
+              failureCode: publicFailure?.details?.controlFailureCode ?? "unclassified",
+              retryable: publicFailure?.retryable ?? false,
+              outcomeUnknown: publicFailure?.outcomeUnknown ?? false,
+              controlRequestId: publicFailure?.details?.controlRequestId ?? null,
             });
             throw error;
           }
@@ -1543,6 +1548,8 @@ function interactionFailure(error: unknown) {
 
 function computerRouteError(error: unknown): HTTPException {
   if (error instanceof HTTPException) return error;
+  const connectedMachineError = interactionControlApiError(error, "computer");
+  if (connectedMachineError) return connectedMachineError;
   if (error instanceof ComputerSessionNotFoundError) {
     return new HTTPException(404, { message: error.message, cause: error });
   }

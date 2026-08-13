@@ -16,6 +16,7 @@ import type {
   InteractionIntervention,
   InteractionSemanticNode,
 } from "@opengeni/sdk/interaction";
+import { interactionControlFailureFromError } from "@opengeni/sdk/interaction";
 import {
   BugIcon,
   ArchiveIcon,
@@ -1949,6 +1950,7 @@ function SemanticBrowserFallback(props: {
   onAction: (action: BrowserAction) => void;
   onReconnect: () => void;
 }) {
+  const controlFailure = interactionControlFailureFromError(props.error);
   const nodes = semanticNodes(
     props.observation?.semantic?.kind === "snapshot" ? props.observation.semantic.roots : [],
   );
@@ -1972,6 +1974,11 @@ function SemanticBrowserFallback(props: {
                 : "Semantic browser"}
           </p>
         </div>
+        {props.error ? (
+          <p className="mt-2 text-og-control leading-5 text-og-muted">
+            {controlFailure?.message ?? props.error.message}
+          </p>
+        ) : null}
         {interactive.length > 0 ? (
           <div className="mt-3 border-t border-og-border pt-3">
             <p className="mb-2 text-og-xs text-og-subtle">
@@ -2004,7 +2011,7 @@ function SemanticBrowserFallback(props: {
             onClick={props.onReconnect}
             className="mt-3 text-og-control font-medium text-og-accent hover:underline"
           >
-            Reconnect
+            {controlFailure?.retryable === false ? "Try again" : "Reconnect"}
           </button>
         ) : null}
       </div>

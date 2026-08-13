@@ -2162,6 +2162,41 @@ export const BrowserActionBatch = z
   });
 export type BrowserActionBatch = z.infer<typeof BrowserActionBatch>;
 
+/** Secret-safe projection of a connected-machine control failure carried in a
+ * standard API error envelope. The outer envelope owns HTTP status, retryability,
+ * and public request correlation; this preserves the exact failing control class
+ * and optional inner request id without exposing subjects, local paths, or tokens. */
+export const InteractionControlFailureCode = z.enum([
+  "unknown",
+  "unsupported",
+  "os",
+  "not_found",
+  "consent_required",
+  "timeout",
+  "draining",
+  "protocol",
+  "stream",
+  "agent_offline",
+  "fenced",
+  "payload_too_large",
+]);
+export type InteractionControlFailureCode = z.infer<typeof InteractionControlFailureCode>;
+
+export const InteractionControlFailureDetails = z
+  .object({
+    interactionLayer: z.literal("connected_machine"),
+    interactionSurface: z.enum(["browser", "computer"]),
+    controlFailureCode: InteractionControlFailureCode,
+    controlRequestId: z
+      .string()
+      .min(1)
+      .max(128)
+      .regex(/^[A-Za-z0-9._:-]+$/u)
+      .optional(),
+  })
+  .strict();
+export type InteractionControlFailureDetails = z.infer<typeof InteractionControlFailureDetails>;
+
 export const InteractionError = z
   .object({
     code: z.enum([

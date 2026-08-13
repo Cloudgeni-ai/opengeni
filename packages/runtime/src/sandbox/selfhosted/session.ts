@@ -557,13 +557,16 @@ export class SelfhostedSession {
         return res.result;
       }
       const error = res.error
-        ? agentErrorToControlError(res.error)
-        : agentErrorToControlError({
-            code: 7, // ERROR_CODE_PROTOCOL — an empty result is a protocol violation
-            message: "agent returned an empty control response",
-            retryable: false,
-            detail: {},
-          });
+        ? agentErrorToControlError(res.error, req.requestId)
+        : agentErrorToControlError(
+            {
+              code: 7, // ERROR_CODE_PROTOCOL — an empty result is a protocol violation
+              message: "agent returned an empty control response",
+              retryable: false,
+              detail: {},
+            },
+            req.requestId,
+          );
       const decision = decideSelfhostedRetry({
         opKind,
         error,

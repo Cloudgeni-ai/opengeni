@@ -51,6 +51,19 @@ pub enum PlatformError {
         /// Structured detail (e.g. `errno`, `path`) surfaced in logs only.
         detail: BTreeMap<String, String>,
     },
+
+    /// A stream producer or relay channel could not be established. Unlike a
+    /// generic OS failure, this preserves whether the stream layer knows a
+    /// fresh channel may be retried safely. Maps to [`ErrorCode::Stream`].
+    #[error("stream error: {message}")]
+    Stream {
+        /// Bounded operator-facing summary. Public API adapters must still
+        /// project this through their secret-safe error vocabulary.
+        message: String,
+        /// True only for transport-class stream failures; protocol and rejected
+        /// opens are deterministic for the current request.
+        retryable: bool,
+    },
 }
 
 impl PlatformError {
@@ -60,6 +73,16 @@ impl PlatformError {
         Self::Os {
             message: message.into(),
             detail: BTreeMap::new(),
+        }
+    }
+
+    /// Constructs a typed stream-plane failure without collapsing it into the
+    /// OS bucket. The caller supplies the stream layer's retryability ruling.
+    #[must_use]
+    pub fn stream(message: impl Into<String>, retryable: bool) -> Self {
+        Self::Stream {
+            message: message.into(),
+            retryable,
         }
     }
 
@@ -92,6 +115,7 @@ impl PlatformError {
             Self::ConsentRequired(_) => ErrorCode::ConsentRequired,
             Self::Timeout(_) => ErrorCode::Timeout,
             Self::Os { .. } => ErrorCode::Os,
+            Self::Stream { .. } => ErrorCode::Stream,
         }
     }
 
@@ -103,6 +127,13 @@ impl PlatformError {
     #[must_use]
     pub fn retryable(&self) -> bool {
         matches!(self, Self::Timeout(_))
+            || matches!(
+                self,
+                Self::Stream {
+                    retryable: true,
+                    ..
+                }
+            )
     }
 
     /// Renders this error into the proto [`AgentError`] carried on a
@@ -159,5 +190,15 @@ mod tests {
     fn consent_maps_to_consent_required() {
         let err = PlatformError::ConsentRequired("screen-control".to_string());
         assert_eq!(err.to_agent_error().code, ErrorCode::ConsentRequired as i32);
+    }
+
+    #[test]
+    fn stream_preserves_its_code_and_retryability() {
+        let transport = PlatformError::stream("relay transport dropped", true);
+        let protocol = PlatformError::stream("frame source rejected", false);
+        assert_eq!(transport.code(), ErrorCode::Stream);
+        assert!(transport.to_agent_error().retryable);
+        assert_eq!(protocol.to_agent_error().code, ErrorCode::Stream as i32);
+        assert!(!protocol.retryable());
     }
 }

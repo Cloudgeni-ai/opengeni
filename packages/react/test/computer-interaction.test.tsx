@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { StreamFrame, StreamOpen, StreamOpenAck } from "@opengeni/agent-proto";
+import { OpenGeniApiError } from "@opengeni/sdk";
 import type {
   ComputerActionReceipt,
   ComputerFrame,
@@ -553,6 +554,55 @@ describe("ComputerViewer", () => {
     expect(computerKey(event("Control", { ctrlKey: true }))).toBeNull();
     expect(computerKey(event("Alt", { altKey: true }))).toBeNull();
     expect(computerKey(event("a", { metaKey: true }))).toBe("Meta+a");
+  });
+
+  test("renders a typed connected-machine startup failure with truthful retry copy", async () => {
+    const current = computerSession();
+    const currentTarget = target();
+    const client = fakeClient({
+      listComputerSessions: async () => ({ revision: 1, sessions: [current] }),
+      getComputerSession: async () => current,
+      listComputerTargets: async () => ({
+        computerSessionId: current.id,
+        controllerGeneration: "controller-1",
+        targets: [currentTarget],
+      }),
+      observeComputerTarget: async () => observation(currentTarget),
+      attachComputerSession: async () => {
+        throw new OpenGeniApiError(
+          504,
+          JSON.stringify({
+            error: {
+              status: 504,
+              code: "upstream_unavailable",
+              message:
+                "The connected machine did not finish opening the computer live view in time.",
+              retryable: true,
+              outcomeUnknown: true,
+              requestId: "outer-computer-request",
+              details: {
+                interactionLayer: "connected_machine",
+                interactionSurface: "computer",
+                controlFailureCode: "timeout",
+                controlRequestId: "inner-computer-request",
+              },
+            },
+          }),
+          { mutation: true },
+        );
+      },
+    });
+    const rendered = await renderComponent(
+      <ComputerViewer client={client} workspaceId={WORKSPACE_ID} sessionId={SESSION_ID} />,
+    );
+    await flush(40);
+
+    expect(rendered.container.textContent).toContain("Live view disconnected");
+    expect(rendered.container.textContent).toContain(
+      "The connected machine did not finish opening the computer live view in time.",
+    );
+    expect(rendered.container.textContent).toContain("Reconnect");
+    await rendered.unmount();
   });
 
   test("pins an exact ComputerSession requested by Browser navigation", async () => {

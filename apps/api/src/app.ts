@@ -747,7 +747,9 @@ export function createAppComposition(deps: AppDependencies): {
             ? (boundedPublicMessage(apiError.message) ?? "Request failed.")
             : publicErrorMessage(error, status),
         retryable: apiError?.retryable ?? retryableHttpStatus(status),
-        ...(mutationOutcomeUnknown(error, c.req.method) ? { outcomeUnknown: true } : {}),
+        ...((apiError?.outcomeUnknown ?? mutationOutcomeUnknown(error, c.req.method))
+          ? { outcomeUnknown: true }
+          : {}),
         requestId,
         ...(apiError?.details ? { details: apiError.details } : {}),
       },

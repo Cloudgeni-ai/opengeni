@@ -354,6 +354,46 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     expect(openedComputer.endpoint.query).toContain("channel=mock-computer-window-1");
   });
 
+  test("frame startup failures retain the exact inner control request correlation", async () => {
+    let dispatchedRequestId: string | null = null;
+    const rpc: ControlRpc = {
+      request: async (_subject, req) => {
+        dispatchedRequestId = req.requestId;
+        return {
+          requestId: req.requestId,
+          error: {
+            code: ErrorCode.ERROR_CODE_STREAM,
+            message: "private local capture failure",
+            retryable: false,
+            detail: { path: "/Users/private/capture" },
+          },
+        };
+      },
+    };
+
+    const failure = await sessionWith(rpc)
+      .openBrowserFrames({
+        scopeId: `${WS}:attached:device-1`,
+        scopeGeneration: "connection-1",
+        browserSessionId: "22222222-2222-2222-2222-222222222222",
+        controllerGeneration: "controller-1",
+        targetId: "target-1",
+        viewToken: "b".repeat(32),
+        expiresAtMs: String(Date.now() + 60_000),
+        format: "jpeg",
+        quality: 70,
+        maxWidth: 1_440,
+        maxHeight: 900,
+        everyNthFrame: 1,
+      })
+      .catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(SelfhostedControlError);
+    expect((failure as SelfhostedControlError).code).toBe(ErrorCode.ERROR_CODE_STREAM);
+    expect((failure as SelfhostedControlError).controlRequestId).toBe(dispatchedRequestId);
+    expect(dispatchedRequestId).toMatch(/^[0-9a-f-]{36}$/u);
+  });
+
   test("ping returns true against a live responder, false when offline", async () => {
     const mock = new MockAgentResponder();
     expect(await sessionWith(mock).ping()).toBe(true);
@@ -616,9 +656,13 @@ describe("AgentError → runtime reason mapping (the M3 ruling)", () => {
   });
 
   test("TIMEOUT → agent_reconnecting + retryable (the turn pauses + retries)", () => {
-    const mapped = agentErrorToControlError(err(ErrorCode.ERROR_CODE_TIMEOUT, true));
+    const mapped = agentErrorToControlError(
+      err(ErrorCode.ERROR_CODE_TIMEOUT, true),
+      "inner-control-request",
+    );
     expect(mapped.reason).toBe("agent_reconnecting");
     expect(mapped.retryable).toBe(true);
+    expect(mapped.controlRequestId).toBe("inner-control-request");
   });
 
   test("CONSENT_REQUIRED → consent_required", () => {

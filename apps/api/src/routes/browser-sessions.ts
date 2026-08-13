@@ -193,6 +193,7 @@ import {
 } from "../browser-auth-broker";
 import { managedNetworkRouteForPlacement } from "../browser-network-route";
 import { allowedCorsOrigin } from "../http/cors";
+import { interactionControlApiError } from "../http/interaction-control-error";
 import {
   observeAuthMutation,
   observeBrowserActionResult,
@@ -4455,6 +4456,8 @@ async function recordBrowserDownloadFileUsage(
 
 function browserRouteError(error: unknown): HTTPException {
   if (error instanceof HTTPException) return error;
+  const connectedMachineError = interactionControlApiError(error, "browser");
+  if (connectedMachineError) return connectedMachineError;
   if (error instanceof BrowserSessionNotFoundError) {
     return new HTTPException(404, { message: error.message, cause: error });
   }

@@ -957,6 +957,53 @@ describe("BrowserViewer", () => {
     );
   });
 
+  test("renders a typed connected-machine startup failure instead of a generic spinner", async () => {
+    const current = browserSession();
+    const currentTarget = target();
+    const client = fakeClient({
+      listBrowserSessions: async () => ({ revision: 1, sessions: [current] }),
+      getBrowserSession: async () => current,
+      listBrowserTargets: async () => ({
+        browserSessionId: current.id,
+        controllerGeneration: "controller-1",
+        targets: [currentTarget],
+      }),
+      observeBrowserTarget: async () => observation(current.id, currentTarget),
+      attachBrowserSession: async () => {
+        throw new OpenGeniApiError(
+          502,
+          JSON.stringify({
+            error: {
+              status: 502,
+              code: "upstream_unavailable",
+              message: "The connected machine could not open the browser live view stream.",
+              retryable: false,
+              requestId: "outer-browser-request",
+              details: {
+                interactionLayer: "connected_machine",
+                interactionSurface: "browser",
+                controlFailureCode: "stream",
+                controlRequestId: "inner-browser-request",
+              },
+            },
+          }),
+          { mutation: true },
+        );
+      },
+    });
+    const rendered = await renderComponent(
+      <BrowserViewer client={client} workspaceId={WORKSPACE_ID} sessionId={SESSION_ID} />,
+    );
+    await flush(40);
+
+    expect(rendered.container.textContent).toContain("Live view disconnected");
+    expect(rendered.container.textContent).toContain(
+      "The connected machine could not open the browser live view stream.",
+    );
+    expect(rendered.container.textContent).toContain("Try again");
+    await rendered.unmount();
+  });
+
   test("opens actionable runtime and page diagnostics without leaving the browser", async () => {
     const current = browserSession();
     const currentTarget = target();

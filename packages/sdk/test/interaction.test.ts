@@ -2,10 +2,12 @@ import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
   OpenGeniClient,
+  OpenGeniApiError,
   browserFrameSocketUrl,
   computerFrameSocketUrl,
   decodeBrowserFrameMessage,
   decodeComputerFrameMessage,
+  interactionControlFailureFromError,
   type AttachedBrowserDevice,
   type BrowserFrameMetadata,
   type BrowserIdentity,
@@ -29,6 +31,60 @@ const INTERVENTION_ID = "00000000-0000-4000-8000-000000000022";
 const BROWSER_DOWNLOAD_ID = "00000000-0000-4000-8000-000000000023";
 const BROWSER_DOWNLOAD_SAVE_OPERATION_ID = "00000000-0000-4000-8000-000000000024";
 const BROWSER_DOWNLOAD_FILE_ID = "00000000-0000-4000-8000-000000000025";
+
+describe("interaction control failure projection", () => {
+  test("decodes typed control detail while retaining outer and inner correlation", () => {
+    const error = new OpenGeniApiError(
+      502,
+      JSON.stringify({
+        error: {
+          status: 502,
+          code: "upstream_unavailable",
+          message: "The connected machine could not open the browser live view stream.",
+          retryable: false,
+          requestId: "outer-request",
+          details: {
+            interactionLayer: "connected_machine",
+            interactionSurface: "browser",
+            controlFailureCode: "stream",
+            controlRequestId: "inner-request",
+          },
+        },
+      }),
+      { mutation: true },
+    );
+    expect(interactionControlFailureFromError(error)).toEqual({
+      layer: "connected_machine",
+      surface: "browser",
+      code: "stream",
+      retryable: false,
+      outcomeUnknown: false,
+      requestId: "outer-request",
+      controlRequestId: "inner-request",
+      message: error.message,
+    });
+  });
+
+  test("rejects arbitrary details that do not match the interaction contract", () => {
+    const error = new OpenGeniApiError(
+      502,
+      JSON.stringify({
+        error: {
+          code: "upstream_unavailable",
+          message: "failed",
+          retryable: true,
+          details: {
+            interactionLayer: "connected_machine",
+            interactionSurface: "browser",
+            controlFailureCode: "PRIVATE_SECRET",
+          },
+        },
+      }),
+      { mutation: true },
+    );
+    expect(interactionControlFailureFromError(error)).toBeNull();
+  });
+});
 
 function attachedBrowser(): AttachedBrowserDevice {
   return {
