@@ -1,5 +1,16 @@
 # @opengeni/sdk
 
+## 0.56.0
+
+### Minor Changes
+
+- b0b2bed: Add unified browser and computer interaction APIs, reusable browser identities, native input, live streaming, and React viewer controls across managed sandboxes and connected machines.
+
+### Patch Changes
+
+- Updated dependencies [b0b2bed]
+  - @opengeni/contracts@0.49.0
+
 ## 0.55.0
 
 ### Minor Changes
