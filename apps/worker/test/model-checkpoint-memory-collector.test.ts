@@ -4,6 +4,7 @@ import {
   MODEL_CHECKPOINT_GC_COOLDOWN_MS,
   MODEL_CHECKPOINT_GC_PRESSURE_BYTES,
   createModelCheckpointMemoryCollector,
+  modelCheckpointPressureBytes,
 } from "../src/model-checkpoint-memory-collector";
 
 function observabilityRecorder() {
@@ -31,6 +32,15 @@ function controlledTimer() {
 }
 
 describe("model checkpoint memory collector", () => {
+  test("counts heap and external allocations as independent pressure", () => {
+    expect(
+      modelCheckpointPressureBytes({
+        heapUsed: MODEL_CHECKPOINT_GC_PRESSURE_BYTES / 2,
+        external: MODEL_CHECKPOINT_GC_PRESSURE_BYTES / 2,
+      }),
+    ).toBe(MODEL_CHECKPOINT_GC_PRESSURE_BYTES);
+  });
+
   test("does nothing below process heap and external pressure", () => {
     const timer = controlledTimer();
     const metrics = observabilityRecorder();
@@ -60,8 +70,8 @@ describe("model checkpoint memory collector", () => {
     const collector = createModelCheckpointMemoryCollector({
       setTimeout: timer.setTimeout,
       memoryUsage: () => ({
-        heapUsed: 0,
-        external: MODEL_CHECKPOINT_GC_PRESSURE_BYTES,
+        heapUsed: MODEL_CHECKPOINT_GC_PRESSURE_BYTES / 2,
+        external: MODEL_CHECKPOINT_GC_PRESSURE_BYTES / 2,
       }),
       gc: () => {
         collections += 1;

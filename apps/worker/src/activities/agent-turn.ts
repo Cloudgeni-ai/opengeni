@@ -2767,6 +2767,10 @@ export async function finalizeDurableTurnOpStreams(
 
 export function createRunAgentTurnActivity(services: () => Promise<ActivityServices>) {
   const modelCheckpointMemoryCollector = createModelCheckpointMemoryCollector();
+  // Keep a distinct cooldown for terminal collection. A collection at the
+  // final model checkpoint happens while the activity still owns its complete
+  // turn graph and must not suppress collection after that graph is released.
+  const turnCompletionMemoryCollector = createModelCheckpointMemoryCollector();
   return async function runAgentTurn(input: RunAgentTurnInput): Promise<RunAgentTurnResult> {
     const {
       settings,
@@ -10831,6 +10835,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               ? safeErrorForTelemetry(finalizationError ?? activityError)
               : undefined,
         });
+        // This timer runs only after the activity promise and its full turn
+        // stack unwind. Checkpoint collection alone cannot reclaim objects that
+        // remain strongly reachable until this terminal boundary.
+        turnCompletionMemoryCollector.schedule(observability);
         assertPhysicalToolQuiescenceForCancellation({
           acknowledgeQuiescence,
           physicalToolQuiescenceConfirmed,
