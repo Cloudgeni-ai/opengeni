@@ -4816,9 +4816,9 @@ export const sessionAttemptCodemodeCalls = pgTable(
     accountId: uuid("account_id").notNull(),
     workspaceId: uuid("workspace_id").notNull(),
     sessionId: uuid("session_id").notNull(),
-    turnId: uuid("turn_id").notNull(),
-    attemptId: uuid("attempt_id").notNull(),
-    executionGeneration: integer("execution_generation").notNull(),
+    turnId: uuid("turn_id"),
+    attemptId: uuid("attempt_id"),
+    executionGeneration: integer("execution_generation"),
     catalogDigest: text("catalog_digest").notNull(),
     requestDigest: text("request_digest").notNull(),
     serverId: text("server_id").notNull(),
@@ -6608,9 +6608,9 @@ export const sandboxWorkspaceMutationAdmissions = pgTable(
     actorId: uuid("actor_id").notNull(),
     // Exact turn authority is present only for actor_kind='turn'. Direct HTTP
     // requests and retained processes never invent a turn or quiescence owner.
-    turnId: uuid("turn_id"),
-    attemptId: uuid("attempt_id"),
-    executionGeneration: integer("execution_generation"),
+    turnId: uuid("turn_id").notNull(),
+    attemptId: uuid("attempt_id").notNull(),
+    executionGeneration: integer("execution_generation").notNull(),
     holderKind: text("holder_kind", {
       enum: sandboxWorkspaceMutationHolderKindValues,
     }).notNull(),
@@ -6627,7 +6627,7 @@ export const sandboxWorkspaceMutationAdmissions = pgTable(
     workspaceGeneration: integer("workspace_generation").notNull(),
     operation: text("operation").notNull(),
     providerOutcome: text("provider_outcome", {
-      enum: ["resolved", "rejected", "retained"],
+      enum: ["resolved", "rejected", "retained", "unknown"],
     }),
     admittedAt: timestamp("admitted_at", { withTimezone: true }).notNull().defaultNow(),
     settledAt: timestamp("settled_at", { withTimezone: true }),
@@ -6722,13 +6722,151 @@ export const sandboxWorkspaceMutationAdmissions = pgTable(
     ),
     outcomeValid: check(
       "sandbox_workspace_mutation_admissions_outcome_check",
-      sql`${table.providerOutcome} is null or ${table.providerOutcome} in ('resolved', 'rejected', 'retained')`,
+      sql`${table.providerOutcome} is null or ${table.providerOutcome} in ('resolved', 'rejected', 'retained', 'unknown')`,
     ),
     settlementConsistent: check(
       "sandbox_workspace_mutation_admissions_settlement_check",
       sql`(${table.providerOutcome} is null and ${table.settledAt} is null)
         or (${table.providerOutcome} = 'retained' and ${table.settledAt} is null)
-        or (${table.providerOutcome} in ('resolved', 'rejected') and ${table.settledAt} is not null)`,
+        or (${table.providerOutcome} in ('resolved', 'rejected', 'unknown') and ${table.settledAt} is not null)`,
+    ),
+  }),
+);
+
+// A distinct pre-provider-action fence for the narrowly repairable legacy
+// provider-loss case. It is never an archive-capture claim and remains active
+// until its exact provider-loss receipt is consumed.
+export const sandboxProviderLossTeardownClaims = pgTable(
+  "sandbox_provider_loss_teardown_claims",
+  {
+    id: uuid("id").primaryKey(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    admissionId: uuid("admission_id").notNull(),
+    actorKind: text("actor_kind", { enum: sandboxWorkspaceMutationActorKindValues }).notNull(),
+    actorId: uuid("actor_id").notNull(),
+    operation: text("operation").notNull(),
+    turnId: uuid("turn_id").notNull(),
+    attemptId: uuid("attempt_id").notNull(),
+    executionGeneration: integer("execution_generation").notNull(),
+    holderKind: text("holder_kind", { enum: sandboxWorkspaceMutationHolderKindValues }).notNull(),
+    holderId: text("holder_id").notNull(),
+    leaseId: uuid("lease_id").notNull(),
+    sandboxGroupId: uuid("sandbox_group_id").notNull(),
+    leaseEpoch: integer("lease_epoch").notNull(),
+    workspaceGeneration: integer("workspace_generation").notNull(),
+    providerBackend: text("provider_backend").notNull(),
+    providerInstanceId: text("provider_instance_id").notNull(),
+    routeKind: text("route_kind", { enum: ["home", "active"] }).notNull(),
+    routeTargetId: uuid("route_target_id"),
+    routeEpoch: integer("route_epoch").notNull(),
+    claimedAt: timestamp("claimed_at", { withTimezone: true }).notNull().defaultNow(),
+    consumedAt: timestamp("consumed_at", { withTimezone: true }),
+  },
+  (table) => ({
+    scopedId: uniqueIndex("sandbox_provider_loss_teardown_claims_scoped_id_uq").on(
+      table.accountId,
+      table.workspaceId,
+      table.id,
+    ),
+    admission: uniqueIndex("sandbox_provider_loss_teardown_claims_admission_uq").on(
+      table.admissionId,
+    ),
+    admissionScope: uniqueIndex("sandbox_provider_loss_teardown_claims_admission_scope_uq").on(
+      table.accountId,
+      table.workspaceId,
+      table.admissionId,
+      table.id,
+    ),
+    identity: index("sandbox_provider_loss_teardown_claims_identity_idx").on(
+      table.leaseId,
+      table.leaseEpoch,
+      table.providerInstanceId,
+      table.workspaceGeneration,
+    ),
+    identityValid: check(
+      "sandbox_provider_loss_teardown_claims_identity_check",
+      sql`${table.actorKind} = 'turn'
+        and ${table.actorId} = ${table.attemptId}
+        and ${table.holderKind} = 'turn'
+        and ${table.operation} = 'codemodeTokenRenewal'
+        and ${table.leaseEpoch} >= 0
+        and ${table.workspaceGeneration} > 0
+        and ${table.routeEpoch} >= 0
+        and (${table.routeKind} = 'active' or ${table.routeTargetId} is null)
+        and octet_length(${table.holderId}) between 1 and 256
+        and octet_length(${table.providerBackend}) between 1 and 64
+        and octet_length(${table.providerInstanceId}) between 1 and 512`,
+    ),
+  }),
+);
+
+// Immutable provider-loss proof. A receipt is written only after an exact
+// provider destruction action has a correlation id and an authoritative
+// post-destruction not-found observation. Consuming code must still re-check
+// every identity and blocker fence in one transaction; this row is never an
+// instruction to destroy a provider and never authorizes replay.
+export const sandboxProviderLossReceipts = pgTable(
+  "sandbox_provider_loss_receipts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    admissionId: uuid("admission_id").notNull(),
+    claimId: uuid("claim_id").notNull(),
+    actorKind: text("actor_kind", { enum: sandboxWorkspaceMutationActorKindValues }).notNull(),
+    actorId: uuid("actor_id").notNull(),
+    operation: text("operation").notNull(),
+    turnId: uuid("turn_id").notNull(),
+    attemptId: uuid("attempt_id").notNull(),
+    executionGeneration: integer("execution_generation").notNull(),
+    holderKind: text("holder_kind", { enum: sandboxWorkspaceMutationHolderKindValues }).notNull(),
+    holderId: text("holder_id").notNull(),
+    leaseId: uuid("lease_id").notNull(),
+    sandboxGroupId: uuid("sandbox_group_id").notNull(),
+    leaseEpoch: integer("lease_epoch").notNull(),
+    workspaceGeneration: integer("workspace_generation").notNull(),
+    providerBackend: text("provider_backend").notNull(),
+    providerInstanceId: text("provider_instance_id").notNull(),
+    routeKind: text("route_kind", { enum: ["home", "active"] }).notNull(),
+    routeTargetId: uuid("route_target_id"),
+    routeEpoch: integer("route_epoch").notNull(),
+    terminateOutcome: text("terminate_outcome", {
+      enum: ["terminated", "not_found"],
+    }).notNull(),
+    destructionCorrelationId: text("destruction_correlation_id").notNull(),
+    destructionObservedAt: timestamp("destruction_observed_at", { withTimezone: true }).notNull(),
+    notFoundObservedAt: timestamp("not_found_observed_at", { withTimezone: true }).notNull(),
+    consumedAt: timestamp("consumed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    scopedId: uniqueIndex("sandbox_provider_loss_receipts_scoped_id_uq").on(
+      table.accountId,
+      table.workspaceId,
+      table.id,
+    ),
+    admission: uniqueIndex("sandbox_provider_loss_receipts_admission_uq").on(table.admissionId),
+    claim: uniqueIndex("sandbox_provider_loss_receipts_claim_uq").on(table.claimId),
+    identity: index("sandbox_provider_loss_receipts_identity_idx").on(
+      table.leaseId,
+      table.leaseEpoch,
+      table.providerInstanceId,
+      table.workspaceGeneration,
+    ),
+    identityValid: check(
+      "sandbox_provider_loss_receipts_identity_check",
+      sql`${table.leaseEpoch} >= 0
+        and ${table.workspaceGeneration} > 0
+        and ${table.routeEpoch} >= 0
+        and octet_length(${table.operation}) between 1 and 128
+        and octet_length(${table.holderId}) between 1 and 256
+        and octet_length(${table.providerBackend}) between 1 and 64
+        and octet_length(${table.providerInstanceId}) between 1 and 512
+        and octet_length(${table.destructionCorrelationId}) between 1 and 256
+        and (${table.routeKind} = 'active' or ${table.routeTargetId} is null)`,
     ),
   }),
 );

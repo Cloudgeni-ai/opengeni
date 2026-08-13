@@ -524,6 +524,166 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     }
   });
 
+  test("provider-loss repair consumes only an exact not_found proof and never terminates or replays", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const attempt = await freshWarmSnapshotAttempt(ids);
+    ids.groupId = attempt.sandboxGroupId;
+    const leaseEpoch = 41;
+    const instanceId = "modal-provider-loss-worker-test";
+    const leaseId = await insertLease(ids, {
+      liveness: "draining",
+      refcount: 0,
+      leaseEpoch,
+      expiresInMs: -1_000,
+      instanceId,
+      backend: "modal",
+      resumeBackendId: "modal",
+    });
+    await admin`
+      update session_turn_attempts
+      set state = 'closed', outcome = 'superseded', closed_at = now(), quiesced_at = null
+      where id = ${attempt.attemptId}`;
+    const [command] = await admin<{ id: string }[]>`
+      insert into session_command_receipts (
+        account_id, workspace_id, actor_type, actor_subject_id, action,
+        target_session_id, target_turn_id, operation_key, canonical_request_hash
+      ) values (
+        ${ids.accountId}, ${ids.workspaceId}, 'human', 'provider-loss-worker-test',
+        'session.queue.steer', ${attempt.sessionId}, ${attempt.turnId},
+        ${crypto.randomUUID()}, 'provider-loss-worker-test'
+      ) returning id`;
+    await admin`
+      insert into session_attempt_interruptions (
+        account_id, workspace_id, session_id, operation_id, attempt_id,
+        kind, control_revision, state, settled_at
+      ) values (
+        ${ids.accountId}, ${ids.workspaceId}, ${attempt.sessionId}, ${command!.id},
+        ${attempt.attemptId}, 'steer', 1, 'settled', now()
+      )`;
+    const admissionId = crypto.randomUUID();
+    await admin`
+      insert into sandbox_workspace_mutation_admissions (
+        id, account_id, workspace_id, lease_id, sandbox_group_id, session_id,
+        actor_kind, actor_id, turn_id, attempt_id, execution_generation,
+        holder_kind, holder_id, lease_epoch, provider_backend, provider_instance_id,
+        route_kind, route_target_id, route_epoch, workspace_generation, operation
+      ) values (
+        ${admissionId}, ${ids.accountId}, ${ids.workspaceId}, ${leaseId}, ${ids.groupId},
+        ${attempt.sessionId}, 'turn', ${attempt.attemptId}, ${attempt.turnId},
+        ${attempt.attemptId}, ${attempt.executionGeneration}, 'turn', ${attempt.holderId},
+        ${leaseEpoch}, 'modal', ${instanceId}, 'home', null, 0, 1, 'codemodeTokenRenewal'
+      )`;
+
+    let lifecycle: "running" | "terminated" | "error" | "not_found" = "running";
+    let terminateCalls = 0;
+    const { drainSandboxLease } = createSandboxLeaseActivities(reaperServices(), {
+      probeDrainableProvider: async () => "missing",
+      inspectProviderLifecycle: async () => {
+        if (lifecycle === "error") throw new Error("provider lifecycle probe failed");
+        if (lifecycle === "terminated") {
+          return {
+            status: "terminated" as const,
+            exitCode: 137,
+            providerBindingKey: MODAL_PROVIDER_BINDING.key,
+            providerBinding: MODAL_PROVIDER_BINDING.binding,
+          };
+        }
+        return {
+          status: lifecycle,
+          providerBindingKey: MODAL_PROVIDER_BINDING.key,
+          providerBinding: MODAL_PROVIDER_BINDING.binding,
+        };
+      },
+      terminateBox: async () => {
+        terminateCalls += 1;
+        return { terminated: true, providerMissingBeforeCapture: true };
+      },
+    });
+    const target = {
+      target: {
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: ids.groupId,
+        instanceId,
+        leaseEpoch,
+      },
+      timeoutClass: "fast" as const,
+      snapshotTimeoutMs: 60_000,
+      captureTimeoutMs: 120_000,
+      operationId: crypto.randomUUID(),
+    };
+    const expectRepairDeferred = async () => {
+      const [state] = await admin<{
+        provider_outcome: string | null;
+        admission_settled: Date | null;
+        claim_consumed: Date | null;
+        receipt_id: string | null;
+      }[]>`
+        select admission.provider_outcome,
+               admission.settled_at as admission_settled,
+               claim.consumed_at as claim_consumed,
+               receipt.id as receipt_id
+        from sandbox_workspace_mutation_admissions admission
+        left join sandbox_provider_loss_teardown_claims claim
+          on claim.admission_id = admission.id
+        left join sandbox_provider_loss_receipts receipt
+          on receipt.claim_id = claim.id
+        where admission.id = ${admissionId}::uuid`;
+      expect(state?.provider_outcome).toBeNull();
+      expect(state?.admission_settled).toBeNull();
+      expect(state?.claim_consumed).toBeNull();
+      expect(state?.receipt_id).toBeNull();
+    };
+
+    await expect(drainSandboxLease(target)).rejects.toThrow(/remains running/);
+    expect(terminateCalls).toBe(0);
+    expect((await readLease(db, ids.workspaceId, ids.groupId))?.liveness).toBe("draining");
+    await expectRepairDeferred();
+
+    lifecycle = "terminated";
+    await expect(
+      drainSandboxLease({ ...target, operationId: crypto.randomUUID() }),
+    ).rejects.toThrow(/remains terminated/);
+    expect(terminateCalls).toBe(0);
+    expect((await readLease(db, ids.workspaceId, ids.groupId))?.liveness).toBe("draining");
+    await expectRepairDeferred();
+
+    lifecycle = "error";
+    await expect(
+      drainSandboxLease({ ...target, operationId: crypto.randomUUID() }),
+    ).rejects.toThrow(/provider lifecycle probe failed/);
+    expect(terminateCalls).toBe(0);
+    expect((await readLease(db, ids.workspaceId, ids.groupId))?.liveness).toBe("draining");
+    await expectRepairDeferred();
+
+    lifecycle = "not_found";
+    expect(await drainSandboxLease({ ...target, operationId: crypto.randomUUID() })).toEqual({
+      status: "terminated",
+    });
+    expect(terminateCalls).toBe(0);
+    const [state] = await admin<{
+      liveness: string;
+      provider_outcome: string | null;
+      admission_settled: Date | null;
+      claim_consumed: Date | null;
+      receipt_consumed: Date | null;
+    }[]>`
+      select lease.liveness, admission.provider_outcome,
+             admission.settled_at as admission_settled,
+             claim.consumed_at as claim_consumed,
+             receipt.consumed_at as receipt_consumed
+      from sandbox_leases lease
+      join sandbox_workspace_mutation_admissions admission on admission.id = ${admissionId}::uuid
+      join sandbox_provider_loss_teardown_claims claim on claim.admission_id = admission.id
+      join sandbox_provider_loss_receipts receipt on receipt.claim_id = claim.id
+      where lease.id = ${leaseId}::uuid`;
+    expect(state?.liveness).toBe("cold");
+    expect(state?.provider_outcome).toBe("unknown");
+    expect(state?.admission_settled).toBeTruthy();
+    expect(state?.claim_consumed).toBeTruthy();
+    expect(state?.receipt_consumed).toBeTruthy();
+  }, 60_000);
+
   test("(1) one pass reaps stale holders and bounded subsequent passes terminate every due box", async () => {
     if (!available) return;
     const spy = makeTerminateSpy();

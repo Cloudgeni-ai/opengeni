@@ -22,6 +22,7 @@ import {
   confirmDrainCold,
   appendSessionEventToSandboxGroup,
   bindRetainedProcessProviderIdentity,
+  claimProviderLossTeardown,
   claimWorkspaceArchiveCapture,
   claimSandboxCheckpointArtifactsForGc,
   claimTerminalRetainedProcesses,
@@ -45,6 +46,7 @@ import {
   recordRetainedProcessReconciliationProof,
   replaceWorkspaceArchiveCaptureAfterProof,
   readLease,
+  readSandboxProviderLossReceipt,
   reapExpiredSessionListSnapshots,
   reapStaleLeaseHoldersGlobal,
   requestDueSandboxRotationsGlobal,
@@ -53,6 +55,8 @@ import {
   retainedProcessReconciliationProof,
   retainedProcessSettlementIdentity,
   settleSandboxCheckpointArtifactGc,
+  consumeSandboxProviderLossReceipt,
+  persistSandboxProviderLossObservation,
   rlsContextForWorkspace,
   settleRetainedProcess,
   type MeterableWarmLease,
@@ -234,6 +238,8 @@ export type SandboxLeaseActivityOptions = {
   /** Override the read-only exact-instance readiness probe used before the
    * reaper settles blockers for a provider that has definitively vanished. */
   probeDrainableProvider?: DrainableProviderProbeFn;
+  /** Override the independent exact Modal lifecycle read used by provider-loss repair. */
+  inspectProviderLifecycle?: HistoricalModalSandboxLifecycleProbeFn;
 };
 
 export type RetainedProcessProbeResult =
@@ -269,6 +275,10 @@ export type DrainableProviderProbeFn = (
   settings: ActivityServices["settings"],
   lease: LeaseSnapshot,
 ) => Promise<"ready" | "missing">;
+
+class SandboxProviderLossRepairDeferredError extends Error {
+  readonly name = "SandboxProviderLossRepairDeferredError";
+}
 
 export const RETAINED_PROCESS_RECONCILIATION_LIMIT = 20;
 export const RETAINED_PROCESS_RECONCILIATION_CLAIM_TTL_MS = 5 * 60_000;
@@ -541,6 +551,7 @@ export function createSandboxLeaseActivities(
           observability,
           terminateBox,
           probeDrainableProvider,
+          options.inspectProviderLifecycle ?? inspectModalSandboxLifecycle,
           captureAttempt,
         );
         return { status: drainedCold ? "terminated" : "skipped" };
@@ -1813,6 +1824,151 @@ async function probeDrainableProviderReadiness(
   }
 }
 
+function providerLossRepairUuid(seed: string): string {
+  const bytes = createHash("sha256")
+    .update(`opengeni:sandbox-provider-loss:${seed}`)
+    .digest()
+    .subarray(0, 16);
+  bytes[6] = (bytes[6]! & 0x0f) | 0x50;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+async function repairLegacyProviderLossAdmission(
+  db: ActivityServices["db"],
+  settings: ActivityServices["settings"],
+  accountId: string,
+  workspaceId: string,
+  lease: LeaseSnapshot,
+  observability: ActivityServices["observability"],
+  inspectProviderLifecycle: HistoricalModalSandboxLifecycleProbeFn,
+): Promise<boolean> {
+  const durableBackend = sandboxBackendForSdkBackendId(
+    (lease.resumeBackendId ?? lease.backend) as string,
+  );
+  if (durableBackend !== "modal" || !lease.instanceId) return false;
+
+  const identitySeed = `${lease.id}:${lease.leaseEpoch}:${lease.instanceId}`;
+  const claimId = providerLossRepairUuid(`claim:${identitySeed}`);
+  const receiptId = providerLossRepairUuid(`receipt:${claimId}`);
+  const destructionCorrelationId = `opengeni:modal-provider-loss:${claimId}`;
+  const claimed = await claimProviderLossTeardown(db, {
+    accountId,
+    workspaceId,
+    sandboxGroupId: lease.sandboxGroupId,
+    expectedEpoch: lease.leaseEpoch,
+    expectedInstanceId: lease.instanceId,
+    claimId,
+  });
+  if (claimed.status !== "claimed") {
+    observability.info("sandbox reaper: provider-loss repair not eligible", {
+      sandboxGroupId: lease.sandboxGroupId,
+      leaseEpoch: lease.leaseEpoch,
+      instanceId: lease.instanceId,
+      reason: claimed.reason,
+    });
+    return false;
+  }
+  observability.info("sandbox reaper: provider-loss repair claim acquired", {
+    sandboxGroupId: lease.sandboxGroupId,
+    leaseEpoch: lease.leaseEpoch,
+    instanceId: lease.instanceId,
+    admissionId: claimed.claim.admissionId,
+    reusedClaim: claimed.reused,
+  });
+
+  const existingReceipt = await readSandboxProviderLossReceipt(db, {
+    accountId,
+    workspaceId,
+    claimId,
+    receiptId,
+  });
+  if (existingReceipt.status === "identity_mismatch") {
+    throw new SandboxProviderLossRepairDeferredError(
+      `sandbox ${lease.sandboxGroupId} provider-loss receipt identity changed`,
+    );
+  }
+  observability.info("sandbox reaper: provider-loss receipt state observed", {
+    sandboxGroupId: lease.sandboxGroupId,
+    leaseEpoch: lease.leaseEpoch,
+    instanceId: lease.instanceId,
+    receiptState: existingReceipt.status,
+  });
+
+  const terminateOutcome = "not_found" as const;
+  if (existingReceipt.status === "missing") {
+    const observed = await inspectProviderLifecycle(settings, lease.instanceId);
+    if (observed.status !== "not_found") {
+      throw new SandboxProviderLossRepairDeferredError(
+        `sandbox ${lease.sandboxGroupId} Modal instance ${lease.instanceId} remains ${observed.status}`,
+      );
+    }
+    const persisted = await persistSandboxProviderLossObservation(db, {
+      accountId,
+      workspaceId,
+      claimId,
+      receiptId,
+      destructionCorrelationId,
+      providerBackend: "modal",
+      providerInstanceId: lease.instanceId,
+      terminateOutcome,
+      postDestructionStatus: "not_found",
+      postDestructionInstanceId: lease.instanceId,
+    });
+    observability.info("sandbox reaper: provider-loss not_found proof persisted", {
+      sandboxGroupId: lease.sandboxGroupId,
+      leaseEpoch: lease.leaseEpoch,
+      instanceId: lease.instanceId,
+      terminateOutcome,
+      receiptStatus: persisted.status,
+    });
+    if (persisted.status === "rejected") {
+      throw new SandboxProviderLossRepairDeferredError(
+        `sandbox ${lease.sandboxGroupId} provider-loss receipt was not persisted: ${persisted.reason}`,
+      );
+    }
+  } else {
+    const observed = await inspectProviderLifecycle(settings, lease.instanceId);
+    if (observed.status !== "not_found") {
+      throw new SandboxProviderLossRepairDeferredError(
+        `sandbox ${lease.sandboxGroupId} Modal instance ${lease.instanceId} remains ${observed.status}`,
+      );
+    }
+  }
+
+  const consumed = await consumeSandboxProviderLossReceipt(db, {
+    accountId,
+    workspaceId,
+    receiptId,
+    claimId,
+    admissionId: claimed.claim.admissionId,
+    leaseId: claimed.claim.leaseId,
+    leaseEpoch: claimed.claim.leaseEpoch,
+    providerInstanceId: claimed.claim.providerInstanceId,
+  });
+  if (consumed.status === "consumed" || consumed.status === "already_consumed") {
+    observability.info("sandbox reaper: consumed exact Modal provider-loss receipt", {
+      sandboxGroupId: lease.sandboxGroupId,
+      leaseEpoch: lease.leaseEpoch,
+      instanceId: lease.instanceId,
+      admissionId: claimed.claim.admissionId,
+      reusedClaim: claimed.reused,
+    });
+    return true;
+  }
+  observability.warn("sandbox reaper: provider-loss receipt consumption deferred", {
+    sandboxGroupId: lease.sandboxGroupId,
+    leaseEpoch: lease.leaseEpoch,
+    instanceId: lease.instanceId,
+    status: consumed.status,
+    reason: consumed.reason,
+  });
+  throw new SandboxProviderLossRepairDeferredError(
+    `sandbox ${lease.sandboxGroupId} provider-loss receipt consumption was rejected: ${consumed.reason}`,
+  );
+}
+
 /**
  * Terminate one drainable box by id, then CAS its lease draining->cold under the
  * epoch fence. Returns true when the lease went cold (the box is ours to stop
@@ -1836,6 +1992,7 @@ async function terminateDrainableBox(
   observability: ActivityServices["observability"],
   terminateBox: TerminateBoxFn,
   probeDrainableProvider: DrainableProviderProbeFn,
+  inspectProviderLifecycle: HistoricalModalSandboxLifecycleProbeFn,
   attempt: SandboxDrainCaptureAttempt,
 ): Promise<boolean> {
   // Resolve the account for the RLS-scoped confirmDrainCold (the global sweep
@@ -1873,6 +2030,33 @@ async function terminateDrainableBox(
   }
 
   const captureTimeoutMs = attempt.captureTimeoutMs;
+  const durableBackend = sandboxBackendForSdkBackendId(
+    (lease.resumeBackendId ?? lease.backend) as string,
+  );
+  if (lease.instanceId && durableBackend === "modal") {
+    const providerState = await probeDrainableProvider(settings, lease);
+    if (providerState === "missing") {
+      const repaired = await repairLegacyProviderLossAdmission(
+        db,
+        settings,
+        accountId,
+        row.workspaceId,
+        lease,
+        observability,
+        inspectProviderLifecycle,
+      );
+      if (repaired) {
+        const { wentCold } = await confirmDrainCold(db, {
+          accountId,
+          workspaceId: row.workspaceId,
+          sandboxGroupId: row.sandboxGroupId,
+          expectedEpoch: row.leaseEpoch,
+          providerMissingBeforeCapture: true,
+        });
+        return wentCold;
+      }
+    }
+  }
   let captureClaim:
     | NonNullable<
         Extract<Awaited<ReturnType<typeof claimWorkspaceArchiveCapture>>, { status: "claimed" }>

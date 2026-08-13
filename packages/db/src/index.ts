@@ -35374,7 +35374,11 @@ export type SandboxWorkspaceMutationAdmission = {
   workspaceGeneration: number;
 };
 
-export type SandboxWorkspaceMutationProviderOutcome = "resolved" | "rejected";
+export type SandboxWorkspaceMutationProviderOutcome =
+  | "resolved"
+  | "rejected"
+  | "retained"
+  | "unknown";
 
 export type SandboxRetainedProcessState = "active" | "exited" | "lost";
 
@@ -36245,7 +36249,7 @@ type AdmissionIdentityRow = {
   route_epoch: number | string;
   workspace_generation: number | string;
   operation: string;
-  provider_outcome: "resolved" | "rejected" | "retained" | null;
+  provider_outcome: "resolved" | "rejected" | "retained" | "unknown" | null;
   settled_at: Date | string | null;
 } & Record<string, unknown>;
 
@@ -37906,6 +37910,791 @@ export type WorkspaceArchiveCaptureClaim = {
    * or release/re-arm. */
   publishedAt: Date | null;
 };
+
+export type SandboxProviderLossTeardownClaim = {
+  id: string;
+  admissionId: string;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  attemptId: string;
+  executionGeneration: number;
+  leaseId: string;
+  sandboxGroupId: string;
+  leaseEpoch: number;
+  workspaceGeneration: number;
+  providerBackend: string;
+  providerInstanceId: string;
+  routeKind: string;
+  routeTargetId: string | null;
+  routeEpoch: number;
+  operation: string;
+  holderId: string;
+  claimedAt: Date;
+};
+
+export type ClaimProviderLossTeardownResult =
+  | { status: "claimed"; claim: SandboxProviderLossTeardownClaim; reused: boolean }
+  | {
+      status: "not_eligible";
+      reason:
+        | "lease_missing"
+        | "admission_missing"
+        | "attempt_not_terminal"
+        | "later_admission"
+        | "active_process"
+        | "open_pty"
+        | "process_holder"
+        | "holder_present"
+        | "claim_race";
+    };
+
+/**
+ * Claim one exact legacy Codemode renewal for provider-loss repair. This is a
+ * distinct teardown claim, never an archive-capture claim. The transaction
+ * locks the control/session/attempt prefix first, then admission/process/PTY,
+ * then the lease, and inserts an immutable hard fence before any provider call.
+ */
+export async function claimProviderLossTeardown(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    expectedEpoch: number;
+    expectedInstanceId: string;
+    claimId: string;
+  },
+): Promise<ClaimProviderLossTeardownResult> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        const leaseRows = await tx.execute<LeaseRow>(sql`
+          select * from sandbox_leases
+          where account_id = ${input.accountId}
+            and workspace_id = ${input.workspaceId}
+            and sandbox_group_id = ${input.sandboxGroupId}
+            and lease_epoch = ${input.expectedEpoch}
+            and instance_id = ${input.expectedInstanceId}
+            and backend = 'modal'
+            and liveness = 'draining'
+            and refcount = 0
+            and archive_capture_id is null
+            and (reaper_hold_id is null or reaper_hold_until <= now())
+        `);
+        const lease = leaseRows[0];
+        if (!lease) return { status: "not_eligible", reason: "lease_missing" } as const;
+
+        const candidates = await tx.execute<AdmissionIdentityRow>(sql`
+          select admission.*
+          from sandbox_workspace_mutation_admissions admission
+          join session_turn_attempts attempt
+            on attempt.account_id = admission.account_id
+           and attempt.workspace_id = admission.workspace_id
+           and attempt.session_id = admission.session_id
+           and attempt.turn_id = admission.turn_id
+           and attempt.id = admission.attempt_id
+           and attempt.execution_generation = admission.execution_generation
+          where admission.account_id = ${input.accountId}
+            and admission.workspace_id = ${input.workspaceId}
+            and admission.lease_id = ${lease.id}
+            and admission.lease_epoch = ${input.expectedEpoch}
+            and admission.provider_backend = 'modal'
+            and admission.provider_instance_id = ${input.expectedInstanceId}
+            and admission.actor_kind = 'turn'
+            and admission.operation = 'codemodeTokenRenewal'
+            and admission.provider_outcome is null
+            and admission.settled_at is null
+            and attempt.state = 'closed'
+            and attempt.outcome = 'superseded'
+            and exists (
+              select 1 from session_attempt_interruptions interruption
+              where interruption.workspace_id = attempt.workspace_id
+                and interruption.session_id = attempt.session_id
+                and interruption.attempt_id = attempt.id
+                and interruption.state = 'settled'
+            )
+            and not exists (
+              select 1 from session_attempt_interruptions interruption
+              where interruption.workspace_id = attempt.workspace_id
+                and interruption.session_id = attempt.session_id
+                and interruption.attempt_id = attempt.id
+                and interruption.state in ('pending', 'delivered', 'acknowledged')
+            )
+          order by admission.id
+        `);
+        if (candidates.length === 0) return { status: "not_eligible", reason: "admission_missing" } as const;
+        if (candidates.length !== 1) return { status: "not_eligible", reason: "later_admission" } as const;
+        const admission = candidates[0]!;
+
+        await lockSessionEventWriteRows(tx, {
+          workspaceId: input.workspaceId,
+          controlLock: "share",
+          sessionIds: [admission.session_id],
+          turnIds: [admission.turn_id!],
+          attemptIds: [admission.attempt_id!],
+        });
+
+        const lockedAdmissions = await tx.execute<AdmissionIdentityRow>(sql`
+          select * from sandbox_workspace_mutation_admissions
+          where account_id = ${input.accountId}
+            and workspace_id = ${input.workspaceId}
+            and lease_id = ${lease.id}
+            and lease_epoch = ${input.expectedEpoch}
+          order by id
+          for update
+        `);
+        const lockedAdmission = lockedAdmissions.find((row: AdmissionIdentityRow) => row.id === admission.id);
+        if (!lockedAdmission) {
+          return { status: "not_eligible", reason: "admission_missing" } as const;
+        }
+
+        const openAdmissions = lockedAdmissions.filter(
+          (row: AdmissionIdentityRow) => row.provider_outcome === null && row.settled_at === null,
+        );
+        if (
+          openAdmissions.length !== 1 ||
+          openAdmissions[0]!.id !== lockedAdmission.id ||
+          lockedAdmissions.some(
+            (row: AdmissionIdentityRow) => Number(row.workspace_generation) > Number(lockedAdmission.workspace_generation),
+          )
+        ) {
+          return { status: "not_eligible", reason: "later_admission" } as const;
+        }
+
+        const activeProcesses = await tx.execute<{ id: string }>(sql`
+          select id from sandbox_retained_processes
+          where account_id = ${input.accountId} and workspace_id = ${input.workspaceId}
+            and lease_id = ${lease.id} and lease_epoch = ${input.expectedEpoch}
+            and provider_instance_id = ${input.expectedInstanceId} and state = 'active'
+          for update
+        `);
+        if (activeProcesses.length) return { status: "not_eligible", reason: "active_process" } as const;
+        const openPtys = await tx.execute<{ id: string }>(sql`
+          select id from sandbox_pty_sessions
+          where account_id = ${input.accountId} and workspace_id = ${input.workspaceId}
+            and lease_id = ${lease.id} and lease_epoch = ${input.expectedEpoch}
+            and provider_instance_id = ${input.expectedInstanceId} and status = 'open'
+          for update
+        `);
+        if (openPtys.length) return { status: "not_eligible", reason: "open_pty" } as const;
+        const processHolders = await tx.execute<{ id: string }>(sql`
+          select id from sandbox_lease_holders
+          where account_id = ${input.accountId} and workspace_id = ${input.workspaceId}
+            and lease_id = ${lease.id} and kind = 'process'
+          for update
+        `);
+        if (processHolders.length) return { status: "not_eligible", reason: "process_holder" } as const;
+        const holders = await tx.execute<{ id: string }>(sql`
+          select id from sandbox_lease_holders
+          where account_id = ${input.accountId} and workspace_id = ${input.workspaceId}
+            and lease_id = ${lease.id}
+          for update
+        `);
+        if (holders.length) return { status: "not_eligible", reason: "holder_present" } as const;
+
+        const lockedLeases = await tx.execute<LeaseRow>(sql`
+          select * from sandbox_leases
+          where id = ${lease.id}
+          for update
+        `);
+        const lockedLease = lockedLeases[0];
+        if (
+          !lockedLease ||
+          lockedLease.account_id !== input.accountId ||
+          lockedLease.workspace_id !== input.workspaceId ||
+          lockedLease.sandbox_group_id !== input.sandboxGroupId ||
+          Number(lockedLease.lease_epoch) !== input.expectedEpoch ||
+          lockedLease.instance_id !== input.expectedInstanceId ||
+          lockedLease.backend !== "modal" ||
+          lockedLease.liveness !== "draining" ||
+          Number(lockedLease.refcount) !== 0 ||
+          lockedLease.archive_capture_id !== null ||
+          (lockedLease.reaper_hold_id !== null &&
+            lockedLease.reaper_hold_until !== null &&
+            new Date(lockedLease.reaper_hold_until) > new Date())
+        ) {
+          return { status: "not_eligible", reason: "claim_race" } as const;
+        }
+
+        const existingClaims = await tx.execute<{
+          id: string; admission_id: string; account_id: string; workspace_id: string;
+          session_id: string; turn_id: string; attempt_id: string;
+          execution_generation: number | string; lease_id: string; sandbox_group_id: string;
+          lease_epoch: number | string; workspace_generation: number | string;
+          provider_backend: string; provider_instance_id: string; route_kind: string;
+          route_target_id: string | null; route_epoch: number | string; operation: string;
+          holder_id: string; claimed_at: Date | string; consumed_at: Date | string | null;
+        }>(sql`
+          select * from sandbox_provider_loss_teardown_claims
+          where admission_id = ${lockedAdmission.id}
+          for update
+        `);
+        const existing = existingClaims[0];
+        if (existing) {
+          if (existing.consumed_at) return { status: "not_eligible", reason: "claim_race" } as const;
+          const exact =
+            existing.id === input.claimId &&
+            existing.account_id === lockedAdmission.account_id &&
+            existing.workspace_id === lockedAdmission.workspace_id &&
+            existing.session_id === lockedAdmission.session_id &&
+            existing.admission_id === lockedAdmission.id &&
+            existing.actor_kind === lockedAdmission.actor_kind &&
+            existing.actor_id === lockedAdmission.actor_id &&
+            existing.operation === lockedAdmission.operation &&
+            existing.turn_id === lockedAdmission.turn_id &&
+            existing.attempt_id === lockedAdmission.attempt_id &&
+            Number(existing.execution_generation) === Number(lockedAdmission.execution_generation) &&
+            existing.holder_kind === lockedAdmission.holder_kind &&
+            existing.holder_id === lockedAdmission.holder_id &&
+            existing.lease_id === lockedAdmission.lease_id &&
+            existing.sandbox_group_id === lockedAdmission.sandbox_group_id &&
+            Number(existing.lease_epoch) === Number(lockedAdmission.lease_epoch) &&
+            Number(existing.workspace_generation) === Number(lockedAdmission.workspace_generation) &&
+            existing.provider_backend === lockedAdmission.provider_backend &&
+            existing.provider_instance_id === lockedAdmission.provider_instance_id &&
+            existing.route_kind === lockedAdmission.route_kind &&
+            existing.route_target_id === lockedAdmission.route_target_id &&
+            Number(existing.route_epoch) === Number(lockedAdmission.route_epoch);
+          if (!exact) return { status: "not_eligible", reason: "claim_race" } as const;
+          return {
+            status: "claimed" as const,
+            reused: true,
+            claim: {
+              id: existing.id,
+              admissionId: existing.admission_id,
+              accountId: existing.account_id,
+              workspaceId: existing.workspace_id,
+              sessionId: existing.session_id,
+              turnId: existing.turn_id,
+              attemptId: existing.attempt_id,
+              executionGeneration: Number(existing.execution_generation),
+              leaseId: existing.lease_id,
+              sandboxGroupId: existing.sandbox_group_id,
+              leaseEpoch: Number(existing.lease_epoch),
+              workspaceGeneration: Number(existing.workspace_generation),
+              providerBackend: existing.provider_backend,
+              providerInstanceId: existing.provider_instance_id,
+              routeKind: existing.route_kind,
+              routeTargetId: existing.route_target_id,
+              routeEpoch: Number(existing.route_epoch),
+              operation: existing.operation,
+              holderId: existing.holder_id,
+              claimedAt: existing.claimed_at instanceof Date ? existing.claimed_at : new Date(existing.claimed_at),
+            },
+          };
+        }
+
+        const claimed = await tx.execute<{
+          id: string; admission_id: string; account_id: string; workspace_id: string;
+          session_id: string; turn_id: string; attempt_id: string;
+          execution_generation: number | string; lease_id: string; sandbox_group_id: string;
+          lease_epoch: number | string; workspace_generation: number | string;
+          provider_backend: string; provider_instance_id: string; route_kind: string;
+          route_target_id: string | null; route_epoch: number | string; operation: string;
+          holder_id: string; claimed_at: Date | string;
+        }>(sql`
+          insert into sandbox_provider_loss_teardown_claims (
+            id, account_id, workspace_id, session_id, admission_id, actor_kind, actor_id,
+            operation, turn_id, attempt_id, execution_generation, holder_kind, holder_id,
+            lease_id, sandbox_group_id, lease_epoch, workspace_generation, provider_backend,
+            provider_instance_id, route_kind, route_target_id, route_epoch, claimed_at
+          ) values (
+            ${input.claimId}::uuid, ${admission.account_id}, ${admission.workspace_id},
+            ${lockedAdmission.session_id}, ${lockedAdmission.id}, ${lockedAdmission.actor_kind}, ${lockedAdmission.actor_id},
+            ${lockedAdmission.operation}, ${lockedAdmission.turn_id}, ${lockedAdmission.attempt_id},
+            ${lockedAdmission.execution_generation}, ${lockedAdmission.holder_kind}, ${lockedAdmission.holder_id},
+            ${lockedAdmission.lease_id}, ${lockedAdmission.sandbox_group_id}, ${lockedAdmission.lease_epoch},
+            ${lockedAdmission.workspace_generation}, ${lockedAdmission.provider_backend},
+            ${lockedAdmission.provider_instance_id}, ${lockedAdmission.route_kind}, ${lockedAdmission.route_target_id},
+            ${lockedAdmission.route_epoch}, now()
+          )
+          on conflict (admission_id) do nothing
+          returning *
+        `);
+        const row = claimed[0];
+        if (!row) return { status: "not_eligible", reason: "claim_race" } as const;
+        return {
+          status: "claimed" as const,
+          reused: false,
+          claim: {
+            id: row.id,
+            admissionId: row.admission_id,
+            accountId: row.account_id,
+            workspaceId: row.workspace_id,
+            sessionId: row.session_id,
+            turnId: row.turn_id,
+            attemptId: row.attempt_id,
+            executionGeneration: Number(row.execution_generation),
+            leaseId: row.lease_id,
+            sandboxGroupId: row.sandbox_group_id,
+            leaseEpoch: Number(row.lease_epoch),
+            workspaceGeneration: Number(row.workspace_generation),
+            providerBackend: row.provider_backend,
+            providerInstanceId: row.provider_instance_id,
+            routeKind: row.route_kind,
+            routeTargetId: row.route_target_id,
+            routeEpoch: Number(row.route_epoch),
+            operation: row.operation,
+            holderId: row.holder_id,
+            claimedAt: row.claimed_at instanceof Date ? row.claimed_at : new Date(row.claimed_at),
+          },
+        };
+      }),
+  );
+}
+
+export type ReadSandboxProviderLossReceiptResult =
+  | { status: "missing" }
+  | { status: "available"; receiptId: string }
+  | { status: "consumed"; receiptId: string }
+  | { status: "identity_mismatch" };
+
+/** Read only the exact receipt identity needed to make provider retries safe. */
+export async function readSandboxProviderLossReceipt(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    claimId: string;
+    receiptId: string;
+  },
+): Promise<ReadSandboxProviderLossReceiptResult> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb.execute<{
+        id: string;
+        claim_id: string;
+        consumed_at: Date | string | null;
+      }>(sql`
+        select id, claim_id, consumed_at
+        from sandbox_provider_loss_receipts
+        where account_id = ${input.accountId}
+          and workspace_id = ${input.workspaceId}
+          and claim_id = ${input.claimId}::uuid
+        limit 1
+      `);
+      const row = rows[0];
+      if (!row) return { status: "missing" } as const;
+      if (row.id !== input.receiptId || row.claim_id !== input.claimId) {
+        return { status: "identity_mismatch" } as const;
+      }
+      return row.consumed_at
+        ? ({ status: "consumed", receiptId: row.id } as const)
+        : ({ status: "available", receiptId: row.id } as const);
+    },
+  );
+}
+
+export type PersistSandboxProviderLossObservationResult =
+  | { status: "persisted"; receiptId: string }
+  | { status: "already_persisted"; receiptId: string }
+  | { status: "rejected"; reason: "claim_missing" | "provider_identity_mismatch" | "not_found_not_authoritative" | "wrong_terminate_outcome" };
+
+/** Persist evidence only after the provider action returned and an independent
+ * control-plane read reported the exact instance as not_found. Timestamps come
+ * from PostgreSQL; callers cannot fabricate ordering or receipt age. */
+export async function persistSandboxProviderLossObservation(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    claimId: string;
+    receiptId: string;
+    destructionCorrelationId: string;
+    providerBackend: "modal";
+    providerInstanceId: string;
+    terminateOutcome: "terminated" | "not_found";
+    postDestructionStatus: "not_found" | "terminated" | "unknown";
+    postDestructionInstanceId: string | null;
+  },
+): Promise<PersistSandboxProviderLossObservationResult> {
+  if (
+    input.postDestructionStatus !== "not_found" ||
+    input.postDestructionInstanceId !== input.providerInstanceId ||
+    input.destructionCorrelationId.length === 0 ||
+    input.destructionCorrelationId.length > 256
+  ) {
+    return { status: "rejected", reason: "not_found_not_authoritative" };
+  }
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb.execute<{
+        id: string;
+        provider_backend: string;
+        provider_instance_id: string;
+        consumed_at: Date | string | null;
+      }>(sql`
+        select id, provider_backend, provider_instance_id, consumed_at
+        from sandbox_provider_loss_teardown_claims
+        where id = ${input.claimId}::uuid
+          and account_id = ${input.accountId}
+          and workspace_id = ${input.workspaceId}
+        for update
+      `);
+      const claim = rows[0];
+      if (!claim) return { status: "rejected", reason: "claim_missing" } as const;
+      if (
+        claim.provider_backend !== input.providerBackend ||
+        claim.provider_instance_id !== input.providerInstanceId
+      ) {
+        return { status: "rejected", reason: "provider_identity_mismatch" } as const;
+      }
+      if (claim.consumed_at) {
+        return { status: "rejected", reason: "claim_missing" } as const;
+      }
+      const existing = await scopedDb.execute<{
+        id: string;
+        claim_id: string;
+        provider_backend: string;
+        provider_instance_id: string;
+        terminate_outcome: "terminated" | "not_found";
+        destruction_correlation_id: string;
+      }>(sql`
+        select id, claim_id, provider_backend, provider_instance_id,
+          terminate_outcome, destruction_correlation_id
+        from sandbox_provider_loss_receipts
+        where claim_id = ${input.claimId}::uuid
+        limit 1
+      `);
+      if (existing[0]) {
+        const exact =
+          existing[0].claim_id === input.claimId &&
+          existing[0].id === input.receiptId &&
+          existing[0].provider_backend === input.providerBackend &&
+          existing[0].provider_instance_id === input.providerInstanceId &&
+          existing[0].terminate_outcome === input.terminateOutcome &&
+          existing[0].destruction_correlation_id === input.destructionCorrelationId;
+        return exact
+          ? ({ status: "already_persisted", receiptId: existing[0].id } as const)
+          : ({ status: "rejected", reason: "provider_identity_mismatch" } as const);
+      }
+      const inserted = await scopedDb.execute<{ id: string }>(sql`
+        insert into sandbox_provider_loss_receipts (
+          id, account_id, workspace_id, session_id, admission_id, claim_id, actor_kind, actor_id,
+          operation, turn_id, attempt_id, execution_generation, holder_kind, holder_id,
+          lease_id, sandbox_group_id, lease_epoch, workspace_generation, provider_backend,
+          provider_instance_id, route_kind, route_target_id, route_epoch,
+          terminate_outcome,
+          destruction_correlation_id, destruction_observed_at, not_found_observed_at
+        )
+        select ${input.receiptId}::uuid, account_id, workspace_id, session_id, admission_id, claim_id, actor_kind, actor_id,
+          operation, turn_id, attempt_id, execution_generation, holder_kind, holder_id,
+          lease_id, sandbox_group_id, lease_epoch, workspace_generation, provider_backend,
+          provider_instance_id, route_kind, route_target_id, route_epoch,
+          ${input.terminateOutcome}, ${input.destructionCorrelationId}, now(), now()
+        from sandbox_provider_loss_teardown_claims
+        where id = ${input.claimId}::uuid
+        returning id
+      `);
+      return inserted[0]
+        ? ({ status: "persisted", receiptId: inserted[0].id } as const)
+        : ({ status: "rejected", reason: "claim_missing" } as const);
+    },
+  );
+}
+
+export type ConsumeSandboxProviderLossReceiptResult =
+  | { status: "consumed"; admissionId: string }
+  | { status: "already_consumed"; admissionId: string }
+  | { status: "rejected"; reason: "receipt_missing" | "identity_mismatch" | "blocker_present" | "later_admission" | "admission_not_open" };
+
+/** Consume exactly one receipt and change exactly one admission to unknown.
+ * The provider is never called here and no other admission is bulk-settled. */
+export async function consumeSandboxProviderLossReceipt(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    receiptId: string;
+    claimId: string;
+    admissionId: string;
+    leaseId: string;
+    leaseEpoch: number;
+    providerInstanceId: string;
+  },
+): Promise<ConsumeSandboxProviderLossReceiptResult> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        const receipts = await tx.execute<{
+          id: string;
+          admission_id: string;
+          claim_id: string;
+          account_id: string;
+          workspace_id: string;
+          session_id: string;
+          turn_id: string;
+          attempt_id: string;
+          lease_id: string;
+          sandbox_group_id: string;
+          lease_epoch: number | string;
+          workspace_generation: number | string;
+          provider_backend: string;
+          provider_instance_id: string;
+          route_kind: string;
+          route_target_id: string | null;
+          route_epoch: number | string;
+          execution_generation: number | string;
+          operation: string;
+          holder_id: string;
+          terminate_outcome: "terminated" | "not_found";
+          destruction_correlation_id: string;
+          consumed_at: Date | string | null;
+        }>(sql`
+          select
+            receipt.id,
+            receipt.admission_id,
+            receipt.claim_id,
+            receipt.account_id,
+            receipt.workspace_id,
+            receipt.session_id,
+            receipt.turn_id,
+            receipt.attempt_id,
+            receipt.lease_id,
+            receipt.sandbox_group_id,
+            receipt.lease_epoch,
+            receipt.workspace_generation,
+            receipt.execution_generation,
+            receipt.provider_backend,
+            receipt.provider_instance_id,
+            receipt.route_kind,
+            receipt.route_target_id,
+            receipt.route_epoch,
+            receipt.operation,
+            receipt.holder_id,
+            receipt.terminate_outcome,
+            receipt.destruction_correlation_id,
+            receipt.consumed_at
+          from sandbox_provider_loss_receipts receipt
+          where receipt.id = ${input.receiptId}::uuid
+            and receipt.account_id = ${input.accountId}
+            and receipt.workspace_id = ${input.workspaceId}
+            and receipt.claim_id = ${input.claimId}::uuid
+        `);
+        const receipt = receipts[0];
+        if (!receipt) return { status: "rejected", reason: "receipt_missing" } as const;
+        if (receipt.consumed_at) return { status: "already_consumed", admissionId: receipt.admission_id } as const;
+        if (
+          receipt.admission_id !== input.admissionId ||
+          receipt.lease_id !== input.leaseId ||
+          Number(receipt.lease_epoch) !== input.leaseEpoch ||
+          receipt.provider_instance_id !== input.providerInstanceId
+        ) return { status: "rejected", reason: "identity_mismatch" } as const;
+
+        await lockSessionEventWriteRows(tx, {
+          workspaceId: input.workspaceId,
+          controlLock: "share",
+          sessionIds: [receipt.session_id],
+          turnIds: [receipt.turn_id],
+          attemptIds: [receipt.attempt_id],
+        });
+
+        const admissions = await tx.execute<AdmissionIdentityRow>(sql`
+          select * from sandbox_workspace_mutation_admissions
+          where id = ${input.admissionId}::uuid
+            and account_id = ${input.accountId}
+            and workspace_id = ${input.workspaceId}
+            and lease_id = ${input.leaseId}::uuid
+            and lease_epoch = ${input.leaseEpoch}
+            and provider_instance_id = ${input.providerInstanceId}
+          for update
+        `);
+        const admission = admissions[0];
+        if (!admission || admission.provider_outcome !== null || admission.settled_at !== null) {
+          return { status: "rejected", reason: "admission_not_open" } as const;
+        }
+        const attemptRows = await tx.execute<{
+          state: string;
+          outcome: string | null;
+          quiesced_at: Date | string | null;
+        }>(sql`
+          select state, outcome, quiesced_at
+          from session_turn_attempts
+          where account_id = ${input.accountId}
+            and workspace_id = ${input.workspaceId}
+            and session_id = ${receipt.session_id}
+            and turn_id = ${receipt.turn_id}
+            and id = ${receipt.attempt_id}
+            and execution_generation = ${Number(receipt.execution_generation)}
+          for update
+        `);
+        const attempt = attemptRows[0];
+        if (!attempt || attempt.state !== "closed" || attempt.outcome !== "superseded") {
+          return { status: "rejected", reason: "admission_not_open" } as const;
+        }
+        const interruptions = await tx.execute<{ state: string }>(sql`
+          select state
+          from session_attempt_interruptions
+          where workspace_id = ${input.workspaceId}
+            and session_id = ${receipt.session_id}
+            and attempt_id = ${receipt.attempt_id}
+          order by id
+          for update
+        `);
+        if (
+          !interruptions.some((row: { state: string }) => row.state === "settled") ||
+          interruptions.some((row: { state: string }) =>
+            ["pending", "delivered", "acknowledged"].includes(row.state),
+          )
+        ) {
+          return { status: "rejected", reason: "admission_not_open" } as const;
+        }
+        const lockedAdmissions = await tx.execute<AdmissionIdentityRow>(sql`
+          select *
+          from sandbox_workspace_mutation_admissions
+          where account_id = ${input.accountId}
+            and workspace_id = ${input.workspaceId}
+            and lease_id = ${input.leaseId}::uuid
+            and lease_epoch = ${input.leaseEpoch}
+          order by id
+          for update
+        `);
+        const openAdmissions = lockedAdmissions.filter(
+          (row: AdmissionIdentityRow) => row.provider_outcome === null && row.settled_at === null,
+        );
+        if (openAdmissions.length !== 1 || openAdmissions[0]!.id !== admission.id) {
+          return { status: "rejected", reason: "later_admission" } as const;
+        }
+        const activeProcesses = await tx.execute<{ id: string }>(sql`
+          select id from sandbox_retained_processes
+          where account_id = ${input.accountId}
+            and workspace_id = ${input.workspaceId}
+            and lease_id = ${input.leaseId}::uuid
+            and lease_epoch = ${input.leaseEpoch}
+            and state = 'active'
+          order by id
+          for update
+        `);
+        const openPtys = await tx.execute<{ id: string }>(sql`
+          select id from sandbox_pty_sessions
+          where account_id = ${input.accountId}
+            and workspace_id = ${input.workspaceId}
+            and lease_id = ${input.leaseId}::uuid
+            and lease_epoch = ${input.leaseEpoch}
+            and status = 'open'
+          order by id
+          for update
+        `);
+        const holders = await tx.execute<{ id: string }>(sql`
+          select id from sandbox_lease_holders
+          where account_id = ${input.accountId}
+            and workspace_id = ${input.workspaceId}
+            and lease_id = ${input.leaseId}::uuid
+          order by id
+          for update
+        `);
+        if (activeProcesses.length || openPtys.length || holders.length) {
+          return { status: "rejected", reason: "blocker_present" } as const;
+        }
+        const claims = await tx.execute<AdmissionIdentityRow & { claim_id: string; claimed_at: Date | string; consumed_at: Date | string | null }>(sql`
+          select *
+          from sandbox_provider_loss_teardown_claims
+          where id = ${input.claimId}::uuid
+            and account_id = ${input.accountId}
+            and workspace_id = ${input.workspaceId}
+            and admission_id = ${input.admissionId}::uuid
+          for update
+        `);
+        const claim = claims[0];
+        if (!claim || claim.consumed_at) {
+          return { status: "rejected", reason: "receipt_missing" } as const;
+        }
+        if (
+          claim.id !== receipt.claim_id ||
+          claim.admission_id !== receipt.admission_id ||
+          claim.account_id !== receipt.account_id ||
+          claim.workspace_id !== receipt.workspace_id ||
+          claim.session_id !== receipt.session_id ||
+          claim.turn_id !== receipt.turn_id ||
+          claim.attempt_id !== receipt.attempt_id ||
+          Number(claim.execution_generation) !== Number(receipt.execution_generation) ||
+          claim.actor_kind !== "turn" ||
+          claim.actor_id !== receipt.attempt_id ||
+          claim.operation !== receipt.operation ||
+          claim.holder_kind !== "turn" ||
+          claim.holder_id !== receipt.holder_id ||
+          claim.lease_id !== receipt.lease_id ||
+          claim.sandbox_group_id !== receipt.sandbox_group_id ||
+          Number(claim.lease_epoch) !== Number(receipt.lease_epoch) ||
+          Number(claim.workspace_generation) !== Number(receipt.workspace_generation) ||
+          claim.provider_backend !== receipt.provider_backend ||
+          claim.provider_instance_id !== receipt.provider_instance_id ||
+          claim.route_kind !== receipt.route_kind ||
+          claim.route_target_id !== receipt.route_target_id ||
+          Number(claim.route_epoch) !== Number(receipt.route_epoch)
+        ) {
+          return { status: "rejected", reason: "identity_mismatch" } as const;
+        }
+        const lockedReceipts = await tx.execute<{
+          id: string;
+          admission_id: string;
+          claim_id: string;
+          consumed_at: Date | string | null;
+        }>(sql`
+          select id, admission_id, claim_id, consumed_at
+          from sandbox_provider_loss_receipts
+          where id = ${input.receiptId}::uuid
+            and account_id = ${input.accountId}
+            and workspace_id = ${input.workspaceId}
+            and admission_id = ${input.admissionId}::uuid
+            and claim_id = ${input.claimId}::uuid
+          for update
+        `);
+        if (!lockedReceipts[0] || lockedReceipts[0].consumed_at) {
+          return { status: "rejected", reason: "receipt_missing" } as const;
+        }
+        const leases = await tx.execute<LeaseRow>(sql`
+          select * from sandbox_leases
+          where id = ${input.leaseId}::uuid
+          for update
+        `);
+        const lease = leases[0];
+        if (
+          !lease ||
+          lease.account_id !== input.accountId ||
+          lease.workspace_id !== input.workspaceId ||
+          lease.sandbox_group_id !== receipt.sandbox_group_id ||
+          Number(lease.lease_epoch) !== input.leaseEpoch ||
+          lease.instance_id !== input.providerInstanceId ||
+          lease.liveness !== "draining" ||
+          Number(lease.refcount) !== 0
+        ) {
+          return { status: "rejected", reason: "identity_mismatch" } as const;
+        }
+        await tx.execute(sql`
+          update sandbox_provider_loss_receipts
+          set consumed_at = now()
+          where id = ${input.receiptId}::uuid
+            and consumed_at is null
+        `);
+        await tx.execute(sql`
+          update sandbox_provider_loss_teardown_claims
+          set consumed_at = now()
+          where id = ${input.claimId}::uuid
+            and consumed_at is null
+        `);
+        await tx.execute(sql`
+          update sandbox_workspace_mutation_admissions
+          set provider_outcome = 'unknown', settled_at = now()
+          where id = ${input.admissionId}::uuid
+            and provider_outcome is null and settled_at is null
+        `);
+        return { status: "consumed", admissionId: input.admissionId } as const;
+      }),
+  );
+}
 
 /** Read the authoritative takeover clock for one exact unpublished capture.
  * Provider recovery must never compare a Postgres deadline with an application

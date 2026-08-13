@@ -115,7 +115,10 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0237_interaction_transition_reaper.sql",
     );
     const sourceContract = transitionReaper
-      ? await contractWithoutMigration(transitionReaper.path)
+      ? await contractWithoutMigrations([
+          transitionReaper.path,
+          "0238_sandbox_provider_loss_receipts.sql",
+        ])
       : completeSourceContract;
     if (transitionReaper) {
       expect(transitionReaper).toMatchObject({ deploymentMode: "maintenance" });
@@ -1070,12 +1073,12 @@ describe("release schema contract", () => {
   });
 });
 
-async function contractWithoutMigration(excludedPath: string) {
+async function contractWithoutMigrations(excludedPaths: string[]) {
   const source = join(import.meta.dir, "../packages/db/drizzle");
   const directory = await mkdtemp(join(tmpdir(), "opengeni-schema-contract-filtered-"));
   directories.push(directory);
   for (const entry of await readdir(source, { withFileTypes: true })) {
-    if (!entry.isFile() || !entry.name.endsWith(".sql") || entry.name === excludedPath) continue;
+    if (!entry.isFile() || !entry.name.endsWith(".sql") || excludedPaths.includes(entry.name)) continue;
     await copyFile(join(source, entry.name), join(directory, entry.name));
   }
   return await buildSchemaContract(directory);
