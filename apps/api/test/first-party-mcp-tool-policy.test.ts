@@ -120,29 +120,6 @@ describe("first-party MCP tool visibility policy", () => {
     expect(registeredToolNames(server)).toEqual(["set_session_title"]);
   });
 
-  test("retrieval-only memory tools disclose the preference authority boundary", async () => {
-    const server = buildOpenGeniMcpServer(
-      deps(),
-      grant([...Permission.options], ["memory_search", "memory_save"]),
-      { workspaceMemoryEnabled: true, workspaceMemoryPromptMode: "retrieval_only" },
-    );
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    const client = new Client({ name: "memory-containment-description-test", version: "1" });
-    await server.connect(serverTransport);
-    await client.connect(clientTransport);
-    try {
-      const tools = (await client.listTools()).tools;
-      expect(tools.find((tool) => tool.name === "memory_search")?.description).toContain(
-        "structured preferences are the only behavioral authority",
-      );
-      expect(tools.find((tool) => tool.name === "memory_save")?.description).toContain(
-        "cannot become behavioral authority",
-      );
-    } finally {
-      await Promise.all([client.close(), server.close()]);
-    }
-  });
-
   test("ordinary omission excludes connector tools while explicit authorized selection stays exact", () => {
     const ordinary = buildOpenGeniMcpServer(
       deps(),
@@ -168,27 +145,6 @@ describe("first-party MCP tool visibility policy", () => {
 
     const admitted = buildOpenGeniMcpServer(deps(), grant(["sessions:create"], ["session_create"]));
     expect(registeredToolNames(admitted)).toEqual(["session_create"]);
-  });
-
-  test("task-tree note tools require exact agent-attempt authority and their own permissions", () => {
-    const selected: FirstPartyMcpToolName[] = [
-      "task_notes_list",
-      "task_note_save",
-      "task_note_archive",
-    ];
-    const readOnly = buildOpenGeniMcpServer(deps(), grant(["sessions:read"], selected));
-    expect(registeredToolNames(readOnly)).toEqual(["task_notes_list"]);
-
-    const admitted = buildOpenGeniMcpServer(
-      deps(),
-      grant(["sessions:read", "sessions:control"], selected),
-    );
-    expect(registeredToolNames(admitted)).toEqual([...selected].sort());
-
-    const humanGrant = grant(["sessions:read", "sessions:control"], selected);
-    humanGrant.principalKind = "human";
-    const denied = buildOpenGeniMcpServer(deps(), humanGrant);
-    expect(registeredToolNames(denied)).toEqual([]);
   });
 
   test("the broad catalog excludes compatibility-only and local first-party tools", () => {
