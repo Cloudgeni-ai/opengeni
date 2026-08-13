@@ -1,5 +1,31 @@
 # @opengeni/runtime
 
+## 0.23.0
+
+### Minor Changes
+
+- 478d7fe: Persist exact accepted-turn goal authority, separate semantic goal revisions
+  from execution progress, and add policy-controlled rewrite proposals with API,
+  SDK, MCP, and runtime support.
+
+### Patch Changes
+
+- d86610d: Prevent deterministic model-generated worker-spawn failures, hide exhausted nested-agent creation, and show bounded structured session orchestration diagnostics in worker timeline rows while preserving the advanced public REST/SDK create contract.
+- d86610d: Add opt-in document-parsing guidance for the pinned AnyDoc sandbox runtime.
+- d86610d: Reissue the complete MCP result fidelity release source after the prior automated Version PR was merged without the required provider-native approval.
+- 478d7fe: Add a reversible workspace memory prompt mode that removes the legacy standing memory block, keeps preference observations out of agent behavioral authority, contains company-profile context for child agents, and reports metadata-only model-context contribution telemetry.
+- Updated dependencies [d86610d]
+- Updated dependencies [d86610d]
+- Updated dependencies [478d7fe]
+- Updated dependencies [d86610d]
+- Updated dependencies [478d7fe]
+- Updated dependencies [478d7fe]
+- Updated dependencies [478d7fe]
+  - @opengeni/contracts@0.50.0
+  - @opengeni/sdk@0.57.0
+  - @opengeni/config@0.16.1
+  - @opengeni/codemode@0.4.1
+
 ## 0.22.0
 
 ### Minor Changes
