@@ -412,10 +412,12 @@ export {
   type DbClient,
   type SessionActivityDatabase,
   type RlsContext,
+  type SessionRlsActorContext,
   type RlsStrategy,
   type SandboxProviderReadLockIdentity,
   type UserLookup,
 } from "./database";
+export { withSessionRlsActorContext } from "./database";
 import {
   buildCodexTokenResolver as buildCodexTokenResolverCore,
   fetchCodexRateLimitResetCreditsForAccount as fetchCodexRateLimitResetCreditsForAccountCore,
@@ -22256,6 +22258,39 @@ export async function getSession(
     if (!row) return null;
     const grouped = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, [row.id]);
     return await mapSessionWithControl(scopedDb, row, grouped.get(row.id) ?? []);
+  });
+}
+
+export type SessionAuthorityProjection = {
+  sessionId: string;
+  rootSessionId: string;
+  visibility: "user_private" | "workspace_shared";
+  ownerSubjectId: string | null;
+};
+
+export async function getSessionAuthorityProjection(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<SessionAuthorityProjection | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        sessionId: schema.sessions.id,
+        rootSessionId: schema.sessions.rootSessionId,
+        visibility: schema.sessions.visibility,
+        ownerSubjectId: schema.sessions.ownerSubjectId,
+      })
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .limit(1);
+    if (!row) return null;
+    return {
+      sessionId: row.sessionId,
+      rootSessionId: row.rootSessionId,
+      visibility: row.visibility as SessionAuthorityProjection["visibility"],
+      ownerSubjectId: row.ownerSubjectId ?? null,
+    };
   });
 }
 
@@ -53840,3 +53875,4 @@ export * from "./browser-downloads";
 export * from "./attached-browser-devices";
 export * from "./interaction-revisions";
 export * from "./canonical-human-identities";
+export * from "./session-tenancy";

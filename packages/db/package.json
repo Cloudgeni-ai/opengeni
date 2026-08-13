@@ -50,6 +50,10 @@
     "./canonical-human-identities": {
       "types": "./src/canonical-human-identities.ts",
       "default": "./src/canonical-human-identities.ts"
+    },
+    "./session-tenancy": {
+      "types": "./src/session-tenancy.ts",
+      "default": "./src/session-tenancy.ts"
     }
   },
   "publishConfig": {

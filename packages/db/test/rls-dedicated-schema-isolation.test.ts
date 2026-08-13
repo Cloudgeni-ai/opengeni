@@ -325,6 +325,13 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
         securityDefiner: true,
       },
       {
+        name: "fork_session_content(uuid, uuid, uuid, text, uuid, text, text, text)",
+        owner: "postgres",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+      },
+      {
         name: "knowledge_source_sync_lock_authority(uuid, uuid, uuid)",
         owner: "postgres",
         execute: true,
@@ -333,6 +340,27 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
       },
       {
         name: "validate_canonical_human_session(text, text, boolean)",
+        owner: "postgres",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+      },
+      {
+        name: "session_private_actor_visible(uuid, uuid, uuid, text)",
+        owner: "postgres",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+      },
+      {
+        name: "session_reference_visible(uuid, uuid, uuid)",
+        owner: "postgres",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: false,
+      },
+      {
+        name: "transition_session_visibility(uuid, uuid, uuid, text, text, integer, text, text)",
         owner: "postgres",
         execute: true,
         publicExecute: false,

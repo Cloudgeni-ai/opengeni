@@ -454,6 +454,7 @@ describe("migration 0219 managed-human organization provisioning", () => {
       join pg_policy p on p.polrelid = c.oid
       where n.nspname = current_schema()
         and c.relname = any(${shared.admin.array([...tenancyTables])})
+        and p.polname = 'organization_tenancy_lifecycle'
       order by c.relname
     `;
     expect(policyRows).toHaveLength(tenancyTables.length);

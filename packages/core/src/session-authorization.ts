@@ -8,10 +8,13 @@ import {
   type SessionAuthorizationTarget,
 } from "@opengeni/contracts";
 import {
+  getSessionAuthorityProjection,
   getSession,
   getSessionTurnForAttempt,
   getSlackInteractionSessionAccessForSession,
+  withSessionRlsActorContext,
   type Database,
+  type SessionRlsActorContext,
 } from "@opengeni/db";
 import type { AppDependencies } from "./dependencies";
 
@@ -112,6 +115,24 @@ function enforceAgentSessionHierarchy(
   throw new SessionAuthorizationDeniedError("forbidden");
 }
 
+export function sessionRlsActorForAuthorization(
+  authorization: ResolvedSessionAuthorization,
+): SessionRlsActorContext {
+  return authorization.actor.kind === "agent_attempt"
+    ? {
+        subjectId: authorization.actor.subjectId,
+        initiatingHumanSubjectId: authorization.actor.initiatingHumanSubjectId,
+      }
+    : { subjectId: authorization.actor.subjectId };
+}
+
+export async function withResolvedSessionAuthorization<T>(
+  authorization: ResolvedSessionAuthorization,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return await withSessionRlsActorContext(sessionRlsActorForAuthorization(authorization), fn);
+}
+
 /**
  * Prove that a first-party request belongs to the exact currently active
  * attempt of the named caller session. Unlike the optional embedding-host ACL
@@ -150,36 +171,34 @@ export async function requireSessionAuthorization(
   },
 ): Promise<ResolvedSessionAuthorization | null> {
   const port = deps.sessionAuthorization;
-  const slackAccessPromise = getSlackInteractionSessionAccessForSession(deps.db, {
-    accountId: grant.accountId,
-    workspaceId: grant.workspaceId,
-    sessionId: input.sessionId,
-  });
   const isAgentAttempt = grantHasAgentAttemptAuthority(grant);
-  if (!port && !isAgentAttempt) {
-    const slackAccess = await slackAccessPromise;
-    if (slackAccess?.visibility !== "private") return null;
-  }
+  const [slackAccess, authority] = await Promise.all([
+    getSlackInteractionSessionAccessForSession(deps.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: input.sessionId,
+    }),
+    getSessionAuthorityProjection(deps.db, grant.workspaceId, input.sessionId),
+  ]);
 
-  const [slackAccess, resolvedActor, agentTarget] = await Promise.all([
-    slackAccessPromise,
+  // Preserve the standalone workspace-shared path. Private sessions continue
+  // through the durable actor and ownership checks even without a host port.
+  if (
+    !port &&
+    !isAgentAttempt &&
+    slackAccess?.visibility !== "private" &&
+    authority?.visibility !== "user_private"
+  ) {
+    return null;
+  }
+  if (!authority) throw new SessionAuthorizationDeniedError("not_found");
+
+  const [resolvedActor, resolvedTarget] = await Promise.all([
     resolveSessionAuthorizationActor(deps.db, grant),
-    isAgentAttempt
-      ? resolveSessionAuthorizationTarget(deps.db, grant, input.sessionId)
-      : Promise.resolve(null),
+    resolveSessionAuthorizationTarget(deps.db, grant, input.sessionId),
   ]);
   const actor = resolvedActor.actor;
-  const resolvedTarget =
-    agentTarget ??
-    (slackAccess
-      ? {
-          target: { sessionId: input.sessionId, rootSessionId: slackAccess.rootSessionId },
-          parentSessionId: null,
-        }
-      : await resolveSessionAuthorizationTarget(deps.db, grant, input.sessionId));
-  const target = slackAccess
-    ? { sessionId: input.sessionId, rootSessionId: slackAccess.rootSessionId }
-    : resolvedTarget.target;
+  const target = resolvedTarget.target;
   const agentRelatedSessionAccess =
     actor.kind === "agent_attempt"
       ? enforceAgentSessionHierarchy(
@@ -189,6 +208,15 @@ export async function requireSessionAuthorization(
           input.operation,
         )
       : null;
+
+  if (authority.visibility === "user_private") {
+    const allowed =
+      authority.ownerSubjectId !== null &&
+      (actor.kind === "subject"
+        ? actor.subjectId === authority.ownerSubjectId
+        : actor.initiatingHumanSubjectId === authority.ownerSubjectId);
+    if (!allowed) throw new SessionAuthorizationDeniedError("forbidden");
+  }
   if (slackAccess?.visibility === "private") {
     const allowed =
       actor.kind === "subject"
@@ -197,14 +225,12 @@ export async function requireSessionAuthorization(
     if (!allowed) throw new SessionAuthorizationDeniedError("forbidden");
   }
   if (!port) {
-    return agentRelatedSessionAccess
-      ? {
-          actor,
-          target,
-          relatedSessionAccess: agentRelatedSessionAccess,
-          reauthorizeAfterMs: null,
-        }
-      : null;
+    return {
+      actor,
+      target,
+      relatedSessionAccess: agentRelatedSessionAccess ?? "root",
+      reauthorizeAfterMs: null,
+    };
   }
 
   let rawDecision: unknown;
@@ -288,7 +314,6 @@ async function resolveSessionAuthorizationTarget(
     parentSessionId: session.parentSessionId,
   };
 }
-
 async function resolveSessionAuthorizationActor(
   db: Database,
   grant: AccessGrant,
