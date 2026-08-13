@@ -307,6 +307,42 @@ serving, or workflow polling begins. Their readiness endpoints repeat it instead
 of treating `select 1` as database readiness. `OPENGENI_RUNTIME_DATABASE_ROLE`
 defaults to and should remain `opengeni_app` for standalone deployments.
 
+### Embedding-host turn-instructions key
+
+An embedding host that sends hidden per-turn `turnInstructions` needs a second,
+server-only workspace API key. Provision it after migration 0229 and before
+enabling the host feature. The operator command uses the restricted
+`OPENGENI_DATABASE_URL` with exact account/workspace RLS scope and works through
+a non-superuser, non-`BYPASSRLS` identity; it neither consumes the
+migration-owner URL nor depends on a superuser bypass:
+
+```bash
+export OPENGENI_TURN_INSTRUCTIONS_ACCOUNT_ID='<account UUID>'
+export OPENGENI_WORKSPACE_ID='<workspace UUID>'
+export OPENGENI_TURN_INSTRUCTIONS_KEY="ogk_$(openssl rand -hex 32)"
+export OPENGENI_TURN_INSTRUCTIONS_KEY_MODE=stage
+bun run operator:provision-turn-instructions-key
+```
+
+Keep the token only in the embedding host's server-side secret and send it in
+`x-opengeni-turn-instructions-key`; never publish it to a browser or put it in
+the ordinary OpenGeni runtime secret. `stage` is idempotent and preserves every
+prior active key under the dedicated name. Rotation is therefore:
+
+1. stage the replacement token;
+2. update and roll the embedding host to the replacement;
+3. prove create, Send/Steer, and realtime requests succeed with the replacement;
+4. rerun the provisioner with that token and mode `finalize`;
+5. require `activeNamedKeys: 1` and record `revokedPrevious` as the cleanup
+   receipt.
+
+Do not finalize before the host acceptance proof. Staging leaves the predecessor
+valid, so a failed host rollout can revert without a credential outage.
+Migration 0229 rejects any old transaction—including a request routed to an old
+API replica—that tries to introduce, replace, or clear hidden instructions
+without the new protocol marker, while permitting ordinary null-instruction
+traffic during the rollout.
+
 The `scoped` strategy is an explicit embedding contract: OpenGeni checks only
 coherent connectivity/identity because the host owns the role and isolation
 boundary. It must not be used to bypass the standalone `force` posture.

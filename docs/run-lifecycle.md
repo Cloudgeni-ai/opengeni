@@ -147,7 +147,10 @@ At public HTTP ingress, their admission additionally requires a distinct
 same-workspace secondary API key with literal
 `sessions:turn_instructions` authority. `workspace:admin` is not a substitute,
 and a primary browser/API-key bearer cannot self-authorize by copying itself
-into the host-only header.
+into the host-only header. Migration 0229 rejects any legacy transaction that
+introduces, replaces, or clears non-null hidden instructions without the new
+writer marker, including a request routed to an old API replica. This preserves
+ordinary mixed-version traffic without a security-bypass interval.
 Idle work queues normally; active work is superseded/interrupted; queued work is
 reordered by the existing Steer semantics. The call row links one-to-one to the
 turn for terminal result/error projection. Invalid calls receive a deterministic

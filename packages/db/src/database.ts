@@ -330,6 +330,10 @@ export async function setRlsContext(db: Database, context: RlsContext): Promise<
   // fences can distinguish their partial writes without inspecting content.
   await db.execute(sql`select set_config('opengeni.lossless_content_writer', '1', true)`);
   await db.execute(sql`select set_config('opengeni.sandbox_recovery_protocol_v2', '1', true)`);
+  // Migration 0229 uses this transaction-local generation marker to reject a
+  // legacy API replica that tries to introduce hidden turn instructions while
+  // still allowing that replica to process ordinary null-instruction work.
+  await db.execute(sql`select set_config('opengeni.turn_instructions_protocol_v1', '1', true)`);
 }
 
 async function readRlsContextSettings(db: Database): Promise<RlsContextSettings> {

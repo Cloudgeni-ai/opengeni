@@ -558,8 +558,15 @@ literal-only `sessions:turn_instructions` permission, and differ from the
 primary API key itself. Ordinary `workspace:admin`, member management, API-key
 management, and first-party session permissions cannot manufacture this
 authority. Embedding hosts keep the credential server-side; browsers never
-receive it. Trusted in-process OpenGeni producers call the core transitions
-directly and do not cross this HTTP boundary.
+receive it. Migration 0229's transaction-local protocol marker rejects legacy
+writers that try to introduce, replace, or clear hidden instructions at the
+database boundary, so a request routed to an old API replica fails closed.
+Ordinary legacy writes with no hidden instructions remain compatible during a
+rolling replacement. Trusted
+in-process OpenGeni producers call the core transitions directly and do not
+cross this HTTP boundary. The dedicated key is rotated through staged overlap,
+host switch and acceptance, then explicit finalization; staging never revokes
+the predecessor.
 
 ---
 

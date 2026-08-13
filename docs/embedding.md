@@ -87,7 +87,12 @@ block) always substituted in.
   delegate that authority, and the secondary key must differ from the primary
   request API key. Do not expose this header or key to a browser. Trusted
   in-process OpenGeni producers use the core transition directly and do not
-  traverse this embedding-host boundary.
+  traverse this embedding-host boundary. Migration 0229 makes the boundary
+  rolling-safe at storage: a legacy replica may continue ordinary
+  null-instruction work, but PostgreSQL rejects introducing, replacing, or
+  clearing hidden instructions unless the transaction carries the new
+  writer-generation marker. A request routed to an old API replica therefore
+  fails closed instead of creating privileged context.
 - **Preallocated session identity** (`CreateSessionRequest.requestedSessionId`) — an optional UUID an embedding host may persist in its own projection before calling OpenGeni. OpenGeni creates that exact session and rejects collisions with `409`, so the initial worker claim cannot outrun the host link. Pair retries with the same workspace-scoped `idempotencyKey`; a replay that changes the UUID is rejected. The UUID is identity/correlation only and grants no access.
 
 Do not stuff persona or host context into `initialMessage`/message text: those
@@ -95,6 +100,37 @@ fields render as visible timeline content. Use workspace `agentInstructions` for
 tenant-wide behavior, session `instructions` for one durable persona, and
 `turnInstructions` for one submit-time context snapshot. Both optional request
 fields are trimmed, non-empty, and capped at 32768 characters.
+
+### Provisioning and rotating the host-only key
+
+The operator provisioner uses the restricted `OPENGENI_DATABASE_URL` and the
+ordinary FORCE-RLS path rather than the migration-owner URL or a tenant bypass.
+It requires the exact account/workspace pair and never prints the token:
+
+```bash
+export OPENGENI_TURN_INSTRUCTIONS_ACCOUNT_ID='<account UUID>'
+export OPENGENI_WORKSPACE_ID='<workspace UUID>'
+export OPENGENI_TURN_INSTRUCTIONS_KEY="ogk_$(openssl rand -hex 32)"
+export OPENGENI_TURN_INSTRUCTIONS_KEY_MODE=stage
+bun run operator:provision-turn-instructions-key
+```
+
+`stage` is the default and is intentionally non-destructive. It creates or
+replays the requested key while leaving every prior active key with the same
+dedicated name valid. Rotate without an outage in this order:
+
+1. stage the new token and require the result to report the expected new key;
+2. update the embedding host's server-only secret to that token;
+3. verify create, Send/Steer, and realtime admission through the host using the
+   new token;
+4. run the same command with the same token and
+   `OPENGENI_TURN_INSTRUCTIONS_KEY_MODE=finalize`;
+5. require `activeNamedKeys: 1`; `revokedPrevious` reports the predecessor keys
+   revoked by that explicit finalization.
+
+Never finalize before the host switch and acceptance proof. A failed host
+rollout therefore leaves the old key usable and can be rolled back without a
+credential gap.
 
 ## Ports
 

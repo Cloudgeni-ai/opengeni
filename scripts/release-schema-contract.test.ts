@@ -117,7 +117,7 @@ describe("release schema contract", () => {
     expect(sourceContract.sha256).toBe(
       migrations.has("0235_canonical_human_login_bindings.sql") &&
         migrations.has("0229_realtime_turn_instructions.sql")
-        ? "d65d892ac00cb26edb1dc013a982fa48d7578d952f28edbd66d22d2d2140e608"
+        ? "7ee5f614b63af3d41f431daa0115034638b29b23f9fb9f1556d6ad974b84b2a5"
         : migrations.has("0235_canonical_human_login_bindings.sql")
           ? "e0f7b19f681fee92ea7813660fee0227fef4ed885032a134f36b399591888d8c"
           : migrations.has("0233_skill_and_integration_authority_cutover.sql")
@@ -173,7 +173,7 @@ describe("release schema contract", () => {
       sha256:
         migrations.has("0235_canonical_human_login_bindings.sql") &&
         migrations.has("0229_realtime_turn_instructions.sql")
-          ? "d65d892ac00cb26edb1dc013a982fa48d7578d952f28edbd66d22d2d2140e608"
+          ? "7ee5f614b63af3d41f431daa0115034638b29b23f9fb9f1556d6ad974b84b2a5"
           : migrations.has("0235_canonical_human_login_bindings.sql")
             ? "e0f7b19f681fee92ea7813660fee0227fef4ed885032a134f36b399591888d8c"
             : migrations.has("0233_skill_and_integration_authority_cutover.sql")
@@ -412,7 +412,7 @@ describe("release schema contract", () => {
     expect(contract.sha256).toBe(
       migrations.has("0235_canonical_human_login_bindings.sql") &&
         migrations.has("0229_realtime_turn_instructions.sql")
-        ? "d65d892ac00cb26edb1dc013a982fa48d7578d952f28edbd66d22d2d2140e608"
+        ? "7ee5f614b63af3d41f431daa0115034638b29b23f9fb9f1556d6ad974b84b2a5"
         : migrations.has("0235_canonical_human_login_bindings.sql")
           ? "e0f7b19f681fee92ea7813660fee0227fef4ed885032a134f36b399591888d8c"
           : migrations.has("0233_skill_and_integration_authority_cutover.sql")
@@ -619,7 +619,7 @@ describe("release schema contract", () => {
       deploymentMode: "rolling",
     });
     expect(migrations.get("0229_realtime_turn_instructions.sql")).toMatchObject({
-      sha256: "ce43c19b6193ed914bf9a1c440a3894d79850f237ddd914e1dad527a6123c023",
+      sha256: "faf5a19708a9f1fff8bd1715c82c9c720f17b55d7f2fdabd80d29bcd6aa0cc5f",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0231_integration_definition_identity_cutover.sql")).toMatchObject({
