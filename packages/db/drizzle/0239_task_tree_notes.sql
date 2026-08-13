@@ -230,7 +230,7 @@ CREATE POLICY task_notes_tenant ON "task_notes"
     "account_id" = opengeni_private.current_account_id()
     AND "workspace_id" = opengeni_private.current_workspace_id()
   );
-CREATE POLICY task_notes_session_visibility ON "task_notes" AS RESTRICTIVE
+CREATE POLICY session_visibility_isolation ON "task_notes" AS RESTRICTIVE
   USING (session_reference_visible("account_id", "workspace_id", "root_session_id"))
   WITH CHECK (session_reference_visible("account_id", "workspace_id", "root_session_id"));
 CREATE POLICY task_notes_lifecycle_only ON "task_notes" AS RESTRICTIVE
@@ -260,7 +260,7 @@ CREATE POLICY task_note_events_tenant ON "task_note_events"
     "account_id" = opengeni_private.current_account_id()
     AND "workspace_id" = opengeni_private.current_workspace_id()
   );
-CREATE POLICY task_note_events_session_visibility ON "task_note_events" AS RESTRICTIVE
+CREATE POLICY session_visibility_isolation ON "task_note_events" AS RESTRICTIVE
   USING (session_reference_visible("account_id", "workspace_id", "root_session_id"))
   WITH CHECK (session_reference_visible("account_id", "workspace_id", "root_session_id"));
 CREATE POLICY task_note_events_lifecycle_only ON "task_note_events" AS RESTRICTIVE

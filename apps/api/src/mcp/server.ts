@@ -2185,12 +2185,15 @@ function registerGoalTools(
         message: `${field} exceeds ${maxBytes} UTF-8 bytes`,
       });
   const goalText = boundedGoalToolString(SESSION_GOAL_TEXT_MAX_BYTES, "goal text");
-  const successCriteria = boundedGoalToolString(
+  const successCriteriaSchema = boundedGoalToolString(
     SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES,
     "goal success criteria",
   );
   const goalRationale = boundedGoalToolString(SESSION_GOAL_RATIONALE_MAX_BYTES, "goal rationale");
-  const progressNote = boundedGoalToolString(SESSION_GOAL_PROGRESS_MAX_BYTES, "goal progress note");
+  const progressNoteSchema = boundedGoalToolString(
+    SESSION_GOAL_PROGRESS_MAX_BYTES,
+    "goal progress note",
+  );
   server.registerTool(
     "goal_set",
     {
@@ -2198,7 +2201,7 @@ function registerGoalTools(
         "Create a goal when this session has none. While active, idle moments synthesize continuation turns until goal_complete or goal_pause. To change an existing goal, use goal_update with its objective revision, a change kind, and rationale.",
       inputSchema: {
         text: goalText,
-        successCriteria: successCriteria.optional(),
+        successCriteria: successCriteriaSchema.optional(),
         maxAutoContinuations: z4.number().int().positive().optional(),
       },
     },
@@ -2257,7 +2260,7 @@ function registerGoalTools(
         "Propose or apply a semantic goal revision under the session's mutation policy. Retain the standing goal unless explicit user direction or meaningful new evidence justifies the declared refinement, adaptation, or replacement. A rewrite never counts as execution progress; use goal_progress for that.",
       inputSchema: {
         text: goalText.optional(),
-        successCriteria: successCriteria.nullable().optional(),
+        successCriteria: successCriteriaSchema.nullable().optional(),
         // Optional for rolling compatibility with the former goal_update
         // surface. Omitted semantic metadata is classified as a refinement of
         // the currently fenced objective; new callers should always supply it.
@@ -2266,7 +2269,7 @@ function registerGoalTools(
         expectedObjectiveRevision: z4.number().int().positive().optional(),
         // Deprecated compatibility input. It is committed through the new
         // progress operation and never makes a semantic rewrite count itself.
-        progressNote: progressNote.optional(),
+        progressNote: progressNoteSchema.optional(),
         idempotencyKey: z4.string().uuid(),
       },
     },
@@ -2335,7 +2338,7 @@ function registerGoalTools(
       description:
         "Record concrete progress toward the unchanged active goal. This does not change goal text, success criteria, mutation policy, or objective revision. Do not use it merely to keep the continuation loop alive.",
       inputSchema: {
-        progressNote,
+        progressNote: progressNoteSchema,
         idempotencyKey: z4.string().uuid(),
       },
     },

@@ -332,6 +332,9 @@ export const FORCE_RLS_TABLES = [
   "slack_user_link_access_requests",
   "social_connections",
   "social_posts",
+  "task_note_events",
+  "task_note_write_capabilities",
+  "task_notes",
   "temporal_schedule_cleanup_outbox",
   "transcription_recording_chunks",
   "transcription_recording_objects",
@@ -369,9 +372,6 @@ export const FORCE_RLS_TABLES = [
   "xai_rotation_settings",
   "xai_session_account_pins",
   "xai_subscription_credentials",
-  "task_note_events",
-  "task_note_write_capabilities",
-  "task_notes",
 ] as const;
 
 /**
