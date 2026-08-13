@@ -176,3 +176,13 @@ input, authorization predicates run before vector/keyword ranking and limits,
 and results retain source plus immutable authority provenance. Agent calls also
 require `agent_access=true`. Legacy workspace and legacy private rows keep the
 workspace bindings established by migration 0165.
+
+The workspace-local agent projection builds on that boundary without another
+store. Docs-MCP `knowledge_search` returns strict Knowledge envelopes over
+authorized chunks, then re-fetches every selected chunk before response
+projection. `knowledge_get` rechecks one stable Document/chunk id, while
+`knowledge_browse` rechecks an authorized Document parent before returning its
+chunks and binds its opaque cursor to the exact account, requesting workspace,
+initiating subject, parent, and filters. Personal subject ids and inaccessible
+linked-record metadata are absent from this projection. See
+[`knowledge-retrieval.md`](knowledge-retrieval.md).

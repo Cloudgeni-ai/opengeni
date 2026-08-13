@@ -166,10 +166,11 @@ export function goalContinuationPrompt(
   return [
     `[GOAL CONTINUATION ${counter}] The session goal is not done. Goal: ${goal.text}.`,
     `Success criteria: ${goal.successCriteria ?? "none specified"}.`,
+    `Objective revision: ${goal.objectiveRevision}. Mutation policy: ${goal.mutationPolicy}.`,
     "Continue from the existing conversation state. Do not repeat completed session setup, persistent metadata settings, or context checks merely because this is a new continuation turn.",
     "Continue working toward the goal now. If it is actually complete, call opengeni__goal_complete with concrete evidence.",
     "If you are blocked or continuing is not productive, call opengeni__goal_pause with your rationale.",
-    "You may revise the goal with opengeni__goal_update. Do not stop without one of these explicit actions.",
+    "Record concrete progress with opengeni__goal_progress. Revise the goal only when explicit user direction or material new evidence justifies the declared change kind; use opengeni__goal_update with this objective revision and a rationale. A rewrite alone is not progress. Do not stop without goal_complete, goal_pause, or concrete continued work.",
   ].join("\n");
 }
 

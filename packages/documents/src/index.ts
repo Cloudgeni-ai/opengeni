@@ -13,6 +13,9 @@ import type {
   DocumentVisibility,
   FileAsset,
   IndexedDocumentSummary,
+  KnowledgeBrowseResponse,
+  KnowledgeRecord,
+  KnowledgeSearchResponse,
   KnowledgeSourceKind,
   ListIndexedDocumentsResponse,
 } from "@opengeni/contracts";
@@ -30,6 +33,10 @@ import type { ObjectStorage } from "@opengeni/storage";
 import { createHash } from "node:crypto";
 import { and, asc, desc, eq, gt, inArray, isNotNull, or, sql, type SQL } from "drizzle-orm";
 import type OpenAI from "openai";
+import { KNOWLEDGE_BROWSE_CURSOR_MAX_CHARS } from "@opengeni/contracts";
+import { projectKnowledgeRecord } from "./knowledge-projection";
+
+export { projectKnowledgeRecord } from "./knowledge-projection";
 
 export const DEFAULT_DOCUMENT_PARSER = "liteparse";
 export const DEFAULT_DOCUMENT_EMBEDDING_MODEL = "text-embedding-3-large";
@@ -195,6 +202,19 @@ export type ListEffectiveIndexedDocumentsInput = {
   /** Immutable human subject accepted for the logical request/turn. */
   initiatingSubjectId: string;
   checkpoint?: string | undefined;
+  limit?: number | undefined;
+};
+
+export type EffectiveKnowledgeBrowseInput = {
+  accountId: string;
+  workspaceId: string;
+  /** Immutable human subject accepted for the logical request/turn. */
+  initiatingSubjectId: string;
+  /** Omit to browse top-level documents; pass a document record id for chunks. */
+  parentId?: string | undefined;
+  topic?: string | undefined;
+  sourceKinds?: KnowledgeSourceKind[] | undefined;
+  cursor?: string | undefined;
   limit?: number | undefined;
 };
 
@@ -1791,6 +1811,414 @@ export async function searchEffectiveDocuments(
     },
     services,
   );
+}
+
+/**
+ * Agent-facing Knowledge search over the existing Documents evidence store.
+ * Search selects candidates only after authority filtering; this second read
+ * rechecks every exact chunk before projecting it, so a record revoked between
+ * ranking and response construction disappears rather than leaking stale data.
+ */
+export async function searchEffectiveKnowledge(
+  db: Database,
+  input: EffectiveDocumentSearchInput,
+  services: Pick<DocumentServices, "embedder"> = createDocumentServices(),
+): Promise<KnowledgeSearchResponse> {
+  const initiatingSubjectId = canonicalEffectiveDocumentSubject(input.initiatingSubjectId);
+  const ranked = await searchEffectiveDocuments(
+    db,
+    { ...input, initiatingSubjectId, surface: "agent" },
+    services,
+  );
+  if (ranked.length === 0) return { results: [] };
+  const access: DocumentAccessFilter = { agentOnly: true, viewerSubjectId: initiatingSubjectId };
+  const current = await withDocumentAccountRls(
+    db,
+    input.accountId,
+    input.workspaceId,
+    access,
+    async (scopedDb) =>
+      await scopedDb
+        .select({ chunk: schema.documentChunks, document: schema.documents })
+        .from(schema.documentChunks)
+        .innerJoin(schema.documents, eq(schema.documentChunks.documentId, schema.documents.id))
+        .where(
+          and(
+            eq(schema.documents.accountId, input.accountId),
+            eq(schema.documentChunks.accountId, input.accountId),
+            inArray(
+              schema.documentChunks.id,
+              ranked.map((result) => result.chunkId),
+            ),
+            eq(schema.documents.status, "ready"),
+            ...documentAccessConditions(input.workspaceId, access),
+          ),
+        ),
+  );
+  const currentByChunkId = new Map(current.map((row) => [row.chunk.id, row]));
+  return {
+    results: ranked.flatMap((rankedResult) => {
+      const row = currentByChunkId.get(rankedResult.chunkId);
+      if (!row) return [];
+      return [
+        {
+          record: knowledgeChunkRecord(row.document, row.chunk),
+          retrieval: {
+            score: rankedResult.score,
+            matchType: rankedResult.matchType,
+            vectorScore: rankedResult.vectorScore,
+            keywordScore: rankedResult.keywordScore,
+          },
+        },
+      ];
+    }),
+  };
+}
+
+/** Fetch one stable Knowledge record with a fresh authorization check. */
+export async function getEffectiveKnowledgeRecord(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    initiatingSubjectId: string;
+    id: string;
+  },
+): Promise<KnowledgeRecord | null> {
+  const initiatingSubjectId = canonicalEffectiveDocumentSubject(input.initiatingSubjectId);
+  const target = parseKnowledgeRecordId(input.id);
+  const access: DocumentAccessFilter = { agentOnly: true, viewerSubjectId: initiatingSubjectId };
+  return await withDocumentAccountRls(
+    db,
+    input.accountId,
+    input.workspaceId,
+    access,
+    async (scopedDb) => {
+      if (target.kind === "document") {
+        const [document] = await scopedDb
+          .select()
+          .from(schema.documents)
+          .where(
+            and(
+              eq(schema.documents.accountId, input.accountId),
+              eq(schema.documents.id, target.id),
+              eq(schema.documents.status, "ready"),
+              ...documentAccessConditions(input.workspaceId, access),
+            ),
+          )
+          .limit(1);
+        return document ? knowledgeDocumentRecord(document) : null;
+      }
+      const [row] = await scopedDb
+        .select({ chunk: schema.documentChunks, document: schema.documents })
+        .from(schema.documentChunks)
+        .innerJoin(schema.documents, eq(schema.documentChunks.documentId, schema.documents.id))
+        .where(
+          and(
+            eq(schema.documents.accountId, input.accountId),
+            eq(schema.documentChunks.accountId, input.accountId),
+            eq(schema.documentChunks.id, target.id),
+            eq(schema.documents.status, "ready"),
+            ...documentAccessConditions(input.workspaceId, access),
+          ),
+        )
+        .limit(1);
+      return row ? knowledgeChunkRecord(row.document, row.chunk) : null;
+    },
+  );
+}
+
+/**
+ * Browse top-level authorized documents or the chunks of one authorized
+ * document. The cursor is opaque and bound to the caller, workspace, parent,
+ * and filters. It can change pagination position but can never widen scope.
+ */
+export async function browseEffectiveKnowledge(
+  db: Database,
+  input: EffectiveKnowledgeBrowseInput,
+): Promise<KnowledgeBrowseResponse> {
+  const initiatingSubjectId = canonicalEffectiveDocumentSubject(input.initiatingSubjectId);
+  const limit = input.limit ?? 20;
+  if (!Number.isInteger(limit) || limit < 1 || limit > 50) {
+    throw new Error("knowledge browse limit must be between 1 and 50");
+  }
+  const topic = input.topic === undefined ? null : (cleanString(input.topic) ?? null);
+  if (input.topic !== undefined && (!topic || topic !== input.topic || topic.length > 256)) {
+    throw new Error("knowledge browse topic is invalid");
+  }
+  const sourceKinds = [...new Set(input.sourceKinds ?? [])].sort();
+  const parent = input.parentId ? parseKnowledgeRecordId(input.parentId) : null;
+  if (parent?.kind === "document_chunk") {
+    throw new Error("knowledge browse parent must be a document record");
+  }
+  if (parent && (topic || sourceKinds.length > 0)) {
+    throw new Error("knowledge browse document contents do not accept topic/source filters");
+  }
+  const cursorScope = {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    initiatingSubjectId,
+    parentId: parent ? `${parent.kind}:${parent.id}` : null,
+    topic,
+    sourceKinds,
+  };
+  const after = input.cursor ? decodeKnowledgeBrowseCursor(input.cursor, cursorScope) : 0n;
+  if (parent && after > 2_147_483_648n) {
+    throw new Error("invalid knowledge browse cursor");
+  }
+  const access: DocumentAccessFilter = { agentOnly: true, viewerSubjectId: initiatingSubjectId };
+  return await withDocumentAccountRls(
+    db,
+    input.accountId,
+    input.workspaceId,
+    access,
+    async (scopedDb) => {
+      if (parent) {
+        const [authorizedParent] = await scopedDb
+          .select({ id: schema.documents.id })
+          .from(schema.documents)
+          .where(
+            and(
+              eq(schema.documents.accountId, input.accountId),
+              eq(schema.documents.id, parent.id),
+              eq(schema.documents.status, "ready"),
+              ...documentAccessConditions(input.workspaceId, access),
+            ),
+          )
+          .limit(1);
+        if (!authorizedParent) return { records: [], nextCursor: null, hasMore: false };
+        const rows = await scopedDb
+          .select({ chunk: schema.documentChunks, document: schema.documents })
+          .from(schema.documentChunks)
+          .innerJoin(schema.documents, eq(schema.documentChunks.documentId, schema.documents.id))
+          .where(
+            and(
+              eq(schema.documentChunks.accountId, input.accountId),
+              eq(schema.documentChunks.documentId, parent.id),
+              gt(schema.documentChunks.chunkIndex, Number(after) - 1),
+              eq(schema.documents.status, "ready"),
+              ...documentAccessConditions(input.workspaceId, access),
+            ),
+          )
+          .orderBy(asc(schema.documentChunks.chunkIndex))
+          .limit(limit + 1);
+        const hasMore = rows.length > limit;
+        const page = rows.slice(0, limit);
+        const last = page.at(-1)?.chunk.chunkIndex;
+        return {
+          records: page.map((row) => knowledgeChunkRecord(row.document, row.chunk)),
+          nextCursor:
+            hasMore && last !== undefined
+              ? encodeKnowledgeBrowseCursor(cursorScope, BigInt(last + 1))
+              : null,
+          hasMore,
+        };
+      }
+
+      const conditions: SQL[] = [
+        eq(schema.documents.accountId, input.accountId),
+        eq(schema.documents.status, "ready"),
+        isNotNull(schema.documents.indexSequence),
+        gt(schema.documents.indexSequence, after),
+        ...documentAccessConditions(input.workspaceId, access),
+      ];
+      if (topic) conditions.push(sql`${schema.documents.topics} ? ${topic}`);
+      if (sourceKinds.length > 0)
+        conditions.push(inArray(schema.documents.sourceKind, sourceKinds));
+      const rows = await scopedDb
+        .select()
+        .from(schema.documents)
+        .where(and(...conditions))
+        .orderBy(asc(schema.documents.indexSequence))
+        .limit(limit + 1);
+      const hasMore = rows.length > limit;
+      const page = rows.slice(0, limit);
+      const last = page.at(-1)?.indexSequence;
+      return {
+        records: page.map(knowledgeDocumentRecord),
+        nextCursor:
+          hasMore && last !== undefined && last !== null
+            ? encodeKnowledgeBrowseCursor(cursorScope, last)
+            : null,
+        hasMore,
+      };
+    },
+  );
+}
+
+type KnowledgeBrowseCursorScope = {
+  accountId: string;
+  workspaceId: string;
+  initiatingSubjectId: string;
+  parentId: string | null;
+  topic: string | null;
+  sourceKinds: readonly string[];
+};
+
+export function encodeKnowledgeBrowseCursor(
+  scope: KnowledgeBrowseCursorScope,
+  position: bigint,
+): string {
+  if (position < 0n) throw new Error("knowledge browse cursor position is invalid");
+  return Buffer.from(
+    JSON.stringify({ v: 1, s: knowledgeBrowseCursorScope(scope), q: position.toString() }),
+    "utf8",
+  ).toString("base64url");
+}
+
+export function decodeKnowledgeBrowseCursor(
+  value: string,
+  scope: KnowledgeBrowseCursorScope,
+): bigint {
+  try {
+    if (!value || value.length > KNOWLEDGE_BROWSE_CURSOR_MAX_CHARS) {
+      throw new Error("cursor length");
+    }
+    const bytes = Buffer.from(value, "base64url");
+    if (bytes.toString("base64url") !== value) throw new Error("cursor encoding");
+    const parsed = JSON.parse(bytes.toString("utf8")) as Record<string, unknown>;
+    if (
+      Object.keys(parsed).sort().join(",") !== "q,s,v" ||
+      parsed.v !== 1 ||
+      typeof parsed.s !== "string" ||
+      typeof parsed.q !== "string" ||
+      !/^(0|[1-9][0-9]*)$/.test(parsed.q)
+    ) {
+      throw new Error("cursor payload");
+    }
+    if (parsed.s !== knowledgeBrowseCursorScope(scope)) {
+      throw new Error("knowledge browse cursor belongs to a different scope");
+    }
+    const position = BigInt(parsed.q);
+    if (position > 9_223_372_036_854_775_807n) throw new Error("cursor position");
+    return position;
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message === "knowledge browse cursor belongs to a different scope"
+    ) {
+      throw error;
+    }
+    throw new Error("invalid knowledge browse cursor", { cause: error });
+  }
+}
+
+function knowledgeBrowseCursorScope(scope: KnowledgeBrowseCursorScope): string {
+  return createHash("sha256")
+    .update("opengeni:knowledge-browse-cursor:v1\0")
+    .update(scope.accountId)
+    .update("\0")
+    .update(scope.workspaceId)
+    .update("\0")
+    .update(canonicalEffectiveDocumentSubject(scope.initiatingSubjectId))
+    .update("\0")
+    .update(scope.parentId ?? "")
+    .update("\0")
+    .update(scope.topic ?? "")
+    .update("\0")
+    .update([...scope.sourceKinds].sort().join("\0"))
+    .digest("hex");
+}
+
+function parseKnowledgeRecordId(value: string): {
+  kind: "document" | "document_chunk";
+  id: string;
+} {
+  const match =
+    /^(document|document_chunk):([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/iu.exec(
+      value,
+    );
+  if (!match) throw new Error("invalid knowledge record id");
+  return { kind: match[1] as "document" | "document_chunk", id: match[2]!.toLowerCase() };
+}
+
+function knowledgeDocumentRecord(document: typeof schema.documents.$inferSelect): KnowledgeRecord {
+  if (!document.indexedAt) throw new Error(`Ready document is missing indexed_at: ${document.id}`);
+  const projected = projectKnowledgeRecord({
+    title: document.title,
+    body: document.summary,
+    summary: document.summary,
+    topics: document.topics,
+    metadata: { parser: document.parser, chunkCount: document.chunkCount },
+    source: knowledgeSource(document),
+  });
+  return {
+    id: `document:${document.id}`,
+    kind: "document",
+    title: projected.title,
+    content: projected.content,
+    authority: { kind: normalizeDocumentAuthorityKind(document.authorityKind) },
+    provenance: {
+      source: projected.source,
+      indexedAt: document.indexedAt.toISOString(),
+    },
+    lifecycle: { state: "active", updatedAt: document.updatedAt.toISOString() },
+    quality: knowledgeQuality(document),
+    links: knowledgeSourceLinks(projected.source.uri),
+    projection: projected.projection,
+  };
+}
+
+function knowledgeChunkRecord(
+  document: typeof schema.documents.$inferSelect,
+  chunk: typeof schema.documentChunks.$inferSelect,
+): KnowledgeRecord {
+  if (!document.indexedAt) throw new Error(`Ready document is missing indexed_at: ${document.id}`);
+  const projected = projectKnowledgeRecord({
+    title: document.title,
+    body: chunk.text,
+    summary: document.summary,
+    topics: document.topics,
+    metadata: { ...chunk.metadata, chunkIndex: chunk.chunkIndex },
+    source: knowledgeSource(document),
+  });
+  return {
+    id: `document_chunk:${chunk.id}`,
+    kind: "document_chunk",
+    title: projected.title,
+    content: projected.content,
+    authority: { kind: normalizeDocumentAuthorityKind(document.authorityKind) },
+    provenance: {
+      source: projected.source,
+      indexedAt: document.indexedAt.toISOString(),
+    },
+    lifecycle: { state: "active", updatedAt: document.updatedAt.toISOString() },
+    quality: knowledgeQuality(document),
+    links: [
+      { relation: "parent", target: { kind: "knowledge", id: `document:${document.id}` } },
+      ...knowledgeSourceLinks(projected.source.uri),
+    ],
+    projection: projected.projection,
+  };
+}
+
+function knowledgeSource(document: typeof schema.documents.$inferSelect) {
+  return {
+    kind: normalizeKnowledgeSourceKind(document.sourceKind),
+    uri: document.sourceUri,
+    externalId: document.sourceExternalId,
+    title: document.sourceTitle,
+    author: document.sourceAuthor,
+    createdAt: document.sourceCreatedAt?.toISOString() ?? null,
+    updatedAt: document.sourceUpdatedAt?.toISOString() ?? null,
+    version: document.sourceVersion,
+  };
+}
+
+function knowledgeQuality(
+  document: typeof schema.documents.$inferSelect,
+): KnowledgeRecord["quality"] {
+  if (!document.indexedAt) throw new Error(`Ready document is missing indexed_at: ${document.id}`);
+  return {
+    trust: "sourced",
+    freshnessAt: (document.sourceUpdatedAt ?? document.indexedAt).toISOString(),
+    conflict: "not_evaluated",
+    correction: "current_source_version",
+  };
+}
+
+function knowledgeSourceLinks(sourceUri: string | null): KnowledgeRecord["links"] {
+  return sourceUri ? [{ relation: "source", target: { kind: "external", uri: sourceUri } }] : [];
 }
 
 async function vectorSearchDocuments(

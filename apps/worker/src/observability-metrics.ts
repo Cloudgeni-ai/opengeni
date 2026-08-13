@@ -3,6 +3,7 @@ import { errorCodeToJSON } from "@opengeni/agent-proto";
 import { SandboxBackend, type SessionEventType } from "@opengeni/contracts";
 import type { EventLogger } from "@opengeni/events";
 import type { Attributes, AttributeValue, Observability } from "@opengeni/observability";
+import type { CompanyBrainContributionReceipt } from "./model-context-contributions";
 import {
   SELFHOSTED_INFRASTRUCTURE_FAULT_CLASSES,
   modelUsageTokenCountOrNull,
@@ -1044,6 +1045,40 @@ export function recordContextCompaction(observability: Observability, trigger: s
     help: "Total context compactions performed, by trigger.",
     labels: { trigger },
   });
+}
+
+const MODEL_CONTEXT_CONTRIBUTION_TOKEN_BUCKETS = [1, 8, 32, 128, 512, 2_048, 8_192];
+
+/**
+ * Metadata-only Company Brain exposure telemetry. Labels are closed enums and
+ * never include tenant ids, record ids, titles, descriptions, or content.
+ */
+export function recordCompanyBrainContributions(
+  observability: Observability,
+  receipt: CompanyBrainContributionReceipt,
+): void {
+  for (const contribution of receipt.contributions) {
+    const labels = {
+      category: contribution.category,
+      source: contribution.source,
+      inclusion_reason: contribution.inclusionReason,
+      authority_scope: contribution.authorityScope,
+      session_role: receipt.sessionRole,
+      memory_prompt_mode: receipt.memoryPromptMode,
+    };
+    observability.incrementCounter({
+      name: "opengeni_model_context_contributions_total",
+      help: "Company Brain contributions exposed to a model, by bounded reason and authority.",
+      labels,
+    });
+    observability.observeHistogram({
+      name: "opengeni_model_context_contribution_estimated_tokens",
+      help: "Estimated tokens per model-visible Company Brain contribution.",
+      buckets: MODEL_CONTEXT_CONTRIBUTION_TOKEN_BUCKETS,
+      labels,
+      value: contribution.estimatedTokens,
+    });
+  }
 }
 
 // ── Prompt-cache efficiency ─────────────────────────────────────────────────
