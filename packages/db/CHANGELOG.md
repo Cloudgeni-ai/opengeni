@@ -1,5 +1,14 @@
 # @opengeni/db
 
+## 0.35.1
+
+### Patch Changes
+
+- Updated dependencies [b0b2bed]
+  - @opengeni/codemode@0.4.0
+  - @opengeni/config@0.16.0
+  - @opengeni/contracts@0.49.0
+
 ## 0.35.0
 
 ### Minor Changes

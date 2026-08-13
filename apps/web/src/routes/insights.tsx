@@ -30,6 +30,11 @@ import { useAppContext } from "@/context";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import { cn } from "@/lib/utils";
 
+function inputSeriesHeading(seriesLabel: string, subject: string): string {
+  const separator = seriesLabel.indexOf(" / ");
+  return separator >= 0 ? `${subject}${seriesLabel.slice(separator)}` : subject;
+}
+
 /**
  * Workspace Insights — live rollups from usage_events + model_call_facts.
  */
@@ -304,7 +309,9 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
           <div className="rounded-lg border border-border bg-surface/35 p-4">
             <div className="flex flex-wrap items-baseline justify-between gap-2">
               <h3 className="text-sm font-medium text-fg">
-                {measure === "tokens" ? "Token usage / UTC day" : "Pricing / UTC day"}
+                {measure === "tokens"
+                  ? inputSeriesHeading(snap.seriesLabel, "Token usage")
+                  : inputSeriesHeading(snap.seriesLabel, "Pricing")}
               </h3>
               <p className="text-2xs text-fg-subtle">
                 {measure === "tokens"

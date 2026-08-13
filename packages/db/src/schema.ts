@@ -619,6 +619,13 @@ export const workspaceVariableSets = pgTable(
       .references(() => workspaces.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
     description: text("description"),
+    // Migration 0230 is schema-only: all shipped CRUD continues to omit these
+    // fields and therefore remains workspace-scoped. A later activation slice
+    // must provide the complete owner authority and runtime protocol.
+    authorityScope: text("authority_scope").notNull().default("workspace"),
+    authorityId: uuid("authority_id"),
+    ownerOrganizationMembershipId: uuid("owner_organization_membership_id"),
+    originWorkspaceId: uuid("origin_workspace_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -631,6 +638,33 @@ export const workspaceVariableSets = pgTable(
       table.workspaceId,
       table.createdAt,
     ),
+    authorityShape: check(
+      "workspace_variable_sets_authority_shape_check",
+      sql`(
+          ${table.authorityScope} = 'workspace'
+          and ${table.authorityId} is null
+          and ${table.ownerOrganizationMembershipId} is null
+        ) or (
+          ${table.authorityScope} = 'user'
+          and ${table.authorityId} is not null
+          and ${table.ownerOrganizationMembershipId} is not null
+        )`,
+    ),
+    authorityScopeValid: check(
+      "workspace_variable_sets_authority_scope_check",
+      sql`${table.authorityScope} in ('workspace', 'user')`,
+    ),
+    authority: foreignKey({
+      name: "workspace_variable_sets_authority_fk",
+      columns: [table.authorityId, table.accountId, table.ownerOrganizationMembershipId],
+      foreignColumns: [
+        organizationUserResourceAuthorities.id,
+        organizationUserResourceAuthorities.accountId,
+        organizationUserResourceAuthorities.organizationMembershipId,
+      ],
+    }).onDelete("restrict"),
+    // PostgreSQL's column-subset SET NULL action preserves account_id; Drizzle
+    // cannot represent that action, so migration 0230 owns the origin FK.
   }),
 );
 
@@ -9000,12 +9034,44 @@ export const rigs = pgTable(
     description: text("description"),
     // Attribution string: 'user:<subject>' | 'session:<id>' | 'system'.
     createdBy: text("created_by"),
+    // Inert migration-0230 identity foundation. Existing DAO/API/runtime paths
+    // omit these fields and keep their historical workspace authority.
+    authorityScope: text("authority_scope").notNull().default("workspace"),
+    authorityId: uuid("authority_id"),
+    ownerOrganizationMembershipId: uuid("owner_organization_membership_id"),
+    originWorkspaceId: uuid("origin_workspace_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
     workspaceName: uniqueIndex("rigs_workspace_name_idx").on(table.workspaceId, table.name),
     workspaceCreated: index("rigs_workspace_created_idx").on(table.workspaceId, table.createdAt),
+    authorityShape: check(
+      "rigs_authority_shape_check",
+      sql`(
+          ${table.authorityScope} = 'workspace'
+          and ${table.authorityId} is null
+          and ${table.ownerOrganizationMembershipId} is null
+        ) or (
+          ${table.authorityScope} = 'user'
+          and ${table.authorityId} is not null
+          and ${table.ownerOrganizationMembershipId} is not null
+        )`,
+    ),
+    authorityScopeValid: check(
+      "rigs_authority_scope_check",
+      sql`${table.authorityScope} in ('workspace', 'user')`,
+    ),
+    authority: foreignKey({
+      name: "rigs_authority_fk",
+      columns: [table.authorityId, table.accountId, table.ownerOrganizationMembershipId],
+      foreignColumns: [
+        organizationUserResourceAuthorities.id,
+        organizationUserResourceAuthorities.accountId,
+        organizationUserResourceAuthorities.organizationMembershipId,
+      ],
+    }).onDelete("restrict"),
+    // Migration 0230 owns the origin-workspace FK's column-subset SET NULL.
   }),
 );
 

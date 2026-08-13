@@ -1,5 +1,11 @@
 # @opengeni/agent-proto
 
+## 0.5.0
+
+### Minor Changes
+
+- b0b2bed: Add unified browser and computer interaction APIs, reusable browser identities, native input, live streaming, and React viewer controls across managed sandboxes and connected machines.
+
 ## 0.4.0
 
 ### Minor Changes
