@@ -49,6 +49,16 @@ describe("observability series projection", () => {
     ).toBe(false);
   });
 
+  test("retains the exact CronJob and Job truth consumed by synthetic-probe alerts", () => {
+    for (const metric of [
+      "kube_cronjob_status_last_successful_time",
+      "kube_job_status_failed",
+      "kube_job_status_start_time",
+    ]) {
+      expect(retainedByProfile("kube-state-metrics", { __name__: metric }, values)).toBe(true);
+    }
+  });
+
   test("compares like-for-like instantaneous series instead of stale head state", () => {
     expect(MIN_INSTANT_SERIES_REDUCTION).toBe(4);
     expect(reductionRatio(80_000, 20_000)).toBe(4);

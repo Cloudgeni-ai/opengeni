@@ -16,6 +16,13 @@ export type ModelCheckpointMemoryCollector = {
   schedule(observability: Observability): void;
 };
 
+export function modelCheckpointPressureBytes(memory: ProcessMemory): number {
+  // `external` includes ArrayBuffer storage in Bun/Node's memoryUsage contract.
+  // Heap and external allocations are independent, so max(heap, external)
+  // undercounts the actual reclaimable pressure whenever both are large.
+  return memory.heapUsed + memory.external;
+}
+
 /**
  * Reclaim request serialization and stream buffers only after one model
  * response has crossed the durable conversation checkpoint. The callback runs
@@ -51,7 +58,7 @@ export function createModelCheckpointMemoryCollector(
             return;
           }
 
-          const pressureBytes = Math.max(memory.heapUsed, memory.external);
+          const pressureBytes = modelCheckpointPressureBytes(memory);
           const observedAt = now();
           if (
             !Number.isFinite(pressureBytes) ||
