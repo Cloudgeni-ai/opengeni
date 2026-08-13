@@ -73,6 +73,7 @@ function bridgeOptions(input: {
   events?: RTCDataChannel;
   sync(request: SyncSessionRealtimeLedgerRequest): Promise<SyncSessionRealtimeLedgerResponse>;
   randomUUID?: () => string;
+  getModelContext?: () => string | undefined;
   onFatal?: (fatal: { code: "pending_overflow"; message: string }) => void;
 }) {
   return {
@@ -84,6 +85,7 @@ function bridgeOptions(input: {
     owner,
     sync: input.sync,
     randomUUID: input.randomUUID ?? uuidSource(),
+    getModelContext: input.getModelContext,
     onFatal: input.onFatal,
   };
 }
@@ -158,6 +160,46 @@ describe("Codex realtime V3 wire parity", () => {
 });
 
 describe("Codex realtime V3 bridge", () => {
+  test("freezes the current host model context into each durable message-bearing entry", async () => {
+    const requests: SyncSessionRealtimeLedgerRequest[] = [];
+    let context = "  first route context  ";
+    const bridge = createCodexRealtimeV3Bridge(
+      bridgeOptions({
+        getModelContext: () => context,
+        sync: async (request) => {
+          requests.push(request);
+          return { accepted: [], outbound: [] };
+        },
+      }),
+    );
+
+    await bridge.ingest(transcript(1, "first request"));
+    context = "second route context";
+    await bridge.ingest(
+      JSON.stringify({
+        type: "delegation.created",
+        event_id: "delegation-event-context",
+        item: {
+          id: "delegation-context",
+          type: "delegation",
+          target: "client",
+          content: [{ type: "input_text", text: "delegate now" }],
+        },
+      }),
+    );
+
+    const entries = requests.flatMap((request) => request.entries ?? []);
+    expect(entries[0]).toMatchObject({
+      kind: "user_transcript",
+      modelContext: "first route context",
+    });
+    expect(entries.at(-1)).toMatchObject({
+      kind: "delegation_call",
+      modelContext: "second route context",
+    });
+    bridge.close();
+  });
+
   test("persists one finalized transcript per turn and ignores live transcript deltas", async () => {
     const requests: SyncSessionRealtimeLedgerRequest[] = [];
     const bridge = createCodexRealtimeV3Bridge(

@@ -213,6 +213,8 @@ export type CreateCodexRealtimeControllerOptions = {
   model?: SessionRealtimeModel | undefined;
   ownerStorageNamespace?: string | undefined;
   startTransport?: RealtimeControllerTransportStarter | undefined;
+  /** Model-visible application context captured with each durable realtime message. */
+  getModelContext?: (() => string | undefined) | undefined;
 };
 
 export type RealtimeControllerTransportStarter = (input: {
@@ -911,6 +913,7 @@ export function createCodexRealtimeController(
         sync: async (request) =>
           await syncForGeneration(targetGeneration, activated.mode.id, request),
         randomUUID,
+        ...(options.getModelContext ? { getModelContext: options.getModelContext } : {}),
         onSnapshot: (nextBridge) => {
           if (active?.generation === targetGeneration) publish({ bridge: nextBridge });
         },

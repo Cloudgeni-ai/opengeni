@@ -6,6 +6,7 @@ import { migrate } from "../src/migrate";
 
 const migrationName = "0240_model_context_user_messages.sql";
 const migrationUrl = new URL(`../drizzle/${migrationName}`, import.meta.url);
+const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
 describe("migration 0240 model context user messages", () => {
   test("hard-fences old writers and installs the generic message-context columns", async () => {
@@ -25,8 +26,15 @@ describe("migration 0240 model context user messages", () => {
     );
     expect(source).not.toContain("sessions:turn_instructions");
 
-    const blank = await acquireBlankTestDatabase("migration-0238");
-    if (!blank) return;
+    const blank = await acquireBlankTestDatabase("migration-0240");
+    if (!blank) {
+      if (requireRealDatabase) {
+        throw new Error(
+          "[migration-0240-model-context] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
+        );
+      }
+      return;
+    }
     const sql = postgres(blank.databaseUrl, { max: 1, onnotice: () => undefined });
     try {
       await migrate(blank.databaseUrl);

@@ -343,6 +343,33 @@ describe("session realtime transcript tail and continuity", () => {
     });
   });
 
+  test("does not attach model context from a transcript omitted by tail truncation", async () => {
+    const value = await fixture();
+    const omittedContext = "Context from the omitted user transcript.";
+    await runMode(value, [
+      transcript("user", "This user row will be omitted.", {}, omittedContext),
+      transcript("assistant", "x".repeat(SESSION_REALTIME_CONTEXT_MAX_BYTES * 2)),
+    ]);
+    const [turn] = await transaction(value.workspaceId, (tx) =>
+      tx
+        .select({ modelContext: schema.sessionTurns.modelContext })
+        .from(schema.sessionTurns)
+        .where(eq(schema.sessionTurns.sessionId, value.session.id))
+        .orderBy(asc(schema.sessionTurns.createdAt)),
+    );
+    const [projection] = await transaction(value.workspaceId, (tx) =>
+      tx
+        .select({
+          includedEntryCount: schema.sessionRealtimeContextProjections.includedEntryCount,
+          omittedEntryCount: schema.sessionRealtimeContextProjections.omittedEntryCount,
+        })
+        .from(schema.sessionRealtimeContextProjections)
+        .where(eq(schema.sessionRealtimeContextProjections.sessionId, value.session.id)),
+    );
+    expect(projection).toEqual({ includedEntryCount: 1, omittedEntryCount: 1 });
+    expect(turn?.modelContext).toBeNull();
+  });
+
   test("a later user transcript without context clears earlier assistant-only context", async () => {
     const value = await fixture();
     await runMode(value, [

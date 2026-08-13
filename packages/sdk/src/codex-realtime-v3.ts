@@ -72,6 +72,8 @@ export type CodexRealtimeV3BridgeOptions = {
   >;
   sync(request: SyncSessionRealtimeLedgerRequest): Promise<SyncSessionRealtimeLedgerResponse>;
   randomUUID?: (() => string) | undefined;
+  /** Model-visible application context captured once for each durable message-bearing entry. */
+  getModelContext?: (() => string | undefined) | undefined;
   /** The controller installs its activation FIFO first, then enables this listener synchronously. */
   listen?: boolean | undefined;
   onSnapshot?: ((snapshot: CodexRealtimeV3BridgeSnapshot) => void) | undefined;
@@ -128,6 +130,10 @@ export function createCodexRealtimeV3Bridge(
   let transcriptSinceDelegation: FinalizedTranscript[] = [];
   let pendingDelegationUserTranscript: { delegationItemId: string; text: string } | null = null;
   const randomUUID = options.randomUUID ?? defaultRandomUUID;
+  const currentModelContext = (): string | undefined => {
+    const context = options.getModelContext?.()?.trim();
+    return context ? context : undefined;
+  };
 
   const snapshot = (): CodexRealtimeV3BridgeSnapshot => ({
     connectionId: options.connectionId,
@@ -348,6 +354,7 @@ export function createCodexRealtimeV3Bridge(
       activeDelegationId = event.delegationItemId;
       const transcript = delegationTranscript(transcriptSinceDelegation, event.inputTranscript);
       const coveredTurnIds = transcriptSinceDelegation.map((entry) => entry.turnId);
+      const modelContext = currentModelContext();
       durable = enqueue({
         operationId: randomUUID(),
         kind: "delegation_call",
@@ -359,6 +366,7 @@ export function createCodexRealtimeV3Bridge(
           inputTranscript: event.inputTranscript,
           transcriptFenceTurnIds: coveredTurnIds,
         },
+        ...(modelContext ? { modelContext } : {}),
       });
       if (durable) {
         const alreadyFinalized = transcriptSinceDelegation.some(
@@ -383,7 +391,9 @@ export function createCodexRealtimeV3Bridge(
             normalizedTranscript(pendingDelegationUserTranscript.text)
             ? pendingDelegationUserTranscript.delegationItemId
             : null;
-        durable = enqueue(finalTranscript(randomUUID, event, coveredByDelegationItemId));
+        durable = enqueue(
+          finalTranscript(randomUUID, event, coveredByDelegationItemId, currentModelContext()),
+        );
         if (durable) {
           finalizedTurnIds.add(event.turnId);
           if (coveredByDelegationItemId) {
@@ -446,6 +456,7 @@ function finalTranscript(
   randomUUID: () => string,
   event: Extract<CodexRealtimeV3Event, { type: "turn.done" }>,
   coveredByDelegationItemId: string | null,
+  modelContext: string | undefined,
 ): SessionRealtimeInboundEntry {
   return {
     operationId: randomUUID(),
@@ -456,6 +467,7 @@ function finalTranscript(
       turnId: event.turnId,
       ...(coveredByDelegationItemId ? { coveredByDelegationItemId } : {}),
     },
+    ...(modelContext ? { modelContext } : {}),
   };
 }
 

@@ -259,10 +259,11 @@ export async function flushSessionRealtimeTranscriptTailInTransaction(
   }));
   const rendered = renderSessionRealtimeTail(decodedRows);
   if (!rendered.context) return null;
+  const renderedRows = decodedRows.slice(decodedRows.length - rendered.includedEntryCount);
   let foundUserTranscript = false;
   let modelContext: string | null = null;
-  for (let index = decodedRows.length - 1; index >= 0; index -= 1) {
-    const entry = decodedRows[index]!;
+  for (let index = renderedRows.length - 1; index >= 0; index -= 1) {
+    const entry = renderedRows[index]!;
     if (entry.role === "user") {
       foundUserTranscript = true;
       modelContext = entry.modelContext;
@@ -270,7 +271,7 @@ export async function flushSessionRealtimeTranscriptTailInTransaction(
     }
   }
   if (!foundUserTranscript) {
-    modelContext = decodedRows.at(-1)?.modelContext ?? null;
+    modelContext = renderedRows.at(-1)?.modelContext ?? null;
   }
 
   const [session] = await db
