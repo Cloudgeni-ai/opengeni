@@ -1,5 +1,24 @@
 # @opengeni/db
 
+## 0.36.1
+
+### Patch Changes
+
+- 499c70c: Retry transient pre-inference attempt claims atomically, durably re-wake a
+  logical turn when its activity failed before creating an attempt, and preserve
+  the requested backoff deadline once older workflow-wake revisions are delivered.
+  Still-open legacy workflow histories and every effectively active durable work
+  shape whose prior wake was delivered now retain the same recovery obligation:
+  queued/recovering turns, accepted approval responses, released capacity waits,
+  manual compaction, and pending internal updates. Held, paused, live-attempt, and
+  already-pending wake states remain untouched.
+  Terminal failure retries also close the workflow without synthesizing an
+  active-goal continuation.
+- Updated dependencies [944be7f]
+  - @opengeni/codemode@0.4.2
+  - @opengeni/codex@0.2.17
+  - @opengeni/config@0.16.2
+
 ## 0.36.0
 
 ### Minor Changes
