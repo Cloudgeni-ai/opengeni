@@ -6,10 +6,12 @@ import {
   AGENT_DIAGRAM_NODE_WIDTH,
   agentHasMatchingDescendants,
   buildAgentTopology,
+  canStartAgentTopologyRootRead,
   filterAgentTopology,
   layoutAgentTopologyDiagram,
   limitAgentTopology,
   mergeAgentTopologySessions,
+  selectAgentTopologyBranchesToLoad,
   summarizeAgentTopology,
 } from "./agent-topology";
 
@@ -107,6 +109,30 @@ describe("agent topology", () => {
       "root-a",
       "root-b",
     ]);
+  });
+
+  test("fills only the available global auto-expand request slots", () => {
+    expect(
+      selectAgentTopologyBranchesToLoad(
+        ["loaded", "active", "next", "later"],
+        new Set(["loaded"]),
+        new Set(["active", "manual"]),
+        4,
+      ),
+    ).toEqual(["next", "later"]);
+    expect(
+      selectAgentTopologyBranchesToLoad(
+        ["one", "two"],
+        new Set(),
+        new Set(["a", "b", "c", "d"]),
+        4,
+      ),
+    ).toEqual([]);
+  });
+
+  test("keeps first-page refresh and root pagination on one request lane", () => {
+    expect(canStartAgentTopologyRootRead(false)).toBe(true);
+    expect(canStartAgentTopologyRootRead(true)).toBe(false);
   });
 
   test("summarizes paused work separately from active statuses", () => {

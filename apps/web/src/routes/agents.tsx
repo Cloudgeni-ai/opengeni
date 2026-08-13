@@ -29,6 +29,7 @@ import {
   AGENT_DIAGRAM_NODE_WIDTH,
   agentHasMatchingDescendants,
   buildAgentTopology,
+  canStartAgentTopologyRootRead,
   countTopologyDescendants,
   filterAgentTopology,
   isActiveAgent,
@@ -36,6 +37,7 @@ import {
   layoutAgentTopologyDiagram,
   limitAgentTopology,
   mergeAgentTopologySessions,
+  selectAgentTopologyBranchesToLoad,
   summarizeAgentTopology,
   type AgentTopologyFilter,
   type AgentTopologyNode,
@@ -84,9 +86,8 @@ const EMPTY_DATA: AgentTopologyData = {
 
 export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
-  const requestSequence = useRef(0);
   const dataGeneration = useRef(0);
-  const rootPageRequest = useRef<symbol | null>(null);
+  const rootRequest = useRef<symbol | null>(null);
   const branchRequests = useRef(new Map<string, symbol>());
   const [data, setData] = useState<AgentTopologyData>(EMPTY_DATA);
   const [branchPages, setBranchPages] = useState<ReadonlyMap<string, AgentTopologyBranchPage>>(
@@ -102,9 +103,9 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
     async (cursor?: string) => {
       const generation = dataGeneration.current;
       const loadingMore = !!cursor;
-      if (loadingMore && rootPageRequest.current) return;
-      const request = loadingMore ? Symbol("root-page") : ++requestSequence.current;
-      if (loadingMore) rootPageRequest.current = request as symbol;
+      if (!canStartAgentTopologyRootRead(rootRequest.current !== null)) return;
+      const request = Symbol(loadingMore ? "root-page" : "root-refresh");
+      rootRequest.current = request;
       setData((current) => ({
         ...current,
         loading: !cursor && current.sessions.length === 0,
@@ -119,12 +120,7 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
           ...(cursor ? { cursor } : {}),
           ...(search ? { search } : { parentSessionId: null }),
         });
-        if (
-          generation !== dataGeneration.current ||
-          (!loadingMore && request !== requestSequence.current) ||
-          (loadingMore && rootPageRequest.current !== request)
-        )
-          return;
+        if (generation !== dataGeneration.current || rootRequest.current !== request) return;
         setData((current) => {
           // Keep already paged roots during the 15-second first-page refresh.
           // Query/workspace changes reset the collection before starting a new
@@ -149,12 +145,7 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
           setBranchPages(new Map());
         }
       } catch (error) {
-        if (
-          generation !== dataGeneration.current ||
-          (!loadingMore && request !== requestSequence.current) ||
-          (loadingMore && rootPageRequest.current !== request)
-        )
-          return;
+        if (generation !== dataGeneration.current || rootRequest.current !== request) return;
         setData((current) => ({
           ...current,
           loading: false,
@@ -163,7 +154,7 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
           error: error instanceof Error ? error : new Error(String(error)),
         }));
       } finally {
-        if (loadingMore && rootPageRequest.current === request) rootPageRequest.current = null;
+        if (rootRequest.current === request) rootRequest.current = null;
       }
     },
     [context.client, query, workspaceId],
@@ -171,7 +162,7 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
 
   useEffect(() => {
     dataGeneration.current += 1;
-    rootPageRequest.current = null;
+    rootRequest.current = null;
     branchRequests.current.clear();
     setData(EMPTY_DATA);
     setExpanded(new Set());
@@ -180,7 +171,6 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
     const start = window.setTimeout(() => void refresh(), query.trim() ? 250 : 0);
     const interval = query.trim() ? undefined : window.setInterval(() => void refresh(), 15_000);
     return () => {
-      requestSequence.current += 1;
       window.clearTimeout(start);
       if (interval !== undefined) window.clearInterval(interval);
     };
@@ -340,9 +330,12 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
       for (const sessionId of candidates) next.add(sessionId);
       return next;
     });
-    for (const sessionId of candidates
-      .filter((id) => !branchPages.has(id) && !branchRequests.current.has(id))
-      .slice(0, AUTO_EXPAND_CONCURRENCY)) {
+    for (const sessionId of selectAgentTopologyBranchesToLoad(
+      candidates,
+      new Set(branchPages.keys()),
+      new Set(branchRequests.current.keys()),
+      AUTO_EXPAND_CONCURRENCY,
+    )) {
       void loadChildren(sessionId);
     }
   }, [

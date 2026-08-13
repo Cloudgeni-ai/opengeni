@@ -103,6 +103,23 @@ export function mergeAgentTopologySessions(
   return [...sessions.values()];
 }
 
+export function canStartAgentTopologyRootRead(requestInFlight: boolean): boolean {
+  return !requestInFlight;
+}
+
+export function selectAgentTopologyBranchesToLoad(
+  candidates: string[],
+  loadedBranches: ReadonlySet<string>,
+  inFlightBranches: ReadonlySet<string>,
+  maxConcurrency: number,
+): string[] {
+  const available = Math.max(0, maxConcurrency - inFlightBranches.size);
+  if (available === 0) return [];
+  return candidates
+    .filter((id) => !loadedBranches.has(id) && !inFlightBranches.has(id))
+    .slice(0, available);
+}
+
 function compareAgentSessions(left: AgentTopologySession, right: AgentTopologySession): number {
   const activeDelta = Number(isActiveAgent(right)) - Number(isActiveAgent(left));
   if (activeDelta !== 0) return activeDelta;
