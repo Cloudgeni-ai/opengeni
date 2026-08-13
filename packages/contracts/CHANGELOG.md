@@ -1,16 +1,5 @@
 # @opengeni/contracts
 
-## 0.48.0
-
-### Minor Changes
-
-- 05c52f2: Add workspace-governed Slack shared-conversation task policies with durable enforcement and public contracts, and enforce vertical-only agent session authority across core and persistence.
-- 0cf3ab9: Add managed-human organization membership discovery. Expose the exact active
-  self-membership and personal-workspace identity returned by the existing
-  narrow provisioning capability through a managed-session-only API route and
-  typed SDK method, while denying delegated/API-key principals and terminal
-  memberships.
-
 ## 0.47.0
 
 ### Minor Changes
