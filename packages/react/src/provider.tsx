@@ -55,8 +55,7 @@ export function OpenGeniProvider({
   const workspaceInteractionSequencesRef = useRef(new Map<string, number>());
   const pageLive = usePageLiveActivity();
   const supportsWorkspaceLiveStream =
-    "streamWorkspaceLiveEvents" in client &&
-    typeof client.streamWorkspaceLiveEvents === "function";
+    "streamWorkspaceLiveEvents" in client && typeof client.streamWorkspaceLiveEvents === "function";
   callbackRef.current = onWorkspaceControlEvent;
   interactionCallbackRef.current = onWorkspaceInteractionEvent;
 

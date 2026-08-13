@@ -3,8 +3,9 @@ import { reactModuleNeedsFullReload } from "../vite-safe-react-hmr";
 
 describe("safe React HMR boundary", () => {
   test("keeps component-only modules on Fast Refresh", () => {
-    expect(reactModuleNeedsFullReload("export function BrowserViewer() { return null; }\n"))
-      .toBe(false);
+    expect(reactModuleNeedsFullReload("export function BrowserViewer() { return null; }\n")).toBe(
+      false,
+    );
   });
 
   test("full-reloads mixed helper and constant exports", () => {

@@ -227,7 +227,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
               origin,
               async (client) =>
                 await client.createComputerSession({
-              computerSessionId: preparedSession.id,
+                  computerSessionId: preparedSession.id,
                   controllerGeneration,
                   tokenGeneration: record.tokenGeneration,
                   ...tokens,
@@ -272,7 +272,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
             accountId: grant.accountId,
             workspaceId,
             operationId: request.operationId,
-                  computerSessionId: preparedSession.id,
+            computerSessionId: preparedSession.id,
             controller: {
               controllerId: "opengeni-browserd",
               controllerGeneration,
@@ -919,9 +919,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
   ): Promise<T> {
     const cachedUrl = placement.lease?.controllerDataPlaneUrl;
     const sandboxGroupId =
-      placement.placement.kind === "sandbox_group"
-        ? placement.placement.sandboxGroupId
-        : null;
+      placement.placement.kind === "sandbox_group" ? placement.placement.sandboxGroupId : null;
     return await withCachedController({
       cachedUrl: sandboxGroupId ? (cachedUrl ?? null) : null,
       createCachedClient: (url) =>

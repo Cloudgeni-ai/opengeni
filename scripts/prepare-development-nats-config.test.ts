@@ -18,7 +18,12 @@ describe("development NATS auth-callout config", () => {
     const account = nkeys.createAccount();
     const seed = new TextDecoder().decode(account.getSeed());
     const process = Bun.spawn(
-      ["bun", new URL("./prepare-development-nats-config.ts", import.meta.url).pathname, "--output", output],
+      [
+        "bun",
+        new URL("./prepare-development-nats-config.ts", import.meta.url).pathname,
+        "--output",
+        output,
+      ],
       {
         env: {
           ...Bun.env,

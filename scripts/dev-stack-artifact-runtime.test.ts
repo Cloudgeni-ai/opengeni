@@ -124,9 +124,9 @@ describe("local artifact runtime stack contract", () => {
     ]);
     expect(status).toBe(0);
     expect(stderr).toBe("");
-    expect(source).toContain("while [ \"$stopping\" = \"0\" ]");
+    expect(source).toContain('while [ "$stopping" = "0" ]');
     expect(source).toContain("cargo run --quiet -p opengeni-relay &");
-    expect(source).toContain('trap cleanup EXIT INT TERM');
+    expect(source).toContain("trap cleanup EXIT INT TERM");
     expect(source).toContain('kill "$child_pid"');
   });
 

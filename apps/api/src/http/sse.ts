@@ -665,14 +665,7 @@ export async function sseWorkspaceLiveStream(
   void (async () => {
     try {
       const [control, interaction] = await Promise.all([
-        sseWorkspaceControlStream(
-          db,
-          bus,
-          workspaceId,
-          controlAfter,
-          upstream.signal,
-          options,
-        ),
+        sseWorkspaceControlStream(db, bus, workspaceId, controlAfter, upstream.signal, options),
         sseWorkspaceInteractionRevisionStream(
           db,
           accountId,

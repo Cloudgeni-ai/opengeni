@@ -331,8 +331,7 @@ describe("useTerminalStream connection boundary", () => {
 
   test("relay PTY preserves directional cursors across credential rotation", async () => {
     const output: string[] = [];
-    const oldUrl =
-      "wss://relay.example/stream?ws=ws&agent=ag&port=7681&channel=pty-1&grant=old";
+    const oldUrl = "wss://relay.example/stream?ws=ws&agent=ag&port=7681&channel=pty-1&grant=old";
     const freshUrl =
       "wss://relay.example/stream?ws=ws&agent=ag&port=7681&channel=pty-1&grant=fresh";
     const hook = await renderHook(

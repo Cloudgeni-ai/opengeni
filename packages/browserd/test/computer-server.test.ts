@@ -204,25 +204,28 @@ describe("Computer routes on the placement interaction server", () => {
     const address = upstream.address();
     if (!address || typeof address === "string") throw new Error("RFB fixture did not bind TCP");
     try {
-      await withServer(async ({ server, reference }) => {
-        const created = await request(server, "/v1/computer-sessions", {
-          method: "POST",
-          token: adminToken,
-          body: createBody(reference),
-        });
-        expect(created.status).toBe(201);
-        const websocket = new WebSocket(
-          `${server.url.replace("http:", "ws:")}/v1/computer-sessions/${reference.computerSessionId}/targets/screen-1/rfb`,
-          [
-            "binary",
-            COMPUTER_RFB_WEBSOCKET_PROTOCOL,
-            `${BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX}${viewToken}`,
-          ],
-        );
-        websocket.binaryType = "arraybuffer";
-        expect(await websocketBytes(websocket, expected.byteLength)).toEqual(expected);
-        websocket.close(1000, "fixture complete");
-      }, { rfbPort: address.port });
+      await withServer(
+        async ({ server, reference }) => {
+          const created = await request(server, "/v1/computer-sessions", {
+            method: "POST",
+            token: adminToken,
+            body: createBody(reference),
+          });
+          expect(created.status).toBe(201);
+          const websocket = new WebSocket(
+            `${server.url.replace("http:", "ws:")}/v1/computer-sessions/${reference.computerSessionId}/targets/screen-1/rfb`,
+            [
+              "binary",
+              COMPUTER_RFB_WEBSOCKET_PROTOCOL,
+              `${BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX}${viewToken}`,
+            ],
+          );
+          websocket.binaryType = "arraybuffer";
+          expect(await websocketBytes(websocket, expected.byteLength)).toEqual(expected);
+          websocket.close(1000, "fixture complete");
+        },
+        { rfbPort: address.port },
+      );
     } finally {
       await new Promise<void>((resolve, reject) =>
         upstream.close((error) => (error ? reject(error) : resolve())),
@@ -249,7 +252,8 @@ async function withServer(
   const computerSupervisor = await ComputerSupervisor.open({
     rootDirectory: join(directory, "computer-state"),
     environmentAllocator: fixtureEnvironmentAllocator(options.rfbPort ?? null),
-    createDriver: async (context) => new FixtureComputerDriver(context, options.rfbPort !== undefined),
+    createDriver: async (context) =>
+      new FixtureComputerDriver(context, options.rfbPort !== undefined),
   });
   const server = BrowserControlServer.start({
     supervisor: browserSupervisor,
@@ -291,7 +295,9 @@ class FixtureComputerDriver implements ComputerSupervisorDriver {
   ) {}
 
   async listTargets(): Promise<ComputerTarget[]> {
-    return this.includeScreen ? [this.buildTarget(), this.buildScreenTarget()] : [this.buildTarget()];
+    return this.includeScreen
+      ? [this.buildTarget(), this.buildScreenTarget()]
+      : [this.buildTarget()];
   }
 
   async target(targetId: string): Promise<ComputerTarget | null> {
@@ -476,7 +482,10 @@ async function websocketBytes(websocket: WebSocket, expectedLength: number): Pro
   return await new Promise((resolve, reject) => {
     const chunks: Uint8Array[] = [];
     let length = 0;
-    const timer = setTimeout(() => reject(new Error(`RFB fixture received ${length} bytes`)), 5_000);
+    const timer = setTimeout(
+      () => reject(new Error(`RFB fixture received ${length} bytes`)),
+      5_000,
+    );
     websocket.addEventListener("message", (event) => {
       const chunk = new Uint8Array(event.data as ArrayBuffer);
       chunks.push(chunk);
@@ -491,10 +500,14 @@ async function websocketBytes(websocket: WebSocket, expectedLength: number): Pro
       }
       resolve(received);
     });
-    websocket.addEventListener("error", () => {
-      clearTimeout(timer);
-      reject(new Error("RFB fixture websocket failed"));
-    }, { once: true });
+    websocket.addEventListener(
+      "error",
+      () => {
+        clearTimeout(timer);
+        reject(new Error("RFB fixture websocket failed"));
+      },
+      { once: true },
+    );
   });
 }
 

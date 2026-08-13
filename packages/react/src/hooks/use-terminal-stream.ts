@@ -290,7 +290,8 @@ export function useTerminalStream(options: UseTerminalStreamOptions): UseTermina
     wsRef.current = socket;
 
     const requestFreshGrant = () => {
-      if (disposed || refreshRequestedRef.current || intentionalCloseRef.current.has(socket)) return;
+      if (disposed || refreshRequestedRef.current || intentionalCloseRef.current.has(socket))
+        return;
       refreshRequestedRef.current = true;
       onReconnectNeededRef.current?.();
     };
@@ -456,61 +457,61 @@ export function useTerminalStream(options: UseTerminalStreamOptions): UseTermina
   }, [transport, url, token, expiresAt, reconnectGeneration]);
 
   const write = useCallback((data: string) => {
-      const currentTransport = transportRef.current;
-      const ws = wsRef.current;
-      if (ws && ws.readyState === WebSocket.OPEN && socketAuthenticatedRef.current) {
-        try {
-          const relayChannel = relayChannelRef.current;
-          if (currentTransport === "relay-pty" && relayChannel) {
-            sendRelayInput(ws, relayChannel, relayInputSequenceRef.current++, data);
-          } else {
-            ws.send(ttydInputFrame(data));
-          }
-        } catch {
-          socketFailedRef.current = false;
-          setStatus("connecting");
-          closeSocket(ws);
+    const currentTransport = transportRef.current;
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN && socketAuthenticatedRef.current) {
+      try {
+        const relayChannel = relayChannelRef.current;
+        if (currentTransport === "relay-pty" && relayChannel) {
+          sendRelayInput(ws, relayChannel, relayInputSequenceRef.current++, data);
+        } else {
+          ws.send(ttydInputFrame(data));
         }
-      } else if (
-        (currentTransport === "pty-ws" || currentTransport === "relay-pty") &&
-        !socketFailedRef.current
-      ) {
-        const nextSize = pendingInputRef.current.length + data.length;
-        if (nextSize > MAX_PENDING_TERMINAL_INPUT_CODE_UNITS) {
-          pendingInputRef.current = "";
-          socketFailedRef.current = true;
-          setStatus("error");
-          closeSocket(ws);
-          return;
-        }
-        pendingInputRef.current += data;
+      } catch {
+        socketFailedRef.current = false;
+        setStatus("connecting");
+        closeSocket(ws);
       }
-    }, []);
+    } else if (
+      (currentTransport === "pty-ws" || currentTransport === "relay-pty") &&
+      !socketFailedRef.current
+    ) {
+      const nextSize = pendingInputRef.current.length + data.length;
+      if (nextSize > MAX_PENDING_TERMINAL_INPUT_CODE_UNITS) {
+        pendingInputRef.current = "";
+        socketFailedRef.current = true;
+        setStatus("error");
+        closeSocket(ws);
+        return;
+      }
+      pendingInputRef.current += data;
+    }
+  }, []);
   const resize = useCallback((cols: number, rows: number) => {
-      if (cols <= 0 || rows <= 0) return;
-      sizeRef.current = { cols, rows };
-      const ws = wsRef.current;
-      if (ws && ws.readyState === WebSocket.OPEN && socketAuthenticatedRef.current) {
-        try {
-          // Self-hosted relay PTYs carry raw input/output frames. Resize remains
-          // an out-of-band control operation; do not send ttyd framing into them.
-          if (transportRef.current === "pty-ws") ws.send(ttydResizeFrame(cols, rows));
-        } catch {
-          // socket raced closed — geometry is replayed on the next open.
-        }
+    if (cols <= 0 || rows <= 0) return;
+    sizeRef.current = { cols, rows };
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN && socketAuthenticatedRef.current) {
+      try {
+        // Self-hosted relay PTYs carry raw input/output frames. Resize remains
+        // an out-of-band control operation; do not send ttyd framing into them.
+        if (transportRef.current === "pty-ws") ws.send(ttydResizeFrame(cols, rows));
+      } catch {
+        // socket raced closed — geometry is replayed on the next open.
       }
-    }, []);
+    }
+  }, []);
   const disconnect = useCallback(() => {
-      const ws = wsRef.current;
-      wsRef.current = null;
-      pendingInputRef.current = "";
-      socketFailedRef.current = false;
-      socketAuthenticatedRef.current = false;
-      relayChannelRef.current = null;
-      setStatus("closed");
-      if (ws) intentionalCloseRef.current.add(ws);
-      closeSocket(ws);
-    }, []);
+    const ws = wsRef.current;
+    wsRef.current = null;
+    pendingInputRef.current = "";
+    socketFailedRef.current = false;
+    socketAuthenticatedRef.current = false;
+    relayChannelRef.current = null;
+    setStatus("closed");
+    if (ws) intentionalCloseRef.current.add(ws);
+    closeSocket(ws);
+  }, []);
 
   return useMemo<UseTerminalStreamResult>(() => {
     return { connected: status === "open", status, write, resize, disconnect };

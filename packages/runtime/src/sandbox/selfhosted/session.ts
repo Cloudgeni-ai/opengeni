@@ -1315,9 +1315,7 @@ export class SelfhostedSandboxClient {
       agentId,
       controlRpc: this.controlRpc(),
       relay: this.relay,
-      ...(this.terminalScopeId !== undefined
-        ? { terminalScopeId: this.terminalScopeId }
-        : {}),
+      ...(this.terminalScopeId !== undefined ? { terminalScopeId: this.terminalScopeId } : {}),
       ...(this.epoch !== undefined ? { epoch: this.epoch } : {}),
       ...(this.timeoutMs !== undefined ? { timeoutMs: this.timeoutMs } : {}),
       ...(this.execTimeoutMs !== undefined ? { execTimeoutMs: this.execTimeoutMs } : {}),
@@ -1441,9 +1439,7 @@ export async function buildSelfhostedBackendSession(
     controlRpcFactory: deps.controlRpcFactory,
     agentId: deps.agentId,
     epoch: deps.epoch,
-    ...(deps.terminalScopeId !== undefined
-      ? { terminalScopeId: deps.terminalScopeId }
-      : {}),
+    ...(deps.terminalScopeId !== undefined ? { terminalScopeId: deps.terminalScopeId } : {}),
     ...(deps.timeoutMs !== undefined ? { timeoutMs: deps.timeoutMs } : {}),
     ...(deps.execTimeoutMs !== undefined ? { execTimeoutMs: deps.execTimeoutMs } : {}),
     ...(deps.onOp !== undefined ? { onOp: deps.onOp } : {}),

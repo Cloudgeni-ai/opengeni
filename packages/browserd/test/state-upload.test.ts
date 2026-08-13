@@ -94,11 +94,15 @@ describe("browser state artifact upload", () => {
     await withDirectory(async (directory) => {
       const artifact = join(directory, "profile.ogbs");
       await writeFile(artifact, "encrypted");
-      await withUploadServer(200, async (url) => {
-        await uploadBrowserStateArtifact(artifact, authority(url), { now: () => now });
-      }, {
-        leaveResponseOpen: true,
-      });
+      await withUploadServer(
+        200,
+        async (url) => {
+          await uploadBrowserStateArtifact(artifact, authority(url), { now: () => now });
+        },
+        {
+          leaveResponseOpen: true,
+        },
+      );
     });
   });
 });
@@ -132,7 +136,11 @@ async function withUploadServer<T>(
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(Buffer.from(chunk));
-    resolveUpload({ method: request.method, headers: request.headers, body: Buffer.concat(chunks) });
+    resolveUpload({
+      method: request.method,
+      headers: request.headers,
+      body: Buffer.concat(chunks),
+    });
     response.writeHead(status);
     response.flushHeaders();
     if (!options.leaveResponseOpen) response.end();
