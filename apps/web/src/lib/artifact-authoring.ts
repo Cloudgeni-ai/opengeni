@@ -29,7 +29,7 @@ export const ARTIFACT_EDIT_TOOLS = [
   "artifacts_publish",
 ] as const satisfies readonly FirstPartyMcpToolName[];
 
-const ARTIFACT_RUNTIME_CONTRACT = `For this MVP, artifacts render as static HTML and inline CSS only. JavaScript, event handlers, forms, embeds, navigation-capable markup, network requests, external assets, downloads, browser storage, OpenGeni credentials, parent-page access, and workspace APIs are removed or blocked. Do not include scripts or controls that require JavaScript. Use semantic HTML and inline CSS only; CSS-only interactions and responsive layouts are supported.`;
+const ARTIFACT_RUNTIME_CONTRACT = `Artifacts run as exact HTML in an opaque-origin sandboxed iframe. JavaScript, event handlers, forms, external resources, network requests, popups, and downloads work. The artifact cannot access OpenGeni credentials, parent-page DOM/storage, same-origin authority, or top-level navigation. Prefer a complete, responsive, accessible document; external resources are supported.`;
 
 export function artifactCreateOpeningMessage(): string {
   return "Help me create a workspace artifact.";

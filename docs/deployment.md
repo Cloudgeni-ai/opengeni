@@ -1494,6 +1494,13 @@ Product access is controlled by `OPENGENI_PRODUCT_ACCESS_MODE`:
 - `configured` supports self-hosted embedded deployments with delegated bearer tokens or the deployment shared-key boundary.
 - `managed` uses Better Auth for browser human auth, OpenGeni-owned API keys for product/API access, Stripe prepaid credits, usage, limits, and local entitlement mirrors.
 
+Configured deployments using `OPENGENI_AUTH_REQUIRED=true` reuse
+`OPENGENI_ACCESS_KEY` to sign internal first-party delegation when
+`OPENGENI_DELEGATION_SECRET` is unset. An explicit delegation secret always wins.
+`OPENGENI_DEFAULT_FIRST_PARTY_MCP_TOOLS` sets the selection for omitted session
+tool policies and `OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS` sets the hard runtime
+ceiling; each accepts a JSON array or comma-separated canonical tool names.
+
 Long-lived public deployments should still sit behind a gateway or ingress stack that provides:
 
 - TLS termination with a managed certificate.

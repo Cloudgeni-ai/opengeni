@@ -82,7 +82,8 @@ import {
   type SessionDraft,
 } from "@/lib/session-create";
 import {
-  firstPartySessionToolOptions,
+  clientFirstPartyMcpToolPolicy,
+  firstPartySessionToolOptionsFor,
   selectableSessionMcpServerIds,
   newSessionDraftToolPolicy,
   rehydrateRepositoryResources,
@@ -121,12 +122,16 @@ function SessionsIndexRouteContent({
   launch: ComposerLaunchSearch;
 }) {
   const context = useAppContext();
+  const firstPartyMcpToolPolicy = clientFirstPartyMcpToolPolicy(context.clientConfig);
+  const firstPartyToolOptions = firstPartySessionToolOptionsFor(firstPartyMcpToolPolicy.allowed);
   const navigate = useNavigate();
   const modelCatalog = useWorkspaceModelCatalog(workspaceId);
   const attachments = useDraftAttachments(workspaceId);
   const { resetSessionView } = context;
   const [message, setMessage] = useState("");
-  const [draft, setDraft] = useState<SessionDraft>(() => emptySessionDraft());
+  const [draft, setDraft] = useState<SessionDraft>(() =>
+    emptySessionDraft(firstPartyMcpToolPolicy.default),
+  );
   const [toolSelectionExplicit, setToolSelectionExplicit] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [createdSessionAuthority, setCreatedSessionAuthority] =
@@ -171,7 +176,7 @@ function SessionsIndexRouteContent({
       model: context.model,
       reasoningEffort: context.reasoningEffort,
       latencyMode: context.latencyMode,
-      options: newSessionDraftOptionsFromSessionDraft(draft),
+      options: newSessionDraftOptionsFromSessionDraft(draft, firstPartyMcpToolPolicy.default),
     }),
     [
       attachments.readyResources,
@@ -180,6 +185,7 @@ function SessionsIndexRouteContent({
       context.reasoningEffort,
       context.currentResources,
       draft,
+      firstPartyMcpToolPolicy.default,
       message,
       persistedToolPolicy,
     ],
@@ -199,7 +205,9 @@ function SessionsIndexRouteContent({
   const applyRemoteDraft = useCallback(
     (remote: NewSessionDraftEditable) => {
       setMessage(remote.text);
-      setDraft(sessionDraftFromNewSessionDraftOptions(remote.options));
+      setDraft(
+        sessionDraftFromNewSessionDraftOptions(remote.options, firstPartyMcpToolPolicy.default),
+      );
       setModel(remote.model);
       setReasoningEffort(remote.reasoningEffort);
       setLatencyMode(remote.latencyMode ?? "standard");
@@ -224,6 +232,7 @@ function SessionsIndexRouteContent({
       setSelectedRepoIds,
       setSelectedRepoRefs,
       githubRepos,
+      firstPartyMcpToolPolicy.default,
       workspaceDefaultToolIdsForHydration,
     ],
   );
@@ -286,7 +295,7 @@ function SessionsIndexRouteContent({
             if (realtimeModel) {
               const flushed = await newSessionDraft.flush();
               if (!flushed) return null;
-              const submission = submissionFromSessionDraft(draft);
+              const submission = submissionFromSessionDraft(draft, firstPartyMcpToolPolicy.default);
               const created = await context.startSession(
                 workspaceId,
                 {
@@ -318,7 +327,7 @@ function SessionsIndexRouteContent({
                 : persistedValue.resources;
             const flushed = await newSessionDraft.flush();
             if (!flushed) return null;
-            const submission = submissionFromSessionDraft(draft);
+            const submission = submissionFromSessionDraft(draft, firstPartyMcpToolPolicy.default);
             const created = await context.startSession(
               workspaceId,
               {
@@ -344,7 +353,7 @@ function SessionsIndexRouteContent({
                 const acknowledged = await newSessionDraft.acknowledgeConsumed(flushed);
                 if (acknowledged?.kind === "consumed") {
                   setMessage("");
-                  setDraft(emptySessionDraft());
+                  setDraft(emptySessionDraft(firstPartyMcpToolPolicy.default));
                   attachments.removeReadyFiles(
                     submittedResources.flatMap((resource) =>
                       resource.kind === "file" ? [resource.fileId] : [],
@@ -510,7 +519,7 @@ function SessionsIndexRouteContent({
                 disabled={busy || newSessionDraft.loading}
                 fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
                 servers={context.toolMcpServers}
-                firstPartyTools={firstPartySessionToolOptions}
+                firstPartyTools={firstPartyToolOptions}
                 selection={{
                   mcpServerIds: context.selectedCapabilityToolIds,
                   firstPartyToolIds: draft.firstPartyMcpTools,
@@ -764,6 +773,9 @@ function SessionControlStrip({
   onToolSelectionChange: (selection: SessionToolSelection) => void;
 }) {
   const context = useAppContext();
+  const firstPartyToolOptions = firstPartySessionToolOptionsFor(
+    clientFirstPartyMcpToolPolicy(context.clientConfig).allowed,
+  );
   useEffect(() => {
     const row = findPickerRow(modelCatalog.rows, context.model);
     if (!row?.selectable) {
@@ -796,7 +808,7 @@ function SessionControlStrip({
       />
       <SessionToolPicker
         servers={context.toolMcpServers}
-        firstPartyTools={firstPartySessionToolOptions}
+        firstPartyTools={firstPartyToolOptions}
         selection={selection}
         triggerClassName="max-sm:hidden"
         disabled={disabled}
