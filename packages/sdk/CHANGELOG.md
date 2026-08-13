@@ -1,5 +1,21 @@
 # @opengeni/sdk
 
+## 0.55.0
+
+### Minor Changes
+
+- 0cf3ab9: Add managed-human organization membership discovery. Expose the exact active
+  self-membership and personal-workspace identity returned by the existing
+  narrow provisioning capability through a managed-session-only API route and
+  typed SDK method, while denying delegated/API-key principals and terminal
+  memberships.
+
+### Patch Changes
+
+- Updated dependencies [05c52f2]
+- Updated dependencies [0cf3ab9]
+  - @opengeni/contracts@0.48.0
+
 ## 0.54.0
 
 ### Minor Changes
