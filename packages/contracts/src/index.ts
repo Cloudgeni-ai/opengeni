@@ -12314,6 +12314,68 @@ export const MachineConnectionAuthority = z.object({
 });
 export type MachineConnectionAuthority = z.infer<typeof MachineConnectionAuthority>;
 
+export const MachineRuntimeCapabilities = z.object({
+  exec: z.boolean(),
+  filesystem: z.boolean(),
+  git: z.boolean(),
+  pty: z.boolean(),
+  desktop: z.boolean(),
+  opStream: z.boolean(),
+  browserBridge: z.boolean(),
+});
+export type MachineRuntimeCapabilities = z.infer<typeof MachineRuntimeCapabilities>;
+
+export const MachineUpdateStatus = z.enum([
+  "requested",
+  "accepted",
+  "waiting_for_idle",
+  "downloading",
+  "verifying",
+  "applying",
+  "restarting",
+  "succeeded",
+  "failed",
+]);
+export type MachineUpdateStatus = z.infer<typeof MachineUpdateStatus>;
+
+export const MachineUpdateState = z.object({
+  operationId: z.string().uuid(),
+  status: MachineUpdateStatus,
+  targetVersion: z.string(),
+  expectedBinarySha256: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/)
+    .nullable(),
+  errorCode: z.string().nullable(),
+  retryable: z.boolean(),
+  rolledBack: z.boolean(),
+  requestedAt: z.string(),
+  updatedAt: z.string(),
+  completedAt: z.string().nullable(),
+});
+export type MachineUpdateState = z.infer<typeof MachineUpdateState>;
+
+export const MachineRuntime = z.object({
+  installedVersion: z.string().nullable(),
+  binarySha256: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/)
+    .nullable(),
+  updateChannel: z.enum(["stable", "beta"]).nullable(),
+  desiredVersion: z.string().nullable(),
+  versionState: z.enum(["unknown", "current", "outdated", "ahead", "updating", "update_failed"]),
+  capabilities: MachineRuntimeCapabilities,
+  update: MachineUpdateState.nullable(),
+});
+export type MachineRuntime = z.infer<typeof MachineRuntime>;
+
+export const UpdateMachineAgentResponse = z.object({
+  operationId: z.string().uuid(),
+  accepted: z.boolean(),
+  targetVersion: z.string(),
+});
+export type UpdateMachineAgentResponse = z.infer<typeof UpdateMachineAgentResponse>;
+
 /**
  * A machine as the Machines dashboard renders it. The workspace's enrolled
  * selfhosted machines PLUS the session's synthetic Modal group box
@@ -12344,6 +12406,9 @@ export const MachineView = z.object({
   sharedSessionCount: z.number().int(),
   lastSeenAt: z.string().nullable(),
   connectionAuthority: MachineConnectionAuthority,
+  // Exact connected-agent build/capabilities and current update operation. Null
+  // for managed/session sandboxes and pre-runtime-reporting synthetic rows.
+  runtime: MachineRuntime.nullable().default(null),
   metrics: MetricSample.nullable(),
 });
 export type MachineView = z.infer<typeof MachineView>;

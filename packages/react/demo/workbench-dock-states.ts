@@ -418,6 +418,7 @@ function machine(overrides: Partial<MachineView>): MachineView {
       duplicateRunnerDeniedCount: 0,
       duplicateRunnerDeniedAt: null,
     },
+    runtime: null,
     metrics: null,
     ...overrides,
   };

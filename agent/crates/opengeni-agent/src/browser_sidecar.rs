@@ -506,6 +506,10 @@ fn append_platform_error(error: PlatformError, diagnostic: &str) -> PlatformErro
                 detail,
             }
         }
+        PlatformError::Stream { message, retryable } => PlatformError::Stream {
+            message: format!("{message}; {diagnostic}"),
+            retryable,
+        },
     }
 }
 

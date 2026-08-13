@@ -40,6 +40,7 @@ function machine(overrides: Partial<MachineView> & Pick<MachineView, "sandboxId"
       duplicateRunnerDeniedCount: 0,
       duplicateRunnerDeniedAt: null,
     },
+    runtime: null,
     metrics: null,
     ...overrides,
   };
@@ -55,6 +56,38 @@ const response: MachinesResponse = {
 };
 
 describe("useMachines", () => {
+  test("starts a signed agent update and refetches durable progress", async () => {
+    const calls: string[] = [];
+    let lists = 0;
+    const machinesClient: MachinesClientLike = {
+      listMachines: async () => {
+        lists += 1;
+        return response;
+      },
+      updateMachineAgent: async (_workspaceId, enrollmentId) => {
+        calls.push(enrollmentId);
+        return {
+          operationId: "00000000-0000-4000-8000-000000000001",
+          accepted: true,
+          targetVersion: "0.1.16",
+        };
+      },
+    };
+    const hook = await renderHook(
+      () => useMachines({ client, workspaceId: WORKSPACE_ID, machinesClient }),
+      undefined,
+    );
+    await flush();
+    expect(hook.result.current.canUpdateAgent).toBe(true);
+    const result = await actRun(() => hook.result.current.updateAgent("enr-sh-1"));
+    await flush();
+    expect(result?.accepted).toBe(true);
+    expect(calls).toEqual(["enr-sh-1"]);
+    expect(lists).toBeGreaterThanOrEqual(2);
+    expect(hook.result.current.updatingEnrollmentId).toBeNull();
+    await hook.unmount();
+  });
+
   test("loads the fleet + active pointer from the structural client", async () => {
     const machinesClient: MachinesClientLike = {
       listMachines: async () => response,

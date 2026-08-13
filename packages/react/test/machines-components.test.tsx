@@ -75,6 +75,7 @@ function machine(
       duplicateRunnerDeniedCount: 0,
       duplicateRunnerDeniedAt: null,
     },
+    runtime: null,
     metrics: idle,
     ...overrides,
   };
@@ -183,6 +184,139 @@ describe("MachineMetrics", () => {
 });
 
 describe("MachineCard — attach/swap affordance", () => {
+  test("an outdated agent shows exact build truth and one-click update without opening detail", async () => {
+    const updated: MachineView[] = [];
+    const opened: MachineView[] = [];
+    const m = machine({
+      sandboxId: "sh-outdated",
+      state: "online",
+      runtime: {
+        installedVersion: "0.1.15",
+        binarySha256: "ab".repeat(32),
+        updateChannel: "stable",
+        desiredVersion: "0.1.16",
+        versionState: "outdated",
+        capabilities: {
+          exec: true,
+          filesystem: true,
+          git: true,
+          pty: true,
+          desktop: true,
+          opStream: true,
+          browserBridge: true,
+        },
+        update: null,
+      },
+    });
+    const r = await renderComponent(
+      <MachineCard
+        machine={m}
+        onUpdateAgent={(value) => updated.push(value)}
+        onOpenDetail={(value) => opened.push(value)}
+      />,
+    );
+    await flush();
+    expect(r.container.textContent).toContain("Agent v0.1.15");
+    expect(r.container.textContent).toContain("Promoted v0.1.16");
+    const button = r.container.querySelector("[data-update-agent]") as HTMLButtonElement;
+    button.click();
+    await flush();
+    expect(updated.map((value) => value.sandboxId)).toEqual(["sh-outdated"]);
+    expect(opened).toEqual([]);
+    await r.unmount();
+  });
+
+  test("a draining update is truthful and cannot be started twice", async () => {
+    const m = machine({
+      sandboxId: "sh-updating",
+      state: "online",
+      runtime: {
+        installedVersion: "0.1.15",
+        binarySha256: "ab".repeat(32),
+        updateChannel: "stable",
+        desiredVersion: "0.1.16",
+        versionState: "updating",
+        capabilities: {
+          exec: true,
+          filesystem: true,
+          git: true,
+          pty: true,
+          desktop: true,
+          opStream: true,
+          browserBridge: true,
+        },
+        update: {
+          operationId: "00000000-0000-4000-8000-000000000001",
+          status: "waiting_for_idle",
+          targetVersion: "0.1.16",
+          expectedBinarySha256: null,
+          errorCode: null,
+          retryable: false,
+          rolledBack: false,
+          requestedAt: "2026-08-13T12:00:00.000Z",
+          updatedAt: "2026-08-13T12:00:01.000Z",
+          completedAt: null,
+        },
+      },
+    });
+    const r = await renderComponent(<MachineCard machine={m} onUpdateAgent={() => {}} />);
+    await flush();
+    expect(r.container.textContent).toContain("Waiting for current work");
+    expect(r.container.querySelector("[data-update-agent]")).toBeNull();
+    await r.unmount();
+  });
+
+  test("an unconfirmed dispatch becomes safely redeliverable with the same operation", async () => {
+    const retried: MachineView[] = [];
+    const m = machine({
+      sandboxId: "sh-awaiting-confirmation",
+      state: "online",
+      runtime: {
+        installedVersion: "0.1.15",
+        binarySha256: "ab".repeat(32),
+        updateChannel: "stable",
+        desiredVersion: "0.1.16",
+        versionState: "updating",
+        capabilities: {
+          exec: true,
+          filesystem: true,
+          git: true,
+          pty: true,
+          desktop: true,
+          opStream: true,
+          browserBridge: true,
+        },
+        update: {
+          operationId: "00000000-0000-4000-8000-000000000001",
+          status: "requested",
+          targetVersion: "0.1.16",
+          expectedBinarySha256: null,
+          errorCode: null,
+          retryable: false,
+          rolledBack: false,
+          requestedAt: "2026-08-13T12:00:00.000Z",
+          updatedAt: "2026-08-13T12:00:00.000Z",
+          completedAt: null,
+        },
+      },
+    });
+    const r = await renderComponent(
+      <MachineCard
+        machine={m}
+        now={new Date("2026-08-13T12:00:31.000Z").getTime()}
+        onUpdateAgent={(value) => retried.push(value)}
+      />,
+    );
+    await flush();
+    expect(r.container.textContent).toContain("Agent confirmation delayed");
+    const button = r.container.querySelector("[data-update-agent]") as HTMLButtonElement;
+    expect(button.textContent).toContain("Retry delivery");
+    button.click();
+    await flush();
+    expect(retried.map((value) => value.sandboxId)).toEqual(["sh-awaiting-confirmation"]);
+    await r.unmount();
+  });
+
   test("an online, inactive machine shows an Attach button", async () => {
     const attached: MachineView[] = [];
     const m = machine({ sandboxId: "sh-a", state: "online" });

@@ -33,6 +33,7 @@
 import {
   clearEnrollmentWentOffline,
   disconnectAttachedBrowserDevices,
+  advanceEnrollmentAgentUpdate,
   getEnrollment,
   getLiveEnrollmentConnection,
   ingestMachineMetricsSample,
@@ -41,6 +42,7 @@ import {
   renewEnrollmentConnection,
   sessionsWithActiveOpOnEnrollment,
   setEnrollmentDisplayState,
+  setEnrollmentAgentRuntime,
   setEnrollmentOpStreamState,
   type AppendEventInput,
   type Database,
@@ -54,6 +56,7 @@ import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
 import {
   AgentEvent,
+  AgentUpdateStage,
   Arch,
   GoingOfflineReason,
   Hello,
@@ -405,6 +408,55 @@ export async function handleAgentEventPayload(
     }
     return;
   }
+  if (event.event?.$case === "agentUpdateProgress") {
+    const enrollment = await getEnrollment(db, ids.workspaceId, ids.agentId).catch(() => null);
+    if (!enrollment || enrollment.connectionInstanceId !== ids.connectionInstanceId) return;
+    const progress = event.event.agentUpdateProgress;
+    const status = (() => {
+      switch (progress.stage) {
+        case AgentUpdateStage.AGENT_UPDATE_STAGE_ACCEPTED:
+          return "accepted" as const;
+        case AgentUpdateStage.AGENT_UPDATE_STAGE_WAITING_FOR_IDLE:
+          return "waiting_for_idle" as const;
+        case AgentUpdateStage.AGENT_UPDATE_STAGE_DOWNLOADING:
+          return "downloading" as const;
+        case AgentUpdateStage.AGENT_UPDATE_STAGE_VERIFYING:
+          return "verifying" as const;
+        case AgentUpdateStage.AGENT_UPDATE_STAGE_APPLYING:
+          return "applying" as const;
+        case AgentUpdateStage.AGENT_UPDATE_STAGE_RESTARTING:
+          return "restarting" as const;
+        case AgentUpdateStage.AGENT_UPDATE_STAGE_FAILED:
+          return "failed" as const;
+        default:
+          return null;
+      }
+    })();
+    if (!status) return;
+    try {
+      await advanceEnrollmentAgentUpdate(db, {
+        accountId: enrollment.accountId,
+        workspaceId: ids.workspaceId,
+        enrollmentId: ids.agentId,
+        connectionInstanceId: ids.connectionInstanceId,
+        connectionGeneration: enrollment.connectionGeneration,
+        operationId: progress.operationId,
+        status,
+        expectedBinarySha256: /^[0-9a-f]{64}$/.test(progress.expectedBinarySha256)
+          ? progress.expectedBinarySha256
+          : null,
+        errorCode: progress.errorCode || null,
+        retryable: progress.retryable,
+        rolledBack: progress.rolledBack,
+      });
+    } catch (error) {
+      observability?.warn?.("Failed to ingest a machine self-update progress event", {
+        subject,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return;
+  }
   if (event.event?.$case !== "heartbeat") {
     return; // an unknown event kind → not a metrics point.
   }
@@ -516,6 +568,44 @@ export function helloDesktopUnavailableReason(hello: Hello): string | null {
 /** Whether the runner's current Hello advertises the op-stream engine. */
 export function helloReportsOpStream(hello: Hello): boolean {
   return hello.capabilities?.opStream === true;
+}
+
+function helloRuntimeCapabilities(hello: Hello): Record<string, boolean> {
+  const caps = hello.capabilities;
+  // Absence is an older-agent/unknown signal, not seven explicit false claims.
+  // Keep the durable cursor empty so reconnects from legacy agents remain a
+  // no-op and future capability additions do not get silently fabricated.
+  if (!caps) return {};
+  return {
+    exec: caps.exec === true,
+    filesystem: caps.filesystem === true,
+    git: caps.git === true,
+    pty: caps.pty === true,
+    desktop: caps.desktop === true,
+    opStream: caps.opStream === true,
+    browserBridge: caps.browserBridge === true,
+  };
+}
+
+function helloCompletedUpdate(hello: Hello): {
+  operationId: string;
+  targetVersion: string;
+  binarySha256: string;
+} | null {
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      hello.completedUpdateOperationId,
+    ) ||
+    !/^(?:v)?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(hello.completedUpdateTargetVersion) ||
+    !/^[0-9a-f]{64}$/.test(hello.completedUpdateBinarySha256)
+  ) {
+    return null;
+  }
+  return {
+    operationId: hello.completedUpdateOperationId,
+    targetVersion: hello.completedUpdateTargetVersion,
+    binarySha256: hello.completedUpdateBinarySha256,
+  };
 }
 
 /**
@@ -644,6 +734,20 @@ export async function handleHelloPayload(
       agentId: ids.agentId,
       opStream: helloReportsOpStream(hello),
       connectionInstanceId: ids.connectionInstanceId,
+    });
+    await setEnrollmentAgentRuntime(db, {
+      accountId: authority.accountId,
+      workspaceId: ids.workspaceId,
+      enrollmentId: ids.agentId,
+      connectionInstanceId: ids.connectionInstanceId,
+      agentVersion: hello.agentVersion.trim() || null,
+      binarySha256: /^[0-9a-f]{64}$/.test(hello.binarySha256) ? hello.binarySha256 : null,
+      updateChannel:
+        hello.updateChannel === "stable" || hello.updateChannel === "beta"
+          ? hello.updateChannel
+          : null,
+      capabilities: helloRuntimeCapabilities(hello),
+      completedUpdate: helloCompletedUpdate(hello),
     });
   } catch (error) {
     observability?.warn?.("Failed to refresh an enrollment's capabilities from a Hello", {

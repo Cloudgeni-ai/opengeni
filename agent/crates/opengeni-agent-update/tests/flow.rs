@@ -227,3 +227,19 @@ fn an_older_or_equal_version_is_up_to_date_not_an_error() {
         CheckOutcome::Available(_) => panic!("running version should be up-to-date"),
     }
 }
+
+#[test]
+fn explicit_same_version_opt_in_returns_the_signed_plan() {
+    let release = staged_release();
+    let source = DirSource::new(release.path());
+    let mut cfg = config_for(release.path());
+    cfg.current_version = "1.0.1".to_string();
+    cfg.allow_same_version = true;
+
+    match check_update_manifest(&source, &cfg).expect("manifest check") {
+        ManifestCheckOutcome::Available(plan) => assert_eq!(plan.version, "1.0.1"),
+        ManifestCheckOutcome::UpToDate(reason) => {
+            panic!("explicit same-version repair must keep the signed plan: {reason}")
+        }
+    }
+}

@@ -8,6 +8,7 @@ import {
 } from "@opengeni/testing";
 import {
   AgentEvent,
+  AgentUpdateStage,
   ControlRequest,
   ControlResponse,
   GoingOfflineReason,
@@ -16,6 +17,7 @@ import {
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import {
   claimEnrollmentConnection,
+  beginEnrollmentAgentUpdate,
   createDb,
   createEnrollment,
   createSandbox,
@@ -79,6 +81,7 @@ function busWithAgent(opts: {
   workspaceId: string;
   agentId: string;
   online: boolean;
+  onRequest?: (request: ControlRequest) => void;
 }): MemoryEventBus {
   const bus = new MemoryEventBus();
   if (!opts.online) {
@@ -88,6 +91,7 @@ function busWithAgent(opts: {
     subjectFor(opts.workspaceId, opts.agentId, CONNECTION_INSTANCE_ID),
     (payload) => {
       const req = ControlRequest.decode(payload);
+      opts.onRequest?.(req);
       const op = req.op;
       const res: ControlResponse =
         op?.$case === "ping"
@@ -95,10 +99,24 @@ function busWithAgent(opts: {
               requestId: req.requestId,
               result: { $case: "ping", ping: { nonce: op.ping.nonce, agentMonotonicMs: "0" } },
             }
-          : {
-              requestId: req.requestId,
-              error: { code: 0, message: "unsupported", retryable: false, detail: {} },
-            };
+          : op?.$case === "agentUpdateApply"
+            ? {
+                requestId: req.requestId,
+                result: {
+                  $case: "agentUpdateApply",
+                  agentUpdateApply: {
+                    accepted: true,
+                    operationId: op.agentUpdateApply.operationId,
+                    currentVersion: op.agentUpdateApply.expectedCurrentVersion,
+                    currentSha256: op.agentUpdateApply.expectedCurrentSha256,
+                    targetVersion: op.agentUpdateApply.targetVersion,
+                  },
+                },
+              }
+            : {
+                requestId: req.requestId,
+                error: { code: 0, message: "unsupported", retryable: false, detail: {} },
+              };
       return ControlResponse.encode(res).finish();
     },
   );
@@ -655,6 +673,199 @@ describe("M10 GET /machines/:enrollmentId/metrics/series", () => {
       { headers: { authorization: auth } },
     );
     expect(unknown.status).toBe(404);
+  }, 90_000);
+});
+
+describe("Connected Machine signed self-update orchestration", () => {
+  test("dispatches to the exact process and completes only after the matching successor Hello", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, enrollment } = await seed();
+    const currentDigest = "ab".repeat(32);
+    const targetDigest = "cd".repeat(32);
+    await handleHelloPayload(
+      db,
+      undefined,
+      Hello.encode(
+        Hello.fromPartial({
+          agentId: enrollment.id,
+          workspaceId,
+          agentVersion: "0.1.15",
+          binarySha256: currentDigest,
+          updateChannel: "stable",
+          capabilities: { exec: true, filesystem: true, git: true, pty: true },
+        }),
+      ).finish(),
+      `agent.${workspaceId}.${enrollment.id}.connection.${CONNECTION_INSTANCE_ID}.hello`,
+    );
+
+    const requests: ControlRequest[] = [];
+    const bus = busWithAgent({
+      workspaceId,
+      agentId: enrollment.id,
+      online: true,
+      onRequest: (request) => requests.push(request),
+    });
+    const app = appFor(bus, {
+      settings: {
+        ...settings,
+        agentStableVersion: "0.1.16",
+        publicBaseUrl: "https://dev.opengeni.example",
+      },
+    });
+    const auth = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:manage"])}`;
+    const response = await app.request(
+      `/v1/workspaces/${workspaceId}/machines/${enrollment.id}/update`,
+      { method: "POST", headers: { authorization: auth } },
+    );
+    expect(response.status).toBe(202);
+    const body = (await response.json()) as { operationId: string; targetVersion: string };
+    expect(body.targetVersion).toBe("0.1.16");
+    const updateRequest = requests.find((request) => request.op?.$case === "agentUpdateApply");
+    expect(updateRequest?.epoch).toBe(0);
+    expect(updateRequest?.op).toEqual({
+      $case: "agentUpdateApply",
+      agentUpdateApply: {
+        operationId: body.operationId,
+        targetVersion: "0.1.16",
+        channel: "stable",
+        expectedCurrentVersion: "0.1.15",
+        expectedCurrentSha256: currentDigest,
+        releaseBaseUrl: "https://dev.opengeni.example",
+      },
+    });
+    expect((await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate?.status).toBe(
+      "accepted",
+    );
+
+    await bus.emitAgentEvent(
+      `agent.${workspaceId}.${enrollment.id}.connection.${CONNECTION_INSTANCE_ID}.events`,
+      AgentEvent.encode({
+        agentId: enrollment.id,
+        event: {
+          $case: "agentUpdateProgress",
+          agentUpdateProgress: {
+            operationId: body.operationId,
+            targetVersion: "0.1.16",
+            expectedBinarySha256: targetDigest,
+            stage: AgentUpdateStage.AGENT_UPDATE_STAGE_RESTARTING,
+            errorCode: "",
+            retryable: false,
+            rolledBack: false,
+          },
+        },
+      }).finish(),
+    );
+    expect((await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate?.status).toBe(
+      "restarting",
+    );
+
+    // A reconnect alone is insufficient: the exact signed artifact digest is
+    // part of the success proof.
+    await handleHelloPayload(
+      db,
+      undefined,
+      Hello.encode(
+        Hello.fromPartial({
+          agentId: enrollment.id,
+          workspaceId,
+          agentVersion: "0.1.16",
+          binarySha256: "ef".repeat(32),
+          updateChannel: "stable",
+          completedUpdateOperationId: body.operationId,
+          completedUpdateTargetVersion: "0.1.16",
+          completedUpdateBinarySha256: targetDigest,
+        }),
+      ).finish(),
+      `agent.${workspaceId}.${enrollment.id}.connection.${CONNECTION_INSTANCE_ID}.hello`,
+    );
+    expect((await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate?.status).toBe(
+      "restarting",
+    );
+    await handleHelloPayload(
+      db,
+      undefined,
+      Hello.encode(
+        Hello.fromPartial({
+          agentId: enrollment.id,
+          workspaceId,
+          agentVersion: "0.1.16",
+          binarySha256: targetDigest,
+          updateChannel: "stable",
+          completedUpdateOperationId: body.operationId,
+          completedUpdateTargetVersion: "0.1.16",
+          completedUpdateBinarySha256: targetDigest,
+        }),
+      ).finish(),
+      `agent.${workspaceId}.${enrollment.id}.connection.${CONNECTION_INSTANCE_ID}.hello`,
+    );
+    expect((await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate?.status).toBe(
+      "succeeded",
+    );
+  }, 90_000);
+
+  test("redelivers one unconfirmed operation id instead of reserving a second update", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, enrollment } = await seed();
+    const currentDigest = "ab".repeat(32);
+    await handleHelloPayload(
+      db,
+      undefined,
+      Hello.encode(
+        Hello.fromPartial({
+          agentId: enrollment.id,
+          workspaceId,
+          agentVersion: "0.1.15",
+          binarySha256: currentDigest,
+          updateChannel: "stable",
+        }),
+      ).finish(),
+      `agent.${workspaceId}.${enrollment.id}.connection.${CONNECTION_INSTANCE_ID}.hello`,
+    );
+    const live = await getEnrollment(db, workspaceId, enrollment.id);
+    const operationId = crypto.randomUUID();
+    await beginEnrollmentAgentUpdate(db, {
+      accountId,
+      workspaceId,
+      enrollmentId: enrollment.id,
+      connectionInstanceId: CONNECTION_INSTANCE_ID,
+      connectionGeneration: live!.connectionGeneration,
+      operationId,
+      targetVersion: "0.1.16",
+    });
+    const requests: ControlRequest[] = [];
+    const app = appFor(
+      busWithAgent({
+        workspaceId,
+        agentId: enrollment.id,
+        online: true,
+        onRequest: (request) => requests.push(request),
+      }),
+      {
+        settings: {
+          ...settings,
+          agentStableVersion: "0.1.16",
+          publicBaseUrl: "https://dev.opengeni.example",
+        },
+      },
+    );
+    const response = await app.request(
+      `/v1/workspaces/${workspaceId}/machines/${enrollment.id}/update`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${await bearer(accountId, workspaceId, ["enrollments:manage"])}`,
+        },
+      },
+    );
+    expect(response.status).toBe(202);
+    expect((await response.json()) as { operationId: string }).toMatchObject({ operationId });
+    expect(requests.find((request) => request.op?.$case === "agentUpdateApply")?.requestId).toBe(
+      operationId,
+    );
+    expect((await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate).toMatchObject({
+      operationId,
+      status: "accepted",
+    });
   }, 90_000);
 });
 

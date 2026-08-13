@@ -14,6 +14,8 @@ export type MachinesDashboardProps = {
   onAttach?: ((machine: MachineView) => void) | undefined;
   /** The sandbox id currently being attached/swapped to (disables that card). */
   attachingSandboxId?: string | null | undefined;
+  onUpdateAgent?: ((machine: MachineView) => void) | undefined;
+  updatingEnrollmentId?: string | null | undefined;
   /** Short recent history per machine (keyed by sandboxId) — drives card sparklines. */
   seriesByMachine?: Record<string, MetricSample[]> | undefined;
   /** Open the per-machine telemetry detail (makes each card actionable). */
@@ -116,6 +118,8 @@ export function MachinesDashboard({
   error,
   onAttach,
   attachingSandboxId,
+  onUpdateAgent,
+  updatingEnrollmentId,
   seriesByMachine,
   onOpenDetail,
   now,
@@ -172,6 +176,8 @@ export function MachinesDashboard({
               }}
               onAttach={onAttach}
               attaching={attachingSandboxId === machine.sandboxId}
+              onUpdateAgent={onUpdateAgent}
+              updatingAgent={updatingEnrollmentId === machine.enrollmentId}
               series={seriesByMachine?.[machine.sandboxId]}
               onOpenDetail={onOpenDetail}
               now={now}

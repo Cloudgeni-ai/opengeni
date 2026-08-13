@@ -2,9 +2,12 @@ import {
   AlertTriangleIcon,
   ArrowRightIcon,
   CpuIcon,
+  CircleCheckIcon,
+  DownloadIcon,
   LaptopIcon,
   MonitorIcon,
   MonitorOffIcon,
+  LoaderCircleIcon,
   ServerIcon,
   UsersIcon,
 } from "lucide-react";
@@ -21,6 +24,9 @@ export type MachineCardProps = {
   onAttach?: ((machine: MachineView) => void) | undefined;
   /** Whether an attach/swap is currently in flight (disables the affordance). */
   attaching?: boolean | undefined;
+  /** Start/retry the exact signed Connected Machine agent update. */
+  onUpdateAgent?: ((machine: MachineView) => void) | undefined;
+  updatingAgent?: boolean | undefined;
   /** Short recent history (e.g. 15m) — drives the card's CPU trend + preview. */
   series?: MetricSample[] | undefined;
   /** Open the full per-machine telemetry detail. Makes the whole card actionable. */
@@ -46,6 +52,8 @@ export function MachineCard({
   machine,
   onAttach,
   attaching,
+  onUpdateAgent,
+  updatingAgent,
   series,
   onOpenDetail,
   now,
@@ -60,6 +68,45 @@ export function MachineCard({
     : null;
   const cpuPts = (series ?? []).map((s) => ({ t: new Date(s.sampledAt).getTime(), v: s.cpuPct }));
   const openable = Boolean(onOpenDetail);
+  const runtime = machine.runtime;
+  const updateRunning = runtime?.versionState === "updating";
+  const dispatchConfirmationStalled =
+    runtime?.update?.status === "requested" &&
+    clockNow - new Date(runtime.update.updatedAt).getTime() >= 30_000;
+  const canUpdate =
+    Boolean(machine.enrollmentId && onUpdateAgent) &&
+    !offline &&
+    (runtime?.versionState === "outdated" ||
+      runtime?.versionState === "update_failed" ||
+      dispatchConfirmationStalled);
+  const updateLabel = (() => {
+    const update = runtime?.update;
+    if (!update) return null;
+    switch (update.status) {
+      case "requested":
+        return dispatchConfirmationStalled
+          ? "Agent confirmation delayed"
+          : "Confirming with agent";
+      case "accepted":
+        return "Update accepted";
+      case "waiting_for_idle":
+        return "Waiting for current work";
+      case "downloading":
+      case "verifying":
+      case "applying":
+        return `${update.status}…`;
+      case "restarting":
+        return "Restarting agent";
+      case "succeeded":
+        return `Updated · v${update.targetVersion}`;
+      case "failed": {
+        const detail = update.errorCode?.replaceAll("_", " ");
+        return update.rolledBack
+          ? `Update rolled back safely${detail ? ` · ${detail}` : ""}`
+          : `Update failed${detail ? ` · ${detail}` : ""}`;
+      }
+    }
+  })();
 
   return (
     <div
@@ -155,6 +202,57 @@ export function MachineCard({
           <AlertTriangleIcon className="size-3.5 shrink-0" aria-hidden />
           Competing agent process blocked. Open diagnostics for details.
         </p>
+      ) : null}
+
+      {runtime ? (
+        <div
+          data-agent-runtime
+          className="flex items-center justify-between gap-3 rounded-og-md border border-og-border/70 bg-og-surface-2/35 px-2.5 py-2 text-og-xs"
+        >
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5 text-og-fg-muted">
+              {runtime.versionState === "current" ? (
+                <CircleCheckIcon className="size-3.5 text-og-status-idle" aria-hidden />
+              ) : updateRunning ? (
+                <LoaderCircleIcon className="size-3.5 animate-og-spin text-og-accent" aria-hidden />
+              ) : (
+                <DownloadIcon className="size-3.5" aria-hidden />
+              )}
+              <span className="truncate">
+                Agent{" "}
+                {runtime.installedVersion ? `v${runtime.installedVersion}` : "version unknown"}
+              </span>
+            </div>
+            <p className="mt-0.5 truncate text-og-fg-subtle">
+              {updateLabel ??
+                (runtime.versionState === "current"
+                  ? `Current · ${runtime.updateChannel ?? "channel unknown"}`
+                  : runtime.desiredVersion
+                    ? `Promoted v${runtime.desiredVersion}`
+                    : "No promoted version configured")}
+            </p>
+          </div>
+          {canUpdate ? (
+            <button
+              type="button"
+              data-update-agent
+              disabled={updatingAgent}
+              onClick={(event) => {
+                event.stopPropagation();
+                onUpdateAgent?.(machine);
+              }}
+              className="shrink-0 rounded-og-sm border border-og-border px-2 py-1 font-medium text-og-fg-muted transition-colors hover:border-og-border-strong hover:text-og-fg disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:min-h-11"
+            >
+              {updatingAgent
+                ? "Starting…"
+                : dispatchConfirmationStalled
+                  ? "Retry delivery"
+                  : runtime.versionState === "update_failed"
+                    ? "Retry"
+                    : "Update"}
+            </button>
+          ) : null}
+        </div>
       ) : null}
 
       <MachineMetrics metrics={machine.metrics} />

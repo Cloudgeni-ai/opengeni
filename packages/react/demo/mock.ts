@@ -3148,6 +3148,7 @@ export class MockOpenGeniClient implements SessionClientLike {
             duplicateRunnerDeniedCount: 0,
             duplicateRunnerDeniedAt: null,
           },
+          runtime: null,
           metrics: null,
         },
       ],

@@ -31,7 +31,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures::stream::FuturesUnordered;
@@ -43,6 +43,7 @@ use opengeni_agent_proto::v1::{
     GoingOfflineReason, Heartbeat, Hello,
 };
 use prost::Message as _;
+use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 use tokio::sync::Notify;
 use tokio::task::JoinSet;
@@ -149,6 +150,7 @@ impl EpochCell {
 #[derive(Clone, Default)]
 pub struct ShutdownSignal {
     requested: Arc<AtomicBool>,
+    reason: Arc<AtomicU8>,
     notify: Arc<Notify>,
 }
 
@@ -156,8 +158,23 @@ impl ShutdownSignal {
     /// Requests a clean shutdown: latch the flag FIRST (so any subsequent
     /// [`is_requested`](Self::is_requested) sees it), then wake current waiters.
     pub fn request(&self) {
+        let _ = self
+            .reason
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire);
         self.requested.store(true, Ordering::Release);
         self.notify.notify_waiters();
+    }
+
+    /// Requests process replacement after a verified self-update.
+    pub fn request_update(&self) {
+        self.reason.store(2, Ordering::Release);
+        self.requested.store(true, Ordering::Release);
+        self.notify.notify_waiters();
+    }
+
+    #[must_use]
+    pub fn is_update(&self) -> bool {
+        self.reason.load(Ordering::Acquire) == 2
     }
 
     /// Whether a clean shutdown has been requested (level-triggered — true forever
@@ -376,6 +393,7 @@ pub struct Supervisor<P: Platform> {
     links: Vec<SupervisorLink<P>>,
     platform_type: std::marker::PhantomData<fn() -> P>,
     agent_version: String,
+    binary_sha256: String,
     started: Instant,
     /// The latest metrics sample, refreshed by a background task so the
     /// heartbeat send never blocks the serve loop (the sampler's /proc/stat
@@ -386,6 +404,10 @@ pub struct Supervisor<P: Platform> {
     browser_bridge: Option<BrowserBridgeInventory>,
     /// Latched once a clean shutdown (SIGINT/SIGTERM) is requested.
     shutdown: ShutdownSignal,
+    /// Process-global update admission fence + idempotency key. One binary backs
+    /// every workspace link, so concurrent per-link updates cannot be independent.
+    update_active: Arc<AtomicBool>,
+    update_operation_id: Arc<Mutex<Option<String>>>,
 }
 
 impl<P: Platform + 'static> Supervisor<P> {
@@ -425,10 +447,13 @@ impl<P: Platform + 'static> Supervisor<P> {
             links: links.to_vec(),
             platform_type: std::marker::PhantomData,
             agent_version: agent_version.into(),
+            binary_sha256: running_binary_sha256(),
             started: Instant::now(),
             metrics: Arc::new(std::sync::RwLock::new(v1::MetricsSample::default())),
             browser_bridge: None,
             shutdown: ShutdownSignal::default(),
+            update_active: Arc::new(AtomicBool::new(false)),
+            update_operation_id: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -928,7 +953,24 @@ impl<P: Platform + 'static> Supervisor<P> {
         }
         let request_id = request.request_id.clone();
         let label = op_label(&request);
-        match classify(&request) {
+        let route = classify(&request);
+        if self.update_active.load(Ordering::Acquire)
+            && !matches!(
+                &route,
+                Route::Liveness | Route::OpControl | Route::AgentUpdate(_)
+            )
+        {
+            publish_response(
+                client,
+                reply,
+                dispatch::update_draining_reply(request_id, label),
+                label,
+                max_payload,
+            )
+            .await;
+            return;
+        }
+        match route {
             Route::Liveness => {
                 debug!(request_id = %request_id, op = label, "serving liveness rpc outside admission");
                 serve_request(
@@ -948,6 +990,10 @@ impl<P: Platform + 'static> Supervisor<P> {
                 let response =
                     serve_op_control(&self.engine, &link.connection_id, request_id, &request);
                 publish_response(client, reply, response, label, max_payload).await;
+            }
+            Route::AgentUpdate(update) => {
+                self.spawn_agent_update(link, client, &request, update, reply)
+                    .await;
             }
             Route::LegacyExec(exec) => {
                 self.spawn_adapter(
@@ -991,6 +1037,257 @@ impl<P: Platform + 'static> Supervisor<P> {
                     serve_request(&client, reply, request, &platform, &ctx, max_payload).await;
                     drop(ticket);
                 });
+            }
+        }
+    }
+
+    async fn spawn_agent_update(
+        &self,
+        link: &WorkspaceLink<P>,
+        client: &async_nats::Client,
+        request: &ControlRequest,
+        update: v1::AgentUpdateApplyRequest,
+        reply: async_nats::Subject,
+    ) {
+        let max_payload = client.server_info().max_payload;
+        let request_id = request.request_id.clone();
+        if request.epoch != 0 && request.epoch < link.epoch.load() {
+            publish_response(
+                client,
+                reply,
+                dispatch::fenced_reply(request_id, request.epoch, link.epoch.load()),
+                "agent_update_apply",
+                max_payload,
+            )
+            .await;
+            return;
+        }
+        let invalid = uuid::Uuid::parse_str(&update.operation_id).is_err()
+            || semver::Version::parse(&update.target_version).is_err()
+            || !matches!(update.channel.as_str(), "stable" | "beta")
+            || !(update.release_base_url.starts_with("https://")
+                || update.release_base_url.starts_with("http://"))
+            || update.expected_current_version != self.agent_version
+            || (!update.expected_current_sha256.is_empty()
+                && update.expected_current_sha256 != self.binary_sha256);
+        if invalid {
+            publish_response(
+                client,
+                reply,
+                update_error_response(request_id, "update_precondition_failed", false),
+                "agent_update_apply",
+                max_payload,
+            )
+            .await;
+            return;
+        }
+
+        let newly_started = match self.reserve_update_operation(&update.operation_id) {
+            UpdateReservation::Started => true,
+            UpdateReservation::AlreadyAccepted => false,
+            UpdateReservation::Busy => {
+                publish_response(
+                    client,
+                    reply,
+                    update_error_response(request_id, "update_already_in_progress", true),
+                    "agent_update_apply",
+                    max_payload,
+                )
+                .await;
+                return;
+            }
+            UpdateReservation::Unavailable => {
+                publish_response(
+                    client,
+                    reply,
+                    update_error_response(request_id, "update_state_unavailable", true),
+                    "agent_update_apply",
+                    max_payload,
+                )
+                .await;
+                return;
+            }
+        };
+
+        let response = v1::ControlResponse {
+            request_id,
+            error: None,
+            result: Some(v1::control_response::Result::AgentUpdateApply(
+                v1::AgentUpdateApplyResponse {
+                    accepted: true,
+                    operation_id: update.operation_id.clone(),
+                    current_version: self.agent_version.clone(),
+                    current_sha256: self.binary_sha256.clone(),
+                    target_version: update.target_version.clone(),
+                },
+            )),
+        };
+        publish_response(client, reply, response, "agent_update_apply", max_payload).await;
+        // A lost-reply retry is deliberately response-idempotent. The original
+        // task remains the sole owner of progress, mutation, and restart.
+        if !newly_started {
+            return;
+        }
+
+        let client = client.clone();
+        let events_subject = link.events_subject();
+        let agent_id = link.creds.agent_id.clone();
+        let engine = self.engine.clone();
+        let update_active = self.update_active.clone();
+        let update_operation_id = self.update_operation_id.clone();
+        let shutdown = self.shutdown.clone();
+        // Process-global ownership is intentional. Credential rotation or one
+        // transport generation ending must not cancel a verified binary swap.
+        tokio::spawn(async move {
+            publish_agent_update_progress(
+                &client,
+                &events_subject,
+                &agent_id,
+                &update,
+                v1::AgentUpdateStage::Accepted,
+                "",
+                "",
+                false,
+                false,
+            )
+            .await;
+            publish_agent_update_progress(
+                &client,
+                &events_subject,
+                &agent_id,
+                &update,
+                v1::AgentUpdateStage::WaitingForIdle,
+                "",
+                "",
+                false,
+                false,
+            )
+            .await;
+
+            loop {
+                let admission = engine.admission_snapshot();
+                if admission.light_running == 0
+                    && admission.light_queued == 0
+                    && admission.heavy_running == 0
+                    && admission.heavy_queued == 0
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+
+            let (phase_tx, mut phase_rx) = tokio::sync::mpsc::unbounded_channel();
+            let base_url = update.release_base_url.clone();
+            let channel = update.channel.clone();
+            let target = update.target_version.clone();
+            let operation_id = update.operation_id.clone();
+            let apply = tokio::task::spawn_blocking(move || {
+                crate::update::apply_managed(&operation_id, &base_url, &channel, &target, |phase| {
+                    let _ = phase_tx.send(phase);
+                })
+            });
+            tokio::pin!(apply);
+            let result = loop {
+                tokio::select! {
+                    phase = phase_rx.recv() => {
+                        let Some(phase) = phase else { continue; };
+                        let stage = match phase {
+                            crate::update::ManagedUpdatePhase::Downloading => v1::AgentUpdateStage::Downloading,
+                            crate::update::ManagedUpdatePhase::Verifying => v1::AgentUpdateStage::Verifying,
+                            crate::update::ManagedUpdatePhase::Applying => v1::AgentUpdateStage::Applying,
+                        };
+                        publish_agent_update_progress(
+                            &client, &events_subject, &agent_id, &update, stage, "", "", false, false,
+                        ).await;
+                    }
+                    joined = &mut apply => break joined,
+                }
+            };
+
+            match result {
+                Ok(Ok(applied)) => {
+                    publish_agent_update_progress(
+                        &client,
+                        &events_subject,
+                        &agent_id,
+                        &update,
+                        v1::AgentUpdateStage::Restarting,
+                        &applied.expected_sha256,
+                        "",
+                        false,
+                        false,
+                    )
+                    .await;
+                    let _ = client.flush().await;
+                    shutdown.request_update();
+                }
+                Ok(Err(code)) => {
+                    let rolled_back = code == "startup_preflight_failed_rolled_back";
+                    publish_agent_update_progress(
+                        &client,
+                        &events_subject,
+                        &agent_id,
+                        &update,
+                        v1::AgentUpdateStage::Failed,
+                        "",
+                        &code,
+                        !rolled_back,
+                        rolled_back,
+                    )
+                    .await;
+                    update_active.store(false, Ordering::Release);
+                    if let Ok(mut operation) = update_operation_id.lock() {
+                        *operation = None;
+                    }
+                }
+                Err(error) => {
+                    warn!(%error, "self-update worker failed");
+                    publish_agent_update_progress(
+                        &client,
+                        &events_subject,
+                        &agent_id,
+                        &update,
+                        v1::AgentUpdateStage::Failed,
+                        "",
+                        "update_worker_failed",
+                        true,
+                        false,
+                    )
+                    .await;
+                    update_active.store(false, Ordering::Release);
+                    if let Ok(mut operation) = update_operation_id.lock() {
+                        *operation = None;
+                    }
+                }
+            }
+        });
+    }
+
+    /// Claims the process-global updater without retaining a synchronous mutex
+    /// guard across an async reply. The same operation id is response-idempotent;
+    /// a different operation is rejected until the owner finishes or restarts.
+    fn reserve_update_operation(&self, operation_id: &str) -> UpdateReservation {
+        if self
+            .update_active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return match self.update_operation_id.lock() {
+                Ok(operation) if operation.as_deref() == Some(operation_id) => {
+                    UpdateReservation::AlreadyAccepted
+                }
+                Ok(_) => UpdateReservation::Busy,
+                Err(_) => UpdateReservation::Unavailable,
+            };
+        }
+        match self.update_operation_id.lock() {
+            Ok(mut operation) => {
+                *operation = Some(operation_id.to_string());
+                UpdateReservation::Started
+            }
+            Err(_) => {
+                self.update_active.store(false, Ordering::Release);
+                UpdateReservation::Unavailable
             }
         }
     }
@@ -1181,6 +1478,13 @@ impl<P: Platform + 'static> Supervisor<P> {
         client: &async_nats::Client,
     ) -> Result<(), async_nats::PublishError> {
         let identity = link.platform.host_identity();
+        let completed_update = match crate::update::load_completed_update_receipt() {
+            Ok(receipt) => receipt,
+            Err(error_code) => {
+                warn!(%error_code, "ignoring invalid managed-update receipt");
+                None
+            }
+        };
         let hello = Hello {
             agent_id: link.creds.agent_id.clone(),
             workspace_id: link.creds.workspace_id.clone(),
@@ -1192,6 +1496,16 @@ impl<P: Platform + 'static> Supervisor<P> {
             capabilities: Some(self.capabilities(link).await),
             update_channel: link.creds.update_channel.clone(),
             resume_token: link.creds.resume_token.clone(),
+            binary_sha256: self.binary_sha256.clone(),
+            completed_update_operation_id: completed_update
+                .as_ref()
+                .map_or_else(String::new, |receipt| receipt.operation_id.clone()),
+            completed_update_target_version: completed_update
+                .as_ref()
+                .map_or_else(String::new, |receipt| receipt.target_version.clone()),
+            completed_update_binary_sha256: completed_update
+                .as_ref()
+                .map_or_else(String::new, |receipt| receipt.binary_sha256.clone()),
         };
         // The hello is its own message (not an AgentEvent oneof member): it is
         // published on the dedicated hello subject the control plane listens on,
@@ -1326,11 +1640,20 @@ impl<P: Platform + 'static> Supervisor<P> {
     /// Publishes a clean [`GoingOffline`] event so the lease flips offline
     /// immediately (§23.0), then flushes so the message leaves before we close.
     async fn announce_going_offline(&self, link: &WorkspaceLink<P>, client: &async_nats::Client) {
+        let updating = self.shutdown.is_update();
         let event = AgentEvent {
             agent_id: link.creds.agent_id.clone(),
             event: Some(Event::GoingOffline(GoingOffline {
-                reason: GoingOfflineReason::UserStop as i32,
-                message: "agent stopped (foreground run ended)".to_string(),
+                reason: if updating {
+                    GoingOfflineReason::Update as i32
+                } else {
+                    GoingOfflineReason::UserStop as i32
+                },
+                message: if updating {
+                    "verified self-update installed; replacing agent process".to_string()
+                } else {
+                    "agent stopped (foreground run ended)".to_string()
+                },
             })),
         };
         if let Err(e) = client
@@ -1353,6 +1676,14 @@ enum AdapterWork {
     Git(v1::GitRequest),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpdateReservation {
+    Started,
+    AlreadyAccepted,
+    Busy,
+    Unavailable,
+}
+
 /// How a decoded control RPC is served.
 enum Route {
     /// Answered inline on the serve loop — liveness never enters admission.
@@ -1366,6 +1697,8 @@ enum Route {
     /// Op-control (cancel/query/attach): engine state + routing only — served
     /// inline like liveness (admission gates job STARTS, never byte flow).
     OpControl,
+    /// Process-global signed self-update, coordinated outside host admission.
+    AgentUpdate(v1::AgentUpdateApplyRequest),
     /// Runs on its own task behind an engine admission ticket of this class.
     Work(JobClass),
 }
@@ -1381,6 +1714,7 @@ fn classify(request: &ControlRequest) -> Route {
         Some(Op::Git(req)) => Route::LegacyGit(req.clone()),
         Some(Op::OpStart(start)) => Route::OpStart(start.clone()),
         Some(Op::OpCancel(_) | Op::OpQuery(_) | Op::OpAttach(_)) => Route::OpControl,
+        Some(Op::AgentUpdateApply(update)) => Route::AgentUpdate(update.clone()),
         _ => Route::Work(JobClass::Light),
     }
 }
@@ -1406,6 +1740,61 @@ fn serve_op_control(
             crate::ops::serve_op_attach_scoped(engine, scope, request_id, attach)
         }
         _ => unreachable!("classified OpControl"),
+    }
+}
+
+fn update_error_response(
+    request_id: String,
+    failure_code: &str,
+    retryable: bool,
+) -> v1::ControlResponse {
+    let mut detail = HashMap::new();
+    detail.insert("failure_code".to_string(), failure_code.to_string());
+    v1::ControlResponse {
+        request_id,
+        error: Some(v1::AgentError {
+            code: if retryable {
+                v1::ErrorCode::Draining as i32
+            } else {
+                v1::ErrorCode::Protocol as i32
+            },
+            message: format!("self-update request rejected: {failure_code}"),
+            retryable,
+            detail,
+        }),
+        result: None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn publish_agent_update_progress(
+    client: &async_nats::Client,
+    subject: &str,
+    agent_id: &str,
+    update: &v1::AgentUpdateApplyRequest,
+    stage: v1::AgentUpdateStage,
+    expected_binary_sha256: &str,
+    error_code: &str,
+    retryable: bool,
+    rolled_back: bool,
+) {
+    let event = AgentEvent {
+        agent_id: agent_id.to_string(),
+        event: Some(Event::AgentUpdateProgress(v1::AgentUpdateProgress {
+            operation_id: update.operation_id.clone(),
+            target_version: update.target_version.clone(),
+            stage: stage as i32,
+            expected_binary_sha256: expected_binary_sha256.to_string(),
+            error_code: error_code.to_string(),
+            retryable,
+            rolled_back,
+        })),
+    };
+    if let Err(error) = client
+        .publish(subject.to_string(), event.encode_to_vec().into())
+        .await
+    {
+        warn!(%error, operation_id = %update.operation_id, ?stage, "failed to publish self-update progress");
     }
 }
 
@@ -1548,6 +1937,7 @@ fn op_label(req: &ControlRequest) -> &'static str {
         Some(Op::BrowserControlEnsure(_)) => "browser_control_ensure",
         Some(Op::BrowserFramesOpen(_)) => "browser_frames_open",
         Some(Op::ComputerFramesOpen(_)) => "computer_frames_open",
+        Some(Op::AgentUpdateApply(_)) => "agent_update_apply",
         Some(Op::Metrics(_)) => "metrics",
         Some(Op::UpdateMayProceed(_)) => "update_may_proceed",
         // Op-stream (v1.1) — wire types present; no runtime serves them yet.
@@ -1575,6 +1965,35 @@ pub(crate) fn hostname_or_default() -> String {
     )
 }
 
+/// Hash the exact executable mapped for this process once at startup. A failure
+/// is loud in logs and leaves an empty digest (older/unknown truth), never a
+/// fabricated value that could falsely complete an update.
+fn running_binary_sha256() -> String {
+    use std::io::Read as _;
+
+    let Ok(path) = std::env::current_exe() else {
+        warn!("could not resolve running executable for build identity");
+        return String::new();
+    };
+    let Ok(mut file) = std::fs::File::open(&path) else {
+        warn!(path = %path.display(), "could not open running executable for build identity");
+        return String::new();
+    };
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 128 * 1024];
+    loop {
+        match file.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => hasher.update(&buffer[..read]),
+            Err(error) => {
+                warn!(path = %path.display(), %error, "could not hash running executable");
+                return String::new();
+            }
+        }
+    }
+    format!("{:x}", hasher.finalize())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1587,6 +2006,27 @@ mod tests {
         assert_eq!(cell.load(), 0);
         cell.store(42);
         assert_eq!(cell.load(), 42);
+    }
+
+    #[test]
+    fn update_reservation_is_process_global_and_retry_idempotent() {
+        use opengeni_agent_platform::NativePlatform;
+
+        let platform = Arc::new(NativePlatform::new());
+        let credentials = it::test_credentials("nats://127.0.0.1:1");
+        let supervisor = Supervisor::new(platform, credentials, "test-0.0.0");
+        assert_eq!(
+            supervisor.reserve_update_operation("operation-one"),
+            UpdateReservation::Started
+        );
+        assert_eq!(
+            supervisor.reserve_update_operation("operation-one"),
+            UpdateReservation::AlreadyAccepted
+        );
+        assert_eq!(
+            supervisor.reserve_update_operation("operation-two"),
+            UpdateReservation::Busy
+        );
     }
 
     #[test]

@@ -233,6 +233,7 @@ import type {
   MachineMetricsSeriesResponse,
   RemoveEnrollmentRequest,
   RemoveEnrollmentResponse,
+  UpdateMachineAgentResponse,
   // Bring-your-own-compute: the user-authenticated active-sandbox swap (M7).
   SwapActiveSandboxRequest,
   SwapActiveSandboxResponse,
@@ -1193,6 +1194,19 @@ export class OpenGeniClient {
         ...(options.sessionId !== undefined ? { sessionId: options.sessionId } : {}),
       },
       { signal: options.signal },
+    );
+  }
+
+  /** Ask one authoritative Connected Machine runner to drain accepted work and
+   * install the exact signed version promoted for its channel. Progress is read
+   * from `listMachines`; completion requires the successor build identity. */
+  async updateMachineAgent(
+    workspaceId: string,
+    enrollmentId: string,
+  ): Promise<UpdateMachineAgentResponse> {
+    return await this.requestJson<UpdateMachineAgentResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/machines/${enrollmentId}/update`,
     );
   }
 

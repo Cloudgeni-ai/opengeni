@@ -41017,6 +41017,22 @@ export type SandboxKind = (typeof schema.sandboxKindValues)[number];
 export type EnrollmentExposure = (typeof schema.enrollmentExposureValues)[number];
 export type EnrollmentStatus = (typeof schema.enrollmentStatusValues)[number];
 export type EnrollmentOs = (typeof schema.enrollmentOsValues)[number];
+export type AgentUpdateStatus = (typeof schema.agentUpdateStatusValues)[number];
+
+export type EnrollmentAgentUpdateRecord = {
+  operationId: string;
+  status: AgentUpdateStatus;
+  targetVersion: string;
+  expectedBinarySha256: string | null;
+  errorCode: string | null;
+  retryable: boolean;
+  rolledBack: boolean;
+  connectionInstanceId: string;
+  connectionGeneration: number;
+  requestedAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+};
 
 export type EnrollmentRecord = {
   id: string;
@@ -41050,6 +41066,11 @@ export type EnrollmentRecord = {
   /** The typed reason string of the pending clean going-offline (e.g.
    *  GOING_OFFLINE_REASON_UPDATE); NULL when there is no un-cleared marker. */
   wentOfflineReason: string | null;
+  agentVersion: string | null;
+  agentBinarySha256: string | null;
+  agentUpdateChannel: "stable" | "beta" | null;
+  agentCapabilities: Record<string, boolean>;
+  agentUpdate: EnrollmentAgentUpdateRecord | null;
   createdAt: string;
   revokedAt: string | null;
   updatedAt: string;
@@ -41078,6 +41099,36 @@ function mapEnrollment(row: typeof schema.enrollments.$inferSelect): EnrollmentR
     lastSeenAt: row.lastSeenAt ? row.lastSeenAt.toISOString() : null,
     wentOfflineAt: row.wentOfflineAt ? row.wentOfflineAt.toISOString() : null,
     wentOfflineReason: row.wentOfflineReason ?? null,
+    agentVersion: row.agentVersion ?? null,
+    agentBinarySha256: row.agentBinarySha256 ?? null,
+    agentUpdateChannel:
+      row.agentUpdateChannel === "stable" || row.agentUpdateChannel === "beta"
+        ? row.agentUpdateChannel
+        : null,
+    agentCapabilities: row.agentCapabilities ?? {},
+    agentUpdate:
+      row.agentUpdateOperationId &&
+      row.agentUpdateStatus &&
+      row.agentUpdateTargetVersion &&
+      row.agentUpdateConnectionInstanceId &&
+      row.agentUpdateConnectionGeneration !== null &&
+      row.agentUpdateRequestedAt &&
+      row.agentUpdateUpdatedAt
+        ? {
+            operationId: row.agentUpdateOperationId,
+            status: row.agentUpdateStatus as AgentUpdateStatus,
+            targetVersion: row.agentUpdateTargetVersion,
+            expectedBinarySha256: row.agentUpdateExpectedBinarySha256 ?? null,
+            errorCode: row.agentUpdateErrorCode ?? null,
+            retryable: row.agentUpdateRetryable,
+            rolledBack: row.agentUpdateRolledBack,
+            connectionInstanceId: row.agentUpdateConnectionInstanceId,
+            connectionGeneration: row.agentUpdateConnectionGeneration,
+            requestedAt: row.agentUpdateRequestedAt.toISOString(),
+            updatedAt: row.agentUpdateUpdatedAt.toISOString(),
+            completedAt: row.agentUpdateCompletedAt?.toISOString() ?? null,
+          }
+        : null,
     createdAt: row.createdAt.toISOString(),
     revokedAt: row.revokedAt ? row.revokedAt.toISOString() : null,
     updatedAt: row.updatedAt.toISOString(),
@@ -42315,6 +42366,269 @@ export async function setEnrollmentOpStreamState(
                 ]
               : []),
             ne(schema.enrollments.opStream, input.opStream),
+          ),
+        )
+        .returning({ id: schema.enrollments.id });
+      return { updated: rows.length > 0 };
+    },
+  );
+}
+
+/** Refresh the exact running agent build/capabilities from an authoritative
+ * process Hello. A pending update becomes succeeded only when the successor
+ * reports BOTH the requested version and the artifact digest selected from the
+ * signed manifest. Merely reaching `restarting` never counts as success. */
+export async function setEnrollmentAgentRuntime(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    enrollmentId: string;
+    connectionInstanceId: string;
+    agentVersion: string | null;
+    binarySha256: string | null;
+    updateChannel: "stable" | "beta" | null;
+    capabilities: Record<string, boolean>;
+    completedUpdate: {
+      operationId: string;
+      targetVersion: string;
+      binarySha256: string;
+    } | null;
+  },
+): Promise<{ updated: boolean; updateCompleted: boolean }> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const now = new Date();
+      const completedOperationId = input.completedUpdate?.operationId ?? null;
+      const completedTargetVersion = input.completedUpdate?.targetVersion ?? null;
+      const completedBinarySha256 = input.completedUpdate?.binarySha256 ?? null;
+      const activeUpdate = sql`${schema.enrollments.agentUpdateStatus} in (
+        'requested', 'accepted', 'waiting_for_idle', 'downloading', 'verifying',
+        'applying', 'restarting'
+      )`;
+      const successorProvesCompletion = sql`(
+        ${activeUpdate}
+        and ${schema.enrollments.agentUpdateOperationId}::text = ${completedOperationId}
+        and ${schema.enrollments.agentUpdateTargetVersion} = ${completedTargetVersion}
+        and ${schema.enrollments.agentUpdateTargetVersion} = ${input.agentVersion}
+        and ${completedBinarySha256} = ${input.binarySha256}
+      )`;
+      const acceptingProcessWasReplaced = sql`(
+        ${activeUpdate}
+        and ${schema.enrollments.agentUpdateConnectionInstanceId}
+          is distinct from ${input.connectionInstanceId}
+        and not ${successorProvesCompletion}
+      )`;
+      const rows = await scopedDb
+        .update(schema.enrollments)
+        .set({
+          agentVersion: input.agentVersion,
+          agentBinarySha256: input.binarySha256,
+          agentUpdateChannel: input.updateChannel,
+          agentCapabilities: input.capabilities,
+          // Success is derived atomically from the successor's durable updater
+          // receipt + exact running build. If another process replaced the
+          // accepting one without that proof, fail retryably instead of leaving
+          // the dashboard stuck forever.
+          agentUpdateStatus: sql`case
+            when ${successorProvesCompletion} then 'succeeded'
+            when ${acceptingProcessWasReplaced} then 'failed'
+            else ${schema.enrollments.agentUpdateStatus}
+          end`,
+          agentUpdateExpectedBinarySha256: sql`case
+            when ${successorProvesCompletion} then ${completedBinarySha256}
+            else ${schema.enrollments.agentUpdateExpectedBinarySha256}
+          end`,
+          agentUpdateErrorCode: sql`case
+            when ${successorProvesCompletion} then null
+            when ${acceptingProcessWasReplaced} then 'accepting_process_replaced'
+            else ${schema.enrollments.agentUpdateErrorCode}
+          end`,
+          agentUpdateRetryable: sql`case
+            when ${successorProvesCompletion} then false
+            when ${acceptingProcessWasReplaced} then true
+            else ${schema.enrollments.agentUpdateRetryable}
+          end`,
+          agentUpdateRolledBack: sql`case
+            when ${successorProvesCompletion} then false
+            else ${schema.enrollments.agentUpdateRolledBack}
+          end`,
+          agentUpdateCompletedAt: sql`case
+            when ${successorProvesCompletion} or ${acceptingProcessWasReplaced}
+              then ${now.toISOString()}::timestamptz
+            else ${schema.enrollments.agentUpdateCompletedAt}
+          end`,
+          agentUpdateUpdatedAt: sql`case
+            when ${successorProvesCompletion} or ${acceptingProcessWasReplaced}
+              then ${now.toISOString()}::timestamptz
+            else ${schema.enrollments.agentUpdateUpdatedAt}
+          end`,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(schema.enrollments.workspaceId, input.workspaceId),
+            eq(schema.enrollments.id, input.enrollmentId),
+            eq(schema.enrollments.status, "active"),
+            eq(schema.enrollments.connectionInstanceId, input.connectionInstanceId),
+            gt(schema.enrollments.connectionLeaseExpiresAt, sql`clock_timestamp()`),
+            or(
+              sql`${schema.enrollments.agentVersion} is distinct from ${input.agentVersion}`,
+              sql`${schema.enrollments.agentBinarySha256} is distinct from ${input.binarySha256}`,
+              sql`${schema.enrollments.agentUpdateChannel} is distinct from ${input.updateChannel}`,
+              sql`${schema.enrollments.agentCapabilities} is distinct from ${JSON.stringify(input.capabilities)}::jsonb`,
+              successorProvesCompletion,
+              acceptingProcessWasReplaced,
+            ),
+          ),
+        )
+        .returning({
+          id: schema.enrollments.id,
+          updateStatus: schema.enrollments.agentUpdateStatus,
+          completedAt: schema.enrollments.agentUpdateCompletedAt,
+        });
+      return {
+        updated: rows.length > 0,
+        updateCompleted: rows[0]?.updateStatus === "succeeded" && rows[0].completedAt !== null,
+      };
+    },
+  );
+}
+
+/** Atomically reserve the one process-global update slot on an exact live
+ * runner generation. An in-flight operation is never overwritten. */
+export async function beginEnrollmentAgentUpdate(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    enrollmentId: string;
+    connectionInstanceId: string;
+    connectionGeneration: number;
+    operationId: string;
+    targetVersion: string;
+  },
+): Promise<EnrollmentRecord | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const now = new Date();
+      const rows = await scopedDb
+        .update(schema.enrollments)
+        .set({
+          agentUpdateOperationId: input.operationId,
+          agentUpdateStatus: "requested",
+          agentUpdateTargetVersion: input.targetVersion,
+          agentUpdateExpectedBinarySha256: null,
+          agentUpdateErrorCode: null,
+          agentUpdateRetryable: false,
+          agentUpdateRolledBack: false,
+          agentUpdateConnectionInstanceId: input.connectionInstanceId,
+          agentUpdateConnectionGeneration: input.connectionGeneration,
+          agentUpdateRequestedAt: now,
+          agentUpdateUpdatedAt: now,
+          agentUpdateCompletedAt: null,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(schema.enrollments.workspaceId, input.workspaceId),
+            eq(schema.enrollments.id, input.enrollmentId),
+            eq(schema.enrollments.status, "active"),
+            eq(schema.enrollments.connectionInstanceId, input.connectionInstanceId),
+            eq(schema.enrollments.connectionGeneration, input.connectionGeneration),
+            gt(schema.enrollments.connectionLeaseExpiresAt, sql`clock_timestamp()`),
+            or(
+              sql`${schema.enrollments.agentUpdateStatus} is null`,
+              eq(schema.enrollments.agentUpdateStatus, "succeeded"),
+              eq(schema.enrollments.agentUpdateStatus, "failed"),
+            ),
+          ),
+        )
+        .returning();
+      return rows[0] ? mapEnrollment(rows[0]) : null;
+    },
+  );
+}
+
+const AGENT_UPDATE_PROGRESS_RANK: Record<
+  Exclude<AgentUpdateStatus, "requested" | "succeeded">,
+  number
+> = {
+  accepted: 1,
+  waiting_for_idle: 2,
+  downloading: 3,
+  verifying: 4,
+  applying: 5,
+  restarting: 6,
+  failed: 99,
+};
+
+/** Fold one progress event/dispatch failure into the reserved update. Exact
+ * operation + process authority coordinates fence stale events; monotonic rank
+ * prevents reordered NATS delivery from regressing the UI. */
+export async function advanceEnrollmentAgentUpdate(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    enrollmentId: string;
+    connectionInstanceId: string;
+    connectionGeneration: number;
+    operationId: string;
+    status: Exclude<AgentUpdateStatus, "requested" | "succeeded">;
+    expectedBinarySha256?: string | null;
+    errorCode?: string | null;
+    retryable?: boolean;
+    rolledBack?: boolean;
+  },
+): Promise<{ updated: boolean }> {
+  const nextRank = AGENT_UPDATE_PROGRESS_RANK[input.status];
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const now = new Date();
+      const currentRank = sql<number>`case ${schema.enrollments.agentUpdateStatus}
+        when 'requested' then 0
+        when 'accepted' then 1
+        when 'waiting_for_idle' then 2
+        when 'downloading' then 3
+        when 'verifying' then 4
+        when 'applying' then 5
+        when 'restarting' then 6
+        else 100
+      end`;
+      const rows = await scopedDb
+        .update(schema.enrollments)
+        .set({
+          agentUpdateStatus: input.status,
+          ...(input.expectedBinarySha256 !== undefined && input.expectedBinarySha256
+            ? { agentUpdateExpectedBinarySha256: input.expectedBinarySha256 }
+            : {}),
+          agentUpdateErrorCode: input.errorCode ?? null,
+          agentUpdateRetryable: input.retryable ?? false,
+          agentUpdateRolledBack: input.rolledBack ?? false,
+          agentUpdateUpdatedAt: now,
+          ...(input.status === "failed" ? { agentUpdateCompletedAt: now } : {}),
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(schema.enrollments.workspaceId, input.workspaceId),
+            eq(schema.enrollments.id, input.enrollmentId),
+            eq(schema.enrollments.status, "active"),
+            eq(schema.enrollments.connectionInstanceId, input.connectionInstanceId),
+            eq(schema.enrollments.connectionGeneration, input.connectionGeneration),
+            gt(schema.enrollments.connectionLeaseExpiresAt, sql`clock_timestamp()`),
+            eq(schema.enrollments.agentUpdateOperationId, input.operationId),
+            eq(schema.enrollments.agentUpdateConnectionInstanceId, input.connectionInstanceId),
+            eq(schema.enrollments.agentUpdateConnectionGeneration, input.connectionGeneration),
+            sql`${schema.enrollments.agentUpdateStatus} not in ('succeeded', 'failed')`,
+            input.status === "failed" ? sql`true` : sql`${currentRank} <= ${nextRank}`,
           ),
         )
         .returning({ id: schema.enrollments.id });

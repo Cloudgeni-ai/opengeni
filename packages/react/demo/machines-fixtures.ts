@@ -73,6 +73,7 @@ function machine(
       duplicateRunnerDeniedCount: 0,
       duplicateRunnerDeniedAt: null,
     },
+    runtime: null,
     metrics: idleMetrics,
     ...overrides,
   };

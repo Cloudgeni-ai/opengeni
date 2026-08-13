@@ -8,9 +8,12 @@ import {
 import { Hello } from "@opengeni/agent-proto";
 import {
   claimEnrollmentConnection,
+  advanceEnrollmentAgentUpdate,
+  beginEnrollmentAgentUpdate,
   createDb,
   createEnrollment,
   getEnrollment,
+  releaseEnrollmentConnection,
   setEnrollmentWentOffline,
   type Database,
   type DbClient,
@@ -201,12 +204,26 @@ function helloPayload(
     desktopUnavailableReason?: string;
     display?: { id: string; width: number; height: number; virtual: boolean };
     capabilitiesAbsent?: boolean;
+    agentVersion?: string;
+    binarySha256?: string;
+    updateChannel?: "stable" | "beta";
+    completedUpdate?: {
+      operationId: string;
+      targetVersion: string;
+      binarySha256: string;
+    };
   },
 ): Uint8Array {
   return Hello.encode(
     Hello.fromPartial({
       agentId,
       workspaceId,
+      agentVersion: opts.agentVersion ?? "",
+      binarySha256: opts.binarySha256 ?? "",
+      updateChannel: opts.updateChannel ?? "",
+      completedUpdateOperationId: opts.completedUpdate?.operationId ?? "",
+      completedUpdateTargetVersion: opts.completedUpdate?.targetVersion ?? "",
+      completedUpdateBinarySha256: opts.completedUpdate?.binarySha256 ?? "",
       ...(opts.capabilitiesAbsent
         ? {}
         : {
@@ -471,5 +488,206 @@ describe("refreshEnrollmentDisplay — the Hello reconciles has_display", () => 
     expect(after?.hasDisplay).toBe(false);
     expect(after?.opStream).toBe(false);
     expect(after?.wentOfflineAt).not.toBeNull();
+  });
+
+  test("a Hello persists exact build identity, channel, and negotiated capabilities", async () => {
+    if (!available) return;
+    const { workspaceId, enrollment, connectionInstanceId } = await seedEnrollment(false);
+    const digest = "ab".repeat(32);
+    const warnings: unknown[] = [];
+    await handleHelloPayload(
+      db,
+      { warn: (message, fields) => warnings.push({ message, fields }) },
+      helloPayload(enrollment.id, workspaceId, {
+        agentVersion: "0.1.15",
+        binarySha256: digest,
+        updateChannel: "beta",
+        desktop: true,
+        opStream: true,
+      }),
+      helloSubject(workspaceId, enrollment.id, connectionInstanceId),
+    );
+    expect(warnings).toEqual([]);
+    const after = await getEnrollment(db, workspaceId, enrollment.id);
+    expect(after?.agentVersion).toBe("0.1.15");
+    expect(after?.agentBinarySha256).toBe(digest);
+    expect(after?.agentUpdateChannel).toBe("beta");
+    expect(after?.agentCapabilities).toMatchObject({ desktop: true, opStream: true });
+  });
+
+  test("restarting is provisional; only exact successor version+digest completes update", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, enrollment, connectionInstanceId } =
+      await seedEnrollment(false);
+    const operationId = crypto.randomUUID();
+    const targetDigest = "cd".repeat(32);
+    const warnings: unknown[] = [];
+    const current = await getEnrollment(db, workspaceId, enrollment.id);
+    await beginEnrollmentAgentUpdate(db, {
+      accountId,
+      workspaceId,
+      enrollmentId: enrollment.id,
+      connectionInstanceId,
+      connectionGeneration: current!.connectionGeneration,
+      operationId,
+      targetVersion: "0.1.16",
+    });
+    await advanceEnrollmentAgentUpdate(db, {
+      accountId,
+      workspaceId,
+      enrollmentId: enrollment.id,
+      connectionInstanceId,
+      connectionGeneration: current!.connectionGeneration,
+      operationId,
+      status: "restarting",
+      expectedBinarySha256: targetDigest,
+    });
+    expect((await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate?.status).toBe(
+      "restarting",
+    );
+
+    await handleHelloPayload(
+      db,
+      { warn: (message, fields) => warnings.push({ message, fields }) },
+      helloPayload(enrollment.id, workspaceId, {
+        agentVersion: "0.1.16",
+        binarySha256: "ef".repeat(32),
+        updateChannel: "stable",
+        completedUpdate: {
+          operationId,
+          targetVersion: "0.1.16",
+          binarySha256: targetDigest,
+        },
+      }),
+      helloSubject(workspaceId, enrollment.id, connectionInstanceId),
+    );
+    expect((await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate?.status).toBe(
+      "restarting",
+    );
+
+    await handleHelloPayload(
+      db,
+      { warn: (message, fields) => warnings.push({ message, fields }) },
+      helloPayload(enrollment.id, workspaceId, {
+        agentVersion: "0.1.16",
+        binarySha256: targetDigest,
+        updateChannel: "stable",
+        completedUpdate: {
+          operationId,
+          targetVersion: "0.1.16",
+          binarySha256: targetDigest,
+        },
+      }),
+      helloSubject(workspaceId, enrollment.id, connectionInstanceId),
+    );
+    expect(warnings).toEqual([]);
+    const after = await getEnrollment(db, workspaceId, enrollment.id);
+    expect(after?.agentUpdate?.status).toBe("succeeded");
+    expect(after?.agentUpdate?.completedAt).not.toBeNull();
+  });
+
+  test("a replacement process without the matching receipt fails an orphaned update retryably", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, enrollment, connectionInstanceId } =
+      await seedEnrollment(false);
+    const operationId = crypto.randomUUID();
+    const current = await getEnrollment(db, workspaceId, enrollment.id);
+    await beginEnrollmentAgentUpdate(db, {
+      accountId,
+      workspaceId,
+      enrollmentId: enrollment.id,
+      connectionInstanceId,
+      connectionGeneration: current!.connectionGeneration,
+      operationId,
+      targetVersion: "0.1.16",
+    });
+    await releaseEnrollmentConnection(db, {
+      accountId,
+      workspaceId,
+      enrollmentId: enrollment.id,
+      connectionInstanceId,
+      reason: "GOING_OFFLINE_REASON_USER_STOP",
+    });
+    const successorConnectionInstanceId = crypto.randomUUID();
+    const claim = await claimEnrollmentConnection(db, {
+      workspaceId,
+      enrollmentId: enrollment.id,
+      credentialGeneration: enrollment.credentialGeneration,
+      connectionInstanceId: successorConnectionInstanceId,
+      leaseMs: 60_000,
+    });
+    expect(claim.claimed).toBe(true);
+    await handleHelloPayload(
+      db,
+      undefined,
+      helloPayload(enrollment.id, workspaceId, {
+        agentVersion: "0.1.15",
+        binarySha256: "ab".repeat(32),
+        updateChannel: "stable",
+      }),
+      helloSubject(workspaceId, enrollment.id, successorConnectionInstanceId),
+    );
+    const after = await getEnrollment(db, workspaceId, enrollment.id);
+    expect(after?.agentUpdate).toMatchObject({
+      operationId,
+      status: "failed",
+      errorCode: "accepting_process_replaced",
+      retryable: true,
+    });
+  });
+
+  test("stale process progress and reordered stages cannot mutate or regress update state", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, enrollment, connectionInstanceId } =
+      await seedEnrollment(false);
+    const operationId = crypto.randomUUID();
+    const current = await getEnrollment(db, workspaceId, enrollment.id);
+    await beginEnrollmentAgentUpdate(db, {
+      accountId,
+      workspaceId,
+      enrollmentId: enrollment.id,
+      connectionInstanceId,
+      connectionGeneration: current!.connectionGeneration,
+      operationId,
+      targetVersion: "0.1.16",
+    });
+    await advanceEnrollmentAgentUpdate(db, {
+      accountId,
+      workspaceId,
+      enrollmentId: enrollment.id,
+      connectionInstanceId,
+      connectionGeneration: current!.connectionGeneration,
+      operationId,
+      status: "applying",
+    });
+    expect(
+      (
+        await advanceEnrollmentAgentUpdate(db, {
+          accountId,
+          workspaceId,
+          enrollmentId: enrollment.id,
+          connectionInstanceId,
+          connectionGeneration: current!.connectionGeneration,
+          operationId,
+          status: "downloading",
+        })
+      ).updated,
+    ).toBe(false);
+    expect(
+      (
+        await advanceEnrollmentAgentUpdate(db, {
+          accountId,
+          workspaceId,
+          enrollmentId: enrollment.id,
+          connectionInstanceId: crypto.randomUUID(),
+          connectionGeneration: current!.connectionGeneration,
+          operationId,
+          status: "restarting",
+        })
+      ).updated,
+    ).toBe(false);
+    expect((await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate?.status).toBe(
+      "applying",
+    );
   });
 });

@@ -368,6 +368,7 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
         supervisor = supervisor.with_browser_bridge(bridge.inventory());
     }
     let shutdown = supervisor.shutdown_handle();
+    let shutdown_status = shutdown.clone();
 
     // Wire SIGINT/SIGTERM to a clean shutdown so the lease flips offline
     // immediately (§23.0) rather than waiting on heartbeat dead-detect.
@@ -416,8 +417,38 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
         sidecars.shutdown().await;
     }
     supervisor_result.map_err(to_boxed)?;
+    if shutdown_status.is_update() {
+        // The running path has already been atomically replaced and health-gated.
+        // Release the single-process lock before replacing/spawning the successor.
+        drop(_instance_lock);
+        restart_after_verified_update()?;
+    }
     info!("agent stopped");
     Ok(())
+}
+
+fn restart_after_verified_update() -> anyhow_lite::Result {
+    let executable = std::env::current_exe().map_err(to_boxed)?;
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    info!(path = %executable.display(), "starting verified self-update successor");
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        let error = std::process::Command::new(&executable).args(&args).exec();
+        return Err(to_boxed(error));
+    }
+    #[cfg(windows)]
+    {
+        std::process::Command::new(&executable)
+            .args(&args)
+            .spawn()
+            .map_err(to_boxed)?;
+        return Ok(());
+    }
+    #[allow(unreachable_code)]
+    Err(string_err(
+        "self-update restart is unsupported on this platform".to_string(),
+    ))
 }
 
 fn attach_browser_controller(
