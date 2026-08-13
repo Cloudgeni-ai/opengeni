@@ -1,4 +1,5 @@
 import {
+  GROK_IMAGINE_VIDEO_1_5_MODEL_ID,
   SEEDANCE_2_5_MODEL_ID,
   VideoGenerationCapabilities,
   VideoGenerationPolicy,
@@ -23,10 +24,40 @@ export const VIDEO_GENERATION_MODEL_CATALOG: readonly VideoGenerationModelCapabi
       ]),
       resolutions: Object.freeze(["480p", "720p"]),
       aspectRatios: Object.freeze(["16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive"]),
-      duration: Object.freeze({ minSeconds: 4, maxSeconds: 30, stepSeconds: 1 }),
+      duration: Object.freeze({
+        minSeconds: 4,
+        maxSeconds: 30,
+        stepSeconds: 1,
+      }),
+      supportsAudio: true,
+    }) as VideoGenerationModelCapability,
+    Object.freeze({
+      modelId: GROK_IMAGINE_VIDEO_1_5_MODEL_ID,
+      label: "Grok Imagine Video 1.5",
+      providerLabel: "Connected SuperGrok",
+      sourceModes: Object.freeze(["text", "first_frame", "image_reference"]),
+      resolutions: Object.freeze(["480p", "720p"]),
+      aspectRatios: Object.freeze(["16:9", "4:3", "1:1", "3:4", "9:16"]),
+      duration: Object.freeze({
+        minSeconds: 4,
+        maxSeconds: 15,
+        stepSeconds: 1,
+      }),
+      // xAI emits audio but exposes no separate audio wire option.
       supportsAudio: true,
     }) as VideoGenerationModelCapability,
   ]);
+
+export function videoGenerationModelSupportsFundingSource(
+  modelId: string,
+  fundingSource: VideoGenerationPolicyType["fundingSource"],
+): boolean {
+  return modelId === GROK_IMAGINE_VIDEO_1_5_MODEL_ID
+    ? fundingSource === "supergrok_subscription"
+    : modelId === SEEDANCE_2_5_MODEL_ID
+      ? fundingSource === "opengeni_credits" || fundingSource === "workspace_gateway"
+      : false;
+}
 
 export function defaultVideoGenerationPolicy(): VideoGenerationPolicyType {
   return VideoGenerationPolicy.parse({
@@ -44,7 +75,11 @@ export function videoGenerationCapabilitiesForPolicy(input: {
 }): VideoGenerationCapabilities {
   const policy = VideoGenerationPolicy.parse(input.policy);
   const enabled = new Set(policy.enabledModelIds);
-  const models = VIDEO_GENERATION_MODEL_CATALOG.filter((model) => enabled.has(model.modelId));
+  const models = VIDEO_GENERATION_MODEL_CATALOG.filter(
+    (model) =>
+      enabled.has(model.modelId) &&
+      videoGenerationModelSupportsFundingSource(model.modelId, policy.fundingSource),
+  );
   if (models.length === 0 || policy.defaultModelId === null) {
     throw new Error("Video generation is disabled for this workspace");
   }

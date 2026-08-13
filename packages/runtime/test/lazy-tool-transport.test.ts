@@ -296,6 +296,36 @@ function baseRequest(tools: ModelRequest["tools"]): ModelRequest {
 }
 
 describe("generic lazy tool dispatch", () => {
+  test("hides and searches first-party function tools without an MCP registry id", async () => {
+    const firstPartyTool = tool({
+      name: "interaction__browser_act",
+      description: "Click, type, and interact with the current browser page",
+      parameters: {
+        type: "object",
+        properties: { action: { type: "string" } },
+        required: ["action"],
+        additionalProperties: false,
+      },
+      strict: false,
+      execute: () => "unused",
+    }) as unknown as Tool;
+    const agent = agentWith(firstPartyTool);
+    const runtime = installLazyToolRuntime(agent, "generic_dispatch", new Set());
+    const visible = await agent.getAllTools(undefined as never);
+    const inner = new CapturingModel();
+    const wrapped = await new LazyToolModelProvider(providerFor(inner), runtime).getModel("test");
+
+    await wrapped.getResponse(baseRequest(visible.map(serializedFunction)));
+
+    expect(inner.requests[0]!.tools.map((candidate) => candidate.name)).toEqual([
+      "tool_search",
+      "tool_invoke",
+    ]);
+    expect(
+      runtime.search({ query: "interact with browser" }).map((candidate) => candidate.name),
+    ).toEqual(["interaction__browser_act"]);
+  });
+
   test("searches, restores provider history, and executes the real tool pipeline", async () => {
     let approvalChecks = 0;
     let executions = 0;

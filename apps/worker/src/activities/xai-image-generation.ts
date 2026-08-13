@@ -42,9 +42,6 @@ export async function executeXaiSubscriptionImageGeneration(
   },
   ports: XaiImageGenerationPorts = xaiImageGenerationPorts,
 ): Promise<GeneratedImageReceipt> {
-  if (input.references?.length) {
-    throw new Error("SuperGrok image generation does not support reference images");
-  }
   const providerBindingHash = imageProviderBindingHash(
     XAI_SUBSCRIPTION_PROVIDER_ID,
     input.credentialId,
@@ -65,6 +62,15 @@ export async function executeXaiSubscriptionImageGeneration(
     generate: async () => {
       const generated = await ports.generate({
         prompt: input.prompt,
+        sessionId: input.sessionId,
+        ...(input.references?.length
+          ? {
+              references: input.references.map((reference) => ({
+                mediaType: reference.mediaType,
+                bytes: reference.bytes,
+              })),
+            }
+          : {}),
         getToken: input.xaiContext.getToken,
         refresh: input.xaiContext.refresh,
         ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),

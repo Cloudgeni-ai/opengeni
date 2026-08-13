@@ -51,8 +51,8 @@ import {
   type ResourceRef,
   type ToolAuthNeededPayload,
   type ToolRef,
-  type VideoGenerationAcceptedReceipt,
   type VideoGenerationCapabilities,
+  type VideoGenerationToolResult,
 } from "@opengeni/contracts";
 import {
   MCP_MAX_CONCURRENT_SERVER_OPERATIONS,
@@ -1405,7 +1405,7 @@ export type BuildAgentOptions = {
     execute: (
       input: import("@opengeni/contracts").GenerateVideoToolInput,
       context: { toolCallId: string },
-    ) => Promise<VideoGenerationAcceptedReceipt>;
+    ) => Promise<VideoGenerationToolResult>;
   };
   encryptedReasoning?: boolean;
   structuredToolTransport?: boolean;
@@ -2027,7 +2027,7 @@ export function buildOpenGeniAgent(
     ? agentTool({
         name: "get_video_generation_capabilities",
         description:
-          "Return the video-generation models and exact source, duration, resolution, aspect-ratio, and audio capabilities currently enabled for this workspace. Call when choosing a model or reference mode; availability is runtime state and is never encoded in the generate_video schema.",
+          "Return the video-generation models and exact source, duration, resolution, aspect-ratio, and audio capabilities currently enabled for this workspace. Call immediately before generate_video, then select a listed model and source mode; availability is runtime state and is never encoded in the generate_video schema.",
         parameters: GetVideoGenerationCapabilitiesToolInput,
         errorFunction: null,
         execute: async () => {
@@ -2041,7 +2041,7 @@ export function buildOpenGeniAgent(
     ? agentTool({
         name: "generate_video",
         description:
-          "Start one durable asynchronous video generation. Use exact /workspace paths for any references and call once per intentionally distinct result. The accepted receipt means work continues independently; a later platform update provides the terminal result. Never retry automatically after failure or uncertainty.",
+          "Start one durable asynchronous video generation after get_video_generation_capabilities. Match the selected model's exact source mode: omit references for text-to-video, provide one exact /workspace image path for image-to-video, or provide one exact /workspace video path for video editing. Call once per intentionally distinct result. An accepted result means work continues independently and must never be retried automatically. A rejected result means no operation or provider request was created; correct the stated reference problem and call again only with corrected input.",
         parameters: GenerateVideoToolInput,
         errorFunction: null,
         execute: async (input, _context, details) => {
@@ -2188,7 +2188,13 @@ export function buildOpenGeniAgent(
 
   const skillComposition = composeRuntimeSkills(options.skillActivations ?? [], {
     editableArtifacts: editableArtifactToolsAvailable,
-    videoGeneration: Boolean(options.videoGeneration),
+    // A connected machine owns its filesystem, and its session deliberately
+    // does not materialize host-local lazy entries. Advertising this bundled
+    // skill there makes load_skill report a path that does not exist. Keep the
+    // executable tools (whose descriptions contain the full short workflow),
+    // but expose the filesystem-backed helper only where it can be delivered.
+    videoGeneration:
+      Boolean(options.videoGeneration) && options.activeSandboxBackend !== "selfhosted",
   });
   const runAs = sandboxRunAs(settings);
   const agent = new SandboxAgent({
@@ -2215,7 +2221,9 @@ export function buildOpenGeniAgent(
         : {}),
       ...(options.onComputerUseReady ? { onComputerUseReady: options.onComputerUseReady } : {}),
       ...(options.onRetainableSessionImageOutput
-        ? { onRetainableSessionImageOutput: options.onRetainableSessionImageOutput }
+        ? {
+            onRetainableSessionImageOutput: options.onRetainableSessionImageOutput,
+          }
         : {}),
       ...(options.turnCancellationSignal
         ? { turnCancellationSignal: options.turnCancellationSignal }
@@ -2302,10 +2310,11 @@ export function buildOpenGeniAgent(
  *
  * Codex stays on its existing native `defer_loading` implementation. Direct
  * OpenAI/Azure keep full real tools in Runner's execution registry while a model
- * wrapper omits searchable schemas from the provider request and native client
- * tool_search discloses the same objects. Generic providers receive only stable
- * ordinary tool_search/tool_invoke schemas; valid dispatcher calls are rewritten
- * back to the real runtime tool before Runner handles approval and execution.
+ * wrapper omits searchable MCP schemas from the provider request and native
+ * client tool_search discloses the same objects. Generic providers receive only
+ * stable ordinary tool_search/tool_invoke schemas; every function tool stays in
+ * Runner's registry and valid dispatcher calls are rewritten back to the real
+ * runtime tool before Runner handles approval and execution.
  */
 function maybeInstallLazyToolTransport(
   agent: Agent<any, any>,
@@ -2858,7 +2867,9 @@ function buildAgentCapabilitiesFromComposition(
       ...(options.turnCancellationSignal ? { abortSignal: options.turnCancellationSignal } : {}),
       ...(options.onComputerUseReady ? { onReady: options.onComputerUseReady } : {}),
       ...(options.onRetainableSessionImageOutput
-        ? { onRetainableSessionImageOutput: options.onRetainableSessionImageOutput }
+        ? {
+            onRetainableSessionImageOutput: options.onRetainableSessionImageOutput,
+          }
         : {}),
       toolMode: options.computerToolMode ?? "disabled",
     });
@@ -4274,7 +4285,9 @@ export function mcpTransportErrorWithRetryMetadata(
   const classified =
     error instanceof Error
       ? (error as McpTransportError)
-      : (new Error(exactErrorMessage(error), { cause: error }) as McpTransportError);
+      : (new Error(exactErrorMessage(error), {
+          cause: error,
+        }) as McpTransportError);
   if (isMcpRequestTimeoutError(error)) {
     mcpTransportFailureKinds.set(classified, "request_timeout");
   } else if (isRawMcpTransportConnectivityError(error, options)) {
@@ -4821,7 +4834,11 @@ export class PrefixedMcpServer implements MCPServer {
       const publicError = publicMcpLifecycleError(exactError, "connect", this.registryId, {
         recoverySafeSetup: this.recoverySafeSetup,
       });
-      this.lifecycleFailures.connect = { phase: "connect", publicError, exactError };
+      this.lifecycleFailures.connect = {
+        phase: "connect",
+        publicError,
+        exactError,
+      };
       logPublicMcpLifecycleFailure(publicError);
       throw publicError;
     }
@@ -4835,7 +4852,11 @@ export class PrefixedMcpServer implements MCPServer {
     } catch (error) {
       const exactError = exactMcpLifecycleError(error);
       const publicError = publicMcpLifecycleError(exactError, "close", this.registryId);
-      this.lifecycleFailures.close = { phase: "close", publicError, exactError };
+      this.lifecycleFailures.close = {
+        phase: "close",
+        publicError,
+        exactError,
+      };
       logPublicMcpLifecycleFailure(publicError);
       throw publicError;
     }

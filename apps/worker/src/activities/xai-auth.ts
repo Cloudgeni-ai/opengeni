@@ -1,7 +1,7 @@
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import {
   materializeXaiCredentialForRun,
-  refreshXaiSubscriptionCredential,
+  refreshXaiSubscriptionCredentialSerialized,
   type Database,
 } from "@opengeni/db";
 import type { XaiProviderAccountAuthoritySnapshotV1 } from "@opengeni/contracts";
@@ -60,36 +60,45 @@ export async function buildXaiTurnRequestAuthorization(input: {
   };
 
   const refresh = async (): Promise<XaiSubscriptionTokenSnapshot> => {
-    const refreshToken = credential.secret.refreshToken;
-    if (!refreshToken) {
+    const observedAccessToken = credential.secret.accessToken;
+    const observedRefreshToken = credential.secret.refreshToken;
+    if (!observedRefreshToken) {
       throw new XaiSubscriptionReloginRequired(
         "The SuperGrok connection cannot be refreshed. Reconnect the account.",
       );
     }
-    const tokens = await refreshXaiToken(refreshToken, {
-      ...(input.fetch ? { fetch: input.fetch } : {}),
-    });
-    const expiresAt =
-      xaiAccessTokenExpiry(tokens.accessToken) ??
-      new Date(Date.now() + tokens.expiresInSeconds * 1_000);
-    credential = await refreshXaiSubscriptionCredential(input.db, {
+    const result = await refreshXaiSubscriptionCredentialSerialized(input.db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       subjectId: input.subjectId,
       credentialId: input.credentialId,
       authoritySnapshot: input.authoritySnapshot,
       encryptionKey,
-      secret: {
-        version: 1,
-        accessToken: tokens.accessToken,
-        refreshToken: tokens.refreshToken,
+      observedAccessToken,
+      observedRefreshToken,
+      refresh: async (current) => {
+        const refreshToken = current.secret.refreshToken;
+        if (!refreshToken) {
+          throw new XaiSubscriptionReloginRequired(
+            "The SuperGrok connection cannot be refreshed. Reconnect the account.",
+          );
+        }
+        const tokens = await refreshXaiToken(refreshToken, {
+          ...(input.fetch ? { fetch: input.fetch } : {}),
+        });
+        return {
+          secret: {
+            version: 1,
+            accessToken: tokens.accessToken,
+            refreshToken: tokens.refreshToken,
+          },
+          expiresAt:
+            xaiAccessTokenExpiry(tokens.accessToken) ??
+            new Date(Date.now() + tokens.expiresInSeconds * 1_000),
+        };
       },
-      providerAccountId: credential.providerAccountId,
-      label: credential.label,
-      accountEmail: credential.accountEmail,
-      planType: credential.planType,
-      expiresAt,
     });
+    credential = result.credential;
     return tokenSnapshot();
   };
 

@@ -22,9 +22,13 @@ import {
   persistAttemptToolCatalog,
   workspaceCodexSubscriptionActive,
   acquireXaiCredentialLease,
+  selectXaiCredentialForUse,
+  materializeXaiCredentialForRun,
+  resolveXaiProviderAccountAuthoritySnapshotForAcceptance,
   heartbeatXaiCredentialLeaseUntil,
   releaseXaiCredentialLease,
   getXaiSessionAccountPin,
+  setXaiSessionAccountPin,
   recordXaiSessionLastAccount,
   updateXaiQuotaMetadata,
   XAI_CREDENTIAL_LEASE_TTL_MS,
@@ -191,6 +195,7 @@ import {
   sandboxLifecycleTransitionWaitMs,
   sandboxWarmRateMicrosPerSecond,
   serviceTierForLatencyMode,
+  environmentsEncryptionKeyBytes,
   settingsWithResolvedModelContext,
   resolveTurnExecutionPolicyV1,
   OPENGENI_GATEWAY_MODELS,
@@ -281,8 +286,10 @@ import { TurnAttemptFencedError } from "./turn-attempt-fenced";
 import {
   admitVideoGenerationRequest,
   managedVideoGenerationCredentialLease,
+  xaiVideoGenerationCredentialLease,
   type VideoGenerationCredentialLease,
 } from "./video-generation-admission";
+import { VideoReferenceInputError } from "./video-reference-staging";
 import {
   assertGitCredentialRenewalTransportUnchanged,
   gitCredentialAuthorityForTurn,
@@ -439,6 +446,7 @@ import {
   readTurnExecutionPolicyV1,
   resolveWorkspaceAgentHumanInputEnabled,
   resourceMountPath,
+  VideoGenerationRejectedResult,
   type LatencyMode,
   type ResourceRef,
   type RetainedArtifactMetadata,
@@ -4038,6 +4046,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // a codex-billed turn is confirmed and threaded into the token resolver below.
     let effectiveCodexCredentialId: string | null = null;
     let effectiveXaiCredentialId: string | null = null;
+    let xaiRotationEnabled = false;
     let xaiAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1 | null = null;
     let xaiRequestContext: XaiSubscriptionRequestContext | null = null;
     let xaiCredentialQuarantined = false;
@@ -5060,12 +5069,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           accountId: input.accountId,
           workspaceId: input.workspaceId,
           subjectId,
+          sessionId: input.sessionId,
           turnId: turn.id,
           holderId: dispatchId,
           authoritySnapshot,
           pinnedCredentialId: sessionPin?.pinnedCredentialId ?? null,
+          pinSource:
+            sessionPin?.pinSource === "manual" || sessionPin?.pinSource === "policy"
+              ? sessionPin.pinSource
+              : null,
         });
         effectiveXaiCredentialId = leased.credentialId;
+        xaiRotationEnabled = leased.rotationEnabled;
         xaiLeaseSubjectId = subjectId;
         xaiLeaseHolderId = leased.holderId;
         xaiLeaseGeneration = leased.generation;
@@ -5100,7 +5115,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                       requestPreserved: true,
                     },
                   },
-                  { type: "session.status.changed", payload: { status: "idle" } },
+                  {
+                    type: "session.status.changed",
+                    payload: { status: "idle" },
+                  },
                 ],
                 turnStatus: "cancelled",
                 sessionStatus: "idle",
@@ -5192,6 +5210,40 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           return claimedResult({ status: "idle" });
         }
         if (xaiLeaseHeld) startXaiLeaseHeartbeat();
+        if (
+          leased.rotationEnabled &&
+          sessionPin?.pinSource !== "manual" &&
+          (sessionPin?.pinnedCredentialId !== effectiveXaiCredentialId ||
+            sessionPin?.pinSource !== "policy")
+        ) {
+          await setXaiSessionAccountPin(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId,
+            sessionId: input.sessionId,
+            authoritySnapshot,
+            credentialId: effectiveXaiCredentialId,
+            pinSource: "policy",
+            expectedVersion: sessionPin?.version ?? null,
+          }).catch((error: unknown) => {
+            if (error instanceof Error && error.message === "xAI session pin changed") return;
+            throw error;
+          });
+        } else if (!leased.rotationEnabled && sessionPin?.pinSource === "policy") {
+          await setXaiSessionAccountPin(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId,
+            sessionId: input.sessionId,
+            authoritySnapshot,
+            credentialId: null,
+            pinSource: null,
+            expectedVersion: sessionPin.version,
+          }).catch((error: unknown) => {
+            if (error instanceof Error && error.message === "xAI session pin changed") return;
+            throw error;
+          });
+        }
         await recordXaiSessionLastAccount(db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
@@ -5978,7 +6030,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // the runtime the effective backend so it builds a SandboxAgent for the
       // attached Connected Machine without mutating the session or turn record.
       if (machinePrimary && modelRunSettings.sandboxBackend === "none") {
-        modelRunSettings = { ...modelRunSettings, sandboxBackend: "selfhosted" };
+        modelRunSettings = {
+          ...modelRunSettings,
+          sandboxBackend: "selfhosted",
+        };
       }
       // The backend that can actually create a sandbox for this turn. In the
       // common path this is runSettings.sandboxBackend. A selfhosted home turn
@@ -7154,7 +7209,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (objectStorage && videoGenerationEnabled) {
         if (videoGenerationPolicy.fundingSource === "opengeni_credits") {
           videoGenerationCredential = managedVideoGenerationCredentialLease(modelRunSettings);
-        } else {
+        } else if (videoGenerationPolicy.fundingSource === "workspace_gateway") {
           const workspaceCredential = await loadWorkspaceVercelAiGatewayCredentialLease(
             db,
             modelRunSettings,
@@ -7165,6 +7220,74 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               fundingSource: "workspace_gateway",
               ...workspaceCredential,
             };
+          }
+        } else if (videoGenerationPolicy.fundingSource === "supergrok_subscription") {
+          const encryptionKey = environmentsEncryptionKeyBytes(modelRunSettings);
+          const subjectId = xaiLeaseSubjectId ?? turn.initiatingHumanSubjectId;
+          if (encryptionKey && subjectId) {
+            const authoritySnapshot =
+              xaiAuthoritySnapshot ??
+              (await resolveXaiProviderAccountAuthoritySnapshotForAcceptance(db, {
+                workspaceId: input.workspaceId,
+                subjectId,
+              }));
+            const pin = await getXaiSessionAccountPin(db, {
+              workspaceId: input.workspaceId,
+              subjectId,
+              sessionId: input.sessionId,
+              authoritySnapshot,
+            });
+            const selected = effectiveXaiCredentialId
+              ? {
+                  credentialId: effectiveXaiCredentialId,
+                  rotationEnabled: xaiRotationEnabled,
+                }
+              : await selectXaiCredentialForUse(db, {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  subjectId,
+                  authoritySnapshot,
+                  shardKey: input.sessionId,
+                  pinnedCredentialId: pin?.pinnedCredentialId ?? null,
+                  pinSource:
+                    pin?.pinSource === "manual" || pin?.pinSource === "policy"
+                      ? pin.pinSource
+                      : null,
+                });
+            if (selected.credentialId) {
+              if (
+                selected.rotationEnabled &&
+                pin?.pinSource !== "manual" &&
+                pin?.pinnedCredentialId !== selected.credentialId
+              ) {
+                await setXaiSessionAccountPin(db, {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  subjectId,
+                  sessionId: input.sessionId,
+                  authoritySnapshot,
+                  credentialId: selected.credentialId,
+                  pinSource: "policy",
+                  expectedVersion: pin?.version ?? null,
+                }).catch((error: unknown) => {
+                  if (error instanceof Error && error.message === "xAI session pin changed") return;
+                  throw error;
+                });
+              }
+              const credential = await materializeXaiCredentialForRun(db, {
+                workspaceId: input.workspaceId,
+                subjectId,
+                credentialId: selected.credentialId,
+                authoritySnapshot,
+                encryptionKey,
+              });
+              videoGenerationCredential = xaiVideoGenerationCredentialLease({
+                settings: modelRunSettings,
+                credential,
+                subjectId,
+                authoritySnapshot,
+              });
+            }
           }
         }
       }
@@ -7192,33 +7315,47 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 resolvedSandbox?.established.session ?? sdkOwnedSandboxSession;
               const fence = toolCancellationFenceRef.current;
               const runAs = sandboxRunAs(modelRunSettings);
-              const accepted = await admitVideoGenerationRequest({
-                db,
-                storage: objectStorage,
-                settings: modelRunSettings,
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: input.sessionId,
-                turnId: turn.id,
-                attemptId: input.attemptId,
-                toolCallId,
-                toolInput,
-                policy: videoGenerationPolicy,
-                credential: videoGenerationCredential,
-                ...(sessionForReference && fence
-                  ? {
-                      runCommand: async (command) =>
-                        await fence.runSandboxCommandStructured(
-                          sessionForReference as import("@opengeni/runtime").TurnSandboxCommandSession,
-                          {
-                            ...command,
-                            ...(runAs ? { runAs } : {}),
-                          },
-                        ),
-                    }
-                  : {}),
-                ...(runtimeCancellationSignal ? { signal: runtimeCancellationSignal } : {}),
-              });
+              let accepted: Awaited<ReturnType<typeof admitVideoGenerationRequest>>;
+              try {
+                accepted = await admitVideoGenerationRequest({
+                  db,
+                  storage: objectStorage,
+                  settings: modelRunSettings,
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  turnId: turn.id,
+                  attemptId: input.attemptId,
+                  toolCallId,
+                  toolInput,
+                  policy: videoGenerationPolicy,
+                  credential: videoGenerationCredential,
+                  ...(sessionForReference && fence
+                    ? {
+                        runCommand: async (command) =>
+                          await fence.runSandboxCommandStructured(
+                            sessionForReference as import("@opengeni/runtime").TurnSandboxCommandSession,
+                            {
+                              ...command,
+                              ...(runAs ? { runAs } : {}),
+                            },
+                          ),
+                      }
+                    : {}),
+                  ...(runtimeCancellationSignal ? { signal: runtimeCancellationSignal } : {}),
+                });
+              } catch (error) {
+                if (error instanceof VideoReferenceInputError) {
+                  return VideoGenerationRejectedResult.parse({
+                    schemaVersion: 1,
+                    status: "rejected",
+                    code: error.code,
+                    message: error.message,
+                    operationCreated: false,
+                  });
+                }
+                throw error;
+              }
               videoGenerationAcceptancesByCallId.set(toolCallId, {
                 operationId: accepted.operationId,
                 requestDigest: accepted.requestDigest,

@@ -148,6 +148,7 @@ export type SyncSessionRealtimeLedgerResponse = {
 
 export type SessionRealtimeModel =
   | "gpt-live-1-boulder-alpha"
+  | "supergrok/grok-voice-think-fast-2.0"
   | "opengeni-gateway/openai/gpt-realtime-2.1"
   | "opengeni-gateway/openai/gpt-realtime-mini"
   | "opengeni-gateway/xai/grok-voice-think-fast-2.0"
@@ -158,7 +159,7 @@ export type SessionRealtimeModel =
 export type WorkspaceRealtimeModelCatalogItem = {
   id: SessionRealtimeModel;
   label: string;
-  provider: "OpenGeni" | "Connected Codex" | "Your Gateway";
+  provider: "OpenGeni" | "Connected Codex" | "Connected SuperGrok" | "Your Gateway";
   description: string;
   available: boolean;
   unavailableReason: string | null;
@@ -839,12 +840,18 @@ export type AtlassianConnectionMetadata = {
   selectedSources: AtlassianSelectedSource[];
   [key: string]: unknown;
 };
-export type AtlassianOAuthStartResponse = { authorizationUrl: string; expiresAt: string };
+export type AtlassianOAuthStartResponse = {
+  authorizationUrl: string;
+  expiresAt: string;
+};
 export type AtlassianLifecycleActionRequest = {
   action: "pause" | "resume";
   expectedVersion: number;
 };
-export type AtlassianDisconnectRequest = { expectedVersion: number; idempotencyKey: string };
+export type AtlassianDisconnectRequest = {
+  expectedVersion: number;
+  idempotencyKey: string;
+};
 export type AtlassianBrowseItem = {
   id: string;
   cloudId: string;
@@ -1123,7 +1130,11 @@ export type AgentTopologySession = {
   parentSessionId: string | null;
   rootSessionId: string;
   nestedAgentDepth: number;
-  ancestorPath: Array<{ id: string; title: string | null; titleTruncated: boolean }>;
+  ancestorPath: Array<{
+    id: string;
+    title: string | null;
+    titleTruncated: boolean;
+  }>;
   status: SessionStatus;
   pause: {
     state: "active" | "paused";
@@ -4166,7 +4177,10 @@ export type UpdateVideoGenerationPolicyRequest = {
   defaultModelId: string | null;
 };
 
-export type VideoGenerationFundingSource = "opengeni_credits" | "workspace_gateway";
+export type VideoGenerationFundingSource =
+  | "opengeni_credits"
+  | "workspace_gateway"
+  | "supergrok_subscription";
 
 export type VideoGenerationFundingOption = {
   source: VideoGenerationFundingSource;

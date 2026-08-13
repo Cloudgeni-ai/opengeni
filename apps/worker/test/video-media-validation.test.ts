@@ -75,6 +75,76 @@ describe("video media validation", () => {
     });
   });
 
+  test("ignores an explicitly attached cover-art stream", async () => {
+    const path = join(root, `cover-art-${randomUUID()}.mp4`);
+    await writeFile(path, Buffer.from(FAST_START_MP4_BASE64, "base64"));
+    const coverArtProbe = await writeProbeFixture({
+      streams: [
+        {
+          codec_name: "h264",
+          codec_type: "video",
+          width: 480,
+          height: 480,
+          avg_frame_rate: "24/1",
+          disposition: { attached_pic: 0 },
+        },
+        {
+          codec_name: "aac",
+          codec_type: "audio",
+          avg_frame_rate: "0/0",
+          disposition: { attached_pic: 0 },
+        },
+        {
+          codec_name: "mjpeg",
+          codec_type: "video",
+          width: 480,
+          height: 480,
+          avg_frame_rate: "0/0",
+          disposition: { attached_pic: 1 },
+        },
+      ],
+      format: { format_name: "mov,mp4,m4a,3gp,3g2,mj2", duration: "4.041667" },
+    });
+
+    await expect(
+      validateGeneratedVideo({ path, ffprobePath: coverArtProbe, expectedDurationSeconds: 4 }),
+    ).resolves.toMatchObject({
+      videoCodec: "h264",
+      audioCodec: "aac",
+      hasAudio: true,
+      width: 480,
+      height: 480,
+    });
+  });
+
+  test("still rejects a second playable video stream", async () => {
+    const path = join(root, `two-videos-${randomUUID()}.mp4`);
+    await writeFile(path, Buffer.from(FAST_START_MP4_BASE64, "base64"));
+    const twoVideoProbe = await writeProbeFixture({
+      streams: [
+        {
+          codec_name: "h264",
+          codec_type: "video",
+          width: 480,
+          height: 480,
+          avg_frame_rate: "24/1",
+        },
+        {
+          codec_name: "mjpeg",
+          codec_type: "video",
+          width: 480,
+          height: 480,
+          avg_frame_rate: "1/1",
+        },
+      ],
+      format: { format_name: "mov,mp4,m4a,3gp,3g2,mj2", duration: "4.041667" },
+    });
+
+    await expect(validateGeneratedVideo({ path, ffprobePath: twoVideoProbe })).rejects.toThrow(
+      "browser-compatible H.264 MP4",
+    );
+  });
+
   test("copies a version-fenced staged object in bounded ranges and verifies its digest", async () => {
     const bytes = Buffer.from(FAST_START_MP4_BASE64, "base64");
     const sha256 = createHash("sha256").update(bytes).digest("hex");
@@ -114,6 +184,15 @@ describe("video media validation", () => {
     }
   });
 });
+
+async function writeProbeFixture(value: unknown): Promise<string> {
+  const path = join(root, `ffprobe-${randomUUID()}`);
+  await writeFile(path, `#!/bin/sh\nprintf '%s\\n' '${JSON.stringify(value)}'\n`, {
+    mode: 0o700,
+  });
+  await chmod(path, 0o700);
+  return path;
+}
 
 function topLevelBoxes(bytes: Buffer): Map<string, { offset: number; size: number }> {
   const boxes = new Map<string, { offset: number; size: number }>();
