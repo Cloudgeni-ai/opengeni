@@ -652,6 +652,9 @@ describe("durable active-goal wake", () => {
       shared.admin`update session_goal_revisions set rationale = 'mutated' where id = ${proposal.id}`,
     ).rejects.toThrow("session goal revisions are immutable");
     await expect(
+      shared.admin`delete from session_goal_revisions where id = ${proposal.id}`,
+    ).rejects.toThrow("session goal revisions are immutable");
+    await expect(
       upsertSessionGoalWithEvent(client.db, {
         accountId: ctx.grant.accountId,
         workspaceId: ctx.grant.workspaceId!,

@@ -22,7 +22,9 @@ let client: DbClient | null = null;
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("task-notes-postgres");
   if (!shared && requireRealDatabase) {
-    throw new Error("[task-notes-postgres] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable");
+    throw new Error(
+      "[task-notes-postgres] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
+    );
   }
   if (shared) client = createDb(shared.appUrl, { max: 8 });
 }, 180_000);
@@ -53,18 +55,20 @@ async function fixture(options: { privateRoot?: boolean; child?: boolean } = {})
     name: "Task note owner",
   });
   const grant = access.workspaceGrants[0]!;
-  const root = await withSessionRlsActorContext({ subjectId: ownerSubjectId }, async () =>
-    await createSession(client!.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      initialMessage: "root task",
-      resources: [],
-      metadata: {},
-      model: "test-model",
-      sandboxBackend: "none",
-      createdBy: { kind: "subject", subjectId: ownerSubjectId },
-      createdByContext: {},
-    }),
+  const root = await withSessionRlsActorContext(
+    { subjectId: ownerSubjectId },
+    async () =>
+      await createSession(client!.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        initialMessage: "root task",
+        resources: [],
+        metadata: {},
+        model: "test-model",
+        sandboxBackend: "none",
+        createdBy: { kind: "subject", subjectId: ownerSubjectId },
+        createdByContext: {},
+      }),
   );
   if (options.privateRoot) {
     await transitionSessionVisibility(client.db, {
@@ -77,19 +81,21 @@ async function fixture(options: { privateRoot?: boolean; child?: boolean } = {})
     });
   }
   const child = options.child
-    ? await withSessionRlsActorContext({ subjectId: ownerSubjectId }, async () =>
-        await createSession(client!.db, {
-          accountId: grant.accountId,
-          workspaceId: grant.workspaceId,
-          parentSessionId: root.id,
-          initialMessage: "child task",
-          resources: [],
-          metadata: {},
-          model: "test-model",
-          sandboxBackend: "none",
-          createdBy: { kind: "subject", subjectId: ownerSubjectId },
-          createdByContext: {},
-        }),
+    ? await withSessionRlsActorContext(
+        { subjectId: ownerSubjectId },
+        async () =>
+          await createSession(client!.db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            parentSessionId: root.id,
+            initialMessage: "child task",
+            resources: [],
+            metadata: {},
+            model: "test-model",
+            sandboxBackend: "none",
+            createdBy: { kind: "subject", subjectId: ownerSubjectId },
+            createdByContext: {},
+          }),
       )
     : null;
   return { grant, ownerSubjectId, root, child };
@@ -291,12 +297,14 @@ describe("task-tree notes PostgreSQL authority", () => {
       text: "Service-originated handoff with no manufactured human authority.",
       expiresInDays: 1,
     };
-    const first = await withSessionRlsActorContext({ subjectId: "worker:service" }, async () =>
-      await createTaskNote(client!.db, input),
+    const first = await withSessionRlsActorContext(
+      { subjectId: "worker:service" },
+      async () => await createTaskNote(client!.db, input),
     );
     await Bun.sleep(25);
-    const retry = await withSessionRlsActorContext({ subjectId: "worker:service" }, async () =>
-      await createTaskNote(client!.db, input),
+    const retry = await withSessionRlsActorContext(
+      { subjectId: "worker:service" },
+      async () => await createTaskNote(client!.db, input),
     );
     expect(first.replayed).toBe(false);
     expect(retry).toEqual({ note: first.note, replayed: true });
@@ -323,8 +331,9 @@ describe("task-tree notes PostgreSQL authority", () => {
     });
     await expectSqlState(
       async () =>
-        await withSessionRlsActorContext({ subjectId: "worker:service" }, async () =>
-          await createTaskNote(client!.db, { ...input, ...claims(otherTreeAttempt) }),
+        await withSessionRlsActorContext(
+          { subjectId: "worker:service" },
+          async () => await createTaskNote(client!.db, { ...input, ...claims(otherTreeAttempt) }),
         ),
       "23505",
     );
@@ -339,8 +348,9 @@ describe("task-tree notes PostgreSQL authority", () => {
     const recovery = await seedAttempt({ ...attempt, generation: 2, turnId: attempt.turnId });
     await expectSqlState(
       async () =>
-        await withSessionRlsActorContext({ subjectId: "worker:service" }, async () =>
-          await createTaskNote(client!.db, { ...input, ...claims(recovery) }),
+        await withSessionRlsActorContext(
+          { subjectId: "worker:service" },
+          async () => await createTaskNote(client!.db, { ...input, ...claims(recovery) }),
         ),
       "23505",
     );
@@ -458,16 +468,22 @@ describe("task-tree notes PostgreSQL authority", () => {
         { subjectId: "worker:root", initiatingHumanSubjectId: f.ownerSubjectId },
         async () =>
           await createTaskNote(client!.db, {
-            ...claims(rootAttempt), operationId: crypto.randomUUID(), kind: "finding",
-            text: "root boundary winner", expiresInDays: 1,
+            ...claims(rootAttempt),
+            operationId: crypto.randomUUID(),
+            kind: "finding",
+            text: "root boundary winner",
+            expiresInDays: 1,
           }),
       ),
       withSessionRlsActorContext(
         { subjectId: "worker:child", initiatingHumanSubjectId: f.ownerSubjectId },
         async () =>
           await createTaskNote(client!.db, {
-            ...claims(childAttempt), operationId: crypto.randomUUID(), kind: "finding",
-            text: "child boundary winner", expiresInDays: 1,
+            ...claims(childAttempt),
+            operationId: crypto.randomUUID(),
+            kind: "finding",
+            text: "child boundary winner",
+            expiresInDays: 1,
           }),
       ),
     ]);
@@ -489,8 +505,11 @@ describe("task-tree notes PostgreSQL authority", () => {
     });
     await expect(
       createTaskNote(client.db, {
-        ...claims(attempt), operationId: crypto.randomUUID(), kind: "finding",
-        text: "🧠".repeat(1_025), expiresInDays: 1,
+        ...claims(attempt),
+        operationId: crypto.randomUUID(),
+        kind: "finding",
+        text: "🧠".repeat(1_025),
+        expiresInDays: 1,
       }),
     ).rejects.toThrow("4096 UTF-8 bytes");
   });

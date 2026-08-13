@@ -142,6 +142,20 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
+  -- Parent lifecycle deletion is the sole mutation exception. PostgreSQL's
+  -- cascading constraint trigger runs only after its parent row is absent;
+  -- require both nested trigger context and one missing ownership edge so
+  -- direct or unrelated-trigger deletes remain fail-closed.
+  IF TG_OP = 'DELETE'
+    AND pg_trigger_depth() > 1
+    AND (
+      NOT EXISTS (SELECT 1 FROM "managed_accounts" WHERE "id" = OLD."account_id")
+      OR NOT EXISTS (SELECT 1 FROM "workspaces" WHERE "id" = OLD."workspace_id")
+      OR NOT EXISTS (SELECT 1 FROM "sessions" WHERE "id" = OLD."session_id")
+    )
+  THEN
+    RETURN OLD;
+  END IF;
   RAISE EXCEPTION 'session goal revisions are immutable'
     USING ERRCODE = '55000';
 END;

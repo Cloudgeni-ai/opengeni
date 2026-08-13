@@ -24,7 +24,10 @@ export type KnowledgeProjectionInput = {
   source: KnowledgeSource;
 };
 
-export type KnowledgeProjectionResult = Pick<KnowledgeRecord, "title" | "content" | "projection"> & {
+export type KnowledgeProjectionResult = Pick<
+  KnowledgeRecord,
+  "title" | "content" | "projection"
+> & {
   source: KnowledgeSource;
 };
 
@@ -61,10 +64,7 @@ function projectNullableString(
   return projected.value;
 }
 
-function projectSourceUri(
-  value: string | null,
-  fields: Set<ProjectionField>,
-): string | null {
+function projectSourceUri(value: string | null, fields: Set<ProjectionField>): string | null {
   if (value === null || value === "") return null;
   if (utf8Bytes(value) > KNOWLEDGE_SOURCE_URI_MAX_BYTES) {
     fields.add("provenance.source.uri");
@@ -198,12 +198,7 @@ export function projectKnowledgeRecord(input: KnowledgeProjectionInput): Knowled
     title: title.value,
     content: {
       format: "markdown",
-      body: projectNullableString(
-        input.body,
-        KNOWLEDGE_BODY_MAX_BYTES,
-        "content.body",
-        fields,
-      ),
+      body: projectNullableString(input.body, KNOWLEDGE_BODY_MAX_BYTES, "content.body", fields),
       summary: projectNullableString(
         input.summary,
         KNOWLEDGE_SUMMARY_MAX_BYTES,

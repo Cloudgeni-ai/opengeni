@@ -18,7 +18,10 @@ const utf8Bytes = (value: string): number => new TextEncoder().encode(value).byt
 const boundedUtf8 = (maxBytes: number) =>
   z.string().superRefine((value, ctx) => {
     if (utf8Bytes(value) > maxBytes) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `must be at most ${maxBytes} UTF-8 bytes` });
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `must be at most ${maxBytes} UTF-8 bytes`,
+      });
     }
   });
 
@@ -132,9 +135,7 @@ export const KnowledgeRecord = z.object({
     format: z.literal("markdown"),
     body: boundedUtf8(KNOWLEDGE_BODY_MAX_BYTES).nullable(),
     summary: boundedUtf8(KNOWLEDGE_SUMMARY_MAX_BYTES).nullable(),
-    topics: z
-      .array(boundedUtf8(KNOWLEDGE_TOPIC_MAX_BYTES))
-      .max(KNOWLEDGE_TOPICS_MAX_ITEMS),
+    topics: z.array(boundedUtf8(KNOWLEDGE_TOPIC_MAX_BYTES)).max(KNOWLEDGE_TOPICS_MAX_ITEMS),
     metadata: z.record(z.string(), z.unknown()).refine(boundedJson, {
       message: "knowledge metadata exceeds its JSON projection boundary",
     }),

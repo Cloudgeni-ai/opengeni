@@ -52,10 +52,7 @@ export const taskNotes = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    workspaceIdentity: uniqueIndex("task_notes_workspace_id_uq").on(
-      table.workspaceId,
-      table.id,
-    ),
+    workspaceIdentity: uniqueIndex("task_notes_workspace_id_uq").on(table.workspaceId, table.id),
     workspaceRootIdentity: uniqueIndex("task_notes_workspace_root_id_uq").on(
       table.workspaceId,
       table.rootSessionId,

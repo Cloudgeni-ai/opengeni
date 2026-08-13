@@ -11,20 +11,23 @@ export const TASK_NOTE_LIST_RESPONSE_MAX_BYTES = 96 * 1_024;
 const utf8Bytes = (value: string): number => new TextEncoder().encode(value).byteLength;
 
 export function boundedTaskNoteText(maxBytes: number, label: string) {
-  return z.string().min(1).superRefine((value, ctx) => {
-    if (value !== value.trim()) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `${label} must not have leading or trailing whitespace`,
-      });
-    }
-    if (utf8Bytes(value) > maxBytes) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `${label} must be at most ${maxBytes} UTF-8 bytes`,
-      });
-    }
-  });
+  return z
+    .string()
+    .min(1)
+    .superRefine((value, ctx) => {
+      if (value !== value.trim()) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `${label} must not have leading or trailing whitespace`,
+        });
+      }
+      if (utf8Bytes(value) > maxBytes) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `${label} must be at most ${maxBytes} UTF-8 bytes`,
+        });
+      }
+    });
 }
 
 export const TaskNoteText = boundedTaskNoteText(TASK_NOTE_TEXT_MAX_BYTES, "task note text");

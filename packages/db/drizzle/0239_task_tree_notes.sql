@@ -290,7 +290,14 @@ AS $$
 DECLARE
   has_capability boolean;
 BEGIN
-  IF TG_OP = 'DELETE' AND pg_trigger_depth() > 1 THEN
+  IF TG_OP = 'DELETE'
+    AND pg_trigger_depth() > 1
+    AND (
+      NOT EXISTS (SELECT 1 FROM workspaces WHERE id = OLD.workspace_id)
+      OR NOT EXISTS (SELECT 1 FROM sessions WHERE id = OLD.root_session_id)
+      OR NOT EXISTS (SELECT 1 FROM sessions WHERE id = OLD.created_by_session_id)
+    )
+  THEN
     RETURN OLD;
   END IF;
   SELECT EXISTS (
@@ -361,7 +368,18 @@ AS $$
 DECLARE
   note_row task_notes%ROWTYPE;
 BEGIN
-  IF TG_OP = 'DELETE' AND pg_trigger_depth() > 1 THEN
+  IF TG_OP = 'DELETE'
+    AND pg_trigger_depth() > 1
+    AND (
+      NOT EXISTS (SELECT 1 FROM workspaces WHERE id = OLD.workspace_id)
+      OR NOT EXISTS (SELECT 1 FROM sessions WHERE id = OLD.root_session_id)
+      OR NOT EXISTS (SELECT 1 FROM sessions WHERE id = OLD.actor_session_id)
+      OR NOT EXISTS (
+        SELECT 1 FROM task_notes
+        WHERE workspace_id = OLD.workspace_id AND id = OLD.note_id
+      )
+    )
+  THEN
     RETURN OLD;
   END IF;
   IF TG_OP <> 'INSERT' THEN

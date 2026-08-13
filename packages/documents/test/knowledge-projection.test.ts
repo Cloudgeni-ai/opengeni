@@ -31,15 +31,19 @@ describe("Knowledge agent projection", () => {
       title: "😀".repeat(KNOWLEDGE_TITLE_MAX_BYTES),
       body: "😀".repeat(KNOWLEDGE_BODY_MAX_BYTES),
       summary: "😀".repeat(KNOWLEDGE_SUMMARY_MAX_BYTES),
-      topics: Array.from({ length: KNOWLEDGE_TOPICS_MAX_ITEMS + 5 }, (_, index) =>
-        `${index}:${"😀".repeat(100)}`,
+      topics: Array.from(
+        { length: KNOWLEDGE_TOPICS_MAX_ITEMS + 5 },
+        (_, index) => `${index}:${"😀".repeat(100)}`,
       ),
       metadata: {
         z: "z".repeat(KNOWLEDGE_METADATA_MAX_BYTES),
         a: { nested: { deeper: { terminal: { omitted: true } } } },
         many: Array.from({ length: 100 }, (_, index) => index),
       },
-      source: { ...source(), uri: `https://example.test/${"x".repeat(KNOWLEDGE_SOURCE_URI_MAX_BYTES)}` },
+      source: {
+        ...source(),
+        uri: `https://example.test/${"x".repeat(KNOWLEDGE_SOURCE_URI_MAX_BYTES)}`,
+      },
     };
     const first = projectKnowledgeRecord(input);
     const second = projectKnowledgeRecord({
