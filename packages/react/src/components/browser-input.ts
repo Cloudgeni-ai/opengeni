@@ -18,9 +18,7 @@ export function normalizeBrowserAddress(value: string): string | null {
     }
   }
 
-  const isLocal = /^(?:localhost|127(?:\.\d{1,3}){3}|\[::1\])(?::\d+)?(?:[/?#]|$)/iu.test(
-    trimmed,
-  );
+  const isLocal = /^(?:localhost|127(?:\.\d{1,3}){3}|\[::1\])(?::\d+)?(?:[/?#]|$)/iu.test(trimmed);
   const looksLikeHost =
     !/\s/u.test(trimmed) &&
     (isLocal || /^(?:[^./\s]+\.)+[^./\s]+(?::\d+)?(?:[/?#]|$)/u.test(trimmed));

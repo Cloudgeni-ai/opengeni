@@ -65,11 +65,7 @@ import { cn } from "../lib/cn";
 import { copyTextToClipboard } from "../lib/clipboard";
 import { formatBytes } from "../lib/format";
 import type { EmbeddedBrowserInteractionClientOverride } from "../session-context";
-import {
-  browserKey,
-  HUMAN_BROWSER_HOME_URL,
-  normalizeBrowserAddress,
-} from "./browser-input";
+import { browserKey, HUMAN_BROWSER_HOME_URL, normalizeBrowserAddress } from "./browser-input";
 import { InteractionInterventionBanner } from "./interaction-intervention-banner";
 
 export type BrowserViewerNotification = {
