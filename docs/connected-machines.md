@@ -153,10 +153,14 @@ answers `ping` and publishes heartbeats outside command execution. Production
 admission has no ordinary fixed concurrency or queue-wait limit: its only
 circuit breakers are derived from host file-descriptor and process headroom and
 sit above normal workloads (including 100 concurrent command requests). Linux
-puts the supervisor and each operation in separate cgroup-v2 leaves for fate
-isolation and accounting. Before moving itself, the supervisor stamps its own leaf
-with systemd-oomd's `user.oomd_avoid=1` marker; if that protection cannot be
-established, it stays in the already-protected unit cgroup. The generated systemd
+puts the supervisor and each operation in separate cgroup-v2 leaves for accounting
+and systemd-oomd selection. Before moving itself, the supervisor stamps its own leaf
+with systemd-oomd's `user.oomd_avoid=1` marker; if that preference cannot be
+established, it stays in the unit cgroup. Cgroup placement alone does not change
+host-wide kernel OOM victim selection: the generated service requests a negative
+supervisor `OOMScoreAdjust`, startup reports the effective `/proc` value because an
+unprivileged user manager may clamp it, and command descendants are raised to
+`+500`. The generated systemd
 unit explicitly clears stale aggregate resource limits and enables accounting
 without a parent `MemoryHigh`; the default operation leaf has no memory maximum or
 throttle. At spawn, the agent stops the command's process group, moves its direct
