@@ -336,35 +336,39 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const subjectId = "user:bounded-pinned-roots";
+    const marker = `bounded-pinned-root-${crypto.randomUUID()}`;
     await grantMember(workspace, subjectId);
     await withWorkspaceSubjectSessionActivityRls(
       db,
       workspace.workspaceId,
       subjectId,
-      async (scoped) =>
+      async (scoped) => {
         await scoped.execute(sql`
-      with nodes as (
-        select gen_random_uuid() as id, ordinal
-        from generate_series(1, 105) as ordinal
-      ), inserted as (
-        insert into sessions (
-          id, account_id, workspace_id, status, initial_message, model,
-          sandbox_backend, sandbox_group_id, temporal_workflow_id, tool_policy
-        )
-        select
-          id, ${workspace.accountId}, ${workspace.workspaceId}, 'idle',
-          'pinned-root-' || ordinal::text, 'test-model', 'none', id,
-          'bounded-pinned-root-' || id::text,
-          jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
-        from nodes
-        returning id
-      )
-      insert into session_pins (
-        account_id, workspace_id, subject_id, session_id, pinned, pinned_at
-      )
-      select
-        ${workspace.accountId}, ${workspace.workspaceId}, ${subjectId}, id, true, now()
-      from inserted`),
+          with nodes as (
+            select gen_random_uuid() as id, ordinal
+            from generate_series(1, 105) as ordinal
+          )
+          insert into sessions (
+            id, account_id, workspace_id, status, initial_message, model,
+            sandbox_backend, sandbox_group_id, temporal_workflow_id, tool_policy
+          )
+          select
+            id, ${workspace.accountId}, ${workspace.workspaceId}, 'idle',
+            'pinned-root-' || ordinal::text, 'test-model', 'none', id,
+            ${marker} || '-' || ordinal::text,
+            jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
+          from nodes`);
+        await scoped.execute(sql`
+          insert into session_pins (
+            account_id, workspace_id, subject_id, session_id, pinned, pinned_at
+          )
+          select
+            ${workspace.accountId}, ${workspace.workspaceId}, ${subjectId}, id, true, now()
+          from sessions
+          where account_id = ${workspace.accountId}
+            and workspace_id = ${workspace.workspaceId}
+            and temporal_workflow_id like ${`${marker}-%`}`);
+      },
     );
 
     const page = await listSessionsForSubject(db, workspace.workspaceId, {
