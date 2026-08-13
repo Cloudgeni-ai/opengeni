@@ -1300,6 +1300,8 @@ function isTurnBoundary(group: TimelineGroup | undefined): boolean {
     (group?.kind === "item" &&
       (group.item.kind === "user-message" ||
         group.item.kind === "context-compaction" ||
+        (group.item.kind === "machine-input-batch" &&
+          group.item.members.some((member) => member.kind === "media_generation_result")) ||
         (group.item.kind === "notice" && group.item.tone === "input")))
   );
 }

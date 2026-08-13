@@ -5,6 +5,7 @@ import type {
 } from "@opengeni/sdk";
 import {
   CheckIcon,
+  ChevronDownIcon,
   CopyIcon,
   ExternalLinkIcon,
   Loader2Icon,
@@ -16,7 +17,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
+import { MetaChip } from "@/components/ui/meta-chip";
 import { Select } from "@/components/ui/select";
 import { useAppContext } from "@/context";
 
@@ -79,6 +82,7 @@ export function SuperGrokSubscriptionsCard({
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<PendingDeviceCode | null>(null);
   const [editing, setEditing] = useState<{ id: string; value: string } | null>(null);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
   const cancelled = useRef(false);
 
   const refresh = useCallback(async () => {
@@ -104,7 +108,10 @@ export function SuperGrokSubscriptionsCard({
     setBusy(true);
     try {
       const start = await client.supergrokConnectStart(workspaceId, scope);
-      setPending({ userCode: start.userCode, verificationUri: start.verificationUri });
+      setPending({
+        userCode: start.userCode,
+        verificationUri: start.verificationUri,
+      });
       window.open(
         start.verificationUriComplete ?? start.verificationUri,
         "_blank",
@@ -172,30 +179,81 @@ export function SuperGrokSubscriptionsCard({
 
   const accounts = data?.accounts ?? [];
   return (
-    <section aria-labelledby="supergrok-heading" className="rounded-lg border border-border">
-      <div className="grid gap-3 p-4">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="grid gap-1">
-            <h2 id="supergrok-heading" className="text-sm font-medium">
-              SuperGrok / xAI subscription
-            </h2>
-            <p className="max-w-2xl text-xs text-fg-subtle">
-              Use connected SuperGrok accounts for Grok models without OpenGeni credits. Workspace
-              accounts are available to members; private accounts remain usable only by you.
-            </p>
+    <section aria-labelledby="supergrok-heading" className="grid gap-2">
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <h2 id="supergrok-heading" className="text-sm font-medium">
+            SuperGrok subscriptions
+          </h2>
+          <p className="mt-0.5 text-2xs text-fg-subtle">
+            xAI plans for Grok models — subscription usage, not OpenGeni credits.
+          </p>
+        </div>
+        {canManage && accounts.length > 0 && !pending ? (
+          <div className="flex items-center gap-1">
+            <Select
+              aria-label="SuperGrok connection scope"
+              className="h-8 border-0 bg-transparent text-xs"
+              value={scope}
+              disabled={busy}
+              onChange={(event) => setScope(event.target.value as SuperGrokAccountScope)}
+            >
+              <option value="workspace">Workspace</option>
+              <option value="user">Only me</option>
+            </Select>
+            <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={connect}>
+              <PlusIcon className="size-3.5" /> Connect
+            </Button>
           </div>
+        ) : null}
+      </div>
+
+      {accounts.length > 1 && canManage ? (
+        <label
+          className="flex cursor-pointer items-center justify-between gap-3 rounded-md border border-border/70 px-3 py-2"
+          title="Spread new sessions across eligible SuperGrok accounts."
+        >
+          <span className="text-xs font-medium">Auto-rotate subscriptions</span>
+          <input
+            type="checkbox"
+            className="size-4 accent-brand"
+            checked={data?.settings.rotationEnabled ?? false}
+            disabled={busy}
+            onChange={(event) =>
+              void mutate(
+                () =>
+                  client.setSuperGrokRotationSettings(workspaceId, {
+                    rotationEnabled: event.target.checked,
+                  }),
+                "SuperGrok rotation updated",
+              )
+            }
+          />
+        </label>
+      ) : null}
+
+      {loading ? (
+        <div className="flex items-center gap-2 text-xs text-fg-subtle">
+          <Loader2Icon className="size-3.5 animate-spin" /> Loading subscriptions…
+        </div>
+      ) : pending ? (
+        <SuperGrokDeviceCodePanel {...pending} />
+      ) : accounts.length === 0 ? (
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="text-xs text-fg-subtle">No SuperGrok subscriptions connected.</p>
           {canManage ? (
             <div className="flex items-center gap-2">
               <Select
                 aria-label="SuperGrok connection scope"
+                className="h-8 text-xs"
                 value={scope}
-                disabled={busy || pending !== null}
+                disabled={busy}
                 onChange={(event) => setScope(event.target.value as SuperGrokAccountScope)}
               >
                 <option value="workspace">Workspace</option>
                 <option value="user">Only me</option>
               </Select>
-              <Button type="button" size="sm" disabled={busy || pending !== null} onClick={connect}>
+              <Button type="button" size="sm" disabled={busy} onClick={connect}>
                 {busy ? (
                   <Loader2Icon className="size-3.5 animate-spin" />
                 ) : (
@@ -206,130 +264,204 @@ export function SuperGrokSubscriptionsCard({
             </div>
           ) : null}
         </div>
-
-        {pending ? <SuperGrokDeviceCodePanel {...pending} /> : null}
-
-        {loading ? (
-          <p className="text-xs text-fg-subtle">Loading SuperGrok accounts…</p>
-        ) : accounts.length === 0 ? (
-          <p className="rounded-md bg-surface-2/70 px-3 py-2 text-xs text-fg-subtle">
-            No SuperGrok accounts connected.
-          </p>
-        ) : (
-          <div className="divide-y divide-border/70 rounded-lg border border-border">
-            {accounts.map((account) => (
-              <div key={account.id} className="grid gap-2 p-3">
-                <div className="flex flex-wrap items-center gap-2">
-                  <input
-                    type="radio"
-                    aria-label={`Use ${accountLabel(account)} as active SuperGrok account`}
-                    checked={account.id === data?.activeAccountId}
-                    disabled={!canManage || busy || account.status !== "active"}
-                    onChange={() =>
-                      void mutate(
-                        () => client.activateSuperGrokAccount(workspaceId, account.id),
-                        "Active SuperGrok account updated",
-                      )
-                    }
-                  />
-                  {editing?.id === account.id ? (
-                    <Input
-                      value={editing.value}
-                      className="h-8 max-w-xs"
-                      onChange={(event) =>
-                        setEditing({ id: account.id, value: event.target.value })
-                      }
-                      onBlur={() => {
-                        const label = editing.value.trim();
-                        setEditing(null);
-                        void mutate(
-                          () =>
-                            client.renameSuperGrokAccount(workspaceId, account.id, label || null),
-                          "SuperGrok account renamed",
-                        );
-                      }}
-                    />
-                  ) : (
-                    <span className="min-w-0 flex-1 truncate text-sm font-medium">
-                      {accountLabel(account)}
-                    </span>
-                  )}
-                  <span className="rounded-full border border-border px-2 py-0.5 text-2xs text-fg-subtle">
-                    {account.scope === "workspace" ? "Workspace" : "Only me"}
-                  </span>
-                  <span className="text-2xs text-fg-subtle">{account.status}</span>
-                  {canManage ? (
-                    <>
-                      <Button
-                        type="button"
-                        size="icon-sm"
-                        variant="ghost"
-                        aria-label="Rename SuperGrok account"
-                        onClick={() => setEditing({ id: account.id, value: account.label ?? "" })}
+      ) : (
+        <div className="divide-y divide-border/70 overflow-hidden rounded-lg border border-border">
+          {accounts.map((account) => {
+            const expanded = expandedId === account.id;
+            const isActive = account.id === data?.activeAccountId;
+            return (
+              <article
+                key={account.id}
+                aria-label={`${accountLabel(account)} SuperGrok subscription`}
+              >
+                <Collapsible
+                  open={expanded}
+                  onOpenChange={(open) => setExpandedId(open ? account.id : null)}
+                >
+                  <div
+                    className="flex min-w-0 cursor-pointer flex-wrap items-center gap-2 px-2.5 py-2 transition-colors hover:bg-surface-2/50"
+                    onClick={() => setExpandedId(expanded ? null : account.id)}
+                  >
+                    <label
+                      className="flex min-h-9 min-w-9 cursor-pointer items-center justify-center"
+                      title="Used when a session isn't pinned to a specific subscription"
+                      onClick={(event) => event.stopPropagation()}
+                    >
+                      <input
+                        type="radio"
+                        name="supergrok-active"
+                        className="size-3.5 accent-brand"
+                        aria-label={`Use ${accountLabel(account)} as active SuperGrok account`}
+                        checked={isActive}
+                        disabled={!canManage || busy || account.status !== "active"}
+                        onChange={() => {
+                          if (!isActive) {
+                            void mutate(
+                              () => client.activateSuperGrokAccount(workspaceId, account.id),
+                              "Active SuperGrok account updated",
+                            );
+                          }
+                        }}
+                      />
+                    </label>
+                    <div className="flex min-w-0 flex-1 basis-36 items-center gap-1">
+                      {editing?.id === account.id ? (
+                        <Input
+                          autoFocus
+                          value={editing.value}
+                          className="h-7 text-sm"
+                          onClick={(event) => event.stopPropagation()}
+                          onChange={(event) =>
+                            setEditing({
+                              id: account.id,
+                              value: event.target.value,
+                            })
+                          }
+                          onBlur={() => {
+                            const label = editing.value.trim();
+                            setEditing(null);
+                            void mutate(
+                              () =>
+                                client.renameSuperGrokAccount(
+                                  workspaceId,
+                                  account.id,
+                                  label || null,
+                                ),
+                              "SuperGrok account renamed",
+                            );
+                          }}
+                        />
+                      ) : (
+                        <>
+                          <span className="min-w-0 truncate text-sm font-medium">
+                            {accountLabel(account)}
+                            {account.email && account.label ? (
+                              <span className="font-normal text-fg-subtle"> · {account.email}</span>
+                            ) : null}
+                          </span>
+                          {canManage ? (
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon-sm"
+                              className="size-7 shrink-0"
+                              aria-label={`Rename ${accountLabel(account)}`}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                setEditing({
+                                  id: account.id,
+                                  value: account.label ?? "",
+                                });
+                              }}
+                            >
+                              <PencilIcon className="size-3.5" />
+                            </Button>
+                          ) : null}
+                        </>
+                      )}
+                    </div>
+                    <MetaChip rounded="full">
+                      {account.scope === "workspace" ? "Workspace" : "Only me"}
+                    </MetaChip>
+                    {account.quota?.subscriptionTier ? (
+                      <MetaChip
+                        dot={account.status === "active" ? "running" : "waiting"}
+                        rounded="full"
                       >
-                        <PencilIcon className="size-3.5" />
-                      </Button>
+                        {account.quota.subscriptionTier}
+                      </MetaChip>
+                    ) : account.status !== "active" ? (
+                      <MetaChip dot="waiting" rounded="full">
+                        {account.status.replaceAll("_", " ")}
+                      </MetaChip>
+                    ) : null}
+                    {account.quota?.usedPercent != null ? (
+                      <span className="shrink-0 text-2xs text-fg-subtle">
+                        {Math.round(account.quota.usedPercent)}%
+                      </span>
+                    ) : null}
+                    <CollapsibleTrigger asChild>
                       <Button
                         type="button"
-                        size="icon-sm"
                         variant="ghost"
-                        aria-label="Disconnect SuperGrok account"
-                        disabled={busy}
-                        onClick={() =>
-                          void mutate(
-                            () => client.disconnectSuperGrokAccount(workspaceId, account.id),
-                            "SuperGrok account disconnected",
-                          )
+                        size="icon-sm"
+                        className="shrink-0"
+                        aria-label={
+                          expanded
+                            ? `Hide details for ${accountLabel(account)}`
+                            : `Show details for ${accountLabel(account)}`
                         }
+                        onClick={(event) => event.stopPropagation()}
                       >
-                        <Trash2Icon className="size-3.5" />
+                        <ChevronDownIcon
+                          className={`size-4 text-fg-subtle transition-transform ${expanded ? "rotate-180" : ""}`}
+                        />
                       </Button>
-                    </>
-                  ) : null}
-                </div>
-                <label className="flex items-center gap-2 text-xs text-fg-subtle">
-                  <input
-                    type="checkbox"
-                    checked={account.allocatorEnabled}
-                    disabled={!canManage || busy}
-                    onChange={(event) =>
-                      void mutate(
-                        () =>
-                          client.setSuperGrokAccountAllocator(workspaceId, account.id, {
-                            enabled: event.target.checked,
-                            expectedVersion: account.allocatorVersion,
-                          }),
-                        "Automatic-turn eligibility updated",
-                      )
-                    }
-                  />
-                  Available for new automatic turns
-                </label>
-              </div>
-            ))}
-          </div>
-        )}
+                    </CollapsibleTrigger>
+                  </div>
+                  <CollapsibleContent className="grid gap-2 border-t border-border/60 px-2.5 py-2.5">
+                    <label className="flex min-h-10 cursor-pointer items-center justify-between gap-3 rounded-md border border-border/70 bg-surface/50 px-2.5">
+                      <span className="text-xs font-medium">Use for new automatic turns</span>
+                      <span className="flex items-center gap-2 text-xs text-fg-muted">
+                        <input
+                          type="checkbox"
+                          className="size-4 accent-brand"
+                          checked={account.allocatorEnabled}
+                          disabled={!canManage || busy}
+                          onChange={(event) =>
+                            void mutate(
+                              () =>
+                                client.setSuperGrokAccountAllocator(workspaceId, account.id, {
+                                  enabled: event.target.checked,
+                                  expectedVersion: account.allocatorVersion,
+                                }),
+                              "Automatic-turn eligibility updated",
+                            )
+                          }
+                        />
+                        <span aria-hidden="true">
+                          {account.allocatorEnabled ? "Enabled" : "Paused"}
+                        </span>
+                      </span>
+                    </label>
+                    {account.lastError ? (
+                      <p className="rounded-md border border-status-waiting/30 bg-status-waiting/10 p-2 text-xs text-status-waiting">
+                        {account.lastError}
+                      </p>
+                    ) : null}
+                    {canManage ? (
+                      <div>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          disabled={busy}
+                          onClick={() =>
+                            void mutate(
+                              () => client.disconnectSuperGrokAccount(workspaceId, account.id),
+                              "SuperGrok account disconnected",
+                            )
+                          }
+                        >
+                          <Trash2Icon className="size-3.5" /> Disconnect
+                        </Button>
+                      </div>
+                    ) : null}
+                  </CollapsibleContent>
+                </Collapsible>
+              </article>
+            );
+          })}
+        </div>
+      )}
 
-        {canManage && data ? (
-          <label className="flex items-center gap-2 text-xs text-fg-subtle">
-            <input
-              type="checkbox"
-              checked={data.settings.rotationEnabled}
-              disabled={busy || accounts.length < 2}
-              onChange={(event) =>
-                void mutate(
-                  () =>
-                    client.setSuperGrokRotationSettings(workspaceId, {
-                      rotationEnabled: event.target.checked,
-                    }),
-                  "SuperGrok rotation updated",
-                )
-              }
-            />
-            Rotate new turns across eligible accounts
-          </label>
-        ) : null}
-      </div>
+      {accounts.length > 0 && !pending && !loading ? (
+        <p className="text-2xs text-fg-subtle">
+          {data?.settings.rotationEnabled && accounts.length > 1
+            ? `New sessions rotate across ${accounts.length} eligible subscriptions.`
+            : "The active subscription runs sessions that aren't pinned to a specific account."}
+        </p>
+      ) : null}
     </section>
   );
 }

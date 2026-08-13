@@ -19343,16 +19343,33 @@ export async function reconcileXaiCapacityWait(
           .where(
             and(
               eq(schema.xaiCredentialLeases.workspaceId, input.workspaceId),
+              eq(schema.xaiCredentialLeases.authorityScope, authority.snapshot.scope),
+              ownerOrganizationMembershipId === null
+                ? isNull(schema.xaiCredentialLeases.ownerOrganizationMembershipId)
+                : eq(
+                    schema.xaiCredentialLeases.ownerOrganizationMembershipId,
+                    ownerOrganizationMembershipId,
+                  ),
               gt(schema.xaiCredentialLeases.leasedUntil, now),
             ),
           );
-        const leasedIds = new Set(activeLeases.map((lease) => lease.credentialId));
+        const activeLeaseCountByCredential = new Map<string, number>();
+        for (const lease of activeLeases) {
+          activeLeaseCountByCredential.set(
+            lease.credentialId,
+            (activeLeaseCountByCredential.get(lease.credentialId) ?? 0) + 1,
+          );
+        }
         const eligible = candidates.filter(
           (candidate) =>
             candidate.status === "active" &&
             candidate.allocatorEnabled &&
-            (!candidate.exhaustedUntil || candidate.exhaustedUntil <= now) &&
-            !leasedIds.has(candidate.id),
+            (!candidate.exhaustedUntil || candidate.exhaustedUntil <= now),
+        );
+        const balancedEligible = [...eligible].sort(
+          (left, right) =>
+            (activeLeaseCountByCredential.get(left.id) ?? 0) -
+            (activeLeaseCountByCredential.get(right.id) ?? 0),
         );
         const [pin] = await tx
           .select()
@@ -19374,7 +19391,7 @@ export async function reconcileXaiCapacityWait(
         const selected = pin?.pinnedCredentialId
           ? eligible.find((candidate) => candidate.id === pin.pinnedCredentialId)
           : rotation.rotationEnabled || rotation.activeCredentialId === null
-            ? eligible[0]
+            ? balancedEligible[0]
             : eligible.find((candidate) => candidate.id === rotation.activeCredentialId);
         if (!selected) {
           const futureResets = candidates

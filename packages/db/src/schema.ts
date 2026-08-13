@@ -439,7 +439,9 @@ export const organizationMemberships = pgTable(
       .notNull()
       .default(1),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
-    personalRetentionUntil: timestamp("personal_retention_until", { withTimezone: true }),
+    personalRetentionUntil: timestamp("personal_retention_until", {
+      withTimezone: true,
+    }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -752,12 +754,16 @@ export const codexSubscriptionCredentials = pgTable(
     // continues to own `version`; quota/cache writes own neither counter.
     allocatorVersion: integer("allocator_version").notNull().default(1),
     allocatorUpdatedBySubjectId: text("allocator_updated_by_subject_id"),
-    allocatorUpdatedAt: timestamp("allocator_updated_at", { withTimezone: true }),
+    allocatorUpdatedAt: timestamp("allocator_updated_at", {
+      withTimezone: true,
+    }),
     // Authoritative count-only summary cached from /wham/usage. Detailed rows
     // are never persisted as redemption authority; every first POST preflights
     // the provider's fresh detail endpoint.
     resetCreditAvailableCount: integer("reset_credit_available_count"),
-    resetCreditsCheckedAt: timestamp("reset_credits_checked_at", { withTimezone: true }),
+    resetCreditsCheckedAt: timestamp("reset_credits_checked_at", {
+      withTimezone: true,
+    }),
     // Set only by a direct Better Auth cookie connection/reconnection. Legacy,
     // configured, delegated, API-key, and agent-created rows remain view-only.
     connectedBySubjectId: text("connected_by_subject_id"),
@@ -855,7 +861,9 @@ export const codexResetRedemptionAttempts = pgTable(
     outcome: text("outcome"),
     claimHolderId: uuid("claim_holder_id"),
     claimExpiresAt: timestamp("claim_expires_at", { withTimezone: true }),
-    confirmationExpiresAt: timestamp("confirmation_expires_at", { withTimezone: true }).notNull(),
+    confirmationExpiresAt: timestamp("confirmation_expires_at", {
+      withTimezone: true,
+    }).notNull(),
     providerStartedAt: timestamp("provider_started_at", { withTimezone: true }),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     lastFailureKind: text("last_failure_kind"),
@@ -1763,7 +1771,9 @@ export const memorySlackPublications = pgTable(
       .references(() => workspaces.id, { onDelete: "cascade" }),
     configurationId: uuid("configuration_id")
       .notNull()
-      .references(() => memorySlackPublicationConfigurations.id, { onDelete: "restrict" }),
+      .references(() => memorySlackPublicationConfigurations.id, {
+        onDelete: "restrict",
+      }),
     configurationRevision: integer("configuration_revision").notNull(),
     connectionId: uuid("connection_id").notNull(),
     slackTeamId: text("slack_team_id").notNull(),
@@ -2253,7 +2263,9 @@ export const xaiSubscriptionCredentials = pgTable(
     version: integer("version").notNull().default(1),
     allocatorEnabled: boolean("allocator_enabled").notNull().default(true),
     allocatorVersion: integer("allocator_version").notNull().default(1),
-    allocatorUpdatedAt: timestamp("allocator_updated_at", { withTimezone: true }),
+    allocatorUpdatedAt: timestamp("allocator_updated_at", {
+      withTimezone: true,
+    }),
     quotaUsedPercent: integer("quota_used_percent"),
     quotaResetAt: timestamp("quota_reset_at", { withTimezone: true }),
     quotaCheckedAt: timestamp("quota_checked_at", { withTimezone: true }),
@@ -2545,7 +2557,9 @@ export const sessions = pgTable(
     // Workspace channel this session is filed under (rail organization only;
     // the rail groups a tree by its ROOT session's channel). Null = unfiled
     // (inbox). ON DELETE SET NULL detaches sessions when a channel is removed.
-    channelId: uuid("channel_id").references(() => channels.id, { onDelete: "set null" }),
+    channelId: uuid("channel_id").references(() => channels.id, {
+      onDelete: "set null",
+    }),
     // Non-default first-party MCP token permissions (manager-style sessions);
     // null means the fixed worker default set in @opengeni/runtime.
     firstPartyMcpPermissions: jsonb("first_party_mcp_permissions").$type<string[]>(),
@@ -2654,7 +2668,9 @@ export const sessions = pgTable(
     activityRevision: bigint("activity_revision", { mode: "number" }).notNull().default(0),
     // Transaction ownership marker between the cheap row trigger and the
     // once-per-transaction commit gate. Committed rows must always be null.
-    activityRevisionPendingXid: bigint("activity_revision_pending_xid", { mode: "bigint" }),
+    activityRevisionPendingXid: bigint("activity_revision_pending_xid", {
+      mode: "bigint",
+    }),
   },
   (table) => ({
     accountIdentity: uniqueIndex("sessions_id_account_idx").on(table.id, table.accountId),
@@ -2871,15 +2887,21 @@ export const sessionRealtimeModes = pgTable(
     state: text("state").notNull().default("active"),
     version: integer("version").notNull().default(1),
     connectionEpoch: integer("connection_epoch").notNull().default(1),
-    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }).notNull(),
-    lastHeartbeatAt: timestamp("last_heartbeat_at", { withTimezone: true }).notNull(),
+    leaseExpiresAt: timestamp("lease_expires_at", {
+      withTimezone: true,
+    }).notNull(),
+    lastHeartbeatAt: timestamp("last_heartbeat_at", {
+      withTimezone: true,
+    }).notNull(),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
     endedAt: timestamp("ended_at", { withTimezone: true }),
     endReason: text("end_reason"),
     // The rolling migration owns this forward reference. End commits at most
     // one canonical transcript-tail Steer and binds its audit projection here.
     contextProjectionId: uuid("context_projection_id"),
-    contextProjectedAt: timestamp("context_projected_at", { withTimezone: true }),
+    contextProjectedAt: timestamp("context_projected_at", {
+      withTimezone: true,
+    }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -2913,6 +2935,7 @@ export const sessionRealtimeModes = pgTable(
       "session_realtime_modes_model_check",
       sql`${table.model} in (
         'gpt-live-1-boulder-alpha',
+        'supergrok/grok-voice-think-fast-2.0',
         'opengeni-gateway/openai/gpt-realtime-2.1',
         'opengeni-gateway/openai/gpt-realtime-mini',
         'opengeni-gateway/xai/grok-voice-think-fast-2.0',
@@ -2970,7 +2993,9 @@ export const sessionRealtimeConnections = pgTable(
     failureCode: text("failure_code"),
     providerSessionId: text("provider_session_id"),
     startupEventId: text("startup_event_id"),
-    startupAcknowledgedAt: timestamp("startup_acknowledged_at", { withTimezone: true }),
+    startupAcknowledgedAt: timestamp("startup_acknowledged_at", {
+      withTimezone: true,
+    }),
     negotiatedAt: timestamp("negotiated_at", { withTimezone: true }),
     closedAt: timestamp("closed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -3439,7 +3464,9 @@ export const generatedImageArtifacts = pgTable(
     workspaceId: uuid("workspace_id")
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
-    sessionId: uuid("session_id").references(() => sessions.id, { onDelete: "set null" }),
+    sessionId: uuid("session_id").references(() => sessions.id, {
+      onDelete: "set null",
+    }),
     // Turn/attempt foreign keys are installed by the migration; those tables
     // are declared later in this monolithic schema module.
     turnId: uuid("turn_id"),
@@ -3654,7 +3681,7 @@ export const workspaceVideoGenerationPolicies = pgTable(
     ),
     fundingSourceValid: check(
       "workspace_video_generation_policies_funding_source_chk",
-      sql`${table.fundingSource} in ('opengeni_credits', 'workspace_gateway')`,
+      sql`${table.fundingSource} in ('opengeni_credits', 'workspace_gateway', 'supergrok_subscription')`,
     ),
   }),
 );
@@ -3700,7 +3727,9 @@ export const videoGenerationOperations = pgTable(
     workspaceId: uuid("workspace_id")
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
-    sessionId: uuid("session_id").references(() => sessions.id, { onDelete: "set null" }),
+    sessionId: uuid("session_id").references(() => sessions.id, {
+      onDelete: "set null",
+    }),
     turnId: uuid("turn_id"),
     attemptId: uuid("attempt_id"),
     toolCallId: text("tool_call_id").notNull(),
@@ -3722,7 +3751,9 @@ export const videoGenerationOperations = pgTable(
     /** Exact provider start body, encrypted before the first network byte. */
     providerRequestEncrypted: text("provider_request_encrypted"),
     /** Bearer URLs inside the frozen body are unusable after this instant. */
-    providerRequestExpiresAt: timestamp("provider_request_expires_at", { withTimezone: true }),
+    providerRequestExpiresAt: timestamp("provider_request_expires_at", {
+      withTimezone: true,
+    }),
     expectedArtifactId: uuid("expected_artifact_id").notNull(),
     expectedFileId: uuid("expected_file_id").notNull(),
     reservedBytes: bigint("reserved_bytes", { mode: "number" }).notNull(),
@@ -3733,13 +3764,21 @@ export const videoGenerationOperations = pgTable(
     terminalUpdateId: uuid("terminal_update_id"),
     reconcileRevision: bigint("reconcile_revision", { mode: "number" }).notNull().default(0),
     reconcileLeaseOwner: text("reconcile_lease_owner"),
-    reconcileLeaseExpiresAt: timestamp("reconcile_lease_expires_at", { withTimezone: true }),
+    reconcileLeaseExpiresAt: timestamp("reconcile_lease_expires_at", {
+      withTimezone: true,
+    }),
     nextReconcileAt: timestamp("next_reconcile_at", { withTimezone: true }),
-    providerRequestSentAt: timestamp("provider_request_sent_at", { withTimezone: true }),
+    providerRequestSentAt: timestamp("provider_request_sent_at", {
+      withTimezone: true,
+    }),
     providerStartedAt: timestamp("provider_started_at", { withTimezone: true }),
-    recoveryDeadlineAt: timestamp("recovery_deadline_at", { withTimezone: true }).notNull(),
+    recoveryDeadlineAt: timestamp("recovery_deadline_at", {
+      withTimezone: true,
+    }).notNull(),
     terminalAt: timestamp("terminal_at", { withTimezone: true }),
-    privateDataEraseAfter: timestamp("private_data_erase_after", { withTimezone: true }),
+    privateDataEraseAfter: timestamp("private_data_erase_after", {
+      withTimezone: true,
+    }),
     boundedPublicReason: text("bounded_public_reason"),
     lastError: text("last_error"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -3815,11 +3854,15 @@ export const videoGenerationOperations = pgTable(
               and ((${table.status} in ('provider_failed','cancelled_before_submit','outcome_unknown','retention_failed')
                     and ${table.creditState} = 'refunded')
                 or (${table.status} not in ('provider_failed','cancelled_before_submit','outcome_unknown','retention_failed')
-                    and ${table.creditState} = 'debited')))))`,
+                    and ${table.creditState} = 'debited'))))
+        or (${table.fundingSource} = 'supergrok_subscription'
+          and ${table.connectionId} is null
+          and ${table.pricedCostMicros} = 0
+          and ${table.creditState} = 'not_applicable'))`,
     ),
     fundingValuesValid: check(
       "video_generation_operations_funding_values_chk",
-      sql`${table.fundingSource} in ('opengeni_credits','workspace_gateway')
+      sql`${table.fundingSource} in ('opengeni_credits','workspace_gateway','supergrok_subscription')
         and ${table.pricedCostMicros} between 0 and 1000000000
         and ${table.creditState} in ('not_applicable','debited','refunded')`,
     ),
@@ -3891,7 +3934,9 @@ export const generatedVideoArtifacts = pgTable(
     operationId: uuid("operation_id")
       .notNull()
       .references(() => videoGenerationOperations.id, { onDelete: "restrict" }),
-    sessionId: uuid("session_id").references(() => sessions.id, { onDelete: "set null" }),
+    sessionId: uuid("session_id").references(() => sessions.id, {
+      onDelete: "set null",
+    }),
     turnId: uuid("turn_id"),
     attemptId: uuid("attempt_id"),
     modelId: text("model_id").notNull(),
@@ -4027,12 +4072,16 @@ export const retainedScreenshotArtifacts = pgTable(
     sha256: text("sha256").notNull(),
     width: integer("width").notNull(),
     height: integer("height").notNull(),
-    retentionExpiresAt: timestamp("retention_expires_at", { withTimezone: true }).notNull(),
+    retentionExpiresAt: timestamp("retention_expires_at", {
+      withTimezone: true,
+    }).notNull(),
     readyAt: timestamp("ready_at", { withTimezone: true }),
     cleanupReason: text("cleanup_reason"),
     lastError: text("last_error"),
     maintenanceClaimId: uuid("maintenance_claim_id"),
-    maintenanceClaimedAt: timestamp("maintenance_claimed_at", { withTimezone: true }),
+    maintenanceClaimedAt: timestamp("maintenance_claimed_at", {
+      withTimezone: true,
+    }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -4836,7 +4885,9 @@ export const sessionAttemptCodemodeCalls = pgTable(
     errorMessage: text("error_message"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     claimedAt: timestamp("claimed_at", { withTimezone: true }),
-    executionStartedAt: timestamp("execution_started_at", { withTimezone: true }),
+    executionStartedAt: timestamp("execution_started_at", {
+      withTimezone: true,
+    }),
     claimExpiresAt: timestamp("claim_expires_at", { withTimezone: true }),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -5009,8 +5060,12 @@ export const connectorActionRequests = pgTable(
     decisionBySubjectId: text("decision_by_subject_id"),
     decisionEventId: uuid("decision_event_id"),
     decidedAt: timestamp("decided_at", { withTimezone: true }),
-    executionStartedAt: timestamp("execution_started_at", { withTimezone: true }),
-    executionFinishedAt: timestamp("execution_finished_at", { withTimezone: true }),
+    executionStartedAt: timestamp("execution_started_at", {
+      withTimezone: true,
+    }),
+    executionFinishedAt: timestamp("execution_finished_at", {
+      withTimezone: true,
+    }),
     outcome: text("outcome"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -5601,10 +5656,14 @@ export const sessionGoals = pgTable(
     // update, timeline events, usage row, and workflow-wake outbox row.
     // Temporal signals and workflow history are replaceable nudges over these
     // monotonic revisions.
-    continuationWakeRevision: bigint("continuation_wake_revision", { mode: "number" })
+    continuationWakeRevision: bigint("continuation_wake_revision", {
+      mode: "number",
+    })
       .notNull()
       .default(0),
-    continuationObservedRevision: bigint("continuation_observed_revision", { mode: "number" })
+    continuationObservedRevision: bigint("continuation_observed_revision", {
+      mode: "number",
+    })
       .notNull()
       .default(0),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
@@ -6604,7 +6663,9 @@ export const sandboxWorkspaceMutationAdmissions = pgTable(
       .references(() => sandboxLeases.id, { onDelete: "cascade" }),
     sandboxGroupId: uuid("sandbox_group_id").notNull(),
     sessionId: uuid("session_id").notNull(),
-    actorKind: text("actor_kind", { enum: sandboxWorkspaceMutationActorKindValues }).notNull(),
+    actorKind: text("actor_kind", {
+      enum: sandboxWorkspaceMutationActorKindValues,
+    }).notNull(),
     actorId: uuid("actor_id").notNull(),
     // Exact turn authority is present only for actor_kind='turn'. Direct HTTP
     // requests and retained processes never invent a turn or quiescence owner.
@@ -6889,7 +6950,9 @@ export const sandboxRetainedProcesses = pgTable(
     sandboxGroupId: uuid("sandbox_group_id").notNull(),
     parentAdmissionId: uuid("parent_admission_id").notNull(),
     holderId: text("holder_id").notNull(),
-    ownerActorKind: text("owner_actor_kind", { enum: ["turn", "direct"] }).notNull(),
+    ownerActorKind: text("owner_actor_kind", {
+      enum: ["turn", "direct"],
+    }).notNull(),
     ownerActorId: uuid("owner_actor_id").notNull(),
     ownerTurnId: uuid("owner_turn_id"),
     ownerAttemptId: uuid("owner_attempt_id"),
@@ -6917,13 +6980,19 @@ export const sandboxRetainedProcesses = pgTable(
     // never exit/loss proof.
     reconcileAfter: timestamp("reconcile_after", { withTimezone: true }).notNull().defaultNow(),
     reconcileClaimId: uuid("reconcile_claim_id"),
-    reconcileClaimedAt: timestamp("reconcile_claimed_at", { withTimezone: true }),
+    reconcileClaimedAt: timestamp("reconcile_claimed_at", {
+      withTimezone: true,
+    }),
     reconcileAttempts: integer("reconcile_attempts").notNull().default(0),
     lastReconcileOutcome: text("last_reconcile_outcome"),
-    reconcileProofOutcome: text("reconcile_proof_outcome", { enum: ["exited", "lost"] }),
+    reconcileProofOutcome: text("reconcile_proof_outcome", {
+      enum: ["exited", "lost"],
+    }),
     reconcileProofExitCode: integer("reconcile_proof_exit_code"),
     reconcileProofReason: text("reconcile_proof_reason"),
-    reconcileProofObservedAt: timestamp("reconcile_proof_observed_at", { withTimezone: true }),
+    reconcileProofObservedAt: timestamp("reconcile_proof_observed_at", {
+      withTimezone: true,
+    }),
   },
   (table) => ({
     workspaceAccount: foreignKey({
@@ -7397,7 +7466,9 @@ export const machineRemovalOperations = pgTable(
       .references(() => enrollments.id, { onDelete: "restrict" }),
     operationKey: text("operation_key").notNull(),
     requestFingerprint: text("request_fingerprint").notNull(),
-    outcome: text("outcome", { enum: machineRemovalOperationOutcomeValues }).notNull(),
+    outcome: text("outcome", {
+      enum: machineRemovalOperationOutcomeValues,
+    }).notNull(),
     result: jsonb("result").$type<Record<string, unknown>>().notNull().default({}),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -7804,8 +7875,12 @@ export const githubInstallations = pgTable(
     githubActorId: bigint("github_actor_id", { mode: "number" }),
     githubActorLogin: text("github_actor_login"),
     authorityKind: text("authority_kind"),
-    authorityCheckedAt: timestamp("authority_checked_at", { withTimezone: true }),
-    authorityExpiresAt: timestamp("authority_expires_at", { withTimezone: true }),
+    authorityCheckedAt: timestamp("authority_checked_at", {
+      withTimezone: true,
+    }),
+    authorityExpiresAt: timestamp("authority_expires_at", {
+      withTimezone: true,
+    }),
     authorityNonce: text("authority_nonce"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -8023,7 +8098,9 @@ export const modelCallFacts = pgTable(
     reasoningTokens: bigint("reasoning_tokens", { mode: "number" }),
     totalTokens: bigint("total_tokens", { mode: "number" }),
     pricedCostMicros: bigint("priced_cost_micros", { mode: "number" }).notNull().default(0),
-    estimatedProviderCostMicros: bigint("estimated_provider_cost_micros", { mode: "number" }),
+    estimatedProviderCostMicros: bigint("estimated_provider_cost_micros", {
+      mode: "number",
+    }),
     pricingSource: text("pricing_source"),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
     recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
@@ -8149,7 +8226,9 @@ export const hostExportOutbox = pgTable(
     payloadCodecVersion: losslessCodecVersion("payload_codec_version"),
     envelopeBytes: integer("envelope_bytes").notNull(),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
-    sourceRecordedAt: timestamp("source_recorded_at", { withTimezone: true }).notNull(),
+    sourceRecordedAt: timestamp("source_recorded_at", {
+      withTimezone: true,
+    }).notNull(),
     enqueuedAt: timestamp("enqueued_at", { withTimezone: true }).notNull(),
   },
   (table) => ({
@@ -8602,8 +8681,12 @@ export const capabilityPlugins = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     pluginKey: text("plugin_key").notNull(),
-    accountId: uuid("account_id").references(() => managedAccounts.id, { onDelete: "cascade" }),
-    workspaceId: uuid("workspace_id").references(() => workspaces.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id").references(() => managedAccounts.id, {
+      onDelete: "cascade",
+    }),
+    workspaceId: uuid("workspace_id").references(() => workspaces.id, {
+      onDelete: "cascade",
+    }),
     name: text("name").notNull(),
     description: text("description"),
     category: text("category").notNull(),
@@ -8815,7 +8898,9 @@ export const capabilityFacetInstallations = pgTable(
       .references(() => workspaces.id, { onDelete: "cascade" }),
     pluginInstallationId: uuid("plugin_installation_id")
       .notNull()
-      .references(() => capabilityPluginInstallations.id, { onDelete: "cascade" }),
+      .references(() => capabilityPluginInstallations.id, {
+        onDelete: "cascade",
+      }),
     facetId: uuid("facet_id")
       .notNull()
       .references(() => capabilityFacets.id, { onDelete: "restrict" }),
@@ -8853,7 +8938,9 @@ export const capabilityComponentOwners = pgTable(
       .references(() => workspaces.id, { onDelete: "cascade" }),
     facetInstallationId: uuid("facet_installation_id")
       .notNull()
-      .references(() => capabilityFacetInstallations.id, { onDelete: "cascade" }),
+      .references(() => capabilityFacetInstallations.id, {
+        onDelete: "cascade",
+      }),
     ownerKind: text("owner_kind").notNull(),
     ownerId: text("owner_id").notNull(),
     removable: boolean("removable").notNull().default(true),
@@ -8928,7 +9015,9 @@ export const integrationFacetDefinitions = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     integrationFacetId: uuid("integration_facet_id")
       .notNull()
-      .references(() => capabilityIntegrationFacets.facetId, { onDelete: "cascade" }),
+      .references(() => capabilityIntegrationFacets.facetId, {
+        onDelete: "cascade",
+      }),
     facetKey: text("facet_key").notNull(),
     kind: text("kind").notNull(),
     configSchema: jsonb("config_schema").$type<Record<string, unknown>>().notNull().default({}),
@@ -8959,10 +9048,14 @@ export const integrationFacetBindings = pgTable(
       .references(() => workspaces.id, { onDelete: "cascade" }),
     facetDefinitionId: uuid("facet_definition_id")
       .notNull()
-      .references(() => integrationFacetDefinitions.id, { onDelete: "restrict" }),
+      .references(() => integrationFacetDefinitions.id, {
+        onDelete: "restrict",
+      }),
     integrationFacetInstallationId: uuid("integration_facet_installation_id")
       .notNull()
-      .references(() => capabilityFacetInstallations.id, { onDelete: "cascade" }),
+      .references(() => capabilityFacetInstallations.id, {
+        onDelete: "cascade",
+      }),
     bindingKey: text("binding_key").notNull(),
     displayName: text("display_name").notNull(),
     runtimeKey: text("runtime_key"),

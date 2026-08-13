@@ -118,18 +118,40 @@ describe("release schema contract", () => {
       sha256: "6b9c438798a7ff93d84a45fb5bdb8e6a657a320bb9f345a274770aa1fc418c51",
       deploymentMode: "rolling",
     });
+    const appendedMigrationPaths = [
+      "0237_interaction_transition_reaper.sql",
+      "0238_sandbox_provider_loss_receipts.sql",
+      "0238_supergrok_realtime_model.sql",
+      "0239_supergrok_video_funding.sql",
+    ].filter((path) =>
+      completeSourceContract.migrations.some((migration) => migration.path === path),
+    );
+    const sourceContract =
+      appendedMigrationPaths.length > 0
+        ? await contractWithoutMigrations(appendedMigrationPaths)
+        : completeSourceContract;
     const transitionReaper = completeSourceContract.migrations.find(
       (migration) => migration.path === "0237_interaction_transition_reaper.sql",
     );
-    const sourceContract = transitionReaper
-      ? await contractWithoutMigrations([
-          transitionReaper.path,
-          "0238_sandbox_provider_loss_receipts.sql",
-        ])
-      : completeSourceContract;
     if (transitionReaper) {
       expect(transitionReaper).toMatchObject({ deploymentMode: "maintenance" });
     }
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0238_supergrok_realtime_model.sql",
+      ),
+    ).toMatchObject({
+      sha256: "1992505e5994cbef2d650b0eebae2a6c033b567ecbb9cf27301846c500dea66a",
+      deploymentMode: "rolling",
+    });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0239_supergrok_video_funding.sql",
+      ),
+    ).toMatchObject({
+      sha256: "fbe4c79cb20c809767dad12e697ab6ad1becfc8b03eb314cbda38d6069a258f1",
+      deploymentMode: "rolling",
+    });
     const migrations = new Map(
       sourceContract.migrations.map((migration) => [migration.path, migration]),
     );
@@ -1080,13 +1102,13 @@ describe("release schema contract", () => {
   });
 });
 
-async function contractWithoutMigrations(excludedPaths: string[]) {
+async function contractWithoutMigrations(excludedPaths: readonly string[]) {
   const source = join(import.meta.dir, "../packages/db/drizzle");
   const directory = await mkdtemp(join(tmpdir(), "opengeni-schema-contract-filtered-"));
   directories.push(directory);
+  const excluded = new Set(excludedPaths);
   for (const entry of await readdir(source, { withFileTypes: true })) {
-    if (!entry.isFile() || !entry.name.endsWith(".sql") || excludedPaths.includes(entry.name))
-      continue;
+    if (!entry.isFile() || !entry.name.endsWith(".sql") || excluded.has(entry.name)) continue;
     await copyFile(join(source, entry.name), join(directory, entry.name));
   }
   return await buildSchemaContract(directory);

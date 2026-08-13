@@ -154,6 +154,7 @@ import {
   createGatewayRealtimeConnectionSecret,
   GatewayRealtimeBrokerError,
 } from "../gateway-realtime";
+import { createXaiRealtimeConnectionSecret, XaiRealtimeBrokerError } from "../xai-realtime";
 import { z, ZodError } from "zod";
 import {
   runConcurrentChannelAReads,
@@ -1074,6 +1075,121 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           error: {
             status,
             code: `GATEWAY_REALTIME_${error.code.toUpperCase()}`,
+            message: error.message,
+            retryable: error.code === "provider_error",
+          },
+        },
+        status,
+      );
+    }
+  });
+
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/realtime/supergrok", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const sessionId = c.req.param("sessionId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    if (!z.string().uuid().safeParse(sessionId).success) {
+      throw new HTTPException(404, { message: "session not found" });
+    }
+    const parsed = GatewayRealtimeConnectRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(422, { message: "invalid SuperGrok realtime request" });
+    }
+    c.header("cache-control", "private, no-store");
+    const {
+      realtimeId,
+      operationId,
+      browserInstanceId,
+      ownerKey,
+      expectedVersion,
+      expectedConnectionEpoch,
+      rotate,
+    } = parsed.data;
+    let claim: Awaited<ReturnType<typeof claimSessionRealtimeConnectionInTransaction>> | null =
+      null;
+    let connectionCompleted = false;
+    try {
+      claim = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+        scopedDb.transaction(async (tx) =>
+          claimSessionRealtimeConnectionInTransaction(tx as unknown as Database, {
+            workspaceId,
+            sessionId,
+            realtimeId,
+            operationId,
+            ownerSubjectId: grant.subjectId,
+            browserInstanceId,
+            ownerKey,
+            expectedVersion,
+            expectedConnectionEpoch,
+            rotate,
+            promotionMode: "staged",
+          }),
+        ),
+      );
+      if (claim.replay) {
+        throw new SessionRealtimeConflictError(
+          "REALTIME_CONNECTION_STATE_CHANGED",
+          "SuperGrok realtime tokens are single-use; reconnect with a new operation",
+        );
+      }
+      const secret = await createXaiRealtimeConnectionSecret({
+        db,
+        settings,
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+        sessionId,
+        model: claim.mode.model,
+        fetchImpl: deps.xaiFetch ?? fetch,
+      });
+      const claimed = claim;
+      const completed = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+        scopedDb.transaction(async (tx) =>
+          completeSessionRealtimeConnectionInTransaction(tx as unknown as Database, {
+            workspaceId,
+            sessionId,
+            realtimeId,
+            connectionId: claimed.connection.id,
+            operationId,
+            connectionEpoch: claimed.connection.connectionEpoch,
+            sdpAnswer: "supergrok-client-secret-minted",
+          }),
+        ),
+      );
+      connectionCompleted = true;
+      return c.json({
+        ...secret,
+        connectionId: completed.connection.id,
+        connectionEpoch: completed.connection.connectionEpoch,
+        startupFenceSequence: completed.connection.startupFenceSequence,
+        modeVersion: claimed.modeVersion,
+        replay: false as const,
+      });
+    } catch (error) {
+      if (claim !== null && !claim.replay && !connectionCompleted) {
+        const claimed = claim;
+        await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+          scopedDb.transaction(async (tx) =>
+            failSessionRealtimeConnectionInTransaction(tx as unknown as Database, {
+              workspaceId,
+              sessionId,
+              realtimeId,
+              connectionId: claimed.connection.id,
+              operationId,
+              connectionEpoch: claimed.connection.connectionEpoch,
+              failureCode: error instanceof XaiRealtimeBrokerError ? error.code : "supergrok_error",
+            }),
+          ),
+        ).catch(() => undefined);
+      }
+      if (error instanceof SessionRealtimeConflictError) throw sessionRealtimeHttpError(error);
+      if (!(error instanceof XaiRealtimeBrokerError)) throw error;
+      const status = error.code === "credential_unavailable" ? 409 : 502;
+      return c.json(
+        {
+          error: {
+            status,
+            code: `SUPERGROK_REALTIME_${error.code.toUpperCase()}`,
             message: error.message,
             retryable: error.code === "provider_error",
           },
@@ -3257,6 +3373,9 @@ export function sessionAuthorizationOperationForHttp(
     return "session.realtime.start";
   }
   if (suffix === "/realtime/gateway" && verb === "POST") {
+    return "session.realtime.start";
+  }
+  if (suffix === "/realtime/supergrok" && verb === "POST") {
     return "session.realtime.start";
   }
   if (suffix === "/realtime" && verb === "POST") {
