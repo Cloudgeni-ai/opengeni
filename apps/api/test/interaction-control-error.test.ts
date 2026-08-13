@@ -14,12 +14,12 @@ function controlError(
   overrides: Partial<ConstructorParameters<typeof SelfhostedControlError>[0]> = {},
 ): SelfhostedControlError {
   return new SelfhostedControlError({
-    message: "PRIVATE /Users/person/token=secret",
+    message: "PRIVATE /home/user/token=secret",
     code,
     reason: null,
     retryable: false,
     controlRequestId: "inner-request-42",
-    detail: { path: "/Users/person/private", token: "secret" },
+    detail: { path: "/home/user/private", token: "secret" },
     ...overrides,
   });
 }
@@ -48,7 +48,7 @@ describe("connected-machine interaction control errors", () => {
       controlRequestId: "inner-request-42",
     });
     expect(JSON.stringify(projected)).not.toContain("PRIVATE");
-    expect(JSON.stringify(projected)).not.toContain("/Users/person");
+    expect(JSON.stringify(projected)).not.toContain("/home/user");
     expect(JSON.stringify(projected)).not.toContain("secret");
   });
 

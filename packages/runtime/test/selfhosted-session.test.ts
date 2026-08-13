@@ -365,7 +365,7 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
             code: ErrorCode.ERROR_CODE_STREAM,
             message: "private local capture failure",
             retryable: false,
-            detail: { path: "/Users/private/capture" },
+            detail: { path: "/home/user/capture" },
           },
         };
       },
