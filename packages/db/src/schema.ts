@@ -2762,6 +2762,11 @@ export const sessions = pgTable(
       table.rootSessionId,
       table.nestedAgentDepth,
     ),
+    initialModelContextValid: check(
+      "sessions_initial_model_context_check",
+      sql`${table.initialModelContext} is null or (${table.initialModelContext} = btrim(${table.initialModelContext})
+        and char_length(${table.initialModelContext}) between 1 and 32768)`,
+    ),
   }),
 );
 
@@ -4592,6 +4597,11 @@ export const sessionTurns = pgTable(
     latencyModeValid: check(
       "session_turns_latency_mode_check",
       sql`${table.latencyMode} in ('standard', 'priority', 'fast')`,
+    ),
+    modelContextValid: check(
+      "session_turns_model_context_check",
+      sql`${table.modelContext} is null or (${table.modelContext} = btrim(${table.modelContext})
+        and char_length(${table.modelContext}) between 1 and 32768)`,
     ),
   }),
 );

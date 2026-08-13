@@ -10,6 +10,7 @@ import {
 } from "../src/codex-realtime-v3";
 import * as sdkWire from "../src/codex-realtime-v3-wire";
 import type {
+  SessionRealtimeInboundEntry,
   SessionRealtimeLedgerEntry,
   SyncSessionRealtimeLedgerRequest,
   SyncSessionRealtimeLedgerResponse,
@@ -75,6 +76,7 @@ function bridgeOptions(input: {
   randomUUID?: () => string;
   getModelContext?: () => string | undefined;
   acceptedDelegationItemIds?: Set<string>;
+  pendingDelegations?: Map<string, SessionRealtimeInboundEntry>;
   onFatal?: (fatal: { code: "pending_overflow"; message: string }) => void;
 }) {
   return {
@@ -88,6 +90,7 @@ function bridgeOptions(input: {
     randomUUID: input.randomUUID ?? uuidSource(),
     getModelContext: input.getModelContext,
     acceptedDelegationItemIds: input.acceptedDelegationItemIds,
+    pendingDelegations: input.pendingDelegations,
     onFatal: input.onFatal,
   };
 }
@@ -156,8 +159,16 @@ describe("Codex realtime V3 wire parity", () => {
       }),
     );
     expect(
-      sdkWire.encodeCodexRealtimeV3SessionContextAppend({ text, channel: "commentary" }),
-    ).toEqual(codexWire.encodeCodexRealtimeV3SessionContextAppend({ text, channel: "commentary" }));
+      sdkWire.encodeCodexRealtimeV3SessionContextAppend({
+        text,
+        channel: "commentary",
+      }),
+    ).toEqual(
+      codexWire.encodeCodexRealtimeV3SessionContextAppend({
+        text,
+        channel: "commentary",
+      }),
+    );
   });
 });
 
@@ -304,6 +315,77 @@ describe("Codex realtime V3 bridge", () => {
     second.close();
   });
 
+  test("retries an unsynced delegation across rotation with its first operation and context snapshot", async () => {
+    const acceptedDelegationItemIds = new Set<string>();
+    const pendingDelegations = new Map<string, SessionRealtimeInboundEntry>();
+    const firstRequests: SyncSessionRealtimeLedgerRequest[] = [];
+    const secondRequests: SyncSessionRealtimeLedgerRequest[] = [];
+    let context = "first route context";
+    let contextReads = 0;
+    const getModelContext = () => {
+      contextReads += 1;
+      return context;
+    };
+    const delegation = (providerEventId: string) =>
+      JSON.stringify({
+        type: "delegation.created",
+        event_id: providerEventId,
+        item: {
+          id: "unsynced-delegation",
+          type: "delegation",
+          target: "client",
+          content: [{ type: "input_text", text: "delegate once" }],
+        },
+      });
+    const first = createCodexRealtimeV3Bridge(
+      bridgeOptions({
+        getModelContext,
+        acceptedDelegationItemIds,
+        pendingDelegations,
+        sync: async (request) => {
+          firstRequests.push(request);
+          throw new Error("first connection lost before durable sync");
+        },
+      }),
+    );
+
+    await expect(first.ingest(delegation("delegation-original"))).rejects.toThrow(
+      "first connection lost before durable sync",
+    );
+    const original = firstRequests[0]?.entries?.[0];
+    if (!original) throw new Error("Expected the first bridge to freeze one delegation entry");
+    expect(original).toMatchObject({
+      kind: "delegation_call",
+      providerEventId: "delegation-original",
+      delegationItemId: "unsynced-delegation",
+      modelContext: "first route context",
+    });
+    expect(first.snapshot().pendingInbound).toBe(1);
+    expect(acceptedDelegationItemIds).toEqual(new Set());
+    first.close();
+
+    context = "changed route context";
+    const second = createCodexRealtimeV3Bridge(
+      bridgeOptions({
+        getModelContext,
+        acceptedDelegationItemIds,
+        pendingDelegations,
+        sync: async (request) => {
+          secondRequests.push(request);
+          return { accepted: [], outbound: [] };
+        },
+      }),
+    );
+    await second.ingest(delegation("delegation-duplicate"));
+
+    expect(secondRequests[0]?.entries).toEqual([original]);
+    expect(contextReads).toBe(1);
+    expect(acceptedDelegationItemIds).toEqual(new Set(["unsynced-delegation"]));
+    expect(pendingDelegations.size).toBe(0);
+    expect(second.snapshot().pendingInbound).toBe(0);
+    second.close();
+  });
+
   test("persists one finalized transcript per turn and ignores live transcript deltas", async () => {
     const requests: SyncSessionRealtimeLedgerRequest[] = [];
     const bridge = createCodexRealtimeV3Bridge(
@@ -352,7 +434,11 @@ describe("Codex realtime V3 bridge", () => {
       JSON.stringify({
         type: "turn.done",
         event_id: "provider-2",
-        turn: { id: "turn-2", role: "assistant", transcript: "I can inspect it." },
+        turn: {
+          id: "turn-2",
+          role: "assistant",
+          transcript: "I can inspect it.",
+        },
       }),
     );
     await bridge.ingest(
@@ -524,7 +610,10 @@ describe("Codex realtime V3 bridge", () => {
         events: dataChannel((value) => sent.push(value)),
         sync: async (request) => {
           requests.push(request);
-          return { accepted: [], outbound: requests.length === 1 ? [outbound()] : [outbound()] };
+          return {
+            accepted: [],
+            outbound: requests.length === 1 ? [outbound()] : [outbound()],
+          };
         },
       }),
     );
@@ -872,7 +961,10 @@ describe("Codex realtime V3 bridge", () => {
         }),
         sync: async (request) => {
           requests.push(request);
-          return { accepted: [], outbound: [outbound({ text: "x".repeat(900) })] };
+          return {
+            accepted: [],
+            outbound: [outbound({ text: "x".repeat(900) })],
+          };
         },
       }),
     );

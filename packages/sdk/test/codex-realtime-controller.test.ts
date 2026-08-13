@@ -978,6 +978,131 @@ describe("Codex realtime browser controller", () => {
     expect(browser.calls).toEqual(expect.arrayContaining(["peer.1.close", "events.1.close"]));
   });
 
+  test("replays one unsynced delegation after rotation with its first frozen context", async () => {
+    const browser = rotatingBrowserFixture();
+    const timers = timerFixture();
+    const syncRequests: SyncSessionRealtimeLedgerRequest[] = [];
+    let current = mode();
+    let context = "first route context";
+    let contextReads = 0;
+    let uuid = 200;
+    const delegation = (providerEventId: string) =>
+      JSON.stringify({
+        type: "delegation.created",
+        event_id: providerEventId,
+        item: {
+          id: "rotation-unsynced-delegation",
+          type: "delegation",
+          target: "client",
+          content: [{ type: "input_text", text: "delegate once" }],
+        },
+      });
+    const controller = createCodexRealtimeController({
+      workspaceId: WORKSPACE_ID,
+      sessionId: SESSION_ID,
+      storage: storageFixture(),
+      remoteAudio: browser.remoteAudio,
+      randomUUID: () => `21000000-0000-4000-8000-${String(++uuid).padStart(12, "0")}`,
+      createPeerConnection: browser.createPeerConnection,
+      getUserMedia: browser.getUserMedia,
+      connectionRotationIntervalMs: 900,
+      reconnectBackoffMs: [10, 20],
+      getModelContext: () => {
+        contextReads += 1;
+        return context;
+      },
+      ...timers,
+      client: {
+        beginSessionRealtime: async (_workspaceId, _sessionId, request) => {
+          current = mode({
+            operationId: request.operationId,
+            browserInstanceId: request.browserInstanceId,
+          });
+          return { mode: current, replay: false };
+        },
+        negotiateCodexRealtimeWebrtc: async (_workspaceId, _sessionId, request) => {
+          const connectionEpoch = request.rotate
+            ? current.connectionEpoch + 1
+            : current.connectionEpoch;
+          return {
+            sdp: ANSWER,
+            version: "v3",
+            model: "gpt-live-1-boulder-alpha",
+            connectionId: `22000000-0000-4000-8000-${String(connectionEpoch).padStart(12, "0")}`,
+            connectionEpoch,
+            startupFenceSequence: 0,
+            modeVersion: current.version,
+            replay: false,
+          };
+        },
+        activateCodexRealtimeConnection: async (
+          _workspaceId,
+          _sessionId,
+          _realtimeId,
+          _connectionId,
+          request,
+        ) => {
+          const rotated = request.connectionEpoch !== current.connectionEpoch;
+          current = mode({
+            ...current,
+            version: current.version + (rotated ? 1 : 0),
+            connectionEpoch: request.connectionEpoch,
+          });
+          return { mode: current, replay: false };
+        },
+        heartbeatSessionRealtime: async () => ({ mode: current, replay: false }),
+        syncSessionRealtimeLedger: async (_workspaceId, _sessionId, _realtimeId, request) => {
+          syncRequests.push(request);
+          if (syncRequests.length === 1) {
+            throw new Error("first connection lost before durable sync");
+          }
+          return { accepted: [], outbound: [] };
+        },
+        endSessionRealtime: async () => ({
+          mode: mode({
+            ...current,
+            state: "ended",
+            version: current.version + 1,
+            endedAt: "2026-07-29T07:01:00.000Z",
+            endReason: "user_stop",
+          }),
+          replay: false,
+        }),
+      },
+    });
+
+    await controller.start();
+    await expect(controller.ingestProviderEvent(delegation("delegation-original"))).rejects.toThrow(
+      "first connection lost before durable sync",
+    );
+    const original = syncRequests[0]?.entries?.[0];
+    if (!original) throw new Error("Expected the first generation to freeze one delegation");
+    expect(original).toMatchObject({
+      kind: "delegation_call",
+      providerEventId: "delegation-original",
+      delegationItemId: "rotation-unsynced-delegation",
+      modelContext: "first route context",
+    });
+    expect(controller.snapshot().bridge?.pendingInbound).toBe(1);
+
+    timers.runTimeout(900);
+    timers.runTimeout(0);
+    await eventually(
+      () =>
+        controller.snapshot().status === "active" &&
+        controller.snapshot().connectionGeneration === 2,
+      "rotation did not promote the replacement",
+    );
+    context = "changed route context";
+    await controller.ingestProviderEvent(delegation("delegation-duplicate"));
+
+    expect(syncRequests[1]?.entries).toEqual([original]);
+    expect(syncRequests[1]?.connectionEpoch).toBe(2);
+    expect(contextReads).toBe(1);
+    expect(controller.snapshot().bridge).toMatchObject({ pendingInbound: 0, ignoredEventCount: 0 });
+    await controller.stop();
+  });
+
   test("coalesces duplicate peer failures and retries with capped backoff until one replacement succeeds", async () => {
     const browser = rotatingBrowserFixture();
     const timers = timerFixture();

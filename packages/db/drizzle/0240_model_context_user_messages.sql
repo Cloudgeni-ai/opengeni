@@ -124,8 +124,31 @@ ALTER TABLE "sessions"
 ALTER TABLE "session_turns"
   RENAME COLUMN "turn_instructions" TO "model_context";
 
+ALTER TABLE "sessions"
+  ADD CONSTRAINT "sessions_initial_model_context_check"
+  CHECK (
+    "initial_model_context" IS NULL
+    OR (
+      "initial_model_context" = btrim("initial_model_context")
+      AND char_length("initial_model_context") BETWEEN 1 AND 32768
+    )
+  ) NOT VALID;
+
+ALTER TABLE "session_turns"
+  ADD CONSTRAINT "session_turns_model_context_check"
+  CHECK (
+    "model_context" IS NULL
+    OR (
+      "model_context" = btrim("model_context")
+      AND char_length("model_context") BETWEEN 1 AND 32768
+    )
+  ) NOT VALID;
+
 ALTER TABLE "session_realtime_entries"
   ADD COLUMN "model_context" text;
+
+ALTER TABLE "sessions" VALIDATE CONSTRAINT "sessions_initial_model_context_check";
+ALTER TABLE "session_turns" VALIDATE CONSTRAINT "session_turns_model_context_check";
 
 ALTER TABLE "session_realtime_entries"
   ADD CONSTRAINT "session_realtime_entries_model_context_check"

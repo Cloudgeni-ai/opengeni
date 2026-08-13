@@ -33,6 +33,7 @@ import type {
   GatewayRealtimeConnectResponse,
   EndSessionRealtimeRequest,
   RenewSessionRealtimeRequest,
+  SessionRealtimeInboundEntry,
   SessionRealtimeMode,
   SessionRealtimeModel,
   SessionRealtimeMutationResponse,
@@ -341,6 +342,7 @@ export function createCodexRealtimeController(
   let mutationTail = Promise.resolve();
   let connectionTask: Promise<void> | null = null;
   const acceptedDelegationItemIds = new Set<string>();
+  const pendingDelegations = new Map<string, SessionRealtimeInboundEntry>();
 
   const publish = (patch: Partial<CodexRealtimeControllerSnapshot>): void => {
     state = { ...state, ...patch };
@@ -527,7 +529,10 @@ export function createCodexRealtimeController(
       });
       return;
     }
-    publish({ audibleOutput: next, ...(next === "audible" ? { error: null } : {}) });
+    publish({
+      audibleOutput: next,
+      ...(next === "audible" ? { error: null } : {}),
+    });
   };
 
   const startActiveIntervals = (): void => {
@@ -916,6 +921,7 @@ export function createCodexRealtimeController(
         randomUUID,
         ...(options.getModelContext ? { getModelContext: options.getModelContext } : {}),
         acceptedDelegationItemIds,
+        pendingDelegations,
         onSnapshot: (nextBridge) => {
           if (active?.generation === targetGeneration) publish({ bridge: nextBridge });
         },
@@ -1102,7 +1108,12 @@ export function createCodexRealtimeController(
           await handleConnectionFailure(error, "reconnect", false);
         } else {
           clearOwner();
-          publish({ status: "error", realtimeId: null, mode: null, error: safeError(error) });
+          publish({
+            status: "error",
+            realtimeId: null,
+            mode: null,
+            error: safeError(error),
+          });
         }
         throw error;
       }
@@ -1178,7 +1189,11 @@ export function createCodexRealtimeController(
       closed = false;
       stopping = false;
       owner = record;
-      publish({ status: "recovering", realtimeId: lifecycle.realtimeId, error: null });
+      publish({
+        status: "recovering",
+        realtimeId: lifecycle.realtimeId,
+        error: null,
+      });
       connectionTask = begin(record, true)
         .then(() => undefined)
         .catch(async (error) => {

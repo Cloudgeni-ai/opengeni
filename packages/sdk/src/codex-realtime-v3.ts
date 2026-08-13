@@ -77,6 +77,8 @@ export type CodexRealtimeV3BridgeOptions = {
   getModelContext?: (() => string | undefined) | undefined;
   /** Controller-lifetime delegation identities shared across provider connection rotations. */
   acceptedDelegationItemIds?: Set<string> | undefined;
+  /** Unsynced delegation snapshots retained exactly across provider connection rotations. */
+  pendingDelegations?: Map<string, SessionRealtimeInboundEntry> | undefined;
   /** The controller installs its activation FIFO first, then enables this listener synchronously. */
   listen?: boolean | undefined;
   onSnapshot?: ((snapshot: CodexRealtimeV3BridgeSnapshot) => void) | undefined;
@@ -131,8 +133,13 @@ export function createCodexRealtimeV3Bridge(
   const sentSequences = new Set<number>();
   const finalizedTurnIds = new Set<string>();
   const acceptedDelegationItemIds = options.acceptedDelegationItemIds ?? new Set<string>();
+  const pendingDelegations = options.pendingDelegations ?? new Map();
+  const locallyQueuedDelegationItemIds = new Set<string>();
   let transcriptSinceDelegation: FinalizedTranscript[] = [];
-  let pendingDelegationUserTranscript: { delegationItemId: string; text: string } | null = null;
+  let pendingDelegationUserTranscript: {
+    delegationItemId: string;
+    text: string;
+  } | null = null;
   const randomUUID = options.randomUUID ?? defaultRandomUUID;
   const currentModelContext = (): string | undefined => {
     let context: string | undefined;
@@ -237,6 +244,13 @@ export function createCodexRealtimeV3Bridge(
       }
 
       for (const item of batch) {
+        if (item.entry.kind === "delegation_call" && item.entry.delegationItemId) {
+          acceptedDelegationItemIds.add(item.entry.delegationItemId);
+          if (pendingDelegations.get(item.entry.delegationItemId) === item.entry) {
+            pendingDelegations.delete(item.entry.delegationItemId);
+          }
+          locallyQueuedDelegationItemIds.delete(item.entry.delegationItemId);
+        }
         pendingInboundCount -= 1;
         pendingInboundBytes -= item.bytes;
       }
@@ -368,37 +382,52 @@ export function createCodexRealtimeV3Bridge(
       // These events are provider UI deltas. `turn.done` is the single
       // authoritative finalized transcript persisted below.
     } else if (event.type === "delegation.created") {
-      if (acceptedDelegationItemIds.has(event.delegationItemId)) {
+      if (
+        acceptedDelegationItemIds.has(event.delegationItemId) ||
+        locallyQueuedDelegationItemIds.has(event.delegationItemId)
+      ) {
         ignoredEventCount += 1;
         lastIgnoredEventType = event.type;
       } else {
-        const transcript = delegationTranscript(transcriptSinceDelegation, event.inputTranscript);
-        const coveredTurnIds = transcriptSinceDelegation.map((entry) => entry.turnId);
-        const modelContext = currentModelContext();
-        durable = enqueue({
-          operationId: randomUUID(),
-          kind: "delegation_call",
-          providerEventId: event.providerEventId,
-          delegationItemId: event.delegationItemId,
-          text: renderRealtimeDelegationInput(event.inputTranscript, transcript),
-          payload: {
-            offsetMs: event.offsetMs,
-            inputTranscript: event.inputTranscript,
-            transcriptFenceTurnIds: coveredTurnIds,
-          },
-          ...(modelContext ? { modelContext } : {}),
-        });
+        let entry = pendingDelegations.get(event.delegationItemId);
+        if (!entry) {
+          const transcript = delegationTranscript(transcriptSinceDelegation, event.inputTranscript);
+          const coveredTurnIds = transcriptSinceDelegation.map((item) => item.turnId);
+          const modelContext = currentModelContext();
+          entry = {
+            operationId: randomUUID(),
+            kind: "delegation_call",
+            providerEventId: event.providerEventId,
+            delegationItemId: event.delegationItemId,
+            text: renderRealtimeDelegationInput(event.inputTranscript, transcript),
+            payload: {
+              offsetMs: event.offsetMs,
+              inputTranscript: event.inputTranscript,
+              transcriptFenceTurnIds: coveredTurnIds,
+            },
+            ...(modelContext ? { modelContext } : {}),
+          };
+          pendingDelegations.set(event.delegationItemId, entry);
+        }
+        durable = enqueue(entry);
         if (durable) {
-          acceptedDelegationItemIds.add(event.delegationItemId);
+          locallyQueuedDelegationItemIds.add(event.delegationItemId);
           activeDelegationId = event.delegationItemId;
+          const frozenInputTranscript =
+            typeof entry.payload.inputTranscript === "string"
+              ? entry.payload.inputTranscript
+              : event.inputTranscript;
           const alreadyFinalized = transcriptSinceDelegation.some(
-            (entry) =>
-              entry.role === "user" &&
-              normalizedTranscript(entry.text) === normalizedTranscript(event.inputTranscript),
+            (item) =>
+              item.role === "user" &&
+              normalizedTranscript(item.text) === normalizedTranscript(frozenInputTranscript),
           );
           pendingDelegationUserTranscript = alreadyFinalized
             ? null
-            : { delegationItemId: event.delegationItemId, text: event.inputTranscript };
+            : {
+                delegationItemId: event.delegationItemId,
+                text: frozenInputTranscript,
+              };
           transcriptSinceDelegation = [];
         }
       }
@@ -574,7 +603,10 @@ function sendOutbound(events: RTCDataChannel, entry: SessionRealtimeLedgerEntry)
           text,
           channel: payloadChannel ?? "speakable",
         })
-      : encodeCodexRealtimeV3SessionContextAppend({ text, channel: payloadChannel });
+      : encodeCodexRealtimeV3SessionContextAppend({
+          text,
+          channel: payloadChannel,
+        });
   for (const message of messages) events.send(JSON.stringify(message));
 }
 

@@ -70,7 +70,11 @@ async function createInitializedSession(
     createdEventPayload: {},
   });
   if (!initialized.turn) throw new Error("Expected the migration fixture to create a turn");
-  return { id: session.id, turnId: initialized.turn.id, context: input.context };
+  return {
+    id: session.id,
+    turnId: initialized.turn.id,
+    context: input.context,
+  };
 }
 
 async function expectPreCutoverColumns(sql: postgres.Sql): Promise<void> {
@@ -103,6 +107,10 @@ describe("migration 0240 model context user messages", () => {
     );
     expect(source).toContain('RENAME COLUMN "turn_instructions" TO "model_context"');
     expect(source).toContain('ADD COLUMN "model_context" text');
+    expect(source).toContain('ADD CONSTRAINT "sessions_initial_model_context_check"');
+    expect(source).toContain('ADD CONSTRAINT "session_turns_model_context_check"');
+    expect(source).toContain('VALIDATE CONSTRAINT "sessions_initial_model_context_check"');
+    expect(source).toContain('VALIDATE CONSTRAINT "session_turns_model_context_check"');
     expect(source).toContain("Completed historical turns retain their original conversation truth");
     expect(source).not.toContain('UPDATE "session_history_items"');
     expect(source).toContain(
@@ -119,7 +127,10 @@ describe("migration 0240 model context user messages", () => {
       }
       return;
     }
-    const sql = postgres(blank.databaseUrl, { max: 1, onnotice: () => undefined });
+    const sql = postgres(blank.databaseUrl, {
+      max: 1,
+      onnotice: () => undefined,
+    });
     let client: DbClient | null = null;
     try {
       await migrate(blank.databaseUrl);
@@ -213,7 +224,9 @@ describe("migration 0240 model context user messages", () => {
         ALTER TABLE "session_realtime_entries"
           DROP CONSTRAINT "session_realtime_entries_model_context_check";
         ALTER TABLE "session_realtime_entries" DROP COLUMN "model_context";
+        ALTER TABLE "session_turns" DROP CONSTRAINT "session_turns_model_context_check";
         ALTER TABLE "session_turns" RENAME COLUMN "model_context" TO "turn_instructions";
+        ALTER TABLE "sessions" DROP CONSTRAINT "sessions_initial_model_context_check";
         ALTER TABLE "sessions" RENAME COLUMN "initial_model_context" TO "initial_turn_instructions";
         DELETE FROM "schema_migrations" WHERE "name" = '${migrationName}';
       `);
@@ -294,12 +307,37 @@ describe("migration 0240 model context user messages", () => {
         slackInstructions: `Existing Slack persona.\n\n${slackSessionInstructions}`,
         slackInitial: slack.context,
       });
+      let invalidSessionContextError: unknown;
+      try {
+        await sql`update sessions set initial_model_context = '   ' where id = ${queued.id}`;
+      } catch (error) {
+        invalidSessionContextError = error;
+      }
+      expect((invalidSessionContextError as { code?: string } | undefined)?.code).toBe("23514");
+
+      let invalidTurnContextError: unknown;
+      try {
+        await sql`update session_turns set model_context = ${"x".repeat(32_769)} where id = ${queued.turnId}`;
+      } catch (error) {
+        invalidTurnContextError = error;
+      }
+      expect((invalidTurnContextError as { code?: string } | undefined)?.code).toBe("23514");
       const constraints = await sql<Array<{ name: string; validated: boolean }>>`
         select conname as name, convalidated as validated
         from pg_constraint
-        where conname = 'session_realtime_entries_model_context_check'`;
+        where conname in (
+          'sessions_initial_model_context_check',
+          'session_turns_model_context_check',
+          'session_realtime_entries_model_context_check'
+        )
+        order by conname`;
       expect([...constraints]).toEqual([
-        { name: "session_realtime_entries_model_context_check", validated: true },
+        {
+          name: "session_realtime_entries_model_context_check",
+          validated: true,
+        },
+        { name: "session_turns_model_context_check", validated: true },
+        { name: "sessions_initial_model_context_check", validated: true },
       ]);
     } finally {
       await client?.close();
