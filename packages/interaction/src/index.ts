@@ -409,7 +409,7 @@ export type ComputerInteractionDriver = {
   target(targetId: string): Promise<ComputerTargetValue | null>;
   observe(targetId: string): Promise<ComputerObservationValue>;
   validate?(command: ComputerActionCommandValue, target: ComputerTargetValue): Promise<void> | void;
-  dispatch(command: ComputerActionCommandValue): Promise<ComputerObservationValue>;
+  dispatch(command: ComputerActionCommandValue): Promise<ComputerObservationValue | null>;
 };
 
 export type ComputerInteractionAuthority = {

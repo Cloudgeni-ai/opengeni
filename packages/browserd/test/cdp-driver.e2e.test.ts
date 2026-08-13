@@ -246,8 +246,46 @@ e2e(
       expect(names(secondDone)).toContain("Done Parallel B");
       expect(barrierArrivals).toBe(2);
 
+      // A BrowserSession has no daemon-global "active tab" media authority.
+      // Independent target streams stay live at the same time and continue to
+      // describe their own target while both targets mutate concurrently.
+      const firstFrames = await driver.subscribeFrames(firstDone.target.id, {
+        format: "jpeg",
+        maxWidth: 640,
+        maxHeight: 480,
+      });
+      const secondFrames = await driver.subscribeFrames(secondDone.target.id, {
+        format: "jpeg",
+        maxWidth: 640,
+        maxHeight: 480,
+      });
+      const [firstSeed, secondSeed] = await Promise.all([
+        frameWithin(firstFrames[Symbol.asyncIterator](), 5_000),
+        frameWithin(secondFrames[Symbol.asyncIterator](), 5_000),
+      ]);
+      expect(firstSeed.targetId).toBe(firstDone.target.id);
+      expect(secondSeed.targetId).toBe(secondDone.target.id);
+
+      const [firstChanged, secondChanged] = await Promise.all([
+        driver.dispatch(command(firstDone, { type: "navigate", url: fixture("Stream A") })),
+        driver.dispatch(command(secondDone, { type: "navigate", url: fixture("Stream B") })),
+      ]);
+      const [firstUpdatedFrame, secondUpdatedFrame] = await Promise.all([
+        frameAfter(firstFrames[Symbol.asyncIterator](), firstSeed.sequence, 5_000),
+        frameAfter(secondFrames[Symbol.asyncIterator](), secondSeed.sequence, 5_000),
+      ]);
+      expect(firstUpdatedFrame).toMatchObject({
+        targetId: firstChanged.target.id,
+        documentGeneration: firstChanged.target.documentGeneration,
+      });
+      expect(secondUpdatedFrame).toMatchObject({
+        targetId: secondChanged.target.id,
+        documentGeneration: secondChanged.target.documentGeneration,
+      });
+      await Promise.all([firstFrames.close(), secondFrames.close()]);
+
       const replacement = await driver.dispatch(
-        command(firstDone, { type: "navigate", url: fixture("Replacement") }),
+        command(firstChanged, { type: "navigate", url: fixture("Replacement") }),
       );
       expect(replacement.target.title).toBe("Replacement");
       const stale = await controller.run(
@@ -408,4 +446,17 @@ async function frameWithin(
   ]);
   if (result.done) throw new Error("browser frame stream ended early");
   return result.value;
+}
+
+async function frameAfter(
+  frames: AsyncIterator<import("../src").BrowserImageFrame>,
+  sequence: number,
+  timeoutMs: number,
+): Promise<import("../src").BrowserImageFrame> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const frame = await frameWithin(frames, deadline - Date.now());
+    if (frame.sequence > sequence) return frame;
+  }
+  throw new Error("browser frame did not advance");
 }

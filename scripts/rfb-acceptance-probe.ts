@@ -236,6 +236,12 @@ export class RfbAcceptanceProbe {
         }
         this.bytesPerPixel = bitsPerPixel / 8;
         this.consume(24 + nameLength);
+        // The acceptance probe only needs exact change detection and input
+        // round-trips, not 32-bit screenshot fidelity. Negotiate compact 8-bit
+        // true colour before requesting RAW rectangles so the probe exercises a
+        // bandwidth-conscious RFB client instead of forcing a ~3.5 MiB full
+        // desktop over the websocket on every initial attach/reconnect.
+        this.sendCompactPixelFormat();
         this.sendEncodings();
         this.requestFramebuffer(false);
         this.state = "normal";
@@ -339,6 +345,24 @@ export class RfbAcceptanceProbe {
     view.setInt32(4, RAW_ENCODING, false);
     view.setInt32(8, DESKTOP_SIZE_ENCODING, false);
     this.socket.send(message);
+  }
+
+  private sendCompactPixelFormat(): void {
+    const message = new Uint8Array(20);
+    const view = new DataView(message.buffer);
+    view.setUint8(0, 0); // SetPixelFormat
+    view.setUint8(4, 8); // bits-per-pixel
+    view.setUint8(5, 8); // depth
+    view.setUint8(6, 0); // little-endian
+    view.setUint8(7, 1); // true-colour
+    view.setUint16(8, 7, false); // red max (3 bits)
+    view.setUint16(10, 7, false); // green max (3 bits)
+    view.setUint16(12, 3, false); // blue max (2 bits)
+    view.setUint8(14, 5); // red shift
+    view.setUint8(15, 2); // green shift
+    view.setUint8(16, 0); // blue shift
+    this.socket.send(message);
+    this.bytesPerPixel = 1;
   }
 
   private requestFramebuffer(incremental: boolean): void {

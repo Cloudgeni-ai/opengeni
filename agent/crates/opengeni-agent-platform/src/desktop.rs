@@ -34,7 +34,9 @@ use opengeni_agent_proto::v1;
 use crate::error::{PlatformError, PlatformResult};
 
 #[cfg(target_os = "linux")]
-pub use crate::linux::{LinuxDesktop, LinuxRgbaFrame, LinuxWindow, LinuxWindowRect};
+pub use crate::linux::{
+    validate_linux_named_key_chord, LinuxDesktop, LinuxRgbaFrame, LinuxWindow, LinuxWindowRect,
+};
 
 /// A captured desktop frame: PNG-encoded image bytes plus the geometry they were
 /// captured at. The relay framebuffer pump ships `png` as the `StreamFrame.data`

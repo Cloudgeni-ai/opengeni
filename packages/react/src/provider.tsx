@@ -54,6 +54,9 @@ export function OpenGeniProvider({
   const workspaceControlSequencesRef = useRef(new Map<string, number>());
   const workspaceInteractionSequencesRef = useRef(new Map<string, number>());
   const pageLive = usePageLiveActivity();
+  const supportsWorkspaceLiveStream =
+    "streamWorkspaceLiveEvents" in client &&
+    typeof client.streamWorkspaceLiveEvents === "function";
   callbackRef.current = onWorkspaceControlEvent;
   interactionCallbackRef.current = onWorkspaceInteractionEvent;
 
@@ -116,6 +119,78 @@ export function OpenGeniProvider({
   );
 
   useEffect(() => {
+    if (!supportsWorkspaceLiveStream) return;
+    const openLiveStream = client.streamWorkspaceLiveEvents!;
+    setWorkspaceControlEvent(null);
+    setWorkspaceInteractionEvent(null);
+    if (!pageLive) {
+      setWorkspaceControlConnectionState("idle");
+      setWorkspaceInteractionConnectionState("idle");
+      return;
+    }
+    const controller = new AbortController();
+    const setConnectionState = (state: StreamConnectionState) => {
+      setWorkspaceControlConnectionState(state);
+      setWorkspaceInteractionConnectionState(state);
+    };
+    setConnectionState("connecting");
+    void (async () => {
+      try {
+        await verifyApiContract();
+        const workspace = await client.getWorkspace(workspaceId);
+        const controlAfter = Math.max(
+          workspaceControlSequencesRef.current.get(workspaceId) ?? 0,
+          workspace.inferenceControl.revision,
+        );
+        const interactionAfter = workspaceInteractionSequencesRef.current.get(workspaceId) ?? 0;
+        workspaceControlSequencesRef.current.set(workspaceId, controlAfter);
+        const stream = openLiveStream.call(client, workspaceId, {
+          controlAfter,
+          interactionAfter,
+          signal: controller.signal,
+          onStateChange: setConnectionState,
+        });
+        for await (const event of stream) {
+          if (controller.signal.aborted) return;
+          if (event.type === "workspace.control.changed") {
+            workspaceControlSequencesRef.current.set(
+              workspaceId,
+              Math.max(workspaceControlSequencesRef.current.get(workspaceId) ?? 0, event.sequence),
+            );
+            setWorkspaceControlEvent((current) =>
+              !current || event.sequence > current.sequence ? event : current,
+            );
+            callbackRef.current?.(event);
+          } else {
+            workspaceInteractionSequencesRef.current.set(
+              workspaceId,
+              Math.max(
+                workspaceInteractionSequencesRef.current.get(workspaceId) ?? 0,
+                event.sequence,
+              ),
+            );
+            setWorkspaceInteractionEvent((current) =>
+              !current || event.sequence > current.sequence ? event : current,
+            );
+            interactionCallbackRef.current?.(event);
+          }
+        }
+      } catch (error) {
+        if (error instanceof OpenGeniApiContractMismatchError) {
+          setContractMismatch(error);
+          reloadForContractMismatchOnce(error);
+        }
+        if (!controller.signal.aborted) {
+          setWorkspaceControlConnectionState("error");
+          setWorkspaceInteractionConnectionState("error");
+        }
+      }
+    })();
+    return () => controller.abort();
+  }, [client, pageLive, supportsWorkspaceLiveStream, verifyApiContract, workspaceId]);
+
+  useEffect(() => {
+    if (supportsWorkspaceLiveStream) return;
     if (!pageLive) {
       setWorkspaceControlConnectionState("idle");
       return;
@@ -156,9 +231,10 @@ export function OpenGeniProvider({
       }
     })();
     return () => controller.abort();
-  }, [client, pageLive, verifyApiContract, workspaceId]);
+  }, [client, pageLive, supportsWorkspaceLiveStream, verifyApiContract, workspaceId]);
 
   useEffect(() => {
+    if (supportsWorkspaceLiveStream) return;
     setWorkspaceInteractionEvent(null);
     if (!pageLive) {
       setWorkspaceInteractionConnectionState("idle");
@@ -198,7 +274,7 @@ export function OpenGeniProvider({
       }
     })();
     return () => controller.abort();
-  }, [client, pageLive, verifyApiContract, workspaceId]);
+  }, [client, pageLive, supportsWorkspaceLiveStream, verifyApiContract, workspaceId]);
 
   const value = useMemo(
     () => ({

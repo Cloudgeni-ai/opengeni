@@ -78,8 +78,12 @@ mock.module("@opengeni/db", () => ({
   },
 }));
 
-const { sseSessionStream, sseWorkspaceControlStream, sseWorkspaceInteractionRevisionStream } =
-  await import("../src/http/sse");
+const {
+  sseSessionStream,
+  sseWorkspaceControlStream,
+  sseWorkspaceInteractionRevisionStream,
+  sseWorkspaceLiveStream,
+} = await import("../src/http/sse");
 
 afterAll(() => {
   mock.restore();
@@ -105,6 +109,29 @@ test("workspace interaction SSE projects only the newest durable revision", asyn
   expect(await readSequences(reader, 1)).toEqual([7]);
   expect(interactionRevisionReads).toBeGreaterThanOrEqual(2);
 
+  controller.abort();
+  await reader.cancel().catch(() => undefined);
+});
+
+test("workspace live SSE carries both durable domains over one response", async () => {
+  durableControlEvents = [controlEvent(2)];
+  durableControlReads.length = 0;
+  interactionRevisionState = { revision: 7, updatedAt: new Date("2026-08-10T00:00:07.000Z") };
+  const controller = new AbortController();
+  const response = await sseWorkspaceLiveStream(
+    fakeDb as never,
+    {
+      subscribeWorkspaceControl: async () => () => {},
+    } as unknown as EventBus,
+    "00000000-0000-4000-8000-000000000010",
+    WORKSPACE_ID,
+    0,
+    0,
+    controller.signal,
+    { pollIntervalMs: 100, heartbeatIntervalMs: 1_000 },
+  );
+  const reader = response.body!.getReader();
+  expect((await readSequences(reader, 2)).sort((a, b) => a - b)).toEqual([2, 7]);
   controller.abort();
   await reader.cancel().catch(() => undefined);
 });

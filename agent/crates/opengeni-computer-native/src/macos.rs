@@ -668,7 +668,7 @@ impl AxComputerAdapter {
     async fn dispatch_window_pointer(
         &self,
         command: &NativeActionCommand,
-    ) -> NativeAdapterResult<NativeObservation> {
+    ) -> NativeAdapterResult<Option<NativeObservation>> {
         let _seat = self.input_seat.lock().await;
         let (record, frame) = self.validate_window_pointer(command).await?;
         let current = self
@@ -700,13 +700,7 @@ impl AxComputerAdapter {
             ))
         })?
         .map_err(map_ffi_mutation)?;
-        self.observe_after_mutation(&record.target.id, &[])
-            .await
-            .map_err(|error| {
-                NativeAdapterError::outcome_unknown(format!(
-                    "macOS window input was delivered but state could not be observed: {error}"
-                ))
-            })
+        Ok(self.observe_after_mutation(&record.target.id, &[]).await.ok())
     }
 
     async fn validate_observed_action(
@@ -773,7 +767,7 @@ impl AxComputerAdapter {
     async fn dispatch_semantic(
         &self,
         command: &NativeActionCommand,
-    ) -> NativeAdapterResult<NativeObservation> {
+    ) -> NativeAdapterResult<Option<NativeObservation>> {
         // Explicit target focus changes the shared foreground seat. Ordinary AX
         // actions remain parallel and never acquire the seat queue.
         let _seat = if matches!(
@@ -858,19 +852,16 @@ impl AxComputerAdapter {
                 })?
                 .map_err(map_ffi_mutation)?;
         }
-        self.observe_after_mutation(&record.target.id, &before_roots)
+        Ok(self
+            .observe_after_mutation(&record.target.id, &before_roots)
             .await
-            .map_err(|error| {
-                NativeAdapterError::outcome_unknown(format!(
-                    "macOS action was accepted but state could not be observed: {error}"
-                ))
-            })
+            .ok())
     }
 
     async fn dispatch_keyboard_target(
         &self,
         command: &NativeActionCommand,
-    ) -> NativeAdapterResult<NativeObservation> {
+    ) -> NativeAdapterResult<Option<NativeObservation>> {
         let _seat = self.input_seat.lock().await;
         let record = self.load_target(&command.target_id).await?;
         if record.target.target_generation != command.expected_target_generation
@@ -909,19 +900,13 @@ impl AxComputerAdapter {
                 ))
             })?
             .map_err(map_ffi_mutation)?;
-        self.observe_after_mutation(&record.target.id, &[])
-            .await
-            .map_err(|error| {
-                NativeAdapterError::outcome_unknown(format!(
-                    "macOS keyboard input was delivered but state could not be observed: {error}"
-                ))
-            })
+        Ok(self.observe_after_mutation(&record.target.id, &[]).await.ok())
     }
 
     async fn dispatch_clipboard_storage(
         &self,
         command: &NativeActionCommand,
-    ) -> Option<NativeAdapterResult<NativeObservation>> {
+    ) -> Option<NativeAdapterResult<Option<NativeObservation>>> {
         let NativeAction::Clipboard { operation, text } = &command.action else {
             return None;
         };
@@ -943,11 +928,7 @@ impl AxComputerAdapter {
                     })?
                     .mutate(*operation, text.clone())
                     .await?;
-                self.observe(&command.target_id).await.map_err(|error| {
-                    NativeAdapterError::outcome_unknown(format!(
-                        "native clipboard changed but target state could not be observed: {error}"
-                    ))
-                })
+                Ok(self.observe(&command.target_id).await.ok())
             }
             .await,
         )
@@ -1226,7 +1207,7 @@ impl ComputerAdapter for AxComputerAdapter {
     async fn dispatch(
         &self,
         command: &NativeActionCommand,
-    ) -> NativeAdapterResult<NativeObservation> {
+    ) -> NativeAdapterResult<Option<NativeObservation>> {
         Self::ensure_unlocked()?;
         if let Some(result) = self.dispatch_clipboard_storage(command).await {
             return result;
@@ -1274,7 +1255,7 @@ impl ComputerAdapter for AxComputerAdapter {
                 }
                 NativeAction::Semantic { .. } | NativeAction::Focus { .. } => unreachable!(),
             }
-            return Ok(self.screen_observation(screen.target).await);
+            return Ok(Some(self.screen_observation(screen.target).await));
         }
         match &command.action {
             NativeAction::Pointer { .. } => self.dispatch_window_pointer(command).await,

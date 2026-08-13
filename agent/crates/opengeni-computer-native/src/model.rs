@@ -378,7 +378,11 @@ pub enum NativeClipboardAction {
 
 /// Native action union.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(
+    tag = "type",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum NativeAction {
     /// Semantic accessibility operation.
     Semantic {
@@ -450,4 +454,85 @@ pub struct NativeActionCommand {
     pub expected_frame_id: Option<String>,
     /// Operation.
     pub action: NativeAction,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{NativeAction, NativeActionCommand};
+
+    fn command(action: serde_json::Value) -> serde_json::Value {
+        json!({
+            "targetId": "screen:1",
+            "expectedTargetGeneration": "generation-1",
+            "expectedObservationId": null,
+            "expectedFrameId": null,
+            "action": action,
+        })
+    }
+
+    #[test]
+    fn public_camel_case_actions_are_the_native_wire_contract() {
+        let launch: NativeActionCommand = serde_json::from_value(command(json!({
+            "type": "launch",
+            "applicationId": "com.apple.TextEdit",
+        })))
+        .expect("launch action");
+        assert!(matches!(
+            launch.action,
+            NativeAction::Launch { application_id } if application_id == "com.apple.TextEdit"
+        ));
+
+        let focus: NativeActionCommand = serde_json::from_value(command(json!({
+            "type": "focus",
+            "targetId": "window:2",
+        })))
+        .expect("focus action");
+        assert!(matches!(
+            focus.action,
+            NativeAction::Focus { target_id } if target_id == "window:2"
+        ));
+
+        let pointer: NativeActionCommand = serde_json::from_value(json!({
+            "targetId": "screen:1",
+            "expectedTargetGeneration": "generation-1",
+            "expectedObservationId": null,
+            "expectedFrameId": "frame-1",
+            "action": {
+                "type": "pointer",
+                "frameId": "frame-1",
+                "action": "drag",
+                "x": 1.0,
+                "y": 2.0,
+                "endX": 3.0,
+                "endY": 4.0,
+                "deltaX": null,
+                "deltaY": null,
+                "button": "left"
+            },
+        }))
+        .expect("pointer action");
+        assert!(matches!(
+            pointer.action,
+            NativeAction::Pointer {
+                frame_id,
+                end_x: Some(3.0),
+                end_y: Some(4.0),
+                ..
+            } if frame_id == "frame-1"
+        ));
+    }
+
+    #[test]
+    fn native_actions_serialize_with_public_field_names() {
+        let value = serde_json::to_value(NativeAction::Launch {
+            application_id: "com.apple.TextEdit".to_string(),
+        })
+        .expect("serialize launch");
+        assert_eq!(
+            value,
+            json!({"type": "launch", "applicationId": "com.apple.TextEdit"})
+        );
+    }
 }

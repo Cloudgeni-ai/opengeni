@@ -133,8 +133,11 @@ export interface SelfhostedNegotiationInput {
   /** The deployment desktop/terminal/computer-use policy toggles (threaded
    *  through to the base negotiation). */
   desktopEnabled?: boolean;
+  desktopInteractive?: boolean;
   terminalEnabled?: boolean;
   computerUseEnabled?: boolean;
+  computerUseReadOnly?: boolean;
+  streamTokenSecretAvailable?: boolean;
   /** Whether the calling principal acknowledged the un-redacted desktop. */
   desktopAcknowledged?: boolean;
   shared?: boolean;
@@ -172,8 +175,11 @@ export async function negotiateSelfhostedCapabilities(
     liveness: baseLiveness,
     leaseEpoch: input.leaseEpoch,
     desktopEnabled: input.desktopEnabled ?? true,
+    desktopInteractive: input.desktopInteractive ?? true,
     terminalEnabled: input.terminalEnabled ?? true,
     computerUseEnabled: input.computerUseEnabled ?? true,
+    computerUseReadOnly: input.computerUseReadOnly ?? false,
+    streamTokenSecretAvailable: input.streamTokenSecretAvailable ?? true,
     ...(input.desktopAcknowledged !== undefined
       ? { desktopAcknowledged: input.desktopAcknowledged }
       : {}),

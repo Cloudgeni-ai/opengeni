@@ -1409,8 +1409,15 @@ describe("backend-gated sandbox required-credential validation", () => {
         () => getSettings(),
       ).modalImageId,
     ).toBe(imageId);
+    const snapshotImageId = "im-01KZWASVD6W1WEHC1PKN62PAF3";
+    expect(
+      withEnv({ OPENGENI_MODAL_IMAGE_ID: snapshotImageId }, () => getSettings()).modalImageId,
+    ).toBe(snapshotImageId);
     expect(() =>
       withEnv({ OPENGENI_MODAL_IMAGE_ID: "im-not-a-valid-id" }, () => getSettings()),
+    ).toThrow();
+    expect(() =>
+      withEnv({ OPENGENI_MODAL_IMAGE_ID: "im-valid/escape" }, () => getSettings()),
     ).toThrow();
   });
 

@@ -21,6 +21,7 @@ use std::io::{Read as _, Write as _};
 use opengeni_agent_platform::{PlatformResult, PtyProcess};
 use tokio::sync::mpsc;
 
+use crate::backoff::ChannelBackoff;
 use crate::channel::RelayChannel;
 use crate::codec::RelayMessage;
 use crate::error::StreamResult;
@@ -137,7 +138,41 @@ pub async fn run(
     // whatever the command printed, and EOF resolves readiness via the first frame.
     let _ = in_tx.send(b"\n".to_vec()).await;
 
-    let result = pump_loop(process, channel, commands, &mut out_rx, &in_tx, ready).await;
+    // Reader/writer handles are once-only. Keep both blocking bridges alive while
+    // the relay reconnects; recreating this function after a transport drop would
+    // permanently detach the still-running PTY from its IO handles.
+    let mut ready = ready;
+    let mut pending_output = None;
+    let mut backoff = ChannelBackoff::standard();
+    let result = 'pump: loop {
+        match pump_loop(
+            process,
+            channel,
+            commands,
+            &mut out_rx,
+            &in_tx,
+            &mut ready,
+            &mut pending_output,
+            &mut backoff,
+        )
+        .await
+        {
+            Ok(()) => break Ok(()),
+            Err(error) if error.retryable() => {
+                tracing::warn!(%error, "pty relay channel dropped; reconnecting");
+                loop {
+                    match channel.reconnect(backoff.next_delay()).await {
+                        Ok(()) => break,
+                        Err(reconnect) if reconnect.retryable() => {
+                            tracing::warn!(error = %reconnect, "pty relay reconnect failed");
+                        }
+                        Err(reconnect) => break 'pump Err(reconnect),
+                    }
+                }
+            }
+            Err(error) => break Err(error),
+        }
+    };
 
     // Tear down: dropping the senders/receivers ends the blocking tasks.
     drop(in_tx);
@@ -164,12 +199,22 @@ async fn pump_loop(
     commands: &mut mpsc::Receiver<PtyCommand>,
     out_rx: &mut mpsc::Receiver<Vec<u8>>,
     in_tx: &mpsc::Sender<Vec<u8>>,
-    mut ready: Option<ReadyTx>,
+    ready: &mut Option<ReadyTx>,
+    pending_output: &mut Option<Vec<u8>>,
+    backoff: &mut ChannelBackoff,
 ) -> StreamResult<()> {
     // Once the command sender is dropped, stop selecting on it so a closed channel
     // (which resolves immediately) does not spin the loop.
     let mut commands_open = true;
     loop {
+        if let Some(bytes) = pending_output.take() {
+            if let Err(error) = channel.send_frame(bytes::Bytes::from(bytes.clone())).await {
+                *pending_output = Some(bytes);
+                return Err(error);
+            }
+            backoff.reset();
+            fire_ready(ready);
+        }
         tokio::select! {
             // tty output → relay frame.
             chunk = out_rx.recv() => {
@@ -177,27 +222,35 @@ async fn pump_loop(
                     // The reader task ended (PTY EOF) — clean exit. Release a
                     // still-pending readiness waiter so the owner's mint does not
                     // stall on a PTY that exited before printing anything.
-                    fire_ready(&mut ready);
+                    fire_ready(ready);
                     return Ok(());
                 };
-                channel.send_frame(bytes::Bytes::from(bytes)).await?;
+                if let Err(error) = channel.send_frame(bytes::Bytes::from(bytes.clone())).await {
+                    *pending_output = Some(bytes);
+                    return Err(error);
+                }
+                backoff.reset();
                 // First real byte(s) are now buffered in the relay ring — a consumer
                 // dialing the minted URL will replay them. Signal ready.
-                fire_ready(&mut ready);
+                fire_ready(ready);
             }
             // relay inbound → tty input (or ignore non-frame control).
             inbound = channel.recv() => {
-                match inbound? {
-                    Some(RelayMessage::Frame(frame)) => {
+                let message = inbound?.ok_or_else(|| {
+                    crate::error::StreamError::Transport("relay closed without StreamClose".to_string())
+                })?;
+                backoff.reset();
+                match message {
+                    RelayMessage::Frame(frame) => {
                         // Best-effort: if the writer task ended, stop pumping input.
                         if in_tx.send(frame.data.to_vec()).await.is_err() {
                             return Ok(());
                         }
                     }
-                    Some(RelayMessage::Close(_)) | None => return Ok(()),
+                    RelayMessage::Close(_) => return Ok(()),
                     // Open/OpenAck/DesktopInput are not expected on a live PTY data
                     // channel; ignore them defensively rather than tearing down.
-                    Some(_) => {}
+                    _ => {}
                 }
             }
             // out-of-band control op (pty_write/resize/close over NATS). Disabled
@@ -414,5 +467,92 @@ mod tests {
             "the pump must ship a non-empty initial frame without input"
         );
         let _ = proc.kill();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn relay_reconnect_preserves_live_pty_io_and_exact_input_cursor() {
+        let req = v1::PtyOpenRequest {
+            command: vec!["cat".to_string()],
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        };
+        let mut proc = spawn_pty_resilient(&req, &["/bin/sh".to_string()]).expect("spawn cat");
+        let (first_agent, mut first_relay) = MockTransport::pair();
+        let (second_agent, mut second_relay) = MockTransport::pair();
+        let mut channel = RelayChannel::with_transport(pty_channel_config(), Box::new(first_agent));
+        channel.queue_reconnect_transport(Box::new(second_agent));
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let (_cmd_tx, mut cmd_rx) = mpsc::channel::<PtyCommand>(8);
+
+        let pump = tokio::spawn(async move {
+            let result = run(&mut proc, &mut channel, &mut cmd_rx, Some(ready_tx)).await;
+            let _ = proc.kill();
+            result
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(3), ready_rx)
+            .await
+            .expect("first transport becomes ready")
+            .expect("readiness sender stays alive");
+        // Drain the initial tty echo, then sever the exact live transport.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), first_relay.recv()).await;
+        drop(first_relay);
+
+        // The queued replacement must receive a proper reconnect handshake.
+        let open = tokio::time::timeout(std::time::Duration::from_secs(3), second_relay.recv())
+            .await
+            .expect("reconnect open arrives")
+            .expect("relay read succeeds")
+            .expect("reconnect carries a message");
+        let resume_from_seq = match open {
+            RelayMessage::Open(open) => open.resume_from_seq,
+            other => panic!("expected reconnect StreamOpen, got {other:?}"),
+        };
+        assert_eq!(resume_from_seq, 0);
+        second_relay
+            .send(&RelayMessage::OpenAck(v1::StreamOpenAck {
+                accepted: true,
+                error: None,
+                resume_from_seq,
+            }))
+            .await
+            .unwrap();
+        second_relay
+            .send(&RelayMessage::Frame(v1::StreamFrame {
+                channel_id: "pty-ch".to_string(),
+                seq: 0,
+                data: bytes::Bytes::from_static(b"PTY_RECONNECTED_OK\n"),
+                produced_at_ms: 0,
+            }))
+            .await
+            .unwrap();
+
+        let mut seen = Vec::new();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if let Some(RelayMessage::Frame(frame)) = second_relay.recv().await.unwrap() {
+                    seen.extend_from_slice(&frame.data);
+                    if String::from_utf8_lossy(&seen).contains("PTY_RECONNECTED_OK") {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("the same PTY reader/writer survive reconnect");
+        second_relay
+            .send(&RelayMessage::Close(v1::StreamClose {
+                channel_id: "pty-ch".to_string(),
+                reason: v1::StreamCloseReason::Normal as i32,
+                message: "test complete".to_string(),
+            }))
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), pump)
+            .await
+            .expect("pump stops after typed close")
+            .expect("pump task joins")
+            .expect("typed close is clean");
     }
 }

@@ -32,9 +32,9 @@ async fn run_background_browser() -> Result<(), Box<dyn std::error::Error>> {
     let arguments = std::env::args_os()
         .skip(1)
         .map(|argument| {
-            argument.into_string().map_err(|_| {
-                "background browser argument is not valid UTF-8".to_string()
-            })
+            argument
+                .into_string()
+                .map_err(|_| "background browser argument is not valid UTF-8".to_string())
         })
         .collect::<Result<Vec<_>, _>>()?;
     tokio::task::spawn_blocking(move || {

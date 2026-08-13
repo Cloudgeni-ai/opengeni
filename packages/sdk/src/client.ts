@@ -17,6 +17,11 @@ import {
   type WorkspaceInteractionRevisionStreamTransport,
 } from "./interaction-revision-stream";
 import {
+  streamWorkspaceLiveEvents,
+  type WorkspaceLiveStreamOptions,
+  type WorkspaceLiveStreamTransport,
+} from "./workspace-live-stream";
+import {
   OpenGeniInteractionClient,
   type AuthRun,
   type AuthRunListOptions,
@@ -1834,6 +1839,61 @@ export class OpenGeniClient {
     options: StreamSessionEventsOptions = {},
   ): AsyncGenerator<WorkspaceControlEvent, void, void> {
     return streamWorkspaceControlEvents(this.workspaceControlStreamTransport(workspaceId), options);
+  }
+
+  /**
+   * Multiplex workspace control and interaction invalidations over one HTTP
+   * connection while retaining an independent durable cursor for each domain.
+   */
+  streamWorkspaceLiveEvents(
+    workspaceId: string,
+    options: WorkspaceLiveStreamOptions = {},
+  ) {
+    return streamWorkspaceLiveEvents(this.workspaceLiveStreamTransport(workspaceId), options);
+  }
+
+  workspaceLiveStreamTransport(workspaceId: string): WorkspaceLiveStreamTransport {
+    return {
+      openStream: async (controlAfter, interactionAfter, signal) =>
+        await this.openWorkspaceLiveEventStream(workspaceId, {
+          controlAfter,
+          interactionAfter,
+          ...(signal ? { signal } : {}),
+        }),
+    };
+  }
+
+  async openWorkspaceLiveEventStream(
+    workspaceId: string,
+    options: {
+      controlAfter?: number;
+      interactionAfter?: number;
+      signal?: AbortSignal;
+    } = {},
+  ): Promise<ReadableStream<Uint8Array>> {
+    const correlationId = crypto.randomUUID();
+    const response = await this.fetchImpl(
+      this.url(`/v1/workspaces/${workspaceId}/live-events/stream`, {
+        controlAfter: String(options.controlAfter ?? 0),
+        interactionAfter: String(options.interactionAfter ?? 0),
+      }),
+      {
+        method: "GET",
+        headers: {
+          ...this.headers(correlationId),
+          Accept: "text/event-stream",
+        },
+        ...(options.signal ? { signal: options.signal } : {}),
+      },
+    );
+    assertApiContractResponse(response);
+    if (!response.ok) {
+      throw await apiErrorFromResponse(response, { method: "GET", correlationId });
+    }
+    if (!response.body) {
+      throw new OpenGeniApiError(response.status, "SSE response did not include a readable body");
+    }
+    return response.body;
   }
 
   workspaceControlStreamTransport(workspaceId: string): WorkspaceControlStreamTransport {

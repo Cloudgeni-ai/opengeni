@@ -61,6 +61,7 @@ import { cn } from "../lib/cn";
 import { copyTextToClipboard } from "../lib/clipboard";
 import { formatBytes } from "../lib/format";
 import type { EmbeddedBrowserInteractionClientOverride } from "../session-context";
+import { browserKey } from "./browser-input";
 import { InteractionInterventionBanner } from "./interaction-intervention-banner";
 
 export type BrowserViewerNotification = {
@@ -455,12 +456,21 @@ export function BrowserViewer({
         device?.profileLabel ?? device?.name ?? (identity ? `${identity.name} browser` : "Browser");
       setCreating(true);
       void (async () => {
-        const linkedComputer = createLinkedComputer
-          ? await createLinkedComputer(
+        let linkedComputer: Pick<ComputerSession, "id" | "placement"> | null = null;
+        let computerViewUnavailable = false;
+        if (createLinkedComputer) {
+          try {
+            linkedComputer = await createLinkedComputer(
               `${browserName} computer`,
               device ? { kind: "attached_device", deviceId: device.id } : undefined,
-            )
-          : null;
+            );
+          } catch {
+            // Browser control is independently useful on locked/headless placements.
+            // A linked ComputerSession is an optional visual enhancement and must not
+            // prevent the canonical BrowserSession from starting.
+            computerViewUnavailable = true;
+          }
+        }
         const response = await createRegistryBrowser({
           sessionId,
           name: browserName,
@@ -486,6 +496,12 @@ export function BrowserViewer({
           ...(identity ? { identityId: identity.id } : {}),
         });
         setSelection({ sessionId: response.session.id, pinned: true });
+        if (computerViewUnavailable) {
+          onNotify?.({
+            kind: "info",
+            message: "Browser opened. Computer view is unavailable on this placement.",
+          });
+        }
       })()
         .catch((cause) => notifyError(cause, "Could not open a browser."))
         .finally(() => setCreating(false));
@@ -495,6 +511,7 @@ export function BrowserViewer({
       createRegistryBrowser,
       creating,
       notifyError,
+      onNotify,
       profiles.identities,
       sessionId,
     ],
@@ -1322,6 +1339,12 @@ function BrowserAddressBar(props: {
           }}
           onBlur={() => {
             focusedRef.current = false;
+          }}
+          onKeyDown={(event) => {
+            if (event.key !== "Enter") return;
+            event.preventDefault();
+            const normalized = normalizeBrowserAddress(draft);
+            if (normalized) props.onNavigate(normalized);
           }}
           disabled={!props.target}
           className="min-w-0 flex-1 bg-transparent text-og-control text-og-fg placeholder:text-og-subtle focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent disabled:opacity-50"
@@ -2364,37 +2387,6 @@ function browserPoint(
     x: Math.max(0, pixelX / frame.deviceScaleFactor),
     y: Math.max(0, pixelY / frame.deviceScaleFactor),
   };
-}
-
-export function browserKey(
-  event: Pick<
-    KeyboardEvent<HTMLTextAreaElement>,
-    "altKey" | "ctrlKey" | "key" | "metaKey" | "shiftKey"
-  >,
-): string | null {
-  // Modifier keydowns precede the actual chord key. They are not executable
-  // browser actions by themselves (for example Meta+Meta is invalid CDP input).
-  if (["Alt", "AltGraph", "Control", "Meta", "Shift"].includes(event.key)) return null;
-  const special = new Set([
-    "Enter",
-    "Tab",
-    "Escape",
-    "Backspace",
-    "Delete",
-    "ArrowUp",
-    "ArrowDown",
-    "ArrowLeft",
-    "ArrowRight",
-  ]);
-  const modified = event.altKey || event.ctrlKey || event.metaKey;
-  if (!modified && !special.has(event.key)) return null;
-  const parts: string[] = [];
-  if (event.ctrlKey) parts.push("Control");
-  if (event.altKey) parts.push("Alt");
-  if (event.metaKey) parts.push("Meta");
-  if (event.shiftKey) parts.push("Shift");
-  parts.push(event.key === " " ? "Space" : event.key);
-  return parts.join("+");
 }
 
 function normalizeBrowserAddress(value: string): string | null {

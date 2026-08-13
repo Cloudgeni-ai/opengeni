@@ -450,7 +450,8 @@ async fn appkit_swiftui_modal_canvas_hang_and_background_are_causal() {
             Some(NativeActionValue::String("appkit-value".to_string())),
         ))
         .await
-        .expect("set AppKit value in background");
+        .expect("set AppKit value in background")
+        .expect("AppKit target remains observable after set-value");
     let apply_ref = find_identifier(&observation, "fixture-appkit-apply")
         .r#ref
         .clone();
@@ -462,7 +463,8 @@ async fn appkit_swiftui_modal_canvas_hang_and_background_are_causal() {
             None,
         ))
         .await
-        .expect("invoke AppKit button in background");
+        .expect("invoke AppKit button in background")
+        .expect("AppKit target remains observable after invoke");
     assert!(has_text(&observation, "AppKit applied: appkit-value"));
     let refreshed = adapter.targets().await.expect("refresh background state");
     assert!(
@@ -485,7 +487,8 @@ async fn appkit_swiftui_modal_canvas_hang_and_background_are_causal() {
             Some(NativeActionValue::String("swiftui-value".to_string())),
         ))
         .await
-        .expect("set SwiftUI value");
+        .expect("set SwiftUI value")
+        .expect("SwiftUI target remains observable after set-value");
     assert!(matches!(
         &find_identifier(&observation, "fixture-swiftui-input").value,
         Some(NativeNodeValue::Text(value)) if value == "swiftui-value"
@@ -501,7 +504,8 @@ async fn appkit_swiftui_modal_canvas_hang_and_background_are_causal() {
             None,
         ))
         .await
-        .expect("invoke SwiftUI button");
+        .expect("invoke SwiftUI button")
+        .expect("SwiftUI target remains observable after invoke");
     assert!(
         has_text(&observation, "SwiftUI button invoked"),
         "SwiftUI action did not project expected state: {:#?}",
@@ -519,7 +523,8 @@ async fn appkit_swiftui_modal_canvas_hang_and_background_are_causal() {
             None,
         ))
         .await
-        .expect("open modal sheet");
+        .expect("open modal sheet")
+        .expect("fixture target remains observable after opening modal");
     if !has_text(&observation, "Fixture modal question") {
         observation = adapter
             .observe(&application.id)
@@ -538,7 +543,8 @@ async fn appkit_swiftui_modal_canvas_hang_and_background_are_causal() {
             None,
         ))
         .await
-        .expect("close modal sheet");
+        .expect("close modal sheet")
+        .expect("fixture target remains observable after closing modal");
     assert!(!has_text(&observation, "Fixture modal question"));
 
     let hang_ref = find_identifier(&observation, "fixture-hang").r#ref.clone();
@@ -604,7 +610,8 @@ async fn chromium_accessibility_and_window_capture_are_causal() {
             Some(NativeActionValue::String("chromium-value".to_string())),
         ))
         .await
-        .expect("set Chromium field through native AX");
+        .expect("set Chromium field through native AX")
+        .expect("Chromium target remains observable after set-value");
     let mut flattened = Vec::new();
     nodes(&observation.roots, &mut flattened);
     let apply_ref = flattened
@@ -621,7 +628,8 @@ async fn chromium_accessibility_and_window_capture_are_causal() {
             None,
         ))
         .await
-        .expect("invoke Chromium button through native AX");
+        .expect("invoke Chromium button through native AX")
+        .expect("Chromium target remains observable after invoke");
     assert!(has_text(&observation, "Chromium applied: chromium-value"));
 
     let frame = adapter

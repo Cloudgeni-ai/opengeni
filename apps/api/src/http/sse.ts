@@ -602,6 +602,115 @@ export type WorkspaceInteractionSseOptions = SseDeliveryOptions & {
 };
 
 /**
+ * One HTTP connection for the two workspace-wide invalidation domains used by
+ * every visible OpenGeni surface. Keeping these as separate HTTP/1 streams
+ * consumes all six per-origin browser connections with only two windows and
+ * starves ordinary mutations/terminal grants. The durable cursors remain
+ * independent; this function only multiplexes their already-bounded SSE frames.
+ */
+export async function sseWorkspaceLiveStream(
+  db: Database,
+  bus: EventBus,
+  accountId: string,
+  workspaceId: string,
+  controlAfter: number,
+  interactionAfter: number,
+  signal: AbortSignal,
+  options: WorkspaceInteractionSseOptions = {},
+): Promise<Response> {
+  const upstream = new AbortController();
+  const channel = createByteBoundedSseStream({
+    maxQueuedBytes: options.maxQueuedBytes ?? SESSION_EVENT_SSE_FRAME_MAX_BYTES,
+    ...(options.stallTimeoutMs === undefined ? {} : { stallTimeoutMs: options.stallTimeoutMs }),
+    onObservation: sseObservationReporter("workspace_interaction", options),
+    onStop: () => {
+      signal.removeEventListener("abort", abort);
+      upstream.abort();
+    },
+  });
+  const abort = () => {
+    upstream.abort();
+    channel.close();
+  };
+  if (signal.aborted) abort();
+  else signal.addEventListener("abort", abort, { once: true });
+
+  let writeTail = Promise.resolve(true);
+  const write = (frame: string): Promise<boolean> => {
+    const pending = writeTail.then(() => channel.write(frame));
+    writeTail = pending.catch(() => false);
+    return pending;
+  };
+  const pump = async (response: Response): Promise<void> => {
+    if (!response.body) throw new TypeError("workspace live upstream omitted its body");
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    try {
+      for (;;) {
+        const next = await reader.read();
+        if (next.done) {
+          const tail = decoder.decode();
+          if (tail) await write(tail);
+          return;
+        }
+        const frame = decoder.decode(next.value, { stream: true });
+        if (frame && !(await write(frame))) return;
+      }
+    } finally {
+      await reader.cancel().catch(() => undefined);
+      reader.releaseLock();
+    }
+  };
+
+  void (async () => {
+    try {
+      const [control, interaction] = await Promise.all([
+        sseWorkspaceControlStream(
+          db,
+          bus,
+          workspaceId,
+          controlAfter,
+          upstream.signal,
+          options,
+        ),
+        sseWorkspaceInteractionRevisionStream(
+          db,
+          accountId,
+          workspaceId,
+          interactionAfter,
+          upstream.signal,
+          options,
+        ),
+      ]);
+      const pumps = [pump(control), pump(interaction)];
+      let termination: unknown = new TypeError("workspace live upstream ended unexpectedly");
+      try {
+        await Promise.race(pumps);
+      } catch (error) {
+        termination = error;
+      } finally {
+        // Either durable domain ending makes the multiplexed connection stale.
+        // Stop its sibling immediately so the SDK reconnects both independent
+        // cursors instead of silently losing one domain forever.
+        upstream.abort();
+        await Promise.allSettled(pumps);
+      }
+      if (!signal.aborted && !channel.stopped()) channel.fail(termination);
+    } catch (error) {
+      if (!upstream.signal.aborted && !channel.stopped()) channel.fail(error);
+    }
+  })();
+
+  return new Response(channel.stream, {
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+    },
+  });
+}
+
+/**
  * Latest-wins interaction invalidation stream. The durable truth is one
  * monotonic workspace row, not an ever-growing event log. Each poll reads only
  * that row; reconnect immediately projects the newest revision after `after`.

@@ -17,8 +17,7 @@
 //! [`ChannelKey`](opengeni_agent_stream::ChannelKey) so the two ends can never
 //! drift.
 //!
-//! 1. **Dial**: `wss://<relay-host>/stream?ws=<workspaceId>&agent=<agentId>&port=<port>`
-//!    (+ a `channel=<channelId>` hint from the control plane's `resolveExposedPort`).
+//! 1. **Dial**: `wss://<relay-host>/stream?ws=<workspaceId>&agent=<agentId>&port=<port>&channel=<channelId>`.
 //!    The query is the routing [`ChannelKey`](opengeni_agent_stream::ChannelKey).
 //! 2. **Handshake**: the first datagram each end sends is a
 //!    [`StreamOpen`](opengeni_agent_proto::v1::StreamOpen) carrying the channel key,

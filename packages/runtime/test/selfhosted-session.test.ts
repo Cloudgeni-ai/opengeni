@@ -18,13 +18,14 @@ const RELAY = { host: "relay.test", port: 443, tls: true } as const;
 const WS = "11111111-1111-1111-1111-111111111111";
 const AGENT = "agent-abc";
 
-function sessionWith(rpc: ControlRpc, epoch = 0): SelfhostedSession {
+function sessionWith(rpc: ControlRpc, epoch = 0, terminalScopeId?: string): SelfhostedSession {
   return new SelfhostedSession({
     workspaceId: WS,
     agentId: AGENT,
     controlRpc: rpc,
     relay: RELAY,
     epoch,
+    ...(terminalScopeId !== undefined ? { terminalScopeId } : {}),
   });
 }
 
@@ -253,7 +254,8 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
 
   test("resolveExposedPort(7681) routes to ptyOpen (NOT desktopEnsure) — the PTY plane is display-independent", async () => {
     const mock = new MockAgentResponder();
-    const endpoint = await sessionWith(mock).resolveExposedPort(7681);
+    const terminalScopeId = "77777777-7777-4777-8777-777777777777";
+    const endpoint = await sessionWith(mock, 0, terminalScopeId).resolveExposedPort(7681);
     // The terminal port resolves a relay endpoint on 7681 …
     expect(endpoint.host).toBe("relay.test");
     expect(endpoint.path).toBe("/stream");
@@ -263,7 +265,27 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     // terminal must not inherit the desktop's live-display requirement (the gap).
     const op = mock.requests.at(-1)?.req.op?.$case;
     expect(op).toBe("ptyOpen");
+    const request = mock.requests.at(-1)?.req.op;
+    if (request?.$case !== "ptyOpen") throw new Error("expected ptyOpen");
+    expect(request.ptyOpen.scopeId).toBe(terminalScopeId);
     expect(mock.requests.some((r) => r.req.op?.$case === "desktopEnsure")).toBe(false);
+  });
+
+  test("SelfhostedSandboxClient threads the durable terminal scope into every resumed session", async () => {
+    const mock = new MockAgentResponder();
+    const terminalScopeId = "88888888-8888-4888-8888-888888888888";
+    const client = new SelfhostedSandboxClient({
+      workspaceId: WS,
+      relay: RELAY,
+      controlRpcFactory: () => mock,
+      agentId: AGENT,
+      terminalScopeId,
+    });
+    const session = await client.resume({ agentId: AGENT });
+    await session.resolveExposedPort(7681);
+    const request = mock.requests.at(-1)?.req.op;
+    if (request?.$case !== "ptyOpen") throw new Error("expected ptyOpen");
+    expect(request.ptyOpen.scopeId).toBe(terminalScopeId);
   });
 
   test("resolveExposedPort(6080) still routes to desktopEnsure (the desktop plane)", async () => {

@@ -5,6 +5,7 @@ import tailwindcss from "@tailwindcss/vite";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
 import viteReact from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
+import { safeReactHmrPlugin } from "./vite-safe-react-hmr";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const allowedHosts = process.env.OPENGENI_WEB_ALLOWED_HOSTS?.split(",")
@@ -97,6 +98,7 @@ export default defineConfig({
     tanstackRouter({ target: "react", enableRouteGeneration: false }),
     viteReact(),
     tailwindcss(),
+    safeReactHmrPlugin(),
     {
       name: "compact-index-html",
       transformIndexHtml: {

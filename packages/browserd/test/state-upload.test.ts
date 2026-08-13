@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { once } from "node:events";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -16,27 +19,15 @@ describe("browser state artifact upload", () => {
     await withDirectory(async (directory) => {
       const artifact = join(directory, "profile.ogbs");
       await writeFile(artifact, Buffer.from([0, 1, 2, 3, 255]));
-      let calls = 0;
-      const fetchStub = (async (input, init) => {
-        calls += 1;
-        expect(String(input)).toBe("https://state.test/object?signature=private");
-        expect(init?.method).toBe("PUT");
-        expect(init?.redirect).toBe("error");
-        expect(init?.headers).toEqual({
-          "content-type": BROWSER_STATE_ARTIFACT_CONTENT_TYPE,
-          "x-ms-blob-type": "BlockBlob",
-        });
-        expect(Buffer.from(await new Response(init?.body).arrayBuffer())).toEqual(
-          Buffer.from([0, 1, 2, 3, 255]),
-        );
-        return new Response(null, { status: 201 });
-      }) as typeof fetch;
-
-      await uploadBrowserStateArtifact(artifact, authority(), {
-        fetch: fetchStub,
-        now: () => now,
+      await withUploadServer(201, async (url, received) => {
+        await uploadBrowserStateArtifact(artifact, authority(url), { now: () => now });
+        const request = await received;
+        expect(request.method).toBe("PUT");
+        expect(request.headers["content-type"]).toBe(BROWSER_STATE_ARTIFACT_CONTENT_TYPE);
+        expect(request.headers["x-ms-blob-type"]).toBe("BlockBlob");
+        expect(request.headers["content-length"]).toBe("5");
+        expect(request.body).toEqual(Buffer.from([0, 1, 2, 3, 255]));
       });
-      expect(calls).toBe(1);
     });
   });
 
@@ -79,17 +70,17 @@ describe("browser state artifact upload", () => {
     await withDirectory(async (directory) => {
       const artifact = join(directory, "profile.ogbs");
       await writeFile(artifact, "encrypted");
-      for (const fetchStub of [
-        (async () => {
-          throw new Error("connection reset");
-        }) as unknown as typeof fetch,
-        (async () => new Response(null, { status: 503 })) as unknown as typeof fetch,
-      ]) {
+      const unavailable = await unavailableUrl();
+      const attempts = [
+        () => uploadBrowserStateArtifact(artifact, authority(unavailable), { now: () => now }),
+        () =>
+          withUploadServer(503, (url) =>
+            uploadBrowserStateArtifact(artifact, authority(url), { now: () => now }),
+          ),
+      ];
+      for (const attempt of attempts) {
         try {
-          await uploadBrowserStateArtifact(artifact, authority(), {
-            fetch: fetchStub,
-            now: () => now,
-          });
+          await attempt();
           throw new Error("expected upload failure");
         } catch (error) {
           expect(error).toBeInstanceOf(BrowserStateUploadError);
@@ -98,17 +89,76 @@ describe("browser state artifact upload", () => {
       }
     });
   });
+
+  test("does not touch a successful storage response body", async () => {
+    await withDirectory(async (directory) => {
+      const artifact = join(directory, "profile.ogbs");
+      await writeFile(artifact, "encrypted");
+      await withUploadServer(200, async (url) => {
+        await uploadBrowserStateArtifact(artifact, authority(url), { now: () => now });
+      }, {
+        leaveResponseOpen: true,
+      });
+    });
+  });
 });
 
-function authority() {
+function authority(url = "https://state.test/object?signature=private") {
   return {
-    url: "https://state.test/object?signature=private",
+    url,
     requiredHeaders: {
       "content-type": BROWSER_STATE_ARTIFACT_CONTENT_TYPE,
       "x-ms-blob-type": "BlockBlob",
     },
     expiresAt: "2026-08-10T12:05:00.000Z",
   };
+}
+
+type ReceivedUpload = {
+  method: string | undefined;
+  headers: IncomingMessage["headers"];
+  body: Buffer;
+};
+
+async function withUploadServer<T>(
+  status: number,
+  run: (url: string, received: Promise<ReceivedUpload>) => Promise<T>,
+  options: { leaveResponseOpen?: boolean } = {},
+): Promise<T> {
+  let resolveUpload!: (upload: ReceivedUpload) => void;
+  const received = new Promise<ReceivedUpload>((resolve) => {
+    resolveUpload = resolve;
+  });
+  const server = createServer(async (request, response) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) chunks.push(Buffer.from(chunk));
+    resolveUpload({ method: request.method, headers: request.headers, body: Buffer.concat(chunks) });
+    response.writeHead(status);
+    response.flushHeaders();
+    if (!options.leaveResponseOpen) response.end();
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address() as AddressInfo;
+  try {
+    return await run(`http://127.0.0.1:${address.port}/object?signature=private`, received);
+  } finally {
+    server.closeAllConnections();
+    server.close();
+    await once(server, "close");
+  }
+}
+
+async function unavailableUrl(): Promise<string> {
+  const server = createServer((_request: IncomingMessage, response: ServerResponse) => {
+    response.end();
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address() as AddressInfo;
+  server.close();
+  await once(server, "close");
+  return `http://127.0.0.1:${address.port}/closed`;
 }
 
 async function withDirectory(run: (directory: string) => Promise<void>): Promise<void> {

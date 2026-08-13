@@ -18,7 +18,8 @@ import type {
   InteractionIntervention,
 } from "@opengeni/sdk/interaction";
 import { act } from "react";
-import { browserKey, BrowserViewer } from "../src/components/browser-viewer";
+import { browserKey } from "../src/components/browser-input";
+import { BrowserViewer } from "../src/components/browser-viewer";
 import { useAttachedBrowsers } from "../src/hooks/use-attached-browsers";
 import type {
   BrowserFrameWebSocket,
@@ -1361,9 +1362,7 @@ describe("BrowserViewer", () => {
       address!.value = "example.com";
       address!.dispatchEvent(new Event("input", { bubbles: true }));
     });
-    await actRun(() => {
-      form!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-    });
+    await actRun(() => form!.requestSubmit());
     await flush(5);
     expect(actions).toHaveLength(2);
     expect(canvas?.className).toContain("invisible");
@@ -1889,6 +1888,66 @@ describe("BrowserViewer", () => {
       headless: false,
     });
     expect(createRequests[0]).not.toHaveProperty("linkedComputerSessionId");
+    await rendered.unmount();
+  });
+
+  test("opens a browser when optional linked Computer creation is unavailable", async () => {
+    const created: BrowserSession = { ...browserSession(), headless: false };
+    const createRequests: unknown[] = [];
+    const notifications: Array<{ kind: string; message: string }> = [];
+    const client = fakeClient({
+      listBrowserSessions: async () => ({ revision: 1, sessions: [] }),
+      listBrowserIdentities: async () => ({ revision: 1, identities: [] }),
+      createBrowserSession: async (_workspaceId, request) => {
+        createRequests.push(request);
+        return mutation(created);
+      },
+      getBrowserSession: async () => created,
+      listBrowserTargets: async () => ({
+        browserSessionId: created.id,
+        controllerGeneration: "controller-1",
+        targets: [],
+      }),
+    });
+    const rendered = await renderComponent(
+      <BrowserViewer
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        createLinkedComputer={async () => {
+          throw new Error("No display is available on this placement");
+        }}
+        onNotify={(notification) => notifications.push(notification)}
+      />,
+    );
+    await flush(30);
+
+    const launchSummary = rendered.container.querySelector<HTMLElement>(
+      "summary[aria-label='New browser']",
+    );
+    expect(launchSummary).not.toBeNull();
+    await actRun(() => launchSummary!.click());
+    const clean = [...(launchSummary!.closest("details")?.querySelectorAll("button") ?? [])].find(
+      (button) => button.textContent?.includes("Fresh browser"),
+    );
+    expect(clean).toBeDefined();
+    await actRun(() => clean!.click());
+    await flush(30);
+
+    expect(createRequests).toHaveLength(1);
+    expect(createRequests[0]).toMatchObject({
+      sessionId: SESSION_ID,
+      name: "Browser",
+      headless: false,
+    });
+    expect(createRequests[0]).not.toHaveProperty("linkedComputerSessionId");
+    expect(createRequests[0]).not.toHaveProperty("placement");
+    expect(notifications).toEqual([
+      {
+        kind: "info",
+        message: "Browser opened. Computer view is unavailable on this placement.",
+      },
+    ]);
     await rendered.unmount();
   });
 

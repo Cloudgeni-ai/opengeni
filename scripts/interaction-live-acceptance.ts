@@ -306,7 +306,13 @@ class FrameProbe<TFrame extends FrameValue> {
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
-  const client = new OpenGeniClient({ baseUrl: args.apiUrl });
+  const deploymentAccessKey = process.env.OPENGENI_INTERACTION_ACCEPTANCE_ACCESS_KEY?.trim();
+  const client = new OpenGeniClient({
+    baseUrl: args.apiUrl,
+    ...(deploymentAccessKey
+      ? { headers: { "x-opengeni-access-key": deploymentAccessKey } }
+      : {}),
+  });
   const workspaceId = args.workspaceId ?? (await defaultWorkspace(args.apiUrl));
   const checks: string[] = [];
   const raw = new Map<InteractionLatencyMetric, number[]>();

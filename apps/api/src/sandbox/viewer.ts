@@ -1133,6 +1133,8 @@ async function tryMintActiveSelfhostedStream(
         controlRpcFactory: () => controlRpc(bus),
         agentId: sandbox.enrollmentId,
         epoch: session.activeEpoch,
+        // Stream authority rotates; terminal process identity does not.
+        terminalScopeId: session.id,
       });
       shSession = await client.resume({ agentId: sandbox.enrollmentId });
     }

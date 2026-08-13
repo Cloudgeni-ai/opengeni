@@ -626,8 +626,7 @@ impl Platform for NativePlatform {
             .resolve_process_cwd(&req.cwd, "pty")?
             .to_string_lossy()
             .into_owned();
-        let process = crate::pty::spawn_pty(&resolved, &self.default_shell())?;
-        registry.register_pty(process).await
+        registry.open_pty(&resolved, &self.default_shell()).await
     }
 
     /// Builds the command (shell vs argv, cwd/env resolution) and spawns it

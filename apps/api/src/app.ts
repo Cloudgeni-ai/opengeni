@@ -1188,6 +1188,10 @@ const routeLabelPatterns: Array<{
     label: "/v1/workspaces/:workspaceId/control-events/stream",
   },
   {
+    pattern: /^\/v1\/workspaces\/[^/]+\/live-events\/stream$/,
+    label: "/v1/workspaces/:workspaceId/live-events/stream",
+  },
+  {
     pattern: /^\/v1\/workspaces\/[^/]+\/interaction-events\/stream$/,
     label: "/v1/workspaces/:workspaceId/interaction-events/stream",
   },

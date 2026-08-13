@@ -523,6 +523,13 @@ message PtyOpenRequest {
   uint32 rows = 5;
   // The TERM value to advertise (e.g. "xterm-256color").
   string term = 6;
+  // Stable caller-owned identity for an idempotent terminal. Repeating pty_open
+  // with the same non-empty scope_id returns the existing live PTY/channel rather
+  // than spawning another shell. Empty preserves the explicit "open a new PTY"
+  // behavior. The control plane uses the durable OpenGeni session id here so
+  // capability/token refreshes reattach the same terminal while separate sessions
+  // on one machine remain isolated.
+  string scope_id = 7;
 }
 
 message PtyOpenResponse {

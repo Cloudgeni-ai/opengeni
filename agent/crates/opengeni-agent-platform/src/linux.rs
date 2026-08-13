@@ -206,10 +206,7 @@ impl LinuxDesktop {
 
     /// Captures one XComposite-backed window as RGBA8, including while it is
     /// occluded, without an intermediate PNG encode.
-    pub async fn capture_window_rgba(
-        &self,
-        window_id: u32,
-    ) -> PlatformResult<LinuxRgbaFrame> {
+    pub async fn capture_window_rgba(&self, window_id: u32) -> PlatformResult<LinuxRgbaFrame> {
         let this = self.clone();
         tokio::task::spawn_blocking(move || this.capture_window_rgba_blocking(window_id))
             .await
@@ -237,6 +234,26 @@ impl LinuxDesktop {
         })
         .await
         .map_err(|error| PlatformError::os(format!("X11 window input task join: {error}")))?
+    }
+
+    /// Gives keyboard focus to one exact client window without changing its
+    /// stacking order. Semantic accessibility focus is scoped to the focused
+    /// X11 client; AT-SPI alone may report success while Chromium immediately
+    /// discards element focus when its client is not the keyboard focus owner.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed failure when the correlated window disappeared, moved,
+    /// resized, or rejected X11 keyboard focus before semantic dispatch.
+    pub async fn focus_window(
+        &self,
+        window_id: u32,
+        expected_bounds: LinuxWindowRect,
+    ) -> PlatformResult<()> {
+        let this = self.clone();
+        tokio::task::spawn_blocking(move || this.focus_window_blocking(window_id, expected_bounds))
+            .await
+            .map_err(|error| PlatformError::os(format!("X11 window focus task join: {error}")))?
     }
 
     /// Whether the connected display exposes the Composite extension required
@@ -473,6 +490,36 @@ impl LinuxDesktop {
             })?;
         inject_inputs(&conn, screen.root, inputs)
     }
+
+    fn focus_window_blocking(
+        &self,
+        window_id: Window,
+        expected_bounds: LinuxWindowRect,
+    ) -> PlatformResult<()> {
+        let (conn, screen) = self.connect()?;
+        let current = window_bounds(&conn, &screen, window_id).ok_or_else(|| {
+            PlatformError::NotFound(format!(
+                "X11 window {window_id:#x} disappeared before focus"
+            ))
+        })?;
+        if current != expected_bounds {
+            return Err(PlatformError::NotFound(format!(
+                "X11 window {window_id:#x} moved or resized before focus"
+            )));
+        }
+        conn.set_input_focus(InputFocus::PARENT, window_id, x11rb::CURRENT_TIME)
+            .map_err(|error| {
+                PlatformError::os(format!(
+                    "request focus for X11 window {window_id:#x}: {error}"
+                ))
+            })?
+            .check()
+            .map_err(|error| {
+                PlatformError::os(format!("focus X11 window {window_id:#x}: {error}"))
+            })?;
+        conn.flush()
+            .map_err(|error| PlatformError::os(format!("flush X11 window focus: {error}")))
+    }
 }
 
 fn ensure_redirected(state: &mut CompositeState, window: Window) -> PlatformResult<()> {
@@ -598,19 +645,60 @@ fn inject_key(
     k: &v1::KeyEvent,
 ) -> PlatformResult<()> {
     if k.is_text {
-        // Text remains best-effort for the legacy X11 fallback. Reliable
-        // arbitrary UTF-8 entry uses the native clipboard write + paste path.
-        for keysym in k.key.chars().map(|character| character as u32) {
-            let Some(keycode) = keysym_to_keycode(conn, keysym) else {
-                continue;
-            };
+        // Resolve the complete string before emitting anything. X11 exposes
+        // shifted glyphs (A, _, ?, …) on the same keycode as their base glyph;
+        // sending that keycode without Shift silently changes user input. A
+        // missing glyph must fail atomically rather than report success after
+        // dropping part of a password or command. Arbitrary UTF-8 remains
+        // available through the native clipboard write + paste path.
+        let mapping = keyboard_mapping(conn).ok_or_else(|| {
+            PlatformError::Unsupported("X11 keyboard mapping is unavailable".to_string())
+        })?;
+        let strokes = k
+            .key
+            .chars()
+            .map(|character| {
+                let keysym = match character {
+                    '\n' | '\r' => 0xff0d,
+                    '\t' => 0xff09,
+                    character => character as u32,
+                };
+                mapping.resolve(keysym).ok_or_else(|| {
+                    PlatformError::Unsupported(format!(
+                        "X11 keymap cannot type Unicode scalar U+{:04X}; use clipboard paste",
+                        character as u32
+                    ))
+                })
+            })
+            .collect::<PlatformResult<Vec<_>>>()?;
+        let shift_keycode = if strokes.iter().any(|stroke| stroke.shift) {
+            Some(
+                mapping
+                    .resolve(0xffe1)
+                    .map(|stroke| stroke.keycode)
+                    .ok_or_else(|| {
+                        PlatformError::Unsupported(
+                            "X11 keymap has shifted glyphs but no Shift key".to_string(),
+                        )
+                    })?,
+            )
+        } else {
+            None
+        };
+        for stroke in strokes {
+            if stroke.shift {
+                key_press(conn, shift_keycode.expect("shift keycode was preflighted"))?;
+            }
             match k.action() {
-                v1::KeyAction::Down => key_press(conn, keycode)?,
-                v1::KeyAction::Up => key_release(conn, keycode)?,
+                v1::KeyAction::Down => key_press(conn, stroke.keycode)?,
+                v1::KeyAction::Up => key_release(conn, stroke.keycode)?,
                 v1::KeyAction::Press | v1::KeyAction::Unspecified => {
-                    key_press(conn, keycode)?;
-                    key_release(conn, keycode)?;
+                    key_press(conn, stroke.keycode)?;
+                    key_release(conn, stroke.keycode)?;
                 }
+            }
+            if stroke.shift {
+                key_release(conn, shift_keycode.expect("shift keycode was preflighted"))?;
             }
         }
         return Ok(());
@@ -742,22 +830,75 @@ fn x_button_code(button: v1::PointerButton) -> u8 {
     }
 }
 
-/// Resolves an X11 keysym to a keycode by scanning the server keymap. Returns
-/// `None` if the keysym is not bound, so a best-effort type skips it.
-fn keysym_to_keycode(conn: &x11rb::rust_connection::RustConnection, keysym: u32) -> Option<u8> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct X11KeyStroke {
+    keycode: u8,
+    shift: bool,
+}
+
+struct X11KeyboardMapping {
+    min_keycode: u8,
+    keysyms_per_keycode: usize,
+    keysyms: Vec<u32>,
+}
+
+impl X11KeyboardMapping {
+    fn resolve(&self, keysym: u32) -> Option<X11KeyStroke> {
+        resolve_keysym(
+            self.min_keycode,
+            self.keysyms_per_keycode,
+            &self.keysyms,
+            keysym,
+        )
+    }
+}
+
+fn keyboard_mapping(
+    conn: &x11rb::rust_connection::RustConnection,
+) -> Option<X11KeyboardMapping> {
     let setup = conn.setup();
     let min = setup.min_keycode;
     let max = setup.max_keycode;
     let count = max - min + 1;
     let mapping = conn.get_keyboard_mapping(min, count).ok()?.reply().ok()?;
-    let per = mapping.keysyms_per_keycode as usize;
-    for (i, chunk) in mapping.keysyms.chunks(per).enumerate() {
-        if chunk.contains(&keysym) {
-            let code = min as usize + i;
-            return u8::try_from(code).ok();
+    Some(X11KeyboardMapping {
+        min_keycode: min,
+        keysyms_per_keycode: mapping.keysyms_per_keycode as usize,
+        keysyms: mapping.keysyms,
+    })
+}
+
+/// Resolve the base or Shift level of a core X11 keyboard mapping. Higher XKB
+/// groups require AltGr/level modifiers and are intentionally rejected; the
+/// clipboard path provides lossless arbitrary UTF-8 input without guessing the
+/// active layout.
+fn resolve_keysym(
+    min_keycode: u8,
+    keysyms_per_keycode: usize,
+    keysyms: &[u32],
+    keysym: u32,
+) -> Option<X11KeyStroke> {
+    if keysyms_per_keycode == 0 {
+        return None;
+    }
+    for (key_index, chunk) in keysyms.chunks(keysyms_per_keycode).enumerate() {
+        for (level, candidate) in chunk.iter().take(2).enumerate() {
+            if *candidate == keysym {
+                return Some(X11KeyStroke {
+                    keycode: min_keycode.checked_add(u8::try_from(key_index).ok()?)?,
+                    shift: level == 1,
+                });
+            }
         }
     }
     None
+}
+
+/// Resolves an X11 keysym to its physical keycode. Named key chords carry
+/// their modifiers explicitly, so this helper intentionally ignores level.
+fn keysym_to_keycode(conn: &x11rb::rust_connection::RustConnection, keysym: u32) -> Option<u8> {
+    let mapping = keyboard_mapping(conn)?;
+    mapping.resolve(keysym).map(|stroke| stroke.keycode)
 }
 
 /// Maps a small set of named keys to X11 keysyms (the keys the computer-use tool
@@ -766,24 +907,26 @@ fn keysym_to_keycode(conn: &x11rb::rust_connection::RustConnection, keysym: u32)
 fn named_key_to_keysym(name: &str) -> Option<u32> {
     // X11 keysym constants (from keysymdef.h). Only the common control keys are
     // named; everything else is treated as literal text by the caller.
-    let sym = match name {
-        "Enter" | "Return" => 0xff0d,
-        "Tab" => 0xff09,
-        "Escape" | "Esc" => 0xff1b,
-        "Backspace" => 0xff08,
-        "Delete" => 0xffff,
-        "Space" | " " => 0x0020,
-        "ArrowLeft" | "Left" => 0xff51,
-        "ArrowUp" | "Up" => 0xff52,
-        "ArrowRight" | "Right" => 0xff53,
-        "ArrowDown" | "Down" => 0xff54,
-        "Home" => 0xff50,
-        "End" => 0xff57,
-        "PageUp" => 0xff55,
-        "PageDown" => 0xff56,
-        other => {
+    let sym = match name.to_ascii_lowercase().as_str() {
+        "enter" | "return" => 0xff0d,
+        "tab" => 0xff09,
+        "escape" | "esc" => 0xff1b,
+        "backspace" => 0xff08,
+        "delete" => 0xffff,
+        "space" | " " => 0x0020,
+        "arrowleft" | "left" => 0xff51,
+        "arrowup" | "up" => 0xff52,
+        "arrowright" | "right" => 0xff53,
+        "arrowdown" | "down" => 0xff54,
+        "home" => 0xff50,
+        "end" => 0xff57,
+        "pageup" => 0xff55,
+        "pagedown" => 0xff56,
+        _ => {
             // A single printable char maps to its codepoint (Latin-1 keysym range).
-            let mut chars = other.chars();
+            // Use the original spelling here: `A` intentionally resolves to the
+            // shifted glyph, while named controls are case-insensitive.
+            let mut chars = name.chars();
             let c = chars.next()?;
             if chars.next().is_none() && (c as u32) < 0x100 {
                 c as u32
@@ -793,6 +936,13 @@ fn named_key_to_keysym(name: &str) -> Option<u32> {
         }
     };
     Some(sym)
+}
+
+/// Preflights one X11 named key or chord before an operation is durably marked
+/// dispatched. This is the same parser used by injection, so invalid input is a
+/// definite client failure rather than an ambiguous post-dispatch outcome.
+pub fn validate_linux_named_key_chord(name: &str) -> PlatformResult<()> {
+    parse_named_key_chord(name).map(|_| ())
 }
 
 fn parse_named_key_chord(name: &str) -> PlatformResult<Vec<u32>> {
@@ -1131,6 +1281,7 @@ mod tests {
     #[test]
     fn named_keys_resolve_and_text_falls_through() {
         assert_eq!(named_key_to_keysym("Enter"), Some(0xff0d));
+        assert_eq!(named_key_to_keysym("ENTER"), Some(0xff0d));
         assert_eq!(named_key_to_keysym("Tab"), Some(0xff09));
         // A single printable char maps to its codepoint.
         assert_eq!(named_key_to_keysym("a"), Some(0x61));
@@ -1140,8 +1291,41 @@ mod tests {
             parse_named_key_chord("Control+c").unwrap(),
             vec![0xffe3, 0x63]
         );
+        assert_eq!(
+            parse_named_key_chord("CTRL+ENTER").unwrap(),
+            vec![0xffe3, 0xff0d]
+        );
+        assert!(validate_linux_named_key_chord("NotARealKey").is_err());
         assert!(parse_named_key_chord("Control+Control+c").is_err());
         assert!(parse_named_key_chord("Control+").is_err());
+    }
+
+    #[test]
+    fn core_keymap_preserves_shifted_text_glyphs() {
+        // keycode 8: a/A; keycode 9: -/_; later XKB groups are not guessed.
+        let keysyms = [0x61, 0x41, 0, 0, 0x2d, 0x5f, 0, 0];
+        assert_eq!(
+            resolve_keysym(8, 4, &keysyms, 0x61),
+            Some(X11KeyStroke {
+                keycode: 8,
+                shift: false,
+            })
+        );
+        assert_eq!(
+            resolve_keysym(8, 4, &keysyms, 0x41),
+            Some(X11KeyStroke {
+                keycode: 8,
+                shift: true,
+            })
+        );
+        assert_eq!(
+            resolve_keysym(8, 4, &keysyms, 0x5f),
+            Some(X11KeyStroke {
+                keycode: 9,
+                shift: true,
+            })
+        );
+        assert_eq!(resolve_keysym(8, 4, &keysyms, 0x100), None);
     }
 
     #[test]

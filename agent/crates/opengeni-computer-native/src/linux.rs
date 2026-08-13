@@ -24,7 +24,8 @@ use atspi::{
 use futures::stream::{self, StreamExt as _};
 use image::{codecs::jpeg::JpegEncoder, ExtendedColorType, ImageEncoder as _};
 use opengeni_agent_platform::{
-    DesktopBackend as _, LinuxDesktop, LinuxRgbaFrame, LinuxWindow, LinuxWindowRect, PlatformError,
+    validate_linux_named_key_chord, DesktopBackend as _, LinuxDesktop, LinuxRgbaFrame, LinuxWindow,
+    LinuxWindowRect, PlatformError,
 };
 use opengeni_agent_proto::v1;
 use serde_json::json;
@@ -57,6 +58,15 @@ const MUTATION_SETTLE_DELAYS: [Duration; 4] = [
     Duration::from_millis(32),
     Duration::from_millis(64),
 ];
+const FOCUS_SETTLE_DELAYS: [Duration; 7] = [
+    Duration::ZERO,
+    Duration::from_millis(16),
+    Duration::from_millis(32),
+    Duration::from_millis(64),
+    Duration::from_millis(128),
+    Duration::from_millis(256),
+    Duration::from_millis(256),
+];
 
 async fn register_semantic_events(connection: &AccessibilityConnection) -> bool {
     // A reused application snapshot is safe only while every event family that
@@ -87,6 +97,7 @@ struct ObjectRecord {
     parent: ObjectRefOwned,
     index_in_parent: i32,
     interfaces: InterfaceSet,
+    focused: bool,
 }
 
 struct StoredObservation {
@@ -244,7 +255,14 @@ impl AtspiComputerAdapter {
         .await;
         let mut items = Vec::new();
         for snapshot in snapshots {
-            items.extend(snapshot?);
+            // Application accessibility roots are independently ephemeral.
+            // Chromium renderers and short-lived dialogs routinely disappear
+            // between registry enumeration and cache traversal. One stale app
+            // must not make the desktop screen or every other app unavailable.
+            let Ok(snapshot) = snapshot else {
+                continue;
+            };
+            items.extend(snapshot);
             if items.len() > MAX_CACHE_ITEMS {
                 return Err(NativeAdapterError::definite(
                     NativeAdapterErrorCode::DriverFailed,
@@ -447,9 +465,10 @@ impl AtspiComputerAdapter {
         .buffer_unordered(MAX_ENRICH_CONCURRENCY)
         .collect::<Vec<_>>()
         .await;
-        let mut records = enriched
-            .into_iter()
-            .collect::<NativeAdapterResult<Vec<_>>>()?;
+        // A single malformed/stale AT-SPI object is not authority to hide the
+        // rest of the desktop. A direct observation of that target will still
+        // return its precise stale/not-found error.
+        let mut records: Vec<TargetRecord> = enriched.into_iter().filter_map(Result::ok).collect();
         let windows = if let Some(desktop) = &self.desktop {
             desktop.windows().await.unwrap_or_default()
         } else {
@@ -536,7 +555,9 @@ impl AtspiComputerAdapter {
     ) -> NativeAdapterResult<()> {
         let mut by_key = BTreeMap::new();
         for item in items {
-            by_key.insert(object_key(&item.object)?, item);
+            if let Ok(key) = object_key(&item.object) {
+                by_key.insert(key, item);
+            }
         }
         let mut locators = BTreeMap::new();
         for record in records {
@@ -559,7 +580,10 @@ impl AtspiComputerAdapter {
                 if item.parent.is_null() {
                     break;
                 }
-                key = object_key(&item.parent)?;
+                let Ok(parent_key) = object_key(&item.parent) else {
+                    break;
+                };
+                key = parent_key;
             }
         }
         *self.target_locators.write().await = locators;
@@ -709,6 +733,7 @@ impl AtspiComputerAdapter {
             parent: item.parent,
             index_in_parent: item.index,
             interfaces: item.ifaces,
+            focused: item.states.contains(State::Focused),
         };
         Ok((raw, object))
     }
@@ -1082,6 +1107,40 @@ impl AtspiComputerAdapter {
         })
     }
 
+    async fn observe_after_focus(
+        &self,
+        target_id: &str,
+        expected_object_key: &str,
+    ) -> NativeAdapterResult<NativeObservation> {
+        let mut consecutive_matches = 0_u8;
+        for delay in FOCUS_SETTLE_DELAYS {
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
+            let observation = self.observe(target_id).await?;
+            let focused_matches = {
+                let latest = self.latest.read().await;
+                latest
+                    .get(target_id)
+                    .and_then(|stored| stored.objects.get(expected_object_key))
+                    .is_some_and(|record| record.focused)
+            };
+            if focused_matches {
+                consecutive_matches += 1;
+                if consecutive_matches == 2 {
+                    return Ok(observation);
+                }
+            } else {
+                consecutive_matches = 0;
+            }
+        }
+        Err(NativeAdapterError::definite(
+            NativeAdapterErrorCode::DriverFailed,
+            "AT-SPI accepted focus but the requested element did not retain keyboard focus",
+            true,
+        ))
+    }
+
     async fn validate_screen(
         &self,
         command: &NativeActionCommand,
@@ -1135,7 +1194,12 @@ impl AtspiComputerAdapter {
                     }
                 }
             }
-            NativeAction::Keyboard { .. } => {}
+            NativeAction::Keyboard { action, value } => {
+                if *action == NativeKeyboardAction::Press {
+                    validate_linux_named_key_chord(value)
+                        .map_err(|error| invalid_action(error.to_string()))?;
+                }
+            }
             NativeAction::Clipboard { operation, text } => {
                 validate_clipboard_payload(*operation, text.as_deref())?;
                 if self.clipboard.is_none() {
@@ -1400,7 +1464,7 @@ impl AtspiComputerAdapter {
     async fn dispatch_window_pointer(
         &self,
         command: &NativeActionCommand,
-    ) -> NativeAdapterResult<NativeObservation> {
+    ) -> NativeAdapterResult<Option<NativeObservation>> {
         let (record, frame) = self.validate_window_pointer(command).await?;
         let desktop = self.desktop.as_ref().ok_or_else(|| {
             NativeAdapterError::unavailable("Linux X11 window input is unavailable", true)
@@ -1428,7 +1492,7 @@ impl AtspiComputerAdapter {
                     "Linux X11 window input could not be confirmed: {error}"
                 )),
             })?;
-        async {
+        Ok(async {
             let items = self.cache_items().await?;
             let current = self
                 .target_records(&items)
@@ -1445,17 +1509,13 @@ impl AtspiComputerAdapter {
             self.observe_target(current, items).await
         }
         .await
-        .map_err(|error| {
-            NativeAdapterError::outcome_unknown(format!(
-                "window input was delivered but its resulting state could not be observed: {error}"
-            ))
-        })
+        .ok())
     }
 
     async fn dispatch_clipboard_storage(
         &self,
         command: &NativeActionCommand,
-    ) -> Option<NativeAdapterResult<NativeObservation>> {
+    ) -> Option<NativeAdapterResult<Option<NativeObservation>>> {
         let NativeAction::Clipboard { operation, text } = &command.action else {
             return None;
         };
@@ -1477,11 +1537,7 @@ impl AtspiComputerAdapter {
                     })?
                     .mutate(*operation, text.clone())
                     .await?;
-                self.observe(&command.target_id).await.map_err(|error| {
-                    NativeAdapterError::outcome_unknown(format!(
-                        "native clipboard changed but target state could not be observed: {error}"
-                    ))
-                })
+                Ok(self.observe(&command.target_id).await.ok())
             }
             .await,
         )
@@ -1511,11 +1567,16 @@ impl ComputerAdapter for AtspiComputerAdapter {
     }
 
     async fn targets(&self) -> NativeAdapterResult<Vec<NativeTarget>> {
-        let items = self.cache_items().await?;
-        let records = self.target_records(&items).await?;
-        self.replace_target_locators(&records, &items).await?;
-        let mut targets: Vec<NativeTarget> =
-            records.into_iter().map(|record| record.target).collect();
+        // The X11 screen is an independent, always useful control plane. A
+        // transient AT-SPI discovery failure must degrade to pixel control,
+        // never remove the desktop or turn UI polling into a 500 loop.
+        let mut targets = Vec::new();
+        if let Ok(items) = self.cache_items().await {
+            if let Ok(records) = self.target_records(&items).await {
+                let _ = self.replace_target_locators(&records, &items).await;
+                targets.extend(records.into_iter().map(|record| record.target));
+            }
+        }
         if let Some(screen) = self.screen_target() {
             targets.push(screen);
         }
@@ -1700,7 +1761,7 @@ impl ComputerAdapter for AtspiComputerAdapter {
     async fn dispatch(
         &self,
         command: &NativeActionCommand,
-    ) -> NativeAdapterResult<NativeObservation> {
+    ) -> NativeAdapterResult<Option<NativeObservation>> {
         // Do not wait for the accessibility bus to deliver our own mutation
         // event before the settlement observation. External mutations are
         // invalidated by the registered AT-SPI event stream above.
@@ -1713,14 +1774,14 @@ impl ComputerAdapter for AtspiComputerAdapter {
                 self.validate_screen(command, &screen).await?;
                 *self.latest_screen_frame.write().await = None;
                 self.dispatch_screen_action(command).await?;
-                return Ok(self.screen_observation(screen).await);
+                return Ok(Some(self.screen_observation(screen).await));
             }
         }
         if matches!(command.action, NativeAction::Pointer { .. }) {
             return self.dispatch_window_pointer(command).await;
         }
         self.validate(command).await?;
-        let (record, semantic, before_roots) = {
+        let (record, semantic, before_roots, expected_focus_key) = {
             let latest = self.latest.read().await;
             let stored = latest.get(&command.target_id).ok_or_else(|| {
                 NativeAdapterError::definite(
@@ -1747,6 +1808,7 @@ impl ComputerAdapter for AtspiComputerAdapter {
                         record,
                         Some((*action, value.clone())),
                         stored.snapshot.roots().to_vec(),
+                        (*action == NativeSemanticAction::Focus).then(|| key.to_string()),
                     )
                 }
                 NativeAction::Focus { .. } => {
@@ -1771,6 +1833,7 @@ impl ComputerAdapter for AtspiComputerAdapter {
                         record,
                         Some((NativeSemanticAction::Focus, None)),
                         stored.snapshot.roots().to_vec(),
+                        Some(key.to_string()),
                     )
                 }
                 NativeAction::Pointer { .. }
@@ -1784,6 +1847,37 @@ impl ComputerAdapter for AtspiComputerAdapter {
             }
         };
         if let Some((action, value)) = semantic {
+            if action == NativeSemanticAction::Focus {
+                let locator = self
+                    .target_locators
+                    .read()
+                    .await
+                    .get(&command.target_id)
+                    .cloned();
+                if let Some(window) = locator.and_then(|locator| locator.record.x11_window) {
+                    let desktop = self.desktop.as_ref().ok_or_else(|| {
+                        NativeAdapterError::unavailable(
+                            "Linux X11 window focus is unavailable",
+                            true,
+                        )
+                    })?;
+                    desktop
+                        .focus_window(window.id, window.bounds)
+                        .await
+                        .map_err(|error| match error {
+                            PlatformError::NotFound(message) => NativeAdapterError::definite(
+                                NativeAdapterErrorCode::TargetStale,
+                                format!("X11 window changed immediately before focus: {message}"),
+                                true,
+                            ),
+                            error => NativeAdapterError::definite(
+                                NativeAdapterErrorCode::DriverFailed,
+                                format!("focus correlated Linux X11 window: {error}"),
+                                true,
+                            ),
+                        })?;
+                }
+            }
             self.perform_semantic(&record, action, value.as_ref())
                 .await?;
         }
@@ -1792,13 +1886,16 @@ impl ComputerAdapter for AtspiComputerAdapter {
             .await
             .remove(&command.target_id);
         *self.latest_screen_frame.write().await = None;
-        self.observe_after_mutation(&command.target_id, &before_roots)
+        if let Some(expected_focus_key) = expected_focus_key {
+            return Ok(Some(
+                self.observe_after_focus(&command.target_id, &expected_focus_key)
+                    .await?,
+            ));
+        }
+        Ok(self
+            .observe_after_mutation(&command.target_id, &before_roots)
             .await
-            .map_err(|error| {
-                NativeAdapterError::outcome_unknown(format!(
-                    "semantic action was accepted but its resulting state could not be observed: {error}"
-                ))
-            })
+            .ok())
     }
 }
 
