@@ -156,6 +156,7 @@ export function AreaChart(props: {
     if (event.key === "End") next = props.labels.length - 1;
     if (next == null) return;
     event.preventDefault();
+    setPointerActive(null);
     setKeyboardActive(Math.max(0, Math.min(props.labels.length - 1, next)));
   };
   const labelStride = Math.max(1, Math.ceil(props.labels.length / 6));
@@ -227,7 +228,10 @@ export function AreaChart(props: {
         aria-valuenow={keyboardActive ?? pointerActive ?? 0}
         aria-valuetext={pointDescription(keyboardActive ?? pointerActive ?? 0)}
         tabIndex={0}
-        onFocus={() => setKeyboardActive((current) => current ?? pointerActive ?? 0)}
+        onFocus={() => {
+          setKeyboardActive((current) => current ?? pointerActive ?? 0);
+          setPointerActive(null);
+        }}
         onBlur={() => setKeyboardActive(null)}
         onKeyDown={onChartKeyDown}
         onPointerMove={onMove}
@@ -365,7 +369,10 @@ export function AreaChart(props: {
             type="button"
             onMouseEnter={() => setPointerActive(index)}
             onMouseLeave={() => setPointerActive(null)}
-            onFocus={() => setKeyboardActive(index)}
+            onFocus={() => {
+              setPointerActive(null);
+              setKeyboardActive(index);
+            }}
             onClick={() => setKeyboardActive(index)}
             onBlur={() => setKeyboardActive(null)}
             aria-label={pointDescription(index)}

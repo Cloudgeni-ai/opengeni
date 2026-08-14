@@ -319,4 +319,49 @@ describe("AreaChart", () => {
       container.remove();
     }
   });
+
+  test("keyboard navigation takes ownership from a stationary pointer", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        root.render(
+          <AreaChart
+            labels={["00:00", "01:00", "02:00"]}
+            series={[
+              {
+                id: "tokens",
+                label: "Tokens",
+                values: [1, 2, 3],
+                className: "text-brand",
+              },
+            ]}
+          />,
+        );
+      });
+
+      const firstLabel = container.querySelector("button") as HTMLButtonElement;
+      const slider = container.querySelector('[role="slider"]') as SVGSVGElement;
+      await act(async () => {
+        firstLabel.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+      });
+      expect([...container.querySelectorAll("svg line")].at(-1)?.getAttribute("x1")).toBe("36");
+
+      await act(async () => {
+        slider.focus();
+        slider.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true }));
+      });
+      expect(slider.getAttribute("aria-valuenow")).toBe("2");
+      expect(slider.getAttribute("aria-valuetext")).toBe("02:00. Tokens: 3.0");
+      expect([...container.querySelectorAll("svg line")].at(-1)?.getAttribute("x1")).toBe("708");
+      const tooltipTexts = [...container.querySelectorAll('[data-chart-tooltip="aligned"]')].map(
+        (tooltip) => tooltip.textContent,
+      );
+      expect(tooltipTexts.some((text) => text?.includes("02:00"))).toBe(true);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
 });
