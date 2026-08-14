@@ -439,6 +439,7 @@ describe("release image workflow contract", () => {
           if?: string;
           steps?: Array<{
             name?: string;
+            if?: string;
             env?: Record<string, string>;
             run?: string;
             with?: Record<string, unknown>;
@@ -500,6 +501,25 @@ describe("release image workflow contract", () => {
         password: "${{ secrets.GITHUB_TOKEN }}",
       });
     }
+    const apiSteps = parsed.jobs["api-image"]?.steps ?? [];
+    const bake = apiSteps.find((step) => step.name === "Bake and sign exact-SHA dogfood agent");
+    expect(bake?.if).toBe("${{ github.event_name == 'push' }}");
+    expect(bake?.env).toEqual({
+      OPENGENI_AGENT_MINISIGN_KEY: "${{ secrets.OPENGENI_AGENT_MINISIGN_KEY }}",
+    });
+    expect(bake?.run).toBe("scripts/bake-agent.sh");
+    const requireBake = apiSteps.find(
+      (step) => step.name === "Require complete exact-SHA dogfood agent bake",
+    );
+    expect(requireBake?.if).toBe("${{ github.event_name == 'push' }}");
+    expect(requireBake?.run).toContain("x86_64-unknown-linux-musl aarch64-unknown-linux-musl");
+    expect(requireBake?.run).toContain('test -s "$asset.minisig"');
+    expect(apiSteps.indexOf(bake!)).toBeLessThan(
+      apiSteps.findIndex((step) => step.name === "Build API image"),
+    );
+    expect(apiSteps.indexOf(requireBake!)).toBeLessThan(
+      apiSteps.findIndex((step) => step.name === "Build API image"),
+    );
     expect(images).toContain("Require every workload image build");
     expect(images).toContain("API_IMAGE_RESULT: ${{ needs.api-image.result }}");
     expect(images).toContain("WORKER_WEB_IMAGES_RESULT: ${{ needs.worker-web-images.result }}");
