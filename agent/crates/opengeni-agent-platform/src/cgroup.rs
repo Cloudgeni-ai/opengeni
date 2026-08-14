@@ -490,8 +490,33 @@ impl OpCgroups {
         requested_config: OpCgroupConfig,
     ) -> std::io::Result<Option<PreparedOpCgroup>> {
         let applied_config = self.local_config.tightened_by(requested_config);
-        let policy_required = applied_config.has_limits();
-        let cpu_lease = if applied_config.cpu_max_millicores.is_some() {
+        let cpu_lease = self.acquire_cpu_lease(applied_config.cpu_max_millicores)?;
+        let dir = self.create_op_cgroup()?;
+        let handle = OpCgroupHandle {
+            dir: Some(dir.clone()),
+            cpu_lease,
+        };
+
+        self.configure_op_cgroup(&dir, applied_config)?;
+        if applied_config.has_limits() {
+            self.report_resource_policy(&dir, requested_config)
+                .map_err(|error| {
+                    policy_enforcement_error(
+                        "read back the operation resource policy and ancestor bounds",
+                        &error,
+                    )
+                })?;
+        }
+
+        Ok(Some(PreparedOpCgroup { handle }))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn acquire_cpu_lease(
+        &self,
+        cpu_max_millicores: Option<u32>,
+    ) -> std::io::Result<Option<CpuControllerLease>> {
+        let lease = if cpu_max_millicores.is_some() {
             Some(
                 self.cpu_controller
                     .as_ref()
@@ -508,6 +533,11 @@ impl OpCgroups {
         } else {
             None
         };
+        Ok(lease)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn create_op_cgroup(&self) -> std::io::Result<PathBuf> {
         let mut op_id = self.next_op.load(Ordering::Relaxed);
         loop {
             let next = op_id
@@ -537,11 +567,11 @@ impl OpCgroups {
                 &error,
             ));
         }
-        let handle = OpCgroupHandle {
-            dir: Some(dir.clone()),
-            cpu_lease,
-        };
+        Ok(dir)
+    }
 
+    #[cfg(target_os = "linux")]
+    fn configure_op_cgroup(&self, dir: &Path, config: OpCgroupConfig) -> std::io::Result<()> {
         // If this leaf is selected by a memcg OOM, kill the complete operation
         // instead of leaving sibling descendants running with partial state.
         if let Err(error) = std::fs::write(dir.join("memory.oom.group"), "1") {
@@ -557,7 +587,7 @@ impl OpCgroups {
 
         // Optional per-op caps (default: unset). Explicit policy is fail-closed:
         // silently continuing would turn an operator's ceiling into unlimited work.
-        if let Some(max) = applied_config.memory_max {
+        if let Some(max) = config.memory_max {
             if let Err(error) = std::fs::write(dir.join("memory.max"), max.to_string()) {
                 self.note_admission_failure(format_args!(
                     "cannot set memory.max on {}: {error}",
@@ -566,7 +596,7 @@ impl OpCgroups {
                 return Err(policy_enforcement_error("set memory.max", &error));
             }
         }
-        if let Some(high) = applied_config.memory_high {
+        if let Some(high) = config.memory_high {
             if let Err(error) = std::fs::write(dir.join("memory.high"), high.to_string()) {
                 self.note_admission_failure(format_args!(
                     "cannot set memory.high on {}: {error}",
@@ -576,7 +606,7 @@ impl OpCgroups {
             }
         }
 
-        if let Some(millicores) = applied_config.cpu_max_millicores {
+        if let Some(millicores) = config.cpu_max_millicores {
             let cpu_max_path = dir.join("cpu.max");
             let inherited = read_cpu_max(&cpu_max_path).map_err(|error| {
                 policy_enforcement_error("read the operation cpu.max period", &error)
@@ -595,18 +625,7 @@ impl OpCgroups {
                 return Err(policy_enforcement_error("set cpu.max", &error));
             }
         }
-
-        if policy_required {
-            self.report_resource_policy(&dir, requested_config)
-                .map_err(|error| {
-                    policy_enforcement_error(
-                        "read back the operation resource policy and ancestor bounds",
-                        &error,
-                    )
-                })?;
-        }
-
-        Ok(Some(PreparedOpCgroup { handle }))
+        Ok(())
     }
 
     /// Rewrites each live direct PID to the already-inherited operation leaf.
@@ -770,10 +789,10 @@ impl OpCgroupHandle {
         let Some(dir) = self.dir.as_ref() else {
             return Ok(());
         };
-        self.kill_all_at(dir)
+        Self::kill_all_at(dir)
     }
 
-    fn kill_all_at(&self, dir: &Path) -> std::io::Result<()> {
+    fn kill_all_at(dir: &Path) -> std::io::Result<()> {
         match std::fs::write(dir.join("cgroup.kill"), "1") {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound && !dir.exists() => Ok(()),
@@ -816,7 +835,7 @@ impl Drop for OpCgroupHandle {
         // Drop means the operation did not complete normal teardown. Kill the
         // complete cgroup synchronously before returning from the error/cancel
         // path; process-group cleanup alone misses setsid/double-fork descendants.
-        if let Err(error) = self.kill_all_at(&dir) {
+        if let Err(error) = Self::kill_all_at(&dir) {
             tracing::warn!(
                 dir = %dir.display(),
                 %error,
