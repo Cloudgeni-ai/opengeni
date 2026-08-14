@@ -193,11 +193,27 @@ describe("release schema contract", () => {
       sha256: "f098df63a6ed21e88362faf0d6c5e36321604bb300ac155529adb9b17da30858",
       deploymentMode: "rolling",
     });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0245_model_context_contribution_facts.sql",
+      ),
+    ).toMatchObject({
+      sha256: "437bb07ffe12f9c714bd2a40d0ecd8ed9df1fd9003f4d057fe11101999841f40",
+      deploymentMode: "rolling",
+    });
     const migrations = new Map(
       sourceContract.migrations.map((migration) => [migration.path, migration]),
     );
     const sessionVisibilityContractHash = (includesActivation: boolean): string | null => {
       if (!migrations.has("0236_session_visibility_slack_policy.sql")) return null;
+      if (
+        migrations.has("0245_model_context_contribution_facts.sql") &&
+        migrations.has("0244_slack_app_home_refresh_queue.sql")
+      ) {
+        return includesActivation
+          ? "5c12e104be0199831cd12777ea509e9ca3a0448768d211cb52056d55300a1044"
+          : "151a3871e8b935ce10c1d1b5a8182d110636248ed0d34d2281bc890e2c3737b5";
+      }
       if (migrations.has("0244_slack_app_home_refresh_queue.sql")) {
         return includesActivation
           ? "6dfd8724938ea9e087593afcc8ea0cbb963b8600e898b76f7c6eb9b0fadbc05f"
@@ -315,13 +331,16 @@ describe("release schema contract", () => {
         deploymentMode: "rolling",
       });
 
+      const contractWithoutActivation = await contractWithoutMigrations([
+        ...forwardMigrationPaths,
+        "0225_session_visibility_fork_activation.sql",
+      ]);
+      expect(contractWithoutActivation.sha256).toBe(sessionVisibilityContractHash(false));
       migrations.delete("0225_session_visibility_fork_activation.sql");
-      sourceContract.migrations = sourceContract.migrations.filter(
-        (migration) => migration.path !== "0225_session_visibility_fork_activation.sql",
-      );
-      sourceContract.fileCount -= 1;
-      sourceContract.latestMigration = sourceContract.migrations.at(-1)?.path ?? null;
-      sourceContract.sha256 = sessionVisibilityContractHash(false)!;
+      sourceContract.migrations = contractWithoutActivation.migrations;
+      sourceContract.fileCount = contractWithoutActivation.fileCount;
+      sourceContract.latestMigration = contractWithoutActivation.latestMigration;
+      sourceContract.sha256 = contractWithoutActivation.sha256;
     }
     expect(sourceContract.sha256).toBe(
       sessionVisibilityContractHash(false) ?? currentMainContractHash,
@@ -525,10 +544,12 @@ describe("release schema contract", () => {
         (migrations.has("0240_enrollment_connection_authority.sql") ? 1 : 0) +
         (migrations.has("0241_enrollment_agent_runtime.sql") ? 1 : 0) +
         (migrations.has("0243_google_drive_object_acl_authority.sql") ? 1 : 0) +
-        (migrations.has("0244_slack_app_home_refresh_queue.sql") ? 1 : 0),
+        (migrations.has("0244_slack_app_home_refresh_queue.sql") ? 1 : 0) +
+        (migrations.has("0245_model_context_contribution_facts.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(sessionVisibilityContractHash(false) ?? currentMainContractHash);
     const latestCompatibleMigration = [
+      "0245_model_context_contribution_facts.sql",
       "0244_slack_app_home_refresh_queue.sql",
       "0243_google_drive_object_acl_authority.sql",
       "0241_enrollment_agent_runtime.sql",
@@ -742,6 +763,12 @@ describe("release schema contract", () => {
     if (migrations.has("0243_google_drive_object_acl_authority.sql")) {
       expect(migrations.get("0243_google_drive_object_acl_authority.sql")).toMatchObject({
         sha256: "1cc4b297460ba64d252230ceddc9eaaf4d6ea9b02afcd56518900d5b569bfcfe",
+        deploymentMode: "rolling",
+      });
+    }
+    if (migrations.has("0245_model_context_contribution_facts.sql")) {
+      expect(migrations.get("0245_model_context_contribution_facts.sql")).toMatchObject({
+        sha256: "437bb07ffe12f9c714bd2a40d0ecd8ed9df1fd9003f4d057fe11101999841f40",
         deploymentMode: "rolling",
       });
     }

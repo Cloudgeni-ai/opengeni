@@ -70,6 +70,13 @@ function snapshot(overrides: Partial<WorkspaceInsightsSnapshot> = {}): Workspace
     drivers: [],
     schedules: [],
     recentCalls: [],
+    promptContributions: {
+      estimatedTokens: 0,
+      utf8Bytes: 0,
+      coveredCalls: 0,
+      totalCalls: 0,
+      sources: [],
+    },
     warmSeconds: 7200,
     priorWarmSeconds: 3600,
     warmGroups: [],

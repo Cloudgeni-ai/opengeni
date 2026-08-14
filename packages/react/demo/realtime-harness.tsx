@@ -183,6 +183,7 @@ function ExistingSession(props: {
               codexConnected={mode === "mock"}
               realtimeAutostartModel={props.autostartModel ?? undefined}
               onRealtimeAutostartConsumed={props.onAutostartConsumed}
+              showDiagnostics
               controllerFactory={mode === "mock" ? deterministicRealtime.factory : undefined}
             />
           }

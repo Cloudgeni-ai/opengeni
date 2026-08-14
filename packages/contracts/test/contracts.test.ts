@@ -35,6 +35,7 @@ import {
   MarketingDailyAnalysisTaskRequest,
   mergeToolRefs,
   MODEL_CONTEXT_LABEL,
+  ModelContextContributionSummaries,
   McpServerConnectionRef,
   ModelBillingAttributionV1,
   ModelCredentialReadinessV1,
@@ -88,6 +89,28 @@ import {
 } from "../src";
 
 describe("contracts", () => {
+  test("keeps model context contribution summaries content-free and uniquely keyed", () => {
+    const valid = {
+      source: "workspace_instruction_policy",
+      items: 1,
+      utf8Bytes: 40,
+      estimatedTokens: 10,
+    } as const;
+    expect(ModelContextContributionSummaries.parse([valid])).toEqual([valid]);
+    expect(
+      ModelContextContributionSummaries.safeParse([{ ...valid, content: "secret" }]).success,
+    ).toBe(false);
+    expect(ModelContextContributionSummaries.safeParse([valid, valid]).success).toBe(false);
+    expect(
+      ModelContextContributionSummaries.safeParse([{ ...valid, estimatedTokens: -1 }]).success,
+    ).toBe(false);
+    expect(
+      ModelContextContributionSummaries.safeParse([
+        { ...valid, estimatedTokens: Number.MAX_SAFE_INTEGER + 1 },
+      ]).success,
+    ).toBe(false);
+  });
+
   test("goal write bounds count UTF-8 bytes rather than JavaScript characters", () => {
     const exact = "é".repeat(SESSION_GOAL_TEXT_MAX_BYTES / 2);
     expect(GoalSpec.safeParse({ text: exact }).success).toBe(true);

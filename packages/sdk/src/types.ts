@@ -5937,6 +5937,30 @@ export type InsightsModelCallRow = {
   pricingSource: InsightsPricingSource | null;
 };
 
+export type ModelContextContributionSource =
+  | "workspace_instruction_policy"
+  | "legacy_workspace_instructions"
+  | "preference_registry_descriptor"
+  | "company_profile"
+  | "legacy_memory_v1"
+  | "runtime_skill_catalog";
+
+export type InsightsPromptContributionRow = {
+  source: ModelContextContributionSource;
+  items: number;
+  utf8Bytes: number;
+  estimatedTokens: number;
+  calls: number;
+};
+
+export type InsightsPromptContributions = {
+  estimatedTokens: number;
+  utf8Bytes: number;
+  coveredCalls: number;
+  totalCalls: number;
+  sources: InsightsPromptContributionRow[];
+};
+
 export type WorkspaceInsightsSnapshot = {
   range: InsightsRange;
   rangeLabel: string;
@@ -5954,6 +5978,7 @@ export type WorkspaceInsightsSnapshot = {
   drivers: InsightsSpendDriver[];
   schedules: InsightsScheduleRow[];
   recentCalls: InsightsModelCallRow[];
+  promptContributions: InsightsPromptContributions;
   warmSeconds: number;
   priorWarmSeconds: number;
   warmGroups: InsightsWarmGroupRow[];

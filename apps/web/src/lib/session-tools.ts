@@ -1,4 +1,5 @@
 import type {
+  ApiIntegrationInstallationSummary,
   CapabilityCatalogItem,
   ClientConfig,
   GitHubRepository,
@@ -451,6 +452,18 @@ export function enabledWorkspaceCapabilityMcpServers(
       ? [{ id: item.runtime.mcpServerId, name: item.name }]
       : [];
   });
+}
+
+/** One selectable local MCP surface per installed OpenAPI/GraphQL instance. */
+export function installedApiIntegrationMcpServers(
+  integrations: ReadonlyArray<
+    Pick<ApiIntegrationInstallationSummary, "serverId" | "name" | "displayName">
+  >,
+): McpServerOption[] {
+  return integrations.map((integration) => ({
+    id: integration.serverId,
+    name: integration.displayName.trim() || integration.name,
+  }));
 }
 
 export function mergeMcpServerOptions(...groups: McpServerOption[][]): McpServerOption[] {

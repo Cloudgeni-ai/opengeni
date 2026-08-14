@@ -317,6 +317,7 @@ describe("provider adapters and MCP manifest", () => {
               methods: {
                 list: {
                   id: "gmail.users.labels.list",
+                  description: `Lists labels. ${"Detailed provider documentation. ".repeat(20)}`,
                   path: "gmail/v1/users/{userId}/labels",
                   httpMethod: "GET",
                   parameters: {
@@ -335,8 +336,53 @@ describe("provider adapters and MCP manifest", () => {
       provider: "google",
     });
     expect(revision.tools).toEqual([
-      expect.objectContaining({ id: "gmail_users_labels_list", safety: "read" }),
+      expect.objectContaining({
+        id: "gmail_users_labels_list",
+        name: "gmail.users.labels.list",
+        description: expect.stringContaining("Detailed provider documentation."),
+        safety: "read",
+      }),
     ]);
+    expect(revision.tools[0]!.name.length).toBeLessThanOrEqual(200);
+  });
+
+  test("compiles a stable Google revision when Discovery parameter keys are reordered", () => {
+    const discovery = (parameters: Record<string, unknown>) => ({
+      name: "gmail",
+      title: "Gmail API",
+      version: "v1",
+      rootUrl: "https://gmail.googleapis.com/",
+      servicePath: "",
+      resources: {
+        users: {
+          resources: {
+            messages: {
+              methods: {
+                list: {
+                  id: "gmail.users.messages.list",
+                  path: "gmail/v1/users/{userId}/messages",
+                  httpMethod: "GET",
+                  parameters,
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+    const userId = { type: "string", location: "path", required: true };
+    const pageToken = { type: "string", location: "query" };
+    const compile = (parameters: Record<string, unknown>) =>
+      compileOpenApiRevision(googleDiscoveryToOpenApi(discovery(parameters)), {
+        integrationId: GOOGLE_GMAIL_INTEGRATION_DEFINITION.id,
+        provider: "google",
+      });
+
+    const first = compile({ userId, pageToken });
+    const second = compile({ pageToken, userId });
+
+    expect(first.contentSha256).toBe(second.contentSha256);
+    expect(first.id).toBe(second.id);
   });
 
   test("filters the Microsoft Graph mega-spec to the selected workload", () => {

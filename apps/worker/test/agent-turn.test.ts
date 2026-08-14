@@ -1760,11 +1760,17 @@ describe("production model-response usage callback authority", () => {
   test("claims compaction usage before retry side effects and defers restart authority to durable usage", async () => {
     const observability = createObservability(testSettings(), { component: "worker" });
     const billingRows = new Map<string, Record<string, unknown>>();
+    const factRows: Array<Record<string, unknown>> = [];
     const recordUsageSpy = spyOn(opengeniDb, "recordUsageEvent").mockImplementation(
       async (_db, input) => {
         if (!billingRows.has(input.idempotencyKey)) {
           billingRows.set(input.idempotencyKey, input as unknown as Record<string, unknown>);
         }
+      },
+    );
+    const recordFactSpy = spyOn(opengeniDb, "recordModelCallFact").mockImplementation(
+      async (_db, input) => {
+        factRows.push(input as unknown as Record<string, unknown>);
       },
     );
     try {
@@ -1824,6 +1830,14 @@ describe("production model-response usage callback authority", () => {
           },
           leaseLost: () => false,
           leaseLostMessage: "lease lost",
+          contextContributions: [
+            {
+              source: "workspace_instruction_policy",
+              items: 1,
+              utf8Bytes: 40,
+              estimatedTokens: 10,
+            },
+          ],
         });
 
       expect(await process()).toMatchObject({
@@ -1846,12 +1860,26 @@ describe("production model-response usage callback authority", () => {
       expect(leaseRenewals).toBe(2);
       expect(billingRows.size).toBe(1);
       expect(durableUsageSourceKeys).toEqual(new Set([usage.responseId]));
+      expect(factRows).toEqual([
+        expect.objectContaining({
+          sourceKey: usage.responseId,
+          contextContributions: [
+            {
+              source: "workspace_instruction_policy",
+              items: 1,
+              utf8Bytes: 40,
+              estimatedTokens: 10,
+            },
+          ],
+        }),
+      ]);
 
       const metrics = await observability.prometheusMetrics();
       expect(metrics).toMatch(
         /opengeni_model_cached_tokens_total\{[^}]*provider="codex-subscription"[^}]*\} 150\b/,
       );
     } finally {
+      recordFactSpy.mockRestore();
       recordUsageSpy.mockRestore();
     }
   });

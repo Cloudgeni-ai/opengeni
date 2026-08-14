@@ -163,6 +163,50 @@ function integrationInput(connectionId?: string, suffix = "inventory"): InstallA
 }
 
 describe("API Integration persistence", () => {
+  test("accepts provider-equivalent Google OIDC scope names", async () => {
+    if (!available || !client) return;
+    const ownerSubjectId = "user:api-integration-google-owner";
+    const connection = await createConnection(client.db, {
+      accountId: first.accountId,
+      workspaceId: first.workspaceId,
+      subjectId: ownerSubjectId,
+      providerDomain: "gmail.googleapis.com",
+      kind: "oauth2",
+      credentialEncrypted: "test-only-google-encrypted-bundle",
+      grantedScopes: [
+        "openid",
+        "https://www.googleapis.com/auth/userinfo.email",
+        "https://www.googleapis.com/auth/userinfo.profile",
+        "https://mail.google.com/",
+      ],
+      createdBySubjectId: ownerSubjectId,
+    });
+    const base = integrationInput(connection.id, "gmail-scope-aliases");
+    const input: InstallApiIntegrationInput = {
+      ...base,
+      subjectId: ownerSubjectId,
+      ownership: "subject",
+      providerDomain: "gmail.googleapis.com",
+      baseUrl: "https://gmail.googleapis.com/",
+      sourceUrl: "https://www.googleapis.com/discovery/v1/apis/gmail/v1/rest",
+      authScheme: { kind: "oauth2" },
+      requiredScopes: ["openid", "email", "profile", "https://mail.google.com/"],
+      revision: {
+        ...base.revision,
+        source: { url: "https://www.googleapis.com/discovery/v1/apis/gmail/v1/rest" },
+        bindings: Object.fromEntries(
+          Object.entries(base.revision.bindings).map(([key, binding]) => [
+            key,
+            { ...binding, serverUrl: "https://gmail.googleapis.com/" },
+          ]),
+        ),
+      },
+    };
+
+    const installed = await installApiIntegration(client.db, input);
+    expect(installed).toMatchObject({ status: "installed" });
+  }, 60_000);
+
   test("keeps personal runtime projection and removal exact-subject", async () => {
     if (!available || !client) return;
     const ownerSubjectId = "user:api-integration-personal-owner";
