@@ -1,5 +1,24 @@
 # @opengeni/core
 
+## 1.0.2
+
+### Patch Changes
+
+- e0e0102: Unify browser, computer, identity, realtime, and Codemode behavior across managed sandboxes and connected machines.
+- Updated dependencies [a551666]
+- Updated dependencies [9c4e0b8]
+- Updated dependencies [e0e0102]
+- Updated dependencies [b2af2df]
+- Updated dependencies [ec00479]
+  - @opengeni/db@1.0.2
+  - @opengeni/contracts@1.1.0
+  - @opengeni/config@0.16.5
+  - @opengeni/events@0.3.113
+  - @opengeni/runtime@1.0.2
+  - @opengeni/documents@0.5.42
+  - @opengeni/observability@0.7.8
+  - @opengeni/storage@0.2.97
+
 ## 1.0.1
 
 ### Patch Changes
