@@ -213,6 +213,34 @@ describe("release schema contract", () => {
       sourceContract.migrations.map((migration) => [migration.path, migration]),
     );
     const sessionVisibilityContractHash = (includesActivation: boolean): string | null => {
+      if (
+        migrations.has("0236_session_visibility_slack_policy.sql") &&
+        migrations.has("0246_integration_personal_instance_authority.sql") &&
+        migrations.has("0241_atomic_personal_resource_delegation.sql")
+      ) {
+        return includesActivation
+          ? "08c08f359b6c34c51ed190747789f43e10c1f3d32a69e1f0da54a776f83dda66"
+          : "9c3c1b1e6ae87ffcff3025c4a8328007bec6cbcab856ffb967eeffe4ce719da1";
+      }
+      if (
+        migrations.has("0236_session_visibility_slack_policy.sql") &&
+        migrations.has("0245_model_context_contribution_facts.sql") &&
+        migrations.has("0244_slack_app_home_refresh_queue.sql") &&
+        migrations.has("0241_atomic_personal_resource_delegation.sql")
+      ) {
+        return includesActivation
+          ? "64f53a4ec4517fa2525aba293869d9048c9932bed58f0ef17445a2723aa579fe"
+          : "01840387a701cb5585308d2cf47070298c6580e6d037abfa3f4358563220868d";
+      }
+      if (
+        migrations.has("0236_session_visibility_slack_policy.sql") &&
+        migrations.has("0244_slack_app_home_refresh_queue.sql") &&
+        migrations.has("0241_atomic_personal_resource_delegation.sql")
+      ) {
+        return includesActivation
+          ? "ed2d5cdf78858b08efdbf0bd46474c1bd45ec1798595a104da1e4c9b123a34c2"
+          : "720613ad79a8956f6cc5372c5441dcfbbec1b4c9dd7a9c7e3d08dae4f736ffab";
+      }
       if (!migrations.has("0236_session_visibility_slack_policy.sql")) return null;
       if (migrations.has("0246_integration_personal_instance_authority.sql")) {
         return includesActivation
@@ -234,21 +262,51 @@ describe("release schema contract", () => {
       }
       if (
         migrations.has("0243_google_drive_object_acl_authority.sql") &&
+        migrations.has("0241_enrollment_agent_runtime.sql") &&
+        migrations.has("0241_atomic_personal_resource_delegation.sql")
+      ) {
+        return includesActivation
+          ? "9052b2c6bdec863e26504274ccd527bd8d53b8375ac9465edbe8378183bbdd0d"
+          : "7b553426ed71c3a6a1677b9be182f0a7674ff23dddaee017272dd47a6897d0fd";
+      }
+      if (
+        migrations.has("0243_google_drive_object_acl_authority.sql") &&
         migrations.has("0241_enrollment_agent_runtime.sql")
       ) {
         return includesActivation
           ? "619dd36aeccd97091f053c691d1ae57dcf1bae3ec6f274d0789401a7e57529ea"
           : "9afefe94fdadc2f1f85f3fafe6811242b922376c4c01eeb607f3414c0bcce9e4";
       }
+      if (
+        migrations.has("0243_google_drive_object_acl_authority.sql") &&
+        migrations.has("0241_atomic_personal_resource_delegation.sql")
+      ) {
+        return includesActivation
+          ? "015b520626fe065f8497d7bd065da60e1168f902c31af22a1b51e81ac3878a19"
+          : "82e13cbc75672a8fffe3014b606b833c65bd1e476e67d755043a024c49984521";
+      }
       if (migrations.has("0243_google_drive_object_acl_authority.sql")) {
         return includesActivation
           ? "8d30a981d2a744a263e660ab21eeaa0a1071e7afe71b771bbc81151a79330fa4"
           : "2a39ec3cb579dad4f4fc17040cac665b88b39f24871a2462b17286d3925a4378";
       }
+      if (
+        migrations.has("0241_enrollment_agent_runtime.sql") &&
+        migrations.has("0241_atomic_personal_resource_delegation.sql")
+      ) {
+        return includesActivation
+          ? "9c004e0805db7f59f8086c9823f5f9d25bb6849b36b1bae1c1603a91a687f98e"
+          : "0f32095219b9894a903f442fc4cd8feb5dd8ef6d6404104aa6f50131d0c6be90";
+      }
       if (migrations.has("0241_enrollment_agent_runtime.sql")) {
         return includesActivation
           ? "903aaca7cdc6880795488542605f2e007ae184b36209c24fbe06b5b190f96067"
           : "677d05fd674a19f95b329b6381a8a2d79884df8c71c22614e22622d55f4a193a";
+      }
+      if (migrations.has("0241_atomic_personal_resource_delegation.sql")) {
+        return includesActivation
+          ? "22ca0d47d0c0adc8aa6b6f6c32b062110397e312843930c8d2f718d979845f57"
+          : "1ae31a2d57ec668e2a6313b94902304df837ab66d66f3a3968e57e09332c18bd";
       }
       if (migrations.has("0238_recover_unclaimed_session_turns.sql")) {
         return includesActivation
@@ -555,6 +613,7 @@ describe("release schema contract", () => {
         (migrations.has("0236_session_visibility_slack_policy.sql") ? 1 : 0) +
         (migrations.has("0238_recover_unclaimed_session_turns.sql") ? 1 : 0) +
         (migrations.has("0240_enrollment_connection_authority.sql") ? 1 : 0) +
+        (migrations.has("0241_atomic_personal_resource_delegation.sql") ? 1 : 0) +
         (migrations.has("0241_enrollment_agent_runtime.sql") ? 1 : 0) +
         (migrations.has("0243_google_drive_object_acl_authority.sql") ? 1 : 0) +
         (migrations.has("0244_slack_app_home_refresh_queue.sql") ? 1 : 0) +
@@ -568,6 +627,7 @@ describe("release schema contract", () => {
       "0244_slack_app_home_refresh_queue.sql",
       "0243_google_drive_object_acl_authority.sql",
       "0241_enrollment_agent_runtime.sql",
+      "0241_atomic_personal_resource_delegation.sql",
       "0240_enrollment_connection_authority.sql",
       "0238_recover_unclaimed_session_turns.sql",
       "0236_session_visibility_slack_policy.sql",
@@ -772,6 +832,12 @@ describe("release schema contract", () => {
     if (migrations.has("0238_recover_unclaimed_session_turns.sql")) {
       expect(migrations.get("0238_recover_unclaimed_session_turns.sql")).toMatchObject({
         sha256: "7d63ad62f2dc91f8c5de87b95a35a366d4b23d4fc76f320b5376ef2412a2002d",
+        deploymentMode: "rolling",
+      });
+    }
+    if (migrations.has("0241_atomic_personal_resource_delegation.sql")) {
+      expect(migrations.get("0241_atomic_personal_resource_delegation.sql")).toMatchObject({
+        sha256: "4a8e3752decc0a497f8eb00de223923747bf2994a0f76ccb977ce7f3ced9e5be",
         deploymentMode: "rolling",
       });
     }
