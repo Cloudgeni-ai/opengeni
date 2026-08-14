@@ -211,15 +211,29 @@ describe("public editable-artifact browser composition", () => {
       await page.getByRole("button", { name: "Add text box" }).click();
       await waitForEditorIdle(page, "presentation");
       const slideEditor = page.getByRole("application", { name: "Slide 1 editor" });
+      const selectedObjectStatus = page.locator(
+        '[role="status"][id$="-presentation-selection"]',
+      );
+      await selectedObjectStatus.waitFor({ state: "attached" });
+      expect(await selectedObjectStatus.textContent()).toContain(". Position ");
+      await slideEditor.focus();
+      expect(await slideEditor.evaluate((element) => document.activeElement === element)).toBe(true);
       await slideEditor.press("Enter");
       const textBox = page.getByRole("textbox", { name: "Edit Text box" });
+      await textBox.waitFor();
       await textBox.fill("A real Worker/WASM slide");
       await textBox.press("Control+Enter");
       await waitForEditorIdle(page, "presentation");
       await page.reload();
       await page.getByRole("option", { name: /^Slide 1/u }).waitFor({ timeout: 30_000 });
       const reloadedSlideEditor = page.getByRole("application", { name: "Slide 1 editor" });
+      await reloadedSlideEditor.focus();
+      expect(await reloadedSlideEditor.evaluate((element) => document.activeElement === element)).toBe(
+        true,
+      );
       await reloadedSlideEditor.press("]");
+      await selectedObjectStatus.waitFor({ state: "attached" });
+      expect(await selectedObjectStatus.textContent()).toContain(". Position ");
       await reloadedSlideEditor.press("Enter");
       expect(await page.getByRole("textbox", { name: "Edit Text box" }).inputValue()).toBe(
         "A real Worker/WASM slide",
