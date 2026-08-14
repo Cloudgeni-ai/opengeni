@@ -1,19 +1,14 @@
 import {
-  DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
   OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
   OPENGENI_SLACK_BOT_SESSION_METADATA_KEY,
   type ScheduledTask,
   type ScheduledTaskRun,
-  type Session,
 } from "@opengeni/contracts";
 import {
-  defaultSessionMcpServerIds,
   openGeniSlackBotMetadata,
   requireOpenGeniSlackBotConnection,
-  resolveSessionToolPolicy,
   scheduledSlackBotConnectionId,
-  settingsWithEnabledCapabilityMcpServers,
 } from "@opengeni/core";
 import {
   appendSessionEventsWithLockedSessionUpdate,
@@ -28,9 +23,6 @@ import {
   getScheduledTaskPersonalConnectionDelegations,
   getScheduledTaskXaiProviderAccountAuthoritySnapshot,
   getRig,
-  getRigName,
-  getRigVersion,
-  getRigVersionHealth,
   getSessionByCreateIdempotencyKey,
   getVariableSet,
   initializeSessionStartAtomically,
@@ -47,11 +39,7 @@ import {
   upsertSessionGoal,
 } from "@opengeni/db";
 import { appendAndPublishEvents, publishDurableSessionEvents } from "@opengeni/events";
-import {
-  allowedFirstPartyMcpToolsForSession,
-  resolveFirstPartyMcpToolPolicy,
-  type Settings,
-} from "@opengeni/config";
+import { resolveFirstPartyMcpToolPolicy } from "@opengeni/config";
 import {
   assertReusableSessionRevivable,
   scheduledUserMessagePayload,
@@ -62,10 +50,12 @@ import { agentRunAdmissionDenial } from "./agent-run-admission";
 import { scheduledAlertOccurrenceIdentity } from "../scheduled-alert-occurrence";
 import {
   evaluateIncidentTelemetryPreflight,
+  incidentTelemetryAuthorityFence,
   incidentTelemetryPreflightDeclaration,
+  INCIDENT_TELEMETRY_AUTHORITY_FENCE_LINEAGE_KEY,
   type IncidentTelemetryPreflightBlockReason,
-  type IncidentTelemetryResponderMetadata,
 } from "./incident-telemetry-preflight";
+import { resolveIncidentTelemetryResponderMetadata } from "./incident-telemetry-authority";
 import type {
   ControlActivityServices,
   DispatchScheduledTaskRunInput,
@@ -190,6 +180,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         const preflight = evaluateIncidentTelemetryPreflight({
           agentConfig: task.agentConfig,
           incidentTriggered: structuredAlertOccurrence !== null,
+          alertOccurrenceLabels: structuredAlertOccurrence?.labels ?? null,
           responder,
         });
         if (preflight.action === "blocked") return preflight;
@@ -391,6 +382,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                       const exactPreflight = evaluateIncidentTelemetryPreflight({
                         agentConfig: task.agentConfig,
                         incidentTriggered: structuredAlertOccurrence !== null,
+                        alertOccurrenceLabels: structuredAlertOccurrence?.labels ?? null,
                         responder: exactResponder,
                       });
                       if (exactPreflight.action === "blocked") {
@@ -614,6 +606,18 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 status: "dispatched",
               });
             },
+            incidentPreflightRequired
+              ? {
+                  prepareSource: async (tx, sessionId) =>
+                    await prepareIncidentTelemetrySource({
+                      tx,
+                      settings,
+                      task,
+                      sessionId,
+                      alertOccurrenceLabels: structuredAlertOccurrence?.labels ?? null,
+                    }),
+                }
+              : undefined,
           );
           if (scheduledUpdate.reason === "session_cancelled") {
             throw new Error("new scheduled session was cancelled during dispatch");
@@ -749,6 +753,18 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 status: "dispatched",
               });
             },
+            incidentPreflightRequired
+              ? {
+                  prepareSource: async (tx, sessionId) =>
+                    await prepareIncidentTelemetrySource({
+                      tx,
+                      settings,
+                      task,
+                      sessionId,
+                      alertOccurrenceLabels: structuredAlertOccurrence?.labels ?? null,
+                    }),
+                }
+              : undefined,
           );
           if (bundled.reason === "session_cancelled") {
             throw new Error(`scheduled wake was not added: ${bundled.reason}`);
@@ -774,6 +790,9 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             run.id,
             error instanceof Error ? error.message : String(error),
           ).catch(() => undefined);
+        }
+        if (error instanceof IncidentTelemetryPreflightBlockedError) {
+          return { action: "blocked", reason: error.reason };
         }
         throw error;
       }
@@ -814,115 +833,37 @@ class IncidentTelemetryPreflightBlockedError extends Error {
   }
 }
 
-async function resolveIncidentTelemetryResponderMetadata(input: {
-  db: Database;
-  settings: Settings;
+async function prepareIncidentTelemetrySource(input: {
+  tx: Database;
+  settings: ControlActivityServices["settings"];
   task: ScheduledTask;
-  session: Session | null;
-}): Promise<IncidentTelemetryResponderMetadata> {
-  const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(
-    input.db,
-    input.task.workspaceId,
-    input.settings,
-  );
-  const availableMcpServerIds = new Set(runtimeSettings.mcpServers.map((server) => server.id));
-  for (const server of input.session?.mcpServers ?? []) {
-    availableMcpServerIds.add(server.id);
-  }
-
-  const sessionTools = input.session
-    ? input.session.tools
-    : withFirstPartyTools(runtimeSettings, input.task.agentConfig.tools);
-  const resolvedToolPolicy = resolveSessionToolPolicy({
-    toolPolicy: input.session?.toolPolicy ?? {
-      mode: "explicit",
-      inheritedFromSessionId: null,
-    },
-    sessionTools,
-    availableMcpServerIds,
-    defaultMcpServerIds: defaultSessionMcpServerIds(runtimeSettings.mcpServers),
+  sessionId: string;
+  alertOccurrenceLabels: Readonly<Record<string, string>> | null;
+}) {
+  const session = await requireSession(input.tx, input.task.workspaceId, input.sessionId);
+  const responder = await resolveIncidentTelemetryResponderMetadata({
+    db: input.tx,
+    settings: input.settings,
+    task: input.task,
+    session,
   });
-
-  let metadataComplete = true;
-  let rig: IncidentTelemetryResponderMetadata["rig"] = null;
-  const variableSetIds = new Set<string>();
-  if (input.session) {
-    if (input.session.variableSetId) variableSetIds.add(input.session.variableSetId);
-    if ((input.session.rigId === null) !== (input.session.rigVersionId === null)) {
-      metadataComplete = false;
-    } else if (input.session.rigId && input.session.rigVersionId) {
-      const [name, version, health] = await Promise.all([
-        getRigName(input.db, input.task.workspaceId, input.session.rigId),
-        getRigVersion(
-          input.db,
-          input.task.workspaceId,
-          input.session.rigId,
-          input.session.rigVersionId,
-        ),
-        getRigVersionHealth(
-          input.db,
-          input.task.workspaceId,
-          input.session.rigId,
-          input.session.rigVersionId,
-        ),
-      ]);
-      if (!name || !version || !health) {
-        metadataComplete = false;
-      } else {
-        rig = {
-          name,
-          credentialHooks: version.credentialHooks,
-          checkHealth: health.checkHealth,
-        };
-        for (const id of version.defaultVariableSetIds) variableSetIds.add(id);
-      }
-    }
-  } else {
-    if (input.task.variableSetId) variableSetIds.add(input.task.variableSetId);
-    if (input.task.rigId) {
-      const selectedRig = await getRig(input.db, input.task.workspaceId, input.task.rigId);
-      if (!selectedRig?.activeVersion || !selectedRig.activeVersionHealth) {
-        metadataComplete = false;
-      } else {
-        rig = {
-          name: selectedRig.name,
-          credentialHooks: selectedRig.activeVersion.credentialHooks,
-          checkHealth: selectedRig.activeVersionHealth.checkHealth,
-        };
-        for (const id of selectedRig.activeVersion.defaultVariableSetIds) variableSetIds.add(id);
-      }
-    }
+  const preflight = evaluateIncidentTelemetryPreflight({
+    agentConfig: input.task.agentConfig,
+    incidentTriggered: input.alertOccurrenceLabels !== null,
+    alertOccurrenceLabels: input.alertOccurrenceLabels,
+    responder,
+  });
+  if (preflight.action === "blocked") {
+    throw new IncidentTelemetryPreflightBlockedError(preflight.reason);
   }
-
-  const variableSets = await Promise.all(
-    [...variableSetIds].map(
-      async (id) => await getVariableSet(input.db, input.task.workspaceId, id),
-    ),
-  );
-  if (variableSets.some((variableSet) => variableSet === null)) {
-    metadataComplete = false;
+  const fence = incidentTelemetryAuthorityFence(responder);
+  if (!fence) {
+    throw new IncidentTelemetryPreflightBlockedError("incident_preflight_metadata_missing");
   }
-
   return {
-    metadataComplete,
-    resources: input.session?.resources ?? input.task.agentConfig.resources,
-    mcpServerIds: resolvedToolPolicy.toolRefs.map((tool) => tool.id),
-    firstPartyMcpTools: input.session
-      ? allowedFirstPartyMcpToolsForSession(runtimeSettings, input.session.firstPartyMcpTools)
-      : resolveFirstPartyMcpToolPolicy(runtimeSettings).default,
-    firstPartyMcpPermissions:
-      input.session?.firstPartyMcpPermissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
-    rig,
-    variableSets: variableSets.flatMap((variableSet) =>
-      variableSet
-        ? [
-            {
-              name: variableSet.name,
-              variables: variableSet.variables.map((variable) => ({ name: variable.name })),
-            },
-          ]
-        : [],
-    ),
+    lineage: {
+      [INCIDENT_TELEMETRY_AUTHORITY_FENCE_LINEAGE_KEY]: fence,
+    },
   };
 }
 

@@ -1,10 +1,12 @@
 import {
   IncidentTelemetryPreflight,
+  stableJson,
   type FirstPartyMcpToolName,
   type Permission,
   type ResourceRef,
   type ScheduledTaskAgentConfig,
 } from "@opengeni/contracts";
+import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 
 export type IncidentTelemetryPreflightBlockReason =
@@ -37,13 +39,25 @@ export type IncidentTelemetryResponderMetadata = {
   firstPartyMcpPermissions: readonly Permission[];
   rig: IncidentTelemetryRigMetadata | null;
   variableSets: readonly IncidentTelemetryVariableSetMetadata[];
+  /** Exact durable session policy version, or null for a not-yet-created session. */
+  toolPolicyVersion: number | null;
 };
 
 export type IncidentTelemetryPreflightInput = {
   agentConfig: ScheduledTaskAgentConfig;
   /** A valid structured alert occurrence also makes a legacy task incident-triggered. */
   incidentTriggered: boolean;
+  /** Exact bounded labels from that validated occurrence; values are never rendered in blockers. */
+  alertOccurrenceLabels: Readonly<Record<string, string>> | null;
   responder: IncidentTelemetryResponderMetadata;
+};
+
+export const INCIDENT_TELEMETRY_AUTHORITY_FENCE_LINEAGE_KEY = "incidentTelemetryAuthorityFence";
+
+export type IncidentTelemetryAuthorityFence = {
+  version: 1;
+  toolPolicyVersion: number;
+  responderDigest: string;
 };
 
 export type IncidentTelemetryPreflightDeclaration =
@@ -170,7 +184,61 @@ export function evaluateIncidentTelemetryPreflight(
   if (!seriesMetadataSatisfies(preflight.dataSource)) {
     return blocked("incident_data_source_unsuitable");
   }
+  if (!alertSelectorsSatisfy(preflight.dataSource, input.alertOccurrenceLabels)) {
+    return blocked("incident_data_source_unsuitable");
+  }
   return { action: "ready" };
+}
+
+export function incidentTelemetryAuthorityFence(
+  responder: IncidentTelemetryResponderMetadata,
+): IncidentTelemetryAuthorityFence | null {
+  if (responder.toolPolicyVersion === null) return null;
+  const normalized = {
+    metadataComplete: responder.metadataComplete,
+    resources: [...responder.resources].map((resource) => stableJson(resource)).sort(),
+    mcpServerIds: [...responder.mcpServerIds].sort(),
+    firstPartyMcpTools: [...responder.firstPartyMcpTools].sort(),
+    firstPartyMcpPermissions: [...responder.firstPartyMcpPermissions].sort(),
+    rig: responder.rig
+      ? {
+          name: responder.rig.name,
+          credentialHooks: [...responder.rig.credentialHooks].sort(),
+          checkHealth: responder.rig.checkHealth,
+        }
+      : null,
+    variableSets: [...responder.variableSets]
+      .map((set) => ({
+        name: set.name,
+        variables: set.variables.map((variable) => variable.name).sort(),
+      }))
+      .sort((left, right) => left.name.localeCompare(right.name)),
+  };
+  return {
+    version: 1,
+    toolPolicyVersion: responder.toolPolicyVersion,
+    responderDigest: createHash("sha256").update(stableJson(normalized)).digest("hex"),
+  };
+}
+
+export function parseIncidentTelemetryAuthorityFence(
+  lineage: Record<string, unknown>,
+): IncidentTelemetryAuthorityFence | null {
+  const raw = lineage[INCIDENT_TELEMETRY_AUTHORITY_FENCE_LINEAGE_KEY];
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const value = raw as Record<string, unknown>;
+  return value.version === 1 &&
+    typeof value.toolPolicyVersion === "number" &&
+    Number.isInteger(value.toolPolicyVersion) &&
+    value.toolPolicyVersion > 0 &&
+    typeof value.responderDigest === "string" &&
+    /^[0-9a-f]{64}$/.test(value.responderDigest)
+    ? {
+        version: 1,
+        toolPolicyVersion: value.toolPolicyVersion,
+        responderDigest: value.responderDigest,
+      }
+    : null;
 }
 
 function blocked(reason: IncidentTelemetryPreflightBlockReason): IncidentTelemetryPreflightResult {
@@ -200,5 +268,25 @@ function seriesMetadataSatisfies(dataSource: IncidentTelemetryPreflight["dataSou
         labels.has(dataSource.workspaceLabel) && required.labels.every((label) => labels.has(label))
       );
     }),
+  );
+}
+
+function alertSelectorsSatisfy(
+  dataSource: IncidentTelemetryPreflight["dataSource"],
+  occurrenceLabels: Readonly<Record<string, string>> | null,
+): boolean {
+  if (!occurrenceLabels) return false;
+  return dataSource.alertSelectorLabels.every(
+    (label) =>
+      label !== dataSource.workspaceLabel &&
+      typeof occurrenceLabels[label] === "string" &&
+      occurrenceLabels[label]!.length > 0 &&
+      dataSource.requiredSeries.every((series) => series.labels.includes(label)) &&
+      dataSource.availableSeries.some(
+        (series) =>
+          dataSource.requiredSeries.some((required) => required.metric === series.metric) &&
+          series.labels.includes(dataSource.workspaceLabel) &&
+          series.labels.includes(label),
+      ),
   );
 }

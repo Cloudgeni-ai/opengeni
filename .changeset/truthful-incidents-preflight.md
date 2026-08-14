@@ -6,4 +6,4 @@
 "@opengeni/worker-bundle": patch
 ---
 
-Add fail-closed, metadata-only capability, exact rig-version health, and data-source preflight for scheduled incident telemetry responders before expensive retrieval.
+Add fail-closed, metadata-only capability, exact rig-version health, exact alert-selector data-source checks, and source/claim authority fencing for scheduled incident telemetry responders before expensive retrieval.

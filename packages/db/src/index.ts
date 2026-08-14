@@ -13682,6 +13682,27 @@ export async function markScheduledTaskRunFailedIfQueued(
   });
 }
 
+/** Claim-time stale-authority settlement; no model/tool/sandbox work has started. */
+export async function markScheduledTaskRunAuthorityRejectedInTransaction(
+  tx: Database,
+  input: { workspaceId: string; runId: string },
+): Promise<void> {
+  await tx
+    .update(schema.scheduledTaskRuns)
+    .set({
+      status: "failed",
+      error: "incident_responder_under_capable",
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(schema.scheduledTaskRuns.workspaceId, input.workspaceId),
+        eq(schema.scheduledTaskRuns.id, input.runId),
+        inArray(schema.scheduledTaskRuns.status, ["queued", "dispatched"]),
+      ),
+    );
+}
+
 export async function updateScheduledTaskRun(
   db: Database,
   workspaceId: string,
@@ -47938,6 +47959,11 @@ export type ClaimSessionWorkForAttemptInput = {
   attemptId: string;
   dispatchId: string;
   trigger: SessionWorkTrigger;
+  /** Optional worker-owned mutable-authority fence for pending machine inputs. */
+  validatePendingSystemUpdateAuthority?: (
+    tx: Database,
+    update: SessionSystemUpdate,
+  ) => Promise<{ action: "accept" } | { action: "reject"; reason: string }>;
 };
 
 export type ClaimSessionWorkForAttemptResult =
@@ -48170,7 +48196,22 @@ export async function claimSessionWorkForAttempt(
           }
           const validUpdates: typeof updates = [];
           const cancelledUpdateIds: string[] = [];
+          const authorityRejectedUpdateIds: string[] = [];
           for (const update of updates) {
+            if (input.validatePendingSystemUpdateAuthority) {
+              const validation = await input.validatePendingSystemUpdateAuthority(
+                tx as unknown as Database,
+                mapSessionSystemUpdate(update),
+              );
+              if (validation.action === "reject") {
+                await tx
+                  .update(schema.sessionSystemUpdates)
+                  .set({ state: "failed", classification: "failure" })
+                  .where(eq(schema.sessionSystemUpdates.id, update.id));
+                authorityRejectedUpdateIds.push(update.id);
+                continue;
+              }
+            }
             const payload = update.payload;
             if (payload.type === "goal_continuation") {
               const goalId = typeof payload.goalId === "string" ? payload.goalId : null;
@@ -48219,36 +48260,56 @@ export async function claimSessionWorkForAttempt(
               systemUpdateExecutionAuthorityKey(candidate),
           );
           if (deliverable.length === 0) {
-            const cancellationEvent =
-              cancelledUpdateIds.length > 0
-                ? {
-                    accountId,
-                    workspaceId,
-                    sessionId,
-                    // No receiving turn exists when every candidate was
-                    // cancelled before a model batch could be persisted.
-                    turnId: null,
-                    turnGeneration: null,
-                    turnAttemptId: null,
-                    turnAssociation: null,
-                    sequence: nextSequence,
-                    type: "system.update.cancelled" as const,
-                    payload: {
-                      updateIds: cancelledUpdateIds,
-                      count: cancelledUpdateIds.length,
-                      reason: "stale_goal_continuation",
-                    },
-                    occurredAt,
-                  }
-                : null;
+            let sequence = nextSequence - 1;
+            const cancellationEvents: SessionEventInsertWithPayload[] = [];
+            if (cancelledUpdateIds.length > 0) {
+              cancellationEvents.push({
+                accountId,
+                workspaceId,
+                sessionId,
+                // No receiving turn exists when every candidate was
+                // cancelled before a model batch could be persisted.
+                turnId: null,
+                turnGeneration: null,
+                turnAttemptId: null,
+                turnAssociation: null,
+                sequence: ++sequence,
+                type: "system.update.cancelled" as const,
+                payload: {
+                  updateIds: cancelledUpdateIds,
+                  count: cancelledUpdateIds.length,
+                  reason: "stale_goal_continuation",
+                },
+                occurredAt,
+              });
+            }
+            if (authorityRejectedUpdateIds.length > 0) {
+              cancellationEvents.push({
+                accountId,
+                workspaceId,
+                sessionId,
+                turnId: null,
+                turnGeneration: null,
+                turnAttemptId: null,
+                turnAssociation: null,
+                sequence: ++sequence,
+                type: "system.update.cancelled" as const,
+                payload: {
+                  updateIds: authorityRejectedUpdateIds,
+                  count: authorityRejectedUpdateIds.length,
+                  reason: "stale_execution_authority",
+                },
+                occurredAt,
+              });
+            }
             return {
               count: 0,
-              lastSequence: cancellationEvent ? nextSequence : nextSequence - 1,
+              lastSequence: sequence,
               triggerEventId: null,
               historyItemId: null,
               historyItem: null,
               updates: [],
-              events: cancellationEvent ? [cancellationEvent] : [],
+              events: cancellationEvents,
               event: null,
             };
           }
@@ -48317,6 +48378,25 @@ export async function claimSessionWorkForAttempt(
                 updateIds: cancelledUpdateIds,
                 count: cancelledUpdateIds.length,
                 reason: "stale_goal_continuation",
+              },
+              occurredAt,
+            });
+          }
+          if (authorityRejectedUpdateIds.length > 0) {
+            events.push({
+              accountId,
+              workspaceId,
+              sessionId,
+              turnId,
+              turnGeneration,
+              turnAttemptId: input.attemptId,
+              turnAssociation: "current",
+              sequence: ++sequence,
+              type: "system.update.cancelled",
+              payload: {
+                updateIds: authorityRejectedUpdateIds,
+                count: authorityRejectedUpdateIds.length,
+                reason: "stale_execution_authority",
               },
               occurredAt,
             });
@@ -55156,6 +55236,11 @@ export type AddSessionSystemUpdateResult =
       events: SessionEvent[];
     };
 
+export type PrepareSessionSystemUpdateSourceResult = {
+  /** Private, bounded, content-free source authority appended before insert. */
+  lineage?: Record<string, unknown>;
+};
+
 export async function addSessionSystemUpdate(
   db: Database,
   input: AddSessionSystemUpdateInput,
@@ -55178,6 +55263,13 @@ export async function addSessionSystemUpdateWithSourceMutation(
     wakeEventId: string | null,
     updateId: string | null,
   ) => Promise<void>,
+  options: {
+    /** Runs under the locked session/source transaction before any update/event insert. */
+    prepareSource?: (
+      tx: Database,
+      sessionId: string,
+    ) => Promise<PrepareSessionSystemUpdateSourceResult | void>;
+  } = {},
 ): Promise<AddSessionSystemUpdateResult> {
   if (Buffer.byteLength(JSON.stringify(input.payload)) > MAX_INTERNAL_UPDATE_BYTES) {
     throw new Error(`Internal update payload exceeds ${MAX_INTERNAL_UPDATE_BYTES} bytes`);
@@ -55207,6 +55299,11 @@ export async function addSessionSystemUpdateWithSourceMutation(
           await mutateSource(tx as unknown as Database, null, null);
           return { added: false, reason: "session_cancelled" } as const;
         }
+        const prepared = await options.prepareSource?.(tx as unknown as Database, input.sessionId);
+        const lineage = {
+          ...(input.lineage ?? {}),
+          ...(prepared?.lineage ?? {}),
+        };
 
         const [inserted] = await tx
           .insert(schema.sessionSystemUpdates)
@@ -55223,7 +55320,7 @@ export async function addSessionSystemUpdateWithSourceMutation(
                   dedupeKey: input.dedupeKey,
                   summary: input.summary,
                   payload: input.payload,
-                  lineage: input.lineage ?? {},
+                  lineage,
                   personalConnectionDelegations: input.personalConnectionDelegations ?? [],
                   xaiProviderAccountAuthoritySnapshot:
                     input.xaiProviderAccountAuthoritySnapshot ??

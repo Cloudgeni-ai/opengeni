@@ -2219,6 +2219,7 @@ export type IncidentTelemetryPreflight = {
     kind: "prometheus";
     queryPath: "/api/v1/query" | "/api/v1/query_range";
     workspaceLabel: string;
+    alertSelectorLabels: string[];
     route: IncidentTelemetryDataRoute;
     requiredSeries: IncidentTelemetrySeriesMetadata[];
     availableSeries: IncidentTelemetrySeriesMetadata[];

@@ -770,15 +770,21 @@ servers, resolved first-party tool policy, and required first-party permissions.
 Before dispatch can create a run or session, the worker revalidates those
 selections together with passing rig verification health, exact credential-hook
 metadata, attached variable-set names and variable names, a targeted Prometheus
-query route, and configured alert-series label metadata. New responders use the
-rig's current active version; existing and reusable responders use their frozen
-exact rig version even after another version becomes active. A valid structured
-alert on a legacy task without the declaration fails closed before authority,
-admission, run, session, or retrieval work. The evaluator is pure and
-metadata-only: it cannot discover broad endpoints, fetch `/metrics`, decrypt a
-value, inspect ambient worker credentials, or expose private configuration in
-its fixed blocker result. Ordinary tasks and malformed/non-alert legacy metadata
-retain their existing path.
+query route, and configured non-workspace selector labels whose exact values
+come only from the validated structured alert occurrence. Workspace-only or
+mismatched series metadata is rejected. New responders use the rig's current
+active version; existing and reusable responders use their frozen exact rig
+version even after another version becomes active. The full preflight is repeated
+inside the locked scheduled-source settlement, which persists only a content-free
+responder-authority digest and exact tool-policy version. Claim revalidates that
+fence before any model, tool, sandbox, provider, or retrieval work; a narrowed
+responder fails the pending source instead of running with stale authority. A
+valid structured alert on a legacy task without the declaration fails closed
+before authority, admission, run, session, or retrieval work. The evaluator is
+pure and metadata-only: it cannot discover broad endpoints, fetch `/metrics`,
+decrypt a value, inspect ambient worker credentials, or expose private
+configuration in its fixed blocker result. Ordinary tasks and malformed/non-alert
+legacy metadata retain their existing path.
 
 The official Gmail MCP stays on the generic capability/connection path, but it
 is personal-only: each workspace member authorizes their own mailbox, and both

@@ -6872,6 +6872,9 @@ export const IncidentTelemetryPreflight = z
         // Exposition endpoints such as /metrics are deliberately excluded.
         queryPath: z.enum(["/api/v1/query", "/api/v1/query_range"]),
         workspaceLabel: IncidentTelemetryLabelName,
+        // Exact non-workspace labels whose values come from the validated
+        // structured alert occurrence and bound every telemetry query.
+        alertSelectorLabels: z.array(IncidentTelemetryLabelName).min(1).max(16),
         route: IncidentTelemetryDataRoute,
         requiredSeries: z.array(IncidentTelemetrySeriesMetadata).min(1).max(100),
         availableSeries: z.array(IncidentTelemetrySeriesMetadata).min(1).max(500),
@@ -6880,6 +6883,15 @@ export const IncidentTelemetryPreflight = z
   })
   .strict()
   .superRefine((value, context) => {
+    for (const [index, label] of value.dataSource.alertSelectorLabels.entries()) {
+      if (label === value.dataSource.workspaceLabel) {
+        context.addIssue({
+          code: "custom",
+          path: ["dataSource", "alertSelectorLabels", index],
+          message: "alert selector labels must be non-workspace labels",
+        });
+      }
+    }
     for (const [index, series] of value.dataSource.requiredSeries.entries()) {
       if (!series.labels.includes(value.dataSource.workspaceLabel)) {
         context.addIssue({
@@ -6887,6 +6899,15 @@ export const IncidentTelemetryPreflight = z
           path: ["dataSource", "requiredSeries", index, "labels"],
           message: "required incident series must include the workspace label",
         });
+      }
+      for (const label of value.dataSource.alertSelectorLabels) {
+        if (!series.labels.includes(label)) {
+          context.addIssue({
+            code: "custom",
+            path: ["dataSource", "requiredSeries", index, "labels"],
+            message: "required incident series must include every alert selector label",
+          });
+        }
       }
     }
   });

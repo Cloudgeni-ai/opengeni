@@ -30,6 +30,7 @@ function incidentConfig(): ScheduledTaskAgentConfig {
         kind: "prometheus",
         queryPath: "/api/v1/query_range",
         workspaceLabel: "workspace_id",
+        alertSelectorLabels: ["alertname"],
         route: {
           kind: "variable_set",
           variableSetName: "incident-production",
@@ -38,13 +39,13 @@ function incidentConfig(): ScheduledTaskAgentConfig {
         requiredSeries: [
           {
             metric: "opengeni_turn_worker_rss_bytes",
-            labels: ["workspace_id", "pod"],
+            labels: ["workspace_id", "alertname", "pod"],
           },
         ],
         availableSeries: [
           {
             metric: "opengeni_turn_worker_rss_bytes",
-            labels: ["workspace_id", "pod"],
+            labels: ["workspace_id", "alertname", "pod"],
           },
         ],
       },

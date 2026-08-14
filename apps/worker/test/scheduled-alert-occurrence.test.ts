@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   createDb,
+  claimSessionWorkForAttempt,
   createRig,
   createRigChange,
   createRigVersion,
@@ -22,6 +23,7 @@ import {
 } from "@opengeni/testing";
 import postgres from "postgres";
 import { createScheduledTaskActivities } from "../src/activities/scheduled-tasks";
+import { validateIncidentTelemetrySystemUpdateAuthority } from "../src/activities/incident-telemetry-authority";
 import type { ActivityServices } from "../src/activities/types";
 import { scheduledAlertOccurrenceIdentity } from "../src/scheduled-alert-occurrence";
 
@@ -95,6 +97,11 @@ describe("scheduled alert occurrence identity", () => {
     expect(first?.sessionCreateIdempotencyKey).not.toContain(
       "OpenGeniTurnWorkerMemoryConsumesReserve",
     );
+    expect(first?.labels).toEqual({
+      alertname: "OpenGeniTurnWorkerMemoryConsumesReserve",
+      service: "worker-turn",
+      severity: "warning",
+    });
   });
 
   test("separates tasks, exact starts, provider fingerprints, labels, providers, workspaces, and reopenings", () => {
@@ -239,6 +246,7 @@ async function taskFixture(
     runMode?: "new_session_per_run" | "reusable_session" | "existing_session";
     responderSessionId?: string;
     rig?: { id: string; name: string; credentialHookId: string };
+    availableSeriesLabels?: string[];
   } = {},
 ) {
   const runMode = options.runMode ?? "new_session_per_run";
@@ -276,12 +284,21 @@ async function taskFixture(
                 kind: "prometheus" as const,
                 queryPath: "/api/v1/query" as const,
                 workspaceLabel: "workspace_id",
+                alertSelectorLabels: ["alertname"],
                 route: options.underCapable
                   ? { kind: "mcp" as const, serverId: "missing-observability" }
                   : { kind: "first_party" as const, tool: "sessions_list" as const },
-                requiredSeries: [{ metric: "opengeni_alert_occurrence", labels: ["workspace_id"] }],
+                requiredSeries: [
+                  {
+                    metric: "opengeni_alert_occurrence",
+                    labels: ["workspace_id", "alertname"],
+                  },
+                ],
                 availableSeries: [
-                  { metric: "opengeni_alert_occurrence", labels: ["workspace_id"] },
+                  {
+                    metric: "opengeni_alert_occurrence",
+                    labels: options.availableSeriesLabels ?? ["workspace_id", "alertname"],
+                  },
                 ],
               },
             },
@@ -487,6 +504,145 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
         (select count(*)::int from session_events where workspace_id = ${workspace.workspaceId}) as events,
         (select count(*)::int from usage_events where workspace_id = ${workspace.workspaceId}) as usage`;
     expect(after).toEqual(before);
+  });
+
+  test("blocks workspace-only and mismatched series with zero durable dispatch side effects", async () => {
+    if (!shared || !client || !admin) return;
+    const workspace = await workspaceFixture();
+    const tasks = [
+      await taskFixture(workspace, alertMetadata(), {
+        availableSeriesLabels: ["workspace_id"],
+      }),
+      await taskFixture(workspace, alertMetadata(), {
+        availableSeriesLabels: ["workspace_id", "service"],
+      }),
+    ];
+    const snapshot = async () => {
+      const [row] = await admin!<
+        {
+          runs: number;
+          sessions: number;
+          events: number;
+          turns: number;
+          updates: number;
+          goals: number;
+          usage: number;
+        }[]
+      >`
+        select
+          (select count(*)::int from scheduled_task_runs where workspace_id = ${workspace.workspaceId}) as runs,
+          (select count(*)::int from sessions where workspace_id = ${workspace.workspaceId}) as sessions,
+          (select count(*)::int from session_events where workspace_id = ${workspace.workspaceId}) as events,
+          (select count(*)::int from session_turns where workspace_id = ${workspace.workspaceId}) as turns,
+          (select count(*)::int from session_system_updates where workspace_id = ${workspace.workspaceId}) as updates,
+          (select count(*)::int from session_goals where workspace_id = ${workspace.workspaceId}) as goals,
+          (select count(*)::int from usage_events where workspace_id = ${workspace.workspaceId}) as usage`;
+      return row!;
+    };
+    const before = await snapshot();
+
+    for (const task of tasks) {
+      expect(
+        await activities().dispatchScheduledTaskRun({
+          workspaceId: workspace.workspaceId,
+          taskId: task.id,
+          triggerType: "scheduled",
+          producerKey: `series-block-${task.id}`,
+        }),
+      ).toEqual({ action: "blocked", reason: "incident_data_source_unsuitable" });
+    }
+
+    expect(await snapshot()).toEqual(before);
+  });
+
+  test("rejects a source-frozen responder when authority narrows before claim", async () => {
+    if (!shared || !client || !admin) return;
+    const workspace = await workspaceFixture();
+    const task = await taskFixture(workspace);
+    const dispatch = await activities().dispatchScheduledTaskRun({
+      workspaceId: workspace.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey: `authority-fence-${crypto.randomUUID()}`,
+    });
+    expect(dispatch.action).toBe("start");
+    if (dispatch.action !== "start") return;
+
+    await admin!`
+      update sessions
+      set first_party_mcp_tools = '[]'::jsonb,
+          tool_policy_version = tool_policy_version + 1
+      where workspace_id = ${workspace.workspaceId} and id = ${dispatch.sessionId}`;
+
+    const claim = await claimSessionWorkForAttempt(client.db, workspace.workspaceId, {
+      sessionId: dispatch.sessionId,
+      workflowId: dispatch.workflowId,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+      validatePendingSystemUpdateAuthority: async (tx, update) =>
+        await validateIncidentTelemetrySystemUpdateAuthority({
+          db: tx,
+          settings: testSettings({
+            databaseUrl: shared!.appUrl,
+            sandboxBackend: "none",
+          }),
+          workspaceId: workspace.workspaceId,
+          sessionId: dispatch.sessionId,
+          update,
+        }),
+    });
+    expect(claim).toEqual({ action: "unclaimed", reason: "no-work" });
+
+    const [run] = await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10);
+    expect(run?.status).toBe("failed");
+    const [state] = await admin!<{ state: string; turns: number }[]>`
+      select
+        (select state from session_system_updates
+         where workspace_id = ${workspace.workspaceId}
+           and session_id = ${dispatch.sessionId}
+           and kind = 'scheduled_occurrence'
+         order by created_at desc limit 1) as state,
+        (select count(*)::int from session_turns
+         where workspace_id = ${workspace.workspaceId}
+           and session_id = ${dispatch.sessionId}) as turns`;
+    expect(state).toEqual({ state: "failed", turns: 0 });
+  });
+
+  test("claims an unchanged source-frozen capable responder", async () => {
+    if (!shared || !client) return;
+    const workspace = await workspaceFixture();
+    const task = await taskFixture(workspace);
+    const dispatch = await activities().dispatchScheduledTaskRun({
+      workspaceId: workspace.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey: `authority-fence-valid-${crypto.randomUUID()}`,
+    });
+    expect(dispatch.action).toBe("start");
+    if (dispatch.action !== "start") return;
+
+    const claim = await claimSessionWorkForAttempt(client.db, workspace.workspaceId, {
+      sessionId: dispatch.sessionId,
+      workflowId: dispatch.workflowId,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+      validatePendingSystemUpdateAuthority: async (tx, update) =>
+        await validateIncidentTelemetrySystemUpdateAuthority({
+          db: tx,
+          settings: testSettings({
+            databaseUrl: shared!.appUrl,
+            sandboxBackend: "none",
+          }),
+          workspaceId: workspace.workspaceId,
+          sessionId: dispatch.sessionId,
+          update,
+        }),
+    });
+    expect(claim.action).toBe("claimed");
   });
 
   test("blocks an active but unverified incident rig before creating a run or session", async () => {

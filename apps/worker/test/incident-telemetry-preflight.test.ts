@@ -42,6 +42,7 @@ function incidentConfig(): ScheduledTaskAgentConfig {
         kind: "prometheus",
         queryPath: "/api/v1/query_range",
         workspaceLabel: "workspace_id",
+        alertSelectorLabels: ["alertname"],
         route: {
           kind: "variable_set",
           variableSetName: "incident-production",
@@ -50,13 +51,13 @@ function incidentConfig(): ScheduledTaskAgentConfig {
         requiredSeries: [
           {
             metric: "opengeni_turn_worker_rss_bytes",
-            labels: ["workspace_id", "pod"],
+            labels: ["workspace_id", "alertname", "pod"],
           },
         ],
         availableSeries: [
           {
             metric: "opengeni_turn_worker_rss_bytes",
-            labels: ["workspace_id", "pod", "region"],
+            labels: ["workspace_id", "alertname", "pod", "region"],
           },
         ],
       },
@@ -87,6 +88,7 @@ function responder(
         variables: [{ name: "PROMETHEUS_TOKEN" }, { name: "PROMETHEUS_URL" }],
       },
     ],
+    toolPolicyVersion: 1,
     ...overrides,
   };
 }
@@ -95,10 +97,14 @@ function evaluate(
   agentConfig: ScheduledTaskAgentConfig,
   overrides: Partial<IncidentTelemetryResponderMetadata> = {},
   incidentTriggered = false,
+  alertOccurrenceLabels: Readonly<Record<string, string>> | null = {
+    alertname: "OpenGeniTurnWorkerMemoryConsumesReserve",
+  },
 ) {
   return evaluateIncidentTelemetryPreflight({
     agentConfig,
     incidentTriggered,
+    alertOccurrenceLabels,
     responder: responder(overrides),
   });
 }
@@ -106,7 +112,7 @@ function evaluate(
 describe("incident telemetry dispatch preflight", () => {
   test("does not affect ordinary or malformed non-alert scheduled tasks", () => {
     const ordinary = { prompt: "ordinary task", resources: [], tools: [], metadata: {} };
-    expect(evaluate(ordinary)).toEqual({ action: "not_required" });
+    expect(evaluate(ordinary, {}, false, null)).toEqual({ action: "not_required" });
     expect(incidentTelemetryPreflightDeclaration(ordinary, false)).toEqual({
       action: "not_required",
     });
@@ -179,6 +185,24 @@ describe("incident telemetry dispatch preflight", () => {
       "workspace_id",
     ];
     expect(evaluate(missingLabels)).toEqual({
+      action: "blocked",
+      reason: "incident_data_source_unsuitable",
+    });
+
+    const mismatchedSelector = incidentConfig();
+    mismatchedSelector.incidentTelemetryPreflight!.dataSource.alertSelectorLabels = ["service"];
+    mismatchedSelector.incidentTelemetryPreflight!.dataSource.requiredSeries[0]!.labels.push(
+      "service",
+    );
+    mismatchedSelector.incidentTelemetryPreflight!.dataSource.availableSeries[0]!.labels.push(
+      "service",
+    );
+    expect(evaluate(mismatchedSelector)).toEqual({
+      action: "blocked",
+      reason: "incident_data_source_unsuitable",
+    });
+
+    expect(evaluate(incidentConfig(), {}, false, null)).toEqual({
       action: "blocked",
       reason: "incident_data_source_unsuitable",
     });

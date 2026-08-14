@@ -25,6 +25,7 @@ const preflight = {
     kind: "prometheus",
     queryPath: "/api/v1/query_range",
     workspaceLabel: "workspace_id",
+    alertSelectorLabels: ["alertname"],
     route: {
       kind: "variable_set",
       variableSetName: "incident-production",
@@ -33,13 +34,13 @@ const preflight = {
     requiredSeries: [
       {
         metric: "opengeni_turn_worker_rss_bytes",
-        labels: ["workspace_id", "pod"],
+        labels: ["workspace_id", "alertname", "pod"],
       },
     ],
     availableSeries: [
       {
         metric: "opengeni_turn_worker_rss_bytes",
-        labels: ["workspace_id", "pod", "region"],
+        labels: ["workspace_id", "alertname", "pod", "region"],
       },
     ],
   },
@@ -112,6 +113,26 @@ describe("scheduled incident telemetry contract", () => {
         dataSource: {
           ...preflight.dataSource,
           requiredSeries: [{ metric: "opengeni_turn_worker_rss_bytes", labels: [] }],
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      IncidentTelemetryPreflight.safeParse({
+        ...preflight,
+        dataSource: {
+          ...preflight.dataSource,
+          alertSelectorLabels: ["workspace_id"],
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      IncidentTelemetryPreflight.safeParse({
+        ...preflight,
+        dataSource: {
+          ...preflight.dataSource,
+          requiredSeries: [
+            { metric: "opengeni_turn_worker_rss_bytes", labels: ["workspace_id", "pod"] },
+          ],
         },
       }).success,
     ).toBe(false);
