@@ -49,6 +49,51 @@ describe("observability", () => {
     expect(metrics).toContain("opengeni_process_cpu_user_seconds_total");
   });
 
+  test("reports bounded configured and effective sandbox rollout state", async () => {
+    const obs = createObservability(
+      {
+        ...settings,
+        sandboxOwnershipEnabled: true,
+        sandboxLazyProvisionEnabled: true,
+        rigVerificationLeaseOwnershipEnabled: false,
+      },
+      { component: "worker-turn", now: () => 1 },
+    );
+
+    const metrics = await obs.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_sandbox_rollout_config\{[^}]*feature="ownership"[^}]*state="effective"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_sandbox_rollout_config\{[^}]*feature="lazy_provision"[^}]*state="effective"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_sandbox_rollout_config\{[^}]*feature="rig_verification_lease_ownership"[^}]*state="effective"[^}]*\} 0\b/,
+    );
+    expect(metrics).toContain('deployment_revision="revision-test"');
+    expect(metrics).toContain('component="worker-turn"');
+  });
+
+  test("reports lazy provisioning as configured but ineffective without ownership", async () => {
+    const obs = createObservability(
+      {
+        ...settings,
+        sandboxOwnershipEnabled: false,
+        sandboxLazyProvisionEnabled: true,
+        rigVerificationLeaseOwnershipEnabled: false,
+      },
+      { component: "api", now: () => 1 },
+    );
+
+    const metrics = await obs.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_sandbox_rollout_config\{[^}]*feature="lazy_provision"[^}]*state="configured"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_sandbox_rollout_config\{[^}]*feature="lazy_provision"[^}]*state="effective"[^}]*\} 0\b/,
+    );
+  });
+
   test("registers generic counters gauges and histograms with bounded labels", async () => {
     const obs = createObservability(settings, { component: "worker", now: () => 1 });
     obs.incrementCounter({
