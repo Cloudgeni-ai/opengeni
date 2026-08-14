@@ -1055,3 +1055,97 @@ index 773f1fc48bf8758d642bd51f8c062efbf08f5c45..3540413d2bdac08df13084f0b98545bc
          const consumedExactClones = new WeakSet();
          const injectedExactCloneIndexes = new Set();
          // Preserve a pointer to the original object backing each filtered clone so downstream
+diff --git a/dist/runner/modelOutputs.js b/dist/runner/modelOutputs.js
+index c9d44147563f79619b754013800494811c180e22..ddd315188141369162b826bf6fa80c7fb5ca31da 100644
+--- a/dist/runner/modelOutputs.js
++++ b/dist/runner/modelOutputs.js
+@@ -274,6 +274,33 @@ function buildGeneratedClientToolSearchOutputMap(modelResponse, tools, hasClient
+     }
+     return generatedOutputs;
+ }
++function mergeClientToolSearchExecutionTools(availableTools, runtimeTools) {
++    const availableIndexByKey = new Map();
++    for (let index = 0; index < availableTools.length; index++) {
++        const key = (0, tool_1.getToolSearchRuntimeRoutingKey)(availableTools[index]);
++        if (key && !availableIndexByKey.has(key)) {
++            availableIndexByKey.set(key, index);
++        }
++    }
++    for (const runtimeTool of runtimeTools) {
++        const key = (0, tool_1.getToolSearchRuntimeRoutingKey)(runtimeTool);
++        if (!key) {
++            if (!availableTools.includes(runtimeTool)) {
++                availableTools.push(runtimeTool);
++            }
++            continue;
++        }
++        const existingIndex = availableIndexByKey.get(key);
++        if (existingIndex === undefined) {
++            availableIndexByKey.set(key, availableTools.length);
++            availableTools.push(runtimeTool);
++            continue;
++        }
++        if (availableTools[existingIndex] !== runtimeTool) {
++            availableTools[existingIndex] = runtimeTool;
++        }
++    }
++}
+ async function buildGeneratedClientToolSearchOutputMapAsync(args) {
+     const { agent, handoffs, modelResponse, replaceableRuntimeToolKeys, runContext, tools, } = args;
+     const clientToolSearchTool = (0, toolSearch_1.getClientToolSearchHelper)(tools);
+@@ -307,7 +334,7 @@ async function buildGeneratedClientToolSearchOutputMapAsync(args) {
+                 runtimeTools: generatedOutput.runtimeTools,
+             });
+             generatedOutputs.set(toolSearchCall, generatedOutput);
+-            executionTools.push(...generatedOutput.callbackRuntimeTools);
++            mergeClientToolSearchExecutionTools(executionTools, generatedOutput.callbackRuntimeTools);
+             continue;
+         }
+         generatedOutputs.set(toolSearchCall, {
+diff --git a/dist/runner/modelOutputs.mjs b/dist/runner/modelOutputs.mjs
+index 34dc1b761aee009ea97f2a26529f7246c44d018e..24a929cfd887fdb913992293e4129bbd10ce4646 100644
+--- a/dist/runner/modelOutputs.mjs
++++ b/dist/runner/modelOutputs.mjs
+@@ -270,6 +270,33 @@ function buildGeneratedClientToolSearchOutputMap(modelResponse, tools, hasClient
+     }
+     return generatedOutputs;
+ }
++function mergeClientToolSearchExecutionTools(availableTools, runtimeTools) {
++    const availableIndexByKey = new Map();
++    for (let index = 0; index < availableTools.length; index++) {
++        const key = getToolSearchRuntimeRoutingKey(availableTools[index]);
++        if (key && !availableIndexByKey.has(key)) {
++            availableIndexByKey.set(key, index);
++        }
++    }
++    for (const runtimeTool of runtimeTools) {
++        const key = getToolSearchRuntimeRoutingKey(runtimeTool);
++        if (!key) {
++            if (!availableTools.includes(runtimeTool)) {
++                availableTools.push(runtimeTool);
++            }
++            continue;
++        }
++        const existingIndex = availableIndexByKey.get(key);
++        if (existingIndex === undefined) {
++            availableIndexByKey.set(key, availableTools.length);
++            availableTools.push(runtimeTool);
++            continue;
++        }
++        if (availableTools[existingIndex] !== runtimeTool) {
++            availableTools[existingIndex] = runtimeTool;
++        }
++    }
++}
+ async function buildGeneratedClientToolSearchOutputMapAsync(args) {
+     const { agent, handoffs, modelResponse, replaceableRuntimeToolKeys, runContext, tools, } = args;
+     const clientToolSearchTool = getClientToolSearchHelper(tools);
+@@ -303,7 +330,7 @@ async function buildGeneratedClientToolSearchOutputMapAsync(args) {
+                 runtimeTools: generatedOutput.runtimeTools,
+             });
+             generatedOutputs.set(toolSearchCall, generatedOutput);
+-            executionTools.push(...generatedOutput.callbackRuntimeTools);
++            mergeClientToolSearchExecutionTools(executionTools, generatedOutput.callbackRuntimeTools);
+             continue;
+         }
+         generatedOutputs.set(toolSearchCall, {
