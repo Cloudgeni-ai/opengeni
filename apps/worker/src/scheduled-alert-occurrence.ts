@@ -1,13 +1,14 @@
 import { createHash } from "node:crypto";
 
 const MAX_SCHEDULED_TASK_ID_BYTES = 256;
+const MAX_STARTS_AT_BYTES = 256;
 const MAX_PROVIDER_BYTES = 256;
 const MAX_FINGERPRINT_BYTES = 1_024;
 const MAX_LABELS = 256;
 const MAX_LABEL_KEY_BYTES = 256;
 const MAX_LABEL_VALUE_BYTES = 4_096;
 const OFFSET_TIMESTAMP =
-  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/;
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?(?:Z|[+-](\d{2}):(\d{2}))$/;
 
 export type ScheduledAlertOccurrenceDeclaration = {
   status: "firing" | "resolved";
@@ -86,7 +87,44 @@ function boundedString(value: unknown, maxBytes: number): string | null {
 function canonicalTimestamp(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
-  if (!OFFSET_TIMESTAMP.test(trimmed)) return null;
+  if (!trimmed || Buffer.byteLength(trimmed, "utf8") > MAX_STARTS_AT_BYTES) return null;
+  const match = OFFSET_TIMESTAMP.exec(trimmed);
+  if (!match) return null;
+  const [
+    ,
+    yearText,
+    monthText,
+    dayText,
+    hourText,
+    minuteText,
+    secondText,
+    ,
+    offsetHourText,
+    offsetMinuteText,
+  ] = match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const second = secondText === undefined ? 0 : Number(secondText);
+  const offsetHour = offsetHourText === undefined ? 0 : Number(offsetHourText);
+  const offsetMinute = offsetMinuteText === undefined ? 0 : Number(offsetMinuteText);
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  if (
+    month < 1 ||
+    month > 12 ||
+    day < 1 ||
+    day > daysInMonth[month - 1]! ||
+    hour > 23 ||
+    minute > 59 ||
+    second > 59 ||
+    offsetHour > 23 ||
+    offsetMinute > 59
+  ) {
+    return null;
+  }
   const parsed = new Date(trimmed);
   return Number.isFinite(parsed.getTime()) ? trimmed : null;
 }

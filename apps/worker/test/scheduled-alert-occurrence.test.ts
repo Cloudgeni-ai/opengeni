@@ -105,6 +105,7 @@ describe("scheduled alert occurrence identity", () => {
       })?.sessionCreateIdempotencyKey;
     const original = key(alertMetadata());
 
+    expect(key(alertMetadata({ startsAt: "2028-02-29T15:10:29Z" }))).toBeDefined();
     expect(key(alertMetadata({ startsAt: "2026-08-13T16:10:29Z" }))).not.toBe(original);
     expect(key(alertMetadata({ startsAt: "2026-08-13T17:10:29+02:00" }))).not.toBe(original);
     expect(key(alertMetadata({ fingerprint: "provider-fingerprint-2" }))).not.toBe(original);
@@ -164,6 +165,10 @@ describe("scheduled alert occurrence identity", () => {
           labels: { alertname: 7 },
         },
       },
+      alertMetadata({ startsAt: "2026-02-30T15:10:29Z" }),
+      alertMetadata({ startsAt: "2026-08-13T24:00:00Z" }),
+      alertMetadata({ startsAt: "2026-08-13T15:10:29+24:00" }),
+      alertMetadata({ startsAt: `2026-08-13T15:10:29.${"1".repeat(257)}Z` }),
     ]) {
       expect(
         scheduledAlertOccurrenceIdentity({ workspaceId, scheduledTaskId, metadata }),
