@@ -87,6 +87,19 @@ describe("migration 0205 attempt tool catalogs", () => {
         "session_attempt_codemode_calls_lifecycle_check",
       );
 
+      const codemodeAuthorityColumns = await sql<Array<{ name: string; nullable: string }>>`
+        select column_name as name, is_nullable as nullable
+        from information_schema.columns
+        where table_schema = current_schema()
+          and table_name = 'session_attempt_codemode_calls'
+          and column_name in ('turn_id', 'attempt_id', 'execution_generation')
+        order by column_name`;
+      expect([...codemodeAuthorityColumns]).toEqual([
+        { name: "attempt_id", nullable: "NO" },
+        { name: "execution_generation", nullable: "NO" },
+        { name: "turn_id", nullable: "NO" },
+      ]);
+
       const [role] = await sql<Array<{ exists: boolean }>>`
         select to_regrole('opengeni_app') is not null as exists`;
       if (role?.exists) {

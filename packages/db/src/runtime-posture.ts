@@ -42,6 +42,14 @@ const DEDICATED_ARTIFACT_CAPABILITY_ROUTINES = new Set<string>([
   ...ARTIFACT_LIVE_TICKET_INTERNAL_ROUTINES,
 ]);
 
+const PROVIDER_LOSS_TRIGGER_ONLY_ROUTINES = [
+  "guard_provider_loss_claim_mutation()",
+  "guard_provider_loss_receipt_mutation()",
+  "guard_provider_loss_claim_fence()",
+  "guard_provider_loss_lease_mutation()",
+] as const;
+const PROVIDER_LOSS_TRIGGER_ONLY_ROUTINE_SET = new Set<string>(PROVIDER_LOSS_TRIGGER_ONLY_ROUTINES);
+
 const KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE =
   "knowledge_source_sync_lock_authority(uuid, uuid, uuid)";
 const KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_TABLES = [
@@ -280,6 +288,8 @@ export const FORCE_RLS_TABLES = [
   "sandbox_checkpoint_artifacts",
   "sandbox_lease_holders",
   "sandbox_leases",
+  "sandbox_provider_loss_receipts",
+  "sandbox_provider_loss_teardown_claims",
   "sandbox_pty_sessions",
   "sandbox_retained_processes",
   "sandbox_session_envelopes",
@@ -637,6 +647,8 @@ export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
   "interaction_operations",
   "interaction_resource_operations",
   "network_routes",
+  "sandbox_provider_loss_receipts",
+  "sandbox_provider_loss_teardown_claims",
   "session_attempt_codemode_calls",
   "site_auth_connections",
   "slack_user_link_access_requests",
@@ -1538,6 +1550,22 @@ export function evaluateRuntimeDatabasePosture(
     }
   }
 
+  const providerLossClaims = tableByName.get("sandbox_provider_loss_teardown_claims");
+  const providerLossReceipts = tableByName.get("sandbox_provider_loss_receipts");
+  if (providerLossClaims || providerLossReceipts) {
+    for (const expectedRoutine of PROVIDER_LOSS_TRIGGER_ONLY_ROUTINES) {
+      const matches = posture.privateRoutines.filter((routine) => routine.name === expectedRoutine);
+      if (matches.length !== 1) {
+        violations.push(`provider-loss trigger guard ${expectedRoutine} is missing or ambiguous`);
+        continue;
+      }
+      const routine = matches[0]!;
+      if (routine.execute) {
+        violations.push(`runtime role has forbidden provider-loss trigger guard ${routine.name}`);
+      }
+    }
+  }
+
   if (posture.privateRoutines.length === 0) {
     violations.push("opengeni_private has no helper routines");
   }
@@ -1545,8 +1573,10 @@ export function evaluateRuntimeDatabasePosture(
     if (routine.owner === expectedRole) {
       violations.push(`runtime role owns private routine ${routine.name}`);
     }
-    const dedicatedArtifactCapability = DEDICATED_ARTIFACT_CAPABILITY_ROUTINES.has(routine.name);
-    if (!routine.execute && !dedicatedArtifactCapability) {
+    const intentionallyUnavailable =
+      DEDICATED_ARTIFACT_CAPABILITY_ROUTINES.has(routine.name) ||
+      PROVIDER_LOSS_TRIGGER_ONLY_ROUTINE_SET.has(routine.name);
+    if (!routine.execute && !intentionallyUnavailable) {
       violations.push(`runtime role lacks EXECUTE on private routine ${routine.name}`);
     }
   }
