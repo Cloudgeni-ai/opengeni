@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { stableJson } from "@opengeni/contracts";
-import { and, asc, eq, or, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, or, sql } from "drizzle-orm";
 
 import type { Database } from "./database";
 import { effectiveCapabilityOwnerSql } from "./capability-components";
@@ -248,7 +248,14 @@ export async function listIntegrationFacetBindingOwners(
   db: Database,
   bindingId: string,
 ): Promise<IntegrationFacetBindingOwner[]> {
-  return await loadIntegrationFacetBindingOwners(db, bindingId, true);
+  return (await listIntegrationFacetBindingOwnersForBindings(db, [bindingId])).get(bindingId) ?? [];
+}
+
+export async function listIntegrationFacetBindingOwnersForBindings(
+  db: Database,
+  bindingIds: string[],
+): Promise<Map<string, IntegrationFacetBindingOwner[]>> {
+  return await loadIntegrationFacetBindingOwnersForBindings(db, bindingIds, true);
 }
 
 async function loadIntegrationFacetBindingOwners(
@@ -256,8 +263,26 @@ async function loadIntegrationFacetBindingOwners(
   bindingId: string,
   effectiveOnly: boolean,
 ): Promise<IntegrationFacetBindingOwner[]> {
+  return (
+    (await loadIntegrationFacetBindingOwnersForBindings(db, [bindingId], effectiveOnly)).get(
+      bindingId,
+    ) ?? []
+  );
+}
+
+async function loadIntegrationFacetBindingOwnersForBindings(
+  db: Database,
+  bindingIds: string[],
+  effectiveOnly: boolean,
+): Promise<Map<string, IntegrationFacetBindingOwner[]>> {
+  const uniqueBindingIds = [...new Set(bindingIds)];
+  const ownersByBindingId = new Map(
+    uniqueBindingIds.map((bindingId) => [bindingId, [] as IntegrationFacetBindingOwner[]]),
+  );
+  if (uniqueBindingIds.length === 0) return ownersByBindingId;
   const rows = await db
     .select({
+      bindingId: schema.integrationFacetBindingOwners.bindingId,
       kind: schema.integrationFacetBindingOwners.ownerKind,
       id: schema.integrationFacetBindingOwners.ownerId,
       removable: schema.integrationFacetBindingOwners.removable,
@@ -265,7 +290,7 @@ async function loadIntegrationFacetBindingOwners(
     .from(schema.integrationFacetBindingOwners)
     .where(
       and(
-        eq(schema.integrationFacetBindingOwners.bindingId, bindingId),
+        inArray(schema.integrationFacetBindingOwners.bindingId, uniqueBindingIds),
         effectiveOnly
           ? effectiveCapabilityOwnerSql(
               schema.integrationFacetBindingOwners.ownerKind,
@@ -275,10 +300,11 @@ async function loadIntegrationFacetBindingOwners(
       ),
     )
     .orderBy(
+      asc(schema.integrationFacetBindingOwners.bindingId),
       asc(schema.integrationFacetBindingOwners.ownerKind),
       asc(schema.integrationFacetBindingOwners.ownerId),
     );
-  return rows.map((row) => {
+  for (const row of rows) {
     if (
       row.kind !== "direct" &&
       row.kind !== "plugin" &&
@@ -287,8 +313,11 @@ async function loadIntegrationFacetBindingOwners(
     ) {
       throw new Error(`Unknown Integration instance owner kind: ${row.kind}`);
     }
-    return { kind: row.kind, id: row.id, removable: row.removable };
-  });
+    ownersByBindingId
+      .get(row.bindingId)
+      ?.push({ kind: row.kind, id: row.id, removable: row.removable });
+  }
+  return ownersByBindingId;
 }
 
 export async function removeIntegrationFacetBindingOwner(

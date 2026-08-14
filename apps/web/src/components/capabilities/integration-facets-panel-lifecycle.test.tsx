@@ -1,7 +1,7 @@
-import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { act, type ComponentProps } from "react";
+import { act, type ComponentProps, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 
 import type {
@@ -14,7 +14,45 @@ import type {
   GoogleDriveFacetMutation,
   GoogleDriveKnowledgeSourceDialogProps,
 } from "./google-drive-knowledge-source-dialog";
-import { IntegrationFacetsPanel } from "./integration-facets-panel";
+
+const toastSuccess = mock(() => undefined);
+const toastError = mock(() => undefined);
+
+mock.module("sonner", () => ({
+  toast: {
+    success: toastSuccess,
+    error: toastError,
+    info: mock(() => undefined),
+    warning: mock(() => undefined),
+  },
+}));
+
+mock.module("@/components/ui/confirm-dialog", () => ({
+  ConfirmDialog: ({
+    open,
+    title,
+    description,
+    confirmLabel,
+    onConfirm,
+  }: {
+    open: boolean;
+    title: ReactNode;
+    description?: ReactNode;
+    confirmLabel: string;
+    onConfirm: () => void | boolean | Promise<void | boolean>;
+  }) =>
+    open ? (
+      <div data-slot="dialog-content">
+        <h2>{title}</h2>
+        <p>{description}</p>
+        <button type="button" onClick={() => void onConfirm()}>
+          {confirmLabel}
+        </button>
+      </div>
+    ) : null,
+}));
+
+const { IntegrationFacetsPanel } = await import("./integration-facets-panel");
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -23,7 +61,15 @@ beforeAll(() => {
   ).IS_REACT_ACT_ENVIRONMENT = true;
 });
 
-afterAll(() => GlobalRegistrator.unregister());
+afterAll(() => {
+  mock.restore();
+  GlobalRegistrator.unregister();
+});
+
+beforeEach(() => {
+  toastSuccess.mockClear();
+  toastError.mockClear();
+});
 
 describe("Integration Facet lifecycle state", () => {
   test("applies the authoritative lifecycle result without a stale list refetch", async () => {
@@ -113,6 +159,72 @@ describe("Integration Facet lifecycle state", () => {
     } finally {
       await rendered.unmount();
     }
+  });
+
+  test("refreshes an open facet panel when the parent service list is refreshed", async () => {
+    const active = binding("active", 1);
+    const paused = binding("paused", 2);
+    let listCount = 0;
+    const listIntegrationFacets = mock(async () => response(listCount++ === 0 ? active : paused));
+    const client = { listIntegrationFacets } as unknown as OpenGeniCoreClient;
+    const rendered = await renderPanel({ client });
+    try {
+      await act(async () => button(rendered.container, "Manage facets").click());
+      await waitFor(() => rendered.container.textContent?.includes("Active") === true);
+
+      await rendered.rerender({ client, refreshRevision: 1 });
+      await waitFor(() => listIntegrationFacets.mock.calls.length === 2);
+      await waitFor(() => rendered.container.textContent?.includes("Paused") === true);
+
+      expect(rendered.container.textContent).not.toContain("Active");
+      expect(
+        rendered.container.querySelector('[data-integration-facets="finance"]'),
+      ).not.toBeNull();
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("suppresses a pending lifecycle result and toast after unmount", async () => {
+    const active = binding("active", 1);
+    const paused = binding("paused", 2);
+    type LifecycleResult = {
+      capabilityId: string;
+      instanceKey: string;
+      facetKey: string;
+      status: "paused";
+      binding: IntegrationFacetBindingSummary;
+    };
+    let resolvePause!: (result: LifecycleResult) => void;
+    const pendingPause = new Promise<LifecycleResult>((resolve) => {
+      resolvePause = resolve;
+    });
+    const pauseIntegrationFacet = mock(async () => await pendingPause);
+    const client = {
+      listIntegrationFacets: mock(async () => response(active)),
+      pauseIntegrationFacet,
+    } as unknown as OpenGeniCoreClient;
+    const rendered = await renderPanel({ client });
+
+    await act(async () => button(rendered.container, "Manage facets").click());
+    await waitFor(() => rendered.container.textContent?.includes("Active") === true);
+    await act(async () => button(rendered.container, "Pause").click());
+    await waitFor(() => pauseIntegrationFacet.mock.calls.length === 1);
+
+    await rendered.unmount();
+    await act(async () =>
+      resolvePause({
+        capabilityId: instance.capabilityId,
+        instanceKey: instance.instanceKey,
+        facetKey: "inventory-source",
+        status: "paused",
+        binding: paused,
+      }),
+    );
+    await act(async () => await Bun.sleep(0));
+
+    expect(toastSuccess).not.toHaveBeenCalled();
+    expect(toastError).not.toHaveBeenCalled();
   });
 
   test("applies concurrent lifecycle results for different facets independently", async () => {
@@ -326,6 +438,107 @@ describe("Integration Facet lifecycle state", () => {
       await rendered.unmount();
     }
   });
+
+  test("renders a Pack-owned facet as shared and read-only", async () => {
+    const packOwned = binding("active", 1, "inventory-source", "402", [packOwner]);
+    const client = {
+      listIntegrationFacets: mock(async () => response(packOwned)),
+    } as unknown as OpenGeniCoreClient;
+    const rendered = await renderPanel({ client });
+    try {
+      await act(async () => button(rendered.container, "Manage facets").click());
+      await waitFor(() => facet(rendered.container, "inventory-source") !== null);
+
+      const row = requiredFacet(rendered.container, "inventory-source");
+      expect(row.textContent).toContain("Shared");
+      expect(row.textContent).toContain("Managed by another Pack");
+      expect(button(row, "Edit").disabled).toBe(true);
+      expect(optionalButton(row, "Pause")).toBeNull();
+      expect(optionalButton(row, "Remove")).toBeNull();
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("does not treat another direct installation as this facet's owner", async () => {
+    const otherDirectOwner = {
+      kind: "direct" as const,
+      id: "facet:another-direct-installation",
+      removable: true,
+    };
+    const externallyManaged = binding(
+      "active",
+      1,
+      "inventory-source",
+      "452",
+      [otherDirectOwner],
+      false,
+    );
+    const client = {
+      listIntegrationFacets: mock(async () => response(externallyManaged)),
+    } as unknown as OpenGeniCoreClient;
+    const rendered = await renderPanel({ client });
+    try {
+      await act(async () => button(rendered.container, "Manage facets").click());
+      await waitFor(() => facet(rendered.container, "inventory-source") !== null);
+
+      const row = requiredFacet(rendered.container, "inventory-source");
+      expect(row.textContent).toContain("Shared");
+      expect(row.textContent).toContain("Managed by another direct installation");
+      expect(button(row, "Edit").disabled).toBe(true);
+      expect(optionalButton(row, "Pause")).toBeNull();
+      expect(optionalButton(row, "Remove")).toBeNull();
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("removes only direct control when another owner retains the facet", async () => {
+    const directlyShared = binding("active", 1, "inventory-source", "502", [
+      directOwner,
+      packOwner,
+    ]);
+    const retained = binding("active", 1, "inventory-source", "502", [packOwner]);
+    const removeIntegrationFacet = mock(async () => ({
+      capabilityId: instance.capabilityId,
+      instanceKey: instance.instanceKey,
+      facetKey: "inventory-source",
+      status: "retained_by_other_owners" as const,
+      binding: retained,
+      remainingOwners: [packOwner],
+    }));
+    const client = {
+      listIntegrationFacets: mock(async () => response(directlyShared)),
+      removeIntegrationFacet,
+    } as unknown as OpenGeniCoreClient;
+    const rendered = await renderPanel({ client });
+    try {
+      await act(async () => button(rendered.container, "Manage facets").click());
+      await waitFor(() => facet(rendered.container, "inventory-source") !== null);
+
+      const row = requiredFacet(rendered.container, "inventory-source");
+      await act(async () => button(row, "Remove direct control").click());
+      await waitFor(() => document.body.querySelector('[data-slot="dialog-content"]') !== null);
+      const removeDialog = document.body.querySelector('[data-slot="dialog-content"]');
+      if (!removeDialog) throw new Error("Missing remove-direct-control dialog");
+      await act(async () => button(removeDialog, "Remove direct control").click());
+      await waitFor(() => removeIntegrationFacet.mock.calls.length === 1);
+      await waitFor(
+        () =>
+          requiredFacet(rendered.container, "inventory-source").textContent?.includes("Active") ===
+          true,
+      );
+
+      const retainedRow = requiredFacet(rendered.container, "inventory-source");
+      expect(retainedRow.textContent).toContain("Shared");
+      expect(retainedRow.textContent).toContain("Managed by another Pack");
+      expect(button(retainedRow, "Edit").disabled).toBe(true);
+      expect(optionalButton(retainedRow, "Pause")).toBeNull();
+      expect(optionalButton(retainedRow, "Remove")).toBeNull();
+    } finally {
+      await rendered.unmount();
+    }
+  });
 });
 
 async function openGoogleDriveEditor(container: ParentNode, instanceKey: string): Promise<void> {
@@ -362,6 +575,7 @@ async function renderPanel(props: Partial<ComponentProps<typeof IntegrationFacet
           canManagePersonalDestination
           canManageWorkspaceDestination
           canManageOrganizationDestination={false}
+          refreshRevision={0}
           GoogleDriveDialog={() => null}
           {...nextProps}
         />,
@@ -389,13 +603,19 @@ async function waitFor(predicate: () => boolean): Promise<void> {
 }
 
 function button(container: ParentNode, label: string): HTMLButtonElement {
-  const match = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
-    (candidate) =>
-      candidate.getAttribute("aria-label")?.includes(label) ||
-      candidate.textContent?.includes(label),
-  );
+  const match = optionalButton(container, label);
   if (!match) throw new Error(`Missing button: ${label}`);
   return match;
+}
+
+function optionalButton(container: ParentNode, label: string): HTMLButtonElement | null {
+  return (
+    [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+      (candidate) =>
+        candidate.getAttribute("aria-label")?.includes(label) ||
+        candidate.textContent?.includes(label),
+    ) ?? null
+  );
 }
 
 function facet(container: ParentNode, facetKey: string): HTMLElement | null {
@@ -456,6 +676,10 @@ function binding(
   version: number,
   facetKey = "inventory-source",
   idSuffix = "102",
+  owners: IntegrationFacetBindingSummary["owners"] = [directOwner],
+  directlyOwned = owners.some(
+    (owner) => owner.kind === directOwner.kind && owner.id === directOwner.id,
+  ),
 ): IntegrationFacetBindingSummary {
   return {
     id: `00000000-0000-4000-8000-000000000${idSuffix}`,
@@ -472,8 +696,22 @@ function binding(
     lastErrorCode: null,
     createdAt: "2026-08-14T00:00:00.000Z",
     updatedAt: "2026-08-14T00:00:00.000Z",
+    directlyOwned,
+    owners,
   };
 }
+
+const directOwner = {
+  kind: "direct" as const,
+  id: "facet:inventory-source",
+  removable: true,
+};
+
+const packOwner = {
+  kind: "pack" as const,
+  id: "pack:inventory-operations",
+  removable: false,
+};
 
 const instance: ApiIntegrationInstallationSummary = {
   capabilityId: "api:inventory",

@@ -863,6 +863,14 @@ function mailInboxBinding(
     lastErrorCode: null,
     createdAt: "2026-08-11T00:00:00.000Z",
     updatedAt: "2026-08-11T00:00:00.000Z",
+    directlyOwned: true,
+    owners: [
+      {
+        kind: "direct" as const,
+        id: "facet:d358a95c79124370ff2e8e3c9d366cd95ff8ddf1f30dfde2c79dffc61d3627af",
+        removable: true,
+      },
+    ],
   };
 }
 

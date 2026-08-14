@@ -88,6 +88,7 @@ export function IntegrationFacetsPanel({
   canManagePersonalDestination,
   canManageWorkspaceDestination,
   canManageOrganizationDestination,
+  refreshRevision,
   GoogleDriveDialog,
 }: {
   client: OpenGeniCoreClient;
@@ -98,6 +99,7 @@ export function IntegrationFacetsPanel({
   canManagePersonalDestination: boolean;
   canManageWorkspaceDestination: boolean;
   canManageOrganizationDestination: boolean;
+  refreshRevision: number;
   GoogleDriveDialog: ComponentType<GoogleDriveDialogProps>;
 }) {
   const [open, setOpen] = useState(false);
@@ -113,8 +115,64 @@ export function IntegrationFacetsPanel({
   const nextMutationSequence = useRef(0);
   const mutationSequenceByFacet = useRef(new Map<string, number>());
   const loadPromise = useRef<Promise<void> | null>(null);
+  const seenRefreshRevision = useRef(refreshRevision);
+  const panelIdentity = useRef({
+    client,
+    workspaceId,
+    capabilityId: instance.capabilityId,
+    instanceKey: instance.instanceKey,
+    instanceVersion: instance.instanceVersion,
+  });
 
   useEffect(() => {
+    const previousIdentity = panelIdentity.current;
+    const identityChanged =
+      previousIdentity.client !== client ||
+      previousIdentity.workspaceId !== workspaceId ||
+      previousIdentity.capabilityId !== instance.capabilityId ||
+      previousIdentity.instanceKey !== instance.instanceKey ||
+      previousIdentity.instanceVersion !== instance.instanceVersion;
+    panelIdentity.current = {
+      client,
+      workspaceId,
+      capabilityId: instance.capabilityId,
+      instanceKey: instance.instanceKey,
+      instanceVersion: instance.instanceVersion,
+    };
+    if (identityChanged) {
+      ++operationGeneration.current;
+      mutationSequenceByFacet.current.clear();
+      loadPromise.current = null;
+      setData(null);
+      setLoading(false);
+      setError(null);
+      setBusyFacetKeys(new Set());
+      setOpen(false);
+      setEditor(null);
+      setGoogleDriveEditor(null);
+      setRemoveTarget(null);
+      seenRefreshRevision.current = refreshRevision;
+    }
+    const operationGenerationRef = operationGeneration;
+    const mutationSequences = mutationSequenceByFacet.current;
+    const loadPromiseRef = loadPromise;
+    return () => {
+      ++operationGenerationRef.current;
+      mutationSequences.clear();
+      loadPromiseRef.current = null;
+    };
+  }, [
+    client,
+    instance.capabilityId,
+    instance.instanceKey,
+    instance.instanceVersion,
+    refreshRevision,
+    workspaceId,
+  ]);
+
+  useEffect(() => {
+    if (seenRefreshRevision.current === refreshRevision) return;
+    seenRefreshRevision.current = refreshRevision;
     ++operationGeneration.current;
     mutationSequenceByFacet.current.clear();
     loadPromise.current = null;
@@ -122,11 +180,13 @@ export function IntegrationFacetsPanel({
     setLoading(false);
     setError(null);
     setBusyFacetKeys(new Set());
-    setOpen(false);
     setEditor(null);
     setGoogleDriveEditor(null);
     setRemoveTarget(null);
-  }, [instance.capabilityId, instance.instanceKey, instance.instanceVersion]);
+    if (open) void load();
+    // load is deliberately scoped to the current exact panel identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshRevision]);
 
   useEffect(() => {
     if (open && data === null && !loading) void load();
@@ -306,9 +366,19 @@ export function IntegrationFacetsPanel({
       );
       if (!applyMutationBinding(token, result.binding)) return false;
       setRemoveTarget(null);
-      toast.success(`${facetTitle(target.definition)} removed`, {
-        description: `${instance.displayName} and its Connection remain intact.`,
-      });
+      if (result.status === "retained_by_other_owners") {
+        toast.success(`${facetTitle(target.definition)} direct control removed`, {
+          description: `The facet remains active because ${facetOwnerSummary(result.remainingOwners)} still owns it.`,
+        });
+      } else if (result.status === "not_configured") {
+        toast.info(`${facetTitle(target.definition)} was already managed elsewhere`, {
+          description: `No direct facet control was removed from ${instance.displayName}.`,
+        });
+      } else {
+        toast.success(`${facetTitle(target.definition)} removed`, {
+          description: `${instance.displayName} and its Connection remain intact.`,
+        });
+      }
       return true;
     } catch (removeError) {
       if (!isCurrentMutation(token)) return false;
@@ -421,8 +491,16 @@ export function IntegrationFacetsPanel({
         open={removeTarget !== null}
         onOpenChange={(next) => !next && setRemoveTarget(null)}
         title={removeTarget ? `Remove ${facetTitle(removeTarget.definition)}?` : "Remove facet?"}
-        description={`This removes only this facet from ${instance.displayName}. The account, Connection, tools, and sibling facets remain intact.`}
-        confirmLabel="Remove facet"
+        description={
+          removeTarget && otherFacetOwners(removeTarget.binding).length > 0
+            ? `This removes direct control from ${instance.displayName}. The facet remains active because ${facetOwnerSummary(otherFacetOwners(removeTarget.binding))} also owns it.`
+            : `This removes only this facet from ${instance.displayName}. The account, Connection, tools, and sibling facets remain intact.`
+        }
+        confirmLabel={
+          removeTarget && otherFacetOwners(removeTarget.binding).length > 0
+            ? "Remove direct control"
+            : "Remove facet"
+        }
         destructive
         onConfirm={remove}
       />
@@ -464,6 +542,11 @@ function FacetRow({
   const Icon = detail.icon;
   const binding = entry.binding;
   const configured = binding !== null && binding.status !== "disabled";
+  const directlyOwned = binding?.directlyOwned === true;
+  const otherOwners = otherFacetOwners(binding);
+  const externallyManaged = configured && !directlyOwned;
+  const independentlyMutable = directlyOwned && otherOwners.length === 0;
+  const canConfigure = !configured && otherOwners.length === 0;
   return (
     <article
       className="rounded-lg border border-border bg-bg p-3"
@@ -477,8 +560,24 @@ function FacetRow({
           <div className="flex flex-wrap items-center gap-1.5">
             <p className="text-xs font-semibold text-fg">{facetTitle(entry.definition)}</p>
             <FacetStatusBadge binding={binding} />
+            {otherOwners.length > 0 || externallyManaged ? (
+              <Badge variant="outline" className="text-2xs text-fg-subtle">
+                {otherOwners.length > 0 ? "Shared" : "Managed"}
+              </Badge>
+            ) : null}
           </div>
           <p className="mt-1 text-2xs leading-4 text-fg-muted">{detail.description}</p>
+          {otherOwners.length > 0 ? (
+            <p className="mt-1 text-2xs leading-4 text-fg-subtle">
+              Managed by {facetOwnerSummary(otherOwners)}. Shared configuration and lifecycle are
+              read-only here.
+            </p>
+          ) : externallyManaged ? (
+            <p className="mt-1 text-2xs leading-4 text-fg-subtle">
+              Managed outside this direct installation. Configuration and lifecycle are read-only
+              here.
+            </p>
+          ) : null}
         </div>
         {busy ? <Loader2Icon className="size-3.5 animate-spin text-brand" /> : null}
       </div>
@@ -487,12 +586,12 @@ function FacetRow({
           type="button"
           variant="ghost"
           size="xs"
-          disabled={!canManage || busy}
+          disabled={!canManage || busy || (!canConfigure && !independentlyMutable)}
           onClick={onEdit}
         >
           {configured ? "Edit" : entry.definition.kind === "identity_link" ? "Enable" : "Configure"}
         </Button>
-        {binding?.status === "active" ? (
+        {binding?.status === "active" && independentlyMutable ? (
           <Button
             type="button"
             variant="ghost"
@@ -503,7 +602,8 @@ function FacetRow({
             <CirclePauseIcon />
             Pause
           </Button>
-        ) : binding?.status === "paused" || binding?.status === "needs_attention" ? (
+        ) : (binding?.status === "paused" || binding?.status === "needs_attention") &&
+          independentlyMutable ? (
           <Button
             type="button"
             variant="ghost"
@@ -515,7 +615,7 @@ function FacetRow({
             Resume
           </Button>
         ) : null}
-        {configured ? (
+        {configured && directlyOwned ? (
           <Button
             type="button"
             variant="ghost"
@@ -524,7 +624,7 @@ function FacetRow({
             onClick={onRemove}
           >
             <Trash2Icon />
-            Remove
+            {otherOwners.length > 0 ? "Remove direct control" : "Remove"}
           </Button>
         ) : null}
       </div>
@@ -557,6 +657,33 @@ function FacetStatusBadge({ binding }: { binding: IntegrationFacetBindingSummary
       {label}
     </Badge>
   );
+}
+
+function otherFacetOwners(
+  binding: IntegrationFacetBindingSummary | null,
+): IntegrationFacetBindingSummary["owners"] {
+  if (!binding) return [];
+  let excludedCurrentDirectOwner = !binding.directlyOwned;
+  return binding.owners.filter((owner) => {
+    if (owner.kind === "direct" && !excludedCurrentDirectOwner) {
+      excludedCurrentDirectOwner = true;
+      return false;
+    }
+    return true;
+  });
+}
+
+function facetOwnerSummary(owners: IntegrationFacetBindingSummary["owners"]): string {
+  const kinds = new Set(owners.map((owner) => owner.kind));
+  const labels = [
+    kinds.has("plugin") ? "another Plugin" : null,
+    kinds.has("pack") ? "another Pack" : null,
+    kinds.has("migration") ? "migration authority" : null,
+    kinds.has("direct") ? "another direct installation" : null,
+  ].filter((label): label is string => label !== null);
+  if (labels.length === 0) return "another owner";
+  if (labels.length === 1) return labels[0]!;
+  return `${labels.slice(0, -1).join(", ")} and ${labels.at(-1)}`;
 }
 
 function FacetEditorDialog({

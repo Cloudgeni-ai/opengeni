@@ -8398,6 +8398,8 @@ export const IntegrationFacetBindingSummary = z
     lastErrorCode: z.string().min(1).max(120).nullable(),
     createdAt: z.string().datetime({ offset: true }),
     updatedAt: z.string().datetime({ offset: true }),
+    directlyOwned: z.boolean(),
+    owners: z.array(CapabilityComponentOwner),
   })
   .strict();
 export type IntegrationFacetBindingSummary = z.infer<typeof IntegrationFacetBindingSummary>;
