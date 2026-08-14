@@ -403,7 +403,11 @@ import {
   type TurnOutcome,
   type TurnSandboxEstablishReason,
 } from "../observability-metrics";
-import { buildCompanyBrainContributionReceipt } from "../model-context-contributions";
+import {
+  buildCompanyBrainContributionReceipt,
+  modelVisibleCompanyBrainSkillActivations,
+  summarizeCompanyBrainContributions,
+} from "../model-context-contributions";
 import {
   beginRecording,
   discardUnpublishedRecording,
@@ -465,6 +469,7 @@ import {
   type ResourceRef,
   type RetainedArtifactMetadata,
   type MediaGenerationResult,
+  type ModelContextContributionSummary,
   type SessionEvent,
   type SessionEventType,
   type SessionStatus,
@@ -1545,6 +1550,7 @@ export async function processModelResponseTerminalEvent(input: {
   leaseLost: () => boolean;
   leaseLostMessage: string;
   setLastInputTokens: (tokens: number | null) => Promise<void>;
+  contextContributions?: readonly ModelContextContributionSummary[] | null;
 }): Promise<
   | { status: "not_response" }
   | { status: "duplicate"; sourceKey: string }
@@ -1636,6 +1642,9 @@ export async function processModelResponseTerminalEvent(input: {
           providerApi: input.providerApi,
           model: input.model,
           billing,
+          ...(input.contextContributions !== undefined
+            ? { contextContributions: input.contextContributions }
+            : {}),
         });
       }
       const observedInput = normalizedUsage.telemetry.inputTokens;
@@ -1694,6 +1703,7 @@ export async function processCompactionModelUsageEvent(input: {
   renewLease: () => Promise<void>;
   leaseLost: () => boolean;
   leaseLostMessage: string;
+  contextContributions?: readonly ModelContextContributionSummary[] | null;
 }): Promise<
   | { status: "duplicate"; sourceKey: string }
   | { status: "processed"; sourceKey: string; authoritative: boolean }
@@ -1768,6 +1778,9 @@ export async function processCompactionModelUsageEvent(input: {
           providerApi: input.providerApi,
           model: input.model,
           billing,
+          ...(input.contextContributions !== undefined
+            ? { contextContributions: input.contextContributions }
+            : {}),
         });
       }
     },
@@ -5445,6 +5458,37 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const structuredWorkspacePolicyActive =
         hasActiveWorkspaceInstructionPolicy(instructionPolicySnapshot);
       const workspaceMemory = await resolveWorkspaceMemoryBlock(db, input.workspaceId);
+      const buildCompanyBrainContributionReceiptFor = (
+        skillActivations: Parameters<
+          typeof buildCompanyBrainContributionReceipt
+        >[0]["skillActivations"],
+      ) =>
+        buildCompanyBrainContributionReceipt({
+          attemptId: input.attemptId,
+          turnId: turn.id,
+          nestedAgentDepth: session.nestedAgentDepth,
+          memoryPromptMode,
+          instructionPolicy: instructionPolicySnapshot,
+          workspaceAgentInstructions,
+          preferences: preferenceSnapshot,
+          companyProfile: companyProfileSnapshot,
+          companyProfileIncluded,
+          workspaceMemory,
+          skillActivations,
+        });
+      let companyBrainContextContributions: readonly ModelContextContributionSummary[] | null =
+        null;
+      try {
+        // Portable operator compaction runs before tool/skill preparation, so its
+        // exact Company Brain prefix contains governance and standing memory but
+        // no runtime skill catalog. Later compaction paths replace this summary
+        // after the complete skill activation set is resolved.
+        companyBrainContextContributions = summarizeCompanyBrainContributions(
+          buildCompanyBrainContributionReceiptFor([]),
+        );
+      } catch {
+        // Contribution telemetry must never change model execution semantics.
+      }
       const logicalSandboxSettings = settingsWithRigImage(
         settingsWithPackSandboxImage(
           capabilitySettings,
@@ -5848,6 +5892,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           renewLease: () => renewServingCredentialLease("model_usage"),
           leaseLost: servingCredentialLeaseLost,
           leaseLostMessage: "Provider credential lease expired during context compaction",
+          contextContributions: companyBrainContextContributions,
         });
       };
       const compactionSummarizerFor = (systemInstructions?: string) =>
@@ -7798,6 +7843,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           reason: "attached to session",
         })),
       ];
+      const modelVisibleRuntimeSkillActivations = modelVisibleCompanyBrainSkillActivations(
+        modelRunSettings.sandboxBackend,
+        runtimeSkillActivations,
+      );
+      try {
+        companyBrainContextContributions = summarizeCompanyBrainContributions(
+          buildCompanyBrainContributionReceiptFor(modelVisibleRuntimeSkillActivations),
+        );
+      } catch {
+        // Contribution telemetry must never change model execution semantics.
+      }
       recordTurnStartupPhase(observability, {
         phase: "post_tool_preparation",
         provider: turnExecutionPolicy.providerId,
@@ -8220,19 +8276,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         if (companyBrainContributionReceiptRecorded) return;
         companyBrainContributionReceiptRecorded = true;
         try {
-          const companyBrainContributionReceipt = buildCompanyBrainContributionReceipt({
-            attemptId: input.attemptId,
-            turnId: turn.id,
-            nestedAgentDepth: session.nestedAgentDepth,
-            memoryPromptMode,
-            instructionPolicy: instructionPolicySnapshot,
-            workspaceAgentInstructions,
-            preferences: preferenceSnapshot,
-            companyProfile: companyProfileSnapshot,
-            companyProfileIncluded,
-            workspaceMemory,
-            skillActivations: runtimeSkillActivations,
-          });
+          const companyBrainContributionReceipt = buildCompanyBrainContributionReceiptFor(
+            modelVisibleRuntimeSkillActivations,
+          );
+          companyBrainContextContributions = summarizeCompanyBrainContributions(
+            companyBrainContributionReceipt,
+          );
           recordCompanyBrainContributions(observability, companyBrainContributionReceipt);
           observability.info("model context contribution receipt", {
             attemptId: companyBrainContributionReceipt.attemptId,
@@ -9120,6 +9169,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               leaseLost: servingCredentialLeaseLost,
               leaseLostMessage: "Provider credential lease expired during the active turn",
               setLastInputTokens: setLastInputTokensFenced,
+              contextContributions: companyBrainContextContributions,
             });
             assertModelResponseLatencyMode({
               event: next.value,
@@ -9496,6 +9546,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     providerApi: aggregateProviderApi,
                     model: turn.model,
                     billing,
+                    contextContributions: companyBrainContextContributions,
                   });
                 }
                 if (aggregateAuthoritative && aggregateInput !== null && aggregateInput > 0) {
@@ -12558,6 +12609,7 @@ export async function recordAuthoritativeModelCallFact(input: {
   providerApi: ModelProviderApi;
   model: string;
   billing: ModelUsageBillingRecord;
+  contextContributions?: readonly ModelContextContributionSummary[] | null;
 }): Promise<void> {
   try {
     const telemetry = input.billing.normalizedUsage.telemetry;
@@ -12581,6 +12633,9 @@ export async function recordAuthoritativeModelCallFact(input: {
       cacheWriteTokens: telemetry.cacheWriteTokens,
       reasoningTokens: telemetry.reasoningTokens,
       totalTokens: input.billing.normalizedUsage.totalTokens,
+      ...(input.contextContributions !== undefined
+        ? { contextContributions: input.contextContributions }
+        : {}),
     });
   } catch (error) {
     input.observability.warn("model call fact persist failed", {

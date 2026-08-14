@@ -4,7 +4,11 @@ import type {
   ResolvedCompanyProfileSnapshot,
   ResolvedWorkspaceInstructionPolicySnapshot,
 } from "@opengeni/contracts";
-import { buildCompanyBrainContributionReceipt } from "../src/model-context-contributions";
+import {
+  buildCompanyBrainContributionReceipt,
+  modelVisibleCompanyBrainSkillActivations,
+  summarizeCompanyBrainContributions,
+} from "../src/model-context-contributions";
 
 const identity = (): string => crypto.randomUUID();
 
@@ -101,6 +105,24 @@ function preferences(): PreferenceRegistrySnapshot {
 }
 
 describe("Company Brain model contribution receipts", () => {
+  test("omits skill descriptors when the none backend cannot expose runtime skills", () => {
+    const activations = [
+      {
+        source: "session" as const,
+        id: "session:review",
+        reason: "attached to session",
+        artifact: {
+          name: "review",
+          description: "Use for repository reviews.",
+          files: [{ path: "SKILL.md", content: "# Review" }],
+        },
+      },
+    ];
+
+    expect(modelVisibleCompanyBrainSkillActivations("none", activations)).toEqual([]);
+    expect(modelVisibleCompanyBrainSkillActivations("modal", activations)).toBe(activations);
+  });
+
   test("contained children retain rules and guide catalogs but omit standing knowledge", () => {
     const receipt = buildCompanyBrainContributionReceipt({
       attemptId: identity(),
@@ -137,6 +159,11 @@ describe("Company Brain model contribution receipts", () => {
     expect(receipt.contributions.every((item) => item.estimatedTokens > 0)).toBe(true);
     expect(JSON.stringify(receipt)).not.toContain("Mandatory rule");
     expect(JSON.stringify(receipt)).not.toContain("Keep replies concise");
+    expect(summarizeCompanyBrainContributions(receipt)).toEqual([
+      expect.objectContaining({ source: "workspace_instruction_policy", items: 1 }),
+      expect.objectContaining({ source: "preference_registry_descriptor", items: 1 }),
+      expect.objectContaining({ source: "runtime_skill_catalog", items: 1 }),
+    ]);
   });
 
   test("accounts for legacy workspace instructions only when structured policy is absent", () => {

@@ -5,6 +5,7 @@ import type {
   FirstPartyMcpToolName,
   McpPersonalConnectionDelegation,
   McpServerConnectionRef,
+  ModelContextContributionSummary,
   RigProviderImages,
   SessionMcpApprovalPolicy,
   SessionGoalChangeKind,
@@ -8250,6 +8251,8 @@ export const modelCallFacts = pgTable(
       mode: "number",
     }),
     pricingSource: text("pricing_source"),
+    contextContributions:
+      jsonb("context_contributions").$type<readonly ModelContextContributionSummary[]>(),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
     recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -8319,6 +8322,10 @@ export const modelCallFacts = pgTable(
     modelBytes: check(
       "model_call_facts_model_bytes_check",
       sql`octet_length(${table.model}) between 1 and 512`,
+    ),
+    contextContributionsValid: check(
+      "model_call_facts_context_contributions_check",
+      sql`opengeni_private.model_context_contributions_valid(${table.contextContributions})`,
     ),
   }),
 );
