@@ -23,6 +23,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { CodexSubscriptionsCard } from "@/components/codex-connection";
+import { ModelAccessPolicySection } from "@/components/model-access-policy";
 import { SuperGrokSubscriptionsCard } from "@/components/supergrok-connection";
 import { AiGatewayConnectionCard } from "@/components/ai-gateway-connection";
 import { VideoGenerationPreferenceRow } from "@/components/video-generation-settings";
@@ -377,6 +378,12 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
             <CodexCompactionPreferenceRow workspaceId={workspaceId} canManage={canRename} />
           </div>
         </section>
+
+        <ModelAccessPolicySection
+          key={workspaceId}
+          workspaceId={workspaceId}
+          canManage={canDeleteWorkspace}
+        />
 
         {/* Codex live overview is intentionally once-per-mount; remount at tenant boundary. */}
         <CodexSubscriptionsCard

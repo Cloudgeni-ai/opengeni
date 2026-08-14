@@ -12931,6 +12931,8 @@ export const WorkspaceModelCatalogModel =
   /* @__PURE__ */ defineModelContractSchema(() =>
     ClientModel.extend({
       credentialReadiness: ModelCredentialReadinessV1,
+      /** Exact workspace-policy verdict without exposing provider identity. */
+      policyAllowed: z.boolean().optional(),
       availability: ModelAvailabilityV1,
     }),
   );

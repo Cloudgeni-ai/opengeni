@@ -2664,11 +2664,28 @@ export type ModelCredentialReadinessV1 = {
 
 export type WorkspaceModelCatalogModel = ClientModel & {
   credentialReadiness: ModelCredentialReadinessV1;
+  /** Exact workspace-policy verdict without exposing provider identity. */
+  policyAllowed?: boolean | undefined;
   availability: ModelAvailabilityV1;
 };
 
 export type WorkspaceModelCatalogResponse = {
   models: WorkspaceModelCatalogModel[];
+};
+
+/**
+ * The workspace's hard model/provider allowlist. `null` means unrestricted for
+ * that dimension; an empty array is an explicit total block.
+ */
+export type WorkspaceModelAccessPolicy = {
+  allowedProviders: string[] | null;
+  allowedModels: string[] | null;
+};
+
+/** Full replacement body for `PUT /v1/workspaces/:id/model-policy`. */
+export type UpdateWorkspaceModelAccessPolicyRequest = {
+  allowedProviders?: string[] | null | undefined;
+  allowedModels?: string[] | null | undefined;
 };
 
 /**

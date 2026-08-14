@@ -376,6 +376,7 @@ export class MockOpenGeniClient implements SessionClientLike {
           basis: "configuration" as const,
           checkedAt: null,
         },
+        policyAllowed: true,
         availability: {
           status: "available" as const,
           selectable: true,
