@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { createObservability } from "@opengeni/observability";
 import { testSettings } from "@opengeni/testing";
 import {
+  ModelRequestLifecycleMetrics,
   recordBatchFlush,
   recordContextCompaction,
   recordCompanyBrainContributions,
@@ -144,6 +145,43 @@ describe("provider request lifecycle diagnostics", () => {
       /opengeni_model_request_phase_duration_seconds_count\{[^}]*phase="first_byte"[^}]*provider="codex-subscription"[^}]*\} 1\b/,
     );
     expect(metrics).not.toContain("requestId");
+  });
+
+  test("tracks active SuperGrok requests and valid-event liveness without identity labels", async () => {
+    const observability = worker();
+    let now = 1_000;
+    const lifecycle = new ModelRequestLifecycleMetrics(observability, {
+      now: () => now,
+      refreshIntervalMs: 60_000,
+    });
+
+    lifecycle.start("private-request-id:1", "supergrok-subscription");
+    now = 2_500;
+    lifecycle.event("private-request-id:1", 1_500);
+    now = 7_500;
+    lifecycle.refreshGauges();
+
+    let metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_model_requests_inflight\{[^}]*provider="supergrok-subscription"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_model_request_oldest_no_event_age_seconds\{[^}]*provider="supergrok-subscription"[^}]*\} 5\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_model_request_stream_events_total\{[^}]*provider="supergrok-subscription"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_model_request_stream_event_gap_seconds_sum\{[^}]*provider="supergrok-subscription"[^}]*\} 1\.5\b/,
+    );
+    expect(metrics).not.toContain("private-request-id");
+
+    lifecycle.finish("private-request-id:1");
+    metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_model_requests_inflight\{[^}]*provider="supergrok-subscription"[^}]*\} 0\b/,
+    );
+    lifecycle.stop();
   });
 });
 

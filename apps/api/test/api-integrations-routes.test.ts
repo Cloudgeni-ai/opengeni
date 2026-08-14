@@ -1,4 +1,11 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { GOOGLE_DRIVE_INTEGRATION_DEFINITION } from "@opengeni/capabilities";
+import {
+  GOOGLE_DRIVE_CREDENTIAL_LABEL,
+  GOOGLE_DRIVE_CREDENTIAL_ROLE,
+  GOOGLE_DRIVE_READONLY_SCOPE,
+  GoogleDriveConnectionMetadata,
+} from "@opengeni/contracts/google-drive";
 import { signDelegatedAccessToken } from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
@@ -6,6 +13,7 @@ import {
   createConnection,
   createDb,
   deleteWorkspace,
+  encryptEnvironmentValue,
   installApiIntegration,
   type DbClient,
 } from "@opengeni/db";
@@ -25,7 +33,10 @@ import {
 import { registerIntegrationFacetRoutes } from "../src/routes/integration-facets";
 
 const delegationSecret = "api-integration-route-secret";
+const environmentsEncryptionKey = new Uint8Array(32).fill(19);
 let sourceVersion = "1.0.0";
+let googleDriveFolderName = "Product";
+const googleDriveProviderRequests: string[] = [];
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
 let app: Hono | null = null;
@@ -158,7 +169,23 @@ beforeAll(async () => {
     settings: testSettings({
       productAccessMode: "managed",
       delegationSecret,
+      environmentsEncryptionKey: Buffer.from(environmentsEncryptionKey).toString("base64"),
     }),
+    googleDriveFetch: async (input) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      googleDriveProviderRequests.push(url.href);
+      if (url.pathname === "/drive/v3/files/folder-1") {
+        return Response.json({
+          id: "folder-1",
+          name: googleDriveFolderName,
+          mimeType: "application/vnd.google-apps.folder",
+          modifiedTime: "2026-08-14T06:00:00.000Z",
+          webViewLink: "https://drive.google.com/drive/folders/folder-1",
+          trashed: false,
+        });
+      }
+      throw new Error(`unexpected Google Drive provider request: ${url.href}`);
+    },
   } as ApiRouteDeps);
 }, 180_000);
 
@@ -710,5 +737,231 @@ describe("API Integration routes", () => {
       binding: { status: "disabled", version: 4, directlyOwned: false, owners: [] },
       remainingOwners: [],
     });
+
+    await shared!.admin`
+      update capability_plugin_installations
+      set status = 'disabled', updated_at = now()
+      where id = ${installed.pluginInstallationId}
+    `;
+    expect((await request(base)).status).toBe(404);
+    const replayAfterInstanceDrift = await request(`${base}/inventory-source`, {
+      method: "PUT",
+      body: JSON.stringify({
+        displayName: "Finance inventory",
+        config: { collection: "finance", includeArchived: false },
+        idempotencyKey: configureKey,
+      }),
+    });
+    expect(replayAfterInstanceDrift.status).toBe(201);
+    expect(await replayAfterInstanceDrift.json()).toEqual(configured);
+    const conflictAfterInstanceDrift = await request(`${base}/inventory-source`, {
+      method: "PUT",
+      body: JSON.stringify({
+        displayName: "Changed inventory",
+        config: { collection: "finance", includeArchived: false },
+        idempotencyKey: configureKey,
+      }),
+    });
+    expect(conflictAfterInstanceDrift.status).toBe(409);
+  }, 60_000);
+
+  test("replays completed Google Drive facet saves before provider and Connection validation", async () => {
+    if (!available || !client) return;
+    googleDriveFolderName = "Product";
+    googleDriveProviderRequests.length = 0;
+    const connection = await createConnection(client.db, {
+      accountId,
+      workspaceId,
+      subjectId,
+      providerDomain: "googleapis.com",
+      kind: "oauth2",
+      credentialEncrypted: encryptEnvironmentValue(
+        environmentsEncryptionKey,
+        JSON.stringify({ access_token: "route-google-access", token_type: "Bearer" }),
+      ),
+      grantedScopes: [GOOGLE_DRIVE_READONLY_SCOPE],
+      expiresAt: new Date(Date.now() + 60 * 60_000),
+      metadata: GoogleDriveConnectionMetadata.parse({
+        credentialRole: GOOGLE_DRIVE_CREDENTIAL_ROLE,
+        credentialLabel: GOOGLE_DRIVE_CREDENTIAL_LABEL,
+        googlePermissionId: "route-google-permission",
+        googleEmail: "route-google@example.com",
+        googleDisplayName: "Route Google",
+        verifiedAt: "2026-08-14T06:00:00.000Z",
+        accessMode: "readonly",
+        lifecycle: {
+          state: "active",
+          recoverable: true,
+          observedAt: "2026-08-14T06:00:00.000Z",
+        },
+      }),
+      createdBySubjectId: subjectId,
+    });
+    const installed = await installApiIntegration(client.db, {
+      accountId,
+      workspaceId,
+      subjectId,
+      capabilityId: "api:route-google-drive-facet",
+      pluginKey: "integration/route-google-drive-facet",
+      serverId: "route_google_drive_facet",
+      name: "Route Google Drive",
+      description: "Exercises provider-specific facet receipt replay.",
+      definitionId: "route-google-drive-facet",
+      definitionProvenance: "workspace",
+      providerDomain: "googleapis.com",
+      protocol: "openapi",
+      baseUrl: GOOGLE_DRIVE_INTEGRATION_DEFINITION.baseUrl,
+      sourceUrl: "https://www.googleapis.com/discovery/v1/apis/drive/v3/rest",
+      authScheme: { kind: "oauth2" },
+      connectionId: connection.id,
+      instanceKey: "finance",
+      requiredScopes: [GOOGLE_DRIVE_READONLY_SCOPE],
+      ownership: "subject",
+      facetDefinitions: GOOGLE_DRIVE_INTEGRATION_DEFINITION.facets,
+      revision: {
+        id: "openapi:444444444444444444444444",
+        protocol: "openapi",
+        definitionId: "route-google-drive-facet",
+        contentSha256: "4".repeat(64),
+        source: { url: "https://www.googleapis.com/discovery/v1/apis/drive/v3/rest" },
+        title: "Route Google Drive",
+        tools: [
+          {
+            id: "files_get",
+            operationKey: "drive.files.get",
+            name: "Get file",
+            description: "Get Drive metadata.",
+            inputSchema: { type: "object", properties: {} },
+            safety: "read",
+            approvalMode: "never",
+            deprecated: false,
+          },
+        ],
+        bindings: {
+          files_get: {
+            method: "get",
+            pathTemplate: "/files/{fileId}",
+            serverUrl: GOOGLE_DRIVE_INTEGRATION_DEFINITION.baseUrl,
+            parameters: [],
+          },
+        },
+      },
+    });
+    const endpoint = `/integrations/${encodeURIComponent(installed.capabilityId)}/instances/${installed.instanceKey}/facets/drive-content/source`;
+    const aliasCollisionKey = crypto.randomUUID();
+    const aliasCollision = await request(endpoint, {
+      method: "PUT",
+      body: JSON.stringify({
+        sources: [
+          {
+            id: "folder-1",
+            name: "Product",
+            mimeType: "application/vnd.google-apps.folder",
+            driveId: null,
+          },
+          {
+            id: "https://drive.google.com/drive/folders/folder-1",
+            name: "Product",
+            mimeType: "application/vnd.google-apps.folder",
+            driveId: null,
+          },
+        ],
+        destination: { authorityKind: "workspace", collectionId: null },
+        syncCadence: "hourly",
+        syncEnabled: true,
+        readPolicy: "allow",
+        idempotencyKey: aliasCollisionKey,
+      }),
+    });
+    expect(aliasCollision.status).toBe(400);
+    expect(await aliasCollision.text()).toBe("Google Drive sources must be unique");
+    expect(googleDriveProviderRequests).toHaveLength(0);
+    expect(
+      await shared!.admin<Array<{ count: number }>>`
+        select count(*)::int as count
+        from capability_operations
+        where workspace_id = ${workspaceId}::uuid
+          and idempotency_key = ${aliasCollisionKey}
+      `,
+    ).toEqual([{ count: 0 }]);
+
+    const idempotencyKey = crypto.randomUUID();
+    const payload = {
+      sources: [
+        {
+          id: "https://drive.google.com/drive/folders/folder-1",
+          name: "Product",
+          mimeType: "application/vnd.google-apps.folder",
+          driveId: null,
+        },
+      ],
+      destination: { authorityKind: "workspace", collectionId: null },
+      syncCadence: "hourly",
+      syncEnabled: true,
+      readPolicy: "allow",
+      idempotencyKey,
+    };
+    const configuredResponse = await request(endpoint, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    });
+    expect(configuredResponse.status).toBe(200);
+    const configured = await configuredResponse.json();
+    expect(configured).toMatchObject({
+      status: "configured",
+      binding: {
+        connectionId: connection.id,
+        status: "active",
+        version: 1,
+        config: { sources: [{ id: "folder-1" }] },
+      },
+    });
+    expect(googleDriveProviderRequests).toHaveLength(1);
+
+    const legacyConfigured = {
+      ...configured,
+      binding: { ...configured.binding },
+    };
+    delete legacyConfigured.binding.directlyOwned;
+    delete legacyConfigured.binding.owners;
+    await shared!.admin`
+      update capability_operations
+      set result = ${shared!.admin.json(legacyConfigured)}
+      where workspace_id = ${workspaceId}::uuid
+        and idempotency_key = ${idempotencyKey}
+    `;
+
+    googleDriveFolderName = "Renamed Product";
+    await shared!.admin`
+      update connections
+      set status = 'revoked', version = version + 1, updated_at = now()
+      where id = ${connection.id}
+    `;
+    const providerRequestCount = googleDriveProviderRequests.length;
+    const replay = await request(endpoint, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    });
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual(configured);
+    expect(googleDriveProviderRequests).toHaveLength(providerRequestCount);
+
+    const conflict = await request(endpoint, {
+      method: "PUT",
+      body: JSON.stringify({
+        ...payload,
+        sources: [{ ...payload.sources[0], name: "Renamed Product" }],
+      }),
+    });
+    expect(conflict.status).toBe(409);
+    expect(googleDriveProviderRequests).toHaveLength(providerRequestCount);
+
+    const crossSubjectReplay = await request(
+      endpoint,
+      { method: "PUT", body: JSON.stringify(payload) },
+      "user:api-integration-route-other-admin",
+    );
+    expect(crossSubjectReplay.status).toBe(409);
+    expect(googleDriveProviderRequests).toHaveLength(providerRequestCount);
   }, 60_000);
 });

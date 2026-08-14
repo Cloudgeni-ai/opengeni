@@ -618,6 +618,7 @@ function SessionDock(props: {
   onDockCollapsedChange: (collapsed: boolean) => void;
   onOpenNavigation: () => void;
 }) {
+  const context = useAppContext();
   // The workbench (Changes | Files | Terminal | Desktop + machine chip) lives in
   // the package now; the app injects durable artifacts and Debug around it.
   // Heavy editor/runtime code stays lazy until the user opens the tab.
@@ -692,6 +693,7 @@ function SessionDock(props: {
     <SessionWorkspace
       workspaceId={props.workspaceId}
       sessionId={props.sessionId}
+      preferenceOwnerId={context.accessContext.subjectId}
       events={props.events}
       primary={props.primary}
       trailingTabs={trailingTabs}

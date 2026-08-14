@@ -4,6 +4,19 @@ import { readFile } from "node:fs/promises";
 const SCRAPE_IDENTITY = "and on(namespace, release, environment, component, instance)";
 
 describe("turn-capacity Prometheus alerts", () => {
+  test("alerts on actual SuperGrok valid-event idle timeout terminals", async () => {
+    const template = await readFile(
+      new URL("../templates/prometheusrule.yaml", import.meta.url),
+      "utf8",
+    );
+    const idleTimeout = alertExpression(template, "OpenGeniSuperGrokResponseStreamIdleTimeout");
+
+    expect(idleTimeout).toContain('provider="supergrok-subscription"');
+    expect(idleTimeout).toContain('phase="terminal"');
+    expect(idleTimeout).toContain('outcome="timed_out"');
+    expect(idleTimeout).not.toContain("requestId");
+  });
+
   test("correlates backlog and freshness before fleet aggregation", async () => {
     const template = await readFile(
       new URL("../templates/prometheusrule.yaml", import.meta.url),

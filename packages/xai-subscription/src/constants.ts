@@ -44,6 +44,7 @@ export const XAI_VIDEO_MODEL = "grok-imagine-video-1.5";
 export const XAI_OAUTH_OPERATION_TIMEOUT_MS = 15_000;
 export const XAI_REFRESH_WINDOW_MS = 2 * 60_000;
 export const XAI_REFRESH_FALLBACK_MS = 60 * 60_000;
+export const XAI_RESPONSE_STREAM_IDLE_TIMEOUT_MS = 5 * 60_000;
 export const XAI_RESPONSE_SDK_OUTER_TIMEOUT_MS = 35 * 60_000;
 export const XAI_IMAGE_REQUEST_TIMEOUT_MS = 5 * 60_000;
 export const XAI_VIDEO_START_TIMEOUT_MS = 60_000;

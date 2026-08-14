@@ -113,10 +113,13 @@ export function ComputerViewer({
     resourceKind: "computer_session",
   });
   const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState<Error | null>(null);
   const [showControls, setShowControls] = useState(false);
   const previousSessionIdRef = useRef(sessionId);
   const handledRequestRef = useRef<string | null>(null);
   const seenInterventionIdsRef = useRef(new Set<string>());
+  const createInFlightRef = useRef(false);
+  const autoCreateSessionRef = useRef<string | null>(null);
 
   const notifyError = useCallback(
     (cause: unknown, fallback: string) => {
@@ -132,6 +135,8 @@ export function ComputerViewer({
     if (previousSessionIdRef.current === sessionId) return;
     previousSessionIdRef.current = sessionId;
     handledRequestRef.current = null;
+    autoCreateSessionRef.current = null;
+    setCreateError(null);
     setSelection(null);
   }, [sessionId]);
 
@@ -269,15 +274,38 @@ export function ComputerViewer({
   );
 
   const createComputer = useCallback(() => {
-    if (creating) return;
+    if (createInFlightRef.current) return;
+    createInFlightRef.current = true;
+    setCreateError(null);
     setCreating(true);
     void createSession({ sessionId, name: "Computer" })
       .then((response) => {
         setSelection({ sessionId: response.session.id, pinned: false });
       })
-      .catch((cause) => notifyError(cause, "Could not open a computer."))
-      .finally(() => setCreating(false));
-  }, [createSession, creating, notifyError, sessionId]);
+      .catch((cause) => {
+        const error = cause instanceof Error ? cause : new Error("Could not open a computer.");
+        setCreateError(error);
+        notifyError(error, "Could not open a computer.");
+      })
+      .finally(() => {
+        createInFlightRef.current = false;
+        setCreating(false);
+      });
+  }, [createSession, notifyError, sessionId]);
+
+  useEffect(() => {
+    if (
+      !enabled ||
+      registry.loading ||
+      registry.error ||
+      relevant.length > 0 ||
+      autoCreateSessionRef.current === sessionId
+    ) {
+      return;
+    }
+    autoCreateSessionRef.current = sessionId;
+    createComputer();
+  }, [createComputer, enabled, registry.error, registry.loading, relevant.length, sessionId]);
 
   const perform = useCallback(
     async (action: ComputerAction, frame: ComputerFrame | null): Promise<void> => {
@@ -340,31 +368,37 @@ export function ComputerViewer({
   }
   if (liveSessions.length === 0) {
     if (renderEmpty) return renderEmpty(createComputer, creating);
+    const error = createError ?? registry.error;
     return (
       <div className={cn("grid h-full place-items-center bg-og-bg p-6", className)}>
         <div className="max-w-sm text-center">
           <span className="mx-auto grid size-10 place-items-center rounded-og-lg border border-og-border bg-og-surface-1 text-og-muted">
-            <MonitorIcon className="size-5" />
-          </span>
-          <p className="mt-3 text-og-menu font-medium text-og-fg">No computer open</p>
-          <p className="mt-1 text-og-control leading-5 text-og-muted">
-            Open this agent&apos;s desktop, or switch to any computer another workspace agent uses.
-          </p>
-          <button
-            type="button"
-            onClick={createComputer}
-            disabled={creating}
-            className="mt-4 inline-flex h-8 items-center gap-1.5 rounded-og-sm bg-og-accent-deep px-3 text-og-control font-medium text-og-accent-fg transition hover:brightness-110 disabled:opacity-50"
-          >
-            {creating ? (
-              <LoaderCircleIcon className="size-3.5 animate-spin" />
+            {error ? (
+              <CircleAlertIcon className="size-5 text-og-status-error" />
             ) : (
-              <PlusIcon className="size-3.5" />
+              <LoaderCircleIcon className="size-5 animate-spin" />
             )}
-            Open computer
-          </button>
-          {registry.error ? (
-            <p className="mt-3 text-og-control text-og-status-error">{registry.error.message}</p>
+          </span>
+          <p className="mt-3 text-og-menu font-medium text-og-fg">
+            {error ? "Computer didn’t open" : "Opening computer…"}
+          </p>
+          <p className="mt-1 text-og-control leading-5 text-og-muted">
+            {error?.message ?? "Preparing this agent’s desktop. It will appear here when ready."}
+          </p>
+          {error ? (
+            <button
+              type="button"
+              onClick={createError ? createComputer : () => void refreshRegistry()}
+              disabled={creating || registry.refreshing}
+              className="mt-4 inline-flex h-8 items-center gap-1.5 rounded-og-sm bg-og-accent-deep px-3 text-og-control font-medium text-og-accent-fg transition hover:brightness-110 disabled:opacity-50"
+            >
+              {creating || registry.refreshing ? (
+                <LoaderCircleIcon className="size-3.5 animate-spin" />
+              ) : (
+                <RotateCcwIcon className="size-3.5" />
+              )}
+              Try again
+            </button>
           ) : null}
         </div>
       </div>
@@ -404,6 +438,7 @@ export function ComputerViewer({
         <ComputerUnselectedPanel
           peerCount={liveSessions.length}
           creating={creating}
+          error={createError}
           onCreate={createComputer}
         />
       ) : !controllerReady ? (
@@ -485,33 +520,43 @@ export function ComputerViewer({
 function ComputerUnselectedPanel(props: {
   peerCount: number;
   creating: boolean;
+  error: Error | null;
   onCreate: () => void;
 }) {
   return (
     <div className="grid min-h-0 flex-1 place-items-center bg-og-bg p-6 text-center">
       <div className="max-w-sm">
         <span className="mx-auto grid size-10 place-items-center rounded-og-md border border-og-border bg-og-surface-1 text-og-muted">
-          <MonitorIcon className="size-4.5" />
-        </span>
-        <p className="mt-3 text-og-menu font-medium text-og-fg">No computer for this agent</p>
-        <p className="mt-1 text-og-control leading-5 text-og-muted">
-          {props.peerCount === 1
-            ? "One workspace computer is available from the computer menu."
-            : `${props.peerCount} workspace computers are available from the computer menu.`}
-        </p>
-        <button
-          type="button"
-          disabled={props.creating}
-          onClick={props.onCreate}
-          className="mt-4 inline-flex h-8 items-center gap-1.5 rounded-og-sm border border-og-border bg-og-surface-1 px-3 text-og-control font-medium text-og-fg transition hover:bg-og-surface-2 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {props.creating ? (
-            <LoaderCircleIcon className="size-3.5 animate-spin" />
+          {props.error ? (
+            <CircleAlertIcon className="size-4.5 text-og-status-error" />
           ) : (
-            <PlusIcon className="size-3.5" />
+            <LoaderCircleIcon className="size-4.5 animate-spin" />
           )}
-          {props.creating ? "Opening…" : "New computer"}
-        </button>
+        </span>
+        <p className="mt-3 text-og-menu font-medium text-og-fg">
+          {props.error ? "Computer didn’t open" : "Opening computer…"}
+        </p>
+        <p className="mt-1 text-og-control leading-5 text-og-muted">
+          {props.error?.message ??
+            (props.peerCount === 1
+              ? "Preparing this agent’s desktop. One peer computer remains available from the menu."
+              : `Preparing this agent’s desktop. ${props.peerCount} peer computers remain available from the menu.`)}
+        </p>
+        {props.error ? (
+          <button
+            type="button"
+            disabled={props.creating}
+            onClick={props.onCreate}
+            className="mt-4 inline-flex h-8 items-center gap-1.5 rounded-og-sm border border-og-border bg-og-surface-1 px-3 text-og-control font-medium text-og-fg transition hover:bg-og-surface-2 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {props.creating ? (
+              <LoaderCircleIcon className="size-3.5 animate-spin" />
+            ) : (
+              <RotateCcwIcon className="size-3.5" />
+            )}
+            Try again
+          </button>
+        ) : null}
       </div>
     </div>
   );
