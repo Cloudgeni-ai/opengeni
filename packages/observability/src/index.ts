@@ -13,6 +13,9 @@ export type ObservabilitySettings = {
   observabilityMetricsEnabled: boolean;
   observabilityOtlpEndpoint?: string | undefined;
   observabilityOtlpHeaders: string;
+  sandboxOwnershipEnabled?: boolean | undefined;
+  sandboxLazyProvisionEnabled?: boolean | undefined;
+  rigVerificationLeaseOwnershipEnabled?: boolean | undefined;
 };
 
 export type ObservabilityOptions = {
@@ -418,6 +421,37 @@ export class Observability {
           revision: settings.deploymentRevision ?? "dev",
         },
         value: 1,
+      });
+      this.registerSandboxRolloutConfig();
+    }
+  }
+
+  private registerSandboxRolloutConfig(): void {
+    const ownership = this.settings.sandboxOwnershipEnabled;
+    const lazyConfigured = this.settings.sandboxLazyProvisionEnabled;
+    const rigVerification = this.settings.rigVerificationLeaseOwnershipEnabled;
+    if (
+      typeof ownership !== "boolean" ||
+      typeof lazyConfigured !== "boolean" ||
+      typeof rigVerification !== "boolean"
+    ) {
+      return;
+    }
+
+    const values = [
+      ["ownership", "configured", ownership],
+      ["ownership", "effective", ownership],
+      ["lazy_provision", "configured", lazyConfigured],
+      ["lazy_provision", "effective", ownership && lazyConfigured],
+      ["rig_verification_lease_ownership", "configured", rigVerification],
+      ["rig_verification_lease_ownership", "effective", rigVerification],
+    ] as const;
+    for (const [feature, state, enabled] of values) {
+      this.setGauge({
+        name: "opengeni_sandbox_rollout_config",
+        help: "Configured and effective sandbox rollout state for this workload revision.",
+        labels: { feature, state },
+        value: enabled ? 1 : 0,
       });
     }
   }
