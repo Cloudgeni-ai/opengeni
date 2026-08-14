@@ -51,6 +51,10 @@ describe("session browse projections", () => {
 
   test("filters by the frozen creator identity and keeps display labels separate", () => {
     const ada = session({ id: "ada" });
+    const opaqueSubject = session({
+      id: "opaque-subject",
+      createdBy: { kind: "subject", subjectId: "tenant:ada" },
+    });
     const scheduler = session({
       id: "scheduler",
       createdBy: { kind: "service", subjectId: "service:scheduler" },
@@ -64,7 +68,8 @@ describe("session browse projections", () => {
         now: NOW,
       }).map((item) => item.id),
     ).toEqual(["scheduler"]);
-    expect(sessionCreatorLabel(scheduler)).toBe("Service · scheduler");
+    expect(sessionCreatorLabel(opaqueSubject)).toBe("tenant:ada");
+    expect(sessionCreatorLabel(scheduler)).toBe("Service · service:scheduler");
   });
 
   test("groups flat browse results by creator or created-date buckets", () => {

@@ -56,8 +56,11 @@ describe("session control surface architecture", () => {
     const list = await source("components/rail/session-list.tsx");
     expect(list).toContain("const serverSessions = useMemo");
     expect(list).toContain("const projected = serverSessions.find");
-    expect(list).toContain("const paginationKey = sessionPageKey(rail.workspaceId, search);");
-    expect(list).not.toContain("const paginationKey = `${sessionPageKey");
+    const paginationKey = list.match(/const paginationKey = sessionPageKey\([\s\S]*?\n  \);/)?.[0];
+    expect(paginationKey).toContain("rail.workspaceId");
+    expect(paginationKey).toContain('hierarchyMode ? "tree" : "browse"');
+    expect(paginationKey).not.toContain("pinOverrides");
+    expect(paginationKey).not.toContain("serverSessions");
   });
 
   test("the retired client-side queue model is gone", async () => {

@@ -193,14 +193,10 @@ export function sessionCreatorLabel(session: Session): string {
   const explicit = session.createdBy.label?.trim();
   if (explicit) return explicit;
   if (session.createdBy.subjectId === "unattributed-legacy") return "Unattributed";
-  const separator = session.createdBy.subjectId.indexOf(":");
-  const identity = (
-    separator >= 0 ? session.createdBy.subjectId.slice(separator + 1) : session.createdBy.subjectId
-  ).trim();
   if (session.createdBy.kind === "service") {
-    return identity ? `Service · ${identity}` : "Service";
+    return `Service · ${session.createdBy.subjectId}`;
   }
-  return identity || "Unknown creator";
+  return session.createdBy.subjectId;
 }
 
 function browseTimestamp(session: Session, field: SessionBrowseDateField): number {
