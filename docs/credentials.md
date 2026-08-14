@@ -77,3 +77,6 @@ Rules that hold across the table:
   outage backoff or stop established op-stream commands. A
   re-enrollment atomically advances the row's credential generation, so the old
   `oge_` bearer can neither authenticate nor self-revoke the new generation.
+  Each approved device-flow request is durably bound to that exact generation;
+  rotating the enrollment denies older requests in the same transaction, so
+  retrying an old device code cannot mint a bearer for the replacement family.

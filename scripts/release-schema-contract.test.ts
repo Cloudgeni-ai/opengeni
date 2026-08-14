@@ -133,6 +133,8 @@ describe("release schema contract", () => {
       "0238_supergrok_realtime_model.sql",
       "0239_supergrok_video_funding.sql",
       "0240_model_context_user_messages.sql",
+      "0247_enrollment_authority_index.sql",
+      "0248_device_enrollment_request_authority.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -207,6 +209,22 @@ describe("release schema contract", () => {
       ),
     ).toMatchObject({
       sha256: "1717d5cdaa298501f20463eef43822a2b1421984f30cab7cb381c2773c505388",
+      deploymentMode: "rolling",
+    });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0247_enrollment_authority_index.sql",
+      ),
+    ).toMatchObject({
+      sha256: "eeb0f661c2eb35f3eff7c09a2ec7e49f8d9dfb084263d86f544defcddcfeb68c",
+      deploymentMode: "rolling",
+    });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0248_device_enrollment_request_authority.sql",
+      ),
+    ).toMatchObject({
+      sha256: "628446019c58433ed70bb2ab2f9b017298e0862b74ad3d6d5b906593d97fec73",
       deploymentMode: "rolling",
     });
     const migrations = new Map(

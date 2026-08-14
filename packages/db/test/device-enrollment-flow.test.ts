@@ -87,6 +87,7 @@ describe("0025 device-enrollment-requests migration shape", () => {
       "approved_at",
       "enrollment_id",
       "sandbox_id",
+      "enrollment_credential_generation",
       "expires_at",
     ]) {
       expect(names.has(required)).toBe(true);
@@ -119,7 +120,7 @@ describe("0025 device-enrollment-requests migration shape", () => {
     let gone = await admin<{ n: number }[]>`
       SELECT count(*)::int as n FROM information_schema.tables WHERE table_name = 'device_enrollment_requests'`;
     expect(Number(gone[0]!.n)).toBe(0);
-    // UP again: re-run the 0025 SQL body verbatim (re-applies clean — IF NOT EXISTS).
+    // UP again: re-run the 0025 SQL body and the forward request-authority repair.
     // Re-running migrate() is a no-op (schema_migrations marks it applied), so apply
     // the file body directly to prove idempotent re-application.
     const { readFileSync } = await import("node:fs");
@@ -131,6 +132,11 @@ describe("0025 device-enrollment-requests migration shape", () => {
       "utf8",
     );
     await admin.unsafe(body);
+    const authorityBody = readFileSync(
+      join(here, "..", "drizzle", "0248_device_enrollment_request_authority.sql"),
+      "utf8",
+    );
+    await admin.unsafe(authorityBody);
     gone = await admin<{ n: number }[]>`
       SELECT count(*)::int as n FROM information_schema.tables WHERE table_name = 'device_enrollment_requests'`;
     expect(Number(gone[0]!.n)).toBe(1);
@@ -222,6 +228,7 @@ describe("device-flow DAOs (start -> approve -> poll-consume + deny + lookups)",
     expect(reread?.approvedAt).not.toBeNull();
     expect(reread?.enrollmentId).toBe(approved.enrollment!.id);
     expect(reread?.sandboxId).toBe(approved.sandbox!.id);
+    expect(reread?.enrollmentCredentialGeneration).toBe(1);
 
     // Idempotent re-approve (same request) reuses the SAME enrollment + sandbox — no
     // duplicate machine.

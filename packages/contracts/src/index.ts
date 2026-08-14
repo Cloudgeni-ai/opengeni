@@ -2190,7 +2190,7 @@ export const EnrollmentBearerPayload = z.object({
   agentId: z.string().uuid(),
   enrollmentId: z.string().uuid(),
   // Backward-compatible credential-family fence. Generationless bearers minted
-  // before migration 0061 parse ONLY as generation 1, matching the migration's
+  // before migration 0065 parse ONLY as generation 1, matching the migration's
   // default for existing rows. signEnrollmentBearer serializes the parsed output,
   // so every newly signed bearer carries this claim explicitly.
   credentialGeneration: z.number().int().positive().default(1),

@@ -423,8 +423,14 @@ export async function pollDeviceEnrollment(
   }
 
   const enrollment = await getEnrollment(db, request.workspaceId, request.enrollmentId);
-  if (!enrollment || enrollment.status !== "active") {
-    // The machine was revoked between approve and poll — treat as denied.
+  if (
+    !enrollment ||
+    enrollment.status !== "active" ||
+    request.enrollmentCredentialGeneration === null ||
+    request.enrollmentCredentialGeneration !== enrollment.credentialGeneration
+  ) {
+    // Revocation or a later re-enrollment permanently fences this request. A
+    // consumed device_code may retry only within the exact family it approved.
     return { state: "denied" };
   }
 

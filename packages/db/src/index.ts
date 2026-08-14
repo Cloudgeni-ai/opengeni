@@ -42952,6 +42952,7 @@ export type DeviceEnrollmentRequestRecord = {
   approvedAt: string | null;
   enrollmentId: string | null;
   sandboxId: string | null;
+  enrollmentCredentialGeneration: number | null;
   expiresAt: string;
   createdAt: string;
   updatedAt: string;
@@ -42980,6 +42981,10 @@ function mapDeviceEnrollmentRequest(
     approvedAt: row.approvedAt ? row.approvedAt.toISOString() : null,
     enrollmentId: row.enrollmentId ?? null,
     sandboxId: row.sandboxId ?? null,
+    enrollmentCredentialGeneration:
+      row.enrollmentCredentialGeneration === null
+        ? null
+        : Number(row.enrollmentCredentialGeneration),
     expiresAt: row.expiresAt.toISOString(),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -43397,6 +43402,7 @@ export async function approveDeviceEnrollmentRequest(
           approvedAt: now,
           enrollmentId: enrollment.id,
           sandboxId: sandbox.id,
+          enrollmentCredentialGeneration: enrollment.credentialGeneration,
           updatedAt: now,
         })
         .where(eq(schema.deviceEnrollmentRequests.id, pending.id));
@@ -43646,7 +43652,39 @@ export async function setActiveSandbox(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
       if (input.targetSandboxId !== null) {
-        const [target] = await scopedDb.execute<{
+        // Read the immutable routing identity first without taking a lock, then
+        // acquire locks in enrollment -> sandbox order. removeEnrollment uses
+        // the same order; taking the sandbox first here would deadlock with a
+        // concurrent removal that already owns the enrollment row.
+        const [targetSnapshot] = await scopedDb.execute<{
+          kind: string;
+          enrollment_id: string | null;
+        }>(sql`
+          select kind, enrollment_id
+          from sandboxes
+          where workspace_id = ${input.workspaceId} and id = ${input.targetSandboxId}
+        `);
+        if (!targetSnapshot) {
+          return { swapped: false, pointer: null };
+        }
+        if (targetSnapshot.kind === "selfhosted") {
+          if (!targetSnapshot.enrollment_id) {
+            return { swapped: false, pointer: null };
+          }
+          // SHARE conflicts with removeEnrollment's UPDATE lock. If removal
+          // wins first, this read observes revoked; if attach wins first,
+          // removal observes the committed pointer and blocks safely.
+          const [enrollment] = await scopedDb.execute<{ status: string }>(sql`
+            select status
+            from enrollments
+            where workspace_id = ${input.workspaceId} and id = ${targetSnapshot.enrollment_id}
+            for share
+          `);
+          if (!enrollment || enrollment.status !== "active") {
+            return { swapped: false, pointer: null };
+          }
+        }
+        const [lockedTarget] = await scopedDb.execute<{
           kind: string;
           enrollment_id: string | null;
         }>(sql`
@@ -43655,25 +43693,12 @@ export async function setActiveSandbox(
           where workspace_id = ${input.workspaceId} and id = ${input.targetSandboxId}
           for share
         `);
-        if (!target) {
+        if (
+          !lockedTarget ||
+          lockedTarget.kind !== targetSnapshot.kind ||
+          lockedTarget.enrollment_id !== targetSnapshot.enrollment_id
+        ) {
           return { swapped: false, pointer: null };
-        }
-        if (target.kind === "selfhosted") {
-          // SHARE conflicts with removeEnrollment's UPDATE lock. If removal
-          // wins first, this read observes revoked; if attach wins first,
-          // removal observes the committed pointer and blocks safely.
-          if (!target.enrollment_id) {
-            return { swapped: false, pointer: null };
-          }
-          const [enrollment] = await scopedDb.execute<{ status: string }>(sql`
-            select status
-            from enrollments
-            where workspace_id = ${input.workspaceId} and id = ${target.enrollment_id}
-            for share
-          `);
-          if (!enrollment || enrollment.status !== "active") {
-            return { swapped: false, pointer: null };
-          }
         }
       }
       const rows = await scopedDb.execute<{

@@ -324,7 +324,7 @@ describe("M5 authz: unauthenticated + cross-workspace approve are rejected", () 
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ publicKey: "ed25519:XWS", workspaceId: a.workspaceId }),
       })
-    ).json()) as { userCode: string };
+    ).json()) as { deviceCode: string; userCode: string };
     // A user authenticated to workspace B tries to approve A's user_code IN B.
     const resInB = await app.request(`/v1/workspaces/${b.workspaceId}/enrollments/device/approve`, {
       method: "POST",
@@ -441,7 +441,7 @@ describe("M5 list + revoke + idempotent re-enroll", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ publicKey: "ed25519:LIST", machineName: "node-a", workspaceId }),
       })
-    ).json()) as { userCode: string };
+    ).json()) as { deviceCode: string; userCode: string };
     const approve2 = (await (
       await app.request(`/v1/workspaces/${workspaceId}/enrollments/device/approve`, {
         method: "POST",
@@ -457,6 +457,25 @@ describe("M5 list + revoke + idempotent re-enroll", () => {
     ).json()) as { enrollments: { status: string }[] };
     expect(finalList.enrollments.length).toBe(1);
     expect(finalList.enrollments[0]!.status).toBe("active");
+
+    // The first device-flow request remains bound to generation 1. Replaying
+    // its opaque device code after the fresh approval rotates to generation 2
+    // must not mint credentials for the replacement family.
+    const stalePoll = await app.request("/v1/enrollments/device/poll", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ deviceCode: start.deviceCode }),
+    });
+    expect(stalePoll.status).toBe(200);
+    expect(await stalePoll.json()).toEqual({ state: "denied" });
+
+    const freshPoll = await app.request("/v1/enrollments/device/poll", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ deviceCode: start2.deviceCode }),
+    });
+    expect(freshPoll.status).toBe(200);
+    expect((await freshPoll.json()) as { state: string }).toMatchObject({ state: "authorized" });
   }, 120_000);
 });
 

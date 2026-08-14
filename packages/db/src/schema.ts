@@ -7535,6 +7535,11 @@ export const enrollments = pgTable(
     ),
     // List a workspace's ACTIVE machines without scanning revoked rows.
     workspaceStatus: index("enrollments_workspace_status_idx").on(table.workspaceId, table.status),
+    accountWorkspaceIdentity: uniqueIndex("enrollments_account_workspace_id_uq").on(
+      table.accountId,
+      table.workspaceId,
+      table.id,
+    ),
     connectionAuthorityShape: check(
       "enrollments_connection_authority_shape_chk",
       sql`(${table.connectionInstanceId} is null and ${table.connectionLeaseExpiresAt} is null)
@@ -7610,9 +7615,7 @@ export const machineRemovalOperations = pgTable(
     workspaceId: uuid("workspace_id")
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
-    enrollmentId: uuid("enrollment_id")
-      .notNull()
-      .references(() => enrollments.id, { onDelete: "restrict" }),
+    enrollmentId: uuid("enrollment_id").notNull(),
     operationKey: text("operation_key").notNull(),
     requestFingerprint: text("request_fingerprint").notNull(),
     outcome: text("outcome", {
@@ -7628,6 +7631,11 @@ export const machineRemovalOperations = pgTable(
       columns: [table.workspaceId, table.accountId],
       foreignColumns: [workspaces.id, workspaces.accountId],
     }).onDelete("cascade"),
+    enrollmentAuthority: foreignKey({
+      name: "machine_removal_operations_enrollment_authority_fk",
+      columns: [table.accountId, table.workspaceId, table.enrollmentId],
+      foreignColumns: [enrollments.accountId, enrollments.workspaceId, enrollments.id],
+    }).onDelete("restrict"),
     workspaceOperation: uniqueIndex("machine_removal_operations_workspace_operation_uq").on(
       table.workspaceId,
       table.operationKey,
@@ -7649,6 +7657,10 @@ export const machineRemovalOperations = pgTable(
       "machine_removal_operations_operation_key_chk",
       sql`length(btrim(${table.operationKey})) between 1 and 200
         and ${table.operationKey} = btrim(${table.operationKey})`,
+    ),
+    outcomeValid: check(
+      "machine_removal_operations_outcome_chk",
+      sql`${table.outcome} in ('removed', 'already_removed', 'blocked')`,
     ),
   }),
 );
@@ -7723,6 +7735,10 @@ export const deviceEnrollmentRequests = pgTable(
     sandboxId: uuid("sandbox_id").references(() => sandboxes.id, {
       onDelete: "set null",
     }),
+    // Exact credential family authorized by this one device-flow request. The
+    // database binds it at approval and denies the request when that family is
+    // superseded, including while older API binaries remain in the rollout.
+    enrollmentCredentialGeneration: integer("enrollment_credential_generation"),
     // The short-TTL expiry; a pending row past this is EXPIRED on poll.
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
