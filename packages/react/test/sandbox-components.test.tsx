@@ -190,6 +190,24 @@ describe("FileBrowser", () => {
 });
 
 describe("SandboxFiles guarded-file routing", () => {
+  test("restores and reports the selected file", async () => {
+    const selected: Array<string | null> = [];
+    const r = await renderComponent(
+      <SandboxFiles
+        files={filesResult()}
+        git={gitResult()}
+        initialSelectedPath="src/app.ts"
+        onSelectedPathChange={(path) => selected.push(path)}
+      />,
+    );
+    await flush();
+    expect(selectedFile(r.container)).toContain("src/app.ts");
+
+    await actRun(() => fileButton(r.container, "README.md").click());
+    expect(selected).toEqual(["README.md"]);
+    await r.unmount();
+  });
+
   test("capture-only untouched files expose an explicit live-open action", async () => {
     let wakeCalls = 0;
     const files = filesResult({

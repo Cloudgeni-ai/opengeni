@@ -87,6 +87,11 @@ import { createWorkspaceRetainedArtifactLoader } from "@/lib/retained-artifact-l
 import { createSessionRetainedScreenshotLoader } from "@/lib/retained-screenshot-loader";
 import { createWorkspaceRetainedVideoLoader } from "@/lib/retained-video-loader";
 import {
+  readSessionDockNavigation,
+  sessionDockLayoutStorageId,
+  updateSessionDockNavigation,
+} from "@/lib/session-dock-preferences";
+import {
   clientFirstPartyMcpToolPolicy,
   firstPartySessionToolOptionsFor,
   isIntelligenceEffort,
@@ -619,6 +624,18 @@ function SessionDock(props: {
   onOpenNavigation: () => void;
 }) {
   const context = useAppContext();
+  const dockLayoutStorageId = sessionDockLayoutStorageId(
+    context.accessContext.subjectId,
+    props.sessionId,
+  );
+  const dockNavigation = useMemo(
+    () => readSessionDockNavigation(dockLayoutStorageId),
+    [dockLayoutStorageId],
+  );
+  const rememberArtifact = useCallback(
+    (artifactId: string | null) => updateSessionDockNavigation(dockLayoutStorageId, { artifactId }),
+    [dockLayoutStorageId],
+  );
   // The workbench (Changes | Files | Terminal | Desktop + machine chip) lives in
   // the package now; the app injects durable artifacts and Debug around it.
   // Heavy editor/runtime code stays lazy until the user opens the tab.
@@ -664,10 +681,13 @@ function SessionDock(props: {
       content: (
         <Suspense fallback={<LoadingPanel label="Opening artifact" />}>
           <LazySessionEditableArtifactsWorkspace
+            key={props.sessionId}
             workspaceId={props.workspaceId}
             artifacts={artifactSummaries}
             status={artifactState.status}
             onRetry={artifactState.retry}
+            initialSelectedArtifactId={dockNavigation.artifactId}
+            onSelectedArtifactIdChange={rememberArtifact}
           />
         </Suspense>
       ),
