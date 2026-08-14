@@ -191,6 +191,15 @@ describe("release schema contract", () => {
     const sessionVisibilityContractHash = (includesActivation: boolean): string | null => {
       if (
         migrations.has("0236_session_visibility_slack_policy.sql") &&
+        migrations.has("0246_integration_personal_instance_authority.sql") &&
+        migrations.has("0241_atomic_personal_resource_delegation.sql")
+      ) {
+        return includesActivation
+          ? "08c08f359b6c34c51ed190747789f43e10c1f3d32a69e1f0da54a776f83dda66"
+          : "9c3c1b1e6ae87ffcff3025c4a8328007bec6cbcab856ffb967eeffe4ce719da1";
+      }
+      if (
+        migrations.has("0236_session_visibility_slack_policy.sql") &&
         migrations.has("0245_model_context_contribution_facts.sql") &&
         migrations.has("0244_slack_app_home_refresh_queue.sql") &&
         migrations.has("0241_atomic_personal_resource_delegation.sql")
