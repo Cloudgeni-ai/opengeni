@@ -480,6 +480,86 @@ describe("appendAndPublishEvents is best-effort on the live fan-out", () => {
     ]);
   });
 
+  test("an unresolved detached append times out without pinning a ready awaited sequence", async () => {
+    let releaseDetached!: () => void;
+    const timeoutCallbacks: Array<() => void> = [];
+    const outcomes: string[] = [];
+    const published: number[][] = [];
+    const bus = {
+      publish: async (
+        _workspaceId: string,
+        _sessionId: string,
+        events: Array<{ sequence: number }>,
+      ) => {
+        published.push(events.map((event) => event.sequence));
+      },
+    } as never;
+    const fanout = createDetachedSessionEventFanout(bus, {
+      timeoutScheduler: (callback) => {
+        timeoutCallbacks.push(callback);
+        return () => {};
+      },
+      onPublishOutcome: ({ outcome }) => outcomes.push(outcome),
+    });
+    const args = [
+      {} as never,
+      bus,
+      SENTINEL_WS,
+      "00000000-0000-4000-8000-000000000001",
+      "00000000-0000-4000-8000-000000000020",
+      1,
+      "00000000-0000-4000-8000-000000000021",
+    ] as const;
+
+    const detached = appendAndPublishTurnEventsFenced(
+      ...args,
+      [{ type: "sandbox.box.created", payload: {} }] as never,
+      {
+        fanout: "detached",
+        detachedFanout: fanout,
+        appendSessionEventsForTurnAttempt: (async () => {
+          await new Promise<void>((resolve) => {
+            releaseDetached = resolve;
+          });
+          return { events: [eventFor(11)], accepted: true };
+        }) as never,
+      },
+    );
+    await settleMicrotasks();
+
+    let awaitedCompleted = false;
+    const awaited = appendAndPublishTurnEventsFenced(
+      ...args,
+      [{ type: "turn.completed", payload: {} }] as never,
+      {
+        fanout: "awaited",
+        detachedFanout: fanout,
+        appendSessionEventsForTurnAttempt: (async () => ({
+          events: [eventFor(12, "turn.completed")],
+          accepted: true,
+        })) as never,
+      },
+    ).then(() => {
+      awaitedCompleted = true;
+    });
+    await settleMicrotasks();
+    expect(published).toEqual([]);
+    expect(awaitedCompleted).toBe(false);
+    expect(timeoutCallbacks).toHaveLength(1);
+
+    timeoutCallbacks.shift()!();
+    await awaited;
+    expect(published).toEqual([[12]]);
+    expect(awaitedCompleted).toBe(true);
+    expect(outcomes).toEqual(["timed_out"]);
+
+    releaseDetached();
+    await detached;
+    await fanout.drain();
+    expect(published).toEqual([[12]]);
+    expect(outcomes).toEqual(["timed_out"]);
+  });
+
   test("an admitted awaited sequence cannot be overtaken by a later detached enqueue", async () => {
     const releases: Array<() => void> = [];
     const published: number[][] = [];

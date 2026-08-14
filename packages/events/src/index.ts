@@ -376,8 +376,11 @@ export type DetachedSessionEventFanoutOptions = {
  * classes use the same lane so a lower detached sequence is invoked before a
  * higher critical sequence. Every provider promise has both fulfillment and
  * rejection handlers; timeout releases lane ownership without retaining the
- * provider promise, and close drops the pending live-only batch before forcing
- * the one active operation through the same bounded timeout settlement.
+ * provider promise. An unresolved detached append reservation is itself bounded:
+ * on timeout its future LIVE delivery is dropped so it cannot pin an already-
+ * durable awaited batch; a late commit remains only in Postgres and reconciles
+ * through replay. Close drops pending live-only work before forcing the one
+ * active operation through the same bounded timeout settlement.
  */
 export function createDetachedSessionEventFanout(
   bus: Pick<EventBus, "publish" | "publishWithOutcome">,
@@ -393,12 +396,15 @@ export function createDetachedSessionEventFanout(
     });
   type FanoutItem = {
     reservationOrder: number;
+    reservedAt: number;
     mode: "detached" | "awaited";
     workspaceId: string;
     sessionId: string;
     events: SessionEvent[] | null;
     observe?: AppendPublishObserver;
     state: "reserved" | "ready" | "active" | "settled" | "dropped" | "cancelled";
+    cancelReservationTimeout: (() => void) | null;
+    dropOutcomeEmitted: boolean;
     resolveCompletion: () => void;
     completion: Promise<void>;
   };
@@ -553,24 +559,44 @@ export function createDetachedSessionEventFanout(
       !accepting || (mode === "detached" && liveDetachedReservations >= detachedCapacity);
     const item: FanoutItem = {
       reservationOrder: nextReservationOrder++,
+      reservedAt: performance.now(),
       mode,
       workspaceId,
       sessionId,
       events: null,
       ...(observe ? { observe } : {}),
       state: dropped ? "dropped" : "reserved",
+      cancelReservationTimeout: null,
+      dropOutcomeEmitted: false,
       resolveCompletion,
       completion,
     };
     reservations.push(item);
+    if (mode === "detached" && !dropped) {
+      queueMicrotask(() => {
+        if (item.state !== "reserved" || !accepting) return;
+        item.cancelReservationTimeout = scheduleTimeout(() => {
+          if (item.state !== "reserved") return;
+          item.cancelReservationTimeout = null;
+          item.state = "dropped";
+          item.dropOutcomeEmitted = true;
+          emitOutcome("timed_out", item.reservedAt, 0);
+          item.resolveCompletion();
+          pump();
+        }, timeoutMs);
+      });
+    }
 
     return {
       async commit(events) {
         if (item.state === "cancelled" || item.state === "settled") return;
+        item.cancelReservationTimeout?.();
+        item.cancelReservationTimeout = null;
         item.events = events;
         if (item.state === "dropped") {
-          if (item.mode === "detached" && events.length > 0) {
-            emitOutcome("dropped", performance.now(), events.length);
+          if (item.mode === "detached" && events.length > 0 && !item.dropOutcomeEmitted) {
+            item.dropOutcomeEmitted = true;
+            emitOutcome("dropped", item.reservedAt, events.length);
           }
           item.resolveCompletion();
           pump();
@@ -578,8 +604,9 @@ export function createDetachedSessionEventFanout(
         }
         if (events.length === 0 || !accepting) {
           item.state = item.mode === "detached" ? "dropped" : "cancelled";
-          if (item.mode === "detached" && events.length > 0) {
-            emitOutcome("dropped", performance.now(), events.length);
+          if (item.mode === "detached" && events.length > 0 && !item.dropOutcomeEmitted) {
+            item.dropOutcomeEmitted = true;
+            emitOutcome("dropped", item.reservedAt, events.length);
           }
           item.resolveCompletion();
           pump();
@@ -593,6 +620,8 @@ export function createDetachedSessionEventFanout(
       },
       cancel() {
         if (item.state !== "reserved") return;
+        item.cancelReservationTimeout?.();
+        item.cancelReservationTimeout = null;
         item.state = "cancelled";
         item.resolveCompletion();
         pump();
@@ -635,8 +664,16 @@ export function createDetachedSessionEventFanout(
       accepting = false;
       for (const item of reservations.splice(0)) {
         if (item.state === "active" || item.state === "settled") continue;
-        if (item.mode === "detached" && item.events && item.events.length > 0) {
-          emitOutcome("dropped", performance.now(), item.events.length);
+        item.cancelReservationTimeout?.();
+        item.cancelReservationTimeout = null;
+        if (
+          item.mode === "detached" &&
+          item.events &&
+          item.events.length > 0 &&
+          !item.dropOutcomeEmitted
+        ) {
+          item.dropOutcomeEmitted = true;
+          emitOutcome("dropped", item.reservedAt, item.events.length);
         }
         item.state = item.mode === "detached" ? "dropped" : "cancelled";
         item.resolveCompletion();
