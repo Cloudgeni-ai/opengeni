@@ -382,7 +382,7 @@ default-off and exposes only an internal, deterministic `provider_event` wake
 seam. Event payloads never mutate source truth or advance provider cursors; the
 authoritative Changes drain and periodic full repair still do that work.
 Workspace Events subscription/Pub/Sub provisioning and live provider acceptance
-remain release work, as does Drive ACL/citation reauthorization.
+remain release work.
 
 The **Only me**, **This workspace**, and **Company** options are immutable
 knowledge authority, not presentation labels. **Hourly**, **Daily**, and **On
