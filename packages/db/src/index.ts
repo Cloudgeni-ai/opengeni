@@ -1119,6 +1119,44 @@ export const allWorkspacePermissions: Permission[] = [
   "artifacts:publish",
 ];
 
+/**
+ * Runtime capabilities for the authenticated managed human's personal
+ * workspace. This projection is deliberately not an administrative grant:
+ * workspace administration is a wildcard over member management and API-key
+ * delegation, either of which would let the owner create another principal
+ * with ambient access to the private workspace.
+ */
+export const managedPersonalWorkspacePermissions: Permission[] = [
+  "workspace:read",
+  "sessions:create",
+  "sessions:read",
+  "sessions:control",
+  "files:upload",
+  "files:read",
+  "documents:manage",
+  "documents:search",
+  "scheduled_tasks:manage",
+  "scheduled_tasks:run",
+  "github:manage",
+  "github:use",
+  "connections:read",
+  "connections:write",
+  "variable-sets:list",
+  "variable-sets:read",
+  "variable-sets:write",
+  "variable-sets:manage",
+  "variable-sets:use",
+  "secrets:list",
+  "secrets:read",
+  "secrets:write",
+  "mcp_servers:attach",
+  "goals:manage",
+  "enrollments:read",
+  "enrollments:manage",
+  "artifacts:read",
+  "artifacts:publish",
+];
+
 export const allAccountPermissions: Permission[] = [
   "account:read",
   "account:admin",
@@ -1587,8 +1625,11 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
       throw new Error("Managed organization membership provisioning did not converge");
     }
 
-    // The personal workspace is lifecycle metadata only in Slice B. Keep the
-    // existing default-workspace access projection and all legacy lists intact.
+    // Keep persisted legacy grants first so defaultWorkspaceId and callers that
+    // still select the first grant preserve the existing default workspace.
+    // The personal grant is derived only after the lifecycle capability returns
+    // the exact active membership pointer; no workspace_memberships row is
+    // created, so no administrator or secondary principal gains ambient access.
     await setRlsContext(tx as unknown as Database, {
       accountId: account.id,
       workspaceId: null,
@@ -1605,6 +1646,22 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
       )
       .where(eq(schema.workspaceMemberships.subjectId, subjectId))
       .orderBy(desc(schema.workspaces.createdAt));
+    const workspaceGrants: AccessGrant[] = memberships.map((row) => ({
+      workspaceId: row.workspace.id,
+      accountId: row.workspace.accountId,
+      subjectId,
+      subjectLabel,
+      permissions: row.membership.permissions as Permission[],
+      principalKind: "human_session",
+    }));
+    workspaceGrants.push({
+      workspaceId: provisionedMembership.personal_workspace_id,
+      accountId: account.id,
+      subjectId,
+      subjectLabel,
+      permissions: managedPersonalWorkspacePermissions,
+      principalKind: "human_session",
+    });
     return {
       accessContext: {
         mode: "managed",
@@ -1619,14 +1676,7 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
             permissions: allAccountPermissions,
           },
         ],
-        workspaceGrants: memberships.map((row) => ({
-          workspaceId: row.workspace.id,
-          accountId: row.workspace.accountId,
-          subjectId,
-          subjectLabel,
-          permissions: row.membership.permissions as Permission[],
-          principalKind: "human_session",
-        })),
+        workspaceGrants,
         defaultAccountId: account.id,
         defaultWorkspaceId: defaultWorkspace.id,
       },

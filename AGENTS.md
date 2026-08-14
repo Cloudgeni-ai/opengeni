@@ -80,14 +80,18 @@ For a map of every app, package, and how the parts fit together, start at [`docs
 
 - Public clients talk only to the API.
 - Organization-tenancy Slices A+B stage the `Organization → Workspace → User`
-  authority hierarchy without activating personal runtime access:
-  `managed_accounts.id` remains the physical organization id, organization
-  membership is distinct from workspace access, managed-human provisioning
-  creates one same-org personal workspace pointer plus its normal control row,
-  and the personal workspace receives no `workspace_memberships` row. The four
-  authority/grant tables remain FORCE-RLS with zero direct app DML; only the
-  exact lifecycle SECURITY DEFINER seam may create the membership. Existing
-  APIs, resources, sessions, lists, and RLS behavior remain
+  authority hierarchy: `managed_accounts.id` remains the physical organization
+  id, organization membership is distinct from ordinary workspace membership,
+  and managed-human provisioning creates one same-org personal workspace
+  pointer plus its normal control row without a durable `workspace_memberships`
+  row for that personal workspace. The first narrow runtime exception derives
+  an owner-only personal-workspace grant only for the canonical managed-cookie
+  (Better Auth) session, after the exact active organization membership and its
+  personal-workspace pointer converge through the lifecycle SECURITY DEFINER
+  seam. Bearer/delegated principals, API keys, and account or organization
+  administrators receive no personal-workspace access through that exception.
+  The four authority/grant tables remain FORCE-RLS with zero direct app DML;
+  all other APIs, resources, sessions, lists, and RLS behavior remain
   workspace-owned/workspace-shared. See `docs/organization-tenancy.md`.
 - Domain/access/billing helpers now live in `@opengeni/core` under `packages/core/src`; `apps/api` routes are HTTP adapters over them.
 - Browser streaming uses `GET /v1/workspaces/:workspaceId/sessions/:id/events/stream` with SSE.
