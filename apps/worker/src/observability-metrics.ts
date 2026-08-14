@@ -117,6 +117,19 @@ export function runtimeMetricsHooksForObservability(
         labels: { backend, stage },
       });
     },
+    onMcpToolCall: ({ outcome, durationSeconds }) => {
+      observability.incrementCounter({
+        name: "opengeni_mcp_tool_calls_total",
+        help: "Total physical MCP tool calls by bounded structural outcome.",
+        labels: { outcome },
+      });
+      observability.observeHistogram({
+        name: "opengeni_mcp_tool_call_duration_seconds",
+        help: "MCP tool-call duration in seconds by bounded structural outcome.",
+        labels: { outcome },
+        value: durationSeconds,
+      });
+    },
     onSandboxOp: ({ backend, op, outcome, code, healed, durationSeconds, replyBytes }) => {
       observability.incrementCounter({
         name: "opengeni_machine_op_total",
