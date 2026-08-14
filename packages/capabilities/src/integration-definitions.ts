@@ -173,7 +173,6 @@ const GOOGLE_DRIVE_READ_OPERATION_IDS = [
   "drive.changes.list",
   "drive.drives.get",
   "drive.drives.list",
-  "drive.files.download",
   "drive.files.export",
   "drive.files.get",
   "drive.files.list",

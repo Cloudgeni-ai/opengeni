@@ -385,6 +385,11 @@ describe("provider adapters and MCP manifest", () => {
                 path: "files/{fileId}",
                 httpMethod: "GET",
               },
+              download: {
+                id: "drive.files.download",
+                path: "files/{fileId}/download",
+                httpMethod: "POST",
+              },
               create: {
                 id: "drive.files.create",
                 path: "files",
@@ -441,9 +446,11 @@ describe("provider adapters and MCP manifest", () => {
       "drive.files.list",
       "drive.permissions.list",
     ]);
-    expect(revision.tools.every((tool) => tool.safety === "read")).toBe(true);
+    expect(
+      revision.tools.every((tool) => tool.safety === "read" && tool.approvalMode === "never"),
+    ).toBe(true);
     expect(JSON.stringify(filtered)).not.toMatch(
-      /drive\.(files\.(create|update|delete)|permissions\.create)/,
+      /drive\.(files\.(download|create|update|delete)|permissions\.create)/,
     );
   });
 
