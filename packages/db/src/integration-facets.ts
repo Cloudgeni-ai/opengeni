@@ -100,6 +100,72 @@ export class IntegrationFacetOperationIdempotencyError extends Error {
   readonly name = "IntegrationFacetOperationIdempotencyError";
 }
 
+type IntegrationFacetOperationKind = "configure" | "update" | "disconnect";
+
+type IntegrationFacetOperationIdentity = {
+  accountId: string;
+  workspaceId: string;
+  subjectId: string;
+  capabilityId: string;
+  instanceKey: string;
+  facetKey: string;
+  idempotencyKey: string;
+};
+
+export function integrationFacetConfigureRequestDigest(input: {
+  capabilityId: string;
+  instanceKey: string;
+  facetKey: string;
+  displayName: string;
+  config: Record<string, unknown>;
+  expectedVersion?: number;
+}): string {
+  return sha256(
+    stableJson({
+      action: "configure",
+      capabilityId: input.capabilityId,
+      instanceKey: input.instanceKey,
+      facetKey: input.facetKey,
+      displayName: input.displayName,
+      config: input.config,
+      expectedVersion: input.expectedVersion ?? null,
+    }),
+  );
+}
+
+/**
+ * Replays only an exact completed Integration Facet receipt. This intentionally
+ * runs before mutable instance/Connection/provider validation at HTTP edges.
+ */
+export async function replayCompletedIntegrationFacetOperation<T extends Record<string, unknown>>(
+  db: Database,
+  input: IntegrationFacetOperationIdentity & {
+    kind: IntegrationFacetOperationKind;
+    expectedRequestDigest: string | ((result: T) => string);
+  },
+): Promise<T | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, input.subjectId);
+      return await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        await lockFacetOperation(tx, input);
+        const existing = await loadFacetOperation(tx, input);
+        if (!existing) return null;
+        const result = replayFacetOperation<T>(
+          existing,
+          input,
+          input.kind,
+          input.expectedRequestDigest,
+        );
+        return await hydrateFacetOperationResult(tx, input, result);
+      });
+    },
+  );
+}
+
 type IntegrationInstanceContext = {
   accountId: string;
   integrationFacetInstallationId: string;
@@ -226,17 +292,7 @@ export async function configureIntegrationFacet(
     idempotencyKey: string;
   },
 ): Promise<IntegrationFacetMutationResult> {
-  const requestDigest = sha256(
-    stableJson({
-      action: "configure",
-      capabilityId: input.capabilityId,
-      instanceKey: input.instanceKey,
-      facetKey: input.facetKey,
-      displayName: input.displayName,
-      config: input.config,
-      expectedVersion: input.expectedVersion ?? null,
-    }),
-  );
+  const requestDigest = integrationFacetConfigureRequestDigest(input);
   return await withFacetOperation(db, input, requestDigest, "configure", async (tx) => {
     const context = await requireMutationContext(tx, input);
     const definition = await requireFacetDefinition(tx, context, input.facetKey);
@@ -443,17 +499,9 @@ export async function removeIntegrationFacet(
 
 async function withFacetOperation<T extends Record<string, unknown>>(
   db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    subjectId: string;
-    capabilityId: string;
-    instanceKey: string;
-    facetKey: string;
-    idempotencyKey: string;
-  },
+  input: IntegrationFacetOperationIdentity,
   requestDigest: string,
-  kind: string,
+  kind: IntegrationFacetOperationKind,
   execute: (tx: Database) => Promise<T>,
 ): Promise<T> {
   return await withRlsContext(
@@ -463,35 +511,11 @@ async function withFacetOperation<T extends Record<string, unknown>>(
       await setSubjectRlsContext(scopedDb, input.subjectId);
       return await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
-        await tx.execute(
-          sql`select pg_advisory_xact_lock(hashtextextended(${`capability-operation:${input.workspaceId}:${input.idempotencyKey}`}, 0))`,
-        );
-        const [existing] = await tx
-          .select()
-          .from(schema.capabilityOperations)
-          .where(
-            and(
-              eq(schema.capabilityOperations.workspaceId, input.workspaceId),
-              eq(schema.capabilityOperations.idempotencyKey, input.idempotencyKey),
-            ),
-          )
-          .for("update")
-          .limit(1);
+        await lockFacetOperation(tx, input);
+        const existing = await loadFacetOperation(tx, input);
         if (existing) {
-          if (
-            existing.createdBySubjectId !== input.subjectId ||
-            existing.requestDigest !== requestDigest
-          ) {
-            throw new IntegrationFacetOperationIdempotencyError(
-              "Integration facet idempotency key was reused",
-            );
-          }
-          if (existing.status === "completed" && existing.result) {
-            return await hydrateFacetOperationResult(tx, input, existing.result as T);
-          }
-          throw new IntegrationFacetOperationIdempotencyError(
-            "Integration facet operation is already in progress",
-          );
+          const result = replayFacetOperation<T>(existing, input, kind, requestDigest);
+          return await hydrateFacetOperationResult(tx, input, result);
         }
         const result = await execute(tx);
         await tx.insert(schema.capabilityOperations).values({
@@ -501,9 +525,7 @@ async function withFacetOperation<T extends Record<string, unknown>>(
           requestDigest,
           kind,
           targetKind: "facet_binding",
-          targetId: `facet:${sha256(
-            `${input.capabilityId}\0${input.instanceKey}\0${input.facetKey}`,
-          )}`,
+          targetId: facetOperationTargetId(input),
           status: "completed",
           phase: "completed",
           result,
@@ -514,6 +536,82 @@ async function withFacetOperation<T extends Record<string, unknown>>(
       });
     },
   );
+}
+
+async function lockFacetOperation(
+  db: Database,
+  input: Pick<IntegrationFacetOperationIdentity, "workspaceId" | "idempotencyKey">,
+): Promise<void> {
+  await db.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`capability-operation:${input.workspaceId}:${input.idempotencyKey}`}, 0))`,
+  );
+}
+
+async function loadFacetOperation(
+  db: Database,
+  input: Pick<IntegrationFacetOperationIdentity, "accountId" | "workspaceId" | "idempotencyKey">,
+) {
+  const [existing] = await db
+    .select()
+    .from(schema.capabilityOperations)
+    .where(
+      and(
+        eq(schema.capabilityOperations.accountId, input.accountId),
+        eq(schema.capabilityOperations.workspaceId, input.workspaceId),
+        eq(schema.capabilityOperations.idempotencyKey, input.idempotencyKey),
+      ),
+    )
+    .for("update")
+    .limit(1);
+  return existing;
+}
+
+function replayFacetOperation<T extends Record<string, unknown>>(
+  existing: typeof schema.capabilityOperations.$inferSelect,
+  input: IntegrationFacetOperationIdentity,
+  kind: IntegrationFacetOperationKind,
+  expectedRequestDigest: string | ((result: T) => string),
+): T {
+  if (
+    existing.createdBySubjectId !== input.subjectId ||
+    existing.kind !== kind ||
+    existing.targetKind !== "facet_binding" ||
+    existing.targetId !== facetOperationTargetId(input)
+  ) {
+    throw new IntegrationFacetOperationIdempotencyError(
+      "Integration facet idempotency key was reused",
+    );
+  }
+  if (
+    typeof expectedRequestDigest === "string" &&
+    existing.requestDigest !== expectedRequestDigest
+  ) {
+    throw new IntegrationFacetOperationIdempotencyError(
+      "Integration facet idempotency key was reused",
+    );
+  }
+  if (existing.status !== "completed" || !existing.result) {
+    throw new IntegrationFacetOperationIdempotencyError(
+      "Integration facet operation is already in progress",
+    );
+  }
+  const result = existing.result as T;
+  const requestDigest =
+    typeof expectedRequestDigest === "string"
+      ? expectedRequestDigest
+      : expectedRequestDigest(result);
+  if (existing.requestDigest !== requestDigest) {
+    throw new IntegrationFacetOperationIdempotencyError(
+      "Integration facet idempotency key was reused",
+    );
+  }
+  return result;
+}
+
+function facetOperationTargetId(
+  input: Pick<IntegrationFacetOperationIdentity, "capabilityId" | "instanceKey" | "facetKey">,
+): string {
+  return `facet:${sha256(`${input.capabilityId}\0${input.instanceKey}\0${input.facetKey}`)}`;
 }
 
 async function hydrateFacetOperationResult<T extends Record<string, unknown>>(

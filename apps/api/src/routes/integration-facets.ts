@@ -13,6 +13,7 @@ import {
 } from "@opengeni/core";
 import {
   configureIntegrationFacet,
+  integrationFacetConfigureRequestDigest,
   IntegrationFacetBindingOwnershipConflictError,
   IntegrationFacetBindingVersionConflictError,
   IntegrationFacetBindingVersionRequiredError,
@@ -22,6 +23,7 @@ import {
   IntegrationFacetOperationIdempotencyError,
   listIntegrationInstanceFacets,
   removeIntegrationFacet,
+  replayCompletedIntegrationFacetOperation,
   setIntegrationFacetLifecycle,
 } from "@opengeni/db";
 import type { Hono } from "hono";
@@ -126,6 +128,33 @@ export function registerIntegrationFacetRoutes(app: Hono, deps: ApiRouteDeps): v
       const instanceKey = decoded(c.req.param("instanceKey"));
       const facetKey = decoded(c.req.param("facetKey"));
       try {
+        const replayed =
+          await replayCompletedIntegrationFacetOperation<IntegrationFacetMutationResult>(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            subjectId: grant.subjectId,
+            capabilityId,
+            instanceKey,
+            facetKey,
+            idempotencyKey: payload.idempotencyKey,
+            kind: "configure",
+            expectedRequestDigest: integrationFacetConfigureRequestDigest({
+              capabilityId,
+              instanceKey,
+              facetKey,
+              displayName: payload.displayName,
+              config: payload.config,
+              ...(payload.expectedVersion !== undefined
+                ? { expectedVersion: payload.expectedVersion }
+                : {}),
+            }),
+          });
+        if (replayed) {
+          return c.json(
+            IntegrationFacetMutationResult.parse(replayed),
+            payload.expectedVersion === undefined ? 201 : 200,
+          );
+        }
         const instance = await listIntegrationInstanceFacets(
           deps.db,
           workspaceId,
