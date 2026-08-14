@@ -309,6 +309,13 @@ describe("migration 0243 Google Drive object ACL authority", () => {
       insert into document_bases (account_id, workspace_id, name)
       values (${account!.id}, ${workspace!.id}, ${`Drive ACL ${suffix}`})
       returning id`;
+    const subjectlessOrdinaryRead = await requireFileForSubject(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      subjectId: null,
+      fileId: sharedFile.id,
+    });
+    expect(subjectlessOrdinaryRead.id).toBe(sharedFile.id);
 
     const createProtectedObject = async (name: "a" | "b"): Promise<ProtectedObject> => {
       const externalObjectId = `drive-object-${name}-${suffix}`;

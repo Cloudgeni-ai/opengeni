@@ -4601,6 +4601,7 @@ export async function requireFileForSubject(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
       if (input.subjectId) await setSubjectRlsContext(scopedDb, input.subjectId);
+      const subjectIdSql = input.subjectId === null ? sql`NULL::text` : sql`${input.subjectId}`;
       const [row] = await scopedDb
         .select()
         .from(schema.files)
@@ -4612,7 +4613,7 @@ export async function requireFileForSubject(
             sql`google_drive_file_authorized(
               ${input.accountId}::uuid,
               ${input.workspaceId}::uuid,
-              ${input.subjectId},
+              ${subjectIdSql},
               ${input.fileId}::uuid
             )`,
           ),
@@ -4641,6 +4642,7 @@ export async function getFilesForSubject(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
       if (input.subjectId) await setSubjectRlsContext(scopedDb, input.subjectId);
+      const subjectIdSql = input.subjectId === null ? sql`NULL::text` : sql`${input.subjectId}`;
       const rows = await scopedDb
         .select()
         .from(schema.files)
@@ -4652,7 +4654,7 @@ export async function getFilesForSubject(
             sql`google_drive_file_authorized(
               ${input.accountId}::uuid,
               ${input.workspaceId}::uuid,
-              ${input.subjectId},
+              ${subjectIdSql},
               ${schema.files.id}
             )`,
           ),

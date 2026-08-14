@@ -2543,10 +2543,11 @@ function documentAccessConditions(
   const authority = viewer
     ? (or(organization, workspace, personal) ?? organization)
     : (or(organization, workspace) ?? organization);
+  const viewerSql = viewer ? sql`${viewer}` : sql`NULL::text`;
   const providerAuthorization = sql`google_drive_file_authorized(
     ${schema.documents.accountId},
     ${workspaceId}::uuid,
-    ${viewer},
+    ${viewerSql},
     ${schema.documents.fileId}
   )`;
   if (access?.agentOnly) {
@@ -2696,10 +2697,11 @@ function googleDriveCitationProjection(
   access: DocumentAccessFilter | undefined,
 ): SQL<unknown> {
   const viewer = cleanString(access?.viewerSubjectId ?? null);
+  const viewerSql = viewer ? sql`${viewer}` : sql`NULL::text`;
   return sql`google_drive_document_citation(
     ${schema.documents.accountId},
     ${workspaceId}::uuid,
-    ${viewer},
+    ${viewerSql},
     ${schema.documents.id},
     ${schema.documents.fileId}
   )`;
