@@ -194,7 +194,7 @@ impl LinuxApplicationLauncher {
                     ))
                 }
             }
-            _ = tokio::time::sleep(APPLICATION_LAUNCH_STARTUP_GRACE) => {
+            () = tokio::time::sleep(APPLICATION_LAUNCH_STARTUP_GRACE) => {
                 tokio::spawn(async move {
                     let _ = child.wait().await;
                 });
