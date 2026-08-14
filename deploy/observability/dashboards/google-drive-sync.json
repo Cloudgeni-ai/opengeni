@@ -94,7 +94,7 @@
     },
     {
       "id": 5,
-      "title": "p95 sync duration by outcome",
+      "title": "p95 terminal batch duration by outcome",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 9 },
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
@@ -103,7 +103,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum by (le, outcome) (rate(opengeni_knowledge_source_sync_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",provider=\"google_drive\"}[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le, outcome) (rate(opengeni_knowledge_source_sync_terminal_batch_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",provider=\"google_drive\"}[5m])))",
           "legendFormat": "{{outcome}}",
           "editorMode": "code",
           "range": true,

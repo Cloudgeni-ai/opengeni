@@ -1,5 +1,9 @@
 import { createHash, randomBytes } from "node:crypto";
-import { configuredGoogleDriveSyncLimits, type Settings } from "@opengeni/config";
+import {
+  configuredGoogleDriveSyncLimits,
+  googleDriveOAuthCallbackUrl,
+  type Settings,
+} from "@opengeni/config";
 import type { AccessGrant, ScheduledTask, ScheduledTaskScheduleSpec } from "@opengeni/contracts";
 import {
   bindConnectorDocumentDestination,
@@ -225,8 +229,7 @@ export async function startGoogleDriveOAuth(
 
   const key = requireEnvironmentEncryption(deps.settings);
   const verifier = randomBytes(48).toString("base64url");
-  const baseUrl = integrationBaseUrl(deps.settings.publicBaseUrl, input.requestUrl);
-  const redirectUri = `${baseUrl}/v1/integrations/google-drive/callback`;
+  const redirectUri = requireGoogleDriveOAuthCallbackUrl(deps.settings);
   const state = createSignedState(requireIntegrationsStateSecret(deps.settings), {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
@@ -264,6 +267,7 @@ export async function completeGoogleDriveOAuthCallback(
     requestUrl: string;
   },
 ): Promise<{ redirectTo: string }> {
+  const redirectUri = requireGoogleDriveOAuthCallbackUrl(deps.settings);
   const baseUrl = integrationBaseUrl(deps.settings.publicBaseUrl, input.requestUrl);
   const returnBaseUrl = deps.settings.webBaseUrl?.replace(/\/+$/, "") ?? baseUrl;
   let state: GoogleDriveOAuthState | null = null;
@@ -291,7 +295,6 @@ export async function completeGoogleDriveOAuthCallback(
     const google = requireGoogleDriveSettings(deps.settings);
     const key = requireEnvironmentEncryption(deps.settings);
     const verifier = decryptEnvironmentValue(key, state.encryptedPkceVerifier);
-    const redirectUri = `${baseUrl}/v1/integrations/google-drive/callback`;
     const fetchImpl = deps.googleDriveFetch ?? fetch;
     const token = await exchangeGoogleAuthorizationCode(
       {
@@ -1507,6 +1510,16 @@ function requireGoogleDriveSettings(settings: Settings): {
     });
   }
   return { clientId, clientSecret };
+}
+
+function requireGoogleDriveOAuthCallbackUrl(settings: Settings): string {
+  const callbackUrl = googleDriveOAuthCallbackUrl(settings.publicBaseUrl);
+  if (!callbackUrl) {
+    throw new HTTPException(503, {
+      message: "Google Drive requires a canonical OPENGENI_PUBLIC_BASE_URL origin",
+    });
+  }
+  return callbackUrl;
 }
 
 function requireGoogleDriveConnection(connection: GoogleDriveConnectionRecord, subjectId: string) {

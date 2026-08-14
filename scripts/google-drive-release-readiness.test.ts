@@ -50,6 +50,26 @@ describe("Google Drive release readiness", () => {
     expect(result.checks.filter((candidate) => candidate.status === "block")).toHaveLength(7);
   });
 
+  test("does not reflect malformed callback URL secrets into readiness evidence", () => {
+    const sentinel = "drive-url-secret-must-not-print";
+    const result = buildGoogleDriveReleaseReadiness(
+      testSettings({
+        integrationsEnabled: true,
+        publicBaseUrl: `https://user:${sentinel}@opengeni.example.com/path?token=${sentinel}#${sentinel}`,
+        integrationsStateSecret: "state-secret",
+        environmentsEncryptionKey: Buffer.alloc(32, 7).toString("base64"),
+        googleDriveClientId: "client.apps.googleusercontent.com",
+        googleDriveClientSecret: "client-secret",
+        observabilityStructuredLogs: true,
+        observabilityMetricsEnabled: true,
+      }),
+    );
+
+    expect(result.status).toBe("blocked");
+    expect(result.runtime.callbackUrl).toBeNull();
+    expect(JSON.stringify(result)).not.toContain(sentinel);
+  });
+
   test("CLI emits only bounded invalid-configuration evidence", () => {
     const sentinel = "drive-secret-sentinel-must-not-print";
     const result = spawnSync("bun", ["scripts/google-drive-release-readiness.ts"], {

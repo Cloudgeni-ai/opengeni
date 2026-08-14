@@ -227,6 +227,29 @@ describe("Google Drive integration settings", () => {
     ).toThrow(/OPENGENI_INTEGRATIONS_ENABLED=true/);
   });
 
+  test("rejects a non-origin public URL for a configured Google OAuth client", () => {
+    for (const publicBaseUrl of [
+      "https://user:password@opengeni.example.com",
+      "https://opengeni.example.com/path",
+      "https://opengeni.example.com?token=secret",
+      "https://opengeni.example.com#secret",
+    ]) {
+      expect(() =>
+        withEnv(
+          {
+            OPENGENI_ENVIRONMENT: "production",
+            OPENGENI_INTEGRATIONS_ENABLED: "true",
+            OPENGENI_PUBLIC_BASE_URL: publicBaseUrl,
+            OPENGENI_INTEGRATIONS_STATE_SECRET: "state-secret",
+            OPENGENI_GOOGLE_DRIVE_CLIENT_ID: "client.apps.googleusercontent.com",
+            OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET: "client-secret",
+          },
+          () => getSettings(),
+        ),
+      ).toThrow(/must be a credential-free origin/);
+    }
+  });
+
   test("loads custom sync and provider retry budgets", () => {
     const settings = withEnv(
       {
@@ -287,6 +310,27 @@ describe("Google Drive integration settings", () => {
         () => getSettings(),
       ),
     ).toThrow(/RETRY_INITIAL_DELAY_MS must not exceed.*RETRY_BUDGET_MS/);
+  });
+
+  test("keeps accepted provider waits at or below the heartbeat-safe maxima", () => {
+    expect(
+      withEnv(
+        {
+          OPENGENI_GOOGLE_DRIVE_PROVIDER_REQUEST_TIMEOUT_MS: "60000",
+          OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_MAX_DELAY_MS: "60000",
+        },
+        () => getSettings(),
+      ),
+    ).toMatchObject({
+      googleDriveProviderRequestTimeoutMs: 60_000,
+      googleDriveProviderRetryMaxDelayMs: 60_000,
+    });
+    expect(() =>
+      withEnv({ OPENGENI_GOOGLE_DRIVE_PROVIDER_REQUEST_TIMEOUT_MS: "60001" }, () => getSettings()),
+    ).toThrow();
+    expect(() =>
+      withEnv({ OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_MAX_DELAY_MS: "60001" }, () => getSettings()),
+    ).toThrow();
   });
 });
 

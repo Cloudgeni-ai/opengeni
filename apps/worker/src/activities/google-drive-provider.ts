@@ -10,6 +10,12 @@ export type GoogleDriveProviderOperation =
   | "download"
   | "export";
 
+export type GoogleDriveProviderHeartbeat = (details: {
+  operation: GoogleDriveProviderOperation;
+  attempt: number;
+  phase: "request_start" | "request_end" | "retry_delay_start" | "retry_delay_end";
+}) => void;
+
 export class GoogleDriveProviderTransportError extends Error {
   constructor() {
     super("google_drive_provider_transport_failed");
@@ -30,6 +36,7 @@ export async function fetchGoogleDriveProvider(input: {
   operation: GoogleDriveProviderOperation;
   policy: GoogleDriveProviderRetryOptions;
   observability: Observability;
+  heartbeat?: GoogleDriveProviderHeartbeat;
   now?: () => number;
   sleep?: (delayMs: number) => Promise<void>;
 }): Promise<Response> {
@@ -39,6 +46,7 @@ export async function fetchGoogleDriveProvider(input: {
 
   for (let attempt = 1; attempt <= input.policy.attempts; attempt += 1) {
     let response: Response;
+    input.heartbeat?.({ operation: input.operation, attempt, phase: "request_start" });
     try {
       response = await input.fetchImpl(input.url, {
         ...input.init,
@@ -46,6 +54,7 @@ export async function fetchGoogleDriveProvider(input: {
         signal: AbortSignal.timeout(input.policy.requestTimeoutMs),
       });
     } catch {
+      input.heartbeat?.({ operation: input.operation, attempt, phase: "request_end" });
       recordRequest(input.observability, input.operation, "retryable_error");
       const delayMs = retryDelayMs(input.policy, attempt, null);
       if (!canRetry(input.policy, attempt, retryDelaySpentMs, delayMs)) {
@@ -53,9 +62,12 @@ export async function fetchGoogleDriveProvider(input: {
       }
       recordRetry(input.observability, input.operation, "transport", attempt, delayMs);
       retryDelaySpentMs += delayMs;
+      input.heartbeat?.({ operation: input.operation, attempt, phase: "retry_delay_start" });
       await sleep(delayMs);
+      input.heartbeat?.({ operation: input.operation, attempt, phase: "retry_delay_end" });
       continue;
     }
+    input.heartbeat?.({ operation: input.operation, attempt, phase: "request_end" });
 
     if (!isRetryableStatus(response.status)) {
       recordRequest(
@@ -82,7 +94,9 @@ export async function fetchGoogleDriveProvider(input: {
       delayMs,
     );
     retryDelaySpentMs += delayMs;
+    input.heartbeat?.({ operation: input.operation, attempt, phase: "retry_delay_start" });
     await sleep(delayMs);
+    input.heartbeat?.({ operation: input.operation, attempt, phase: "retry_delay_end" });
   }
 
   throw new GoogleDriveProviderTransportError();

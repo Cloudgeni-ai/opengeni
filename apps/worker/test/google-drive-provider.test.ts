@@ -1,10 +1,18 @@
 import { describe, expect, test } from "bun:test";
-import type { GoogleDriveProviderRetryOptions } from "@opengeni/config";
+import {
+  GOOGLE_DRIVE_PROVIDER_REQUEST_TIMEOUT_MAX_MS,
+  GOOGLE_DRIVE_PROVIDER_RETRY_DELAY_MAX_MS,
+  type GoogleDriveProviderRetryOptions,
+} from "@opengeni/config";
 import { createObservability } from "@opengeni/observability";
 import {
   fetchGoogleDriveProvider,
   GoogleDriveProviderTransportError,
 } from "../src/activities/google-drive-provider";
+import {
+  KNOWLEDGE_SOURCE_SYNC_ACTIVITY_HEARTBEAT_TIMEOUT_MS,
+  KNOWLEDGE_SOURCE_SYNC_ACTIVITY_MAXIMUM_ATTEMPTS,
+} from "../src/knowledge-source-sync-activity-policy";
 
 const policy: GoogleDriveProviderRetryOptions = {
   requestTimeoutMs: 1_000,
@@ -28,8 +36,22 @@ function observability() {
 }
 
 describe("Google Drive provider retry budget", () => {
+  test("keeps each provider wait below the activity heartbeat timeout", () => {
+    expect(GOOGLE_DRIVE_PROVIDER_REQUEST_TIMEOUT_MAX_MS).toBeLessThan(
+      KNOWLEDGE_SOURCE_SYNC_ACTIVITY_HEARTBEAT_TIMEOUT_MS,
+    );
+    expect(GOOGLE_DRIVE_PROVIDER_RETRY_DELAY_MAX_MS).toBeLessThan(
+      KNOWLEDGE_SOURCE_SYNC_ACTIVITY_HEARTBEAT_TIMEOUT_MS,
+    );
+  });
+
+  test("does not let Temporal multiply the local provider-attempt bound", () => {
+    expect(KNOWLEDGE_SOURCE_SYNC_ACTIVITY_MAXIMUM_ATTEMPTS).toBe(1);
+  });
+
   test("retries 429 with bounded backoff and records low-cardinality telemetry", async () => {
     const delays: number[] = [];
+    const heartbeatPhases: string[] = [];
     let calls = 0;
     let nowMs = 0;
     const obs = observability();
@@ -45,6 +67,7 @@ describe("Google Drive provider retry budget", () => {
       operation: "list_children",
       policy,
       observability: obs,
+      heartbeat: ({ attempt, phase }) => heartbeatPhases.push(`${attempt}:${phase}`),
       now: () => nowMs,
       sleep: async (delayMs) => {
         delays.push(delayMs);
@@ -55,6 +78,14 @@ describe("Google Drive provider retry budget", () => {
     expect(response.status).toBe(200);
     expect(calls).toBe(2);
     expect(delays).toEqual([200]);
+    expect(heartbeatPhases).toEqual([
+      "1:request_start",
+      "1:request_end",
+      "1:retry_delay_start",
+      "1:retry_delay_end",
+      "2:request_start",
+      "2:request_end",
+    ]);
     const metrics = await obs.prometheusMetrics();
     expect(metrics).toMatch(
       /opengeni_google_drive_provider_requests_total\{operation="list_children",outcome="retryable_error",[^}]+\} 1/,

@@ -2338,6 +2338,7 @@ async function requestGoogleDrive(
       operation,
       policy: retry,
       observability,
+      heartbeat: (details) => heartbeat({ provider: "google_drive", ...details }),
     });
   } catch (error) {
     if (error instanceof GoogleDriveProviderTransportError) {
@@ -2909,8 +2910,8 @@ function recordSyncHealthTelemetry(
   failure?: SyncFailure,
 ): void {
   observability.observeHistogram({
-    name: "opengeni_knowledge_source_sync_duration_seconds",
-    help: "Knowledge-source synchronization duration by provider and terminal outcome.",
+    name: "opengeni_knowledge_source_sync_terminal_batch_duration_seconds",
+    help: "Terminal knowledge-source activity batch duration by provider and outcome.",
     labels: { provider, outcome },
     value: Math.max(0, summary.elapsedMs) / 1_000,
   });

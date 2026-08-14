@@ -194,7 +194,7 @@ readiness evidence.
 ### Sync-health evidence and response
 
 The canonical `Google Drive sync` Grafana dashboard reports run outcomes,
-failure ratio, reconnect-required events, p95 duration, provider attempts and
+failure ratio, reconnect-required events, p95 terminal activity-batch duration, provider attempts and
 retries, explicit limit hits, and bounded terminal failure reasons. The Helm
 chart adds exact namespace/release/environment/provider-scoped alerts for a
 sustained failure ratio, reconnect-required events, and explicit limit hits.

@@ -56,6 +56,8 @@ export const SANDBOX_ARCHIVE_CAPTURE_MAX_TIMEOUT_MS = 60 * 60_000;
 export const SANDBOX_ARCHIVE_CAPTURE_SETTLEMENT_GRACE_MS = 10_000;
 export const SANDBOX_SNAPSHOT_MAX_TIMEOUT_MS =
   SANDBOX_ARCHIVE_CAPTURE_MAX_TIMEOUT_MS - SANDBOX_ARCHIVE_CAPTURE_SETTLEMENT_GRACE_MS;
+export const GOOGLE_DRIVE_PROVIDER_REQUEST_TIMEOUT_MAX_MS = 60_000;
+export const GOOGLE_DRIVE_PROVIDER_RETRY_DELAY_MAX_MS = 60_000;
 // Admission waits are observational: successful capture/teardown returns as
 // soon as the DB fence clears. This ceiling only covers the unhealthy path. It
 // allows one scheduled inventory and one complete successor claim without
@@ -387,7 +389,7 @@ const SettingsSchema = z.object({
     .number()
     .int()
     .min(1_000)
-    .max(120_000)
+    .max(GOOGLE_DRIVE_PROVIDER_REQUEST_TIMEOUT_MAX_MS)
     .default(30_000),
   googleDriveProviderRetryAttempts: z.coerce.number().int().min(1).max(5).default(3),
   googleDriveProviderRetryInitialDelayMs: z.coerce
@@ -396,7 +398,12 @@ const SettingsSchema = z.object({
     .positive()
     .max(30_000)
     .default(250),
-  googleDriveProviderRetryMaxDelayMs: z.coerce.number().int().positive().max(60_000).default(5_000),
+  googleDriveProviderRetryMaxDelayMs: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(GOOGLE_DRIVE_PROVIDER_RETRY_DELAY_MAX_MS)
+    .default(5_000),
   googleDriveProviderRetryBudgetMs: z.coerce.number().int().positive().max(120_000).default(15_000),
   fikenClientId: z.string().optional(),
   fikenClientSecret: z.string().optional(),
@@ -1162,6 +1169,34 @@ export function googleDriveProviderRetryOptions(
     maxDelayMs: settings.googleDriveProviderRetryMaxDelayMs,
     budgetMs: settings.googleDriveProviderRetryBudgetMs,
   };
+}
+
+/** Return only a credential-free HTTP(S) origin. Reject path, user-info, query,
+ * and fragment input instead of reflecting it into callbacks or evidence. */
+export function canonicalPublicOrigin(publicBaseUrl: string | undefined): string | null {
+  if (!publicBaseUrl) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(publicBaseUrl);
+  } catch {
+    return null;
+  }
+  if (
+    !["http:", "https:"].includes(parsed.protocol) ||
+    parsed.username ||
+    parsed.password ||
+    parsed.search ||
+    parsed.hash ||
+    (parsed.pathname !== "" && parsed.pathname !== "/")
+  ) {
+    return null;
+  }
+  return parsed.origin;
+}
+
+export function googleDriveOAuthCallbackUrl(publicBaseUrl: string | undefined): string | null {
+  const origin = canonicalPublicOrigin(publicBaseUrl);
+  return origin ? `${origin}/v1/integrations/google-drive/callback` : null;
 }
 
 /** Declarative voice-input transcription provider ids. */
@@ -4968,6 +5003,11 @@ function validateSettings(settings: Settings): void {
     if (!settings.publicBaseUrl) {
       throw new Error(
         "OPENGENI_PUBLIC_BASE_URL is required when the Google Drive integration is configured",
+      );
+    }
+    if (!googleDriveOAuthCallbackUrl(settings.publicBaseUrl)) {
+      throw new Error(
+        "OPENGENI_PUBLIC_BASE_URL must be a credential-free origin without a path, query, or fragment when the Google Drive integration is configured",
       );
     }
     if (

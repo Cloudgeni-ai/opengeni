@@ -2,6 +2,7 @@
 import {
   configuredGoogleDriveSyncLimits,
   getSettings,
+  googleDriveOAuthCallbackUrl,
   googleDriveProviderRetryOptions,
   type Settings,
 } from "@opengeni/config";
@@ -26,6 +27,7 @@ export type GoogleDriveReleaseReadiness = {
 };
 
 export function buildGoogleDriveReleaseReadiness(settings: Settings): GoogleDriveReleaseReadiness {
+  const callbackUrl = googleDriveOAuthCallbackUrl(settings.publicBaseUrl);
   const checks: ReadinessCheck[] = [
     check(
       "integrations_enabled",
@@ -49,8 +51,8 @@ export function buildGoogleDriveReleaseReadiness(settings: Settings): GoogleDriv
     ),
     check(
       "public_callback_origin",
-      Boolean(settings.publicBaseUrl),
-      "OPENGENI_PUBLIC_BASE_URL must define the OAuth callback origin.",
+      Boolean(callbackUrl),
+      "OPENGENI_PUBLIC_BASE_URL must define a credential-free OAuth callback origin without a path, query, or fragment.",
     ),
     check(
       "structured_logs_enabled",
@@ -69,9 +71,7 @@ export function buildGoogleDriveReleaseReadiness(settings: Settings): GoogleDriv
     providerCallsPerformed: false,
     checks,
     runtime: {
-      callbackUrl: settings.publicBaseUrl
-        ? `${settings.publicBaseUrl.replace(/\/+$/, "")}/v1/integrations/google-drive/callback`
-        : null,
+      callbackUrl,
       syncLimits: configuredGoogleDriveSyncLimits(settings),
       providerRetry: googleDriveProviderRetryOptions(settings),
     },

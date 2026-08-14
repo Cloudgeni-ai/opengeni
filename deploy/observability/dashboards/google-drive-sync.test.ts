@@ -43,7 +43,7 @@ describe("Google Drive sync dashboard", () => {
       "Run rate by outcome",
       "Failure ratio (15m)",
       "Reconnect required (15m)",
-      "p95 sync duration by outcome",
+      "p95 terminal batch duration by outcome",
       "Provider attempts and retries",
       "Explicit sync limit hits",
       "Terminal failures by bounded reason",
@@ -54,7 +54,7 @@ describe("Google Drive sync dashboard", () => {
     const expressions = collectExpressions(dashboard).join("\n");
     for (const metric of [
       "opengeni_knowledge_source_sync_runs_total",
-      "opengeni_knowledge_source_sync_duration_seconds_bucket",
+      "opengeni_knowledge_source_sync_terminal_batch_duration_seconds_bucket",
       "opengeni_knowledge_source_sync_provider_requests_total",
       "opengeni_google_drive_provider_requests_total",
       "opengeni_google_drive_provider_retries_total",
