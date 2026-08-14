@@ -6,12 +6,14 @@ import {
   type ScheduledTask,
   type ScheduledTaskAgentConfig,
 } from "@opengeni/contracts";
+import { defaultSessionMcpServerIds, resolveSessionToolPolicy } from "@opengeni/core";
 import {
   evaluateIncidentTelemetryPreflight,
   incidentTelemetryAuthorityFence,
   incidentTelemetryPreflightDeclaration,
   type IncidentTelemetryResponderMetadata,
 } from "../src/activities/incident-telemetry-preflight";
+import { resolveIncidentTelemetryResponderToolPolicy } from "../src/activities/incident-telemetry-authority";
 
 const repository = {
   kind: "repository" as const,
@@ -268,6 +270,65 @@ describe("incident telemetry dispatch preflight", () => {
         reason: "incident_responder_under_capable",
       });
     }
+  });
+
+  test("matches runtime workspace defaults for dynamic capability and delegated integration ids", () => {
+    const currentRegistryIds = [
+      "opengeni",
+      "configured-static",
+      "dynamic-capability",
+      "delegated-integration",
+    ];
+    const session = {
+      tools: [{ kind: "mcp" as const, id: "opengeni" }],
+      mcpServers: [
+        {
+          id: "session-custom",
+          name: null,
+          url: "https://session-custom.example.com/mcp",
+          allowedTools: null,
+          timeoutMs: null,
+          cacheToolsList: null,
+          requireApproval: "never" as const,
+          connectionRef: null,
+        },
+      ],
+      toolPolicy: { mode: "workspace_default" as const, inheritedFromSessionId: null },
+    };
+    const preflight = resolveIncidentTelemetryResponderToolPolicy({
+      settingsMcpServerIds: ["opengeni", "configured-static"],
+      capabilityServerIds: ["dynamic-capability"],
+      apiIntegrationServerIds: ["delegated-integration"],
+      session,
+      plannedTools: [],
+    });
+    const runtime = resolveSessionToolPolicy({
+      toolPolicy: session.toolPolicy,
+      sessionTools: session.tools,
+      availableMcpServerIds: [...currentRegistryIds, "session-custom"],
+      defaultMcpServerIds: defaultSessionMcpServerIds(currentRegistryIds.map((id) => ({ id }))),
+    });
+
+    expect(preflight).toEqual(runtime);
+    expect(preflight.toolRefs.map((tool) => tool.id).sort()).toEqual([
+      "configured-static",
+      "delegated-integration",
+      "dynamic-capability",
+      "opengeni",
+    ]);
+    expect(preflight.toolRefs.map((tool) => tool.id)).not.toContain("session-custom");
+
+    const explicit = resolveIncidentTelemetryResponderToolPolicy({
+      settingsMcpServerIds: ["opengeni", "configured-static"],
+      capabilityServerIds: ["dynamic-capability"],
+      apiIntegrationServerIds: ["delegated-integration"],
+      session: {
+        ...session,
+        toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+      },
+      plannedTools: [],
+    });
+    expect(explicit.toolRefs).toEqual([{ kind: "mcp", id: "opengeni" }]);
   });
 
   test("returns fixed blockers without secret, endpoint, repository, or identity leakage", () => {

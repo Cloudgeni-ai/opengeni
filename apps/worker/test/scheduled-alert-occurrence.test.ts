@@ -248,6 +248,7 @@ async function taskFixture(
   options: {
     incidentDeclaration?: boolean;
     underCapable?: boolean;
+    requiredMcpServerId?: string;
     runMode?: "new_session_per_run" | "reusable_session" | "existing_session";
     responderSessionId?: string;
     rig?: { id: string; name: string; credentialHookId: string };
@@ -255,6 +256,9 @@ async function taskFixture(
   } = {},
 ) {
   const runMode = options.runMode ?? "new_session_per_run";
+  const requiredMcpServerId = options.underCapable
+    ? "missing-observability"
+    : (options.requiredMcpServerId ?? null);
   const created = await createScheduledTask(client!.db, {
     ...workspace,
     name: `scheduled alert ${crypto.randomUUID()}`,
@@ -266,7 +270,7 @@ async function taskFixture(
     agentConfig: {
       prompt: "Handle the exact structured alert occurrence without parsing this prompt.",
       resources: [],
-      tools: options.underCapable ? [{ kind: "mcp" as const, id: "missing-observability" }] : [],
+      tools: requiredMcpServerId ? [{ kind: "mcp" as const, id: requiredMcpServerId }] : [],
       metadata: { purpose: "incident-response" },
       ...(options.incidentDeclaration === false
         ? {}
@@ -274,9 +278,9 @@ async function taskFixture(
             executionClass: "incident_telemetry" as const,
             incidentTelemetryPreflight: {
               requiredResources: [],
-              requiredMcpServerIds: options.underCapable ? ["missing-observability"] : [],
-              requiredFirstPartyMcpTools: options.underCapable ? [] : ["sessions_list"],
-              requiredFirstPartyMcpPermissions: options.underCapable ? [] : ["sessions:read"],
+              requiredMcpServerIds: requiredMcpServerId ? [requiredMcpServerId] : [],
+              requiredFirstPartyMcpTools: requiredMcpServerId ? [] : ["sessions_list"],
+              requiredFirstPartyMcpPermissions: requiredMcpServerId ? [] : ["sessions:read"],
               requiredRig: options.rig
                 ? {
                     name: options.rig.name,
@@ -290,8 +294,8 @@ async function taskFixture(
                 queryPath: "/api/v1/query" as const,
                 workspaceLabel: "workspace_id",
                 alertSelectorLabels: ["alertname"],
-                route: options.underCapable
-                  ? { kind: "mcp" as const, serverId: "missing-observability" }
+                route: requiredMcpServerId
+                  ? { kind: "mcp" as const, serverId: requiredMcpServerId }
                   : {
                       kind: "first_party" as const,
                       tool: "sessions_list" as const,
@@ -346,6 +350,63 @@ function activities() {
 }
 
 describe("scheduled alert canonical responder session (real PostgreSQL)", () => {
+  async function installTrustedCapabilityMcpServer(
+    workspace: Awaited<ReturnType<typeof workspaceFixture>>,
+    serverId: string,
+  ) {
+    const capabilityId = `mcp:workspace-default-${crypto.randomUUID()}`;
+    const endpoint = `https://example.com/${serverId}`;
+    await admin!`
+      insert into capability_catalog_items (
+        id,
+        account_id,
+        workspace_id,
+        kind,
+        source,
+        name,
+        endpoint_url,
+        auth_model,
+        auth_kind,
+        provider_domain,
+        mcp_url,
+        metadata
+      ) values (
+        ${capabilityId},
+        null,
+        null,
+        'mcp',
+        'registry',
+        ${capabilityId},
+        ${endpoint},
+        null,
+        'none',
+        ${`${crypto.randomUUID()}.example.com`},
+        ${endpoint},
+        ${admin!.json({
+          mcpProbe: { status: "real" },
+          mcpServerId: serverId,
+        })}
+      )`;
+    await admin!`
+      insert into capability_installations (
+        account_id,
+        workspace_id,
+        capability_id,
+        kind,
+        status,
+        config,
+        metadata
+      ) values (
+        ${workspace.accountId},
+        ${workspace.workspaceId},
+        ${capabilityId},
+        'mcp',
+        'active',
+        '{}'::jsonb,
+        ${admin!.json({ mcpConnectivity: { status: "ok" } })}
+      )`;
+  }
+
   test("matches canonical registry API-key trim trust without exposing contract text", async () => {
     if (!shared || !client || !admin) return;
     const workspace = await workspaceFixture();
@@ -569,6 +630,55 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
         producerKey: `four-mode-${candidate.label}-${crypto.randomUUID()}`,
       });
       expect(result.action, candidate.label).toBe(candidate.expectedAction);
+    }
+  });
+
+  test("admits current dynamic defaults for existing and reusable workspace-default responders", async () => {
+    if (!shared || !client) return;
+    const workspace = await workspaceFixture();
+    const workspaceDefaultResponder = async (label: string) =>
+      await createSession(client.db, {
+        ...workspace,
+        initialMessage: label,
+        resources: [],
+        tools: [{ kind: "mcp", id: "opengeni" }],
+        toolPolicy: { mode: "workspace_default", inheritedFromSessionId: null },
+        metadata: {},
+        model: "scripted-model",
+        sandboxBackend: "none",
+      });
+    const existing = await workspaceDefaultResponder("existing workspace-default responder");
+    const reusable = await workspaceDefaultResponder("reusable workspace-default responder");
+    const dynamicServerId = `dynamic-observability-${crypto.randomUUID()}`;
+
+    // The capability becomes a current workspace default only after the
+    // sessions are created, so their stored tool refs cannot mask the parity.
+    await installTrustedCapabilityMcpServer(workspace, dynamicServerId);
+
+    const tasks = [
+      await taskFixture(workspace, alertMetadata(), {
+        runMode: "existing_session",
+        responderSessionId: existing.id,
+        requiredMcpServerId: dynamicServerId,
+      }),
+      await taskFixture(workspace, alertMetadata(), {
+        runMode: "reusable_session",
+        responderSessionId: reusable.id,
+        requiredMcpServerId: dynamicServerId,
+      }),
+    ];
+
+    for (const task of tasks) {
+      expect(
+        (
+          await activities().dispatchScheduledTaskRun({
+            workspaceId: workspace.workspaceId,
+            taskId: task.id,
+            triggerType: "scheduled",
+            producerKey: `workspace-default-${task.id}`,
+          })
+        ).action,
+      ).toBe("signal");
     }
   });
 

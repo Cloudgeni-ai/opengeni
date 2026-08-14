@@ -50,24 +50,15 @@ export async function resolveIncidentTelemetryResponderMetadata(input: {
       input.personalConnectionDelegations,
     ),
   ]);
-  const availableMcpServerIds = new Set(input.settings.mcpServers.map((server) => server.id));
-  for (const id of capabilityServerIds) availableMcpServerIds.add(id);
-  for (const id of apiIntegrationServerIds) availableMcpServerIds.add(id);
-  for (const server of input.session?.mcpServers ?? []) {
-    availableMcpServerIds.add(server.id);
-  }
-
   const sessionTools = input.session
     ? input.session.tools
     : withFirstPartyTools(input.settings, input.task.agentConfig.tools);
-  const resolvedToolPolicy = resolveSessionToolPolicy({
-    toolPolicy: input.session?.toolPolicy ?? {
-      mode: "explicit",
-      inheritedFromSessionId: null,
-    },
-    sessionTools,
-    availableMcpServerIds,
-    defaultMcpServerIds: defaultSessionMcpServerIds(input.settings.mcpServers),
+  const resolvedToolPolicy = resolveIncidentTelemetryResponderToolPolicy({
+    settingsMcpServerIds: input.settings.mcpServers.map((server) => server.id),
+    capabilityServerIds,
+    apiIntegrationServerIds,
+    session: input.session,
+    plannedTools: sessionTools,
   });
 
   let metadataComplete = true;
@@ -154,6 +145,36 @@ export async function resolveIncidentTelemetryResponderMetadata(input: {
     ),
     toolPolicyVersion: input.session?.toolPolicyVersion ?? null,
   };
+}
+
+/** Resolve the responder's current ID-only MCP policy without materializing runtime secrets. */
+export function resolveIncidentTelemetryResponderToolPolicy(input: {
+  settingsMcpServerIds: readonly string[];
+  capabilityServerIds: readonly string[];
+  apiIntegrationServerIds: readonly string[];
+  session: Pick<Session, "mcpServers" | "tools" | "toolPolicy"> | null;
+  plannedTools: Session["tools"];
+}) {
+  const workspaceDefaultMcpServerIds = new Set(input.settingsMcpServerIds);
+  for (const id of input.capabilityServerIds) workspaceDefaultMcpServerIds.add(id);
+  for (const id of input.apiIntegrationServerIds) workspaceDefaultMcpServerIds.add(id);
+
+  const availableMcpServerIds = new Set(workspaceDefaultMcpServerIds);
+  for (const server of input.session?.mcpServers ?? []) {
+    availableMcpServerIds.add(server.id);
+  }
+
+  return resolveSessionToolPolicy({
+    toolPolicy: input.session?.toolPolicy ?? {
+      mode: "explicit",
+      inheritedFromSessionId: null,
+    },
+    sessionTools: input.session?.tools ?? input.plannedTools,
+    availableMcpServerIds,
+    defaultMcpServerIds: defaultSessionMcpServerIds(
+      [...workspaceDefaultMcpServerIds].map((id) => ({ id })),
+    ),
+  });
 }
 
 /** Revalidate a source-frozen incident responder fence before a turn can claim it. */
