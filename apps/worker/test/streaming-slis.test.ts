@@ -11,6 +11,7 @@ import {
   recordSessionEventAppendLatency,
   recordSessionEventPublishLatency,
   recordTurnSandboxEstablishPolicy,
+  recordTurnStartupMilestone,
   recordTurnStartupPhase,
   recordTurnWorkerPreparationTotal,
   StreamTimingMetrics,
@@ -186,6 +187,37 @@ describe("provider request lifecycle diagnostics", () => {
 });
 
 describe("turn startup phase diagnostics", () => {
+  test("records cumulative queue-to-milestone SLOs with bounded labels", async () => {
+    const observability = worker();
+    recordTurnStartupMilestone(observability, {
+      milestone: "queue",
+      provider: "codex-subscription",
+      backend: "modal",
+      outcome: "completed",
+      durationSeconds: 1.714,
+    });
+    recordTurnStartupMilestone(observability, {
+      milestone: "first_byte",
+      provider: "codex-subscription",
+      backend: "modal",
+      outcome: "completed",
+      durationSeconds: 93.168,
+    });
+
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_turn_startup_milestone_duration_seconds_sum\{[^}]*backend="modal"[^}]*milestone="queue"[^}]*outcome="completed"[^}]*provider="codex-subscription"[^}]*\} 1\.714\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_turn_startup_milestone_duration_seconds_sum\{[^}]*milestone="first_byte"[^}]*\} 93\.168\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_turn_startup_milestone_duration_seconds_bucket\{[^}]*le="7200"[^}]*milestone="queue"[^}]*\}/,
+    );
+    expect(metrics).not.toContain("sessionId");
+    expect(metrics).not.toContain("turnId");
+  });
+
   test("records one bounded phase series without request identity", async () => {
     const observability = worker();
     recordTurnStartupPhase(observability, {

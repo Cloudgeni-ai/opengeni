@@ -21,6 +21,8 @@ import type {
   MachineInputBatchItem,
   MemoryItem,
   SandboxItem,
+  StartupPhase,
+  StartupPhaseItem,
   SessionStatusItem,
   TimelineGroup,
   TimelineItem,
@@ -124,6 +126,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
   const items: TimelineItem[] = [];
   const prescan = prescanTurnAnchors(events);
   const ordered = orderTimelineEvents(events, prescan);
+  const queuedAtByTurn = new Map<string, string>();
 
   const last = (): TimelineItem | undefined => items[items.length - 1];
 
@@ -138,6 +141,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
   const finalizeOpen = (
     turnId?: string | null,
     disposition: "complete" | "failed" | "cancelled" = "complete",
+    completedAt?: string,
   ): void => {
     for (const item of items) {
       if (
@@ -157,6 +161,13 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
       }
       if (item.kind === "sandbox" && item.status === "running") {
         item.status = disposition;
+      }
+      if (item.kind === "startup-phase" && item.status === "running") {
+        item.status = disposition;
+        if (completedAt) {
+          item.completedAt = completedAt;
+          item.durationMs = elapsedDurationMs(item.startedAt, completedAt);
+        }
       }
     }
   };
@@ -452,6 +463,38 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         break;
       }
 
+      case "turn.queued": {
+        const queuedTurnId = turnId ?? (typeof payload.turnId === "string" ? payload.turnId : null);
+        if (queuedTurnId) {
+          queuedAtByTurn.set(queuedTurnId, event.occurredAt);
+        }
+        break;
+      }
+
+      case "turn.started": {
+        if (!turnId) break;
+        const queuedAt = queuedAtByTurn.get(turnId);
+        if (!queuedAt) break;
+        // Recovery starts the same logical turn again. Queue latency belongs to
+        // the first admission only, so consume the queued timestamp after its
+        // first projection instead of manufacturing another queue span.
+        queuedAtByTurn.delete(turnId);
+        closeStreamingTail();
+        items.push({
+          kind: "startup-phase",
+          id: `${event.id}-queue`,
+          turnId,
+          phase: "queue",
+          status: "complete",
+          startedAt: queuedAt,
+          completedAt: event.occurredAt,
+          durationMs: elapsedDurationMs(queuedAt, event.occurredAt),
+          outcome: null,
+          occurredAt: queuedAt,
+        });
+        break;
+      }
+
       case "sandbox.operation.started":
       case "sandbox.operation.completed":
       case "sandbox.operation.failed": {
@@ -461,6 +504,25 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           : event.type.endsWith(".completed")
             ? "complete"
             : "running";
+        const startupPhase = startupPhaseForSandboxOperation(name);
+        if (startupPhase) {
+          closeStreamingTail();
+          settleOrPushStartupPhase(items, {
+            id: event.id,
+            turnId,
+            phase: startupPhase,
+            status,
+            occurredAt: event.occurredAt,
+            durationMs: numberOrNull(payload.durationMs),
+            outcome:
+              payload.origin === "created" ||
+              payload.origin === "restored" ||
+              payload.origin === "resumed"
+                ? payload.origin
+                : null,
+          });
+          break;
+        }
         // Routine per-turn platform plumbing that runs before EVERY turn to
         // guarantee box contents survive a re-warm — NOT the agent redoing work:
         //   - repository-clone: idempotent clone check + off-manifest token re-seed;
@@ -510,6 +572,95 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
                 : null,
             status,
             occurredAt: event.occurredAt,
+          });
+        }
+        break;
+      }
+
+      case "rig.setup.started":
+      case "rig.setup.completed":
+      case "rig.setup.skipped":
+      case "rig.setup.failed": {
+        closeStreamingTail();
+        settleOrPushStartupPhase(items, {
+          id: event.id,
+          turnId,
+          phase: "rig",
+          status:
+            event.type === "rig.setup.started"
+              ? "running"
+              : event.type === "rig.setup.failed"
+                ? "failed"
+                : "complete",
+          occurredAt: event.occurredAt,
+          durationMs: numberOrNull(payload.durationMs),
+          outcome: event.type === "rig.setup.skipped" ? "skipped" : null,
+        });
+        break;
+      }
+
+      case "turn.startup.phase.started":
+      case "turn.startup.phase.completed":
+      case "turn.startup.phase.failed": {
+        const phase = startupPhaseFromPayload(payload.phase);
+        if (!phase) break;
+        closeStreamingTail();
+        settleOrPushStartupPhase(items, {
+          id: event.id,
+          turnId,
+          phase,
+          status:
+            event.type === "turn.startup.phase.started"
+              ? "running"
+              : event.type === "turn.startup.phase.failed"
+                ? "failed"
+                : "complete",
+          occurredAt: event.occurredAt,
+          durationMs: numberOrNull(payload.durationMs),
+          outcome: null,
+        });
+        break;
+      }
+
+      case "agent.model.request": {
+        const requestPhase = typeof payload.phase === "string" ? payload.phase : null;
+        const existingProviderWait = findStartupPhase(items, "provider_first_byte", turnId);
+        if (requestPhase === "started" && !existingProviderWait) {
+          closeStreamingTail();
+          settleOrPushStartupPhase(items, {
+            id: event.id,
+            turnId,
+            phase: "provider_first_byte",
+            status: "running",
+            occurredAt: event.occurredAt,
+            durationMs: null,
+            outcome: null,
+          });
+        } else if (
+          existingProviderWait?.status === "running" &&
+          (requestPhase === "first_byte" || requestPhase === "first_event")
+        ) {
+          settleOrPushStartupPhase(items, {
+            id: event.id,
+            turnId,
+            phase: "provider_first_byte",
+            status: "complete",
+            occurredAt: event.occurredAt,
+            durationMs: numberOrNull(payload.durationMs),
+            outcome: null,
+          });
+        } else if (
+          existingProviderWait?.status === "running" &&
+          (requestPhase === "failed" || requestPhase === "timed_out")
+        ) {
+          settleOrPushStartupPhase(items, {
+            id: event.id,
+            turnId,
+            phase: "provider_first_byte",
+            status: "failed",
+            occurredAt: event.occurredAt,
+            durationMs: numberOrNull(payload.durationMs),
+            outcome: null,
           });
         }
         break;
@@ -572,7 +723,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
       }
 
       case "session.requiresAction": {
-        finalizeOpen(turnId);
+        finalizeOpen(turnId, "complete", event.occurredAt);
         items.push({
           kind: "notice",
           id: event.id,
@@ -700,7 +851,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         // adding a generic turn chip would falsely make it look like an
         // extra agent response.
         if (payload.maintenance === "context_compaction") {
-          finalizeOpen(turnId);
+          finalizeOpen(turnId, "complete", event.occurredAt);
           break;
         }
         // Credit exhaustion arrives as a NOMINALLY completed turn (`detail:
@@ -710,7 +861,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         // session looking healthy while every future turn silently dies, so it
         // projects exactly like a failed turn plus an explicit notice.
         if (isCreditExhaustionPayload(payload)) {
-          finalizeOpen(turnId);
+          finalizeOpen(turnId, "complete", event.occurredAt);
           items.push(turnEndItem(event, "failed", CREDIT_EXHAUSTION_MESSAGE));
           items.push({
             kind: "notice",
@@ -721,7 +872,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           });
           break;
         }
-        finalizeOpen(turnId);
+        finalizeOpen(turnId, "complete", event.occurredAt);
         items.push(turnEndItem(event, "complete", null));
         break;
       }
@@ -738,7 +889,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         // spent once, on the turn-level outcome. Items caught mid-flight read
         // as calm "interrupted" (same as turn.cancelled); an item that itself
         // failed keeps its own failed status from its output event.
-        finalizeOpen(turnId, "cancelled");
+        finalizeOpen(turnId, "cancelled", event.occurredAt);
         items.push(turnEndItem(event, "failed", failureText));
         if (!hadActivity) {
           items.push({
@@ -760,7 +911,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           break;
         }
         const hadActivity = hasTurnActivity(items, turnId);
-        finalizeOpen(turnId, "cancelled");
+        finalizeOpen(turnId, "cancelled", event.occurredAt);
         items.push(turnEndItem(event, "cancelled", null));
         if (!hadActivity) {
           items.push({
@@ -972,6 +1123,7 @@ function isActivityItem(item: TimelineItem): item is ActivityItem {
     case "tool-call":
     case "worker":
     case "sandbox":
+    case "startup-phase":
     case "memory":
     case "fleet-decision":
       return true;
@@ -1160,6 +1312,7 @@ function isTurnExecutionEvidence(type: string): boolean {
     type === "session.requiresAction" ||
     type === "tool.auth_needed" ||
     type === "credential.auth_needed" ||
+    type.startsWith("turn.startup.phase.") ||
     type.startsWith("rig.setup.") ||
     type === "codex.capacity.waiting" ||
     type === "codex.capacity.resumed" ||
@@ -1637,6 +1790,114 @@ function findOpenSandbox(items: TimelineItem[], name: string): SandboxItem | und
       (item): item is SandboxItem =>
         item.kind === "sandbox" && item.name === name && item.status === "running",
     );
+}
+
+function startupPhaseForSandboxOperation(name: string): StartupPhase | null {
+  if (name === "sandbox.provision") return "sandbox";
+  if (name === "repository-clone") return "repository";
+  if (name === "file-resource-download") return "files";
+  return null;
+}
+
+function startupPhaseFromPayload(value: unknown): StartupPhase | null {
+  switch (value) {
+    case "queue":
+    case "sandbox":
+    case "rig":
+    case "repository":
+    case "files":
+    case "tools":
+    case "model_preparation":
+    case "provider_first_byte":
+      return value;
+    default:
+      return null;
+  }
+}
+
+function findStartupPhase(
+  items: TimelineItem[],
+  phase: StartupPhase,
+  turnId: string | null,
+): StartupPhaseItem | undefined {
+  return [...items]
+    .reverse()
+    .find(
+      (item): item is StartupPhaseItem =>
+        item.kind === "startup-phase" && item.phase === phase && item.turnId === turnId,
+    );
+}
+
+function settleOrPushStartupPhase(
+  items: TimelineItem[],
+  input: {
+    id: string;
+    turnId: string | null;
+    phase: StartupPhase;
+    status: StartupPhaseItem["status"];
+    occurredAt: string;
+    durationMs: number | null;
+    outcome: StartupPhaseItem["outcome"];
+  },
+): void {
+  const open = [...items]
+    .reverse()
+    .find(
+      (item): item is StartupPhaseItem =>
+        item.kind === "startup-phase" &&
+        item.phase === input.phase &&
+        item.turnId === input.turnId &&
+        item.status === "running",
+    );
+  if (input.status !== "running" && open) {
+    open.status = input.status;
+    open.completedAt = input.occurredAt;
+    open.durationMs =
+      input.durationMs === null
+        ? elapsedDurationMs(open.startedAt, input.occurredAt)
+        : Math.max(0, input.durationMs);
+    open.outcome = input.outcome ?? open.outcome;
+    return;
+  }
+  if (input.status === "running") {
+    items.push({
+      kind: "startup-phase",
+      id: input.id,
+      turnId: input.turnId,
+      phase: input.phase,
+      status: "running",
+      startedAt: input.occurredAt,
+      completedAt: null,
+      durationMs: null,
+      outcome: input.outcome,
+      occurredAt: input.occurredAt,
+    });
+    return;
+  }
+  const durationMs = input.durationMs === null ? null : Math.max(0, input.durationMs);
+  const completedEpoch = Date.parse(input.occurredAt);
+  const startedAt =
+    durationMs !== null && Number.isFinite(completedEpoch)
+      ? new Date(completedEpoch - durationMs).toISOString()
+      : input.occurredAt;
+  items.push({
+    kind: "startup-phase",
+    id: input.id,
+    turnId: input.turnId,
+    phase: input.phase,
+    status: input.status,
+    startedAt,
+    completedAt: input.occurredAt,
+    durationMs,
+    outcome: input.outcome,
+    occurredAt: startedAt,
+  });
+}
+
+function elapsedDurationMs(startedAt: string, completedAt: string): number | null {
+  const start = Date.parse(startedAt);
+  const end = Date.parse(completedAt);
+  return Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, end - start) : null;
 }
 
 function failureMessage(payload: Record<string, unknown>): string | null {

@@ -3,6 +3,7 @@ import {
   BotIcon,
   BrainCircuitIcon,
   BrainIcon,
+  Clock3Icon,
   SquareTerminalIcon,
 } from "lucide-react";
 import { lazy, Suspense, useLayoutEffect, useRef } from "react";
@@ -16,7 +17,14 @@ import type { RetainedArtifactLoader, RetainedScreenshotLoader, ToolRegistry } f
 import { useSeenActivityIds } from "./seen-activity-ids";
 import { BodyNote, PayloadBlock, ActivityDisclosure, ToolCallTruncationProvider } from "./shared";
 import { toolDisplayName } from "./tool-display-name";
-import type { ActivityItem, MemoryItem, ReasoningItem, SandboxItem, WorkerItem } from "./types";
+import type {
+  ActivityItem,
+  MemoryItem,
+  ReasoningItem,
+  SandboxItem,
+  StartupPhaseItem,
+  WorkerItem,
+} from "./types";
 
 const LazyFleetDecisionRow = lazy(() => import("./fleet-decision-row"));
 
@@ -174,6 +182,8 @@ function renderActivity(
       return <WorkerRow item={item} onOpenSession={onOpenSession} />;
     case "sandbox":
       return <SandboxRow item={item} />;
+    case "startup-phase":
+      return <StartupPhaseRow item={item} />;
     case "memory":
       return <MemoryRow item={item} onMemoryClick={onMemoryClick} />;
     case "fleet-decision":
@@ -353,6 +363,117 @@ function SandboxRow({ item }: { item: SandboxItem }) {
       {item.output ? <PayloadBlock label="Output" value={item.output} /> : null}
     </ActivityDisclosure>
   );
+}
+
+function StartupPhaseRow({ item }: { item: StartupPhaseItem }) {
+  const failed = item.status === "failed";
+  const running = item.status === "running";
+  const duration = startupDuration(item.durationMs);
+  return (
+    <ActivityDisclosure
+      icon={<Clock3Icon className="size-3.5" />}
+      iconTone={failed ? "failed" : running ? "running" : "muted"}
+      title={startupPhaseTitle(item)}
+      running={running}
+      failed={failed}
+      cancelled={item.status === "cancelled"}
+      chip={duration ? { tone: failed ? "bad" : "muted", text: duration } : undefined}
+      expandable={false}
+    />
+  );
+}
+
+function startupPhaseTitle(item: StartupPhaseItem): string {
+  if (item.status === "running") {
+    switch (item.phase) {
+      case "queue":
+        return "Waiting for a worker";
+      case "sandbox":
+        return "Starting sandbox";
+      case "rig":
+        return "Setting up rig";
+      case "repository":
+        return "Preparing repository";
+      case "files":
+        return "Preparing files";
+      case "tools":
+        return "Connecting tools";
+      case "model_preparation":
+        return "Preparing model request";
+      case "provider_first_byte":
+        return "Waiting for model";
+    }
+  }
+  if (item.status === "failed") {
+    switch (item.phase) {
+      case "queue":
+        return "Worker startup failed";
+      case "sandbox":
+        return "Sandbox didn’t start";
+      case "rig":
+        return "Rig setup failed";
+      case "repository":
+        return "Repository preparation failed";
+      case "files":
+        return "File preparation failed";
+      case "tools":
+        return "Tool connection failed";
+      case "model_preparation":
+        return "Model request preparation failed";
+      case "provider_first_byte":
+        return "Model didn’t respond";
+    }
+  }
+  if (item.status === "cancelled") {
+    switch (item.phase) {
+      case "queue":
+        return "Worker wait interrupted";
+      case "sandbox":
+        return "Sandbox startup interrupted";
+      case "rig":
+        return "Rig setup interrupted";
+      case "repository":
+        return "Repository preparation interrupted";
+      case "files":
+        return "File preparation interrupted";
+      case "tools":
+        return "Tool connection interrupted";
+      case "model_preparation":
+        return "Model request preparation interrupted";
+      case "provider_first_byte":
+        return "Model wait interrupted";
+    }
+  }
+  switch (item.phase) {
+    case "queue":
+      return "Worker started";
+    case "sandbox":
+      if (item.outcome === "restored") return "Sandbox restored";
+      if (item.outcome === "resumed") return "Sandbox reattached";
+      if (item.outcome === "created") return "Sandbox created";
+      return "Sandbox ready";
+    case "rig":
+      return item.outcome === "skipped" ? "Rig already ready" : "Rig ready";
+    case "repository":
+      return "Repository ready";
+    case "files":
+      return "Files ready";
+    case "tools":
+      return "Tools ready";
+    case "model_preparation":
+      return "Model request ready";
+    case "provider_first_byte":
+      return "Model started responding";
+  }
+}
+
+function startupDuration(durationMs: number | null): string | null {
+  if (durationMs === null || !Number.isFinite(durationMs) || durationMs < 0) return null;
+  if (durationMs < 1_000) return `${Math.round(durationMs)}ms`;
+  if (durationMs < 60_000) return `${(durationMs / 1_000).toFixed(1)}s`;
+  const minutes = Math.floor(durationMs / 60_000);
+  const seconds = Math.round((durationMs % 60_000) / 1_000);
+  return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
 }
 
 /** Spawned/messaged worker sessions get a first-class card, not a tool row. */

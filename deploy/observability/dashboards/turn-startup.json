@@ -1,0 +1,358 @@
+{
+  "uid": "opengeni-turn-startup",
+  "title": "OpenGeni · Turn Startup",
+  "description": "Queue-to-first-byte SLOs and bounded worker preparation phases. Session drill-down stays in durable authenticated events; no session or turn identity is a metric label.",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "graphTooltip": 1,
+  "timezone": "browser",
+  "refresh": "30s",
+  "time": { "from": "now-7d", "to": "now" },
+  "timepicker": {
+    "refresh_intervals": ["30s", "1m", "5m", "15m", "30m", "1h"],
+    "time_options": ["6h", "24h", "7d", "30d"]
+  },
+  "tags": ["opengeni", "turns", "startup", "slo"],
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "label": "Prometheus",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0,
+        "refresh": 1
+      },
+      {
+        "name": "provider",
+        "label": "Provider",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "query": {
+          "query": "label_values(opengeni_turn_startup_phase_duration_seconds_bucket, provider)",
+          "refId": "provider"
+        },
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "refresh": 1
+      },
+      {
+        "name": "backend",
+        "label": "Sandbox backend",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "query": {
+          "query": "label_values(opengeni_turn_startup_phase_duration_seconds_bucket, backend)",
+          "refId": "backend"
+        },
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "refresh": 1
+      },
+      {
+        "name": "outcome",
+        "label": "Outcome",
+        "type": "custom",
+        "query": "completed,failed",
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "current": { "text": "completed", "value": "completed" }
+      },
+      {
+        "name": "phase",
+        "label": "Startup phase",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "query": {
+          "query": "label_values(opengeni_turn_startup_phase_duration_seconds_bucket, phase)",
+          "refId": "phase"
+        },
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "refresh": 1
+      },
+      {
+        "name": "cache",
+        "label": "Cache",
+        "type": "custom",
+        "query": "none,hit,miss,disabled",
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true
+      },
+      {
+        "name": "count_bucket",
+        "label": "Input count",
+        "type": "custom",
+        "query": "0,1,2-5,6-20,21+,unknown",
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Worker preparation",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 1 }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Worker preparation p50 / p95 / p99",
+      "description": "Durable turn start to first runtime entry. This is platform preparation, not provider think time.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.50, sum by (le, provider, backend) (rate(opengeni_turn_worker_preparation_duration_seconds_bucket{provider=~\"$provider\",backend=~\"$backend\",outcome=~\"$outcome\"}[$__rate_interval])))",
+          "legendFormat": "{{provider}} · {{backend}} p50",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le, provider, backend) (rate(opengeni_turn_worker_preparation_duration_seconds_bucket{provider=~\"$provider\",backend=~\"$backend\",outcome=~\"$outcome\"}[$__rate_interval])))",
+          "legendFormat": "{{provider}} · {{backend}} p95",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.99, sum by (le, provider, backend) (rate(opengeni_turn_worker_preparation_duration_seconds_bucket{provider=~\"$provider\",backend=~\"$backend\",outcome=~\"$outcome\"}[$__rate_interval])))",
+          "legendFormat": "{{provider}} · {{backend}} p99",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 0, "y": 1, "w": 12, "h": 9 }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Selected startup phase p50 / p95 / p99",
+      "description": "Filters are restricted to the metric's fixed-cardinality provider/backend/outcome/count/cache vocabulary.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.50, sum by (le, phase) (rate(opengeni_turn_startup_phase_duration_seconds_bucket{phase=~\"$phase\",provider=~\"$provider\",backend=~\"$backend\",outcome=~\"$outcome\",cache=~\"$cache\",count_bucket=~\"$count_bucket\"}[$__rate_interval])))",
+          "legendFormat": "{{phase}} p50",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le, phase) (rate(opengeni_turn_startup_phase_duration_seconds_bucket{phase=~\"$phase\",provider=~\"$provider\",backend=~\"$backend\",outcome=~\"$outcome\",cache=~\"$cache\",count_bucket=~\"$count_bucket\"}[$__rate_interval])))",
+          "legendFormat": "{{phase}} p95",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.99, sum by (le, phase) (rate(opengeni_turn_startup_phase_duration_seconds_bucket{phase=~\"$phase\",provider=~\"$provider\",backend=~\"$backend\",outcome=~\"$outcome\",cache=~\"$cache\",count_bucket=~\"$count_bucket\"}[$__rate_interval])))",
+          "legendFormat": "{{phase}} p99",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 12, "y": 1, "w": 12, "h": 9 }
+    },
+    {
+      "id": 4,
+      "type": "bargauge",
+      "title": "Startup phase p95 breakdown",
+      "description": "The longest platform phase is immediately visible; provider response time is intentionally excluded.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showUnfilled": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, phase) (rate(opengeni_turn_startup_phase_duration_seconds_bucket{provider=~\"$provider\",backend=~\"$backend\",outcome=~\"$outcome\",cache=~\"$cache\",count_bucket=~\"$count_bucket\"}[$__rate_interval])))",
+          "legendFormat": "{{phase}}",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 0, "y": 10, "w": 12, "h": 9 }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Failed startup phases",
+      "description": "Failures by bounded phase, provider, and backend over the selected range.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["sum"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (phase, provider, backend) (increase(opengeni_turn_startup_phase_duration_seconds_count{outcome=\"failed\",provider=~\"$provider\",backend=~\"$backend\"}[$__range]))",
+          "legendFormat": "{{phase}} · {{provider}} · {{backend}}",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 12, "y": 10, "w": 12, "h": 9 }
+    },
+    {
+      "id": 6,
+      "type": "row",
+      "title": "Queue → provider dispatch → first byte",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": { "x": 0, "y": 19, "w": 24, "h": 1 }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "End-to-end startup milestones p50 / p95 / p99",
+      "description": "Cumulative latency measured from the durable turn queue timestamp. first_byte is a real end-to-end TTFB sample, not a sum of independently distributed phase percentiles.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.50, sum by (le, milestone) (rate(opengeni_turn_startup_milestone_duration_seconds_bucket{provider=~\"$provider\",backend=~\"$backend\",outcome=~\"$outcome\"}[$__rate_interval])))",
+          "legendFormat": "{{milestone}} p50",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le, milestone) (rate(opengeni_turn_startup_milestone_duration_seconds_bucket{provider=~\"$provider\",backend=~\"$backend\",outcome=~\"$outcome\"}[$__rate_interval])))",
+          "legendFormat": "{{milestone}} p95",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.99, sum by (le, milestone) (rate(opengeni_turn_startup_milestone_duration_seconds_bucket{provider=~\"$provider\",backend=~\"$backend\",outcome=~\"$outcome\"}[$__rate_interval])))",
+          "legendFormat": "{{milestone}} p99",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 0, "y": 20, "w": 16, "h": 10 }
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "Startup SLO misses",
+      "description": "Turns above the default queue (5s), provider-dispatch (60s), and first-byte (120s) SLOs over the selected 7- or 30-day range.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(opengeni_turn_startup_milestone_duration_seconds_count{milestone=\"queue\",outcome=\"completed\",provider=~\"$provider\",backend=~\"$backend\"}[$__range])) - sum(increase(opengeni_turn_startup_milestone_duration_seconds_bucket{milestone=\"queue\",outcome=\"completed\",le=\"5\",provider=~\"$provider\",backend=~\"$backend\"}[$__range]))",
+          "legendFormat": "queue >5s",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "sum(increase(opengeni_turn_startup_milestone_duration_seconds_count{milestone=\"provider_dispatch\",outcome=\"completed\",provider=~\"$provider\",backend=~\"$backend\"}[$__range])) - sum(increase(opengeni_turn_startup_milestone_duration_seconds_bucket{milestone=\"provider_dispatch\",outcome=\"completed\",le=\"60\",provider=~\"$provider\",backend=~\"$backend\"}[$__range]))",
+          "legendFormat": "dispatch >60s",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "expr": "sum(increase(opengeni_turn_startup_milestone_duration_seconds_count{milestone=\"first_byte\",outcome=\"completed\",provider=~\"$provider\",backend=~\"$backend\"}[$__range])) - sum(increase(opengeni_turn_startup_milestone_duration_seconds_bucket{milestone=\"first_byte\",outcome=\"completed\",le=\"120\",provider=~\"$provider\",backend=~\"$backend\"}[$__range]))",
+          "legendFormat": "first byte >120s",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 16, "y": 20, "w": 8, "h": 10 }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Platform preparation vs provider think time (p95)",
+      "description": "Worker preparation is platform-owned. Request lifecycle first-byte is the provider-network span for instrumented subscription transports; stream TTFT is the provider-neutral fallback.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(opengeni_turn_worker_preparation_duration_seconds_bucket{provider=~\"$provider\",backend=~\"$backend\",outcome=\"completed\"}[$__rate_interval])))",
+          "legendFormat": "platform preparation p95",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(opengeni_model_request_phase_duration_seconds_bucket{phase=\"first_byte\",provider=~\"$provider\"}[$__rate_interval])))",
+          "legendFormat": "provider first byte p95",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(opengeni_stream_ttft_seconds_bucket{provider=~\"$provider\"}[$__rate_interval])))",
+          "legendFormat": "stream TTFT p95",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 0, "y": 30, "w": 24, "h": 9 }
+    }
+  ]
+}

@@ -46,7 +46,7 @@ the live target mix with `bun run bench:observability-series -- --prometheus-url
 <url> --check`; the guard requires at least a 4x instantaneous series reduction
 and treats TSDB head series as diagnostic because they include stale data.
 
-`values.production.example.yaml` raises Prometheus to 50 GiB/15 days, Grafana
+`values.production.example.yaml` raises Prometheus to 100 GiB/30 days, Grafana
 to 5 GiB, Alertmanager to 5 GiB, and requires an existing
 `opengeni-grafana-admin` Secret. It is a capacity and credential example, not a
 complete production overlay. Review storage classes, volume reclaim policy,

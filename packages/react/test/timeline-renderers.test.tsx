@@ -8,6 +8,7 @@ import type {
   MemoryItem,
   ToolCallItem,
   SandboxItem,
+  StartupPhaseItem,
   ToolRegistry,
   TimelineItem,
 } from "../src/timeline";
@@ -2093,6 +2094,30 @@ describe("SandboxRow — failed chip", () => {
     await flush();
 
     expect(r.container.textContent ?? "").toContain("Sandbox reattached");
+
+    await r.unmount();
+  });
+});
+
+describe("StartupPhaseRow", () => {
+  test("shows the settled phase duration and truthful sandbox origin", async () => {
+    const item: StartupPhaseItem = {
+      kind: "startup-phase",
+      id: "startup-1",
+      turnId: "turn-1",
+      phase: "sandbox",
+      status: "complete",
+      startedAt: new Date(0).toISOString(),
+      completedAt: new Date(45_544).toISOString(),
+      durationMs: 45_544,
+      outcome: "restored",
+      occurredAt: new Date(0).toISOString(),
+    };
+    const r = await renderComponent(<ActivityRail items={[item]} />);
+    await flush();
+
+    expect(r.container.textContent ?? "").toContain("Sandbox restored");
+    expect(r.container.textContent ?? "").toContain("45.5s");
 
     await r.unmount();
   });

@@ -9,6 +9,18 @@
       "tools": []
     },
     {
+      "kind": "startup-phase",
+      "id": "00000000-0000-4000-8000-000000000603-queue",
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000011",
+      "occurredAt": "2026-01-02T15:00:02.000Z",
+      "phase": "queue",
+      "status": "complete",
+      "startedAt": "2026-01-02T15:00:02.000Z",
+      "completedAt": "2026-01-02T15:00:03.000Z",
+      "durationMs": 1000,
+      "outcome": null
+    },
+    {
       "kind": "worker",
       "id": "00000000-0000-4000-8000-000000000604",
       "turnId": "aaaaaaaa-0000-4000-8000-000000000011",
@@ -55,19 +67,32 @@
       "kind": "turn",
       "id": "turn-aaaaaaaa-0000-4000-8000-000000000011",
       "outcome": "complete",
-      "startedAt": "2026-01-02T15:00:04.000Z",
+      "startedAt": "2026-01-02T15:00:02.000Z",
       "endedAt": "2026-01-02T15:00:08.000Z",
       "groupCount": 1,
       "groups": [
         {
           "kind": "activity",
-          "id": "activity-00000000-0000-4000-8000-000000000604",
-          "itemCount": 2,
+          "id": "activity-00000000-0000-4000-8000-000000000603-queue",
+          "itemCount": 3,
           "itemKinds": {
+            "startup-phase": 1,
             "worker": 2
           },
           "outcome": "complete",
           "items": [
+            {
+              "kind": "startup-phase",
+              "id": "00000000-0000-4000-8000-000000000603-queue",
+              "turnId": "aaaaaaaa-0000-4000-8000-000000000011",
+              "occurredAt": "2026-01-02T15:00:02.000Z",
+              "phase": "queue",
+              "status": "complete",
+              "startedAt": "2026-01-02T15:00:02.000Z",
+              "completedAt": "2026-01-02T15:00:03.000Z",
+              "durationMs": 1000,
+              "outcome": null
+            },
             {
               "kind": "worker",
               "id": "00000000-0000-4000-8000-000000000604",
@@ -97,6 +122,7 @@
   ],
   "facets": {
     "itemKinds": {
+      "startup-phase": 1,
       "turn-end": 1,
       "user-message": 1,
       "worker": 2
@@ -107,6 +133,7 @@
       "turn": 1
     },
     "activityItemKinds": {
+      "startup-phase": 1,
       "worker": 2
     },
     "turnOutcomes": {

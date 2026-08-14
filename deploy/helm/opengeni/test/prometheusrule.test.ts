@@ -4,6 +4,26 @@ import { readFile } from "node:fs/promises";
 const SCRAPE_IDENTITY = "and on(namespace, release, environment, component, instance)";
 
 describe("turn-capacity Prometheus alerts", () => {
+  test("alerts on cumulative queue, provider-dispatch, and first-byte p95 SLOs", async () => {
+    const template = await readFile(
+      new URL("../templates/prometheusrule.yaml", import.meta.url),
+      "utf8",
+    );
+    for (const [name, milestone] of [
+      ["OpenGeniTurnStartupQueueP95High", "queue"],
+      ["OpenGeniTurnStartupProviderDispatchP95High", "provider_dispatch"],
+      ["OpenGeniTurnStartupFirstByteP95High", "first_byte"],
+    ] as const) {
+      const expression = alertExpression(template, name);
+      expect(expression).toContain("opengeni_turn_startup_milestone_duration_seconds_bucket");
+      expect(expression).toContain(`milestone="${milestone}"`);
+      expect(expression).toContain("histogram_quantile(");
+      expect(expression).toContain("turnStartupMinSamples");
+      expect(expression).not.toContain("sessionId");
+      expect(expression).not.toContain("turnId");
+    }
+  });
+
   test("alerts on actual SuperGrok valid-event idle timeout terminals", async () => {
     const template = await readFile(
       new URL("../templates/prometheusrule.yaml", import.meta.url),
