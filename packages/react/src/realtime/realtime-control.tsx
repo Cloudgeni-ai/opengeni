@@ -763,7 +763,7 @@ export function RealtimeVoiceControl(props: {
       : modeOwned
         ? props.onStop
         : props.onStart;
-  const diagnosticsVisible = props.showDiagnostics ?? import.meta.env.DEV;
+  const diagnosticsVisible = props.showDiagnostics ?? false;
   const modelMenu = props.modelMenu ?? "split";
   const showAttachedModelMenu = modelMenu === "split" || modelMenu === "split-desktop";
   const desktopOnlyModelMenu = modelMenu === "split-desktop";
