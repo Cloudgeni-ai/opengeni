@@ -835,11 +835,14 @@ export async function saveGoogleDriveFacetSource(
     throw new HTTPException(400, { message: "invalid Google Drive source selection" });
   }
   const payload = parsedPayload.data;
-  const requestedDestination = bindGoogleDriveDocumentDestination(input, payload);
   const requestedSources = payload.sources.map((source) => ({
     ...source,
     id: validDriveId(source.id, "source.id"),
   }));
+  if (new Set(requestedSources.map((source) => source.id)).size !== requestedSources.length) {
+    throw new HTTPException(400, { message: "Google Drive sources must be unique" });
+  }
+  const requestedDestination = bindGoogleDriveDocumentDestination(input, payload);
   const requestedConfig = googleDriveFacetConfig(requestedSources, requestedDestination, payload);
   const replayed = await replayCompletedIntegrationFacetOperation<IntegrationFacetMutationResult>(
     deps.db,

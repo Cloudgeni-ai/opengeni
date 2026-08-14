@@ -848,6 +848,43 @@ describe("API Integration routes", () => {
       },
     });
     const endpoint = `/integrations/${encodeURIComponent(installed.capabilityId)}/instances/${installed.instanceKey}/facets/drive-content/source`;
+    const aliasCollisionKey = crypto.randomUUID();
+    const aliasCollision = await request(endpoint, {
+      method: "PUT",
+      body: JSON.stringify({
+        sources: [
+          {
+            id: "folder-1",
+            name: "Product",
+            mimeType: "application/vnd.google-apps.folder",
+            driveId: null,
+          },
+          {
+            id: "https://drive.google.com/drive/folders/folder-1",
+            name: "Product",
+            mimeType: "application/vnd.google-apps.folder",
+            driveId: null,
+          },
+        ],
+        destination: { authorityKind: "workspace", collectionId: null },
+        syncCadence: "hourly",
+        syncEnabled: true,
+        readPolicy: "allow",
+        idempotencyKey: aliasCollisionKey,
+      }),
+    });
+    expect(aliasCollision.status).toBe(400);
+    expect(await aliasCollision.text()).toBe("Google Drive sources must be unique");
+    expect(googleDriveProviderRequests).toHaveLength(0);
+    expect(
+      await shared!.admin<Array<{ count: number }>>`
+        select count(*)::int as count
+        from capability_operations
+        where workspace_id = ${workspaceId}::uuid
+          and idempotency_key = ${aliasCollisionKey}
+      `,
+    ).toEqual([{ count: 0 }]);
+
     const idempotencyKey = crypto.randomUUID();
     const payload = {
       sources: [
