@@ -7,8 +7,9 @@ const root = resolve(import.meta.dir, "..");
 
 describe("sandbox AnyDoc runtime", () => {
   test("pins one verified native target and proves the CLI during image build", async () => {
-    const [dockerfile, manifest, lockfile, license] = await Promise.all([
+    const [sandboxDockerfile, desktopDockerfile, manifest, lockfile, license] = await Promise.all([
       readFile(resolve(root, "docker/sandbox.Dockerfile"), "utf8"),
+      readFile(resolve(root, "docker/desktop.Dockerfile"), "utf8"),
       readFile(resolve(root, "docker/anydoc/package.json"), "utf8"),
       readFile(resolve(root, "docker/anydoc/bun.lock"), "utf8"),
       readFile(resolve(root, "docker/anydoc/LICENSE"), "utf8"),
@@ -26,14 +27,16 @@ describe("sandbox AnyDoc runtime", () => {
       "03a9e7657aac6536fb6458bd220347c4e7f85bd0a51d8d9e8528530b7a682ade",
     );
 
-    expect(dockerfile).toContain("bun install --frozen-lockfile --production --os=linux");
-    expect(dockerfile).toContain("node_arch=x64");
-    expect(dockerfile).toContain("node_arch=arm64");
-    expect(dockerfile).toContain("anydoc-linux-${node_arch}-gnu");
-    expect(dockerfile).toContain('test "$(anydoc --version)" = 0.1.8');
-    expect(dockerfile).toContain("anydoc /tmp/anydoc-smoke.csv");
-    expect(dockerfile).toContain("anydoc /tmp/anydoc-smoke.rtf");
-    expect(dockerfile).not.toContain("@firecrawl/anydoc@latest");
+    for (const dockerfile of [sandboxDockerfile, desktopDockerfile]) {
+      expect(dockerfile).toContain("bun install --frozen-lockfile --production --os=linux");
+      expect(dockerfile).toContain("node_arch=x64");
+      expect(dockerfile).toContain("node_arch=arm64");
+      expect(dockerfile).toContain("anydoc-linux-${node_arch}-gnu");
+      expect(dockerfile).toContain('test "$(anydoc --version)" = 0.1.8');
+      expect(dockerfile).toContain("anydoc /tmp/anydoc-smoke.csv");
+      expect(dockerfile).toContain("anydoc /tmp/anydoc-smoke.rtf");
+      expect(dockerfile).not.toContain("@firecrawl/anydoc@latest");
+    }
   });
 
   test("ships opt-in guidance that never installs code during a turn", async () => {

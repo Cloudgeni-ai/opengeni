@@ -74,6 +74,7 @@ export function useComputerSessions(
       requestRef.current = { id, controller };
       setState((current) => ({
         ...(current.workspaceId === workspaceId ? current : emptyState(workspaceId, true)),
+        active: true,
         loading: foreground,
         refreshing: !foreground,
         error: foreground || current.workspaceId !== workspaceId ? null : current.error,
@@ -85,6 +86,7 @@ export function useComputerSessions(
         if (!mountedRef.current || requestRef.current.id !== id) return;
         setState({
           workspaceId,
+          active: true,
           revision: response.revision,
           sessions: sortComputerSessions(response.sessions),
           loading: false,
@@ -187,7 +189,10 @@ export function useComputerSessions(
     revision: visible.revision,
     sessions: visible.sessions,
     relevantSessions,
-    loading: visible.loading,
+    // A disabled registry is deliberately empty. When its surface becomes
+    // visible again, expose that transition as loading in the same render so
+    // consumers cannot mistake the stale empty snapshot for a completed list.
+    loading: enabled ? !visible.active || visible.loading : false,
     refreshing: visible.refreshing,
     error: visible.error,
     refresh,
@@ -198,6 +203,7 @@ export function useComputerSessions(
 
 type ComputerRegistryState = {
   workspaceId: string;
+  active: boolean;
   revision: number;
   sessions: ComputerSession[];
   loading: boolean;
@@ -208,6 +214,7 @@ type ComputerRegistryState = {
 function emptyState(workspaceId: string, loading: boolean): ComputerRegistryState {
   return {
     workspaceId,
+    active: loading,
     revision: 0,
     sessions: [],
     loading,

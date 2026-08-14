@@ -8735,7 +8735,14 @@ describe("runtime event normalization", () => {
 
     // Use the real config default for the opengeni server so a regression that
     // flips cacheToolsList back to true is caught here too.
-    const opengeniDefault = getSettings().mcpServers.find((server) => server.id === "opengeni");
+    const originalEnv = process.env;
+    process.env = {};
+    let opengeniDefault: ReturnType<typeof getSettings>["mcpServers"][number] | undefined;
+    try {
+      opengeniDefault = getSettings().mcpServers.find((server) => server.id === "opengeni");
+    } finally {
+      process.env = originalEnv;
+    }
     expect(opengeniDefault).toBeDefined();
 
     const settingsForAuthorization = (authorization: string) =>

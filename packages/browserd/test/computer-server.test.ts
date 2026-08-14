@@ -232,6 +232,81 @@ describe("Computer routes on the placement interaction server", () => {
       );
     }
   });
+
+  test("owns rapid browser RFB input packets until TCP consumes them", async () => {
+    const packets = Array.from({ length: 512 }, (_, index) =>
+      Uint8Array.of(4, index & 1, 0, 0, 0, 0, 0, index & 0xff),
+    );
+    const expected = new Uint8Array(packets.reduce((length, packet) => length + packet.length, 0));
+    let offset = 0;
+    for (const packet of packets) {
+      expected.set(packet, offset);
+      offset += packet.length;
+    }
+    let resolveReceived!: (value: Uint8Array) => void;
+    const received = new Promise<Uint8Array>((resolve) => {
+      resolveReceived = resolve;
+    });
+    const upstream = createServer((socket) => {
+      const chunks: Uint8Array[] = [];
+      let length = 0;
+      socket.on("data", (chunk) => {
+        const bytes = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+        chunks.push(bytes.slice());
+        length += bytes.byteLength;
+        if (length < expected.byteLength) return;
+        const value = new Uint8Array(length);
+        let writeOffset = 0;
+        for (const current of chunks) {
+          value.set(current, writeOffset);
+          writeOffset += current.byteLength;
+        }
+        resolveReceived(value);
+      });
+    });
+    await new Promise<void>((resolve, reject) => {
+      upstream.once("error", reject);
+      upstream.listen(0, "127.0.0.1", () => resolve());
+    });
+    const address = upstream.address();
+    if (!address || typeof address === "string") throw new Error("RFB fixture did not bind TCP");
+    try {
+      await withServer(
+        async ({ server, reference }) => {
+          const created = await request(server, "/v1/computer-sessions", {
+            method: "POST",
+            token: adminToken,
+            body: createBody(reference),
+          });
+          expect(created.status).toBe(201);
+          const websocket = new WebSocket(
+            `${server.url.replace("http:", "ws:")}/v1/computer-sessions/${reference.computerSessionId}/targets/screen-1/rfb`,
+            [
+              "binary",
+              COMPUTER_RFB_WEBSOCKET_PROTOCOL,
+              `${BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX}${viewToken}`,
+            ],
+          );
+          await new Promise<void>((resolve, reject) => {
+            websocket.addEventListener("open", () => resolve(), { once: true });
+            websocket.addEventListener("error", () => reject(new Error("websocket failed")), {
+              once: true,
+            });
+          });
+          for (const packet of packets) websocket.send(packet);
+          expect(await Promise.race([received, Bun.sleep(5_000).then(() => null)])).toEqual(
+            expected,
+          );
+          websocket.close(1000, "fixture complete");
+        },
+        { rfbPort: address.port },
+      );
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        upstream.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+  });
 });
 
 async function withServer(

@@ -136,7 +136,7 @@ function WorkbenchTabLabel({ icon, children }: { icon: ReactNode; children: Reac
   );
 }
 
-function WorkbenchSurfaceLoading({ name }: { name: "Browser" | "Computer" }) {
+function WorkbenchSurfaceLoading({ name }: { name: "Browser" | "Desktop" }) {
   return (
     <CenteredState
       icon={
@@ -383,7 +383,7 @@ export function useSandboxWorkspaceTabs(
         ...(placement ? { placement } : {}),
       });
       if (response.operation.state !== "completed" || response.session.lifecycle !== "active") {
-        throw new Error(response.operation.error?.message ?? "The computer could not be opened.");
+        throw new Error(response.operation.error?.message ?? "The desktop could not be opened.");
       }
       return {
         id: response.session.id,
@@ -831,9 +831,9 @@ export function useSandboxWorkspaceTabs(
     if (desktopEnabled) {
       list.push({
         id: WORKBENCH_TAB_DESKTOP,
-        label: <WorkbenchTabLabel icon={<MonitorIcon />}>Computer</WorkbenchTabLabel>,
+        label: <WorkbenchTabLabel icon={<MonitorIcon />}>Desktop</WorkbenchTabLabel>,
         content: (
-          <Suspense fallback={<WorkbenchSurfaceLoading name="Computer" />}>
+          <Suspense fallback={<WorkbenchSurfaceLoading name="Desktop" />}>
             <LazyComputerViewer
               key={sessionId}
               client={client}

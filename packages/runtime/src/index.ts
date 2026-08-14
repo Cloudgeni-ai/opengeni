@@ -2422,7 +2422,6 @@ function maybeInstallLazyToolTransport(
     agent as unknown as Parameters<typeof installLazyToolRuntime>[0],
     transport,
     mcpServerIds,
-    settings.modelToolOutputTruncationTokens,
   );
 }
 

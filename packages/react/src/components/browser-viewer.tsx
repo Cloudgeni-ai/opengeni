@@ -509,7 +509,7 @@ export function BrowserViewer({
         if (createLinkedComputer) {
           try {
             linkedComputer = await createLinkedComputer(
-              `${browserName} computer`,
+              `${browserName} desktop`,
               device ? { kind: "attached_device", deviceId: device.id } : undefined,
             );
           } catch {
@@ -555,7 +555,7 @@ export function BrowserViewer({
         if (computerViewUnavailable) {
           onNotify?.({
             kind: "info",
-            message: "Browser opened. Computer view is unavailable on this placement.",
+            message: "Browser opened. Desktop view is unavailable on this placement.",
           });
         }
       })()
@@ -2247,10 +2247,10 @@ function BrowserStatusBar(props: {
           type="button"
           onClick={props.onOpenComputer}
           className="flex items-center gap-1 rounded px-1.5 py-0.5 transition hover:bg-og-surface-2 hover:text-og-fg"
-          aria-label="Open this browser window in Computer"
+          aria-label="Open this browser window in Desktop"
         >
           <MonitorIcon className="size-3" />
-          Computer
+          Desktop
         </button>
       ) : null}
       <button
