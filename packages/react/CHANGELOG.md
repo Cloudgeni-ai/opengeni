@@ -1,5 +1,13 @@
 # @opengeni/react
 
+## 1.0.1
+
+### Patch Changes
+
+- 8bb860b: Keep embedded client configurations synchronized with the exported API contract revision and document the fail-closed host integration boundary.
+- Updated dependencies [8bb860b]
+  - @opengeni/sdk@1.0.1
+
 ## 1.0.0
 
 ### Major Changes
