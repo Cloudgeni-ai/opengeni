@@ -189,6 +189,15 @@ describe("release schema contract", () => {
       sourceContract.migrations.map((migration) => [migration.path, migration]),
     );
     const sessionVisibilityContractHash = (includesActivation: boolean): string | null => {
+      if (
+        migrations.has("0236_session_visibility_slack_policy.sql") &&
+        migrations.has("0244_slack_app_home_refresh_queue.sql") &&
+        migrations.has("0241_atomic_personal_resource_delegation.sql")
+      ) {
+        return includesActivation
+          ? "f65c52256bbcca9efb74d5b263d4e1689bd497670df3d59c4fec360d8dfcf840"
+          : "b82e3fea7922a70439c405d97800675ab46f8d433912bfc3d7b6f4906e41b861";
+      }
       if (!migrations.has("0236_session_visibility_slack_policy.sql")) return null;
       if (
         migrations.has("0243_google_drive_object_acl_authority.sql") &&
