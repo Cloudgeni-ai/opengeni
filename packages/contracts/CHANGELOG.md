@@ -1,5 +1,15 @@
 # @opengeni/contracts
 
+## 1.1.0
+
+### Minor Changes
+
+- 9c4e0b8: Add the workspace-bot Slack App Home task inbox with exact linked-user authorization, bounded active/attention/recent task projection, convergent `views.publish` refreshes, access-revocation clearing, and canonical manifest support.
+
+### Patch Changes
+
+- e0e0102: Unify browser, computer, identity, realtime, and Codemode behavior across managed sandboxes and connected machines.
+
 ## 1.0.1
 
 ### Patch Changes
