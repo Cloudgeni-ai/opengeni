@@ -15,12 +15,18 @@ import {
 function established(
   backendId: string,
   exec: (args: { cmd: string }) => Promise<unknown>,
+  writeStdin?: (args: {
+    sessionId: number;
+    chars?: string;
+    yieldTimeMs?: number;
+    maxOutputTokens?: number;
+  }) => Promise<unknown>,
 ): EstablishedSandboxSession {
   return {
     backendId,
     client: {},
     instanceId: "sandbox-1",
-    session: { exec },
+    session: { exec, ...(writeStdin ? { writeStdin } : {}) },
     sessionState: {},
   };
 }
@@ -66,13 +72,86 @@ describe("sandbox exec readiness", () => {
     ).rejects.toBeInstanceOf(SandboxExecReadinessError);
   });
 
-  test("rejects a resolved Modal exec without an explicit completion status", async () => {
-    await expect(
-      waitForSandboxExecReadiness(
-        established("modal", async () => ({ output: "" })),
-        100,
+  test("retries a transient Modal exec response without a completion status", async () => {
+    let calls = 0;
+    await waitForSandboxExecReadiness(
+      established("modal", async () => {
+        calls += 1;
+        return calls === 1 ? { output: "" } : { output: "", exitCode: 0 };
+      }),
+      500,
+    );
+    expect(calls).toBe(2);
+  });
+
+  test("polls an exact yielded Modal readiness process instead of rejecting it", async () => {
+    const writes: Array<{
+      sessionId: number;
+      chars?: string;
+      yieldTimeMs?: number;
+      maxOutputTokens?: number;
+    }> = [];
+    await waitForSandboxExecReadiness(
+      established(
+        "modal",
+        async () => "Chunk ID: readiness\nProcess running with session ID 7\nOutput:\n",
+        async (args) => {
+          writes.push(args);
+          return "Chunk ID: readiness\nProcess exited with code 0\nOutput:\n";
+        },
       ),
-    ).rejects.toBeInstanceOf(SandboxExecReadinessError);
+      500,
+    );
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toMatchObject({
+      sessionId: 7,
+      chars: "",
+      maxOutputTokens: 1_000,
+    });
+    expect(writes[0]!.yieldTimeMs).toBeGreaterThan(0);
+    expect(writes[0]!.yieldTimeMs).toBeLessThanOrEqual(500);
+  });
+
+  test("polls an exact yielded OpenSandbox readiness process instead of rejecting it", async () => {
+    const writes: Array<{
+      sessionId: number;
+      chars?: string;
+      yieldTimeMs?: number;
+      maxOutputTokens?: number;
+    }> = [];
+    await waitForSandboxExecReadiness(
+      established(
+        "opensandbox",
+        async () => ({ output: "", sessionId: 11 }),
+        async (args) => {
+          writes.push(args);
+          return { output: "", exitCode: 0 };
+        },
+      ),
+      500,
+    );
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toMatchObject({
+      sessionId: 11,
+      chars: "",
+      maxOutputTokens: 1_000,
+    });
+    expect(writes[0]!.yieldTimeMs).toBeGreaterThan(0);
+    expect(writes[0]!.yieldTimeMs).toBeLessThanOrEqual(500);
+  });
+
+  test("bounds repeated statusless Modal responses", async () => {
+    let calls = 0;
+    const error = await waitForSandboxExecReadiness(
+      established("modal", async () => {
+        calls += 1;
+        return { output: "" };
+      }),
+      10,
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(SandboxWarmingTimeoutError);
+    expect(calls).toBe(1);
   });
 
   test("bounds a Modal exec RPC that never returns", async () => {
