@@ -7,6 +7,7 @@ import {
 import type { AccessGrant, ScheduledTask, ScheduledTaskScheduleSpec } from "@opengeni/contracts";
 import {
   bindConnectorDocumentDestination,
+  type ConnectorDocumentDestination,
   type ConnectorDocumentDestinationSelection,
 } from "@opengeni/contracts/connector-destinations";
 import {
@@ -55,6 +56,7 @@ import type { ApiRouteDeps } from "@opengeni/core";
 import {
   buildConnectionTokenResolver,
   configureIntegrationFacet,
+  integrationFacetConfigureRequestDigest,
   appendKnowledgeSourceAclVersion,
   deauthorizeKnowledgeSourceRetrieval,
   ConnectionDisconnectGenerationError,
@@ -72,6 +74,7 @@ import {
   listKnowledgeSourceSyncTasksForConnection,
   loadConnectionCredentialForBroker,
   listIntegrationInstanceFacets,
+  replayCompletedIntegrationFacetOperation,
   transitionConnectionState,
   updateConnection,
   updateScheduledTask,
@@ -832,43 +835,42 @@ export async function saveGoogleDriveFacetSource(
     throw new HTTPException(400, { message: "invalid Google Drive source selection" });
   }
   const payload = parsedPayload.data;
+  const requestedDestination = bindGoogleDriveDocumentDestination(input, payload);
+  const requestedConfig = googleDriveFacetConfig(payload.sources, requestedDestination, payload);
+  const replayed = await replayCompletedIntegrationFacetOperation<IntegrationFacetMutationResult>(
+    deps.db,
+    {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      subjectId: input.subjectId,
+      capabilityId: input.capabilityId,
+      instanceKey: input.instanceKey,
+      facetKey: input.facetKey,
+      idempotencyKey: payload.idempotencyKey,
+      kind: "configure",
+      expectedRequestDigest: (result) => {
+        const receipt = IntegrationFacetMutationResult.parse(result);
+        return integrationFacetConfigureRequestDigest({
+          capabilityId: input.capabilityId,
+          instanceKey: input.instanceKey,
+          facetKey: input.facetKey,
+          displayName: receipt.binding.displayName,
+          config: requestedConfig,
+          ...(payload.expectedVersion !== undefined
+            ? { expectedVersion: payload.expectedVersion }
+            : {}),
+        });
+      },
+    },
+  );
+  if (replayed) return IntegrationFacetMutationResult.parse(replayed);
   const context = await requireGoogleDriveIntegrationFacet(deps, input);
-  const documentDestination = googleDriveDocumentDestination(input, payload);
-  const verifiedSources = await verifyGoogleDriveSources(deps, {
+  googleDriveDocumentDestination(input, payload);
+  await verifyGoogleDriveSources(deps, {
     workspaceId: input.workspaceId,
     subjectId: input.subjectId,
     connectionId: context.connection.id,
     sources: payload.sources,
-  });
-  const config = GoogleDriveKnowledgeSourceConfig.parse({
-    sources: verifiedSources.map((verified) => ({
-      id: verified.id,
-      name: verified.name,
-      mimeType: verified.mimeType,
-      ...(verified.driveId ? { driveId: verified.driveId } : {}),
-      sourceKind:
-        verified.id === "root"
-          ? "my_drive"
-          : verified.driveId === verified.id
-            ? "shared_drive"
-            : "folder",
-      includeDescendants: true,
-    })),
-    destination: {
-      authorityKind: documentDestination.authorityKind,
-      authorityAccountId: documentDestination.authorityAccountId,
-      ...(documentDestination.authorityWorkspaceId
-        ? { authorityWorkspaceId: documentDestination.authorityWorkspaceId }
-        : {}),
-      ...(documentDestination.authoritySubjectId
-        ? { authoritySubjectId: documentDestination.authoritySubjectId }
-        : {}),
-      ...(documentDestination.collectionId
-        ? { collectionId: documentDestination.collectionId }
-        : {}),
-    },
-    syncCadence: payload.syncCadence,
-    readPolicy: payload.readPolicy,
   });
   return IntegrationFacetMutationResult.parse(
     await configureIntegrationFacet(deps.db, {
@@ -880,7 +882,7 @@ export async function saveGoogleDriveFacetSource(
       facetKey: input.facetKey,
       displayName:
         context.facet.binding?.displayName ?? `${input.instanceKey} — Google Drive content`,
-      config,
+      config: requestedConfig,
       ...(payload.expectedVersion !== undefined
         ? { expectedVersion: payload.expectedVersion }
         : {}),
@@ -1111,10 +1113,73 @@ function googleDriveDocumentDestination(
   if (destinationSelection.authorityKind === "personal" && !input.canManagePersonalDestination) {
     throw new HTTPException(403, { message: "personal destination requires the exact actor" });
   }
+  return bindGoogleDriveDocumentDestination(input, payload);
+}
+
+function bindGoogleDriveDocumentDestination(
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+  },
+  payload: {
+    destination?: ConnectorDocumentDestinationSelection | undefined;
+    targetScope?: "user" | "workspace" | "organization" | undefined;
+  },
+): ConnectorDocumentDestination {
+  const destinationSelection: ConnectorDocumentDestinationSelection = payload.destination ?? {
+    authorityKind: "workspace",
+    collectionId: null,
+  };
   return bindConnectorDocumentDestination(destinationSelection, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     initiatingSubjectId: input.subjectId,
+  });
+}
+
+function googleDriveFacetConfig(
+  sources: ReadonlyArray<{
+    id: string;
+    name: string;
+    mimeType: string;
+    driveId: string | null;
+  }>,
+  documentDestination: ConnectorDocumentDestination,
+  payload: {
+    syncCadence: "manual" | "hourly" | "daily";
+    readPolicy: "allow" | "ask" | "block";
+  },
+) {
+  return GoogleDriveKnowledgeSourceConfig.parse({
+    sources: sources.map((source) => ({
+      id: source.id,
+      name: source.name,
+      mimeType: source.mimeType,
+      ...(source.driveId ? { driveId: source.driveId } : {}),
+      sourceKind:
+        source.id === "root"
+          ? "my_drive"
+          : source.driveId === source.id
+            ? "shared_drive"
+            : "folder",
+      includeDescendants: true,
+    })),
+    destination: {
+      authorityKind: documentDestination.authorityKind,
+      authorityAccountId: documentDestination.authorityAccountId,
+      ...(documentDestination.authorityWorkspaceId
+        ? { authorityWorkspaceId: documentDestination.authorityWorkspaceId }
+        : {}),
+      ...(documentDestination.authoritySubjectId
+        ? { authoritySubjectId: documentDestination.authoritySubjectId }
+        : {}),
+      ...(documentDestination.collectionId
+        ? { collectionId: documentDestination.collectionId }
+        : {}),
+    },
+    syncCadence: payload.syncCadence,
+    readPolicy: payload.readPolicy,
   });
 }
 
