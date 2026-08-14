@@ -12,6 +12,7 @@ import {
   createDb,
   createSession,
   createSessionMcpServers,
+  getActiveSessionHistoryItems,
   initializeSessionStartAtomically,
   listSessionEvents,
   mutateSessionControlInTransaction,
@@ -153,7 +154,7 @@ async function fixture() {
     workspaceId: grant.workspaceId,
     parentSessionId: root.id,
     initialMessage: "private child",
-    initialTurnInstructions: "host-only selected-record context",
+    initialModelContext: "host-only selected-record context",
     resources: [],
     metadata: {},
     model: "test-model",
@@ -445,7 +446,7 @@ describe("embedding host session authorization routes", () => {
     });
   });
 
-  test("public turn and queue reads omit host instructions while the worker claim retains them", async () => {
+  test("public projections omit model context while canonical history retains it", async () => {
     if (!available) return;
     const value = await fixture();
     const started = await initializeSessionStartAtomically(client.db, {
@@ -468,7 +469,7 @@ describe("embedding host session authorization routes", () => {
     expect(turnsResponse.status).toBe(200);
     const turns = (await turnsResponse.json()) as Array<Record<string, unknown>>;
     expect(turns).toHaveLength(1);
-    expect(turns[0]).not.toHaveProperty("turnInstructions");
+    expect(turns[0]).not.toHaveProperty("modelContext");
 
     const queueResponse = await app.request(`${base}/queue`, { headers });
     expect(queueResponse.status).toBe(200);
@@ -476,7 +477,7 @@ describe("embedding host session authorization routes", () => {
       items: Array<Record<string, unknown>>;
     };
     expect(queue.items).toHaveLength(1);
-    expect(queue.items[0]).not.toHaveProperty("turnInstructions");
+    expect(queue.items[0]).not.toHaveProperty("modelContext");
 
     const claimed = await claimSessionWorkForAttempt(client.db, value.grant.workspaceId, {
       sessionId: value.child.id,
@@ -486,10 +487,16 @@ describe("embedding host session authorization routes", () => {
       dispatchId: crypto.randomUUID(),
       trigger: { kind: "next" },
     });
-    expect(claimed).toMatchObject({
-      action: "claimed",
-      turn: { turnInstructions: "host-only selected-record context" },
-    });
+    expect(claimed).toMatchObject({ action: "claimed", turn: { id: started.turn.id } });
+    if (claimed.action !== "claimed") throw new Error(`turn was not claimed: ${claimed.reason}`);
+    expect(claimed.turn).not.toHaveProperty("modelContext");
+    const history = await getActiveSessionHistoryItems(
+      client.db,
+      value.grant.workspaceId,
+      value.child.id,
+    );
+    expect(JSON.stringify(history[0]?.item)).toContain("host-only selected-record context");
+    expect(JSON.stringify(history[0]?.item)).toContain("private child");
   });
 
   test("enforces root-aware detail authorization and in-query list scope", async () => {

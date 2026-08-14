@@ -61,29 +61,45 @@ still reference the public Agents types, so the Agents packages remain declared
 dependencies, but OpenGeni's executable `dist` contains no external Agents or
 Zod import. The publish-closure guard enforces that boundary.
 
-### Agent instructions and exact-turn context
+### Agent instructions and per-message application context
 
-A host has three composable, system-level instruction scopes. None is rendered as
-a user/timeline message, and they compose in a fixed order: **deployment default
-template → workspace persona → per-session instructions → per-turn
-instructions**, with the non-bypassable CORE (goal-loop ownership + variable set
-block) always substituted in.
+A host has two system-level instruction scopes, composed as **deployment default
+template → workspace persona → per-session instructions**, with the
+non-bypassable CORE (goal-loop ownership + variable set block) always
+substituted in. Exact-message application context does not enter this prefix.
 
 - **Workspace `agentInstructions`** (`Workspace.agentInstructions`, set at workspace create/update) — the white-label persona for _every_ session in a workspace. Use it for stable, tenant-wide branding/behavior. It may embed the `{{core}}` marker to place the non-bypassable CORE; if it omits the marker, CORE is appended.
-- **Per-session `instructions`** (`CreateSessionRequest.instructions`) — an optional, per-_session_ refinement layered after the workspace persona. Use it to deliver a **per-agent-type prompt** (reviewer vs. planner vs. fixer) when many personas share one workspace, without minting a workspace per persona. It is org-visible metadata (returned on the session record, exposed like `title`/`goal`), **never** a timeline event, so internal prompt content does not leak to shared-session readers and carries full system-level authority.
-- **Per-turn `turnInstructions`** (`CreateSessionRequest.turnInstructions`,
-  `SendMessageInput.turnInstructions`) — optional host context for one exact
-  accepted turn. OpenGeni stores it separately from the visible prompt and keeps
-  it attached through queueing, steering, retry, approval resume, and worker
-  recovery. It does not carry into the next turn. Use it for submit-time route,
-  selection, or viewport context that must not be reconstructed later.
+- **Per-session `instructions`** (`CreateSessionRequest.instructions`) — an optional, per-_session_ refinement layered after the workspace persona. Use it to deliver a **per-agent-type prompt** (reviewer vs. planner vs. fixer) when many personas share one workspace, without minting a workspace per persona. It is org-visible metadata (returned on the session record, exposed like `title`/`goal`), never a timeline event, and carries system-level authority.
+- **Per-message `modelContext`** (`CreateSessionRequest.modelContext`,
+  `SendMessageInput.modelContext`, and supported realtime inbound entries) —
+  optional application context for one exact accepted message. OpenGeni stores
+  it with the accepted turn/realtime entry, includes it as a separate
+  `input_text` part in that same canonical user-role history item, and preserves
+  it through queueing, steering, retry, approval resume, worker recovery, and
+  realtime handoff. Standard timeline rendering displays only the visible
+  message text; full event/audit reads retain `modelContext`. It is **not**
+  secret, private, privileged, or system-level authority. For realtime voice,
+  SDK/React hosts may provide `getModelContext`; OpenGeni captures its current
+  bounded value once when each durable delegation or finalized transcript entry
+  is created, without restarting the controller when the callback changes. A
+  failing or oversized callback omits only that entry's context and does not
+  discard or block the provider message.
 - **Preallocated session identity** (`CreateSessionRequest.requestedSessionId`) — an optional UUID an embedding host may persist in its own projection before calling OpenGeni. OpenGeni creates that exact session and rejects collisions with `409`, so the initial worker claim cannot outrun the host link. Pair retries with the same workspace-scoped `idempotencyKey`; a replay that changes the UUID is rejected. The UUID is identity/correlation only and grants no access.
 
-Do not stuff persona or host context into `initialMessage`/message text: those
-fields render as visible timeline content. Use workspace `agentInstructions` for
-tenant-wide behavior, session `instructions` for one durable persona, and
-`turnInstructions` for one submit-time context snapshot. Both optional request
-fields are trimmed, non-empty, and capped at 32768 characters.
+Use workspace `agentInstructions` for stable tenant-wide behavior and session
+`instructions` for a durable session persona. Use `modelContext` for concise
+submit-time route, selection, viewport, or entity context that belongs to the
+user's current message but should not clutter the ordinary chat presentation.
+Do not put secrets in it: authorized full event/audit surfaces may return the
+exact value. When current product state must be read or mutated, prefer a
+tenant-scoped tool over a large context snapshot.
+
+Because `modelContext` is appended in the newest user history item rather than
+composed into `Agent.instructions`, changing it does not rewrite the persistent
+provider prefix or invalidate otherwise reusable prompt-cache bytes. Initial
+`modelContext` requires `initialMessage`; a realtime shell attaches context to a
+later delegation or finalized transcript entry instead. Values are trimmed,
+non-empty, and capped at 32768 characters.
 
 ## Ports
 

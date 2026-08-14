@@ -17,9 +17,13 @@ export const GOOGLE_DRIVE_READONLY_SCOPE =
 export const GOOGLE_DRIVE_CREDENTIAL_ROLE = "google_drive_metadata" as const;
 export const GOOGLE_DRIVE_CREDENTIAL_LABEL = "Google Drive read-only source sync" as const;
 export const GOOGLE_DRIVE_LEGACY_CREDENTIAL_LABEL = "Google Drive metadata browser" as const;
+export const GOOGLE_DRIVE_PUBLICATION_SERVER_ID = "google-drive-publishing" as const;
+export const GOOGLE_DRIVE_PUBLICATION_TOOL_NAME = "google_drive_publish_file" as const;
+export const GOOGLE_DRIVE_PUBLICATION_CREATE_ACTION = "create" as const;
 
 export const GoogleDriveOAuthCapability = z.enum([
   "picker_file_read",
+  "publish_file",
   "source_metadata_discovery",
   "source_content_read",
   "recursive_source_sync",
@@ -27,7 +31,7 @@ export const GoogleDriveOAuthCapability = z.enum([
 export type GoogleDriveOAuthCapability = z.infer<typeof GoogleDriveOAuthCapability>;
 
 export type GoogleDriveOAuthScopeDecision = {
-  accessMode: "metadata_readonly" | "readonly" | null;
+  accessMode: "file_only" | "metadata_readonly" | "readonly" | null;
   capabilities: GoogleDriveOAuthCapability[];
 };
 
@@ -43,11 +47,13 @@ export function googleDriveOAuthScopeDecision(
   const granted = new Set(grantedScopes);
   const hasFullDrive = granted.has(GOOGLE_DRIVE_FULL_SCOPE);
   const hasSourceContentRead = hasFullDrive || granted.has(GOOGLE_DRIVE_READONLY_SCOPE);
+  const hasFileWrite = hasFullDrive || granted.has(GOOGLE_DRIVE_FILE_SCOPE);
   const hasSourceMetadataDiscovery =
     hasSourceContentRead || granted.has(GOOGLE_DRIVE_METADATA_READONLY_SCOPE);
-  const hasPickerFileRead = hasSourceContentRead || granted.has(GOOGLE_DRIVE_FILE_SCOPE);
+  const hasPickerFileRead = hasSourceContentRead || hasFileWrite;
   const capabilities: GoogleDriveOAuthCapability[] = [];
   if (hasPickerFileRead) capabilities.push("picker_file_read");
+  if (hasFileWrite) capabilities.push("publish_file");
   if (hasSourceMetadataDiscovery) capabilities.push("source_metadata_discovery");
   if (hasSourceContentRead) {
     capabilities.push("source_content_read", "recursive_source_sync");
@@ -57,7 +63,9 @@ export function googleDriveOAuthScopeDecision(
       ? "readonly"
       : hasSourceMetadataDiscovery
         ? "metadata_readonly"
-        : null,
+        : hasFileWrite
+          ? "file_only"
+          : null,
     capabilities,
   };
 }
@@ -148,6 +156,26 @@ export const GoogleDriveSelectedSource = z.object({
 });
 export type GoogleDriveSelectedSource = z.infer<typeof GoogleDriveSelectedSource>;
 
+export const GoogleDriveOutputDestination = z
+  .object({
+    folderId: z.string().min(1).max(256),
+    folderName: z.string().min(1).max(1024),
+    driveId: z.string().min(1).max(256).nullable(),
+    location: z.enum(["my_drive", "shared_drive"]),
+    selectedAt: z.string().datetime({ offset: true }),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if ((value.location === "my_drive") !== (value.driveId === null)) {
+      context.addIssue({
+        code: "custom",
+        path: ["driveId"],
+        message: "Google Drive destination location does not match its drive identity",
+      });
+    }
+  });
+export type GoogleDriveOutputDestination = z.infer<typeof GoogleDriveOutputDestination>;
+
 export const GoogleDriveConnectionMetadata = z
   .object({
     credentialRole: z.literal(GOOGLE_DRIVE_CREDENTIAL_ROLE),
@@ -159,8 +187,9 @@ export const GoogleDriveConnectionMetadata = z
     googleEmail: z.string().email().max(320),
     googleDisplayName: z.string().min(1).max(512).nullable(),
     verifiedAt: z.string().datetime({ offset: true }),
-    accessMode: z.enum(["metadata_readonly", "readonly"]),
+    accessMode: z.enum(["file_only", "metadata_readonly", "readonly"]),
     lifecycle: GoogleDriveConnectionLifecycle.optional(),
+    outputDestination: GoogleDriveOutputDestination.optional(),
     documentDestination: ConnectorDocumentDestination.optional(),
     selectedSources: z.array(GoogleDriveSelectedSource).max(100).optional(),
     /** @deprecated Read `selectedSources`; retained while existing connections migrate. */
@@ -171,6 +200,7 @@ export type GoogleDriveConnectionMetadata = z.infer<typeof GoogleDriveConnection
 
 export const GoogleDriveOAuthStartRequest = z.object({
   connectionId: z.string().uuid().optional(),
+  capability: z.enum(["source_read", "publish"]).default("source_read"),
 });
 export type GoogleDriveOAuthStartRequest = z.infer<typeof GoogleDriveOAuthStartRequest>;
 
@@ -191,6 +221,48 @@ export const GoogleDriveDisconnectRequest = z.object({
   idempotencyKey: z.string().trim().min(1).max(200),
 });
 export type GoogleDriveDisconnectRequest = z.infer<typeof GoogleDriveDisconnectRequest>;
+
+export const GoogleDrivePublicationExportFile = z
+  .object({
+    fileId: z.string().uuid(),
+    filename: z.string().trim().min(1).max(512),
+    contentType: z.string().trim().min(1).max(256),
+    sizeBytes: z.number().int().positive(),
+    sha256: z.string().regex(/^[0-9a-f]{64}$/u),
+    artifactId: z.string().regex(/^[0-9a-f]{32}$/u),
+    versionId: z.string().regex(/^[0-9a-f]{32}$/u),
+    materializationJobId: z.string().regex(/^[0-9a-f]{32}$/u),
+    sourceHeadSequence: z.number().int().nonnegative(),
+    sourceStateHash: z.string().regex(/^sha256:[0-9a-f]{64}$/u),
+  })
+  .strict();
+export type GoogleDrivePublicationExportFile = z.infer<typeof GoogleDrivePublicationExportFile>;
+
+export const GoogleDrivePublicationToolInput = z
+  .object({
+    title: z.string().trim().min(1).max(512),
+    modality: z.enum(["document", "spreadsheet", "presentation"]),
+    file: GoogleDrivePublicationExportFile,
+    idempotencyKey: z.string().trim().min(1).max(200),
+  })
+  .strict();
+export type GoogleDrivePublicationToolInput = z.infer<typeof GoogleDrivePublicationToolInput>;
+
+export const GoogleDrivePublicationReceipt = z
+  .object({
+    connectionId: z.string().uuid(),
+    providerFileId: z.string().min(1).max(256),
+    webViewLink: z.string().url(),
+    mimeType: z.enum([
+      "application/vnd.google-apps.document",
+      "application/vnd.google-apps.spreadsheet",
+      "application/vnd.google-apps.presentation",
+    ]),
+    destination: GoogleDriveOutputDestination,
+    replayed: z.boolean(),
+  })
+  .strict();
+export type GoogleDrivePublicationReceipt = z.infer<typeof GoogleDrivePublicationReceipt>;
 
 export const GoogleDriveBrowseItem = z.object({
   id: z.string().min(1).max(256),

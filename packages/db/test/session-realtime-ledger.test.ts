@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { MODEL_CONTEXT_LABEL } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { and, asc, eq, sql } from "drizzle-orm";
 
@@ -763,6 +764,91 @@ describe("session realtime ledger", () => {
     expect(
       history.some(({ item }) => JSON.stringify(item).includes("finalized assistant voice")),
     ).toBe(false);
+  });
+
+  test("realtime delegation context is replay-fenced and enters canonical user history", async () => {
+    const value = await fixture();
+    const first = await claimInitial(value);
+    await complete(value, first.claimed.connection);
+    await proveProviderStarted(value, first.claimed.connection);
+    const modelContext = "Current application context: selected record 42.";
+    const base = delegationSyncInput(value, first.claimed.connection);
+    const input = {
+      ...base,
+      entries: [{ ...base.entries[0]!, modelContext: `  ${modelContext}  ` }],
+    };
+
+    const admitted = await transaction(value.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(tx, input),
+    );
+    const entry = admitted.accepted[0]?.entry;
+    const turnId = entry?.turnId;
+    if (!entry || !turnId) throw new Error("Realtime delegation turn was not linked");
+    expect(entry).not.toHaveProperty("modelContext");
+
+    const stored = await transaction(value.owner.workspaceId, async (tx) => {
+      const [ledger] = await tx
+        .select({ modelContext: schema.sessionRealtimeEntries.modelContext })
+        .from(schema.sessionRealtimeEntries)
+        .where(eq(schema.sessionRealtimeEntries.id, entry.id));
+      const [turn] = await tx
+        .select({
+          triggerEventId: schema.sessionTurns.triggerEventId,
+          modelContext: schema.sessionTurns.modelContext,
+        })
+        .from(schema.sessionTurns)
+        .where(eq(schema.sessionTurns.id, turnId));
+      const [event] = turn
+        ? await tx
+            .select({ payload: schema.sessionEvents.payload })
+            .from(schema.sessionEvents)
+            .where(eq(schema.sessionEvents.id, turn.triggerEventId))
+        : [];
+      return { ledger, turn, event };
+    });
+    expect(stored).toMatchObject({
+      ledger: { modelContext },
+      turn: { modelContext },
+      event: { payload: { modelContext } },
+    });
+
+    const replay = await transaction(value.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(tx, input),
+    );
+    expect(replay.accepted[0]).toMatchObject({ replay: true, entry: { id: entry.id } });
+    await expectConflict(
+      transaction(value.owner.workspaceId, (tx) =>
+        syncSessionRealtimeLedgerInTransaction(tx, {
+          ...input,
+          entries: [{ ...input.entries[0]!, modelContext: "changed context" }],
+        }),
+      ),
+      "REALTIME_DELEGATION_CHANGED",
+    );
+
+    const claim = await claimSessionWorkForAttempt(client.db, value.owner.workspaceId, {
+      sessionId: value.owner.sessionId,
+      workflowId: `session-${value.owner.sessionId}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(claim).toMatchObject({ action: "claimed", turn: { id: turnId } });
+    if (claim.action !== "claimed") throw new Error(`turn was not claimed: ${claim.reason}`);
+    expect(claim.turn).not.toHaveProperty("modelContext");
+    const history = await getActiveSessionHistoryItems(
+      client.db,
+      value.owner.workspaceId,
+      value.owner.sessionId,
+    );
+    expect(history.at(-1)?.item).toMatchObject({
+      role: "user",
+      content: [
+        { type: "input_text", text: `${MODEL_CONTEXT_LABEL}\n${modelContext}` },
+        { type: "input_text", text: input.entries[0]!.text },
+      ],
+    });
   });
 
   test("rejects changed immutable input and outbound collisions on every operation replay", async () => {

@@ -2464,10 +2464,10 @@ export const sessions = pgTable(
     status: text("status").notNull().default("queued"),
     initialMessage: losslessText("initial_message").notNull(),
     initialMessageCodecVersion: losslessCodecVersion("initial_message_codec_version"),
-    // Invisible host context frozen with the winning session create. The
-    // initial turn copies this value so an idempotent repair can never adopt a
-    // retrying caller's different instructions.
-    initialTurnInstructions: text("initial_turn_instructions"),
+    // Model-visible application context frozen with the winning create. The
+    // initial turn copies it into the canonical user message so an idempotent
+    // repair cannot adopt a retrying caller's different message context.
+    initialModelContext: text("initial_model_context"),
     title: text("title"),
     titleSource: text("title_source"),
     // Per-session agent persona/system instructions supplied at create (the
@@ -2761,6 +2761,11 @@ export const sessions = pgTable(
       table.workspaceId,
       table.rootSessionId,
       table.nestedAgentDepth,
+    ),
+    initialModelContextValid: check(
+      "sessions_initial_model_context_check",
+      sql`${table.initialModelContext} is null
+        or opengeni_private.model_context_value_valid(${table.initialModelContext})`,
     ),
   }),
 );
@@ -3115,6 +3120,9 @@ export const sessionRealtimeEntries = pgTable(
     textCodecVersion: losslessCodecVersion("text_codec_version"),
     payload: losslessJsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
     payloadCodecVersion: losslessCodecVersion("payload_codec_version"),
+    // Application context for an exact provider-in delegation or finalized
+    // transcript. It is materialized as ordinary user-role message content.
+    modelContext: text("model_context"),
     clientAckedAt: timestamp("client_acked_at", { withTimezone: true }),
     providerAckedAt: timestamp("provider_acked_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -3189,6 +3197,15 @@ export const sessionRealtimeEntries = pgTable(
       sql`(${table.kind} = 'user_transcript' and ${table.role} = 'user' and ${table.text} is not null)
         or (${table.kind} = 'assistant_transcript' and ${table.role} = 'assistant' and ${table.text} is not null)
         or (${table.kind} not in ('user_transcript', 'assistant_transcript') and ${table.role} is null)`,
+    ),
+    modelContextValid: check(
+      "session_realtime_entries_model_context_check",
+      sql`${table.modelContext} is null
+        or (
+          ${table.direction} = 'provider_in'
+          and ${table.kind} in ('delegation_call', 'user_transcript', 'assistant_transcript')
+          and opengeni_private.model_context_value_valid(${table.modelContext})
+        )`,
     ),
   }),
 );
@@ -4497,9 +4514,10 @@ export const sessionTurns = pgTable(
     prompt: losslessText("prompt").notNull(),
     promptCodecVersion: losslessCodecVersion("prompt_codec_version"),
     annotations: jsonb("annotations").$type<TimelineAnnotation[]>().notNull().default([]),
-    // Host context for this exact turn. System-level at runtime and deliberately
-    // separate from the visible prompt/event payload.
-    turnInstructions: text("turn_instructions"),
+    // Application context for this exact user message. It is copied into the
+    // canonical user-role history item at claim and omitted from public queue
+    // projections; full event/audit data retains it.
+    modelContext: text("model_context"),
     resources: jsonb("resources").$type<unknown[]>().notNull().default([]),
     tools: jsonb("tools").$type<unknown[]>().notNull().default([]),
     // false = inherit the durable session policy; true = this turn explicitly
@@ -4578,6 +4596,11 @@ export const sessionTurns = pgTable(
     latencyModeValid: check(
       "session_turns_latency_mode_check",
       sql`${table.latencyMode} in ('standard', 'priority', 'fast')`,
+    ),
+    modelContextValid: check(
+      "session_turns_model_context_check",
+      sql`${table.modelContext} is null
+        or opengeni_private.model_context_value_valid(${table.modelContext})`,
     ),
   }),
 );

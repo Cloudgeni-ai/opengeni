@@ -2257,7 +2257,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const result = await acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
       text: payload.text,
       annotations: payload.annotations,
-      turnInstructions: payload.turnInstructions ?? null,
+      modelContext: payload.modelContext ?? null,
       resources: payload.resources,
       model: payload.model ?? null,
       reasoningEffort: payload.reasoningEffort ?? null,
@@ -2300,7 +2300,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       const { accepted } = await acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
         text: event.payload.text,
         annotations: event.payload.annotations,
-        turnInstructions: event.payload.turnInstructions ?? null,
+        modelContext: event.payload.modelContext ?? null,
         resources: event.payload.resources ?? [],
         model: event.payload.model ?? null,
         reasoningEffort: event.payload.reasoningEffort ?? null,

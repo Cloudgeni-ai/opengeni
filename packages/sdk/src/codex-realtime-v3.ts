@@ -35,9 +35,10 @@ export const CODEX_REALTIME_V3_PENDING_MAX_ENTRIES = 256;
 export const CODEX_REALTIME_V3_PENDING_MAX_BYTES = 16 * 1024 * 1024;
 const REALTIME_DELEGATION_TRANSCRIPT_MAX_BYTES = 65_536;
 const REALTIME_DELEGATION_INPUT_MAX_BYTES = 65_536;
+const REALTIME_MODEL_CONTEXT_MAX_CHARACTERS = 32_768;
 
 export type CodexRealtimeV3BridgeFatal = {
-  code: "pending_overflow";
+  code: "pending_overflow" | "replay_journal_failed";
   message: string;
 };
 
@@ -72,6 +73,19 @@ export type CodexRealtimeV3BridgeOptions = {
   >;
   sync(request: SyncSessionRealtimeLedgerRequest): Promise<SyncSessionRealtimeLedgerResponse>;
   randomUUID?: (() => string) | undefined;
+  /** Model-visible application context captured once for each durable message-bearing entry. */
+  getModelContext?: (() => string | undefined) | undefined;
+  /** Controller-lifetime delegation identities shared across provider connection rotations. */
+  acceptedDelegationItemIds?: Set<string> | undefined;
+  /** Unsynced delegation snapshots retained exactly across provider connection rotations. */
+  pendingDelegations?: Map<string, SessionRealtimeInboundEntry> | undefined;
+  /** Persist exact delegation replay state before it becomes browser-reload-sensitive. */
+  onDelegationReplayStateChange?:
+    | ((state: {
+        acceptedDelegationItemIds: ReadonlySet<string>;
+        pendingDelegations: ReadonlyMap<string, SessionRealtimeInboundEntry>;
+      }) => void)
+    | undefined;
   /** The controller installs its activation FIFO first, then enables this listener synchronously. */
   listen?: boolean | undefined;
   onSnapshot?: ((snapshot: CodexRealtimeV3BridgeSnapshot) => void) | undefined;
@@ -125,9 +139,32 @@ export function createCodexRealtimeV3Bridge(
   const clientReceivedSequences = new Set<number>();
   const sentSequences = new Set<number>();
   const finalizedTurnIds = new Set<string>();
+  const acceptedDelegationItemIds = options.acceptedDelegationItemIds ?? new Set<string>();
+  const pendingDelegations = options.pendingDelegations ?? new Map();
+  const locallyQueuedDelegationItemIds = new Set<string>();
   let transcriptSinceDelegation: FinalizedTranscript[] = [];
-  let pendingDelegationUserTranscript: { delegationItemId: string; text: string } | null = null;
+  let pendingDelegationUserTranscript: {
+    delegationItemId: string;
+    text: string;
+  } | null = null;
   const randomUUID = options.randomUUID ?? defaultRandomUUID;
+  const currentModelContext = (): string | undefined => {
+    let context: string | undefined;
+    try {
+      context = options.getModelContext?.()?.trim();
+    } catch {
+      lastError =
+        "Realtime model context callback failed; the provider message continued without application context";
+      return undefined;
+    }
+    if (!context) return undefined;
+    if (context.length > REALTIME_MODEL_CONTEXT_MAX_CHARACTERS) {
+      lastError =
+        "Realtime model context exceeded the 32768-character limit; the provider message continued without application context";
+      return undefined;
+    }
+    return context;
+  };
 
   const snapshot = (): CodexRealtimeV3BridgeSnapshot => ({
     connectionId: options.connectionId,
@@ -148,9 +185,9 @@ export function createCodexRealtimeV3Bridge(
   });
   const publish = (): void => options.onSnapshot?.(snapshot());
 
-  const triggerFatal = (message: string): void => {
+  const triggerFatalCode = (code: CodexRealtimeV3BridgeFatal["code"], message: string): void => {
     if (closed || fatal) return;
-    fatal = { code: "pending_overflow", message };
+    fatal = { code, message };
     lastError = message;
     publish();
     try {
@@ -159,6 +196,10 @@ export function createCodexRealtimeV3Bridge(
       // A consumer callback cannot turn a controlled bridge failure into an
       // unhandled provider-message exception.
     }
+  };
+
+  const triggerFatal = (message: string): void => {
+    triggerFatalCode("pending_overflow", message);
   };
 
   const enqueue = (entry: SessionRealtimeInboundEntry): boolean => {
@@ -176,6 +217,14 @@ export function createCodexRealtimeV3Bridge(
     pendingInboundBytes += bytes;
     return true;
   };
+
+  // Same-browser reload reconstructs this exact map from the persisted owner
+  // journal. Queue those first-frozen calls before listening to the replacement
+  // provider connection; startup proof or a duplicate call drives the normal
+  // flush path without resampling application context.
+  for (const [delegationItemId, entry] of pendingDelegations) {
+    if (enqueue(entry)) locallyQueuedDelegationItemIds.add(delegationItemId);
+  }
 
   const hasWork = (): boolean =>
     pendingInbound.length > 0 ||
@@ -213,7 +262,46 @@ export function createCodexRealtimeV3Bridge(
         throw error;
       }
 
+      const acceptedAfterSync = new Set(acceptedDelegationItemIds);
+      const pendingAfterSync = new Map(pendingDelegations);
+      let delegationReplayChanged = false;
       for (const item of batch) {
+        if (item.entry.kind === "delegation_call" && item.entry.delegationItemId) {
+          delegationReplayChanged = true;
+          acceptedAfterSync.add(item.entry.delegationItemId);
+          if (pendingAfterSync.get(item.entry.delegationItemId) === item.entry) {
+            pendingAfterSync.delete(item.entry.delegationItemId);
+          }
+        }
+      }
+      if (delegationReplayChanged) {
+        try {
+          options.onDelegationReplayStateChange?.({
+            acceptedDelegationItemIds: acceptedAfterSync,
+            pendingDelegations: pendingAfterSync,
+          });
+        } catch (error) {
+          // The server may already have admitted this exact batch. Keep it
+          // queued with the original operation identity and stop this bridge.
+          // Recovery can safely replay it because the prior pending journal
+          // state remains authoritative until the accepted transition writes.
+          pendingInbound = [...batch, ...pendingInbound];
+          triggerFatalCode(
+            "replay_journal_failed",
+            `Codex realtime delegation replay journal failed: ${safeError(error)}`,
+          );
+          return;
+        }
+      }
+
+      for (const item of batch) {
+        if (item.entry.kind === "delegation_call" && item.entry.delegationItemId) {
+          acceptedDelegationItemIds.add(item.entry.delegationItemId);
+          if (pendingDelegations.get(item.entry.delegationItemId) === item.entry) {
+            pendingDelegations.delete(item.entry.delegationItemId);
+          }
+          locallyQueuedDelegationItemIds.delete(item.entry.delegationItemId);
+        }
         pendingInboundCount -= 1;
         pendingInboundBytes -= item.bytes;
       }
@@ -345,31 +433,67 @@ export function createCodexRealtimeV3Bridge(
       // These events are provider UI deltas. `turn.done` is the single
       // authoritative finalized transcript persisted below.
     } else if (event.type === "delegation.created") {
-      activeDelegationId = event.delegationItemId;
-      const transcript = delegationTranscript(transcriptSinceDelegation, event.inputTranscript);
-      const coveredTurnIds = transcriptSinceDelegation.map((entry) => entry.turnId);
-      durable = enqueue({
-        operationId: randomUUID(),
-        kind: "delegation_call",
-        providerEventId: event.providerEventId,
-        delegationItemId: event.delegationItemId,
-        text: renderRealtimeDelegationInput(event.inputTranscript, transcript),
-        payload: {
-          offsetMs: event.offsetMs,
-          inputTranscript: event.inputTranscript,
-          transcriptFenceTurnIds: coveredTurnIds,
-        },
-      });
-      if (durable) {
-        const alreadyFinalized = transcriptSinceDelegation.some(
-          (entry) =>
-            entry.role === "user" &&
-            normalizedTranscript(entry.text) === normalizedTranscript(event.inputTranscript),
-        );
-        pendingDelegationUserTranscript = alreadyFinalized
-          ? null
-          : { delegationItemId: event.delegationItemId, text: event.inputTranscript };
-        transcriptSinceDelegation = [];
+      if (acceptedDelegationItemIds.has(event.delegationItemId)) {
+        ignoredEventCount += 1;
+        lastIgnoredEventType = event.type;
+      } else if (locallyQueuedDelegationItemIds.has(event.delegationItemId)) {
+        ignoredEventCount += 1;
+        lastIgnoredEventType = event.type;
+        durable = true;
+      } else {
+        let entry = pendingDelegations.get(event.delegationItemId);
+        if (!entry) {
+          const transcript = delegationTranscript(transcriptSinceDelegation, event.inputTranscript);
+          const coveredTurnIds = transcriptSinceDelegation.map((item) => item.turnId);
+          const modelContext = currentModelContext();
+          entry = {
+            operationId: randomUUID(),
+            kind: "delegation_call",
+            providerEventId: event.providerEventId,
+            delegationItemId: event.delegationItemId,
+            text: renderRealtimeDelegationInput(event.inputTranscript, transcript),
+            payload: {
+              offsetMs: event.offsetMs,
+              inputTranscript: event.inputTranscript,
+              transcriptFenceTurnIds: coveredTurnIds,
+            },
+            ...(modelContext ? { modelContext } : {}),
+          };
+          pendingDelegations.set(event.delegationItemId, entry);
+        }
+        try {
+          options.onDelegationReplayStateChange?.({
+            acceptedDelegationItemIds,
+            pendingDelegations,
+          });
+        } catch (error) {
+          triggerFatalCode(
+            "replay_journal_failed",
+            `Codex realtime delegation replay journal failed: ${safeError(error)}`,
+          );
+          return Promise.resolve();
+        }
+        durable = enqueue(entry);
+        if (durable) {
+          locallyQueuedDelegationItemIds.add(event.delegationItemId);
+          activeDelegationId = event.delegationItemId;
+          const frozenInputTranscript =
+            typeof entry.payload.inputTranscript === "string"
+              ? entry.payload.inputTranscript
+              : event.inputTranscript;
+          const alreadyFinalized = transcriptSinceDelegation.some(
+            (item) =>
+              item.role === "user" &&
+              normalizedTranscript(item.text) === normalizedTranscript(frozenInputTranscript),
+          );
+          pendingDelegationUserTranscript = alreadyFinalized
+            ? null
+            : {
+                delegationItemId: event.delegationItemId,
+                text: frozenInputTranscript,
+              };
+          transcriptSinceDelegation = [];
+        }
       }
     } else if (event.type === "output_audio.delta") {
       speaking = true;
@@ -383,7 +507,9 @@ export function createCodexRealtimeV3Bridge(
             normalizedTranscript(pendingDelegationUserTranscript.text)
             ? pendingDelegationUserTranscript.delegationItemId
             : null;
-        durable = enqueue(finalTranscript(randomUUID, event, coveredByDelegationItemId));
+        durable = enqueue(
+          finalTranscript(randomUUID, event, coveredByDelegationItemId, currentModelContext()),
+        );
         if (durable) {
           finalizedTurnIds.add(event.turnId);
           if (coveredByDelegationItemId) {
@@ -446,6 +572,7 @@ function finalTranscript(
   randomUUID: () => string,
   event: Extract<CodexRealtimeV3Event, { type: "turn.done" }>,
   coveredByDelegationItemId: string | null,
+  modelContext: string | undefined,
 ): SessionRealtimeInboundEntry {
   return {
     operationId: randomUUID(),
@@ -456,6 +583,7 @@ function finalTranscript(
       turnId: event.turnId,
       ...(coveredByDelegationItemId ? { coveredByDelegationItemId } : {}),
     },
+    ...(modelContext ? { modelContext } : {}),
   };
 }
 
@@ -539,7 +667,10 @@ function sendOutbound(events: RTCDataChannel, entry: SessionRealtimeLedgerEntry)
           text,
           channel: payloadChannel ?? "speakable",
         })
-      : encodeCodexRealtimeV3SessionContextAppend({ text, channel: payloadChannel });
+      : encodeCodexRealtimeV3SessionContextAppend({
+          text,
+          channel: payloadChannel,
+        });
   for (const message of messages) events.send(JSON.stringify(message));
 }
 

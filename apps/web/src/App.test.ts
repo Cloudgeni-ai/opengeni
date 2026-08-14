@@ -1314,7 +1314,7 @@ describe("composer reasoning-effort picker (full host enum)", () => {
   function clientConfig(patch: Partial<ClientConfig> = {}): ClientConfig {
     return {
       deploymentRevision: "rev-1",
-      apiContractRevision: "2026-08-social-provider-tools-v1",
+      apiContractRevision: "2026-08-model-context-v1",
       defaultModel: "gpt-5.6-sol",
       allowedModels: ["gpt-5.6-sol"],
       models: [],

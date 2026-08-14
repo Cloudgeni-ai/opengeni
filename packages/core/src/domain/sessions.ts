@@ -565,7 +565,7 @@ export async function createAndStartSessionWithOutcome(input: {
   initialMessage: string;
   /** Create the session shell without an initial user event/agent turn. */
   deferInitialTurn?: boolean;
-  turnInstructions?: string | null;
+  modelContext?: string | null;
   resources: ResourceRef[];
   skills?: SessionSkill[];
   tools: ToolRef[];
@@ -674,7 +674,7 @@ export async function createAndStartSessionWithOutcome(input: {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       initialMessage: input.initialMessage,
-      initialTurnInstructions: input.turnInstructions ?? null,
+      initialModelContext: input.modelContext ?? null,
       resources: input.resources,
       skills: input.skills ?? [],
       tools: input.tools,
@@ -740,7 +740,7 @@ export async function createAndStartSessionWithOutcome(input: {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       initialMessage: input.initialMessage,
-      initialTurnInstructions: input.turnInstructions ?? null,
+      initialModelContext: input.modelContext ?? null,
       resources: input.resources,
       skills: input.skills ?? [],
       tools: input.tools,
@@ -809,7 +809,7 @@ async function finishStartSession(
     workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
     initialMessage: string;
     deferInitialTurn?: boolean;
-    turnInstructions?: string | null;
+    modelContext?: string | null;
     resources: ResourceRef[];
     tools: ToolRef[];
     toolPolicy: SessionToolPolicy;
@@ -1103,7 +1103,7 @@ export async function postUserMessageTurn(input: {
   sessionId: string;
   text: string;
   annotations?: TimelineAnnotation[];
-  turnInstructions?: string | null;
+  modelContext?: string | null;
   resources: ResourceRef[];
   model?: string | null;
   reasoningEffort?: Settings["openaiReasoningEffort"] | null;
@@ -1176,7 +1176,7 @@ export async function postUserMessageTurn(input: {
               expectedDraftRevision: input.expectedDraftRevision ?? null,
               text: input.text,
               annotations: input.annotations ?? [],
-              turnInstructions: input.turnInstructions ?? null,
+              modelContext: input.modelContext ?? null,
               resources: input.resources,
               model: requestedModel,
               reasoningEffort: requestedReasoningEffort,
@@ -1883,7 +1883,7 @@ export async function createSessionForRequestWithOutcome(
       workspaceId,
       initialMessage: payload.initialMessage ?? "",
       deferInitialTurn: payload.startMode === "realtime",
-      turnInstructions: payload.turnInstructions ?? null,
+      modelContext: payload.modelContext ?? null,
       resources,
       skills,
       tools,
@@ -2024,7 +2024,7 @@ export async function acceptSessionUserMessageWithOutcome(
   input: {
     text: string;
     annotations?: SubmittedTimelineAnnotation[];
-    turnInstructions?: string | null;
+    modelContext?: string | null;
     resources?: ResourceRef[];
     model?: string | null;
     reasoningEffort?: ReasoningEffort | null;
@@ -2133,7 +2133,7 @@ export async function acceptSessionUserMessageWithOutcome(
     sessionId,
     text: input.text,
     annotations,
-    turnInstructions: input.turnInstructions ?? null,
+    modelContext: input.modelContext ?? null,
     resources: requestedResources,
     model: input.model ?? null,
     reasoningEffort: input.reasoningEffort ?? null,

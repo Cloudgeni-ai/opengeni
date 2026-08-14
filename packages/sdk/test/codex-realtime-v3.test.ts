@@ -7,9 +7,12 @@ import {
   CODEX_REALTIME_V3_PENDING_MAX_BYTES,
   CODEX_REALTIME_V3_PENDING_MAX_ENTRIES,
   createCodexRealtimeV3Bridge,
+  type CodexRealtimeV3BridgeFatal,
+  type CodexRealtimeV3BridgeOptions,
 } from "../src/codex-realtime-v3";
 import * as sdkWire from "../src/codex-realtime-v3-wire";
 import type {
+  SessionRealtimeInboundEntry,
   SessionRealtimeLedgerEntry,
   SyncSessionRealtimeLedgerRequest,
   SyncSessionRealtimeLedgerResponse,
@@ -73,7 +76,11 @@ function bridgeOptions(input: {
   events?: RTCDataChannel;
   sync(request: SyncSessionRealtimeLedgerRequest): Promise<SyncSessionRealtimeLedgerResponse>;
   randomUUID?: () => string;
-  onFatal?: (fatal: { code: "pending_overflow"; message: string }) => void;
+  getModelContext?: () => string | undefined;
+  acceptedDelegationItemIds?: Set<string>;
+  pendingDelegations?: Map<string, SessionRealtimeInboundEntry>;
+  onDelegationReplayStateChange?: CodexRealtimeV3BridgeOptions["onDelegationReplayStateChange"];
+  onFatal?: (fatal: CodexRealtimeV3BridgeFatal) => void;
 }) {
   return {
     events: input.events ?? dataChannel(),
@@ -84,6 +91,10 @@ function bridgeOptions(input: {
     owner,
     sync: input.sync,
     randomUUID: input.randomUUID ?? uuidSource(),
+    getModelContext: input.getModelContext,
+    acceptedDelegationItemIds: input.acceptedDelegationItemIds,
+    pendingDelegations: input.pendingDelegations,
+    onDelegationReplayStateChange: input.onDelegationReplayStateChange,
     onFatal: input.onFatal,
   };
 }
@@ -152,12 +163,342 @@ describe("Codex realtime V3 wire parity", () => {
       }),
     );
     expect(
-      sdkWire.encodeCodexRealtimeV3SessionContextAppend({ text, channel: "commentary" }),
-    ).toEqual(codexWire.encodeCodexRealtimeV3SessionContextAppend({ text, channel: "commentary" }));
+      sdkWire.encodeCodexRealtimeV3SessionContextAppend({
+        text,
+        channel: "commentary",
+      }),
+    ).toEqual(
+      codexWire.encodeCodexRealtimeV3SessionContextAppend({
+        text,
+        channel: "commentary",
+      }),
+    );
   });
 });
 
 describe("Codex realtime V3 bridge", () => {
+  test("freezes the current host model context into each durable message-bearing entry", async () => {
+    const requests: SyncSessionRealtimeLedgerRequest[] = [];
+    let context = "  first route context  ";
+    const bridge = createCodexRealtimeV3Bridge(
+      bridgeOptions({
+        getModelContext: () => context,
+        sync: async (request) => {
+          requests.push(request);
+          return { accepted: [], outbound: [] };
+        },
+      }),
+    );
+
+    await bridge.ingest(transcript(1, "first request"));
+    context = "second route context";
+    await bridge.ingest(
+      JSON.stringify({
+        type: "delegation.created",
+        event_id: "delegation-event-context",
+        item: {
+          id: "delegation-context",
+          type: "delegation",
+          target: "client",
+          content: [{ type: "input_text", text: "delegate now" }],
+        },
+      }),
+    );
+
+    const entries = requests.flatMap((request) => request.entries ?? []);
+    expect(entries[0]).toMatchObject({
+      kind: "user_transcript",
+      modelContext: "first route context",
+    });
+    expect(entries.at(-1)).toMatchObject({
+      kind: "delegation_call",
+      modelContext: "second route context",
+    });
+    bridge.close();
+  });
+
+  test("continues durable messages without context when the host callback fails or exceeds its bound", async () => {
+    const requests: SyncSessionRealtimeLedgerRequest[] = [];
+    let mode: "throw" | "oversized" | "valid" = "throw";
+    const bridge = createCodexRealtimeV3Bridge(
+      bridgeOptions({
+        getModelContext: () => {
+          if (mode === "throw") throw new Error("host route unavailable");
+          return mode === "oversized" ? "x".repeat(32_769) : "current route context";
+        },
+        sync: async (request) => {
+          requests.push(request);
+          return { accepted: [], outbound: [] };
+        },
+      }),
+    );
+
+    await bridge.ingest(transcript(1, "callback failure still persists"));
+    expect(bridge.snapshot().lastError).toContain("callback failed");
+    mode = "oversized";
+    await bridge.ingest(transcript(2, "oversized context still persists"));
+    expect(bridge.snapshot().lastError).toContain("32768-character limit");
+    mode = "valid";
+    await bridge.ingest(transcript(3, "later valid context persists"));
+
+    const entries = requests.flatMap((request) => request.entries ?? []);
+    expect(entries).toEqual([
+      expect.objectContaining({ text: "callback failure still persists" }),
+      expect.objectContaining({ text: "oversized context still persists" }),
+      expect.objectContaining({
+        text: "later valid context persists",
+        modelContext: "current route context",
+      }),
+    ]);
+    expect(entries[0]).not.toHaveProperty("modelContext");
+    expect(entries[1]).not.toHaveProperty("modelContext");
+    bridge.close();
+  });
+
+  test("ignores duplicate delegation ids across bridge rotations without resampling host context", async () => {
+    const firstRequests: SyncSessionRealtimeLedgerRequest[] = [];
+    const secondRequests: SyncSessionRealtimeLedgerRequest[] = [];
+    const acceptedDelegationItemIds = new Set<string>();
+    let context = "first route context";
+    let contextReads = 0;
+    const getModelContext = () => {
+      contextReads += 1;
+      return context;
+    };
+    const delegation = (providerEventId: string) =>
+      JSON.stringify({
+        type: "delegation.created",
+        event_id: providerEventId,
+        item: {
+          id: "duplicate-delegation",
+          type: "delegation",
+          target: "client",
+          content: [{ type: "input_text", text: "delegate once" }],
+        },
+      });
+    const first = createCodexRealtimeV3Bridge(
+      bridgeOptions({
+        getModelContext,
+        acceptedDelegationItemIds,
+        sync: async (request) => {
+          firstRequests.push(request);
+          return { accepted: [], outbound: [] };
+        },
+      }),
+    );
+
+    await first.ingest(delegation("delegation-original"));
+    first.close();
+    context = "changed route context";
+    const second = createCodexRealtimeV3Bridge(
+      bridgeOptions({
+        getModelContext,
+        acceptedDelegationItemIds,
+        sync: async (request) => {
+          secondRequests.push(request);
+          return { accepted: [], outbound: [] };
+        },
+      }),
+    );
+    await second.ingest(delegation("delegation-duplicate"));
+
+    expect(firstRequests.flatMap((request) => request.entries ?? [])).toEqual([
+      expect.objectContaining({
+        kind: "delegation_call",
+        providerEventId: "delegation-original",
+        delegationItemId: "duplicate-delegation",
+        modelContext: "first route context",
+      }),
+    ]);
+    expect(secondRequests).toEqual([]);
+    expect(contextReads).toBe(1);
+    expect(second.snapshot()).toMatchObject({
+      ignoredEventCount: 1,
+      lastIgnoredEventType: "delegation.created",
+    });
+    second.close();
+  });
+
+  test("retries an unsynced delegation across rotation with its first operation and context snapshot", async () => {
+    const acceptedDelegationItemIds = new Set<string>();
+    const pendingDelegations = new Map<string, SessionRealtimeInboundEntry>();
+    const firstRequests: SyncSessionRealtimeLedgerRequest[] = [];
+    const secondRequests: SyncSessionRealtimeLedgerRequest[] = [];
+    let context = "first route context";
+    let contextReads = 0;
+    const getModelContext = () => {
+      contextReads += 1;
+      return context;
+    };
+    const delegation = (providerEventId: string) =>
+      JSON.stringify({
+        type: "delegation.created",
+        event_id: providerEventId,
+        item: {
+          id: "unsynced-delegation",
+          type: "delegation",
+          target: "client",
+          content: [{ type: "input_text", text: "delegate once" }],
+        },
+      });
+    const first = createCodexRealtimeV3Bridge(
+      bridgeOptions({
+        getModelContext,
+        acceptedDelegationItemIds,
+        pendingDelegations,
+        sync: async (request) => {
+          firstRequests.push(request);
+          throw new Error("first connection lost before durable sync");
+        },
+      }),
+    );
+
+    await expect(first.ingest(delegation("delegation-original"))).rejects.toThrow(
+      "first connection lost before durable sync",
+    );
+    const original = firstRequests[0]?.entries?.[0];
+    if (!original) throw new Error("Expected the first bridge to freeze one delegation entry");
+    expect(original).toMatchObject({
+      kind: "delegation_call",
+      providerEventId: "delegation-original",
+      delegationItemId: "unsynced-delegation",
+      modelContext: "first route context",
+    });
+    expect(first.snapshot().pendingInbound).toBe(1);
+    expect(acceptedDelegationItemIds).toEqual(new Set());
+    first.close();
+
+    context = "changed route context";
+    const second = createCodexRealtimeV3Bridge(
+      bridgeOptions({
+        getModelContext,
+        acceptedDelegationItemIds,
+        pendingDelegations,
+        sync: async (request) => {
+          secondRequests.push(request);
+          return { accepted: [], outbound: [] };
+        },
+      }),
+    );
+    await second.ingest(delegation("delegation-duplicate"));
+
+    expect(secondRequests[0]?.entries).toEqual([original]);
+    expect(contextReads).toBe(1);
+    expect(acceptedDelegationItemIds).toEqual(new Set(["unsynced-delegation"]));
+    expect(pendingDelegations.size).toBe(0);
+    expect(second.snapshot().pendingInbound).toBe(0);
+    second.close();
+  });
+
+  test("fails closed before sync when the first delegation replay journal write fails", async () => {
+    const requests: SyncSessionRealtimeLedgerRequest[] = [];
+    const fatals: CodexRealtimeV3BridgeFatal[] = [];
+    const pendingDelegations = new Map<string, SessionRealtimeInboundEntry>();
+    let contextReads = 0;
+    const bridge = createCodexRealtimeV3Bridge(
+      bridgeOptions({
+        getModelContext: () => {
+          contextReads += 1;
+          return "frozen route context";
+        },
+        pendingDelegations,
+        onDelegationReplayStateChange: () => {
+          throw new Error("session storage quota exceeded");
+        },
+        onFatal: (fatal) => fatals.push(fatal),
+        sync: async (request) => {
+          requests.push(request);
+          return { accepted: [], outbound: [] };
+        },
+      }),
+    );
+
+    await bridge.ingest(
+      JSON.stringify({
+        type: "delegation.created",
+        event_id: "delegation-original",
+        item: {
+          id: "journal-write-failure",
+          type: "delegation",
+          target: "client",
+          content: [{ type: "input_text", text: "delegate once" }],
+        },
+      }),
+    );
+
+    expect(requests).toEqual([]);
+    expect(contextReads).toBe(1);
+    expect(pendingDelegations.get("journal-write-failure")).toMatchObject({
+      kind: "delegation_call",
+      providerEventId: "delegation-original",
+      delegationItemId: "journal-write-failure",
+      modelContext: "frozen route context",
+    });
+    expect(bridge.snapshot()).toMatchObject({
+      pendingInbound: 0,
+      fatal: {
+        code: "replay_journal_failed",
+        message: "Codex realtime delegation replay journal failed: session storage quota exceeded",
+      },
+    });
+    expect(fatals).toHaveLength(1);
+    expect(bridge.snapshot().fatal).toEqual(fatals[0]!);
+    bridge.close();
+  });
+
+  test("retains the exact pending delegation when its accepted journal transition fails", async () => {
+    const requests: SyncSessionRealtimeLedgerRequest[] = [];
+    const fatals: CodexRealtimeV3BridgeFatal[] = [];
+    const acceptedDelegationItemIds = new Set<string>();
+    const pendingDelegations = new Map<string, SessionRealtimeInboundEntry>();
+    let journalWrites = 0;
+    const bridge = createCodexRealtimeV3Bridge(
+      bridgeOptions({
+        acceptedDelegationItemIds,
+        pendingDelegations,
+        onDelegationReplayStateChange: () => {
+          journalWrites += 1;
+          if (journalWrites === 2) throw new Error("accepted transition could not persist");
+        },
+        onFatal: (fatal) => fatals.push(fatal),
+        sync: async (request) => {
+          requests.push(request);
+          return { accepted: [], outbound: [] };
+        },
+      }),
+    );
+
+    await bridge.ingest(
+      JSON.stringify({
+        type: "delegation.created",
+        event_id: "delegation-original",
+        item: {
+          id: "accepted-write-failure",
+          type: "delegation",
+          target: "client",
+          content: [{ type: "input_text", text: "delegate once" }],
+        },
+      }),
+    );
+
+    const original = requests[0]?.entries?.[0];
+    if (!original) throw new Error("Expected one exact delegation sync entry");
+    expect(journalWrites).toBe(2);
+    expect(acceptedDelegationItemIds).toEqual(new Set());
+    expect(pendingDelegations.get("accepted-write-failure")).toBe(original);
+    expect(bridge.snapshot()).toMatchObject({
+      pendingInbound: 1,
+      fatal: {
+        code: "replay_journal_failed",
+        message:
+          "Codex realtime delegation replay journal failed: accepted transition could not persist",
+      },
+    });
+    expect(fatals).toHaveLength(1);
+    expect(bridge.snapshot().fatal).toEqual(fatals[0]!);
+    bridge.close();
+  });
+
   test("persists one finalized transcript per turn and ignores live transcript deltas", async () => {
     const requests: SyncSessionRealtimeLedgerRequest[] = [];
     const bridge = createCodexRealtimeV3Bridge(
@@ -206,7 +547,11 @@ describe("Codex realtime V3 bridge", () => {
       JSON.stringify({
         type: "turn.done",
         event_id: "provider-2",
-        turn: { id: "turn-2", role: "assistant", transcript: "I can inspect it." },
+        turn: {
+          id: "turn-2",
+          role: "assistant",
+          transcript: "I can inspect it.",
+        },
       }),
     );
     await bridge.ingest(
@@ -378,7 +723,10 @@ describe("Codex realtime V3 bridge", () => {
         events: dataChannel((value) => sent.push(value)),
         sync: async (request) => {
           requests.push(request);
-          return { accepted: [], outbound: requests.length === 1 ? [outbound()] : [outbound()] };
+          return {
+            accepted: [],
+            outbound: requests.length === 1 ? [outbound()] : [outbound()],
+          };
         },
       }),
     );
@@ -607,7 +955,7 @@ describe("Codex realtime V3 bridge", () => {
   });
 
   test("crossing either hard pending bound emits one fatal and stops the generation", async () => {
-    const fatals: Array<{ code: "pending_overflow"; message: string }> = [];
+    const fatals: CodexRealtimeV3BridgeFatal[] = [];
     const requests: SyncSessionRealtimeLedgerRequest[] = [];
     const bridge = createCodexRealtimeV3Bridge(
       bridgeOptions({
@@ -638,7 +986,7 @@ describe("Codex realtime V3 bridge", () => {
     });
     bridge.close();
 
-    const byteFatals: Array<{ code: "pending_overflow"; message: string }> = [];
+    const byteFatals: CodexRealtimeV3BridgeFatal[] = [];
     const byteRequests: SyncSessionRealtimeLedgerRequest[] = [];
     const byteBridge = createCodexRealtimeV3Bridge(
       bridgeOptions({
@@ -726,7 +1074,10 @@ describe("Codex realtime V3 bridge", () => {
         }),
         sync: async (request) => {
           requests.push(request);
-          return { accepted: [], outbound: [outbound({ text: "x".repeat(900) })] };
+          return {
+            accepted: [],
+            outbound: [outbound({ text: "x".repeat(900) })],
+          };
         },
       }),
     );

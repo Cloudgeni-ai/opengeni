@@ -20,8 +20,11 @@ import { useAppContext } from "@/context";
 import {
   GOOGLE_DRIVE_ACCESS_DISCLOSURE,
   GOOGLE_DRIVE_APP_DESCRIPTION,
+  GOOGLE_DRIVE_PUBLISHING_DISCLOSURE,
   GOOGLE_DRIVE_SYNC_BEHAVIOR,
   googleDriveAccountState,
+  googleDriveCanPublish,
+  googleDriveCanReadSources,
   googleDriveConnectionMetadata,
   googleDriveDisconnectAttempt,
   localConnectedGoogleDrivePreview,
@@ -112,6 +115,9 @@ export function GoogleDriveConnectorCard({
   const stateNotice = googleDriveStateNotice(accountState.state);
   const savedSources = configuredGoogleDriveSources(metadata);
   const savedDefaults = savedSources[0];
+  const canReadSources = googleDriveCanReadSources(metadata);
+  const canPublish = googleDriveCanPublish(connection);
+  const outputDestination = metadata?.outputDestination;
   const folderItems = items.filter((item) => item.kind === "folder");
 
   const refreshConnections = useCallback(async () => {
@@ -140,10 +146,20 @@ export function GoogleDriveConnectorCard({
     const url = new URL(window.location.href);
     const status = url.searchParams.get("google_drive");
     if (!status) return;
+    const completedCapability = window.sessionStorage.getItem(
+      `opengeni:google-drive-oauth-capability:${workspaceId}`,
+    );
+    window.sessionStorage.removeItem(`opengeni:google-drive-oauth-capability:${workspaceId}`);
     if (status === "connected") {
-      toast.success("Google Drive connected", {
-        description: "Choose a Shared Drive or folder boundary and configure incremental sync.",
-      });
+      if (completedCapability === "publish") {
+        toast.success("Google Drive publishing configured", {
+          description: "The selected output folder is active. Connector writes ask by default.",
+        });
+      } else {
+        toast.success("Google Drive connected", {
+          description: "Choose a Shared Drive or folder boundary and configure incremental sync.",
+        });
+      }
       void refreshConnections();
     } else {
       toast.error("Google Drive connection failed", {
@@ -154,9 +170,9 @@ export function GoogleDriveConnectorCard({
     url.searchParams.delete("connectionId");
     url.searchParams.delete("reason");
     window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
-  }, [refreshConnections]);
+  }, [refreshConnections, workspaceId]);
 
-  async function connect(reconnect = false) {
+  async function connect(reconnect = false, capability: "source_read" | "publish" = "source_read") {
     if (!canWrite) return;
     setBusy(true);
     try {
@@ -164,8 +180,15 @@ export function GoogleDriveConnectorCard({
         `/v1/workspaces/${workspaceId}/connections/google-drive/install`,
         {
           method: "POST",
-          body: JSON.stringify(reconnect && connection ? { connectionId: connection.id } : {}),
+          body: JSON.stringify({
+            ...(reconnect && connection ? { connectionId: connection.id } : {}),
+            capability,
+          }),
         },
+      );
+      window.sessionStorage.setItem(
+        `opengeni:google-drive-oauth-capability:${workspaceId}`,
+        capability,
       );
       window.location.assign(start.authorizationUrl);
     } catch (error) {
@@ -426,7 +449,7 @@ export function GoogleDriveConnectorCard({
               </Button>
             ) : connection && accountState.state !== "disconnected" ? (
               <>
-                {accountState.state === "connected" ? (
+                {accountState.state === "connected" && canReadSources ? (
                   <Button
                     type="button"
                     size="sm"
@@ -435,6 +458,42 @@ export function GoogleDriveConnectorCard({
                   >
                     <FolderOpenIcon className="size-3.5" />
                     {savedSources.length > 0 ? "Manage folders" : "Connect folders"}
+                  </Button>
+                ) : null}
+                {accountState.state === "connected" && !canReadSources ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    aria-describedby="google-drive-access-disclosure"
+                    disabled={busy || !canWrite || readOnly}
+                    onClick={() => void connect(true, "source_read")}
+                  >
+                    Enable source sync
+                  </Button>
+                ) : null}
+                {accountState.state === "connected" && !canPublish ? (
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    aria-describedby="google-drive-publishing-disclosure"
+                    disabled={busy || !canWrite || readOnly}
+                    onClick={() => void connect(true, "publish")}
+                  >
+                    Enable publishing
+                  </Button>
+                ) : null}
+                {accountState.state === "connected" && canPublish && canReadSources ? (
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    disabled={busy || !canWrite || readOnly}
+                    aria-describedby="google-drive-publishing-disclosure"
+                    onClick={() => void connect(true, "publish")}
+                  >
+                    <FolderOpenIcon className="size-3.5" />
+                    {outputDestination ? "Change output folder" : "Choose output folder"}
                   </Button>
                 ) : null}
                 {accountState.state === "paused" ? (
@@ -493,9 +552,12 @@ export function GoogleDriveConnectorCard({
         >
           {GOOGLE_DRIVE_ACCESS_DISCLOSURE}
         </p>
+        <p id="google-drive-publishing-disclosure" className="mt-2 text-xs leading-5 text-fg-muted">
+          {GOOGLE_DRIVE_PUBLISHING_DISCLOSURE}
+        </p>
 
         {connection && metadata ? (
-          <div className="mt-3 grid gap-2 border-t border-border/70 pt-3 text-xs sm:grid-cols-3">
+          <div className="mt-3 grid gap-2 border-t border-border/70 pt-3 text-xs sm:grid-cols-4">
             <div>
               <span className="text-fg-subtle">Account</span>
               <div className="mt-0.5 truncate text-fg">
@@ -520,6 +582,18 @@ export function GoogleDriveConnectorCard({
                       savedDefaults.syncCadence,
                     )} · ${googleDriveReadPolicyLabel(savedDefaults.readPolicy)}`
                   : "Not configured"}
+              </div>
+            </div>
+            <div>
+              <span className="text-fg-subtle">Publishing output</span>
+              <div className="mt-0.5 truncate text-fg">
+                {outputDestination
+                  ? `${outputDestination.location === "shared_drive" ? "Shared Drive" : "My Drive"} · ${outputDestination.folderName}`
+                  : canPublish && canReadSources
+                    ? "Write consent granted · folder required"
+                    : canPublish
+                      ? "Write consent granted · enable source sync to choose a folder"
+                      : "Not enabled"}
               </div>
             </div>
           </div>
