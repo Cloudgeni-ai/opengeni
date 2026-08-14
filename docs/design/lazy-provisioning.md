@@ -16,13 +16,15 @@ While unprovisioned, the turn injects a `RoutingSandboxSession` backed by a synt
 
 That reference identity is the invariant. The OpenAI Agents SDK's `applyManifestToProvidedSession(...)` compares current and target manifests; when both point at `agent.defaultManifest`, the delta is empty, so the SDK does not throw or write a new manifest before the real box exists. On the first default-pointer sandbox op, the routing proxy calls the in-process provisioner and then switches its backend state to the real established session.
 
-The provisioner is a memoized promise scoped to one turn. Parallel tool calls share the same establish attempt. It runs:
+The provisioner is a memoized promise scoped to one turn. Parallel tool calls share the same establish attempt. A configured host run-credential resolver does not by itself make a turn eager: credential fetch/decrypt, sandbox materialization, renewal, and exact-attempt cleanup all remain absent until the first sandbox operation. Signed file resources and generated-video materialization still select the eager path because their verified paths must exist before the first model boundary. The provisioner runs:
 
 1. worker-shutdown check
-2. lazy run-scoped Git token mint, if repo resources need one
-3. `resumeBoxForTurn(...)`
-4. `runOwnedSandboxSetup(...)` against the un-proxied real session
-5. lease heartbeat and warm-meter tick
+2. exact frozen attempt/group-scoped host run-credential resolution, when configured
+3. lazy run-scoped Git token mint, if repo resources need one
+4. `resumeBoxForTurn(...)`
+5. host run-credential materialization on that exact lease, before setup or the waiting provider operation, followed by renewal
+6. `runOwnedSandboxSetup(...)` against the un-proxied real session
+7. lease heartbeat and warm-meter tick
 
 Desktop work is not part of provisioning. Registering the computer-use tools is
 side-effect free; the first actual computer action idempotently starts the display
@@ -38,7 +40,7 @@ Retries are deliberately narrow: only ownership-fenced lease supersession/transi
 Metrics deliberately keep the two levels separate. `opengeni_sandbox_provisions_total` and `opengeni_sandbox_provision_duration_seconds` record one terminal logical outcome, with expected lifecycle transitions distinct from actual failures. `opengeni_sandbox_provision_attempts_total` and its duration histogram record internal physical attempts/retries. Correlation ids, session ids, sandbox ids, group ids, provider instance ids, and error text are never metric labels.
 
 Turn cleanup is conditional. If the provisioner never ran, there is no lease,
-timer, recording, or box to release. If it ran or is still in flight, the activity
+timer, recording, run-credential generation/renewal, or box to release. If it ran or is still in flight, the activity
 waits briefly for it to settle, then uses the same release/snapshot finalization
 path as eager ownership. Recording cleanup exists only when computer-use actually
 started one.

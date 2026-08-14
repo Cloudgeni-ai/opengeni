@@ -527,6 +527,16 @@ sandbox session before the first model call. This performs no second clone,
 copy, or manifest materialization. With no repository resource, that workspace
 discovery capability is absent and cannot force provisioning.
 
+Host-owned rotating sandbox run credentials follow the same first-operation
+boundary when lazy provisioning is enabled. Binding the resolver preserves the
+exact accepted turn, attempt, shared sandbox group, initiator, and effective
+backend authority without fetching secret material. Only the first actual
+sandbox operation enters the existing single-flight provisioner, resolves the
+material, writes it to that exact lease before the waiting operation, and starts
+renewal. A model-only turn therefore owns no credential fetch/decrypt/write,
+renewal, or cleanup work. Signed file resources and generated-video files remain
+eager because their verified sandbox paths must exist before model dispatch.
+
 One model response's parallel tool calls are tracked as an in-memory settlement
 batch while its stream is active; batch identity is not durable schema. A
 completed response can reconcile and clear its exact call IDs even if an older

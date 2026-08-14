@@ -2608,7 +2608,7 @@ describe("lazy sandbox provisioner single-flight", () => {
       lazyEnabled: true,
       machinePrimary: false,
       sandboxBackend: "docker" as const,
-      hasInitialRunCredentialMaterial: false,
+      hasRunCredentialResolver: false,
       generatedVideoFileCount: 0,
       hasSignedFileResources: false,
     };
@@ -2629,9 +2629,10 @@ describe("lazy sandbox provisioner single-flight", () => {
       policy: "eager",
       reason: "backend_none",
     });
-    expect(
-      sandboxEstablishPolicyDecision({ ...base, hasInitialRunCredentialMaterial: true }),
-    ).toEqual({ policy: "eager", reason: "initial_run_credentials" });
+    expect(sandboxEstablishPolicyDecision({ ...base, hasRunCredentialResolver: true })).toEqual({
+      policy: "on-demand",
+      reason: "initial_run_credentials_deferred",
+    });
     expect(sandboxEstablishPolicyDecision({ ...base, generatedVideoFileCount: 1 })).toEqual({
       policy: "eager",
       reason: "generated_video_files",
@@ -2640,6 +2641,50 @@ describe("lazy sandbox provisioner single-flight", () => {
       policy: "eager",
       reason: "signed_file_resources",
     });
+    expect(
+      sandboxEstablishPolicyDecision({
+        ...base,
+        hasRunCredentialResolver: true,
+        generatedVideoFileCount: 1,
+      }),
+    ).toEqual({ policy: "eager", reason: "generated_video_files" });
+    expect(
+      sandboxEstablishPolicyDecision({
+        ...base,
+        hasRunCredentialResolver: true,
+        hasSignedFileResources: true,
+      }),
+    ).toEqual({ policy: "eager", reason: "signed_file_resources" });
+  });
+
+  test("credential-bearing lazy turns fetch and materialize once at the first shared operation", async () => {
+    const steps: string[] = [];
+    let resolves = 0;
+    let materializations = 0;
+    const provisioner = createTurnSandboxProvisioner(async () => {
+      resolves += 1;
+      steps.push("credential-resolved");
+      await Bun.sleep(5);
+      materializations += 1;
+      steps.push("credential-materialized");
+      return {
+        exec: async () => {
+          steps.push("provider-operation");
+        },
+      };
+    });
+
+    // Model-only work never asks the provisioner for a box, and therefore does
+    // not fetch, decrypt, write, renew, or later clean up credential material.
+    expect(resolves).toBe(0);
+    expect(materializations).toBe(0);
+
+    const boxes = await Promise.all(Array.from({ length: 8 }, () => provisioner.get()));
+    await boxes[0]!.exec();
+
+    expect(resolves).toBe(1);
+    expect(materializations).toBe(1);
+    expect(steps).toEqual(["credential-resolved", "credential-materialized", "provider-operation"]);
   });
 
   test("deadline rotation uses only short anti-churn pacing", () => {
