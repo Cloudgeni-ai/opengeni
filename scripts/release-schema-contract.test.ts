@@ -191,6 +191,15 @@ describe("release schema contract", () => {
     const sessionVisibilityContractHash = (includesActivation: boolean): string | null => {
       if (!migrations.has("0236_session_visibility_slack_policy.sql")) return null;
       if (
+        migrations.has("0244_model_context_contribution_facts.sql") &&
+        migrations.has("0243_google_drive_object_acl_authority.sql") &&
+        migrations.has("0241_enrollment_agent_runtime.sql")
+      ) {
+        return includesActivation
+          ? "ba109dd420eaeffe5996252d478b4d36685dca0dd37bd8bc6b5d1415b4fd3299"
+          : "e0d0701c6e297fbae612b980c850dd86f54adc1c7c71c43771b246a70a1da854";
+      }
+      if (
         migrations.has("0243_google_drive_object_acl_authority.sql") &&
         migrations.has("0241_enrollment_agent_runtime.sql")
       ) {
@@ -511,10 +520,12 @@ describe("release schema contract", () => {
         (migrations.has("0238_recover_unclaimed_session_turns.sql") ? 1 : 0) +
         (migrations.has("0240_enrollment_connection_authority.sql") ? 1 : 0) +
         (migrations.has("0241_enrollment_agent_runtime.sql") ? 1 : 0) +
-        (migrations.has("0243_google_drive_object_acl_authority.sql") ? 1 : 0),
+        (migrations.has("0243_google_drive_object_acl_authority.sql") ? 1 : 0) +
+        (migrations.has("0244_model_context_contribution_facts.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(sessionVisibilityContractHash(false) ?? currentMainContractHash);
     const latestCompatibleMigration = [
+      "0244_model_context_contribution_facts.sql",
       "0243_google_drive_object_acl_authority.sql",
       "0241_enrollment_agent_runtime.sql",
       "0240_enrollment_connection_authority.sql",
@@ -727,6 +738,12 @@ describe("release schema contract", () => {
     if (migrations.has("0243_google_drive_object_acl_authority.sql")) {
       expect(migrations.get("0243_google_drive_object_acl_authority.sql")).toMatchObject({
         sha256: "1cc4b297460ba64d252230ceddc9eaaf4d6ea9b02afcd56518900d5b569bfcfe",
+        deploymentMode: "rolling",
+      });
+    }
+    if (migrations.has("0244_model_context_contribution_facts.sql")) {
+      expect(migrations.get("0244_model_context_contribution_facts.sql")).toMatchObject({
+        sha256: "f7178be69ea94a5c3aeae7f17c6c896c3ea4bf892715e47de7f6fb95fc7fcf4d",
         deploymentMode: "rolling",
       });
     }
