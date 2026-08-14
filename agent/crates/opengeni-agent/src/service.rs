@@ -153,6 +153,42 @@ pub fn refresh_managed_service_definition() -> Result<bool, String> {
 
 #[cfg(target_os = "linux")]
 fn refresh_managed_systemd_definition() -> Result<bool, String> {
+    let Some((cgroup_path, cgroup_location)) = current_managed_systemd_cgroup()? else {
+        return Ok(false);
+    };
+    let Some((install_scope, unit_path)) = find_live_managed_systemd_scope(&binary_path()?)? else {
+        return Ok(false);
+    };
+    let spec = spec_for(install_scope)?;
+    let existing = std::fs::read_to_string(&unit_path)
+        .map_err(|error| format!("read {}: {error}", unit_path.display()))?;
+    match managed_systemd_definition(&existing, &spec) {
+        ManagedSystemdDefinition::Unowned => {
+            tracing::warn!(
+                path = %unit_path.display(),
+                "the active systemd unit is custom; leaving it untouched. Run `opengeni-agent service install --restart` to adopt the generated containment topology"
+            );
+            Ok(false)
+        }
+        ManagedSystemdDefinition::CurrentOwned => {
+            if cgroup_location == ManagedSystemdCgroup::Supervisor {
+                return Ok(false);
+            }
+            tracing::warn!(
+                path = %unit_path.display(),
+                cgroup = cgroup_path,
+                "the managed unit already requests the supervisor subgroup but systemd did not place this process there; continuing without operation-cgroup capability to avoid a restart loop"
+            );
+            Ok(false)
+        }
+        ManagedSystemdDefinition::LegacyOwned => {
+            migrate_legacy_systemd_unit(install_scope, &unit_path, &spec, &existing)
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn current_managed_systemd_cgroup() -> Result<Option<(String, ManagedSystemdCgroup)>, String> {
     let current_cgroup = std::fs::read_to_string("/proc/self/cgroup")
         .map_err(|error| format!("read /proc/self/cgroup: {error}"))?;
     let Some(path) = current_cgroup
@@ -160,14 +196,18 @@ fn refresh_managed_systemd_definition() -> Result<bool, String> {
         .find_map(|line| line.strip_prefix("0::"))
         .map(str::trim)
     else {
-        return Ok(false);
+        return Ok(None);
     };
     let Some(cgroup_location) = managed_systemd_cgroup(path) else {
-        return Ok(false);
+        return Ok(None);
     };
-    let in_manager_supervisor = cgroup_location == ManagedSystemdCgroup::Supervisor;
+    Ok(Some((path.to_string(), cgroup_location)))
+}
 
-    let binary = binary_path()?;
+#[cfg(target_os = "linux")]
+fn find_live_managed_systemd_scope(
+    binary: &Path,
+) -> Result<Option<(ServiceScope, PathBuf)>, String> {
     let current_pid = std::process::id();
     let mut matched = Vec::new();
     for install_scope in [ServiceScope::User, ServiceScope::System] {
@@ -210,87 +250,70 @@ fn refresh_managed_systemd_definition() -> Result<bool, String> {
             "--value",
         ]);
         let exec_start = capture_systemctl(&exec_args)?;
-        if !systemd_exec_start_matches(&exec_start, &binary) {
+        if !systemd_exec_start_matches(&exec_start, binary) {
             continue;
         }
         matched.push((install_scope, canonical_fragment));
     }
 
-    let [(install_scope, unit_path)] = matched.as_slice() else {
-        if !matched.is_empty() {
-            return Err("multiple canonical systemd scopes claim this runner MainPID".to_string());
-        }
-        return Ok(false);
-    };
-    let spec = spec_for(*install_scope)?;
-    let existing = std::fs::read_to_string(unit_path)
-        .map_err(|error| format!("read {}: {error}", unit_path.display()))?;
-    match managed_systemd_definition(&existing, &spec) {
-        ManagedSystemdDefinition::Unowned => {
-            tracing::warn!(
-                path = %unit_path.display(),
-                "the active systemd unit is custom; leaving it untouched. Run `opengeni-agent service install --restart` to adopt the generated containment topology"
-            );
-            Ok(false)
-        }
-        ManagedSystemdDefinition::CurrentOwned => {
-            if in_manager_supervisor {
-                return Ok(false);
-            }
-            tracing::warn!(
-                path = %unit_path.display(),
-                cgroup = path,
-                "the managed unit already requests the supervisor subgroup but systemd did not place this process there; continuing without operation-cgroup capability to avoid a restart loop"
-            );
-            Ok(false)
-        }
-        ManagedSystemdDefinition::LegacyOwned => {
-            let version = capture_systemctl(&["--version"])
-                .ok()
-                .and_then(|output| parse_systemd_version(&output));
-            if version.is_none_or(|version| version < SYSTEMD_DELEGATE_SUBGROUP_MIN_VERSION) {
-                tracing::warn!(
-                    ?version,
-                    required = SYSTEMD_DELEGATE_SUBGROUP_MIN_VERSION,
-                    "systemd is too old for DelegateSubgroup; keeping the proven legacy unit and continuing without operation-cgroup capability"
-                );
-                return Ok(false);
-            }
-
-            remove_legacy_opengeni_control_dropins(*install_scope, &home()?)?;
-            atomic_replace_managed_unit(unit_path, &service::render_systemd_unit(&spec))?;
-            let scope_prefix = match install_scope {
-                ServiceScope::User => Some("--user"),
-                ServiceScope::System => None,
-            };
-            let mut reload = Vec::new();
-            if let Some(prefix) = scope_prefix {
-                reload.push(prefix);
-            }
-            reload.push("daemon-reload");
-            if let Err(error) = systemctl(&reload) {
-                rollback_managed_unit(unit_path, &existing, &reload);
-                return Err(format!("reload the migrated systemd definition: {error}"));
-            }
-
-            let mut restart = Vec::new();
-            if let Some(prefix) = scope_prefix {
-                restart.push(prefix);
-            }
-            restart.extend(["restart", "--no-block", service::ids::SYSTEMD_UNIT]);
-            if let Err(error) = systemctl(&restart) {
-                rollback_managed_unit(unit_path, &existing, &reload);
-                return Err(format!(
-                    "queue the migrated systemd manager restart: {error}"
-                ));
-            }
-            info!(
-                path = %unit_path.display(),
-                "migrated the owned systemd unit; manager restart will enter the stable supervisor subgroup"
-            );
-            Ok(true)
-        }
+    match matched.as_slice() {
+        [] => Ok(None),
+        [(scope, path)] => Ok(Some((*scope, path.clone()))),
+        _ => Err("multiple canonical systemd scopes claim this runner MainPID".to_string()),
     }
+}
+
+#[cfg(target_os = "linux")]
+fn migrate_legacy_systemd_unit(
+    install_scope: ServiceScope,
+    unit_path: &Path,
+    spec: &ServiceSpec,
+    existing: &str,
+) -> Result<bool, String> {
+    let version = capture_systemctl(&["--version"])
+        .ok()
+        .and_then(|output| parse_systemd_version(&output));
+    if version.is_none_or(|version| version < SYSTEMD_DELEGATE_SUBGROUP_MIN_VERSION) {
+        tracing::warn!(
+            ?version,
+            required = SYSTEMD_DELEGATE_SUBGROUP_MIN_VERSION,
+            "systemd is too old for DelegateSubgroup; keeping the proven legacy unit and continuing without operation-cgroup capability"
+        );
+        return Ok(false);
+    }
+
+    remove_legacy_opengeni_control_dropins(install_scope, &home()?)?;
+    atomic_replace_managed_unit(unit_path, &service::render_systemd_unit(spec))?;
+    let scope_prefix = match install_scope {
+        ServiceScope::User => Some("--user"),
+        ServiceScope::System => None,
+    };
+    let mut reload = Vec::new();
+    if let Some(prefix) = scope_prefix {
+        reload.push(prefix);
+    }
+    reload.push("daemon-reload");
+    if let Err(error) = systemctl(&reload) {
+        rollback_managed_unit(unit_path, existing, &reload);
+        return Err(format!("reload the migrated systemd definition: {error}"));
+    }
+
+    let mut restart = Vec::new();
+    if let Some(prefix) = scope_prefix {
+        restart.push(prefix);
+    }
+    restart.extend(["restart", "--no-block", service::ids::SYSTEMD_UNIT]);
+    if let Err(error) = systemctl(&restart) {
+        rollback_managed_unit(unit_path, existing, &reload);
+        return Err(format!(
+            "queue the migrated systemd manager restart: {error}"
+        ));
+    }
+    info!(
+        path = %unit_path.display(),
+        "migrated the owned systemd unit; manager restart will enter the stable supervisor subgroup"
+    );
+    Ok(true)
 }
 
 #[cfg(target_os = "linux")]
