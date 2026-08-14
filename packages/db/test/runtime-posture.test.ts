@@ -99,6 +99,26 @@ function xaiAuthorityTables(): RuntimeTablePosture[] {
   }));
 }
 
+function googleDriveAccountAuthorityTables(): RuntimeTablePosture[] {
+  return ["managed_accounts", "workspaces"].map((name) => ({
+    name,
+    owner: "opengeni_migrator",
+    rlsEnabled: false,
+    rlsForced: false,
+    rlsActive: false,
+    policyCount: 0,
+    artifactOutboxDispatcherPolicy: false,
+    artifactMaterializerPolicy: false,
+    select: false,
+    insert: false,
+    update: false,
+    delete: false,
+    truncate: false,
+    references: false,
+    trigger: false,
+  }));
+}
+
 function safePosture(): RuntimeDatabasePosture {
   return {
     identity: {
@@ -154,6 +174,7 @@ function safePosture(): RuntimeDatabasePosture {
       ...knowledgeAuthorityTables(),
       ...canonicalHumanIdentityAuthorityTables(),
       ...xaiAuthorityTables(),
+      ...googleDriveAccountAuthorityTables(),
     ],
     targetRoutines: RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.map((name) => ({
       name,
@@ -384,6 +405,22 @@ describe("runtime database posture evaluator", () => {
     );
   });
 
+  test("fails closed on missing or split Google Drive account authority ownership", () => {
+    const missing = safePosture();
+    missing.tables = missing.tables.filter(
+      (table) => table.name !== "managed_accounts" && table.name !== "workspaces",
+    );
+    expect(evaluateRuntimeDatabasePosture(missing, options)).toContain(
+      "target-schema runtime capability google_drive_workspace_account_admin_authorized(uuid, uuid, text) authority tables are missing: managed_accounts, workspaces",
+    );
+
+    const split = safePosture();
+    split.tables.find((table) => table.name === "workspaces")!.owner = "another_owner";
+    expect(evaluateRuntimeDatabasePosture(split, options)).toContain(
+      "target-schema runtime capability google_drive_workspace_account_admin_authorized(uuid, uuid, text) authority table owners do not match: managed_accounts=opengeni_migrator, organization_memberships=opengeni_migrator, workspaces=another_owner",
+    );
+  });
+
   test("fails closed on missing or split canonical human identity authority", () => {
     const missing = safePosture();
     missing.tables = missing.tables.filter(
@@ -543,6 +580,7 @@ describe("runtime database posture evaluator", () => {
       },
       ...knowledgeAuthorityTables(),
       ...canonicalHumanIdentityAuthorityTables(),
+      ...googleDriveAccountAuthorityTables(),
     ];
     const inertOptions: RuntimeDatabasePostureOptions = {
       ...options,
@@ -692,6 +730,8 @@ describe("runtime database posture evaluator", () => {
       })),
       ...knowledgeAuthorityTables(),
       ...canonicalHumanIdentityAuthorityTables(),
+      ...xaiAuthorityTables(),
+      ...googleDriveAccountAuthorityTables(),
     ];
     for (const name of [
       "claim_editable_artifact_materializations(text, integer, integer, name)",

@@ -161,7 +161,20 @@ type TokenPlan = {
   refreshToken?: string;
 };
 
-function providerFixture() {
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
+}
+
+function providerFixture(
+  options: {
+    googleTokenGate?: Promise<void>;
+    googleTokenStarted?: () => void;
+  } = {},
+) {
   const googlePlans: TokenPlan[] = [];
   const microsoftPlans: TokenPlan[] = [];
   const tokenRequests: Array<{
@@ -180,6 +193,8 @@ function providerFixture() {
         body,
         authorization: new Headers(init?.headers).get("authorization"),
       });
+      options.googleTokenStarted?.();
+      await options.googleTokenGate;
       const plan = googlePlans.shift() ?? {
         scopes: [...GOOGLE_GMAIL_INTEGRATION_DEFINITION.authentication.scopes],
         refreshToken: "google-refresh-token",
@@ -380,6 +395,55 @@ describe("API Integration provider OAuth", () => {
       "connection_conflict",
     );
     expect(managedFixture.tokenRequests).toHaveLength(0);
+  }, 60_000);
+
+  test("atomically rejects workspace Google Drive persistence after account authority is revoked", async () => {
+    if (!available) return;
+    const managed = await freshManagedWorkspace();
+    const tokenGate = deferred();
+    const tokenStarted = deferred();
+    const fixture = providerFixture({
+      googleTokenGate: tokenGate.promise,
+      googleTokenStarted: tokenStarted.resolve,
+    });
+    fixture.googlePlans.push({
+      scopes: [...GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes],
+      refreshToken: "must-not-persist-after-revocation",
+    });
+    const started = await start(
+      fixture,
+      managed,
+      {
+        definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+        ownership: "workspace",
+      },
+      ["account:admin", "connections:read", "connections:write", "workspace:read"],
+    );
+    expect(started.response.status).toBe(200);
+
+    const pending = callback(fixture, new URL(started.authorizationUrl).searchParams.get("state")!);
+    await tokenStarted.promise;
+    await shared!.admin`
+      update organization_memberships
+      set status = 'suspended', authorization_revision = authorization_revision + 1,
+          updated_at = now()
+      where account_id = ${managed.accountId} and subject_id = ${managed.subjectId}
+    `;
+    tokenGate.resolve();
+
+    const rejected = await pending;
+    expect(new URL(rejected.headers.get("location")!).searchParams.get("reason")).toBe(
+      "connection_conflict",
+    );
+    expect(fixture.tokenRequests).toHaveLength(1);
+    const persisted = await shared!.admin<Array<{ id: string; credential_encrypted: string }>>`
+      select id, credential_encrypted
+      from connections
+      where workspace_id = ${managed.workspaceId}
+        and subject_id is null
+        and provider_domain = 'www.googleapis.com'
+    `;
+    expect(persisted).toEqual([]);
   }, 60_000);
 
   test("requires literal account admin to disconnect workspace Google Drive without changing personal disconnect", async () => {

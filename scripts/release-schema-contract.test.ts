@@ -170,7 +170,7 @@ describe("release schema contract", () => {
       if (migrations.has("0238_recover_unclaimed_session_turns.sql")) {
         if (migrations.has("0242_google_drive_account_admin_authority.sql")) {
           return includesActivation
-            ? "ebb2d69392737475386fcfc503e8f7c22d2790921524a44e0ca016a338c2a728"
+            ? "b5d39816a02b26fe22959a4f38a1493aa8a8a33df3107835a09f211cf81e5c7e"
             : "da3ec4154e52954b78e1712b75b9b58211a4731aa82fad9e6615afd3ea9f325f";
         }
         return includesActivation

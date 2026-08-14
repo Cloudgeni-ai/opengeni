@@ -25,6 +25,7 @@ BEGIN
     DECLARE
       account_source text;
       account_external_id text;
+      membership_id uuid;
       authorized boolean := false;
       previous_marker text := pg_catalog.current_setting(
         'opengeni.organization_tenancy_lifecycle', true
@@ -36,7 +37,8 @@ BEGIN
       INNER JOIN workspaces workspace
         ON workspace.account_id = account.id
       WHERE account.id = p_account_id
-        AND workspace.id = p_workspace_id;
+        AND workspace.id = p_workspace_id
+      FOR SHARE OF account, workspace;
 
       IF account_source IN ('opengeni:local', 'opengeni:configured') THEN
         RETURN true;
@@ -51,14 +53,16 @@ BEGIN
         'managed_human_provisioning',
         true
       );
-      SELECT EXISTS (
-        SELECT 1
-        FROM organization_memberships membership
-        WHERE membership.account_id = p_account_id
-          AND membership.subject_id = p_subject_id
-          AND membership.status = 'active'
-          AND membership.revoked_at IS NULL
-      ) INTO authorized;
+      SELECT membership.id
+      INTO membership_id
+      FROM organization_memberships membership
+      WHERE membership.account_id = p_account_id
+        AND membership.subject_id = p_subject_id
+        AND membership.status = 'active'
+        AND membership.revoked_at IS NULL
+      LIMIT 1
+      FOR SHARE OF membership;
+      authorized := membership_id IS NOT NULL;
       PERFORM pg_catalog.set_config(
         'opengeni.organization_tenancy_lifecycle',
         CASE WHEN previous_marker IS NULL THEN '' ELSE previous_marker END,

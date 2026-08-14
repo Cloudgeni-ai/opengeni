@@ -286,8 +286,6 @@ export async function completeApiIntegrationProviderOAuth(
     ) {
       throw new ProviderOAuthCallbackError("account_mismatch");
     }
-    await requireProviderOAuthGrant(deps, state);
-
     const existing = state.connectionId
       ? await getConnectionMetadata(deps.db, state.workspaceId, state.connectionId, state.subjectId)
       : null;
@@ -367,6 +365,14 @@ export async function completeApiIntegrationProviderOAuth(
       credentialRole: API_INTEGRATION_OAUTH_CREDENTIAL_ROLE,
       providerFamily: definition.provider.id,
       providerPrincipalId: identity.principalId,
+      ...(state.definitionId === "google-drive" && state.ownership === "workspace"
+        ? {
+            workspaceCredentialAuthority: {
+              kind: "google_drive_account_admin" as const,
+              subjectId: state.subjectId,
+            },
+          }
+        : {}),
       ...(state.connectionId
         ? {
             requestedConnectionId: state.connectionId,

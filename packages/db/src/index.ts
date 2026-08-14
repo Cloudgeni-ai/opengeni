@@ -3903,6 +3903,10 @@ export type PersistProviderOAuthConnectionInput = CreateConnectionInput & {
   credentialRole: string;
   providerFamily: string;
   providerPrincipalId: string;
+  workspaceCredentialAuthority?: {
+    kind: "google_drive_account_admin";
+    subjectId: string;
+  };
   requestedConnectionId?: string;
   requestedConnectionVersion?: number;
 };
@@ -7554,6 +7558,17 @@ export async function persistProviderOAuthConnection(
         await tx.execute(
           sql`select pg_advisory_xact_lock(hashtextextended(${`provider-oauth-connection:${input.workspaceId}:${ownerKey}:${input.providerDomain}:${input.providerFamily}:${input.providerPrincipalId}`}, 0))`,
         );
+        if (
+          input.workspaceCredentialAuthority?.kind === "google_drive_account_admin" &&
+          (input.subjectId !== null ||
+            !(await hasCurrentAccountAdminForWorkspaceCredential(tx, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              subjectId: input.workspaceCredentialAuthority.subjectId,
+            })))
+        ) {
+          return null;
+        }
         const exactOwner = connectionExactSubject(input.subjectId ?? null);
         const requested = input.requestedConnectionId
           ? (
