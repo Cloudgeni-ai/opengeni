@@ -201,11 +201,24 @@ describe("release schema contract", () => {
       sha256: "437bb07ffe12f9c714bd2a40d0ecd8ed9df1fd9003f4d057fe11101999841f40",
       deploymentMode: "rolling",
     });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0246_integration_personal_instance_authority.sql",
+      ),
+    ).toMatchObject({
+      sha256: "1717d5cdaa298501f20463eef43822a2b1421984f30cab7cb381c2773c505388",
+      deploymentMode: "rolling",
+    });
     const migrations = new Map(
       sourceContract.migrations.map((migration) => [migration.path, migration]),
     );
     const sessionVisibilityContractHash = (includesActivation: boolean): string | null => {
       if (!migrations.has("0236_session_visibility_slack_policy.sql")) return null;
+      if (migrations.has("0246_integration_personal_instance_authority.sql")) {
+        return includesActivation
+          ? "b70c095097581527ba8f694f17b1ef8b4607d57dd5535e1c57193fda28970b8f"
+          : "7a59d00e485087d34bde8473a94d49a895d51a049103244f6a320a750ad49f1b";
+      }
       if (
         migrations.has("0245_model_context_contribution_facts.sql") &&
         migrations.has("0244_slack_app_home_refresh_queue.sql")
@@ -545,10 +558,12 @@ describe("release schema contract", () => {
         (migrations.has("0241_enrollment_agent_runtime.sql") ? 1 : 0) +
         (migrations.has("0243_google_drive_object_acl_authority.sql") ? 1 : 0) +
         (migrations.has("0244_slack_app_home_refresh_queue.sql") ? 1 : 0) +
-        (migrations.has("0245_model_context_contribution_facts.sql") ? 1 : 0),
+        (migrations.has("0245_model_context_contribution_facts.sql") ? 1 : 0) +
+        (migrations.has("0246_integration_personal_instance_authority.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(sessionVisibilityContractHash(false) ?? currentMainContractHash);
     const latestCompatibleMigration = [
+      "0246_integration_personal_instance_authority.sql",
       "0245_model_context_contribution_facts.sql",
       "0244_slack_app_home_refresh_queue.sql",
       "0243_google_drive_object_acl_authority.sql",

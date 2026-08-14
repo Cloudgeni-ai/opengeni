@@ -184,6 +184,7 @@ export async function upsertIntegrationFacetBinding(
     await addIntegrationFacetBindingOwner(db, created.id, input);
     return { row: created, changed: true };
   }
+  await assertPersonalBindingConnectionRebindAuthority(db, existing, input);
   if (existing.bindingKey !== input.bindingKey) {
     throw new IntegrationFacetBindingOwnershipConflictError(
       "Integration runtime identity is already assigned to another instance",
@@ -242,6 +243,58 @@ export async function upsertIntegrationFacetBinding(
   }
   await addIntegrationFacetBindingOwner(db, row.id, input);
   return { row, changed };
+}
+
+async function assertPersonalBindingConnectionRebindAuthority(
+  db: Database,
+  existing: typeof schema.integrationFacetBindings.$inferSelect,
+  input: Pick<
+    UpsertIntegrationFacetBindingInput,
+    "accountId" | "workspaceId" | "connectionId" | "createdBySubjectId"
+  >,
+): Promise<void> {
+  const nextConnectionId = input.connectionId ?? null;
+  if (!existing.connectionId || existing.connectionId === nextConnectionId) return;
+  // Personal Connections are visible through the app role only to their exact
+  // subject, so a missing current row is an authority failure, not absence.
+  const [currentConnection] = await db
+    .select({ subjectId: schema.connections.subjectId })
+    .from(schema.connections)
+    .where(
+      and(
+        eq(schema.connections.id, existing.connectionId),
+        eq(schema.connections.accountId, input.accountId),
+        eq(schema.connections.workspaceId, input.workspaceId),
+      ),
+    )
+    .limit(1);
+  if (!currentConnection) {
+    throw new IntegrationFacetBindingOwnershipConflictError(
+      "Personal Integration instance belongs to another subject and cannot be changed in place",
+    );
+  }
+  if (!currentConnection.subjectId) return;
+  if (currentConnection.subjectId !== input.createdBySubjectId || nextConnectionId === null) {
+    throw new IntegrationFacetBindingOwnershipConflictError(
+      "Personal Integration instance belongs to another subject and cannot be changed in place",
+    );
+  }
+  const [nextConnection] = await db
+    .select({ subjectId: schema.connections.subjectId })
+    .from(schema.connections)
+    .where(
+      and(
+        eq(schema.connections.id, nextConnectionId),
+        eq(schema.connections.accountId, input.accountId),
+        eq(schema.connections.workspaceId, input.workspaceId),
+      ),
+    )
+    .limit(1);
+  if (!nextConnection || nextConnection.subjectId !== currentConnection.subjectId) {
+    throw new IntegrationFacetBindingOwnershipConflictError(
+      "Personal Integration instance Connection ownership cannot be changed",
+    );
+  }
 }
 
 export async function listIntegrationFacetBindingOwners(

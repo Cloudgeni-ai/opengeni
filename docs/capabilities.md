@@ -197,8 +197,11 @@ instance has a stable `instanceKey`, human-editable display name, collision-free
 runtime MCP id, exact Connection/configuration, optimistic version, and owner
 ledger. This supports two Gmail accounts, two Linear workspaces, or several
 resource-scoped configurations without copying the schema or overwriting a
-sibling. Reconnect and uninstall operate on the exact instance; the underlying
-Connection and shared definition survive unless separately removed.
+sibling. A personal instance's Connection may be rebound only by its exact
+subject, and the replacement Connection must retain that same subject; workspace
+administration alone never transfers it. Reconnect and uninstall operate on the
+exact instance; the underlying Connection and shared definition survive unless
+separately removed.
 
 Provider adapters may also publish immutable generic facet definitions for
 Knowledge Sources, Inbound Triggers, Delivery Destinations, and Identity Links.
