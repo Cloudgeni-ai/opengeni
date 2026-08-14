@@ -331,6 +331,9 @@ export async function completeApiIntegrationProviderOAuth(
       throw new ProviderOAuthCallbackError("account_mismatch");
     }
     let refreshToken = token.refreshToken;
+    if (!refreshToken && state.googleDriveScopeNarrowing === true) {
+      throw new ProviderOAuthCallbackError("refresh_token_missing");
+    }
     if (!refreshToken && existing) {
       const previous = await loadConnectionCredentialForBroker(deps.db, deps.settings, {
         workspaceId: state.workspaceId,

@@ -15,10 +15,12 @@ import {
   signDelegatedAccessToken,
   type Permission,
 } from "@opengeni/contracts";
+import { requireEnvironmentEncryption } from "@opengeni/core";
 import {
   bootstrapWorkspace,
   createDb,
   deleteWorkspace,
+  encryptEnvironmentValue,
   ensureManagedAccessForUserWithOrganizationMemberships,
   listConnectionsMetadata,
   loadConnectionCredentialForBroker,
@@ -148,6 +150,12 @@ async function seedLegacyGoogleDriveConnection(
   workspace: Awaited<ReturnType<typeof freshWorkspace>>,
   ownership: "personal" | "workspace",
 ) {
+  const legacyScopes = [
+    ...GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes.filter(
+      (scope) => scope !== "https://www.googleapis.com/auth/drive.readonly",
+    ),
+    LEGACY_GOOGLE_DRIVE_SCOPE,
+  ];
   const connection = await persistProviderOAuthConnection(client.db, {
     accountId: workspace.accountId,
     workspaceId: workspace.workspaceId,
@@ -156,13 +164,20 @@ async function seedLegacyGoogleDriveConnection(
     providerDomain: "www.googleapis.com",
     kind: "oauth2",
     status: "active",
-    credentialEncrypted: `legacy-google-drive-${ownership}-${crypto.randomUUID()}`,
-    grantedScopes: [
-      ...GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes.filter(
-        (scope) => scope !== "https://www.googleapis.com/auth/drive.readonly",
-      ),
-      LEGACY_GOOGLE_DRIVE_SCOPE,
-    ],
+    credentialEncrypted: encryptEnvironmentValue(
+      requireEnvironmentEncryption(settings),
+      JSON.stringify({
+        access_token: `legacy-google-drive-access-${ownership}`,
+        refresh_token: `legacy-google-drive-refresh-${ownership}`,
+        token_type: "Bearer",
+        scope: legacyScopes.join(" "),
+        token_endpoint: GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.tokenUrl,
+        client_id: GOOGLE_CLIENT_ID,
+        client_secret: GOOGLE_CLIENT_SECRET,
+        token_endpoint_auth_method: "client_secret_post",
+      }),
+    ),
+    grantedScopes: legacyScopes,
     metadata: {
       credentialRole: API_INTEGRATION_OAUTH_CREDENTIAL_ROLE,
       providerFamily: "google",
@@ -1010,6 +1025,105 @@ describe("API Integration provider OAuth", () => {
       expect(unchanged.version).toBe(legacy.version);
       expect(unchanged.grantedScopes).toContain(LEGACY_GOOGLE_DRIVE_SCOPE);
     }
+  }, 60_000);
+
+  test("does not relabel a legacy full-Drive refresh token when narrowed consent omits a replacement", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const legacy = await seedLegacyGoogleDriveConnection(workspace, "personal");
+    const credentialLookup = {
+      workspaceId: workspace.workspaceId,
+      connectionId: legacy.id,
+      providerDomain: "www.googleapis.com",
+      kind: "oauth2" as const,
+      subjectId: workspace.subjectId,
+      allowSubjectOwned: true,
+    };
+    const before = await loadConnectionCredentialForBroker(client.db, settings, credentialLookup);
+    expect(before?.credential.refresh_token).toBe("legacy-google-drive-refresh-personal");
+    expect(String(before?.credential.scope).split(" ")).toContain(LEGACY_GOOGLE_DRIVE_SCOPE);
+
+    const fixture = providerFixture();
+    fixture.googlePlans.push({
+      scopes: [...GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes],
+    });
+    const started = await start(fixture, workspace, {
+      definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+      connectionId: legacy.id,
+      ownership: "personal",
+    });
+    expect(started.response.status).toBe(200);
+    const rejected = await callback(
+      fixture,
+      new URL(started.authorizationUrl).searchParams.get("state")!,
+    );
+    expect(new URL(rejected.headers.get("location")!).searchParams.get("reason")).toBe(
+      "refresh_token_missing",
+    );
+
+    const unchanged = (
+      await listConnectionsMetadata(client.db, workspace.workspaceId, workspace.subjectId)
+    ).find((connection) => connection.id === legacy.id)!;
+    expect(unchanged.version).toBe(legacy.version);
+    expect(unchanged.grantedScopes).toEqual(legacy.grantedScopes);
+    const after = await loadConnectionCredentialForBroker(client.db, settings, credentialLookup);
+    expect(after?.credential).toEqual(before?.credential);
+  }, 60_000);
+
+  test("preserves the refresh token when an already-narrow Drive reconnect omits it", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const fixture = providerFixture();
+    fixture.googlePlans.push({
+      scopes: [...GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes],
+      refreshToken: "reviewed-drive-refresh-token",
+    });
+    const firstStart = await start(fixture, workspace, {
+      definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+      ownership: "personal",
+    });
+    const firstCallback = await callback(
+      fixture,
+      new URL(firstStart.authorizationUrl).searchParams.get("state")!,
+    );
+    expect(
+      new URL(firstCallback.headers.get("location")!).searchParams.get("integration_oauth"),
+    ).toBe("success");
+    const firstConnection = (
+      await listConnectionsMetadata(client.db, workspace.workspaceId, workspace.subjectId)
+    )[0]!;
+
+    fixture.googlePlans.push({
+      scopes: [...GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes],
+    });
+    const reconnect = await start(fixture, workspace, {
+      definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+      connectionId: firstConnection.id,
+      ownership: "personal",
+    });
+    const reconnectCallback = await callback(
+      fixture,
+      new URL(reconnect.authorizationUrl).searchParams.get("state")!,
+    );
+    expect(
+      new URL(reconnectCallback.headers.get("location")!).searchParams.get("integration_oauth"),
+    ).toBe("success");
+    const reconnected = (
+      await listConnectionsMetadata(client.db, workspace.workspaceId, workspace.subjectId)
+    )[0]!;
+    expect(reconnected.version).toBe(firstConnection.version + 1);
+    expect(reconnected.grantedScopes).toEqual(
+      GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes,
+    );
+    const credential = await loadConnectionCredentialForBroker(client.db, settings, {
+      workspaceId: workspace.workspaceId,
+      connectionId: reconnected.id,
+      providerDomain: "www.googleapis.com",
+      kind: "oauth2",
+      subjectId: workspace.subjectId,
+      allowSubjectOwned: true,
+    });
+    expect(credential?.credential.refresh_token).toBe("reviewed-drive-refresh-token");
   }, 60_000);
 
   test("connects a Google definition with signed PKCE state and no callback perimeter credential", async () => {
