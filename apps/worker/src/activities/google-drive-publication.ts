@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { AttemptToolApprovalRequiredError, type AttemptToolDefinition } from "@opengeni/codemode";
+import type { McpPersonalConnectionDelegation } from "@opengeni/contracts";
 import {
   GOOGLE_DRIVE_FILE_SCOPE,
   GOOGLE_DRIVE_FULL_SCOPE,
@@ -19,7 +20,7 @@ import {
   beginConnectorActionExecution,
   completeConnectorActionExecution,
   getConnectionMetadata,
-  listConnectionsMetadata,
+  getWorkspaceGrant,
   prepareConnectorActionApproval,
   requireFile,
   type ConnectorActionAttemptIdentity,
@@ -28,6 +29,10 @@ import {
   type ResolveConnectionCredentialInput,
   type ResolveConnectionCredentialResult,
 } from "@opengeni/db";
+import {
+  readAuthorizedEditableArtifactMaterialization,
+  type PersistedEditableArtifactMaterializationJob,
+} from "@opengeni/db/editable-artifact-durable-export";
 import { readResponseJsonBounded, undiciFetch, type FetchLike } from "@opengeni/network";
 import type { ObjectStorage } from "@opengeni/storage";
 
@@ -36,18 +41,20 @@ const DRIVE_UPLOAD_API = "https://www.googleapis.com/upload/drive/v3";
 const DRIVE_FOLDER_MIME = "application/vnd.google-apps.folder";
 const RESPONSE_MAX_BYTES = 256 * 1024;
 const REQUEST_TIMEOUT_MS = 30_000;
+const FIRST_PARTY_MCP_SUBJECT_ID = "worker:first-party-mcp";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 
 export type GoogleDrivePublicationTarget = Readonly<{
+  ownerSubjectId: string;
   connectionId: string;
-  connectionVersion: number;
   destination: GoogleDriveOutputDestination;
   credentialScope: typeof GOOGLE_DRIVE_FILE_SCOPE | typeof GOOGLE_DRIVE_FULL_SCOPE;
 }>;
 
 export type GoogleDrivePublicationPorts = {
   getConnection: typeof getConnectionMetadata;
-  listConnections: typeof listConnectionsMetadata;
+  getMembership: typeof getWorkspaceGrant;
+  readMaterialization: typeof readAuthorizedEditableArtifactMaterialization;
   requireFile: typeof requireFile;
   prepare: typeof prepareConnectorActionApproval;
   begin: typeof beginConnectorActionExecution;
@@ -57,7 +64,8 @@ export type GoogleDrivePublicationPorts = {
 
 const defaultPorts: GoogleDrivePublicationPorts = {
   getConnection: getConnectionMetadata,
-  listConnections: listConnectionsMetadata,
+  getMembership: getWorkspaceGrant,
+  readMaterialization: readAuthorizedEditableArtifactMaterialization,
   requireFile,
   prepare: prepareConnectorActionApproval,
   begin: beginConnectorActionExecution,
@@ -68,39 +76,52 @@ const defaultPorts: GoogleDrivePublicationPorts = {
 export async function resolveGoogleDrivePublicationTarget(
   db: Database,
   workspaceId: string,
-  subjectId: string,
-  ports: Pick<GoogleDrivePublicationPorts, "listConnections"> = defaultPorts,
+  delegations: readonly McpPersonalConnectionDelegation[],
+  ports: Pick<GoogleDrivePublicationPorts, "getConnection" | "getMembership"> = defaultPorts,
 ): Promise<GoogleDrivePublicationTarget | null> {
-  const connections = await ports.listConnections(db, workspaceId, subjectId);
-  for (const connection of connections) {
-    if (
-      connection.subjectId !== subjectId ||
-      connection.providerDomain !== GOOGLE_DRIVE_PROVIDER_DOMAIN ||
-      connection.kind !== "oauth2" ||
-      connection.status !== "active" ||
-      !googleDriveScopesAllowCapability(connection.grantedScopes, "publish_file")
-    ) {
-      continue;
-    }
-    const metadata = GoogleDriveConnectionMetadata.safeParse(connection.metadata);
-    if (
-      !metadata.success ||
-      !metadata.data.outputDestination ||
-      metadata.data.lifecycle?.state === "paused" ||
-      (metadata.data.lifecycle && metadata.data.lifecycle.state !== "active")
-    ) {
-      continue;
-    }
-    return Object.freeze({
-      connectionId: connection.id,
-      connectionVersion: connection.version,
-      destination: metadata.data.outputDestination,
-      credentialScope: connection.grantedScopes.includes(GOOGLE_DRIVE_FILE_SCOPE)
-        ? GOOGLE_DRIVE_FILE_SCOPE
-        : GOOGLE_DRIVE_FULL_SCOPE,
-    });
+  const frozen = delegations.filter(
+    (delegation) =>
+      delegation.serverId === GOOGLE_DRIVE_PUBLICATION_SERVER_ID &&
+      delegation.providerDomain.toLowerCase() === GOOGLE_DRIVE_PROVIDER_DOMAIN &&
+      delegation.kind === "oauth2",
+  );
+  if (frozen.length !== 1) return null;
+  const delegation = frozen[0]!;
+  if (!(await ports.getMembership(db, delegation.ownerSubjectId, workspaceId))) return null;
+  const connection = await ports.getConnection(
+    db,
+    workspaceId,
+    delegation.connectionId,
+    delegation.ownerSubjectId,
+  );
+  if (
+    !connection ||
+    connection.id !== delegation.connectionId ||
+    connection.subjectId !== delegation.ownerSubjectId ||
+    connection.providerDomain.toLowerCase() !== GOOGLE_DRIVE_PROVIDER_DOMAIN ||
+    connection.kind !== "oauth2" ||
+    connection.status !== "active" ||
+    !googleDriveScopesAllowCapability(connection.grantedScopes, "publish_file")
+  ) {
+    return null;
   }
-  return null;
+  const metadata = GoogleDriveConnectionMetadata.safeParse(connection.metadata);
+  if (
+    !metadata.success ||
+    !metadata.data.outputDestination ||
+    metadata.data.lifecycle?.state === "paused" ||
+    (metadata.data.lifecycle && metadata.data.lifecycle.state !== "active")
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    ownerSubjectId: delegation.ownerSubjectId,
+    connectionId: connection.id,
+    destination: metadata.data.outputDestination,
+    credentialScope: connection.grantedScopes.includes(GOOGLE_DRIVE_FILE_SCOPE)
+      ? GOOGLE_DRIVE_FILE_SCOPE
+      : GOOGLE_DRIVE_FULL_SCOPE,
+  });
 }
 
 export function googleDrivePublicationConnectorCall(
@@ -124,6 +145,7 @@ export function googleDrivePublicationConnectorCall(
         modality: request.modality,
         sourceSha256: request.file.sha256,
       },
+      canonicalReceipt: { ...request.file },
       idempotencyKeyDigest: createHash("sha256")
         .update(request.idempotencyKey, "utf8")
         .digest("hex"),
@@ -268,7 +290,7 @@ export function createGoogleDrivePublicationAttemptTool(input: {
           {
             db: input.db,
             objectStorage: input.objectStorage,
-            workspaceId: input.identity.workspaceId,
+            identity: input.identity,
             subjectId: input.subjectId,
             target: input.target,
             request,
@@ -333,7 +355,7 @@ export async function executeGoogleDrivePublication(
   input: {
     db: Database;
     objectStorage: ObjectStorage;
-    workspaceId: string;
+    identity: ConnectorActionAttemptIdentity;
     subjectId: string;
     target: GoogleDrivePublicationTarget;
     request: GoogleDrivePublicationToolInputValue;
@@ -344,38 +366,47 @@ export async function executeGoogleDrivePublication(
   },
   ports: Pick<
     GoogleDrivePublicationPorts,
-    "getConnection" | "requireFile" | "fetch"
+    "getConnection" | "readMaterialization" | "requireFile" | "fetch"
   > = defaultPorts,
 ): Promise<GoogleDrivePublicationReceiptValue> {
   const request = GoogleDrivePublicationToolInput.parse(input.request);
   const connection = await ports.getConnection(
     input.db,
-    input.workspaceId,
+    input.identity.workspaceId,
     input.target.connectionId,
     input.subjectId,
   );
   if (!connection || connection.subjectId !== input.subjectId) {
     throw new Error("Google Drive publication connection is unavailable");
   }
-  const metadata = GoogleDriveConnectionMetadata.parse(connection.metadata);
-  if (
-    connection.version !== input.target.connectionVersion ||
-    connection.providerDomain !== GOOGLE_DRIVE_PROVIDER_DOMAIN ||
-    connection.kind !== "oauth2" ||
-    connection.status !== "active" ||
-    metadata.lifecycle?.state === "paused" ||
-    (metadata.lifecycle && metadata.lifecycle.state !== "active") ||
-    !googleDriveScopesAllowCapability(connection.grantedScopes, "publish_file") ||
-    !metadata.outputDestination ||
-    !sameDestination(metadata.outputDestination, input.target.destination)
-  ) {
-    throw new Error("Google Drive publication authority changed; retry on a new turn");
-  }
-  const expected = expectedExportWorkspaceFile(input.workspaceId, request);
+  assertPublicationConnection(input, connection);
+  const materialization = await ports.readMaterialization(input.db, {
+    scope: {
+      accountId: input.identity.accountId,
+      workspaceId: input.identity.workspaceId,
+    },
+    artifactId: request.file.artifactId,
+    jobId: request.file.materializationJobId,
+    actor: {
+      kind: "agent",
+      subjectId: FIRST_PARTY_MCP_SUBJECT_ID,
+      replicaId: publicationActorReplicaId(input.identity),
+      sessionId: input.identity.sessionId,
+      turnId: input.identity.turnId,
+      attemptId: input.identity.attemptId,
+      generation: input.identity.executionGeneration,
+    },
+  });
+  assertCanonicalMaterialization(input.identity, request, materialization);
+  const expected = expectedExportWorkspaceFile(input.identity.workspaceId, request);
   if (request.file.fileId !== expected.fileId) {
     throw new Error("Google Drive publication requires a canonical editable-artifact export file");
   }
-  const sourceFile = await ports.requireFile(input.db, input.workspaceId, request.file.fileId);
+  const sourceFile = await ports.requireFile(
+    input.db,
+    input.identity.workspaceId,
+    request.file.fileId,
+  );
   if (
     sourceFile.status !== "ready" ||
     sourceFile.id !== expected.fileId ||
@@ -396,7 +427,7 @@ export async function executeGoogleDrivePublication(
     throw new Error("Editable artifact export bytes failed verification");
   }
   const credential = await input.resolveCredential({
-    workspaceId: input.workspaceId,
+    workspaceId: input.identity.workspaceId,
     subjectId: input.subjectId,
     serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
     toolName: GOOGLE_DRIVE_PUBLICATION_TOOL_NAME,
@@ -410,14 +441,21 @@ export async function executeGoogleDrivePublication(
     destinationUrl: `${DRIVE_UPLOAD_API}/files`,
     forceRefresh: false,
   });
-  if (
-    credential.status !== "ok" ||
-    credential.connectionVersion !== input.target.connectionVersion
-  ) {
+  if (credential.status !== "ok" || credential.connectionId !== input.target.connectionId) {
     throw new Error("Google Drive publication credential is unavailable");
   }
+  const resolvedConnection = await ports.getConnection(
+    input.db,
+    input.identity.workspaceId,
+    input.target.connectionId,
+    input.subjectId,
+  );
+  if (!resolvedConnection) {
+    throw new Error("Google Drive publication authority changed; retry on a new turn");
+  }
+  assertPublicationConnection(input, resolvedConnection);
   return await publishToGoogleDrive({
-    workspaceId: input.workspaceId,
+    workspaceId: input.identity.workspaceId,
     connectionId: input.target.connectionId,
     destination: input.target.destination,
     request,
@@ -426,6 +464,69 @@ export async function executeGoogleDrivePublication(
     fetchImpl: ports.fetch,
     ...(input.signal ? { signal: input.signal } : {}),
   });
+}
+
+function assertPublicationConnection(
+  input: { subjectId: string; target: GoogleDrivePublicationTarget },
+  connection: NonNullable<Awaited<ReturnType<typeof getConnectionMetadata>>>,
+): void {
+  const metadata = GoogleDriveConnectionMetadata.parse(connection.metadata);
+  const credentialScope = connection.grantedScopes.includes(GOOGLE_DRIVE_FILE_SCOPE)
+    ? GOOGLE_DRIVE_FILE_SCOPE
+    : GOOGLE_DRIVE_FULL_SCOPE;
+  if (
+    input.subjectId !== input.target.ownerSubjectId ||
+    connection.id !== input.target.connectionId ||
+    connection.subjectId !== input.target.ownerSubjectId ||
+    connection.providerDomain.toLowerCase() !== GOOGLE_DRIVE_PROVIDER_DOMAIN ||
+    connection.kind !== "oauth2" ||
+    connection.status !== "active" ||
+    metadata.lifecycle?.state === "paused" ||
+    (metadata.lifecycle && metadata.lifecycle.state !== "active") ||
+    !googleDriveScopesAllowCapability(connection.grantedScopes, "publish_file") ||
+    credentialScope !== input.target.credentialScope ||
+    !metadata.outputDestination ||
+    !sameDestination(metadata.outputDestination, input.target.destination)
+  ) {
+    throw new Error("Google Drive publication authority changed; retry on a new turn");
+  }
+}
+
+function publicationActorReplicaId(identity: ConnectorActionAttemptIdentity): string {
+  const value = createHash("sha256")
+    .update(
+      `google-drive-publication:${identity.sessionId}:${identity.turnId}:${identity.attemptId}:${identity.executionGeneration}`,
+      "utf8",
+    )
+    .digest("hex")
+    .slice(0, 16);
+  return /^0+$/u.test(value) ? `1${value.slice(1)}` : value;
+}
+
+function assertCanonicalMaterialization(
+  identity: ConnectorActionAttemptIdentity,
+  request: GoogleDrivePublicationToolInputValue,
+  job: PersistedEditableArtifactMaterializationJob | null,
+): void {
+  const format = officeFormat(request.modality, request.file.contentType);
+  if (
+    !job ||
+    job.scope.accountId !== identity.accountId ||
+    job.scope.workspaceId !== identity.workspaceId ||
+    job.artifactId !== request.file.artifactId ||
+    job.id !== request.file.materializationJobId ||
+    job.versionId !== request.file.versionId ||
+    job.targetHeadSequence !== request.file.sourceHeadSequence ||
+    job.stateHash !== request.file.sourceStateHash ||
+    job.format !== format ||
+    job.state !== "succeeded" ||
+    !job.result ||
+    job.result.byteSize !== request.file.sizeBytes ||
+    job.result.mimeType !== request.file.contentType ||
+    job.result.contentHash !== `sha256:${request.file.sha256}`
+  ) {
+    throw new Error("Google Drive publication receipt differs from its canonical materialization");
+  }
 }
 
 function expectedExportWorkspaceFile(

@@ -53,8 +53,8 @@ const destination = {
   selectedAt: "2026-08-10T00:00:00.000Z",
 };
 const target: GoogleDrivePublicationTarget = {
+  ownerSubjectId: "subject-a",
   connectionId,
-  connectionVersion: 3,
   destination,
   credentialScope: GOOGLE_DRIVE_FILE_SCOPE,
 };
@@ -98,9 +98,48 @@ const identity = {
   executionGeneration: 1,
   initiator: { kind: "human" as const, subjectId: "subject-a" },
 };
+const publicationDelegation = {
+  serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
+  connectionId,
+  ownerSubjectId: "subject-a",
+  providerDomain: "googleapis.com",
+  kind: "oauth2" as const,
+};
+
+function materialization(overrides: Record<string, unknown> = {}) {
+  return {
+    scope: { accountId, workspaceId },
+    artifactId,
+    id: jobId,
+    versionId,
+    inputSnapshotId: "e".repeat(32),
+    targetHeadSequence: request.file.sourceHeadSequence,
+    stateHash: request.file.sourceStateHash,
+    format: "docx",
+    state: "succeeded",
+    attemptCount: 1,
+    errorCode: null,
+    createdAt: "2026-08-10T00:00:00.000Z",
+    startedAt: "2026-08-10T00:00:01.000Z",
+    completedAt: "2026-08-10T00:00:02.000Z",
+    result: {
+      id: "f".repeat(32),
+      byteSize: sourceBytes.byteLength,
+      contentHash: `sha256:${sourceSha256}`,
+      mimeType: request.file.contentType,
+      verifiedAt: "2026-08-10T00:00:02.000Z",
+      createdAt: "2026-08-10T00:00:02.000Z",
+    },
+    ...overrides,
+  };
+}
 
 function connection(
-  overrides: { grantedScopes?: string[]; accessMode?: "file_only" | "readonly" } = {},
+  overrides: {
+    grantedScopes?: string[];
+    accessMode?: "file_only" | "readonly";
+    version?: number;
+  } = {},
 ) {
   return {
     id: connectionId,
@@ -111,7 +150,7 @@ function connection(
     kind: "oauth2",
     status: "active",
     grantedScopes: overrides.grantedScopes ?? [GOOGLE_DRIVE_FILE_SCOPE],
-    version: 3,
+    version: overrides.version ?? 3,
     metadata: {
       credentialRole: "google_drive_metadata",
       credentialLabel: "Google Drive read-only source sync",
@@ -132,9 +171,28 @@ function connection(
 
 function executionPorts(
   fetch: GoogleDrivePublicationPorts["fetch"],
-): Pick<GoogleDrivePublicationPorts, "getConnection" | "requireFile" | "fetch"> {
+): Pick<
+  GoogleDrivePublicationPorts,
+  "getConnection" | "readMaterialization" | "requireFile" | "fetch"
+> {
   return {
     getConnection: async () => connection() as never,
+    readMaterialization: async (_db, input) => {
+      expect(input).toMatchObject({
+        scope: { accountId, workspaceId },
+        artifactId,
+        jobId,
+        actor: {
+          kind: "agent",
+          subjectId: "worker:first-party-mcp",
+          sessionId,
+          turnId,
+          attemptId,
+          generation: 1,
+        },
+      });
+      return materialization() as never;
+    },
     requireFile: async () => sourceFile,
     fetch,
   };
@@ -153,18 +211,50 @@ describe("Google Drive editable artifact publication", () => {
     const resolved = await resolveGoogleDrivePublicationTarget(
       {} as Database,
       workspaceId,
-      "subject-a",
-      { listConnections: async () => [connection() as never] },
+      [publicationDelegation],
+      {
+        getMembership: async () => ({}) as never,
+        getConnection: async () => connection() as never,
+      },
     );
     expect(resolved).toEqual(target);
     expect(
-      await resolveGoogleDrivePublicationTarget({} as Database, workspaceId, "subject-a", {
-        listConnections: async () => [
-          connection({
-            grantedScopes: ["https://www.googleapis.com/auth/drive.readonly"],
-          }) as never,
-        ],
-      }),
+      await resolveGoogleDrivePublicationTarget(
+        {} as Database,
+        workspaceId,
+        [publicationDelegation],
+        {
+          getMembership: async () => ({}) as never,
+          getConnection: async () =>
+            connection({
+              grantedScopes: ["https://www.googleapis.com/auth/drive.readonly"],
+            }) as never,
+        },
+      ),
+    ).toBeNull();
+    expect(
+      await resolveGoogleDrivePublicationTarget(
+        {} as Database,
+        workspaceId,
+        [publicationDelegation],
+        {
+          getMembership: async () => null,
+          getConnection: async () => {
+            throw new Error("must not read a connection after membership revocation");
+          },
+        },
+      ),
+    ).toBeNull();
+    expect(
+      await resolveGoogleDrivePublicationTarget(
+        {} as Database,
+        workspaceId,
+        [publicationDelegation, publicationDelegation],
+        {
+          getMembership: async () => ({}) as never,
+          getConnection: async () => connection() as never,
+        },
+      ),
     ).toBeNull();
   });
 
@@ -179,6 +269,7 @@ describe("Google Drive editable artifact publication", () => {
         action: "create",
         destination,
         artifact: { id: artifactId, versionId, title: "Final report", modality: "document" },
+        canonicalReceipt: request.file,
       },
     });
     expect(JSON.stringify(call.arguments)).not.toContain(request.idempotencyKey);
@@ -215,7 +306,7 @@ describe("Google Drive editable artifact publication", () => {
         {
           db: {} as Database,
           objectStorage: objectStorage(),
-          workspaceId,
+          identity,
           subjectId: "subject-a",
           target,
           request: { ...request, file: { ...request.file, fileId: crypto.randomUUID() } },
@@ -230,6 +321,39 @@ describe("Google Drive editable artifact publication", () => {
         }),
       ),
     ).rejects.toThrow("canonical editable-artifact export file");
+    expect(credentialCalls).toBe(0);
+    expect(providerCalls).toBe(0);
+  });
+
+  test("rejects altered materialization provenance before credential or provider access", async () => {
+    let credentialCalls = 0;
+    let providerCalls = 0;
+    await expect(
+      executeGoogleDrivePublication(
+        {
+          db: {} as Database,
+          objectStorage: objectStorage(),
+          identity,
+          subjectId: "subject-a",
+          target,
+          request: {
+            ...request,
+            file: { ...request.file, sourceHeadSequence: request.file.sourceHeadSequence + 1 },
+          },
+          resolveCredential: async () => {
+            credentialCalls += 1;
+            return {} as never;
+          },
+        },
+        {
+          ...executionPorts(async () => {
+            providerCalls += 1;
+            return new Response();
+          }),
+          readMaterialization: async () => materialization() as never,
+        },
+      ),
+    ).rejects.toThrow("canonical materialization");
     expect(credentialCalls).toBe(0);
     expect(providerCalls).toBe(0);
   });
@@ -282,7 +406,7 @@ describe("Google Drive editable artifact publication", () => {
         {
           db: {} as Database,
           objectStorage: objectStorage(),
-          workspaceId,
+          identity,
           subjectId: "subject-a",
           target: publicationTarget,
           request,
@@ -297,7 +421,16 @@ describe("Google Drive editable artifact publication", () => {
             } as never;
           },
         },
-        executionPorts(fetch),
+        {
+          ...executionPorts(fetch),
+          getConnection: async () =>
+            connection({
+              grantedScopes:
+                publicationTarget.credentialScope === GOOGLE_DRIVE_FULL_SCOPE
+                  ? [GOOGLE_DRIVE_FULL_SCOPE]
+                  : [GOOGLE_DRIVE_FILE_SCOPE],
+            }) as never,
+        },
       );
     const created = await execute();
     const replayed = await execute();
@@ -311,6 +444,109 @@ describe("Google Drive editable artifact publication", () => {
       [GOOGLE_DRIVE_FILE_SCOPE],
       [GOOGLE_DRIVE_FULL_SCOPE],
     ]);
+  });
+
+  test("accepts host-brokered credentials without a version across a token refresh", async () => {
+    let connectionReads = 0;
+    let providerFile: Record<string, unknown> | null = null;
+    const fetch = async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      if (url.pathname === "/drive/v3/files/folder-1") {
+        return Response.json({
+          id: destination.folderId,
+          name: destination.folderName,
+          mimeType: "application/vnd.google-apps.folder",
+          driveId: null,
+          trashed: false,
+          capabilities: { canAddChildren: true },
+        });
+      }
+      if (url.pathname === "/drive/v3/files") {
+        return Response.json({ files: providerFile ? [providerFile] : [] });
+      }
+      if (url.pathname === "/upload/drive/v3/files" && init?.method === "POST") {
+        const body = new TextDecoder().decode(init.body as Uint8Array);
+        const operationKey = body.match(/"opengeniPublicationKey":"([0-9a-f]{64})"/u)?.[1];
+        providerFile = {
+          id: "drive-file-refreshed",
+          name: request.title,
+          mimeType: "application/vnd.google-apps.document",
+          parents: [destination.folderId],
+          driveId: null,
+          webViewLink: "https://docs.google.com/document/d/drive-file-refreshed/edit",
+          appProperties: {
+            opengeniPublicationKey: operationKey,
+            opengeniArtifactId: artifactId,
+            opengeniArtifactVersionId: versionId,
+            opengeniSourceSha256: sourceSha256,
+          },
+          trashed: false,
+        };
+        return Response.json(providerFile);
+      }
+      return new Response("not found", { status: 404 });
+    };
+    const receipt = await executeGoogleDrivePublication(
+      {
+        db: {} as Database,
+        objectStorage: objectStorage(),
+        identity,
+        subjectId: "subject-a",
+        target,
+        request,
+        resolveCredential: async () => ({
+          status: "ok",
+          headers: { authorization: "Bearer host-owned" },
+          connectionId,
+        }),
+      },
+      {
+        ...executionPorts(fetch),
+        getConnection: async () => {
+          connectionReads += 1;
+          return connection({ version: connectionReads === 1 ? 3 : 4 }) as never;
+        },
+      },
+    );
+    expect(receipt).toMatchObject({ providerFileId: "drive-file-refreshed", replayed: false });
+    expect(connectionReads).toBe(2);
+  });
+
+  test("rejects a local authority change after credential resolution before provider access", async () => {
+    let connectionReads = 0;
+    let providerCalls = 0;
+    await expect(
+      executeGoogleDrivePublication(
+        {
+          db: {} as Database,
+          objectStorage: objectStorage(),
+          identity,
+          subjectId: "subject-a",
+          target,
+          request,
+          resolveCredential: async () => ({
+            status: "ok",
+            headers: { authorization: "Bearer refreshed" },
+            connectionId,
+          }),
+        },
+        {
+          ...executionPorts(async () => {
+            providerCalls += 1;
+            return new Response();
+          }),
+          getConnection: async () => {
+            connectionReads += 1;
+            return {
+              ...connection({ version: connectionReads }),
+              status: connectionReads === 1 ? "active" : "revoked",
+            } as never;
+          },
+        },
+      ),
+    ).rejects.toThrow("authority changed");
+    expect(connectionReads).toBe(2);
+    expect(providerCalls).toBe(0);
   });
 
   test("attempt tool executes Codemode only after durable begin and completes the request", async () => {
@@ -331,7 +567,8 @@ describe("Google Drive editable artifact publication", () => {
         }) as never,
       ports: {
         getConnection: async () => connection() as never,
-        listConnections: async () => [],
+        getMembership: async () => ({}) as never,
+        readMaterialization: async () => materialization() as never,
         requireFile: async () => sourceFile,
         prepare: async () => ({ managed: true, decision: "allow" }),
         begin: async () => ({ allowed: false, managed: true, requestId: "r", reason: "blocked" }),

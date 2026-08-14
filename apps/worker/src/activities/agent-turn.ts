@@ -7150,17 +7150,20 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           subjectId: turn.initiator.subjectId,
         },
       } as const;
-      const googleDrivePublicationTarget =
-        objectStorage && credentialSubjectId
-          ? await resolveGoogleDrivePublicationTarget(db, input.workspaceId, credentialSubjectId)
-          : null;
+      const googleDrivePublicationTarget = objectStorage
+        ? await resolveGoogleDrivePublicationTarget(
+            db,
+            input.workspaceId,
+            personalConnectionDelegations,
+          )
+        : null;
       const googleDrivePublicationTool =
-        objectStorage && credentialSubjectId && googleDrivePublicationTarget
+        objectStorage && googleDrivePublicationTarget
           ? createGoogleDrivePublicationAttemptTool({
               db,
               objectStorage,
               identity: connectorActionIdentity,
-              subjectId: credentialSubjectId,
+              subjectId: googleDrivePublicationTarget.ownerSubjectId,
               target: googleDrivePublicationTarget,
               resolveCredential,
               ...(runtimeCancellationSignal ? { signal: runtimeCancellationSignal } : {}),
