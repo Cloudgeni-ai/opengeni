@@ -7486,13 +7486,19 @@ export async function listEnabledMcpCapabilityServers(
   });
 }
 
+const ecmaScriptTrimCharacters =
+  "\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff";
+
 const registryApiKeyContractValidSql = sql<boolean>`coalesce((
   jsonb_typeof(${schema.capabilityCatalogItems.metadata} -> 'authContract') = 'object'
   and jsonb_typeof(${schema.capabilityCatalogItems.metadata} -> 'authContract' -> 'headerName') = 'string'
   and (${schema.capabilityCatalogItems.metadata} -> 'authContract' ->> 'headerName')
     ~ ${"^[A-Za-z0-9!#$%&'*+.^_`|~-]+$"}
   and jsonb_typeof(${schema.capabilityCatalogItems.metadata} -> 'authContract' -> 'scheme') = 'string'
-  and length(btrim(${schema.capabilityCatalogItems.metadata} -> 'authContract' ->> 'scheme')) > 0
+  and length(btrim(
+    ${schema.capabilityCatalogItems.metadata} -> 'authContract' ->> 'scheme',
+    ${ecmaScriptTrimCharacters}
+  )) > 0
 ), false)`;
 
 /**

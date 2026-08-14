@@ -9,6 +9,7 @@ import {
   createScheduledTask,
   createSession,
   getSession,
+  listEnabledMcpCapabilityServerIds,
   listSessionEvents,
   listScheduledTaskRuns,
   updateScheduledTask,
@@ -345,6 +346,123 @@ function activities() {
 }
 
 describe("scheduled alert canonical responder session (real PostgreSQL)", () => {
+  test("matches canonical registry API-key trim trust without exposing contract text", async () => {
+    if (!shared || !client || !admin) return;
+    const workspace = await workspaceFixture();
+    const install = async (input: {
+      id: string;
+      source?: string;
+      authKind?: string | null;
+      authModel?: string | null;
+      metadata: Record<string, unknown>;
+      config?: Record<string, unknown>;
+    }) => {
+      const source = input.source ?? "registry";
+      const endpoint = `https://example.com/${input.id}`;
+      await admin!`
+        insert into capability_catalog_items (
+          id,
+          account_id,
+          workspace_id,
+          kind,
+          source,
+          name,
+          endpoint_url,
+          auth_model,
+          auth_kind,
+          provider_domain,
+          mcp_url,
+          metadata
+        ) values (
+          ${input.id},
+          null,
+          null,
+          'mcp',
+          ${source},
+          ${input.id},
+          ${endpoint},
+          ${input.authModel ?? null},
+          ${input.authKind ?? null},
+          ${source === "registry" ? `${crypto.randomUUID()}.example.com` : null},
+          ${source === "registry" ? endpoint : null},
+          ${admin!.json(input.metadata)}
+        )`;
+      await admin!`
+        insert into capability_installations (
+          account_id,
+          workspace_id,
+          capability_id,
+          kind,
+          status,
+          config,
+          metadata
+        ) values (
+          ${workspace.accountId},
+          ${workspace.workspaceId},
+          ${input.id},
+          'mcp',
+          'active',
+          ${admin!.json(input.config ?? {})},
+          ${admin!.json({ mcpConnectivity: { status: "ok" } })}
+        )`;
+    };
+    const trustedMetadata = (serverId: string, scheme: string) => ({
+      mcpProbe: { status: "real" },
+      authContract: { headerName: "Authorization", scheme },
+      mcpServerId: serverId,
+    });
+    const credentialConfig = { headersEncrypted: { Authorization: "ciphertext" } };
+
+    await install({
+      id: `mcp:trim-valid-${crypto.randomUUID()}`,
+      authKind: "api_key",
+      authModel: "credential_ref",
+      metadata: trustedMetadata("trim-valid", " \tBearer\n"),
+      config: credentialConfig,
+    });
+    await install({
+      id: `mcp:trim-tab-${crypto.randomUUID()}`,
+      authKind: "api_key",
+      authModel: "credential_ref",
+      metadata: trustedMetadata("trim-tab", "\t"),
+      config: credentialConfig,
+    });
+    await install({
+      id: `mcp:trim-newline-${crypto.randomUUID()}`,
+      authKind: "api_key",
+      authModel: "credential_ref",
+      metadata: trustedMetadata("trim-newline", "\n\r"),
+      config: credentialConfig,
+    });
+    await install({
+      id: `mcp:trim-mixed-${crypto.randomUUID()}`,
+      authKind: "api_key",
+      authModel: "credential_ref",
+      metadata: trustedMetadata("trim-mixed", " \t\n\r\u00a0\ufeff"),
+      config: credentialConfig,
+    });
+    await install({
+      id: `mcp:legacy-${crypto.randomUUID()}`,
+      authKind: "api_key",
+      authModel: "credential_ref",
+      metadata: { mcpServerId: "legacy-active" },
+      config: credentialConfig,
+    });
+    await install({
+      id: `mcp:configured-${crypto.randomUUID()}`,
+      source: "configured",
+      metadata: { mcpServerId: "configured-active" },
+    });
+
+    const ids = await listEnabledMcpCapabilityServerIds(client.db, workspace.workspaceId);
+    expect(ids).toContain("trim-valid");
+    expect(ids).toContain("legacy-active");
+    expect(ids).toContain("configured-active");
+    expect(ids).not.toContain("trim-tab");
+    expect(ids).not.toContain("trim-newline");
+    expect(ids).not.toContain("trim-mixed");
+  });
+
   test("legacy structured alerts block before any run, session, event, usage, or task mutation", async () => {
     if (!shared || !client || !admin) return;
     const workspace = await workspaceFixture();
