@@ -461,7 +461,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "discover"],
     title: "Discover browsers and computers",
     description:
-      "List live workspace BrowserSessions, ComputerSessions, reusable browser identities, and attached Chrome devices. Resources are workspace-visible: inspect and reuse relevant peer/child sessions instead of creating duplicates.",
+      "List workspace BrowserSessions, ComputerSessions, reusable browser identities, attached-Chrome-capable machine bridges, and actually connected Chrome profiles. An attachedBrowserBridge only means the machine is ready for the extension; only attachedBrowsers are real user Chrome profiles/tabs. For requests about the user's existing/current/personal Chrome, call this before browser_open and use an attachedBrowsers device explicitly. Resources are workspace-visible: inspect and reuse relevant peer/child sessions instead of creating duplicates. Leave includeTerminal=false unless ended history is specifically required because terminal history may be large.",
     input: DiscoveryInput,
     output: DiscoveryOutput,
     readOnly: true,
@@ -500,7 +500,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "open"],
     title: "Open or reuse browser",
     description:
-      "Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, or attach to an explicit workspace BrowserSession. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control. Returns exact session and tab state.",
+      "Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, attach to an explicit workspace BrowserSession, or open an attached Chrome profile by passing placement={kind:'attached_device',deviceId}. This does not infer or attach the user's existing Chrome: for requests about 'my browser', 'my tabs', or current Chrome, call interaction_discover first and select an actual attachedBrowsers device; if none exists, explain that the Chrome extension must be connected instead of silently creating a blank managed browser. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control. Returns exact session and tab state.",
     input: BrowserOpenInput,
     output: BrowserOpenOutput,
     readOnly: false,

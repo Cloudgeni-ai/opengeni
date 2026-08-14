@@ -32,6 +32,25 @@ export type GoogleDriveFacetEntry = {
   binding: IntegrationFacetBindingSummary | null;
 };
 
+export type GoogleDriveFacetMutation = {
+  apply: (binding: IntegrationFacetBindingSummary) => boolean;
+  isCurrent: () => boolean;
+  finish: () => void;
+};
+
+export type GoogleDriveKnowledgeSourceDialogProps = {
+  client: OpenGeniCoreClient;
+  workspaceId: string;
+  instance: ApiIntegrationInstallationSummary;
+  entry: GoogleDriveFacetEntry | null;
+  canManage: boolean;
+  canManagePersonalDestination: boolean;
+  canManageWorkspaceDestination: boolean;
+  canManageOrganizationDestination: boolean;
+  onClose: () => void;
+  onMutationStart: () => GoogleDriveFacetMutation;
+};
+
 export function GoogleDriveKnowledgeSourceDialog({
   client,
   workspaceId,
@@ -42,21 +61,8 @@ export function GoogleDriveKnowledgeSourceDialog({
   canManageWorkspaceDestination,
   canManageOrganizationDestination,
   onClose,
-  onBusyChange,
-  onSaved,
-}: {
-  client: OpenGeniCoreClient;
-  workspaceId: string;
-  instance: ApiIntegrationInstallationSummary;
-  entry: GoogleDriveFacetEntry | null;
-  canManage: boolean;
-  canManagePersonalDestination: boolean;
-  canManageWorkspaceDestination: boolean;
-  canManageOrganizationDestination: boolean;
-  onClose: () => void;
-  onBusyChange: (busy: boolean) => void;
-  onSaved: () => Promise<void>;
-}) {
+  onMutationStart,
+}: GoogleDriveKnowledgeSourceDialogProps) {
   const [busy, setBusy] = useState(false);
   const [browseBusy, setBrowseBusy] = useState(false);
   const [items, setItems] = useState<GoogleDriveBrowseItem[]>([]);
@@ -218,10 +224,10 @@ export function GoogleDriveKnowledgeSourceDialog({
 
   async function saveSelection(): Promise<void> {
     if (!entry || selectedSources.length === 0 || destinationDisabled || !canManage) return;
+    const mutation = onMutationStart();
     setBusy(true);
-    onBusyChange(true);
     try {
-      await client.saveGoogleDriveFacetSource(
+      const result = await client.saveGoogleDriveFacetSource(
         workspaceId,
         instance.capabilityId,
         instance.instanceKey,
@@ -241,18 +247,21 @@ export function GoogleDriveKnowledgeSourceDialog({
           idempotencyKey: crypto.randomUUID(),
         },
       );
-      await onSaved();
-      onClose();
-      toast.success("Google Drive locations saved", {
-        description: `Only ${instance.displayName} was updated; sibling Drive accounts were unchanged.`,
-      });
+      if (mutation.apply(result.binding)) {
+        onClose();
+        toast.success("Google Drive locations saved", {
+          description: `Only ${instance.displayName} was updated; sibling Drive accounts were unchanged.`,
+        });
+      }
     } catch (error) {
-      toast.error("Google Drive locations could not be saved", {
-        description: error instanceof Error ? error.message : String(error),
-      });
+      if (mutation.isCurrent()) {
+        toast.error("Google Drive locations could not be saved", {
+          description: error instanceof Error ? error.message : String(error),
+        });
+      }
     } finally {
       setBusy(false);
-      onBusyChange(false);
+      mutation.finish();
     }
   }
 

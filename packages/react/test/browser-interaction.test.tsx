@@ -2362,7 +2362,7 @@ describe("BrowserViewer", () => {
       (link) => link.textContent?.includes("Connect this Chrome profile"),
     );
     expect(setup?.getAttribute("href")).toBe("/browser-extension-setup.html");
-    expect(setup?.textContent).toContain("Machine agent ready");
+    expect(setup?.textContent).toContain("Chrome extension missing");
     await rendered.unmount();
   });
 });

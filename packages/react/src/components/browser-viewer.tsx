@@ -1208,7 +1208,7 @@ function BrowserLaunchMenu(props: {
                         : "Connect this Chrome profile"}
                     </span>
                     <span className="block truncate text-og-xs text-og-subtle">
-                      Machine agent ready · install extension once
+                      Machine connected · Chrome extension missing
                     </span>
                   </span>
                 </a>
@@ -1778,6 +1778,7 @@ function BrowserViewport(props: {
   const readClipboardRef = useRef(props.onReadClipboard);
   const errorRef = useRef(props.onError);
   const actionTailRef = useRef<Promise<void>>(Promise.resolve());
+  const actionQueueEpochRef = useRef(0);
   const queuedFrameRef = useRef<BrowserFrame | null>(null);
   const decodingFrameRef = useRef(false);
   const mountedRef = useRef(true);
@@ -1859,13 +1860,19 @@ function BrowserViewport(props: {
       frame: BrowserFrame | null,
       after?: (receipt: BrowserActionReceipt) => Promise<void>,
     ) => {
+      const epoch = actionQueueEpochRef.current;
       actionTailRef.current = actionTailRef.current
         .catch(() => undefined)
         .then(async () => {
+          if (epoch !== actionQueueEpochRef.current) return;
           const receipt = await actionRef.current(action, frame);
           await after?.(receipt);
         })
-        .catch((cause) => errorRef.current(cause));
+        .catch((cause) => {
+          // Do not replay or continue input collected behind a failed request.
+          actionQueueEpochRef.current += 1;
+          errorRef.current(cause);
+        });
     },
     [],
   );

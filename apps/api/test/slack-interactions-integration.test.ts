@@ -26,6 +26,7 @@ import {
   synchronizeCanonicalHumanLoginBindings,
   updateSlackTaskPolicy,
   updateWorkspaceSettings,
+  withWorkspaceSessionActivityRls,
   type DbClient,
 } from "@opengeni/db";
 import {
@@ -41,6 +42,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import type { ObjectHead, ObjectStorage } from "@opengeni/storage";
+import { sql } from "drizzle-orm";
 import { Hono } from "hono";
 import {
   createSlackUserLinkToken,
@@ -105,6 +107,12 @@ type SlackCall = {
   inclusive?: string | null;
 };
 
+type SlackHomePublication = {
+  userId: string;
+  hash: string | null;
+  view: { type: string; blocks: unknown[] };
+};
+
 type SlackReactionContextPage = {
   messages: Array<Record<string, unknown>>;
   nextCursor?: string;
@@ -121,6 +129,8 @@ type SlackPostPause = {
   entered: Promise<void>;
   release: () => void;
 };
+
+type SlackHomePause = SlackPostPause;
 
 type SlackPrivateFileFixture = {
   channelId: string;
@@ -142,6 +152,8 @@ function fakeSlack(
   } = {},
 ) {
   const posts: SlackPost[] = [];
+  const homePublications: SlackHomePublication[] = [];
+  const homeViewHashes = new Map<string, string>();
   const calls: SlackCall[] = [];
   const reactionContexts = new Map<string, SlackReactionContext>();
   const privateFiles = new Map<string, SlackPrivateFileFixture>();
@@ -167,6 +179,13 @@ function fakeSlack(
       released: Promise<void>;
     }
   >();
+  const homePauses = new Map<
+    string,
+    {
+      signalEntered: () => void;
+      released: Promise<void>;
+    }
+  >();
   const pauseBeforePost = (textFragment: string): SlackPostPause => {
     if (postPauses.has(textFragment)) throw new Error("Slack post pause already exists");
     let signalEntered!: () => void;
@@ -183,6 +202,22 @@ function fakeSlack(
       release: () => {
         signalReleased();
       },
+    };
+  };
+  const pauseBeforeHomePublish = (userId: string): SlackHomePause => {
+    if (homePauses.has(userId)) throw new Error("Slack App Home pause already exists");
+    let signalEntered!: () => void;
+    let signalReleased!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      signalEntered = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      signalReleased = resolve;
+    });
+    homePauses.set(userId, { signalEntered, released });
+    return {
+      entered,
+      release: () => signalReleased(),
     };
   };
   let nextTimestamp = 1;
@@ -330,6 +365,28 @@ function fakeSlack(
       const user = form.get("users") ?? "";
       return Response.json({ ok: true, channel: { id: `D_${user}` } });
     }
+    if (method === "views.publish") {
+      const view = JSON.parse(form.get("view") ?? "null") as SlackHomePublication["view"];
+      const userId = form.get("user_id") ?? "";
+      const paused = homePauses.get(userId);
+      if (paused) {
+        paused.signalEntered();
+        await paused.released;
+        homePauses.delete(userId);
+      }
+      const requestedHash = form.get("hash");
+      const currentHash = homeViewHashes.get(userId);
+      if (requestedHash && currentHash && requestedHash !== currentHash) {
+        return Response.json({ ok: false, error: "hash_conflict" });
+      }
+      homePublications.push({ userId, hash: requestedHash, view });
+      const nextHash = `home-view-${homePublications.length}`;
+      homeViewHashes.set(userId, nextHash);
+      return Response.json({
+        ok: true,
+        view: { id: `V_${homePublications.length}`, hash: nextHash },
+      });
+    }
     if (method === "files.info") {
       const fileId = form.get("file") ?? "";
       const privateFile = privateFiles.get(fileId);
@@ -433,6 +490,7 @@ function fakeSlack(
   return {
     fetch: fetch as typeof globalThis.fetch,
     posts,
+    homePublications,
     calls,
     reactionContexts,
     privateFiles,
@@ -442,6 +500,9 @@ function fakeSlack(
     postFailuresByChannel,
     channelAccessFailures,
     pauseBeforePost,
+    pauseBeforeHomePublish,
+    currentHomeViewHash: (userId: string) => homeViewHashes.get(userId) ?? null,
+    setHomeViewHash: (userId: string, hash: string) => homeViewHashes.set(userId, hash),
   };
 }
 
@@ -799,6 +860,229 @@ async function interactions(workspaceId: string) {
 }
 
 describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
+  test("App Home publishes only currently authorized tasks from the linked workspace", async () => {
+    if (!available) return;
+    const value = await fixture();
+    await createSessionForRequest(value.deps, value.owner, value.owner.workspaceId, {
+      initialMessage: "Visible App Home task",
+      model: "gpt-5.6-terra",
+      sandboxBackend: "none",
+    });
+    const crossWorkspace = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "slack-app-home-cross-workspace",
+      accountExternalId: `account-${crypto.randomUUID()}`,
+      accountName: "Slack App Home isolation",
+      workspaceExternalSource: "slack-app-home-cross-workspace",
+      workspaceExternalId: `workspace-${crypto.randomUUID()}`,
+      workspaceName: "Slack App Home isolation",
+      subjectId: value.owner.subjectId,
+    });
+    const crossWorkspaceGrant = crossWorkspace.workspaceGrants[0]!;
+    await createSessionForRequest(
+      value.deps,
+      crossWorkspaceGrant,
+      crossWorkspaceGrant.workspaceId,
+      {
+        initialMessage: "Cross-workspace task must stay hidden",
+        model: "gpt-5.6-terra",
+        sandboxBackend: "none",
+      },
+    );
+
+    const event = {
+      teamId: value.teamId,
+      eventId: `E_HOME_${crypto.randomUUID()}`,
+      event: {
+        type: "app_home_opened",
+        user: value.ownerSlackUserId,
+        tab: "home",
+        view: { hash: "home-hash-initial" },
+      },
+    };
+    value.slack.setHomeViewHash(value.ownerSlackUserId, "home-hash-initial");
+    expect((await postEvent(value.app, event)).status).toBe(200);
+    expect((await postEvent(value.app, event)).status).toBe(200);
+    expect(value.slack.homePublications).toHaveLength(0);
+    expect(await drainAll(value.deps)).toBe(1);
+    expect(value.slack.homePublications).toHaveLength(1);
+    const first = JSON.stringify(value.slack.homePublications[0]!.view.blocks);
+    expect(first).toContain("Visible App Home task");
+    expect(first).not.toContain("Cross-workspace task must stay hidden");
+    expect(value.slack.homePublications[0]!.userId).toBe(value.ownerSlackUserId);
+    expect(value.slack.calls.filter((call) => call.method === "views.publish")).toHaveLength(1);
+  });
+
+  test("App Home replaces task data with an access view after link revocation", async () => {
+    if (!available) return;
+    const value = await fixture();
+    await createSessionForRequest(value.deps, value.owner, value.owner.workspaceId, {
+      initialMessage: "Must disappear after unlink",
+      model: "gpt-5.6-terra",
+      sandboxBackend: "none",
+    });
+    const event = {
+      teamId: value.teamId,
+      eventId: `E_HOME_REVOKED_${crypto.randomUUID()}`,
+      event: {
+        type: "app_home_opened",
+        user: value.ownerSlackUserId,
+        tab: "home",
+        view: { hash: "home-hash-authorized" },
+      },
+    };
+    value.slack.setHomeViewHash(value.ownerSlackUserId, "home-hash-authorized");
+    expect((await postEvent(value.app, event)).status).toBe(200);
+    expect(value.slack.homePublications).toHaveLength(0);
+    expect(await drainAll(value.deps)).toBe(1);
+    await shared!.admin`
+      delete from slack_bot_user_links
+      where workspace_id = ${value.owner.workspaceId}
+        and connection_id = ${value.connectionId}
+        and slack_user_id = ${value.ownerSlackUserId}`;
+    expect(
+      (
+        await postEvent(value.app, {
+          ...event,
+          eventId: `${event.eventId}_2`,
+          event: {
+            ...event.event,
+            view: { hash: value.slack.currentHomeViewHash(value.ownerSlackUserId) },
+          },
+        })
+      ).status,
+    ).toBe(200);
+    expect(await drainAll(value.deps)).toBe(1);
+    const revoked = JSON.stringify(value.slack.homePublications.at(-1)!.view.blocks);
+    expect(revoked).toContain("Connect your OpenGeni account");
+    expect(revoked).not.toContain("Must disappear after unlink");
+  });
+
+  test("App Home never publishes task data without Slack's current view hash", async () => {
+    if (!available) return;
+    const value = await fixture();
+    await createSessionForRequest(value.deps, value.owner, value.owner.workspaceId, {
+      initialMessage: "Must remain hidden without a Slack view hash",
+      model: "gpt-5.6-terra",
+      sandboxBackend: "none",
+    });
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_HOME_NO_HASH_${crypto.randomUUID()}`,
+          event: {
+            type: "app_home_opened",
+            user: value.ownerSlackUserId,
+            tab: "home",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    expect(await drainAll(value.deps)).toBe(1);
+    const view = JSON.stringify(value.slack.homePublications.at(-1)!.view.blocks);
+    expect(view).toContain("Refresh OpenGeni Home");
+    expect(view).not.toContain("Must remain hidden without a Slack view hash");
+  });
+
+  test("App Home serializes overlapping refreshes so revoked content cannot win last", async () => {
+    if (!available) return;
+    const value = await fixture();
+    await createSessionForRequest(value.deps, value.owner, value.owner.workspaceId, {
+      initialMessage: "Must not overwrite the revoked view",
+      model: "gpt-5.6-terra",
+      sandboxBackend: "none",
+    });
+    const firstEvent = {
+      teamId: value.teamId,
+      eventId: `E_HOME_RACE_A_${crypto.randomUUID()}`,
+      event: {
+        type: "app_home_opened",
+        user: value.ownerSlackUserId,
+        tab: "home",
+        view: { hash: "home-hash-a" },
+      },
+    };
+    value.slack.setHomeViewHash(value.ownerSlackUserId, "home-hash-a");
+    expect((await postEvent(value.app, firstEvent)).status).toBe(200);
+    const pause = value.slack.pauseBeforeHomePublish(value.ownerSlackUserId);
+    const firstDrain = drainSlackInteractionsOnce(value.deps);
+    await pause.entered;
+
+    await shared!.admin`
+      delete from slack_bot_user_links
+      where workspace_id = ${value.owner.workspaceId}
+        and connection_id = ${value.connectionId}
+        and slack_user_id = ${value.ownerSlackUserId}`;
+    expect(
+      (
+        await postEvent(value.app, {
+          ...firstEvent,
+          eventId: `E_HOME_RACE_B_${crypto.randomUUID()}`,
+          event: { ...firstEvent.event, view: { hash: "home-hash-a" } },
+        })
+      ).status,
+    ).toBe(200);
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(false);
+
+    pause.release();
+    expect(await firstDrain).toBe(true);
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(false);
+    expect(value.slack.homePublications.map((publication) => publication.hash)).toEqual([
+      "home-hash-a",
+      null,
+    ]);
+    const finalView = JSON.stringify(value.slack.homePublications.at(-1)!.view.blocks);
+    expect(finalView).toContain("Connect your OpenGeni account");
+    expect(finalView).not.toContain("Must not overwrite the revoked view");
+  });
+
+  test("App Home scans beyond the newest page for older tasks needing attention", async () => {
+    if (!available) return;
+    const value = await fixture();
+    const urgent = await createSessionForRequest(value.deps, value.owner, value.owner.workspaceId, {
+      initialMessage: "Older urgent task remains visible",
+      model: "gpt-5.6-terra",
+      sandboxBackend: "none",
+    });
+    await withWorkspaceSessionActivityRls(client.db, value.owner.workspaceId, async (db) => {
+      await db.execute(sql`
+        update sessions
+        set status = 'failed', updated_at = now() - interval '2 hours'
+        where workspace_id = ${value.owner.workspaceId} and id = ${urgent.id}`);
+      await db.execute(sql`
+        insert into sessions (
+          account_id, workspace_id, status, initial_message, resources, tools, metadata,
+          model, sandbox_backend, sandbox_group_id, tool_policy, created_at, updated_at
+        )
+        select ${value.owner.accountId}, ${value.owner.workspaceId}, 'idle',
+          'Newer completed task ' || n::text, '[]'::jsonb, '[]'::jsonb, '{}'::jsonb,
+          'gpt-5.6-terra', 'none', gen_random_uuid(),
+          jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null),
+          statement_timestamp() - make_interval(secs => n),
+          statement_timestamp() - make_interval(secs => n)
+        from generate_series(1, 500) as generated(n)
+      `);
+    });
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_HOME_SCAN_${crypto.randomUUID()}`,
+          event: {
+            type: "app_home_opened",
+            user: value.ownerSlackUserId,
+            tab: "home",
+            view: { hash: "home-hash-pagination" },
+          },
+        })
+      ).status,
+    ).toBe(200);
+    expect(await drainAll(value.deps)).toBe(1);
+    const view = JSON.stringify(value.slack.homePublications.at(-1)!.view.blocks);
+    expect(view).toContain("Older urgent task remains visible");
+  });
+
   test("Slack identity link tokens are scoped, tamper-evident, and short-lived", () => {
     const now = 1_800_000_000_000;
     const input = {
