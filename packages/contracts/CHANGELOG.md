@@ -1,5 +1,11 @@
 # @opengeni/contracts
 
+## 1.0.2
+
+### Patch Changes
+
+- e0e0102: Unify browser, computer, identity, realtime, and Codemode behavior across managed sandboxes and connected machines.
+
 ## 1.0.1
 
 ### Patch Changes
