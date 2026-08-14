@@ -47175,6 +47175,7 @@ export type InitializeSessionStartInput = {
     successCriteria?: string | null;
     maxAutoContinuations?: number | null;
     mutationPolicy?: SessionGoalMutationPolicy;
+    createdBy?: SessionGoalCreatedBy;
   } | null;
   consumeNewSessionDraft?: {
     subjectId: string;
@@ -47182,6 +47183,8 @@ export type InitializeSessionStartInput = {
   } | null;
   /** Persist session.created only; realtime will supply the first human turn. */
   deferInitialTurn?: boolean;
+  /** Public status persisted with a deferred session start. Defaults to idle. */
+  deferredStatus?: Extract<SessionStatus, "idle" | "queued">;
 };
 
 export type InitializeSessionStartResult = {
@@ -47270,7 +47273,7 @@ export async function initializeSessionStartAtomically(
               successCriteria: input.goal.successCriteria ?? null,
               maxAutoContinuations: input.goal.maxAutoContinuations ?? null,
               mutationPolicy: input.goal.mutationPolicy ?? "preserve_intent",
-              createdBy: "api",
+              createdBy: input.goal.createdBy ?? "api",
             })
             .returning();
           if (!goal) throw new Error("Failed to create initial session goal");
@@ -47278,6 +47281,7 @@ export async function initializeSessionStartAtomically(
         }
 
         if (input.deferInitialTurn) {
+          const deferredStatus = input.deferredStatus ?? "idle";
           const [existingCreatedEvent] = await tx
             .select({ id: schema.sessionEvents.id })
             .from(schema.sessionEvents)
@@ -47306,7 +47310,7 @@ export async function initializeSessionStartAtomically(
                       type: "session.created",
                       payload: {
                         ...input.createdEventPayload,
-                        status: "idle",
+                        status: deferredStatus,
                         createdBy: creator.initiator,
                       },
                     },
@@ -47327,7 +47331,7 @@ export async function initializeSessionStartAtomically(
                               version: goal.version,
                               objectiveRevision: goal.objectiveRevision,
                               mutationPolicy: goal.mutationPolicy,
-                              actor: "api",
+                              actor: input.goal?.createdBy ?? "api",
                               replaced: false,
                             },
                           },
@@ -47341,17 +47345,18 @@ export async function initializeSessionStartAtomically(
               .returning();
             initializedNow = true;
           }
+          const deferredStatusNeedsRepair = initializedNow && session.status !== deferredStatus;
           const sessionNeedsRepair =
             session.temporalWorkflowId !== temporalWorkflowId ||
             session.lastSequence !== sequence ||
-            (initializedNow && session.status === "queued");
+            deferredStatusNeedsRepair;
           if (sessionNeedsRepair) {
             await tx
               .update(schema.sessions)
               .set({
                 temporalWorkflowId,
                 lastSequence: sequence,
-                ...(initializedNow && session.status === "queued" ? { status: "idle" } : {}),
+                ...(deferredStatusNeedsRepair ? { status: deferredStatus } : {}),
                 updatedAt: new Date(),
               })
               .where(

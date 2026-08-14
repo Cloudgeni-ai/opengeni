@@ -19,7 +19,9 @@
 #   4. an atomic-swap FAILURE                         -> the previous bundle is
 #      restored from its .bak and the installer dies loudly (rc 2).
 #   5. a newer installed agent                        -> an older deployment's
-#      candidate is preserved unless downgrade is explicitly authorized.
+#      candidate is preserved unless downgrade is explicitly authorized;
+#   8. two same-semver executables with different bytes -> restart is required,
+#      while a byte-identical reinstall remains non-disruptive.
 #
 # Usage:  sh agent/install/test/macos-bundle-sim.sh
 set -eu
@@ -239,6 +241,30 @@ if [ "$OPENGENI_AGENT_WAS_UPGRADED" = "0" ]; then
   ok "a same-version bundle install remains non-disruptive"
 else
   bad "a same-version install was misclassified as an upgrade"
+fi
+
+echo "SIM 8: same-semver per-SHA bytes restart exactly when the executable changes"
+SAME_VERSION_A="$WORK/same-version-a"
+SAME_VERSION_B="$WORK/same-version-b"
+make_version_agent "$SAME_VERSION_A" "10.0.0"
+printf '%s\n' '#!/bin/sh' '# distinct per-SHA build bytes' \
+  "printf '%s\\n' 'opengeni-agent 10.0.0'" > "$SAME_VERSION_B"
+chmod 0755 "$SAME_VERSION_B"
+
+OPENGENI_AGENT_WAS_UPGRADED=0
+mark_upgrade_if_binary_changed "$SAME_VERSION_A" "$SAME_VERSION_B"
+if [ "$OPENGENI_AGENT_WAS_UPGRADED" = "1" ]; then
+  ok "different same-semver bytes require one service restart"
+else
+  bad "different same-semver bytes did not request a restart"
+fi
+
+OPENGENI_AGENT_WAS_UPGRADED=0
+mark_upgrade_if_binary_changed "$SAME_VERSION_A" "$SAME_VERSION_A"
+if [ "$OPENGENI_AGENT_WAS_UPGRADED" = "0" ]; then
+  ok "byte-identical reinstall remains non-disruptive"
+else
+  bad "byte-identical reinstall requested a restart"
 fi
 
 echo ""

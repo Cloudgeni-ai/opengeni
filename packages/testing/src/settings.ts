@@ -159,6 +159,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     modelProvidersJson: "[]",
     codexSubscriptionEnabled: false,
     supergrokSubscriptionEnabled: false,
+    supergrokResponseStreamIdleTimeoutMs: 300_000,
     codexConnectedAppsEnabled: false,
     codexToolSearchEnabled: false,
     lazyToolSearchEnabled: false,

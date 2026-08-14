@@ -1164,6 +1164,33 @@ jobs:
           name: ${{ needs.artifact-runtime.outputs.artifact_name }}
           path: .release/artifact-runtime
 
+      # Jorgebot and other exact-main-SHA dogfood deployments install their
+      # connected-machine agent from this API image. Bake the signed agent only
+      # for a protected main push: PR, scheduled, and automation image builds are
+      # never deployed under dogfood-sha-* and must not receive the signing key.
+      - name: Install Rust toolchain for dogfood agent bake
+        if: ${{ github.event_name == 'push' }}
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal --no-self-update
+          rustup default 1.97.1
+
+      - name: Bake and sign exact-SHA dogfood agent
+        if: ${{ github.event_name == 'push' }}
+        env:
+          OPENGENI_AGENT_MINISIGN_KEY: ${{ secrets.OPENGENI_AGENT_MINISIGN_KEY }}
+        run: scripts/bake-agent.sh
+
+      - name: Require complete exact-SHA dogfood agent bake
+        if: ${{ github.event_name == 'push' }}
+        run: |
+          set -euo pipefail
+          for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+            asset="agent/install/baked/opengeni-agent-$target"
+            test -s "$asset"
+            test -s "$asset.sha256"
+            test -s "$asset.minisig"
+          done
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
 

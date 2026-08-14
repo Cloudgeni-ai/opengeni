@@ -13,6 +13,7 @@ import {
   addSessionSystemUpdateWithSourceMutation,
   createScheduledTaskRun,
   createSession,
+  createSessionWithIdempotencyKeyResult,
   createSessionGoal,
   enqueueSessionWorkflowWakeIfRunnable,
   getScheduledTask,
@@ -21,6 +22,7 @@ import {
   getScheduledTaskXaiProviderAccountAuthoritySnapshot,
   getRig,
   getVariableSet,
+  initializeSessionStartAtomically,
   markScheduledTaskRunFailedIfQueued,
   recordKnowledgeSourceSyncWake,
   recordUsageEvent,
@@ -42,6 +44,7 @@ import {
 } from "./common";
 import { withFirstPartyTools } from "./goals";
 import { agentRunAdmissionDenial } from "./agent-run-admission";
+import { scheduledAlertOccurrenceIdentity } from "../scheduled-alert-occurrence";
 import type {
   ControlActivityServices,
   DispatchScheduledTaskRunInput,
@@ -268,10 +271,19 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             frozenRigVersionId = rig.activeVersion.id;
           }
           let session: Awaited<ReturnType<typeof createSession>>;
+          let sessionCreated = true;
           const taskMetadata = { ...task.agentConfig.metadata };
           delete taskMetadata[OPENGENI_SLACK_BOT_SESSION_METADATA_KEY];
+          const alertOccurrence =
+            task.runMode === "new_session_per_run"
+              ? scheduledAlertOccurrenceIdentity({
+                  workspaceId: task.workspaceId,
+                  scheduledTaskId: task.id,
+                  metadata: task.metadata,
+                })
+              : null;
           try {
-            session = await createSession(db, {
+            const sessionInput: Parameters<typeof createSession>[1] = {
               accountId: task.accountId,
               workspaceId: task.workspaceId,
               initialMessage: task.agentConfig.prompt,
@@ -312,39 +324,58 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
               // workspace/deployment limit is narrowed before a later fire.
               allowNestedAgentDepthIncrease: true,
               subjectId: `scheduled_task:${task.id}`,
-            });
+            };
+            if (alertOccurrence) {
+              const created = await createSessionWithIdempotencyKeyResult(db, {
+                ...sessionInput,
+                createIdempotencyKey: alertOccurrence.sessionCreateIdempotencyKey,
+              });
+              if (created.denied) {
+                throw new SessionSpawnDeniedDbError(created.denial);
+              }
+              session = created.session;
+              sessionCreated = created.created;
+            } else {
+              session = await createSession(db, sessionInput);
+            }
           } catch (error) {
             if (error instanceof SessionSpawnDeniedDbError) {
               throw new Error(`${error.denial.code}: denial=${error.denial.id}`, { cause: error });
             }
             throw error;
           }
-          const goal = goalSpec
-            ? await createSessionGoal(db, {
-                accountId: task.accountId,
-                workspaceId: task.workspaceId,
-                sessionId: session.id,
-                text: goalSpec.text,
-                successCriteria: goalSpec.successCriteria ?? null,
-                maxAutoContinuations: goalSpec.maxAutoContinuations ?? null,
-                createdBy: "scheduled_task",
-              })
-            : null;
-          const workflowId = workflowIdForSession(session.id);
-          await setTemporalWorkflowId(db, task.workspaceId, session.id, workflowId);
-          if (task.runMode === "reusable_session") {
-            await updateScheduledTask(db, task.workspaceId, task.id, {
-              reusableSessionId: session.id,
-            });
+          if (!sessionCreated) {
+            assertReusableSessionRevivable(session.status);
+            if ((session.variableSetId ?? null) !== (task.variableSetId ?? null)) {
+              throw new Error(
+                "scheduled alert occurrence variableSet attachment does not match its canonical session",
+              );
+            }
+            if (
+              scheduledSlackBotConnectionId(session.metadata) !==
+              (task.agentConfig.slackBotConnectionId ?? null)
+            ) {
+              throw new Error(
+                "scheduled alert occurrence OpenGeni Slack bot binding does not match its canonical session",
+              );
+            }
           }
-          await appendAndPublishEvents(db, bus, task.workspaceId, session.id, [
-            {
-              type: "session.created",
-              payload: {
-                status: session.status,
-                createdBy: session.createdBy,
-                scheduledTaskId: task.id,
-                scheduledTaskRunId: run.id,
+          let workflowId: string;
+          if (alertOccurrence) {
+            const started = await initializeSessionStartAtomically(db, {
+              accountId: task.accountId,
+              workspaceId: task.workspaceId,
+              sessionId: session.id,
+              reasoningEffortFallback: reasoningEffort,
+              createdEventPayload: {
+                scheduledTaskId:
+                  typeof session.metadata.scheduledTaskId === "string"
+                    ? session.metadata.scheduledTaskId
+                    : task.id,
+                scheduledTaskRunId:
+                  typeof session.metadata.scheduledTaskRunId === "string"
+                    ? session.metadata.scheduledTaskRunId
+                    : run.id,
                 // Names/ids only; never values.
                 ...(variableSet
                   ? { variableSetId: variableSet.id, variableSetName: variableSet.name }
@@ -360,24 +391,88 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                     }
                   : {}),
               },
-            },
-            ...(goal
-              ? [
-                  {
-                    type: "goal.set" as const,
-                    payload: {
-                      goalId: goal.id,
-                      text: goal.text,
-                      ...(goal.successCriteria ? { successCriteria: goal.successCriteria } : {}),
-                      version: goal.version,
-                      actor: "scheduled_task",
-                      replaced: false,
-                    },
+              goal: goalSpec
+                ? {
+                    text: goalSpec.text,
+                    successCriteria: goalSpec.successCriteria ?? null,
+                    maxAutoContinuations: goalSpec.maxAutoContinuations ?? null,
+                    ...(goalSpec.mutationPolicy ? { mutationPolicy: goalSpec.mutationPolicy } : {}),
+                    createdBy: "scheduled_task",
+                  }
+                : null,
+              deferInitialTurn: true,
+              deferredStatus: "queued",
+            });
+            workflowId = started.temporalWorkflowId;
+            if (started.events.length > 0) {
+              await publishDurableSessionEvents(bus, task.workspaceId, session.id, started.events);
+            }
+          } else {
+            const goal =
+              sessionCreated && goalSpec
+                ? await createSessionGoal(db, {
+                    accountId: task.accountId,
+                    workspaceId: task.workspaceId,
+                    sessionId: session.id,
+                    text: goalSpec.text,
+                    successCriteria: goalSpec.successCriteria ?? null,
+                    maxAutoContinuations: goalSpec.maxAutoContinuations ?? null,
+                    createdBy: "scheduled_task",
+                  })
+                : null;
+            workflowId = workflowIdForSession(session.id);
+            await setTemporalWorkflowId(db, task.workspaceId, session.id, workflowId);
+            if (task.runMode === "reusable_session") {
+              await updateScheduledTask(db, task.workspaceId, task.id, {
+                reusableSessionId: session.id,
+              });
+            }
+            if (sessionCreated) {
+              await appendAndPublishEvents(db, bus, task.workspaceId, session.id, [
+                {
+                  type: "session.created",
+                  payload: {
+                    status: session.status,
+                    createdBy: session.createdBy,
+                    scheduledTaskId: task.id,
+                    scheduledTaskRunId: run.id,
+                    // Names/ids only; never values.
+                    ...(variableSet
+                      ? { variableSetId: variableSet.id, variableSetName: variableSet.name }
+                      : {}),
+                    ...(slackBotConnection && slackBotMetadata
+                      ? {
+                          slackBotConnection: {
+                            credentialRole: OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
+                            credentialLabel: OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
+                            connectionId: slackBotConnection.id,
+                            slackTeamId: slackBotMetadata.slackTeamId,
+                          },
+                        }
+                      : {}),
                   },
-                ]
-              : []),
-            { type: "session.status.changed", payload: { status: session.status } },
-          ]);
+                },
+                ...(goal
+                  ? [
+                      {
+                        type: "goal.set" as const,
+                        payload: {
+                          goalId: goal.id,
+                          text: goal.text,
+                          ...(goal.successCriteria
+                            ? { successCriteria: goal.successCriteria }
+                            : {}),
+                          version: goal.version,
+                          actor: "scheduled_task",
+                          replaced: false,
+                        },
+                      },
+                    ]
+                  : []),
+                { type: "session.status.changed", payload: { status: session.status } },
+              ]);
+            }
+          }
           const scheduledUpdate = await addSessionSystemUpdateWithSourceMutation(
             db,
             {
@@ -430,7 +525,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             );
           }
           result = {
-            action: "start",
+            action: sessionCreated ? "start" : "signal",
             accountId: task.accountId,
             workspaceId: task.workspaceId,
             sessionId: session.id,

@@ -642,6 +642,26 @@ describe("productShortLabelForModelId", () => {
 });
 
 describe("configuredModels", () => {
+  test("parses the SuperGrok valid-event idle interval and rejects invalid bounds", () => {
+    const configured = withEnv(
+      {
+        OPENGENI_OPENAI_API_KEY: "sk-test",
+        OPENGENI_SUPERGROK_RESPONSE_STREAM_IDLE_TIMEOUT_MS: "123456",
+      },
+      () => getSettings(),
+    );
+    expect(configured.supergrokResponseStreamIdleTimeoutMs).toBe(123_456);
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_OPENAI_API_KEY: "sk-test",
+          OPENGENI_SUPERGROK_RESPONSE_STREAM_IDLE_TIMEOUT_MS: "0",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow();
+  });
+
   test("SuperGrok catalog is a distinct externally billed xAI subscription rail", () => {
     const base = withEnv(
       {

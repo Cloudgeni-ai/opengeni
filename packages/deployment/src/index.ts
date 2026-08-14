@@ -143,14 +143,18 @@ export const SANDBOX_REQUIRED_ENV: Record<SandboxBackend, SandboxEnvBackendSpec>
 // they never enter missingEnvVars:
 //   - OPENGENI_STREAM_TOKEN_SECRET: HMAC secret minting scoped desktop stream
 //     tokens; falls back to OPENGENI_DELEGATION_SECRET when unset.
-//   - the three feature flags default off in @opengeni/config; preview flips
-//     them on through the helm config map, not here.
+//   - rollout flags default off in @opengeni/config. Generated deployment
+//     artifacts carry explicit operator values in the runtime Secret; the
+//     Secret is the authoritative managed-production source because it is the
+//     final envFrom source for API and worker workloads.
 //   - OPENGENI_MODAL_IMAGE_REF is also a modal-backend optional passthrough; it
 //     is injected at deploy time (--set) when a desktop image ref is built.
 export const SANDBOX_SURFACING_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_STREAM_TOKEN_SECRET",
   "OPENGENI_STREAM_CONTROL_ENABLED",
   "OPENGENI_SANDBOX_OWNERSHIP_ENABLED",
+  "OPENGENI_SANDBOX_LAZY_PROVISION",
+  "OPENGENI_RIG_VERIFICATION_LEASE_OWNERSHIP_ENABLED",
   "OPENGENI_SANDBOX_DESKTOP_ENABLED",
 ];
 
@@ -2417,9 +2421,10 @@ function runtimeEnvValues(
   // into runtime.env, but they are valueEnv passthroughs (emitted only when set,
   // never forced into missingEnvVars): OPENGENI_STREAM_TOKEN_SECRET gracefully
   // falls back to OPENGENI_DELEGATION_SECRET when unset (config's
-  // resolveStreamTokenSecret), and the three feature flags default off in
-  // @opengeni/config. Preview turns them ON via the helm config map; here we
-  // ensure the HMAC secret + the modal image ref reach the runtime secret.
+  // resolveStreamTokenSecret), and the rollout flags default off in
+  // @opengeni/config. Explicit rollout values are carried by the generated
+  // runtime Secret, whose later envFrom position makes it authoritative over
+  // any non-production example ConfigMap value.
   for (const key of SANDBOX_SURFACING_PASSTHROUGH_ENV) {
     entries.push(valueEnv(key, env[key]));
   }

@@ -1,9 +1,19 @@
 import { randomUUID } from "node:crypto";
 
-import { XAI_CLIENT_MODE, XAI_CLIENT_VERSION, XAI_TOKEN_AUTH_HEADER_VALUE } from "./constants";
-import { XaiSubscriptionHostedToolContinuationError } from "./errors";
+import {
+  XAI_CLIENT_MODE,
+  XAI_CLIENT_VERSION,
+  XAI_RESPONSE_STREAM_IDLE_TIMEOUT_MS,
+  XAI_TOKEN_AUTH_HEADER_VALUE,
+} from "./constants";
+import { XaiSubscriptionStreamIdleTimeoutError } from "./errors";
 import { normalizeXaiResponseEventJson, normalizeXaiSubscriptionRequestBody } from "./normalize";
-import { type XaiFinalContextUsage, xaiSubscriptionRequestStorage } from "./request-context";
+import {
+  type XaiFinalContextUsage,
+  type XaiModelRequestEvent,
+  type XaiSubscriptionRequestContext,
+  xaiSubscriptionRequestStorage,
+} from "./request-context";
 
 export type XaiFetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
@@ -20,7 +30,27 @@ export const XAI_SUBSCRIPTION_REQUEST_MODEL_HEADER = "x-opengeni-xai-subscriptio
 export const XAI_SUBSCRIPTION_REQUEST_ID_HEADER = "x-opengeni-xai-subscription-request-id";
 
 const MAX_ERROR_BODY_BYTES = 64 * 1024;
-const DEFAULT_HOSTED_TOOL_CONTINUATION_TIMEOUT_MS = 90_000;
+const MAX_STREAM_IDLE_TIMEOUT_MS = 24 * 60 * 60_000;
+
+type RequestAudit = {
+  ctx: XaiSubscriptionRequestContext;
+  requestId: string;
+  transportAttempt: number;
+  model: string;
+  startedAt: number;
+  streamIdleTimeoutMs: number;
+  eventCount: number;
+  lastEventType: string | null;
+  lastProgressAt: number | null;
+  terminal: boolean;
+  terminalEventEmitted: boolean;
+};
+
+type SseProgress = {
+  valid: boolean;
+  eventType: string | null;
+  terminal: "completed" | "failed" | null;
+};
 
 export function xaiSubscriptionFetch(base: XaiFetchLike): XaiFetchLike {
   return async (input, init) => {
@@ -37,7 +67,10 @@ export function xaiSubscriptionFetch(base: XaiFetchLike): XaiFetchLike {
       new Headers(init.headers).forEach((value, key) => originalHeaders.set(key, value));
     }
     const normalized = originalHeaders.get(XAI_SUBSCRIPTION_REQUEST_BODY_NORMALIZED_HEADER) === "1";
-    const requestId = originalHeaders.get(XAI_SUBSCRIPTION_REQUEST_ID_HEADER) ?? randomUUID();
+    const requestId =
+      originalHeaders.get(XAI_SUBSCRIPTION_REQUEST_ID_HEADER) ??
+      context.nextRequestId?.() ??
+      randomUUID();
     const handedOffModel = originalHeaders.get(XAI_SUBSCRIPTION_REQUEST_MODEL_HEADER);
     originalHeaders.delete(XAI_SUBSCRIPTION_REQUEST_BODY_NORMALIZED_HEADER);
     originalHeaders.delete(XAI_SUBSCRIPTION_REQUEST_ID_HEADER);
@@ -55,7 +88,13 @@ export function xaiSubscriptionFetch(base: XaiFetchLike): XaiFetchLike {
       handedOffModel ??
       (typeof normalizedBody.model === "string" ? normalizedBody.model : "grok-4.6");
 
-    const send = async (refresh: boolean): Promise<Response> => {
+    const streamIdleTimeoutMs = boundedStreamIdleTimeout(
+      context.streamIdleTimeoutMs ?? context.hostedToolContinuationTimeoutMs,
+    );
+    const send = async (
+      refresh: boolean,
+      transportAttempt: number,
+    ): Promise<{ response: Response; audit: RequestAudit }> => {
       const token = refresh ? await context.refresh() : await context.getToken();
       const headers = new Headers(originalHeaders);
       headers.set("authorization", `Bearer ${token.accessToken}`);
@@ -74,24 +113,67 @@ export function xaiSubscriptionFetch(base: XaiFetchLike): XaiFetchLike {
       headers.set("x-grok-req-id", requestId);
       headers.set("x-grok-agent-id", context.turnId);
       headers.set("x-grok-model-override", model);
-      return await base(url, {
-        ...init,
-        method: init?.method ?? (input instanceof Request ? input.method : "POST"),
-        headers,
-        body: JSON.stringify(normalizedBody),
-      });
+      const audit: RequestAudit = {
+        ctx: context,
+        requestId,
+        transportAttempt,
+        model,
+        startedAt: performance.now(),
+        streamIdleTimeoutMs,
+        eventCount: 0,
+        lastEventType: null,
+        lastProgressAt: null,
+        terminal: false,
+        terminalEventEmitted: false,
+      };
+      let response: Response | undefined;
+      try {
+        await emitRequestEvent(audit, {
+          phase: "started",
+          responseObserved: false,
+        });
+        response = await base(url, {
+          ...init,
+          method: init?.method ?? (input instanceof Request ? input.method : "POST"),
+          headers,
+          body: JSON.stringify(normalizedBody),
+        });
+        await emitRequestEvent(audit, {
+          phase: "headers",
+          responseObserved: true,
+          status: response.status,
+          ...providerRequestIdFields(response.headers),
+        });
+        return { response, audit };
+      } catch (error) {
+        await response?.body?.cancel(error).catch(() => undefined);
+        await emitRequestEvent(audit, {
+          phase: "failed",
+          responseObserved: response !== undefined,
+          ...(response
+            ? {
+                status: response.status,
+                ...providerRequestIdFields(response.headers),
+              }
+            : {}),
+        }).catch(() => undefined);
+        throw error;
+      }
     };
 
-    let response = await send(false);
-    if (response.status === 401) {
-      await response.body?.cancel().catch(() => undefined);
-      response = await send(true);
+    let sent = await send(false, 1);
+    if (sent.response.status === 401) {
+      await sent.response.body?.cancel().catch(() => undefined);
+      await emitRequestEvent(sent.audit, {
+        phase: "failed",
+        responseObserved: true,
+        status: sent.response.status,
+        willRetry: true,
+        ...providerRequestIdFields(sent.response.headers),
+      });
+      sent = await send(true, 2);
     }
-    return await normalizeResponse(
-      response,
-      context.onFinalContextUsage,
-      boundedHostedToolContinuationTimeout(context.hostedToolContinuationTimeoutMs),
-    );
+    return await normalizeResponse(sent.response, sent.audit, context.onFinalContextUsage);
   };
 }
 
@@ -109,8 +191,8 @@ async function requestBodyText(
 
 async function normalizeResponse(
   response: Response,
+  audit: RequestAudit,
   onFinalContextUsage: ((usage: XaiFinalContextUsage) => void) | undefined,
-  hostedToolContinuationTimeoutMs: number,
 ): Promise<Response> {
   if (!response.ok) {
     const bytes = new Uint8Array(await response.arrayBuffer());
@@ -118,13 +200,27 @@ async function normalizeResponse(
       bytes.byteLength > MAX_ERROR_BODY_BYTES ? bytes.slice(0, MAX_ERROR_BODY_BYTES) : bytes;
     const headers = new Headers(response.headers);
     headers.set(XAI_SUBSCRIPTION_TRANSPORT_ERROR_HEADER, "1");
+    await emitRequestEvent(audit, {
+      phase: "failed",
+      responseObserved: true,
+      status: response.status,
+      ...providerRequestIdFields(response.headers),
+    });
     return new Response(bounded, {
       status: response.status,
       statusText: response.statusText,
       headers,
     });
   }
-  if (!response.body) return response;
+  if (!response.body) {
+    await emitRequestEvent(audit, {
+      phase: "completed",
+      responseObserved: true,
+      status: response.status,
+      ...providerRequestIdFields(response.headers),
+    });
+    return response;
+  }
   const contentType = response.headers.get("content-type") ?? "";
   if (!contentType.includes("text/event-stream")) {
     const value = await response.json();
@@ -137,6 +233,12 @@ async function normalizeResponse(
       normalized.value && typeof normalized.value === "object" && !Array.isArray(normalized.value)
         ? (normalized.value as Record<string, unknown>).response
         : value;
+    await emitRequestEvent(audit, {
+      phase: "completed",
+      responseObserved: true,
+      status: response.status,
+      ...providerRequestIdFields(response.headers),
+    });
     return Response.json(responseValue, {
       status: response.status,
       statusText: response.statusText,
@@ -147,39 +249,154 @@ async function normalizeResponse(
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let pending = "";
-  let awaitingHostedToolContinuation = false;
-  const body = new ReadableStream<Uint8Array>({
-    async pull(controller) {
-      const chunk = await readNextChunk(
-        reader,
-        awaitingHostedToolContinuation ? hostedToolContinuationTimeoutMs : null,
+  let idleTimer: ReturnType<typeof setTimeout> | null = null;
+  let controllerRef: ReadableStreamDefaultController<Uint8Array> | null = null;
+  let silenceStartedAt = performance.now();
+  let streamSettled = false;
+  const errorStream = (error: unknown) => {
+    if (streamSettled || !controllerRef) return;
+    streamSettled = true;
+    controllerRef.error(error);
+  };
+  const closeStream = () => {
+    if (streamSettled || !controllerRef) return;
+    streamSettled = true;
+    controllerRef.close();
+  };
+  const clearIdleTimer = () => {
+    if (idleTimer !== null) clearTimeout(idleTimer);
+    idleTimer = null;
+  };
+  const armIdleTimer = () => {
+    clearIdleTimer();
+    idleTimer = setTimeout(() => {
+      if (audit.terminal || !controllerRef) return;
+      audit.terminal = true;
+      clearIdleTimer();
+      const now = performance.now();
+      const silenceDurationMs = Math.max(0, now - silenceStartedAt);
+      const error = new XaiSubscriptionStreamIdleTimeoutError(
+        audit.requestId,
+        audit.eventCount > 0,
+        audit.eventCount,
+        audit.lastEventType,
+        silenceDurationMs,
       );
-      pending += decoder.decode(chunk.value, { stream: !chunk.done });
-      const parts = pending.split("\n\n");
-      pending = parts.pop() ?? "";
-      let terminal = false;
-      for (const part of parts) {
-        const progress = sseProgress(part);
-        if (progress === "hosted_tool_done") awaitingHostedToolContinuation = true;
-        else if (progress === "continued" || progress === "terminal") {
-          awaitingHostedToolContinuation = false;
+      void reader.cancel(error).catch(() => undefined);
+      void emitRequestEvent(audit, {
+        phase: "timed_out",
+        responseObserved: audit.eventCount > 0,
+        status: response.status,
+        silenceDurationMs,
+        ...providerRequestIdFields(response.headers),
+      }).then(
+        () => errorStream(error),
+        () => errorStream(error),
+      );
+    }, audit.streamIdleTimeoutMs);
+    idleTimer.unref?.();
+  };
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controllerRef = controller;
+      silenceStartedAt = performance.now();
+      armIdleTimer();
+    },
+    async pull(controller) {
+      if (audit.terminal) return;
+      try {
+        const chunk = await reader.read();
+        if (audit.terminal) return;
+        pending += decoder.decode(chunk.value, { stream: !chunk.done });
+        const parts = pending.split(/\r?\n\r?\n/);
+        pending = parts.pop() ?? "";
+        if (chunk.done && pending) {
+          parts.push(pending);
+          pending = "";
         }
-        terminal ||= progress === "terminal";
-        controller.enqueue(encoder.encode(`${normalizeSseEvent(part, onFinalContextUsage)}\n\n`));
-      }
-      if (terminal) {
-        await reader.cancel().catch(() => undefined);
-        controller.close();
-        return;
-      }
-      if (chunk.done) {
-        if (pending)
-          controller.enqueue(encoder.encode(normalizeSseEvent(pending, onFinalContextUsage)));
-        controller.close();
+        for (const part of parts) {
+          const progress = sseProgress(part);
+          controller.enqueue(encoder.encode(`${normalizeSseEvent(part, onFinalContextUsage)}\n\n`));
+          if (!progress.valid) continue;
+          clearIdleTimer();
+          const now = performance.now();
+          const interEventGapMs = Math.max(0, now - (audit.lastProgressAt ?? audit.startedAt));
+          audit.eventCount = Math.min(Number.MAX_SAFE_INTEGER, audit.eventCount + 1);
+          audit.lastEventType = progress.eventType;
+          audit.lastProgressAt = now;
+          silenceStartedAt = now;
+          if (audit.eventCount === 1) {
+            await emitRequestEvent(audit, {
+              phase: "first_event",
+              responseObserved: true,
+              status: response.status,
+              ...providerRequestIdFields(response.headers),
+            });
+          } else {
+            emitDiagnosticEvent(audit, {
+              phase: "progress",
+              responseObserved: true,
+              status: response.status,
+              interEventGapMs,
+              ...providerRequestIdFields(response.headers),
+            });
+          }
+          if (progress.terminal) {
+            audit.terminal = true;
+            clearIdleTimer();
+            await reader.cancel().catch(() => undefined);
+            await emitRequestEvent(audit, {
+              phase: progress.terminal,
+              responseObserved: true,
+              status: response.status,
+              ...providerRequestIdFields(response.headers),
+            });
+            closeStream();
+            return;
+          }
+          armIdleTimer();
+        }
+        if (chunk.done) {
+          audit.terminal = true;
+          clearIdleTimer();
+          await emitRequestEvent(audit, {
+            phase: "failed",
+            responseObserved: true,
+            status: response.status,
+            ...providerRequestIdFields(response.headers),
+          });
+          closeStream();
+        }
+      } catch (error) {
+        if (audit.terminal) {
+          errorStream(error);
+          return;
+        }
+        audit.terminal = true;
+        clearIdleTimer();
+        await reader.cancel(error).catch(() => undefined);
+        await emitRequestEvent(audit, {
+          phase: "failed",
+          responseObserved: true,
+          status: response.status,
+          ...providerRequestIdFields(response.headers),
+        }).catch(() => undefined);
+        errorStream(error);
       }
     },
-    cancel(reason) {
-      return reader.cancel(reason);
+    async cancel(reason) {
+      streamSettled = true;
+      if (!audit.terminal) {
+        audit.terminal = true;
+        clearIdleTimer();
+        await emitRequestEvent(audit, {
+          phase: "failed",
+          responseObserved: true,
+          status: response.status,
+          ...providerRequestIdFields(response.headers),
+        }).catch(() => undefined);
+      }
+      await reader.cancel(reason).catch(() => undefined);
     },
   });
   return new Response(body, {
@@ -189,70 +406,114 @@ async function normalizeResponse(
   });
 }
 
-async function readNextChunk(
-  reader: ReadableStreamDefaultReader<Uint8Array>,
-  timeoutMs: number | null,
-): Promise<Awaited<ReturnType<ReadableStreamDefaultReader<Uint8Array>["read"]>>> {
-  if (timeoutMs === null) return await reader.read();
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  try {
-    return await Promise.race([
-      reader.read(),
-      new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(
-          () => reject(new XaiSubscriptionHostedToolContinuationError()),
-          timeoutMs,
-        );
-      }),
-    ]);
-  } catch (error) {
-    await reader.cancel(error).catch(() => undefined);
-    throw error;
-  } finally {
-    if (timer !== null) clearTimeout(timer);
-  }
-}
-
-function sseProgress(block: string): "none" | "hosted_tool_done" | "continued" | "terminal" {
+function sseProgress(block: string): SseProgress {
   for (const line of block.split("\n")) {
     if (!line.startsWith("data:")) continue;
-    const data = line.slice(5).trimStart();
+    const data = line.slice(5).trim();
     if (!data) continue;
-    if (data === "[DONE]") return "terminal";
+    if (data === "[DONE]") {
+      return { valid: true, eventType: "done", terminal: "completed" };
+    }
     try {
-      const value = JSON.parse(data) as Record<string, unknown>;
-      const type = typeof value.type === "string" ? value.type : "";
+      const parsed = JSON.parse(data) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return { valid: false, eventType: null, terminal: null };
+      }
+      const rawType = (parsed as Record<string, unknown>).type;
+      if (typeof rawType !== "string" || !/^[a-z0-9_.-]{1,96}$/i.test(rawType)) {
+        return { valid: false, eventType: null, terminal: null };
+      }
+      const type = rawType;
+      if (type === "response.completed") {
+        return { valid: true, eventType: type, terminal: "completed" };
+      }
       if (
-        type === "response.completed" ||
         type === "response.incomplete" ||
-        type === "response.failed"
+        type === "response.failed" ||
+        type === "response.error"
       ) {
-        return "terminal";
+        return { valid: true, eventType: type, terminal: "failed" };
       }
-      const item =
-        value.item && typeof value.item === "object" && !Array.isArray(value.item)
-          ? (value.item as Record<string, unknown>)
-          : null;
-      if (
-        type === "response.output_item.done" &&
-        (item?.type === "web_search_call" || item?.type === "x_search_call")
-      ) {
-        return "hosted_tool_done";
-      }
-      return "continued";
+      return { valid: true, eventType: type, terminal: null };
     } catch {
-      return "continued";
+      return { valid: false, eventType: null, terminal: null };
     }
   }
-  return "none";
+  return { valid: false, eventType: null, terminal: null };
 }
 
-function boundedHostedToolContinuationTimeout(value: number | undefined): number {
-  const resolved = value ?? DEFAULT_HOSTED_TOOL_CONTINUATION_TIMEOUT_MS;
-  if (!Number.isSafeInteger(resolved) || resolved < 1 || resolved > 10 * 60_000) {
-    throw new RangeError("SuperGrok hosted-tool continuation timeout is invalid");
+function boundedStreamIdleTimeout(value: number | undefined): number {
+  const resolved = value ?? XAI_RESPONSE_STREAM_IDLE_TIMEOUT_MS;
+  if (!Number.isSafeInteger(resolved) || resolved < 1 || resolved > MAX_STREAM_IDLE_TIMEOUT_MS) {
+    throw new RangeError("SuperGrok response stream idle timeout is invalid");
   }
   return resolved;
+}
+
+function providerRequestId(headers: Headers): string | undefined {
+  return headers.get("x-request-id") ?? headers.get("request-id") ?? undefined;
+}
+
+function providerRequestIdFields(headers: Headers): { providerRequestId: string } | object {
+  const value = providerRequestId(headers);
+  return value ? { providerRequestId: value } : {};
+}
+
+function requestEventFor(
+  audit: RequestAudit,
+  event: Omit<
+    XaiModelRequestEvent,
+    | "requestId"
+    | "transportAttempt"
+    | "model"
+    | "durationMs"
+    | "streamIdleTimeoutMs"
+    | "eventCount"
+    | "lastEventType"
+    | "lastProgressDurationMs"
+  >,
+): XaiModelRequestEvent {
+  const now = performance.now();
+  return {
+    requestId: audit.requestId,
+    transportAttempt: audit.transportAttempt,
+    model: audit.model,
+    durationMs: Math.max(0, now - audit.startedAt),
+    streamIdleTimeoutMs: audit.streamIdleTimeoutMs,
+    eventCount: audit.eventCount,
+    ...(audit.lastEventType ? { lastEventType: audit.lastEventType } : {}),
+    ...(audit.lastProgressAt !== null
+      ? {
+          lastProgressDurationMs: Math.max(0, audit.lastProgressAt - audit.startedAt),
+        }
+      : {}),
+    ...event,
+  };
+}
+
+function emitDiagnosticEvent(
+  audit: RequestAudit,
+  event: Parameters<typeof requestEventFor>[1],
+): XaiModelRequestEvent {
+  const observed = requestEventFor(audit, event);
+  try {
+    audit.ctx.onModelRequestDiagnostic?.(observed);
+  } catch {
+    // Diagnostics are in-memory and must never affect provider transport.
+  }
+  return observed;
+}
+
+async function emitRequestEvent(
+  audit: RequestAudit,
+  event: Parameters<typeof requestEventFor>[1],
+): Promise<void> {
+  if (event.phase === "completed" || event.phase === "failed" || event.phase === "timed_out") {
+    if (audit.terminalEventEmitted) return;
+    audit.terminalEventEmitted = true;
+  }
+  const observed = emitDiagnosticEvent(audit, event);
+  await audit.ctx.onModelRequestEvent?.(observed);
 }
 
 function normalizeSseEvent(
@@ -263,7 +524,7 @@ function normalizeSseEvent(
   return lines
     .map((line) => {
       if (!line.startsWith("data:")) return line;
-      const data = line.slice(5).trimStart();
+      const data = line.slice(5).trim();
       if (!data || data === "[DONE]") return line;
       try {
         const normalized = normalizeXaiResponseEventJson(JSON.parse(data));

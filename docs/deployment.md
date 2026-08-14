@@ -185,6 +185,9 @@ SuperGrok/xAI connected-subscription rail. Workspace scope is the default shared
 connection path; private user scope requires the exact managed-browser human.
 The same stable environments encryption key protects its OAuth material. See
 [`supergrok-subscription.md`](supergrok-subscription.md).
+`OPENGENI_SUPERGROK_RESPONSE_STREAM_IDLE_TIMEOUT_MS` optionally overrides the
+five-minute maximum silence between complete, valid SSE response events; it is
+not a total model-call or agent-run deadline.
 
 Bootstrap a new machine in two phases. First install only the persistent
 dependencies and wait until they are healthy:
@@ -1678,6 +1681,39 @@ Secret delivery should use one of these patterns:
 
 Do not put provider credentials, model keys, storage keys, kubeconfigs, TLS private keys, Terraform state, or generated connection strings in committed values files. Sandbox credentials are opt-in through `OPENGENI_SANDBOX_PREPARATION_PROFILES` and `OPENGENI_SANDBOX_ENV_ALLOWLIST`; keep the default `none` profile unless the run truly needs cloud or GitHub credentials inside the sandbox.
 
+### Sandbox rollout configuration authority
+
+Managed staging and production have one authoritative injection path for the
+sandbox rollout controls: set `OPENGENI_SANDBOX_OWNERSHIP_ENABLED`,
+`OPENGENI_SANDBOX_LAZY_PROVISION`, and
+`OPENGENI_RIG_VERIFICATION_LEASE_OWNERSHIP_ENABLED` in the environment consumed
+by `bun run deployment:runtime-artifacts`, then publish the generated
+`opengeni-runtime` Secret through the deployment's configured secret manager.
+The artifact generator preserves explicit `true` and `false`; an unset key is
+omitted and retains the config package's safe default of `false`.
+
+API, control-worker, and turn-worker Pods load the chart ConfigMap first and the
+runtime Secret second, so the Secret wins any duplicate key. Committed example
+values may state explicit local/preview defaults, but they are not production
+rollout authority and must not be copied into a managed production overlay.
+Remove any direct Pod `env`, shell export, or secondary ConfigMap override for
+these three keys before rollout.
+
+Each API and worker `/metrics` endpoint exposes
+`opengeni_sandbox_rollout_config{feature,state}` with the bounded features
+`ownership`, `lazy_provision`, and `rig_verification_lease_ownership` and the
+states `configured` and `effective`. The standard `component` and
+`deployment_revision` labels identify the workload revision without tenant,
+session, credential, or provider identifiers. Lazy provisioning can be
+configured while remaining ineffective until ownership is enabled, which is
+reported explicitly.
+
+Roll out ownership first. After every reaper/verifier consumer reports the
+compatible revision, enable rig-verification lease ownership separately as
+described in [Rig operational rollout](rigs.md#operational-rollout). Enable lazy
+provisioning only after the credential/resource eager-path canaries for the
+target release are green.
+
 ## Observability
 
 OpenGeni emits Prometheus-native metrics. Scrape `/metrics` directly; do not route scraped metrics through OTLP. API and worker processes also emit structured JSON logs and optional OTLP/HTTP JSON traces.
@@ -1758,8 +1794,9 @@ Minimum production dashboards should cover:
 - Worker execution: activity run rate, failure rate, and p50/p95/p99 `runAgentTurn` duration by `activity`, `status`, `variable set`, and `component`.
 - Google Drive sync: run outcome and failure ratio, reconnect-required events, p95 terminal activity-batch duration, logical provider requests, physical provider attempts/retries, explicit limit hits, and bounded terminal failure reasons, scoped by namespace, environment, release, and provider where applicable.
 - Turn lifecycle: `opengeni_turns_total{outcome}`, `opengeni_turn_duration_seconds`, `opengeni_turns_inflight`, `opengeni_turn_oldest_inflight_age_seconds`, and `opengeni_turn_oldest_no_progress_age_seconds`.
-- Model, Codex, and sandbox SLIs: `opengeni_model_calls_total{provider,outcome}`, `opengeni_model_call_duration_seconds{provider}`, `opengeni_codex_credential_selections_total{strategy,reason}`, `opengeni_codex_credential_failures_total{kind,outcome}`, `opengeni_codex_pool_observations_total{depth}`, `opengeni_codex_pool_low_total{depth}`, `opengeni_sandbox_creates_total{backend,image_source,outcome}`, `opengeni_sandbox_create_duration_seconds{backend,image_source}`, `opengeni_sandbox_operations_total{backend,op,outcome}` (`ok`, expected path `not_found`, or actual `failed`), `opengeni_sandbox_operation_duration_seconds{backend,op}`, `opengeni_sandbox_inventory_refresh_timestamp_seconds{domain}`, the chart's freshness-filtered `opengeni:*:fresh_max` inventory recording rules, `opengeni_sandbox_warming_timeouts_total{backend,stage}`, and `opengeni_sandbox_orphans_terminated_total`.
+- Model, Codex, and sandbox SLIs: `opengeni_model_calls_total{provider,outcome}`, `opengeni_model_call_duration_seconds{provider}`, `opengeni_codex_credential_selections_total{strategy,reason}`, `opengeni_codex_credential_failures_total{kind,outcome}`, `opengeni_codex_pool_observations_total{depth}`, `opengeni_codex_pool_low_total{depth}`, `opengeni_sandbox_creates_total{backend,image_source,outcome}`, `opengeni_sandbox_create_duration_seconds{backend,image_source}`, logical `opengeni_sandbox_provisions_total{backend,stage,category,outcome,expected}` plus `opengeni_sandbox_provision_duration_seconds` and `opengeni_sandbox_provision_internal_attempts`, internal `opengeni_sandbox_provision_attempts_total{backend,stage,category,outcome}` plus its duration histogram, `opengeni_sandbox_operations_total{backend,op,outcome}` (`ok`, expected path `not_found`, or actual `failed`), `opengeni_sandbox_operation_duration_seconds{backend,op}`, `opengeni_sandbox_inventory_refresh_timestamp_seconds{domain}`, the chart's freshness-filtered `opengeni:*:fresh_max` inventory recording rules, `opengeni_sandbox_warming_timeouts_total{backend,stage}`, and `opengeni_sandbox_orphans_terminated_total`. Logical provision metrics deliberately classify expected lifecycle transitions separately from actual failures; correlation/provider/session identities and error text are not labels.
 - Queue, admission, and billing: `opengeni_turns_queued`, `opengeni_turn_eligible_backlog`, `opengeni_turn_eligible_backlog_oldest_age_seconds`, `opengeni_turn_slot_saturation_ratio`, `opengeni_credit_balance_micros{account_id}`, `opengeni_credit_micros_total{kind}`, and `opengeni_build_info{version,revision}`.
+- Sandbox rollout state: `opengeni_sandbox_rollout_config{feature,state}` across API, control-worker, and turn-worker revisions; alert on disagreement before advancing a staged rollout.
 - Dependency health: Postgres connection health, Temporal worker poll health, NATS connectivity, object-storage write/read conformance, and sandbox backend readiness.
 - Runtime health: API/worker restarts, continuous turn-worker host/cgroup utilization and RSS reserve consumption, node memory/I/O PSI, swap-out activity, kubelet runtime errors, node readiness, pod pending time, collector scrape/export errors, and OTLP export failures.
 

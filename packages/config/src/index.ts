@@ -41,6 +41,7 @@ import {
   XAI_SUBSCRIPTION_MODEL_ID_PREFIX,
   XAI_SUBSCRIPTION_PROVIDER_ID,
   XAI_SUBSCRIPTION_PROXY_BASE_URL,
+  XAI_RESPONSE_STREAM_IDLE_TIMEOUT_MS,
 } from "@opengeni/xai-subscription";
 export { XAI_SUBSCRIPTION_MODEL_ID_PREFIX } from "@opengeni/xai-subscription";
 import { createHash } from "node:crypto";
@@ -603,6 +604,14 @@ const SettingsSchema = z.object({
   // SuperGrok/xAI connected subscription. This is a workspace-scoped OAuth
   // account pool and a distinct rail from the existing xai/* API-key provider.
   supergrokSubscriptionEnabled: EnvBoolean.default(false), // OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED
+  // Maximum silence between complete, valid SuperGrok SSE data events. This is
+  // not a request/run duration cap; every valid event resets the timer.
+  supergrokResponseStreamIdleTimeoutMs: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(24 * 60 * 60_000)
+    .default(XAI_RESPONSE_STREAM_IDLE_TIMEOUT_MS),
   // Expose the connected apps attached to a Codex subscription through the
   // synthetic codex_apps MCP server. Independent from subscription routing so
   // operators can use Codex models without exposing ChatGPT connectors.
@@ -2202,6 +2211,9 @@ export function getSettings(): Settings {
     modelProvidersJson: optional("OPENGENI_MODEL_PROVIDERS_JSON"),
     codexSubscriptionEnabled: optional("OPENGENI_CODEX_SUBSCRIPTION_ENABLED"),
     supergrokSubscriptionEnabled: optional("OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED"),
+    supergrokResponseStreamIdleTimeoutMs: optional(
+      "OPENGENI_SUPERGROK_RESPONSE_STREAM_IDLE_TIMEOUT_MS",
+    ),
     codexConnectedAppsEnabled: optional("OPENGENI_CODEX_CONNECTED_APPS_ENABLED"),
     codexToolSearchEnabled: optional("OPENGENI_CODEX_TOOL_SEARCH_ENABLED"),
     lazyToolSearchEnabled: optional("OPENGENI_LAZY_TOOL_SEARCH_ENABLED"),

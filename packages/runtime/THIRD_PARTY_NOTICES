@@ -1,6 +1,28 @@
 Third-Party Notices for @opengeni/runtime
 ========================================
 
+Optional curated Terraform Skills
+----------------------------------
+
+The runtime source package contains these optional curated Skill artifacts
+vendored from hashicorp/agent-skills at commit
+de4323afdfbc30d1387f287b55062fa8d82b62e8:
+
+- azure-verified-modules
+- refactor-module
+- terraform-search-import
+- terraform-stacks
+- terraform-style-guide
+- terraform-test
+
+These Skill artifacts are licensed under the Mozilla Public License 2.0
+(MPL-2.0). The complete, unmodified license text is published with this package
+at `src/curated_skill_library/LICENSE`. Exact per-entry source paths and
+provenance are recorded in `src/skill-library.ts`.
+
+MIT-licensed executable dependencies
+------------------------------------
+
 The executable runtime bundle contains code from these MIT-licensed packages:
 
 @openai/agents 0.14.3

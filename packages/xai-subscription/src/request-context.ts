@@ -16,6 +16,24 @@ export type XaiFinalContextUsage = {
   totalTokens: number;
 };
 
+export type XaiModelRequestEvent = {
+  requestId: string;
+  transportAttempt: number;
+  phase: "started" | "headers" | "first_event" | "progress" | "completed" | "failed" | "timed_out";
+  model?: string;
+  durationMs: number;
+  responseObserved: boolean;
+  streamIdleTimeoutMs: number;
+  status?: number;
+  providerRequestId?: string;
+  eventCount: number;
+  lastEventType?: string;
+  lastProgressDurationMs?: number;
+  interEventGapMs?: number;
+  silenceDurationMs?: number;
+  willRetry?: boolean;
+};
+
 export type XaiSubscriptionRequestContext = {
   clientVersion: string;
   sessionId: string;
@@ -26,8 +44,14 @@ export type XaiSubscriptionRequestContext = {
   hostedSearch?: XaiHostedSearchOptions;
   onFinalContextUsage?: (usage: XaiFinalContextUsage) => void;
   nextRequestId?: () => string;
-  /** Internal/test seam. Production uses the transport's bounded default. */
+  /** Maximum silence between complete, valid SSE data events. */
+  streamIdleTimeoutMs?: number;
+  /** @deprecated Use streamIdleTimeoutMs. Retained as a compatibility alias. */
   hostedToolContinuationTimeoutMs?: number;
+  /** Synchronous, best-effort diagnostics; never receives bodies, auth, or output. */
+  onModelRequestDiagnostic?: (event: XaiModelRequestEvent) => void;
+  /** Worker-owned durable lifecycle audit; never receives bodies, auth, or output. */
+  onModelRequestEvent?: (event: XaiModelRequestEvent) => Promise<void> | void;
 };
 
 export const xaiSubscriptionRequestStorage = new AsyncLocalStorage<XaiSubscriptionRequestContext>();

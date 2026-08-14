@@ -45,6 +45,61 @@ export class XaiSubscriptionHostedToolContinuationError extends XaiSubscriptionE
   }
 }
 
+export class XaiSubscriptionStreamIdleTimeoutError extends XaiSubscriptionError {
+  readonly code = "xai_response_stream_idle_timeout";
+
+  constructor(
+    readonly requestId: string,
+    readonly responseObserved: boolean,
+    readonly eventCount: number,
+    readonly lastEventType: string | null,
+    readonly silenceDurationMs: number,
+  ) {
+    super(
+      "timeout",
+      "SuperGrok stopped sending valid response events. The partial response was preserved and was not replayed automatically.",
+    );
+    this.name = "XaiSubscriptionStreamIdleTimeoutError";
+  }
+}
+
+export type XaiSubscriptionStreamIdleTimeoutInfo = {
+  requestId: string | null;
+  responseObserved: boolean;
+  eventCount: number;
+  lastEventType: string | null;
+  silenceDurationMs: number;
+};
+
+export function classifyXaiSubscriptionStreamIdleTimeoutError(
+  error: unknown,
+): XaiSubscriptionStreamIdleTimeoutInfo | null {
+  let current: unknown = error;
+  for (let depth = 0; depth < 8 && current && typeof current === "object"; depth += 1) {
+    const value = current as Record<string, unknown>;
+    if (
+      current instanceof XaiSubscriptionStreamIdleTimeoutError ||
+      value.code === "xai_response_stream_idle_timeout"
+    ) {
+      return {
+        requestId: typeof value.requestId === "string" ? value.requestId : null,
+        responseObserved: value.responseObserved === true,
+        eventCount:
+          typeof value.eventCount === "number" && Number.isSafeInteger(value.eventCount)
+            ? value.eventCount
+            : 0,
+        lastEventType: typeof value.lastEventType === "string" ? value.lastEventType : null,
+        silenceDurationMs:
+          typeof value.silenceDurationMs === "number" && Number.isFinite(value.silenceDurationMs)
+            ? Math.max(0, value.silenceDurationMs)
+            : 0,
+      };
+    }
+    current = value.cause;
+  }
+  return null;
+}
+
 export function isXaiSubscriptionHostedToolContinuationError(error: unknown): boolean {
   let current: unknown = error;
   for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
