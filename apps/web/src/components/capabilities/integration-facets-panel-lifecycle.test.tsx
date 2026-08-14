@@ -110,6 +110,78 @@ describe("Integration Facet lifecycle state", () => {
       await rendered.unmount();
     }
   });
+
+  test("applies concurrent lifecycle results for different facets independently", async () => {
+    const firstActive = binding("active", 1, "inventory-source", "102");
+    const secondActive = binding("active", 1, "orders-source", "105");
+    const firstPaused = binding("paused", 2, "inventory-source", "102");
+    const secondPaused = binding("paused", 2, "orders-source", "105");
+    type LifecycleResult = {
+      capabilityId: string;
+      instanceKey: string;
+      facetKey: string;
+      status: "paused";
+      binding: IntegrationFacetBindingSummary;
+    };
+    const resolvers = new Map<string, (result: LifecycleResult) => void>();
+    const pauseIntegrationFacet = mock(
+      async (_workspaceId: string, _capabilityId: string, _instanceKey: string, facetKey: string) =>
+        await new Promise<LifecycleResult>((resolve) => {
+          resolvers.set(facetKey, resolve);
+        }),
+    );
+    const client = {
+      listIntegrationFacets: mock(async () => response(firstActive, secondActive)),
+      pauseIntegrationFacet,
+    } as unknown as OpenGeniCoreClient;
+    const rendered = await renderPanel({ client, facetCount: 2 });
+    try {
+      await act(async () => button(rendered.container, "Manage facets").click());
+      await waitFor(() => facet(rendered.container, "inventory-source") !== null);
+
+      await act(async () =>
+        button(requiredFacet(rendered.container, "inventory-source"), "Pause").click(),
+      );
+      await waitFor(() => resolvers.has("inventory-source"));
+      await act(async () =>
+        button(requiredFacet(rendered.container, "orders-source"), "Pause").click(),
+      );
+      await waitFor(() => resolvers.has("orders-source"));
+
+      await act(async () =>
+        resolvers.get("orders-source")?.({
+          capabilityId: instance.capabilityId,
+          instanceKey: instance.instanceKey,
+          facetKey: "orders-source",
+          status: "paused",
+          binding: secondPaused,
+        }),
+      );
+      await waitFor(
+        () => facet(rendered.container, "orders-source")?.textContent?.includes("Paused") === true,
+      );
+
+      await act(async () =>
+        resolvers.get("inventory-source")?.({
+          capabilityId: instance.capabilityId,
+          instanceKey: instance.instanceKey,
+          facetKey: "inventory-source",
+          status: "paused",
+          binding: firstPaused,
+        }),
+      );
+      await waitFor(
+        () =>
+          facet(rendered.container, "inventory-source")?.textContent?.includes("Paused") === true,
+      );
+
+      expect(pauseIntegrationFacet).toHaveBeenCalledTimes(2);
+      expect(facet(rendered.container, "inventory-source")?.textContent).toContain("Paused");
+      expect(facet(rendered.container, "orders-source")?.textContent).toContain("Paused");
+    } finally {
+      await rendered.unmount();
+    }
+  });
 });
 
 async function renderPanel(props: Partial<ComponentProps<typeof IntegrationFacetsPanel>> = {}) {
@@ -166,33 +238,45 @@ function button(container: ParentNode, label: string): HTMLButtonElement {
   return match;
 }
 
-function response(bindingValue: IntegrationFacetBindingSummary): IntegrationInstanceFacetsResponse {
+function facet(container: ParentNode, facetKey: string): HTMLElement | null {
+  return container.querySelector<HTMLElement>(`[data-integration-facet="${facetKey}"]`);
+}
+
+function requiredFacet(container: ParentNode, facetKey: string): HTMLElement {
+  const match = facet(container, facetKey);
+  if (!match) throw new Error(`Missing facet: ${facetKey}`);
+  return match;
+}
+
+function response(
+  ...bindingValues: IntegrationFacetBindingSummary[]
+): IntegrationInstanceFacetsResponse {
   return {
     capabilityId: instance.capabilityId,
     instanceKey: instance.instanceKey,
     providerDomain: instance.providerDomain,
     connectionId: instance.connectionId,
-    facets: [
-      {
-        definition: {
-          facetKey: "inventory-source",
-          kind: "knowledge_source",
-          configSchema: { type: "object", properties: {} },
-          capabilities: {},
-        },
-        binding: bindingValue,
+    facets: bindingValues.map((bindingValue) => ({
+      definition: {
+        facetKey: bindingValue.facetKey,
+        kind: "knowledge_source",
+        configSchema: { type: "object", properties: {} },
+        capabilities: {},
       },
-    ],
+      binding: bindingValue,
+    })),
   };
 }
 
 function binding(
   status: IntegrationFacetBindingSummary["status"],
   version: number,
+  facetKey = "inventory-source",
+  idSuffix = "102",
 ): IntegrationFacetBindingSummary {
   return {
-    id: "00000000-0000-4000-8000-000000000102",
-    facetKey: "inventory-source",
+    id: `00000000-0000-4000-8000-000000000${idSuffix}`,
+    facetKey,
     kind: "knowledge_source",
     bindingKey: "finance",
     displayName: "Finance inventory",
