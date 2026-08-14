@@ -66,6 +66,13 @@ const KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_TABLES = [
 ] as const;
 const MANAGED_HUMAN_PERSONAL_WORKSPACE_ROUTINE =
   "ensure_managed_human_personal_workspace(uuid, text, uuid)";
+const GOOGLE_DRIVE_ACCOUNT_ADMIN_AUTHORITY_ROUTINE =
+  "google_drive_workspace_account_admin_authorized(uuid, uuid, text)";
+const GOOGLE_DRIVE_ACCOUNT_ADMIN_AUTHORITY_TABLES = [
+  "managed_accounts",
+  "organization_memberships",
+  "workspaces",
+] as const;
 const MANAGED_HUMAN_PERSONAL_WORKSPACE_AUTHORITY_TABLES = [
   "organization_memberships",
   "organization_user_retention_policies",
@@ -123,6 +130,7 @@ const XAI_AUTHORITY_TABLES = [
 
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   FORK_SESSION_CONTENT_ROUTINE,
+  GOOGLE_DRIVE_ACCOUNT_ADMIN_AUTHORITY_ROUTINE,
   XAI_AUTHORITY_LIVE_ROUTINE,
   XAI_CREATE_CREDENTIAL_ROUTINE,
   XAI_DISCONNECT_CREDENTIAL_ROUTINE,
@@ -1344,6 +1352,29 @@ export function evaluateRuntimeDatabasePosture(
         violations.push(
           `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0].owner}`,
         );
+      }
+    } else if (routine.name === GOOGLE_DRIVE_ACCOUNT_ADMIN_AUTHORITY_ROUTINE) {
+      const missingAuthorityTables = GOOGLE_DRIVE_ACCOUNT_ADMIN_AUTHORITY_TABLES.filter(
+        (tableName) => !tableByName.has(tableName),
+      );
+      if (missingAuthorityTables.length > 0) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
+        );
+      } else {
+        const authorityTables = GOOGLE_DRIVE_ACCOUNT_ADMIN_AUTHORITY_TABLES.map(
+          (tableName) => tableByName.get(tableName)!,
+        );
+        const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+        if (authorityOwners.size !== 1) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
+          );
+        } else if (routine.owner !== authorityTables[0]!.owner) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
+          );
+        }
       }
     } else if ((CANONICAL_HUMAN_IDENTITY_ROUTINES as readonly string[]).includes(routine.name)) {
       const authorityTables = CANONICAL_HUMAN_IDENTITY_AUTHORITY_TABLES.filter((tableName) =>

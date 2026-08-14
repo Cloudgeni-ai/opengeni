@@ -25,6 +25,7 @@ import {
   encryptEnvironmentValue,
   getConnectionMetadata,
   getWorkspaceGrant,
+  hasCurrentAccountAdminForWorkspaceCredential,
   loadConnectionCredentialForBroker,
   persistProviderOAuthConnection,
 } from "@opengeni/db";
@@ -71,6 +72,8 @@ type ProviderOAuthState = {
   connectionId?: string;
   connectionVersion?: number;
   expectedProviderPrincipalId?: string;
+  workspaceGoogleDriveAccountAdmin?: true;
+  googleDriveScopeNarrowing?: true;
   nonce: string;
   iat: number;
 };
@@ -119,6 +122,7 @@ export async function startApiIntegrationProviderOAuth(
     subjectId: string;
     requestUrl: string;
     payload: ApiIntegrationOAuthStartRequest;
+    canManageWorkspaceGoogleDriveCredential: boolean;
   },
 ): Promise<OAuthStartResponse> {
   const definition = requiredDefinition(input.payload.definitionId);
@@ -156,10 +160,20 @@ export async function startApiIntegrationProviderOAuth(
     });
   }
   const ownership = existingOwnership ?? input.payload.ownership ?? "personal";
-  const authorizeScopes = uniqueStrings([
-    ...(existing?.grantedScopes ?? []),
-    ...definition.authentication.scopes,
-  ]);
+  const workspaceGoogleDriveCredential =
+    definition.id === "google-drive" && ownership === "workspace";
+  if (workspaceGoogleDriveCredential && !input.canManageWorkspaceGoogleDriveCredential) {
+    throw new HTTPException(403, {
+      message: "missing permission: account:admin",
+    });
+  }
+  const googleDriveReconnect = definition.id === "google-drive" && existing !== null;
+  const authorizeScopes =
+    definition.id === "google-drive"
+      ? uniqueStrings([...definition.authentication.scopes])
+      : uniqueStrings([...(existing?.grantedScopes ?? []), ...definition.authentication.scopes]);
+  const googleDriveScopeNarrowing =
+    googleDriveReconnect && !scopeSetsEqual(existing.grantedScopes, authorizeScopes);
   const client = providerClientForDefinition(deps.settings, definition);
   const verifier = randomBytes(48).toString("base64url");
   const key = requireEnvironmentEncryption(deps.settings);
@@ -188,6 +202,8 @@ export async function startApiIntegrationProviderOAuth(
           expectedProviderPrincipalId: existingMetadata!.providerPrincipalId,
         }
       : {}),
+    ...(workspaceGoogleDriveCredential ? { workspaceGoogleDriveAccountAdmin: true } : {}),
+    ...(googleDriveScopeNarrowing ? { googleDriveScopeNarrowing: true } : {}),
   });
   const authorizationUrl = new URL(definition.authentication.authorizationUrl);
   authorizationUrl.searchParams.set("response_type", "code");
@@ -203,7 +219,10 @@ export async function startApiIntegrationProviderOAuth(
   authorizationUrl.searchParams.set("prompt", "select_account");
   if (definition.provider.id === "google") {
     authorizationUrl.searchParams.set("access_type", "offline");
-    authorizationUrl.searchParams.set("include_granted_scopes", "true");
+    authorizationUrl.searchParams.set(
+      "include_granted_scopes",
+      definition.id === "google-drive" ? "false" : "true",
+    );
     authorizationUrl.searchParams.set("prompt", "consent select_account");
   }
   return OAuthStartResponse.parse({
@@ -245,7 +264,13 @@ export async function completeApiIntegrationProviderOAuth(
     if (
       state.definitionFingerprint !== providerDefinitionFingerprint(definition) ||
       state.providerDomain !== integrationDefinitionProviderDomain(definition) ||
-      definition.authentication.scopes.some((scope) => !state!.authorizeScopes.includes(scope))
+      (definition.id === "google-drive"
+        ? !scopeSetsEqual(state.authorizeScopes, definition.authentication.scopes)
+        : definition.authentication.scopes.some(
+            (scope) => !state!.authorizeScopes.includes(scope),
+          )) ||
+      (state.googleDriveScopeNarrowing === true &&
+        (definition.id !== "google-drive" || !state.connectionId))
     ) {
       throw new ProviderOAuthCallbackError("state_invalid");
     }
@@ -267,7 +292,19 @@ export async function completeApiIntegrationProviderOAuth(
     if (!providerScopesInclude(definition, token.scopes, state.authorizeScopes)) {
       throw new ProviderOAuthCallbackError("scope_not_granted");
     }
-    const grantedScopes = token.scopes.length > 0 ? token.scopes : state.authorizeScopes;
+    if (
+      definition.id === "google-drive" &&
+      ((state.googleDriveScopeNarrowing === true && token.scopes.length === 0) ||
+        (token.scopes.length > 0 && !scopeSetsEqual(token.scopes, state.authorizeScopes)))
+    ) {
+      throw new ProviderOAuthCallbackError("scope_not_granted");
+    }
+    const grantedScopes =
+      definition.id === "google-drive"
+        ? [...state.authorizeScopes]
+        : token.scopes.length > 0
+          ? token.scopes
+          : state.authorizeScopes;
     const identity = await verifyProviderIdentity(deps, definition, token);
     if (
       state.expectedProviderPrincipalId &&
@@ -294,6 +331,9 @@ export async function completeApiIntegrationProviderOAuth(
       throw new ProviderOAuthCallbackError("account_mismatch");
     }
     let refreshToken = token.refreshToken;
+    if (!refreshToken && state.googleDriveScopeNarrowing === true) {
+      throw new ProviderOAuthCallbackError("refresh_token_missing");
+    }
     if (!refreshToken && existing) {
       const previous = await loadConnectionCredentialForBroker(deps.db, deps.settings, {
         workspaceId: state.workspaceId,
@@ -356,6 +396,14 @@ export async function completeApiIntegrationProviderOAuth(
       credentialRole: API_INTEGRATION_OAUTH_CREDENTIAL_ROLE,
       providerFamily: definition.provider.id,
       providerPrincipalId: identity.principalId,
+      ...(state.definitionId === "google-drive" && state.ownership === "workspace"
+        ? {
+            workspaceCredentialAuthority: {
+              kind: "google_drive_account_admin" as const,
+              subjectId: state.subjectId,
+            },
+          }
+        : {}),
       ...(state.connectionId
         ? {
             requestedConnectionId: state.connectionId,
@@ -513,7 +561,15 @@ function readProviderOAuthState(raw: string | undefined, settings: Settings): Pr
     returnPath: safeReturnPath(requiredStateString(payload.returnPath)),
     ...(connectionId ? { connectionId, connectionVersion: connectionVersion! } : {}),
     ...(optionalString(payload.expectedProviderPrincipalId)
-      ? { expectedProviderPrincipalId: optionalString(payload.expectedProviderPrincipalId)! }
+      ? {
+          expectedProviderPrincipalId: optionalString(payload.expectedProviderPrincipalId)!,
+        }
+      : {}),
+    ...(payload.workspaceGoogleDriveAccountAdmin === true
+      ? { workspaceGoogleDriveAccountAdmin: true as const }
+      : {}),
+    ...(payload.googleDriveScopeNarrowing === true
+      ? { googleDriveScopeNarrowing: true as const }
       : {}),
     nonce: requiredStateString(payload.nonce),
     iat,
@@ -645,7 +701,15 @@ async function providerFetch(
 
 async function requireProviderOAuthGrant(
   deps: ApiRouteDeps,
-  state: Pick<ProviderOAuthState, "accountId" | "workspaceId" | "subjectId">,
+  state: Pick<
+    ProviderOAuthState,
+    | "accountId"
+    | "workspaceId"
+    | "subjectId"
+    | "ownership"
+    | "definitionId"
+    | "workspaceGoogleDriveAccountAdmin"
+  >,
 ): Promise<void> {
   const grant = await getWorkspaceGrant(deps.db, state.subjectId, state.workspaceId);
   if (
@@ -654,6 +718,14 @@ async function requireProviderOAuthGrant(
     !hasPermission(grant.permissions, "connections:write")
   ) {
     throw new ProviderOAuthCallbackError("connection_conflict");
+  }
+  if (state.definitionId === "google-drive" && state.ownership === "workspace") {
+    if (
+      state.workspaceGoogleDriveAccountAdmin !== true ||
+      !(await hasCurrentAccountAdminForWorkspaceCredential(deps.db, state))
+    ) {
+      throw new ProviderOAuthCallbackError("connection_conflict");
+    }
   }
 }
 
@@ -692,6 +764,12 @@ function providerScopesInclude(
   return definition.authentication.scopes.every((scope) => granted.has(normalize(scope)));
 }
 
+function scopeSetsEqual(left: readonly string[], right: readonly string[]): boolean {
+  const leftSet = new Set(left);
+  const rightSet = new Set(right);
+  return leftSet.size === rightSet.size && [...leftSet].every((scope) => rightSet.has(scope));
+}
+
 function providerOAuthReturnUrl(
   baseUrl: string,
   returnPath: string,
@@ -713,11 +791,15 @@ function providerOAuthFailureReason(error: unknown): ProviderOAuthFailureReason 
 
 function safeReturnPath(value: string): string {
   if (!value.startsWith("/") || value.startsWith("//")) {
-    throw new HTTPException(400, { message: "OAuth returnPath must be a relative path" });
+    throw new HTTPException(400, {
+      message: "OAuth returnPath must be a relative path",
+    });
   }
   const parsed = new URL(value, "https://opengeni.local");
   if (parsed.origin !== "https://opengeni.local" || parsed.pathname.startsWith("//")) {
-    throw new HTTPException(400, { message: "OAuth returnPath must be a relative path" });
+    throw new HTTPException(400, {
+      message: "OAuth returnPath must be a relative path",
+    });
   }
   return `${parsed.pathname}${parsed.search}${parsed.hash}`;
 }

@@ -9,6 +9,7 @@ import {
 } from "@opengeni/contracts/atlassian";
 import {
   API_INTEGRATION_OAUTH_CREDENTIAL_ROLE,
+  ApiIntegrationOAuthConnectionMetadata,
   ApiIntegrationOAuthStartRequest,
   ConnectionResponse,
   CreateConnectionRequest,
@@ -808,7 +809,13 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.delete("/v1/workspaces/:workspaceId/connections/:connectionId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const connectionId = c.req.param("connectionId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "connections:write",
+    );
+    const { grant } = authorization;
     const existing = await getConnectionMetadata(db, workspaceId, connectionId, grant.subjectId);
     if (!existing) {
       throw new HTTPException(404, { message: "connection not found" });
@@ -818,6 +825,21 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       existing.providerDomain === GOOGLE_DRIVE_PROVIDER_DOMAIN &&
       existing.kind === "oauth2" &&
       GoogleDriveConnectionMetadata.safeParse(existing.metadata).success;
+    const providerOAuthMetadata = ApiIntegrationOAuthConnectionMetadata.safeParse(
+      existing.metadata,
+    );
+    const isWorkspaceGoogleDriveProviderOAuth =
+      existing.subjectId === null &&
+      existing.providerDomain === "www.googleapis.com" &&
+      existing.kind === "oauth2" &&
+      providerOAuthMetadata.success &&
+      providerOAuthMetadata.data.authorizedDefinitionIds.includes("google-drive");
+    if (
+      isWorkspaceGoogleDriveProviderOAuth &&
+      authorization.accountGrant?.permissions.includes("account:admin") !== true
+    ) {
+      throw new HTTPException(403, { message: "missing permission: account:admin" });
+    }
     const isAtlassian =
       existing.subjectId === grant.subjectId &&
       existing.providerDomain === ATLASSIAN_PROVIDER_DOMAIN &&
@@ -911,7 +933,13 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/integrations/oauth/start", async (c) => {
     assertIntegrationsEnabled();
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "connections:write",
+    );
+    const { grant } = authorization;
     const parsed = ApiIntegrationOAuthStartRequest.safeParse(await c.req.json());
     if (!parsed.success) {
       throw new HTTPException(400, {
@@ -926,6 +954,8 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           subjectId: grant.subjectId,
           requestUrl: c.req.url,
           payload: parsed.data,
+          canManageWorkspaceGoogleDriveCredential:
+            authorization.accountGrant?.permissions.includes("account:admin") === true,
         }),
       ),
     );

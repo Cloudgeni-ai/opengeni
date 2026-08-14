@@ -26,16 +26,27 @@ materializes a scoped knowledge source and a shared Schedule action:
   Background sync is authorized solely by **Enable synchronization** and does
   not pause for per-run approval.
 - Deleting a sync Schedule first disables that exact source selection and
-tombstones its scoped source. Later saves keep it disabled until the same
-initiating subject explicitly enables synchronization again.
+  tombstones its scoped source. Later saves keep it disabled until the same
+  initiating subject explicitly enables synchronization again.
 
 The Capabilities platform can install multiple named Drive instances (for
 example, Finance and Sales). Each instance is bound to one exact Personal or
 workspace Connection and its own feature configuration; provider-domain
 fallback and singleton credential reuse are not authority. The newer provider
-preset may expose separately reviewed Drive read/write tools, while scheduled
-knowledge ingestion remains an explicit source feature with its own destination
-and enablement fences.
+preset requests `drive.readonly` and exposes only an explicit allowlist of Drive
+read operations for files, folders, Shared Drives, change cursors, exports, and
+permission metadata. Provider Discovery write methods are omitted from the
+compiled tool revision rather than retained as tools that fail at authorization.
+Outbound publishing and incremental `drive.file` consent are separate work and
+are not activated by this source preset. Scheduled knowledge ingestion remains
+an explicit source feature with its own destination and enablement fences.
+
+Creating, replacing, reconnecting, or disconnecting a workspace-owned Google
+Drive credential requires literal `account:admin` authority for the exact
+control workspace. `connections:write` and `workspace:admin` do not expand into
+that organization credential authority. Personal named instances remain
+subject-owned and independently manageable, and using an already-configured
+source does not require credential-management authority.
 
 Google currently classifies `drive.readonly` as a restricted scope.
 Keep the OAuth app in Testing with explicit test users for local development.
@@ -459,7 +470,7 @@ default-off and exposes only an internal, deterministic `provider_event` wake
 seam. Event payloads never mutate source truth or advance provider cursors; the
 authoritative Changes drain and periodic full repair still do that work.
 Workspace Events subscription/Pub/Sub provisioning and live provider acceptance
-remain release work, as does Drive ACL/citation reauthorization.
+remain release work.
 
 The **Only me**, **This workspace**, and **Company** options are immutable
 knowledge authority, not presentation labels. **Hourly**, **Daily**, and **On
@@ -521,10 +532,10 @@ demo video, privacy policy, user help, and security-assessment evidence:
    into the sync authority and revalidated before provider access and durable
    writes.
 10. Pause, disconnect, revoked grants, app removal, re-consent requirements, and
-   permission loss stop effective delivery and advance deny-side retrieval
-   authority. Disconnect is local and intentionally does not call Google's
-   project-wide token-revocation endpoint; users must remove CloudGeni access in
-   their Google Account when they also want provider-side revocation.
+    permission loss stop effective delivery and advance deny-side retrieval
+    authority. Disconnect is local and intentionally does not call Google's
+    project-wide token-revocation endpoint; users must remove CloudGeni access in
+    their Google Account when they also want provider-side revocation.
 11. Imported Drive Documents remain `agentAccess=false` until a fresh,
     generation-fenced ACL evidence operation authorizes retrieval. Knowledge
     ranking, exact reads, citations, and every file-byte consumer then recheck
@@ -632,12 +643,12 @@ context, an agent sandbox, logs, or browser persistence.
 Record the following non-secret evidence in the operator-owned acceptance
 tracker before any provider submission or production use:
 
-| Gate | Required named owner and dated evidence |
-| --- | --- |
-| Product/Privacy | Approved consent, just-in-time disclosure, Drive-specific privacy/Limited Use, retention/deletion/export, and launch claims. |
+| Gate                  | Required named owner and dated evidence                                                                                                          |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Product/Privacy       | Approved consent, just-in-time disclosure, Drive-specific privacy/Limited Use, retention/deletion/export, and launch claims.                     |
 | Google OAuth operator | Production project/client label, audience, domains, exact redirects, verification submission/status, and explicit testing/production separation. |
-| Security/CASA | Assessment applicability decision, assessor, submission/findings/remediation, approval/Letter of Validation, and renewal date. |
-| Support | Published help/data-management URL, support contact, response/escalation target, and deletion-completion workflow. |
+| Security/CASA         | Assessment applicability decision, assessor, submission/findings/remediation, approval/Letter of Validation, and renewal date.                   |
+| Support               | Published help/data-management URL, support contact, response/escalation target, and deletion-completion workflow.                               |
 
 Keep external acceptance blocked until every applicable row has a human owner,
 date, evidence link, and Google/assessor status. A source merge supplies reusable

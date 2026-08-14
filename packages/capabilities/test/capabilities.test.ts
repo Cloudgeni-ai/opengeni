@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { buildSchema, introspectionFromSchema } from "graphql";
 
 import {
+  GOOGLE_DRIVE_INTEGRATION_DEFINITION,
   GOOGLE_GMAIL_INTEGRATION_DEFINITION,
   MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION,
   applyCredentialPlacements,
@@ -361,6 +362,96 @@ describe("provider adapters and MCP manifest", () => {
       id: "microsoft",
       domain: "graph.microsoft.com",
     });
+  });
+
+  test("limits Google Drive to the reviewed read-only operation set", () => {
+    const filtered = filterOpenApiDocumentForDefinition(
+      googleDiscoveryToOpenApi({
+        name: "drive",
+        title: "Drive API",
+        version: "v3",
+        rootUrl: "https://www.googleapis.com/",
+        servicePath: "drive/v3/",
+        resources: {
+          files: {
+            methods: {
+              list: {
+                id: "drive.files.list",
+                path: "files",
+                httpMethod: "GET",
+              },
+              get: {
+                id: "drive.files.get",
+                path: "files/{fileId}",
+                httpMethod: "GET",
+              },
+              download: {
+                id: "drive.files.download",
+                path: "files/{fileId}/download",
+                httpMethod: "POST",
+              },
+              create: {
+                id: "drive.files.create",
+                path: "files",
+                httpMethod: "POST",
+              },
+              update: {
+                id: "drive.files.update",
+                path: "files/{fileId}",
+                httpMethod: "PATCH",
+              },
+              delete: {
+                id: "drive.files.delete",
+                path: "files/{fileId}",
+                httpMethod: "DELETE",
+              },
+            },
+          },
+          permissions: {
+            methods: {
+              list: {
+                id: "drive.permissions.list",
+                path: "files/{fileId}/permissions",
+                httpMethod: "GET",
+              },
+              create: {
+                id: "drive.permissions.create",
+                path: "files/{fileId}/permissions",
+                httpMethod: "POST",
+              },
+            },
+          },
+        },
+      }),
+      GOOGLE_DRIVE_INTEGRATION_DEFINITION,
+    );
+    const revision = compileOpenApiRevision(filtered, {
+      definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+      provider: "google",
+    });
+
+    expect(
+      GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes.filter((scope) =>
+        scope.startsWith("https://www.googleapis.com/auth/drive"),
+      ),
+    ).toEqual(["https://www.googleapis.com/auth/drive.readonly"]);
+    expect(GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes).not.toContain(
+      "https://www.googleapis.com/auth/drive",
+    );
+    expect(GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes).not.toContain(
+      "https://www.googleapis.com/auth/drive.file",
+    );
+    expect(revision.tools.map((tool) => tool.operationKey).sort()).toEqual([
+      "drive.files.get",
+      "drive.files.list",
+      "drive.permissions.list",
+    ]);
+    expect(
+      revision.tools.every((tool) => tool.safety === "read" && tool.approvalMode === "never"),
+    ).toBe(true);
+    expect(JSON.stringify(filtered)).not.toMatch(
+      /drive\.(files\.(download|create|update|delete)|permissions\.create)/,
+    );
   });
 
   test("projects malformed MCP entries out and deterministically resolves name collisions", () => {

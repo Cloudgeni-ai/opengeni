@@ -101,27 +101,27 @@ const REVIEWED_INTEGRATION_EXPERIENCES: Readonly<Record<string, ReviewedIntegrat
   "google-drive": {
     providerName: "Google",
     icon: "files",
-    introduction: "Let agents work with files in the Google Drive account you choose.",
+    introduction: "Let agents read files from the Google Drive account you choose.",
     capabilities: [
       {
         title: "Find files and folders",
         description: "Browse and search content in My Drive and shared drives.",
       },
       {
-        title: "Create and update content",
-        description: "Work with files and folders through the reviewed Drive tools.",
+        title: "Read supported content",
+        description: "Open and export supported files for reviewed knowledge-source work.",
       },
       {
-        title: "Manage sharing",
-        description: "Review and update links, permissions, and shared-drive content.",
+        title: "Inspect source access",
+        description: "Read file and permission metadata without changing sharing settings.",
       },
     ],
     permissionSummary:
-      "Google asks for access to the Drive account you approve, including files shared with that account.",
+      "Google grants read-only access to files available to the approved account. OpenGeni does not expose create, update, delete, or sharing mutations in this source integration.",
     scopeLabels: {
-      "https://www.googleapis.com/auth/drive": {
-        label: "Work with Google Drive files",
-        description: "See, create, edit, organize, and share files available to this account.",
+      "https://www.googleapis.com/auth/drive.readonly": {
+        label: "Read Google Drive files",
+        description: "See and download files available to this account without changing them.",
       },
     },
   },
@@ -260,7 +260,10 @@ export function integrationExperience(
 ): IntegrationExperienceDescriptor {
   const reviewed = REVIEWED_INTEGRATION_EXPERIENCES[definition.id];
   const providerName = reviewed?.providerName ?? friendlyProviderName(definition.provider);
-  const scopeLabels = { ...COMMON_SCOPE_LABELS, ...(reviewed?.scopeLabels ?? {}) };
+  const scopeLabels = {
+    ...COMMON_SCOPE_LABELS,
+    ...(reviewed?.scopeLabels ?? {}),
+  };
   const permissions = definition.authentication.scopes.flatMap((scope) => {
     const copy = scopeLabels[scope];
     return copy ? [copy] : [];

@@ -1919,6 +1919,29 @@ export async function getWorkspaceGrant(
     : null;
 }
 
+/**
+ * Re-resolve the current literal account-admin authority for a provider OAuth
+ * callback that cannot rely on the browser's original authenticated request.
+ * The signed OAuth state proves the start-time decision; this read proves the
+ * exact subject still has a current durable account authority source. Managed
+ * humans require their active organization membership, while local/configured
+ * accounts retain their canonical operator-owned account source.
+ */
+export async function hasCurrentAccountAdminForWorkspaceCredential(
+  db: Database,
+  input: { accountId: string; workspaceId: string; subjectId: string },
+): Promise<boolean> {
+  const [row] = await rawRows<{ authorized: boolean }>(
+    db,
+    sql`select google_drive_workspace_account_admin_authorized(
+      ${input.accountId}::uuid,
+      ${input.workspaceId}::uuid,
+      ${input.subjectId}::text
+    ) as authorized`,
+  );
+  return row?.authorized === true;
+}
+
 export async function listWorkspaceMembers(
   db: Database,
   workspaceId: string,
@@ -3880,6 +3903,10 @@ export type PersistProviderOAuthConnectionInput = CreateConnectionInput & {
   credentialRole: string;
   providerFamily: string;
   providerPrincipalId: string;
+  workspaceCredentialAuthority?: {
+    kind: "google_drive_account_admin";
+    subjectId: string;
+  };
   requestedConnectionId?: string;
   requestedConnectionVersion?: number;
 };
@@ -7589,6 +7616,13 @@ export async function createConnection(
   );
 }
 
+function canWriteWorkspaceConnections(permissions: unknown): boolean {
+  return (
+    Array.isArray(permissions) &&
+    (permissions.includes("connections:write") || permissions.includes("workspace:admin"))
+  );
+}
+
 /**
  * Serialize one provider-principal/owner connection generation. Distinct OAuth
  * starts for the same principal converge on one row, while an explicit
@@ -7611,6 +7645,39 @@ export async function persistProviderOAuthConnection(
         await tx.execute(
           sql`select pg_advisory_xact_lock(hashtextextended(${`provider-oauth-connection:${input.workspaceId}:${ownerKey}:${input.providerDomain}:${input.providerFamily}:${input.providerPrincipalId}`}, 0))`,
         );
+        if (
+          input.workspaceCredentialAuthority?.kind === "google_drive_account_admin" &&
+          input.subjectId !== null
+        ) {
+          return null;
+        }
+        if (input.workspaceCredentialAuthority?.kind === "google_drive_account_admin") {
+          const authoritySubjectId = input.workspaceCredentialAuthority.subjectId;
+          if (
+            !(await hasCurrentAccountAdminForWorkspaceCredential(tx, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              subjectId: authoritySubjectId,
+            }))
+          ) {
+            return null;
+          }
+          const [workspaceGrant] = await tx
+            .select({ permissions: schema.workspaceMemberships.permissions })
+            .from(schema.workspaceMemberships)
+            .where(
+              and(
+                eq(schema.workspaceMemberships.accountId, input.accountId),
+                eq(schema.workspaceMemberships.workspaceId, input.workspaceId),
+                eq(schema.workspaceMemberships.subjectId, authoritySubjectId),
+              ),
+            )
+            .for("share")
+            .limit(1);
+          if (!canWriteWorkspaceConnections(workspaceGrant?.permissions)) {
+            return null;
+          }
+        }
         const exactOwner = connectionExactSubject(input.subjectId ?? null);
         const requested = input.requestedConnectionId
           ? (
