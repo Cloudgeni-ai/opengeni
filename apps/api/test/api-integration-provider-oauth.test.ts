@@ -41,6 +41,7 @@ const EDGE_ACCESS_KEY = "api-integration-provider-oauth-edge";
 const GOOGLE_CLIENT_ID = "google-provider-client.apps.googleusercontent.com";
 const GOOGLE_CLIENT_SECRET = "google-provider-client-secret";
 const MICROSOFT_CLIENT_ID = "microsoft-provider-client";
+const LEGACY_GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -141,6 +142,49 @@ async function freshManagedWorkspace() {
     workspaceId: grant.workspaceId,
     subjectId: grant.subjectId,
   };
+}
+
+async function seedLegacyGoogleDriveConnection(
+  workspace: Awaited<ReturnType<typeof freshWorkspace>>,
+  ownership: "personal" | "workspace",
+) {
+  const connection = await persistProviderOAuthConnection(client.db, {
+    accountId: workspace.accountId,
+    workspaceId: workspace.workspaceId,
+    subjectId: ownership === "personal" ? workspace.subjectId : null,
+    visibleToSubjectId: workspace.subjectId,
+    providerDomain: "www.googleapis.com",
+    kind: "oauth2",
+    status: "active",
+    credentialEncrypted: `legacy-google-drive-${ownership}-${crypto.randomUUID()}`,
+    grantedScopes: [
+      ...GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes.filter(
+        (scope) => scope !== "https://www.googleapis.com/auth/drive.readonly",
+      ),
+      LEGACY_GOOGLE_DRIVE_SCOPE,
+    ],
+    metadata: {
+      credentialRole: API_INTEGRATION_OAUTH_CREDENTIAL_ROLE,
+      providerFamily: "google",
+      providerPrincipalId: "google-principal-1",
+      authorizedDefinitionIds: [GOOGLE_DRIVE_INTEGRATION_DEFINITION.id],
+    },
+    createdBySubjectId: workspace.subjectId,
+    updatedBySubjectId: workspace.subjectId,
+    credentialRole: API_INTEGRATION_OAUTH_CREDENTIAL_ROLE,
+    providerFamily: "google",
+    providerPrincipalId: "google-principal-1",
+    ...(ownership === "workspace"
+      ? {
+          workspaceCredentialAuthority: {
+            kind: "google_drive_account_admin" as const,
+            subjectId: workspace.subjectId,
+          },
+        }
+      : {}),
+  });
+  if (!connection) throw new Error("failed to seed legacy Google Drive connection");
+  return connection;
 }
 
 async function bearer(
@@ -872,6 +916,102 @@ describe("API Integration provider OAuth", () => {
     });
   }, 60_000);
 
+  test("narrows legacy full-Drive reconnects for personal and workspace credentials", async () => {
+    if (!available) return;
+    for (const ownership of ["personal", "workspace"] as const) {
+      const workspace =
+        ownership === "workspace" ? await freshManagedWorkspace() : await freshWorkspace();
+      const legacy = await seedLegacyGoogleDriveConnection(workspace, ownership);
+      const fixture = providerFixture();
+      fixture.googlePlans.push({
+        scopes: [...GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes],
+        refreshToken: `narrowed-drive-refresh-${ownership}`,
+      });
+      const started = await start(
+        fixture,
+        workspace,
+        {
+          definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+          connectionId: legacy.id,
+          ownership,
+        },
+        ownership === "workspace"
+          ? ["account:admin", "connections:read", "connections:write", "workspace:read"]
+          : undefined,
+      );
+      expect(started.response.status).toBe(200);
+      const authorizationUrl = new URL(started.authorizationUrl);
+      expect(authorizationUrl.searchParams.get("scope")?.split(" ")).toEqual(
+        GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes,
+      );
+      expect(authorizationUrl.searchParams.get("scope")?.split(" ")).not.toContain(
+        LEGACY_GOOGLE_DRIVE_SCOPE,
+      );
+      expect(authorizationUrl.searchParams.get("include_granted_scopes")).toBe("false");
+
+      const connected = await callback(fixture, authorizationUrl.searchParams.get("state")!);
+      expect(
+        new URL(connected.headers.get("location")!).searchParams.get("integration_oauth"),
+      ).toBe("success");
+      const reconnected = (
+        await listConnectionsMetadata(client.db, workspace.workspaceId, workspace.subjectId)
+      ).find((connection) => connection.id === legacy.id)!;
+      expect(reconnected.version).toBe(legacy.version + 1);
+      expect(reconnected.grantedScopes).toEqual(
+        GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes,
+      );
+      expect(reconnected.grantedScopes).not.toContain(LEGACY_GOOGLE_DRIVE_SCOPE);
+      const credential = await loadConnectionCredentialForBroker(client.db, settings, {
+        workspaceId: workspace.workspaceId,
+        connectionId: legacy.id,
+        providerDomain: "www.googleapis.com",
+        kind: "oauth2",
+        ...(ownership === "personal"
+          ? { subjectId: workspace.subjectId, allowSubjectOwned: true }
+          : {}),
+      });
+      const persistedScopes = String(credential?.credential.scope).split(" ");
+      expect(persistedScopes).toEqual(GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes);
+      expect(persistedScopes).not.toContain(LEGACY_GOOGLE_DRIVE_SCOPE);
+    }
+  }, 60_000);
+
+  test("fails legacy Drive reconnect closed when Google does not confirm the narrowed scope set", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const legacy = await seedLegacyGoogleDriveConnection(workspace, "personal");
+    const fixture = providerFixture();
+    for (const returnedScopes of [
+      [...GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes, LEGACY_GOOGLE_DRIVE_SCOPE],
+      [],
+    ]) {
+      fixture.googlePlans.push({
+        scopes: returnedScopes,
+        refreshToken: "must-not-persist-broad-drive",
+      });
+      const started = await start(fixture, workspace, {
+        definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+        connectionId: legacy.id,
+        ownership: "personal",
+      });
+      expect(started.response.status).toBe(200);
+      const authorizationUrl = new URL(started.authorizationUrl);
+      expect(authorizationUrl.searchParams.get("scope")?.split(" ")).toEqual(
+        GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes,
+      );
+      expect(authorizationUrl.searchParams.get("include_granted_scopes")).toBe("false");
+      const rejected = await callback(fixture, authorizationUrl.searchParams.get("state")!);
+      expect(new URL(rejected.headers.get("location")!).searchParams.get("reason")).toBe(
+        "scope_not_granted",
+      );
+      const unchanged = (
+        await listConnectionsMetadata(client.db, workspace.workspaceId, workspace.subjectId)
+      ).find((connection) => connection.id === legacy.id)!;
+      expect(unchanged.version).toBe(legacy.version);
+      expect(unchanged.grantedScopes).toContain(LEGACY_GOOGLE_DRIVE_SCOPE);
+    }
+  }, 60_000);
+
   test("connects a Google definition with signed PKCE state and no callback perimeter credential", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -890,6 +1030,7 @@ describe("API Integration provider OAuth", () => {
     expect(authorizationUrl.searchParams.get("scope")?.split(" ")).toEqual(
       GOOGLE_GMAIL_INTEGRATION_DEFINITION.authentication.scopes,
     );
+    expect(authorizationUrl.searchParams.get("include_granted_scopes")).toBe("true");
     expect(authorizationUrl.searchParams.get("access_type")).toBe("offline");
     expect(authorizationUrl.searchParams.get("prompt")).toBe("consent select_account");
     expect(authorizationUrl.searchParams.get("code_challenge_method")).toBe("S256");

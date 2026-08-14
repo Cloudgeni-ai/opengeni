@@ -73,6 +73,7 @@ type ProviderOAuthState = {
   connectionVersion?: number;
   expectedProviderPrincipalId?: string;
   workspaceGoogleDriveAccountAdmin?: true;
+  googleDriveScopeNarrowing?: true;
   nonce: string;
   iat: number;
 };
@@ -166,10 +167,13 @@ export async function startApiIntegrationProviderOAuth(
       message: "missing permission: account:admin",
     });
   }
-  const authorizeScopes = uniqueStrings([
-    ...(existing?.grantedScopes ?? []),
-    ...definition.authentication.scopes,
-  ]);
+  const googleDriveReconnect = definition.id === "google-drive" && existing !== null;
+  const authorizeScopes =
+    definition.id === "google-drive"
+      ? uniqueStrings([...definition.authentication.scopes])
+      : uniqueStrings([...(existing?.grantedScopes ?? []), ...definition.authentication.scopes]);
+  const googleDriveScopeNarrowing =
+    googleDriveReconnect && !scopeSetsEqual(existing.grantedScopes, authorizeScopes);
   const client = providerClientForDefinition(deps.settings, definition);
   const verifier = randomBytes(48).toString("base64url");
   const key = requireEnvironmentEncryption(deps.settings);
@@ -199,6 +203,7 @@ export async function startApiIntegrationProviderOAuth(
         }
       : {}),
     ...(workspaceGoogleDriveCredential ? { workspaceGoogleDriveAccountAdmin: true } : {}),
+    ...(googleDriveScopeNarrowing ? { googleDriveScopeNarrowing: true } : {}),
   });
   const authorizationUrl = new URL(definition.authentication.authorizationUrl);
   authorizationUrl.searchParams.set("response_type", "code");
@@ -214,7 +219,10 @@ export async function startApiIntegrationProviderOAuth(
   authorizationUrl.searchParams.set("prompt", "select_account");
   if (definition.provider.id === "google") {
     authorizationUrl.searchParams.set("access_type", "offline");
-    authorizationUrl.searchParams.set("include_granted_scopes", "true");
+    authorizationUrl.searchParams.set(
+      "include_granted_scopes",
+      definition.id === "google-drive" ? "false" : "true",
+    );
     authorizationUrl.searchParams.set("prompt", "consent select_account");
   }
   return OAuthStartResponse.parse({
@@ -256,7 +264,13 @@ export async function completeApiIntegrationProviderOAuth(
     if (
       state.definitionFingerprint !== providerDefinitionFingerprint(definition) ||
       state.providerDomain !== integrationDefinitionProviderDomain(definition) ||
-      definition.authentication.scopes.some((scope) => !state!.authorizeScopes.includes(scope))
+      (definition.id === "google-drive"
+        ? !scopeSetsEqual(state.authorizeScopes, definition.authentication.scopes)
+        : definition.authentication.scopes.some(
+            (scope) => !state!.authorizeScopes.includes(scope),
+          )) ||
+      (state.googleDriveScopeNarrowing === true &&
+        (definition.id !== "google-drive" || !state.connectionId))
     ) {
       throw new ProviderOAuthCallbackError("state_invalid");
     }
@@ -278,7 +292,19 @@ export async function completeApiIntegrationProviderOAuth(
     if (!providerScopesInclude(definition, token.scopes, state.authorizeScopes)) {
       throw new ProviderOAuthCallbackError("scope_not_granted");
     }
-    const grantedScopes = token.scopes.length > 0 ? token.scopes : state.authorizeScopes;
+    if (
+      definition.id === "google-drive" &&
+      ((state.googleDriveScopeNarrowing === true && token.scopes.length === 0) ||
+        (token.scopes.length > 0 && !scopeSetsEqual(token.scopes, state.authorizeScopes)))
+    ) {
+      throw new ProviderOAuthCallbackError("scope_not_granted");
+    }
+    const grantedScopes =
+      definition.id === "google-drive"
+        ? [...state.authorizeScopes]
+        : token.scopes.length > 0
+          ? token.scopes
+          : state.authorizeScopes;
     const identity = await verifyProviderIdentity(deps, definition, token);
     if (
       state.expectedProviderPrincipalId &&
@@ -539,6 +565,9 @@ function readProviderOAuthState(raw: string | undefined, settings: Settings): Pr
     ...(payload.workspaceGoogleDriveAccountAdmin === true
       ? { workspaceGoogleDriveAccountAdmin: true as const }
       : {}),
+    ...(payload.googleDriveScopeNarrowing === true
+      ? { googleDriveScopeNarrowing: true as const }
+      : {}),
     nonce: requiredStateString(payload.nonce),
     iat,
   };
@@ -730,6 +759,12 @@ function providerScopesInclude(
     definition.provider.id === "microsoft" ? value.toLowerCase() : value;
   const granted = new Set(effective.map(normalize));
   return definition.authentication.scopes.every((scope) => granted.has(normalize(scope)));
+}
+
+function scopeSetsEqual(left: readonly string[], right: readonly string[]): boolean {
+  const leftSet = new Set(left);
+  const rightSet = new Set(right);
+  return leftSet.size === rightSet.size && [...leftSet].every((scope) => rightSet.has(scope));
 }
 
 function providerOAuthReturnUrl(
