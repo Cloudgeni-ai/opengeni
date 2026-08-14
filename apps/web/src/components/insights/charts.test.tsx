@@ -211,4 +211,41 @@ describe("AreaChart", () => {
       container.remove();
     }
   });
+
+  test("exposes point values and hover geometry to keyboard focus", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        root.render(
+          <AreaChart
+            labels={["00:00", "01:00", "02:00"]}
+            series={[
+              {
+                id: "tokens",
+                label: "Tokens",
+                values: [0, 1, 0],
+                className: "text-brand",
+              },
+            ]}
+          />,
+        );
+      });
+
+      const middleLabel = container.querySelectorAll("button")[1] as HTMLButtonElement;
+      expect(middleLabel.getAttribute("aria-label")).toBe("01:00. Tokens: 1.0");
+
+      await act(async () => middleLabel.focus());
+      expect(container.querySelector('[data-chart-hover-band="aligned"]')).not.toBeNull();
+      expect(container.textContent).toContain("Tokens");
+      expect(container.textContent).toContain("1.0");
+
+      await act(async () => middleLabel.blur());
+      expect(container.querySelector('[data-chart-hover-band="aligned"]')).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
 });

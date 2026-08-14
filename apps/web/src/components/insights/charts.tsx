@@ -162,7 +162,12 @@ export function AreaChart(props: {
   }
 
   return (
-    <div className={cn("relative w-full", props.className)} onPointerLeave={() => setActive(null)}>
+    <div
+      className={cn("relative w-full", props.className)}
+      onPointerLeave={(event) => {
+        if (!event.currentTarget.contains(document.activeElement)) setActive(null);
+      }}
+    >
       <AnimatePresence>
         {active != null ? (
           <motion.div
@@ -333,6 +338,12 @@ export function AreaChart(props: {
             key={`${label}-${index}`}
             type="button"
             onMouseEnter={() => setActive(index)}
+            onFocus={() => setActive(index)}
+            onClick={() => setActive(index)}
+            onBlur={() => setActive(null)}
+            aria-label={`${label}. ${props.series
+              .map((series) => `${series.label}: ${formattedValue(series.values[index] ?? 0)}`)
+              .join(", ")}`}
             className={cn(
               "min-w-0 truncate text-2xs transition-colors",
               active === index ? "font-medium text-fg" : "text-fg-subtle",
