@@ -1231,8 +1231,9 @@ export class OpenGeniClient {
   /**
    * Remove one connected self-hosted machine enrollment. The control-plane
    * operation works while the agent is offline, revokes future reconnects,
-   * retains history, and returns a typed blocker when active route/lease or
-   * recovery dependencies make removal unsafe. `idempotencyKey` is replay-safe.
+   * retains history, and atomically detaches idle dependent sessions (a
+   * machine-home session becomes `backend:none`). Active turns, live leases,
+   * and recovery work remain typed blockers. `idempotencyKey` is replay-safe.
    */
   async removeEnrollment(
     workspaceId: string,
