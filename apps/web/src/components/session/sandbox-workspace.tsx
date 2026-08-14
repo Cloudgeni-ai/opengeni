@@ -7,9 +7,16 @@
 //   1. the sonner-backed notification sink (the package has no toast dependency);
 //   2. app-injected extra tabs (Run / Debug) passed as leading/trailing tabs.
 import { SandboxWorkspace, type WorkspaceNotification, type WorkspaceTab } from "@opengeni/react";
-import type { ReactNode } from "react";
+import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import {
+  readSessionDockCollapsed,
+  sessionDockLayoutStorageId,
+  writeSessionDockCollapsed,
+} from "@/lib/session-dock-preferences";
 import type { SessionEvent } from "@/types";
+
+const useClientLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
 function notify(notification: WorkspaceNotification) {
   if (notification.kind === "error") {
@@ -27,6 +34,7 @@ function notify(notification: WorkspaceNotification) {
 export function SessionWorkspace(props: {
   workspaceId: string;
   sessionId: string;
+  preferenceOwnerId: string;
   events: SessionEvent[];
   primary: ReactNode;
   /** App tabs shown before the workbench tabs (e.g. Run). */
@@ -39,6 +47,32 @@ export function SessionWorkspace(props: {
   onCollapsedChange: (collapsed: boolean) => void;
   mobileLeadingControl?: ReactNode;
 }) {
+  const layoutStorageId = sessionDockLayoutStorageId(props.preferenceOwnerId, props.sessionId);
+  const [restoredStorageId, setRestoredStorageId] = useState<string | null>(null);
+  const collapsedRef = useRef(props.collapsed);
+  const onCollapsedChangeRef = useRef(props.onCollapsedChange);
+  collapsedRef.current = props.collapsed;
+  onCollapsedChangeRef.current = props.onCollapsedChange;
+  const effectiveCollapsed =
+    restoredStorageId === layoutStorageId
+      ? props.collapsed
+      : (readSessionDockCollapsed(layoutStorageId) ?? true);
+
+  // Restore before paint, then let the existing controlled state remain the
+  // single source of truth for the header toggle and mobile overlay.
+  useClientLayoutEffect(() => {
+    const restored = readSessionDockCollapsed(layoutStorageId) ?? true;
+    setRestoredStorageId(layoutStorageId);
+    if (restored !== collapsedRef.current) {
+      onCollapsedChangeRef.current(restored);
+    }
+  }, [layoutStorageId]);
+
+  useEffect(() => {
+    if (restoredStorageId !== layoutStorageId) return;
+    writeSessionDockCollapsed(layoutStorageId, props.collapsed);
+  }, [layoutStorageId, props.collapsed, restoredStorageId]);
+
   return (
     <SandboxWorkspace
       workspaceId={props.workspaceId}
@@ -48,10 +82,10 @@ export function SessionWorkspace(props: {
       {...(props.leadingTabs ? { leadingTabs: props.leadingTabs } : {})}
       {...(props.trailingTabs ? { trailingTabs: props.trailingTabs } : {})}
       {...(props.initialTab ? { initialTab: props.initialTab } : {})}
-      collapsed={props.collapsed}
+      collapsed={effectiveCollapsed}
       onCollapsedChange={props.onCollapsedChange}
       {...(props.mobileLeadingControl ? { mobileLeadingControl: props.mobileLeadingControl } : {})}
-      autoSaveId="og.session.dock"
+      autoSaveId={layoutStorageId}
       browserExtensionSetupUrl="/browser-extension-setup.html"
       onNotify={notify}
     />
