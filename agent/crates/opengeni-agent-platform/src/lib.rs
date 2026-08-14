@@ -143,6 +143,13 @@ pub trait Platform: Send + Sync {
         false
     }
 
+    /// Whether this exact live platform additionally enforces the CPU quota
+    /// field. Kept separate so memory-capable older runners cannot silently
+    /// ignore an additive protobuf field.
+    fn operation_cpu_quota_supported(&self) -> bool {
+        false
+    }
+
     // --- Channel-A: exec --------------------------------------------------
 
     /// Runs a command and collects its full output. Honors an optional
@@ -187,7 +194,9 @@ pub trait Platform: Send + Sync {
         policy: Option<&v1::OperationResourcePolicy>,
     ) -> PlatformResult<ContainedExec> {
         if policy.is_some_and(|policy| {
-            policy.memory_max_bytes.is_some() || policy.memory_high_bytes.is_some()
+            policy.memory_max_bytes.is_some()
+                || policy.memory_high_bytes.is_some()
+                || policy.cpu_max_millicores.is_some()
         }) {
             return Err(PlatformError::Unsupported(
                 "operation resource policy is not supported by this platform".to_string(),
@@ -229,7 +238,9 @@ pub trait Platform: Send + Sync {
         policy: Option<&v1::OperationResourcePolicy>,
     ) -> PlatformResult<ContainedExec> {
         if policy.is_some_and(|policy| {
-            policy.memory_max_bytes.is_some() || policy.memory_high_bytes.is_some()
+            policy.memory_max_bytes.is_some()
+                || policy.memory_high_bytes.is_some()
+                || policy.cpu_max_millicores.is_some()
         }) {
             return Err(PlatformError::Unsupported(
                 "operation resource policy is not supported by this platform".to_string(),

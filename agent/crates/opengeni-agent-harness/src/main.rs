@@ -99,7 +99,7 @@ enum Command {
     Milestone0,
     /// Scenario 1: reference numbers (pings, small execs, fs ops).
     Baseline,
-    /// Scenario 2: concurrency flood (8-slot saturation + fleet shape).
+    /// Scenario 2: unbounded-admission concurrency flood + fleet shape.
     Flood,
     /// Scenario 3: large replies/requests (the ~1MB wall as a golden baseline).
     Large,

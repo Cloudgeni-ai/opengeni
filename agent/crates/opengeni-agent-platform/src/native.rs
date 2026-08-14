@@ -46,7 +46,8 @@ pub struct NativePlatform {
     /// The per-op OOM cgroup manager, wired by the supervisor at startup on a
     /// delegated Linux cgroup v2 host (issue #345). `None` until then (and on every
     /// non-Linux / non-delegated host), in which case exec runs with no per-op
-    /// memory isolation — its children still get a raised `oom_score_adj`.
+    /// memory isolation — its children still receive the minimal relative
+    /// `oom_score_adj` preference derived from the live supervisor.
     cgroups: Option<Arc<OpCgroups>>,
 }
 
@@ -197,10 +198,15 @@ fn user_home_dir() -> Option<PathBuf> {
 fn requested_policy(
     policy: Option<&v1::OperationResourcePolicy>,
 ) -> PlatformResult<OpCgroupConfig> {
-    let (memory_max, memory_high) = policy.map_or((None, None), |policy| {
-        (policy.memory_max_bytes, policy.memory_high_bytes)
-    });
-    OpCgroupConfig::from_limits(memory_max, memory_high)
+    let (memory_max, memory_high, cpu_max_millicores) =
+        policy.map_or((None, None, None), |policy| {
+            (
+                policy.memory_max_bytes,
+                policy.memory_high_bytes,
+                policy.cpu_max_millicores,
+            )
+        });
+    OpCgroupConfig::from_limits(memory_max, memory_high, cpu_max_millicores)
         .map_err(|error| PlatformError::os(format!("invalid operation resource policy: {error}")))
 }
 
@@ -273,7 +279,7 @@ impl ExecProcessGroup {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         #[cfg(target_os = "linux")]
-        crate::cgroup::configure_exec_oom_score_adj_before_exec(&mut anchor_command);
+        let _ = crate::cgroup::configure_exec_oom_score_adj_before_exec(&mut anchor_command);
         #[cfg(target_os = "linux")]
         if let (Some(cgroups), Some(prepared)) = (cgroups, prepared_op.as_ref()) {
             cgroups.configure_process_cgroup_before_exec(prepared, &mut anchor_command)?;
@@ -284,7 +290,7 @@ impl ExecProcessGroup {
 
         command.process_group(pgid);
         #[cfg(target_os = "linux")]
-        crate::cgroup::configure_exec_oom_score_adj_before_exec(&mut command);
+        let child_oom_score = crate::cgroup::configure_exec_oom_score_adj_before_exec(&mut command);
         #[cfg(target_os = "linux")]
         if let (Some(cgroups), Some(prepared)) = (cgroups, prepared_op.as_ref()) {
             if let Err(error) = cgroups.configure_process_cgroup_before_exec(prepared, &mut command)
@@ -303,20 +309,20 @@ impl ExecProcessGroup {
             }
         };
 
-        // Bias the kernel's global OOM killer toward this child (and its inheriting
-        // descendants) so a runaway command is sacrificed before the supervisor.
-        // Always applied on Linux — independent of, and composing with, the per-op
-        // cgroup below (which bounds systemd-oomd's scope).
+        // Give this child (and its inheriting descendants) the smallest higher
+        // global OOM victim bias when the kernel ABI can represent one. A
+        // supervisor already at 1000 remains equal. Always applied on Linux —
+        // independent of, and composing with, the per-op cgroup below (which
+        // bounds systemd-oomd's scope).
         #[cfg(target_os = "linux")]
         if let Some(child_pid) = child.id() {
-            crate::cgroup::raise_exec_oom_score_adj(child_pid);
+            crate::cgroup::raise_exec_oom_score_adj(child_pid, child_oom_score);
         }
 
-        // Verify the COMPLETE ordinary process group in its prepared accounting
-        // leaf. The pre-exec migration is the race-free ownership boundary; this
-        // post-spawn stop/move/drain remains an observable fallback for an
-        // unrestricted request on a host whose pre-exec cgroup write failed.
-        // This is a no-op when isolation is unavailable / off Linux.
+        // Verify both live direct roots in the prepared leaf. The pre-exec
+        // migration is the race-free admission boundary; this does not attempt a
+        // changing-member repair. Any failure kills the owned cgroup before spawn
+        // returns an error. This is a no-op when isolation is unavailable/off Linux.
         #[cfg(target_os = "linux")]
         let op_cgroup = if let (Some(cg), Some(prepared)) = (cgroups, prepared_op) {
             let pids: Vec<u32> = [anchor.id(), child.id()].into_iter().flatten().collect();
@@ -663,6 +669,12 @@ impl Platform for NativePlatform {
         self.cgroups.is_some()
     }
 
+    fn operation_cpu_quota_supported(&self) -> bool {
+        self.cgroups
+            .as_ref()
+            .is_some_and(|cgroups| cgroups.cpu_quota_supported())
+    }
+
     fn desktop(&self) -> Arc<dyn DesktopBackend> {
         self.desktop.clone()
     }
@@ -694,7 +706,7 @@ impl Platform for NativePlatform {
     /// Builds the command (shell vs argv, cwd/env resolution) and spawns it
     /// inside the shared containment primitive — the streaming job path. The
     /// per-op cgroup leaf (#351) rides inside the group: placed at spawn, torn
-    /// down after the anchor reap in `wait()`, best-effort in `Drop`.
+    /// down after the anchor reap in `wait()`, and cancellation-safe in `Drop`.
     fn spawn_exec(&self, req: &v1::ExecRequest) -> PlatformResult<ContainedExec> {
         self.spawn_exec_with_policy(req, None)
     }
@@ -725,9 +737,14 @@ impl Platform for NativePlatform {
         }
 
         let requested_policy = requested_policy(policy)?;
-        if requested_policy.has_limits() && self.cgroups.is_none() {
+        if requested_policy.has_limits()
+            && self
+                .cgroups
+                .as_ref()
+                .is_none_or(|cgroups| !cgroups.supports_policy(requested_policy))
+        {
             return Err(PlatformError::Unsupported(
-                "operation resource policy requires delegated Linux cgroup-v2 memory support on the runner"
+                "operation resource policy requires the corresponding delegated Linux cgroup-v2 controller support on the runner"
                     .to_string(),
             ));
         }
@@ -968,9 +985,14 @@ impl Platform for NativePlatform {
         cmd.args(git_args(req.op(), &req.args))
             .current_dir(self.resolve_process_cwd(&req.cwd, "git")?);
         let requested_policy = requested_policy(policy)?;
-        if requested_policy.has_limits() && self.cgroups.is_none() {
+        if requested_policy.has_limits()
+            && self
+                .cgroups
+                .as_ref()
+                .is_none_or(|cgroups| !cgroups.supports_policy(requested_policy))
+        {
             return Err(PlatformError::Unsupported(
-                "operation resource policy requires delegated Linux cgroup-v2 memory support on the runner"
+                "operation resource policy requires the corresponding delegated Linux cgroup-v2 controller support on the runner"
                     .to_string(),
             ));
         }
@@ -1757,11 +1779,10 @@ mod tests {
         assert_process_exits(descendant_pid, "cancelled exec").await;
     }
 
-    /// Every exec child is stamped `oom_score_adj=500` so the kernel OOM killer
-    /// sacrifices a runaway command before the supervisor (issue #345). This needs
-    /// no cgroup delegation (raising is always unprivileged-legal), so it runs on
-    /// any Linux host. The direct child (the fixture) reports its own PID — the one
-    /// the exec path stamps — and holds it alive long enough to read the value.
+    /// Every exec child receives the smallest OOM-score adjustment above the live
+    /// supervisor when representable, or the same ABI ceiling. This needs no
+    /// cgroup delegation, so it runs on any Linux host. The direct child reports
+    /// its own PID and stays live for the authoritative `/proc` read.
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn exec_child_gets_raised_oom_score_adj() {
@@ -1787,10 +1808,13 @@ mod tests {
             .to_string();
         exec_task.abort();
         let _ = exec_task.await;
-        assert_eq!(
-            observed, "500",
-            "exec child {child_pid} must have oom_score_adj=500, saw {observed:?}"
-        );
+        let supervisor = std::fs::read_to_string("/proc/self/oom_score_adj")
+            .expect("read supervisor OOM score")
+            .trim()
+            .parse::<i32>()
+            .expect("numeric supervisor OOM score");
+        let expected = crate::cgroup::minimal_exec_oom_score_adj(supervisor).to_string();
+        assert_eq!(observed, expected, "exec child {child_pid} OOM bias");
     }
 
     /// The pre-exec hook closes the no-cgroup race: user code cannot fork a
@@ -1831,13 +1855,19 @@ mod tests {
         .await
         .expect("fixture should publish both pids");
 
+        let supervisor = std::fs::read_to_string("/proc/self/oom_score_adj")
+            .expect("read supervisor OOM score")
+            .trim()
+            .parse::<i32>()
+            .expect("numeric supervisor OOM score");
+        let expected = crate::cgroup::minimal_exec_oom_score_adj(supervisor).to_string();
         for pid in [parent, descendant] {
             let score = tokio::fs::read_to_string(format!("/proc/{pid}/oom_score_adj"))
                 .await
                 .expect("read process OOM score");
             assert_eq!(
                 score.trim(),
-                "500",
+                expected,
                 "pid {pid} inherited the wrong OOM bias"
             );
         }

@@ -1600,6 +1600,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             op_stream: true,
             browser_bridge: self.browser_bridge.is_some(),
             operation_resource_policy: link.platform.operation_resource_policy_supported(),
+            operation_cpu_quota: link.platform.operation_cpu_quota_supported(),
         }
     }
 

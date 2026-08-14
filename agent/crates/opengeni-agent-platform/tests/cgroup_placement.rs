@@ -3,8 +3,8 @@
 //! Exercises the REAL path — the service manager starts the test in the stable
 //! supervisor subgroup and [`establish_oom_isolation`] verifies the topology
 //! and a real shell `exec` forks a session-detached child — then asserts BOTH the shell
-//! and the descendant land in one `op-<n>` leaf with CPU/I/O/memory/PID
-//! accounting and `oom_score_adj=500` while the supervisor (this process) stays
+//! and the descendant land in one `op-<n>` memory leaf with the minimal OOM
+//! victim preference relative to the supervisor while this process stays
 //! in the `supervisor` leaf. It then aborts the owning task and proves the
 //! operation cgroup disappears. Because the child has a different process group,
 //! this is the live regression proof for cgroup-owned cancellation as well as
@@ -22,9 +22,8 @@
 //! ```text
 //! bin=$(cargo test -p opengeni-agent-platform --test cgroup_placement --no-run \
 //!         --message-format=json | jq -r 'select(.executable!=null).executable')
-//! systemd-run --user --wait --collect -p Delegate=yes \
-//!   -p DelegateSubgroup=supervisor -p CPUAccounting=yes -p IOAccounting=yes \
-//!   -p MemoryAccounting=yes -p TasksAccounting=yes -- \
+//! systemd-run --user --wait --collect -p 'Delegate=cpu memory' \
+//!   -p DelegateSubgroup=supervisor -p MemoryAccounting=yes -- \
 //!   "$bin" --exact child_is_accounted_and_task_abort_removes_op_cgroup --nocapture
 //! ```
 //!
@@ -46,7 +45,7 @@ mod linux {
     use opengeni_agent_platform::{
         establish_oom_isolation, NativePlatform, OpCgroupConfig, Platform,
     };
-    use opengeni_agent_proto::v1::ExecRequest;
+    use opengeni_agent_proto::v1::{ExecRequest, OperationResourcePolicy};
     use tokio::io::{AsyncBufReadExt as _, BufReader};
 
     /// The cgroup v2 unified path (after the `0::` prefix) for a PID's cgroup file.
@@ -77,7 +76,7 @@ mod linux {
         }
         let dir = supervisor_dir.parent()?.to_path_buf();
         let controllers = std::fs::read_to_string(dir.join("cgroup.controllers")).ok()?;
-        if ["cpu", "io", "memory", "pids"].iter().any(|required| {
+        if ["cpu", "memory"].iter().any(|required| {
             !controllers
                 .split_whitespace()
                 .any(|actual| actual == *required)
@@ -106,9 +105,9 @@ mod linux {
         let Some(service_dir) = delegated_and_isolated() else {
             eprintln!(
                 "SKIP: not the sole member of a manager-owned delegated supervisor subgroup; \
-                 re-run the binary alone under `systemd-run --user -p Delegate=yes \
+                 re-run the binary alone under `systemd-run --user -p 'Delegate=cpu memory' \
                  -p DelegateSubgroup=supervisor` \
-                 with CPU/IO/Memory/Tasks accounting enabled \
+                 with memory accounting enabled \
                  to exercise the live placement path (see the module docs)"
             );
             return;
@@ -129,16 +128,10 @@ mod linux {
         // Run a real shell exec that forks a descendant into a different session.
         // Both publish their PIDs and stay alive. Process-group kill cannot reach
         // that descendant; task-abort cleanup must use the operation cgroup.
-        let io_file = std::env::temp_dir().join(format!("cgroup-io-{}.bin", std::process::id()));
-        let _ = std::fs::remove_file(&io_file);
         let req = ExecRequest {
-            command: vec![format!(
-                "setsid sh -c 'while :; do :; done' & child=$!; \
-                 page=$(getconf PAGESIZE); dd if=/dev/zero of={} bs=$page count=1 \
-                 oflag=direct conv=fsync \
-                 >/dev/null 2>&1; echo $$ $child; wait",
-                io_file.display(),
-            )],
+            command: vec!["setsid sh -c 'while :; do :; done' & child=$!; \
+                 echo $$ $child; wait"
+                .to_string()],
             shell: true,
             ..Default::default()
         };
@@ -183,13 +176,11 @@ mod linux {
             "the op leaf must be a sibling of the supervisor leaf under the service cgroup \
              ({shell_unified} vs {self_unified})"
         );
+        let expected_score = expected_exec_oom_score();
+        assert_eq!(score, expected_score, "exec shell {leader_pid} OOM bias");
         assert_eq!(
-            score, "500",
-            "exec shell {leader_pid} must carry oom_score_adj=500"
-        );
-        assert_eq!(
-            descendant_score, "500",
-            "fast descendant {detached_pid} must carry oom_score_adj=500"
+            descendant_score, expected_score,
+            "fast descendant {detached_pid} OOM bias"
         );
         let op_leaf = service_dir.join(shell_unified.rsplit('/').next().expect("op leaf name"));
         assert_eq!(
@@ -218,7 +209,68 @@ mod linux {
             !Path::new(&format!("/proc/{detached_pid}")).exists(),
             "session-detached descendant survived operation-cgroup cleanup"
         );
-        let _ = std::fs::remove_file(&io_file);
+        assert_controller_neutrality_after_cleanup(&service_dir);
+
+        // Fault injection through a real post-fork execve failure: the anchor has
+        // already populated the fresh op leaf when the command spawn reports
+        // ENOENT. Returning the error must cgroup.kill the anchor and remove the
+        // leaf; a process-group-only cleanup would not prove recursive ownership.
+        let prior_leaves = operation_leaves(&service_dir);
+        let missing = ExecRequest {
+            command: vec![format!(
+                "/definitely-missing-opengeni-cgroup-fixture-{}",
+                std::process::id()
+            )],
+            ..Default::default()
+        };
+        assert!(
+            platform.spawn_exec(&missing).is_err(),
+            "missing executable must fail after the anchor spawn"
+        );
+        wait_for_operation_leaves(&service_dir, &prior_leaves).await;
+        assert_controller_neutrality_after_cleanup(&service_dir);
+
+        // CPU is an opt-in controller lease, not sticky startup accounting. Prove
+        // a populated unlimited sibling remains admitted, two limited leaves hold
+        // the shared lease independently, and the final limited cleanup removes
+        // +cpu again without waiting for the unlimited operation to exit.
+        let (unlimited_leaf, unlimited_task) = spawn_live_operation(&platform, None).await;
+        assert_controller_neutrality_after_cleanup(&service_dir);
+        let cpu_policy = OperationResourcePolicy {
+            cpu_max_millicores: Some(500),
+            ..Default::default()
+        };
+        let (limited_leaf_one, limited_task_one) =
+            spawn_live_operation(&platform, Some(&cpu_policy)).await;
+        let (limited_leaf_two, limited_task_two) =
+            spawn_live_operation(&platform, Some(&cpu_policy)).await;
+        assert_subtree_controller(&service_dir, "cpu", true);
+        assert_exact_cpu_quota(&limited_leaf_one, 500);
+        assert_exact_cpu_quota(&limited_leaf_two, 500);
+
+        limited_task_one.abort();
+        assert!(limited_task_one
+            .await
+            .expect_err("first limited task must be cancelled")
+            .is_cancelled());
+        wait_for_removal(&limited_leaf_one).await;
+        assert_subtree_controller(&service_dir, "cpu", true);
+
+        limited_task_two.abort();
+        assert!(limited_task_two
+            .await
+            .expect_err("second limited task must be cancelled")
+            .is_cancelled());
+        wait_for_removal(&limited_leaf_two).await;
+        assert!(unlimited_leaf.exists(), "unlimited sibling remains live");
+        assert_controller_neutrality_after_cleanup(&service_dir);
+
+        unlimited_task.abort();
+        assert!(unlimited_task
+            .await
+            .expect_err("unlimited task must be cancelled")
+            .is_cancelled());
+        wait_for_removal(&unlimited_leaf).await;
     }
 
     fn assert_fixture_prerequisites() {
@@ -229,6 +281,19 @@ mod linux {
                 .is_ok_and(|output| output.status.success()),
             "the live lifecycle fixture requires util-linux setsid"
         );
+    }
+
+    fn expected_exec_oom_score() -> String {
+        let supervisor = std::fs::read_to_string("/proc/self/oom_score_adj")
+            .expect("read supervisor OOM score")
+            .trim()
+            .parse::<i32>()
+            .expect("numeric supervisor OOM score");
+        if supervisor < 0 {
+            "0".to_string()
+        } else {
+            supervisor.saturating_add(1).min(1000).to_string()
+        }
     }
 
     fn assert_distinct_process_groups(leader_pid: u32, detached_pid: u32) {
@@ -248,12 +313,16 @@ mod linux {
     fn assert_supervisor_setup(service_dir: &Path) -> String {
         let subtree = std::fs::read_to_string(service_dir.join("cgroup.subtree_control"))
             .expect("read effective subtree controllers");
-        for controller in ["cpu", "io", "memory", "pids"] {
+        assert!(
+            subtree.split_whitespace().any(|actual| actual == "memory"),
+            "runner must enable memory containment; effective: {subtree}"
+        );
+        for controller in ["cpu", "io", "pids"] {
             assert!(
-                subtree
+                !subtree
                     .split_whitespace()
                     .any(|actual| actual == controller),
-                "runner must enable delegated {controller} accounting; effective: {subtree}"
+                "unrestricted startup must not enable {controller}; effective: {subtree}"
             );
         }
 
@@ -301,30 +370,19 @@ mod linux {
         OpCgroupConfig {
             memory_max: Some(memory_max),
             memory_high: Some(memory_max),
+            cpu_max_millicores: None,
         }
     }
 
     fn assert_controller_accounting(op_leaf: &Path, config: OpCgroupConfig) {
-        let pids_current = std::fs::read_to_string(op_leaf.join("pids.current"))
-            .expect("operation PID accounting")
-            .trim()
-            .parse::<u64>()
-            .expect("numeric pids.current");
-        assert!(
-            pids_current >= 2,
-            "shell and descendant must both be charged"
-        );
-        assert!(op_leaf.join("cpu.stat").is_file(), "CPU accounting file");
         assert!(
             op_leaf.join("memory.current").is_file(),
             "memory accounting file"
         );
         assert_eq!(
-            std::fs::read_to_string(op_leaf.join("pids.max"))
-                .expect("read operation PID limit")
-                .trim(),
-            "max",
-            "accounting must not install an implicit PID limit"
+            op_leaf.join("pids.current").exists(),
+            false,
+            "the unrestricted default must not activate hierarchical PID control"
         );
         let memory_max = std::fs::read_to_string(op_leaf.join("memory.max"))
             .expect("read operation memory limit");
@@ -346,29 +404,95 @@ mod linux {
                 "accounting must not install an implicit memory throttle"
             ),
         }
+        match config.cpu_max_millicores {
+            Some(millicores) => {
+                let cpu_max = std::fs::read_to_string(op_leaf.join("cpu.max"))
+                    .expect("read explicit operation CPU quota");
+                let mut fields = cpu_max.split_whitespace();
+                let quota = fields.next().unwrap().parse::<u64>().unwrap();
+                let period = fields.next().unwrap().parse::<u64>().unwrap();
+                assert_eq!(quota * 1_000, period * u64::from(millicores));
+            }
+            None => assert!(
+                !op_leaf.join("cpu.max").exists(),
+                "unrestricted work must not activate hierarchical CPU scheduling"
+            ),
+        }
         assert!(
-            std::fs::read_to_string(op_leaf.join("cpu.max"))
-                .expect("read operation CPU limit")
-                .starts_with("max "),
-            "accounting must not install an implicit CPU quota"
-        );
-
-        let io = std::fs::read_to_string(op_leaf.join("io.stat"))
-            .expect("read operation I/O accounting");
-        assert!(
-            io_stat_reports_activity(&io),
-            "operation I/O accounting did not charge the completed direct fixture write; io.stat={io:?}"
+            !op_leaf.join("io.stat").exists(),
+            "unrestricted startup must not activate hierarchical I/O control"
         );
     }
 
-    fn io_stat_reports_activity(contents: &str) -> bool {
-        contents.split_whitespace().any(|field| {
-            let Some((name, value)) = field.split_once('=') else {
-                return false;
-            };
-            matches!(name, "rbytes" | "wbytes" | "rios" | "wios")
-                && value.parse::<u64>().is_ok_and(|value| value > 0)
-        })
+    fn assert_controller_neutrality_after_cleanup(service_dir: &Path) {
+        let subtree = std::fs::read_to_string(service_dir.join("cgroup.subtree_control"))
+            .expect("read subtree after operation cleanup");
+        for controller in ["cpu", "io", "pids"] {
+            assert!(
+                !subtree
+                    .split_whitespace()
+                    .any(|actual| actual == controller),
+                "controller {controller} remained active after the final limited leaf: {subtree}"
+            );
+        }
+    }
+
+    fn assert_subtree_controller(service_dir: &Path, controller: &str, expected: bool) {
+        let subtree = std::fs::read_to_string(service_dir.join("cgroup.subtree_control"))
+            .expect("read subtree controller state");
+        assert_eq!(
+            subtree
+                .split_whitespace()
+                .any(|actual| actual == controller),
+            expected,
+            "controller {controller} state in {subtree:?}"
+        );
+    }
+
+    fn assert_exact_cpu_quota(op_leaf: &Path, millicores: u32) {
+        let cpu_max =
+            std::fs::read_to_string(op_leaf.join("cpu.max")).expect("read explicit CPU quota");
+        let mut fields = cpu_max.split_whitespace();
+        let quota = fields.next().unwrap().parse::<u64>().unwrap();
+        let period = fields.next().unwrap().parse::<u64>().unwrap();
+        assert_eq!(fields.next(), None);
+        assert_eq!(quota * 1_000, period * u64::from(millicores));
+    }
+
+    async fn spawn_live_operation(
+        platform: &NativePlatform,
+        policy: Option<&OperationResourcePolicy>,
+    ) -> (
+        PathBuf,
+        tokio::task::JoinHandle<std::io::Result<std::process::ExitStatus>>,
+    ) {
+        let request = ExecRequest {
+            command: vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "echo $$; exec sleep infinity".to_string(),
+            ],
+            ..Default::default()
+        };
+        let mut contained = platform
+            .spawn_exec_with_policy(&request, policy)
+            .expect("spawn live controller-lease fixture");
+        drop(contained.stdin.take());
+        let mut stdout = BufReader::new(contained.stdout.take().expect("fixture stdout"));
+        let mut task = tokio::spawn(async move { contained.wait().await });
+        let mut line = String::new();
+        let read = tokio::select! {
+            read = stdout.read_line(&mut line) => read.expect("read live operation pid"),
+            result = &mut task => panic!("live operation ended before readiness: {result:?}"),
+        };
+        assert_ne!(read, 0, "live operation closed stdout before readiness");
+        let pid = line
+            .trim()
+            .parse::<u32>()
+            .expect("numeric live operation pid");
+        let unified = child_cgroup(pid);
+        let leaf = Path::new("/sys/fs/cgroup").join(unified.trim_start_matches('/'));
+        (leaf, task)
     }
 
     async fn wait_for_removal(op_leaf: &Path) {
@@ -392,6 +516,36 @@ mod linux {
         panic!(
             "task abort retained operation cgroup {}; events={events:?} procs={procs:?} process_evidence={process_evidence:?}",
             op_leaf.display()
+        );
+    }
+
+    fn operation_leaves(service_dir: &Path) -> Vec<PathBuf> {
+        let mut leaves = std::fs::read_dir(service_dir)
+            .expect("enumerate operation leaves")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry.file_type().is_ok_and(|kind| kind.is_dir())
+                    && entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| name.starts_with("op-"))
+            })
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+        leaves.sort();
+        leaves
+    }
+
+    async fn wait_for_operation_leaves(service_dir: &Path, expected: &[PathBuf]) {
+        for _ in 0..200 {
+            if operation_leaves(service_dir) == expected {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!(
+            "post-spawn failure leaked an operation leaf: expected {expected:?}, got {:?}",
+            operation_leaves(service_dir)
         );
     }
 

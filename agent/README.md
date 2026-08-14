@@ -100,21 +100,22 @@ bearer; established op-stream commands detach, keep running, and replay any
 missed output after re-attachment. Full-jitter backoff is reserved for actual
 transport failures.
 
-On Linux the systemd aggregate is deliberately unlimited and each accepted host
-operation gets a separate cgroup-v2 CPU/I/O/memory/PID accounting leaf. The
+On Linux each accepted host operation gets a separate cgroup-v2 memory/lifecycle
+leaf while the generated systemd fragment requests an unlimited aggregate. Admin
+drop-ins and ancestor constraints remain authoritative. The
 generated unit uses systemd's `DelegateSubgroup=supervisor`, so the first and every
 replacement control process starts in the same supervisor leaf while the delegated
 root remains empty and restart-safe. Startup verifies this topology and stamps that
 leaf with systemd-oomd's avoid marker. A custom/older unit that cannot provide the
 subgroup is reported as incapable and stays on unrestricted ambient execution;
-an explicit resource policy then fails closed. Optional per-enrollment memory
-and CPU limits arrive on each newly admitted exec/Git control request. CPU uses
-positive uint32 millicores (`1000` = one core); an in-flight command keeps its
-admitted snapshot. Requested values compose with stricter local
+an explicit resource policy then fails closed. Optional per-enrollment memory and
+exact integer-millicore CPU limits arrive on each newly admitted exec/Git request;
+an in-flight command keeps its admitted snapshot. Limits compose with stricter local
 `OPENGENI_AGENT_OP_MEMORY_{MAX,HIGH}` / `OPENGENI_AGENT_OP_CPU_MAX_MILLICORES`
-or ancestor policy. Memory and CPU enforcement are separately advertised and a
-configured unsupported limit fails closed. The default remains the machine's
-available resources, and typed PTY/desktop/browser/computer operations are unchanged.
+or ancestor policy. Memory and CPU enforcement are separately advertised. Startup
+enables memory only; CPU is leased only while a CPU-limited leaf exists, and I/O and
+PID controllers remain untouched. The default remains the machine's ambient
+resources, and typed PTY/desktop/browser/computer operations are unchanged.
 
 An installation upgraded from the old single-connection file keeps that link
 online immediately. Because the old file did not record its deployment URL,

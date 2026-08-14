@@ -11,8 +11,8 @@
 //!
 //! # What this module does (Linux, cgroup v2 only)
 //!
-//! Given a delegated cgroup v2 service cgroup (the hardened unit renders
-//! `Delegate=yes` plus the relevant accounting directives — see
+//! Given a delegated cgroup v2 service cgroup (the generated unit delegates only
+//! `cpu` and `memory` — see
 //! [`crate::service`]), it:
 //!
 //! 1. **Startup topology** ([`establish_oom_isolation`]). cgroup v2 forbids a
@@ -20,23 +20,24 @@
 //!    children (the "no internal processes" rule). The generated systemd unit
 //!    therefore uses `DelegateSubgroup=supervisor`, which places the first and
 //!    every replacement agent process directly in `<service>/supervisor`. The
-//!    agent verifies that manager-owned topology, then enables every delegated
-//!    accounting controller used by the runner (`cpu`, `io`, `memory`, and `pids`) in
+//!    agent verifies that manager-owned topology, then enables only `memory` in
 //!    `<service>/cgroup.subtree_control`. Per-op cgroups are then
 //!    `<service>/op-<n>` siblings of `supervisor`, each with its own resource
-//!    accounting and systemd-oomd selection. Enabling a controller does not set a
-//!    quota: separate leaves do not by themselves constrain the operation or
-//!    change the global kernel OOM victim order.
+//!    accounting and systemd-oomd selection. CPU remains disabled unless an
+//!    explicit CPU quota leases it; I/O and PID remain untouched. This preserves
+//!    ambient CPU/I/O scheduling for the unlimited default.
 //! 2. **Per-exec placement** ([`OpCgroups::prepare_op`]). Before either direct
 //!    child is spawned, the runner creates and configures a fresh `op-<n>` leaf and
 //!    pre-opens its `cgroup.procs`. An async-signal-safe pre-exec hook migrates each
 //!    forked child before `execve(2)`, so user code and every descendant are born in
 //!    the operation leaf even if they immediately call `setsid` or double-fork.
-//!    The post-spawn barrier verifies both direct roots and retains a same-group
-//!    supervisor drain only as observable best-effort fallback for an unrestricted
-//!    request. Optional per-op limits contain a memory blow-up to that leaf.
-//!    Without a limit, the child score bias below is what makes global kernel OOM
-//!    prefer host work over the supervisor.
+//!    The post-spawn barrier only verifies both direct roots. Once the manager is
+//!    established, failure to create, configure, pre-open, migrate, or verify an
+//!    operation leaf aborts that operation; user code never runs ambient after a
+//!    partial admission. Optional per-op limits contain work in that leaf.
+//!    Without a limit, the child score bias below makes global kernel OOM prefer
+//!    host work when a higher score is representable; a supervisor already at the
+//!    ABI ceiling remains equal to its children.
 //! 3. **Teardown** ([`OpCgroupHandle`]). The op leaf is `rmdir`'d after the op's
 //!    complete cgroup-owned process tree is killed and reaped. This includes a
 //!    descendant that changed its process group after admission, but excludes an
@@ -47,12 +48,12 @@
 //!
 //! # Fallback and enforcement posture
 //!
-//! With the unrestricted default, every isolation step degrades gracefully: not
-//! Linux, no cgroup v2, the memory controller is not delegated, or any step returns
-//! `EPERM`/IO error → the reason is logged once and the agent keeps serving with
-//! the host's ambient behavior. An explicit resource policy instead fails the
-//! affected operation closed if it cannot be proved enforced. Either way, an
-//! isolation failure never stops the supervisor from answering control RPCs.
+//! Startup capability discovery degrades gracefully: not Linux, no cgroup v2, no
+//! manager-owned subgroup, or no delegated memory controller means the runner keeps
+//! serving with ambient host behavior. Once a manager is established, each exec is
+//! admitted atomically into a complete operation leaf or that exec fails before
+//! user code runs. An explicit resource policy also fails closed when the exact
+//! controller is unavailable. Failures never stop control RPCs.
 //!
 //! # Cross-platform posture
 //!
@@ -60,8 +61,6 @@
 //! returns `None` (a documented no-op) and no cgroup is ever touched — the same
 //! honest-degradation posture the metrics reader uses for its `/proc` sources.
 
-#[cfg(target_os = "linux")]
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "linux")]
 use std::sync::atomic::Ordering;
@@ -88,11 +87,13 @@ const SUPERVISOR_LEAF: &str = "supervisor";
 #[cfg(target_os = "linux")]
 const SYSTEMD_OOMD_AVOID_XATTR: &str = "user.oomd_avoid";
 
-/// Controllers whose leaf files provide the resource-accounting contract. The
-/// runner enables only the subset delegated by the service manager. None of these
-/// controller activations installs a resource limit.
+/// Controller required continuously for fate/lifecycle containment. CPU is
+/// deliberately absent: enabling it changes hierarchical scheduling between
+/// sibling operation leaves, so it is leased only while an explicit CPU quota is
+/// active. I/O and PID controllers are not enabled until a concrete opt-in policy
+/// needs them.
 #[cfg(target_os = "linux")]
-const OP_ACCOUNTING_CONTROLLERS: [&str; 4] = ["memory", "cpu", "io", "pids"];
+const OP_ALWAYS_ON_CONTROLLERS: [&str; 1] = ["memory"];
 
 /// Environment variable naming an optional per-op `memory.max` hard cap, in bytes.
 const OP_MEMORY_MAX_ENV: &str = "OPENGENI_AGENT_OP_MEMORY_MAX";
@@ -100,9 +101,22 @@ const OP_MEMORY_MAX_ENV: &str = "OPENGENI_AGENT_OP_MEMORY_MAX";
 /// Environment variable naming an optional per-op `memory.high` throttle, in bytes.
 const OP_MEMORY_HIGH_ENV: &str = "OPENGENI_AGENT_OP_MEMORY_HIGH";
 
-/// Optional per-op memory limits applied to each `op-<n>` leaf. Both default to
-/// unset: the leaf still ACCOUNTS memory separately (which is what fate-isolates
-/// the supervisor), and only caps the op when an operator opts in.
+/// Environment variable naming an optional per-op hard CPU quota in exact
+/// thousandths of one CPU (1000 = one CPU).
+const OP_CPU_MAX_MILLICORES_ENV: &str = "OPENGENI_AGENT_OP_CPU_MAX_MILLICORES";
+
+/// `cpu.max` quota and period are microseconds. The cgroup-v2 ABI accepts values
+/// from 1 ms through 1 s; these are kernel contract bounds, not runner tuning.
+#[cfg(any(target_os = "linux", test))]
+const CGROUP_CPU_MIN_MICROS: u64 = 1_000;
+#[cfg(any(target_os = "linux", test))]
+const CGROUP_CPU_MAX_PERIOD_MICROS: u64 = 1_000_000;
+#[cfg(any(target_os = "linux", test))]
+const MILLICORES_PER_CPU: u64 = 1_000;
+
+/// Optional per-op resource limits applied to each `op-<n>` leaf. All default to
+/// unset: the leaf still accounts memory separately (which fate-isolates the
+/// supervisor), and only constrains the op when an operator opts in.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct OpCgroupConfig {
     /// The per-op `memory.max` hard limit in bytes (a hit is an in-op OOM). Unset =
@@ -111,6 +125,10 @@ pub struct OpCgroupConfig {
     /// The per-op `memory.high` throttle in bytes (reclaim pressure, not a kill).
     /// Unset = no throttle.
     pub memory_high: Option<u64>,
+    /// Exact thousandths of one CPU available to the operation. Unset = no hard
+    /// CPU quota. With no CPU-limited operations, the runner removes `+cpu` so
+    /// unlimited leaves retain the host's ambient scheduling topology.
+    pub cpu_max_millicores: Option<u32>,
 }
 
 impl OpCgroupConfig {
@@ -127,6 +145,7 @@ impl OpCgroupConfig {
         Self::from_limits(
             parse_bytes_env(OP_MEMORY_MAX_ENV)?,
             parse_bytes_env(OP_MEMORY_HIGH_ENV)?,
+            parse_millicores_env(OP_CPU_MAX_MILLICORES_ENV)?,
         )
     }
 
@@ -141,6 +160,7 @@ impl OpCgroupConfig {
     pub fn from_limits(
         memory_max: Option<u64>,
         memory_high: Option<u64>,
+        cpu_max_millicores: Option<u32>,
     ) -> Result<Self, OpCgroupConfigError> {
         if memory_max == Some(0) {
             return Err(OpCgroupConfigError::ZeroByteCount {
@@ -152,9 +172,13 @@ impl OpCgroupConfig {
                 setting: "memory.high",
             });
         }
+        if cpu_max_millicores == Some(0) {
+            return Err(OpCgroupConfigError::ZeroCpuCount);
+        }
         let config = Self {
             memory_max,
             memory_high,
+            cpu_max_millicores,
         };
         if let (Some(max), Some(high)) = (config.memory_max, config.memory_high) {
             if high > max {
@@ -168,16 +192,23 @@ impl OpCgroupConfig {
     /// requested policy. A finite value always wins over unlimited; neither
     /// authority can loosen the other.
     #[must_use]
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn tightened_by(self, requested: Self) -> Self {
         let memory_max = tighter_limit(self.memory_max, requested.memory_max);
         let memory_high = tighter_limit(self.memory_high, requested.memory_high)
             .map(|high| memory_max.map_or(high, |max| high.min(max)));
+        let cpu_max_millicores = tighter_limit(
+            self.cpu_max_millicores.map(u64::from),
+            requested.cpu_max_millicores.map(u64::from),
+        )
+        .map(|value| u32::try_from(value).expect("a tightened u32 CPU policy remains a u32"));
         Self {
             memory_max,
             // Do not invent a soft throttle from a hard ceiling. If a soft limit
             // was requested, cap it at the effective hard ceiling so the leaf
             // cannot claim an impossible throttle-above-ceiling policy.
             memory_high,
+            cpu_max_millicores,
         }
     }
 
@@ -186,7 +217,7 @@ impl OpCgroupConfig {
     /// silently granting unlimited resources.
     #[must_use]
     pub fn has_limits(self) -> bool {
-        self.memory_max.is_some() || self.memory_high.is_some()
+        self.memory_max.is_some() || self.memory_high.is_some() || self.cpu_max_millicores.is_some()
     }
 }
 
@@ -196,6 +227,12 @@ pub enum OpCgroupConfigError {
     /// A present environment value is not an unsigned integer byte count.
     #[error("{name} must be an unsigned byte count or zero for unlimited")]
     InvalidByteCount {
+        /// The environment variable containing the malformed value.
+        name: &'static str,
+    },
+    /// A present environment CPU quota is not an unsigned 32-bit millicore count.
+    #[error("{name} must be an unsigned 32-bit millicore count or zero for unlimited")]
+    InvalidCpuCount {
         /// The environment variable containing the malformed value.
         name: &'static str,
     },
@@ -215,6 +252,9 @@ pub enum OpCgroupConfigError {
         /// Requested `memory.max`, in bytes.
         max: u64,
     },
+    /// A present wire CPU quota must be positive; absence represents unlimited.
+    #[error("operation CPU quota must be positive millicores when present")]
+    ZeroCpuCount,
 }
 
 /// Parses a byte count from environment variable `key`; `None` when unset or
@@ -230,12 +270,24 @@ fn parse_bytes_env(key: &'static str) -> Result<Option<u64>, OpCgroupConfigError
     Ok((parsed > 0).then_some(parsed))
 }
 
+fn parse_millicores_env(key: &'static str) -> Result<Option<u32>, OpCgroupConfigError> {
+    let Ok(value) = std::env::var(key) else {
+        return Ok(None);
+    };
+    let parsed = value
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| OpCgroupConfigError::InvalidCpuCount { name: key })?;
+    Ok((parsed > 0).then_some(parsed))
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn policy_enforcement_error(action: &str, source: &std::io::Error) -> std::io::Error {
     // A missing controller file/cgroup is a host containment capability failure,
     // not a missing command or request path. Normalize the I/O kind so the typed
     // platform layer does not publish a misleading `NotFound` wire error.
     std::io::Error::other(format!(
-        "explicit operation memory policy could not {action}: {source}"
+        "explicit operation resource policy could not {action}: {source}"
     ))
 }
 
@@ -251,41 +303,129 @@ pub struct OpCgroups {
     service_dir: PathBuf,
     /// The per-op memory limits to stamp on each leaf.
     local_config: OpCgroupConfig,
-    /// Exact OS ceiling on unique supervisor-leaf PIDs observed during one spawn.
-    /// Crossing it means an active fork pathology, not normal concurrency.
-    placement_pid_breaker: usize,
+    /// Lazily activates the delegated CPU controller only while at least one
+    /// CPU-limited operation leaf exists.
+    #[cfg(target_os = "linux")]
+    cpu_controller: Option<Arc<CpuControllerState>>,
     /// The next op-id; each `place_op` allocates a unique `op-<n>` sibling.
     next_op: AtomicU64,
-    /// Guards the "log once" of the per-op placement fallback so a persistent
-    /// degradation is reported exactly once, not per exec.
-    fallback_logged: AtomicBool,
+    /// Guards the "log once" of an operation admission failure so a persistent
+    /// host fault is reported exactly once, not per exec.
+    admission_failure_logged: AtomicBool,
     /// Last explicit-policy snapshot reported. The next operation re-reads kernel
     /// leaf and ancestor state and logs only when desired/effective/external truth
     /// changed.
-    policy_report: Mutex<Option<MemoryPolicyReport>>,
+    policy_report: Mutex<Option<ResourcePolicyReport>>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct CpuControllerState {
+    service_dir: PathBuf,
+    active_leases: Mutex<usize>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct CpuControllerLease {
+    state: Arc<CpuControllerState>,
+}
+
+#[cfg(target_os = "linux")]
+impl CpuControllerState {
+    fn acquire(self: &Arc<Self>) -> std::io::Result<CpuControllerLease> {
+        let mut active = self
+            .active_leases
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *active == 0 {
+            enable_subtree_controller(&self.service_dir, "cpu")?;
+        }
+        *active = active.checked_add(1).ok_or_else(|| {
+            std::io::Error::other("operation CPU-controller lease count is exhausted")
+        })?;
+        Ok(CpuControllerLease {
+            state: Arc::clone(self),
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for CpuControllerLease {
+    fn drop(&mut self) {
+        let mut active = self
+            .state
+            .active_leases
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        debug_assert!(*active > 0, "a live CPU lease must be counted");
+        *active = active.saturating_sub(1);
+        if *active == 0 {
+            if let Err(error) = disable_subtree_controller(&self.state.service_dir, "cpu") {
+                tracing::warn!(
+                    %error,
+                    "could not return the operation subtree to ambient CPU scheduling after the last explicit quota ended"
+                );
+            }
+        }
+    }
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct MemoryPolicyReport {
-    desired_max: Option<u64>,
-    desired_high: Option<u64>,
-    local_max: Option<u64>,
-    local_high: Option<u64>,
-    leaf_max: Option<u64>,
-    leaf_high: Option<u64>,
-    external_max: Option<u64>,
-    external_high: Option<u64>,
-    effective_max: Option<u64>,
-    effective_high: Option<u64>,
+struct ResourcePolicyReport {
+    desired_memory_max: Option<u64>,
+    desired_memory_high: Option<u64>,
+    local_memory_max: Option<u64>,
+    local_memory_high: Option<u64>,
+    leaf_memory_max: Option<u64>,
+    leaf_memory_high: Option<u64>,
+    ancestor_aggregate_memory_max: Option<u64>,
+    ancestor_aggregate_memory_high: Option<u64>,
+    combined_memory_upper_bound_max: Option<u64>,
+    combined_memory_upper_bound_high: Option<u64>,
+    desired_cpu_millicores: Option<u32>,
+    local_cpu_millicores: Option<u32>,
+    leaf_cpu: Option<CpuMax>,
+    external_cpu: Option<CpuMax>,
+    effective_cpu: Option<CpuMax>,
+}
+
+/// One parsed cgroup-v2 `cpu.max` ratio. `quota = None` means `max` (unlimited);
+/// period is always the kernel's positive microsecond scheduling window.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CpuMax {
+    quota: Option<u64>,
+    period: u64,
 }
 
 impl OpCgroups {
+    /// Whether this exact manager can enforce the CPU portion of the wire policy.
+    /// The controller remains disabled until a limited operation acquires it.
+    #[must_use]
+    pub fn cpu_quota_supported(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.cpu_controller.is_some()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
+    }
+
+    /// Whether every field in a local or wire policy can be enforced by this
+    /// manager. Memory support is established by construction; CPU is additive.
+    #[must_use]
+    pub fn supports_policy(&self, policy: OpCgroupConfig) -> bool {
+        policy.cpu_max_millicores.is_none() || self.cpu_quota_supported()
+    }
+
     /// Installs the pre-exec migration hook on one direct operation child. Opening
     /// `cgroup.procs` occurs in the parent; the post-fork hook performs only the
-    /// async-signal-safe PID write. Explicit policy makes a migration failure a
-    /// spawn failure before user code runs. The unrestricted path records the
-    /// degradation and leaves the post-spawn verifier to attempt recovery.
+    /// async-signal-safe PID write. After a manager exists, migration failure always
+    /// fails spawn before user code runs, including for an unlimited operation.
     #[cfg(target_os = "linux")]
     pub(crate) fn configure_process_cgroup_before_exec(
         &self,
@@ -301,174 +441,49 @@ impl OpCgroups {
         let procs = match std::fs::OpenOptions::new().write(true).open(&procs_path) {
             Ok(procs) => procs,
             Err(error) => {
-                self.note_fallback(format_args!(
+                self.note_admission_failure(format_args!(
                     "cannot pre-open {} for atomic operation placement: {error}",
                     procs_path.display()
                 ));
-                return if prepared.policy_required {
-                    Err(policy_enforcement_error(
-                        "prepare atomic pre-exec cgroup placement",
-                        &error,
-                    ))
-                } else {
-                    Ok(())
-                };
+                return Err(contextual_io_error(
+                    "prepare atomic pre-exec operation-cgroup placement",
+                    &error,
+                ));
             }
         };
-        opengeni_agent_linux_ffi::configure_process_cgroup_before_exec(
-            command,
-            procs,
-            prepared.policy_required,
-        );
+        // Once a cgroup manager prepared a leaf, placement is the admission
+        // boundary even for an unlimited request. Failing the pre-exec write
+        // aborts spawn before user code can fork; there is no racy repair loop.
+        opengeni_agent_linux_ffi::configure_process_cgroup_before_exec(command, procs);
         Ok(())
     }
 
-    /// Stops an exec process group, verifies its direct roots in the prepared
-    /// operation cgroup, then drains any same-group process still inherited in
-    /// the supervisor leaf before resuming it.
-    ///
-    /// A `killpg(SIGSTOP)` return is not itself a barrier: delivery may still be
-    /// pending on another CPU. Correctness therefore comes from the pre-exec
-    /// migration and cgroup inheritance, not signal timing. The direct-root writes
-    /// verify that migration and repair a best-effort write failure. The drain then
-    /// catches a same-group process only when unrestricted execution had to use the
-    /// compatibility path. The loop ends when no such live member remains; a
-    /// repeated set means the kernel refused every repair, so the degradation is
-    /// reported instead of spinning.
+    /// Verifies both direct operation roots after spawn. Every child already had
+    /// to migrate in the pre-exec hook before user code ran, so descendants inherit
+    /// the leaf and there is no changing-member repair/fork-storm loop.
     #[cfg(target_os = "linux")]
     pub(crate) fn place_process_group(
         &self,
-        pgid: i32,
+        _pgid: i32,
         direct_pids: &[u32],
         prepared: PreparedOpCgroup,
     ) -> std::io::Result<OpCgroupHandle> {
-        signal_process_group(pgid, nix::sys::signal::Signal::SIGSTOP)?;
-
-        let PreparedOpCgroup {
-            handle,
-            policy_required,
-        } = prepared;
-        self.place_pids_in(
+        let PreparedOpCgroup { handle } = prepared;
+        self.verify_pids_in(
             handle
                 .dir
                 .as_deref()
                 .expect("a live operation handle must own its cgroup path"),
             direct_pids,
-            policy_required,
         )?;
-
-        let mut prior_members: Option<Vec<u32>> = None;
-        let mut observed_pids = HashSet::new();
-        loop {
-            let members = match self.supervisor_process_group_members(pgid) {
-                Ok(members) => members,
-                Err(error) => {
-                    self.note_fallback(format_args!(
-                        "cannot drain process-group {pgid} from the supervisor cgroup: {error}"
-                    ));
-                    if policy_required {
-                        return Err(std::io::Error::other(format!(
-                            "explicit operation memory policy could not verify process-group {pgid} containment: {error}"
-                        )));
-                    }
-                    break;
-                }
-            };
-            if members.is_empty() {
-                break;
-            }
-            if prior_members.as_ref() == Some(&members) {
-                self.note_fallback(format_args!(
-                    "process-group {pgid} cgroup drain made no progress for pids {members:?}"
-                ));
-                if policy_required {
-                    return Err(std::io::Error::other(format!(
-                        "explicit operation memory policy could not contain process-group {pgid} members {members:?}"
-                    )));
-                }
-                break;
-            }
-            prior_members = Some(members.clone());
-
-            observed_pids.extend(members.iter().copied());
-            if observed_pids.len() > self.placement_pid_breaker {
-                let error = std::io::Error::other(format!(
-                    "process-group {pgid} cgroup drain observed more unique PIDs than the host-derived ceiling of {} while containing an active fork storm",
-                    self.placement_pid_breaker
-                ));
-                tracing::warn!(
-                    group_id = pgid,
-                    observed_pids = observed_pids.len(),
-                    pending_pids = members.len(),
-                    breaker = self.placement_pid_breaker,
-                    "terminating exec whose pre-containment fork storm tripped the cgroup placement breaker"
-                );
-                let _ = signal_process_group(pgid, nix::sys::signal::Signal::SIGKILL);
-                drop(handle);
-                return Err(error);
-            }
-
-            // A descendant in this fallback path may have forked before the direct
-            // child received its OOM bias. Re-stamp every discovered member; later
-            // descendants inherit from their corrected parent after it moves.
-            for pid in &members {
-                raise_exec_oom_score_adj(*pid);
-            }
-            self.place_pids_in(
-                handle
-                    .dir
-                    .as_deref()
-                    .expect("a live operation handle must own its cgroup path"),
-                &members,
-                policy_required,
-            )?;
-            if let Err(error) = signal_process_group(pgid, nix::sys::signal::Signal::SIGSTOP) {
-                let _ = signal_process_group(pgid, nix::sys::signal::Signal::SIGKILL);
-                drop(handle);
-                return Err(error);
-            }
-        }
-
-        if let Err(error) = signal_process_group(pgid, nix::sys::signal::Signal::SIGCONT) {
-            let _ = signal_process_group(pgid, nix::sys::signal::Signal::SIGKILL);
-            drop(handle);
-            return Err(error);
-        }
         Ok(handle)
     }
 
-    /// Enumerates live members of `pgid` that still inherit the supervisor leaf.
-    #[cfg(target_os = "linux")]
-    fn supervisor_process_group_members(&self, pgid: i32) -> std::io::Result<Vec<u32>> {
-        let supervisor_procs = self.service_dir.join(SUPERVISOR_LEAF).join("cgroup.procs");
-        let contents = std::fs::read_to_string(supervisor_procs)?;
-        let mut members = Vec::new();
-        for raw in contents.split_whitespace() {
-            let Ok(member_pid) = raw.parse::<u32>() else {
-                continue;
-            };
-            let Ok(member_raw_pid) = i32::try_from(member_pid) else {
-                continue;
-            };
-            if nix::unistd::getpgid(Some(nix::unistd::Pid::from_raw(member_raw_pid)))
-                .is_ok_and(|member_pgid| member_pgid.as_raw() == pgid)
-            {
-                members.push(member_pid);
-            }
-        }
-        members.sort_unstable();
-        members.dedup();
-        Ok(members)
-    }
-
     /// Creates and configures one fresh `op-<n>` leaf before any operation child
-    /// is forked. The returned preparation owns the teardown handle and records
-    /// whether every pre-exec/post-spawn placement step is policy-critical.
-    ///
-    /// With the unrestricted default, a placement failure degrades loudly and the
-    /// operation retains the host's ambient behavior. When an operator explicitly
-    /// configured a memory policy, every policy and live-PID placement write fails
-    /// closed so the runner never presents an unenforced limit as effective.
+    /// is forked. The returned preparation owns the teardown handle. Once this
+    /// manager exists, every leaf creation/configuration/placement step is an
+    /// admission invariant and fails the operation closed; ambient execution is
+    /// reserved for hosts where startup established no manager at all.
     #[cfg(target_os = "linux")]
     pub(crate) fn prepare_op(
         &self,
@@ -476,6 +491,23 @@ impl OpCgroups {
     ) -> std::io::Result<Option<PreparedOpCgroup>> {
         let applied_config = self.local_config.tightened_by(requested_config);
         let policy_required = applied_config.has_limits();
+        let cpu_lease = if applied_config.cpu_max_millicores.is_some() {
+            Some(
+                self.cpu_controller
+                    .as_ref()
+                    .ok_or_else(|| {
+                        std::io::Error::other(
+                            "explicit operation CPU quota requires a delegated cgroup-v2 CPU controller",
+                        )
+                    })?
+                    .acquire()
+                    .map_err(|error| {
+                        policy_enforcement_error("activate the CPU controller", &error)
+                    })?,
+            )
+        } else {
+            None
+        };
         let mut op_id = self.next_op.load(Ordering::Relaxed);
         loop {
             let next = op_id
@@ -496,40 +528,38 @@ impl OpCgroups {
         // generation. Refuse an existing path instead of adopting and later
         // killing a cgroup whose ownership cannot be proved.
         if let Err(error) = std::fs::create_dir(&dir) {
-            self.note_fallback(format_args!(
+            self.note_admission_failure(format_args!(
                 "cannot create op cgroup {}: {error}",
                 dir.display()
             ));
-            return if policy_required {
-                Err(policy_enforcement_error(
-                    "create the operation cgroup",
-                    &error,
-                ))
-            } else {
-                Ok(None)
-            };
+            return Err(contextual_io_error(
+                "create the operation cgroup after containment was established",
+                &error,
+            ));
         }
         let handle = OpCgroupHandle {
             dir: Some(dir.clone()),
+            cpu_lease,
         };
 
         // If this leaf is selected by a memcg OOM, kill the complete operation
         // instead of leaving sibling descendants running with partial state.
         if let Err(error) = std::fs::write(dir.join("memory.oom.group"), "1") {
-            self.note_fallback(format_args!(
+            self.note_admission_failure(format_args!(
                 "cannot set memory.oom.group on {}: {error}",
                 dir.display()
             ));
-            if policy_required {
-                return Err(policy_enforcement_error("set memory.oom.group", &error));
-            }
+            return Err(contextual_io_error(
+                "set the operation cgroup OOM ownership boundary",
+                &error,
+            ));
         }
 
         // Optional per-op caps (default: unset). Explicit policy is fail-closed:
         // silently continuing would turn an operator's ceiling into unlimited work.
         if let Some(max) = applied_config.memory_max {
             if let Err(error) = std::fs::write(dir.join("memory.max"), max.to_string()) {
-                self.note_fallback(format_args!(
+                self.note_admission_failure(format_args!(
                     "cannot set memory.max on {}: {error}",
                     dir.display()
                 ));
@@ -538,7 +568,7 @@ impl OpCgroups {
         }
         if let Some(high) = applied_config.memory_high {
             if let Err(error) = std::fs::write(dir.join("memory.high"), high.to_string()) {
-                self.note_fallback(format_args!(
+                self.note_admission_failure(format_args!(
                     "cannot set memory.high on {}: {error}",
                     dir.display()
                 ));
@@ -546,31 +576,44 @@ impl OpCgroups {
             }
         }
 
+        if let Some(millicores) = applied_config.cpu_max_millicores {
+            let cpu_max_path = dir.join("cpu.max");
+            let inherited = read_cpu_max(&cpu_max_path).map_err(|error| {
+                policy_enforcement_error("read the operation cpu.max period", &error)
+            })?;
+            let exact = exact_cpu_max(millicores, inherited.period).map_err(|error| {
+                policy_enforcement_error("derive an exact operation CPU quota", &error)
+            })?;
+            let quota = exact
+                .quota
+                .expect("an exact configured CPU policy has a finite quota");
+            if let Err(error) = std::fs::write(&cpu_max_path, format!("{quota} {}", exact.period)) {
+                self.note_admission_failure(format_args!(
+                    "cannot set cpu.max on {}: {error}",
+                    dir.display()
+                ));
+                return Err(policy_enforcement_error("set cpu.max", &error));
+            }
+        }
+
         if policy_required {
-            self.report_memory_policy(&dir, requested_config)
+            self.report_resource_policy(&dir, requested_config)
                 .map_err(|error| {
                     policy_enforcement_error(
-                        "read back the effective operation memory policy",
+                        "read back the operation resource policy and ancestor bounds",
                         &error,
                     )
                 })?;
         }
 
-        Ok(Some(PreparedOpCgroup {
-            handle,
-            policy_required,
-        }))
+        Ok(Some(PreparedOpCgroup { handle }))
     }
 
-    /// Moves each live PID into an existing operation leaf. `cgroup.procs` moves
-    /// the entire thread group and returns only after the migration is visible.
+    /// Rewrites each live direct PID to the already-inherited operation leaf.
+    /// `cgroup.procs` returns only after placement is visible, making this a
+    /// post-spawn verification rather than a race-closing repair mechanism.
     #[cfg(target_os = "linux")]
-    fn place_pids_in(
-        &self,
-        dir: &Path,
-        pids: &[u32],
-        policy_required: bool,
-    ) -> std::io::Result<()> {
+    fn verify_pids_in(&self, dir: &Path, pids: &[u32]) -> std::io::Result<()> {
         let procs = dir.join("cgroup.procs");
         for pid in pids {
             if let Err(error) = std::fs::write(&procs, pid.to_string()) {
@@ -579,23 +622,21 @@ impl OpCgroups {
                 if !Path::new(&format!("/proc/{pid}")).exists() {
                     continue;
                 }
-                self.note_fallback(format_args!(
-                    "cannot place pid {pid} into {}: {error}",
+                self.note_admission_failure(format_args!(
+                    "cannot verify pid {pid} in {}: {error}",
                     dir.display()
                 ));
-                if policy_required {
-                    return Err(policy_enforcement_error(
-                        &format!("place live pid {pid} in the operation cgroup"),
-                        &error,
-                    ));
-                }
+                return Err(contextual_io_error(
+                    &format!("verify live pid {pid} in the operation cgroup"),
+                    &error,
+                ));
             }
         }
         Ok(())
     }
 
     #[cfg(target_os = "linux")]
-    fn report_memory_policy(
+    fn report_resource_policy(
         &self,
         op_dir: &Path,
         requested_config: OpCgroupConfig,
@@ -608,21 +649,42 @@ impl OpCgroups {
         let leaf_high = read_cgroup_limit(&leaf_high_path).map_err(|error| {
             contextual_io_error(&format!("read {}", leaf_high_path.display()), &error)
         })?;
-        let external_max = tightest_ancestor_limit(op_dir, "memory.max")?;
-        let external_high = tightest_ancestor_limit(op_dir, "memory.high")?;
-        let effective_max = tighter_limit(leaf_max, external_max);
-        let effective_high = tighter_limit(tighter_limit(leaf_high, external_high), effective_max);
-        let report = MemoryPolicyReport {
-            desired_max: requested_config.memory_max,
-            desired_high: requested_config.memory_high,
-            local_max: self.local_config.memory_max,
-            local_high: self.local_config.memory_high,
-            leaf_max,
-            leaf_high,
-            external_max,
-            external_high,
-            effective_max,
-            effective_high,
+        // Ancestor memory controls are shared aggregate bounds. They cap what this
+        // operation could consume but do not promise that much availability while
+        // sibling cgroups compete for the same pool.
+        let ancestor_aggregate_max = tightest_ancestor_limit(op_dir, "memory.max")?;
+        let ancestor_aggregate_high = tightest_ancestor_limit(op_dir, "memory.high")?;
+        let combined_upper_bound_max = tighter_limit(leaf_max, ancestor_aggregate_max);
+        let combined_upper_bound_high = tighter_limit(
+            tighter_limit(leaf_high, ancestor_aggregate_high),
+            combined_upper_bound_max,
+        );
+        let (leaf_cpu, external_cpu, effective_cpu) =
+            if requested_config.cpu_max_millicores.is_some()
+                || self.local_config.cpu_max_millicores.is_some()
+            {
+                let leaf = read_cpu_max(&op_dir.join("cpu.max"))?;
+                let external = tightest_ancestor_cpu_max(op_dir)?;
+                (Some(leaf), external, Some(tighter_cpu_max(leaf, external)))
+            } else {
+                (None, None, None)
+            };
+        let report = ResourcePolicyReport {
+            desired_memory_max: requested_config.memory_max,
+            desired_memory_high: requested_config.memory_high,
+            local_memory_max: self.local_config.memory_max,
+            local_memory_high: self.local_config.memory_high,
+            leaf_memory_max: leaf_max,
+            leaf_memory_high: leaf_high,
+            ancestor_aggregate_memory_max: ancestor_aggregate_max,
+            ancestor_aggregate_memory_high: ancestor_aggregate_high,
+            combined_memory_upper_bound_max: combined_upper_bound_max,
+            combined_memory_upper_bound_high: combined_upper_bound_high,
+            desired_cpu_millicores: requested_config.cpu_max_millicores,
+            local_cpu_millicores: self.local_config.cpu_max_millicores,
+            leaf_cpu,
+            external_cpu,
+            effective_cpu,
         };
         let mut prior = self
             .policy_report
@@ -630,17 +692,22 @@ impl OpCgroups {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if prior.as_ref() != Some(&report) {
             tracing::info!(
-                desired_memory_max = ?report.desired_max,
-                desired_memory_high = ?report.desired_high,
-                local_memory_max = ?report.local_max,
-                local_memory_high = ?report.local_high,
-                leaf_memory_max = ?report.leaf_max,
-                leaf_memory_high = ?report.leaf_high,
-                external_memory_max = ?report.external_max,
-                external_memory_high = ?report.external_high,
-                effective_memory_max = ?report.effective_max,
-                effective_memory_high = ?report.effective_high,
-                "effective operation memory policy changed"
+                desired_memory_max = ?report.desired_memory_max,
+                desired_memory_high = ?report.desired_memory_high,
+                local_memory_max = ?report.local_memory_max,
+                local_memory_high = ?report.local_memory_high,
+                leaf_memory_max = ?report.leaf_memory_max,
+                leaf_memory_high = ?report.leaf_memory_high,
+                ancestor_aggregate_memory_max = ?report.ancestor_aggregate_memory_max,
+                ancestor_aggregate_memory_high = ?report.ancestor_aggregate_memory_high,
+                combined_memory_upper_bound_max = ?report.combined_memory_upper_bound_max,
+                combined_memory_upper_bound_high = ?report.combined_memory_upper_bound_high,
+                desired_cpu_millicores = ?report.desired_cpu_millicores,
+                local_cpu_millicores = ?report.local_cpu_millicores,
+                leaf_cpu = ?report.leaf_cpu,
+                external_cpu = ?report.external_cpu,
+                effective_cpu = ?report.effective_cpu,
+                "operation resource policy and observed bounds changed"
             );
             *prior = Some(report);
         }
@@ -651,6 +718,7 @@ impl OpCgroups {
     /// reached; it exists so the cross-platform exec path type-checks.
     #[cfg(not(target_os = "linux"))]
     #[allow(clippy::unused_self)]
+    #[allow(clippy::unnecessary_wraps)]
     pub(crate) fn place_op(
         &self,
         _pids: &[u32],
@@ -659,14 +727,14 @@ impl OpCgroups {
         Ok(None)
     }
 
-    /// Logs the per-op placement fallback reason exactly once (a persistent
-    /// degradation must not spam a line per exec).
+    /// Logs an operation admission fault exactly once; a persistent host failure
+    /// must not spam a line per exec.
     #[cfg(target_os = "linux")]
-    fn note_fallback(&self, reason: std::fmt::Arguments<'_>) {
-        if !self.fallback_logged.swap(true, Ordering::Relaxed) {
+    fn note_admission_failure(&self, reason: std::fmt::Arguments<'_>) {
+        if !self.admission_failure_logged.swap(true, Ordering::Relaxed) {
             tracing::warn!(
                 %reason,
-                "per-op OOM containment partially degraded; continuing to serve (logged once)"
+                "operation-cgroup admission failed; the affected operation is rejected while control service continues (logged once)"
             );
         }
     }
@@ -678,7 +746,6 @@ impl OpCgroups {
 #[cfg(target_os = "linux")]
 pub(crate) struct PreparedOpCgroup {
     handle: OpCgroupHandle,
-    policy_required: bool,
 }
 
 /// A handle to one placed `op-<n>` leaf, responsible for removing it once the op's
@@ -687,6 +754,10 @@ pub(crate) struct PreparedOpCgroup {
 pub(crate) struct OpCgroupHandle {
     /// The op leaf's absolute path.
     dir: Option<PathBuf>,
+    /// Keeps hierarchical CPU scheduling active until this exact limited leaf is
+    /// killed, unpopulated, and removed.
+    #[cfg(target_os = "linux")]
+    cpu_lease: Option<CpuControllerLease>,
 }
 
 #[cfg(target_os = "linux")]
@@ -699,6 +770,10 @@ impl OpCgroupHandle {
         let Some(dir) = self.dir.as_ref() else {
             return Ok(());
         };
+        self.kill_all_at(dir)
+    }
+
+    fn kill_all_at(&self, dir: &Path) -> std::io::Result<()> {
         match std::fs::write(dir.join("cgroup.kill"), "1") {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound && !dir.exists() => Ok(()),
@@ -738,11 +813,27 @@ impl Drop for OpCgroupHandle {
         let Some(dir) = self.dir.take() else {
             return;
         };
+        // Drop means the operation did not complete normal teardown. Kill the
+        // complete cgroup synchronously before returning from the error/cancel
+        // path; process-group cleanup alone misses setsid/double-fork descendants.
+        if let Err(error) = self.kill_all_at(&dir) {
+            tracing::warn!(
+                dir = %dir.display(),
+                %error,
+                "failed to recursively kill a dropped operation cgroup"
+            );
+        }
+        let cpu_lease = self.cpu_lease.take();
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             tracing::warn!(
                 dir = %dir.display(),
                 "cannot schedule operation-cgroup cleanup outside the agent runtime"
             );
+            // Retain a CPU lease rather than lift a hard quota while descendants
+            // may still be alive. Process exit ultimately releases the hierarchy.
+            if let Some(lease) = cpu_lease {
+                std::mem::forget(lease);
+            }
             return;
         };
         runtime.spawn(async move {
@@ -752,7 +843,12 @@ impl Drop for OpCgroupHandle {
                     %error,
                     "failed to remove a runner-owned operation cgroup after task cancellation"
                 );
+                if let Some(lease) = cpu_lease {
+                    std::mem::forget(lease);
+                }
             }
+            // On success, dropping `cpu_lease` after removal may disable +cpu
+            // when this was the final limited operation.
         });
     }
 }
@@ -811,6 +907,7 @@ fn cgroup_is_populated(events: &mut std::fs::File) -> std::io::Result<bool> {
 #[cfg(not(target_os = "linux"))]
 impl OpCgroupHandle {
     #[allow(dead_code)]
+    #[allow(clippy::unused_self, clippy::unnecessary_wraps)]
     pub(crate) fn kill_all(&self) -> std::io::Result<()> {
         Ok(())
     }
@@ -831,30 +928,32 @@ pub fn establish_oom_isolation(config: OpCgroupConfig) -> Option<Arc<OpCgroups>>
     report_supervisor_oom_score_adj();
 
     let startup = discover_delegated_service()?;
-    let (enabled_controllers, unavailable_controllers) = establish_delegated_subtree(&startup)?;
-    let Some(placement_pid_breaker) = placement_pid_breaker(&startup.service_dir) else {
-        tracing::warn!(
-            service_cgroup = %startup.service_dir.display(),
-            "OOM cgroup isolation unavailable: cannot read a delegated, process, or PID-namespace ceiling for bounded pre-containment placement"
-        );
-        return None;
-    };
+    let (enabled_controllers, unavailable_controllers, cpu_delegated) =
+        establish_delegated_subtree(&startup)?;
     tracing::info!(
         service_cgroup = %startup.service_dir.display(),
         ?enabled_controllers,
         ?unavailable_controllers,
         memory_max = ?config.memory_max,
         memory_high = ?config.memory_high,
-        placement_pid_breaker,
+        cpu_max_millicores = ?config.cpu_max_millicores,
+        cpu_quota_supported = cpu_delegated,
         stale_operations_cleanup_scheduled = startup.stale_op_cgroups.len(),
         "established per-op cgroups: host execs have separate resource accounting and systemd-oomd fate; no controller limit was added implicitly and kernel OOM selection remains score-based"
     );
+    let service_dir = startup.service_dir;
+    let cpu_controller = cpu_delegated.then(|| {
+        Arc::new(CpuControllerState {
+            service_dir: service_dir.clone(),
+            active_leases: Mutex::new(0),
+        })
+    });
     Some(Arc::new(OpCgroups {
-        service_dir: startup.service_dir,
+        service_dir,
         local_config: config,
-        placement_pid_breaker,
+        cpu_controller,
         next_op: AtomicU64::new(startup.next_op),
-        fallback_logged: AtomicBool::new(false),
+        admission_failure_logged: AtomicBool::new(false),
         policy_report: Mutex::new(None),
     }))
 }
@@ -975,7 +1074,7 @@ fn discover_delegated_service() -> Option<CgroupStartup> {
 #[cfg(target_os = "linux")]
 fn establish_delegated_subtree(
     startup: &CgroupStartup,
-) -> Option<(Vec<&'static str>, Vec<&'static str>)> {
+) -> Option<(Vec<&'static str>, Vec<&'static str>, bool)> {
     let service_dir = &startup.service_dir;
     let supervisor_dir = &startup.supervisor_dir;
     // `ManagedOOMPreference=avoid` lives as an xattr on the service cgroup and is
@@ -1025,6 +1124,14 @@ fn establish_delegated_subtree(
         );
         return None;
     }
+    let cpu_delegated = controllers_contains(&startup.controllers, "cpu");
+    if let Err(error) = disable_subtree_controller(service_dir, "cpu") {
+        tracing::warn!(
+            %error,
+            "OOM cgroup isolation unavailable: cannot restore ambient CPU scheduling before accepting unrestricted operations"
+        );
+        return None;
+    }
     let (enabled_controllers, unavailable_controllers) = match enable_op_accounting_controllers(
         service_dir,
         &startup.controllers,
@@ -1039,7 +1146,7 @@ fn establish_delegated_subtree(
         }
     };
 
-    Some((enabled_controllers, unavailable_controllers))
+    Some((enabled_controllers, unavailable_controllers, cpu_delegated))
 }
 
 /// Non-Linux no-op: per-op cgroup isolation is a Linux cgroup v2 feature. Returns
@@ -1049,61 +1156,6 @@ fn establish_delegated_subtree(
 pub fn establish_oom_isolation(_config: OpCgroupConfig) -> Option<Arc<OpCgroups>> {
     tracing::debug!("per-op OOM cgroup isolation is Linux-only; running without it on this OS");
     None
-}
-
-/// Signals an owned process group. ESRCH is success: the group completed before
-/// the placement barrier and has nothing left to isolate or resume.
-#[cfg(target_os = "linux")]
-fn signal_process_group(pgid: i32, signal: nix::sys::signal::Signal) -> std::io::Result<()> {
-    use nix::errno::Errno;
-    use nix::sys::signal::killpg;
-    use nix::unistd::Pid;
-
-    match killpg(Pid::from_raw(pgid), signal) {
-        Ok(()) | Err(Errno::ESRCH) => Ok(()),
-        Err(error) => Err(std::io::Error::from(error)),
-    }
-}
-
-/// Derives a one-spawn fork-pathology breaker from the delegated service's PID
-/// ceiling, then the user's process rlimit, then the PID namespace ceiling. The
-/// exact first authoritative OS ceiling is used: containment does not invent a
-/// smaller reserve or operation limit. This breaker limits only the synchronous
-/// pre-containment drain; it does not limit a successfully-contained command's
-/// lifetime or eventual process count.
-#[cfg(target_os = "linux")]
-fn placement_pid_breaker(service_dir: &Path) -> Option<usize> {
-    let cgroup_ceiling = std::fs::read_to_string(service_dir.join("pids.max"))
-        .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok());
-    let rlimit_ceiling = std::fs::read_to_string("/proc/self/limits")
-        .ok()
-        .and_then(|limits| parse_soft_process_limit(&limits));
-    let namespace_ceiling = std::fs::read_to_string("/proc/sys/kernel/pid_max")
-        .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok());
-    derive_placement_pid_breaker(cgroup_ceiling.or(rlimit_ceiling).or(namespace_ceiling))
-}
-
-/// Converts a known positive OS PID ceiling to the host word size. An absent or
-/// zero ceiling disables containment explicitly rather than inventing a fallback.
-#[cfg(target_os = "linux")]
-fn derive_placement_pid_breaker(pid_ceiling: Option<u64>) -> Option<usize> {
-    pid_ceiling
-        .filter(|ceiling| *ceiling > 0)
-        .map(|ceiling| usize::try_from(ceiling).unwrap_or(usize::MAX))
-}
-
-/// Parses the soft `RLIMIT_NPROC` value from `/proc/self/limits`; `unlimited`
-/// deliberately falls through to the kernel PID namespace ceiling.
-#[cfg(target_os = "linux")]
-fn parse_soft_process_limit(limits: &str) -> Option<u64> {
-    let value = limits
-        .lines()
-        .find_map(|line| line.strip_prefix("Max processes"))?
-        .split_whitespace()
-        .next()?;
-    (value != "unlimited").then(|| value.parse().ok()).flatten()
 }
 
 /// Finds exact `op-<u64>` leaves left by an earlier runner process. The next live
@@ -1221,6 +1273,95 @@ fn read_cgroup_limit(path: &Path) -> std::io::Result<Option<u64>> {
     })
 }
 
+/// Parses the two-field cgroup-v2 `cpu.max` ABI (`max|quota period`).
+#[cfg(target_os = "linux")]
+fn read_cpu_max(path: &Path) -> std::io::Result<CpuMax> {
+    let value = std::fs::read_to_string(path)?;
+    parse_cpu_max(&value).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid cpu.max value in {}", path.display()),
+        )
+    })
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_cpu_max(value: &str) -> Option<CpuMax> {
+    let mut fields = value.split_whitespace();
+    let quota = match fields.next()? {
+        "max" => None,
+        quota => Some(quota.parse::<u64>().ok()?),
+    };
+    let period = fields.next()?.parse::<u64>().ok()?;
+    if fields.next().is_some()
+        || !(CGROUP_CPU_MIN_MICROS..=CGROUP_CPU_MAX_PERIOD_MICROS).contains(&period)
+        || quota.is_some_and(|quota| quota < CGROUP_CPU_MIN_MICROS)
+    {
+        return None;
+    }
+    Some(CpuMax { quota, period })
+}
+
+/// Converts an exact integer-millicore contract to the cgroup-v2 microsecond
+/// ratio without rounding. Preserve the leaf's inherited period when possible.
+/// Otherwise lengthen it only enough to meet the kernel's 1 ms minimum quota and
+/// make the reduced millicore ratio integral. The kernel's 1 s ABI maximum
+/// represents even 1 millicore exactly (1000/1_000_000).
+#[cfg(any(target_os = "linux", test))]
+fn exact_cpu_max(millicores: u32, inherited_period: u64) -> std::io::Result<CpuMax> {
+    if millicores == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "CPU quota must be positive millicores",
+        ));
+    }
+    if !(CGROUP_CPU_MIN_MICROS..=CGROUP_CPU_MAX_PERIOD_MICROS).contains(&inherited_period) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "inherited cpu.max period is outside the cgroup-v2 ABI range",
+        ));
+    }
+
+    let millicores = u64::from(millicores);
+    let divisor = greatest_common_divisor(millicores, MILLICORES_PER_CPU);
+    let reduced_numerator = millicores / divisor;
+    let reduced_denominator = MILLICORES_PER_CPU / divisor;
+    let minimum_for_quota = CGROUP_CPU_MIN_MICROS
+        .checked_mul(MILLICORES_PER_CPU)
+        .and_then(|numerator| numerator.checked_add(millicores - 1))
+        .map(|numerator| numerator / millicores)
+        .ok_or_else(|| std::io::Error::other("CPU period derivation overflow"))?;
+    let required = inherited_period
+        .max(minimum_for_quota)
+        .max(CGROUP_CPU_MIN_MICROS);
+    let period = required
+        .checked_add(reduced_denominator - 1)
+        .map(|value| value / reduced_denominator * reduced_denominator)
+        .ok_or_else(|| std::io::Error::other("CPU period alignment overflow"))?;
+    if period > CGROUP_CPU_MAX_PERIOD_MICROS {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "CPU quota cannot be represented within the cgroup-v2 period range",
+        ));
+    }
+    let quota = (period / reduced_denominator)
+        .checked_mul(reduced_numerator)
+        .filter(|quota| *quota >= CGROUP_CPU_MIN_MICROS)
+        .ok_or_else(|| std::io::Error::other("CPU quota derivation overflow"))?;
+    Ok(CpuMax {
+        quota: Some(quota),
+        period,
+    })
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn greatest_common_divisor(mut left: u64, mut right: u64) -> u64 {
+    while right != 0 {
+        (left, right) = (right, left % right);
+    }
+    left
+}
+
 /// Preserves an I/O error's stable kind while attaching the exact cgroup path and
 /// action. This keeps capability and policy failures diagnosable after the native
 /// platform maps them onto its typed wire error.
@@ -1248,8 +1389,48 @@ fn tightest_ancestor_limit(op_dir: &Path, file: &str) -> std::io::Result<Option<
     Ok(tightest)
 }
 
+#[cfg(target_os = "linux")]
+fn tightest_ancestor_cpu_max(op_dir: &Path) -> std::io::Result<Option<CpuMax>> {
+    let mount = Path::new(CGROUP2_MOUNT);
+    let mut tightest = None;
+    let mut current = op_dir.parent();
+    while let Some(dir) = current.filter(|dir| dir.starts_with(mount) && *dir != mount) {
+        let path = dir.join("cpu.max");
+        let limit = read_cpu_max(&path)
+            .map_err(|error| contextual_io_error(&format!("read {}", path.display()), &error))?;
+        if limit.quota.is_some() {
+            tightest = Some(tightest.map_or(limit, |prior| tighter_cpu_max(prior, Some(limit))));
+        }
+        current = dir.parent();
+    }
+    Ok(tightest)
+}
+
+/// Compares CPU ratios with `u128` cross-products so differing periods and large
+/// protocol values never overflow or lose precision.
+#[cfg(any(target_os = "linux", test))]
+fn tighter_cpu_max(left: CpuMax, right: Option<CpuMax>) -> CpuMax {
+    let Some(right) = right else {
+        return left;
+    };
+    match (left.quota, right.quota) {
+        (None, _) => right,
+        (_, None) => left,
+        (Some(left_quota), Some(right_quota)) => {
+            let left_scaled = u128::from(left_quota) * u128::from(right.period);
+            let right_scaled = u128::from(right_quota) * u128::from(left.period);
+            if left_scaled <= right_scaled {
+                left
+            } else {
+                right
+            }
+        }
+    }
+}
+
 /// Combines two cgroup limits: unlimited yields to finite and two finite ceilings
 /// resolve to the tighter value.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn tighter_limit(left: Option<u64>, right: Option<u64>) -> Option<u64> {
     match (left, right) {
         (Some(left), Some(right)) => Some(left.min(right)),
@@ -1258,9 +1439,9 @@ fn tighter_limit(left: Option<u64>, right: Option<u64>) -> Option<u64> {
     }
 }
 
-/// Enables the delegated controller subset used for per-operation accounting.
-/// Memory is the fate-isolation prerequisite and therefore errors out; the other
-/// accounting controllers degrade independently and are reported as unavailable.
+/// Enables the always-on delegated controller subset. Today that is memory only:
+/// it is the fate-isolation prerequisite and therefore errors out. CPU has a
+/// separate opt-in lease; I/O and PID remain disabled.
 #[cfg(target_os = "linux")]
 fn enable_op_accounting_controllers(
     service_dir: &Path,
@@ -1268,7 +1449,7 @@ fn enable_op_accounting_controllers(
 ) -> std::io::Result<(Vec<&'static str>, Vec<&'static str>)> {
     let mut enabled = Vec::new();
     let mut unavailable = Vec::new();
-    for controller in OP_ACCOUNTING_CONTROLLERS {
+    for controller in OP_ALWAYS_ON_CONTROLLERS {
         if !controllers_contains(available, controller) {
             unavailable.push(controller);
             continue;
@@ -1311,15 +1492,55 @@ fn enable_subtree_controller(service_dir: &Path, controller: &str) -> std::io::R
     }
 }
 
+/// Disables one controller for the service's direct children and verifies the
+/// effective state. This restores ambient scheduling after the last explicit CPU
+/// quota; leaving `+cpu` sticky would silently change future unrestricted work.
+#[cfg(target_os = "linux")]
+fn disable_subtree_controller(service_dir: &Path, controller: &str) -> std::io::Result<()> {
+    let subtree = service_dir.join("cgroup.subtree_control");
+    if std::fs::read_to_string(&subtree)
+        .is_ok_and(|contents| !controllers_contains(&contents, controller))
+    {
+        return Ok(());
+    }
+    std::fs::write(&subtree, format!("-{controller}"))?;
+    let effective = std::fs::read_to_string(&subtree)?;
+    if controllers_contains(&effective, controller) {
+        Err(std::io::Error::other(format!(
+            "kernel did not disable delegated controller {controller}"
+        )))
+    } else {
+        Ok(())
+    }
+}
+
 // --- oom_score_adj: bias the kernel OOM killer toward host work ----------------
 
-/// The `oom_score_adj` stamped on every exec child. A positive bias makes the
-/// kernel's GLOBAL OOM killer sacrifice a runaway child (and its descendants,
-/// which inherit the value on fork) before the supervisor, whose effective bias
-/// is reported separately. Raising the value is unprivileged-legal; 500 is a strong
-/// bias without pinning the child as the unconditional first victim.
+/// Derives the minimal child OOM bias above the supervisor when the kernel ABI can
+/// represent one. A manager-protected negative supervisor needs only neutral
+/// children. If the manager clamps the supervisor to neutral or positive, one
+/// point is the smallest legal preference. At the ABI ceiling (1000) no stronger
+/// relative preference is representable, so the child remains equal.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn minimal_exec_oom_score_adj(supervisor: i32) -> u16 {
+    if supervisor < 0 {
+        0
+    } else {
+        u16::try_from(supervisor.saturating_add(1).min(1000))
+            .expect("a parsed nonnegative OOM adjustment fits u16")
+    }
+}
+
+/// Reads the current supervisor's authoritative kernel value and derives the
+/// minimal child bias. `None` leaves the host policy untouched when `/proc` cannot
+/// be read or contains an invalid ABI value.
 #[cfg(target_os = "linux")]
-const EXEC_OOM_SCORE_ADJ: i32 = 500;
+fn exec_oom_score_adj() -> Option<u16> {
+    std::fs::read_to_string("/proc/self/oom_score_adj")
+        .ok()
+        .and_then(|value| parse_oom_score_adj(&value))
+        .map(minimal_exec_oom_score_adj)
+}
 
 /// Reports the effective supervisor victim bias. Service managers are allowed to
 /// clamp a requested negative value, so the generated unit text is not evidence
@@ -1336,11 +1557,14 @@ fn report_supervisor_oom_score_adj() {
         ),
         Some(0) => tracing::info!(
             oom_score_adj = 0,
-            "control supervisor has neutral kernel OOM victim bias"
+            child_oom_score_adj = minimal_exec_oom_score_adj(0),
+            "control supervisor has neutral kernel OOM victim bias; children receive the smallest available relative preference"
         ),
         Some(score) => tracing::warn!(
             oom_score_adj = score,
-            "control supervisor has positive kernel OOM victim bias; delegated cgroups do not protect it from host-wide kernel OOM"
+            child_oom_score_adj = minimal_exec_oom_score_adj(score),
+            relative_preference_representable = score < 1000,
+            "control supervisor has nonnegative kernel OOM victim bias; children receive the smallest higher bias when representable, otherwise the equal ABI ceiling, and delegated cgroups do not protect against host-wide kernel OOM"
         ),
         None => tracing::warn!(
             "could not read the control supervisor's effective kernel OOM victim bias"
@@ -1367,8 +1591,14 @@ static OOM_SCORE_ADJ_WARNED: AtomicBool = AtomicBool::new(false);
 /// retained as a best-effort verification/fallback, but is no longer the only
 /// protection on hosts without delegated cgroups.
 #[cfg(target_os = "linux")]
-pub(crate) fn configure_exec_oom_score_adj_before_exec(command: &mut tokio::process::Command) {
-    opengeni_agent_linux_ffi::configure_oom_score_adj_before_exec(command);
+pub(crate) fn configure_exec_oom_score_adj_before_exec(
+    command: &mut tokio::process::Command,
+) -> Option<u16> {
+    let score = exec_oom_score_adj();
+    if let Some(score) = score {
+        opengeni_agent_linux_ffi::configure_oom_score_adj_before_exec(command, score);
+    }
+    score
 }
 
 /// Raises `/proc/<pid>/oom_score_adj` on a freshly-spawned exec child so the kernel
@@ -1377,14 +1607,17 @@ pub(crate) fn configure_exec_oom_score_adj_before_exec(command: &mut tokio::proc
 /// systemd-oomd a bounded scope — both apply. Best-effort: a failure (the child
 /// already exited, or a locked-down policy) is logged once and ignored.
 #[cfg(target_os = "linux")]
-pub(crate) fn raise_exec_oom_score_adj(pid: u32) {
+pub(crate) fn raise_exec_oom_score_adj(pid: u32, target: Option<u16>) {
+    let Some(target) = target else {
+        return;
+    };
     let path = format!("/proc/{pid}/oom_score_adj");
-    if let Err(error) = std::fs::write(&path, EXEC_OOM_SCORE_ADJ.to_string()) {
+    if let Err(error) = std::fs::write(&path, target.to_string()) {
         if !OOM_SCORE_ADJ_WARNED.swap(true, Ordering::Relaxed) {
             tracing::warn!(
                 %error,
                 pid,
-                target = EXEC_OOM_SCORE_ADJ,
+                target,
                 "could not raise exec child oom_score_adj; continuing (logged once)"
             );
         }
@@ -1460,6 +1693,15 @@ mod tests {
         assert_eq!(parse_oom_score_adj("1000"), Some(1000));
         assert_eq!(parse_oom_score_adj("1001"), None);
         assert_eq!(parse_oom_score_adj("invalid"), None);
+    }
+
+    #[test]
+    fn child_oom_bias_is_the_minimal_representable_target() {
+        assert_eq!(minimal_exec_oom_score_adj(-100), 0);
+        assert_eq!(minimal_exec_oom_score_adj(-1), 0);
+        assert_eq!(minimal_exec_oom_score_adj(0), 1);
+        assert_eq!(minimal_exec_oom_score_adj(999), 1000);
+        assert_eq!(minimal_exec_oom_score_adj(1000), 1000);
     }
 
     #[test]
@@ -1567,7 +1809,7 @@ mod tests {
         assert_eq!(error.kind(), std::io::ErrorKind::Other);
         assert!(error
             .to_string()
-            .contains("explicit operation memory policy could not read back memory.max"));
+            .contains("explicit operation resource policy could not read back memory.max"));
     }
 
     #[test]
@@ -1594,27 +1836,6 @@ mod tests {
         assert_eq!(paths, [root.path().join("op-2"), root.path().join("op-7")]);
     }
 
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn placement_pid_breaker_uses_the_exact_host_ceiling() {
-        assert_eq!(derive_placement_pid_breaker(Some(28_708)), Some(28_708));
-        assert_eq!(derive_placement_pid_breaker(Some(1)), Some(1));
-        assert_eq!(derive_placement_pid_breaker(Some(0)), None);
-        assert_eq!(derive_placement_pid_breaker(None), None);
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn parses_finite_process_rlimit_and_skips_unlimited() {
-        let finite = "Limit                     Soft Limit           Hard Limit           Units\n\
-                      Max processes             95695                95695                processes\n";
-        assert_eq!(parse_soft_process_limit(finite), Some(95_695));
-
-        let unlimited = "Limit                     Soft Limit           Hard Limit           Units\n\
-                         Max processes             unlimited            unlimited            processes\n";
-        assert_eq!(parse_soft_process_limit(unlimited), None);
-    }
-
     #[test]
     fn config_from_env_accepts_explicit_limits_and_rejects_malformed_policy() {
         // Serialize the env mutation so parallel tests don't clobber the vars.
@@ -1625,15 +1846,19 @@ mod tests {
 
         std::env::remove_var(OP_MEMORY_MAX_ENV);
         std::env::remove_var(OP_MEMORY_HIGH_ENV);
+        std::env::remove_var(OP_CPU_MAX_MILLICORES_ENV);
         let unset = OpCgroupConfig::from_env().expect("unset policy is valid");
         assert_eq!(unset.memory_max, None);
         assert_eq!(unset.memory_high, None);
+        assert_eq!(unset.cpu_max_millicores, None);
 
         std::env::set_var(OP_MEMORY_MAX_ENV, "1073741824");
         std::env::set_var(OP_MEMORY_HIGH_ENV, "0"); // zero is "unset"
+        std::env::set_var(OP_CPU_MAX_MILLICORES_ENV, "1750");
         let cfg = OpCgroupConfig::from_env().expect("numeric policy is valid");
         assert_eq!(cfg.memory_max, Some(1_073_741_824));
         assert_eq!(cfg.memory_high, None, "zero disables the limit");
+        assert_eq!(cfg.cpu_max_millicores, Some(1750));
 
         std::env::set_var(OP_MEMORY_MAX_ENV, "not-a-number");
         assert_eq!(
@@ -1655,19 +1880,22 @@ mod tests {
 
         std::env::remove_var(OP_MEMORY_MAX_ENV);
         std::env::remove_var(OP_MEMORY_HIGH_ENV);
+        std::env::remove_var(OP_CPU_MAX_MILLICORES_ENV);
     }
 
     #[test]
     fn per_connection_policy_can_only_tighten_local_policy() {
-        let local = OpCgroupConfig::from_limits(Some(1_073_741_824), Some(805_306_368))
-            .expect("local policy");
-        let requested =
-            OpCgroupConfig::from_limits(Some(536_870_912), None).expect("requested policy");
+        let local =
+            OpCgroupConfig::from_limits(Some(1_073_741_824), Some(805_306_368), Some(2_000))
+                .expect("local policy");
+        let requested = OpCgroupConfig::from_limits(Some(536_870_912), None, Some(3_000))
+            .expect("requested policy");
         assert_eq!(
             local.tightened_by(requested),
             OpCgroupConfig {
                 memory_max: Some(536_870_912),
                 memory_high: Some(536_870_912),
+                cpu_max_millicores: Some(2_000),
             }
         );
 
@@ -1678,17 +1906,21 @@ mod tests {
     #[test]
     fn wire_policy_rejects_zero_and_an_impossible_order() {
         assert_eq!(
-            OpCgroupConfig::from_limits(Some(0), None),
+            OpCgroupConfig::from_limits(Some(0), None, None),
             Err(OpCgroupConfigError::ZeroByteCount {
                 setting: "memory.max",
             })
         );
         assert_eq!(
-            OpCgroupConfig::from_limits(Some(1024), Some(2048)),
+            OpCgroupConfig::from_limits(Some(1024), Some(2048), None),
             Err(OpCgroupConfigError::MemoryHighExceedsMax {
                 high: 2048,
                 max: 1024,
             })
+        );
+        assert_eq!(
+            OpCgroupConfig::from_limits(None, None, Some(0)),
+            Err(OpCgroupConfigError::ZeroCpuCount)
         );
     }
 
@@ -1696,13 +1928,96 @@ mod tests {
     fn hard_ceiling_does_not_invent_a_soft_throttle() {
         let local = OpCgroupConfig::default();
         let requested =
-            OpCgroupConfig::from_limits(Some(536_870_912), None).expect("requested policy");
+            OpCgroupConfig::from_limits(Some(536_870_912), None, None).expect("requested policy");
         assert_eq!(
             local.tightened_by(requested),
             OpCgroupConfig {
                 memory_max: Some(536_870_912),
                 memory_high: None,
+                cpu_max_millicores: None,
             }
         );
+    }
+
+    #[test]
+    fn cpu_max_parser_accepts_only_the_kernel_two_field_abi() {
+        assert_eq!(
+            parse_cpu_max("max 100000\n"),
+            Some(CpuMax {
+                quota: None,
+                period: 100_000,
+            })
+        );
+        assert_eq!(
+            parse_cpu_max("25000 100000"),
+            Some(CpuMax {
+                quota: Some(25_000),
+                period: 100_000,
+            })
+        );
+        assert_eq!(parse_cpu_max("999 100000"), None);
+        assert_eq!(parse_cpu_max("max 100000 extra"), None);
+    }
+
+    #[test]
+    fn exact_millicores_preserve_or_minimally_lengthen_the_kernel_period() {
+        assert_eq!(
+            exact_cpu_max(1, 100_000).expect("1m is exactly representable"),
+            CpuMax {
+                quota: Some(1_000),
+                period: 1_000_000,
+            }
+        );
+        assert_eq!(
+            exact_cpu_max(9, 100_000).expect("9m is exactly representable"),
+            CpuMax {
+                quota: Some(1_008),
+                period: 112_000,
+            }
+        );
+        assert_eq!(
+            exact_cpu_max(10, 100_000).expect("10m preserves the default period"),
+            CpuMax {
+                quota: Some(1_000),
+                period: 100_000,
+            }
+        );
+        assert_eq!(
+            exact_cpu_max(500, 100_001).expect("odd period aligns upward exactly"),
+            CpuMax {
+                quota: Some(50_001),
+                period: 100_002,
+            }
+        );
+        assert_eq!(
+            exact_cpu_max(u32::MAX, 100_000).expect("largest wire value fits"),
+            CpuMax {
+                quota: Some(429_496_729_500),
+                period: 100_000,
+            }
+        );
+        assert!(exact_cpu_max(0, 100_000).is_err());
+        assert!(exact_cpu_max(1, 1_000_001).is_err());
+    }
+
+    #[test]
+    fn cpu_ratio_comparison_is_exact_across_periods_and_large_values() {
+        let leaf = CpuMax {
+            quota: Some(50_000),
+            period: 100_000,
+        };
+        let tighter_ancestor = CpuMax {
+            quota: Some(4_000),
+            period: 10_000,
+        };
+        assert_eq!(
+            tighter_cpu_max(leaf, Some(tighter_ancestor)),
+            tighter_ancestor
+        );
+        let huge = CpuMax {
+            quota: Some(u64::MAX),
+            period: 1_000_000,
+        };
+        assert_eq!(tighter_cpu_max(huge, Some(leaf)), leaf);
     }
 }

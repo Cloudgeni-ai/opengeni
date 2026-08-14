@@ -278,13 +278,13 @@ impl Harness {
         let probe_ping = probe_agg.stats("ping");
         agg.record_all(&flood_out);
         agg.record_all(&probe_out);
-        let draining_a = count_draining(&flood_out);
+        let failures_a = count_failed_ops(&flood_out);
 
         // --- part (b): fleet shape (fleet_size agents × 16 concurrent ops) ----
         let fleet_n = fleet_size.min(self.agents.len());
         let fleet_out = self.fleet_flood(fleet_n, &mut rng).await;
         agg.record_all(&fleet_out);
-        let draining_b = count_draining(&fleet_out);
+        let failures_b = count_failed_ops(&fleet_out);
 
         let resources = sampler.finish();
         let max_gap = max_gap_ms(&self.collector.gaps_ms());
@@ -298,10 +298,13 @@ impl Harness {
                 ),
             },
             Verdict {
-                check: "no admission refusals under the 256-op burst (runner admits everything)"
+                check: "all flood operations complete successfully (runner admits everything)"
                     .to_string(),
-                pass: draining_a == 0 && draining_b == 0,
-                detail: format!("{draining_a} DRAINING in the 256-op burst; {draining_b} across the {fleet_n}-agent fleet burst"),
+                pass: flood_out.len() == 256
+                    && fleet_out.len() == fleet_n * 16
+                    && failures_a == 0
+                    && failures_b == 0,
+                detail: format!("{}/256 single-agent outcomes with {failures_a} failures; {}/{} fleet outcomes with {failures_b} failures", flood_out.len(), fleet_out.len(), fleet_n * 16),
             },
             Verdict {
                 check: "no heartbeat gap > 7.5s during flood".to_string(),
@@ -846,11 +849,13 @@ fn mixed_op_batch(work: &str, sleeps: usize, stats: usize, lists: usize, pings: 
     ops
 }
 
-/// Counts the DRAINING (8-slot saturation) rejections in a batch of outcomes.
-fn count_draining(outcomes: &[OpOutcome]) -> usize {
+/// Counts every non-success response plus an exec response that itself reports a
+/// timeout. A narrow error-code assertion can accidentally pass when all work
+/// fails for another typed or transport reason.
+fn count_failed_ops(outcomes: &[OpOutcome]) -> usize {
     outcomes
         .iter()
-        .filter(|o| matches!(&o.class, OpClass::AgentError(c) if c == "DRAINING"))
+        .filter(|outcome| outcome.class != OpClass::Ok || outcome.exec_timed_out)
         .count()
 }
 

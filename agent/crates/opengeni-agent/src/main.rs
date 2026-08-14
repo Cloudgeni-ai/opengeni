@@ -269,7 +269,20 @@ fn disconnect(args: &DisconnectArgs, api_url: &str) -> anyhow_lite::Result {
 /// clean SIGINT/SIGTERM stops it.
 #[allow(clippy::too_many_lines)]
 async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
-    // Single-instance guard, taken FIRST (before enroll-if-needed or any dial): an
+    // A verified self-update may have exec'd this new binary from the exact old
+    // generated systemd unit. Refresh that narrowly-proven definition before
+    // admission, then let the manager restart us directly in `supervisor`.
+    match service::refresh_managed_service_definition() {
+        Ok(true) => return Ok(()),
+        Ok(false) => {}
+        Err(error) => warn!(
+            %error,
+            "could not refresh the managed service definition; continuing without assuming operation-cgroup capability"
+        ),
+    }
+
+    // Single-instance guard, taken before enroll-if-needed or any dial (the only
+    // earlier action is the no-work service-definition handoff above): an
     // enrolled agent's NATS subject IS its identity, so two `run` processes on one
     // machine become duplicate control-RPC responders + heartbeat publishers and
     // ops route nondeterministically. This was seen live twice — a Finder/Raycast
@@ -327,17 +340,22 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     };
 
     // Establish per-op OOM cgroup isolation (issue #345) BEFORE spawning any
-    // agent-infra child (e.g. Xvfb below): the startup dance moves the agent into a
-    // `supervisor` cgroup leaf, so children spawned afterward inherit that leaf and
-    // only host execs land in their own per-op memory leaves. Returns None (a
-    // logged, graceful no-op) off a delegated Linux cgroup v2 host — the agent then
-    // serves exactly as before, with no per-op isolation.
+    // agent-infra child (e.g. Xvfb below). systemd places the service process in the
+    // generated unit's `supervisor` subgroup; startup verifies that topology, so
+    // children spawned afterward inherit the supervisor leaf and only host execs
+    // land in their own per-op memory leaves. Returns None (a logged, graceful
+    // no-op) when that compatible delegated cgroup-v2 topology is unavailable —
+    // the agent then serves exactly as before, with no per-op isolation.
     let op_cgroup_config = opengeni_agent_platform::OpCgroupConfig::from_env().map_err(to_boxed)?;
     let requires_operation_policy = op_cgroup_config.has_limits();
     let op_cgroups = opengeni_agent_platform::establish_oom_isolation(op_cgroup_config);
-    if requires_operation_policy && op_cgroups.is_none() {
+    if requires_operation_policy
+        && op_cgroups
+            .as_ref()
+            .is_none_or(|cgroups| !cgroups.supports_policy(op_cgroup_config))
+    {
         return Err(to_boxed(std::io::Error::other(
-            "explicit operation memory policy requires a delegated Linux cgroup-v2 memory controller; refusing to run it unenforced",
+            "explicit local operation resource policy requires the corresponding delegated Linux cgroup-v2 controllers; refusing to run it unenforced",
         )));
     }
 
