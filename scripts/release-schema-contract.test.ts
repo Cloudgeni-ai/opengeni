@@ -134,7 +134,7 @@ describe("release schema contract", () => {
       "0239_supergrok_video_funding.sql",
       "0240_model_context_user_messages.sql",
       "0249_personal_resource_delegation_authority_correction.sql",
-      "0250_scheduled_personal_resource_delegation.sql",
+      "0251_scheduled_personal_resource_delegation.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -222,7 +222,7 @@ describe("release schema contract", () => {
     });
     expect(
       completeSourceContract.migrations.find(
-        (migration) => migration.path === "0250_scheduled_personal_resource_delegation.sql",
+        (migration) => migration.path === "0251_scheduled_personal_resource_delegation.sql",
       ),
     ).toMatchObject({
       sha256: "c3ed65cc1d59528358834ee9d1d4dae053f55878649fc4f5020a1fe017de1dfe",

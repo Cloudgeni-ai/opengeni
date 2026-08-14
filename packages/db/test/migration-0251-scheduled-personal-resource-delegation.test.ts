@@ -19,13 +19,13 @@ import {
 import { migrate } from "../src/migrate";
 
 const migrationUrl = new URL(
-  "../drizzle/0250_scheduled_personal_resource_delegation.sql",
+  "../drizzle/0251_scheduled_personal_resource_delegation.sql",
   import.meta.url,
 );
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
-const explicitAdminDatabaseUrl = process.env.OPENGENI_MIGRATION_0250_TEST_DATABASE_ADMIN_URL;
+const explicitAdminDatabaseUrl = process.env.OPENGENI_MIGRATION_0251_TEST_DATABASE_ADMIN_URL;
 
-describe("migration 0250 scheduled personal-resource delegation", () => {
+describe("migration 0251 scheduled personal-resource delegation", () => {
   test("freezes task authority and revalidates each occurrence and exact attempt", async () => {
     const source = await readFile(migrationUrl, "utf8");
     const executable = source.replace(/^--.*$/gmu, "");
@@ -78,7 +78,7 @@ describe("migration 0250 scheduled personal-resource delegation", () => {
     if (!blank) {
       if (requireRealDatabase) {
         throw new Error(
-          "[migration-0250-scheduled-personal-resource-delegation] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
+          "[migration-0251-scheduled-personal-resource-delegation] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
         );
       }
       return;
@@ -181,7 +181,7 @@ describe("migration 0250 scheduled personal-resource delegation", () => {
     if (!blank) {
       if (requireRealDatabase) {
         throw new Error(
-          "[migration-0250-scheduled-personal-resource-delegation] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
+          "[migration-0251-scheduled-personal-resource-delegation] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
         );
       }
       return;
@@ -239,7 +239,7 @@ describe("migration 0250 scheduled personal-resource delegation", () => {
     if (!blank) {
       if (requireRealDatabase) {
         throw new Error(
-          "[migration-0250-scheduled-personal-resource-delegation] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
+          "[migration-0251-scheduled-personal-resource-delegation] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
         );
       }
       return;
@@ -296,7 +296,7 @@ describe("migration 0250 scheduled personal-resource delegation", () => {
     if (!blank) return;
     const admin = postgres(blank.databaseUrl, { max: 2, prepare: false });
     const client = createDb(blank.databaseUrl, { max: 2 });
-    const migrationName = "0250_scheduled_personal_resource_delegation.sql";
+    const migrationName = "0251_scheduled_personal_resource_delegation.sql";
     try {
       await admin`
         create table if not exists schema_migrations (
@@ -477,7 +477,7 @@ describe("migration 0250 scheduled personal-resource delegation", () => {
     if (!blank) {
       if (requireRealDatabase) {
         throw new Error(
-          "[migration-0250-scheduled-personal-resource-delegation] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
+          "[migration-0251-scheduled-personal-resource-delegation] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
         );
       }
       return;
@@ -971,10 +971,10 @@ async function grantAndReceiptState(
 
 async function acquireMigrationTestDatabase(label: string): Promise<BlankTestDatabase | null> {
   if (!explicitAdminDatabaseUrl) {
-    const blank = await acquireBlankTestDatabase(`migration-0250-${label}`);
+    const blank = await acquireBlankTestDatabase(`migration-0251-${label}`);
     if (!blank && requireRealDatabase) {
       throw new Error(
-        `[migration-0250-scheduled-personal-resource-delegation] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable for ${label}`,
+        `[migration-0251-scheduled-personal-resource-delegation] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable for ${label}`,
       );
     }
     return blank;
