@@ -175,6 +175,62 @@ describe("ordinary session Codex realtime control", () => {
     }
   });
 
+  test("keeps one controller while exposing the latest host model-context callback", async () => {
+    let factoryCalls = 0;
+    let capturedContext: (() => string | undefined) | undefined;
+    const factory: SessionRealtimeControllerFactory = (options) => {
+      factoryCalls += 1;
+      capturedContext = options.getModelContext;
+      return {
+        snapshot: () => idle,
+        subscribe(listener) {
+          listener(idle);
+          return () => undefined;
+        },
+        start: async () => undefined,
+        observeLifecycle: async () => undefined,
+        heartbeat: async () => undefined,
+        flush: async () => undefined,
+        ingestProviderEvent: async () => undefined,
+        retry: async () => undefined,
+        retryAudibleOutput: async () => true,
+        setInputMuted: () => undefined,
+        setOutputMuted: () => undefined,
+        stop: async () => undefined,
+        close: () => undefined,
+      };
+    };
+    const client = {} as OpenGeniClient;
+
+    function Harness({ context }: { context: string }) {
+      useSessionRealtime({
+        client,
+        workspaceId: "11111111-1111-4111-8111-111111111111",
+        sessionId: "22222222-2222-4222-8222-222222222222",
+        sessionStatus: "idle",
+        effectiveControl,
+        events: [],
+        eventsReady: true,
+        codexConnected: true,
+        getModelContext: () => context,
+        controllerFactory: factory,
+      });
+      return null;
+    }
+
+    await act(async () => root.render(<Harness context="first" />));
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      if (factoryCalls > 0) break;
+      await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+    }
+    expect(factoryCalls).toBe(1);
+    expect(capturedContext?.()).toBe("first");
+
+    await act(async () => root.render(<Harness context="second" />));
+    expect(factoryCalls).toBe(1);
+    expect(capturedContext?.()).toBe("second");
+  });
+
   test("renders the compact accessible voice action and switches from start to end", async () => {
     const calls: string[] = [];
     await act(async () => {

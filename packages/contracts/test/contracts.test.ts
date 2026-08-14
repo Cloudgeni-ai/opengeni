@@ -34,6 +34,7 @@ import {
   KnowledgeSearchResponse,
   MarketingDailyAnalysisTaskRequest,
   mergeToolRefs,
+  MODEL_CONTEXT_LABEL,
   McpServerConnectionRef,
   ModelBillingAttributionV1,
   ModelCredentialReadinessV1,
@@ -51,6 +52,7 @@ import {
   SESSION_MCP_SERVERS_MAX,
   Session,
   SessionGoal,
+  SessionRealtimeInboundEntry,
   SessionMcpServerMetadata,
   SteerSessionMessageRequest,
   SubmitHumanInputResponseRequest,
@@ -59,6 +61,7 @@ import {
   DraftTimelineAnnotations,
   SubmittedTimelineAnnotations,
   renderTimelineAnnotationsForModel,
+  renderUserMessageContentForModel,
   numberTimelineAnnotations,
   UpdateSessionMcpApprovalPolicyRequest,
   CLEARED_RUN_STATE_BLOB,
@@ -1098,12 +1101,45 @@ describe("contracts", () => {
     expect(payload.instructions?.length).toBe(32768);
   });
 
-  test("accepts trimmed system instructions scoped to only the initial turn", () => {
+  test("rejects the removed turnInstructions request field", () => {
+    expect(
+      CreateSessionRequest.safeParse({
+        initialMessage: "inspect repo",
+        turnInstructions: "legacy system-prefix input",
+      }).success,
+    ).toBe(false);
+    expect(
+      ClientSessionEvent.safeParse({
+        type: "user.message",
+        payload: { text: "inspect repo", turnInstructions: "legacy input" },
+      }).success,
+    ).toBe(false);
+  });
+
+  test("accepts trimmed application context scoped to the initial user message", () => {
     const payload = CreateSessionRequest.parse({
       initialMessage: "inspect repo",
-      turnInstructions: "  Current host context: record 42 is selected.  ",
+      modelContext: "  Current host context: record 42 is selected.  ",
     });
-    expect(payload.turnInstructions).toBe("Current host context: record 42 is selected.");
+    expect(payload.modelContext).toBe("Current host context: record 42 is selected.");
+    expect(
+      CreateSessionRequest.safeParse({
+        startMode: "realtime",
+        modelContext: "orphaned context",
+      }).success,
+    ).toBe(false);
+  });
+
+  test("renders application context as a separate part of the same user message", () => {
+    expect(renderUserMessageContentForModel("Visible request", [], undefined)).toBe(
+      "Visible request",
+    );
+    expect(
+      renderUserMessageContentForModel("Visible request", [], "  selected record 42  "),
+    ).toEqual([
+      { type: "input_text", text: `${MODEL_CONTEXT_LABEL}\nselected record 42` },
+      { type: "input_text", text: "Visible request" },
+    ]);
   });
 
   test("accepts client config payloads", () => {
@@ -1693,7 +1729,7 @@ describe("contracts", () => {
       type: "user.message",
       payload: {
         text: "use this too",
-        turnInstructions: "  Current host context: record 42 is selected.  ",
+        modelContext: "  Current host context: record 42 is selected.  ",
         resources: [{ kind: "file", fileId }],
         model: "gpt-5.6-sol",
         reasoningEffort: "xhigh",
@@ -1704,7 +1740,28 @@ describe("contracts", () => {
     expect(payload.payload.resources).toEqual([{ kind: "file", fileId }]);
     expect(payload.payload.model).toBe("gpt-5.6-sol");
     expect(payload.payload.reasoningEffort).toBe("xhigh");
-    expect(payload.payload.turnInstructions).toBe("Current host context: record 42 is selected.");
+    expect(payload.payload.modelContext).toBe("Current host context: record 42 is selected.");
+  });
+
+  test("accepts model context only on realtime entries that can become user messages", () => {
+    const operationId = "00000000-0000-4000-8000-000000000011";
+    expect(
+      SessionRealtimeInboundEntry.parse({
+        operationId,
+        kind: "user_transcript",
+        role: "user",
+        text: "finalized transcript",
+        payload: { turnId: "provider-turn-1" },
+        modelContext: "  selected record 42  ",
+      }).modelContext,
+    ).toBe("selected record 42");
+    expect(
+      SessionRealtimeInboundEntry.safeParse({
+        operationId,
+        kind: "interruption",
+        modelContext: "not message-bearing",
+      }).success,
+    ).toBe(false);
   });
 
   test("keeps text-only user messages compatible", () => {

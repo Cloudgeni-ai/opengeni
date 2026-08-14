@@ -237,6 +237,8 @@ export function useSessionRealtime(options: {
   model?: SessionRealtimeModel | undefined;
   modelAvailable?: boolean | undefined;
   modelUnavailableReason?: string | null | undefined;
+  /** Model-visible application context captured with each durable realtime message. */
+  getModelContext?: (() => string | undefined) | undefined;
   /** Deterministic browser-test/demo seam. Production hosts should use the SDK default. */
   controllerFactory?: SessionRealtimeControllerFactory | undefined;
 }) {
@@ -248,6 +250,8 @@ export function useSessionRealtime(options: {
   const audioRef = useRef<HTMLAudioElement>(null);
   const controllerRef = useRef<SessionRealtimeController | null>(null);
   const controllerModelRef = useRef<SessionRealtimeModel | null>(null);
+  const modelContextProviderRef = useRef(options.getModelContext);
+  modelContextProviderRef.current = options.getModelContext;
   const [snapshot, setSnapshot] = useState<SessionRealtimeControllerSnapshot>(() => ({
     status: hasStoredSessionRealtimeOwnerProof({
       workspaceId,
@@ -292,6 +296,7 @@ export function useSessionRealtime(options: {
           sessionId: options.sessionId,
           ...(audioRef.current ? { remoteAudio: audioRef.current } : {}),
           model,
+          getModelContext: () => modelContextProviderRef.current?.(),
         });
         controllerRef.current = controller;
         controllerModelRef.current = model;
@@ -405,6 +410,8 @@ export function SessionRealtimeControl(props: {
   events: SessionEvent[];
   eventsReady: boolean;
   codexConnected: boolean;
+  /** Model-visible application context captured with each durable realtime message. */
+  getModelContext?: (() => string | undefined) | undefined;
   realtimeAutostartModel?: SessionRealtimeModel | undefined;
   onRealtimeAutostartConsumed?: (() => void) | undefined;
   /** Host hides dictate (and can choreograph layout) while realtime voice is live. */

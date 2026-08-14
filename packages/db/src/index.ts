@@ -156,7 +156,7 @@ import {
   MODEL_ATTACHMENT_REFS_FIELD,
   MODEL_TIMELINE_ANNOTATIONS_FIELD,
   TimelineAnnotations,
-  renderTimelineAnnotationsForModel,
+  renderUserMessageContentForModel,
   SessionMcpApprovalPolicy as SessionMcpApprovalPolicySchema,
   RequestHumanInteractionToolInput,
   WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
@@ -4331,7 +4331,7 @@ export type EnqueueSessionTurnInput = {
   temporalWorkflowId: string;
   source: SessionTurnSource;
   prompt: string;
-  turnInstructions?: string | null;
+  modelContext?: string | null;
   resources: ResourceRef[];
   tools: ToolRef[];
   toolsProvided?: boolean;
@@ -4350,12 +4350,8 @@ export type EnqueueSessionTurnInput = {
   placement?: "head" | "tail";
 };
 
-/**
- * Worker-only turn projection. Host instructions are durable execution input,
- * never part of the public SessionTurn/queue/HTTP contract.
- */
+/** Worker-only turn projection with causal authority omitted from public APIs. */
 export type SessionTurnForExecution = SessionTurn & {
-  turnInstructions: string | null;
   personalConnectionDelegations: McpPersonalConnectionDelegation[];
   /** Worker-only causal authority; never inferred from the current worker. */
   initiatingHumanSubjectId: string | null;
@@ -4603,6 +4599,7 @@ export function durableUserHistoryItem(
   prompt: string,
   resources: readonly ResourceRef[],
   annotations: readonly TimelineAnnotation[] = [],
+  modelContext?: string | null,
 ): Record<string, unknown> {
   const attachmentRefs = resources.filter(
     (resource): resource is Extract<ResourceRef, { kind: "file" }> => resource.kind === "file",
@@ -4610,7 +4607,7 @@ export function durableUserHistoryItem(
   return {
     type: "message",
     role: "user",
-    content: renderTimelineAnnotationsForModel(prompt, annotations),
+    content: renderUserMessageContentForModel(prompt, annotations, modelContext),
     ...(attachmentRefs.length > 0 ? { [MODEL_ATTACHMENT_REFS_FIELD]: attachmentRefs } : {}),
     ...(annotations.length > 0
       ? {
@@ -23032,7 +23029,7 @@ export type SessionCreateInput = {
   accountId: string;
   workspaceId: string;
   initialMessage: string;
-  initialTurnInstructions?: string | null;
+  initialModelContext?: string | null;
   resources: ResourceRef[];
   skills?: SessionSkill[];
   tools?: ToolRef[];
@@ -23482,7 +23479,7 @@ async function createSessionInTransaction(
             accountId: input.accountId,
             workspaceId: input.workspaceId,
             initialMessage: input.initialMessage,
-            initialTurnInstructions: input.initialTurnInstructions ?? null,
+            initialModelContext: input.initialModelContext ?? null,
             resources: input.resources,
             skills: input.skills ?? [],
             tools: input.tools ?? [],
@@ -46487,6 +46484,9 @@ export async function initializeSessionStartAtomically(
                     type: "user.message",
                     payload: {
                       ...initialPayload,
+                      ...(session.initialModelContext
+                        ? { modelContext: session.initialModelContext }
+                        : {}),
                       initiator: creator.initiator,
                     },
                     clientEventId: input.clientEventId ?? `session-initial:${session.id}`,
@@ -46542,7 +46542,7 @@ export async function initializeSessionStartAtomically(
                   source: "user",
                   position: queueTailPosition,
                   prompt: canonicalInitialMessage,
-                  turnInstructions: session.initialTurnInstructions ?? null,
+                  modelContext: session.initialModelContext ?? null,
                   resources: session.resources,
                   tools: session.tools,
                   toolsProvided: session.toolPolicy?.mode === "explicit",
@@ -46743,7 +46743,7 @@ export async function enqueueSessionTurn(
                 source: input.source,
                 position,
                 prompt: input.prompt,
-                turnInstructions: input.turnInstructions ?? null,
+                modelContext: input.modelContext ?? null,
                 resources: input.resources,
                 tools: input.tools,
                 toolsProvided: input.toolsProvided ?? false,
@@ -48494,6 +48494,7 @@ export async function claimSessionWorkForAttempt(
                 fromPostgresLosslessText(row.prompt, row.promptCodecVersion),
                 Array.isArray(row.resources) ? (row.resources as ResourceRef[]) : [],
                 TimelineAnnotations.parse(row.annotations),
+                row.modelContext,
               ),
             },
             "item",
@@ -55874,7 +55875,6 @@ function mapSessionTurnForExecution(
 ): SessionTurnForExecution {
   return {
     ...mapSessionTurn(row),
-    turnInstructions: row.turnInstructions ?? null,
     initiatingHumanSubjectId: row.initiatingHumanSubjectId ?? null,
     personalConnectionDelegations: parsedPersonalConnectionDelegations(
       row.personalConnectionDelegations,

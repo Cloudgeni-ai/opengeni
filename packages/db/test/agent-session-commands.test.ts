@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import type { McpPersonalConnectionDelegation } from "@opengeni/contracts";
+import { MODEL_CONTEXT_LABEL, type McpPersonalConnectionDelegation } from "@opengeni/contracts";
 import { and, asc, eq } from "drizzle-orm";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
@@ -9,6 +9,7 @@ import {
   claimSessionWorkForAttempt,
   createDb,
   createSession,
+  getActiveSessionHistoryItems,
   getSessionQueueSnapshot,
   listOutstandingSessionSystemUpdates,
   listSessionSystemUpdatesForTurn,
@@ -351,7 +352,7 @@ describe("attempt-fenced Agent session commands", () => {
     });
   });
 
-  test("per-turn instructions are durable on the turn and absent from the visible user event", async () => {
+  test("message context is durable, audit-visible, and materialized only in canonical user history", async () => {
     const grant = await fixture();
     const session = await makeSession(grant);
     const instructions = "Current host context: record 42 is selected.";
@@ -370,7 +371,7 @@ describe("attempt-fenced Agent session commands", () => {
             operationKey: crypto.randomUUID(),
             delivery: "send",
             text: "Use the selected record",
-            turnInstructions: instructions,
+            modelContext: instructions,
             resources: [],
             model: "scripted-model",
             reasoningEffort: "low",
@@ -384,7 +385,7 @@ describe("attempt-fenced Agent session commands", () => {
       db
         .select({
           prompt: schema.sessionTurns.prompt,
-          turnInstructions: schema.sessionTurns.turnInstructions,
+          modelContext: schema.sessionTurns.modelContext,
         })
         .from(schema.sessionTurns)
         .where(eq(schema.sessionTurns.id, submitted.turnId)),
@@ -398,10 +399,35 @@ describe("attempt-fenced Agent session commands", () => {
 
     expect(turn).toEqual({
       prompt: "Use the selected record",
-      turnInstructions: instructions,
+      modelContext: instructions,
     });
-    expect(event?.payload).toMatchObject({ text: "Use the selected record" });
-    expect(event?.payload).not.toHaveProperty("turnInstructions");
+    expect(event?.payload).toMatchObject({
+      text: "Use the selected record",
+      modelContext: instructions,
+    });
+
+    const claim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(claim).toMatchObject({ action: "claimed", turn: { id: submitted.turnId } });
+    if (claim.action !== "claimed") throw new Error(`turn was not claimed: ${claim.reason}`);
+    expect(claim.turn).not.toHaveProperty("modelContext");
+
+    const history = await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id);
+    expect(history).toHaveLength(1);
+    expect(history[0]?.item).toMatchObject({
+      type: "message",
+      role: "user",
+      content: [
+        { type: "input_text", text: `${MODEL_CONTEXT_LABEL}\n${instructions}` },
+        { type: "input_text", text: "Use the selected record" },
+      ],
+    });
   });
 
   test("Agent Pause rejects self and its direct parent with zero writes", async () => {

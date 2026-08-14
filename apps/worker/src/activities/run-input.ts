@@ -79,6 +79,7 @@ export type TurnInputOptions = {
   recovering?: boolean;
   unavailableSandboxFilesNote?: string;
   runCredentialsNote?: string;
+  mcpAvailabilityNote?: string;
   providerApi: HistoryProviderApi;
   projectCanonicalHistory?: ModelHistoryAttachmentProjector;
   materializeModelHistory?: ModelHistoryAttachmentProjector;
@@ -452,6 +453,7 @@ export async function turnInput(
       : undefined,
     options.unavailableSandboxFilesNote,
     options.runCredentialsNote,
+    options.mcpAvailabilityNote,
   );
   if (trigger.type === "user.message") {
     const payload = trigger.payload as {

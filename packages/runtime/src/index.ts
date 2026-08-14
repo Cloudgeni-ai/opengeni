@@ -1575,9 +1575,6 @@ export type BuildAgentOptions = {
   // timeline message. Omitted ⇒ the composed instructions are byte-identical to
   // a workspace-only persona.
   sessionInstructions?: string;
-  // Host context for this exact accepted turn. Composed system-level after the
-  // durable session persona and omitted from all later turns.
-  turnInstructions?: string;
   /**
    * Exact Skill activations admitted for this turn. Optional/domain Skills
    * enter only through an explicit installation, Pack owner, or session
@@ -1711,12 +1708,6 @@ export function appendSessionInstructions(composed: string, sessionInstructions?
   return trimmed ? `${composed} ${trimmed}` : composed;
 }
 
-/** Append system instructions that apply to this exact turn only. */
-export function appendTurnInstructions(composed: string, turnInstructions?: string): string {
-  const trimmed = turnInstructions?.trim();
-  return trimmed ? `${composed} ${trimmed}` : composed;
-}
-
 /**
  * Append the standing goal accepted with this logical turn. The worker passes
  * the persisted turn snapshot, never the mutable current goal head, so queued
@@ -1777,19 +1768,16 @@ function composedPersistentAgentInstructions(
     // authority is active for this exact attempt.
     return appendPersistentSessionSettings(
       appendSessionGoal(
-        appendTurnInstructions(
-          appendSessionInstructions(
-            appendWorkspaceMemory(
-              appendGitCredentialBindingInstructions(
-                appendCodemodeInstructions(personaAndCore, codemodeIsAvailable(options)),
-                options.gitCredentialBindings,
-                options.activeSandboxBackend,
-              ),
-              options.workspaceMemory,
+        appendSessionInstructions(
+          appendWorkspaceMemory(
+            appendGitCredentialBindingInstructions(
+              appendCodemodeInstructions(personaAndCore, codemodeIsAvailable(options)),
+              options.gitCredentialBindings,
+              options.activeSandboxBackend,
             ),
-            options.sessionInstructions,
+            options.workspaceMemory,
           ),
-          options.turnInstructions,
+          options.sessionInstructions,
         ),
         options.goalSnapshot,
       ),
@@ -1805,12 +1793,9 @@ function composedPersistentAgentInstructions(
       appendCodemodeInstructions(
         appendPersistentSessionSettings(
           appendSessionGoal(
-            appendTurnInstructions(
-              appendSessionInstructions(
-                appendWorkspaceGovernance(personaAndCore, options.workspaceGovernance),
-                options.sessionInstructions,
-              ),
-              options.turnInstructions,
+            appendSessionInstructions(
+              appendWorkspaceGovernance(personaAndCore, options.workspaceGovernance),
+              options.sessionInstructions,
             ),
             options.goalSnapshot,
           ),

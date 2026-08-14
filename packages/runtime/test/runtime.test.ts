@@ -55,7 +55,6 @@ import {
   appendGitCredentialBindingInstructions,
   appendPersistentSessionSettings,
   appendSessionGoal,
-  appendTurnInstructions,
   appendCodemodeInstructions,
   appendWorkspaceMemory,
   CODEMODE_PROGRAMMATIC_DIRECTIVE,
@@ -3170,27 +3169,6 @@ describe("runtime event normalization", () => {
       sessionInstructions: "Be terse.",
     });
     expect(agent.instructions).toBe(`${HISTORICAL_DEFAULT_INSTRUCTIONS} Be terse.`);
-  });
-
-  test("per-turn instructions compose after the durable session persona and disappear when absent", () => {
-    expect(appendTurnInstructions("base")).toBe("base");
-    expect(appendTurnInstructions("base", "   ")).toBe("base");
-
-    const withTurnContext = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
-      sessionInstructions: "Persistent session rule.",
-      turnInstructions: "Current host context: record 42 is selected.",
-    });
-    expect(withTurnContext.instructions).toBe(
-      `${HISTORICAL_DEFAULT_INSTRUCTIONS} Persistent session rule. Current host context: record 42 is selected.`,
-    );
-
-    const nextTurn = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
-      sessionInstructions: "Persistent session rule.",
-    });
-    expect(nextTurn.instructions).toBe(
-      `${HISTORICAL_DEFAULT_INSTRUCTIONS} Persistent session rule.`,
-    );
-    expect(nextTurn.instructions).not.toContain("record 42");
   });
 
   test("absent per-session instructions are byte-identical to today's composition", () => {

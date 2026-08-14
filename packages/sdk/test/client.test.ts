@@ -157,7 +157,7 @@ describe("OpenGeniClient", () => {
     const { client, requests } = makeClient(() => jsonResponse(session, 202));
     const created = await client.createSession(WORKSPACE_ID, {
       initialMessage: "hello",
-      turnInstructions: "Host context for the initial turn.",
+      modelContext: "Host context for the initial turn.",
       sandboxBackend: "none",
       expectedNewSessionDraftRevision: 4,
     });
@@ -171,7 +171,7 @@ describe("OpenGeniClient", () => {
     expect(request.headers["content-type"]).toBe("application/json");
     expect(JSON.parse(request.body!)).toEqual({
       initialMessage: "hello",
-      turnInstructions: "Host context for the initial turn.",
+      modelContext: "Host context for the initial turn.",
       sandboxBackend: "none",
       expectedNewSessionDraftRevision: 4,
     });
@@ -539,7 +539,7 @@ describe("OpenGeniClient", () => {
     const { client, requests } = makeClient(() => jsonResponse(accepted, 202));
     const result = await client.sendMessage(WORKSPACE_ID, SESSION_ID, {
       text: "do the thing",
-      turnInstructions: "Host context for this turn.",
+      modelContext: "Host context for this turn.",
       clientEventId: "ce-1",
     });
     expect(result.sequence).toBe(4);
@@ -552,7 +552,7 @@ describe("OpenGeniClient", () => {
       clientEventId: "ce-1",
       payload: {
         text: "do the thing",
-        turnInstructions: "Host context for this turn.",
+        modelContext: "Host context for this turn.",
       },
     });
   });

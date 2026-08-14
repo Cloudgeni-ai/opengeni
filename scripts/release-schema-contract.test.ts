@@ -132,6 +132,7 @@ describe("release schema contract", () => {
       "0237_interaction_transition_reaper.sql",
       "0238_supergrok_realtime_model.sql",
       "0239_supergrok_video_funding.sql",
+      "0240_model_context_user_messages.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -162,6 +163,13 @@ describe("release schema contract", () => {
       sha256: "fbe4c79cb20c809767dad12e697ab6ad1becfc8b03eb314cbda38d6069a258f1",
       deploymentMode: "rolling",
     });
+    const modelContextCutover = completeSourceContract.migrations.find(
+      (migration) => migration.path === "0240_model_context_user_messages.sql",
+    );
+    if (modelContextCutover) {
+      expect(modelContextCutover).toMatchObject({ deploymentMode: "maintenance" });
+      expect(completeSourceContract.latestMigration).toBe(modelContextCutover.path);
+    }
     const migrations = new Map(
       sourceContract.migrations.map((migration) => [migration.path, migration]),
     );

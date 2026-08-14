@@ -125,6 +125,8 @@ export type SessionRealtimeInboundEntry = {
   delegationItemId?: string | null | undefined;
   text?: string | null | undefined;
   payload?: Record<string, unknown> | undefined;
+  /** Model-visible application context attached to this exact realtime message. */
+  modelContext?: string | undefined;
 };
 
 export type SyncSessionRealtimeLedgerRequest = {
@@ -2280,8 +2282,8 @@ export type CreateSessionRequest = {
   initialMessage?: string | undefined;
   /** Create an idle session shell so realtime voice can be the first interaction. */
   startMode?: "realtime" | undefined;
-  /** System instructions scoped to the initial turn; never visible timeline text. */
-  turnInstructions?: string | undefined;
+  /** Model-visible application context attached to the initial user message; omitted by standard timeline rendering. */
+  modelContext?: string | undefined;
   // Per-session agent persona/system instructions (org-visible metadata, not a
   // secret). Delivered system-level, composed AFTER the per-workspace persona —
   // how a host supplies per-agent-type prompts without leaking them into the
@@ -2994,7 +2996,7 @@ export type ClientAuthConfig =
 
 // Kept value-identical to @opengeni/contracts and pinned by the SDK contract
 // parity suite. The SDK has no runtime dependency on the Zod contracts package.
-export const OPENGENI_API_CONTRACT_REVISION = "2026-08-social-provider-tools-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-08-model-context-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
@@ -6016,7 +6018,7 @@ export type UserMessageEventInput = {
   payload: {
     text: string;
     annotations?: SubmittedTimelineAnnotation[] | undefined;
-    turnInstructions?: string | undefined;
+    modelContext?: string | undefined;
     resources?: ResourceRef[] | undefined;
     model?: string | undefined;
     reasoningEffort?: ReasoningEffort | undefined;
