@@ -13,8 +13,10 @@ import {
   IntegrationFacetBindingOwnershipConflictError,
   IntegrationFacetBindingVersionConflictError,
   listIntegrationFacetBindingOwners,
+  listIntegrationFacetBindingOwnersForBindings,
   removeIntegrationFacetBindingOwner,
   upsertIntegrationFacetBinding,
+  type IntegrationFacetBindingOwner,
 } from "./integration-bindings";
 import * as schema from "./schema";
 
@@ -39,6 +41,8 @@ export type IntegrationFacetBindingSummary = {
   lastErrorCode: string | null;
   createdAt: string;
   updatedAt: string;
+  directlyOwned: boolean;
+  owners: IntegrationFacetBindingOwner[];
 };
 
 export type IntegrationFacetDefinitionSummary = {
@@ -164,6 +168,10 @@ export async function listIntegrationInstanceFacets(
         asc(schema.integrationFacetDefinitions.kind),
         asc(schema.integrationFacetDefinitions.facetKey),
       );
+    const ownersByBindingId = await listIntegrationFacetBindingOwnersForBindings(
+      scopedDb,
+      rows.flatMap((row) => (row.bindingId ? [row.bindingId] : [])),
+    );
     return {
       capabilityId,
       instanceKey,
@@ -177,22 +185,26 @@ export async function listIntegrationInstanceFacets(
           capabilities: row.capabilities,
         },
         binding: row.bindingId
-          ? bindingSummary({
-              id: row.bindingId,
-              facetKey: row.facetKey,
-              kind: row.kind,
-              bindingKey: row.bindingKey!,
-              displayName: row.displayName!,
-              connectionId: row.connectionId ?? null,
-              status: row.status!,
-              config: row.config!,
-              cursor: row.cursor!,
-              version: row.version!,
-              lastSuccessAt: row.lastSuccessAt ?? null,
-              lastErrorCode: row.lastErrorCode ?? null,
-              createdAt: row.createdAt!,
-              updatedAt: row.updatedAt!,
-            })
+          ? bindingSummary(
+              {
+                id: row.bindingId,
+                facetKey: row.facetKey,
+                kind: row.kind,
+                bindingKey: row.bindingKey!,
+                displayName: row.displayName!,
+                connectionId: row.connectionId ?? null,
+                status: row.status!,
+                config: row.config!,
+                cursor: row.cursor!,
+                version: row.version!,
+                lastSuccessAt: row.lastSuccessAt ?? null,
+                lastErrorCode: row.lastErrorCode ?? null,
+                createdAt: row.createdAt!,
+                updatedAt: row.updatedAt!,
+              },
+              ownersByBindingId.get(row.bindingId) ?? [],
+              { capabilityId, instanceKey, facetKey: row.facetKey },
+            )
           : null,
       })),
     };
@@ -244,16 +256,21 @@ export async function configureIntegrationFacet(
       owner: facetOwner(input.capabilityId, input.instanceKey, input.facetKey),
       ...(input.expectedVersion !== undefined ? { expectedVersion: input.expectedVersion } : {}),
     });
+    const owners = await listIntegrationFacetBindingOwners(tx, result.row.id);
     return {
       capabilityId: input.capabilityId,
       instanceKey: input.instanceKey,
       facetKey: input.facetKey,
       status: "configured",
-      binding: bindingSummary({
-        ...result.row,
-        facetKey: definition.facetKey,
-        kind: definition.kind,
-      }),
+      binding: bindingSummary(
+        {
+          ...result.row,
+          facetKey: definition.facetKey,
+          kind: definition.kind,
+        },
+        owners,
+        input,
+      ),
     };
   });
 }
@@ -312,16 +329,21 @@ export async function setIntegrationFacetLifecycle(
       if (!updated) throw new Error("Failed to update Integration facet lifecycle");
       row = updated;
     }
+    const owners = await listIntegrationFacetBindingOwners(tx, row.id);
     return {
       capabilityId: input.capabilityId,
       instanceKey: input.instanceKey,
       facetKey: input.facetKey,
       status: input.action === "pause" ? "paused" : "active",
-      binding: bindingSummary({
-        ...row,
-        facetKey: definition.facetKey,
-        kind: definition.kind,
-      }),
+      binding: bindingSummary(
+        {
+          ...row,
+          facetKey: definition.facetKey,
+          kind: definition.kind,
+        },
+        owners,
+        input,
+      ),
     };
   });
 }
@@ -377,11 +399,15 @@ export async function removeIntegrationFacet(
         instanceKey: input.instanceKey,
         facetKey: input.facetKey,
         status: "not_configured",
-        binding: bindingSummary({
-          ...binding,
-          facetKey: definition.facetKey,
-          kind: definition.kind,
-        }),
+        binding: bindingSummary(
+          {
+            ...binding,
+            facetKey: definition.facetKey,
+            kind: definition.kind,
+          },
+          owners,
+          input,
+        ),
         remainingOwners: owners,
       };
     }
@@ -391,17 +417,24 @@ export async function removeIntegrationFacet(
       owner,
       expectedVersion: input.expectedVersion,
     });
+    const effectiveRemainingOwners = removed.binding
+      ? await listIntegrationFacetBindingOwners(tx, removed.binding.id)
+      : [];
     return {
       capabilityId: input.capabilityId,
       instanceKey: input.instanceKey,
       facetKey: input.facetKey,
       status: removed.remainingOwners.length > 0 ? "retained_by_other_owners" : "removed",
       binding: removed.binding
-        ? bindingSummary({
-            ...removed.binding,
-            facetKey: definition.facetKey,
-            kind: definition.kind,
-          })
+        ? bindingSummary(
+            {
+              ...removed.binding,
+              facetKey: definition.facetKey,
+              kind: definition.kind,
+            },
+            effectiveRemainingOwners,
+            input,
+          )
         : null,
       remainingOwners: removed.remainingOwners,
     };
@@ -708,7 +741,12 @@ type BindingSummaryRow = Pick<
   kind: string;
 };
 
-function bindingSummary(row: BindingSummaryRow): IntegrationFacetBindingSummary {
+function bindingSummary(
+  row: BindingSummaryRow,
+  owners: IntegrationFacetBindingOwner[],
+  identity: { capabilityId: string; instanceKey: string; facetKey: string },
+): IntegrationFacetBindingSummary {
+  const expectedOwner = facetOwner(identity.capabilityId, identity.instanceKey, identity.facetKey);
   return {
     id: row.id,
     facetKey: row.facetKey,
@@ -724,6 +762,10 @@ function bindingSummary(row: BindingSummaryRow): IntegrationFacetBindingSummary 
     lastErrorCode: row.lastErrorCode,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
+    directlyOwned: owners.some(
+      (owner) => owner.kind === expectedOwner.kind && owner.id === expectedOwner.id,
+    ),
+    owners,
   };
 }
 

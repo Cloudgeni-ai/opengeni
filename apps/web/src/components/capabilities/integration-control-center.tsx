@@ -52,6 +52,16 @@ type PendingIntegrationOAuth = {
   expectedInstanceVersion?: number;
 };
 
+type IntegrationLoadState = {
+  client: ReturnType<typeof useAppContext>["client"];
+  workspaceId: string;
+  definitions: IntegrationDefinitionSummary[];
+  instances: ApiIntegrationInstallationSummary[];
+  loading: boolean;
+  error: string | null;
+  refreshRevision: number;
+};
+
 const IntegrationControlCenterView = lazy(async () => {
   const module = await import("@/components/capabilities/integration-control-center-view");
   return { default: module.IntegrationControlCenterView };
@@ -145,10 +155,15 @@ export function IntegrationControlCenter({
     workspaceGrant &&
     hasAccountPermission(context.accessContext, workspaceGrant.accountId, "account:admin"),
   );
-  const [definitions, setDefinitions] = useState<IntegrationDefinitionSummary[]>([]);
-  const [instances, setInstances] = useState<ApiIntegrationInstallationSummary[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadState, setLoadState] = useState<IntegrationLoadState>(() => ({
+    client,
+    workspaceId,
+    definitions: [],
+    instances: [],
+    loading: true,
+    error: null,
+    refreshRevision: 0,
+  }));
   const [setupDefinition, setSetupDefinition] = useState<IntegrationDefinitionSummary | null>(null);
   const [setupInitialAccountLabel, setSetupInitialAccountLabel] = useState("");
   const [busyKey, setBusyKey] = useState<string | null>(null);
@@ -160,29 +175,88 @@ export function IntegrationControlCenter({
     initialCustomApiFlowState,
   );
   const callbackHandled = useRef(false);
+  const loadRequestGeneration = useRef(0);
   const setupInstanceKeyRef = useRef<string | null>(null);
   const setupTriggerRef = useRef<HTMLElement | null>(null);
   const removeTriggerRef = useRef<HTMLElement | null>(null);
   const focusFallbackRef = useRef<HTMLElement | null>(null);
+  const currentLoadState =
+    loadState.client === client && loadState.workspaceId === workspaceId
+      ? loadState
+      : {
+          client,
+          workspaceId,
+          definitions: [],
+          instances: [],
+          loading: true,
+          error: null,
+          refreshRevision: 0,
+        };
+  const { definitions, instances, loading, error: loadError, refreshRevision } = currentLoadState;
 
   const load = useCallback(async () => {
-    setLoading(true);
+    const generation = ++loadRequestGeneration.current;
+    setLoadState((current) =>
+      current.client === client && current.workspaceId === workspaceId
+        ? { ...current, loading: true, error: null }
+        : {
+            client,
+            workspaceId,
+            definitions: [],
+            instances: [],
+            loading: true,
+            error: null,
+            refreshRevision: 0,
+          },
+    );
     try {
       const [definitionResponse, installedResponse] = await Promise.all([
         client.listIntegrationDefinitions(workspaceId),
         client.listApiIntegrations(workspaceId),
       ]);
-      setDefinitions(definitionResponse.definitions);
-      setInstances(installedResponse.integrations);
-      setLoadError(null);
+      if (generation !== loadRequestGeneration.current) return;
+      setLoadState((current) => ({
+        client,
+        workspaceId,
+        definitions: definitionResponse.definitions,
+        instances: installedResponse.integrations,
+        loading: false,
+        error: null,
+        refreshRevision:
+          current.client === client && current.workspaceId === workspaceId
+            ? current.refreshRevision + 1
+            : 1,
+      }));
     } catch (error) {
-      setLoadError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setLoading(false);
+      if (generation !== loadRequestGeneration.current) return;
+      setLoadState((current) => ({
+        ...(current.client === client && current.workspaceId === workspaceId
+          ? current
+          : {
+              client,
+              workspaceId,
+              definitions: [],
+              instances: [],
+              refreshRevision: 0,
+            }),
+        client,
+        workspaceId,
+        loading: false,
+        error: error instanceof Error ? error.message : String(error),
+      }));
     }
   }, [client, workspaceId]);
 
-  useEffect(() => void load(), [load]);
+  useEffect(() => {
+    void load();
+    return () => {
+      ++loadRequestGeneration.current;
+    };
+  }, [load]);
+
+  useEffect(() => {
+    callbackHandled.current = false;
+  }, [client, workspaceId]);
 
   useEffect(() => {
     if (callbackHandled.current) return;
@@ -576,6 +650,7 @@ export function IntegrationControlCenter({
         customApi={customApi}
         embedded={embedded}
         showCustomApis={showCustomApis}
+        refreshRevision={refreshRevision}
         onRefresh={() => void load()}
         onOpenSetup={openSetup}
         onReconnect={(instance) => void reconnect(instance)}

@@ -5326,6 +5326,8 @@ export type IntegrationFacetBindingSummary = {
   lastErrorCode: string | null;
   createdAt: string;
   updatedAt: string;
+  directlyOwned: boolean;
+  owners: CapabilityComponentOwner[];
 };
 
 export type IntegrationInstanceFacetsResponse = {

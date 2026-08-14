@@ -797,6 +797,14 @@ describe("API Integration persistence", () => {
         status: "active",
         version: 1,
         hasCursor: false,
+        directlyOwned: true,
+        owners: [
+          {
+            kind: "direct",
+            id: expect.stringMatching(/^facet:[0-9a-f]{64}$/),
+            removable: true,
+          },
+        ],
       },
     });
     expect(
@@ -893,6 +901,8 @@ describe("API Integration persistence", () => {
       id: configured.binding.id,
       version: configured.binding.version + 1,
       status: "active",
+      directlyOwned: true,
+      owners: configured.binding.owners,
       config: {
         sources: [
           {
