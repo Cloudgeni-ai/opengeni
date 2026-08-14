@@ -110,14 +110,20 @@ describe("browser controller image build contract", () => {
 
   test("startup distinguishes a live setsid/env child from a completed browserd exec", async () => {
     const source = await readFile(resolve(root, startupScriptPath), "utf8");
-    const startupLoop = source.indexOf("for _ in $(seq 1 100); do");
+    const startupBudget = source.indexOf(
+      'STARTUP_TIMEOUT_SECONDS="${OPENGENI_BROWSERD_STARTUP_TIMEOUT_SECONDS:-30}"',
+    );
+    const startupLoop = source.indexOf('for _ in $(seq 1 "$STARTUP_ATTEMPTS"); do');
     const processAlive = source.indexOf('if ! kill -0 "$PID" 2>/dev/null; then', startupLoop);
     const browserdExecComplete = source.indexOf('if ! same_process "$PID"; then', processAlive);
     const readiness = source.indexOf("if admin_ready; then", browserdExecComplete);
 
+    expect(startupBudget).toBeGreaterThan(-1);
     expect(startupLoop).toBeGreaterThan(-1);
     expect(processAlive).toBeGreaterThan(startupLoop);
     expect(browserdExecComplete).toBeGreaterThan(processAlive);
     expect(readiness).toBeGreaterThan(browserdExecComplete);
+    expect(source).toContain("print_startup_log");
+    expect(source).toContain('tail -c 16384 "$LOG_FILE" | tail -n 80');
   });
 });

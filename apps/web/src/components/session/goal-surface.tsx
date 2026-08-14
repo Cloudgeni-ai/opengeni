@@ -33,6 +33,7 @@ import type { Session } from "@/types";
 
 export type GoalPillState =
   | "pursuing"
+  | "waiting"
   | "scheduled"
   | "blocked"
   | "held"
@@ -51,6 +52,12 @@ type GoalPillMeta = {
 
 const GOAL_PILL_META: Record<GoalPillState, GoalPillMeta> = {
   pursuing: { label: "Pursuing goal", icon: ZapIcon, tint: "text-brand", ring: "border-brand/40" },
+  waiting: {
+    label: "Waiting for current turn",
+    icon: Loader2Icon,
+    tint: "text-brand",
+    ring: "border-brand/40",
+  },
   scheduled: {
     label: "Continuation scheduled",
     icon: Loader2Icon,
@@ -113,7 +120,7 @@ export function goalPillState(
     return continuation.reason === "goal_turn_running"
       ? "pursuing"
       : continuation.reason === "human_turn_running"
-        ? "blocked"
+        ? "waiting"
         : "invariant_broken";
   }
   if (continuation.state === "scheduled") {
@@ -138,6 +145,13 @@ function continuationNotice(
             continuation?.lastError ?? "The server could not verify how this goal will continue.",
         }
       : null;
+  }
+  if (state === "waiting") {
+    return {
+      tone: "info",
+      title: "Waiting for current turn",
+      body: "The goal remains active and will continue after the current foreground turn finishes.",
+    };
   }
   if (state === "scheduled") {
     return {
@@ -222,18 +236,13 @@ export function GoalSurface({ goal }: { session: Session; goal: UseGoalResult })
   const [open, setOpen] = useState(false);
   const record = goal.goal;
   // All hooks run unconditionally (the null-goal early return is below): the
-  // elapsed clock ticks only while the server-authoritative projection says the
-  // goal turn is running. No session status is used as a pursuit proxy.
-  const live =
-    record?.status === "active" &&
-    record.continuation?.state === "running" &&
-    record.continuation.reason === "goal_turn_running";
+  // Goal duration keeps advancing while the goal is active, including while a
+  // foreground human turn temporarily owns execution.
+  const live = record?.status === "active";
   const elapsed = useLiveElapsed(
     record?.createdAt,
     Boolean(live),
-    // Freeze the clock whenever it stops ticking: a completed goal shows its
-    // final duration; scheduled/blocked/invariant-broken projections freeze at
-    // the goal's last update rather than implying ongoing pursuit.
+    // Freeze the clock only when the goal itself stops being active.
     !live ? record?.updatedAt : null,
   );
 

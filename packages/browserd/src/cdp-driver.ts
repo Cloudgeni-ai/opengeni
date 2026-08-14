@@ -29,6 +29,7 @@ import {
 } from "@opengeni/contracts";
 import {
   InteractionDefiniteDriverError,
+  InteractionOutcomeUnknownDriverError,
   type BrowserInteractionDriver,
 } from "@opengeni/interaction";
 import {
@@ -2173,6 +2174,18 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           await this.sendActionTarget(state, "Input.insertText", {
             text: action.value,
           });
+        const confirmed = await this.callOnNode(
+          state,
+          node.backendDOMNodeId,
+          CONFIRM_EDITABLE_VALUE_FUNCTION,
+          [{ value: action.value }],
+        );
+        if (confirmed !== true) {
+          throw new InteractionOutcomeUnknownDriverError(
+            "outcome_unknown",
+            "browser fill was dispatched but the target did not retain the requested value; re-observe before continuing",
+          );
+        }
         return;
       }
       case "type":
@@ -3602,6 +3615,15 @@ const CLEAR_PROTECTED_VALUE_FUNCTION = `function() {
   else if (this.isContentEditable === true) this.textContent = "";
   else return false;
   return true;
+}`;
+
+const CONFIRM_EDITABLE_VALUE_FUNCTION = `async function(expected) {
+  await Promise.resolve();
+  if (!(this instanceof Element) || !this.isConnected) return false;
+  const tag = String(this.tagName || "").toLowerCase();
+  if (tag === "input" || tag === "textarea") return String(this.value) === String(expected);
+  if (this.isContentEditable === true) return String(this.textContent || "") === String(expected);
+  return false;
 }`;
 
 function cssString(value: string): string {

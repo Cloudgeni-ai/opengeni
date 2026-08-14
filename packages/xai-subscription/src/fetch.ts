@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { XAI_CLIENT_MODE, XAI_CLIENT_VERSION, XAI_TOKEN_AUTH_HEADER_VALUE } from "./constants";
+import { XaiSubscriptionHostedToolContinuationError } from "./errors";
 import { normalizeXaiResponseEventJson, normalizeXaiSubscriptionRequestBody } from "./normalize";
 import { type XaiFinalContextUsage, xaiSubscriptionRequestStorage } from "./request-context";
 
@@ -19,6 +20,7 @@ export const XAI_SUBSCRIPTION_REQUEST_MODEL_HEADER = "x-opengeni-xai-subscriptio
 export const XAI_SUBSCRIPTION_REQUEST_ID_HEADER = "x-opengeni-xai-subscription-request-id";
 
 const MAX_ERROR_BODY_BYTES = 64 * 1024;
+const DEFAULT_HOSTED_TOOL_CONTINUATION_TIMEOUT_MS = 90_000;
 
 export function xaiSubscriptionFetch(base: XaiFetchLike): XaiFetchLike {
   return async (input, init) => {
@@ -85,7 +87,11 @@ export function xaiSubscriptionFetch(base: XaiFetchLike): XaiFetchLike {
       await response.body?.cancel().catch(() => undefined);
       response = await send(true);
     }
-    return await normalizeResponse(response, context.onFinalContextUsage);
+    return await normalizeResponse(
+      response,
+      context.onFinalContextUsage,
+      boundedHostedToolContinuationTimeout(context.hostedToolContinuationTimeoutMs),
+    );
   };
 }
 
@@ -104,6 +110,7 @@ async function requestBodyText(
 async function normalizeResponse(
   response: Response,
   onFinalContextUsage: ((usage: XaiFinalContextUsage) => void) | undefined,
+  hostedToolContinuationTimeoutMs: number,
 ): Promise<Response> {
   if (!response.ok) {
     const bytes = new Uint8Array(await response.arrayBuffer());
@@ -140,14 +147,31 @@ async function normalizeResponse(
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let pending = "";
+  let awaitingHostedToolContinuation = false;
   const body = new ReadableStream<Uint8Array>({
     async pull(controller) {
-      const chunk = await reader.read();
+      const chunk = await readNextChunk(
+        reader,
+        awaitingHostedToolContinuation ? hostedToolContinuationTimeoutMs : null,
+      );
       pending += decoder.decode(chunk.value, { stream: !chunk.done });
       const parts = pending.split("\n\n");
       pending = parts.pop() ?? "";
-      for (const part of parts)
+      let terminal = false;
+      for (const part of parts) {
+        const progress = sseProgress(part);
+        if (progress === "hosted_tool_done") awaitingHostedToolContinuation = true;
+        else if (progress === "continued" || progress === "terminal") {
+          awaitingHostedToolContinuation = false;
+        }
+        terminal ||= progress === "terminal";
         controller.enqueue(encoder.encode(`${normalizeSseEvent(part, onFinalContextUsage)}\n\n`));
+      }
+      if (terminal) {
+        await reader.cancel().catch(() => undefined);
+        controller.close();
+        return;
+      }
       if (chunk.done) {
         if (pending)
           controller.enqueue(encoder.encode(normalizeSseEvent(pending, onFinalContextUsage)));
@@ -163,6 +187,72 @@ async function normalizeResponse(
     statusText: response.statusText,
     headers: response.headers,
   });
+}
+
+async function readNextChunk(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  timeoutMs: number | null,
+): Promise<Awaited<ReturnType<ReadableStreamDefaultReader<Uint8Array>["read"]>>> {
+  if (timeoutMs === null) return await reader.read();
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      reader.read(),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new XaiSubscriptionHostedToolContinuationError()),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } catch (error) {
+    await reader.cancel(error).catch(() => undefined);
+    throw error;
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+  }
+}
+
+function sseProgress(block: string): "none" | "hosted_tool_done" | "continued" | "terminal" {
+  for (const line of block.split("\n")) {
+    if (!line.startsWith("data:")) continue;
+    const data = line.slice(5).trimStart();
+    if (!data) continue;
+    if (data === "[DONE]") return "terminal";
+    try {
+      const value = JSON.parse(data) as Record<string, unknown>;
+      const type = typeof value.type === "string" ? value.type : "";
+      if (
+        type === "response.completed" ||
+        type === "response.incomplete" ||
+        type === "response.failed"
+      ) {
+        return "terminal";
+      }
+      const item =
+        value.item && typeof value.item === "object" && !Array.isArray(value.item)
+          ? (value.item as Record<string, unknown>)
+          : null;
+      if (
+        type === "response.output_item.done" &&
+        (item?.type === "web_search_call" || item?.type === "x_search_call")
+      ) {
+        return "hosted_tool_done";
+      }
+      return "continued";
+    } catch {
+      return "continued";
+    }
+  }
+  return "none";
+}
+
+function boundedHostedToolContinuationTimeout(value: number | undefined): number {
+  const resolved = value ?? DEFAULT_HOSTED_TOOL_CONTINUATION_TIMEOUT_MS;
+  if (!Number.isSafeInteger(resolved) || resolved < 1 || resolved > 10 * 60_000) {
+    throw new RangeError("SuperGrok hosted-tool continuation timeout is invalid");
+  }
+  return resolved;
 }
 
 function normalizeSseEvent(

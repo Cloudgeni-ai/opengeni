@@ -184,6 +184,16 @@ describe("sessionChromeGoalPillState", () => {
     ).toBe("pursuing");
     expect(
       sessionChromeGoalPillState("active", {
+        state: "running",
+        reason: "human_turn_running",
+        wakeRevision: 1,
+        observedRevision: 1,
+        nextAttemptAt: null,
+        lastError: null,
+      }),
+    ).toBe("waiting");
+    expect(
+      sessionChromeGoalPillState("active", {
         state: "blocked",
         reason: "workstream_paused",
         wakeRevision: 1,

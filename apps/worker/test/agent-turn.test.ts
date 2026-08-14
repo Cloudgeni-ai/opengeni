@@ -13,6 +13,7 @@ import {
 } from "@opengeni/codex";
 import {
   XAI_SUBSCRIPTION_TRANSPORT_ERROR_HEADER,
+  XaiSubscriptionHostedToolContinuationError,
   XaiSubscriptionReloginRequired,
 } from "@opengeni/xai-subscription";
 import {
@@ -4245,6 +4246,15 @@ describe("transient provider error classifier", () => {
     expect(
       classifyXaiCredentialFailure(Object.assign(new Error("unrelated 401"), { status: 401 })),
     ).toBeNull();
+  });
+
+  test("surfaces a stalled hosted-search continuation without unsafe replay", () => {
+    expect(agentRunFailurePayload(new XaiSubscriptionHostedToolContinuationError())).toEqual({
+      error:
+        "SuperGrok stopped responding after its hosted search completed. Partial output was preserved; automatic replay is disabled because the accepted response may still have provider-side effects.",
+      code: "xai_hosted_tool_continuation_stalled",
+      retryable: false,
+    });
   });
 
   test("recognizes SDK statusCode when status is not present", () => {

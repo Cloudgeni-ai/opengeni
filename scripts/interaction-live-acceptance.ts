@@ -774,7 +774,7 @@ async function main(): Promise<void> {
               targetId: computerObservation.target.id,
               expectedTargetGeneration: computerObservation.target.targetGeneration,
               expectedObservationId: computerObservation.observationId,
-              expectedFrameId: computerObservation.frameId,
+              expectedFrameId: null,
               action: {
                 type: "semantic",
                 locator: { kind: "ref", ref: inputNode.ref },
@@ -821,7 +821,7 @@ async function main(): Promise<void> {
             targetId: computerObservation.target.id,
             expectedTargetGeneration: computerObservation.target.targetGeneration,
             expectedObservationId: computerObservation.observationId,
-            expectedFrameId: computerObservation.frameId,
+            expectedFrameId: null,
             action: { type: "focus", targetId: computerObservation.target.id },
           }),
         );
@@ -858,7 +858,7 @@ async function main(): Promise<void> {
             targetId: computerObservation.target.id,
             expectedTargetGeneration: computerObservation.target.targetGeneration,
             expectedObservationId: computerObservation.observationId,
-            expectedFrameId: computerObservation.frameId,
+            expectedFrameId: null,
             action: {
               type: "semantic",
               locator: { kind: "ref", ref: inputNode.ref },
@@ -883,6 +883,34 @@ async function main(): Promise<void> {
         );
       }
       let controlObservation = await computer.observe(frameTarget.id);
+      if (controlObservation.frameId === null) {
+        throw new Error(
+          "cold computer observation did not prime an exact frame fence before viewer attachment",
+        );
+      }
+      checks.push("computer.cold-observation-frame-fence");
+      const coldPointerReceipt = await acceptanceStep("computer cold-frame pointer", async () =>
+        computer.act({
+          operationId: crypto.randomUUID(),
+          targetId: controlObservation.target.id,
+          expectedTargetGeneration: controlObservation.target.targetGeneration,
+          expectedObservationId: controlObservation.observationId,
+          expectedFrameId: controlObservation.frameId,
+          action: {
+            type: "pointer",
+            frameId: controlObservation.frameId!,
+            action: "move",
+            x: 1,
+            y: 1,
+          },
+        }),
+      );
+      if (coldPointerReceipt.state !== "completed") {
+        throw new Error(
+          `cold-frame computer pointer settled as ${coldPointerReceipt.state}: ${JSON.stringify(coldPointerReceipt.error)}`,
+        );
+      }
+      checks.push("computer.cold-frame-pointer-fence");
       checks.push("computer.semantic-observation", "computer.semantic-focus");
 
       started = performance.now();

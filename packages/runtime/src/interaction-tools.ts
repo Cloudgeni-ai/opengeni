@@ -95,6 +95,7 @@ const TOOL_PERMISSION = {
 
 const DiscoveryInput = z
   .object({
+    scope: z.enum(["current_session", "workspace"]).optional(),
     includeTerminal: z.boolean().optional(),
     includeArchivedIdentities: z.boolean().optional(),
     includeDisconnectedDevices: z.boolean().optional(),
@@ -461,12 +462,13 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "discover"],
     title: "Discover browsers and computers",
     description:
-      "List workspace BrowserSessions, ComputerSessions, reusable browser identities, attached-Chrome-capable machine bridges, and actually connected Chrome profiles. An attachedBrowserBridge only means the machine is ready for the extension; only attachedBrowsers are real user Chrome profiles/tabs. For requests about the user's existing/current/personal Chrome, call this before browser_open and use an attachedBrowsers device explicitly. Resources are workspace-visible: inspect and reuse relevant peer/child sessions instead of creating duplicates. Leave includeTerminal=false unless ended history is specifically required because terminal history may be large.",
+      "List BrowserSessions and ComputerSessions associated with this agent session. The default current_session scope is deliberately small and omits workspace-wide identities, attached-browser bridges, and Chrome profiles. For requests about the user's existing/current/personal Chrome, reusable identities, or peer/child resources, call this with scope=workspace before browser_open and select an actual attachedBrowsers device; that inventory can be large. An attachedBrowserBridge only means the machine is ready for the extension; only attachedBrowsers are real user Chrome profiles/tabs. Leave includeTerminal=false unless ended history is specifically required.",
     input: DiscoveryInput,
     output: DiscoveryOutput,
     readOnly: true,
     idempotent: true,
     execute: async (value) => {
+      const scope = value.scope ?? "current_session";
       const [browsers, computers, identities, attached] = await Promise.all([
         input.transport.listBrowserSessions(input.workspaceId),
         input.transport.listComputerSessions(input.workspaceId),
@@ -482,15 +484,21 @@ export function createInteractionAttemptToolDefinitions(
         computerRevision: computers.revision,
         identityRevision: identities.revision,
         attachedBrowserRevision: attached.revision,
-        browsers: value.includeTerminal
-          ? browsers.sessions
-          : browsers.sessions.filter((session) => !TERMINAL_LIFECYCLES.has(session.lifecycle)),
-        computers: value.includeTerminal
-          ? computers.sessions
-          : computers.sessions.filter((session) => !TERMINAL_LIFECYCLES.has(session.lifecycle)),
-        identities: identities.identities,
-        attachedBrowserBridges: attached.bridges,
-        attachedBrowsers: attached.devices,
+        browsers: filterDiscoveredSessions(
+          browsers.sessions,
+          input.sessionId,
+          scope,
+          value.includeTerminal ?? false,
+        ),
+        computers: filterDiscoveredSessions(
+          computers.sessions,
+          input.sessionId,
+          scope,
+          value.includeTerminal ?? false,
+        ),
+        identities: scope === "workspace" ? identities.identities : [],
+        attachedBrowserBridges: scope === "workspace" ? attached.bridges : [],
+        attachedBrowsers: scope === "workspace" ? attached.devices : [],
       };
     },
   });
@@ -1000,6 +1008,25 @@ export function createInteractionAttemptToolDefinitions(
   });
 
   return definitions;
+}
+
+function filterDiscoveredSessions<
+  T extends {
+    lifecycle: string;
+    associations: Array<{ sessionId: string }>;
+  },
+>(
+  sessions: T[],
+  sessionId: string,
+  scope: "current_session" | "workspace",
+  includeTerminal: boolean,
+) {
+  return sessions.filter(
+    (session) =>
+      (includeTerminal || !TERMINAL_LIFECYCLES.has(session.lifecycle)) &&
+      (scope === "workspace" ||
+        session.associations.some((association) => association.sessionId === sessionId)),
+  );
 }
 
 export type CreateFirstPartyInteractionAttemptToolsInput = Omit<

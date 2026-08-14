@@ -91,13 +91,19 @@ describe("CodemodeClient", () => {
       definitions: [definition],
     }).catalog;
     const operationId = "66666666-6666-4666-8666-666666666666";
-    const requests: Array<{ url: string; authorization: string | null; body: unknown }> = [];
+    const requests: Array<{
+      url: string;
+      authorization: string | null;
+      apiContract: string | null;
+      body: unknown;
+    }> = [];
     let reads = 0;
     const fetchImpl = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
       const url = String(input);
       requests.push({
         url,
         authorization: new Headers(init?.headers).get("authorization"),
+        apiContract: new Headers(init?.headers).get("x-opengeni-api-contract"),
         body: init?.body ? JSON.parse(String(init.body)) : null,
       });
       if (url.endsWith("/catalog")) return Response.json(catalog);
@@ -135,6 +141,9 @@ describe("CodemodeClient", () => {
     expect(
       requests.every(({ authorization }) => authorization === "Bearer exact-attempt-token"),
     ).toBe(true);
+    expect(requests.every(({ apiContract }) => apiContract === "2026-08-model-context-v1")).toBe(
+      true,
+    );
     expect(requests[1]!.body).toMatchObject({ operationId, identity: definition.identity });
   });
 
