@@ -8325,10 +8325,7 @@ export const modelCallFacts = pgTable(
     ),
     contextContributionsValid: check(
       "model_call_facts_context_contributions_check",
-      sql`${table.contextContributions} is null or (
-        jsonb_typeof(${table.contextContributions}) = 'array'
-        and octet_length(${table.contextContributions}::text) <= 8192
-      )`,
+      sql`opengeni_private.model_context_contributions_valid(${table.contextContributions})`,
     ),
   }),
 );

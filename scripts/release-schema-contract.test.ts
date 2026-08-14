@@ -198,7 +198,7 @@ describe("release schema contract", () => {
         (migration) => migration.path === "0245_model_context_contribution_facts.sql",
       ),
     ).toMatchObject({
-      sha256: "656fc9634bb969903a27a7d1d8e4caed961324a0e2df27fa0a3aeeb88198ba7e",
+      sha256: "437bb07ffe12f9c714bd2a40d0ecd8ed9df1fd9003f4d057fe11101999841f40",
       deploymentMode: "rolling",
     });
     const migrations = new Map(
@@ -211,8 +211,8 @@ describe("release schema contract", () => {
         migrations.has("0244_slack_app_home_refresh_queue.sql")
       ) {
         return includesActivation
-          ? "f36e3e9319cbe1cb51cb27fc60f23f1e7be7613e596fcdbda0c079ddd8c990b9"
-          : "5d33463b1805e94ae3f34b488682b25d75b775c4ef136878903887562b56ad44";
+          ? "5c12e104be0199831cd12777ea509e9ca3a0448768d211cb52056d55300a1044"
+          : "151a3871e8b935ce10c1d1b5a8182d110636248ed0d34d2281bc890e2c3737b5";
       }
       if (migrations.has("0244_slack_app_home_refresh_queue.sql")) {
         return includesActivation
@@ -768,7 +768,7 @@ describe("release schema contract", () => {
     }
     if (migrations.has("0245_model_context_contribution_facts.sql")) {
       expect(migrations.get("0245_model_context_contribution_facts.sql")).toMatchObject({
-        sha256: "656fc9634bb969903a27a7d1d8e4caed961324a0e2df27fa0a3aeeb88198ba7e",
+        sha256: "437bb07ffe12f9c714bd2a40d0ecd8ed9df1fd9003f4d057fe11101999841f40",
         deploymentMode: "rolling",
       });
     }

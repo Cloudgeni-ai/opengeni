@@ -34,7 +34,7 @@ BEGIN
   FOR contribution IN SELECT element FROM jsonb_array_elements(value) AS entries(element)
   LOOP
     IF jsonb_typeof(contribution) <> 'object'
-      OR jsonb_object_length(contribution) <> 4
+      OR (SELECT count(*) FROM pg_catalog.jsonb_object_keys(contribution)) <> 4
       OR NOT (contribution ?& ARRAY['source', 'items', 'utf8Bytes', 'estimatedTokens'])
     THEN
       RETURN false;
@@ -67,6 +67,17 @@ BEGIN
   RETURN true;
 END;
 $$;
+
+REVOKE ALL ON FUNCTION opengeni_private.model_context_contributions_valid(jsonb)
+  FROM PUBLIC;
+DO $model_context_contributions_function_grant$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
+    GRANT EXECUTE ON FUNCTION opengeni_private.model_context_contributions_valid(jsonb)
+      TO opengeni_app;
+  END IF;
+END
+$model_context_contributions_function_grant$;
 
 ALTER TABLE "model_call_facts"
   DROP CONSTRAINT IF EXISTS "model_call_facts_context_contributions_check",
