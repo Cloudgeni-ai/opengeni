@@ -37,7 +37,7 @@ mock.module("@/components/capabilities/integration-control-center-view", () => (
     loading: boolean;
   }) => (
     <div data-workspace-id={workspaceId} data-loading={String(loading)}>
-      {definitions.map((definition) => definition.name).join(",")}
+      {definitions.map((candidate) => candidate.name).join(",")}
     </div>
   ),
 }));
@@ -92,14 +92,18 @@ describe("Integration Control Center load ownership", () => {
       );
 
       await act(async () => {
-        definitionsB.resolve({ definitions: [definition("definition-b", "Workspace B")] });
+        definitionsB.resolve({
+          definitions: [integrationDefinition("definition-b", "Workspace B")],
+        });
         instancesB.resolve({ integrations: [] });
         await Promise.resolve();
       });
       await waitFor(() => rendered.container.textContent === "Workspace B");
 
       await act(async () => {
-        definitionsA.resolve({ definitions: [definition("definition-a", "Workspace A")] });
+        definitionsA.resolve({
+          definitions: [integrationDefinition("definition-a", "Workspace A")],
+        });
         instancesA.resolve({ integrations: [] });
         await Promise.resolve();
       });
@@ -150,7 +154,7 @@ async function renderControlCenter(
   };
 }
 
-function definition(id: string, name: string): IntegrationDefinitionSummary {
+function integrationDefinition(id: string, name: string): IntegrationDefinitionSummary {
   return {
     id,
     name,

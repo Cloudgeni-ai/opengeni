@@ -249,8 +249,9 @@ export function IntegrationControlCenter({
 
   useEffect(() => {
     void load();
+    const loadRequestGenerationRef = loadRequestGeneration;
     return () => {
-      ++loadRequestGeneration.current;
+      ++loadRequestGenerationRef.current;
     };
   }, [load]);
 

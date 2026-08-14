@@ -156,8 +156,9 @@ export function GoogleDriveKnowledgeSourceDialog({
     setNextPageToken(null);
     setFolderIdDraft("");
     void loadFolder({ id: "root", name: "My Drive" });
+    const browseGenerationRef = browseGeneration;
     return () => {
-      ++browseGeneration.current;
+      ++browseGenerationRef.current;
     };
   }, [
     canManageOrganizationDestination,

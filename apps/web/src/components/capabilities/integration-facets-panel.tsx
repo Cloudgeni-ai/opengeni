@@ -116,26 +116,59 @@ export function IntegrationFacetsPanel({
   const mutationSequenceByFacet = useRef(new Map<string, number>());
   const loadPromise = useRef<Promise<void> | null>(null);
   const seenRefreshRevision = useRef(refreshRevision);
+  const panelIdentity = useRef({
+    client,
+    workspaceId,
+    capabilityId: instance.capabilityId,
+    instanceKey: instance.instanceKey,
+    instanceVersion: instance.instanceVersion,
+  });
 
   useEffect(() => {
-    ++operationGeneration.current;
-    mutationSequenceByFacet.current.clear();
-    loadPromise.current = null;
-    setData(null);
-    setLoading(false);
-    setError(null);
-    setBusyFacetKeys(new Set());
-    setOpen(false);
-    setEditor(null);
-    setGoogleDriveEditor(null);
-    setRemoveTarget(null);
-    seenRefreshRevision.current = refreshRevision;
-    return () => {
+    const previousIdentity = panelIdentity.current;
+    const identityChanged =
+      previousIdentity.client !== client ||
+      previousIdentity.workspaceId !== workspaceId ||
+      previousIdentity.capabilityId !== instance.capabilityId ||
+      previousIdentity.instanceKey !== instance.instanceKey ||
+      previousIdentity.instanceVersion !== instance.instanceVersion;
+    panelIdentity.current = {
+      client,
+      workspaceId,
+      capabilityId: instance.capabilityId,
+      instanceKey: instance.instanceKey,
+      instanceVersion: instance.instanceVersion,
+    };
+    if (identityChanged) {
       ++operationGeneration.current;
       mutationSequenceByFacet.current.clear();
       loadPromise.current = null;
+      setData(null);
+      setLoading(false);
+      setError(null);
+      setBusyFacetKeys(new Set());
+      setOpen(false);
+      setEditor(null);
+      setGoogleDriveEditor(null);
+      setRemoveTarget(null);
+      seenRefreshRevision.current = refreshRevision;
+    }
+    const operationGenerationRef = operationGeneration;
+    const mutationSequences = mutationSequenceByFacet.current;
+    const loadPromiseRef = loadPromise;
+    return () => {
+      ++operationGenerationRef.current;
+      mutationSequences.clear();
+      loadPromiseRef.current = null;
     };
-  }, [client, instance.capabilityId, instance.instanceKey, instance.instanceVersion, workspaceId]);
+  }, [
+    client,
+    instance.capabilityId,
+    instance.instanceKey,
+    instance.instanceVersion,
+    refreshRevision,
+    workspaceId,
+  ]);
 
   useEffect(() => {
     if (seenRefreshRevision.current === refreshRevision) return;
