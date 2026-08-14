@@ -324,6 +324,8 @@ export class RoutingMutationOutcomeUnknownError extends Error {
   }
 }
 
+/** Recognize routed mutation uncertainty without allowing a hostile Proxy's
+ * prototype trap to replace the original provider failure. */
 export function isRoutingMutationOutcomeUnknownError(
   error: unknown,
 ): error is RoutingMutationOutcomeUnknownError {
