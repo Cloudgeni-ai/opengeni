@@ -612,7 +612,7 @@ const IDLE_REALTIME_SNAPSHOT: SessionRealtimeControllerSnapshot = {
   error: null,
 };
 
-export function NewSessionRealtimeControl(props: {
+type NewSessionRealtimeControlProps = {
   client?: RealtimeControllerClient | undefined;
   workspaceId?: string | undefined;
   codexConnected: boolean;
@@ -630,20 +630,43 @@ export function NewSessionRealtimeControl(props: {
    * `none` never attaches a model menu to the bar button.
    */
   modelMenu?: "split" | "split-desktop" | "none" | undefined;
-}) {
-  const internalSelection = useRealtimeModelSelection({
+};
+
+type NewSessionRealtimeSelection = {
+  models: readonly RealtimeModelOption[];
+  selectedModel: RealtimeModelOption;
+  selectModel: (modelId: string) => void;
+};
+
+export function NewSessionRealtimeControl(props: NewSessionRealtimeControlProps) {
+  if (props.models && props.selectedModel && props.onSelectModel) {
+    return (
+      <NewSessionRealtimeControlView
+        {...props}
+        selection={{
+          models: props.models,
+          selectedModel: props.selectedModel,
+          selectModel: props.onSelectModel,
+        }}
+      />
+    );
+  }
+  return <NewSessionRealtimeControlWithInternalSelection {...props} />;
+}
+
+function NewSessionRealtimeControlWithInternalSelection(props: NewSessionRealtimeControlProps) {
+  const selection = useRealtimeModelSelection({
     client: props.client,
     workspaceId: props.workspaceId,
     codexConnected: props.codexConnected,
   });
-  const selection =
-    props.models && props.selectedModel && props.onSelectModel
-      ? {
-          models: props.models,
-          selectedModel: props.selectedModel,
-          selectModel: props.onSelectModel,
-        }
-      : internalSelection;
+  return <NewSessionRealtimeControlView {...props} selection={selection} />;
+}
+
+function NewSessionRealtimeControlView(
+  props: NewSessionRealtimeControlProps & { selection: NewSessionRealtimeSelection },
+) {
+  const selection = props.selection;
   const audioRef = useRef<HTMLAudioElement>(null);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
