@@ -417,6 +417,14 @@ describe("OpenSandbox adapter", () => {
     await expect(session.start()).rejects.toThrow(/pool changed for the persisted sandbox/);
   });
 
+  test("direct exact resume rejects explicit provider pool evidence", async () => {
+    const fake = new FakeOpenSandbox();
+    fake.reportedExtensions = { poolRef: "unexpected-pool" };
+    const session = await createClient(fake).create();
+
+    await expect(session.start()).rejects.toThrow(/pool changed for the persisted sandbox/);
+  });
+
   test("state codec rejects another provider binding or image", async () => {
     const fake = new FakeOpenSandbox();
     const client = createClient(fake);

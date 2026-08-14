@@ -509,7 +509,7 @@ export class OpenSandboxSession {
             info.extensions && typeof info.extensions.poolRef === "string"
               ? info.extensions.poolRef
               : null;
-          if (this.state.poolRef !== null && poolRef !== null && poolRef !== this.state.poolRef) {
+          if (poolRef !== null && poolRef !== this.state.poolRef) {
             await provider.close().catch(() => undefined);
             throw new SandboxProviderError("OpenSandbox pool changed for the persisted sandbox", {
               sandboxId: this.state.sandboxId,
