@@ -221,6 +221,11 @@ describe("release schema contract", () => {
       sourceContract.migrations.map((migration) => [migration.path, migration]),
     );
     const sessionVisibilityContractHash = (includesActivation: boolean): string | null => {
+      if (migrations.has("0247_company_brain_governed_write_proposals.sql")) {
+        return includesActivation
+          ? "58e00ef613a283b8a0d161b020f15662d43daa5385a4c03b025884cef4d6651a"
+          : "af02ff330fe41a90c51bbda52e766dc5865fa3cc430e1f2f656b90f73190f1c4";
+      }
       if (
         migrations.has("0236_session_visibility_slack_policy.sql") &&
         migrations.has("0246_integration_personal_instance_authority.sql") &&
@@ -250,11 +255,6 @@ describe("release schema contract", () => {
           : "720613ad79a8956f6cc5372c5441dcfbbec1b4c9dd7a9c7e3d08dae4f736ffab";
       }
       if (!migrations.has("0236_session_visibility_slack_policy.sql")) return null;
-      if (migrations.has("0247_company_brain_governed_write_proposals.sql")) {
-        return includesActivation
-          ? "559f7ba060d2c1434cc88f2d063d29f27d7c58688ecbf7fdf49207b5ac7728d0"
-          : "d06f6787ae19ea9fcf9564e7d180055310c580c5c70ab5b57fac88737d3371a3";
-      }
       if (migrations.has("0246_integration_personal_instance_authority.sql")) {
         return includesActivation
           ? "b70c095097581527ba8f694f17b1ef8b4607d57dd5535e1c57193fda28970b8f"

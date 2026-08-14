@@ -452,18 +452,6 @@ describe("runtime database posture evaluator", () => {
   test("accepts public-schema authority owned by the two protected tables", () => {
     const posture = safePosture();
     posture.schemas[0]!.owner = "pg_database_owner";
-    for (const routine of posture.targetRoutines) {
-      if (
-        routine.name === "fork_session_content(uuid, uuid, uuid, text, uuid, text, text, text)" ||
-        routine.name === "resolve_session_attempt_personal_resources(uuid, uuid, uuid)" ||
-        routine.name === "session_private_actor_visible(uuid, uuid, uuid, text)" ||
-        routine.name === "session_reference_visible(uuid, uuid, uuid)" ||
-        routine.name ===
-          "transition_session_visibility(uuid, uuid, uuid, text, text, integer, text, text)"
-      ) {
-        routine.owner = "pg_database_owner";
-      }
-    }
 
     expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
   });
