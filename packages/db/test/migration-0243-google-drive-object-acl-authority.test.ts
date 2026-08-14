@@ -529,7 +529,7 @@ describe("migration 0243 Google Drive object ACL authority", () => {
     // the exact functions without granting the runtime role a way to create a
     // capability. Without the capability policies this cross-workspace call
     // would miss the source-workspace protector and incorrectly return true.
-    const definerRole = `ope127_acl_${suffix.replaceAll("-", "").slice(0, 24)}`;
+    const definerRole = `drive_acl_owner_${suffix.replaceAll("-", "").slice(0, 24)}`;
     const [requestWorkspace] = await shared.admin<{ id: string }[]>`
       insert into workspaces (account_id, name)
       values (${account!.id}, ${`drive-acl-request-${suffix}`})
