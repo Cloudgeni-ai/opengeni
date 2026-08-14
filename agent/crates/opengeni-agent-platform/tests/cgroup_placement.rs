@@ -139,9 +139,9 @@ mod linux {
         // Both publish their PIDs and stay alive. Process-group kill cannot reach
         // that descendant; task-abort cleanup must use the operation cgroup.
         let req = ExecRequest {
-            command: vec!["setsid sh -c 'while :; do :; done' & child=$!; \
-                 echo $$ $child; wait"
-                .to_string()],
+            command: vec![
+                "echo $$; setsid sh -c 'echo $$; while :; do :; done' & wait".to_string(),
+            ],
             shell: true,
             ..Default::default()
         };
@@ -575,21 +575,31 @@ mod linux {
         stdout: &mut BufReader<tokio::process::ChildStdout>,
         exec_task: &mut tokio::task::JoinHandle<std::io::Result<std::process::ExitStatus>>,
     ) -> (u32, u32) {
+        let shell = require_fixture_pid(stdout, exec_task, "shell").await;
+        let descendant = require_fixture_pid(stdout, exec_task, "descendant").await;
+        (shell, descendant)
+    }
+
+    async fn require_fixture_pid(
+        stdout: &mut BufReader<tokio::process::ChildStdout>,
+        exec_task: &mut tokio::task::JoinHandle<std::io::Result<std::process::ExitStatus>>,
+        label: &str,
+    ) -> u32 {
         let mut line = String::new();
         let read = tokio::select! {
             read = stdout.read_line(&mut line) => read.expect("read fixture readiness line"),
             result = &mut *exec_task => panic!("exec ended before publishing fixture PIDs: {result:?}"),
         };
-        assert_ne!(read, 0, "fixture stdout closed before publishing both PIDs");
+        assert_ne!(
+            read, 0,
+            "fixture stdout closed before publishing {label} PID"
+        );
         let mut parts = line.split_whitespace();
-        let (Some(shell), Some(descendant), None) = (parts.next(), parts.next(), parts.next())
-        else {
-            panic!("fixture published malformed PID line: {line:?}");
+        let (Some(pid), None) = (parts.next(), parts.next()) else {
+            panic!("fixture published malformed {label} PID line: {line:?}");
         };
-        (
-            shell.parse::<u32>().expect("numeric shell PID"),
-            descendant.parse::<u32>().expect("numeric descendant PID"),
-        )
+        pid.parse::<u32>()
+            .unwrap_or_else(|_| panic!("fixture published non-numeric {label} PID: {line:?}"))
     }
 
     fn child_cgroup(child_pid: u32) -> String {
