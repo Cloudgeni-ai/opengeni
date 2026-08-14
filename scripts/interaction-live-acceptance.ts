@@ -647,7 +647,10 @@ async function main(): Promise<void> {
         value: "MUST_NOT_DISPATCH",
       },
     });
-    if (staleTargetReceipt.state !== "failed" || staleTargetReceipt.error?.code !== "target_stale") {
+    if (
+      staleTargetReceipt.state !== "failed" ||
+      staleTargetReceipt.error?.code !== "target_stale"
+    ) {
       throw new Error(
         `stale browser target fence settled unexpectedly: ${JSON.stringify(staleTargetReceipt)}`,
       );

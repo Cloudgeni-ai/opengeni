@@ -84,9 +84,7 @@ export function MachineCard({
     if (!update) return null;
     switch (update.status) {
       case "requested":
-        return dispatchConfirmationStalled
-          ? "Agent confirmation delayed"
-          : "Confirming with agent";
+        return dispatchConfirmationStalled ? "Agent confirmation delayed" : "Confirming with agent";
       case "accepted":
         return "Update accepted";
       case "waiting_for_idle":

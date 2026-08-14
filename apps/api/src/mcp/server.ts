@@ -106,10 +106,7 @@ import {
   appendAndPublishTurnEventsFenced,
   publishDurableSessionEvents,
 } from "@opengeni/events";
-import {
-  allowedFirstPartyMcpToolsForSession,
-  codemodeWorkspaceUrl,
-} from "@opengeni/config";
+import { allowedFirstPartyMcpToolsForSession, codemodeWorkspaceUrl } from "@opengeni/config";
 import {
   createSignedState,
   GitHubAppConfigurationError,

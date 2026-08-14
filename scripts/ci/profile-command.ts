@@ -287,7 +287,10 @@ async function main(): Promise<void> {
       // just-exited grandchild may remain visible as a zombie until the runner
       // init reaps it. Give the complete group one bounded chance to settle on
       // its own before classifying and terminating a persistent orphan.
-      processGroupSettledNaturally = await waitForProcessGroupExit(runningChild.pid, naturalSettleMs);
+      processGroupSettledNaturally = await waitForProcessGroupExit(
+        runningChild.pid,
+        naturalSettleMs,
+      );
       if (!processGroupSettledNaturally) {
         processGroupLeakDetected = true;
         try {

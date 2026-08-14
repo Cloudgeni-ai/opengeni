@@ -1,9 +1,5 @@
 import { CapabilityPack } from "@opengeni/contracts";
-import {
-  getWorkspace,
-  listInstalledPortableSkills,
-  type Database,
-} from "@opengeni/db";
+import { getWorkspace, listInstalledPortableSkills, type Database } from "@opengeni/db";
 import {
   legacySandboxRuntimeFromPacks,
   packInstallationUsesLegacyRuntime,

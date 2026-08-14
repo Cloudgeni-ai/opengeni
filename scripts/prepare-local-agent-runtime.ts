@@ -60,11 +60,7 @@ async function sourceIdentity(): Promise<{ commit: string; digest: string }> {
   const commit = new TextDecoder().decode(await gitOutput(["rev-parse", "HEAD"])).trim();
   const diff = await gitOutput(["diff", "--binary", "HEAD", "--"]);
   const untrackedOutput = await gitOutput(["ls-files", "--others", "--exclude-standard", "-z"]);
-  const untracked = new TextDecoder()
-    .decode(untrackedOutput)
-    .split("\0")
-    .filter(Boolean)
-    .sort();
+  const untracked = new TextDecoder().decode(untrackedOutput).split("\0").filter(Boolean).sort();
   const hasher = new Bun.CryptoHasher("sha256");
   hasher.update(commit);
   hasher.update(diff);

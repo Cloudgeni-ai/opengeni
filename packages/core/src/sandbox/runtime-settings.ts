@@ -129,7 +129,12 @@ export function resolveRigProviderImageSelection(
   const image = version.providerImages[backend];
   if (!image) return { settings, reason: "missing", contentHash: null, imageId: null };
   if (image.status !== "ready" || !image.imageId) {
-    return { settings, reason: "not_ready", contentHash: image.contentHash, imageId: image.imageId };
+    return {
+      settings,
+      reason: "not_ready",
+      contentHash: image.contentHash,
+      imageId: image.imageId,
+    };
   }
   if (image.coldBootValidation?.version !== 1) {
     return {
@@ -220,10 +225,7 @@ export type SessionSandboxRuntime = {
 export async function resolveSessionSandboxRuntime(
   db: Database,
   settings: Settings,
-  session: Pick<
-    Session,
-    "workspaceId" | "sandboxBackend" | "rigId" | "rigVersionId"
-  >,
+  session: Pick<Session, "workspaceId" | "sandboxBackend" | "rigId" | "rigVersionId">,
 ): Promise<SessionSandboxRuntime> {
   const [packs, rigVersion] = await Promise.all([
     resolveWorkspaceLegacyRuntimePacks(db, session.workspaceId),

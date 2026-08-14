@@ -1587,9 +1587,7 @@ function revisionMaterializationSummary(revision: BrowserRevision): { label: str
   );
   if (providerBound) {
     return {
-      label: providerBound.reason
-        ? `Provider-bound · ${providerBound.reason}`
-        : "Provider-bound",
+      label: providerBound.reason ? `Provider-bound · ${providerBound.reason}` : "Provider-bound",
     };
   }
   return { label: "Portable browser data" };

@@ -1,7 +1,4 @@
-import {
-  resolveFirstPartyDelegationSecret,
-  type Settings,
-} from "@opengeni/config";
+import { resolveFirstPartyDelegationSecret, type Settings } from "@opengeni/config";
 import { signDelegatedAccessToken } from "@opengeni/contracts";
 
 export const CODEMODE_TOKEN_TTL_SECONDS = 60 * 60;

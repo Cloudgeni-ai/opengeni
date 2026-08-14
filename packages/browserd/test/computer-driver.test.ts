@@ -319,10 +319,7 @@ class FixtureNativeTransport implements ComputerNativeTransport {
     };
   }
 
-  async startCapture(
-    _targetId: string,
-    options: NativeComputerCaptureOptions,
-  ): Promise<void> {
+  async startCapture(_targetId: string, options: NativeComputerCaptureOptions): Promise<void> {
     if (this.startCaptureError) throw this.startCaptureError;
     this.startedCaptureOptions.push(options);
   }

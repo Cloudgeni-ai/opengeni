@@ -1142,7 +1142,11 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
     if (!placement.lease?.instanceId) {
       throw new ComputerSessionStateError("ComputerSession lease placement is unavailable");
     }
-    const sandboxRuntime = await resolveSessionSandboxRuntime(deps.db, deps.settings, sourceSession);
+    const sandboxRuntime = await resolveSessionSandboxRuntime(
+      deps.db,
+      deps.settings,
+      sourceSession,
+    );
     const acquired = await acquireLease(deps.db, {
       accountId: grant.accountId,
       workspaceId: sourceSession.workspaceId,

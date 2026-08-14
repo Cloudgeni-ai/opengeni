@@ -19,10 +19,7 @@ import {
   type TurnInitiator,
   type TurnInitiatorContext,
 } from "@opengeni/contracts";
-import {
-  mintSandboxCodemodeToken,
-  type SandboxCodemodeAuthority,
-} from "@opengeni/runtime/sandbox";
+import { mintSandboxCodemodeToken, type SandboxCodemodeAuthority } from "@opengeni/runtime/sandbox";
 import {
   loadVariableSetForRun as loadWorkspaceEnvironmentForRunFromDb,
   type Database,

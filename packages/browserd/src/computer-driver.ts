@@ -371,31 +371,33 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
     targetId: string,
     group: TargetFrameGroup,
   ): Promise<ComputerNativeTransport> {
-    const transition = group.sourceTransition.catch(() => undefined).then(async () => {
-      this.assertOpen();
-      if (group.stopping) throw new Error("computer frame source is stopping");
-      const activeProfiles = [...group.profiles.values()].filter(
-        (profile) => !profile.stopped && profile.subscriptions.size > 0,
-      );
-      if (activeProfiles.length === 0) throw new Error("computer frame source has no viewers");
-      const client = await this.activeClient();
-      const sourceOptions: NativeComputerCaptureOptions = {
-        format: "png",
-        quality: 100,
-        maxWidth: Math.max(...activeProfiles.map((profile) => profile.options.maxWidth)),
-        maxHeight: Math.max(...activeProfiles.map((profile) => profile.options.maxHeight)),
-      };
-      const sourceKey = [
-        sourceOptions.format,
-        sourceOptions.quality,
-        sourceOptions.maxWidth,
-        sourceOptions.maxHeight,
-      ].join(":");
-      if (group.sourceClient === client && group.sourceKey === sourceKey) return;
-      await client.startCapture(targetId, sourceOptions);
-      group.sourceClient = client;
-      group.sourceKey = sourceKey;
-    });
+    const transition = group.sourceTransition
+      .catch(() => undefined)
+      .then(async () => {
+        this.assertOpen();
+        if (group.stopping) throw new Error("computer frame source is stopping");
+        const activeProfiles = [...group.profiles.values()].filter(
+          (profile) => !profile.stopped && profile.subscriptions.size > 0,
+        );
+        if (activeProfiles.length === 0) throw new Error("computer frame source has no viewers");
+        const client = await this.activeClient();
+        const sourceOptions: NativeComputerCaptureOptions = {
+          format: "png",
+          quality: 100,
+          maxWidth: Math.max(...activeProfiles.map((profile) => profile.options.maxWidth)),
+          maxHeight: Math.max(...activeProfiles.map((profile) => profile.options.maxHeight)),
+        };
+        const sourceKey = [
+          sourceOptions.format,
+          sourceOptions.quality,
+          sourceOptions.maxWidth,
+          sourceOptions.maxHeight,
+        ].join(":");
+        if (group.sourceClient === client && group.sourceKey === sourceKey) return;
+        await client.startCapture(targetId, sourceOptions);
+        group.sourceClient = client;
+        group.sourceKey = sourceKey;
+      });
     group.sourceTransition = transition;
     await transition;
     if (!group.sourceClient) throw new Error("computer frame source did not start");
