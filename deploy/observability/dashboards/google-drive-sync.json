@@ -1,0 +1,258 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "id": 1,
+      "title": "Google Drive scheduled knowledge sync",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 2,
+      "title": "Run rate by outcome",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (outcome) (rate(opengeni_knowledge_source_sync_runs_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",provider=\"google_drive\"}[5m]))",
+          "legendFormat": "{{outcome}}",
+          "editorMode": "code",
+          "range": true,
+          "datasource": { "type": "prometheus", "uid": "${datasource}" }
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Failure ratio (15m)",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.1 },
+              { "color": "red", "value": 0.2 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["lastNotNull"], "values": false }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(opengeni_knowledge_source_sync_runs_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",provider=\"google_drive\",outcome=\"failed\"}[15m])) / clamp_min(sum(increase(opengeni_knowledge_source_sync_runs_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",provider=\"google_drive\"}[15m])), 1)",
+          "legendFormat": "failure ratio",
+          "editorMode": "code",
+          "range": true,
+          "datasource": { "type": "prometheus", "uid": "${datasource}" }
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Reconnect required (15m)",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["lastNotNull"], "values": false }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(opengeni_knowledge_source_sync_reconnect_required_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",provider=\"google_drive\"}[15m]))",
+          "legendFormat": "reconnect required",
+          "editorMode": "code",
+          "range": true,
+          "datasource": { "type": "prometheus", "uid": "${datasource}" }
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "p95 sync duration by outcome",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 9 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, outcome) (rate(opengeni_knowledge_source_sync_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",provider=\"google_drive\"}[5m])))",
+          "legendFormat": "{{outcome}}",
+          "editorMode": "code",
+          "range": true,
+          "datasource": { "type": "prometheus", "uid": "${datasource}" }
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Provider attempts and retries",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 9 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (operation, outcome) (rate(opengeni_google_drive_provider_requests_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[5m]))",
+          "legendFormat": "attempt {{operation}} {{outcome}}",
+          "editorMode": "code",
+          "range": true,
+          "datasource": { "type": "prometheus", "uid": "${datasource}" }
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (operation, reason) (rate(opengeni_google_drive_provider_retries_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[5m]))",
+          "legendFormat": "retry {{operation}} {{reason}}",
+          "editorMode": "code",
+          "range": true,
+          "datasource": { "type": "prometheus", "uid": "${datasource}" }
+        },
+        {
+          "refId": "C",
+          "expr": "sum by (outcome) (rate(opengeni_knowledge_source_sync_provider_requests_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",provider=\"google_drive\"}[5m]))",
+          "legendFormat": "logical requests {{outcome}}",
+          "editorMode": "code",
+          "range": true,
+          "datasource": { "type": "prometheus", "uid": "${datasource}" }
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Explicit sync limit hits",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 17 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (limit) (increase(opengeni_knowledge_source_sync_limit_hits_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",provider=\"google_drive\"}[30m]))",
+          "legendFormat": "{{limit}}",
+          "editorMode": "code",
+          "range": true,
+          "datasource": { "type": "prometheus", "uid": "${datasource}" }
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Terminal failures by bounded reason",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 17 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (reason, retryable) (increase(opengeni_knowledge_source_sync_failures_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",provider=\"google_drive\"}[30m]))",
+          "legendFormat": "{{reason}} retryable={{retryable}}",
+          "editorMode": "code",
+          "range": true,
+          "datasource": { "type": "prometheus", "uid": "${datasource}" }
+        }
+      ]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["opengeni", "observability", "google-drive"],
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "label": "Prometheus",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0,
+        "refresh": 1
+      },
+      {
+        "name": "namespace",
+        "label": "Namespace",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "query": {
+          "query": "label_values(opengeni_knowledge_source_sync_runs_total{provider=\"google_drive\"}, namespace)",
+          "refId": "namespace"
+        },
+        "definition": "label_values(opengeni_knowledge_source_sync_runs_total{provider=\"google_drive\"}, namespace)",
+        "current": {},
+        "includeAll": false,
+        "multi": false,
+        "refresh": 1,
+        "sort": 1
+      },
+      {
+        "name": "environment",
+        "label": "Environment",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "query": {
+          "query": "label_values(opengeni_knowledge_source_sync_runs_total{namespace=\"$namespace\",provider=\"google_drive\"}, environment)",
+          "refId": "environment"
+        },
+        "definition": "label_values(opengeni_knowledge_source_sync_runs_total{namespace=\"$namespace\",provider=\"google_drive\"}, environment)",
+        "current": {},
+        "includeAll": false,
+        "multi": false,
+        "refresh": 1,
+        "sort": 1
+      },
+      {
+        "name": "release",
+        "label": "Release",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "query": {
+          "query": "label_values(opengeni_knowledge_source_sync_runs_total{namespace=\"$namespace\",environment=\"$environment\",provider=\"google_drive\"}, release)",
+          "refId": "release"
+        },
+        "definition": "label_values(opengeni_knowledge_source_sync_runs_total{namespace=\"$namespace\",environment=\"$environment\",provider=\"google_drive\"}, release)",
+        "current": {},
+        "includeAll": false,
+        "multi": false,
+        "refresh": 1,
+        "sort": 1
+      }
+    ]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "OpenGeni · Google Drive Sync",
+  "uid": "opengeni-google-drive-sync",
+  "version": 1
+}

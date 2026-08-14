@@ -4,6 +4,7 @@ import {
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   Entitlements,
   EntitlementsMode,
+  KnowledgeSourceSyncLimits,
   LatencyMode,
   MAX_NESTED_AGENT_DEPTH,
   ProductAccessMode,
@@ -366,6 +367,37 @@ const SettingsSchema = z.object({
   slackSigningSecret: z.string().optional(),
   googleDriveClientId: z.string().optional(),
   googleDriveClientSecret: z.string().optional(),
+  googleDriveSyncMaxItems: z.coerce.number().int().positive().max(10_000).default(500),
+  googleDriveSyncMaxBytes: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(5_000_000_000)
+    .default(500_000_000),
+  googleDriveSyncMaxFileBytes: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(5_000_000_000)
+    .default(100_000_000),
+  googleDriveSyncMaxProviderRequests: z.coerce.number().int().positive().max(10_000).default(1_000),
+  googleDriveSyncMaxElapsedSeconds: z.coerce.number().int().positive().max(3_600).default(300),
+  googleDriveSyncMaxFailureDetails: z.coerce.number().int().positive().max(100).default(25),
+  googleDriveProviderRequestTimeoutMs: z.coerce
+    .number()
+    .int()
+    .min(1_000)
+    .max(120_000)
+    .default(30_000),
+  googleDriveProviderRetryAttempts: z.coerce.number().int().min(1).max(5).default(3),
+  googleDriveProviderRetryInitialDelayMs: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(30_000)
+    .default(250),
+  googleDriveProviderRetryMaxDelayMs: z.coerce.number().int().positive().max(60_000).default(5_000),
+  googleDriveProviderRetryBudgetMs: z.coerce.number().int().positive().max(120_000).default(15_000),
   fikenClientId: z.string().optional(),
   fikenClientSecret: z.string().optional(),
   googleDriveWorkspaceEventsEnabled: EnvBoolean.optional(),
@@ -1095,6 +1127,42 @@ const SettingsSchema = z.object({
 
 export type Settings = z.infer<typeof SettingsSchema>;
 export type McpServerConfig = Settings["mcpServers"][number];
+
+export type GoogleDriveProviderRetryOptions = {
+  requestTimeoutMs: number;
+  attempts: number;
+  initialDelayMs: number;
+  maxDelayMs: number;
+  budgetMs: number;
+};
+
+/** Freeze one validated provider-neutral budget into every newly created or
+ * updated Google Drive knowledge-source schedule. Existing schedules retain
+ * their persisted limits until an authorized source save updates them. */
+export function configuredGoogleDriveSyncLimits(settings: Settings) {
+  return KnowledgeSourceSyncLimits.parse({
+    maxItems: settings.googleDriveSyncMaxItems,
+    maxBytes: settings.googleDriveSyncMaxBytes,
+    maxFileBytes: settings.googleDriveSyncMaxFileBytes,
+    maxProviderRequests: settings.googleDriveSyncMaxProviderRequests,
+    maxElapsedSeconds: settings.googleDriveSyncMaxElapsedSeconds,
+    maxFailureDetails: settings.googleDriveSyncMaxFailureDetails,
+  });
+}
+
+/** Bounded in-activity retry policy for individual Google Drive requests. The
+ * durable sync workflow remains authoritative after this local budget ends. */
+export function googleDriveProviderRetryOptions(
+  settings: Settings,
+): GoogleDriveProviderRetryOptions {
+  return {
+    requestTimeoutMs: settings.googleDriveProviderRequestTimeoutMs,
+    attempts: settings.googleDriveProviderRetryAttempts,
+    initialDelayMs: settings.googleDriveProviderRetryInitialDelayMs,
+    maxDelayMs: settings.googleDriveProviderRetryMaxDelayMs,
+    budgetMs: settings.googleDriveProviderRetryBudgetMs,
+  };
+}
 
 /** Declarative voice-input transcription provider ids. */
 export type VoiceInputProviderId =
@@ -1980,6 +2048,25 @@ export function getSettings(): Settings {
     slackSigningSecret: optional("OPENGENI_SLACK_SIGNING_SECRET"),
     googleDriveClientId: optional("OPENGENI_GOOGLE_DRIVE_CLIENT_ID"),
     googleDriveClientSecret: optional("OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET"),
+    googleDriveSyncMaxItems: optional("OPENGENI_GOOGLE_DRIVE_SYNC_MAX_ITEMS"),
+    googleDriveSyncMaxBytes: optional("OPENGENI_GOOGLE_DRIVE_SYNC_MAX_BYTES"),
+    googleDriveSyncMaxFileBytes: optional("OPENGENI_GOOGLE_DRIVE_SYNC_MAX_FILE_BYTES"),
+    googleDriveSyncMaxProviderRequests: optional(
+      "OPENGENI_GOOGLE_DRIVE_SYNC_MAX_PROVIDER_REQUESTS",
+    ),
+    googleDriveSyncMaxElapsedSeconds: optional("OPENGENI_GOOGLE_DRIVE_SYNC_MAX_ELAPSED_SECONDS"),
+    googleDriveSyncMaxFailureDetails: optional("OPENGENI_GOOGLE_DRIVE_SYNC_MAX_FAILURE_DETAILS"),
+    googleDriveProviderRequestTimeoutMs: optional(
+      "OPENGENI_GOOGLE_DRIVE_PROVIDER_REQUEST_TIMEOUT_MS",
+    ),
+    googleDriveProviderRetryAttempts: optional("OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_ATTEMPTS"),
+    googleDriveProviderRetryInitialDelayMs: optional(
+      "OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_INITIAL_DELAY_MS",
+    ),
+    googleDriveProviderRetryMaxDelayMs: optional(
+      "OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_MAX_DELAY_MS",
+    ),
+    googleDriveProviderRetryBudgetMs: optional("OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_BUDGET_MS"),
     fikenClientId: optional("OPENGENI_FIKEN_OAUTH_CLIENT_ID"),
     fikenClientSecret: optional("OPENGENI_FIKEN_OAUTH_CLIENT_SECRET"),
     googleDriveWorkspaceEventsEnabled: optional("OPENGENI_GOOGLE_DRIVE_WORKSPACE_EVENTS_ENABLED"),
@@ -4873,6 +4960,11 @@ function validateSettings(settings: Settings): void {
     }
   }
   if (settings.googleDriveClientId) {
+    if (!settings.integrationsEnabled) {
+      throw new Error(
+        "OPENGENI_INTEGRATIONS_ENABLED=true is required when the Google Drive integration is configured",
+      );
+    }
     if (!settings.publicBaseUrl) {
       throw new Error(
         "OPENGENI_PUBLIC_BASE_URL is required when the Google Drive integration is configured",
@@ -4891,6 +4983,23 @@ function validateSettings(settings: Settings): void {
         "OPENGENI_INTEGRATIONS_STATE_SECRET is required when the Google Drive integration is configured",
       );
     }
+  }
+  if (settings.googleDriveSyncMaxFileBytes > settings.googleDriveSyncMaxBytes) {
+    throw new Error(
+      "OPENGENI_GOOGLE_DRIVE_SYNC_MAX_FILE_BYTES must not exceed OPENGENI_GOOGLE_DRIVE_SYNC_MAX_BYTES",
+    );
+  }
+  if (
+    settings.googleDriveProviderRetryInitialDelayMs > settings.googleDriveProviderRetryMaxDelayMs
+  ) {
+    throw new Error(
+      "OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_INITIAL_DELAY_MS must not exceed OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_MAX_DELAY_MS",
+    );
+  }
+  if (settings.googleDriveProviderRetryInitialDelayMs > settings.googleDriveProviderRetryBudgetMs) {
+    throw new Error(
+      "OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_INITIAL_DELAY_MS must not exceed OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_BUDGET_MS",
+    );
   }
   if (Boolean(settings.atlassianClientId) !== Boolean(settings.atlassianClientSecret)) {
     throw new Error(

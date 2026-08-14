@@ -151,6 +151,23 @@ describe("provider-neutral progressive tool disclosure", () => {
 });
 
 describe("Google Drive integration settings", () => {
+  test("provides bounded sync and provider retry defaults", () => {
+    const settings = withEnv({}, () => getSettings());
+    expect(settings).toMatchObject({
+      googleDriveSyncMaxItems: 500,
+      googleDriveSyncMaxBytes: 500_000_000,
+      googleDriveSyncMaxFileBytes: 100_000_000,
+      googleDriveSyncMaxProviderRequests: 1_000,
+      googleDriveSyncMaxElapsedSeconds: 300,
+      googleDriveSyncMaxFailureDetails: 25,
+      googleDriveProviderRequestTimeoutMs: 30_000,
+      googleDriveProviderRetryAttempts: 3,
+      googleDriveProviderRetryInitialDelayMs: 250,
+      googleDriveProviderRetryMaxDelayMs: 5_000,
+      googleDriveProviderRetryBudgetMs: 15_000,
+    });
+  });
+
   test("keeps Workspace Events wake hints default-off", () => {
     expect(withEnv({}, () => getSettings()).googleDriveWorkspaceEventsEnabled).toBeUndefined();
     expect(
@@ -193,6 +210,83 @@ describe("Google Drive integration settings", () => {
     ).toThrow(
       "OPENGENI_GOOGLE_DRIVE_CLIENT_ID and OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET must be configured together",
     );
+  });
+
+  test("requires integrations to be enabled for a configured Google OAuth client", () => {
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_ENVIRONMENT: "local",
+          OPENGENI_PUBLIC_BASE_URL: "http://127.0.0.1:8000",
+          OPENGENI_INTEGRATIONS_STATE_SECRET: "state-secret",
+          OPENGENI_GOOGLE_DRIVE_CLIENT_ID: "client.apps.googleusercontent.com",
+          OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET: "client-secret",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow(/OPENGENI_INTEGRATIONS_ENABLED=true/);
+  });
+
+  test("loads custom sync and provider retry budgets", () => {
+    const settings = withEnv(
+      {
+        OPENGENI_GOOGLE_DRIVE_SYNC_MAX_ITEMS: "321",
+        OPENGENI_GOOGLE_DRIVE_SYNC_MAX_BYTES: "654000000",
+        OPENGENI_GOOGLE_DRIVE_SYNC_MAX_FILE_BYTES: "54000000",
+        OPENGENI_GOOGLE_DRIVE_SYNC_MAX_PROVIDER_REQUESTS: "876",
+        OPENGENI_GOOGLE_DRIVE_SYNC_MAX_ELAPSED_SECONDS: "240",
+        OPENGENI_GOOGLE_DRIVE_SYNC_MAX_FAILURE_DETAILS: "17",
+        OPENGENI_GOOGLE_DRIVE_PROVIDER_REQUEST_TIMEOUT_MS: "12000",
+        OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_ATTEMPTS: "4",
+        OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_INITIAL_DELAY_MS: "400",
+        OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_MAX_DELAY_MS: "4000",
+        OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_BUDGET_MS: "9000",
+      },
+      () => getSettings(),
+    );
+    expect(settings).toMatchObject({
+      googleDriveSyncMaxItems: 321,
+      googleDriveSyncMaxBytes: 654_000_000,
+      googleDriveSyncMaxFileBytes: 54_000_000,
+      googleDriveSyncMaxProviderRequests: 876,
+      googleDriveSyncMaxElapsedSeconds: 240,
+      googleDriveSyncMaxFailureDetails: 17,
+      googleDriveProviderRequestTimeoutMs: 12_000,
+      googleDriveProviderRetryAttempts: 4,
+      googleDriveProviderRetryInitialDelayMs: 400,
+      googleDriveProviderRetryMaxDelayMs: 4_000,
+      googleDriveProviderRetryBudgetMs: 9_000,
+    });
+  });
+
+  test("rejects contradictory Drive sync and retry budgets", () => {
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_GOOGLE_DRIVE_SYNC_MAX_BYTES: "1000",
+          OPENGENI_GOOGLE_DRIVE_SYNC_MAX_FILE_BYTES: "1001",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow(/SYNC_MAX_FILE_BYTES must not exceed/);
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_INITIAL_DELAY_MS: "5001",
+          OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_MAX_DELAY_MS: "5000",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow(/RETRY_INITIAL_DELAY_MS must not exceed.*RETRY_MAX_DELAY_MS/);
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_INITIAL_DELAY_MS: "1000",
+          OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_BUDGET_MS: "999",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow(/RETRY_INITIAL_DELAY_MS must not exceed.*RETRY_BUDGET_MS/);
   });
 });
 

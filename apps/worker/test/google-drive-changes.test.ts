@@ -9,6 +9,7 @@ import {
   GOOGLE_DRIVE_FOLDER_MIME_TYPE,
   type GoogleDriveInventoryProviderItem,
 } from "@opengeni/documents/google-drive";
+import { createObservability } from "@opengeni/observability";
 import {
   advanceGoogleDriveChangesCursor,
   buildGoogleDriveChangesCursor,
@@ -135,6 +136,17 @@ const metadata = GoogleDriveConnectionMetadata.parse({
   accessMode: "readonly",
 });
 
+const observability = createObservability(
+  {
+    serviceName: "opengeni-test",
+    environment: "test",
+    observabilityStructuredLogs: false,
+    observabilityMetricsEnabled: false,
+    observabilityOtlpHeaders: "",
+  },
+  { component: "worker-control" },
+);
+
 function driverFor(
   selectedSource: GoogleDriveSelectedSource,
   provider: GoogleDriveSyncProviderPort,
@@ -156,6 +168,14 @@ function driverFor(
     workspaceId: "00000000-0000-4000-8000-000000000126",
     initiatingSubjectId: "user:drive-test",
     authorization: undefined,
+    retry: {
+      requestTimeoutMs: 1_000,
+      attempts: 1,
+      initialDelayMs: 1,
+      maxDelayMs: 1,
+      budgetMs: 1,
+    },
+    observability,
     fullReconciliationIntervalMs: 86_400_000,
     observedExternalObjectIds,
     provider,
