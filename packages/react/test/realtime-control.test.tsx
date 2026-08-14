@@ -6,6 +6,7 @@ import type { EffectiveSessionControl, OpenGeniClient, SessionEvent } from "@ope
 import type { SessionRealtimeControllerSnapshot } from "@opengeni/sdk/realtime";
 
 import {
+  NewSessionRealtimeControl,
   RealtimeVoiceControl,
   RealtimeModelPickerMenu,
   SessionRealtimeControl,
@@ -90,6 +91,42 @@ describe("ordinary session Codex realtime control", () => {
       new URL("../src/realtime/realtime-control.tsx", import.meta.url),
     ).text();
     expect(source).not.toContain("import.meta.env");
+  });
+
+  test("skips the internal catalog when the parent owns new-session selection", async () => {
+    let catalogRequests = 0;
+    const client = {
+      getWorkspaceRealtimeModelCatalog: async () => {
+        catalogRequests += 1;
+        return { models: [] };
+      },
+    } as unknown as OpenGeniClient;
+    const selectedModel: RealtimeModelOption = {
+      id: "gpt-live-1-boulder-alpha",
+      label: "Codex Live",
+      provider: "Connected Codex",
+      description: "Deep session integration",
+      available: true,
+      unavailableReason: null,
+      recommended: true,
+    };
+
+    await act(async () =>
+      root.render(
+        <NewSessionRealtimeControl
+          client={client}
+          workspaceId="11111111-1111-4111-8111-111111111111"
+          codexConnected={true}
+          models={[selectedModel]}
+          selectedModel={selectedModel}
+          onSelectModel={() => undefined}
+          onStart={async () => true}
+        />,
+      ),
+    );
+    await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+
+    expect(catalogRequests).toBe(0);
   });
 
   test("admits non-cancelled work states when control and Codex are ready", () => {
