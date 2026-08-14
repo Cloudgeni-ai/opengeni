@@ -778,9 +778,6 @@ export class OpenSandboxSession {
       }
       const provider = await this.ensureStarted();
       const status = await provider.commands.getCommandStatus(executionId);
-      if (status.content) {
-        process.events.push({ stream: "stdout", text: status.content });
-      }
       if (status.error) {
         process.events.push({ stream: "stderr", text: `${status.error}\n` });
       }

@@ -489,13 +489,13 @@ describe("OpenSandbox adapter", () => {
     expect(typeof session.writeStdinForProcessControl).toBe("function");
   });
 
-  test("post-dispatch transport loss preserves the exact command for status polling", async () => {
+  test("post-dispatch transport loss polls status without exposing provider command content", async () => {
     const fake = new FakeOpenSandbox();
     fake.commandFailureAfterInit = new Error("synthetic transport loss");
     fake.commandStatus = {
       running: true,
       exitCode: 0,
-      content: "still running",
+      content: "long-task",
     };
     const session = await createClient(fake).create();
 
@@ -509,12 +509,18 @@ describe("OpenSandbox adapter", () => {
     expect(fake.calls.filter((call) => call === "command:run")).toHaveLength(1);
 
     const running = await session.writeStdin({ sessionId, yieldTimeMs: 1 });
-    expect(running).toContain("still running");
+    expect(running).not.toContain("long-task");
     expect(running).toContain(`Process running with session ID ${sessionId}`);
 
-    fake.commandStatus = { running: false, exitCode: 17, content: "done" };
+    fake.commandStatus = {
+      running: false,
+      exitCode: 17,
+      content: "long-task",
+      error: "provider command failed",
+    };
     const settled = await session.writeStdin({ sessionId, yieldTimeMs: 1 });
-    expect(settled).toContain("done");
+    expect(settled).not.toContain("long-task");
+    expect(settled).toContain("provider command failed");
     expect(settled).toContain("Process exited with code 17");
     expect(session.hasRetainedProcess(sessionId)).toBe(false);
     expect(fake.calls.filter((call) => call === "command:run")).toHaveLength(1);
