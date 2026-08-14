@@ -167,9 +167,9 @@ charter/policy authority. A `knowledge_memories.kind = preference` row is legacy
 knowledge observation, not a preference-registry record or instruction-policy
 activation.
 
-At the ordinary model-request boundary, the worker emits content-free,
-exact-attempt contribution telemetry for mandatory rules, guide/Skill
-descriptors, company profile, and the legacy standing block when present. The
+At ordinary and provider-backed compaction model-request boundaries, the worker
+emits content-free, exact-attempt contribution telemetry for mandatory rules,
+guide/Skill descriptors, company profile, and the legacy standing block when present. The
 structured log carries the exact attempt plus the already-durable policy,
 preference, and company-profile snapshot ids, root/child role, inclusion reason,
 authority class, UTF-8 bytes, and an estimated token count. Prometheus receives

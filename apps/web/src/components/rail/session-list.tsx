@@ -16,6 +16,7 @@ import {
   HashIcon,
   InboxIcon,
   LocateFixedIcon,
+  ListFilterIcon,
   MessagesSquareIcon,
   PencilIcon,
   PinIcon,
@@ -47,7 +48,12 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ChannelCreateDialog } from "@/components/rail/channel-create-dialog";
@@ -87,12 +93,18 @@ import {
 import {
   buildPinnedRailSections,
   channelRailSections,
+  filterSessionsForBrowse,
+  groupSessionsForBrowse,
   groupSessionsForRail,
   mergeSessionForRail,
   relativeTimeLabel,
+  sessionCreatorLabelMap,
   visibleForestRows,
   visibleTreeRows,
   type SessionTreeNode,
+  type SessionBrowseDateField,
+  type SessionBrowseDateRange,
+  type SessionBrowseGroupBy,
 } from "@/lib/sessions-group";
 import { creatorHue, creatorInitials } from "@/lib/creator-initials";
 import { sessionDescendantCountAria, sessionDescendantCountText } from "@/lib/session-tree-count";
@@ -161,11 +173,23 @@ export function SessionList() {
   // refresh; the previous index relied on a one-shot load.
   const [searchDraft, setSearchDraft] = useState("");
   const [search, setSearch] = useState("");
+  const [browseGroupBy, setBrowseGroupBy] = useState<SessionBrowseGroupBy>("activity");
+  const [browseDateField, setBrowseDateField] = useState<SessionBrowseDateField>("activity");
+  const [browseDateRange, setBrowseDateRange] = useState<SessionBrowseDateRange>("any");
+  const [browseCreator, setBrowseCreator] = useState<string | null>(null);
   useEffect(() => {
     const timer = window.setTimeout(() => setSearch(searchDraft.trim()), 200);
     return () => window.clearTimeout(timer);
   }, [searchDraft]);
-  const hierarchyMode = search.length === 0;
+  const browseControlsActive =
+    browseGroupBy !== "activity" || browseDateRange !== "any" || browseCreator !== null;
+  const hierarchyMode = search.length === 0 && !browseControlsActive;
+  const clearBrowseControls = useCallback(() => {
+    setBrowseGroupBy("activity");
+    setBrowseDateField("activity");
+    setBrowseDateRange("any");
+    setBrowseCreator(null);
+  }, []);
   const rootPage = useWorkspaceSessions({
     limit: 50,
     search,
@@ -209,10 +233,14 @@ export function SessionList() {
   // Ordinary rows page independently of the complete pinned section. The
   // polled hook owns page one; additional pages are appended and deduplicated.
   // A filter change starts a fresh cursor chain rather than mixing snapshots.
-  // The continuation generation is keyed only to workspace/search. Polling
-  // page one rotates the server's short-lived snapshot, but must not discard
-  // older pages the user already loaded from the prior snapshot.
-  const paginationKey = sessionPageKey(rail.workspaceId, search);
+  // The continuation generation is keyed to workspace/search and whether the
+  // projection is a root hierarchy or flat browse. Polling page one rotates
+  // the server's short-lived snapshot, but must not discard older pages the
+  // user already loaded from the prior snapshot.
+  const paginationKey = sessionPageKey(
+    rail.workspaceId,
+    `${search}\n${hierarchyMode ? "tree" : "browse"}`,
+  );
   const paginationIdentity = useRef({ key: paginationKey, generation: 0 });
   paginationIdentity.current = advanceSessionPageIdentity(
     paginationIdentity.current,
@@ -305,6 +333,19 @@ export function SessionList() {
     }
     return [...source.values()];
   }, [pinOverrides, serverSessions]);
+  const creatorLabels = useMemo(() => sessionCreatorLabelMap(allSessions), [allSessions]);
+  const creatorOptions = useMemo(() => {
+    return [...creatorLabels].map(([value, label]) => ({ value, label }));
+  }, [creatorLabels]);
+  const browseSessions = useMemo(
+    () =>
+      filterSessionsForBrowse(allSessions, {
+        creator: browseCreator,
+        dateField: browseDateField,
+        dateRange: browseDateRange,
+      }),
+    [allSessions, browseCreator, browseDateField, browseDateRange],
+  );
 
   // A complete pins-only page makes presence authoritative, but absence does
   // not carry the version of a remotely unpinned relation. Loaded child pages
@@ -473,12 +514,22 @@ export function SessionList() {
     () =>
       buildPinnedRailSections(
         hierarchyMode
-          ? allSessions
-          : allSessions.map((session) => ({ ...session, parentSessionId: null })),
+          ? browseSessions
+          : browseSessions.map((session) => ({ ...session, parentSessionId: null })),
       ),
-    [allSessions, hierarchyMode],
+    [browseSessions, hierarchyMode],
   );
-  const forest = railSections.ordinary;
+  const forest = useMemo(
+    () =>
+      browseGroupBy === "activity"
+        ? railSections.ordinary
+        : groupSessionsForBrowse(
+            browseSessions.filter((session) => !session.pinned),
+            browseGroupBy,
+            { creatorLabels },
+          ),
+    [browseGroupBy, browseSessions, creatorLabels, railSections.ordinary],
+  );
   const pinnedNodes = railSections.pinned;
   const channelMode = hierarchyMode && channels.length > 0;
   const channelSections = useMemo(
@@ -991,16 +1042,16 @@ export function SessionList() {
   }, [flat, focusIndex]);
 
   useEffect(() => {
-    if (loading || !search) return;
-    const count = allSessions.length;
+    if (loading || (!search && !browseControlsActive)) return;
+    const count = browseSessions.length;
     setAnnouncement(`${count} matching session${count === 1 ? "" : "s"}.`);
-  }, [allSessions.length, loading, search]);
+  }, [browseControlsActive, browseSessions.length, loading, search]);
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <div className="flex min-w-0 items-center justify-between gap-2 px-3 pb-1 pt-1">
         <span className="text-2xs font-semibold uppercase tracking-wider text-fg-muted">
-          {hierarchyMode ? "Workstreams" : "Search results"}
+          {hierarchyMode ? "Workstreams" : search ? "Search results" : "Browse sessions"}
         </span>
         <Tooltip>
           <TooltipTrigger asChild>
@@ -1021,33 +1072,142 @@ export function SessionList() {
         </Tooltip>
       </div>
 
-      <label className="relative mx-2 mb-1 block shrink-0">
-        <span className="sr-only">Search sessions</span>
-        <SearchIcon
-          aria-hidden="true"
-          className="pointer-events-none absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-fg-subtle"
-        />
-        <input
-          type="search"
-          value={searchDraft}
-          onChange={(event) => setSearchDraft(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Escape" && searchDraft) {
-              event.preventDefault();
-              setSearchDraft("");
-            }
-          }}
-          maxLength={200}
-          placeholder="Search"
-          aria-label="Search sessions"
-          className="h-7 w-full min-w-0 rounded-md border border-border bg-bg/45 pl-7 pr-2 text-xs text-fg outline-none placeholder:text-fg-subtle hover:border-border-strong focus-visible:border-ring focus-visible:ring-1 focus-visible:ring-ring/40 pointer-coarse:h-11 pointer-coarse:text-base"
-        />
-      </label>
+      <div className="mx-2 mb-1 flex shrink-0 items-center gap-1">
+        <label className="relative min-w-0 flex-1">
+          <span className="sr-only">Search sessions</span>
+          <SearchIcon
+            aria-hidden="true"
+            className="pointer-events-none absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-fg-subtle"
+          />
+          <input
+            type="search"
+            value={searchDraft}
+            onChange={(event) => setSearchDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape" && searchDraft) {
+                event.preventDefault();
+                setSearchDraft("");
+              }
+            }}
+            maxLength={200}
+            placeholder="Search"
+            aria-label="Search sessions"
+            className="h-7 w-full min-w-0 rounded-md border border-border bg-bg/45 pl-7 pr-2 text-xs text-fg outline-none placeholder:text-fg-subtle hover:border-border-strong focus-visible:border-ring focus-visible:ring-1 focus-visible:ring-ring/40 pointer-coarse:h-11 pointer-coarse:text-base"
+          />
+        </label>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              aria-label={browseControlsActive ? "Session filters, active" : "Session filters"}
+              className={cn(
+                "relative shrink-0 text-fg-muted hover:text-fg pointer-coarse:size-11",
+                browseControlsActive && "bg-surface-2 text-fg",
+              )}
+            >
+              <ListFilterIcon className="size-3.5" />
+              {browseControlsActive ? (
+                <span className="absolute right-0.5 top-0.5 size-1.5 rounded-full bg-brand" />
+              ) : null}
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-56">
+            <DropdownMenuLabel>Group sessions</DropdownMenuLabel>
+            <DropdownMenuRadioGroup
+              value={browseGroupBy}
+              onValueChange={(value) => setBrowseGroupBy(value as SessionBrowseGroupBy)}
+            >
+              <DropdownMenuRadioItem value="activity">Last activity</DropdownMenuRadioItem>
+              <DropdownMenuRadioItem value="created">Created date</DropdownMenuRadioItem>
+              <DropdownMenuRadioItem value="creator">Creator</DropdownMenuRadioItem>
+            </DropdownMenuRadioGroup>
+            <DropdownMenuSeparator />
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger>
+                Date field
+                <span className="ml-auto mr-1 text-2xs text-fg-subtle">
+                  {browseDateField === "activity" ? "Activity" : "Created"}
+                </span>
+              </DropdownMenuSubTrigger>
+              <DropdownMenuSubContent className="w-44">
+                <DropdownMenuRadioGroup
+                  value={browseDateField}
+                  onValueChange={(value) => setBrowseDateField(value as SessionBrowseDateField)}
+                >
+                  <DropdownMenuRadioItem value="activity">Last activity</DropdownMenuRadioItem>
+                  <DropdownMenuRadioItem value="created">Created date</DropdownMenuRadioItem>
+                </DropdownMenuRadioGroup>
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger>
+                Date range
+                <span className="ml-auto mr-1 text-2xs text-fg-subtle">
+                  {browseDateRange === "any"
+                    ? "Any"
+                    : browseDateRange === "today"
+                      ? "Today"
+                      : browseDateRange === "week"
+                        ? "7d"
+                        : "30d"}
+                </span>
+              </DropdownMenuSubTrigger>
+              <DropdownMenuSubContent className="w-40">
+                <DropdownMenuRadioGroup
+                  value={browseDateRange}
+                  onValueChange={(value) => setBrowseDateRange(value as SessionBrowseDateRange)}
+                >
+                  <DropdownMenuRadioItem value="any">Any time</DropdownMenuRadioItem>
+                  <DropdownMenuRadioItem value="today">Today</DropdownMenuRadioItem>
+                  <DropdownMenuRadioItem value="week">Last 7 days</DropdownMenuRadioItem>
+                  <DropdownMenuRadioItem value="month">Last 30 days</DropdownMenuRadioItem>
+                </DropdownMenuRadioGroup>
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger>
+                Creator
+                <span className="ml-auto mr-1 max-w-20 truncate text-2xs text-fg-subtle">
+                  {browseCreator
+                    ? (creatorOptions.find((option) => option.value === browseCreator)?.label ??
+                      "Selected")
+                    : "Anyone"}
+                </span>
+              </DropdownMenuSubTrigger>
+              <DropdownMenuSubContent className="max-h-(--radix-dropdown-menu-content-available-height) w-52 overflow-x-hidden overflow-y-auto">
+                <DropdownMenuRadioGroup
+                  value={browseCreator ?? "all"}
+                  onValueChange={(value) => setBrowseCreator(value === "all" ? null : value)}
+                >
+                  <DropdownMenuRadioItem value="all">Anyone</DropdownMenuRadioItem>
+                  {creatorOptions.map((option) => (
+                    <DropdownMenuRadioItem key={option.value} value={option.value}>
+                      <span className="truncate">{option.label}</span>
+                    </DropdownMenuRadioItem>
+                  ))}
+                </DropdownMenuRadioGroup>
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
+            {browseControlsActive ? (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onSelect={clearBrowseControls}>Reset view</DropdownMenuItem>
+              </>
+            ) : null}
+            <DropdownMenuSeparator />
+            <p className="px-2 py-1 text-2xs leading-4 text-fg-subtle">
+              Filters cover loaded sessions. Load older sessions to extend the result set.
+            </p>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
 
       <div
         ref={listRef}
         role="region"
-        aria-label={hierarchyMode ? "Workstreams" : "Session search results"}
+        aria-label={hierarchyMode ? "Workstreams" : search ? "Session search results" : "Sessions"}
         data-sessionpin-session-list
         onKeyDown={onKeyDown}
         onPointerDown={() => {
@@ -1084,15 +1244,28 @@ export function SessionList() {
               Retry
             </button>
           </div>
-        ) : flat.length === 0 && search ? (
+        ) : flat.length === 0 && (search || browseControlsActive) ? (
           <div className="px-2 py-4 text-center text-xs text-fg-subtle">
-            <p>No matching sessions.</p>
+            <p>No sessions match this view.</p>
+            {continuationCursor ? (
+              <button
+                type="button"
+                disabled={loadingMore}
+                onClick={() => void loadMore()}
+                className="mt-2 min-h-8 rounded px-2 font-medium text-fg-muted hover:bg-surface-2 hover:text-fg disabled:opacity-60 pointer-coarse:min-h-11"
+              >
+                {loadingMore ? "Loading…" : "Load older sessions"}
+              </button>
+            ) : null}
             <button
               type="button"
               className="mt-2 min-h-8 rounded px-2 underline hover:text-fg pointer-coarse:min-h-11"
-              onClick={() => setSearchDraft("")}
+              onClick={() => {
+                setSearchDraft("");
+                clearBrowseControls();
+              }}
             >
-              Clear search
+              Clear search and filters
             </button>
           </div>
         ) : flat.length === 0 ? (

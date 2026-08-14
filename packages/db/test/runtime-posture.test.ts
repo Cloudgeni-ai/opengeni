@@ -185,6 +185,16 @@ function safePosture(): RuntimeDatabasePosture {
       ...canonicalHumanIdentityAuthorityTables(),
       ...xaiAuthorityTables(),
     ],
+    privateTables: [
+      {
+        name: "personal_resource_delegation_capabilities",
+        owner: "opengeni_migrator",
+        select: false,
+        insert: false,
+        update: false,
+        delete: false,
+      },
+    ],
     targetRoutines: RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.map((name) => ({
       name,
       owner: "opengeni_migrator",
@@ -199,7 +209,15 @@ function safePosture(): RuntimeDatabasePosture {
         name: "workspace_rls_visible(uuid, uuid)",
         owner: "opengeni_migrator",
         execute: true,
+        publicExecute: false,
         securityDefiner: false,
+      },
+      {
+        name: "personal_resource_delegation_capability_active(text)",
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
       },
     ],
   };
@@ -219,6 +237,15 @@ describe("runtime database posture evaluator", () => {
         )
         .map(([table]) => table)
         .sort();
+      const personalResourceProtectedTableCount = [
+        "personal_resource_once_consumption_receipts",
+        "session_attempt_personal_resource_admissions",
+        "session_attempt_personal_resource_snapshots",
+      ].filter(
+        (table) =>
+          new Set<string>(FORCE_RLS_TABLES).has(table) &&
+          new Set<string>(PROTECTED_NO_DIRECT_DML_TABLES).has(table),
+      ).length;
       const contracts = hasCurrentMainActivityLedger
         ? ([
             [FORCE_RLS_TABLES, 239],
@@ -243,7 +270,11 @@ describe("runtime database posture evaluator", () => {
             [RUNTIME_DML_TABLES, 178],
           ] as const);
       for (const [tables, length] of contracts) {
-        expect(tables).toHaveLength(length);
+        const expectedLength =
+          tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
+            ? length + personalResourceProtectedTableCount
+            : length;
+        expect(tables).toHaveLength(expectedLength);
         expect(new Set(tables).size).toBe(tables.length);
         expect([...tables].sort()).toEqual([...tables]);
       }
@@ -251,9 +282,11 @@ describe("runtime database posture evaluator", () => {
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
       const tableCount = hasCurrentMainActivityLedger ? 250 : 194;
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
-        tableCount,
+        tableCount + personalResourceProtectedTableCount,
       );
-      expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(tableCount);
+      expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(
+        tableCount + personalResourceProtectedTableCount,
+      );
       expect(RUNTIME_TABLE_PRIVILEGES.memory_slack_publication_configurations).toEqual([
         "SELECT",
         "INSERT",
@@ -308,14 +341,14 @@ describe("runtime database posture evaluator", () => {
     }
 
     const contracts = [
-      [FORCE_RLS_TABLES, 207],
+      [FORCE_RLS_TABLES, 210],
       [NON_RLS_RUNTIME_TABLES, 11],
       [RUNTIME_FULL_DML_TABLES, 133],
       [RUNTIME_READ_ONLY_TABLES, 14],
       [RUNTIME_READ_UPDATE_TABLES, 1],
       [RUNTIME_READ_INSERT_TABLES, 41],
       [RUNTIME_READ_INSERT_UPDATE_TABLES, 18],
-      [PROTECTED_NO_DIRECT_DML_TABLES, 16],
+      [PROTECTED_NO_DIRECT_DML_TABLES, 19],
       [RUNTIME_DML_TABLES, 207],
     ] as const;
     for (const [tables, length] of contracts) {
@@ -325,8 +358,8 @@ describe("runtime database posture evaluator", () => {
     }
 
     expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-    expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(223);
-    expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(218);
+    expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(226);
+    expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(221);
     expect(RUNTIME_TABLE_PRIVILEGES.editable_artifact_session_links).toEqual([
       "SELECT",
       "INSERT",
@@ -358,12 +391,36 @@ describe("runtime database posture evaluator", () => {
     expect(evaluateRuntimeDatabasePosture(safePosture(), options)).toEqual([]);
   });
 
+  test("enforces the exact personal-resource private capability boundary", () => {
+    const posture = safePosture();
+    const capabilityTable = posture.privateTables[0]!;
+    const capabilityRoutine = posture.privateRoutines.find(
+      (routine) => routine.name === "personal_resource_delegation_capability_active(text)",
+    )!;
+    capabilityTable.select = true;
+    capabilityRoutine.owner = "another_owner";
+    capabilityRoutine.execute = false;
+    capabilityRoutine.publicExecute = true;
+    capabilityRoutine.securityDefiner = false;
+
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("does not match table owner"),
+        expect.stringContaining("is not SECURITY DEFINER"),
+        expect.stringContaining("runtime role lacks personal-resource capability predicate"),
+        expect.stringContaining("PUBLIC has forbidden personal-resource capability predicate"),
+        expect.stringContaining("forbidden direct privileges on private table"),
+      ]),
+    );
+  });
+
   test("accepts public-schema authority owned by the two protected tables", () => {
     const posture = safePosture();
     posture.schemas[0]!.owner = "pg_database_owner";
     for (const routine of posture.targetRoutines) {
       if (
         routine.name === "fork_session_content(uuid, uuid, uuid, text, uuid, text, text, text)" ||
+        routine.name === "resolve_session_attempt_personal_resources(uuid, uuid, uuid)" ||
         routine.name === "session_private_actor_visible(uuid, uuid, uuid, text)" ||
         routine.name === "session_reference_visible(uuid, uuid, uuid)" ||
         routine.name ===
@@ -665,8 +722,12 @@ describe("runtime database posture evaluator", () => {
     posture.tables.find(
       (table) => table.name === "editable_artifact_live_outbox",
     )!.artifactOutboxDispatcherPolicy = false;
-    posture.privateRoutines[1]!.securityDefiner = false;
-    posture.privateRoutines[2]!.owner = "another_owner";
+    posture.privateRoutines.find((routine) =>
+      routine.name.startsWith("claim_editable_artifact_live_outbox("),
+    )!.securityDefiner = false;
+    posture.privateRoutines.find((routine) =>
+      routine.name.startsWith("mark_editable_artifact_live_outbox_published("),
+    )!.owner = "another_owner";
     expect(evaluateRuntimeDatabasePosture(posture, artifactOptions)).toEqual(
       expect.arrayContaining([
         "table editable_artifact_live_outbox lacks its owner dispatcher RLS policy",
@@ -699,7 +760,9 @@ describe("runtime database posture evaluator", () => {
       },
     };
     expect(evaluateRuntimeDatabasePosture(posture, artifactOptions)).toEqual([]);
-    posture.privateRoutines[1]!.owner = "another_owner";
+    posture.privateRoutines.find((routine) =>
+      routine.name.startsWith("advance_editable_artifact_authorization_revision("),
+    )!.owner = "another_owner";
     expect(evaluateRuntimeDatabasePosture(posture, artifactOptions)).toEqual(
       expect.arrayContaining([expect.stringContaining("does not match table owner")]),
     );
@@ -748,8 +811,12 @@ describe("runtime database posture evaluator", () => {
     expect(evaluateRuntimeDatabasePosture(posture, artifactOptions)).toEqual([]);
 
     posture.tables[0]!.artifactMaterializerPolicy = false;
-    posture.privateRoutines[1]!.execute = true;
-    posture.privateRoutines[2]!.owner = "another_owner";
+    posture.privateRoutines.find((routine) =>
+      routine.name.startsWith("claim_editable_artifact_materializations("),
+    )!.execute = true;
+    posture.privateRoutines.find((routine) =>
+      routine.name.startsWith("renew_editable_artifact_materialization("),
+    )!.owner = "another_owner";
     expect(evaluateRuntimeDatabasePosture(posture, artifactOptions)).toEqual(
       expect.arrayContaining([
         "table editable_artifact_materialization_jobs lacks its owner materializer RLS policy",

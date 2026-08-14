@@ -72,6 +72,11 @@ const MANAGED_HUMAN_PERSONAL_WORKSPACE_AUTHORITY_TABLES = [
   "organization_user_resource_authorities",
   "organization_user_resource_grants",
 ] as const;
+const PERSONAL_RESOURCE_ATTEMPT_RESOLVER_ROUTINE =
+  "resolve_session_attempt_personal_resources(uuid, uuid, uuid)";
+const PERSONAL_RESOURCE_CAPABILITY_PREDICATE_ROUTINE =
+  "personal_resource_delegation_capability_active(text)";
+const PERSONAL_RESOURCE_CAPABILITY_TABLE = "personal_resource_delegation_capabilities";
 const CANONICAL_HUMAN_IDENTITY_ROUTINES = [
   "ensure_canonical_human_identity(text, text)",
   "validate_canonical_human_session(text, text, boolean)",
@@ -98,6 +103,7 @@ const FORK_SESSION_CONTENT_ROUTINE =
   "fork_session_content(uuid, uuid, uuid, text, uuid, text, text, text)";
 const SESSION_AUTHORITY_ROUTINES = new Set<string>([
   FORK_SESSION_CONTENT_ROUTINE,
+  PERSONAL_RESOURCE_ATTEMPT_RESOLVER_ROUTINE,
   SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE,
   SESSION_REFERENCE_VISIBLE_ROUTINE,
   TRANSITION_SESSION_VISIBILITY_ROUTINE,
@@ -130,6 +136,7 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   GOOGLE_DRIVE_FILE_AUTHORIZATION_ROUTINE,
   KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE,
   MANAGED_HUMAN_PERSONAL_WORKSPACE_ROUTINE,
+  PERSONAL_RESOURCE_ATTEMPT_RESOLVER_ROUTINE,
   ...CANONICAL_HUMAN_IDENTITY_ROUTINES,
   SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE,
   SESSION_REFERENCE_VISIBLE_ROUTINE,
@@ -289,6 +296,7 @@ export const FORCE_RLS_TABLES = [
   "organization_user_retention_policies",
   "pack_installation_components",
   "pack_installations",
+  "personal_resource_once_consumption_receipts",
   "preference_registry_events",
   "preference_registry_preferences",
   "preference_registry_revisions",
@@ -309,6 +317,8 @@ export const FORCE_RLS_TABLES = [
   "scheduled_tasks",
   "session_attempt_codemode_calls",
   "session_attempt_interruptions",
+  "session_attempt_personal_resource_admissions",
+  "session_attempt_personal_resource_snapshots",
   "session_attempt_tool_catalogs",
   "session_command_receipts",
   "session_events",
@@ -687,6 +697,9 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "organization_user_resource_authorities",
   "organization_user_resource_grants",
   "organization_user_retention_policies",
+  "personal_resource_once_consumption_receipts",
+  "session_attempt_personal_resource_admissions",
+  "session_attempt_personal_resource_snapshots",
   "session_visibility_write_capabilities",
   "task_note_events",
   "task_note_write_capabilities",
@@ -777,11 +790,21 @@ export type RuntimeRoutinePosture = {
   name: string;
   owner: string;
   execute: boolean;
+  publicExecute?: boolean;
   securityDefiner: boolean;
 };
 
 export type RuntimeTargetRoutinePosture = RuntimeRoutinePosture & {
   publicExecute: boolean;
+};
+
+export type RuntimePrivateTablePosture = {
+  name: string;
+  owner: string;
+  select: boolean;
+  insert: boolean;
+  update: boolean;
+  delete: boolean;
 };
 
 export type RuntimeDatabasePosture = {
@@ -792,6 +815,7 @@ export type RuntimeDatabasePosture = {
   ownedSchemas: string[];
   ownedRelations: string[];
   tables: RuntimeTablePosture[];
+  privateTables: RuntimePrivateTablePosture[];
   targetRoutines: RuntimeTargetRoutinePosture[];
   privateRoutines: RuntimeRoutinePosture[];
 };
@@ -903,6 +927,7 @@ export async function inspectRuntimeDatabasePosture(
           ownedSchemas: [],
           ownedRelations: [],
           tables: [],
+          privateTables: [],
           targetRoutines: [],
           privateRoutines: [],
         };
@@ -1023,6 +1048,37 @@ export async function inspectRuntimeDatabasePosture(
         trigger: row.can_trigger,
       }));
 
+      const privateTables = resultRows<{
+        name: string;
+        owner: string;
+        can_select: boolean;
+        can_insert: boolean;
+        can_update: boolean;
+        can_delete: boolean;
+      }>(
+        await tx.execute(sql`
+          select
+            c.relname::text as name,
+            pg_get_userbyid(c.relowner)::text as owner,
+            has_table_privilege(current_user, c.oid, 'SELECT') as can_select,
+            has_table_privilege(current_user, c.oid, 'INSERT') as can_insert,
+            has_table_privilege(current_user, c.oid, 'UPDATE') as can_update,
+            has_table_privilege(current_user, c.oid, 'DELETE') as can_delete
+          from pg_class c
+          join pg_namespace n on n.oid = c.relnamespace
+          where n.nspname = 'opengeni_private'
+            and c.relkind in ('r', 'p')
+            and c.relname = ${PERSONAL_RESOURCE_CAPABILITY_TABLE}
+        `),
+      ).map((row) => ({
+        name: row.name,
+        owner: row.owner,
+        select: row.can_select,
+        insert: row.can_insert,
+        update: row.can_update,
+        delete: row.can_delete,
+      }));
+
       const targetRoutines = resultRows<{
         name: string;
         owner: string;
@@ -1067,6 +1123,7 @@ export async function inspectRuntimeDatabasePosture(
         name: string;
         owner: string;
         can_execute: boolean;
+        public_execute: boolean;
         security_definer: boolean;
       }>(
         await tx.execute(sql`
@@ -1074,6 +1131,11 @@ export async function inspectRuntimeDatabasePosture(
             (p.proname || '(' || pg_catalog.oidvectortypes(p.proargtypes) || ')')::text as name,
             pg_get_userbyid(p.proowner)::text as owner,
             has_function_privilege(current_user, p.oid, 'EXECUTE') as can_execute,
+            exists (
+              select 1
+              from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
+              where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
+            ) as public_execute,
             p.prosecdef as security_definer
           from pg_proc p
           join pg_namespace n on n.oid = p.pronamespace
@@ -1085,6 +1147,7 @@ export async function inspectRuntimeDatabasePosture(
         name: row.name,
         owner: row.owner,
         execute: row.can_execute,
+        publicExecute: row.public_execute,
         securityDefiner: row.security_definer,
       }));
 
@@ -1095,6 +1158,7 @@ export async function inspectRuntimeDatabasePosture(
         ownedSchemas,
         ownedRelations,
         tables,
+        privateTables,
         targetRoutines,
         privateRoutines,
       };
@@ -1585,6 +1649,59 @@ export function evaluateRuntimeDatabasePosture(
       if (routine.execute) {
         violations.push(`runtime role has forbidden ticket schema resolver ${routine.name}`);
       }
+    }
+  }
+
+  const personalResourceCapabilityTables = posture.privateTables.filter(
+    (table) => table.name === PERSONAL_RESOURCE_CAPABILITY_TABLE,
+  );
+  const personalResourceCapabilityRoutines = posture.privateRoutines.filter(
+    (routine) => routine.name === PERSONAL_RESOURCE_CAPABILITY_PREDICATE_ROUTINE,
+  );
+  if (personalResourceCapabilityTables.length !== 1) {
+    violations.push(
+      `personal-resource capability table ${PERSONAL_RESOURCE_CAPABILITY_TABLE} is missing or ambiguous`,
+    );
+  }
+  if (personalResourceCapabilityRoutines.length !== 1) {
+    violations.push(
+      `personal-resource capability predicate ${PERSONAL_RESOURCE_CAPABILITY_PREDICATE_ROUTINE} is missing or ambiguous`,
+    );
+  }
+  if (
+    personalResourceCapabilityTables.length === 1 &&
+    personalResourceCapabilityRoutines.length === 1
+  ) {
+    const table = personalResourceCapabilityTables[0]!;
+    const routine = personalResourceCapabilityRoutines[0]!;
+    if (routine.owner !== table.owner) {
+      violations.push(
+        `personal-resource capability predicate ${routine.name} owner ${routine.owner} does not match table owner ${table.owner}`,
+      );
+    }
+    if (!routine.securityDefiner) {
+      violations.push(
+        `personal-resource capability predicate ${routine.name} is not SECURITY DEFINER`,
+      );
+    }
+    if (!routine.execute) {
+      violations.push(`runtime role lacks personal-resource capability predicate ${routine.name}`);
+    }
+    if (routine.publicExecute) {
+      violations.push(
+        `PUBLIC has forbidden personal-resource capability predicate ${routine.name}`,
+      );
+    }
+    const directPrivileges = [
+      ["SELECT", table.select],
+      ["INSERT", table.insert],
+      ["UPDATE", table.update],
+      ["DELETE", table.delete],
+    ].filter(([, granted]) => granted);
+    if (directPrivileges.length > 0) {
+      violations.push(
+        `runtime role has forbidden direct privileges on private table ${table.name}: ${directPrivileges.map(([privilege]) => privilege).join(", ")}`,
+      );
     }
   }
 

@@ -207,6 +207,17 @@ e2e(
           receipts.push(receipt.state);
         },
       });
+      const unconfirmedFill = await controller.run(
+        command(selected, {
+          type: "fill",
+          locator: { kind: "label", text: "Rejecting editor" },
+          value: "silently ignored",
+        }),
+      );
+      expect(unconfirmedFill.state).toBe("outcome_unknown");
+      expect(unconfirmedFill.error?.code).toBe("outcome_unknown");
+      expect(receipts).toEqual(["prepared", "dispatched", "outcome_unknown"]);
+      receipts.length = 0;
       const operation = command(selected, {
         type: "double_click",
         locator: { kind: "role", role: "button", name: "Increment 2" },
@@ -380,6 +391,7 @@ function fixture(title: string): string {
       <form onsubmit="event.preventDefault(); output.textContent='Submitted ' + message.value">
         <label>Message <input id="message" placeholder="Say something"></label>
       </form>
+      <label>Rejecting editor <input oninput="this.value=''" /></label>
       <label>Enable feature <input type="checkbox"></label>
       <label>Priority
         <select onchange="selection.textContent='Selected ' + this.value">

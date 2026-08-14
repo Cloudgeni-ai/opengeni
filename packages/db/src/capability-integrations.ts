@@ -15,6 +15,7 @@ import {
   withWorkspaceSubjectRls,
   type Database,
 } from "./database";
+import { connectionScopeKey } from "./connection-scopes";
 import {
   ensureIntegrationFacetDefinition,
   integrationBindingKey,
@@ -1180,8 +1181,11 @@ async function loadInstallConnection(
     throw new Error("API Integration connection provider does not match the destination");
   }
   assertConnectionKindMatchesAuth(input.authScheme, connection.kind);
+  const grantedScopes = new Set(
+    connection.grantedScopes.map((scope) => connectionScopeKey(connection.providerDomain, scope)),
+  );
   const missing = normalizedStrings(input.requiredScopes ?? [], 256).filter(
-    (scope) => !connection.grantedScopes.includes(scope),
+    (scope) => !grantedScopes.has(connectionScopeKey(connection.providerDomain, scope)),
   );
   if (missing.length > 0) {
     throw new Error("API Integration connection is missing required scopes");

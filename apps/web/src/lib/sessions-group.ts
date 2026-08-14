@@ -175,11 +175,188 @@ export function mergeSessionForRail(current: Session, incoming: Session): Sessio
 export type SessionForest = {
   running: SessionTreeNode[];
   grouped: {
-    group: SessionRecencyGroup;
+    group: string;
     label: string;
     sessions: SessionTreeNode[];
   }[];
 };
+
+export type SessionBrowseGroupBy = "activity" | "created" | "creator";
+export type SessionBrowseDateField = "activity" | "created";
+export type SessionBrowseDateRange = "any" | "today" | "week" | "month";
+
+export function sessionCreatorKey(session: Session): string {
+  return `${session.createdBy.kind}:${session.createdBy.subjectId}`;
+}
+
+export function sessionCreatorLabel(session: Session): string {
+  const explicit = session.createdBy.label?.trim();
+  if (explicit) return explicit;
+  if (session.createdBy.subjectId === "unattributed-legacy") return "Unattributed";
+  if (session.createdBy.kind === "service") {
+    return `Service · ${session.createdBy.subjectId}`;
+  }
+  return session.createdBy.subjectId;
+}
+
+export type SessionCreatorOption = {
+  value: string;
+  label: string;
+};
+
+/**
+ * Loaded creator choices with identity-specific labels only when frozen display
+ * labels collide. The subject ID remains opaque; it is displayed, not parsed.
+ */
+export function sessionCreatorLabelMap(sessions: Session[]): ReadonlyMap<string, string> {
+  const byKey = new Map<
+    string,
+    { label: string; kind: Session["createdBy"]["kind"]; subjectId: string }
+  >();
+  for (const session of sessions) {
+    byKey.set(sessionCreatorKey(session), {
+      label: sessionCreatorLabel(session),
+      kind: session.createdBy.kind,
+      subjectId: session.createdBy.subjectId,
+    });
+  }
+
+  const labelCounts = new Map<string, number>();
+  for (const creator of byKey.values()) {
+    labelCounts.set(creator.label, (labelCounts.get(creator.label) ?? 0) + 1);
+  }
+
+  return new Map(
+    [...byKey.entries()]
+      .map(([value, creator]) => ({
+        value,
+        label:
+          labelCounts.get(creator.label) === 1
+            ? creator.label
+            : `${creator.label} · ${creator.kind === "service" ? "Service" : "Subject"} · ${creator.subjectId}`,
+      }))
+      .sort(
+        (left, right) =>
+          left.label.localeCompare(right.label) || left.value.localeCompare(right.value),
+      )
+      .map((creator) => [creator.value, creator.label]),
+  );
+}
+
+export function sessionCreatorOptions(sessions: Session[]): SessionCreatorOption[] {
+  return [...sessionCreatorLabelMap(sessions)].map(([value, label]) => ({ value, label }));
+}
+
+function browseTimestamp(session: Session, field: SessionBrowseDateField): number {
+  if (field === "activity") return sessionActivityTime(session);
+  const created = Date.parse(session.createdAt);
+  return Number.isNaN(created) ? 0 : created;
+}
+
+export function filterSessionsForBrowse(
+  sessions: Session[],
+  options: {
+    creator: string | null;
+    dateField: SessionBrowseDateField;
+    dateRange: SessionBrowseDateRange;
+    now?: Date;
+  },
+): Session[] {
+  const now = options.now ?? new Date();
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const threshold =
+    options.dateRange === "today"
+      ? startOfToday
+      : options.dateRange === "week"
+        ? startOfToday - 6 * 24 * 60 * 60 * 1000
+        : options.dateRange === "month"
+          ? startOfToday - 29 * 24 * 60 * 60 * 1000
+          : null;
+  return sessions.filter(
+    (session) =>
+      (!options.creator || sessionCreatorKey(session) === options.creator) &&
+      (threshold === null || browseTimestamp(session, options.dateField) >= threshold),
+  );
+}
+
+/** Flat browse projection used only when the operator selects custom grouping. */
+export function groupSessionsForBrowse(
+  sessions: Session[],
+  groupBy: Exclude<SessionBrowseGroupBy, "activity">,
+  options: {
+    now?: Date;
+    creatorLabels?: ReadonlyMap<string, string>;
+  } = {},
+): SessionForest {
+  const now = options.now ?? new Date();
+  const running = sessions
+    .filter((session) => isRunningStatus(session.status))
+    .sort(compareSessionActivity)
+    .map((session) => ({ session, children: [], hasActiveDescendant: false }));
+  const rest = sessions.filter((session) => !isRunningStatus(session.status));
+  if (groupBy === "created") {
+    const buckets = new Map<SessionRecencyGroup, Session[]>();
+    for (const session of rest) {
+      const group = recencyGroupFor(browseTimestamp(session, "created"), now);
+      const list = buckets.get(group) ?? [];
+      list.push(session);
+      buckets.set(group, list);
+    }
+    return {
+      running,
+      grouped: SESSION_GROUP_ORDER.flatMap((group) => {
+        const list = buckets.get(group);
+        if (!list?.length) return [];
+        const label =
+          group === "today"
+            ? "Created today"
+            : group === "yesterday"
+              ? "Created yesterday"
+              : group === "previous7"
+                ? "Created in previous 7 days"
+                : "Created earlier";
+        return [
+          {
+            group: `created:${group}`,
+            label,
+            sessions: list
+              .sort(
+                (left, right) =>
+                  browseTimestamp(right, "created") - browseTimestamp(left, "created"),
+              )
+              .map((session) => ({ session, children: [], hasActiveDescendant: false })),
+          },
+        ];
+      }),
+    };
+  }
+
+  const creatorLabels = options.creatorLabels ?? sessionCreatorLabelMap(sessions);
+  const creators = new Map<string, { label: string; sessions: Session[] }>();
+  for (const session of rest) {
+    const key = sessionCreatorKey(session);
+    const bucket = creators.get(key) ?? {
+      label: creatorLabels.get(key) ?? sessionCreatorLabel(session),
+      sessions: [],
+    };
+    bucket.sessions.push(session);
+    creators.set(key, bucket);
+  }
+  return {
+    running,
+    grouped: [...creators.entries()]
+      .sort(([, left], [, right]) => left.label.localeCompare(right.label))
+      .map(([key, bucket]) => ({
+        group: `creator:${key}`,
+        label: bucket.label,
+        sessions: bucket.sessions.sort(compareSessionActivity).map((session) => ({
+          session,
+          children: [],
+          hasActiveDescendant: false,
+        })),
+      })),
+  };
+}
 
 export type PinnedRailSections = {
   /** Complete loaded hierarchy, used for expansion and lineage lookups. */

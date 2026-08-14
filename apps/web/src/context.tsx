@@ -59,6 +59,7 @@ import {
   enabledWorkspaceCapabilityMcpServers,
   groupRepositories,
   initialReasoningEffort,
+  installedApiIntegrationMcpServers,
   isAbortError,
   mergeMcpServerOptions,
   selectableMcpServers,
@@ -909,15 +910,23 @@ export function RootRouteComponent() {
       const refreshId = mcpRefreshId.current + 1;
       mcpRefreshId.current = refreshId;
       const requestKey = `${accessKeyVersion}:${workspaceId}`;
-      const catalog = await runSingleFlight(
-        mcpCatalogRequests.current,
-        requestKey,
-        async () => await client.listCapabilities(workspaceId),
-      );
+      const [catalog, apiIntegrations] = await Promise.all([
+        runSingleFlight(
+          mcpCatalogRequests.current,
+          requestKey,
+          async () => await client.listCapabilities(workspaceId),
+        ),
+        client.listApiIntegrations(workspaceId),
+      ]);
       if (signal?.aborted || mcpRefreshId.current !== refreshId) {
         return;
       }
-      setWorkspaceMcpServers(enabledWorkspaceCapabilityMcpServers(catalog.items));
+      setWorkspaceMcpServers(
+        mergeMcpServerOptions(
+          enabledWorkspaceCapabilityMcpServers(catalog.items),
+          installedApiIntegrationMcpServers(apiIntegrations.integrations),
+        ),
+      );
       setWorkspaceCapabilityCatalog(catalog.items);
       setWorkspaceMcpCatalogReady(true);
     },

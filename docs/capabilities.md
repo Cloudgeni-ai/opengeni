@@ -197,8 +197,11 @@ instance has a stable `instanceKey`, human-editable display name, collision-free
 runtime MCP id, exact Connection/configuration, optimistic version, and owner
 ledger. This supports two Gmail accounts, two Linear workspaces, or several
 resource-scoped configurations without copying the schema or overwriting a
-sibling. Reconnect and uninstall operate on the exact instance; the underlying
-Connection and shared definition survive unless separately removed.
+sibling. A personal instance's Connection may be rebound only by its exact
+subject, and the replacement Connection must retain that same subject; workspace
+administration alone never transfers it. Reconnect and uninstall operate on the
+exact instance; the underlying Connection and shared definition survive unless
+separately removed.
 
 Provider adapters may also publish immutable generic facet definitions for
 Knowledge Sources, Inbound Triggers, Delivery Destinations, and Identity Links.
@@ -209,11 +212,17 @@ rewritten by a browser request. Operators configure only a definition's bounded
 schema on one exact Integration instance, inheriting that instance's exact
 Connection and Personal/workspace authority. Configure, pause, resume, and
 remove use caller UUID idempotency plus exact binding-version OCC. The public
-projection reports only whether a provider cursor exists; page tokens, delta
-links, and other cursor contents remain private durable state. Integration
-definition upgrades migrate same-key facets without losing configuration,
-cursor, lifecycle status, evidence timestamps, or owner edges, and reject an
-upgrade that would silently remove a configured facet.
+projection includes the effective owner ledger plus an exact `directlyOwned`
+decision for the requested capability/instance/facet identity; clients must not
+infer current control from the presence of some unrelated `direct` owner. A
+Pack-, Plugin-, migration-, or other-direct-owned binding is read-only in the
+direct Integration controls. Removing a direct owner reports when another
+owner retains the binding instead of presenting the shared facet as deleted.
+The projection reports only whether a provider cursor exists; page tokens,
+delta links, and other cursor contents remain private durable state.
+Integration definition upgrades migrate same-key facets without losing
+configuration, cursor, lifecycle status, evidence timestamps, or owner edges,
+and reject an upgrade that would silently remove a configured facet.
 
 Google Drive's `drive-content` facet uses a provider-specific editor because
 its required schema contains a bounded array of verified folders/Shared Drives

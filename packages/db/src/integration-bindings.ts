@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { stableJson } from "@opengeni/contracts";
-import { and, asc, eq, or, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, or, sql } from "drizzle-orm";
 
 import type { Database } from "./database";
 import { effectiveCapabilityOwnerSql } from "./capability-components";
@@ -184,6 +184,7 @@ export async function upsertIntegrationFacetBinding(
     await addIntegrationFacetBindingOwner(db, created.id, input);
     return { row: created, changed: true };
   }
+  await assertPersonalBindingConnectionRebindAuthority(db, existing, input);
   if (existing.bindingKey !== input.bindingKey) {
     throw new IntegrationFacetBindingOwnershipConflictError(
       "Integration runtime identity is already assigned to another instance",
@@ -244,11 +245,70 @@ export async function upsertIntegrationFacetBinding(
   return { row, changed };
 }
 
+async function assertPersonalBindingConnectionRebindAuthority(
+  db: Database,
+  existing: typeof schema.integrationFacetBindings.$inferSelect,
+  input: Pick<
+    UpsertIntegrationFacetBindingInput,
+    "accountId" | "workspaceId" | "connectionId" | "createdBySubjectId"
+  >,
+): Promise<void> {
+  const nextConnectionId = input.connectionId ?? null;
+  if (!existing.connectionId || existing.connectionId === nextConnectionId) return;
+  // Personal Connections are visible through the app role only to their exact
+  // subject, so a missing current row is an authority failure, not absence.
+  const [currentConnection] = await db
+    .select({ subjectId: schema.connections.subjectId })
+    .from(schema.connections)
+    .where(
+      and(
+        eq(schema.connections.id, existing.connectionId),
+        eq(schema.connections.accountId, input.accountId),
+        eq(schema.connections.workspaceId, input.workspaceId),
+      ),
+    )
+    .limit(1);
+  if (!currentConnection) {
+    throw new IntegrationFacetBindingOwnershipConflictError(
+      "Personal Integration instance belongs to another subject and cannot be changed in place",
+    );
+  }
+  if (!currentConnection.subjectId) return;
+  if (currentConnection.subjectId !== input.createdBySubjectId || nextConnectionId === null) {
+    throw new IntegrationFacetBindingOwnershipConflictError(
+      "Personal Integration instance belongs to another subject and cannot be changed in place",
+    );
+  }
+  const [nextConnection] = await db
+    .select({ subjectId: schema.connections.subjectId })
+    .from(schema.connections)
+    .where(
+      and(
+        eq(schema.connections.id, nextConnectionId),
+        eq(schema.connections.accountId, input.accountId),
+        eq(schema.connections.workspaceId, input.workspaceId),
+      ),
+    )
+    .limit(1);
+  if (!nextConnection || nextConnection.subjectId !== currentConnection.subjectId) {
+    throw new IntegrationFacetBindingOwnershipConflictError(
+      "Personal Integration instance Connection ownership cannot be changed",
+    );
+  }
+}
+
 export async function listIntegrationFacetBindingOwners(
   db: Database,
   bindingId: string,
 ): Promise<IntegrationFacetBindingOwner[]> {
-  return await loadIntegrationFacetBindingOwners(db, bindingId, true);
+  return (await listIntegrationFacetBindingOwnersForBindings(db, [bindingId])).get(bindingId) ?? [];
+}
+
+export async function listIntegrationFacetBindingOwnersForBindings(
+  db: Database,
+  bindingIds: string[],
+): Promise<Map<string, IntegrationFacetBindingOwner[]>> {
+  return await loadIntegrationFacetBindingOwnersForBindings(db, bindingIds, true);
 }
 
 async function loadIntegrationFacetBindingOwners(
@@ -256,8 +316,26 @@ async function loadIntegrationFacetBindingOwners(
   bindingId: string,
   effectiveOnly: boolean,
 ): Promise<IntegrationFacetBindingOwner[]> {
+  return (
+    (await loadIntegrationFacetBindingOwnersForBindings(db, [bindingId], effectiveOnly)).get(
+      bindingId,
+    ) ?? []
+  );
+}
+
+async function loadIntegrationFacetBindingOwnersForBindings(
+  db: Database,
+  bindingIds: string[],
+  effectiveOnly: boolean,
+): Promise<Map<string, IntegrationFacetBindingOwner[]>> {
+  const uniqueBindingIds = [...new Set(bindingIds)];
+  const ownersByBindingId = new Map(
+    uniqueBindingIds.map((bindingId) => [bindingId, [] as IntegrationFacetBindingOwner[]]),
+  );
+  if (uniqueBindingIds.length === 0) return ownersByBindingId;
   const rows = await db
     .select({
+      bindingId: schema.integrationFacetBindingOwners.bindingId,
       kind: schema.integrationFacetBindingOwners.ownerKind,
       id: schema.integrationFacetBindingOwners.ownerId,
       removable: schema.integrationFacetBindingOwners.removable,
@@ -265,7 +343,7 @@ async function loadIntegrationFacetBindingOwners(
     .from(schema.integrationFacetBindingOwners)
     .where(
       and(
-        eq(schema.integrationFacetBindingOwners.bindingId, bindingId),
+        inArray(schema.integrationFacetBindingOwners.bindingId, uniqueBindingIds),
         effectiveOnly
           ? effectiveCapabilityOwnerSql(
               schema.integrationFacetBindingOwners.ownerKind,
@@ -275,10 +353,11 @@ async function loadIntegrationFacetBindingOwners(
       ),
     )
     .orderBy(
+      asc(schema.integrationFacetBindingOwners.bindingId),
       asc(schema.integrationFacetBindingOwners.ownerKind),
       asc(schema.integrationFacetBindingOwners.ownerId),
     );
-  return rows.map((row) => {
+  for (const row of rows) {
     if (
       row.kind !== "direct" &&
       row.kind !== "plugin" &&
@@ -287,8 +366,11 @@ async function loadIntegrationFacetBindingOwners(
     ) {
       throw new Error(`Unknown Integration instance owner kind: ${row.kind}`);
     }
-    return { kind: row.kind, id: row.id, removable: row.removable };
-  });
+    ownersByBindingId
+      .get(row.bindingId)
+      ?.push({ kind: row.kind, id: row.id, removable: row.removable });
+  }
+  return ownersByBindingId;
 }
 
 export async function removeIntegrationFacetBindingOwner(

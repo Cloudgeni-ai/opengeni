@@ -267,7 +267,12 @@ describe("API Integration provider OAuth", () => {
     const workspace = await freshWorkspace();
     const fixture = providerFixture();
     fixture.googlePlans.push({
-      scopes: [...GOOGLE_GMAIL_INTEGRATION_DEFINITION.authentication.scopes],
+      scopes: [
+        "openid",
+        "https://www.googleapis.com/auth/userinfo.email",
+        "https://www.googleapis.com/auth/userinfo.profile",
+        "https://mail.google.com/",
+      ],
       refreshToken: "google-refresh-token",
     });
     const started = await start(fixture, workspace, {
@@ -284,10 +289,15 @@ describe("API Integration provider OAuth", () => {
     expect(authorizationUrl.searchParams.get("prompt")).toBe("consent select_account");
     expect(authorizationUrl.searchParams.get("code_challenge_method")).toBe("S256");
     expect(authorizationUrl.searchParams.get("redirect_uri")).toBe(
-      "http://127.0.0.1:8000/v1/integrations/provider-oauth/callback",
+      "http://127.0.0.1:8000/v1/integrations/oauth/callback",
     );
     const state = authorizationUrl.searchParams.get("state")!;
-    const connected = await callback(fixture, state);
+    const connected = await callback(
+      fixture,
+      state,
+      "fixture-code",
+      "/v1/integrations/oauth/callback",
+    );
     expect(connected.status).toBe(302);
     const location = new URL(connected.headers.get("location")!);
     expect(location.origin).toBe("http://127.0.0.1:3000");
@@ -306,7 +316,12 @@ describe("API Integration provider OAuth", () => {
       providerDomain: "gmail.googleapis.com",
       kind: "oauth2",
       status: "active",
-      grantedScopes: GOOGLE_GMAIL_INTEGRATION_DEFINITION.authentication.scopes,
+      grantedScopes: [
+        "openid",
+        "https://www.googleapis.com/auth/userinfo.email",
+        "https://www.googleapis.com/auth/userinfo.profile",
+        "https://mail.google.com/",
+      ],
       metadata: {
         credentialRole: API_INTEGRATION_OAUTH_CREDENTIAL_ROLE,
         providerFamily: "google",

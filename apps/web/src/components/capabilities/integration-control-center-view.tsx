@@ -59,6 +59,7 @@ export function IntegrationControlCenterView({
   customApi,
   embedded,
   showCustomApis,
+  refreshRevision,
   onRefresh,
   onOpenSetup,
   onReconnect,
@@ -101,6 +102,7 @@ export function IntegrationControlCenterView({
   customApi: CustomApiFlowState;
   embedded: boolean;
   showCustomApis: boolean;
+  refreshRevision: number;
   onRefresh: () => void;
   onOpenSetup: (definition: IntegrationDefinitionSummary) => void;
   onReconnect: (instance: ApiIntegrationInstallationSummary) => void;
@@ -220,6 +222,7 @@ export function IntegrationControlCenterView({
                 canManagePersonalDestination={canManagePersonalDestination}
                 canManageWorkspaceDestination={canManageWorkspaceDestination}
                 canManageOrganizationDestination={canManageOrganizationDestination}
+                refreshRevision={refreshRevision}
                 busyKey={busyKey}
                 onAdd={() => onOpenSetup(definition)}
                 onReconnect={onReconnect}
@@ -299,6 +302,7 @@ function DefinitionCard({
   canManagePersonalDestination,
   canManageWorkspaceDestination,
   canManageOrganizationDestination,
+  refreshRevision,
   busyKey,
   onAdd,
   onReconnect,
@@ -313,6 +317,7 @@ function DefinitionCard({
   canManagePersonalDestination: boolean;
   canManageWorkspaceDestination: boolean;
   canManageOrganizationDestination: boolean;
+  refreshRevision: number;
   busyKey: string | null;
   onAdd: () => void;
   onReconnect: (instance: ApiIntegrationInstallationSummary) => void;
@@ -425,6 +430,7 @@ function DefinitionCard({
                 canManagePersonalDestination={canManagePersonalDestination}
                 canManageWorkspaceDestination={canManageWorkspaceDestination}
                 canManageOrganizationDestination={canManageOrganizationDestination}
+                refreshRevision={refreshRevision}
                 GoogleDriveDialog={GoogleDriveKnowledgeSourceDialog}
               />
             </div>

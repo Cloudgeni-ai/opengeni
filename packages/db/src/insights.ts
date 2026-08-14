@@ -82,6 +82,20 @@ export type ModelCallFacetRow = {
   model: string;
 };
 
+export type ModelContextContributionAggregate = {
+  estimatedTokens: number;
+  utf8Bytes: number;
+  coveredCalls: number;
+  totalCalls: number;
+  sources: Array<{
+    source: string;
+    items: number;
+    utf8Bytes: number;
+    estimatedTokens: number;
+    calls: number;
+  }>;
+};
+
 export type SessionDepthAggregate = {
   depth: number;
   sessions: number;
@@ -642,6 +656,99 @@ export async function listRecentModelCalls(
       .orderBy(desc(schema.modelCallFacts.occurredAt), desc(schema.modelCallFacts.id))
       .limit(Math.max(1, Math.min(input.limit ?? 50, 100)));
     return rows;
+  });
+}
+
+export async function aggregateModelContextContributions(
+  db: Database,
+  input: InsightsTimeWindow & {
+    workspaceId: string;
+    provider?: string | null;
+    model?: string | null;
+  },
+): Promise<ModelContextContributionAggregate> {
+  const context = await rlsContextForWorkspace(db, input.workspaceId);
+  return await withRlsContext(db, context, async (scopedDb) => {
+    const clauses = [
+      eq(schema.modelCallFacts.workspaceId, input.workspaceId),
+      gte(schema.modelCallFacts.occurredAt, input.since),
+      lt(schema.modelCallFacts.occurredAt, input.until),
+      ...(input.provider ? [eq(schema.modelCallFacts.provider, input.provider)] : []),
+      ...(input.model ? [eq(schema.modelCallFacts.model, input.model)] : []),
+    ];
+    type ContributionRow = {
+      total_calls: number | string;
+      covered_calls: number | string;
+      source: string | null;
+      items: number | string | null;
+      utf8_bytes: number | string | null;
+      estimated_tokens: number | string | null;
+      calls: number | string | null;
+    };
+    const rows = (await scopedDb.execute(sql<ContributionRow>`
+      with filtered as (
+        select
+          ${schema.modelCallFacts.id} as id,
+          ${schema.modelCallFacts.contextContributions} as context_contributions
+        from ${schema.modelCallFacts}
+        where ${and(...clauses)}
+      ), coverage as (
+        select
+          count(*)::bigint as total_calls,
+          count(context_contributions)::bigint as covered_calls
+        from filtered
+      ), source_rows as (
+        select
+          filtered.id,
+          contribution->>'source' as source,
+          (contribution->>'items')::bigint as items,
+          (contribution->>'utf8Bytes')::bigint as utf8_bytes,
+          (contribution->>'estimatedTokens')::bigint as estimated_tokens
+        from filtered
+        cross join lateral jsonb_array_elements(filtered.context_contributions) contribution
+      ), source_totals as (
+        select
+          source,
+          sum(items)::bigint as items,
+          sum(utf8_bytes)::bigint as utf8_bytes,
+          sum(estimated_tokens)::bigint as estimated_tokens,
+          count(distinct id)::bigint as calls
+        from source_rows
+        group by source
+      )
+      select
+        coverage.total_calls,
+        coverage.covered_calls,
+        source_totals.source,
+        source_totals.items,
+        source_totals.utf8_bytes,
+        source_totals.estimated_tokens,
+        source_totals.calls
+      from coverage
+      left join source_totals on true
+      order by source_totals.estimated_tokens desc nulls last, source_totals.source
+    `)) as ContributionRow[];
+    const first = rows[0];
+    const sources = rows.flatMap((row) =>
+      row.source
+        ? [
+            {
+              source: row.source,
+              items: Number(row.items ?? 0),
+              utf8Bytes: Number(row.utf8_bytes ?? 0),
+              estimatedTokens: Number(row.estimated_tokens ?? 0),
+              calls: Number(row.calls ?? 0),
+            },
+          ]
+        : [],
+    );
+    return {
+      estimatedTokens: sources.reduce((sum, row) => sum + row.estimatedTokens, 0),
+      utf8Bytes: sources.reduce((sum, row) => sum + row.utf8Bytes, 0),
+      coveredCalls: Number(first?.covered_calls ?? 0),
+      totalCalls: Number(first?.total_calls ?? 0),
+      sources,
+    };
   });
 }
 

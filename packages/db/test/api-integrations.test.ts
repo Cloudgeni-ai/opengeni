@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { sql } from "drizzle-orm";
 import postgres from "postgres";
 
 import {
@@ -9,9 +10,11 @@ import {
   createConnection,
   createDb,
   deleteWorkspace,
+  grantWorkspaceAccess,
   getApiIntegrationUninstallPreview,
   getConnectionMetadata,
   installApiIntegration,
+  IntegrationFacetBindingOwnershipConflictError,
   IntegrationFacetBindingVersionConflictError,
   IntegrationFacetConfigError,
   IntegrationFacetNotFoundError,
@@ -21,6 +24,7 @@ import {
   removeIntegrationFacet,
   setIntegrationFacetLifecycle,
   uninstallApiIntegration,
+  withWorkspaceSubjectRls,
   type DbClient,
   type InstallApiIntegrationInput,
 } from "../src";
@@ -163,6 +167,50 @@ function integrationInput(connectionId?: string, suffix = "inventory"): InstallA
 }
 
 describe("API Integration persistence", () => {
+  test("accepts provider-equivalent Google OIDC scope names", async () => {
+    if (!available || !client) return;
+    const ownerSubjectId = "user:api-integration-google-owner";
+    const connection = await createConnection(client.db, {
+      accountId: first.accountId,
+      workspaceId: first.workspaceId,
+      subjectId: ownerSubjectId,
+      providerDomain: "gmail.googleapis.com",
+      kind: "oauth2",
+      credentialEncrypted: "test-only-google-encrypted-bundle",
+      grantedScopes: [
+        "openid",
+        "https://www.googleapis.com/auth/userinfo.email",
+        "https://www.googleapis.com/auth/userinfo.profile",
+        "https://mail.google.com/",
+      ],
+      createdBySubjectId: ownerSubjectId,
+    });
+    const base = integrationInput(connection.id, "gmail-scope-aliases");
+    const input: InstallApiIntegrationInput = {
+      ...base,
+      subjectId: ownerSubjectId,
+      ownership: "subject",
+      providerDomain: "gmail.googleapis.com",
+      baseUrl: "https://gmail.googleapis.com/",
+      sourceUrl: "https://www.googleapis.com/discovery/v1/apis/gmail/v1/rest",
+      authScheme: { kind: "oauth2" },
+      requiredScopes: ["openid", "email", "profile", "https://mail.google.com/"],
+      revision: {
+        ...base.revision,
+        source: { url: "https://www.googleapis.com/discovery/v1/apis/gmail/v1/rest" },
+        bindings: Object.fromEntries(
+          Object.entries(base.revision.bindings).map(([key, binding]) => [
+            key,
+            { ...binding, serverUrl: "https://gmail.googleapis.com/" },
+          ]),
+        ),
+      },
+    };
+
+    const installed = await installApiIntegration(client.db, input);
+    expect(installed).toMatchObject({ status: "installed" });
+  }, 60_000);
+
   test("keeps personal runtime projection and removal exact-subject", async () => {
     if (!available || !client) return;
     const ownerSubjectId = "user:api-integration-personal-owner";
@@ -224,6 +272,172 @@ describe("API Integration persistence", () => {
       expectedInstallationVersion: installed.installationVersion,
       expectedInstanceVersion: installed.instanceVersion,
     });
+  }, 60_000);
+
+  test("keeps a victim personal instance unchanged across cross-subject rebind attempts", async () => {
+    if (!available || !client || !shared) return;
+    const suffix = crypto.randomUUID();
+    const victimSubjectId = `user:api-integration-rebind-victim-${suffix}`;
+    const attackerSubjectId = `user:api-integration-rebind-attacker-${suffix}`;
+    for (const subjectId of [victimSubjectId, attackerSubjectId]) {
+      await grantWorkspaceAccess(client.db, {
+        accountId: first.accountId,
+        workspaceId: first.workspaceId,
+        subjectId,
+        role: "admin",
+        permissions: ["workspace:read", "workspace:admin"],
+      });
+    }
+    const victimConnection = await createConnection(client.db, {
+      accountId: first.accountId,
+      workspaceId: first.workspaceId,
+      subjectId: victimSubjectId,
+      providerDomain: "inventory.example.com",
+      kind: "api_key",
+      credentialEncrypted: "test-only-victim-personal-encrypted-bundle",
+      grantedScopes: ["inventory.read", "inventory.write"],
+      createdBySubjectId: victimSubjectId,
+    });
+    const replacementVictimConnection = await createConnection(client.db, {
+      accountId: first.accountId,
+      workspaceId: first.workspaceId,
+      subjectId: victimSubjectId,
+      providerDomain: "inventory.example.com",
+      kind: "api_key",
+      credentialEncrypted: "test-only-victim-replacement-encrypted-bundle",
+      grantedScopes: ["inventory.read", "inventory.write"],
+      createdBySubjectId: victimSubjectId,
+    });
+    const attackerConnection = await createConnection(client.db, {
+      accountId: first.accountId,
+      workspaceId: first.workspaceId,
+      subjectId: attackerSubjectId,
+      providerDomain: "inventory.example.com",
+      kind: "api_key",
+      credentialEncrypted: "test-only-attacker-personal-encrypted-bundle",
+      grantedScopes: ["inventory.read", "inventory.write"],
+      createdBySubjectId: attackerSubjectId,
+    });
+    const instanceKey = `personal-${suffix}`;
+    const victimInput: InstallApiIntegrationInput = {
+      ...integrationInput(victimConnection.id, `inventory-personal-rebind-${suffix}`),
+      subjectId: victimSubjectId,
+      ownership: "subject",
+      instanceKey,
+      displayName: "Victim inventory",
+    };
+    const installed = await installApiIntegration(client.db, victimInput);
+    const [before] = await shared.admin<
+      {
+        id: string;
+        runtimeKey: string | null;
+        connectionId: string | null;
+        displayName: string;
+        version: number;
+      }[]
+    >`
+      select
+        id,
+        runtime_key as "runtimeKey",
+        connection_id as "connectionId",
+        display_name as "displayName",
+        version
+      from integration_facet_bindings
+      where id = ${installed.instanceId}`;
+    expect(before).toEqual({
+      id: installed.instanceId,
+      runtimeKey: installed.serverId,
+      connectionId: victimConnection.id,
+      displayName: "Victim inventory",
+      version: installed.instanceVersion,
+    });
+
+    await expect(
+      installApiIntegration(client.db, {
+        ...victimInput,
+        subjectId: attackerSubjectId,
+        connectionId: attackerConnection.id,
+        displayName: "Attacker inventory",
+        expectedInstanceVersion: installed.instanceVersion,
+      }),
+    ).rejects.toBeInstanceOf(IntegrationFacetBindingOwnershipConflictError);
+
+    let boundaryError: unknown = null;
+    try {
+      await withWorkspaceSubjectRls(
+        client.db,
+        first.workspaceId,
+        attackerSubjectId,
+        async (scopedDb) => {
+          await scopedDb.execute(sql`
+            update integration_facet_bindings
+            set connection_id = ${attackerConnection.id},
+                display_name = 'Attacker inventory',
+                version = version + 1,
+                updated_at = now()
+            where id = ${installed.instanceId}
+          `);
+        },
+      );
+    } catch (error) {
+      boundaryError = error;
+    }
+    expect(boundaryError).toMatchObject({ cause: { code: "42501" } });
+
+    const [after] = await shared.admin<
+      {
+        id: string;
+        runtimeKey: string | null;
+        connectionId: string | null;
+        displayName: string;
+        version: number;
+      }[]
+    >`
+      select
+        id,
+        runtime_key as "runtimeKey",
+        connection_id as "connectionId",
+        display_name as "displayName",
+        version
+      from integration_facet_bindings
+      where id = ${installed.instanceId}`;
+    expect(after).toEqual(before);
+    expect(
+      await listInstalledApiIntegrations(client.db, first.workspaceId, victimSubjectId),
+    ).toEqual([
+      expect.objectContaining({
+        instanceId: installed.instanceId,
+        instanceKey,
+        instanceVersion: installed.instanceVersion,
+        serverId: installed.serverId,
+        displayName: "Victim inventory",
+        connectionRef: expect.objectContaining({ connectionId: victimConnection.id }),
+      }),
+    ]);
+    expect(
+      await listInstalledApiIntegrations(client.db, first.workspaceId, attackerSubjectId),
+    ).toEqual([]);
+
+    const reconnected = await installApiIntegration(client.db, {
+      ...victimInput,
+      connectionId: replacementVictimConnection.id,
+      expectedInstanceVersion: installed.instanceVersion,
+    });
+    expect(reconnected).toMatchObject({
+      instanceId: installed.instanceId,
+      instanceKey,
+      serverId: installed.serverId,
+      instanceVersion: installed.instanceVersion + 1,
+    });
+    expect(
+      await listInstalledApiIntegrations(client.db, first.workspaceId, victimSubjectId),
+    ).toEqual([
+      expect.objectContaining({
+        instanceId: installed.instanceId,
+        serverId: installed.serverId,
+        connectionRef: expect.objectContaining({ connectionId: replacementVictimConnection.id }),
+      }),
+    ]);
   }, 60_000);
 
   test("installs idempotently, projects runtime policy, isolates tenants, and OCC-uninstalls", async () => {
@@ -753,6 +967,14 @@ describe("API Integration persistence", () => {
         status: "active",
         version: 1,
         hasCursor: false,
+        directlyOwned: true,
+        owners: [
+          {
+            kind: "direct",
+            id: expect.stringMatching(/^facet:[0-9a-f]{64}$/),
+            removable: true,
+          },
+        ],
       },
     });
     expect(
@@ -849,6 +1071,8 @@ describe("API Integration persistence", () => {
       id: configured.binding.id,
       version: configured.binding.version + 1,
       status: "active",
+      directlyOwned: true,
+      owners: configured.binding.owners,
       config: {
         sources: [
           {

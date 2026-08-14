@@ -6,6 +6,7 @@ import type { EffectiveSessionControl, OpenGeniClient, SessionEvent } from "@ope
 import type { SessionRealtimeControllerSnapshot } from "@opengeni/sdk/realtime";
 
 import {
+  NewSessionRealtimeControl,
   RealtimeVoiceControl,
   RealtimeModelPickerMenu,
   SessionRealtimeControl,
@@ -83,6 +84,49 @@ describe("ordinary session Codex realtime control", () => {
   afterEach(async () => {
     await act(async () => root.unmount());
     container.remove();
+  });
+
+  test("keeps the shipped control independent of Vite runtime globals", async () => {
+    const source = await Bun.file(
+      new URL("../src/realtime/realtime-control.tsx", import.meta.url),
+    ).text();
+    expect(source).not.toContain("import.meta.env");
+  });
+
+  test("skips the internal catalog when the parent owns new-session selection", async () => {
+    let catalogRequests = 0;
+    const client = {
+      getWorkspaceRealtimeModelCatalog: async () => {
+        catalogRequests += 1;
+        return { models: [] };
+      },
+    } as unknown as OpenGeniClient;
+    const selectedModel: RealtimeModelOption = {
+      id: "gpt-live-1-boulder-alpha",
+      label: "Codex Live",
+      provider: "Connected Codex",
+      description: "Deep session integration",
+      available: true,
+      unavailableReason: null,
+      recommended: true,
+    };
+
+    await act(async () =>
+      root.render(
+        <NewSessionRealtimeControl
+          client={client}
+          workspaceId="11111111-1111-4111-8111-111111111111"
+          codexConnected={true}
+          models={[selectedModel]}
+          selectedModel={selectedModel}
+          onSelectModel={() => undefined}
+          onStart={async () => true}
+        />,
+      ),
+    );
+    await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+
+    expect(catalogRequests).toBe(0);
   });
 
   test("admits non-cancelled work states when control and Codex are ready", () => {
@@ -718,6 +762,7 @@ describe("ordinary session Codex realtime control", () => {
         .querySelector('[role="group"][aria-label="Realtime voice"]')
         ?.getAttribute("data-picker-side"),
     ).toBe("bottom");
+    expect(container.textContent).not.toContain("Realtime diagnostics");
   });
 
   test("exposes an autoplay-blocked retry without starting another realtime call", async () => {

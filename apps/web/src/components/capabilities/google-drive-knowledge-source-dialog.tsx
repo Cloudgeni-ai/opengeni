@@ -1,6 +1,6 @@
 import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
 import { FolderOpenIcon, Loader2Icon } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -75,6 +75,7 @@ export function GoogleDriveKnowledgeSourceDialog({
   const [folderIdDraft, setFolderIdDraft] = useState("");
   const [syncCadence, setSyncCadence] = useState<GoogleDriveSyncCadence>("hourly");
   const [readPolicy, setReadPolicy] = useState<GoogleDriveReadPolicy>("allow");
+  const browseGeneration = useRef(0);
 
   const folderItems = useMemo(() => items.filter((item) => item.kind === "folder"), [items]);
 
@@ -85,6 +86,7 @@ export function GoogleDriveKnowledgeSourceDialog({
       pageToken?: string,
     ): Promise<GoogleDriveBrowseItem | null> => {
       if (!entry) return null;
+      const generation = ++browseGeneration.current;
       setBrowseBusy(true);
       try {
         const response = await client.browseGoogleDriveFacetSource(
@@ -97,6 +99,7 @@ export function GoogleDriveKnowledgeSourceDialog({
             ...(pageToken ? { pageToken } : {}),
           },
         );
+        if (generation !== browseGeneration.current) return null;
         setItems((current) =>
           mode === "append" ? [...current, ...response.items] : response.items,
         );
@@ -117,19 +120,24 @@ export function GoogleDriveKnowledgeSourceDialog({
         }
         return response.current;
       } catch (error) {
+        if (generation !== browseGeneration.current) return null;
         toast.error("Google Drive folder could not be opened", {
           description: error instanceof Error ? error.message : String(error),
         });
         return null;
       } finally {
-        setBrowseBusy(false);
+        if (generation === browseGeneration.current) setBrowseBusy(false);
       }
     },
     [client, entry, instance.capabilityId, instance.instanceKey, workspaceId],
   );
 
   useEffect(() => {
-    if (!entry) return;
+    ++browseGeneration.current;
+    if (!entry) {
+      setBrowseBusy(false);
+      return;
+    }
     const config = googleDriveKnowledgeSourceConfig(entry.binding?.config);
     setSelectedSources(configuredGoogleDriveKnowledgeSources(entry.binding?.config));
     setAuthorityKind(
@@ -148,6 +156,10 @@ export function GoogleDriveKnowledgeSourceDialog({
     setNextPageToken(null);
     setFolderIdDraft("");
     void loadFolder({ id: "root", name: "My Drive" });
+    const browseGenerationRef = browseGeneration;
+    return () => {
+      ++browseGenerationRef.current;
+    };
   }, [
     canManageOrganizationDestination,
     canManagePersonalDestination,
@@ -260,7 +272,7 @@ export function GoogleDriveKnowledgeSourceDialog({
         });
       }
     } finally {
-      setBusy(false);
+      if (mutation.isCurrent()) setBusy(false);
       mutation.finish();
     }
   }

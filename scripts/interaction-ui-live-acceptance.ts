@@ -200,7 +200,7 @@ try {
     targetId: computerObservation.target.id,
     expectedTargetGeneration: computerObservation.target.targetGeneration,
     expectedObservationId: computerObservation.observationId,
-    expectedFrameId: computerObservation.frameId,
+    expectedFrameId: null,
     action: { type: "semantic", locator: { kind: "ref", ref: inputNode.ref }, action: "focus" },
   });
   if (focused.state !== "completed") throw new Error("computer semantic focus failed");

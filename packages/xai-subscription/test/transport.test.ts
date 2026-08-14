@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   normalizeXaiResponseEventJson,
   normalizeXaiSubscriptionRequestBody,
+  XaiSubscriptionHostedToolContinuationError,
   xaiSubscriptionFetch,
   xaiSubscriptionRequestStorage,
 } from "../src";
@@ -153,5 +154,138 @@ describe("SuperGrok subscription fetch", () => {
     );
     expect(response.status).toBe(503);
     expect(calls).toBe(1);
+  });
+
+  test("fails a hosted-search stream that stops making progress without replaying it", async () => {
+    let calls = 0;
+    const wrapped = xaiSubscriptionFetch(async () => {
+      calls += 1;
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(
+              new TextEncoder().encode(
+                `data: ${JSON.stringify({
+                  type: "response.output_item.done",
+                  item: { type: "web_search_call", id: "search-1", status: "completed" },
+                })}\n\n`,
+              ),
+            );
+          },
+        }),
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    });
+    const response = await xaiSubscriptionRequestStorage.run(
+      {
+        clientVersion: "1.0.1",
+        sessionId: "session-1",
+        turnId: "turn-1",
+        getToken: async () => ({ accessToken: "access", userId: "user-1" }),
+        refresh: async () => ({ accessToken: "fresh", userId: "user-1" }),
+        resolveModel: (slug) => slug,
+        hostedToolContinuationTimeoutMs: 10,
+      },
+      async () =>
+        await wrapped("https://cli-chat-proxy.grok.com/v1/responses", {
+          method: "POST",
+          body: JSON.stringify({ model: "supergrok/grok-4.6", input: "hello" }),
+        }),
+    );
+    const reader = response.body!.getReader();
+    expect(new TextDecoder().decode((await reader.read()).value)).toContain(
+      "response.output_item.done",
+    );
+    await expect(reader.read()).rejects.toBeInstanceOf(XaiSubscriptionHostedToolContinuationError);
+    expect(calls).toBe(1);
+  });
+
+  test("keeps a healthy hosted-search continuation streaming to its terminal response", async () => {
+    const encoder = new TextEncoder();
+    const wrapped = xaiSubscriptionFetch(
+      async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({
+                    type: "response.output_item.done",
+                    item: { type: "web_search_call", id: "search-1", status: "completed" },
+                  })}\n\n`,
+                ),
+              );
+              setTimeout(() => {
+                controller.enqueue(
+                  encoder.encode(
+                    `data: ${JSON.stringify({ type: "response.output_text.delta", delta: "answer" })}\n\n` +
+                      `data: ${JSON.stringify({
+                        type: "response.completed",
+                        response: { output: [], usage: {} },
+                      })}\n\n`,
+                  ),
+                );
+              }, 5);
+            },
+          }),
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    );
+    const response = await xaiSubscriptionRequestStorage.run(
+      {
+        clientVersion: "1.0.1",
+        sessionId: "session-1",
+        turnId: "turn-1",
+        getToken: async () => ({ accessToken: "access", userId: "user-1" }),
+        refresh: async () => ({ accessToken: "fresh", userId: "user-1" }),
+        resolveModel: (slug) => slug,
+        hostedToolContinuationTimeoutMs: 50,
+      },
+      async () =>
+        await wrapped("https://cli-chat-proxy.grok.com/v1/responses", {
+          method: "POST",
+          body: JSON.stringify({ model: "supergrok/grok-4.6", input: "hello" }),
+        }),
+    );
+    const text = await response.text();
+    expect(text).toContain("response.output_text.delta");
+    expect(text).toContain("response.completed");
+  });
+
+  test("closes a terminal SSE response even if the upstream socket stays open", async () => {
+    const wrapped = xaiSubscriptionFetch(
+      async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(
+                new TextEncoder().encode(
+                  `data: ${JSON.stringify({
+                    type: "response.completed",
+                    response: { output: [], usage: {} },
+                  })}\n\n`,
+                ),
+              );
+            },
+          }),
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    );
+    const response = await xaiSubscriptionRequestStorage.run(
+      {
+        clientVersion: "1.0.1",
+        sessionId: "session-1",
+        turnId: "turn-1",
+        getToken: async () => ({ accessToken: "access", userId: "user-1" }),
+        refresh: async () => ({ accessToken: "fresh", userId: "user-1" }),
+        resolveModel: (slug) => slug,
+      },
+      async () =>
+        await wrapped("https://cli-chat-proxy.grok.com/v1/responses", {
+          method: "POST",
+          body: JSON.stringify({ model: "supergrok/grok-4.6", input: "hello" }),
+        }),
+    );
+    expect(await response.text()).toContain("response.completed");
   });
 });

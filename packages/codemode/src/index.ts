@@ -13,6 +13,8 @@ import {
   CodemodeOperation,
   CodemodeDispatchAck,
   CodemodeDispatchRequest,
+  OPENGENI_API_CONTRACT_HEADER,
+  OPENGENI_API_CONTRACT_REVISION,
   type AttemptToolCall as AttemptToolCallValue,
   type AttemptToolCaller,
   type AttemptToolCatalog as AttemptToolCatalogValue,
@@ -389,6 +391,7 @@ export class CodemodeClient {
       ...init,
       headers: {
         ...Object.fromEntries(new Headers(init.headers).entries()),
+        [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
         authorization: `Bearer ${token}`,
       },
     });

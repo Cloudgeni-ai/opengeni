@@ -28,6 +28,7 @@ import { Buffer } from "node:buffer";
 import { isIP } from "node:net";
 import { encryptEnvironmentValue } from "./environment-crypto";
 import type { Database } from "./database";
+import { connectionScopeKey } from "./connection-scopes";
 
 const MAX_CREDENTIAL_PLACEMENTS = 32;
 const MAX_CREDENTIAL_NAME_BYTES = 256;
@@ -658,7 +659,11 @@ export function buildConnectionTokenResolver(
     if (!connectionBindingMatches(cred, ref, destinationUrl, settings.gmailRestAdapterEnabled)) {
       return authNeeded(ref, "missing_connection", cred.id);
     }
-    const missingScopes = missingRequestedScopes(ref.scopes, cred.grantedScopes);
+    const missingScopes = missingRequestedScopes(
+      ref.scopes,
+      cred.grantedScopes,
+      cred.providerDomain,
+    );
     if (missingScopes.length > 0) {
       return {
         status: "auth_needed",
@@ -979,12 +984,16 @@ function authNeededForStatus(
   );
 }
 
-function missingRequestedScopes(requested: string[] | undefined, granted: string[]): string[] {
+function missingRequestedScopes(
+  requested: string[] | undefined,
+  granted: string[],
+  providerDomain: string,
+): string[] {
   if (!requested?.length) {
     return [];
   }
-  const grantedSet = new Set(granted);
-  return requested.filter((scope) => !grantedSet.has(scope));
+  const grantedSet = new Set(granted.map((scope) => connectionScopeKey(providerDomain, scope)));
+  return requested.filter((scope) => !grantedSet.has(connectionScopeKey(providerDomain, scope)));
 }
 
 /**

@@ -448,8 +448,11 @@ async function waitForActive(
   const deadline = performance.now() + TIMEOUT_MS;
   let session = await browser.get();
   while (session.lifecycle !== "active" || !session.controller) {
-    if (session.lifecycle === "ended")
-      throw new Error("identity browser ended before becoming active");
+    if (["repair_required", "lost", "ended", "failed"].includes(session.lifecycle)) {
+      throw new Error(
+        `identity browser became ${session.lifecycle} before active${session.failureCode ? ` (${session.failureCode})` : ""}`,
+      );
+    }
     if (performance.now() >= deadline) throw new Error("identity browser did not become active");
     await Bun.sleep(100);
     session = await browser.get();

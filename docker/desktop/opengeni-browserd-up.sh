@@ -13,6 +13,13 @@ LOG_FILE="${RUN}/browserd.log"
 BIN=/usr/local/bin/opengeni-browserd
 BROWSER_EXECUTABLE="${OPENGENI_BROWSERD_BROWSER_EXECUTABLE:-}"
 COMPUTER_NATIVE_BINARY="${OPENGENI_BROWSERD_COMPUTER_NATIVE_BINARY:-}"
+STARTUP_TIMEOUT_SECONDS="${OPENGENI_BROWSERD_STARTUP_TIMEOUT_SECONDS:-30}"
+
+if ! [[ "$STARTUP_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || [ "$STARTUP_TIMEOUT_SECONDS" -gt 120 ]; then
+  echo "browser controller startup timeout must be an integer from 1 to 120 seconds" >&2
+  exit 14
+fi
+STARTUP_ATTEMPTS=$((STARTUP_TIMEOUT_SECONDS * 10))
 
 if [ -z "$BROWSER_EXECUTABLE" ] && [ -r /etc/opengeni/browser-engine ]; then
   BROWSER_EXECUTABLE="$(head -n 1 /etc/opengeni/browser-engine)"
@@ -51,6 +58,13 @@ admin_ready() {
     printf '"\n'
   } | curl --disable --config - --noproxy '*' --fail --silent --show-error \
     "http://127.0.0.1:${PORT}/v1/browser-sessions" >/dev/null 2>&1
+}
+
+print_startup_log() {
+  if [ -s "$LOG_FILE" ]; then
+    echo "browser controller startup log (last 80 lines, at most 16 KiB):" >&2
+    tail -c 16384 "$LOG_FILE" | tail -n 80 >&2
+  fi
 }
 
 if [ -s "$PID_FILE" ]; then
@@ -94,10 +108,11 @@ PID=$!
 printf '%s\n' "$PID" >"${PID_FILE}.new"
 mv -f "${PID_FILE}.new" "$PID_FILE"
 
-for _ in $(seq 1 100); do
+for _ in $(seq 1 "$STARTUP_ATTEMPTS"); do
   if ! kill -0 "$PID" 2>/dev/null; then
     rm -f "$PID_FILE"
     echo "browser controller exited during startup" >&2
+    print_startup_log
     exit 14
   fi
   # setsid launches `env`, which then execs browserd. On a cold or remote
@@ -117,5 +132,6 @@ done
 
 kill "$PID" 2>/dev/null || true
 rm -f "$PID_FILE"
-echo "browser controller failed to become ready on ${PORT}" >&2
+echo "browser controller failed to become ready on ${PORT} within ${STARTUP_TIMEOUT_SECONDS}s" >&2
+print_startup_log
 exit 14

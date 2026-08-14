@@ -6,6 +6,7 @@ import { MemoryEventBus, testSettings } from "@opengeni/testing";
 import { Hono } from "hono";
 import { isApiContractProtectedMutation } from "../src/app";
 import { requireAccessKey } from "../src/http/auth";
+import { authorizeSlackSharedImageRead } from "../src/integrations/slack-bot";
 import {
   registerSlackInteractionRoutes,
   normalizedBlockActionInteraction,
@@ -154,6 +155,46 @@ describe("Slack interaction signature boundary", () => {
       expect((await app.request(path, { method: "POST" })).status).toBe(401);
       expect(isApiContractProtectedMutation("POST", path)).toBe(true);
     }
+  });
+});
+
+describe("Slack shared-image authorization", () => {
+  const ordinary = {
+    isArchived: false,
+    isShared: false,
+    isExternallyShared: false,
+    isOrgShared: false,
+    isPendingExternallyShared: false,
+    isMpim: false,
+  };
+
+  test("accepts only an explicit authorized governed-conversation capability", async () => {
+    let calls = 0;
+    await authorizeSlackSharedImageRead(
+      { ...ordinary, isShared: true, isExternallyShared: true },
+      async () => {
+        calls += 1;
+      },
+    );
+    expect(calls).toBe(1);
+  });
+
+  test("denies missing or rejected shared policy and never widens ordinary conversations", async () => {
+    await expect(
+      authorizeSlackSharedImageRead({ ...ordinary, isShared: true }, undefined),
+    ).rejects.toMatchObject({ code: "slack_connect_unsupported" });
+    await expect(
+      authorizeSlackSharedImageRead({ ...ordinary, isMpim: true }, async () => {
+        throw new Error("shared policy drifted");
+      }),
+    ).rejects.toThrow("shared policy drifted");
+    let ordinaryCapabilityCalls = 0;
+    await expect(
+      authorizeSlackSharedImageRead(ordinary, async () => {
+        ordinaryCapabilityCalls += 1;
+      }),
+    ).rejects.toMatchObject({ code: "slack_connect_unsupported" });
+    expect(ordinaryCapabilityCalls).toBe(0);
   });
 });
 
