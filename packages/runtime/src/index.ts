@@ -80,6 +80,21 @@ import {
 } from "./lazy-tool-transport";
 import { GmailRestMcpServer, isOfficialGmailMcpConfig } from "./gmail-rest-mcp";
 import { McpResultCustomDataBridge, unwrapSdkMcpResultProjection } from "./mcp-result-custom-data";
+import {
+  ConnectorAttachmentTransferError,
+  projectConnectorAttachmentTransfers,
+  type ConnectorAttachmentMaterializer,
+} from "./connector-attachments";
+export {
+  CONNECTOR_ATTACHMENT_PROVIDER_RESULT_MAX_BYTES,
+  CONNECTOR_ATTACHMENT_SANITIZED_RESULT_MAX_BYTES,
+  ConnectorAttachmentTransferError,
+  connectorAttachmentSandboxPath,
+  projectConnectorAttachmentTransfers,
+  type ConnectorAttachmentMaterializationRequest,
+  type ConnectorAttachmentMaterializer,
+  type ConnectorAttachmentTransferProjectionOptions,
+} from "./connector-attachments";
 export {
   GMAIL_REST_API_BASE,
   GMAIL_REST_MCP_TOOLS,
@@ -169,6 +184,7 @@ import {
 import {
   createSandboxClient,
   desktopCapableBackend,
+  isRoutingMutationOutcomeUnknownError,
   repairSerializedRunStateExposedPorts,
   restoredSandboxSessionStateFromEntry,
   setSelfhostedApplyDiff,
@@ -3134,7 +3150,21 @@ export type PrepareToolsOptions = {
   attemptToolDefinitions?: readonly AttemptToolDefinition[];
   /** Host authorization applied after catalog/input validation and before execution. */
   attemptToolAuthorize?: AttemptToolAuthorization;
+  /**
+   * Private exact-byte connector attachment bridge. Source URLs are passed only
+   * through this host callback and never included in the returned MCP result.
+   */
+  materializeConnectorAttachments?: ConnectorAttachmentMaterializer;
 };
+
+type PrefixedMcpConnectorAttachmentAuthority = Readonly<{
+  expectedProvider?: string;
+  connectionIdForOperation: (operationId: string) => string | undefined;
+  releaseOperation: (operationId: string) => void;
+  authorizeAndMaterialize: (
+    input: Parameters<ConnectorAttachmentMaterializer>[0],
+  ) => ReturnType<ConnectorAttachmentMaterializer>;
+}>;
 
 async function measureToolPreparationPhase<T>(
   options: PrepareToolsOptions,
@@ -3270,6 +3300,7 @@ export async function prepareAgentTools(
   // sanitizing fetch and the current turn's tool_search description.
   const codexConnectorNamespaces = new Set<string>();
   const resolvedMcpConnectionIds = new Map<string, string>();
+  const resolvedMcpToolConnectionIds = new Map<string, string>();
   assertMcpServerSelectionWithinBounds(tools);
   if (options.attemptToolDefinitions?.length && !attemptToolScope(options)) {
     throw new Error("in-process attempt tools require exact attempt scope");
@@ -3314,6 +3345,14 @@ export async function prepareAgentTools(
               optional || Boolean(config.connectionRef),
               aggregateToolBudget,
               `${config.id}:${index}`,
+              false,
+              buildConnectorAttachmentAuthority(
+                config,
+                options,
+                resolvedMcpToolConnectionIds,
+                config.url,
+                local.resolvedConnectionId,
+              ),
             ),
             bestEffort: optional || Boolean(config.connectionRef),
             optional,
@@ -3343,6 +3382,7 @@ export async function prepareAgentTools(
                 config,
                 options,
                 resolvedMcpConnectionIds,
+                resolvedMcpToolConnectionIds,
                 optional,
               )
             : firstParty
@@ -3427,6 +3467,7 @@ export async function prepareAgentTools(
           aggregateToolBudget,
           `${config.id}:${index}`,
           firstParty && !bestEffort,
+          buildConnectorAttachmentAuthority(config, options, resolvedMcpToolConnectionIds, url),
         );
         return {
           server,
@@ -3705,6 +3746,7 @@ function connectionBrokerFetch(
   config: Settings["mcpServers"][number],
   options: PrepareToolsOptions,
   resolvedMcpConnectionIds: Map<string, string>,
+  resolvedMcpToolConnectionIds: Map<string, string>,
   suppressSetupAuthNeeded: boolean,
 ): FetchLike {
   const connectionRef = config.connectionRef;
@@ -3733,6 +3775,12 @@ function connectionBrokerFetch(
       );
     }
     recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, first.connectionId);
+    recordResolvedMcpToolConnectionId(
+      resolvedMcpToolConnectionIds,
+      config,
+      request,
+      first.connectionId,
+    );
     const response = await baseFetch(
       fetchInputForAttempt(input),
       withConnectionHeaders(input, init, first.headers),
@@ -3843,6 +3891,25 @@ function connectionBrokerFetch(
   };
 }
 
+function mcpToolConnectionKey(serverId: string, operationId: string): string {
+  return `${serverId}\u0000${operationId}`;
+}
+
+function recordResolvedMcpToolConnectionId(
+  resolvedMcpToolConnectionIds: Map<string, string>,
+  config: Settings["mcpServers"][number],
+  request: McpRequestReplayInfo,
+  connectionId: string,
+): void {
+  if (request.method !== "tools/call" || !request.operationId) return;
+  const key = mcpToolConnectionKey(config.id, request.operationId);
+  const existingConnectionId = resolvedMcpToolConnectionIds.get(key);
+  if (existingConnectionId !== undefined && existingConnectionId !== connectionId) {
+    throw new Error("MCP connection identity changed during tool execution");
+  }
+  resolvedMcpToolConnectionIds.set(key, connectionId);
+}
+
 function recordResolvedMcpConnectionId(
   resolvedMcpConnectionIds: Map<string, string>,
   config: Settings["mcpServers"][number],
@@ -3907,6 +3974,85 @@ async function resolveConnectionForRequest(
         : {}),
     };
   }
+}
+
+function buildConnectorAttachmentAuthority(
+  config: Settings["mcpServers"][number],
+  options: PrepareToolsOptions,
+  resolvedMcpToolConnectionIds: Map<string, string>,
+  destinationUrl: string,
+  frozenLocalConnectionId?: string,
+): PrefixedMcpConnectorAttachmentAuthority | undefined {
+  const connectionRef = config.connectionRef;
+  if (!connectionRef?.provider) return undefined;
+  const materializeConnectorAttachments = options.materializeConnectorAttachments;
+  if (!materializeConnectorAttachments) return undefined;
+  return {
+    expectedProvider: connectionRef.provider,
+    connectionIdForOperation: (operationId) =>
+      frozenLocalConnectionId ??
+      resolvedMcpToolConnectionIds.get(mcpToolConnectionKey(config.id, operationId)),
+    releaseOperation: (operationId) => {
+      if (!frozenLocalConnectionId) {
+        resolvedMcpToolConnectionIds.delete(mcpToolConnectionKey(config.id, operationId));
+      }
+    },
+    authorizeAndMaterialize: async (input) => {
+      const revalidated = await resolveConnectionForRequest(
+        options,
+        config.id,
+        connectionRef,
+        destinationUrl,
+        input.toolName,
+        false,
+      );
+      if (revalidated.status === "auth_needed") {
+        await publishAuthNeeded(options, {
+          serverId: config.id,
+          toolName: input.toolName,
+          providerDomain: revalidated.providerDomain,
+          ...(revalidated.provider
+            ? { provider: revalidated.provider }
+            : connectionRef.provider
+              ? { provider: connectionRef.provider }
+              : {}),
+          reason: revalidated.reason,
+          ...(revalidated.connectionId
+            ? { connectionId: revalidated.connectionId }
+            : connectionRef.connectionId
+              ? { connectionId: connectionRef.connectionId }
+              : {}),
+          ...(revalidated.scopes
+            ? { scopes: revalidated.scopes }
+            : connectionRef.scopes
+              ? { scopes: connectionRef.scopes }
+              : {}),
+          ...(revalidated.resource
+            ? { resource: revalidated.resource }
+            : connectionRef.resource
+              ? { resource: connectionRef.resource }
+              : {}),
+          ...(revalidated.selectedResources
+            ? { selectedResources: revalidated.selectedResources }
+            : connectionRef.selectedResources
+              ? { selectedResources: connectionRef.selectedResources }
+              : {}),
+          ...(revalidated.authorizationUrl
+            ? { authorizationUrl: revalidated.authorizationUrl }
+            : {}),
+          ...(options.subjectId ? { subjectId: options.subjectId } : {}),
+        });
+        throw new ConnectorAttachmentTransferError();
+      }
+      if (
+        revalidated.connectionId !== input.connectionId ||
+        (revalidated.expiresAt instanceof Date && revalidated.expiresAt.getTime() <= Date.now())
+      ) {
+        throw new ConnectorAttachmentTransferError();
+      }
+      return await materializeConnectorAttachments(input);
+    },
+  };
 }
 
 function insufficientScopeAuth(
@@ -5104,6 +5250,7 @@ export class PrefixedMcpServer implements MCPServer {
     private readonly aggregateToolBudget?: McpAggregateToolListBudget,
     private readonly aggregateSourceId = registryId,
     private readonly recoverySafeSetup = false,
+    private readonly connectorAttachmentAuthority?: PrefixedMcpConnectorAttachmentAuthority,
   ) {
     this.registryId = registryId;
     // The SDK uses `name` for cache keys, traces, and lifecycle diagnostics.
@@ -5321,11 +5468,37 @@ export class PrefixedMcpServer implements MCPServer {
       metricRecorded = true;
       recordRuntimeMcpToolCallMetric(outcome, startedAt);
     };
+    const operationId =
+      meta && typeof meta.opengeniOperationId === "string" ? meta.opengeniOperationId : undefined;
     try {
       const projectedOutput = this.inner.callToolResult
         ? await this.inner.callToolResult(unprefixed, args, meta, options)
         : mcpContentAsResult(await this.inner.callTool(unprefixed, args, meta, options));
-      const output = unwrapSdkMcpResultProjection(projectedOutput);
+      const rawOutput = unwrapSdkMcpResultProjection(projectedOutput);
+      const connectionId = operationId
+        ? this.connectorAttachmentAuthority?.connectionIdForOperation(operationId)
+        : undefined;
+      const output = await projectConnectorAttachmentTransfers(rawOutput, {
+        serverId: this.registryId,
+        toolName: unprefixed,
+        operationId,
+        connectionId,
+        ...(this.connectorAttachmentAuthority?.expectedProvider
+          ? { expectedProvider: this.connectorAttachmentAuthority.expectedProvider }
+          : {}),
+        authorizeAndMaterialize: async (attachments) => {
+          if (!operationId || !connectionId || !this.connectorAttachmentAuthority) {
+            throw new ConnectorAttachmentTransferError();
+          }
+          return await this.connectorAttachmentAuthority.authorizeAndMaterialize({
+            serverId: this.registryId,
+            toolName: unprefixed,
+            operationId,
+            connectionId,
+            attachments,
+          });
+        },
+      });
       assertMcpPayloadWithinBytes(output, MCP_MAX_TOOL_RESULT_BYTES, "MCP tool result");
       const result = AttemptToolResult.parse(output);
       recordOutcome(result.isError === true ? "provider_declared_error" : "success");
@@ -5355,6 +5528,14 @@ export class PrefixedMcpServer implements MCPServer {
           content: [{ type: "text", text: MCP_AUTH_NEEDED_ERROR.message }],
         };
       }
+      // A routed workspace mutation crossed provider admission but lost exact
+      // settlement. Best-effort MCP isolation must not turn that uncertainty
+      // into a completed tool result: model execution fails loud, and Codemode
+      // durably settles the operation as outcome_unknown.
+      if (isRoutingMutationOutcomeUnknownError(error)) {
+        recordOutcome("outcome_uncertain");
+        throw error;
+      }
       recordOutcome(mcpThrownToolCallOutcome(error, options?.signal));
       // Best-effort INVOCATION isolation (sibling to the listTools guard). When
       // the model calls a best-effort server's tool and the call throws for ANY
@@ -5379,6 +5560,10 @@ export class PrefixedMcpServer implements MCPServer {
         };
       }
       throw error;
+    } finally {
+      if (operationId) {
+        this.connectorAttachmentAuthority?.releaseOperation(operationId);
+      }
     }
   }
 

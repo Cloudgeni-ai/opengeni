@@ -58,6 +58,8 @@ export function startTestMcpServer(
     toolResultIsError?: boolean;
     /** Override the search result text with a provider-only regression sentinel. */
     toolResultText?: string;
+    /** Add private MCP result metadata for runtime projection boundary tests. */
+    toolResultMeta?: Record<string, unknown>;
     /** Advertise the optional MCP output/effect metadata used by catalog tests. */
     richToolMetadata?: boolean;
   } = {},
@@ -161,6 +163,7 @@ export function startTestMcpServer(
         options.toolResultBytes,
         options.toolResultIsError,
         options.toolResultText,
+        options.toolResultMeta,
         options.richToolMetadata,
       );
       await mcp.connect(transport);
@@ -225,6 +228,7 @@ function buildServer(
   toolResultBytes?: number,
   toolResultIsError?: boolean,
   toolResultText?: string,
+  toolResultMeta?: Record<string, unknown>,
   richToolMetadata?: boolean,
 ): McpServer {
   const server = new McpServer({
@@ -247,6 +251,7 @@ function buildServer(
       await beforeToolCall?.(call);
       return {
         ...(toolResultIsError ? { isError: true } : {}),
+        ...(toolResultMeta ? { _meta: toolResultMeta } : {}),
         content: [
           {
             type: "text",
