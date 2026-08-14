@@ -3,7 +3,6 @@ import {
   BotIcon,
   BrainCircuitIcon,
   BrainIcon,
-  Clock3Icon,
   SquareTerminalIcon,
 } from "lucide-react";
 import { lazy, Suspense, useLayoutEffect, useRef } from "react";
@@ -371,7 +370,7 @@ function StartupPhaseRow({ item }: { item: StartupPhaseItem }) {
   const duration = startupDuration(item.durationMs);
   return (
     <ActivityDisclosure
-      icon={<Clock3Icon className="size-3.5" />}
+      icon={<BotIcon className="size-3.5" />}
       iconTone={failed ? "failed" : running ? "running" : "muted"}
       title={startupPhaseTitle(item)}
       running={running}
@@ -384,88 +383,75 @@ function StartupPhaseRow({ item }: { item: StartupPhaseItem }) {
 }
 
 function startupPhaseTitle(item: StartupPhaseItem): string {
-  if (item.status === "running") {
-    switch (item.phase) {
-      case "queue":
-        return "Waiting for a worker";
-      case "sandbox":
-        return "Starting sandbox";
-      case "rig":
-        return "Setting up rig";
-      case "repository":
-        return "Preparing repository";
-      case "files":
-        return "Preparing files";
-      case "tools":
-        return "Connecting tools";
-      case "model_preparation":
-        return "Preparing model request";
-      case "provider_first_byte":
-        return "Waiting for model";
-    }
+  if (
+    item.status === "complete" &&
+    item.phase === "sandbox" &&
+    item.outcome &&
+    item.outcome !== "skipped"
+  ) {
+    return `Sandbox ${item.outcome === "resumed" ? "reattached" : item.outcome}`;
   }
-  if (item.status === "failed") {
-    switch (item.phase) {
-      case "queue":
-        return "Worker startup failed";
-      case "sandbox":
-        return "Sandbox didn’t start";
-      case "rig":
-        return "Rig setup failed";
-      case "repository":
-        return "Repository preparation failed";
-      case "files":
-        return "File preparation failed";
-      case "tools":
-        return "Tool connection failed";
-      case "model_preparation":
-        return "Model request preparation failed";
-      case "provider_first_byte":
-        return "Model didn’t respond";
-    }
+  if (item.status === "complete" && item.phase === "rig" && item.outcome === "skipped") {
+    return "Rig already ready";
   }
-  if (item.status === "cancelled") {
-    switch (item.phase) {
-      case "queue":
-        return "Worker wait interrupted";
-      case "sandbox":
-        return "Sandbox startup interrupted";
-      case "rig":
-        return "Rig setup interrupted";
-      case "repository":
-        return "Repository preparation interrupted";
-      case "files":
-        return "File preparation interrupted";
-      case "tools":
-        return "Tool connection interrupted";
-      case "model_preparation":
-        return "Model request preparation interrupted";
-      case "provider_first_byte":
-        return "Model wait interrupted";
-    }
-  }
-  switch (item.phase) {
-    case "queue":
-      return "Worker started";
-    case "sandbox":
-      if (item.outcome === "restored") return "Sandbox restored";
-      if (item.outcome === "resumed") return "Sandbox reattached";
-      if (item.outcome === "created") return "Sandbox created";
-      return "Sandbox ready";
-    case "rig":
-      return item.outcome === "skipped" ? "Rig already ready" : "Rig ready";
-    case "repository":
-      return "Repository ready";
-    case "files":
-      return "Files ready";
-    case "tools":
-      return "Tools ready";
-    case "model_preparation":
-      return "Model request ready";
-    case "provider_first_byte":
-      return "Model started responding";
-  }
+  return STARTUP_PHASE_TITLES[item.phase][STARTUP_STATUS_INDEX[item.status]];
 }
+
+const STARTUP_STATUS_INDEX: Record<StartupPhaseItem["status"], 0 | 1 | 2 | 3> = {
+  running: 0,
+  failed: 1,
+  cancelled: 2,
+  complete: 3,
+};
+
+const STARTUP_PHASE_TITLES: Record<
+  StartupPhaseItem["phase"],
+  readonly [string, string, string, string]
+> = {
+  queue: [
+    "Waiting for a worker",
+    "Worker startup failed",
+    "Worker wait interrupted",
+    "Worker started",
+  ],
+  sandbox: [
+    "Starting sandbox",
+    "Sandbox didn’t start",
+    "Sandbox startup interrupted",
+    "Sandbox ready",
+  ],
+  rig: ["Setting up rig", "Rig setup failed", "Rig setup interrupted", "Rig ready"],
+  repository: [
+    "Preparing repository",
+    "Repository preparation failed",
+    "Repository preparation interrupted",
+    "Repository ready",
+  ],
+  files: [
+    "Preparing files",
+    "File preparation failed",
+    "File preparation interrupted",
+    "Files ready",
+  ],
+  tools: [
+    "Connecting tools",
+    "Tool connection failed",
+    "Tool connection interrupted",
+    "Tools ready",
+  ],
+  model_preparation: [
+    "Preparing model request",
+    "Model request preparation failed",
+    "Model request preparation interrupted",
+    "Model request ready",
+  ],
+  provider_first_byte: [
+    "Waiting for model",
+    "Model didn’t respond",
+    "Model wait interrupted",
+    "Model started responding",
+  ],
+};
 
 function startupDuration(durationMs: number | null): string | null {
   if (durationMs === null || !Number.isFinite(durationMs) || durationMs < 0) return null;
