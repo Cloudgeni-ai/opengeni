@@ -1023,6 +1023,15 @@ BEGIN
         ${literal(role)}
       );
       EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.clone_scheduled_task_personal_resource_authority(uuid, uuid, uuid, bigint, bigint) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.clone_scheduled_task_personal_resource_authority(uuid, uuid, uuid, bigint, bigint) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+      EXECUTE format(
         'REVOKE ALL ON FUNCTION %I.scheduled_task_run_personal_resource_authority(uuid, uuid, uuid) FROM PUBLIC',
         ${literal(schema)}
       );

@@ -263,6 +263,52 @@ CREATE TABLE "scheduled_task_run_personal_resource_once_receipts" (
   )
 );
 
+-- Existing tasks were accepted by writers that could not create this migration's
+-- authority ledger. Pause every such personal-resource task deterministically;
+-- a current writer's explicit resume creates a new, fully frozen revision.
+UPDATE "scheduled_tasks" task
+SET "status" = 'paused', "updated_at" = clock_timestamp()
+WHERE task."status" = 'active'
+  AND NOT EXISTS (
+    SELECT 1
+    FROM "scheduled_task_personal_resource_authorities" authority
+    WHERE authority."task_id" = task."id"
+      AND authority."task_authority_revision" = task."authority_revision"
+  )
+  AND (
+    EXISTS (
+      SELECT 1
+      FROM "workspace_variable_sets" variable_set
+      WHERE variable_set."id" = task."variable_set_id"
+        AND variable_set."account_id" = task."account_id"
+        AND variable_set."authority_scope" = 'user'
+    )
+    OR EXISTS (
+      SELECT 1
+      FROM "rigs" rig
+      WHERE rig."id" = task."rig_id"
+        AND rig."account_id" = task."account_id"
+        AND rig."authority_scope" = 'user'
+    )
+    OR EXISTS (
+      SELECT 1
+      FROM "rigs" rig
+      JOIN "rig_versions" rig_version
+        ON rig_version."rig_id" = rig."id"
+       AND rig_version."account_id" = rig."account_id"
+       AND rig_version."active"
+      CROSS JOIN LATERAL jsonb_array_elements_text(
+        rig_version."default_variable_set_ids"
+      ) default_id(value)
+      JOIN "workspace_variable_sets" default_variable_set
+        ON default_variable_set."id" = default_id.value::uuid
+       AND default_variable_set."account_id" = task."account_id"
+       AND default_variable_set."authority_scope" = 'user'
+      WHERE rig."id" = task."rig_id"
+        AND rig."account_id" = task."account_id"
+    )
+  );
+
 CREATE INDEX "scheduled_task_personal_resource_snapshots_authority_idx"
   ON "scheduled_task_personal_resource_snapshots"(
     "account_id", "authority_id", "authority_generation"
@@ -631,6 +677,117 @@ EXCEPTION WHEN OTHERS THEN
 END
 $freeze_scheduled_task_personal_resources$;
 
+CREATE OR REPLACE FUNCTION clone_scheduled_task_personal_resource_authority(
+  p_account_id uuid,
+  p_workspace_id uuid,
+  p_task_id uuid,
+  p_source_task_authority_revision bigint,
+  p_target_task_authority_revision bigint
+)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $clone_scheduled_task_personal_resource_authority$
+DECLARE
+  source_authority scheduled_task_personal_resource_authorities%ROWTYPE;
+  copied_count integer;
+BEGIN
+  IF p_source_task_authority_revision <= 0
+    OR p_target_task_authority_revision <= p_source_task_authority_revision
+  THEN
+    RAISE EXCEPTION 'scheduled personal-resource authority clone revision is invalid'
+      USING ERRCODE = '22023';
+  END IF;
+
+  INSERT INTO opengeni_private.scheduled_personal_resource_capabilities (
+    backend_pid, transaction_id, capability_kind
+  ) VALUES (pg_backend_pid(), pg_current_xact_id(), 'task_write')
+  ON CONFLICT DO NOTHING;
+
+  PERFORM 1
+  FROM scheduled_tasks task
+  WHERE task.id = p_task_id
+    AND task.account_id = p_account_id
+    AND task.workspace_id = p_workspace_id
+    AND task.authority_revision = p_target_task_authority_revision
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'scheduled personal-resource clone target is not current'
+      USING ERRCODE = '40001';
+  END IF;
+
+  SELECT authority.* INTO source_authority
+  FROM scheduled_task_personal_resource_authorities authority
+  WHERE authority.task_id = p_task_id
+    AND authority.task_authority_revision = p_source_task_authority_revision
+    AND authority.account_id = p_account_id
+    AND authority.workspace_id = p_workspace_id;
+  IF NOT FOUND THEN
+    DELETE FROM opengeni_private.scheduled_personal_resource_capabilities
+    WHERE backend_pid = pg_backend_pid()
+      AND transaction_id = pg_current_xact_id_if_assigned()
+      AND capability_kind = 'task_write';
+    RETURN 0;
+  END IF;
+
+  INSERT INTO scheduled_task_personal_resource_authorities (
+    task_id, task_authority_revision, account_id, workspace_id,
+    initiating_human_subject_id, owner_organization_membership_id,
+    membership_authorization_revision, target_session_id, session_visibility,
+    session_authority_epoch, resource_count
+  ) VALUES (
+    source_authority.task_id, p_target_task_authority_revision,
+    source_authority.account_id, source_authority.workspace_id,
+    source_authority.initiating_human_subject_id,
+    source_authority.owner_organization_membership_id,
+    source_authority.membership_authorization_revision,
+    source_authority.target_session_id, source_authority.session_visibility,
+    source_authority.session_authority_epoch, source_authority.resource_count
+  );
+
+  INSERT INTO scheduled_task_personal_resource_snapshots (
+    task_id, task_authority_revision, account_id, workspace_id,
+    resource_kind, resource_id, resource_version_id, selection_sources, action,
+    origin_workspace_id, owner_organization_membership_id,
+    membership_authorization_revision, authority_id, authority_generation,
+    target_workspace_id, session_visibility, session_authority_epoch,
+    grant_id, grant_generation, grant_mode, grant_context,
+    grant_session_id, grant_authority_epoch
+  )
+  SELECT snapshot.task_id, p_target_task_authority_revision,
+    snapshot.account_id, snapshot.workspace_id, snapshot.resource_kind,
+    snapshot.resource_id, snapshot.resource_version_id, snapshot.selection_sources,
+    snapshot.action, snapshot.origin_workspace_id,
+    snapshot.owner_organization_membership_id,
+    snapshot.membership_authorization_revision, snapshot.authority_id,
+    snapshot.authority_generation, snapshot.target_workspace_id,
+    snapshot.session_visibility, snapshot.session_authority_epoch,
+    snapshot.grant_id, snapshot.grant_generation, snapshot.grant_mode,
+    snapshot.grant_context, snapshot.grant_session_id, snapshot.grant_authority_epoch
+  FROM scheduled_task_personal_resource_snapshots snapshot
+  WHERE snapshot.task_id = p_task_id
+    AND snapshot.task_authority_revision = p_source_task_authority_revision;
+  GET DIAGNOSTICS copied_count = ROW_COUNT;
+  IF copied_count <> source_authority.resource_count THEN
+    RAISE EXCEPTION 'scheduled personal-resource authority clone is incomplete'
+      USING ERRCODE = '42501';
+  END IF;
+
+  DELETE FROM opengeni_private.scheduled_personal_resource_capabilities
+  WHERE backend_pid = pg_backend_pid()
+    AND transaction_id = pg_current_xact_id_if_assigned()
+    AND capability_kind = 'task_write';
+  RETURN copied_count;
+EXCEPTION WHEN OTHERS THEN
+  DELETE FROM opengeni_private.scheduled_personal_resource_capabilities
+  WHERE backend_pid = pg_backend_pid()
+    AND transaction_id = pg_current_xact_id_if_assigned()
+    AND capability_kind = 'task_write';
+  RAISE;
+END
+$clone_scheduled_task_personal_resource_authority$;
+
 CREATE OR REPLACE FUNCTION admit_scheduled_task_run_personal_resources()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -641,6 +798,7 @@ DECLARE
   task_row scheduled_tasks%ROWTYPE;
   authority_row scheduled_task_personal_resource_authorities%ROWTYPE;
   once_snapshot record;
+  selected_personal_count integer;
   invalid_count integer;
   affected integer;
 BEGIN
@@ -664,6 +822,40 @@ BEGIN
   WHERE authority.task_id = NEW.task_id
     AND authority.task_authority_revision = task_row.authority_revision;
   IF NOT FOUND THEN
+    SELECT count(*)::integer INTO selected_personal_count
+    FROM (
+      SELECT variable_set.id
+      FROM workspace_variable_sets variable_set
+      WHERE variable_set.id = task_row.variable_set_id
+        AND variable_set.account_id = task_row.account_id
+        AND variable_set.authority_scope = 'user'
+      UNION
+      SELECT rig.id
+      FROM rigs rig
+      WHERE rig.id = task_row.rig_id
+        AND rig.account_id = task_row.account_id
+        AND rig.authority_scope = 'user'
+      UNION
+      SELECT default_variable_set.id
+      FROM rigs rig
+      JOIN rig_versions rig_version
+        ON rig_version.rig_id = rig.id
+       AND rig_version.account_id = rig.account_id
+       AND rig_version.active
+      CROSS JOIN LATERAL jsonb_array_elements_text(
+        rig_version.default_variable_set_ids
+      ) default_id(value)
+      JOIN workspace_variable_sets default_variable_set
+        ON default_variable_set.id = default_id.value::uuid
+       AND default_variable_set.account_id = task_row.account_id
+       AND default_variable_set.authority_scope = 'user'
+      WHERE rig.id = task_row.rig_id
+        AND rig.account_id = task_row.account_id
+    ) selected;
+    IF selected_personal_count <> 0 THEN
+      RAISE EXCEPTION 'scheduled personal-resource task has no authority snapshot'
+        USING ERRCODE = '42501';
+    END IF;
     DELETE FROM opengeni_private.scheduled_personal_resource_capabilities
     WHERE backend_pid = pg_backend_pid()
       AND transaction_id = pg_current_xact_id_if_assigned()
@@ -1118,6 +1310,9 @@ $scheduled_task_run_personal_resource_authority$;
 
 REVOKE ALL ON FUNCTION freeze_scheduled_task_personal_resources(uuid, uuid, uuid, bigint)
   FROM PUBLIC;
+REVOKE ALL ON FUNCTION clone_scheduled_task_personal_resource_authority(
+  uuid, uuid, uuid, bigint, bigint
+) FROM PUBLIC;
 REVOKE ALL ON FUNCTION scheduled_task_run_personal_resource_authority(uuid, uuid, uuid)
   FROM PUBLIC;
 REVOKE ALL ON FUNCTION admit_scheduled_task_run_personal_resources() FROM PUBLIC;
@@ -1134,6 +1329,9 @@ BEGIN
       TO opengeni_app;
     GRANT EXECUTE ON FUNCTION
       freeze_scheduled_task_personal_resources(uuid, uuid, uuid, bigint)
+      TO opengeni_app;
+    GRANT EXECUTE ON FUNCTION
+      clone_scheduled_task_personal_resource_authority(uuid, uuid, uuid, bigint, bigint)
       TO opengeni_app;
     GRANT EXECUTE ON FUNCTION
       scheduled_task_run_personal_resource_authority(uuid, uuid, uuid)

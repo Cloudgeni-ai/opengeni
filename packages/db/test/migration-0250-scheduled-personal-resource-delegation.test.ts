@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing";
+import {
+  captureScheduledTaskRestoreState,
+  ScheduledTaskSyncError,
+  syncUpdatedScheduledTask,
+} from "@opengeni/core";
 import { readFile } from "node:fs/promises";
 import postgres from "postgres";
 import {
@@ -7,6 +12,7 @@ import {
   createScheduledTask,
   createScheduledTaskRun,
   createSession,
+  getScheduledTask,
   getScheduledTaskRunPersonalResourceAuthority,
   updateScheduledTask,
 } from "../src";
@@ -38,6 +44,9 @@ describe("migration 0250 scheduled personal-resource delegation", () => {
     expect(source).toContain("SET search_path FROM CURRENT");
     expect(source).not.toContain("SET search_path = public");
     expect(source).toContain("scheduled personal-resource authority snapshot is no longer live");
+    expect(source).toContain("scheduled personal-resource task has no authority snapshot");
+    expect(source).toContain("clone_scheduled_task_personal_resource_authority");
+    expect(source).toContain("SET \"status\" = 'paused'");
     expect(source).toContain("scheduled task authority revision changed before attempt admission");
     expect(source).toContain("scheduled occurrence personal-resource snapshot widened or changed");
     expect(source).toContain("scheduled occurrence once grant lost its first-use race");
@@ -73,6 +82,7 @@ describe("migration 0250 scheduled personal-resource delegation", () => {
           taskColumn: boolean;
           updateColumn: boolean;
           freezeFunction: boolean;
+          cloneFunction: boolean;
           runTrigger: boolean;
           attemptTrigger: boolean;
           forcedLedgers: number;
@@ -91,6 +101,8 @@ describe("migration 0250 scheduled personal-resource delegation", () => {
           ) as "updateColumn",
           to_regprocedure('${schema}.freeze_scheduled_task_personal_resources(uuid,uuid,uuid,bigint)')
             is not null as "freezeFunction",
+          to_regprocedure('${schema}.clone_scheduled_task_personal_resource_authority(uuid,uuid,uuid,bigint,bigint)')
+            is not null as "cloneFunction",
           exists (
             select 1 from pg_trigger trigger_value
             join pg_class table_value on table_value.oid = trigger_value.tgrelid
@@ -124,12 +136,194 @@ describe("migration 0250 scheduled personal-resource delegation", () => {
         taskColumn: true,
         updateColumn: true,
         freezeFunction: true,
+        cloneFunction: true,
         runTrigger: true,
         attemptTrigger: true,
         forcedLedgers: 5,
       });
     } finally {
       await sql.end({ timeout: 5 }).catch(() => undefined);
+      await blank.release();
+    }
+  }, 180_000);
+
+  test("pauses pre-migration personal tasks and rejects an old writer without a snapshot", async () => {
+    const blank = await acquireMigrationTestDatabase("rolling-old-writer");
+    if (!blank) return;
+    const admin = postgres(blank.databaseUrl, { max: 2, prepare: false });
+    const client = createDb(blank.databaseUrl, { max: 2 });
+    const migrationName = "0250_scheduled_personal_resource_delegation.sql";
+    try {
+      await admin`
+        create table if not exists schema_migrations (
+          name text primary key,
+          applied_at timestamptz not null default now()
+        )
+      `;
+      await admin`insert into schema_migrations (name) values (${migrationName})`;
+      await migrate(blank.databaseUrl);
+      const fixture = await createAuthorityFixture(admin);
+      const [legacyTask] = await admin<Array<{ id: string }>>`
+        insert into scheduled_tasks (
+          account_id, workspace_id, name, status, schedule, temporal_schedule_id,
+          run_mode, overlap_policy, agent_config, created_by_kind,
+          created_by_subject_id, variable_set_id, metadata
+        ) values (
+          ${fixture.accountId}, ${fixture.targetWorkspaceId}, 'legacy personal task', 'active',
+          '{"type":"manual"}'::jsonb, ${`ope233-legacy-${crypto.randomUUID()}`},
+          'new_session_per_run', 'allow_concurrent',
+          '{"prompt":"legacy","resources":[],"tools":[],"metadata":{}}'::jsonb,
+          'subject', ${fixture.subjectId}, ${fixture.variableSetId}, '{}'::jsonb
+        ) returning id
+      `;
+
+      await admin`delete from schema_migrations where name = ${migrationName}`;
+      await migrate(blank.databaseUrl);
+
+      const [paused] = await admin<
+        Array<{ status: string; authorityRevision: number; authorityCount: number }>
+      >`
+        select task.status, task.authority_revision::int as "authorityRevision",
+          (select count(*)::int from scheduled_task_personal_resource_authorities authority
+            where authority.task_id = task.id) as "authorityCount"
+        from scheduled_tasks task where task.id = ${legacyTask!.id}
+      `;
+      expect(paused).toEqual({ status: "paused", authorityRevision: 1, authorityCount: 0 });
+      expect(
+        await rejectedErrorChain(
+          createScheduledTaskRun(client.db, {
+            workspaceId: fixture.targetWorkspaceId,
+            taskId: legacyTask!.id,
+            triggerType: "scheduled",
+            producerKey: "ope233-pre-migration-paused",
+          }),
+        ),
+      ).toContain("scheduled task is not active");
+
+      // A rolling old writer can still issue the pre-0250 status update, but it
+      // cannot manufacture the new immutable authority ledger. The database
+      // rejects the occurrence instead of silently dispatching authority-free.
+      await admin`update scheduled_tasks set status = 'active' where id = ${legacyTask!.id}`;
+      expect(
+        await rejectedErrorChain(
+          createScheduledTaskRun(client.db, {
+            workspaceId: fixture.targetWorkspaceId,
+            taskId: legacyTask!.id,
+            triggerType: "scheduled",
+            producerKey: "ope233-old-writer-reactivated",
+          }),
+        ),
+      ).toContain("scheduled personal-resource task has no authority snapshot");
+      const [runCount] = await admin<Array<{ count: number }>>`
+        select count(*)::int as count from scheduled_task_runs where task_id = ${legacyTask!.id}
+      `;
+      expect(runCount?.count).toBe(0);
+    } finally {
+      await client.close().catch(() => undefined);
+      await admin.end({ timeout: 5 }).catch(() => undefined);
+      await blank.release();
+    }
+  }, 180_000);
+
+  test("Temporal rollback clones the prior causal human instead of the task creator", async () => {
+    const blank = await acquireMigrationTestDatabase("cross-human-rollback");
+    if (!blank) return;
+    const admin = postgres(blank.databaseUrl, { max: 2, prepare: false });
+    const client = createDb(blank.databaseUrl, { max: 2 });
+    try {
+      await migrate(blank.databaseUrl);
+      const fixture = await createAuthorityFixture(admin);
+      const createdByOtherHuman = await createScheduledTask(client.db, {
+        accountId: fixture.accountId,
+        workspaceId: fixture.targetWorkspaceId,
+        name: "created by another human",
+        status: "active",
+        schedule: { type: "manual" },
+        temporalScheduleId: `ope233-rollback-${crypto.randomUUID()}`,
+        runMode: "new_session_per_run",
+        overlapPolicy: "allow_concurrent",
+        agentConfig: {
+          prompt: "before personal authority",
+          resources: [],
+          tools: [],
+          metadata: {},
+        },
+        createdBy: { kind: "subject", subjectId: fixture.otherSubjectId },
+        metadata: {},
+      });
+      const acceptedByResourceOwner = await updateScheduledTask(
+        client.db,
+        fixture.targetWorkspaceId,
+        createdByOtherHuman.id,
+        {
+          name: "accepted by resource owner",
+          variableSetId: fixture.variableSetId,
+          refreshPersonalResourceAuthority: true,
+          authorityUpdatedBy: { kind: "subject", subjectId: fixture.subjectId },
+          authorityUpdatedByActor: null,
+        },
+      );
+      const previous = await captureScheduledTaskRestoreState(client.db, acceptedByResourceOwner);
+      const changed = await updateScheduledTask(
+        client.db,
+        fixture.targetWorkspaceId,
+        createdByOtherHuman.id,
+        {
+          name: "Temporal will reject this update",
+          refreshPersonalResourceAuthority: true,
+          authorityUpdatedBy: { kind: "subject", subjectId: fixture.subjectId },
+          authorityUpdatedByActor: null,
+        },
+      );
+
+      let syncError: unknown;
+      try {
+        await syncUpdatedScheduledTask({
+          db: client.db,
+          previous,
+          task: changed,
+          workflowClient: {
+            syncScheduledTask: async () => {
+              throw new Error("expected Temporal synchronization failure");
+            },
+          } as never,
+        });
+      } catch (error) {
+        syncError = error;
+      }
+      expect(syncError).toBeInstanceOf(ScheduledTaskSyncError);
+      expect((syncError as ScheduledTaskSyncError).persistenceRestored).toBe(true);
+
+      const restored = await getScheduledTask(
+        client.db,
+        fixture.targetWorkspaceId,
+        createdByOtherHuman.id,
+      );
+      expect(restored).toMatchObject({
+        name: acceptedByResourceOwner.name,
+        variableSetId: fixture.variableSetId,
+        authorityRevision: changed.authorityRevision + 1,
+      });
+      const restoredRun = await createScheduledTaskRun(client.db, {
+        workspaceId: fixture.targetWorkspaceId,
+        taskId: createdByOtherHuman.id,
+        triggerType: "scheduled",
+        producerKey: "ope233-cross-human-restored",
+      });
+      expect(
+        await getScheduledTaskRunPersonalResourceAuthority(client.db, {
+          accountId: fixture.accountId,
+          workspaceId: fixture.targetWorkspaceId,
+          runId: restoredRun.id,
+        }),
+      ).toMatchObject({
+        taskAuthorityRevision: changed.authorityRevision + 1,
+        initiatingHumanSubjectId: fixture.subjectId,
+        resources: [expect.objectContaining({ resourceId: fixture.variableSetId })],
+      });
+    } finally {
+      await client.close().catch(() => undefined);
+      await admin.end({ timeout: 5 }).catch(() => undefined);
       await blank.release();
     }
   }, 180_000);
