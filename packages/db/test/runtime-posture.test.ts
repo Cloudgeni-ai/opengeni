@@ -191,15 +191,15 @@ describe("runtime database posture evaluator", () => {
         .sort();
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 236],
+            [FORCE_RLS_TABLES, 238],
             [NON_RLS_RUNTIME_TABLES, 11],
             [RUNTIME_FULL_DML_TABLES, 138],
             [RUNTIME_READ_ONLY_TABLES, 17],
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 43],
-            [RUNTIME_READ_INSERT_UPDATE_TABLES, 29],
+            [RUNTIME_READ_INSERT_UPDATE_TABLES, 31],
             [PROTECTED_NO_DIRECT_DML_TABLES, 19],
-            [RUNTIME_DML_TABLES, 228],
+            [RUNTIME_DML_TABLES, 230],
           ] as const)
         : ([
             [FORCE_RLS_TABLES, 183],
@@ -219,7 +219,7 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = hasCurrentMainActivityLedger ? 247 : 194;
+      const tableCount = hasCurrentMainActivityLedger ? 249 : 194;
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount,
       );
@@ -326,6 +326,64 @@ describe("runtime database posture evaluator", () => {
 
   test("accepts the exact least-privilege FORCE-RLS contract", () => {
     expect(evaluateRuntimeDatabasePosture(safePosture(), options)).toEqual([]);
+  });
+
+  test("requires provider-loss trigger guards to stay non-executable", () => {
+    const posture = safePosture();
+    posture.tables.push(
+      {
+        ...posture.tables[0]!,
+        name: "sandbox_provider_loss_teardown_claims",
+        delete: false,
+      },
+      {
+        ...posture.tables[0]!,
+        name: "sandbox_provider_loss_receipts",
+        delete: false,
+      },
+    );
+    for (const name of [
+      "guard_provider_loss_claim_mutation()",
+      "guard_provider_loss_receipt_mutation()",
+      "guard_provider_loss_claim_fence()",
+      "guard_provider_loss_lease_mutation()",
+    ]) {
+      posture.privateRoutines.push({
+        name,
+        owner: "opengeni_migrator",
+        execute: false,
+        securityDefiner:
+          name.endsWith("_fence()") || name === "guard_provider_loss_lease_mutation()",
+      });
+    }
+    const providerLossOptions: RuntimeDatabasePostureOptions = {
+      ...options,
+      protectedTables: [
+        "tenant_rows",
+        "sandbox_provider_loss_teardown_claims",
+        "sandbox_provider_loss_receipts",
+      ],
+      tablePrivileges: {
+        tenant_rows: ["SELECT", "INSERT", "UPDATE", "DELETE"],
+        sandbox_provider_loss_teardown_claims: ["SELECT", "INSERT", "UPDATE"],
+        sandbox_provider_loss_receipts: ["SELECT", "INSERT", "UPDATE"],
+      },
+    };
+
+    expect(evaluateRuntimeDatabasePosture(posture, providerLossOptions)).toEqual([]);
+
+    posture.privateRoutines.find(
+      (routine) => routine.name === "guard_provider_loss_claim_mutation()",
+    )!.execute = true;
+    posture.privateRoutines = posture.privateRoutines.filter(
+      (routine) => routine.name !== "guard_provider_loss_receipt_mutation()",
+    );
+    expect(evaluateRuntimeDatabasePosture(posture, providerLossOptions)).toEqual(
+      expect.arrayContaining([
+        "runtime role has forbidden provider-loss trigger guard guard_provider_loss_claim_mutation()",
+        "provider-loss trigger guard guard_provider_loss_receipt_mutation() is missing or ambiguous",
+      ]),
+    );
   });
 
   test("accepts public-schema authority owned by the two protected tables", () => {

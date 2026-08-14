@@ -111,6 +111,13 @@ describe("release schema contract", () => {
 
   test("preserves published host-export history and appends the forward repair", async () => {
     const completeSourceContract = await buildSchemaContract();
+    const completeMigrations = new Map(
+      completeSourceContract.migrations.map((migration) => [migration.path, migration]),
+    );
+    expect(completeMigrations.get("0240_sandbox_provider_loss_receipts.sql")).toMatchObject({
+      sha256: "a69a1c64d247db241db0fcad9b5e090aa6d193adab60c92312b43094b8d7cc5b",
+      deploymentMode: "rolling",
+    });
     const companyBrainMigrationPaths = [
       "0238_goal_persistence_policy.sql",
       "0239_task_tree_notes.sql",
@@ -130,6 +137,7 @@ describe("release schema contract", () => {
     }
     const appendedMigrationPaths = [
       "0237_interaction_transition_reaper.sql",
+      "0240_sandbox_provider_loss_receipts.sql",
       "0238_supergrok_realtime_model.sql",
       "0239_supergrok_video_funding.sql",
     ].filter((path) =>

@@ -1014,6 +1014,26 @@ BEGIN
       owner_role,
       ${literal(role)}
     );
+    -- Trigger-only provider-loss guards are never runtime entrypoints. Keep
+    -- them outside the app role even after the historical blanket grant above.
+    IF to_regprocedure('opengeni_private.guard_provider_loss_claim_mutation()') IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE EXECUTE ON FUNCTION opengeni_private.guard_provider_loss_claim_mutation() FROM %I',
+        ${literal(role)}
+      );
+      EXECUTE format(
+        'REVOKE EXECUTE ON FUNCTION opengeni_private.guard_provider_loss_receipt_mutation() FROM %I',
+        ${literal(role)}
+      );
+      EXECUTE format(
+        'REVOKE EXECUTE ON FUNCTION opengeni_private.guard_provider_loss_claim_fence() FROM %I',
+        ${literal(role)}
+      );
+      EXECUTE format(
+        'REVOKE EXECUTE ON FUNCTION opengeni_private.guard_provider_loss_lease_mutation() FROM %I',
+        ${literal(role)}
+      );
+    END IF;
     -- Global cross-workspace artifact workers are separate capabilities. Never
     -- let the generic tenant-scoped app role inherit them from the historical
     -- blanket grant of already-installed helpers.
