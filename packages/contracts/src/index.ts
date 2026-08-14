@@ -2675,6 +2675,40 @@ export type InsightsBillingPath = z.infer<typeof InsightsBillingPath>;
 export const InsightsPricingSource = z.enum(["configured_list_price", "gateway_reported"]);
 export type InsightsPricingSource = z.infer<typeof InsightsPricingSource>;
 
+export const ModelContextContributionSource = z.enum([
+  "workspace_instruction_policy",
+  "legacy_workspace_instructions",
+  "preference_registry_descriptor",
+  "company_profile",
+  "legacy_memory_v1",
+  "runtime_skill_catalog",
+]);
+export type ModelContextContributionSource = z.infer<typeof ModelContextContributionSource>;
+
+/** Content-free per-call summary of model-visible Company Brain material. */
+export const ModelContextContributionSummary = z.object({
+  source: ModelContextContributionSource,
+  items: z.number().int().nonnegative(),
+  utf8Bytes: z.number().int().nonnegative(),
+  estimatedTokens: z.number().int().nonnegative(),
+});
+export type ModelContextContributionSummary = z.infer<typeof ModelContextContributionSummary>;
+
+export const InsightsPromptContributionRow = ModelContextContributionSummary.extend({
+  calls: z.number().int().nonnegative(),
+});
+export type InsightsPromptContributionRow = z.infer<typeof InsightsPromptContributionRow>;
+
+export const InsightsPromptContributions = z.object({
+  /** Sum of UTF-8 byte / 4 estimates across calls with contribution receipts. */
+  estimatedTokens: z.number().int().nonnegative(),
+  utf8Bytes: z.number().int().nonnegative(),
+  coveredCalls: z.number().int().nonnegative(),
+  totalCalls: z.number().int().nonnegative(),
+  sources: z.array(InsightsPromptContributionRow),
+});
+export type InsightsPromptContributions = z.infer<typeof InsightsPromptContributions>;
+
 export const InsightsModelUsageRow = z.object({
   id: z.string().min(1),
   model: z.string().min(1),
@@ -2841,6 +2875,13 @@ export const WorkspaceInsightsSnapshot = z.object({
   drivers: z.array(InsightsSpendDriver),
   schedules: z.array(InsightsScheduleRow),
   recentCalls: z.array(InsightsModelCallRow),
+  promptContributions: InsightsPromptContributions.default({
+    estimatedTokens: 0,
+    utf8Bytes: 0,
+    coveredCalls: 0,
+    totalCalls: 0,
+    sources: [],
+  }),
   warmSeconds: z.number().nonnegative(),
   priorWarmSeconds: z.number().nonnegative(),
   warmGroups: z.array(InsightsWarmGroupRow),

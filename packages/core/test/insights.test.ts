@@ -73,6 +73,17 @@ describe("getWorkspaceInsights", () => {
     restores.push(() => facets.mockRestore());
     const recent = spyOn(opengeniDb, "listRecentModelCalls").mockResolvedValue([]);
     restores.push(() => recent.mockRestore());
+    const promptContributions = spyOn(
+      opengeniDb,
+      "aggregateModelContextContributions",
+    ).mockResolvedValue({
+      estimatedTokens: 0,
+      utf8Bytes: 0,
+      coveredCalls: 0,
+      totalCalls: 0,
+      sources: [],
+    });
+    restores.push(() => promptContributions.mockRestore());
     return { machines, emptyAgg, emptyDays, emptyHours, usageDay, usageHour, recent };
   }
 

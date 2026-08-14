@@ -8,6 +8,7 @@ import {
   aggregateModelCallFacts,
   aggregateModelCallFactsByDay,
   aggregateModelCallFactsByHour,
+  aggregateModelContextContributions,
   aggregateRootSessionDrivers,
   aggregateScheduleFacts,
   aggregateSessionDepth,
@@ -212,6 +213,7 @@ export async function getWorkspaceInsights(
     agentRunsUsed,
     facets,
     recentCalls,
+    promptContributions,
   ] = await Promise.all([
     sumUsageQuantityInRange(db, {
       workspaceId: input.workspaceId,
@@ -314,6 +316,12 @@ export async function getWorkspaceInsights(
       until: window.until,
       ...filter,
       limit: 50,
+    }),
+    aggregateModelContextContributions(db, {
+      workspaceId: input.workspaceId,
+      since: window.since,
+      until: window.until,
+      ...filter,
     }),
   ]);
 
@@ -539,6 +547,7 @@ export async function getWorkspaceInsights(
           : microsToUsd(row.estimatedProviderCostMicros),
       pricingSource: pricingSourceOf(row.pricingSource),
     })),
+    promptContributions,
     warmSeconds,
     priorWarmSeconds,
     warmGroups: warmGroups.map((group) => ({

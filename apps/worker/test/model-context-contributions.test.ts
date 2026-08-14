@@ -4,7 +4,10 @@ import type {
   ResolvedCompanyProfileSnapshot,
   ResolvedWorkspaceInstructionPolicySnapshot,
 } from "@opengeni/contracts";
-import { buildCompanyBrainContributionReceipt } from "../src/model-context-contributions";
+import {
+  buildCompanyBrainContributionReceipt,
+  summarizeCompanyBrainContributions,
+} from "../src/model-context-contributions";
 
 const identity = (): string => crypto.randomUUID();
 
@@ -137,6 +140,11 @@ describe("Company Brain model contribution receipts", () => {
     expect(receipt.contributions.every((item) => item.estimatedTokens > 0)).toBe(true);
     expect(JSON.stringify(receipt)).not.toContain("Mandatory rule");
     expect(JSON.stringify(receipt)).not.toContain("Keep replies concise");
+    expect(summarizeCompanyBrainContributions(receipt)).toEqual([
+      expect.objectContaining({ source: "workspace_instruction_policy", items: 1 }),
+      expect.objectContaining({ source: "preference_registry_descriptor", items: 1 }),
+      expect.objectContaining({ source: "runtime_skill_catalog", items: 1 }),
+    ]);
   });
 
   test("accounts for legacy workspace instructions only when structured policy is absent", () => {

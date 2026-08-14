@@ -1,4 +1,6 @@
 import type {
+  ModelContextContributionSource,
+  ModelContextContributionSummary,
   PreferenceRegistrySnapshot,
   ResolvedCompanyProfileSnapshot,
   ResolvedWorkspaceInstructionPolicySnapshot,
@@ -14,13 +16,7 @@ export type CompanyBrainContributionCategory =
 
 export type CompanyBrainContribution = Readonly<{
   category: CompanyBrainContributionCategory;
-  source:
-    | "workspace_instruction_policy"
-    | "legacy_workspace_instructions"
-    | "preference_registry_descriptor"
-    | "company_profile"
-    | "legacy_memory_v1"
-    | "runtime_skill_catalog";
+  source: ModelContextContributionSource;
   inclusionReason:
     | "active_instruction_policy"
     | "legacy_instruction_fallback"
@@ -32,6 +28,22 @@ export type CompanyBrainContribution = Readonly<{
   utf8Bytes: number;
   estimatedTokens: number;
 }>;
+
+export function summarizeCompanyBrainContributions(
+  receipt: CompanyBrainContributionReceipt,
+): readonly ModelContextContributionSummary[] {
+  const bySource = new Map<ModelContextContributionSource, ModelContextContributionSummary>();
+  for (const entry of receipt.contributions) {
+    const current = bySource.get(entry.source);
+    bySource.set(entry.source, {
+      source: entry.source,
+      items: (current?.items ?? 0) + 1,
+      utf8Bytes: (current?.utf8Bytes ?? 0) + entry.utf8Bytes,
+      estimatedTokens: (current?.estimatedTokens ?? 0) + entry.estimatedTokens,
+    });
+  }
+  return Object.freeze([...bySource.values()].map((summary) => Object.freeze(summary)));
+}
 
 export type CompanyBrainContributionReceipt = Readonly<{
   attemptId: string;

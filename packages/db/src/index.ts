@@ -50,6 +50,7 @@ import type {
   ManagedAccount,
   ManagedOrganizationMembershipProjection,
   McpPersonalConnectionDelegation,
+  ModelContextContributionSummary,
   Permission,
   PackInstallation,
   PackInstallationStatus,
@@ -3193,6 +3194,7 @@ export type ModelCallFact = {
   pricedCostMicros: number;
   estimatedProviderCostMicros: number | null;
   pricingSource: "configured_list_price" | "gateway_reported" | null;
+  contextContributions: readonly ModelContextContributionSummary[] | null;
   occurredAt: Date;
   recordedAt: Date;
 };
@@ -3230,6 +3232,7 @@ function mapModelCallFact(row: typeof schema.modelCallFacts.$inferSelect): Model
       row.pricingSource === "configured_list_price" || row.pricingSource === "gateway_reported"
         ? row.pricingSource
         : null,
+    contextContributions: row.contextContributions,
     occurredAt: row.occurredAt,
     recordedAt: row.recordedAt,
   };
@@ -3292,6 +3295,7 @@ export async function recordModelCallFact(
     pricedCostMicros: number;
     estimatedProviderCostMicros?: number | null;
     pricingSource?: "configured_list_price" | "gateway_reported" | null;
+    contextContributions?: readonly ModelContextContributionSummary[] | null;
     inputTokens?: number | null;
     outputTokens?: number | null;
     cachedTokens?: number | null;
@@ -3371,6 +3375,7 @@ export async function recordModelCallFact(
           pricedCostMicros: input.pricedCostMicros,
           estimatedProviderCostMicros: input.estimatedProviderCostMicros ?? null,
           pricingSource: input.pricingSource ?? null,
+          contextContributions: input.contextContributions ?? null,
           occurredAt,
         })
         .onConflictDoUpdate({
@@ -3387,6 +3392,7 @@ export async function recordModelCallFact(
             turnSource: sql`coalesce(${schema.modelCallFacts.turnSource}, excluded.turn_source)`,
             estimatedProviderCostMicros: sql`coalesce(${schema.modelCallFacts.estimatedProviderCostMicros}, excluded.estimated_provider_cost_micros)`,
             pricingSource: sql`coalesce(${schema.modelCallFacts.pricingSource}, excluded.pricing_source)`,
+            contextContributions: sql`coalesce(${schema.modelCallFacts.contextContributions}, excluded.context_contributions)`,
           },
         })
         .returning();
