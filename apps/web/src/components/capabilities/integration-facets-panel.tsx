@@ -115,18 +115,22 @@ export function IntegrationFacetsPanel({
   const [googleDriveEditor, setGoogleDriveEditor] = useState<FacetEntry | null>(null);
   const [form, setForm] = useState<FacetFormState>({});
   const [removeTarget, setRemoveTarget] = useState<FacetEntry | null>(null);
-  const loadSequence = useRef(0);
+  const operationSequence = useRef(0);
   const loadPromise = useRef<Promise<void> | null>(null);
+  const googleDriveMutationSequence = useRef<number | null>(null);
 
   useEffect(() => {
-    ++loadSequence.current;
+    ++operationSequence.current;
     loadPromise.current = null;
+    googleDriveMutationSequence.current = null;
     setData(null);
     setLoading(false);
     setError(null);
+    setBusyFacetKey(null);
     setOpen(false);
     setEditor(null);
     setGoogleDriveEditor(null);
+    setRemoveTarget(null);
   }, [instance.capabilityId, instance.instanceKey, instance.instanceVersion]);
 
   useEffect(() => {
@@ -139,7 +143,9 @@ export function IntegrationFacetsPanel({
 
   async function load(): Promise<void> {
     if (loadPromise.current) return await loadPromise.current;
-    const sequence = ++loadSequence.current;
+    const sequence = ++operationSequence.current;
+    googleDriveMutationSequence.current = null;
+    setBusyFacetKey(null);
     const pending = (async () => {
       setLoading(true);
       try {
@@ -148,14 +154,14 @@ export function IntegrationFacetsPanel({
           instance.capabilityId,
           instance.instanceKey,
         );
-        if (sequence !== loadSequence.current) return;
+        if (sequence !== operationSequence.current) return;
         setData(response);
         setError(null);
       } catch (loadError) {
-        if (sequence !== loadSequence.current) return;
+        if (sequence !== operationSequence.current) return;
         setError(loadError instanceof Error ? loadError.message : String(loadError));
       } finally {
-        if (sequence === loadSequence.current) setLoading(false);
+        if (sequence === operationSequence.current) setLoading(false);
       }
     })();
     loadPromise.current = pending;
@@ -175,51 +181,69 @@ export function IntegrationFacetsPanel({
     setForm(facetFormState(entry.definition, entry.binding));
   }
 
+  function beginMutation(): number {
+    const sequence = ++operationSequence.current;
+    loadPromise.current = null;
+    googleDriveMutationSequence.current = null;
+    setLoading(false);
+    return sequence;
+  }
+
   function applyMutationBinding(
+    sequence: number,
     facetKey: string,
     binding: IntegrationFacetBindingSummary | null,
-  ): void {
-    ++loadSequence.current;
-    loadPromise.current = null;
-    setLoading(false);
+  ): boolean {
+    if (sequence !== operationSequence.current) return false;
     setData((current) =>
       current ? replaceIntegrationFacetBinding(current, facetKey, binding) : current,
     );
+    return true;
+  }
+
+  function finishMutation(sequence: number): void {
+    if (sequence === operationSequence.current) setBusyFacetKey(null);
   }
 
   async function save(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
-    if (!editor) return;
-    setBusyFacetKey(editor.definition.facetKey);
+    if (!editor || !data) return;
+    const target = editor;
+    const currentData = data;
+    const sequence = beginMutation();
+    setBusyFacetKey(target.definition.facetKey);
     try {
       const configured = await client.configureIntegrationFacet(
         workspaceId,
-        data!.capabilityId,
-        data!.instanceKey,
-        editor.definition.facetKey,
+        currentData.capabilityId,
+        currentData.instanceKey,
+        target.definition.facetKey,
         {
-          displayName: `${instance.displayName} — ${facetTitle(editor.definition)}`,
-          config: facetConfigFromForm(editor.definition, form),
-          ...(editor.binding ? { expectedVersion: editor.binding.version } : {}),
+          displayName: `${instance.displayName} — ${facetTitle(target.definition)}`,
+          config: facetConfigFromForm(target.definition, form),
+          ...(target.binding ? { expectedVersion: target.binding.version } : {}),
           idempotencyKey: crypto.randomUUID(),
         },
       );
-      applyMutationBinding(editor.definition.facetKey, configured.binding);
+      if (!applyMutationBinding(sequence, target.definition.facetKey, configured.binding)) return;
       setEditor(null);
-      toast.success(`${facetTitle(editor.definition)} configured`, {
+      toast.success(`${facetTitle(target.definition)} configured`, {
         description: `This setting applies only to ${instance.displayName}.`,
       });
     } catch (saveError) {
+      if (sequence !== operationSequence.current) return;
       toast.error("Couldn't save this facet", {
         description: saveError instanceof Error ? saveError.message : String(saveError),
       });
     } finally {
-      setBusyFacetKey(null);
+      finishMutation(sequence);
     }
   }
 
   async function changeLifecycle(entry: FacetEntry, action: "pause" | "resume"): Promise<void> {
-    if (!entry.binding) return;
+    if (!entry.binding || !data) return;
+    const currentData = data;
+    const sequence = beginMutation();
     setBusyFacetKey(entry.definition.facetKey);
     try {
       const request = {
@@ -230,57 +254,63 @@ export function IntegrationFacetsPanel({
         action === "pause"
           ? await client.pauseIntegrationFacet(
               workspaceId,
-              data!.capabilityId,
-              data!.instanceKey,
+              currentData.capabilityId,
+              currentData.instanceKey,
               entry.definition.facetKey,
               request,
             )
           : await client.resumeIntegrationFacet(
               workspaceId,
-              data!.capabilityId,
-              data!.instanceKey,
+              currentData.capabilityId,
+              currentData.instanceKey,
               entry.definition.facetKey,
               request,
             );
-      applyMutationBinding(entry.definition.facetKey, result.binding);
+      if (!applyMutationBinding(sequence, entry.definition.facetKey, result.binding)) return;
       toast.success(`${facetTitle(entry.definition)} ${action === "pause" ? "paused" : "resumed"}`);
     } catch (lifecycleError) {
+      if (sequence !== operationSequence.current) return;
       toast.error(`Couldn't ${action} this facet`, {
         description:
           lifecycleError instanceof Error ? lifecycleError.message : String(lifecycleError),
       });
     } finally {
-      setBusyFacetKey(null);
+      finishMutation(sequence);
     }
   }
 
   async function remove(): Promise<boolean> {
     if (!removeTarget?.binding || !data) return false;
-    setBusyFacetKey(removeTarget.definition.facetKey);
+    const target = removeTarget;
+    const targetBinding = removeTarget.binding;
+    const currentData = data;
+    const sequence = beginMutation();
+    setBusyFacetKey(target.definition.facetKey);
     try {
       const result = await client.removeIntegrationFacet(
         workspaceId,
-        data.capabilityId,
-        data.instanceKey,
-        removeTarget.definition.facetKey,
+        currentData.capabilityId,
+        currentData.instanceKey,
+        target.definition.facetKey,
         {
-          expectedVersion: removeTarget.binding.version,
+          expectedVersion: targetBinding.version,
           idempotencyKey: crypto.randomUUID(),
         },
       );
-      applyMutationBinding(removeTarget.definition.facetKey, result.binding);
+      if (!applyMutationBinding(sequence, target.definition.facetKey, result.binding)) return false;
       setRemoveTarget(null);
-      toast.success(`${facetTitle(removeTarget.definition)} removed`, {
+      toast.success(`${facetTitle(target.definition)} removed`, {
         description: `${instance.displayName} and its Connection remain intact.`,
       });
       return true;
     } catch (removeError) {
+      if (sequence !== operationSequence.current) return false;
       toast.error("Couldn't remove this facet", {
         description: removeError instanceof Error ? removeError.message : String(removeError),
       });
       return false;
     } finally {
-      setBusyFacetKey(null);
+      finishMutation(sequence);
     }
   }
 
@@ -367,14 +397,23 @@ export function IntegrationFacetsPanel({
           canManageWorkspaceDestination={canManageWorkspaceDestination}
           canManageOrganizationDestination={canManageOrganizationDestination}
           onClose={() => setGoogleDriveEditor(null)}
-          onBusyChange={(busy) =>
-            setBusyFacetKey(
-              busy && googleDriveEditor ? googleDriveEditor.definition.facetKey : null,
-            )
-          }
-          onSaved={(binding) =>
-            applyMutationBinding(googleDriveEditor.definition.facetKey, binding)
-          }
+          onBusyChange={(busy) => {
+            if (busy) {
+              const sequence = beginMutation();
+              googleDriveMutationSequence.current = sequence;
+              setBusyFacetKey(googleDriveEditor.definition.facetKey);
+              return;
+            }
+            const sequence = googleDriveMutationSequence.current;
+            googleDriveMutationSequence.current = null;
+            if (sequence !== null) finishMutation(sequence);
+          }}
+          onSaved={(binding) => {
+            const sequence = googleDriveMutationSequence.current;
+            if (sequence !== null) {
+              applyMutationBinding(sequence, googleDriveEditor.definition.facetKey, binding);
+            }
+          }}
         />
       ) : null}
 

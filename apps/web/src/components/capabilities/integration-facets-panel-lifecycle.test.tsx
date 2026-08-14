@@ -52,30 +52,94 @@ describe("Integration Facet lifecycle state", () => {
       await rendered.unmount();
     }
   });
+
+  test("ignores an older lifecycle result after a newer instance list wins", async () => {
+    const active = binding("active", 1);
+    const paused = binding("paused", 2);
+    const newerActive = binding("active", 3);
+    let listCount = 0;
+    const listIntegrationFacets = mock(async () =>
+      response(listCount++ === 0 ? active : newerActive),
+    );
+    type LifecycleResult = {
+      capabilityId: string;
+      instanceKey: string;
+      facetKey: string;
+      status: "paused";
+      binding: IntegrationFacetBindingSummary;
+    };
+    let resolvePause: (result: LifecycleResult) => void = () => undefined;
+    const pauseResult = new Promise<LifecycleResult>((resolve) => {
+      resolvePause = resolve;
+    });
+    const pauseIntegrationFacet = mock(async () => await pauseResult);
+    const client = {
+      listIntegrationFacets,
+      pauseIntegrationFacet,
+    } as unknown as OpenGeniCoreClient;
+    const rendered = await renderPanel({ client });
+    try {
+      await act(async () => button(rendered.container, "Manage facets").click());
+      await waitFor(() => rendered.container.textContent?.includes("Active") === true);
+
+      await act(async () => button(rendered.container, "Pause").click());
+      await waitFor(() => pauseIntegrationFacet.mock.calls.length === 1);
+
+      await rendered.rerender({
+        client,
+        instance: { ...instance, instanceVersion: 2 },
+      });
+      await act(async () => button(rendered.container, "Manage facets").click());
+      await waitFor(() => listIntegrationFacets.mock.calls.length === 2);
+      await waitFor(() => rendered.container.textContent?.includes("Active") === true);
+
+      await act(async () =>
+        resolvePause({
+          capabilityId: instance.capabilityId,
+          instanceKey: instance.instanceKey,
+          facetKey: "inventory-source",
+          status: "paused",
+          binding: paused,
+        }),
+      );
+      await act(async () => await Bun.sleep(0));
+
+      expect(rendered.container.textContent).toContain("Active");
+      expect(rendered.container.textContent).not.toContain("Paused");
+    } finally {
+      await rendered.unmount();
+    }
+  });
 });
 
 async function renderPanel(props: Partial<ComponentProps<typeof IntegrationFacetsPanel>> = {}) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
-  await act(async () => {
-    root.render(
-      <IntegrationFacetsPanel
-        client={{} as OpenGeniCoreClient}
-        workspaceId="00000000-0000-4000-8000-000000000101"
-        instance={instance}
-        facetCount={1}
-        canManage
-        canManagePersonalDestination
-        canManageWorkspaceDestination
-        canManageOrganizationDestination={false}
-        GoogleDriveDialog={() => null}
-        {...props}
-      />,
-    );
-  });
+  const render = async (
+    nextProps: Partial<ComponentProps<typeof IntegrationFacetsPanel>> = props,
+  ): Promise<void> => {
+    await act(async () => {
+      root.render(
+        <IntegrationFacetsPanel
+          client={{} as OpenGeniCoreClient}
+          workspaceId="00000000-0000-4000-8000-000000000101"
+          instance={instance}
+          facetCount={1}
+          canManage
+          canManagePersonalDestination
+          canManageWorkspaceDestination
+          canManageOrganizationDestination={false}
+          GoogleDriveDialog={() => null}
+          {...nextProps}
+        />,
+      );
+    });
+  };
+  await render();
   return {
     container,
+    rerender: render,
     unmount: async () => {
       await act(async () => root.unmount());
       container.remove();
