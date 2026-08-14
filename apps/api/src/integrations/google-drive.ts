@@ -836,7 +836,11 @@ export async function saveGoogleDriveFacetSource(
   }
   const payload = parsedPayload.data;
   const requestedDestination = bindGoogleDriveDocumentDestination(input, payload);
-  const requestedConfig = googleDriveFacetConfig(payload.sources, requestedDestination, payload);
+  const requestedSources = payload.sources.map((source) => ({
+    ...source,
+    id: validDriveId(source.id, "source.id"),
+  }));
+  const requestedConfig = googleDriveFacetConfig(requestedSources, requestedDestination, payload);
   const replayed = await replayCompletedIntegrationFacetOperation<IntegrationFacetMutationResult>(
     deps.db,
     {
@@ -849,12 +853,13 @@ export async function saveGoogleDriveFacetSource(
       idempotencyKey: payload.idempotencyKey,
       kind: "configure",
       expectedRequestDigest: (result) => {
-        const receipt = IntegrationFacetMutationResult.parse(result);
+        const displayName = integrationFacetReceiptDisplayName(result);
+        if (displayName === null) return "invalid-integration-facet-receipt";
         return integrationFacetConfigureRequestDigest({
           capabilityId: input.capabilityId,
           instanceKey: input.instanceKey,
           facetKey: input.facetKey,
-          displayName: receipt.binding.displayName,
+          displayName,
           config: requestedConfig,
           ...(payload.expectedVersion !== undefined
             ? { expectedVersion: payload.expectedVersion }
@@ -870,7 +875,7 @@ export async function saveGoogleDriveFacetSource(
     workspaceId: input.workspaceId,
     subjectId: input.subjectId,
     connectionId: context.connection.id,
-    sources: payload.sources,
+    sources: requestedSources,
   });
   return IntegrationFacetMutationResult.parse(
     await configureIntegrationFacet(deps.db, {
@@ -889,6 +894,13 @@ export async function saveGoogleDriveFacetSource(
       idempotencyKey: payload.idempotencyKey,
     }),
   );
+}
+
+function integrationFacetReceiptDisplayName(result: Record<string, unknown>): string | null {
+  const binding = result.binding;
+  if (!binding || typeof binding !== "object" || Array.isArray(binding)) return null;
+  const bindingRecord = binding as Record<string, unknown>;
+  return typeof bindingRecord.displayName === "string" ? bindingRecord.displayName : null;
 }
 
 export async function saveGoogleDriveSource(

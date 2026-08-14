@@ -852,7 +852,7 @@ describe("API Integration routes", () => {
     const payload = {
       sources: [
         {
-          id: "folder-1",
+          id: "https://drive.google.com/drive/folders/folder-1",
           name: "Product",
           mimeType: "application/vnd.google-apps.folder",
           driveId: null,
@@ -872,9 +872,27 @@ describe("API Integration routes", () => {
     const configured = await configuredResponse.json();
     expect(configured).toMatchObject({
       status: "configured",
-      binding: { connectionId: connection.id, status: "active", version: 1 },
+      binding: {
+        connectionId: connection.id,
+        status: "active",
+        version: 1,
+        config: { sources: [{ id: "folder-1" }] },
+      },
     });
     expect(googleDriveProviderRequests).toHaveLength(1);
+
+    const legacyConfigured = {
+      ...configured,
+      binding: { ...configured.binding },
+    };
+    delete legacyConfigured.binding.directlyOwned;
+    delete legacyConfigured.binding.owners;
+    await shared!.admin`
+      update capability_operations
+      set result = ${shared!.admin.json(legacyConfigured)}
+      where workspace_id = ${workspaceId}::uuid
+        and idempotency_key = ${idempotencyKey}
+    `;
 
     googleDriveFolderName = "Renamed Product";
     await shared!.admin`
