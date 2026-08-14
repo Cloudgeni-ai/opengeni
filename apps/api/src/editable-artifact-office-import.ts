@@ -12,10 +12,13 @@ import {
   editableArtifactReplicaId,
   editableArtifactStateHash,
   EditableArtifactOfficeImportError,
+  type EditableArtifactActor,
   type EditableArtifactOfficeImportPort,
   type EditableArtifactModality,
+  type EditableArtifactScope,
 } from "@opengeni/core/editable-artifacts";
-import { getFile } from "@opengeni/db";
+import { requireLiveAgentAttemptAuthorization } from "@opengeni/core";
+import { getFilesForSubject } from "@opengeni/db";
 import {
   MAX_BOUNDED_OBJECT_CHUNK_BYTES,
   type BoundedImmutableObjectWritePort,
@@ -32,23 +35,37 @@ export type EditableArtifactOfficeImportAdapterDependencies = Readonly<{
   runtime: VerifiedNativeArtifactRuntimeBinding;
   sourceObjects: BoundedImmutableObjectWritePort;
   snapshotObjects: BoundedImmutableObjectWritePort;
-  readFile?: typeof getFile;
+  readFiles?: typeof getFilesForSubject;
+  resolveFileAuthoritySubjectId?: typeof editableArtifactFileAuthoritySubjectId;
   prepareOffice?: typeof prepareArtifactOfficeImport;
 }>;
 
 /** Trusted import boundary from one ready workspace file into native sequence-zero state. */
 export class EditableArtifactOfficeImportAdapter implements EditableArtifactOfficeImportPort {
-  private readonly readFile: typeof getFile;
+  private readonly readFiles: typeof getFilesForSubject;
+  private readonly resolveFileAuthoritySubjectId: typeof editableArtifactFileAuthoritySubjectId;
 
   constructor(private readonly dependencies: EditableArtifactOfficeImportAdapterDependencies) {
-    this.readFile = dependencies.readFile ?? getFile;
+    this.readFiles = dependencies.readFiles ?? getFilesForSubject;
+    this.resolveFileAuthoritySubjectId =
+      dependencies.resolveFileAuthoritySubjectId ?? editableArtifactFileAuthoritySubjectId;
   }
 
   async prepare(
     input: Parameters<EditableArtifactOfficeImportPort["prepare"]>[0],
   ): ReturnType<EditableArtifactOfficeImportPort["prepare"]> {
     throwIfAborted(input.signal);
-    const file = await this.readFile(this.dependencies.db, input.scope.workspaceId, input.fileId);
+    const subjectId = await this.resolveFileAuthoritySubjectId(
+      this.dependencies.db,
+      input.scope,
+      input.actor,
+    );
+    const [file] = await this.readFiles(this.dependencies.db, {
+      accountId: input.scope.accountId,
+      workspaceId: input.scope.workspaceId,
+      subjectId,
+      fileIds: [input.fileId],
+    });
     if (!file || file.status !== "ready") {
       throw new EditableArtifactOfficeImportError("invalid_source");
     }
@@ -179,7 +196,7 @@ function officeFilenameMatches(filename: string, modality: EditableArtifactModal
 
 async function readVerifiedWorkspaceFile(
   storage: ObjectStorage,
-  file: NonNullable<Awaited<ReturnType<typeof getFile>>>,
+  file: NonNullable<Awaited<ReturnType<typeof getFilesForSubject>>>[number],
   signal?: AbortSignal,
 ): Promise<Uint8Array> {
   throwIfAborted(signal);
@@ -217,6 +234,32 @@ async function readVerifiedWorkspaceFile(
     throw new EditableArtifactOfficeImportError("source_changed");
   }
   return bytes;
+}
+
+export async function editableArtifactFileAuthoritySubjectId(
+  db: Database,
+  scope: EditableArtifactScope,
+  actor: EditableArtifactActor,
+): Promise<string | null> {
+  if (actor.kind !== "agent") return actor.subjectId;
+  const authorization = await requireLiveAgentAttemptAuthorization(
+    db,
+    {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      subjectId: actor.subjectId,
+      permissions: [],
+      principalKind: "agent_attempt",
+      metadata: {
+        sessionId: actor.sessionId,
+        turnId: actor.turnId,
+        attemptId: actor.attemptId,
+        executionGeneration: actor.generation,
+      },
+    },
+    actor.sessionId,
+  );
+  return authorization.initiatingHumanSubjectId;
 }
 
 async function* byteChunks(bytes: Uint8Array): AsyncIterable<Uint8Array> {

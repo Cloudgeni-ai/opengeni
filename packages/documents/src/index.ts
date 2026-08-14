@@ -22,7 +22,7 @@ import {
   ListIndexedDocumentsResponse,
 } from "@opengeni/contracts";
 import {
-  requireFile,
+  getFilesForSubject,
   rlsContextForWorkspace,
   setSubjectRlsContext,
   withRlsContext,
@@ -969,7 +969,18 @@ export async function addDocumentToBase(
       if (viewerSubjectId) await setSubjectRlsContext(scopedDb, viewerSubjectId);
       const base = await getDocumentBase(scopedDb, input.workspaceId, input.baseId);
       if (!base) throw new Error(`Document base not found: ${input.baseId}`);
-      const file = await requireReadyFile(scopedDb, input.workspaceId, input.fileId);
+      const initiatingSubjectId = cleanString(input.initiatingSubjectId ?? null);
+      const createdBy = cleanString(input.createdBy ?? null);
+      if (initiatingSubjectId && createdBy && initiatingSubjectId !== createdBy) {
+        throw new Error("document file authority must match the exact initiating subject");
+      }
+      const fileAuthoritySubjectId = initiatingSubjectId ?? createdBy ?? null;
+      const file = await requireReadyFile(scopedDb, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: fileAuthoritySubjectId,
+        fileId: input.fileId,
+      });
       const knowledgeSourceIdentity = cleanString(input.knowledgeSourceIdentity ?? null);
       if (knowledgeSourceIdentity && knowledgeSourceIdentity.length > 512) {
         throw new Error("knowledge source document identity exceeds 512 characters");
@@ -1056,7 +1067,7 @@ export async function addDocumentToBase(
           authoritySubjectId: authority.subjectId,
           visibility: authority.kind === "personal" ? "private" : "workspace",
           agentAccess: input.agentAccess ?? true,
-          createdBy: input.createdBy ?? null,
+          createdBy: fileAuthoritySubjectId,
           curationStatus: input.curationStatus ?? "none",
           updatedAt: now,
         })
@@ -1503,7 +1514,12 @@ export async function indexDocumentNow(
   );
   if (!loadedDocument) throw new Error(`Document not found: ${documentId}`);
   let document: DocumentRow = loadedDocument;
-  const file = await requireReadyFile(db, workspaceId, document.fileId);
+  const file = await requireReadyFile(db, {
+    accountId: document.accountId,
+    workspaceId,
+    subjectId: cleanString(document.createdBy) ?? null,
+    fileId: document.fileId,
+  });
   await withDocumentRls(db, workspaceId, access, async (scopedDb) => {
     await scopedDb
       .update(schema.documents)
@@ -2842,12 +2858,22 @@ export function deterministicEmbedding(
 
 async function requireReadyFile(
   db: Database,
-  workspaceId: string,
-  fileId: string,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string | null;
+    fileId: string;
+  },
 ): Promise<FileAsset> {
-  const file = await requireFile(db, workspaceId, fileId);
+  const [file] = await getFilesForSubject(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    subjectId: input.subjectId,
+    fileIds: [input.fileId],
+  });
+  if (!file) throw new Error(`File not found: ${input.fileId}`);
   if (file.status !== "ready") {
-    throw new Error(`File ${fileId} is ${file.status}`);
+    throw new Error(`File ${input.fileId} is ${file.status}`);
   }
   return file;
 }

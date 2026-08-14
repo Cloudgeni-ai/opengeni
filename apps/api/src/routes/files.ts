@@ -24,6 +24,7 @@ import {
   getFileUpload,
   getGeneratedImageArtifact,
   getGeneratedVideoArtifact,
+  getFilesForSubject,
   getRetainedFileArtifact,
   getRetainedScreenshotArtifact,
   requireFileForSubject,
@@ -34,7 +35,11 @@ import {
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { requireAccessGrant } from "@opengeni/core";
+import {
+  requireAccessGrant,
+  requireLiveAgentAttemptAuthorization,
+  SessionAuthorizationDeniedError,
+} from "@opengeni/core";
 import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
@@ -280,9 +285,14 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get("/v1/workspaces/:workspaceId/artifacts/:artifactId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "files:read");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "files:read");
     const artifactId = retainedArtifactId(c.req.param("artifactId"));
-    const artifact = await getWorkspaceArtifact(db, workspaceId, artifactId);
+    const artifact = await getWorkspaceArtifact(db, {
+      accountId: grant.accountId,
+      workspaceId,
+      subjectId: await fileAuthoritySubjectIdForGrant(deps, grant),
+      artifactId,
+    });
     if (!artifact) {
       return c.json(retainedArtifactUnavailable(artifactId, "deleted"), 404);
     }
@@ -291,9 +301,14 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get("/v1/workspaces/:workspaceId/artifacts/:artifactId/content", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "files:read");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "files:read");
     const artifactId = retainedArtifactId(c.req.param("artifactId"));
-    const artifact = await getWorkspaceArtifact(db, workspaceId, artifactId);
+    const artifact = await getWorkspaceArtifact(db, {
+      accountId: grant.accountId,
+      workspaceId,
+      subjectId: await fileAuthoritySubjectIdForGrant(deps, grant),
+      artifactId,
+    });
     if (!artifact) {
       return c.json(retainedArtifactUnavailable(artifactId, "deleted"), 404);
     }
@@ -547,14 +562,18 @@ function retainedArtifactMetadata(artifact: RetainedFileArtifact): RetainedArtif
 
 async function getWorkspaceArtifact(
   db: ApiRouteDeps["db"],
-  workspaceId: string,
-  artifactId: string,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string | null;
+    artifactId: string;
+  },
 ): Promise<{ file: RetainedFileArtifact["file"]; metadata: RetainedArtifactMetadata } | null> {
-  const generated = await getGeneratedImageArtifact(db, workspaceId, artifactId);
+  const generated = await getGeneratedImageArtifact(db, input.workspaceId, input.artifactId);
   if (generated) {
     return { file: generated.file, metadata: retainedGeneratedImageMetadata(generated) };
   }
-  const generatedVideo = await getGeneratedVideoArtifact(db, workspaceId, artifactId);
+  const generatedVideo = await getGeneratedVideoArtifact(db, input.workspaceId, input.artifactId);
   if (generatedVideo && !generatedVideo.artifact.deletedAt) {
     const file = generatedVideoFileAsset(generatedVideo.file);
     return {
@@ -565,8 +584,43 @@ async function getWorkspaceArtifact(
       }),
     };
   }
-  const artifact = await getRetainedFileArtifact(db, workspaceId, artifactId);
-  return artifact ? { file: artifact.file, metadata: retainedArtifactMetadata(artifact) } : null;
+  const artifact = await getRetainedFileArtifact(db, input.workspaceId, input.artifactId);
+  if (!artifact) return null;
+  const [authorizedFile] = await getFilesForSubject(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    subjectId: input.subjectId,
+    fileIds: [artifact.file.id],
+  });
+  if (!authorizedFile) return null;
+  const authorizedArtifact = { ...artifact, file: authorizedFile };
+  return {
+    file: authorizedFile,
+    metadata: retainedArtifactMetadata(authorizedArtifact),
+  };
+}
+
+/** Human and stable service grants already carry their immutable subject.
+ * Agent tokens carry only a technical worker subject, so resolve the exact
+ * live attempt and use the initiating human frozen on its durable turn. */
+export async function fileAuthoritySubjectIdForGrant(
+  deps: Pick<ApiRouteDeps, "db">,
+  grant: import("@opengeni/contracts").AccessGrant,
+): Promise<string | null> {
+  if (grant.principalKind !== "agent_attempt") return grant.subjectId;
+  const sessionId = grant.metadata?.["sessionId"];
+  if (typeof sessionId !== "string") {
+    throw new HTTPException(404, { message: "file not found" });
+  }
+  try {
+    const actor = await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId);
+    return actor.initiatingHumanSubjectId;
+  } catch (error) {
+    if (error instanceof SessionAuthorizationDeniedError) {
+      throw new HTTPException(404, { message: "file not found", cause: error });
+    }
+    throw error;
+  }
 }
 
 function generatedVideoFileAsset(

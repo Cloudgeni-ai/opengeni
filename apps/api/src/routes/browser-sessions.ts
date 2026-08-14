@@ -100,7 +100,7 @@ import {
   getBrowserRevisionArtifactAuthority,
   getEnrollment,
   getExternalAuthInteractiveContext,
-  getFiles,
+  getFilesForSubject,
   getFileUpload,
   getAuthRun,
   getExternalAuthPreparation,
@@ -145,6 +145,7 @@ import {
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
   type ApiRouteDeps,
+  type ResolvedSessionAuthorization,
 } from "@opengeni/core";
 import {
   BrowserControlProtocolError,
@@ -927,7 +928,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         browserSessionId,
         "session.control",
         "browser.action",
-        async ({ sessionClient, binding, record }) => {
+        async ({ sessionClient, binding, record, sourceAuthorization }) => {
           const command = BrowserActionCommand.parse({
             protocolVersion: BROWSER_CONTROL_PROTOCOL_VERSION,
             operationId: request.operationId,
@@ -957,27 +958,25 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
                   message: "object storage is not configured",
                 });
               }
-              const files = await getFiles(deps.db, workspaceId, workspaceFileIds);
-              const byId = new Map(files.map((file) => [file.id, file]));
-              const ordered = workspaceFileIds.map((fileId) => byId.get(fileId));
-              if (ordered.some((file) => !file)) {
-                throw new HTTPException(404, { message: "workspace file not found" });
-              }
-              if (ordered.some((file) => file!.status !== "ready")) {
-                throw new HTTPException(409, { message: "workspace file is not ready" });
-              }
+              const files = await getFilesForSubject(deps.db, {
+                accountId: grant.accountId,
+                workspaceId,
+                subjectId: browserFileAuthoritySubjectId(grant, sourceAuthorization),
+                fileIds: workspaceFileIds,
+              });
+              const ordered = requireAuthorizedBrowserUploadFiles(workspaceFileIds, files);
               const authorities = await Promise.all(
                 ordered.map(async (file) => {
                   const signed = await deps.objectStorage!.createGetUrl({
-                    key: file!.objectKey,
+                    key: file.objectKey,
                     expiresInSeconds: BROWSER_WORKSPACE_FILE_AUTHORITY_TTL_SECONDS,
                     audience: signedUrlAudienceForPlacement(record.session.placement),
                   });
                   return {
-                    fileId: file!.id,
-                    safeFilename: browserUploadFilename(file!.safeFilename),
-                    sizeBytes: file!.sizeBytes,
-                    sha256: browserUploadSha256(file!.sha256),
+                    fileId: file.id,
+                    safeFilename: browserUploadFilename(file.safeFilename),
+                    sizeBytes: file.sizeBytes,
+                    sha256: browserUploadSha256(file.sha256),
                     download: {
                       url: signed.url,
                       expiresAt: signed.expiresAt.toISOString(),
@@ -2874,6 +2873,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
       record: BrowserSessionControlRecord;
       binding: NonNullable<BrowserSessionControlRecord["session"]["controller"]>;
       placement: BrowserPlacement;
+      sourceAuthorization: ResolvedSessionAuthorization | null;
     }) => Promise<T>,
     recoverMissing = true,
   ): Promise<T> {
@@ -2883,7 +2883,12 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         workspaceId,
         browserSessionId,
       });
-      await authorizeSourceSession(deps, grant, record.sourceSessionId, authorizationOperation);
+      const sourceAuthorization = await authorizeSourceSession(
+        deps,
+        grant,
+        record.sourceSessionId,
+        authorizationOperation,
+      );
       if (record.session.lifecycle !== "active" || !record.session.controller) {
         throw new BrowserSessionStateError("BrowserSession is not active");
       }
@@ -2923,6 +2928,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
           record,
           binding,
           placement,
+          sourceAuthorization,
         };
         let result: T;
         try {
@@ -3792,9 +3798,9 @@ async function authorizeSourceSession(
   grant: AccessGrant,
   sessionId: string,
   operation: SessionAuthorizationOperation,
-): Promise<void> {
+): Promise<ResolvedSessionAuthorization | null> {
   try {
-    await requireSessionAuthorization(deps, grant, {
+    return await requireSessionAuthorization(deps, grant, {
       sessionId,
       operation,
       surface: "http",
@@ -4283,6 +4289,40 @@ function browserUploadFileIds(action: BrowserActionRequestValue["action"]): stri
   return [
     ...new Set(actions.flatMap((entry) => (entry.type === "upload" ? entry.workspaceFileIds : []))),
   ];
+}
+
+/** Resolve Drive authority from the same immutable session authorization that
+ * admitted the browser action. Agent-attempt subjects are technical worker
+ * identities; their frozen initiating human is the only personal Drive
+ * principal. Pure service attempts retain null and can read only ordinary
+ * workspace files through the database predicate. */
+export function browserFileAuthoritySubjectId(
+  grant: AccessGrant,
+  authorization: ResolvedSessionAuthorization | null,
+): string | null {
+  if (!authorization) return grant.principalKind === "agent_attempt" ? null : grant.subjectId;
+  return authorization.actor.kind === "agent_attempt"
+    ? authorization.actor.initiatingHumanSubjectId
+    : authorization.actor.subjectId;
+}
+
+/** The batch authority query intentionally omits every unauthorized file. Any
+ * omission therefore fails the whole upload before an object-storage URL is
+ * minted, including mixed ordinary/Drive mappings and partially authorized
+ * batches. */
+export function requireAuthorizedBrowserUploadFiles(
+  workspaceFileIds: readonly string[],
+  authorizedFiles: readonly FileAsset[],
+): FileAsset[] {
+  const byId = new Map(authorizedFiles.map((file) => [file.id, file]));
+  return workspaceFileIds.map((fileId) => {
+    const file = byId.get(fileId);
+    if (!file) throw new HTTPException(404, { message: "workspace file not found" });
+    if (file.status !== "ready") {
+      throw new HTTPException(409, { message: "workspace file is not ready" });
+    }
+    return file;
+  });
 }
 
 function browserUploadFilename(value: string): string {

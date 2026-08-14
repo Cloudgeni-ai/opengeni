@@ -15,6 +15,7 @@ import {
   enqueueKnowledgeSourceSyncIndexObligation,
   ensureKnowledgeSourceBlobFile,
   ensureKnowledgeSourceSyncState,
+  getFilesForSubject,
   migrate,
   provisionRoles,
   recordGoogleDriveObjectAclEvidence,
@@ -396,7 +397,7 @@ describe("migration 0243 Google Drive object ACL authority", () => {
       };
     };
 
-    const objectA = await createProtectedObject("a");
+    let objectA = await createProtectedObject("a");
     const objectB = await createProtectedObject("b");
     await shared.admin`
       insert into documents (
@@ -456,6 +457,14 @@ describe("migration 0243 Google Drive object ACL authority", () => {
           fileId: sharedFile.id,
         }),
       ).rejects.toThrow(`File not found: ${sharedFile.id}`);
+      expect(
+        await getFilesForSubject(client!.db, {
+          accountId: account!.id,
+          workspaceId: workspace!.id,
+          subjectId: bob,
+          fileIds: [sharedFile.id],
+        }),
+      ).toEqual([]);
     };
     const expectAllowed = async (): Promise<void> => {
       const file = await requireFileForSubject(client!.db, {
@@ -465,6 +474,16 @@ describe("migration 0243 Google Drive object ACL authority", () => {
         fileId: sharedFile.id,
       });
       expect(file.id).toBe(sharedFile.id);
+      expect(
+        (
+          await getFilesForSubject(client!.db, {
+            accountId: account!.id,
+            workspaceId: workspace!.id,
+            subjectId: bob,
+            fileIds: [sharedFile.id],
+          })
+        ).map((authorized) => authorized.id),
+      ).toEqual([sharedFile.id]);
     };
 
     const longExpiry = new Date(Date.now() + 60_000);
@@ -514,6 +533,89 @@ describe("migration 0243 Google Drive object ACL authority", () => {
     await expectDenied();
     await shared.admin`
       update connections set granted_scopes = ${shared.admin.json([driveScope])}::jsonb
+      where id = ${sourceConnection.id}`;
+    await expectAllowed();
+
+    const refreshedVersion = await appendKnowledgeDocumentVersion(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      objectId: objectA.objectId,
+      expectedSourceLifecycleGeneration: source.lifecycleGeneration,
+      expectedObjectLifecycleGeneration: 1,
+      expectedVersionGeneration: objectA.versionGeneration,
+      externalVersionId: "revision-a-2",
+      contentSha256: "a".repeat(64),
+      ingestionKey: `drive:${objectA.externalObjectId}:revision-a-2`,
+      sourceMetadata: { providerRevision: "revision-a-2" },
+      aclVersionId: acl.id,
+      aclGeneration: acl.generation,
+      documentId: objectA.documentId,
+      fileId: sharedFile.id,
+      operationId: `version-a-2-${suffix}`,
+      reasonCode: "source_content_observed",
+      actor,
+    });
+    const refreshedObligation = await enqueueKnowledgeSourceSyncIndexObligation(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      scheduledTaskRunId: run.id,
+      sourceId: source.id,
+      sourceSyncGeneration: source.syncGeneration,
+      initiatingSubjectId: alice,
+      externalObjectId: objectA.externalObjectId,
+      knowledgeSourceObjectId: objectA.objectId,
+      knowledgeDocumentVersionId: refreshedVersion.id,
+      documentId: objectA.documentId,
+      sourceConfigGeneration: 1,
+      sourceLifecycleGeneration: source.lifecycleGeneration,
+      objectLifecycleGeneration: 1,
+      objectVersionGeneration: refreshedVersion.versionGeneration,
+      citationLocator: {
+        provider: "google_drive",
+        externalObjectId: objectA.externalObjectId,
+        sourceUri: `https://drive.google.com/open?id=${objectA.externalObjectId}`,
+      },
+    });
+    await settleKnowledgeSourceSyncIndexObligation(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      obligationId: refreshedObligation.id,
+      status: "indexed",
+    });
+    await expectDenied();
+    objectA = {
+      ...objectA,
+      versionId: refreshedVersion.id,
+      versionGeneration: refreshedVersion.versionGeneration,
+      obligationId: refreshedObligation.id,
+      providerRevision: "revision-a-2",
+    };
+    await recordEvidence(objectA, `evidence-a-2-${suffix}`, longExpiry);
+    await expectAllowed();
+
+    await shared.admin`
+      update connections
+      set status = 'revoked',
+          metadata = jsonb_set(metadata, '{lifecycle,state}', '"disconnected"'::jsonb, true)
+      where id = ${viewerConnection.id}`;
+    await expectDenied();
+    await shared.admin`
+      update connections
+      set status = 'active',
+          metadata = jsonb_set(metadata, '{lifecycle,state}', '"active"'::jsonb, true)
+      where id = ${viewerConnection.id}`;
+    await expectAllowed();
+
+    await shared.admin`
+      update connections
+      set status = 'revoked',
+          metadata = jsonb_set(metadata, '{lifecycle,state}', '"disconnected"'::jsonb, true)
+      where id = ${sourceConnection.id}`;
+    await expectDenied();
+    await shared.admin`
+      update connections
+      set status = 'active',
+          metadata = jsonb_set(metadata, '{lifecycle,state}', '"active"'::jsonb, true)
       where id = ${sourceConnection.id}`;
     await expectAllowed();
 
