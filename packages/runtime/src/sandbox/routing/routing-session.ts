@@ -33,9 +33,16 @@ import { renderSelfhostedFault } from "../selfhosted/fault-rendering";
 import {
   isDefinitePathNotFoundError,
   isExecSessionLostBanner,
+  SandboxChannelAService,
   stripExecBanner,
 } from "../channel-a";
-import type { ChannelAExecArgs, ChannelAExecResult } from "../channel-a";
+import type {
+  ChannelAExecArgs,
+  ChannelAExecResult,
+  ChannelARoutedWorkspaceImportRequest,
+  ChannelASession,
+  WorkspaceFileImportReceipt,
+} from "../channel-a";
 import { parseExecBannerExitCode, parseExecBannerSessionId } from "../exec-banner";
 import { withSandboxProviderOperation } from "../provider-operation-gate";
 
@@ -1411,6 +1418,23 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         return;
       }
       throw new RoutingUnsupportedError("deletePlacementPrivate", this.cached?.kind ?? "unknown");
+    });
+  }
+
+  /** Keep private download authority and its consuming import on one exact
+   * backend. A pointer move during the callback is handled by the enclosing
+   * mutation settlement; the operation is never replayed onto another route. */
+  async importWorkspaceFileOnResolvedBackend(
+    input: ChannelARoutedWorkspaceImportRequest,
+  ): Promise<WorkspaceFileImportReceipt> {
+    return await this.dispatch("importWorkspaceFile", true, async (session) => {
+      const channel = new SandboxChannelAService({
+        session: session as ChannelASession,
+        workspaceRoot: input.workspaceRoot,
+        revision: input.revision,
+        ...(input.runAs ? { runAs: input.runAs } : {}),
+      });
+      return await channel.importWorkspaceFile(input.request);
     });
   }
 

@@ -126,6 +126,11 @@ export type ChannelASession = {
     runAs?: string;
   }): Promise<unknown>;
   deletePlacementPrivate?(path: string, runAs?: string): Promise<void>;
+  /** Routing-only composite. Resolves one backend and keeps private staging,
+   * exact-byte import, and cleanup on that backend under one mutation fence. */
+  importWorkspaceFileOnResolvedBackend?(
+    input: ChannelARoutedWorkspaceImportRequest,
+  ): Promise<WorkspaceFileImportReceipt>;
   writeStdin?(args: {
     sessionId: number;
     chars?: string;
@@ -171,6 +176,13 @@ export type WorkspaceFileImportReceipt = {
   sha256: string;
   replayed: boolean;
   revision: number;
+};
+
+export type ChannelARoutedWorkspaceImportRequest = {
+  request: WorkspaceFileImportRequest;
+  workspaceRoot: string;
+  revision: number;
+  runAs?: string;
 };
 
 // ── Errors mapped to HTTP status at the route. ───────────────────────────────
@@ -848,6 +860,45 @@ export class SandboxChannelAService {
    * or the public receipt. Exactly one routed exec crosses the workspace
    * mutation boundary; target hashing makes response-loss retries safe. */
   async importWorkspaceFile(req: WorkspaceFileImportRequest): Promise<WorkspaceFileImportReceipt> {
+    const routedImport = this.session.importWorkspaceFileOnResolvedBackend?.bind(this.session);
+    // The routed composite currently returns the existing public receipt, which
+    // distinguishes replay from mutation but not create from replace. Use it
+    // only for non-replacing imports so fs.changed remains exact; replacement
+    // callers retain the existing per-operation path until the receipt grows an
+    // internal outcome field.
+    if (routedImport && !req.overwrite && !req.mayReplaceExisting) {
+      const receipt = await routedImport({
+        request: req,
+        workspaceRoot: this.workspaceRoot,
+        revision: this.revision,
+        ...(this.runAs ? { runAs: this.runAs } : {}),
+      });
+      const expectedRevision = this.revision + (receipt.replayed ? 0 : 1);
+      if (
+        receipt.destinationPath !== req.destinationPath ||
+        receipt.sizeBytes !== req.sizeBytes ||
+        receipt.sha256 !== req.sha256 ||
+        receipt.revision !== expectedRevision
+      ) {
+        throw new ChannelAUnavailableError("Workspace file import returned an invalid receipt.");
+      }
+      this.revision = receipt.revision;
+      if (!receipt.replayed) {
+        await this.emitFsChanged(
+          [
+            {
+              path: receipt.destinationPath,
+              kind: "created",
+              isDir: false,
+              sizeBytes: receipt.sizeBytes,
+            },
+          ],
+          "write",
+        );
+      }
+      return receipt;
+    }
+
     const operationId = workspaceImportOperationId(req.operationId);
     const destinationPath = assertPortableWorkspaceFilePath(req.destinationPath);
     if (typeof req.overwrite !== "boolean" || typeof req.mayReplaceExisting !== "boolean") {

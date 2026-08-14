@@ -80,6 +80,20 @@ import {
 } from "./lazy-tool-transport";
 import { GmailRestMcpServer, isOfficialGmailMcpConfig } from "./gmail-rest-mcp";
 import { McpResultCustomDataBridge, unwrapSdkMcpResultProjection } from "./mcp-result-custom-data";
+import {
+  ConnectorAttachmentTransferError,
+  projectConnectorAttachmentTransfers,
+  type ConnectorAttachmentMaterializer,
+} from "./connector-attachments";
+export {
+  CONNECTOR_ATTACHMENT_PROVIDER_RESULT_MAX_BYTES,
+  CONNECTOR_ATTACHMENT_SANITIZED_RESULT_MAX_BYTES,
+  ConnectorAttachmentTransferError,
+  projectConnectorAttachmentTransfers,
+  type ConnectorAttachmentMaterializationRequest,
+  type ConnectorAttachmentMaterializer,
+  type ConnectorAttachmentTransferProjectionOptions,
+} from "./connector-attachments";
 export {
   GMAIL_REST_API_BASE,
   GMAIL_REST_MCP_TOOLS,
@@ -3132,7 +3146,19 @@ export type PrepareToolsOptions = {
   attemptToolDefinitions?: readonly AttemptToolDefinition[];
   /** Host authorization applied after catalog/input validation and before execution. */
   attemptToolAuthorize?: AttemptToolAuthorization;
+  /**
+   * Private exact-byte connector attachment bridge. Source URLs are passed only
+   * through this host callback and never included in the returned MCP result.
+   */
+  materializeConnectorAttachments?: ConnectorAttachmentMaterializer;
 };
+
+type PrefixedMcpConnectorAttachmentAuthority = Readonly<{
+  expectedProvider?: string;
+  authorizeAndMaterialize: (
+    input: Omit<Parameters<ConnectorAttachmentMaterializer>[0], "connectionId">,
+  ) => ReturnType<ConnectorAttachmentMaterializer>;
+}>;
 
 async function measureToolPreparationPhase<T>(
   options: PrepareToolsOptions,
@@ -3312,6 +3338,13 @@ export async function prepareAgentTools(
               optional || Boolean(config.connectionRef),
               aggregateToolBudget,
               `${config.id}:${index}`,
+              false,
+              buildConnectorAttachmentAuthority(
+                config,
+                options,
+                resolvedMcpConnectionIds,
+                config.url,
+              ),
             ),
             bestEffort: optional || Boolean(config.connectionRef),
             optional,
@@ -3425,6 +3458,7 @@ export async function prepareAgentTools(
           aggregateToolBudget,
           `${config.id}:${index}`,
           firstParty && !bestEffort,
+          buildConnectorAttachmentAuthority(config, options, resolvedMcpConnectionIds, url),
         );
         return {
           server,
@@ -3905,6 +3939,81 @@ async function resolveConnectionForRequest(
         : {}),
     };
   }
+}
+
+function buildConnectorAttachmentAuthority(
+  config: Settings["mcpServers"][number],
+  options: PrepareToolsOptions,
+  resolvedMcpConnectionIds: ReadonlyMap<string, string>,
+  destinationUrl: string,
+): PrefixedMcpConnectorAttachmentAuthority | undefined {
+  const connectionRef = config.connectionRef;
+  if (!connectionRef?.provider) return undefined;
+  return {
+    expectedProvider: connectionRef.provider,
+    authorizeAndMaterialize: async (input) => {
+      const frozenConnectionId = resolvedMcpConnectionIds.get(config.id);
+      if (!frozenConnectionId || !options.materializeConnectorAttachments) {
+        throw new ConnectorAttachmentTransferError();
+      }
+      const revalidated = await resolveConnectionForRequest(
+        options,
+        config.id,
+        connectionRef,
+        destinationUrl,
+        input.toolName,
+        false,
+      );
+      if (revalidated.status === "auth_needed") {
+        await publishAuthNeeded(options, {
+          serverId: config.id,
+          toolName: input.toolName,
+          providerDomain: revalidated.providerDomain,
+          ...(revalidated.provider
+            ? { provider: revalidated.provider }
+            : connectionRef.provider
+              ? { provider: connectionRef.provider }
+              : {}),
+          reason: revalidated.reason,
+          ...(revalidated.connectionId
+            ? { connectionId: revalidated.connectionId }
+            : connectionRef.connectionId
+              ? { connectionId: connectionRef.connectionId }
+              : {}),
+          ...(revalidated.scopes
+            ? { scopes: revalidated.scopes }
+            : connectionRef.scopes
+              ? { scopes: connectionRef.scopes }
+              : {}),
+          ...(revalidated.resource
+            ? { resource: revalidated.resource }
+            : connectionRef.resource
+              ? { resource: connectionRef.resource }
+              : {}),
+          ...(revalidated.selectedResources
+            ? { selectedResources: revalidated.selectedResources }
+            : connectionRef.selectedResources
+              ? { selectedResources: connectionRef.selectedResources }
+              : {}),
+          ...(revalidated.authorizationUrl
+            ? { authorizationUrl: revalidated.authorizationUrl }
+            : {}),
+          ...(options.subjectId ? { subjectId: options.subjectId } : {}),
+        });
+        throw new ConnectorAttachmentTransferError();
+      }
+      if (
+        revalidated.connectionId !== frozenConnectionId ||
+        (revalidated.expiresAt instanceof Date && revalidated.expiresAt.getTime() <= Date.now())
+      ) {
+        throw new ConnectorAttachmentTransferError();
+      }
+      return await options.materializeConnectorAttachments({
+        ...input,
+        connectionId: frozenConnectionId,
+      });
+    },
+  };
 }
 
 function insufficientScopeAuth(
@@ -5020,6 +5129,7 @@ export class PrefixedMcpServer implements MCPServer {
     private readonly aggregateToolBudget?: McpAggregateToolListBudget,
     private readonly aggregateSourceId = registryId,
     private readonly recoverySafeSetup = false,
+    private readonly connectorAttachmentAuthority?: PrefixedMcpConnectorAttachmentAuthority,
   ) {
     this.registryId = registryId;
     // The SDK uses `name` for cache keys, traces, and lifecycle diagnostics.
@@ -5231,7 +5341,28 @@ export class PrefixedMcpServer implements MCPServer {
       const projectedOutput = this.inner.callToolResult
         ? await this.inner.callToolResult(unprefixed, args, meta, options)
         : mcpContentAsResult(await this.inner.callTool(unprefixed, args, meta, options));
-      const output = unwrapSdkMcpResultProjection(projectedOutput);
+      const rawOutput = unwrapSdkMcpResultProjection(projectedOutput);
+      const operationId =
+        meta && typeof meta.opengeniOperationId === "string" ? meta.opengeniOperationId : undefined;
+      const output = await projectConnectorAttachmentTransfers(rawOutput, {
+        serverId: this.registryId,
+        toolName: unprefixed,
+        operationId,
+        ...(this.connectorAttachmentAuthority?.expectedProvider
+          ? { expectedProvider: this.connectorAttachmentAuthority.expectedProvider }
+          : {}),
+        authorizeAndMaterialize: async (attachments) => {
+          if (!operationId || !this.connectorAttachmentAuthority) {
+            throw new ConnectorAttachmentTransferError();
+          }
+          return await this.connectorAttachmentAuthority.authorizeAndMaterialize({
+            serverId: this.registryId,
+            toolName: unprefixed,
+            operationId,
+            attachments,
+          });
+        },
+      });
       assertMcpPayloadWithinBytes(output, MCP_MAX_TOOL_RESULT_BYTES, "MCP tool result");
       return AttemptToolResult.parse(output);
     } catch (error) {

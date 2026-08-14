@@ -180,6 +180,7 @@ import {
   type NormalizedRunCredentialMaterial,
   type RunCredentialCommandSession,
   type CodemodeTokenWriterSession,
+  type ConnectorAttachmentMaterializationRequest,
   createFirstPartyInteractionAttemptToolDefinitions,
   deleteRecordingArtifacts,
   stopRecording as stopRecordingOnBox,
@@ -192,6 +193,7 @@ import {
 } from "./google-drive-publication";
 import { connectionTokenResolverForTurn } from "./mcp-credentials";
 import { buildApiIntegrationServersForTurn } from "./api-integrations";
+import { materializeConnectorAttachmentsInChannel } from "./connector-attachments";
 import {
   allowedFirstPartyMcpToolsForSession,
   assertTurnExecutionPolicyMatchesConfigV1,
@@ -7361,6 +7363,41 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       });
       const toolPreparationStartedAt = performance.now();
       let toolPreparationOutcome: "completed" | "failed" = "completed";
+      const materializeConnectorAttachments = async (
+        request: ConnectorAttachmentMaterializationRequest,
+      ) => {
+        throwIfWorkerShuttingDown();
+        throwIfTurnCancelled();
+        let sandbox = resolvedSandbox;
+        if (!sandbox && turnSandboxProvisioner) {
+          sandbox = await turnSandboxProvisioner.get();
+        }
+        const sessionForImport = (lazyOwnedSandbox?.session ??
+          sandbox?.established.session ??
+          sdkOwnedSandboxSession) as ChannelASession | null;
+        if (!sessionForImport) {
+          throw new Error("Connector attachment sandbox is unavailable");
+        }
+        const runAs = sandboxRunAs(runSettings);
+        const channel = new SandboxChannelAService({
+          session: sessionForImport,
+          workspaceRoot: "/workspace",
+          leaseEpoch: sandbox?.leaseEpoch ?? 0,
+          emit: async (events) => {
+            await publish?.(events, true);
+          },
+          ...(runAs ? { runAs } : {}),
+        });
+        const importExactBytes = async () =>
+          await materializeConnectorAttachmentsInChannel(channel, request);
+        return sandbox && !routingOn
+          ? await runWorkspaceMutationForSandbox(
+              sandbox,
+              "connectorAttachmentMaterialization",
+              importExactBytes,
+            )
+          : await importExactBytes();
+      };
       try {
         preparedTools = await waitForTurnOperation(
           runtime.prepareTools(runSettings, turnTools, {
@@ -7379,6 +7416,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             ...(codexAppsAuth ? { codexAppsAuth } : {}),
             resolveCredential,
             onAuthNeeded: publishToolAuthNeeded,
+            materializeConnectorAttachments,
             localMcpServers,
             onPreparationPhase: (measurement) => {
               recordTurnStartupPhase(observability, {

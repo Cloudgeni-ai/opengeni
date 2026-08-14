@@ -20,6 +20,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   ChannelANotFoundError,
+  SandboxChannelAService,
   RoutingBackendRecoveryRequiredError,
   RoutingMutationOutcomeUnknownError,
   RoutingSandboxSession,
@@ -513,6 +514,84 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
       sessionId: 41,
       chars: Buffer.from("signed-url-is-private").toString("base64"),
     });
+  });
+
+  test("cleans private import authority on its admitted backend and rejects output after a swap", async () => {
+    const pointer = mutablePointer();
+    const events: string[] = [];
+    const privateUrl = "https://files.example.test/download?signature=private";
+    const oldBackend: RoutableBackendSession = {
+      async writePlacementPrivate(args) {
+        const input = args as { content: string };
+        expect(input.content).toContain(privateUrl);
+        events.push("old:staged");
+        pointer.swap("new-backend");
+      },
+      async exec(args) {
+        const command = String((args as { cmd?: unknown }).cmd ?? "");
+        expect(command).not.toContain(privateUrl);
+        const marker = command.match(/__OPENGENI_WORKSPACE_IMPORT_[0-9a-f]+_OK__/u)?.[0];
+        if (!marker) throw new Error("expected workspace import marker");
+        events.push("old:imported");
+        return { stdout: `${marker}\tcreated`, stderr: "", exitCode: 0 };
+      },
+      async deletePlacementPrivate() {
+        events.push("old:cleaned");
+      },
+    };
+    const newBackend: RoutableBackendSession = {
+      async writePlacementPrivate() {
+        events.push("new:staged");
+      },
+      async exec() {
+        events.push("new:exec");
+        return { stdout: "wrong-backend", stderr: "", exitCode: 0 };
+      },
+      async deletePlacementPrivate() {
+        events.push("new:cleaned");
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: pointer.read,
+      resolveActiveBackend: async (active) =>
+        active.activeSandboxId === null
+          ? { session: oldBackend, sandboxId: null, kind: "modal" }
+          : { session: newBackend, sandboxId: active.activeSandboxId, kind: "selfhosted" },
+      beforeMutation: async ({ op }) => {
+        events.push(`admitted:${op}`);
+        return "admission";
+      },
+      afterMutation: async ({ outcome }) => {
+        events.push(`settled:${outcome}`);
+      },
+    });
+    const channel = new SandboxChannelAService({
+      session: proxy,
+      workspaceRoot: "/workspace",
+      emit: async (emitted) => {
+        expect(JSON.stringify(emitted)).not.toContain(privateUrl);
+        events.push("fs:emitted");
+      },
+    });
+
+    await expect(
+      channel.importWorkspaceFile({
+        operationId: "11111111-1111-4111-8111-111111111111",
+        destinationPath: ".opengeni/connector-attachments/example/digest/payload.bin",
+        overwrite: false,
+        mayReplaceExisting: false,
+        sizeBytes: 6,
+        sha256: "a".repeat(64),
+        source: { url: privateUrl, expiresAt: "2030-01-02T03:04:05.000Z" },
+      }),
+    ).rejects.toBeInstanceOf(RoutingMutationOutcomeUnknownError);
+    expect(events).toEqual([
+      "admitted:importWorkspaceFile",
+      "old:staged",
+      "old:imported",
+      "old:cleaned",
+      "settled:resolved",
+    ]);
   });
 
   test("a rejected provider promise physically settles before its original error propagates", async () => {
