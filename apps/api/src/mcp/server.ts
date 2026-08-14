@@ -106,7 +106,10 @@ import {
   appendAndPublishTurnEventsFenced,
   publishDurableSessionEvents,
 } from "@opengeni/events";
-import { allowedFirstPartyMcpToolsForSession } from "@opengeni/config";
+import {
+  allowedFirstPartyMcpToolsForSession,
+  codemodeWorkspaceUrl,
+} from "@opengeni/config";
 import {
   createSignedState,
   GitHubAppConfigurationError,
@@ -233,6 +236,7 @@ import {
 } from "../integrations/atlassian";
 import { AtlassianConnectionMetadata } from "@opengeni/contracts/atlassian";
 import { registerEditableArtifactAgentTools } from "./editable-artifacts";
+import { mintSandboxCodemodeToken } from "@opengeni/runtime/sandbox";
 
 export type McpServerOptions = {
   // Origin of the HTTP request that reached the MCP route. Browser-oriented
@@ -3369,6 +3373,27 @@ function registerFleetTools(
       sessionId,
     });
 
+  const oneOffCodemodeEnvironment = async (
+    op: RunOnOp,
+  ): Promise<Readonly<Record<string, string>> | undefined> => {
+    if (op.kind !== "exec") return undefined;
+    const claims = exactAgentAttemptClaims(grant);
+    if (!claims || claims.sessionId !== sessionId) return undefined;
+    const material = await mintSandboxCodemodeToken(
+      deps.settings,
+      { accountId: grant.accountId, workspaceId: grant.workspaceId },
+      claims,
+    );
+    if (!material) return undefined;
+    return {
+      OPENGENI_CODEMODE_URL: codemodeWorkspaceUrl(deps.settings, grant.workspaceId),
+      OPENGENI_CODEMODE_TOKEN: material.token,
+      ...(deps.settings.ogtoolPackageSpec
+        ? { OPENGENI_OGTOOL_PACKAGE_SPEC: deps.settings.ogtoolPackageSpec }
+        : {}),
+    };
+  };
+
   server.registerTool(
     "sandboxes_list",
     {
@@ -3421,8 +3446,15 @@ function registerFleetTools(
         ]),
       },
     },
-    async ({ target, op }) =>
-      json(await runOnSandbox(services, await fleetContext(), target, op as RunOnOp)),
+    async ({ target, op }) => {
+      const typedOp = op as RunOnOp;
+      const transientExecEnvironment = await oneOffCodemodeEnvironment(typedOp);
+      return json(
+        await runOnSandbox(services, await fleetContext(), target, typedOp, {
+          ...(transientExecEnvironment ? { transientExecEnvironment } : {}),
+        }),
+      );
+    },
   );
 
   server.registerTool(

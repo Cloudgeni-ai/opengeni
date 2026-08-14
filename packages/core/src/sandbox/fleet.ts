@@ -591,6 +591,16 @@ export type RunOnSelfhostedMachine = {
   execTimeoutMs: number;
   /** Streaming transport required when execTimeoutMs is 0 (unbounded). */
   opStream?: SelfhostedOpStreamDeps;
+  /**
+   * Exact-attempt values for this one child process. Never persisted on the
+   * enrollment or machine. The caller may supply these only after authenticating
+   * the active attempt that owns the one-off operation.
+   */
+  transientExecEnvironment?: Readonly<Record<string, string>>;
+};
+
+export type RunOnOptions = {
+  transientExecEnvironment?: Readonly<Record<string, string>>;
 };
 
 /**
@@ -614,6 +624,9 @@ export async function executeRunOnSelfhostedMachine(
     relay: machine.relay,
     timeoutMs: machine.controlTimeoutMs,
     execTimeoutMs: machine.execTimeoutMs,
+    ...(machine.transientExecEnvironment !== undefined
+      ? { transientExecEnvironment: () => machine.transientExecEnvironment! }
+      : {}),
     ...(machine.opStream !== undefined ? { opStream: machine.opStream } : {}),
   });
 
@@ -684,6 +697,7 @@ export async function runOnSandbox(
   ctx: FleetContext,
   target: string,
   op: RunOnOp,
+  options: RunOnOptions = {},
 ): Promise<RunOnResult> {
   const sandbox = await getSandbox(services.db, ctx.workspaceId, target);
   if (!sandbox) {
@@ -727,6 +741,9 @@ export async function runOnSandbox(
       relay: relayConfigFromSettings(services.settings),
       controlTimeoutMs: services.settings.sandboxSelfhostedControlTimeoutMs,
       execTimeoutMs: services.settings.sandboxSelfhostedExecTimeoutMs,
+      ...(options.transientExecEnvironment !== undefined
+        ? { transientExecEnvironment: options.transientExecEnvironment }
+        : {}),
       ...(services.settings.agentOpStreamEnabled === true &&
       enrollment.opStream === true &&
       services.bus?.getOpStreamConnection

@@ -304,6 +304,17 @@ export {
   withCodemodeTokenClient,
 } from "./codemode-token";
 
+// Exact-attempt Codemode authority. Shared by ordinary turn execution and
+// one-off Connected Machine execution so neither surface can drift into a
+// second token shape or lifetime.
+export {
+  CODEMODE_TOKEN_TTL_SECONDS,
+  mintSandboxCodemodeToken,
+  type CodemodeAuthorityScope,
+  type SandboxCodemodeAuthority,
+  type MintedSandboxCodemodeToken,
+} from "./codemode-authority";
+
 // The Channel-B pixel DATA PLANE (P4.2). Resolves the provider's scoped tunnel
 // for port 6080 (client → provider-tunnel direct), assembles the WS URL, and
 // mints the scoped stream token. Called API-direct on the resumed handle.

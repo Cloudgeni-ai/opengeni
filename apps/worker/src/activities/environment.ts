@@ -1,7 +1,6 @@
 import {
   applyGitAuthPointerEnvironment,
   codemodeWorkspaceUrl,
-  resolveFirstPartyDelegationSecret,
   stableSandboxEnvironmentForRun,
   type Settings,
 } from "@opengeni/config";
@@ -9,7 +8,6 @@ import {
   gitCredentialBindingIdForRepository,
   gitCredentialProviderForRepository,
   gitRemoteIdentity,
-  signDelegatedAccessToken,
   type ConnectionCredentialsPort,
   type GitCredentialProvider,
   type GitCredentialRepositoryRef,
@@ -21,6 +19,11 @@ import {
   type TurnInitiator,
   type TurnInitiatorContext,
 } from "@opengeni/contracts";
+import {
+  mintSandboxCodemodeToken,
+  type MintedSandboxCodemodeToken,
+  type SandboxCodemodeAuthority,
+} from "@opengeni/runtime/sandbox";
 import {
   loadVariableSetForRun as loadWorkspaceEnvironmentForRunFromDb,
   type Database,
@@ -68,44 +71,12 @@ export type GitHubTokenMintAuthorization = (selection: {
   repositoryIds: number[];
 }) => Promise<void>;
 
-export const CODEMODE_TOKEN_TTL_SECONDS = 60 * 60;
-
-export type MintedSandboxCodemodeToken = {
-  token: string;
-  expiresAt: Date;
-};
-
-export type SandboxCodemodeAuthority = {
-  sessionId: string;
-  turnId: string;
-  attemptId: string;
-  executionGeneration: number;
-};
-
-export async function mintSandboxCodemodeToken(
-  settings: Settings,
-  scope: ConnectionScope,
-  authority: SandboxCodemodeAuthority,
-  nowMs = Date.now(),
-): Promise<MintedSandboxCodemodeToken | undefined> {
-  const delegationSecret = resolveFirstPartyDelegationSecret(settings);
-  if (!delegationSecret) return undefined;
-  const expiresAtSeconds = Math.floor(nowMs / 1000) + CODEMODE_TOKEN_TTL_SECONDS;
-  const token = await signDelegatedAccessToken(delegationSecret, {
-    accountId: scope.accountId,
-    workspaceId: scope.workspaceId,
-    subjectId: `sandbox:${authority.attemptId}`,
-    subjectLabel: "sandbox Codemode",
-    permissions: ["codemode:call"],
-    sessionId: authority.sessionId,
-    turnId: authority.turnId,
-    attemptId: authority.attemptId,
-    executionGeneration: authority.executionGeneration,
-    principalKind: "agent_attempt",
-    exp: expiresAtSeconds,
-  });
-  return { token, expiresAt: new Date(expiresAtSeconds * 1000) };
-}
+export {
+  CODEMODE_TOKEN_TTL_SECONDS,
+  mintSandboxCodemodeToken,
+  type MintedSandboxCodemodeToken,
+  type SandboxCodemodeAuthority,
+} from "@opengeni/runtime/sandbox";
 
 export type GitCredentialAuthority = {
   sessionId: string;
