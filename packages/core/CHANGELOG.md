@@ -1,5 +1,20 @@
 # @opengeni/core
 
+## 0.28.2
+
+### Patch Changes
+
+- 11913b7: Add separately consented Google Drive editable-artifact publishing with an explicit writable destination, connector-action approval policy, Google-native conversion, and retry-safe provider reconciliation.
+- Updated dependencies [11913b7]
+  - @opengeni/contracts@0.50.1
+  - @opengeni/db@0.36.2
+  - @opengeni/runtime@0.23.2
+  - @opengeni/config@0.16.3
+  - @opengeni/documents@0.5.40
+  - @opengeni/events@0.3.111
+  - @opengeni/observability@0.7.6
+  - @opengeni/storage@0.2.95
+
 ## 0.28.1
 
 ### Patch Changes

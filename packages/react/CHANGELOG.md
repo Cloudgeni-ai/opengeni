@@ -1,5 +1,13 @@
 # @opengeni/react
 
+## 0.57.1
+
+### Patch Changes
+
+- 1ef18cc: Deduplicate realtime model catalog loads and reuse settled catalogs across embedded control remounts.
+- Updated dependencies [11913b7]
+  - @opengeni/sdk@0.57.1
+
 ## 0.57.0
 
 ### Patch Changes
