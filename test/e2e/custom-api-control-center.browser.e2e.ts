@@ -5,6 +5,7 @@ import { mkdir } from "node:fs/promises";
 import { chromium, type Browser, type Page } from "playwright";
 
 import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const evidenceDir = new URL("../../.agent/evidence/capabilities-custom-api/", import.meta.url)
@@ -15,7 +16,7 @@ const subjectId = "user:capabilities-browser";
 const financeConnectionId = "00000000-0000-4000-8000-000000000619";
 const salesConnectionId = "00000000-0000-4000-8000-000000000620";
 const gmailConnectionId = "00000000-0000-4000-8000-000000000621";
-const apiContractRevision = "2026-08-model-context-v1";
+const apiContractRevision = OPENGENI_API_CONTRACT_REVISION;
 let webBaseUrl = "";
 
 type UiState = {

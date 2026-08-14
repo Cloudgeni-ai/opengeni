@@ -8,6 +8,7 @@ import {
   OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
   type ConnectionMetadata,
 } from "@opengeni/contracts";
+import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
 import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
@@ -16,7 +17,7 @@ const accountId = "00000000-0000-4000-8000-000000000218";
 const botConnectionId = "00000000-0000-4000-8000-000000000219";
 const personalConnectionId = "00000000-0000-4000-8000-000000000220";
 const personalSlackCapabilityId = "mcp:slack-personal-browser-fixture";
-const apiContractRevision = "2026-08-model-context-v1";
+const apiContractRevision = OPENGENI_API_CONTRACT_REVISION;
 const slackAuthorizationUrl =
   "https://slack.com/oauth/v2/authorize?client_id=browser-fixture&scope=chat%3Awrite&state=server-signed-browser-fixture";
 

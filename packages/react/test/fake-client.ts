@@ -1,3 +1,4 @@
+import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
 import type { ComposerDraft, SessionGoal, SessionTurn } from "@opengeni/sdk";
 import type { SessionClientLike } from "../src/client";
 
@@ -23,7 +24,7 @@ export function fakeClient(partial: Partial<SessionClientLike>): SessionClientLi
     getClientConfig: async () =>
       ({
         deploymentRevision: "test",
-        apiContractRevision: "2026-08-model-context-v1",
+        apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
         defaultModel: "model-x",
         allowedModels: ["model-x"],
         models: [],
