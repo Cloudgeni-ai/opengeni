@@ -20,6 +20,7 @@ import { e2bProvider } from "./e2b";
 import { localProvider } from "./local";
 import { modalProvider } from "./modal";
 import { noneProvider } from "./none";
+import { opensandboxProvider } from "./opensandbox";
 import { runloopProvider } from "./runloop";
 import { selfhostedProvider } from "./selfhosted";
 import type {
@@ -41,6 +42,7 @@ export const PROVIDER_REGISTRY: Record<SandboxBackend, ProviderRegistration> = {
   cloudflare: cloudflareProvider,
   vercel: vercelProvider,
   selfhosted: selfhostedProvider,
+  opensandbox: opensandboxProvider,
 };
 
 // Stub settings carrying every per-provider credential, used ONLY by the
@@ -61,6 +63,10 @@ const ASSERTION_STUB_SETTINGS = {
   cloudflareWorkerUrl: "https://stub.example.com",
   vercelToken: "stub",
   vercelProjectId: "stub",
+  openSandboxBaseUrl: "https://opensandbox.example.test",
+  openSandboxApiKey: "stub",
+  openSandboxImage:
+    "ghcr.io/cloudgeni-ai/opengeni-sandbox@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 } as unknown as Settings;
 
 /**
@@ -166,6 +172,19 @@ export function providerSupportsImmutableImageBuild(backend: SandboxBackend): bo
   return typeof PROVIDER_REGISTRY[backend].buildImmutableImage === "function";
 }
 
+export async function renewSandboxProviderExpiration(input: {
+  backend: SandboxBackend;
+  settings: Settings;
+  instanceId: string;
+}): Promise<boolean> {
+  const registration = PROVIDER_REGISTRY[input.backend];
+  const renew = registration.renewExpiration;
+  if (!renew) return false;
+  registration.validateCredentials(input.settings);
+  await renew({ settings: input.settings, instanceId: input.instanceId });
+  return true;
+}
+
 export async function buildImmutableProviderImage(input: {
   backend: SandboxBackend;
   settings: Settings;
@@ -197,6 +216,7 @@ export type {
   ProviderExactResumeMode,
   ProviderImmutableImageBuildInput,
   ProviderImmutableImageBuildResult,
+  ProviderExpirationRenewalInput,
   ProviderWorkspaceCapturePolicy,
   ProviderWorkspaceCaptureTakeover,
 } from "./types";

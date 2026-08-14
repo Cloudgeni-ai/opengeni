@@ -163,6 +163,7 @@ import {
   NatsControlRpc,
   NatsOpStreamTransport,
   provisionBrowserControlClient,
+  renewSandboxProviderExpiration,
   type BrowserControlPlacementSession,
   type PlacementBrowserStateCaptureReceipt,
   type PlacementBrowserNetworkRoute,
@@ -3554,6 +3555,11 @@ async function ensureInteractionHolder(
     ).catch(() => undefined);
     throw new BrowserSessionStateError("BrowserSession placement fence changed; retry");
   }
+  await renewSandboxProviderExpiration({
+    backend: acquired.lease.backend as ApiRouteDeps["settings"]["sandboxBackend"],
+    settings: deps.settings,
+    instanceId: acquired.lease.instanceId,
+  }).catch(() => false);
   return true;
 }
 

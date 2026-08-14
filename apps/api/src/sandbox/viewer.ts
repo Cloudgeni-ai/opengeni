@@ -72,6 +72,7 @@ import {
   TerminalServerUnsupportedError,
   verifySandboxExecReadiness,
   StreamPortUnavailableError,
+  renewSandboxProviderExpiration,
   type ControlRpc,
   type EstablishedSandboxSession,
   type NatsRequestConnection,
@@ -492,7 +493,7 @@ export async function heartbeatViewer(
     expectedEpoch: number;
   },
 ): Promise<boolean> {
-  return await heartbeatLeaseHolder(services.db, {
+  const alive = await heartbeatLeaseHolder(services.db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     sandboxGroupId: input.sandboxGroupId,
@@ -501,6 +502,16 @@ export async function heartbeatViewer(
     leaseTtlMs: services.settings.sandboxLeaseTtlMs,
     expectedEpoch: input.expectedEpoch,
   });
+  if (!alive) return false;
+  const lease = await readLease(services.db, input.workspaceId, input.sandboxGroupId);
+  if (lease?.liveness === "warm" && lease.leaseEpoch === input.expectedEpoch && lease.instanceId) {
+    await renewSandboxProviderExpiration({
+      backend: lease.backend as Settings["sandboxBackend"],
+      settings: services.settings,
+      instanceId: lease.instanceId,
+    }).catch(() => false);
+  }
+  return true;
 }
 
 /**

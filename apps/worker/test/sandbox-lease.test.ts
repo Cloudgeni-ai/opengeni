@@ -4506,6 +4506,9 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       OPENGENI_TEMPORAL_HOST: "127.0.0.1:7233",
       OPENGENI_NATS_URL: "nats://127.0.0.1:4222",
       OPENGENI_SANDBOX_OWNERSHIP_ENABLED: "true",
+      OPENGENI_SANDBOX_BACKEND: "modal",
+      OPENGENI_MODAL_TOKEN_ID: "test-token-id",
+      OPENGENI_MODAL_TOKEN_SECRET: "test-token-secret",
       OPENGENI_SANDBOX_ROTATION_LEAD_MS: "300000",
     } as Record<string, string>;
 

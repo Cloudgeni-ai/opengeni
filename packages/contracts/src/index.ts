@@ -148,11 +148,12 @@ export const SessionStatus = z.enum([
 ]);
 export type SessionStatus = z.infer<typeof SessionStatus>;
 
-// 11 backends; 3-way enum parity (contracts / sdk / deployment) is pinned by
+// 12 backends; 3-way enum parity (contracts / sdk / deployment) is pinned by
 // `packages/sdk/test/contract-parity.test.ts`. Every member is ADDITIVE AT THE
 // END (the parity test pins positions): the original four, then the six cloud
 // backends, then `selfhosted` (bring-your-own-compute — a user's own machine
-// enrolled as a first-class sandbox).
+// enrolled as a first-class sandbox), then `opensandbox` (an optional
+// Kubernetes-native provisioned sandbox provider).
 export const SandboxBackend = z.enum([
   "docker",
   "modal",
@@ -165,6 +166,7 @@ export const SandboxBackend = z.enum([
   "cloudflare",
   "vercel",
   "selfhosted",
+  "opensandbox",
 ]);
 export type SandboxBackend = z.infer<typeof SandboxBackend>;
 
@@ -190,6 +192,7 @@ export const SANDBOX_PROVIDER_INSTANCE_ID_FIELDS_BY_BACKEND = {
   cloudflare: ["sandboxId"],
   vercel: ["sandboxId"],
   selfhosted: ["agentId"],
+  opensandbox: ["sandboxId"],
 } as const satisfies Record<SandboxBackend, readonly string[]>;
 export const LEGACY_SANDBOX_PROVIDER_INSTANCE_ID_FIELDS = [
   "sandboxId",
@@ -592,6 +595,36 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     workspaceRoot: "/", // agent-reported machine root (the whole machine is the sandbox)
     nativeBucketMount: false,
     persistable: false,
+    supportsRunAs: false,
+  },
+  // Optional Kubernetes-native provisioned sandbox through OpenSandbox. The
+  // provider is headless in v1: ordinary command/files/ports are available,
+  // PTY and desktop claims stay off until live protocol conformance proves
+  // them. OpenGeni owns persistence through its portable tar checkpoint path;
+  // native OpenSandbox pause/resume and snapshots are deliberately not used.
+  opensandbox: {
+    backend: "opensandbox",
+    backendId: "opensandbox",
+    tier: "headless",
+    os: { supported: ["linux"], default: "linux" },
+    capabilities: {
+      FileSystem: { available: true, readOnly: false },
+      Terminal: { available: true, transport: "sse-events", pty: false },
+      Git: { available: true },
+      DesktopStream: { available: false, transport: null },
+      Recording: { available: false },
+    },
+    lifetime: {
+      requiresSnapshotRollover: false,
+      hasIdleKiller: false,
+      supportsSuspendResume: false,
+      resumeIsLockFree: true,
+    },
+    snapshot: { kind: "tar-only", hasTarFallback: true },
+    portExposure: { kind: "provider-tunnel", supportsOnDemandPorts: true },
+    workspaceRoot: "/workspace",
+    nativeBucketMount: false,
+    persistable: true,
     supportsRunAs: false,
   },
 };
@@ -12297,7 +12330,7 @@ export const MachineState = z.enum([
 ]);
 export type MachineState = z.infer<typeof MachineState>;
 
-export const MachineKind = z.enum(["modal", "selfhosted"]);
+export const MachineKind = z.enum(["modal", "selfhosted", "opensandbox"]);
 export type MachineKind = z.infer<typeof MachineKind>;
 
 /** Diagnostic projection of the single live Connected-Machine runner authority.

@@ -99,12 +99,14 @@ export {
   buildImmutableProviderImage,
   prepareProviderForTeardownAfterCapture,
   providerSupportsImmutableImageBuild,
+  renewSandboxProviderExpiration,
   providerWorkspaceCapturePolicy,
   type ProviderRegistration,
   type ProviderConstructionContext,
   type ProviderExactResumeMode,
   type ProviderImmutableImageBuildInput,
   type ProviderImmutableImageBuildResult,
+  type ProviderExpirationRenewalInput,
   type ProviderWorkspaceCapturePolicy,
   type ProviderWorkspaceCaptureTakeover,
 } from "./providers";
@@ -158,6 +160,15 @@ export {
   type ModalSandboxAttribution,
   type RevalidateModalOrphanTermination,
 } from "./providers/modal";
+export {
+  OpenSandboxClient,
+  OpenSandboxSession,
+  setOpenSandboxApplyDiff,
+  type OpenSandboxApplyDiff,
+  type OpenSandboxClientOptions,
+  type OpenSandboxEditor,
+  type OpenSandboxSessionState,
+} from "./providers/opensandbox-adapter";
 export {
   selectBackend,
   sdkBackendIdForSandboxBackend,
@@ -1107,10 +1118,12 @@ export class SandboxExecReadinessError extends Error {
   }
 }
 
-/** Modal may return a sandbox handle before its command router accepts exec.
- * Allow cold filesystem-snapshot restores to absorb provider tail latency
- * without publishing the lease warm before command execution is possible. */
+/** A remote provider may return a sandbox handle before its command router
+ * accepts exec. Allow cold restores to absorb provider tail latency without
+ * publishing the lease warm before command execution is possible. */
 export const MODAL_EXEC_READINESS_TIMEOUT_MS = 60_000;
+
+const EXEC_READINESS_BACKENDS = new Set(["modal", "opensandbox"]);
 
 function sandboxExecProbeExitCode(result: unknown): number | null {
   if (typeof result === "string") {
@@ -1137,14 +1150,14 @@ function sandboxExecProbeStillRunning(result: unknown): boolean {
   return typeof candidate.sessionId === "number" || typeof candidate.session_id === "number";
 }
 
-/** A provider handle is not workspace readiness. Modal can return a handle
- * before its command router accepts exec, so every create path must pass this
- * bounded probe before atomically publishing the lease warm/ready. */
+/** A provider handle is not workspace readiness. Providers with asynchronous
+ * startup must pass this bounded command probe before a caller publishes the
+ * lease warm/ready. */
 export async function verifySandboxExecReadiness(
   established: EstablishedSandboxSession,
   timeoutMs = MODAL_EXEC_READINESS_TIMEOUT_MS,
 ): Promise<void> {
-  if (established.backendId !== "modal") return;
+  if (!EXEC_READINESS_BACKENDS.has(established.backendId)) return;
   const session = established.session as {
     exec?: (args: {
       cmd: string;

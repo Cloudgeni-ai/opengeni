@@ -251,7 +251,11 @@ describe("deployment contract", () => {
   test("allows Modal with Azure Blob because runtime materializes file resources into the sandbox", () => {
     const contract = parseDeploymentContract({
       ...deploymentProfiles["azure-managed"],
-      sandbox: { backend: "modal", preparationProfiles: ["none"], envAllowlist: [] },
+      sandbox: {
+        backend: "modal",
+        preparationProfiles: ["none"],
+        envAllowlist: [],
+      },
     });
 
     expect(contract.sandbox.backend).toBe("modal");
@@ -408,6 +412,158 @@ describe("deployment contract", () => {
       'TEMPORAL_POSTGRES_TLS_ENABLED="${TEMPORAL_POSTGRES_TLS_ENABLED:-true}"',
     );
     expect(commands).not.toContain("opengeni-postgres-ca");
+  });
+
+  test("plans pinned private OpenSandbox only when a Kubernetes deployment selects it", () => {
+    const contract = withSandboxBackend("opensandbox");
+    const plan = stackPlanFor(contract);
+    const dependency = plan.platformDependencies.find((entry) => entry.id === "opensandbox");
+
+    expect(dependency).toMatchObject({
+      lifecycle: "officialChart",
+      namespace: "opensandbox-system",
+      releaseName: "opensandbox",
+      chartName: "opensandbox-group/OpenSandbox@88004c989e334ffd7811acbe193cddcd9014f14e",
+      valuesFile: "deploy/stacks/official-opensandbox.values.yaml",
+      runtimeEnv: {
+        OPENGENI_OPENSANDBOX_BASE_URL:
+          "http://opensandbox-server.opensandbox-system.svc.cluster.local",
+      },
+    });
+    expect(dependency?.requiredSecretKeys).toEqual(["opensandbox-api-key/api-key"]);
+    expect(dependency?.installCommands.join("\n")).toContain("prepare-opensandbox-chart.sh");
+    expect(dependency?.installCommands.join("\n")).toContain(
+      "--post-renderer scripts/operator/opensandbox-image-post-renderer.sh",
+    );
+    expect(dependency?.installCommands.join("\n")).toContain(
+      "create secret generic opensandbox-api-key",
+    );
+    expect(dependency?.installCommands.join("\n")).toContain(
+      "opensandbox-batchsandbox-template.azure.yaml",
+    );
+    expect(dependency?.verifyCommands.join("\n")).toContain("grep -qx ClusterIP");
+    expect(dependency?.destroyCommands.join("\n")).toContain(
+      "delete crd batchsandboxes.sandbox.opensandbox.io",
+    );
+
+    const artifacts = generateRuntimeArtifacts(
+      contract,
+      {
+        temporal_host: { value: "host:7233" },
+        object_storage_bucket: { value: "opengeni-files" },
+        object_storage_azure_connection_string: { value: "x", sensitive: true },
+        helm_set_values: { value: {} },
+      },
+      {
+        OPENGENI_OPENSANDBOX_API_KEY: "opensandbox-secret",
+        OPENGENI_OPENSANDBOX_IMAGE: `docker.io/opengeni/sandbox@sha256:${"a".repeat(64)}`,
+      },
+    );
+    expect(artifacts.runtimeEnv).toContain(
+      "OPENGENI_OPENSANDBOX_BASE_URL=http://opensandbox-server.opensandbox-system.svc.cluster.local",
+    );
+    expect(artifacts.missingEnvVars).not.toContain("OPENGENI_OPENSANDBOX_BASE_URL");
+  });
+
+  test("uses the generic OpenSandbox template and installs it from local Kubernetes profiles", () => {
+    for (const profileId of ["local-kubernetes", "single-node-kubernetes"] as const) {
+      const contract = parseDeploymentContract({
+        ...deploymentProfiles[profileId],
+        sandbox: {
+          backend: "opensandbox",
+          preparationProfiles: ["none"],
+          envAllowlist: [],
+        },
+      });
+      const plan = stackPlanFor(contract);
+      const dependency = plan.platformDependencies.find((entry) => entry.id === "opensandbox");
+      const installCommands = dependency?.installCommands.join("\n") ?? "";
+      const deployCommands = plan.deployCommands.join("\n");
+
+      expect(installCommands).toContain(
+        "kubectl apply -f deploy/stacks/opensandbox-batchsandbox-template.yaml",
+      );
+      expect(installCommands).not.toContain("opensandbox-batchsandbox-template.azure.yaml");
+      expect(deployCommands).toContain("prepare-opensandbox-chart.sh");
+      expect(deployCommands).toContain("OPENGENI_OPENSANDBOX_API_KEY");
+      expect(deployCommands).toContain(
+        "config.OPENGENI_OPENSANDBOX_BASE_URL=http://opensandbox-server.opensandbox-system.svc.cluster.local",
+      );
+      expect(plan.destroyCommands).not.toContain(
+        "kubectl delete namespace opengeni-platform --ignore-not-found",
+      );
+    }
+
+    const genericTemplate = readFileSync(
+      new URL("../../../deploy/stacks/opensandbox-batchsandbox-template.yaml", import.meta.url),
+      "utf8",
+    );
+    const azureTemplate = readFileSync(
+      new URL(
+        "../../../deploy/stacks/opensandbox-batchsandbox-template.azure.yaml",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    expect(genericTemplate).not.toContain("nodeSelector:");
+    expect(genericTemplate).not.toContain("tolerations:");
+    expect(azureTemplate).toContain("opengeni.ai/sandbox-pool: opensandbox");
+    expect(azureTemplate).toContain("opengeni.ai/sandbox");
+  });
+
+  test("disables upstream native-snapshot controller defaults for the pinned OpenSandbox set", () => {
+    const values = readFileSync(
+      new URL("../../../deploy/stacks/official-opensandbox.values.yaml", import.meta.url),
+      "utf8",
+    );
+    expect(values).toContain('imageCommitterImage: ""');
+    expect(values).toContain('containerdSocketPath: ""');
+    expect(values).toContain('commitJobTimeout: ""');
+    expect(values).toContain("sandbox_create_timeout_seconds = 900");
+    expect(values).not.toContain("sandbox-registry.cn-");
+  });
+
+  test("keeps the worker image target reachable by legacy remote Docker builders", () => {
+    const dockerfile = readFileSync(
+      new URL("../../../docker/opengeni.Dockerfile", import.meta.url),
+      "utf8",
+    );
+    expect(dockerfile.indexOf("FROM source-base AS worker")).toBeGreaterThan(-1);
+    expect(dockerfile.indexOf("FROM source-base AS worker")).toBeLessThan(
+      dockerfile.indexOf("FROM source-base AS artifact-runtime-base"),
+    );
+  });
+
+  test("prepares the declared non-root sandbox workspace in every runtime image", () => {
+    const dockerfile = readFileSync(
+      new URL("../../../docker/opengeni.Dockerfile", import.meta.url),
+      "utf8",
+    );
+    const workspaceSetup = "RUN install -d -o bun -g bun -m 0755 /workspace";
+
+    expect(dockerfile).toContain(workspaceSetup);
+    expect(dockerfile.indexOf(workspaceSetup)).toBeLessThan(
+      dockerfile.indexOf("FROM source-base AS worker"),
+    );
+  });
+
+  test("keeps OpenSandbox absent from default and non-Kubernetes stack plans", () => {
+    for (const profile of Object.values(deploymentProfiles)) {
+      if (profile.sandbox.backend === "opensandbox") continue;
+      expect(
+        stackPlanFor(profile).platformDependencies.some((entry) => entry.id === "opensandbox"),
+      ).toBe(false);
+    }
+
+    const nonKubernetes = parseDeploymentContract({
+      ...deploymentProfiles["local-compose"],
+      sandbox: {
+        backend: "opensandbox",
+        preparationProfiles: ["none"],
+        envAllowlist: [],
+      },
+    });
+    expect(stackPlanFor(nonKubernetes).platformDependencies).toEqual([]);
   });
 
   test("does not plan cloud substrate for existing-service profiles", () => {
@@ -991,6 +1147,18 @@ describe("deployment contract", () => {
       "OPENGENI_KERNEL_BROWSER_STEALTH",
     ]);
     expect(SANDBOX_REQUIRED_ENV.daytona.required).toEqual(["OPENGENI_DAYTONA_API_KEY"]);
+    expect(SANDBOX_REQUIRED_ENV.opensandbox).toEqual({
+      required: [
+        "OPENGENI_OPENSANDBOX_BASE_URL",
+        "OPENGENI_OPENSANDBOX_API_KEY",
+        "OPENGENI_OPENSANDBOX_IMAGE",
+      ],
+      optional: [
+        "OPENGENI_OPENSANDBOX_TTL_SECONDS",
+        "OPENGENI_OPENSANDBOX_USE_SERVER_PROXY",
+        "OPENGENI_OPENSANDBOX_POOL_REF",
+      ],
+    });
     expect(SANDBOX_REQUIRED_ENV.docker.required).toEqual([]);
     expect(SANDBOX_REQUIRED_ENV.none.required).toEqual([]);
   });

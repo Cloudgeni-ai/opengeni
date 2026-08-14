@@ -1334,6 +1334,7 @@ Use this boundary when building a production cluster:
 | Secrets | External Secrets Operator from `https://charts.external-secrets.io`, Vault, or cloud-native secret delivery | `externalSecret.enabled=true` or `secret.existingSecret` |
 | TLS | cert-manager, cloud load balancer certificates, or an existing ingress/TLS stack | `ingress.tls` and SSE-safe ingress annotations |
 | Observability | `deploy/observability` pinned Prometheus/Grafana wrapper, an existing compatible platform, or a managed OTLP/Prometheus backend | `/metrics`, OTLP env, `ServiceMonitor`, `PrometheusRule`, canonical dashboard labels |
+| OpenSandbox (optional) | Exact upstream source/chart pin recorded in `deploy/stacks/opensandbox-source.lock` | Select `sandbox.backend=opensandbox`; the stack wrapper installs a private API-key-authenticated lifecycle service outside the OpenGeni app chart |
 
 The runtime secret must provide values such as:
 
@@ -1359,6 +1360,83 @@ The runtime secret must provide values such as:
 - sandbox backend credentials when required
 
 Do not commit real secret values.
+
+### Optional OpenSandbox Kubernetes provider
+
+OpenSandbox is an additive provisioned backend; production Modal behavior and
+defaults are unchanged. It is installed only when a Kubernetes deployment
+contract explicitly selects `sandbox.backend=opensandbox`. The stack wrapper:
+
+- downloads exact upstream source commit
+  `88004c989e334ffd7811acbe193cddcd9014f14e` and verifies the source, CRD,
+  deterministic chart, and image digests from
+  `deploy/stacks/opensandbox-source.lock`;
+- installs the official upstream controller/server chart into
+  `opensandbox-system`, with sandbox CRs and Pods in `opensandbox`;
+- keeps the lifecycle service `ClusterIP`-only and loads its API key from the
+  `opensandbox-api-key` Secret;
+- uses the lifecycle server's private in-cluster proxy for exec, files, and
+  configured HTTP/WebSocket ports; upstream single-tenant mode exempts these
+  proxy routes from API-key checks, so the service must not receive ingress; and
+- mounts a generic BatchSandbox template, or the Azure-specific variant that
+  selects/tolerates the dedicated sandbox node pool.
+
+Required runtime values are:
+
+```bash
+OPENGENI_SANDBOX_BACKEND=opensandbox
+OPENGENI_OPENSANDBOX_API_KEY=...
+OPENGENI_OPENSANDBOX_IMAGE=ghcr.io/your-org/opengeni-sandbox@sha256:...
+```
+
+The platform plan supplies
+`OPENGENI_OPENSANDBOX_BASE_URL=http://opensandbox-server.opensandbox-system.svc.cluster.local`.
+`OPENGENI_OPENSANDBOX_TTL_SECONDS` defaults to 3,600 seconds and is renewed only
+while the matching authoritative OpenGeni lease remains warm. OpenGeni idle
+reaping is primary; provider expiry is a leak backstop.
+
+OpenSandbox v1 uses exact ID-addressed attach and OpenGeni portable
+`/workspace` tar capture/hydration. Native OpenSandbox pause/resume, snapshots,
+and immutable rig-image builds are deliberately not used. The capability row is
+headless: ordinary and retained commands, files, Git, and configured ports are
+supported. The Agents SDK does not expose `write_stdin` because PTY is false;
+OpenGeni's internal finalizer can still poll and Ctrl-C an exact retained
+provider command. Arbitrary stdin, `runAs`, desktop, and recording are reported
+unavailable.
+
+Prepare/render the pinned upstream chart without cluster mutation:
+
+```bash
+scripts/operator/prepare-opensandbox-chart.sh .agent/generated/opensandbox
+helm template opensandbox .agent/generated/opensandbox/opensandbox-0.2.0.tgz \
+  --namespace opensandbox-system \
+  --values deploy/stacks/official-opensandbox.values.yaml \
+  --post-renderer scripts/operator/opensandbox-image-post-renderer.sh
+```
+
+For the custom-Kubernetes portability path, `deploy/stacks/k3s-source.lock`
+pins the installer, checksum manifests, and amd64/arm64 binaries for k3s
+`v1.36.1+k3s1`. On a fresh Linux VM, copy the repository checkout and run:
+
+```bash
+sudo scripts/operator/bootstrap-opensandbox-k3s.sh
+```
+
+The script verifies every downloaded byte before installation, disables only
+the bundled Traefik component, waits for Kubernetes readiness, and writes a
+root-only kubeconfig. `scripts/operator/destroy-opensandbox-k3s.sh` removes the
+k3s installation; isolated preview automation should still delete the entire
+VM resource group afterward.
+
+The Azure reference module exposes `sandbox_node_pool`, disabled by default. An
+enabled pool uses label `opengeni.ai/sandbox-pool=opensandbox`, taint
+`opengeni.ai/sandbox=true:NoSchedule`, and explicit autoscaling bounds including
+scale-to-zero. Size 5/50/500 profiles from CPU, memory, pod/IP density, daemon
+overhead, utilization, disruption margin, quota, and cost; a 500 lightweight
+profile is not evidence for 500 desktop rigs. An Azure deployment that selects
+OpenSandbox must enable this pool because its Azure BatchSandbox template pins
+workloads to that scheduling contract. Generic Kubernetes and k3s use the
+unconstrained template instead.
 
 Keep `OPENGENI_MIGRATIONS_DATABASE_URL` and
 `OPENGENI_APP_DATABASE_PASSWORD` out of the runtime Secret. Put them in a

@@ -435,6 +435,7 @@ const MANAGED_BACKEND_LABELS: Partial<Record<SandboxBackend, string>> = {
   blaxel: "Blaxel",
   cloudflare: "Cloudflare",
   vercel: "Vercel",
+  opensandbox: "OpenSandbox",
 };
 
 function backendLabel(backend: SandboxBackend): string {

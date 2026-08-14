@@ -85,8 +85,8 @@ When planning a deployment, make these choices explicitly from current source:
   infrastructure. This is what every profile above and `docs/deployment.md`
   describe.
 - **Connected Machine (user-owned compute)**: the `selfhosted` sandbox backend
-  (`OPENGENI_SANDBOX_BACKEND=selfhosted`; also the 11th entry in the
-  `SandboxBackend` enum and the `selfhosted` `MachineKind`). A user enrolls their
+  (`OPENGENI_SANDBOX_BACKEND=selfhosted`; the 11th entry in the current
+  12-member `SandboxBackend` enum and the `selfhosted` `MachineKind`). A user enrolls their
   own computer as a first-class primary compute target. A machine-targeted turn
   establishes the machine session directly and routes tool execution to the
   agent on that machine over NATS request/reply; the platform creates no cloud

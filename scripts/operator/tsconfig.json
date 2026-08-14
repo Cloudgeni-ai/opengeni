@@ -6,6 +6,10 @@
   "include": [
     "connected-machine-load-profile.ts",
     "connected-machine-load-profile.test.ts",
+    "opensandbox-conformance.ts",
+    "opensandbox-load-profile.ts",
+    "verify-opensandbox-cluster.ts",
+    "opensandbox-operator.test.ts",
     "turn-density-profile.ts",
     "sandbox-reaper-hold.ts",
     "sandbox-reaper-hold.test.ts",

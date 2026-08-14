@@ -159,6 +159,7 @@ import {
   runOwnedSandboxSetup,
   RoutingMutationOutcomeUnknownError,
   WorkspaceArchiveIntegrityError,
+  sandboxBackendForSdkBackendId,
   sdkBackendIdForSandboxBackend,
   swapTargetEstablishability,
   type SandboxFileDownload,
@@ -182,6 +183,7 @@ import {
   type CodemodeTokenWriterSession,
   createFirstPartyInteractionAttemptToolDefinitions,
   deleteRecordingArtifacts,
+  renewSandboxProviderExpiration,
   stopRecording as stopRecordingOnBox,
 } from "@opengeni/runtime";
 import {
@@ -199,6 +201,7 @@ import {
   calculateModelUsageCostBreakdown,
   configuredModelPricingSchedules,
   configuredStaticUsageLimits,
+  effectiveSandboxLifecycle,
   responseSatisfiesLatencyMode,
   sandboxLifecycleTransitionWaitMs,
   sandboxWarmRateMicrosPerSecond,
@@ -3509,10 +3512,54 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // home turn that degraded to the cloud group box (swap-away / flag-off), that
       // is the deployment default (modal), so the fallback box is warm-metered at
       // the cloud rate instead of selfhosted's rate-0 (which would under-bill).
-      const warmRate = sandboxWarmRateMicrosPerSecond(
+      const providerBackend =
+        warmBackend ?? sandboxBackendForSdkBackendId(sandbox.established.backendId);
+      if (!providerBackend) {
+        throw new Error(
+          `Sandbox provider backendId ${sandbox.established.backendId} has no canonical backend`,
+        );
+      }
+      const warmRate = sandboxWarmRateMicrosPerSecond(settings, providerBackend);
+      const providerTtlSeconds = effectiveSandboxLifecycle(
         settings,
-        warmBackend ?? (sandbox.established.backendId as Settings["sandboxBackend"]),
-      );
+        providerBackend,
+      ).renewableTtlSeconds;
+      const providerRenewalIntervalMs =
+        providerTtlSeconds === null
+          ? null
+          : Math.max(10_000, Math.floor((providerTtlSeconds * 1000) / 3));
+      let providerRenewedAtMs = Date.now();
+      let providerRenewalInFlight: Promise<void> | null = null;
+      const maybeRenewProviderExpiration = (): void => {
+        if (
+          providerRenewalIntervalMs === null ||
+          providerRenewalInFlight ||
+          Date.now() - providerRenewedAtMs < providerRenewalIntervalMs
+        ) {
+          return;
+        }
+        providerRenewalInFlight = renewSandboxProviderExpiration({
+          backend: providerBackend,
+          settings,
+          instanceId: sandbox.established.instanceId,
+        })
+          .then(() => {
+            providerRenewedAtMs = Date.now();
+          })
+          .catch((error) => {
+            observability.warn("sandbox provider TTL renewal failed", {
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              sandboxGroupId: heartbeatGroupId,
+              leaseEpoch: heartbeatEpoch,
+              backend: providerBackend,
+              ...safeErrorDiagnostic(error),
+            });
+          })
+          .finally(() => {
+            providerRenewalInFlight = null;
+          });
+      };
       leaseHeartbeatTimer = setInterval(() => {
         void heartbeatLeaseHolder(db, {
           accountId: input.accountId,
@@ -3524,7 +3571,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           expectedEpoch: heartbeatEpoch,
         })
           .then(async (alive) => {
-            if (alive || rotationInFlight || sandboxRotationController.signal.aborted) return;
+            if (alive) {
+              maybeRenewProviderExpiration();
+              return;
+            }
+            if (rotationInFlight || sandboxRotationController.signal.aborted) return;
             const rotatingLease = await readLease(db, input.workspaceId, heartbeatGroupId).catch(
               () => null,
             );

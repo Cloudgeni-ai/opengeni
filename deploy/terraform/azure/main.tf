@@ -226,6 +226,44 @@ resource "azurerm_kubernetes_cluster" "this" {
   }
 }
 
+resource "azurerm_kubernetes_cluster_node_pool" "sandbox" {
+  count = var.sandbox_node_pool.enabled ? 1 : 0
+
+  name                  = var.sandbox_node_pool.name
+  kubernetes_cluster_id = azurerm_kubernetes_cluster.this.id
+  vm_size               = var.sandbox_node_pool.vm_size
+  mode                  = "User"
+
+  auto_scaling_enabled = true
+  min_count            = var.sandbox_node_pool.min_count
+  max_count            = var.sandbox_node_pool.max_count
+  node_count           = null
+  max_pods             = var.sandbox_node_pool.max_pods
+
+  os_type                     = "Linux"
+  os_disk_size_gb             = var.sandbox_node_pool.os_disk_size_gb
+  os_disk_type                = var.sandbox_node_pool.os_disk_type
+  zones                       = var.sandbox_node_pool.zones
+  temporary_name_for_rotation = var.sandbox_node_pool.temporary_name_for_rotation
+
+  node_labels = {
+    "opengeni.ai/sandbox-pool" = "opensandbox"
+  }
+  node_taints = [
+    "opengeni.ai/sandbox=true:NoSchedule",
+  ]
+
+  upgrade_settings {
+    drain_timeout_in_minutes      = var.sandbox_node_pool.node_pool_upgrade_drain_minutes
+    max_surge                     = var.sandbox_node_pool.node_pool_upgrade_max_surge
+    node_soak_duration_in_minutes = var.sandbox_node_pool.node_pool_upgrade_soak_minutes
+  }
+
+  tags = merge(local.tags, {
+    purpose = "opengeni-opensandbox-compute"
+  })
+}
+
 resource "azurerm_role_assignment" "aks_acr_pull" {
   count                = var.create_acr_pull_role_assignment ? 1 : 0
   principal_id         = azurerm_kubernetes_cluster.this.kubelet_identity[0].object_id

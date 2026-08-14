@@ -1,0 +1,93 @@
+opensandbox-controller:
+  controller:
+    replicaCount: 1
+    image:
+      repository: docker.io/opensandbox/controller
+      tag: v0.2.0
+      pullPolicy: IfNotPresent
+    kubeClient:
+      qps: 100
+      burst: 200
+    leaderElection:
+      enabled: true
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+    snapshot:
+      # Native snapshots are not an OpenGeni v1 persistence authority.
+      imageCommitterImage: ""
+      containerdSocketPath: ""
+      commitJobTimeout: ""
+      registry: ""
+      snapshotPushSecret: ""
+      resumePullSecret: ""
+  crds:
+    install: true
+    keep: true
+
+opensandbox-server:
+  server:
+    replicaCount: 1
+    image:
+      repository: docker.io/opensandbox/server
+      tag: v0.2.2
+      pullPolicy: IfNotPresent
+    env:
+      - name: OPENSANDBOX_SERVER_API_KEY
+        valueFrom:
+          secretKeyRef:
+            name: opensandbox-api-key
+            key: api-key
+    resources:
+      requests:
+        cpu: 250m
+        memory: 512Mi
+      limits:
+        cpu: "1"
+        memory: 2Gi
+    gateway:
+      enabled: false
+    volumeMounts:
+      - name: batchsandbox-template
+        mountPath: /etc/opensandbox/opengeni.batchsandbox-template.yaml
+        subPath: batchsandbox-template.yaml
+        readOnly: true
+    volumes:
+      - name: batchsandbox-template
+        configMap:
+          name: opensandbox-batchsandbox-template
+  configToml: |
+    [server]
+    host = "0.0.0.0"
+    port = 80
+    api_key = ""
+
+    [log]
+    level = "INFO"
+
+    [runtime]
+    type = "kubernetes"
+    execd_image = "docker.io/opensandbox/execd@sha256:1dc98c7de10b9a73450ac75aa0f200ad7972f2c40f5225f6a8998e166b45d6dd"
+
+    [kubernetes]
+    kubeconfig_path = ""
+    namespace = "opensandbox"
+    informer_enabled = true
+    informer_resync_seconds = 300
+    informer_watch_timeout_seconds = 60
+    sandbox_create_timeout_seconds = 900
+    snapshot_create_timeout_seconds = 900
+    workload_provider = "batchsandbox"
+    batchsandbox_template_file = "/etc/opensandbox/opengeni.batchsandbox-template.yaml"
+    image_pull_policy = "IfNotPresent"
+
+    [egress]
+    image = "docker.io/opensandbox/egress@sha256:5788021a4a96620dbe84a1c62baca8d403328d021b81186c6869067d0f98137b"
+    mode = "dns+nft"
+
+opensandbox-node-agent:
+  enabled: false

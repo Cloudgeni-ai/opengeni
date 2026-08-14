@@ -42,6 +42,18 @@ describe("sandbox exec readiness", () => {
     expect(commands).toEqual(["true"]);
   });
 
+  test("probes OpenSandbox before the lease is published warm", async () => {
+    const commands: string[] = [];
+    await waitForSandboxExecReadiness(
+      established("opensandbox", async ({ cmd }) => {
+        commands.push(cmd);
+        return { output: "", exitCode: 0 };
+      }),
+      100,
+    );
+    expect(commands).toEqual(["true"]);
+  });
+
   test("rejects a resolved Modal exec with a nonzero exit code", async () => {
     await expect(
       waitForSandboxExecReadiness(
@@ -80,7 +92,7 @@ describe("sandbox exec readiness", () => {
     expect((error as Error).message).not.toContain("capacity");
   });
 
-  test("does not probe other backends", async () => {
+  test("does not probe synchronous backends", async () => {
     let called = false;
     await waitForSandboxExecReadiness(
       established("unix_local", async () => {

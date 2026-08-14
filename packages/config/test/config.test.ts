@@ -1,11 +1,15 @@
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
-import { McpServerConnectionRef as ContractMcpServerConnectionRef } from "@opengeni/contracts";
+import {
+  McpServerConnectionRef as ContractMcpServerConnectionRef,
+  SandboxBackend,
+} from "@opengeni/contracts";
 import {
   collectGitIdentityEnvironment,
   configuredEntitlements,
   collectSandboxEnvironment,
+  effectiveSandboxLifecycle,
   effectiveModalIdleTimeoutSeconds,
   configuredStaticUsageLimits,
   configuredAllowedModels,
@@ -1672,6 +1676,29 @@ describe("backend-gated sandbox required-credential validation", () => {
     }
   });
 
+  test("opensandbox requires private API connection data and an immutable image only when active", () => {
+    expect(() => withEnv({ OPENGENI_SANDBOX_BACKEND: "opensandbox" }, () => getSettings())).toThrow(
+      "OPENGENI_OPENSANDBOX_BASE_URL is required",
+    );
+    const active = {
+      OPENGENI_SANDBOX_BACKEND: "opensandbox",
+      OPENGENI_OPENSANDBOX_BASE_URL: "http://opensandbox-server.opensandbox.svc:8080",
+      OPENGENI_OPENSANDBOX_API_KEY: "test-key",
+      OPENGENI_OPENSANDBOX_IMAGE: `registry.example.com/opengeni@sha256:${"a".repeat(64)}`,
+    };
+    expect(() => withEnv(active, () => getSettings())).not.toThrow();
+    expect(withEnv(active, () => getSettings()).openSandboxUseServerProxy).toBe(true);
+    expect(() =>
+      withEnv(
+        { ...active, OPENGENI_OPENSANDBOX_IMAGE: "registry.example.com/opengeni:latest" },
+        () => getSettings(),
+      ),
+    ).toThrow(/immutable OCI reference/i);
+    expect(() =>
+      withEnv({ OPENGENI_OPENSANDBOX_API_KEY: "unused" }, () => getSettings()),
+    ).not.toThrow();
+  });
+
   test("the modal token stays a both-or-neither pair regardless of the active backend", () => {
     // Half-configured Modal token while backend=docker: still a misconfig.
     expect(() =>
@@ -1692,6 +1719,11 @@ describe("backend-gated sandbox required-credential validation", () => {
       "OPENGENI_MODAL_APP_NAME",
       "OPENGENI_MODAL_TOKEN_ID",
       "OPENGENI_MODAL_TOKEN_SECRET",
+    ]);
+    expect(requiredSandboxEnvForBackend("opensandbox")).toEqual([
+      "OPENGENI_OPENSANDBOX_BASE_URL",
+      "OPENGENI_OPENSANDBOX_API_KEY",
+      "OPENGENI_OPENSANDBOX_IMAGE",
     ]);
     expect(requiredSandboxEnvForBackend("docker")).toEqual([]);
     // every backend in the table maps to a (possibly empty) env list.
@@ -1761,7 +1793,15 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
   });
 
   test("rotation lead derives from a short provider lifetime when not explicitly pinned", () => {
-    const settings = withEnv({ OPENGENI_MODAL_TIMEOUT_SECONDS: "300" }, () => getSettings());
+    const settings = withEnv(
+      {
+        OPENGENI_SANDBOX_BACKEND: "modal",
+        OPENGENI_MODAL_TOKEN_ID: "ak",
+        OPENGENI_MODAL_TOKEN_SECRET: "as",
+        OPENGENI_MODAL_TIMEOUT_SECONDS: "300",
+      },
+      () => getSettings(),
+    );
     expect(settings.sandboxRotationLeadMs).toBe(150_000);
     expect(settings.sandboxIdleGraceMs).toBe(150_000);
   });
@@ -1769,6 +1809,9 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
   test("an explicit rotation lead overrides the provider-relative default", () => {
     const settings = withEnv(
       {
+        OPENGENI_SANDBOX_BACKEND: "modal",
+        OPENGENI_MODAL_TOKEN_ID: "ak",
+        OPENGENI_MODAL_TOKEN_SECRET: "as",
         OPENGENI_MODAL_TIMEOUT_SECONDS: "900",
         OPENGENI_SANDBOX_ROTATION_LEAD_MS: "300000",
       },
@@ -1787,6 +1830,9 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
     expect(() =>
       withEnv(
         {
+          OPENGENI_SANDBOX_BACKEND: "modal",
+          OPENGENI_MODAL_TOKEN_ID: "ak",
+          OPENGENI_MODAL_TOKEN_SECRET: "as",
           OPENGENI_MODAL_TIMEOUT_SECONDS: "3600",
           OPENGENI_SANDBOX_ROTATION_LEAD_MS: "3600000",
         },
@@ -1797,11 +1843,26 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
 
   test("boot reserves the full capture window plus one reaper tick before rotation", () => {
     expect(() =>
-      withEnv({ OPENGENI_SANDBOX_ROTATION_LEAD_MS: "100000" }, () => getSettings()),
+      withEnv(
+        {
+          OPENGENI_SANDBOX_BACKEND: "modal",
+          OPENGENI_MODAL_TOKEN_ID: "ak",
+          OPENGENI_MODAL_TOKEN_SECRET: "as",
+          OPENGENI_SANDBOX_ROTATION_LEAD_MS: "100000",
+        },
+        () => getSettings(),
+      ),
     ).toThrow(/must exceed the durable capture timeout/i);
     expect(
-      withEnv({ OPENGENI_SANDBOX_ROTATION_LEAD_MS: "100001" }, () => getSettings())
-        .sandboxRotationLeadMs,
+      withEnv(
+        {
+          OPENGENI_SANDBOX_BACKEND: "modal",
+          OPENGENI_MODAL_TOKEN_ID: "ak",
+          OPENGENI_MODAL_TOKEN_SECRET: "as",
+          OPENGENI_SANDBOX_ROTATION_LEAD_MS: "100001",
+        },
+        () => getSettings(),
+      ).sandboxRotationLeadMs,
     ).toBe(100_001);
   });
 
@@ -1822,6 +1883,9 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
     expect(() =>
       withEnv(
         {
+          OPENGENI_SANDBOX_BACKEND: "modal",
+          OPENGENI_MODAL_TOKEN_ID: "ak",
+          OPENGENI_MODAL_TOKEN_SECRET: "as",
           OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS: "120",
           OPENGENI_SANDBOX_IDLE_GRACE_MS: "900000",
         },
@@ -1834,6 +1898,9 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
     expect(() =>
       withEnv(
         {
+          OPENGENI_SANDBOX_BACKEND: "modal",
+          OPENGENI_MODAL_TOKEN_ID: "ak",
+          OPENGENI_MODAL_TOKEN_SECRET: "as",
           OPENGENI_MODAL_TIMEOUT_SECONDS: "300",
           OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS: "600",
           OPENGENI_SANDBOX_ROTATION_LEAD_MS: "180000",
@@ -1841,6 +1908,34 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
         () => getSettings(),
       ),
     ).toThrow(/must not exceed the hard provider/i);
+  });
+
+  test("opensandbox exposes renewable TTL without Modal rotation semantics", () => {
+    const settings = withEnv(
+      {
+        OPENGENI_SANDBOX_BACKEND: "opensandbox",
+        OPENGENI_OPENSANDBOX_BASE_URL: "http://opensandbox-server.opensandbox.svc:8080",
+        OPENGENI_OPENSANDBOX_API_KEY: "test-key",
+        OPENGENI_OPENSANDBOX_IMAGE: `registry.example.com/opengeni@sha256:${"b".repeat(64)}`,
+        OPENGENI_OPENSANDBOX_TTL_SECONDS: "60",
+      },
+      () => getSettings(),
+    );
+    expect(effectiveSandboxLifecycle(settings)).toEqual({
+      hardLifetimeMs: null,
+      renewableTtlSeconds: 60,
+      providerIdleTimeoutMs: null,
+      rotationLeadMs: null,
+    });
+    expect(settings.sandboxIdleGraceMs).toBe(900_000);
+    expect(settings.sandboxRotationLeadMs).toBe(3_600_000);
+  });
+
+  test("every canonical sandbox backend resolves a lifecycle policy", () => {
+    const settings = withEnv({ OPENGENI_SANDBOX_BACKEND: "local" }, () => getSettings());
+    for (const backend of SandboxBackend.options) {
+      expect(() => effectiveSandboxLifecycle(settings, backend)).not.toThrow();
+    }
   });
 });
 

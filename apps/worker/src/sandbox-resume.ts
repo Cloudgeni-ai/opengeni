@@ -21,6 +21,7 @@
 // Liveness between turns is the lease refcount; there is no keepalive loop.
 
 import {
+  effectiveSandboxLifecycle,
   sandboxArchiveCaptureTimeoutMs,
   sandboxLifecycleTransitionWaitMs,
   type Settings,
@@ -64,6 +65,7 @@ import {
   providerWorkspaceCapturePolicy,
   SandboxProviderContinuityUnavailableError,
   requirePersistableReplacementSandboxEnvelope,
+  renewSandboxProviderExpiration,
   modalSessionMatchesCheckpointProviderBinding,
   resolveModalCheckpointProviderBindingForSession,
   serializeReplacementSandboxEnvelope,
@@ -140,7 +142,7 @@ export type ResumeBoxIds = {
    *  disclosure/attribution). For a singleton group this == sandboxGroupId. */
   sessionId: string;
   /** The backend the box runs on (sessions.sandbox_backend). */
-  backend: string;
+  backend: Settings["sandboxBackend"];
   /** The OS axis (sessions.sandbox_os); default 'linux'. */
   os?: string;
   /**
@@ -277,10 +279,10 @@ async function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Modal may return a sandbox handle before its command router accepts the first
- * exec. The upstream session's yieldTimeMs starts only after sandbox.exec()
- * returns, so it cannot bound that initial RPC. Probe it before publishing the
- * lease as warm and enforce our own wall-clock deadline.
+ * A remote provider may return a sandbox handle before its command router
+ * accepts the first exec. The upstream session's yieldTimeMs starts only after
+ * sandbox.exec() returns, so it cannot bound that initial RPC. Probe it before
+ * publishing the lease as warm and enforce our own wall-clock deadline.
  */
 export async function waitForSandboxExecReadiness(
   established: EstablishedSandboxSession,
@@ -913,6 +915,35 @@ export async function resumeBoxForTurn(
           acquired.lease.liveness === "warm"
         ? { expectedEpoch: acquired.lease.leaseEpoch, leaseTtlMs }
         : null;
+  let providerRenewalTarget: { backend: Settings["sandboxBackend"]; instanceId: string } | null =
+    acquired.lease.liveness === "warm" && acquired.lease.instanceId
+      ? {
+          backend: ids.backend,
+          instanceId: acquired.lease.instanceId,
+        }
+      : null;
+  let providerRenewedAtMs = Date.now();
+  let providerRenewalInFlight: Promise<void> | null = null;
+  const maybeRenewProviderExpiration = async (force = false): Promise<void> => {
+    const target = providerRenewalTarget;
+    if (!target || providerRenewalInFlight) return;
+    const ttlSeconds = effectiveSandboxLifecycle(settings, target.backend).renewableTtlSeconds;
+    if (ttlSeconds === null) return;
+    const intervalMs = Math.max(10_000, Math.floor((ttlSeconds * 1000) / 3));
+    if (!force && Date.now() - providerRenewedAtMs < intervalMs) return;
+    providerRenewalInFlight = renewSandboxProviderExpiration({
+      backend: target.backend,
+      settings,
+      instanceId: target.instanceId,
+    })
+      .then(() => {
+        providerRenewedAtMs = Date.now();
+      })
+      .finally(() => {
+        providerRenewalInFlight = null;
+      });
+    await providerRenewalInFlight;
+  };
   holderLivenessTimer = setInterval(() => {
     const heartbeat = holderLeaseHeartbeat;
     const refresh = heartbeat
@@ -939,6 +970,10 @@ export async function resumeBoxForTurn(
         // operation and idempotently drop any remaining holder state.
         if (!touched && heartbeat === holderLeaseHeartbeat) {
           void release().catch(() => undefined);
+          return;
+        }
+        if (touched && heartbeat === holderLeaseHeartbeat) {
+          void maybeRenewProviderExpiration().catch(() => undefined);
         }
       })
       .catch(() => undefined);
@@ -1088,6 +1123,11 @@ export async function resumeBoxForTurn(
           : {}),
         onSandboxCreated: async (created) => {
           createdEstablished = created;
+          providerRenewalTarget = {
+            backend: ids.backend,
+            instanceId: created.instanceId,
+          };
+          providerRenewedAtMs = Date.now();
           throwIfReleasedOrCancelled();
           if (
             rematerialization &&
@@ -1218,13 +1258,15 @@ export async function resumeBoxForTurn(
       });
       createdEstablished = established;
       throwIfReleasedOrCancelled();
-      // A sandbox handle is not sufficient evidence that Modal's command router
-      // is live. Do not publish a warm lease until one bounded no-op exec works.
+      // A sandbox handle is not sufficient evidence that an asynchronous
+      // provider's command router is live. Do not publish a warm lease until
+      // one bounded no-op exec works.
       // On timeout the catch below terminates the box and rolls warming -> cold,
       // so the next turn cold-creates instead of hanging forever on first use.
       await waitForSandboxExecReadiness(established, MODAL_EXEC_READINESS_TIMEOUT_MS, {
         sandboxGroupId: ids.sandboxGroupId,
       });
+      await maybeRenewProviderExpiration(true);
       throwIfReleasedOrCancelled();
       // Fold the LIVE box into a re-resumable envelope and persist it as the
       // lease's resume_state — exactly like the API-direct paths (channel-a.ts /
@@ -1401,8 +1443,8 @@ export async function resumeBoxForTurn(
       });
       throwIfReleasedOrCancelled();
       // A durable `warm` row is an ownership assertion, not provider liveness.
-      // Modal may have ended the exact box at its finite timeout while OpenGeni
-      // was idle. Prove the command router before handing the session to the
+      // A provider may have ended the exact box while OpenGeni was idle. Prove
+      // the command router before handing the session to the
       // agent so terminal evidence enters the atomic warm->cold recovery path
       // below instead of surfacing inside a model-visible tool call.
       if (services.verifyAttachedSandboxReadiness) {
@@ -1412,6 +1454,11 @@ export async function resumeBoxForTurn(
           sandboxGroupId: ids.sandboxGroupId,
         });
       }
+      providerRenewalTarget = {
+        backend: ids.backend,
+        instanceId: established.instanceId,
+      };
+      await maybeRenewProviderExpiration(true);
       throwIfReleasedOrCancelled();
     } catch (error) {
       if (!isProviderSandboxNotFoundError(ids.backend, error)) {

@@ -32,7 +32,7 @@ export type DependencyMode = z.infer<typeof DependencyMode>;
 export const StorageApi = z.enum(["s3-compatible", "aws-s3", "azure-blob", "gcs"]);
 export type StorageApi = z.infer<typeof StorageApi>;
 
-// Mirror of `@opengeni/contracts` SandboxBackend (11 values; every member is
+// Mirror of `@opengeni/contracts` SandboxBackend (12 values; every member is
 // additive at the end). 3-way enum parity is pinned by the SDK contract-parity
 // test.
 export const SandboxBackend = z.enum([
@@ -47,6 +47,7 @@ export const SandboxBackend = z.enum([
   "cloudflare",
   "vercel",
   "selfhosted",
+  "opensandbox",
 ]);
 export type SandboxBackend = z.infer<typeof SandboxBackend>;
 
@@ -116,6 +117,18 @@ export const SANDBOX_REQUIRED_ENV: Record<SandboxBackend, SandboxEnvBackendSpec>
   vercel: {
     required: ["OPENGENI_VERCEL_TOKEN", "OPENGENI_VERCEL_PROJECT_ID"],
     optional: ["OPENGENI_VERCEL_TEAM_ID", "OPENGENI_VERCEL_RUNTIME"],
+  },
+  opensandbox: {
+    required: [
+      "OPENGENI_OPENSANDBOX_BASE_URL",
+      "OPENGENI_OPENSANDBOX_API_KEY",
+      "OPENGENI_OPENSANDBOX_IMAGE",
+    ],
+    optional: [
+      "OPENGENI_OPENSANDBOX_TTL_SECONDS",
+      "OPENGENI_OPENSANDBOX_USE_SERVER_PROXY",
+      "OPENGENI_OPENSANDBOX_POOL_REF",
+    ],
   },
   // selfhosted carries NO per-backend creds — the user's own machine is reached
   // over the agent's enrollment; the enrollment-signing + relay-token secrets are
@@ -571,7 +584,7 @@ export interface DeploymentStackPlan {
 }
 
 export interface PlatformDependencyPlan {
-  id: "nats" | "temporal";
+  id: "nats" | "temporal" | "opensandbox";
   lifecycle: "officialChart" | "external";
   namespace: string;
   releaseName: string;
@@ -1676,26 +1689,42 @@ function deployCommands(
     const namespace = contract.runtime.namespace ?? "opengeni";
     const release = contract.runtime.releaseName;
     const values = helmValuesFile ?? "deploy/helm/opengeni/values.single-node.example.yaml";
+    const opensandbox = platformDependencies.find((dependency) => dependency.id === "opensandbox");
+    const sandboxSecretArgs = opensandbox
+      ? ' --from-literal=OPENGENI_OPENSANDBOX_API_KEY="$OPENGENI_OPENSANDBOX_API_KEY" --from-literal=OPENGENI_OPENSANDBOX_IMAGE="$OPENGENI_OPENSANDBOX_IMAGE"'
+      : "";
+    const sandboxValueArgs = opensandbox
+      ? " --set-string config.OPENGENI_SANDBOX_BACKEND=opensandbox --set-string config.OPENGENI_OPENSANDBOX_BASE_URL=http://opensandbox-server.opensandbox-system.svc.cluster.local"
+      : "";
     return [
       `kubectl create namespace ${namespace} --dry-run=client -o yaml | kubectl apply -f -`,
       "bun run deployment:single-node-secrets -- --out-dir .agent/generated/single-node/secrets",
       `kubectl -n ${namespace} create secret generic opengeni-postgres --from-env-file=.agent/generated/single-node/secrets/postgres.env --dry-run=client -o yaml | kubectl apply -f -`,
       `kubectl -n ${namespace} create secret generic opengeni-minio --from-env-file=.agent/generated/single-node/secrets/minio.env --dry-run=client -o yaml | kubectl apply -f -`,
-      `kubectl -n ${namespace} create secret generic opengeni-runtime --from-env-file=.agent/generated/single-node/secrets/runtime.env --dry-run=client -o yaml | kubectl apply -f -`,
+      `kubectl -n ${namespace} create secret generic opengeni-runtime --from-env-file=.agent/generated/single-node/secrets/runtime.env${sandboxSecretArgs} --dry-run=client -o yaml | kubectl apply -f -`,
       `kubectl -n ${namespace} create secret generic opengeni-migrations --from-env-file=.agent/generated/single-node/secrets/migrations.env --dry-run=client -o yaml | kubectl apply -f -`,
+      ...platformDependencies.flatMap((dependency) => dependency.installCommands),
       `helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace} --values ${values} --set api.enabled=false --set worker.enabled=false --set web.enabled=false --set relay.enabled=false --set migrations.enabled=false --wait --timeout 10m`,
-      `helm upgrade ${release} deploy/helm/opengeni --namespace ${namespace} --values ${values} --wait --timeout 15m`,
+      `helm upgrade ${release} deploy/helm/opengeni --namespace ${namespace} --values ${values}${sandboxValueArgs} --wait --timeout 15m`,
     ];
   }
   if (contract.profile === "local-kubernetes") {
+    const opensandbox = platformDependencies.find((dependency) => dependency.id === "opensandbox");
+    const sandboxSecretArgs = opensandbox
+      ? ' --from-literal=OPENGENI_OPENSANDBOX_API_KEY="$OPENGENI_OPENSANDBOX_API_KEY" --from-literal=OPENGENI_OPENSANDBOX_IMAGE="$OPENGENI_OPENSANDBOX_IMAGE"'
+      : "";
+    const sandboxValueArgs = opensandbox
+      ? " --set-string config.OPENGENI_SANDBOX_BACKEND=opensandbox --set-string config.OPENGENI_OPENSANDBOX_BASE_URL=http://opensandbox-server.opensandbox-system.svc.cluster.local"
+      : "";
     return [
       "docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target api -t opengeni-api:local-k8s .",
       "docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target worker -t opengeni-worker:local-k8s .",
       "OPENGENI_DEPLOYMENT_REVISION=${OPENGENI_DEPLOYMENT_REVISION:-local-k8s} docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target web --build-arg OPENGENI_DEPLOYMENT_REVISION -t opengeni-web:local-k8s .",
       "kind load docker-image opengeni-api:local-k8s opengeni-worker:local-k8s opengeni-web:local-k8s --name ${KIND_CLUSTER_NAME:-opengeni-local}",
       `kubectl create namespace ${contract.runtime.namespace ?? "opengeni-local"} --dry-run=client -o yaml | kubectl apply -f -`,
-      `kubectl -n ${contract.runtime.namespace ?? "opengeni-local"} create secret generic opengeni-runtime-local-k8s --from-literal=OPENGENI_ACCESS_KEY="$OPENGENI_ACCESS_KEY" --from-literal=OPENGENI_DATABASE_URL="postgres://opengeni_app:opengeni_app@opengeni-local-postgres:5432/opengeni" --from-literal=OPENGENI_MIGRATIONS_DATABASE_URL="postgres://opengeni:opengeni@opengeni-local-postgres:5432/opengeni" --from-literal=OPENGENI_APP_DATABASE_USER=opengeni_app --from-literal=OPENGENI_APP_DATABASE_PASSWORD=opengeni_app --dry-run=client -o yaml | kubectl apply -f -`,
-      `helm upgrade --install ${contract.runtime.releaseName} deploy/helm/opengeni --namespace ${contract.runtime.namespace ?? "opengeni-local"} --values ${helmValuesFile ?? "deploy/helm/opengeni/values.local-kubernetes.example.yaml"}`,
+      `kubectl -n ${contract.runtime.namespace ?? "opengeni-local"} create secret generic opengeni-runtime-local-k8s --from-literal=OPENGENI_ACCESS_KEY="$OPENGENI_ACCESS_KEY" --from-literal=OPENGENI_DATABASE_URL="postgres://opengeni_app:opengeni_app@opengeni-local-postgres:5432/opengeni" --from-literal=OPENGENI_MIGRATIONS_DATABASE_URL="postgres://opengeni:opengeni@opengeni-local-postgres:5432/opengeni" --from-literal=OPENGENI_APP_DATABASE_USER=opengeni_app --from-literal=OPENGENI_APP_DATABASE_PASSWORD=opengeni_app${sandboxSecretArgs} --dry-run=client -o yaml | kubectl apply -f -`,
+      ...platformDependencies.flatMap((dependency) => dependency.installCommands),
+      `helm upgrade --install ${contract.runtime.releaseName} deploy/helm/opengeni --namespace ${contract.runtime.namespace ?? "opengeni-local"} --values ${helmValuesFile ?? "deploy/helm/opengeni/values.local-kubernetes.example.yaml"}${sandboxValueArgs}`,
     ];
   }
   const commands: string[] = [
@@ -1793,7 +1822,7 @@ function destroyCommands(
   for (const dependency of [...platformDependencies].reverse()) {
     commands.push(...dependency.destroyCommands);
   }
-  if (platformDependencies.length > 0) {
+  if (platformDependencies.some((dependency) => dependency.namespace === "opengeni-platform")) {
     commands.push("kubectl delete namespace opengeni-platform --ignore-not-found");
   }
   if (terraformRoot) {
@@ -1803,19 +1832,18 @@ function destroyCommands(
 }
 
 function platformDependencyPlans(contract: DeploymentContract): PlatformDependencyPlan[] {
-  if (
-    !["azure-managed", "aws-managed", "gcp-managed", "self-contained-kubernetes"].includes(
-      contract.profile,
-    )
-  ) {
-    return [];
-  }
   if (contract.runtime.platform !== "kubernetes") {
     return [];
   }
+  const managesOfficialCoreDependencies = [
+    "azure-managed",
+    "aws-managed",
+    "gcp-managed",
+    "self-contained-kubernetes",
+  ].includes(contract.profile);
   const namespace = "opengeni-platform";
   const out: PlatformDependencyPlan[] = [];
-  if (contract.nats.mode === "external") {
+  if (managesOfficialCoreDependencies && contract.nats.mode === "external") {
     out.push({
       id: "nats",
       lifecycle: "officialChart",
@@ -1851,7 +1879,7 @@ function platformDependencyPlans(contract: DeploymentContract): PlatformDependen
       ],
     });
   }
-  if (contract.temporal.mode === "external") {
+  if (managesOfficialCoreDependencies && contract.temporal.mode === "external") {
     const temporalTlsEnv =
       contract.runtime.cloud === "aws"
         ? `TEMPORAL_POSTGRES_TLS_ENABLED="\${TEMPORAL_POSTGRES_TLS_ENABLED:-true}" TEMPORAL_POSTGRES_TLS_CA_FILE="\${TEMPORAL_POSTGRES_TLS_CA_FILE:-/etc/opengeni/postgres-ca/ca.pem}" TEMPORAL_POSTGRES_TLS_CA_CONFIG_MAP_NAME="\${TEMPORAL_POSTGRES_TLS_CA_CONFIG_MAP_NAME:-opengeni-postgres-ca}"`
@@ -1910,6 +1938,63 @@ function platformDependencyPlans(contract: DeploymentContract): PlatformDependen
       ],
     });
   }
+  if (contract.sandbox.backend === "opensandbox") {
+    const opensandboxNamespace = "opensandbox-system";
+    const dataplaneNamespace = "opensandbox";
+    const generatedDir = `.agent/generated/${contract.profile}/opensandbox`;
+    const chartArchive = `${generatedDir}/opensandbox-0.2.0.tgz`;
+    const batchSandboxTemplate =
+      contract.runtime.cloud === "azure"
+        ? "deploy/stacks/opensandbox-batchsandbox-template.azure.yaml"
+        : "deploy/stacks/opensandbox-batchsandbox-template.yaml";
+    out.push({
+      id: "opensandbox",
+      lifecycle: "officialChart",
+      namespace: opensandboxNamespace,
+      releaseName: "opensandbox",
+      chartRepoName: null,
+      chartRepoUrl: null,
+      chartName: "opensandbox-group/OpenSandbox@88004c989e334ffd7811acbe193cddcd9014f14e",
+      valuesFile: "deploy/stacks/official-opensandbox.values.yaml",
+      runtimeEnv: {
+        OPENGENI_OPENSANDBOX_BASE_URL:
+          "http://opensandbox-server.opensandbox-system.svc.cluster.local",
+      },
+      requiredEnvVars: ["OPENGENI_OPENSANDBOX_API_KEY", "OPENGENI_OPENSANDBOX_IMAGE"],
+      requiredSecretKeys: ["opensandbox-api-key/api-key"],
+      installCommands: [
+        `mkdir -p ${generatedDir}`,
+        `scripts/operator/prepare-opensandbox-chart.sh ${generatedDir}`,
+        `kubectl create namespace ${opensandboxNamespace} --dry-run=client -o yaml | kubectl apply -f -`,
+        `kubectl create namespace ${dataplaneNamespace} --dry-run=client -o yaml | kubectl apply -f -`,
+        `kubectl -n ${opensandboxNamespace} create secret generic opensandbox-api-key --from-literal=api-key="$OPENGENI_OPENSANDBOX_API_KEY" --dry-run=client -o yaml | kubectl apply -f -`,
+        `kubectl apply -f ${batchSandboxTemplate}`,
+        `helm upgrade --install opensandbox ${chartArchive} --namespace ${opensandboxNamespace} --values deploy/stacks/official-opensandbox.values.yaml --post-renderer scripts/operator/opensandbox-image-post-renderer.sh --wait --timeout 15m`,
+      ],
+      verifyCommands: [
+        `helm lint ${chartArchive} --values deploy/stacks/official-opensandbox.values.yaml`,
+        `kubectl -n ${opensandboxNamespace} rollout status deployment/opensandbox-controller-manager --timeout=300s`,
+        `kubectl -n ${opensandboxNamespace} rollout status deployment/opensandbox-server --timeout=300s`,
+        `kubectl -n ${opensandboxNamespace} get svc opensandbox-server -o jsonpath='{.spec.type}' | grep -qx ClusterIP`,
+        `kubectl -n ${opensandboxNamespace} get secret opensandbox-api-key -o jsonpath='{.data.api-key}' | grep -q .`,
+        `kubectl get crd batchsandboxes.sandbox.opensandbox.io pools.sandbox.opensandbox.io sandboxsnapshots.sandbox.opensandbox.io`,
+      ],
+      destroyCommands: [
+        `kubectl -n ${dataplaneNamespace} delete batchsandboxes.sandbox.opensandbox.io,pools.sandbox.opensandbox.io --all --ignore-not-found --wait=true --timeout=15m`,
+        `helm uninstall opensandbox --namespace ${opensandboxNamespace} --ignore-not-found`,
+        `kubectl delete namespace ${dataplaneNamespace} ${opensandboxNamespace} --ignore-not-found --wait=true --timeout=15m`,
+        "kubectl delete crd batchsandboxes.sandbox.opensandbox.io pools.sandbox.opensandbox.io sandboxsnapshots.sandbox.opensandbox.io --ignore-not-found",
+      ],
+      notes: [
+        "OpenSandbox is lifecycle-managed from the exact upstream source commit and checksums in deploy/stacks/opensandbox-source.lock; its templates are not copied into the OpenGeni app chart.",
+        "The lifecycle service is ClusterIP-only and its lifecycle routes are API-key authenticated. Upstream single-tenant proxy routes are API-key exempt, so the worker proxy remains private with no ingress.",
+        contract.runtime.cloud === "azure"
+          ? "The Azure BatchSandbox template requires the optional Terraform sandbox node pool label and taint contract."
+          : "The generic BatchSandbox template has no cloud-specific node selector and works on ordinary Kubernetes or k3s nodes.",
+        "Native OpenSandbox snapshots, ingress gateway, and node log agent remain disabled; OpenGeni portable workspace archives are authoritative in v1.",
+      ],
+    });
+  }
   return out;
 }
 
@@ -1940,6 +2025,11 @@ function planNotes(contract: DeploymentContract): string[] {
   if (contract.temporal.mode === "external") {
     notes.push(
       "Temporal is intentionally outside the OpenGeni app chart; use Temporal Cloud, an existing endpoint, or the official Temporal Helm chart.",
+    );
+  }
+  if (contract.sandbox.backend === "opensandbox") {
+    notes.push(
+      "OpenSandbox is optional and planned only because this deployment explicitly selects sandbox.backend=opensandbox; the default Modal and other backend plans are unchanged.",
     );
   }
   if (contract.profile === "single-node-kubernetes") {
@@ -2309,7 +2399,7 @@ function runtimeEnvValues(
   // a daytona deployment never demands Modal creds and vice versa.
   const sandboxEnv = SANDBOX_REQUIRED_ENV[contract.sandbox.backend];
   for (const key of sandboxEnv.required) {
-    entries.push(requiredEnv(key, env[key]));
+    entries.push(requiredEnv(key, platformRuntimeEnv(contract, key) ?? env[key]));
   }
   for (const key of sandboxEnv.optional) {
     entries.push(valueEnv(key, env[key]));

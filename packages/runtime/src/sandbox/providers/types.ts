@@ -38,6 +38,11 @@ export type ProviderImmutableImageBuildInput = {
   timeoutMs: number;
 };
 
+export type ProviderExpirationRenewalInput = {
+  settings: Settings;
+  instanceId: string;
+};
+
 /**
  * Crash-recovery contract for one provider's /workspace capture path.
  *
@@ -143,6 +148,9 @@ export interface ProviderRegistration {
   buildImmutableImage?(
     input: ProviderImmutableImageBuildInput,
   ): Promise<ProviderImmutableImageBuildResult>;
+  /** Refresh a renewable provider expiration for one exact live instance.
+   * Omission means the provider has no renewable TTL contract. */
+  renewExpiration?(input: ProviderExpirationRenewalInput): Promise<void>;
   descriptor: CapabilityDescriptor;
   /**
    * Validate that the settings carry the credentials/config this provider

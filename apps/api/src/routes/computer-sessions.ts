@@ -72,6 +72,7 @@ import {
   NatsControlRpc,
   NatsOpStreamTransport,
   provisionBrowserControlClient,
+  renewSandboxProviderExpiration,
   type BrowserControlPlacementSession,
 } from "@opengeni/runtime/sandbox";
 import type { Context, Hono } from "hono";
@@ -1178,6 +1179,11 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
       ).catch(() => undefined);
       throw new ComputerSessionStateError("ComputerSession placement fence changed; retry");
     }
+    await renewSandboxProviderExpiration({
+      backend: acquired.lease.backend as ApiRouteDeps["settings"]["sandboxBackend"],
+      settings: deps.settings,
+      instanceId: acquired.lease.instanceId,
+    }).catch(() => false);
     return true;
   }
 
