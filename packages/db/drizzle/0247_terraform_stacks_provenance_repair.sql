@@ -74,6 +74,17 @@ BEGIN
 END
 $rewrite_pack$;
 
+-- Runtime stableJson() sorts keys with the default en-US Intl comparator and
+-- preserves the input order of comparator-equal keys. jsonb_each ordinality is
+-- the stable order emitted when the stored snapshot is read back into runtime.
+-- The exact old-digest precondition below remains authoritative: an ICU/version
+-- or scalar-rendering mismatch aborts before any row is changed.
+CREATE COLLATION opengeni_private.terraform_stacks_provenance_js_en_us (
+  provider = icu,
+  locale = 'en-US',
+  deterministic = false
+);
+
 CREATE OR REPLACE FUNCTION opengeni_private.terraform_stacks_provenance_canonical_json(value jsonb)
 RETURNS text
 LANGUAGE plpgsql
@@ -90,12 +101,14 @@ BEGIN
         '{' || string_agg(
           to_jsonb(entry.key)::text || ':' ||
             opengeni_private.terraform_stacks_provenance_canonical_json(entry.value),
-          ',' ORDER BY entry.key COLLATE "C"
+          ',' ORDER BY
+            entry.key COLLATE opengeni_private.terraform_stacks_provenance_js_en_us,
+            entry.ordinality
         ) || '}',
         '{}'
       )
       INTO rendered
-      FROM jsonb_each(value) AS entry(key, value);
+      FROM jsonb_each(value) WITH ORDINALITY AS entry(key, value, ordinality);
       RETURN rendered;
     WHEN 'array' THEN
       SELECT COALESCE(
@@ -187,12 +200,29 @@ BEGIN
   ) OR EXISTS (
     SELECT 1
     FROM pack_installation_components component
-    WHERE component.kind = 'plugin'
-      AND component.capability_id = 'plugin:skill/library/terraform-stacks'
-      AND component.metadata ->> 'pluginKey' = 'skill/library/terraform-stacks'
-      AND component.metadata ->> 'version' = '0.0.1'
-      AND component.digest IS DISTINCT FROM old_digest
-      AND component.digest IS DISTINCT FROM new_digest
+    WHERE (
+        component.capability_id = 'plugin:skill/library/terraform-stacks'
+        OR component.metadata ->> 'pluginKey' = 'skill/library/terraform-stacks'
+        OR EXISTS (
+          SELECT 1
+          FROM capability_plugin_installations installation
+          JOIN capability_plugins plugin ON plugin.id = installation.plugin_id
+          WHERE installation.id::text = component.resolved_id
+            AND plugin.plugin_key = 'skill/library/terraform-stacks'
+        )
+      )
+      AND (
+        component.kind IS DISTINCT FROM 'plugin'
+        OR component.capability_id IS DISTINCT FROM
+          'plugin:skill/library/terraform-stacks'
+        OR component.metadata ->> 'pluginKey' IS DISTINCT FROM
+          'skill/library/terraform-stacks'
+        OR component.metadata ->> 'version' IS DISTINCT FROM '0.0.1'
+        OR (
+          component.digest IS DISTINCT FROM old_digest
+          AND component.digest IS DISTINCT FROM new_digest
+        )
+      )
   ) THEN
     RAISE EXCEPTION 'Terraform Stacks provenance repair found unexpected Pack state'
       USING ERRCODE = '23514';
@@ -238,9 +268,25 @@ WHERE pack.manifest IS DISTINCT FROM
 CREATE TEMP TABLE terraform_stacks_pack_snapshot_repair ON COMMIT DROP AS
 SELECT
   installation.id,
+  installation.manifest_snapshot AS previous_manifest_snapshot,
+  installation.manifest_digest AS previous_manifest_digest,
   opengeni_private.terraform_stacks_provenance_rewrite_pack(
     installation.manifest_snapshot
-  ) AS manifest_snapshot
+  ) AS manifest_snapshot,
+  encode(
+    digest(
+      convert_to(
+        opengeni_private.terraform_stacks_provenance_canonical_json(
+          opengeni_private.terraform_stacks_provenance_rewrite_pack(
+            installation.manifest_snapshot
+          )
+        ),
+        'UTF8'
+      ),
+      'sha256'
+    ),
+    'hex'
+  ) AS manifest_digest
 FROM pack_installations installation
 WHERE installation.manifest_snapshot IS NOT NULL
   AND installation.manifest_snapshot IS DISTINCT FROM
@@ -248,13 +294,19 @@ WHERE installation.manifest_snapshot IS NOT NULL
       installation.manifest_snapshot
     );
 
-UPDATE pack_installations installation
-SET manifest_snapshot = repaired.manifest_snapshot,
-    manifest_digest = encode(
+DO $pack_digest_precondition$
+BEGIN
+  -- The repair changes only one same-shaped JSON string value. Reproducing the
+  -- already-stored runtime digest proves this renderer's bytes for every other
+  -- key and value in that exact snapshot before it computes the new digest.
+  IF EXISTS (
+    SELECT 1
+    FROM terraform_stacks_pack_snapshot_repair repaired
+    WHERE repaired.previous_manifest_digest IS DISTINCT FROM encode(
       digest(
         convert_to(
           opengeni_private.terraform_stacks_provenance_canonical_json(
-            repaired.manifest_snapshot
+            repaired.previous_manifest_snapshot
           ),
           'UTF8'
         ),
@@ -262,6 +314,17 @@ SET manifest_snapshot = repaired.manifest_snapshot,
       ),
       'hex'
     )
+  ) THEN
+    RAISE EXCEPTION
+      'Terraform Stacks provenance repair cannot reproduce the stored runtime Pack digest'
+      USING ERRCODE = '23514';
+  END IF;
+END
+$pack_digest_precondition$;
+
+UPDATE pack_installations installation
+SET manifest_snapshot = repaired.manifest_snapshot,
+    manifest_digest = repaired.manifest_digest
 FROM terraform_stacks_pack_snapshot_repair repaired
 WHERE installation.id = repaired.id;
 
@@ -322,29 +385,34 @@ BEGIN
         '3a58c98b725573b8fd524555b7ed9dbff04df4df9f8fad44e2e850bac3824809'
   ) OR EXISTS (
     SELECT 1
-    FROM pack_installations installation
-    WHERE installation.manifest_snapshot IS NOT NULL
-      AND installation.manifest_digest IS DISTINCT FROM encode(
-        digest(
-          convert_to(
-            opengeni_private.terraform_stacks_provenance_canonical_json(
-              installation.manifest_snapshot
-            ),
-            'UTF8'
-          ),
-          'sha256'
-        ),
-        'hex'
-      )
+    FROM terraform_stacks_pack_snapshot_repair repaired
+    JOIN pack_installations installation ON installation.id = repaired.id
+    WHERE installation.manifest_snapshot IS DISTINCT FROM repaired.manifest_snapshot
+      OR installation.manifest_digest IS DISTINCT FROM repaired.manifest_digest
   ) OR EXISTS (
     SELECT 1
     FROM pack_installation_components component
-    WHERE component.kind = 'plugin'
-      AND component.capability_id = 'plugin:skill/library/terraform-stacks'
-      AND component.metadata ->> 'pluginKey' = 'skill/library/terraform-stacks'
-      AND component.metadata ->> 'version' = '0.0.1'
-      AND component.digest IS DISTINCT FROM
-        '3a58c98b725573b8fd524555b7ed9dbff04df4df9f8fad44e2e850bac3824809'
+    WHERE (
+        component.capability_id = 'plugin:skill/library/terraform-stacks'
+        OR component.metadata ->> 'pluginKey' = 'skill/library/terraform-stacks'
+        OR EXISTS (
+          SELECT 1
+          FROM capability_plugin_installations installation
+          JOIN capability_plugins plugin ON plugin.id = installation.plugin_id
+          WHERE installation.id::text = component.resolved_id
+            AND plugin.plugin_key = 'skill/library/terraform-stacks'
+        )
+      )
+      AND (
+        component.kind IS DISTINCT FROM 'plugin'
+        OR component.capability_id IS DISTINCT FROM
+          'plugin:skill/library/terraform-stacks'
+        OR component.metadata ->> 'pluginKey' IS DISTINCT FROM
+          'skill/library/terraform-stacks'
+        OR component.metadata ->> 'version' IS DISTINCT FROM '0.0.1'
+        OR component.digest IS DISTINCT FROM
+          '3a58c98b725573b8fd524555b7ed9dbff04df4df9f8fad44e2e850bac3824809'
+      )
   ) THEN
     RAISE EXCEPTION 'Terraform Stacks Pack provenance repair did not converge'
       USING ERRCODE = '23514';
@@ -354,6 +422,7 @@ $provenance_postcondition$;
 
 DROP FUNCTION opengeni_private.terraform_stacks_provenance_rewrite_pack(jsonb);
 DROP FUNCTION opengeni_private.terraform_stacks_provenance_canonical_json(jsonb);
+DROP COLLATION opengeni_private.terraform_stacks_provenance_js_en_us;
 
 RESET statement_timeout;
 RESET lock_timeout;

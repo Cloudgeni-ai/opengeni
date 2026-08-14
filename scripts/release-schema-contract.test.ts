@@ -263,17 +263,17 @@ describe("release schema contract", () => {
           migrations.has("0241_atomic_personal_resource_delegation.sql")
         ) {
           return includesActivation
-            ? "284783d8796f7aee26d2cd020c6f0a75e36e7ad94c396830bb57767069b0e415"
-            : "9fc0116ea258cee2003cfc37243a392b2d00051879f428af77afe74fe569b1f6";
+            ? "ea50aa2d9a6b19febfee39a3b2ee8a077c978c7f1e7c215ece9b8add289a062f"
+            : "c0dbc7a03a111d7e5807bcb6c3ef371a95ad2d0b97528c89a0ef3e06ad48317a";
         }
         if (migrations.has("0246_integration_personal_instance_authority.sql")) {
           return includesActivation
-            ? "4010330f29f41088c8691ae6a210a76407023af21e6e301628ab489c150e51bb"
-            : "365b8417d0c1e119824cd05a1e86abbe8f1ee8538482675186c2a9cbc97baabf";
+            ? "0e98eb9af4b05809821914f2b6cd9ca1dc719b8c7c088f72cfbcbb955c7ec9a8"
+            : "e94a784536935dab356f8288a0460bcae1946df5b2e1ffa20ac541244c2139d2";
         }
         return includesActivation
-          ? "4d502decbade1f1d07267ada056b156a72167fe2415f3197cecbafa94f5a9acb"
-          : "0da6690847a2949756bfbbe501f13d7901df18a080d91668cc629e3c759c1b0b";
+          ? "115a58c544c77745ee9b8af93b6cc58f89d05c618367c0dd706856c789ffd69e"
+          : "7aaa4256393e8ef72ee5862ca0c49675252d03f86dfa748436ca9c357f8290d2";
       }
       return sessionVisibilityContractHash(includesActivation);
     };
@@ -756,7 +756,7 @@ describe("release schema contract", () => {
     });
     if (migrations.has("0247_terraform_stacks_provenance_repair.sql")) {
       expect(migrations.get("0247_terraform_stacks_provenance_repair.sql")).toMatchObject({
-        sha256: "8c3e3d9071c175ea253183f080c1be831eab4423eacf5a4ec80594f67cf7b44f",
+        sha256: "0bb6196b0a89e4b9d2271ec098793e2c8cbeecf4c9ef7ff036f3ed26e1792cff",
         deploymentMode: "maintenance",
       });
     }

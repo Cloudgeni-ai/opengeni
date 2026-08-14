@@ -53,7 +53,9 @@ describe("migration 0247 Terraform Stacks provenance repair", () => {
     expect(migration).toContain(newDigest);
     expect(migration).toContain("found unexpected immutable state");
     expect(migration).toContain("found unexpected Pack state");
+    expect(migration).toContain("cannot reproduce the stored runtime Pack digest");
     expect(migration).toContain("repair did not converge");
+    expect(migration).toContain("terraform_stacks_provenance_js_en_us");
     expect(migration).toContain(
       "DROP FUNCTION opengeni_private.terraform_stacks_provenance_rewrite_pack(jsonb)",
     );
@@ -139,6 +141,7 @@ describe("migration 0247 Terraform Stacks provenance repair", () => {
             required: true,
           },
         ],
+        metadata: { A: 1, a: 2 },
       });
       const newPackManifest = CapabilityPack.parse({
         ...oldPackManifest,
@@ -316,6 +319,32 @@ describe("migration 0247 Terraform Stacks provenance repair", () => {
         order by path
       `;
 
+      await shared.admin`
+        update pack_installations
+        set manifest_digest = ${"e".repeat(64)}
+        where id = ${packInstallation!.id}
+      `;
+      await shared.admin`delete from schema_migrations where name = ${migrationName}`;
+      await expect(migrate(shared.adminUrl)).rejects.toThrow(
+        "cannot reproduce the stored runtime Pack digest",
+      );
+      const [rolledBack] = await shared.admin<
+        Array<{ sourceUrl: string; componentDigest: string }>
+      >`
+          select
+            skill.source_url as "sourceUrl",
+            component.digest as "componentDigest"
+          from capability_skill_facets skill
+          join pack_installation_components component on component.id = ${packComponent!.id}
+          where skill.facet_id = ${facet!.id}
+        `;
+      expect(rolledBack).toEqual({ sourceUrl: oldUrl, componentDigest: oldDigest });
+      await shared.admin`
+        update pack_installations
+        set manifest_digest = ${oldPackDigest}
+        where id = ${packInstallation!.id}
+      `;
+
       await shared.admin`delete from schema_migrations where name = ${migrationName}`;
       await migrate(shared.adminUrl);
 
@@ -481,6 +510,24 @@ describe("migration 0247 Terraform Stacks provenance repair", () => {
       await shared.admin`
         update pack_installation_components
         set digest = ${newDigest}
+        where id = ${packComponent!.id}
+      `;
+      await migrate(shared.adminUrl);
+
+      await shared.admin`
+        update pack_installation_components
+        set metadata = jsonb_set(metadata, '{pluginKey}', '"tampered"'::jsonb)
+        where id = ${packComponent!.id}
+      `;
+      await shared.admin`delete from schema_migrations where name = ${migrationName}`;
+      await expect(migrate(shared.adminUrl)).rejects.toThrow("unexpected Pack state");
+      await shared.admin`
+        update pack_installation_components
+        set metadata = jsonb_set(
+          metadata,
+          '{pluginKey}',
+          to_jsonb('skill/library/terraform-stacks'::text)
+        )
         where id = ${packComponent!.id}
       `;
       await migrate(shared.adminUrl);
