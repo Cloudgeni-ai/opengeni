@@ -2,7 +2,7 @@
 //
 // `ControlRpc` is the ONE seam the `SelfhostedSession` depends on to reach a
 // user's enrolled machine: request/reply addressed by the subject
-// `agent.<workspaceId>.<agentId>.rpc`, payloads encoded/decoded via
+// `agent.<workspaceId>.<agentId>.connection.<instanceId>.rpc`, payloads encoded/decoded via
 // `@opengeni/agent-proto` (the single-source-of-truth wire types). The session
 // knows NOTHING about NATS — it speaks only `ControlRpc`.
 //
@@ -53,10 +53,18 @@ export interface ControlRpc {
   ): Promise<ControlResponse>;
 }
 
-/** The control-plane RPC subject for an enrolled agent — its subscription IS the
- *  registry (the binding two-plane decision). */
-export function subjectFor(workspaceId: string, agentId: string): string {
-  return `agent.${workspaceId}.${agentId}.rpc`;
+/** The control-plane RPC subject for an enrolled agent. Production always supplies
+ * the exact claimed daemon instance; the legacy shape remains only for isolated
+ * compatibility tests and callers that do not route a live machine. */
+export function subjectFor(
+  workspaceId: string,
+  agentId: string,
+  connectionInstanceId?: string,
+): string {
+  const prefix = `agent.${workspaceId}.${agentId}`;
+  return connectionInstanceId
+    ? `${prefix}.connection.${connectionInstanceId}.rpc`
+    : `${prefix}.rpc`;
 }
 
 // ── The runtime error taxonomy for a selfhosted control op ────────────────────
@@ -97,6 +105,9 @@ export class SelfhostedControlError extends Error {
    *  (a post-send timeout is ambiguous — at-least-once — and must not be re-sent
    *  unless the op is read-only). Never set for an agent-returned error. */
   readonly neverSent: boolean;
+  /** Exact inner control request that produced this failure. Safe opaque
+   * correlation only; never a NATS subject, token, or machine credential. */
+  readonly controlRequestId: string | null;
   readonly detail: Record<string, string>;
 
   constructor(input: {
@@ -110,6 +121,7 @@ export class SelfhostedControlError extends Error {
     osNotFound?: boolean;
     payloadTooLarge?: boolean;
     neverSent?: boolean;
+    controlRequestId?: string | null;
     detail?: Record<string, string>;
   }) {
     super(input.message);
@@ -122,6 +134,7 @@ export class SelfhostedControlError extends Error {
     this.osNotFound = input.osNotFound ?? false;
     this.payloadTooLarge = input.payloadTooLarge ?? false;
     this.neverSent = input.neverSent ?? false;
+    this.controlRequestId = input.controlRequestId ?? null;
     this.detail = input.detail ?? {};
   }
 }
@@ -147,7 +160,10 @@ export class SelfhostedControlError extends Error {
  *   - OS / UNSUPPORTED / STREAM / PROTOCOL / UNSPECIFIED → op-level error, no
  *                             reason, non-retryable.
  */
-export function agentErrorToControlError(err: AgentError): SelfhostedControlError {
+export function agentErrorToControlError(
+  err: AgentError,
+  controlRequestId: string | null = null,
+): SelfhostedControlError {
   const message = err.message || `agent error (${err.code})`;
   const detail = err.detail ?? {};
   switch (err.code) {
@@ -163,6 +179,7 @@ export function agentErrorToControlError(err: AgentError): SelfhostedControlErro
         retryable: false,
         agentOffline: true,
         neverSent: detail[NEVER_SENT_DETAIL_KEY] === "1",
+        controlRequestId,
         detail,
       });
     case ErrorCode.ERROR_CODE_TIMEOUT:
@@ -173,6 +190,7 @@ export function agentErrorToControlError(err: AgentError): SelfhostedControlErro
         code: err.code,
         reason: "agent_reconnecting",
         retryable: true,
+        controlRequestId,
         detail,
       });
     case ErrorCode.ERROR_CODE_CONSENT_REQUIRED:
@@ -181,6 +199,7 @@ export function agentErrorToControlError(err: AgentError): SelfhostedControlErro
         code: err.code,
         reason: "consent_required",
         retryable: false,
+        controlRequestId,
         detail,
       });
     case ErrorCode.ERROR_CODE_DRAINING:
@@ -195,6 +214,7 @@ export function agentErrorToControlError(err: AgentError): SelfhostedControlErro
         reason: null,
         retryable: true,
         draining: true,
+        controlRequestId,
         detail,
       });
     case ErrorCode.ERROR_CODE_PAYLOAD_TOO_LARGE:
@@ -209,6 +229,7 @@ export function agentErrorToControlError(err: AgentError): SelfhostedControlErro
         reason: null,
         retryable: false,
         payloadTooLarge: true,
+        controlRequestId,
         detail,
       });
     case ErrorCode.ERROR_CODE_FENCED:
@@ -218,6 +239,7 @@ export function agentErrorToControlError(err: AgentError): SelfhostedControlErro
         reason: null,
         retryable: true,
         fenced: true,
+        controlRequestId,
         detail,
       });
     case ErrorCode.ERROR_CODE_NOT_FOUND:
@@ -232,6 +254,7 @@ export function agentErrorToControlError(err: AgentError): SelfhostedControlErro
         reason: null,
         retryable: Boolean(err.retryable),
         osNotFound: true,
+        controlRequestId,
         detail,
       });
     default:
@@ -241,6 +264,7 @@ export function agentErrorToControlError(err: AgentError): SelfhostedControlErro
         code: err.code,
         reason: null,
         retryable: Boolean(err.retryable),
+        controlRequestId,
         detail,
       });
   }
@@ -298,6 +322,7 @@ export function drainingExhaustedError(
     reason: base.reason,
     retryable: base.retryable,
     draining: base.draining,
+    controlRequestId: base.controlRequestId,
     // Carry the retry count in `detail` so the fault renderer can state it.
     detail: { ...base.detail, retries: String(retries) },
   });

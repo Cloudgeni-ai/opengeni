@@ -169,12 +169,14 @@ import type {
   WorkspaceRegisteredPack,
   WorkspaceRealtimeModelCatalogResponse,
 } from "@opengeni/sdk";
+import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
 import type { SessionClientLike } from "@opengeni/react";
 import type { MachinesResponse } from "@opengeni/react/machines";
 
 const WORKSPACE_ID = "11111111-2222-4333-8444-555555555555";
 export const MANAGER_SESSION_ID = "3f6e1a2b-4c5d-4e6f-8a9b-0c1d2e3f4a5b";
 const WORKER_SESSION_ID = "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d";
+export const DEMO_HUMAN_INPUT_REQUEST_ID = "71000000-0000-4000-8000-000000000001";
 export const DEMO_BROWSER_SESSION_ID = "81000000-0000-4000-8000-000000000001";
 export const DEMO_BROWSER_TARGET_ID = "82000000-0000-4000-8000-000000000001";
 export const DEMO_BROWSER_DOWNLOAD_ID = "82000000-0000-4000-8000-000000000002";
@@ -190,6 +192,42 @@ let nextDemoUuid = 0;
 function demoUuid(): string {
   nextDemoUuid += 1;
   return `00000000-0000-4000-8000-${String(nextDemoUuid).padStart(12, "0")}`;
+}
+
+function fabricateHumanInputRequest(): SessionHumanInputRequest {
+  const createdAt = "2026-08-13T12:00:00.000Z";
+  return {
+    id: DEMO_HUMAN_INPUT_REQUEST_ID,
+    workspaceId: WORKSPACE_ID,
+    sessionId: MANAGER_SESSION_ID,
+    turnId: "71000000-0000-4000-8000-000000000002",
+    turnGeneration: 1,
+    creationAttemptId: "71000000-0000-4000-8000-000000000003",
+    toolCallId: "demo-request-human-input",
+    status: "pending",
+    questions: [
+      {
+        id: "environment",
+        kind: "single_select",
+        label: "Choose the next environment",
+        prompt: "Which deployment should the manager inspect next?",
+        helpText: "The same structured question remains available while realtime voice is active.",
+        options: [
+          { id: "staging", label: "Staging", description: "Inspect the current candidate." },
+          { id: "production", label: "Production", description: "Check live drift first." },
+        ],
+        required: true,
+        allowOther: false,
+      },
+    ],
+    allowSkip: true,
+    response: null,
+    respondedBy: null,
+    respondedAt: null,
+    expiresAt: null,
+    createdAt,
+    updatedAt: createdAt,
+  };
 }
 
 function sleep(ms: number): Promise<void> {
@@ -270,6 +308,9 @@ export class MockOpenGeniClient implements SessionClientLike {
   private siteAuthConnections = new Map<string, SiteAuthConnection>();
   private authRuns = new Map<string, AuthRun>();
   private interventions = new Map<string, InteractionIntervention>();
+  private humanInputRequests = new Map<string, SessionHumanInputRequest>([
+    [DEMO_HUMAN_INPUT_REQUEST_ID, fabricateHumanInputRequest()],
+  ]);
   private browserRevision = 1;
   private browserIdentities = new Map<string, BrowserIdentity>([
     [DEMO_BROWSER_IDENTITY_ID, fabricateBrowserIdentity()],
@@ -910,15 +951,22 @@ export class MockOpenGeniClient implements SessionClientLike {
     return this.bus(sessionId).append("user.approvalDecision", decision);
   }
 
-  async listHumanInputRequests(): Promise<SessionHumanInputRequest[]> {
-    return [];
+  async listHumanInputRequests(
+    _workspaceId: string,
+    sessionId: string,
+  ): Promise<SessionHumanInputRequest[]> {
+    return [...this.humanInputRequests.values()].filter(
+      (request) => request.sessionId === sessionId && request.status === "pending",
+    );
   }
 
   async getHumanInputRequest(
     _workspaceId: string,
-    _sessionId: string,
+    sessionId: string,
     requestId: string,
   ): Promise<SessionHumanInputRequest> {
+    const request = this.humanInputRequests.get(requestId);
+    if (request?.sessionId === sessionId) return request;
     throw new Error(`No demo human-input request ${requestId}`);
   }
 
@@ -928,10 +976,20 @@ export class MockOpenGeniClient implements SessionClientLike {
     requestId: string,
     response: SubmitHumanInputResponseRequest,
   ): Promise<SessionEvent> {
-    return this.bus(sessionId).append("user.humanInputResponse", {
-      requestId,
+    const request = this.humanInputRequests.get(requestId);
+    if (!request || request.sessionId !== sessionId || request.status !== "pending") {
+      throw new Error(`No pending demo human-input request ${requestId}`);
+    }
+    const now = new Date().toISOString();
+    this.humanInputRequests.set(requestId, {
+      ...request,
+      status: response.outcome === "answered" ? "answered" : "skipped",
       response,
+      respondedBy: "demo:user",
+      respondedAt: now,
+      updatedAt: now,
     });
+    return this.bus(sessionId).append("user.humanInputResponse", { requestId, response });
   }
 
   // --- Environments, packs, workspaces, billing (static-ish fixtures) ----------
@@ -2068,7 +2126,7 @@ export class MockOpenGeniClient implements SessionClientLike {
     _workspaceId: string,
     _options: AttachedBrowserDeviceListOptions = {},
   ): Promise<AttachedBrowserDeviceListResponse> {
-    return { revision: this.browserRevision, devices: [] };
+    return { revision: this.browserRevision, bridges: [], devices: [] };
   }
 
   async getAttachedBrowser(
@@ -3139,6 +3197,15 @@ export class MockOpenGeniClient implements SessionClientLike {
           allowScreenControl: false,
           sharedSessionCount: 1,
           lastSeenAt: new Date().toISOString(),
+          connectionAuthority: {
+            state: "not_applicable",
+            generation: 0,
+            supersededCount: 0,
+            leaseExpiresAt: null,
+            duplicateRunnerDeniedCount: 0,
+            duplicateRunnerDeniedAt: null,
+          },
+          runtime: null,
           metrics: null,
         },
       ],
@@ -3970,7 +4037,7 @@ const ACCOUNT_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
  */
 const CLIENT_CONFIG: ClientConfig = {
   deploymentRevision: "demo",
-  apiContractRevision: "2026-08-model-context-v1",
+  apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
   defaultModel: "gpt-5.6-sol",
   allowedModels: ["gpt-5.6-sol", "accounts/fireworks/models/glm-5p2"],
   models: [

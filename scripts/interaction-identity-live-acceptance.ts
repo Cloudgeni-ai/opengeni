@@ -489,9 +489,12 @@ function semanticText(observation: BrowserObservation): string {
 
 async function createFixture(runId: string): Promise<{ url: string; dispose(): Promise<void> }> {
   const localEndpoint = requiredEnv("OPENGENI_OBJECT_STORAGE_ENDPOINT");
-  const publicEndpoint =
-    process.env.OPENGENI_IDENTITY_ACCEPTANCE_FIXTURE_ENDPOINT?.trim() ||
-    (await discoverObjectStorageTunnel(localEndpoint));
+  // This is the exact endpoint used by ordinary sandbox object URLs. The dev
+  // stack resolves it to its worktree-scoped Cloudflare edge and writes it to
+  // .env.runtime; deployments resolve it to their configured object endpoint.
+  // Identity acceptance must exercise that canonical path rather than inventing
+  // a second fixture tunnel with separate discovery and failure modes.
+  const publicEndpoint = requiredEnv("OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT");
   const storage = createObjectStorage({
     objectStorageBackend: "s3-compatible",
     objectStorageBucket: requiredEnv("OPENGENI_OBJECT_STORAGE_BUCKET"),
@@ -522,29 +525,6 @@ async function createFixture(runId: string): Promise<{ url: string; dispose(): P
       await storage.deleteObject(key).catch(() => undefined);
     },
   };
-}
-
-async function discoverObjectStorageTunnel(localEndpoint: string): Promise<string> {
-  const localOrigin = new URL(localEndpoint).origin;
-  const response = await fetch("http://127.0.0.1:4040/api/tunnels");
-  if (!response.ok) throw new Error("could not discover the local object-storage tunnel");
-  const value = (await response.json()) as {
-    tunnels?: Array<{ public_url?: unknown; config?: { addr?: unknown } }>;
-  };
-  const tunnel = value.tunnels?.find((candidate) => {
-    if (typeof candidate.config?.addr !== "string") return false;
-    try {
-      return new URL(candidate.config.addr).origin === localOrigin;
-    } catch {
-      return false;
-    }
-  });
-  if (typeof tunnel?.public_url !== "string") {
-    throw new Error(
-      "no public object-storage tunnel found; set OPENGENI_IDENTITY_ACCEPTANCE_FIXTURE_ENDPOINT",
-    );
-  }
-  return new URL(tunnel.public_url).origin;
 }
 
 function identityFixtureHtml(): string {

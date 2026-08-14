@@ -6087,6 +6087,65 @@ export type MachineState =
 
 export type MachineKind = "modal" | "selfhosted";
 
+export type MachineConnectionAuthority = {
+  state: "not_applicable" | "unclaimed" | "active" | "expired";
+  generation: number;
+  supersededCount: number;
+  leaseExpiresAt: string | null;
+  duplicateRunnerDeniedCount: number;
+  duplicateRunnerDeniedAt: string | null;
+};
+
+export type MachineRuntimeCapabilities = {
+  exec: boolean;
+  filesystem: boolean;
+  git: boolean;
+  pty: boolean;
+  desktop: boolean;
+  opStream: boolean;
+  browserBridge: boolean;
+};
+
+export type MachineUpdateStatus =
+  | "requested"
+  | "accepted"
+  | "waiting_for_idle"
+  | "downloading"
+  | "verifying"
+  | "applying"
+  | "restarting"
+  | "succeeded"
+  | "failed";
+
+export type MachineUpdateState = {
+  operationId: string;
+  status: MachineUpdateStatus;
+  targetVersion: string;
+  expectedBinarySha256: string | null;
+  errorCode: string | null;
+  retryable: boolean;
+  rolledBack: boolean;
+  requestedAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+};
+
+export type MachineRuntime = {
+  installedVersion: string | null;
+  binarySha256: string | null;
+  updateChannel: "stable" | "beta" | null;
+  desiredVersion: string | null;
+  versionState: "unknown" | "current" | "outdated" | "ahead" | "updating" | "update_failed";
+  capabilities: MachineRuntimeCapabilities;
+  update: MachineUpdateState | null;
+};
+
+export type UpdateMachineAgentResponse = {
+  operationId: string;
+  accepted: boolean;
+  targetVersion: string;
+};
+
 /** A machine as the Machines dashboard renders it (an enrolled selfhosted machine
  *  or the session's synthetic Modal group box, `isSessionGroup: true`). */
 export type MachineView = {
@@ -6110,6 +6169,11 @@ export type MachineView = {
   allowScreenControl: boolean;
   sharedSessionCount: number;
   lastSeenAt: string | null;
+  /** Secret-free single-runner authority diagnostics. */
+  connectionAuthority: MachineConnectionAuthority;
+  /** Exact build/update truth. Null means the runner predates runtime Hello
+   * reporting or this is a managed-session group without a connected agent. */
+  runtime: MachineRuntime | null;
   metrics: MetricSample | null;
 };
 

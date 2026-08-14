@@ -306,9 +306,22 @@ export async function startApi() {
   } as const;
   // The PRIVILEGED control-plane NATS login (M-AUTH): when the server runs with
   // auth_callout, api/worker authenticate as a static account user permitted to
-  // request `agent.*.rpc`. Null in local dev (anonymous connect — the bus default).
+  // request exact generation-fenced agent RPC subjects. Null in local dev
+  // (anonymous connect — the bus default).
   const controlPlaneAuth = resolveNatsControlPlaneAuth(settings);
   try {
+    // Browser, Computer, Terminal, and Files can cold-create the home sandbox
+    // directly from this API process. Resolve the same private-registry Modal
+    // image before the API becomes reachable so the first human interaction
+    // does not pay the provider import/build latency. This mirrors the turn
+    // worker's startup boundary and is a no-op for provider-native image IDs,
+    // public images, and non-Modal backends.
+    const { ensureModalRegistryImage } = await import("@opengeni/runtime/sandbox");
+    await retryStartupDependency(
+      "Modal private-registry image",
+      () => ensureModalRegistryImage(settings),
+      { ...retryOptions, onRetry },
+    );
     await retryStartupDependency(
       "PostgreSQL runtime posture",
       () => assertRuntimeDatabasePosture(dbClient.db, databasePosture),

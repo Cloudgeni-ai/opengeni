@@ -7,11 +7,11 @@
 // connect auth-token, nats-server (configured with `auth_callout`) issues an
 // authorization request on `$SYS.REQ.USER.AUTH`. Our responder (auth-callout.ts)
 // validates the bearer and answers with a SIGNED authorization-response JWT that
-// embeds a SIGNED user JWT scoping the connection to publish/subscribe ONLY
-// `agent.<workspaceId>.>` (+ the reply `_INBOX.>`). That per-subject permission
-// set IS the per-workspace isolation: workspace A's agent literally cannot
-// pub/sub workspace B's subjects (§19 the NATS-Accounts-misconfig leak risk is
-// closed at the JWT-permission layer, not just by subject naming).
+// embeds a SIGNED user JWT scoping the connection to publish/subscribe ONLY its
+// generation-fenced process subtree
+// `agent.<workspaceId>.<agentId>.connection.<instanceId>.>` (+ reply
+// `_INBOX.>`). That exact scope prevents both cross-workspace access and a stale
+// process sharing credentials with its live successor.
 //
 // WHY HAND-ROLL THE JWT ENCODING (vs a dep): the NATS JWT v2 wire format is small,
 // stable, and fully specified (ADR-26 + nats-io/jwt): a base64url header
@@ -237,7 +237,7 @@ export function mintAuthResponse(input: MintAuthResponseInput): string {
     // (nats-server validates "Audience must be a server public key"). The
     // authenticated user is placed into the configured `auth_callout.account` (the
     // SAME account the responder + the privileged control plane connect into), so
-    // `agent.<ws>.<id>.rpc` request/reply routes; the workspace isolation is carried
+    // exact generation-fenced agent request/reply routes; workspace isolation is carried
     // entirely by the user JWT's pub/sub subject permissions (NOT by cross-account
     // placement, which server-config-mode nats does not support — nats-io#4335).
     aud: input.serverId,
@@ -263,6 +263,10 @@ export interface DecodedAuthRequest {
   authToken: string | undefined;
   /** The connect username, if any (unused today; present for completeness). */
   user: string | undefined;
+  /** Client-reported process identity. OpenGeni agents use a strict
+   *  `opengeni-agent/connection/<uuid>` shape; auth-callout rejects anything
+   *  else before granting machine subjects. */
+  name: string | undefined;
 }
 
 /**
@@ -305,31 +309,52 @@ export function decodeAuthRequest(token: string): DecodedAuthRequest | null {
   const serverId = typeof serverIdRaw === "string" ? serverIdRaw : "";
   const connectOpts =
     typeof natsObj.connect_opts === "object" && natsObj.connect_opts !== null
-      ? (natsObj.connect_opts as { auth_token?: unknown; user?: unknown })
+      ? (natsObj.connect_opts as { auth_token?: unknown; user?: unknown; name?: unknown })
       : {};
   const authToken = typeof connectOpts.auth_token === "string" ? connectOpts.auth_token : undefined;
   const user = typeof connectOpts.user === "string" ? connectOpts.user : undefined;
-  return { userNkey, serverId, authToken, user };
+  const name = typeof connectOpts.name === "string" ? connectOpts.name : undefined;
+  return { userNkey, serverId, authToken, user, name };
+}
+
+const AGENT_CONNECTION_NAME_PREFIX = "opengeni-agent/connection/";
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/** Parse the exact process instance carried by the NATS CONNECT name. The value
+ *  is authority material used in subjects, so arbitrary tokens/dots are never
+ *  accepted. */
+export function parseAgentConnectionName(name: string | undefined): string | null {
+  if (!name?.startsWith(AGENT_CONNECTION_NAME_PREFIX)) return null;
+  const instanceId = name.slice(AGENT_CONNECTION_NAME_PREFIX.length);
+  return UUID_PATTERN.test(instanceId) ? instanceId.toLowerCase() : null;
 }
 
 /**
- * Build the workspace-scoped permission set for an agent: it may publish + subscribe
- * ONLY `agent.<workspaceId>.>` (its own RPC/event/hello subtree) and the reply
- * `_INBOX.>` subtree (so request/reply round-trips work). Everything else is
- * implicitly denied (an allow-list with no other entries IS the deny-all-else).
+ * Build the exact process-scoped permission set for an authenticated agent. In
+ * production agentId + connectionInstanceId are mandatory, restricting both
+ * directions to that claimed daemon's RPC/event/hello/op subtree. It may publish
+ * to `_INBOX.>` only to answer control-plane requests; it never needs to read
+ * another connection's reply inbox.
+ * The workspace-only fallback exists solely for legacy isolated callers/tests.
  *
- * THE isolation assertion (§17): with `workspaceId=A`, the returned allow lists name
- * only `agent.A.>` — so a connection bearing this credential is rejected by
- * nats-server the instant it tries to pub/sub `agent.B.>`. This is the per-workspace
- * tenancy boundary, enforced cryptographically by the signed JWT, not by naming.
+ * THE isolation assertion (§17): with workspace A, agent B, instance C, the
+ * production allow lists name only `agent.A.B.connection.C.>` and `_INBOX.>`.
+ * NATS rejects every other workspace, agent, or process generation.
  */
-export function workspaceAgentPermissions(workspaceId: string): NatsPermissions {
-  const agentScope = `agent.${workspaceId}.>`;
+export function workspaceAgentPermissions(
+  workspaceId: string,
+  agentId?: string,
+  connectionInstanceId?: string,
+): NatsPermissions {
+  const agentScope =
+    agentId && connectionInstanceId
+      ? `agent.${workspaceId}.${agentId}.connection.${connectionInstanceId}.>`
+      : `agent.${workspaceId}.>`;
   // The reply-inbox subtree must be reachable for request/reply (the control plane
-  // requests on agent.<ws>.<id>.rpc with a reply inbox; the agent responds there).
+  // requests on the exact process RPC subject with a reply inbox; the agent responds there).
   const inboxScope = "_INBOX.>";
   return {
     pub: { allow: [agentScope, inboxScope] },
-    sub: { allow: [agentScope, inboxScope] },
+    sub: { allow: [agentScope] },
   };
 }

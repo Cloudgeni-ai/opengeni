@@ -170,6 +170,10 @@ pub struct UpdateConfig {
     pub pubkey: String,
     /// Allow re-installing the SAME version (a forced re-pin); normally false.
     pub allow_same_version: bool,
+    /// Allow an explicit operator-requested update to opt into a signed staged
+    /// release before this agent's automatic-rollout cohort is selected.
+    /// Automatic checks leave this false.
+    pub allow_staged_rollout_opt_in: bool,
 }
 
 impl UpdateConfig {
@@ -189,6 +193,7 @@ impl UpdateConfig {
             target: current_target().to_string(),
             pubkey: PINNED_MINISIGN_PUBKEY.to_string(),
             allow_same_version: false,
+            allow_staged_rollout_opt_in: false,
         }
     }
 
@@ -242,6 +247,12 @@ impl PendingUpdatePlan {
     #[must_use]
     pub fn expected_size(&self) -> u64 {
         self.artifact.size
+    }
+
+    /// Lowercase sha256 pinned by the signed manifest for this exact artifact.
+    #[must_use]
+    pub fn expected_sha256(&self) -> &str {
+        &self.artifact.sha256
     }
 
     /// Downloads and independently verifies the one selected artifact.
@@ -364,6 +375,7 @@ pub fn check_update_manifest(
 
     // 3. Gate: staged-rollout cohort. A forced manifest overrides cohorting.
     if !manifest.force
+        && !config.allow_staged_rollout_opt_in
         && !in_rollout(
             &config.agent_id,
             &manifest.cohort_salt,

@@ -17,8 +17,8 @@ export class MemoryEventBus implements EventBus {
    *  subscription. A missing entry models "no responder" (NATS 503 → offline). */
   private responders = new Map<string, RequestHandler>();
   /** Agent-event (one-way) subscribers, keyed by the subscribed subject pattern.
-   *  The in-memory mirror of `agent.*.*.events` pub/sub for the metrics-ingestion
-   *  consumer. */
+   *  The in-memory mirror of `agent.*.*.connection.*.events` pub/sub for the
+   *  metrics-ingestion consumer. */
   private agentEventSubscribers = new Map<
     string,
     Set<(payload: Uint8Array, subject: string) => void | Promise<void>>
@@ -104,10 +104,9 @@ export class MemoryEventBus implements EventBus {
     };
   }
 
-  /** Test helper: publish a raw agent-event payload on a concrete subject (e.g.
-   *  `agent.<ws>.<id>.events`), delivering it to every subscriber whose pattern
-   *  matches (`agent.*.*.events` ↔ the concrete subject). Mirrors NATS wildcard
-   *  delivery so an ingestion test can drive a heartbeat without a real broker. */
+  /** Test helper: publish a raw agent-event payload on a concrete process subject,
+   *  delivering it to every matching wildcard subscriber. Mirrors NATS delivery
+   *  so ingestion tests can drive a generation-fenced heartbeat without a broker. */
   async emitAgentEvent(eventSubject: string, payload: Uint8Array): Promise<void> {
     const matching: Array<(payload: Uint8Array, subject: string) => void | Promise<void>> = [];
     for (const [pattern, subscribers] of this.agentEventSubscribers) {
@@ -128,8 +127,7 @@ export class MemoryEventBus implements EventBus {
   async close(): Promise<void> {}
 }
 
-/** NATS-style subject wildcard match: `*` matches exactly one token. Used by the
- *  in-memory bus to mirror `agent.*.*.events` ↔ `agent.<ws>.<id>.events`. */
+/** NATS-style subject wildcard match: `*` matches exactly one token. */
 function subjectMatches(pattern: string, candidateSubject: string): boolean {
   const p = pattern.split(".");
   const s = candidateSubject.split(".");

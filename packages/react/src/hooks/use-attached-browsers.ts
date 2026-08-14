@@ -1,4 +1,4 @@
-import type { AttachedBrowserDevice } from "@opengeni/sdk/interaction";
+import type { AttachedBrowserBridge, AttachedBrowserDevice } from "@opengeni/sdk/interaction";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { EmbeddedBrowserInteractionClientLike } from "../client";
 import {
@@ -15,6 +15,7 @@ export type UseAttachedBrowsersOptions = EmbeddedBrowserInteractionClientOverrid
 
 export type UseAttachedBrowsersResult = {
   revision: number;
+  bridges: AttachedBrowserBridge[];
   devices: AttachedBrowserDevice[];
   loading: boolean;
   refreshing: boolean;
@@ -67,6 +68,7 @@ export function useAttachedBrowsers(
         setState({
           workspaceId,
           revision: response.revision,
+          bridges: response.bridges,
           devices: sortDevices(response.devices),
           loading: false,
           refreshing: false,
@@ -117,6 +119,7 @@ export function useAttachedBrowsers(
 
   return {
     revision: visible.revision,
+    bridges: visible.bridges,
     devices: visible.devices,
     loading: visible.loading,
     refreshing: visible.refreshing,
@@ -129,6 +132,7 @@ function emptyState(workspaceId: string, loading: boolean) {
   return {
     workspaceId,
     revision: 0,
+    bridges: [] as AttachedBrowserBridge[],
     devices: [] as AttachedBrowserDevice[],
     loading,
     refreshing: false,

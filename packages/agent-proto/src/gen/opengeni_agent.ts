@@ -478,6 +478,71 @@ export function goingOfflineReasonToJSON(object: GoingOfflineReason): string {
   }
 }
 
+export enum AgentUpdateStage {
+  AGENT_UPDATE_STAGE_UNSPECIFIED = 0,
+  AGENT_UPDATE_STAGE_ACCEPTED = 1,
+  AGENT_UPDATE_STAGE_WAITING_FOR_IDLE = 2,
+  AGENT_UPDATE_STAGE_DOWNLOADING = 3,
+  AGENT_UPDATE_STAGE_VERIFYING = 4,
+  AGENT_UPDATE_STAGE_APPLYING = 5,
+  AGENT_UPDATE_STAGE_RESTARTING = 6,
+  AGENT_UPDATE_STAGE_FAILED = 7,
+}
+
+export function agentUpdateStageFromJSON(object: any): AgentUpdateStage {
+  switch (object) {
+    case 0:
+    case "AGENT_UPDATE_STAGE_UNSPECIFIED":
+      return AgentUpdateStage.AGENT_UPDATE_STAGE_UNSPECIFIED;
+    case 1:
+    case "AGENT_UPDATE_STAGE_ACCEPTED":
+      return AgentUpdateStage.AGENT_UPDATE_STAGE_ACCEPTED;
+    case 2:
+    case "AGENT_UPDATE_STAGE_WAITING_FOR_IDLE":
+      return AgentUpdateStage.AGENT_UPDATE_STAGE_WAITING_FOR_IDLE;
+    case 3:
+    case "AGENT_UPDATE_STAGE_DOWNLOADING":
+      return AgentUpdateStage.AGENT_UPDATE_STAGE_DOWNLOADING;
+    case 4:
+    case "AGENT_UPDATE_STAGE_VERIFYING":
+      return AgentUpdateStage.AGENT_UPDATE_STAGE_VERIFYING;
+    case 5:
+    case "AGENT_UPDATE_STAGE_APPLYING":
+      return AgentUpdateStage.AGENT_UPDATE_STAGE_APPLYING;
+    case 6:
+    case "AGENT_UPDATE_STAGE_RESTARTING":
+      return AgentUpdateStage.AGENT_UPDATE_STAGE_RESTARTING;
+    case 7:
+    case "AGENT_UPDATE_STAGE_FAILED":
+      return AgentUpdateStage.AGENT_UPDATE_STAGE_FAILED;
+    default:
+      throw new globalThis.Error("Unrecognized enum value " + object + " for enum AgentUpdateStage");
+  }
+}
+
+export function agentUpdateStageToJSON(object: AgentUpdateStage): string {
+  switch (object) {
+    case AgentUpdateStage.AGENT_UPDATE_STAGE_UNSPECIFIED:
+      return "AGENT_UPDATE_STAGE_UNSPECIFIED";
+    case AgentUpdateStage.AGENT_UPDATE_STAGE_ACCEPTED:
+      return "AGENT_UPDATE_STAGE_ACCEPTED";
+    case AgentUpdateStage.AGENT_UPDATE_STAGE_WAITING_FOR_IDLE:
+      return "AGENT_UPDATE_STAGE_WAITING_FOR_IDLE";
+    case AgentUpdateStage.AGENT_UPDATE_STAGE_DOWNLOADING:
+      return "AGENT_UPDATE_STAGE_DOWNLOADING";
+    case AgentUpdateStage.AGENT_UPDATE_STAGE_VERIFYING:
+      return "AGENT_UPDATE_STAGE_VERIFYING";
+    case AgentUpdateStage.AGENT_UPDATE_STAGE_APPLYING:
+      return "AGENT_UPDATE_STAGE_APPLYING";
+    case AgentUpdateStage.AGENT_UPDATE_STAGE_RESTARTING:
+      return "AGENT_UPDATE_STAGE_RESTARTING";
+    case AgentUpdateStage.AGENT_UPDATE_STAGE_FAILED:
+      return "AGENT_UPDATE_STAGE_FAILED";
+    default:
+      throw new globalThis.Error("Unrecognized enum value " + object + " for enum AgentUpdateStage");
+  }
+}
+
 /** The logical byte stream an op-frame Data chunk belongs to. */
 export enum OpChannel {
   OP_CHANNEL_UNSPECIFIED = 0,
@@ -893,6 +958,20 @@ export interface Hello {
    * first connect.
    */
   resumeToken: string;
+  /**
+   * Lowercase sha256 of the exact running executable. The control plane uses
+   * this with agent_version to verify that a self-update's successor process is
+   * the build the signed manifest selected, not merely a process that reconnected.
+   */
+  binarySha256: string;
+  /**
+   * Durable proof written only after an explicitly requested update passed the
+   * signed-manifest, artifact signature+digest, atomic apply, and startup health
+   * gates. Repeating it on successor Hellos heals lost progress events.
+   */
+  completedUpdateOperationId: string;
+  completedUpdateTargetVersion: string;
+  completedUpdateBinarySha256: string;
 }
 
 /**
@@ -1666,6 +1745,48 @@ export interface UpdateMayProceedResponse {
 }
 
 /**
+ * Control-plane initiated, process-global self-update. This wraps the same
+ * signed/minisign/sha256/atomic-rollback updater used by the local CLI; it is not
+ * a second installer. The request is idempotent by operation_id and fenced by
+ * the exact process subject plus its expected running version+digest.
+ */
+export interface AgentUpdateApplyRequest {
+  operationId: string;
+  targetVersion: string;
+  channel: string;
+  expectedCurrentVersion: string;
+  expectedCurrentSha256: string;
+  /**
+   * The deployment origin serving the signed channel manifest. The pinned
+   * minisign key remains the trust root; this only chooses the fetch origin.
+   */
+  releaseBaseUrl: string;
+}
+
+export interface AgentUpdateApplyResponse {
+  accepted: boolean;
+  operationId: string;
+  currentVersion: string;
+  currentSha256: string;
+  targetVersion: string;
+}
+
+/**
+ * Durable, secret-free progress from the authoritative runner. A successful
+ * RESTARTING event is still provisional: only the successor Hello completes the
+ * update in the control plane.
+ */
+export interface AgentUpdateProgress {
+  operationId: string;
+  targetVersion: string;
+  stage: AgentUpdateStage;
+  expectedBinarySha256: string;
+  errorCode: string;
+  retryable: boolean;
+  rolledBack: boolean;
+}
+
+/**
  * The terminal outcome of an op — carried in the Exit frame body AND echoed in
  * OpStatus once complete. Digests/totals are keyed by channel name
  * ("stdout"/"stderr"/"content") for a byte-exact assembly proof.
@@ -1866,7 +1987,8 @@ export interface OpProgress {
 
 /**
  * A server→runner cumulative ack + credit replenishment, published fire-and-forget
- * on the ack subject (`agent.<ws>.<id>.ack`). Best-effort, healed by repetition.
+ * on the exact process ack subject
+ * (`agent.<ws>.<id>.connection.<instance>.ack`). Best-effort, healed by repetition.
  */
 export interface OpAck {
   opId: string;
@@ -1931,6 +2053,7 @@ export interface ControlRequest {
     | { $case: "browserControlEnsure"; browserControlEnsure: BrowserControlEnsureRequest }
     | { $case: "browserFramesOpen"; browserFramesOpen: BrowserFramesOpenRequest }
     | { $case: "computerFramesOpen"; computerFramesOpen: ComputerFramesOpenRequest }
+    | { $case: "agentUpdateApply"; agentUpdateApply: AgentUpdateApplyRequest }
     | undefined;
 }
 
@@ -1972,6 +2095,7 @@ export interface ControlResponse {
     | { $case: "browserControlEnsure"; browserControlEnsure: BrowserControlEnsureResponse }
     | { $case: "browserFramesOpen"; browserFramesOpen: BrowserFramesOpenResponse }
     | { $case: "computerFramesOpen"; computerFramesOpen: ComputerFramesOpenResponse }
+    | { $case: "agentUpdateApply"; agentUpdateApply: AgentUpdateApplyResponse }
     | undefined;
 }
 
@@ -1993,10 +2117,10 @@ export interface HelloAck {
  */
 export interface AgentEvent {
   agentId: string;
-  event:
-    | { $case: "heartbeat"; heartbeat: Heartbeat }
-    | { $case: "goingOffline"; goingOffline: GoingOffline }
-    | undefined;
+  event: { $case: "heartbeat"; heartbeat: Heartbeat } | { $case: "goingOffline"; goingOffline: GoingOffline } | {
+    $case: "agentUpdateProgress";
+    agentUpdateProgress: AgentUpdateProgress;
+  } | undefined;
 }
 
 /** The control plane's ack of an AgentEvent (e.g. a HeartbeatAck). */
@@ -2331,6 +2455,10 @@ function createBaseHello(): Hello {
     capabilities: undefined,
     updateChannel: "",
     resumeToken: "",
+    binarySha256: "",
+    completedUpdateOperationId: "",
+    completedUpdateTargetVersion: "",
+    completedUpdateBinarySha256: "",
   };
 }
 
@@ -2365,6 +2493,18 @@ export const Hello: MessageFns<Hello> = {
     }
     if (message.resumeToken !== "") {
       writer.uint32(82).string(message.resumeToken);
+    }
+    if (message.binarySha256 !== "") {
+      writer.uint32(90).string(message.binarySha256);
+    }
+    if (message.completedUpdateOperationId !== "") {
+      writer.uint32(98).string(message.completedUpdateOperationId);
+    }
+    if (message.completedUpdateTargetVersion !== "") {
+      writer.uint32(106).string(message.completedUpdateTargetVersion);
+    }
+    if (message.completedUpdateBinarySha256 !== "") {
+      writer.uint32(114).string(message.completedUpdateBinarySha256);
     }
     return writer;
   },
@@ -2456,6 +2596,38 @@ export const Hello: MessageFns<Hello> = {
           message.resumeToken = reader.string();
           continue;
         }
+        case 11: {
+          if (tag !== 90) {
+            break;
+          }
+
+          message.binarySha256 = reader.string();
+          continue;
+        }
+        case 12: {
+          if (tag !== 98) {
+            break;
+          }
+
+          message.completedUpdateOperationId = reader.string();
+          continue;
+        }
+        case 13: {
+          if (tag !== 106) {
+            break;
+          }
+
+          message.completedUpdateTargetVersion = reader.string();
+          continue;
+        }
+        case 14: {
+          if (tag !== 114) {
+            break;
+          }
+
+          message.completedUpdateBinarySha256 = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -2505,6 +2677,26 @@ export const Hello: MessageFns<Hello> = {
         : isSet(object.resume_token)
         ? globalThis.String(object.resume_token)
         : "",
+      binarySha256: isSet(object.binarySha256)
+        ? globalThis.String(object.binarySha256)
+        : isSet(object.binary_sha256)
+        ? globalThis.String(object.binary_sha256)
+        : "",
+      completedUpdateOperationId: isSet(object.completedUpdateOperationId)
+        ? globalThis.String(object.completedUpdateOperationId)
+        : isSet(object.completed_update_operation_id)
+        ? globalThis.String(object.completed_update_operation_id)
+        : "",
+      completedUpdateTargetVersion: isSet(object.completedUpdateTargetVersion)
+        ? globalThis.String(object.completedUpdateTargetVersion)
+        : isSet(object.completed_update_target_version)
+        ? globalThis.String(object.completed_update_target_version)
+        : "",
+      completedUpdateBinarySha256: isSet(object.completedUpdateBinarySha256)
+        ? globalThis.String(object.completedUpdateBinarySha256)
+        : isSet(object.completed_update_binary_sha256)
+        ? globalThis.String(object.completed_update_binary_sha256)
+        : "",
     };
   },
 
@@ -2540,6 +2732,18 @@ export const Hello: MessageFns<Hello> = {
     if (message.resumeToken !== "") {
       obj.resumeToken = message.resumeToken;
     }
+    if (message.binarySha256 !== "") {
+      obj.binarySha256 = message.binarySha256;
+    }
+    if (message.completedUpdateOperationId !== "") {
+      obj.completedUpdateOperationId = message.completedUpdateOperationId;
+    }
+    if (message.completedUpdateTargetVersion !== "") {
+      obj.completedUpdateTargetVersion = message.completedUpdateTargetVersion;
+    }
+    if (message.completedUpdateBinarySha256 !== "") {
+      obj.completedUpdateBinarySha256 = message.completedUpdateBinarySha256;
+    }
     return obj;
   },
 
@@ -2560,6 +2764,10 @@ export const Hello: MessageFns<Hello> = {
       : undefined;
     message.updateChannel = object.updateChannel ?? "";
     message.resumeToken = object.resumeToken ?? "";
+    message.binarySha256 = object.binarySha256 ?? "";
+    message.completedUpdateOperationId = object.completedUpdateOperationId ?? "";
+    message.completedUpdateTargetVersion = object.completedUpdateTargetVersion ?? "";
+    message.completedUpdateBinarySha256 = object.completedUpdateBinarySha256 ?? "";
     return message;
   },
 };
@@ -10524,6 +10732,497 @@ export const UpdateMayProceedResponse: MessageFns<UpdateMayProceedResponse> = {
   },
 };
 
+function createBaseAgentUpdateApplyRequest(): AgentUpdateApplyRequest {
+  return {
+    operationId: "",
+    targetVersion: "",
+    channel: "",
+    expectedCurrentVersion: "",
+    expectedCurrentSha256: "",
+    releaseBaseUrl: "",
+  };
+}
+
+export const AgentUpdateApplyRequest: MessageFns<AgentUpdateApplyRequest> = {
+  encode(message: AgentUpdateApplyRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.operationId !== "") {
+      writer.uint32(10).string(message.operationId);
+    }
+    if (message.targetVersion !== "") {
+      writer.uint32(18).string(message.targetVersion);
+    }
+    if (message.channel !== "") {
+      writer.uint32(26).string(message.channel);
+    }
+    if (message.expectedCurrentVersion !== "") {
+      writer.uint32(34).string(message.expectedCurrentVersion);
+    }
+    if (message.expectedCurrentSha256 !== "") {
+      writer.uint32(42).string(message.expectedCurrentSha256);
+    }
+    if (message.releaseBaseUrl !== "") {
+      writer.uint32(50).string(message.releaseBaseUrl);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AgentUpdateApplyRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAgentUpdateApplyRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.operationId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.targetVersion = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.channel = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.expectedCurrentVersion = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.expectedCurrentSha256 = reader.string();
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.releaseBaseUrl = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): AgentUpdateApplyRequest {
+    return {
+      operationId: isSet(object.operationId)
+        ? globalThis.String(object.operationId)
+        : isSet(object.operation_id)
+        ? globalThis.String(object.operation_id)
+        : "",
+      targetVersion: isSet(object.targetVersion)
+        ? globalThis.String(object.targetVersion)
+        : isSet(object.target_version)
+        ? globalThis.String(object.target_version)
+        : "",
+      channel: isSet(object.channel) ? globalThis.String(object.channel) : "",
+      expectedCurrentVersion: isSet(object.expectedCurrentVersion)
+        ? globalThis.String(object.expectedCurrentVersion)
+        : isSet(object.expected_current_version)
+        ? globalThis.String(object.expected_current_version)
+        : "",
+      expectedCurrentSha256: isSet(object.expectedCurrentSha256)
+        ? globalThis.String(object.expectedCurrentSha256)
+        : isSet(object.expected_current_sha256)
+        ? globalThis.String(object.expected_current_sha256)
+        : "",
+      releaseBaseUrl: isSet(object.releaseBaseUrl)
+        ? globalThis.String(object.releaseBaseUrl)
+        : isSet(object.release_base_url)
+        ? globalThis.String(object.release_base_url)
+        : "",
+    };
+  },
+
+  toJSON(message: AgentUpdateApplyRequest): unknown {
+    const obj: any = {};
+    if (message.operationId !== "") {
+      obj.operationId = message.operationId;
+    }
+    if (message.targetVersion !== "") {
+      obj.targetVersion = message.targetVersion;
+    }
+    if (message.channel !== "") {
+      obj.channel = message.channel;
+    }
+    if (message.expectedCurrentVersion !== "") {
+      obj.expectedCurrentVersion = message.expectedCurrentVersion;
+    }
+    if (message.expectedCurrentSha256 !== "") {
+      obj.expectedCurrentSha256 = message.expectedCurrentSha256;
+    }
+    if (message.releaseBaseUrl !== "") {
+      obj.releaseBaseUrl = message.releaseBaseUrl;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AgentUpdateApplyRequest>, I>>(base?: I): AgentUpdateApplyRequest {
+    return AgentUpdateApplyRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AgentUpdateApplyRequest>, I>>(object: I): AgentUpdateApplyRequest {
+    const message = createBaseAgentUpdateApplyRequest();
+    message.operationId = object.operationId ?? "";
+    message.targetVersion = object.targetVersion ?? "";
+    message.channel = object.channel ?? "";
+    message.expectedCurrentVersion = object.expectedCurrentVersion ?? "";
+    message.expectedCurrentSha256 = object.expectedCurrentSha256 ?? "";
+    message.releaseBaseUrl = object.releaseBaseUrl ?? "";
+    return message;
+  },
+};
+
+function createBaseAgentUpdateApplyResponse(): AgentUpdateApplyResponse {
+  return { accepted: false, operationId: "", currentVersion: "", currentSha256: "", targetVersion: "" };
+}
+
+export const AgentUpdateApplyResponse: MessageFns<AgentUpdateApplyResponse> = {
+  encode(message: AgentUpdateApplyResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.accepted !== false) {
+      writer.uint32(8).bool(message.accepted);
+    }
+    if (message.operationId !== "") {
+      writer.uint32(18).string(message.operationId);
+    }
+    if (message.currentVersion !== "") {
+      writer.uint32(26).string(message.currentVersion);
+    }
+    if (message.currentSha256 !== "") {
+      writer.uint32(34).string(message.currentSha256);
+    }
+    if (message.targetVersion !== "") {
+      writer.uint32(42).string(message.targetVersion);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AgentUpdateApplyResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAgentUpdateApplyResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.accepted = reader.bool();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.operationId = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.currentVersion = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.currentSha256 = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.targetVersion = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): AgentUpdateApplyResponse {
+    return {
+      accepted: isSet(object.accepted) ? globalThis.Boolean(object.accepted) : false,
+      operationId: isSet(object.operationId)
+        ? globalThis.String(object.operationId)
+        : isSet(object.operation_id)
+        ? globalThis.String(object.operation_id)
+        : "",
+      currentVersion: isSet(object.currentVersion)
+        ? globalThis.String(object.currentVersion)
+        : isSet(object.current_version)
+        ? globalThis.String(object.current_version)
+        : "",
+      currentSha256: isSet(object.currentSha256)
+        ? globalThis.String(object.currentSha256)
+        : isSet(object.current_sha256)
+        ? globalThis.String(object.current_sha256)
+        : "",
+      targetVersion: isSet(object.targetVersion)
+        ? globalThis.String(object.targetVersion)
+        : isSet(object.target_version)
+        ? globalThis.String(object.target_version)
+        : "",
+    };
+  },
+
+  toJSON(message: AgentUpdateApplyResponse): unknown {
+    const obj: any = {};
+    if (message.accepted !== false) {
+      obj.accepted = message.accepted;
+    }
+    if (message.operationId !== "") {
+      obj.operationId = message.operationId;
+    }
+    if (message.currentVersion !== "") {
+      obj.currentVersion = message.currentVersion;
+    }
+    if (message.currentSha256 !== "") {
+      obj.currentSha256 = message.currentSha256;
+    }
+    if (message.targetVersion !== "") {
+      obj.targetVersion = message.targetVersion;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AgentUpdateApplyResponse>, I>>(base?: I): AgentUpdateApplyResponse {
+    return AgentUpdateApplyResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AgentUpdateApplyResponse>, I>>(object: I): AgentUpdateApplyResponse {
+    const message = createBaseAgentUpdateApplyResponse();
+    message.accepted = object.accepted ?? false;
+    message.operationId = object.operationId ?? "";
+    message.currentVersion = object.currentVersion ?? "";
+    message.currentSha256 = object.currentSha256 ?? "";
+    message.targetVersion = object.targetVersion ?? "";
+    return message;
+  },
+};
+
+function createBaseAgentUpdateProgress(): AgentUpdateProgress {
+  return {
+    operationId: "",
+    targetVersion: "",
+    stage: 0,
+    expectedBinarySha256: "",
+    errorCode: "",
+    retryable: false,
+    rolledBack: false,
+  };
+}
+
+export const AgentUpdateProgress: MessageFns<AgentUpdateProgress> = {
+  encode(message: AgentUpdateProgress, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.operationId !== "") {
+      writer.uint32(10).string(message.operationId);
+    }
+    if (message.targetVersion !== "") {
+      writer.uint32(18).string(message.targetVersion);
+    }
+    if (message.stage !== 0) {
+      writer.uint32(24).int32(message.stage);
+    }
+    if (message.expectedBinarySha256 !== "") {
+      writer.uint32(34).string(message.expectedBinarySha256);
+    }
+    if (message.errorCode !== "") {
+      writer.uint32(42).string(message.errorCode);
+    }
+    if (message.retryable !== false) {
+      writer.uint32(48).bool(message.retryable);
+    }
+    if (message.rolledBack !== false) {
+      writer.uint32(56).bool(message.rolledBack);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AgentUpdateProgress {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAgentUpdateProgress();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.operationId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.targetVersion = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.stage = reader.int32() as any;
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.expectedBinarySha256 = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.errorCode = reader.string();
+          continue;
+        }
+        case 6: {
+          if (tag !== 48) {
+            break;
+          }
+
+          message.retryable = reader.bool();
+          continue;
+        }
+        case 7: {
+          if (tag !== 56) {
+            break;
+          }
+
+          message.rolledBack = reader.bool();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): AgentUpdateProgress {
+    return {
+      operationId: isSet(object.operationId)
+        ? globalThis.String(object.operationId)
+        : isSet(object.operation_id)
+        ? globalThis.String(object.operation_id)
+        : "",
+      targetVersion: isSet(object.targetVersion)
+        ? globalThis.String(object.targetVersion)
+        : isSet(object.target_version)
+        ? globalThis.String(object.target_version)
+        : "",
+      stage: isSet(object.stage) ? agentUpdateStageFromJSON(object.stage) : 0,
+      expectedBinarySha256: isSet(object.expectedBinarySha256)
+        ? globalThis.String(object.expectedBinarySha256)
+        : isSet(object.expected_binary_sha256)
+        ? globalThis.String(object.expected_binary_sha256)
+        : "",
+      errorCode: isSet(object.errorCode)
+        ? globalThis.String(object.errorCode)
+        : isSet(object.error_code)
+        ? globalThis.String(object.error_code)
+        : "",
+      retryable: isSet(object.retryable) ? globalThis.Boolean(object.retryable) : false,
+      rolledBack: isSet(object.rolledBack)
+        ? globalThis.Boolean(object.rolledBack)
+        : isSet(object.rolled_back)
+        ? globalThis.Boolean(object.rolled_back)
+        : false,
+    };
+  },
+
+  toJSON(message: AgentUpdateProgress): unknown {
+    const obj: any = {};
+    if (message.operationId !== "") {
+      obj.operationId = message.operationId;
+    }
+    if (message.targetVersion !== "") {
+      obj.targetVersion = message.targetVersion;
+    }
+    if (message.stage !== 0) {
+      obj.stage = agentUpdateStageToJSON(message.stage);
+    }
+    if (message.expectedBinarySha256 !== "") {
+      obj.expectedBinarySha256 = message.expectedBinarySha256;
+    }
+    if (message.errorCode !== "") {
+      obj.errorCode = message.errorCode;
+    }
+    if (message.retryable !== false) {
+      obj.retryable = message.retryable;
+    }
+    if (message.rolledBack !== false) {
+      obj.rolledBack = message.rolledBack;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AgentUpdateProgress>, I>>(base?: I): AgentUpdateProgress {
+    return AgentUpdateProgress.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AgentUpdateProgress>, I>>(object: I): AgentUpdateProgress {
+    const message = createBaseAgentUpdateProgress();
+    message.operationId = object.operationId ?? "";
+    message.targetVersion = object.targetVersion ?? "";
+    message.stage = object.stage ?? 0;
+    message.expectedBinarySha256 = object.expectedBinarySha256 ?? "";
+    message.errorCode = object.errorCode ?? "";
+    message.retryable = object.retryable ?? false;
+    message.rolledBack = object.rolledBack ?? false;
+    return message;
+  },
+};
+
 function createBaseOpExit(): OpExit {
   return {
     exitCode: 0,
@@ -12485,6 +13184,9 @@ export const ControlRequest: MessageFns<ControlRequest> = {
       case "computerFramesOpen":
         ComputerFramesOpenRequest.encode(message.op.computerFramesOpen, writer.uint32(306).fork()).join();
         break;
+      case "agentUpdateApply":
+        AgentUpdateApplyRequest.encode(message.op.agentUpdateApply, writer.uint32(314).fork()).join();
+        break;
     }
     return writer;
   },
@@ -12759,6 +13461,17 @@ export const ControlRequest: MessageFns<ControlRequest> = {
           };
           continue;
         }
+        case 39: {
+          if (tag !== 314) {
+            break;
+          }
+
+          message.op = {
+            $case: "agentUpdateApply",
+            agentUpdateApply: AgentUpdateApplyRequest.decode(reader, reader.uint32()),
+          };
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -12898,6 +13611,10 @@ export const ControlRequest: MessageFns<ControlRequest> = {
           $case: "computerFramesOpen",
           computerFramesOpen: ComputerFramesOpenRequest.fromJSON(object.computer_frames_open),
         }
+        : isSet(object.agentUpdateApply)
+        ? { $case: "agentUpdateApply", agentUpdateApply: AgentUpdateApplyRequest.fromJSON(object.agentUpdateApply) }
+        : isSet(object.agent_update_apply)
+        ? { $case: "agentUpdateApply", agentUpdateApply: AgentUpdateApplyRequest.fromJSON(object.agent_update_apply) }
         : undefined,
     };
   },
@@ -12968,6 +13685,8 @@ export const ControlRequest: MessageFns<ControlRequest> = {
       obj.browserFramesOpen = BrowserFramesOpenRequest.toJSON(message.op.browserFramesOpen);
     } else if (message.op?.$case === "computerFramesOpen") {
       obj.computerFramesOpen = ComputerFramesOpenRequest.toJSON(message.op.computerFramesOpen);
+    } else if (message.op?.$case === "agentUpdateApply") {
+      obj.agentUpdateApply = AgentUpdateApplyRequest.toJSON(message.op.agentUpdateApply);
     }
     return obj;
   },
@@ -13172,6 +13891,15 @@ export const ControlRequest: MessageFns<ControlRequest> = {
         }
         break;
       }
+      case "agentUpdateApply": {
+        if (object.op?.agentUpdateApply !== undefined && object.op?.agentUpdateApply !== null) {
+          message.op = {
+            $case: "agentUpdateApply",
+            agentUpdateApply: AgentUpdateApplyRequest.fromPartial(object.op.agentUpdateApply),
+          };
+        }
+        break;
+      }
     }
     return message;
   },
@@ -13270,6 +13998,9 @@ export const ControlResponse: MessageFns<ControlResponse> = {
         break;
       case "computerFramesOpen":
         ComputerFramesOpenResponse.encode(message.result.computerFramesOpen, writer.uint32(306).fork()).join();
+        break;
+      case "agentUpdateApply":
+        AgentUpdateApplyResponse.encode(message.result.agentUpdateApply, writer.uint32(314).fork()).join();
         break;
     }
     return writer;
@@ -13535,6 +14266,17 @@ export const ControlResponse: MessageFns<ControlResponse> = {
           };
           continue;
         }
+        case 39: {
+          if (tag !== 314) {
+            break;
+          }
+
+          message.result = {
+            $case: "agentUpdateApply",
+            agentUpdateApply: AgentUpdateApplyResponse.decode(reader, reader.uint32()),
+          };
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -13672,6 +14414,10 @@ export const ControlResponse: MessageFns<ControlResponse> = {
           $case: "computerFramesOpen",
           computerFramesOpen: ComputerFramesOpenResponse.fromJSON(object.computer_frames_open),
         }
+        : isSet(object.agentUpdateApply)
+        ? { $case: "agentUpdateApply", agentUpdateApply: AgentUpdateApplyResponse.fromJSON(object.agentUpdateApply) }
+        : isSet(object.agent_update_apply)
+        ? { $case: "agentUpdateApply", agentUpdateApply: AgentUpdateApplyResponse.fromJSON(object.agent_update_apply) }
         : undefined,
     };
   },
@@ -13738,6 +14484,8 @@ export const ControlResponse: MessageFns<ControlResponse> = {
       obj.browserFramesOpen = BrowserFramesOpenResponse.toJSON(message.result.browserFramesOpen);
     } else if (message.result?.$case === "computerFramesOpen") {
       obj.computerFramesOpen = ComputerFramesOpenResponse.toJSON(message.result.computerFramesOpen);
+    } else if (message.result?.$case === "agentUpdateApply") {
+      obj.agentUpdateApply = AgentUpdateApplyResponse.toJSON(message.result.agentUpdateApply);
     }
     return obj;
   },
@@ -13935,6 +14683,15 @@ export const ControlResponse: MessageFns<ControlResponse> = {
         }
         break;
       }
+      case "agentUpdateApply": {
+        if (object.result?.agentUpdateApply !== undefined && object.result?.agentUpdateApply !== null) {
+          message.result = {
+            $case: "agentUpdateApply",
+            agentUpdateApply: AgentUpdateApplyResponse.fromPartial(object.result.agentUpdateApply),
+          };
+        }
+        break;
+      }
     }
     return message;
   },
@@ -14056,6 +14813,9 @@ export const AgentEvent: MessageFns<AgentEvent> = {
       case "goingOffline":
         GoingOffline.encode(message.event.goingOffline, writer.uint32(90).fork()).join();
         break;
+      case "agentUpdateProgress":
+        AgentUpdateProgress.encode(message.event.agentUpdateProgress, writer.uint32(98).fork()).join();
+        break;
     }
     return writer;
   },
@@ -14091,6 +14851,17 @@ export const AgentEvent: MessageFns<AgentEvent> = {
           message.event = { $case: "goingOffline", goingOffline: GoingOffline.decode(reader, reader.uint32()) };
           continue;
         }
+        case 12: {
+          if (tag !== 98) {
+            break;
+          }
+
+          message.event = {
+            $case: "agentUpdateProgress",
+            agentUpdateProgress: AgentUpdateProgress.decode(reader, reader.uint32()),
+          };
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -14113,6 +14884,16 @@ export const AgentEvent: MessageFns<AgentEvent> = {
         ? { $case: "goingOffline", goingOffline: GoingOffline.fromJSON(object.goingOffline) }
         : isSet(object.going_offline)
         ? { $case: "goingOffline", goingOffline: GoingOffline.fromJSON(object.going_offline) }
+        : isSet(object.agentUpdateProgress)
+        ? {
+          $case: "agentUpdateProgress",
+          agentUpdateProgress: AgentUpdateProgress.fromJSON(object.agentUpdateProgress),
+        }
+        : isSet(object.agent_update_progress)
+        ? {
+          $case: "agentUpdateProgress",
+          agentUpdateProgress: AgentUpdateProgress.fromJSON(object.agent_update_progress),
+        }
         : undefined,
     };
   },
@@ -14126,6 +14907,8 @@ export const AgentEvent: MessageFns<AgentEvent> = {
       obj.heartbeat = Heartbeat.toJSON(message.event.heartbeat);
     } else if (message.event?.$case === "goingOffline") {
       obj.goingOffline = GoingOffline.toJSON(message.event.goingOffline);
+    } else if (message.event?.$case === "agentUpdateProgress") {
+      obj.agentUpdateProgress = AgentUpdateProgress.toJSON(message.event.agentUpdateProgress);
     }
     return obj;
   },
@@ -14146,6 +14929,15 @@ export const AgentEvent: MessageFns<AgentEvent> = {
       case "goingOffline": {
         if (object.event?.goingOffline !== undefined && object.event?.goingOffline !== null) {
           message.event = { $case: "goingOffline", goingOffline: GoingOffline.fromPartial(object.event.goingOffline) };
+        }
+        break;
+      }
+      case "agentUpdateProgress": {
+        if (object.event?.agentUpdateProgress !== undefined && object.event?.agentUpdateProgress !== null) {
+          message.event = {
+            $case: "agentUpdateProgress",
+            agentUpdateProgress: AgentUpdateProgress.fromPartial(object.event.agentUpdateProgress),
+          };
         }
         break;
       }

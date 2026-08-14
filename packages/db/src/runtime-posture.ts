@@ -44,6 +44,22 @@ const DEDICATED_ARTIFACT_CAPABILITY_ROUTINES = new Set<string>([
 
 const KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE =
   "knowledge_source_sync_lock_authority(uuid, uuid, uuid)";
+const GOOGLE_DRIVE_FILE_AUTHORIZATION_ROUTINE =
+  "google_drive_file_authorized(uuid, uuid, text, uuid)";
+const GOOGLE_DRIVE_DOCUMENT_CITATION_ROUTINE =
+  "google_drive_document_citation(uuid, uuid, text, uuid, uuid)";
+const GOOGLE_DRIVE_AUTHORITY_TABLES = [
+  "connections",
+  "files",
+  "google_drive_object_acl_evidence",
+  "google_drive_object_acl_principals",
+  "knowledge_document_versions",
+  "knowledge_providers",
+  "knowledge_source_objects",
+  "knowledge_source_sync_index_obligations",
+  "knowledge_source_sync_states",
+  "knowledge_sources",
+] as const;
 const KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_TABLES = [
   "knowledge_sources",
   "knowledge_source_objects",
@@ -110,6 +126,8 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   XAI_AUTHORITY_LIVE_ROUTINE,
   XAI_CREATE_CREDENTIAL_ROUTINE,
   XAI_DISCONNECT_CREDENTIAL_ROUTINE,
+  GOOGLE_DRIVE_DOCUMENT_CITATION_ROUTINE,
+  GOOGLE_DRIVE_FILE_AUTHORIZATION_ROUTINE,
   KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE,
   MANAGED_HUMAN_PERSONAL_WORKSPACE_ROUTINE,
   ...CANONICAL_HUMAN_IDENTITY_ROUTINES,
@@ -214,6 +232,8 @@ export const FORCE_RLS_TABLES = [
   "generated_video_artifacts",
   "github_installation_repositories",
   "github_installations",
+  "google_drive_object_acl_evidence",
+  "google_drive_object_acl_principals",
   "host_export_config",
   "host_export_consumers",
   "host_export_cursor_state",
@@ -581,6 +601,8 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "editable_artifact_transactions",
   "editable_artifact_undo_claims",
   "editable_artifact_versions",
+  "google_drive_object_acl_evidence",
+  "google_drive_object_acl_principals",
   "knowledge_change_proposals",
   "knowledge_claim_evidence",
   "knowledge_claim_relations",
@@ -1262,7 +1284,33 @@ export function evaluateRuntimeDatabasePosture(
     } else if (!routine.securityDefiner) {
       violations.push(`target-schema runtime capability ${routine.name} is not SECURITY DEFINER`);
     }
-    if (routine.name === KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE) {
+    if (
+      routine.name === GOOGLE_DRIVE_FILE_AUTHORIZATION_ROUTINE ||
+      routine.name === GOOGLE_DRIVE_DOCUMENT_CITATION_ROUTINE
+    ) {
+      const missingAuthorityTables = GOOGLE_DRIVE_AUTHORITY_TABLES.filter(
+        (tableName) => !tableByName.has(tableName),
+      );
+      if (missingAuthorityTables.length > 0) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
+        );
+      } else {
+        const authorityTables = GOOGLE_DRIVE_AUTHORITY_TABLES.map(
+          (tableName) => tableByName.get(tableName)!,
+        );
+        const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+        if (authorityOwners.size !== 1) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
+          );
+        } else if (routine.owner !== authorityTables[0]!.owner) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
+          );
+        }
+      }
+    } else if (routine.name === KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE) {
       const missingAuthorityTables = KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_TABLES.filter(
         (tableName) => !tableByName.has(tableName),
       );

@@ -30,11 +30,10 @@ receives no direct table DML. Privileged migration/operator connections can
 inspect the scaffold. No API, SDK, worker, MCP, UI, or resource DAO uses it in
 Slice A.
 
-## Slice B: managed-human lifecycle provisioning
+## Slice B: managed-human lifecycle provisioning and first runtime projection
 
 Migration `0219_organization_tenancy_managed_human_provisioning.sql` adds the
-first narrow dual-write seam without activating personal-workspace runtime
-access. The existing Better Auth managed-human hook
+first narrow dual-write seam. The existing Better Auth managed-human hook
 `ensureManagedAccessForUser` now converges, in one transaction, on:
 
 - exactly one `organization_memberships` row for the existing
@@ -43,11 +42,23 @@ access. The existing Better Auth managed-human hook
   `workspace_inference_controls` row; and
 - an active membership pointer to that workspace.
 
-The personal workspace is lifecycle metadata only in this slice. It receives no
-`workspace_memberships` row, is absent from `AccessContext.workspaceGrants`,
-`defaultWorkspaceId`, subject workspace lists, and existing runtime resource
-paths, and does not create user-resource authority or grant rows. The legacy
-Better Auth default workspace remains the sole runtime-access workspace.
+After that exact lifecycle routine returns the active membership and matching
+personal-workspace pointer, the same transaction appends one owner-only runtime
+grant to the authenticated managed human's `AccessContext.workspaceGrants`.
+The grant is an access projection rather than a `workspace_memberships` row and
+does not carry `workspace:admin`, `members:manage`, or `api_keys:manage`, so it
+cannot delegate access to another principal. The personal workspace is therefore
+included in authenticated workspace lists and ordinary runtime resource paths
+only for its owning managed human. Organization/account admins, API keys,
+delegated bearers, services, and other members receive no ambient personal-
+workspace access. The legacy Better Auth workspace remains
+`defaultWorkspaceId`, and persisted legacy grants remain first in the returned
+grant order.
+
+This runtime projection does not create user-resource authority or grant rows.
+The personal workspace still receives no `workspace_memberships` row, so
+membership CRUD and subject-membership fallback cannot discover or widen the
+owner-only projection.
 
 Organization-table writes use one target-schema-local
 `ensure_managed_human_personal_workspace(uuid, text, uuid)` SECURITY DEFINER
@@ -56,8 +67,9 @@ revoked, and explicit `opengeni_app` EXECUTE. Its transaction-local RLS marker,
 exact account/subject binding to the existing managed-human owner membership,
 deterministic workspace identity, control-row validation, and row lock make
 first, repeated, and concurrent provisioning converge. Suspended or revoked
-memberships, foreign accounts, wrong subjects/workspaces, existing runtime
-access on the personal workspace, and malformed subjects fail closed. The app
+memberships, foreign accounts, wrong subjects/workspaces, an unexpected
+persisted workspace membership on the personal workspace, and malformed
+subjects fail closed. The app
 role still has zero direct SELECT/INSERT/UPDATE/DELETE privileges on all four
 organization-tenancy tables.
 
@@ -67,7 +79,7 @@ returns the exact active membership id, organization id, and personal-workspace
 id emitted by that same narrow provisioning capability. API keys, delegated
 bearers, configured/local access, and missing or terminal memberships fail
 closed. The response intentionally omits subjects, retention state, grants,
-resource authority, and personal-workspace runtime access.
+resource authority, and the runtime grant itself.
 
 ## Canonical human identity and login bindings
 
@@ -149,11 +161,14 @@ the access path.
 
 ## Later migration phases
 
-### B. Dual-write (0219 current)
+### B. Dual-write and first access projection (0219 current)
 
 Managed-human membership and personal-workspace lifecycle metadata now use the
-narrow provisioning seam described above. Resource authority/grant dual-write,
-new-session owner/visibility writes, and all read-path changes remain future
+narrow provisioning seam described above. The first disjoint activation adds
+only the authenticated owner's personal workspace to the managed-human access
+projection after lifecycle convergence; it does not add a durable workspace
+membership or change the legacy default. Resource authority/grant dual-write,
+new-session owner/visibility writes, and other read-path changes remain future
 work; old writers remain accepted. Migration 0222 separately delivers the
 accepted-attempt authority snapshot and stale activity-write fence described in
 the Legacy behavior section.
@@ -194,7 +209,7 @@ rewritten in the same release that first activates user authority.
 ## Non-goals in Slices A and B
 
 - organization invitation, role/admin, offboarding, or member-management UI;
-- personal-workspace runtime access or a personal `workspace_memberships` row;
+- a personal `workspace_memberships` row or delegated personal-workspace access;
 - user-resource authority/grant writes, discovery, or sharing;
 - resource CRUD or discovery changes;
 - session sharing/fork runtime;

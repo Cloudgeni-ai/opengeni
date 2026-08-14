@@ -1451,7 +1451,7 @@ export async function createSessionForRequestWithOutcome(
       message: "object storage is not configured",
     });
   }
-  await validateFileResources(db, workspaceId, resources);
+  await validateFileResources(db, grant.accountId, workspaceId, grant.subjectId, resources);
   // VariableSet attachment requires variable-sets:use on the calling grant
   // (validateVariableSetAttachment enforces it), preserving the invariant
   // that sandboxed agents cannot self-attach workspace secrets.
@@ -2102,7 +2102,13 @@ export async function acceptSessionUserMessageWithOutcome(
       message: "object storage is not configured",
     });
   }
-  await validateFileResources(db, workspaceId, requestedResources);
+  await validateFileResources(
+    db,
+    grant.accountId,
+    workspaceId,
+    grant.subjectId,
+    requestedResources,
+  );
   await validateGitHubRepositorySelection(db, workspaceId, [
     ...existingSession.resources,
     ...requestedResources,

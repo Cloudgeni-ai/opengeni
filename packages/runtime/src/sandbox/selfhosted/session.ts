@@ -7,7 +7,7 @@
 // `session.resolveExposedPort`, `session.serializeSessionState`. If the
 // selfhosted client's `create()`/`resume()` return a session presenting that
 // EXACT surface — but backed by `ControlRpc` (request/reply to the agent over
-// `agent.<ws>.<id>.rpc`, encoded via `@opengeni/agent-proto`) instead of a
+// the exact claimed process subject, encoded via `@opengeni/agent-proto`) instead of a
 // provider SDK — then those seams work UNCHANGED. The agent IS the box.
 //
 // The session depends ONLY on `ControlRpc` + `{workspaceId, agentId}` (+ the
@@ -258,6 +258,9 @@ export interface SelfhostedOpStreamDeps {
 export interface SelfhostedSessionDeps {
   workspaceId: string;
   agentId: string;
+  /** Exact live daemon process claimed for this enrollment. Production builders
+   *  require it; direct transport tests may omit it for the legacy subject shape. */
+  connectionInstanceId?: string;
   controlRpc: ControlRpc;
   relay: SelfhostedRelayConfig;
   /** Stable identity for the session's interactive terminal. Repeated stream
@@ -425,13 +428,16 @@ export class SelfhostedSession {
     this.execTimeoutMs = deps.execTimeoutMs;
     this.retryClock = deps.retryClock ?? defaultSelfhostedRetryClock;
     this.onOp = deps.onOp;
-    this.subject = subjectFor(deps.workspaceId, deps.agentId);
+    this.subject = subjectFor(deps.workspaceId, deps.agentId, deps.connectionInstanceId);
     this.workingDir = deps.workingDir ?? "";
     this.transientExecEnvironment = deps.transientExecEnvironment;
     this.opStreamClient = deps.opStream
       ? new OpStreamExecClient({
           workspaceId: deps.workspaceId,
           agentId: deps.agentId,
+          ...(deps.connectionInstanceId !== undefined
+            ? { connectionInstanceId: deps.connectionInstanceId }
+            : {}),
           epoch: this.epoch,
           controlRpc: deps.controlRpc,
           rpcSubject: this.subject,
@@ -551,13 +557,16 @@ export class SelfhostedSession {
         return res.result;
       }
       const error = res.error
-        ? agentErrorToControlError(res.error)
-        : agentErrorToControlError({
-            code: 7, // ERROR_CODE_PROTOCOL — an empty result is a protocol violation
-            message: "agent returned an empty control response",
-            retryable: false,
-            detail: {},
-          });
+        ? agentErrorToControlError(res.error, req.requestId)
+        : agentErrorToControlError(
+            {
+              code: 7, // ERROR_CODE_PROTOCOL — an empty result is a protocol violation
+              message: "agent returned an empty control response",
+              retryable: false,
+              detail: {},
+            },
+            req.requestId,
+          );
       const decision = decideSelfhostedRetry({
         opKind,
         error,
@@ -1242,6 +1251,7 @@ export class SelfhostedSandboxClient {
   private readonly relay: SelfhostedRelayConfig;
   private readonly controlRpcFactory: () => ControlRpc;
   private readonly defaultAgentId: string | undefined;
+  private readonly connectionInstanceId: string | undefined;
   private readonly terminalScopeId: string | undefined;
   private readonly epoch: number | undefined;
   private readonly timeoutMs: number | undefined;
@@ -1261,6 +1271,8 @@ export class SelfhostedSandboxClient {
     /** The agentId a bare create()/resume() (no state) binds to. Optional: the
      *  resume path supplies it via deserializeSessionState. */
     agentId?: string;
+    /** Exact live daemon process. Production builders always supply it. */
+    connectionInstanceId?: string;
     /** Stable terminal identity (normally the durable OpenGeni session id). */
     terminalScopeId?: string;
     epoch?: number;
@@ -1291,6 +1303,7 @@ export class SelfhostedSandboxClient {
     this.relay = opts.relay;
     this.controlRpcFactory = opts.controlRpcFactory;
     this.defaultAgentId = opts.agentId;
+    this.connectionInstanceId = opts.connectionInstanceId;
     this.terminalScopeId = opts.terminalScopeId;
     this.epoch = opts.epoch;
     this.timeoutMs = opts.timeoutMs;
@@ -1313,6 +1326,9 @@ export class SelfhostedSandboxClient {
     return new SelfhostedSession({
       workspaceId: this.workspaceId,
       agentId,
+      ...(this.connectionInstanceId !== undefined
+        ? { connectionInstanceId: this.connectionInstanceId }
+        : {}),
       controlRpc: this.controlRpc(),
       relay: this.relay,
       ...(this.terminalScopeId !== undefined ? { terminalScopeId: this.terminalScopeId } : {}),
@@ -1385,8 +1401,10 @@ export class SelfhostedSandboxClient {
 export interface SelfhostedSessionBuild {
   /** The workspace the machine's control-plane subject is scoped to. */
   workspaceId: string;
-  /** The enrollment id == the agent id `agent.<ws>.<id>.rpc` addresses. */
+  /** The enrollment id == the agent id the exact process subject addresses. */
   agentId: string;
+  /** Exact daemon instance holding the enrollment's live connection lease. */
+  connectionInstanceId: string;
   /** The relay-URL shape for stream endpoints. */
   relay: SelfhostedRelayConfig;
   /** Stable terminal identity; normally the durable OpenGeni session id. */
@@ -1438,6 +1456,7 @@ export async function buildSelfhostedBackendSession(
     relay: deps.relay,
     controlRpcFactory: deps.controlRpcFactory,
     agentId: deps.agentId,
+    connectionInstanceId: deps.connectionInstanceId,
     epoch: deps.epoch,
     ...(deps.terminalScopeId !== undefined ? { terminalScopeId: deps.terminalScopeId } : {}),
     ...(deps.timeoutMs !== undefined ? { timeoutMs: deps.timeoutMs } : {}),

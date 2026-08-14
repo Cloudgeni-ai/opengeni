@@ -603,6 +603,19 @@ describe("API Integration routes", () => {
     });
     expect(replay.status).toBe(201);
     expect(await replay.json()).toEqual(configured);
+    const crossSubjectReplay = await request(
+      `${base}/inventory-source`,
+      {
+        method: "PUT",
+        body: JSON.stringify({
+          displayName: "Finance inventory",
+          config: { collection: "finance", includeArchived: false },
+          idempotencyKey: configureKey,
+        }),
+      },
+      "user:api-integration-route-other-admin",
+    );
+    expect(crossSubjectReplay.status).toBe(409);
 
     const invalid = await request(`${base}/inventory-source`, {
       method: "PUT",

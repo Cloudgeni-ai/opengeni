@@ -410,6 +410,15 @@ function machine(overrides: Partial<MachineView>): MachineView {
     allowScreenControl: false,
     sharedSessionCount: 1,
     lastSeenAt: new Date().toISOString(),
+    connectionAuthority: {
+      state: "not_applicable",
+      generation: 0,
+      supersededCount: 0,
+      leaseExpiresAt: null,
+      duplicateRunnerDeniedCount: 0,
+      duplicateRunnerDeniedAt: null,
+    },
+    runtime: null,
     metrics: null,
     ...overrides,
   };

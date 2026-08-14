@@ -1,24 +1,29 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { createRoot } from "react-dom/client";
 import { CalendarClockIcon, MessagesSquareIcon, NetworkIcon, PanelRightIcon } from "lucide-react";
+import type { EffectiveSessionControl } from "@opengeni/sdk";
 import {
   ChatComposer,
   FleetTile,
+  HumanInputSurface,
   MessageTimeline,
   OpenGeniProvider,
   SandboxWorkspace,
   SessionStatus,
   useAvailableModels,
   useComposer,
+  useHumanInputRequests,
   useOpenGeni,
   useScheduledTasks,
   useSession,
   useSessionEvents,
   useWorkspaceSessions,
 } from "@opengeni/react";
+import { SessionRealtimeControl } from "@opengeni/react/realtime";
 import { MANAGER_SESSION_ID, MockOpenGeniClient } from "./mock";
 import { createDemoBrowserWebSocketFactory } from "./fake-browser";
 import { createDemoComputerWebSocketFactory } from "./fake-computer";
+import { createDeterministicRealtimeHarness } from "./realtime-controller";
 import "./styles.css";
 
 type DemoView = "session" | "fleet" | "schedules";
@@ -30,6 +35,18 @@ type DemoHistoryState = {
 
 const DEMO_HISTORY_KEY = "ogReactDemo";
 const COMPACT_BREAKPOINT = 1024;
+const ACTIVE_CONTROL: EffectiveSessionControl = {
+  state: "active",
+  controlVersion: 0,
+  controlEtag: "react-demo-active",
+  directState: "active",
+  primaryBlocker: null,
+  additionalBlockerCount: 0,
+  blockers: [],
+  resumeOptions: [],
+  override: null,
+  settlement: null,
+};
 
 function isDemoView(value: string): value is DemoView {
   return value === "session" || value === "fleet" || value === "schedules";
@@ -332,7 +349,8 @@ function DemoPrimary({ compact, view }: { compact: boolean; view: DemoView }) {
 function OpsChannel({ autoFocus }: { autoFocus: boolean }) {
   const { client, workspaceId } = useOpenGeni();
   const { session } = useSession(MANAGER_SESSION_ID, { pollIntervalMs: 5000 });
-  const { timeline, sessionStatus, connectionState } = useSessionEvents(MANAGER_SESSION_ID);
+  const sessionEvents = useSessionEvents(MANAGER_SESSION_ID);
+  const { timeline, events, sessionStatus, connectionState } = sessionEvents;
   // Host-exposed models for the composer's <ModelPicker>; preselect the
   // deployment default once it loads, then let the operator switch.
   const { models, defaultModel } = useAvailableModels();
@@ -345,6 +363,9 @@ function OpsChannel({ autoFocus }: { autoFocus: boolean }) {
     effectiveControl: session?.effectiveControl,
   });
   const status = sessionStatus ?? session?.status ?? null;
+  const realtimeStatus = status ?? "idle";
+  const effectiveControl = session?.effectiveControl ?? ACTIVE_CONTROL;
+  const humanInput = useHumanInputRequests(MANAGER_SESSION_ID, { events });
   // Surface the slash-command palette (type "/"): operator controls on this
   // session. The demo operator holds full control.
   const commandContext = {
@@ -372,16 +393,36 @@ function OpsChannel({ autoFocus }: { autoFocus: boolean }) {
         </div>
       </div>
       <MessageTimeline items={timeline} status={status} className="min-h-0 flex-1" />
+      <HumanInputSurface
+        requests={humanInput.requests}
+        respondingRequestId={humanInput.respondingRequestId}
+        error={humanInput.mutationError?.message ?? humanInput.error?.message ?? null}
+        onSubmit={async (requestId, response) => {
+          await humanInput.respond(requestId, response);
+        }}
+        className="shrink-0 border-t border-og-border px-3.5 py-3 sm:px-4"
+      />
       <div className="shrink-0 px-3.5 pb-3 pt-1 sm:px-4 sm:pb-4">
         <ChatComposer
           composer={composer}
-          effectiveControl={session?.effectiveControl}
+          effectiveControl={effectiveControl}
           placeholder="Ask the manager to adjust the plan…"
           autoFocus={autoFocus}
           commandContext={commandContext}
           models={models}
           selectedModel={model}
           onSelectModel={setSelectedModel}
+          actionsStart={
+            <SessionRealtimeControl
+              sessionId={MANAGER_SESSION_ID}
+              sessionStatus={realtimeStatus}
+              effectiveControl={effectiveControl}
+              events={events}
+              eventsReady={!sessionEvents.initialLoading}
+              codexConnected
+              controllerFactory={deterministicRealtime.factory}
+            />
+          }
         />
       </div>
     </section>
@@ -506,6 +547,7 @@ function Schedules({ standalone }: { standalone: boolean }) {
 }
 
 const client = new MockOpenGeniClient();
+const deterministicRealtime = createDeterministicRealtimeHarness();
 const browserWebSocketFactory = createDemoBrowserWebSocketFactory((browserSessionId, targetId) =>
   client.demoBrowserFrameTarget(browserSessionId, targetId),
 );

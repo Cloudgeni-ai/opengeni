@@ -21,6 +21,7 @@
 import type { Settings } from "@opengeni/config";
 import {
   getSession,
+  getLiveEnrollmentConnection,
   listEnrollments,
   listSandboxes,
   readActiveSandbox,
@@ -48,6 +49,108 @@ export type MachinesServices = {
 };
 
 const PROBE_TIMEOUT_MS = 5_000;
+
+const ACTIVE_UPDATE_STATUSES = new Set([
+  "requested",
+  "accepted",
+  "waiting_for_idle",
+  "downloading",
+  "verifying",
+  "applying",
+  "restarting",
+]);
+
+function compareAgentVersions(left: string, right: string): number | null {
+  const parse = (value: string): { core: number[]; prerelease: string | null } | null => {
+    const match = /^(?:v)?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/.exec(value.trim());
+    if (!match) return null;
+    return {
+      core: [Number(match[1]), Number(match[2]), Number(match[3])],
+      prerelease: match[4] ?? null,
+    };
+  };
+  const a = parse(left);
+  const b = parse(right);
+  if (!a || !b) return null;
+  for (let index = 0; index < 3; index += 1) {
+    const delta = a.core[index]! - b.core[index]!;
+    if (delta !== 0) return Math.sign(delta);
+  }
+  if (a.prerelease === b.prerelease) return 0;
+  if (a.prerelease === null) return 1;
+  if (b.prerelease === null) return -1;
+  return a.prerelease.localeCompare(b.prerelease);
+}
+
+function runtimeFor(settings: Settings, enrollment: EnrollmentRecord): MachineView["runtime"] {
+  const desiredVersion =
+    enrollment.agentUpdateChannel === "beta"
+      ? (settings.agentBetaVersion ?? settings.agentStableVersion)
+      : settings.agentStableVersion;
+  const update = enrollment.agentUpdate;
+  const activeUpdate = update ? ACTIVE_UPDATE_STATUSES.has(update.status) : false;
+  const order =
+    enrollment.agentVersion && desiredVersion
+      ? compareAgentVersions(enrollment.agentVersion, desiredVersion)
+      : null;
+  const versionState = activeUpdate
+    ? "updating"
+    : update?.status === "failed"
+      ? "update_failed"
+      : order === null
+        ? "unknown"
+        : order === 0
+          ? "current"
+          : order < 0
+            ? "outdated"
+            : "ahead";
+  const capability = (name: string): boolean => enrollment.agentCapabilities[name] === true;
+  return {
+    installedVersion: enrollment.agentVersion,
+    binarySha256: enrollment.agentBinarySha256,
+    updateChannel: enrollment.agentUpdateChannel,
+    desiredVersion,
+    versionState,
+    capabilities: {
+      exec: capability("exec"),
+      filesystem: capability("filesystem"),
+      git: capability("git"),
+      pty: capability("pty"),
+      desktop: capability("desktop"),
+      opStream: capability("opStream"),
+      browserBridge: capability("browserBridge"),
+    },
+    update,
+  };
+}
+
+function connectionAuthorityFor(
+  enrollment: EnrollmentRecord | null,
+  liveConnection: EnrollmentRecord | null,
+): MachineView["connectionAuthority"] {
+  if (!enrollment) {
+    return {
+      state: "not_applicable",
+      generation: 0,
+      supersededCount: 0,
+      leaseExpiresAt: null,
+      duplicateRunnerDeniedCount: 0,
+      duplicateRunnerDeniedAt: null,
+    };
+  }
+  return {
+    state: liveConnection
+      ? "active"
+      : enrollment.connectionInstanceId && enrollment.connectionLeaseExpiresAt
+        ? "expired"
+        : "unclaimed",
+    generation: enrollment.connectionGeneration,
+    supersededCount: Math.max(0, enrollment.connectionGeneration - 1),
+    leaseExpiresAt: enrollment.connectionLeaseExpiresAt,
+    duplicateRunnerDeniedCount: enrollment.connectionDuplicateDeniedCount,
+    duplicateRunnerDeniedAt: enrollment.connectionDuplicateDeniedAt,
+  };
+}
 
 function controlRpc(bus: EventBus | undefined): ControlRpc {
   return new NatsControlRpc(async (): Promise<NatsRequestConnection | null> => {
@@ -91,6 +194,7 @@ async function probeEnrollment(
   services: MachinesServices,
   workspaceId: string,
   enrollment: EnrollmentRecord,
+  liveConnection: EnrollmentRecord | null,
 ): Promise<{
   state: "online" | "reconnecting" | "offline";
   consented: boolean;
@@ -98,10 +202,11 @@ async function probeEnrollment(
 }> {
   const { settings, bus } = services;
   let probeResponded = false;
-  if (enrollment.status === "active") {
+  if (liveConnection?.connectionInstanceId) {
     const session = new SelfhostedSession({
       workspaceId,
       agentId: enrollment.id,
+      connectionInstanceId: liveConnection.connectionInstanceId,
       controlRpc: controlRpc(bus),
       relay: relayConfigFromSettings(settings),
       timeoutMs: PROBE_TIMEOUT_MS,
@@ -210,6 +315,8 @@ export async function listMachines(
         allowScreenControl: false,
         sharedSessionCount: 1,
         lastSeenAt: null,
+        connectionAuthority: connectionAuthorityFor(null, null),
+        runtime: null,
         metrics: null,
       }),
     );
@@ -233,10 +340,11 @@ export async function listMachines(
       if (!enrollment) {
         return null;
       }
-      const [probe, lease] = await Promise.all([
-        probeEnrollment(services, workspaceId, enrollment),
+      const [liveConnection, lease] = await Promise.all([
+        getLiveEnrollmentConnection(db, workspaceId, enrollment.id),
         readLease(db, workspaceId, sandbox.id),
       ]);
+      const probe = await probeEnrollment(services, workspaceId, enrollment, liveConnection);
       const state = machineStateFor(probe.state, probe.hasDisplay);
 
       // sharedSessionCount = the lease refcount for this machine's group. The
@@ -263,6 +371,8 @@ export async function listMachines(
         allowScreenControl: enrollment.allowScreenControl,
         sharedSessionCount,
         lastSeenAt: enrollment.lastSeenAt,
+        connectionAuthority: connectionAuthorityFor(enrollment, liveConnection),
+        runtime: runtimeFor(services.settings, enrollment),
         metrics: metricsRow ? metricRowToSample(metricsRow) : null,
       });
     }),

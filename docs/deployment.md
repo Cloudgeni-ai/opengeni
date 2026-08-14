@@ -420,6 +420,21 @@ secret-managed CI system. The open-source repository intentionally provides the
 reusable product, chart, Terraform roots, and conformance commands; it does not
 ship Cloudgeni-specific operational release gates or live-account scripts.
 
+Google Drive candidates also provide a provider-free, secret-safe configuration
+receipt:
+
+```bash
+bun run deployment:google-drive-readiness
+```
+
+The command makes no provider, deployment, database, or Kubernetes call. It
+checks the local runtime settings, emits the derived callback URL and numeric
+budgets, and leaves declared source-security dependencies, human-approved
+non-production provider acceptance, deployment, and production acceptance as
+explicit blocking gates. The canonical configuration, retry, observability, and
+acceptance contract is in `docs/google-drive.md`; the non-secret Helm overlay is
+`deploy/helm/opengeni/values.google-drive-readiness.example.yaml`.
+
 For private in-cluster MinIO behind a local port-forward, keep the presigned URL host intact with curl's connect mapping:
 
 ```bash
@@ -814,6 +829,21 @@ and terminal head identity remain fail-closed. Exact-head review stays bound to
 the candidate. The merge authority separately performs the fresh latest-main
 conflict, canonical patch-equivalence, protected-path, generated/migration,
 identity/manifest, security, and evidence checks immediately before merge.
+
+Do not enable or leave auto-merge armed on a generated Version PR before the
+exact-head release review is submitted. Release admission compares GitHub's
+provider-recorded review and merge timestamps and requires the decisive review
+to precede the merge. A review added after auto-merge is intentionally not
+release evidence and cannot rehabilitate that source commit; stop that train
+and use a fresh, normally reviewed release-source PR instead of retrying or
+weakening admission.
+
+Immediately before merge, re-read `baseRefOid`, `headRefOid`, `state`, and
+`autoMergeRequest` from the PR and the exact-head review from the provider API.
+Require the PR to remain open, auto-merge to remain null, and the canonical
+review to bind the unchanged head with a strictly earlier provider timestamp;
+equal review and merge timestamps are not ordering evidence. Then merge with an
+exact head-SHA fence. Never rely on an earlier UI observation for this boundary.
 
 The exact source must separately have one successful GitHub Actions result for
 each required candidate check:
@@ -1603,12 +1633,13 @@ helm upgrade --install opengeni deploy/helm/opengeni \
   --set secret.existingSecret=opengeni-runtime
 ```
 
-`ServiceMonitor` and `PrometheusRule` templates render only when `monitoring.coreos.com/v1` CRDs are installed. The canonical rules cover turns without durable progress (`opengeni_turn_oldest_no_progress_age_seconds > 900`), traffic-gated sandbox create failure ratio, warming timeouts, orphan sandbox growth, overdue finite-lifetime rotation, checkpoint deletion failures, terminal-owner retained-process backlog, expired drains, stale/absent inventory projections, scraped target availability, turn-worker memory-guard target/drain/failure signals, and node-relative memory/I/O PSI, swap activity, kubelet runtime errors, and NotReady state. Node alerts are joined to `kube_pod_info` so they retain only nodes hosting the current OpenGeni Helm release; deployments without node-exporter or kube-state-metrics produce no false series. `observability.prometheusRule.inventoryFreshnessSeconds` defaults to 300 seconds and must cover at least three configured sandbox-reaper periods; Helm rejects an unsafe pairing. Read-only inventory refresh remains active when sandbox ownership mutation is disabled, so an ownership fence does not silently age every inventory projection out. `observability.prometheusRule.rules` appends environment-specific rules; it never replaces the canonical safety catalog. The chart-managed OpenTelemetry Collector remains optional and is for traces/logs forwarding, not scraped metrics.
+`ServiceMonitor` and `PrometheusRule` templates render only when `monitoring.coreos.com/v1` CRDs are installed. The canonical rules cover turns without durable progress (`opengeni_turn_oldest_no_progress_age_seconds > 900`), traffic-gated sandbox create failure ratio, warming timeouts, orphan sandbox growth, overdue finite-lifetime rotation, checkpoint deletion failures, terminal-owner retained-process backlog, expired drains, stale/absent inventory projections, scraped target availability, turn-worker memory-guard target/drain/failure signals, Google Drive sync failure ratio, reconnect-required events, and explicit Drive sync limit hits, plus node-relative memory/I/O PSI, swap activity, kubelet runtime errors, and NotReady state. Drive rules are fenced to the exact namespace, Helm release, configured environment, and `google_drive` provider. Node alerts are joined to `kube_pod_info` so they retain only nodes hosting the current OpenGeni Helm release; deployments without node-exporter or kube-state-metrics produce no false series. `observability.prometheusRule.inventoryFreshnessSeconds` defaults to 300 seconds and must cover at least three configured sandbox-reaper periods; Helm rejects an unsafe pairing. Read-only inventory refresh remains active when sandbox ownership mutation is disabled, so an ownership fence does not silently age every inventory projection out. `observability.prometheusRule.rules` appends environment-specific rules; it never replaces the canonical safety catalog. The chart-managed OpenTelemetry Collector remains optional and is for traces/logs forwarding, not scraped metrics.
 
 Minimum production dashboards should cover:
 
 - API traffic: request rate, error rate, and p50/p95/p99 latency by `route`, `method`, `status`, `variable set`, and `component`.
 - Worker execution: activity run rate, failure rate, and p50/p95/p99 `runAgentTurn` duration by `activity`, `status`, `variable set`, and `component`.
+- Google Drive sync: run outcome and failure ratio, reconnect-required events, p95 terminal activity-batch duration, logical provider requests, physical provider attempts/retries, explicit limit hits, and bounded terminal failure reasons, scoped by namespace, environment, release, and provider where applicable.
 - Turn lifecycle: `opengeni_turns_total{outcome}`, `opengeni_turn_duration_seconds`, `opengeni_turns_inflight`, `opengeni_turn_oldest_inflight_age_seconds`, and `opengeni_turn_oldest_no_progress_age_seconds`.
 - Model, Codex, and sandbox SLIs: `opengeni_model_calls_total{provider,outcome}`, `opengeni_model_call_duration_seconds{provider}`, `opengeni_codex_credential_selections_total{strategy,reason}`, `opengeni_codex_credential_failures_total{kind,outcome}`, `opengeni_codex_pool_observations_total{depth}`, `opengeni_codex_pool_low_total{depth}`, `opengeni_sandbox_creates_total{backend,image_source,outcome}`, `opengeni_sandbox_create_duration_seconds{backend,image_source}`, `opengeni_sandbox_operations_total{backend,op,outcome}` (`ok`, expected path `not_found`, or actual `failed`), `opengeni_sandbox_operation_duration_seconds{backend,op}`, `opengeni_sandbox_inventory_refresh_timestamp_seconds{domain}`, the chart's freshness-filtered `opengeni:*:fresh_max` inventory recording rules, `opengeni_sandbox_warming_timeouts_total{backend,stage}`, and `opengeni_sandbox_orphans_terminated_total`.
 - Queue, admission, and billing: `opengeni_turns_queued`, `opengeni_turn_eligible_backlog`, `opengeni_turn_eligible_backlog_oldest_age_seconds`, `opengeni_turn_slot_saturation_ratio`, `opengeni_credit_balance_micros{account_id}`, `opengeni_credit_micros_total{kind}`, and `opengeni_build_info{version,revision}`.

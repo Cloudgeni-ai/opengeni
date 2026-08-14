@@ -234,23 +234,13 @@ if command -v nc >/dev/null 2>&1; then
 fi
 
 port_available() {
-  # `lsof` can block for tens of seconds on macOS when an unrelated filesystem
-  # mount is unhealthy. A loopback connect probe answers the question this
-  # startup path needs without walking process file tables or mounted volumes.
+  # Every host service below binds 127.0.0.1. Probe that exact socket instead of
+  # asking lsof to enumerate the entire host: lsof can block for minutes when an
+  # unrelated OrbStack/NFS mount is degraded, making one worktree appear hung
+  # while merely selecting ports. Prove a compatible netcat first, then use
+  # bash's exact loopback socket fallback.
   if [ "$netcat_probe_supported" = "1" ]; then
     ! nc -z -w 1 127.0.0.1 "$1" >/dev/null 2>&1
-    return
-  fi
-  if command -v lsof >/dev/null 2>&1; then
-    ! lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1
-    return
-  fi
-  if command -v ss >/dev/null 2>&1; then
-    ! ss -H -ltn "sport = :$1" | grep -q .
-    return
-  fi
-  if command -v netstat >/dev/null 2>&1; then
-    ! netstat -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|[:.])$1$"
     return
   fi
   ! (echo >"/dev/tcp/127.0.0.1/$1") >/dev/null 2>&1

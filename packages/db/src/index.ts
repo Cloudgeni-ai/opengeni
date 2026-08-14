@@ -1119,6 +1119,44 @@ export const allWorkspacePermissions: Permission[] = [
   "artifacts:publish",
 ];
 
+/**
+ * Runtime capabilities for the authenticated managed human's personal
+ * workspace. This projection is deliberately not an administrative grant:
+ * workspace administration is a wildcard over member management and API-key
+ * delegation, either of which would let the owner create another principal
+ * with ambient access to the private workspace.
+ */
+export const managedPersonalWorkspacePermissions: Permission[] = [
+  "workspace:read",
+  "sessions:create",
+  "sessions:read",
+  "sessions:control",
+  "files:upload",
+  "files:read",
+  "documents:manage",
+  "documents:search",
+  "scheduled_tasks:manage",
+  "scheduled_tasks:run",
+  "github:manage",
+  "github:use",
+  "connections:read",
+  "connections:write",
+  "variable-sets:list",
+  "variable-sets:read",
+  "variable-sets:write",
+  "variable-sets:manage",
+  "variable-sets:use",
+  "secrets:list",
+  "secrets:read",
+  "secrets:write",
+  "mcp_servers:attach",
+  "goals:manage",
+  "enrollments:read",
+  "enrollments:manage",
+  "artifacts:read",
+  "artifacts:publish",
+];
+
 export const allAccountPermissions: Permission[] = [
   "account:read",
   "account:admin",
@@ -1587,8 +1625,11 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
       throw new Error("Managed organization membership provisioning did not converge");
     }
 
-    // The personal workspace is lifecycle metadata only in Slice B. Keep the
-    // existing default-workspace access projection and all legacy lists intact.
+    // Keep persisted legacy grants first so defaultWorkspaceId and callers that
+    // still select the first grant preserve the existing default workspace.
+    // The personal grant is derived only after the lifecycle capability returns
+    // the exact active membership pointer; no workspace_memberships row is
+    // created, so no administrator or secondary principal gains ambient access.
     await setRlsContext(tx as unknown as Database, {
       accountId: account.id,
       workspaceId: null,
@@ -1605,6 +1646,22 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
       )
       .where(eq(schema.workspaceMemberships.subjectId, subjectId))
       .orderBy(desc(schema.workspaces.createdAt));
+    const workspaceGrants: AccessGrant[] = memberships.map((row) => ({
+      workspaceId: row.workspace.id,
+      accountId: row.workspace.accountId,
+      subjectId,
+      subjectLabel,
+      permissions: row.membership.permissions as Permission[],
+      principalKind: "human_session",
+    }));
+    workspaceGrants.push({
+      workspaceId: provisionedMembership.personal_workspace_id,
+      accountId: account.id,
+      subjectId,
+      subjectLabel,
+      permissions: managedPersonalWorkspacePermissions,
+      principalKind: "human_session",
+    });
     return {
       accessContext: {
         mode: "managed",
@@ -1619,14 +1676,7 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
             permissions: allAccountPermissions,
           },
         ],
-        workspaceGrants: memberships.map((row) => ({
-          workspaceId: row.workspace.id,
-          accountId: row.workspace.accountId,
-          subjectId,
-          subjectLabel,
-          permissions: row.membership.permissions as Permission[],
-          principalKind: "human_session",
-        })),
+        workspaceGrants,
         defaultAccountId: account.id,
         defaultWorkspaceId: defaultWorkspace.id,
       },
@@ -4575,6 +4625,89 @@ export async function requireFile(
     throw new Error(`File not found: ${fileId}`);
   }
   return file;
+}
+
+/**
+ * Subject-bound file read for user-visible and model-injection surfaces. The
+ * database predicate returns true for ordinary workspace files, but Drive-
+ * derived bytes require current per-object ACL evidence for every protecting
+ * mapping. Missing/stale/mixed denied mappings therefore look not found.
+ */
+export async function requireFileForSubject(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string | null;
+    fileId: string;
+  },
+): Promise<FileAsset> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      if (input.subjectId) await setSubjectRlsContext(scopedDb, input.subjectId);
+      const subjectIdSql = input.subjectId === null ? sql`NULL::text` : sql`${input.subjectId}`;
+      const [row] = await scopedDb
+        .select()
+        .from(schema.files)
+        .where(
+          and(
+            eq(schema.files.accountId, input.accountId),
+            eq(schema.files.workspaceId, input.workspaceId),
+            eq(schema.files.id, input.fileId),
+            sql`google_drive_file_authorized(
+              ${input.accountId}::uuid,
+              ${input.workspaceId}::uuid,
+              ${subjectIdSql},
+              ${input.fileId}::uuid
+            )`,
+          ),
+        )
+        .limit(1);
+      if (!row) throw new Error(`File not found: ${input.fileId}`);
+      return mapFile(row);
+    },
+  );
+}
+
+/** Batch form of requireFileForSubject for durable model-history projection. */
+export async function getFilesForSubject(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string | null;
+    fileIds: readonly string[];
+  },
+): Promise<FileAsset[]> {
+  const ids = [...new Set(input.fileIds)];
+  if (ids.length === 0) return [];
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      if (input.subjectId) await setSubjectRlsContext(scopedDb, input.subjectId);
+      const subjectIdSql = input.subjectId === null ? sql`NULL::text` : sql`${input.subjectId}`;
+      const rows = await scopedDb
+        .select()
+        .from(schema.files)
+        .where(
+          and(
+            eq(schema.files.accountId, input.accountId),
+            eq(schema.files.workspaceId, input.workspaceId),
+            inArray(schema.files.id, ids),
+            sql`google_drive_file_authorized(
+              ${input.accountId}::uuid,
+              ${input.workspaceId}::uuid,
+              ${subjectIdSql},
+              ${schema.files.id}
+            )`,
+          ),
+        );
+      return rows.map(mapFile);
+    },
+  );
 }
 
 /** One RLS-scoped query for all attachment metadata needed by a model turn. */
@@ -41121,6 +41254,22 @@ export type SandboxKind = (typeof schema.sandboxKindValues)[number];
 export type EnrollmentExposure = (typeof schema.enrollmentExposureValues)[number];
 export type EnrollmentStatus = (typeof schema.enrollmentStatusValues)[number];
 export type EnrollmentOs = (typeof schema.enrollmentOsValues)[number];
+export type AgentUpdateStatus = (typeof schema.agentUpdateStatusValues)[number];
+
+export type EnrollmentAgentUpdateRecord = {
+  operationId: string;
+  status: AgentUpdateStatus;
+  targetVersion: string;
+  expectedBinarySha256: string | null;
+  errorCode: string | null;
+  retryable: boolean;
+  rolledBack: boolean;
+  connectionInstanceId: string;
+  connectionGeneration: number;
+  requestedAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+};
 
 export type EnrollmentRecord = {
   id: string;
@@ -41136,6 +41285,15 @@ export type EnrollmentRecord = {
   allowScreenControl: boolean;
   status: EnrollmentStatus;
   credentialGeneration: number;
+  /** Exact live runner instance receiving this machine's control traffic. */
+  connectionInstanceId: string | null;
+  /** Monotonic authority generation, advanced only when a different runner claims. */
+  connectionGeneration: number;
+  /** Server-clock expiry for the live runner claim. */
+  connectionLeaseExpiresAt: string | null;
+  /** Valid competing processes denied while another runner held authority. */
+  connectionDuplicateDeniedCount: number;
+  connectionDuplicateDeniedAt: string | null;
   os: EnrollmentOs;
   arch: string;
   lastSeenAt: string | null;
@@ -41145,6 +41303,11 @@ export type EnrollmentRecord = {
   /** The typed reason string of the pending clean going-offline (e.g.
    *  GOING_OFFLINE_REASON_UPDATE); NULL when there is no un-cleared marker. */
   wentOfflineReason: string | null;
+  agentVersion: string | null;
+  agentBinarySha256: string | null;
+  agentUpdateChannel: "stable" | "beta" | null;
+  agentCapabilities: Record<string, boolean>;
+  agentUpdate: EnrollmentAgentUpdateRecord | null;
   createdAt: string;
   revokedAt: string | null;
   updatedAt: string;
@@ -41163,11 +41326,46 @@ function mapEnrollment(row: typeof schema.enrollments.$inferSelect): EnrollmentR
     allowScreenControl: row.allowScreenControl,
     status: row.status as EnrollmentStatus,
     credentialGeneration: Number(row.credentialGeneration),
+    connectionInstanceId: row.connectionInstanceId ?? null,
+    connectionGeneration: Number(row.connectionGeneration),
+    connectionLeaseExpiresAt: row.connectionLeaseExpiresAt?.toISOString() ?? null,
+    connectionDuplicateDeniedCount: Number(row.connectionDuplicateDeniedCount),
+    connectionDuplicateDeniedAt: row.connectionDuplicateDeniedAt?.toISOString() ?? null,
     os: row.os as EnrollmentOs,
     arch: row.arch,
     lastSeenAt: row.lastSeenAt ? row.lastSeenAt.toISOString() : null,
     wentOfflineAt: row.wentOfflineAt ? row.wentOfflineAt.toISOString() : null,
     wentOfflineReason: row.wentOfflineReason ?? null,
+    agentVersion: row.agentVersion ?? null,
+    agentBinarySha256: row.agentBinarySha256 ?? null,
+    agentUpdateChannel:
+      row.agentUpdateChannel === "stable" || row.agentUpdateChannel === "beta"
+        ? row.agentUpdateChannel
+        : null,
+    agentCapabilities: row.agentCapabilities ?? {},
+    agentUpdate:
+      row.agentUpdateOperationId &&
+      row.agentUpdateStatus &&
+      row.agentUpdateTargetVersion &&
+      row.agentUpdateConnectionInstanceId &&
+      row.agentUpdateConnectionGeneration !== null &&
+      row.agentUpdateRequestedAt &&
+      row.agentUpdateUpdatedAt
+        ? {
+            operationId: row.agentUpdateOperationId,
+            status: row.agentUpdateStatus as AgentUpdateStatus,
+            targetVersion: row.agentUpdateTargetVersion,
+            expectedBinarySha256: row.agentUpdateExpectedBinarySha256 ?? null,
+            errorCode: row.agentUpdateErrorCode ?? null,
+            retryable: row.agentUpdateRetryable,
+            rolledBack: row.agentUpdateRolledBack,
+            connectionInstanceId: row.agentUpdateConnectionInstanceId,
+            connectionGeneration: row.agentUpdateConnectionGeneration,
+            requestedAt: row.agentUpdateRequestedAt.toISOString(),
+            updatedAt: row.agentUpdateUpdatedAt.toISOString(),
+            completedAt: row.agentUpdateCompletedAt?.toISOString() ?? null,
+          }
+        : null,
     createdAt: row.createdAt.toISOString(),
     revokedAt: row.revokedAt ? row.revokedAt.toISOString() : null,
     updatedAt: row.updatedAt.toISOString(),
@@ -41249,6 +41447,10 @@ export async function createEnrollment(
             status: "active",
             revokedAt: null,
             credentialGeneration: sql`${schema.enrollments.credentialGeneration} + 1`,
+            // A fresh enrollment credential is a new authority family. The old
+            // process must not retain its live data-plane address.
+            connectionInstanceId: null,
+            connectionLeaseExpiresAt: null,
             updatedAt: new Date(),
           },
         })
@@ -41279,6 +41481,253 @@ export async function getEnrollment(
       .limit(1);
     return row ? mapEnrollment(row) : null;
   });
+}
+
+/** Read an enrollment only while its exact runner claim is live according to
+ * PostgreSQL's clock. Callers receive capability + process identity from one
+ * snapshot and never reinterpret lease time using an API host's wall clock. */
+export async function getLiveEnrollmentConnection(
+  db: Database,
+  workspaceId: string,
+  enrollmentId: string,
+): Promise<EnrollmentRecord | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.enrollments)
+      .where(
+        and(
+          eq(schema.enrollments.workspaceId, workspaceId),
+          eq(schema.enrollments.id, enrollmentId),
+          eq(schema.enrollments.status, "active"),
+          isNotNull(schema.enrollments.connectionInstanceId),
+          isNotNull(schema.enrollments.connectionLeaseExpiresAt),
+          gt(schema.enrollments.connectionLeaseExpiresAt, sql`clock_timestamp()`),
+        ),
+      )
+      .limit(1);
+    return row ? mapEnrollment(row) : null;
+  });
+}
+
+export type EnrollmentConnectionClaim = {
+  claimed: boolean;
+  connectionInstanceId: string | null;
+  connectionGeneration: number;
+  connectionLeaseExpiresAt: string | null;
+};
+
+async function enrollmentConnectionClock(scopedDb: Database): Promise<Date> {
+  const [row] = await rawRows<{ now: Date | string }>(
+    scopedDb,
+    sql`select clock_timestamp() as now`,
+  );
+  const now = row?.now instanceof Date ? row.now : row?.now ? new Date(row.now) : null;
+  if (!now || !Number.isFinite(now.getTime())) {
+    throw new Error("Failed to read the database clock for enrollment connection authority");
+  }
+  return now;
+}
+
+/**
+ * Claims or renews one enrollment's exact live runner instance under the
+ * enrollment-row lock. A second process holding the same valid bearer is denied
+ * while the current runner heartbeats. Once the lease expires, a successor
+ * advances the generation and receives a different NATS address; the old socket
+ * can no longer receive operations even if its short-lived user JWT has not yet
+ * expired.
+ */
+export async function claimEnrollmentConnection(
+  db: Database,
+  input: {
+    workspaceId: string;
+    enrollmentId: string;
+    credentialGeneration: number;
+    connectionInstanceId: string;
+    leaseMs: number;
+  },
+): Promise<EnrollmentConnectionClaim> {
+  if (!input.connectionInstanceId || input.connectionInstanceId.length > 128) {
+    throw new Error("connection instance id must be 1-128 characters");
+  }
+  if (!Number.isSafeInteger(input.leaseMs) || input.leaseMs < 1_000) {
+    throw new Error("connection lease must be at least one second");
+  }
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.enrollments)
+      .where(
+        and(
+          eq(schema.enrollments.workspaceId, input.workspaceId),
+          eq(schema.enrollments.id, input.enrollmentId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (
+      !row ||
+      row.status !== "active" ||
+      Number(row.credentialGeneration) !== input.credentialGeneration
+    ) {
+      return {
+        claimed: false,
+        connectionInstanceId: row?.connectionInstanceId ?? null,
+        connectionGeneration: Number(row?.connectionGeneration ?? 0),
+        connectionLeaseExpiresAt: row?.connectionLeaseExpiresAt?.toISOString() ?? null,
+      };
+    }
+
+    // The database clock is the sole authority for connection leases. Different
+    // API replicas may have slightly different wall clocks, but they all claim
+    // and expire the enrollment row under this transaction's database time.
+    const now = await enrollmentConnectionClock(scopedDb);
+    const sameInstance = row.connectionInstanceId === input.connectionInstanceId;
+    const existingLease = row.connectionLeaseExpiresAt;
+    const claimAvailable =
+      sameInstance ||
+      row.connectionInstanceId === null ||
+      existingLease === null ||
+      existingLease.getTime() <= now.getTime();
+    if (!claimAvailable) {
+      const incumbentInstanceId = row.connectionInstanceId;
+      if (!incumbentInstanceId) {
+        throw new Error("Unavailable connection claim had no incumbent runner");
+      }
+      await scopedDb
+        .update(schema.enrollments)
+        .set({
+          connectionDuplicateDeniedCount: sql`${schema.enrollments.connectionDuplicateDeniedCount} + 1`,
+          connectionDuplicateDeniedAt: now,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(schema.enrollments.workspaceId, input.workspaceId),
+            eq(schema.enrollments.id, input.enrollmentId),
+            eq(schema.enrollments.status, "active"),
+            eq(schema.enrollments.credentialGeneration, input.credentialGeneration),
+            eq(schema.enrollments.connectionInstanceId, incumbentInstanceId),
+          ),
+        );
+      return {
+        claimed: false,
+        connectionInstanceId: row.connectionInstanceId,
+        connectionGeneration: Number(row.connectionGeneration),
+        connectionLeaseExpiresAt: existingLease?.toISOString() ?? null,
+      };
+    }
+
+    const leaseExpiresAt = new Date(now.getTime() + input.leaseMs);
+    const connectionGeneration = Number(row.connectionGeneration) + (sameInstance ? 0 : 1);
+    const [updated] = await scopedDb
+      .update(schema.enrollments)
+      .set({
+        connectionInstanceId: input.connectionInstanceId,
+        connectionGeneration,
+        connectionLeaseExpiresAt: leaseExpiresAt,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(schema.enrollments.workspaceId, input.workspaceId),
+          eq(schema.enrollments.id, input.enrollmentId),
+          eq(schema.enrollments.status, "active"),
+          eq(schema.enrollments.credentialGeneration, input.credentialGeneration),
+        ),
+      )
+      .returning({ id: schema.enrollments.id });
+    if (updated?.id !== input.enrollmentId) {
+      throw new Error("Enrollment authority changed while row lock was held");
+    }
+    return {
+      claimed: true,
+      connectionInstanceId: input.connectionInstanceId,
+      connectionGeneration,
+      connectionLeaseExpiresAt: leaseExpiresAt.toISOString(),
+    };
+  });
+}
+
+/** Renew only the exact active runner. Stale heartbeats never extend or steal a
+ * successor's lease. */
+export async function renewEnrollmentConnection(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    enrollmentId: string;
+    connectionInstanceId: string;
+    leaseMs: number;
+  },
+): Promise<{ renewed: boolean }> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const now = await enrollmentConnectionClock(scopedDb);
+      const leaseExpiresAt = new Date(now.getTime() + input.leaseMs);
+      const rows = await scopedDb
+        .update(schema.enrollments)
+        .set({
+          connectionLeaseExpiresAt: leaseExpiresAt,
+          lastSeenAt: now,
+          wentOfflineAt: null,
+          wentOfflineReason: null,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(schema.enrollments.workspaceId, input.workspaceId),
+            eq(schema.enrollments.id, input.enrollmentId),
+            eq(schema.enrollments.status, "active"),
+            eq(schema.enrollments.connectionInstanceId, input.connectionInstanceId),
+          ),
+        )
+        .returning({ id: schema.enrollments.id });
+      return { renewed: rows.length === 1 };
+    },
+  );
+}
+
+/** Release only the exact active runner. A late goodbye from a fenced process is
+ * ignored and cannot mark its successor offline. */
+export async function releaseEnrollmentConnection(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    enrollmentId: string;
+    connectionInstanceId: string;
+    reason: string;
+  },
+): Promise<{ released: boolean }> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const now = await enrollmentConnectionClock(scopedDb);
+      const rows = await scopedDb
+        .update(schema.enrollments)
+        .set({
+          connectionInstanceId: null,
+          connectionLeaseExpiresAt: null,
+          wentOfflineAt: now,
+          wentOfflineReason: input.reason,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(schema.enrollments.workspaceId, input.workspaceId),
+            eq(schema.enrollments.id, input.enrollmentId),
+            eq(schema.enrollments.status, "active"),
+            eq(schema.enrollments.connectionInstanceId, input.connectionInstanceId),
+          ),
+        )
+        .returning({ id: schema.enrollments.id });
+      return { released: rows.length === 1 };
+    },
+  );
 }
 
 // List a workspace's enrollments, newest first. `status` filters the lifecycle
@@ -42010,6 +42459,8 @@ export async function clearEnrollmentWentOffline(
     accountId: string;
     workspaceId: string;
     enrollmentId: string;
+    /** When present, only the exact still-live runner may clear the marker. */
+    connectionInstanceId?: string;
   },
 ): Promise<{ cleared: boolean }> {
   return await withRlsContext(
@@ -42029,6 +42480,12 @@ export async function clearEnrollmentWentOffline(
             eq(schema.enrollments.id, input.enrollmentId),
             eq(schema.enrollments.status, "active"),
             isNotNull(schema.enrollments.wentOfflineAt),
+            ...(input.connectionInstanceId
+              ? [
+                  eq(schema.enrollments.connectionInstanceId, input.connectionInstanceId),
+                  gt(schema.enrollments.connectionLeaseExpiresAt, sql`clock_timestamp()`),
+                ]
+              : []),
           ),
         )
         .returning({ id: schema.enrollments.id });
@@ -42039,7 +42496,6 @@ export async function clearEnrollmentWentOffline(
 
 // Live display cursor: the agent's connect Hello reports whether a display is
 // present RIGHT NOW (a desktop framebuffer probes). Unlike `has_display` set once
-// at enroll time from the enroll-offer snapshot, this tracks REALITY across the
 // machine's life — a Mac that later grants Screen Recording, or a Linux box whose
 // Xvfb starts after enrollment, flips false→true on its next Hello (and a display
 // that goes away flips true→false).
@@ -42063,6 +42519,8 @@ export async function setEnrollmentDisplayState(
     enrollmentId: string;
     hasDisplay: boolean;
     desktopUnavailableReason: string | null;
+    /** When present, fence the update to the exact still-live runner. */
+    connectionInstanceId?: string;
   },
 ): Promise<{ updated: boolean }> {
   return await withRlsContext(
@@ -42081,6 +42539,12 @@ export async function setEnrollmentDisplayState(
             eq(schema.enrollments.workspaceId, input.workspaceId),
             eq(schema.enrollments.id, input.enrollmentId),
             eq(schema.enrollments.status, "active"),
+            ...(input.connectionInstanceId
+              ? [
+                  eq(schema.enrollments.connectionInstanceId, input.connectionInstanceId),
+                  gt(schema.enrollments.connectionLeaseExpiresAt, sql`clock_timestamp()`),
+                ]
+              : []),
             // Only write on a CHANGE to EITHER field — an unchanged display state must
             // not churn a write on every reconnect Hello. `IS DISTINCT FROM` is the
             // null-safe inequality (a plain `ne` skips NULL rows).
@@ -42113,6 +42577,8 @@ export async function setEnrollmentOpStreamState(
     workspaceId: string;
     enrollmentId: string;
     opStream: boolean;
+    /** When present, fence the update to the exact still-live runner. */
+    connectionInstanceId?: string;
   },
 ): Promise<{ updated: boolean }> {
   return await withRlsContext(
@@ -42130,7 +42596,276 @@ export async function setEnrollmentOpStreamState(
             eq(schema.enrollments.workspaceId, input.workspaceId),
             eq(schema.enrollments.id, input.enrollmentId),
             eq(schema.enrollments.status, "active"),
+            ...(input.connectionInstanceId
+              ? [
+                  eq(schema.enrollments.connectionInstanceId, input.connectionInstanceId),
+                  gt(schema.enrollments.connectionLeaseExpiresAt, sql`clock_timestamp()`),
+                ]
+              : []),
             ne(schema.enrollments.opStream, input.opStream),
+          ),
+        )
+        .returning({ id: schema.enrollments.id });
+      return { updated: rows.length > 0 };
+    },
+  );
+}
+
+/** Refresh the exact running agent build/capabilities from an authoritative
+ * process Hello. A pending update becomes succeeded only when the successor
+ * reports BOTH the requested version and the artifact digest selected from the
+ * signed manifest. Merely reaching `restarting` never counts as success. */
+export async function setEnrollmentAgentRuntime(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    enrollmentId: string;
+    connectionInstanceId: string;
+    agentVersion: string | null;
+    binarySha256: string | null;
+    updateChannel: "stable" | "beta" | null;
+    capabilities: Record<string, boolean>;
+    completedUpdate: {
+      operationId: string;
+      targetVersion: string;
+      binarySha256: string;
+    } | null;
+  },
+): Promise<{ updated: boolean; updateCompleted: boolean }> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const now = new Date();
+      const completedOperationId = input.completedUpdate?.operationId ?? null;
+      const completedTargetVersion = input.completedUpdate?.targetVersion ?? null;
+      const completedBinarySha256 = input.completedUpdate?.binarySha256 ?? null;
+      const activeUpdate = sql`${schema.enrollments.agentUpdateStatus} in (
+        'requested', 'accepted', 'waiting_for_idle', 'downloading', 'verifying',
+        'applying', 'restarting'
+      )`;
+      const successorProvesCompletion = sql`(
+        ${activeUpdate}
+        and ${schema.enrollments.agentUpdateOperationId}::text = ${completedOperationId}
+        and ${schema.enrollments.agentUpdateTargetVersion} = ${completedTargetVersion}
+        and ${schema.enrollments.agentUpdateTargetVersion} = ${input.agentVersion}
+        and ${completedBinarySha256} = ${input.binarySha256}
+      )`;
+      const acceptingProcessWasReplaced = sql`(
+        ${activeUpdate}
+        and ${schema.enrollments.agentUpdateConnectionInstanceId}
+          is distinct from ${input.connectionInstanceId}
+        and not ${successorProvesCompletion}
+      )`;
+      const rows = await scopedDb
+        .update(schema.enrollments)
+        .set({
+          agentVersion: input.agentVersion,
+          agentBinarySha256: input.binarySha256,
+          agentUpdateChannel: input.updateChannel,
+          agentCapabilities: input.capabilities,
+          // Success is derived atomically from the successor's durable updater
+          // receipt + exact running build. If another process replaced the
+          // accepting one without that proof, fail retryably instead of leaving
+          // the dashboard stuck forever.
+          agentUpdateStatus: sql`case
+            when ${successorProvesCompletion} then 'succeeded'
+            when ${acceptingProcessWasReplaced} then 'failed'
+            else ${schema.enrollments.agentUpdateStatus}
+          end`,
+          agentUpdateExpectedBinarySha256: sql`case
+            when ${successorProvesCompletion} then ${completedBinarySha256}
+            else ${schema.enrollments.agentUpdateExpectedBinarySha256}
+          end`,
+          agentUpdateErrorCode: sql`case
+            when ${successorProvesCompletion} then null
+            when ${acceptingProcessWasReplaced} then 'accepting_process_replaced'
+            else ${schema.enrollments.agentUpdateErrorCode}
+          end`,
+          agentUpdateRetryable: sql`case
+            when ${successorProvesCompletion} then false
+            when ${acceptingProcessWasReplaced} then true
+            else ${schema.enrollments.agentUpdateRetryable}
+          end`,
+          agentUpdateRolledBack: sql`case
+            when ${successorProvesCompletion} then false
+            else ${schema.enrollments.agentUpdateRolledBack}
+          end`,
+          agentUpdateCompletedAt: sql`case
+            when ${successorProvesCompletion} or ${acceptingProcessWasReplaced}
+              then ${now.toISOString()}::timestamptz
+            else ${schema.enrollments.agentUpdateCompletedAt}
+          end`,
+          agentUpdateUpdatedAt: sql`case
+            when ${successorProvesCompletion} or ${acceptingProcessWasReplaced}
+              then ${now.toISOString()}::timestamptz
+            else ${schema.enrollments.agentUpdateUpdatedAt}
+          end`,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(schema.enrollments.workspaceId, input.workspaceId),
+            eq(schema.enrollments.id, input.enrollmentId),
+            eq(schema.enrollments.status, "active"),
+            eq(schema.enrollments.connectionInstanceId, input.connectionInstanceId),
+            gt(schema.enrollments.connectionLeaseExpiresAt, sql`clock_timestamp()`),
+            or(
+              sql`${schema.enrollments.agentVersion} is distinct from ${input.agentVersion}`,
+              sql`${schema.enrollments.agentBinarySha256} is distinct from ${input.binarySha256}`,
+              sql`${schema.enrollments.agentUpdateChannel} is distinct from ${input.updateChannel}`,
+              sql`${schema.enrollments.agentCapabilities} is distinct from ${JSON.stringify(input.capabilities)}::jsonb`,
+              successorProvesCompletion,
+              acceptingProcessWasReplaced,
+            ),
+          ),
+        )
+        .returning({
+          id: schema.enrollments.id,
+          updateStatus: schema.enrollments.agentUpdateStatus,
+          completedAt: schema.enrollments.agentUpdateCompletedAt,
+        });
+      return {
+        updated: rows.length > 0,
+        updateCompleted: rows[0]?.updateStatus === "succeeded" && rows[0].completedAt !== null,
+      };
+    },
+  );
+}
+
+/** Atomically reserve the one process-global update slot on an exact live
+ * runner generation. An in-flight operation is never overwritten. */
+export async function beginEnrollmentAgentUpdate(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    enrollmentId: string;
+    connectionInstanceId: string;
+    connectionGeneration: number;
+    operationId: string;
+    targetVersion: string;
+  },
+): Promise<EnrollmentRecord | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const now = new Date();
+      const rows = await scopedDb
+        .update(schema.enrollments)
+        .set({
+          agentUpdateOperationId: input.operationId,
+          agentUpdateStatus: "requested",
+          agentUpdateTargetVersion: input.targetVersion,
+          agentUpdateExpectedBinarySha256: null,
+          agentUpdateErrorCode: null,
+          agentUpdateRetryable: false,
+          agentUpdateRolledBack: false,
+          agentUpdateConnectionInstanceId: input.connectionInstanceId,
+          agentUpdateConnectionGeneration: input.connectionGeneration,
+          agentUpdateRequestedAt: now,
+          agentUpdateUpdatedAt: now,
+          agentUpdateCompletedAt: null,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(schema.enrollments.workspaceId, input.workspaceId),
+            eq(schema.enrollments.id, input.enrollmentId),
+            eq(schema.enrollments.status, "active"),
+            eq(schema.enrollments.connectionInstanceId, input.connectionInstanceId),
+            eq(schema.enrollments.connectionGeneration, input.connectionGeneration),
+            gt(schema.enrollments.connectionLeaseExpiresAt, sql`clock_timestamp()`),
+            or(
+              sql`${schema.enrollments.agentUpdateStatus} is null`,
+              eq(schema.enrollments.agentUpdateStatus, "succeeded"),
+              eq(schema.enrollments.agentUpdateStatus, "failed"),
+            ),
+          ),
+        )
+        .returning();
+      return rows[0] ? mapEnrollment(rows[0]) : null;
+    },
+  );
+}
+
+const AGENT_UPDATE_PROGRESS_RANK: Record<
+  Exclude<AgentUpdateStatus, "requested" | "succeeded">,
+  number
+> = {
+  accepted: 1,
+  waiting_for_idle: 2,
+  downloading: 3,
+  verifying: 4,
+  applying: 5,
+  restarting: 6,
+  failed: 99,
+};
+
+/** Fold one progress event/dispatch failure into the reserved update. Exact
+ * operation + process authority coordinates fence stale events; monotonic rank
+ * prevents reordered NATS delivery from regressing the UI. */
+export async function advanceEnrollmentAgentUpdate(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    enrollmentId: string;
+    connectionInstanceId: string;
+    connectionGeneration: number;
+    operationId: string;
+    status: Exclude<AgentUpdateStatus, "requested" | "succeeded">;
+    expectedBinarySha256?: string | null;
+    errorCode?: string | null;
+    retryable?: boolean;
+    rolledBack?: boolean;
+  },
+): Promise<{ updated: boolean }> {
+  const nextRank = AGENT_UPDATE_PROGRESS_RANK[input.status];
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const now = new Date();
+      const currentRank = sql<number>`case ${schema.enrollments.agentUpdateStatus}
+        when 'requested' then 0
+        when 'accepted' then 1
+        when 'waiting_for_idle' then 2
+        when 'downloading' then 3
+        when 'verifying' then 4
+        when 'applying' then 5
+        when 'restarting' then 6
+        else 100
+      end`;
+      const rows = await scopedDb
+        .update(schema.enrollments)
+        .set({
+          agentUpdateStatus: input.status,
+          ...(input.expectedBinarySha256 !== undefined && input.expectedBinarySha256
+            ? { agentUpdateExpectedBinarySha256: input.expectedBinarySha256 }
+            : {}),
+          agentUpdateErrorCode: input.errorCode ?? null,
+          agentUpdateRetryable: input.retryable ?? false,
+          agentUpdateRolledBack: input.rolledBack ?? false,
+          agentUpdateUpdatedAt: now,
+          ...(input.status === "failed" ? { agentUpdateCompletedAt: now } : {}),
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(schema.enrollments.workspaceId, input.workspaceId),
+            eq(schema.enrollments.id, input.enrollmentId),
+            eq(schema.enrollments.status, "active"),
+            eq(schema.enrollments.connectionInstanceId, input.connectionInstanceId),
+            eq(schema.enrollments.connectionGeneration, input.connectionGeneration),
+            gt(schema.enrollments.connectionLeaseExpiresAt, sql`clock_timestamp()`),
+            eq(schema.enrollments.agentUpdateOperationId, input.operationId),
+            eq(schema.enrollments.agentUpdateConnectionInstanceId, input.connectionInstanceId),
+            eq(schema.enrollments.agentUpdateConnectionGeneration, input.connectionGeneration),
+            sql`${schema.enrollments.agentUpdateStatus} not in ('succeeded', 'failed')`,
+            input.status === "failed" ? sql`true` : sql`${currentRank} <= ${nextRank}`,
           ),
         )
         .returning({ id: schema.enrollments.id });

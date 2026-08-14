@@ -256,6 +256,8 @@ export type UseSandboxWorkspaceTabsOptions = ClientOverride & {
   browserWebSocketFactory?: BrowserFrameWebSocketFactory | undefined;
   /** Alternate Computer frame transport for non-browser runtimes and deterministic tests. */
   computerWebSocketFactory?: ComputerFrameWebSocketFactory | undefined;
+  /** Host-owned setup page or store listing for attaching an existing Chrome profile. */
+  browserExtensionSetupUrl?: string | undefined;
   /** File requested by a Changes guard. The Files surface defers the read until
    *  the sandbox is live, then reveals this path. */
   requestedFilePath?: string | null | undefined;
@@ -312,6 +314,7 @@ export function useSandboxWorkspaceTabs(
     onNotify,
     browserWebSocketFactory,
     computerWebSocketFactory,
+    browserExtensionSetupUrl,
     requestedFilePath,
     requestedFileRequestId,
     onOpenFile,
@@ -806,6 +809,7 @@ export function useSandboxWorkspaceTabs(
               {...(desktopEnabled ? { createLinkedComputer } : {})}
               {...(onOpenComputerSession ? { onOpenComputer: onOpenComputerSession } : {})}
               {...(browserWebSocketFactory ? { webSocketFactory: browserWebSocketFactory } : {})}
+              {...(browserExtensionSetupUrl ? { browserExtensionSetupUrl } : {})}
               className="h-full"
             />
           </Suspense>
@@ -921,6 +925,8 @@ export type SandboxWorkspaceProps = ClientOverride & {
   browserWebSocketFactory?: BrowserFrameWebSocketFactory | undefined;
   /** Alternate Computer frame transport for non-browser runtimes and deterministic tests. */
   computerWebSocketFactory?: ComputerFrameWebSocketFactory | undefined;
+  /** Host-owned setup page or store listing for attaching an existing Chrome profile. */
+  browserExtensionSetupUrl?: string | undefined;
   /** Controlled collapsed state for hosts with their own dock toggle. */
   collapsed?: boolean | undefined;
   onCollapsedChange?: ((collapsed: boolean) => void) | undefined;
@@ -954,6 +960,7 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
     onNotify,
     browserWebSocketFactory,
     computerWebSocketFactory,
+    browserExtensionSetupUrl,
     collapsed,
     onCollapsedChange,
     showCollapseControl,
@@ -1020,6 +1027,7 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
     ...(onNotify ? { onNotify } : {}),
     ...(browserWebSocketFactory ? { browserWebSocketFactory } : {}),
     ...(computerWebSocketFactory ? { computerWebSocketFactory } : {}),
+    ...(browserExtensionSetupUrl ? { browserExtensionSetupUrl } : {}),
     requestedFilePath: requestedFile?.sessionId === sessionId ? requestedFile.path : null,
     requestedFileRequestId: requestedFile?.sessionId === sessionId ? requestedFile.requestId : null,
     onOpenFile: openFile,

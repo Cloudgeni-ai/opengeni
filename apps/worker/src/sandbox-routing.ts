@@ -25,12 +25,13 @@ import {
   verifyRetainedProcessMutationSettlement,
   verifyWorkspaceMutationSettlement,
   getSandbox,
-  getEnrollment,
+  getLiveEnrollmentConnection,
   markWarmLeaseInstanceLost,
   readLease,
   readActiveSandbox,
   SandboxRetainedProcessPromotionFencedError,
   type Database,
+  type EnrollmentRecord,
   type SandboxWorkspaceMutationAdmission,
 } from "@opengeni/db";
 import type { EventBus } from "@opengeni/events";
@@ -708,10 +709,14 @@ export function wrapTurnBoxWithRouting(
         : null;
     },
     controlRpcFactory: controlRpcFactory(bus),
-    resolveSelfhostedOpStream: async (sandbox) => {
-      if (!sandbox.enrollmentId) return undefined;
-      const enrollment = await getEnrollment(db, ids.workspaceId, sandbox.enrollmentId);
-      return opStreamDepsFor(services, enrollment?.opStream === true);
+    resolveSelfhostedConnection: async (sandbox) => {
+      if (!sandbox.enrollmentId) return null;
+      const enrollment = await getLiveEnrollmentConnection(
+        db,
+        ids.workspaceId,
+        sandbox.enrollmentId,
+      );
+      return connectionBindingFor(services, enrollment);
     },
     relay: relayConfigFromSettings(settings),
     // A selfhosted swap target runs real commands too, so give it the same split
@@ -903,10 +908,14 @@ export function wrapLazyTurnBoxWithRouting(
         : null;
     },
     controlRpcFactory: controlRpcFactory(bus),
-    resolveSelfhostedOpStream: async (sandbox) => {
-      if (!sandbox.enrollmentId) return undefined;
-      const enrollment = await getEnrollment(db, ids.workspaceId, sandbox.enrollmentId);
-      return opStreamDepsFor(services, enrollment?.opStream === true);
+    resolveSelfhostedConnection: async (sandbox) => {
+      if (!sandbox.enrollmentId) return null;
+      const enrollment = await getLiveEnrollmentConnection(
+        db,
+        ids.workspaceId,
+        sandbox.enrollmentId,
+      );
+      return connectionBindingFor(services, enrollment);
     },
     relay: relayConfigFromSettings(settings),
     ...selfhostedResolverTimeouts(settings),
@@ -1021,6 +1030,8 @@ export type SelfhostedTurnSessionArgs = {
   workspaceId: string;
   /** The target machine's enrollment id == the agent subject id. */
   agentId: string;
+  /** Exact daemon process currently leased for the enrollment. */
+  connectionInstanceId: string;
   /** Whether the target machine advertised Capabilities.op_stream in its latest
    *  Hello. The runtime-side transport gate must still require the server flag. */
   opStream: boolean;
@@ -1074,6 +1085,20 @@ function opStreamDepsFor(
   };
 }
 
+/** Project one enrollment read into one exact runtime route. Capability and
+ * process identity must be taken from the same snapshot. */
+function connectionBindingFor(
+  services: RoutingWiringServices,
+  enrollment: EnrollmentRecord | null,
+): { connectionInstanceId: string; opStream?: SelfhostedOpStreamDeps } | null {
+  if (!enrollment?.connectionInstanceId) return null;
+  const opStream = opStreamDepsFor(services, enrollment.opStream === true);
+  return {
+    connectionInstanceId: enrollment.connectionInstanceId,
+    ...(opStream !== undefined ? { opStream } : {}),
+  };
+}
+
 export async function establishSelfhostedTurnSession(
   services: RoutingWiringServices,
   args: SelfhostedTurnSessionArgs,
@@ -1084,6 +1109,7 @@ export async function establishSelfhostedTurnSession(
   const { client, session } = await buildSelfhostedBackendSession({
     workspaceId: args.workspaceId,
     agentId: args.agentId,
+    connectionInstanceId: args.connectionInstanceId,
     relay: relayConfigFromSettings(settings),
     controlRpcFactory: controlRpcFactory(bus),
     epoch: args.epoch,

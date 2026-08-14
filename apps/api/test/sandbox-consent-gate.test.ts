@@ -533,6 +533,7 @@ describe("P3.2 viewer revocation (OD-6 v1) — holder-drop drains iff last holde
       workspaceId,
       session: {
         id: sessionId,
+        workspaceId,
         sandboxGroupId,
         sandboxBackend: BACKEND,
         sandboxOs: "linux",
@@ -632,6 +633,7 @@ describe("P3.2 viewer revocation (OD-6 v1) — holder-drop drains iff last holde
       workspaceId,
       session: {
         id: sessionId,
+        workspaceId,
         sandboxGroupId,
         sandboxBackend: BACKEND,
         sandboxOs: "linux",

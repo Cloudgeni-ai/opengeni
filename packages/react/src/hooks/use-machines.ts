@@ -3,6 +3,7 @@ import type {
   RemoveEnrollmentRequest,
   RemoveEnrollmentResponse,
   SwapActiveSandboxResponse,
+  UpdateMachineAgentResponse,
 } from "@opengeni/sdk";
 import { useOpenGeni, type ClientOverride } from "../provider";
 import { useMutationRunner, usePolledValue } from "./internal";
@@ -42,6 +43,11 @@ export type MachinesClientLike = {
     enrollmentId: string,
     request?: RemoveEnrollmentRequest,
   ) => Promise<RemoveEnrollmentResponse>;
+  /** POST .../machines/:enrollmentId/update — signed, generation-fenced update. */
+  updateMachineAgent?: (
+    workspaceId: string,
+    enrollmentId: string,
+  ) => Promise<UpdateMachineAgentResponse>;
   /**
    * POST .../sessions/:sessionId/active-sandbox — swap the session's active
    * sandbox to a machine. The default swap path; the real SDK client provides it.
@@ -87,6 +93,10 @@ export type UseMachinesResult = {
   ) => Promise<RemoveEnrollmentResponse | null>;
   canRemove: boolean;
   removingEnrollmentId: string | null;
+  /** Start/retry the signed self-update for one Connected Machine. */
+  updateAgent: (enrollmentId: string) => Promise<UpdateMachineAgentResponse | null>;
+  canUpdateAgent: boolean;
+  updatingEnrollmentId: string | null;
   /** Whether the host wired an attach/swap path (drives the card affordance). */
   canAttach: boolean;
   /** Fetch a downsampled metric series for one enrolled machine. */
@@ -170,6 +180,12 @@ export function useMachines(options: UseMachinesOptions = {}): UseMachinesResult
   }>(() => ({ identity: identityKey, enrollmentId: null }));
   const removingEnrollmentId =
     removeState.identity === identityKey ? removeState.enrollmentId : null;
+  const [updateState, setUpdateState] = useState<{
+    identity: string;
+    enrollmentId: string | null;
+  }>(() => ({ identity: identityKey, enrollmentId: null }));
+  const updatingEnrollmentId =
+    updateState.identity === identityKey ? updateState.enrollmentId : null;
 
   const data = loadedData ?? EMPTY;
   // The swap is session-scoped: a host adapter (`attachMachine`) wins; otherwise
@@ -180,6 +196,7 @@ export function useMachines(options: UseMachinesOptions = {}): UseMachinesResult
     (typeof machinesClient.attachMachine === "function" ||
       typeof machinesClient.swapActiveSandbox === "function");
   const canRemove = typeof machinesClient.removeEnrollment === "function";
+  const canUpdateAgent = typeof machinesClient.updateMachineAgent === "function";
 
   const attach = useCallback(
     async (sandboxId: string): Promise<boolean> => {
@@ -246,6 +263,21 @@ export function useMachines(options: UseMachinesOptions = {}): UseMachinesResult
     [machinesClient, workspaceId, identityKey, run, refresh],
   );
 
+  const updateAgent = useCallback(
+    async (enrollmentId: string): Promise<UpdateMachineAgentResponse | null> => {
+      if (!machinesClient.updateMachineAgent) return null;
+      const ownedIdentity = identityKey;
+      setUpdateState({ identity: ownedIdentity, enrollmentId });
+      const result = await run(() => machinesClient.updateMachineAgent!(workspaceId, enrollmentId));
+      if (identityRef.current === ownedIdentity) {
+        setUpdateState({ identity: ownedIdentity, enrollmentId: null });
+        await refresh();
+      }
+      return result;
+    },
+    [machinesClient, workspaceId, identityKey, run, refresh],
+  );
+
   return {
     machines: data.machines,
     activeSandboxId: data.activeSandboxId,
@@ -261,6 +293,9 @@ export function useMachines(options: UseMachinesOptions = {}): UseMachinesResult
     remove,
     canRemove,
     removingEnrollmentId,
+    updateAgent,
+    canUpdateAgent,
+    updatingEnrollmentId,
     mutationError,
     clearMutationError,
   };

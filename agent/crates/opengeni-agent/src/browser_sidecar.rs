@@ -67,7 +67,15 @@ impl BrowserSidecarManager {
     /// Resolves the packaged sidecar and creates a manager rooted in the agent's
     /// owner-only configuration directory.
     pub fn discover(config_dir: impl Into<PathBuf>) -> PlatformResult<Self> {
-        Self::with_binary(config_dir, discover_browserd_binary()?)
+        let config_dir = config_dir.into();
+        let binary = if std::env::var_os(BROWSERD_BINARY_ENV).is_some() {
+            discover_browserd_binary()?
+        } else if let Some(embedded) = crate::embedded_runtime::materialize(&config_dir)? {
+            embedded
+        } else {
+            discover_browserd_binary()?
+        };
+        Self::with_binary(config_dir, binary)
     }
 
     /// Constructs a manager with an explicit binary (the live-test seam).
@@ -182,6 +190,7 @@ impl BrowserSidecarManager {
         if ready.service != "opengeni-browserd"
             || ready.status != "ready"
             || ready.protocol_version != 1
+            || ready.runtime_build_id != expected_runtime_build_id()
             || ready.hostname != "127.0.0.1"
             || ready.port == 0
         {
@@ -397,10 +406,15 @@ struct ReadyDocument {
     service: String,
     status: String,
     protocol_version: u32,
+    runtime_build_id: String,
     #[serde(rename = "computer")]
     _computer_available: bool,
     hostname: String,
     port: u16,
+}
+
+fn expected_runtime_build_id() -> &'static str {
+    option_env!("OPENGENI_RUNTIME_BUILD_ID").unwrap_or("development")
 }
 
 async fn read_ready_line(stdout: tokio::process::ChildStdout) -> PlatformResult<ReadyDocument> {
@@ -492,6 +506,10 @@ fn append_platform_error(error: PlatformError, diagnostic: &str) -> PlatformErro
                 detail,
             }
         }
+        PlatformError::Stream { message, retryable } => PlatformError::Stream {
+            message: format!("{message}; {diagnostic}"),
+            retryable,
+        },
     }
 }
 
@@ -698,6 +716,22 @@ mod tests {
         assert!(canonical_origins(&["https://a.example,https://b.example".to_string()]).is_err());
     }
 
+    #[test]
+    fn ready_document_requires_the_exact_runtime_identity() {
+        let legacy = r#"{"service":"opengeni-browserd","status":"ready","protocolVersion":1,"computer":true,"hostname":"127.0.0.1","port":1234}"#;
+        assert!(
+            serde_json::from_str::<ReadyDocument>(legacy).is_err(),
+            "a pre-identity sidecar must not be silently mixed into the runtime"
+        );
+        let current = format!(
+            r#"{{"service":"opengeni-browserd","status":"ready","protocolVersion":1,"runtimeBuildId":"{}","computer":true,"hostname":"127.0.0.1","port":1234}}"#,
+            expected_runtime_build_id()
+        );
+        let ready =
+            serde_json::from_str::<ReadyDocument>(&current).expect("current ready document");
+        assert_eq!(ready.runtime_build_id, expected_runtime_build_id());
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn sidecar_startup_failure_includes_bounded_redacted_stderr() {
@@ -799,10 +833,11 @@ mod tests {
                     "#!/bin/sh\n",
                     "printf '%s\\n%s\\n%s\\n' \"$OPENGENI_BROWSERD_AGENT_BROWSER_BINARY\" \"$OPENGENI_BROWSERD_LIGHTPANDA_BINARY\" \"$OPENGENI_BROWSERD_COMPUTER_NATIVE_BINARY\" > '{capture}'\n",
                     "printf '%s\\n' '{{\"service\":\"opengeni-browserd\",\"status\":\"ready\",",
-                    "\"protocolVersion\":1,\"computer\":true,\"hostname\":\"127.0.0.1\",\"port\":{port}}}'\n",
+                    "\"protocolVersion\":1,\"runtimeBuildId\":\"{build_id}\",\"computer\":true,\"hostname\":\"127.0.0.1\",\"port\":{port}}}'\n",
                     "exec sleep 30\n",
                 ),
                 capture = environment_capture.display(),
+                build_id = expected_runtime_build_id(),
                 port = controller_port,
             ),
         )

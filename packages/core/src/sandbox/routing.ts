@@ -15,7 +15,7 @@ import { sandboxLifecycleTransitionWaitMs, type Settings } from "@opengeni/confi
 import {
   advanceWorkspaceGenerationForDirectRequest,
   advanceWorkspaceGenerationForRetainedProcess,
-  getEnrollment,
+  getLiveEnrollmentConnection,
   getRetainedProcess,
   getSandbox,
   markWarmLeaseInstanceLost,
@@ -46,6 +46,7 @@ import {
   type RoutingRetainedProcessTerminalProof,
   type RoutingSandboxOperationObserver,
   type SelfhostedRelayConfig,
+  type SelfhostedConnectionBinding,
   type SelfhostedOpStreamDeps,
 } from "@opengeni/runtime/sandbox";
 
@@ -118,24 +119,31 @@ function controlRpcFactory(bus: EventBus | undefined): () => ControlRpc {
     });
 }
 
-async function resolveSelfhostedOpStream(
+async function resolveSelfhostedConnection(
   services: ChannelARoutingServices,
   workspaceId: string,
   sandbox: RoutableSandbox,
-): Promise<SelfhostedOpStreamDeps | undefined> {
-  if (
-    services.settings.agentOpStreamEnabled !== true ||
-    !services.bus?.getOpStreamConnection ||
-    !sandbox.enrollmentId
-  ) {
-    return undefined;
-  }
-  const enrollment = await getEnrollment(services.db, workspaceId, sandbox.enrollmentId);
-  if (enrollment?.opStream !== true) return undefined;
+): Promise<SelfhostedConnectionBinding | null> {
+  if (!sandbox.enrollmentId) return null;
+  const enrollment = await getLiveEnrollmentConnection(
+    services.db,
+    workspaceId,
+    sandbox.enrollmentId,
+  );
+  if (!enrollment?.connectionInstanceId) return null;
+  const opStream: SelfhostedOpStreamDeps | undefined =
+    services.settings.agentOpStreamEnabled === true &&
+    services.bus?.getOpStreamConnection &&
+    enrollment.opStream === true
+      ? {
+          transport: new NatsOpStreamTransport(
+            async () => services.bus?.getOpStreamConnection?.() ?? null,
+          ),
+        }
+      : undefined;
   return {
-    transport: new NatsOpStreamTransport(
-      async () => services.bus?.getOpStreamConnection?.() ?? null,
-    ),
+    connectionInstanceId: enrollment.connectionInstanceId,
+    ...(opStream ? { opStream } : {}),
   };
 }
 
@@ -416,8 +424,8 @@ export function wrapChannelABoxWithRouting(
         : null;
     },
     controlRpcFactory: controlRpcFactory(bus),
-    resolveSelfhostedOpStream: (sandbox) =>
-      resolveSelfhostedOpStream(services, ids.workspaceId, sandbox),
+    resolveSelfhostedConnection: (sandbox) =>
+      resolveSelfhostedConnection(services, ids.workspaceId, sandbox),
     relay: relayConfigFromSettings(settings),
     selfhostedTimeoutMs: settings.sandboxSelfhostedControlTimeoutMs,
     selfhostedExecTimeoutMs: settings.sandboxSelfhostedExecTimeoutMs,

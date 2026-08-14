@@ -2,8 +2,9 @@
 //!
 //! Run your own machine as a first-class OpenGeni sandbox. After a one-time
 //! device-flow enrollment the agent dials the OpenGeni control plane over NATS,
-//! subscribes to a subject that IS its identity (`agent.<ws>.<id>.rpc`), and
-//! answers control RPCs (exec / filesystem / git today; terminal + desktop
+//! claims one process generation and subscribes to its exact authority subject
+//! (`agent.<ws>.<id>.connection.<instance>.rpc`), then answers control RPCs
+//! (exec / filesystem / git today; terminal + desktop
 //! streams in M8) against the host — all with bulletproof, full-jitter reconnect
 //! resiliency and a clean SIGINT/SIGTERM going-offline (§23.0).
 //!
@@ -42,6 +43,7 @@ mod cli;
 mod codemode;
 mod config;
 mod dispatch;
+mod embedded_runtime;
 mod engine;
 mod enrollment;
 mod instance_lock;
@@ -265,6 +267,7 @@ fn disconnect(args: &DisconnectArgs, api_url: &str) -> anyhow_lite::Result {
 
 /// The FOREGROUND `run` command: enroll-if-needed, then dial + serve until a
 /// clean SIGINT/SIGTERM stops it.
+#[allow(clippy::too_many_lines)]
 async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     // Single-instance guard, taken FIRST (before enroll-if-needed or any dial): an
     // enrolled agent's NATS subject IS its identity, so two `run` processes on one
@@ -274,7 +277,7 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     // (dropped when `run` returns), and by the OS when the process exits, so a
     // crashed holder self-heals. Covers BOTH explicit `run` and run-by-default,
     // since both land here; `enroll`/`service`/`update`/`uninstall` do NOT lock.
-    let _instance_lock: Option<instance_lock::InstanceLock> = match instance_lock::acquire() {
+    let instance_lock_guard: Option<instance_lock::InstanceLock> = match instance_lock::acquire() {
         Ok(lock) => Some(lock),
         Err(instance_lock::LockError::Contended { holder_pid }) => {
             let pid = holder_pid.map_or_else(|| "unknown".to_owned(), |p| p.to_string());
@@ -350,7 +353,8 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     platform = next_platform;
     // Clone connection platforms only after browser control is attached. Existing
     // links and links added by the watcher must expose the identical controller.
-    let links = supervisor_links(&connections, &platform);
+    let connection_instance_id = uuid::Uuid::new_v4().to_string();
+    let links = supervisor_links(&connections, &platform, &connection_instance_id);
     let (updates_tx, updates_rx) = tokio::sync::watch::channel(links.clone());
     let browser_bridge = start_browser_bridge(config_dir.as_deref()).await;
 
@@ -365,6 +369,7 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
         supervisor = supervisor.with_browser_bridge(bridge.inventory());
     }
     let shutdown = supervisor.shutdown_handle();
+    let shutdown_status = shutdown.clone();
 
     // Wire SIGINT/SIGTERM to a clean shutdown so the lease flips offline
     // immediately (§23.0) rather than waiting on heartbeat dead-detect.
@@ -375,6 +380,7 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     // a workspace never requires restarting this agent or interrupts other links.
     let watcher_api_url = api_url.to_string();
     let watcher_platform = platform.clone();
+    let watcher_connection_instance_id = connection_instance_id.clone();
     let watcher = tokio::spawn(async move {
         let mut current = connections;
         loop {
@@ -384,7 +390,8 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
             }
             match config::load_connections(&watcher_api_url) {
                 Ok(next) if next != current => {
-                    let next_links = supervisor_links(&next, &watcher_platform);
+                    let next_links =
+                        supervisor_links(&next, &watcher_platform, &watcher_connection_instance_id);
                     if updates_tx.send(next_links).is_err() {
                         return;
                     }
@@ -411,8 +418,38 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
         sidecars.shutdown().await;
     }
     supervisor_result.map_err(to_boxed)?;
+    if shutdown_status.is_update() {
+        // The running path has already been atomically replaced and health-gated.
+        // Release the single-process lock before replacing/spawning the successor.
+        drop(instance_lock_guard);
+        restart_after_verified_update()?;
+    }
     info!("agent stopped");
     Ok(())
+}
+
+fn restart_after_verified_update() -> anyhow_lite::Result {
+    let executable = std::env::current_exe().map_err(to_boxed)?;
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    info!(path = %executable.display(), "starting verified self-update successor");
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        let error = std::process::Command::new(&executable).args(&args).exec();
+        return Err(to_boxed(error));
+    }
+    #[cfg(windows)]
+    {
+        std::process::Command::new(&executable)
+            .args(&args)
+            .spawn()
+            .map_err(to_boxed)?;
+        return Ok(());
+    }
+    #[allow(unreachable_code)]
+    Err(string_err(
+        "self-update restart is unsupported on this platform".to_string(),
+    ))
 }
 
 fn attach_browser_controller(
@@ -451,6 +488,7 @@ async fn start_browser_bridge(config_dir: Option<&Path>) -> Option<BrowserBridge
 fn supervisor_links(
     connections: &[StoredConnection],
     platform: &NativePlatform,
+    connection_instance_id: &str,
 ) -> Vec<SupervisorLink<NativePlatform>> {
     connections
         .iter()
@@ -465,7 +503,8 @@ fn supervisor_links(
             });
             let link_platform = Arc::new(platform.clone().with_stream_registry(Arc::new(hub)));
             let link =
-                SupervisorLink::new(connection.connection_id.clone(), link_platform, credentials);
+                SupervisorLink::new(connection.connection_id.clone(), link_platform, credentials)
+                    .with_connection_instance_id(connection_instance_id);
             if connection.legacy_origin {
                 link
             } else {

@@ -164,6 +164,7 @@ export {
   decodeAuthRequest,
   mintAuthResponse,
   mintUserJwt,
+  parseAgentConnectionName,
   workspaceAgentPermissions,
   type DecodedAuthRequest,
   type MintAuthResponseInput,
@@ -203,8 +204,8 @@ export interface RequestConnection {
  * The raw subscribe/publish surface the selfhosted OP-STREAM transport consumes
  * (structurally identical to `@opengeni/runtime`'s `NatsOpStreamConnection`):
  * a plain subscription for the runner's fire-and-forget op frames
- * (`agent.<ws>.<id>.op.<op_id>`) and a plain publish for the server's acks
- * (`agent.<ws>.<id>.ack`). Same managed connection as everything else — a NATS
+ * (the exact process generation's `.op.<op_id>`) and a plain publish for acks
+ * (that same generation's `.ack`). Same managed connection as everything else — a NATS
  * connection natively supports all of it; there is NEVER a second connection.
  */
 export interface OpStreamConnection {
@@ -216,7 +217,7 @@ export interface OpStreamConnection {
 
 /**
  * A handler answering a request/reply on a subscribed subject: given the request
- * bytes (+ the concrete subject the message landed on, for `agent.<ws>.<id>.rpc`
+ * bytes (+ the concrete subject the message landed on, for exact-process RPC
  * style wildcard routing), return the response bytes to reply with. A thrown error
  * leaves the request unanswered (the caller's request times out / sees no
  * responder), which the control plane maps to `agent_offline` / reconnecting.
@@ -242,7 +243,7 @@ export type EventBus = {
   ) => Promise<() => void>;
   /**
    * Issue a binary request/reply on a subject over the bus's NATS connection
-   * (the selfhosted control plane: `agent.<ws>.<id>.rpc`). A new usage of what was
+   * (the selfhosted control plane's exact claimed process subject). A new usage of what was
    * a one-way bus — same connection, native NATS request/reply. Rejects on a
    * no-responder (NATS 503) or a request timeout; the caller (`NatsControlRpc`)
    * maps those to `agent_offline` / `agent_reconnecting`, never a NotFound.
@@ -256,15 +257,15 @@ export type EventBus = {
    * Subscribe-and-reply on a subject (the responder side — the enrolled agent, or
    * a test stand-in for it): for every request on `subject`, call `handler` and
    * `respond` with its bytes over the SAME connection. Returns an unsubscribe fn.
-   * A subject may be a NATS wildcard (e.g. `agent.*.*.rpc`).
+   * A subject may be a NATS wildcard (e.g. `agent.*.*.connection.*.rpc`).
    */
   subscribeRequests: (subject: string, handler: RequestHandler) => () => void;
   /**
    * Subscribe to the agent EVENT plane (the one-way fire-and-forget heartbeats +
-   * going-offline the agent PUBLISHES on `agent.<ws>.<id>.events`, NOT a
+   * going-offline the agent PUBLISHES on its exact process `.events`, NOT a
    * request/reply). The M10 metrics-ingestion consumer subscribes the wildcard
-   * `agent.*.*.events` and gets each raw payload plus its concrete subject (so it
-   * can extract `<ws>`/`<id>` for the per-enrollment upsert). Returns an
+   * `agent.*.*.connection.*.events` and gets each raw payload plus its concrete
+   * subject (so it can extract `<ws>`/`<id>`/`<instance>`). Returns an
    * unsubscribe fn. Decoding the AgentEvent is the caller's concern (this leaf
    * does not depend on `@opengeni/agent-proto`).
    */
@@ -292,7 +293,8 @@ export type EventBus = {
  * Connect the event bus + control-plane request/reply over ONE managed NATS
  * connection. `auth` is the PRIVILEGED control-plane login (M-AUTH): when the
  * server runs with auth_callout, the api/worker authenticates as a static account
- * user permitted to request `agent.*.rpc` + receive its inbox replies. When `auth`
+ * user permitted to request exact generation-fenced agent RPC subjects + receive
+ * its inbox replies. When `auth`
  * is omitted the connection is anonymous (local dev / a NATS without auth_callout)
  * — the existing behavior, unchanged.
  */

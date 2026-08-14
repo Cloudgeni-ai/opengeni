@@ -7,9 +7,14 @@ import {
 } from "@opengeni/testing";
 import { Hello } from "@opengeni/agent-proto";
 import {
+  claimEnrollmentConnection,
+  advanceEnrollmentAgentUpdate,
+  beginEnrollmentAgentUpdate,
   createDb,
   createEnrollment,
   getEnrollment,
+  releaseEnrollmentConnection,
+  setEnrollmentWentOffline,
   type Database,
   type DbClient,
 } from "@opengeni/db";
@@ -34,14 +39,19 @@ import {
 // ── Pure helpers (no DB / broker) ─────────────────────────────────────────────
 
 describe("parseAgentHelloSubject", () => {
-  test("extracts workspaceId + agentId from agent.<ws>.<id>.hello", () => {
-    expect(parseAgentHelloSubject("agent.ws-1.ag-2.hello")).toEqual({
+  test("extracts the workspace, enrollment, and process from a fenced Hello", () => {
+    expect(
+      parseAgentHelloSubject(
+        "agent.ws-1.ag-2.connection.bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.hello",
+      ),
+    ).toEqual({
       workspaceId: "ws-1",
       agentId: "ag-2",
+      connectionInstanceId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
     });
   });
-  test("the wildcard subscription subject is agent.*.*.hello", () => {
-    expect(AGENT_HELLO_SUBJECT).toBe("agent.*.*.hello");
+  test("the wildcard subscription includes the process authority segment", () => {
+    expect(AGENT_HELLO_SUBJECT).toBe("agent.*.*.connection.*.hello");
   });
   test("rejects a non-hello subject (the heartbeat plane is not the hello plane)", () => {
     expect(parseAgentHelloSubject("agent.ws.ag.events")).toBeNull();
@@ -169,7 +179,20 @@ async function seedEnrollment(hasDisplay: boolean) {
     os: "linux",
     arch: "x86_64",
   });
-  return { accountId, workspaceId, enrollment };
+  const connectionInstanceId = crypto.randomUUID();
+  const claim = await claimEnrollmentConnection(db, {
+    workspaceId,
+    enrollmentId: enrollment.id,
+    credentialGeneration: enrollment.credentialGeneration,
+    connectionInstanceId,
+    leaseMs: 60_000,
+  });
+  expect(claim.claimed).toBe(true);
+  return { accountId, workspaceId, enrollment, connectionInstanceId };
+}
+
+function helloSubject(workspaceId: string, enrollmentId: string, connectionInstanceId: string) {
+  return `agent.${workspaceId}.${enrollmentId}.connection.${connectionInstanceId}.hello`;
 }
 
 function helloPayload(
@@ -181,12 +204,26 @@ function helloPayload(
     desktopUnavailableReason?: string;
     display?: { id: string; width: number; height: number; virtual: boolean };
     capabilitiesAbsent?: boolean;
+    agentVersion?: string;
+    binarySha256?: string;
+    updateChannel?: "stable" | "beta";
+    completedUpdate?: {
+      operationId: string;
+      targetVersion: string;
+      binarySha256: string;
+    };
   },
 ): Uint8Array {
   return Hello.encode(
     Hello.fromPartial({
       agentId,
       workspaceId,
+      agentVersion: opts.agentVersion ?? "",
+      binarySha256: opts.binarySha256 ?? "",
+      updateChannel: opts.updateChannel ?? "",
+      completedUpdateOperationId: opts.completedUpdate?.operationId ?? "",
+      completedUpdateTargetVersion: opts.completedUpdate?.targetVersion ?? "",
+      completedUpdateBinarySha256: opts.completedUpdate?.binarySha256 ?? "",
       ...(opts.capabilitiesAbsent
         ? {}
         : {
@@ -228,13 +265,13 @@ afterAll(async () => {
 describe("refreshEnrollmentDisplay — the Hello reconciles has_display", () => {
   test("desktop=true flips a HEADLESS enrollment's has_display false → true", async () => {
     if (!available) return;
-    const { workspaceId, enrollment } = await seedEnrollment(false);
+    const { workspaceId, enrollment, connectionInstanceId } = await seedEnrollment(false);
 
     await handleHelloPayload(
       db,
       undefined,
       helloPayload(enrollment.id, workspaceId, { desktop: true }),
-      `agent.${workspaceId}.${enrollment.id}.hello`,
+      helloSubject(workspaceId, enrollment.id, connectionInstanceId),
     );
 
     const after = await getEnrollment(db, workspaceId, enrollment.id);
@@ -243,13 +280,13 @@ describe("refreshEnrollmentDisplay — the Hello reconciles has_display", () => 
 
   test("desktop=false flips a DISPLAYED enrollment's has_display true → false", async () => {
     if (!available) return;
-    const { workspaceId, enrollment } = await seedEnrollment(true);
+    const { workspaceId, enrollment, connectionInstanceId } = await seedEnrollment(true);
 
     await handleHelloPayload(
       db,
       undefined,
       helloPayload(enrollment.id, workspaceId, { desktop: false }),
-      `agent.${workspaceId}.${enrollment.id}.hello`,
+      helloSubject(workspaceId, enrollment.id, connectionInstanceId),
     );
 
     const after = await getEnrollment(db, workspaceId, enrollment.id);
@@ -287,13 +324,13 @@ describe("refreshEnrollmentDisplay — the Hello reconciles has_display", () => 
 
   test("opStream=true flips the enrollment's op_stream false → true", async () => {
     if (!available) return;
-    const { workspaceId, enrollment } = await seedEnrollment(false);
+    const { workspaceId, enrollment, connectionInstanceId } = await seedEnrollment(false);
 
     await handleHelloPayload(
       db,
       undefined,
       helloPayload(enrollment.id, workspaceId, { desktop: false, opStream: true }),
-      `agent.${workspaceId}.${enrollment.id}.hello`,
+      helloSubject(workspaceId, enrollment.id, connectionInstanceId),
     );
 
     const after = await getEnrollment(db, workspaceId, enrollment.id);
@@ -324,14 +361,14 @@ describe("refreshEnrollmentDisplay — the Hello reconciles has_display", () => 
 
   test("a Hello with absent Capabilities leaves op_stream false", async () => {
     if (!available) return;
-    const { workspaceId, enrollment } = await seedEnrollment(false);
+    const { workspaceId, enrollment, connectionInstanceId } = await seedEnrollment(false);
     const before = await getEnrollment(db, workspaceId, enrollment.id);
 
     await handleHelloPayload(
       db,
       undefined,
       helloPayload(enrollment.id, workspaceId, { capabilitiesAbsent: true }),
-      `agent.${workspaceId}.${enrollment.id}.hello`,
+      helloSubject(workspaceId, enrollment.id, connectionInstanceId),
     );
 
     const after = await getEnrollment(db, workspaceId, enrollment.id);
@@ -344,7 +381,7 @@ describe("refreshEnrollmentDisplay — the Hello reconciles has_display", () => 
     // A Mac reports a display it cannot capture (Screen Recording not granted). The
     // reason must land ON THE ROW so the Machines dashboard can show "display: capture
     // not granted" — the state must be visible server-side, not just an agent log line.
-    const { workspaceId, enrollment } = await seedEnrollment(true);
+    const { workspaceId, enrollment, connectionInstanceId } = await seedEnrollment(true);
     const reason = "Screen Recording permission not granted — enable it in System Settings.";
 
     await handleHelloPayload(
@@ -355,7 +392,7 @@ describe("refreshEnrollmentDisplay — the Hello reconciles has_display", () => 
         desktopUnavailableReason: reason,
         display: { id: "0", width: 2560, height: 1440, virtual: false },
       }),
-      `agent.${workspaceId}.${enrollment.id}.hello`,
+      helloSubject(workspaceId, enrollment.id, connectionInstanceId),
     );
 
     const after = await getEnrollment(db, workspaceId, enrollment.id);
@@ -408,14 +445,14 @@ describe("refreshEnrollmentDisplay — the Hello reconciles has_display", () => 
     );
   });
 
-  test("the live consumer wiring: a Hello on agent.*.*.hello flips has_display via startHelloIngestion", async () => {
+  test("the live consumer wiring: a fenced Hello flips has_display via startHelloIngestion", async () => {
     if (!available) return;
-    const { workspaceId, enrollment } = await seedEnrollment(false);
+    const { workspaceId, enrollment, connectionInstanceId } = await seedEnrollment(false);
     const bus = new MemoryEventBus();
     const stop = startHelloIngestion({ db, bus, observability: undefined });
     try {
       await bus.emitAgentEvent(
-        `agent.${workspaceId}.${enrollment.id}.hello`,
+        helloSubject(workspaceId, enrollment.id, connectionInstanceId),
         helloPayload(enrollment.id, workspaceId, { desktop: true }),
       );
       const after = await getEnrollment(db, workspaceId, enrollment.id);
@@ -423,5 +460,234 @@ describe("refreshEnrollmentDisplay — the Hello reconciles has_display", () => 
     } finally {
       stop();
     }
+  });
+
+  test("an expired runner Hello cannot mutate capabilities or clear its offline marker", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, enrollment, connectionInstanceId } =
+      await seedEnrollment(false);
+    await setEnrollmentWentOffline(db, {
+      accountId,
+      workspaceId,
+      enrollmentId: enrollment.id,
+      reason: "GOING_OFFLINE_REASON_HOST_SHUTDOWN",
+    });
+    await admin`
+      update enrollments
+      set connection_lease_expires_at = now() - interval '1 second'
+      where id = ${enrollment.id}`;
+
+    await handleHelloPayload(
+      db,
+      undefined,
+      helloPayload(enrollment.id, workspaceId, { desktop: true, opStream: true }),
+      helloSubject(workspaceId, enrollment.id, connectionInstanceId),
+    );
+
+    const after = await getEnrollment(db, workspaceId, enrollment.id);
+    expect(after?.hasDisplay).toBe(false);
+    expect(after?.opStream).toBe(false);
+    expect(after?.wentOfflineAt).not.toBeNull();
+  });
+
+  test("a Hello persists exact build identity, channel, and negotiated capabilities", async () => {
+    if (!available) return;
+    const { workspaceId, enrollment, connectionInstanceId } = await seedEnrollment(false);
+    const digest = "ab".repeat(32);
+    const warnings: unknown[] = [];
+    await handleHelloPayload(
+      db,
+      { warn: (message, fields) => warnings.push({ message, fields }) },
+      helloPayload(enrollment.id, workspaceId, {
+        agentVersion: "0.1.15",
+        binarySha256: digest,
+        updateChannel: "beta",
+        desktop: true,
+        opStream: true,
+      }),
+      helloSubject(workspaceId, enrollment.id, connectionInstanceId),
+    );
+    expect(warnings).toEqual([]);
+    const after = await getEnrollment(db, workspaceId, enrollment.id);
+    expect(after?.agentVersion).toBe("0.1.15");
+    expect(after?.agentBinarySha256).toBe(digest);
+    expect(after?.agentUpdateChannel).toBe("beta");
+    expect(after?.agentCapabilities).toMatchObject({ desktop: true, opStream: true });
+  });
+
+  test("restarting is provisional; only exact successor version+digest completes update", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, enrollment, connectionInstanceId } =
+      await seedEnrollment(false);
+    const operationId = crypto.randomUUID();
+    const targetDigest = "cd".repeat(32);
+    const warnings: unknown[] = [];
+    const current = await getEnrollment(db, workspaceId, enrollment.id);
+    await beginEnrollmentAgentUpdate(db, {
+      accountId,
+      workspaceId,
+      enrollmentId: enrollment.id,
+      connectionInstanceId,
+      connectionGeneration: current!.connectionGeneration,
+      operationId,
+      targetVersion: "0.1.16",
+    });
+    await advanceEnrollmentAgentUpdate(db, {
+      accountId,
+      workspaceId,
+      enrollmentId: enrollment.id,
+      connectionInstanceId,
+      connectionGeneration: current!.connectionGeneration,
+      operationId,
+      status: "restarting",
+      expectedBinarySha256: targetDigest,
+    });
+    expect((await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate?.status).toBe(
+      "restarting",
+    );
+
+    await handleHelloPayload(
+      db,
+      { warn: (message, fields) => warnings.push({ message, fields }) },
+      helloPayload(enrollment.id, workspaceId, {
+        agentVersion: "0.1.16",
+        binarySha256: "ef".repeat(32),
+        updateChannel: "stable",
+        completedUpdate: {
+          operationId,
+          targetVersion: "0.1.16",
+          binarySha256: targetDigest,
+        },
+      }),
+      helloSubject(workspaceId, enrollment.id, connectionInstanceId),
+    );
+    expect((await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate?.status).toBe(
+      "restarting",
+    );
+
+    await handleHelloPayload(
+      db,
+      { warn: (message, fields) => warnings.push({ message, fields }) },
+      helloPayload(enrollment.id, workspaceId, {
+        agentVersion: "0.1.16",
+        binarySha256: targetDigest,
+        updateChannel: "stable",
+        completedUpdate: {
+          operationId,
+          targetVersion: "0.1.16",
+          binarySha256: targetDigest,
+        },
+      }),
+      helloSubject(workspaceId, enrollment.id, connectionInstanceId),
+    );
+    expect(warnings).toEqual([]);
+    const after = await getEnrollment(db, workspaceId, enrollment.id);
+    expect(after?.agentUpdate?.status).toBe("succeeded");
+    expect(after?.agentUpdate?.completedAt).not.toBeNull();
+  });
+
+  test("a replacement process without the matching receipt fails an orphaned update retryably", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, enrollment, connectionInstanceId } =
+      await seedEnrollment(false);
+    const operationId = crypto.randomUUID();
+    const current = await getEnrollment(db, workspaceId, enrollment.id);
+    await beginEnrollmentAgentUpdate(db, {
+      accountId,
+      workspaceId,
+      enrollmentId: enrollment.id,
+      connectionInstanceId,
+      connectionGeneration: current!.connectionGeneration,
+      operationId,
+      targetVersion: "0.1.16",
+    });
+    await releaseEnrollmentConnection(db, {
+      accountId,
+      workspaceId,
+      enrollmentId: enrollment.id,
+      connectionInstanceId,
+      reason: "GOING_OFFLINE_REASON_USER_STOP",
+    });
+    const successorConnectionInstanceId = crypto.randomUUID();
+    const claim = await claimEnrollmentConnection(db, {
+      workspaceId,
+      enrollmentId: enrollment.id,
+      credentialGeneration: enrollment.credentialGeneration,
+      connectionInstanceId: successorConnectionInstanceId,
+      leaseMs: 60_000,
+    });
+    expect(claim.claimed).toBe(true);
+    await handleHelloPayload(
+      db,
+      undefined,
+      helloPayload(enrollment.id, workspaceId, {
+        agentVersion: "0.1.15",
+        binarySha256: "ab".repeat(32),
+        updateChannel: "stable",
+      }),
+      helloSubject(workspaceId, enrollment.id, successorConnectionInstanceId),
+    );
+    const after = await getEnrollment(db, workspaceId, enrollment.id);
+    expect(after?.agentUpdate).toMatchObject({
+      operationId,
+      status: "failed",
+      errorCode: "accepting_process_replaced",
+      retryable: true,
+    });
+  });
+
+  test("stale process progress and reordered stages cannot mutate or regress update state", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, enrollment, connectionInstanceId } =
+      await seedEnrollment(false);
+    const operationId = crypto.randomUUID();
+    const current = await getEnrollment(db, workspaceId, enrollment.id);
+    await beginEnrollmentAgentUpdate(db, {
+      accountId,
+      workspaceId,
+      enrollmentId: enrollment.id,
+      connectionInstanceId,
+      connectionGeneration: current!.connectionGeneration,
+      operationId,
+      targetVersion: "0.1.16",
+    });
+    await advanceEnrollmentAgentUpdate(db, {
+      accountId,
+      workspaceId,
+      enrollmentId: enrollment.id,
+      connectionInstanceId,
+      connectionGeneration: current!.connectionGeneration,
+      operationId,
+      status: "applying",
+    });
+    expect(
+      (
+        await advanceEnrollmentAgentUpdate(db, {
+          accountId,
+          workspaceId,
+          enrollmentId: enrollment.id,
+          connectionInstanceId,
+          connectionGeneration: current!.connectionGeneration,
+          operationId,
+          status: "downloading",
+        })
+      ).updated,
+    ).toBe(false);
+    expect(
+      (
+        await advanceEnrollmentAgentUpdate(db, {
+          accountId,
+          workspaceId,
+          enrollmentId: enrollment.id,
+          connectionInstanceId: crypto.randomUUID(),
+          connectionGeneration: current!.connectionGeneration,
+          operationId,
+          status: "restarting",
+        })
+      ).updated,
+    ).toBe(false);
+    expect((await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate?.status).toBe(
+      "applying",
+    );
   });
 });

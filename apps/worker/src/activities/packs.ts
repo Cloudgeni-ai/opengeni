@@ -1,11 +1,10 @@
-import { CapabilityPack, type PackInstallation } from "@opengeni/contracts";
+import { CapabilityPack } from "@opengeni/contracts";
+import { getWorkspace, listInstalledPortableSkills, type Database } from "@opengeni/db";
 import {
-  getWorkspace,
-  getWorkspacePack,
-  listInstalledPortableSkills,
-  listPackInstallations,
-  type Database,
-} from "@opengeni/db";
+  legacySandboxRuntimeFromPacks,
+  packInstallationUsesLegacyRuntime,
+  resolveWorkspaceLegacyRuntimePacks,
+} from "@opengeni/core";
 import {
   buildPortableSkillArtifact,
   type InstalledSkillActivation,
@@ -19,6 +18,7 @@ export {
   settingsWithRigImage,
   settingsWithRigProviderImage,
 } from "./sandbox-images";
+export { packInstallationUsesLegacyRuntime };
 
 /**
  * Legacy pack-scoped runtime compatibility. V2 Pack installations own ordinary
@@ -51,32 +51,9 @@ export async function resolveWorkspacePackRuntime(
   db: Database,
   workspaceId: string,
 ): Promise<WorkspacePackRuntime> {
-  const installations = await listPackInstallations(db, workspaceId);
-  const active = installations.filter((installation) => installation.status === "active");
-  if (active.length === 0) {
-    return emptyPackRuntime;
-  }
-  const packs: CapabilityPack[] = [];
-  for (const installation of active) {
-    if (!packInstallationUsesLegacyRuntime(installation)) {
-      continue;
-    }
-    const registration = await getWorkspacePack(db, workspaceId, installation.packId);
-    if (!registration) {
-      continue;
-    }
-    const parsed = CapabilityPack.safeParse(registration.pack);
-    if (parsed.success) {
-      packs.push(parsed.data);
-    }
-  }
+  const packs = await resolveWorkspaceLegacyRuntimePacks(db, workspaceId);
+  if (packs.length === 0) return emptyPackRuntime;
   return workspacePackRuntimeFromPacks(packs);
-}
-
-export function packInstallationUsesLegacyRuntime(
-  installation: Pick<PackInstallation, "manifestSnapshot" | "manifestDigest">,
-): boolean {
-  return installation.manifestSnapshot === null && installation.manifestDigest === null;
 }
 
 /**
@@ -128,18 +105,7 @@ export async function resolveWorkspaceInstalledSkillRuntime(
  * unique. V2 rows never reach this function through runtime resolution.
  */
 export function workspacePackRuntimeFromPacks(packs: CapabilityPack[]): WorkspacePackRuntime {
-  const imagePacks = packs.filter(
-    (pack) => typeof pack.sandboxImage === "string" && pack.sandboxImage.trim().length > 0,
-  );
-  if (imagePacks.length > 1) {
-    const ids = imagePacks
-      .map((pack) => pack.id)
-      .sort()
-      .join(", ");
-    throw new Error(
-      `Multiple enabled packs declare a sandbox image (${ids}). Only one enabled pack per workspace may declare sandboxImage; disable the others and retry.`,
-    );
-  }
+  const sandboxRuntime = legacySandboxRuntimeFromPacks(packs);
   const skillActivations: PackSkillActivation[] = [];
   // Keyed case-insensitively to match the per-pack uniqueness rule in the
   // CapabilityPack contract (and case-insensitive filesystems).
@@ -168,8 +134,8 @@ export function workspacePackRuntimeFromPacks(packs: CapabilityPack[]): Workspac
     }
   }
   return {
-    sandboxImage: imagePacks[0]?.sandboxImage?.trim() ?? null,
-    sandboxProviderImages: imagePacks[0]?.sandboxProviderImages ?? null,
+    sandboxImage: sandboxRuntime.sandboxImage,
+    sandboxProviderImages: sandboxRuntime.sandboxProviderImages,
     skillActivations,
   };
 }

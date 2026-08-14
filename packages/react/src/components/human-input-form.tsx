@@ -443,7 +443,7 @@ export function HumanInputForm({
         <button
           type="submit"
           disabled={busy}
-          className="inline-flex min-h-9 items-center rounded-og-md bg-og-accent px-3 py-1.5 text-og-sm font-medium text-og-accent-fg transition-colors hover:bg-og-accent-strong disabled:opacity-50"
+          className="inline-flex min-h-9 items-center rounded-og-md bg-og-accent-deep px-3 py-1.5 text-og-sm font-medium text-og-accent-fg transition hover:brightness-110 disabled:opacity-50"
         >
           {busy ? messages.submitting : resolvedSubmitLabel}
         </button>

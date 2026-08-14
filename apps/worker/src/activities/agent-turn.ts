@@ -9,7 +9,9 @@ import {
   getRigName,
   getRigVersion,
   getSandbox,
+  getFilesForSubject,
   readActiveSandbox,
+  requireFileForSubject,
   setActiveSandbox,
   requireFile,
   getSessionEvent,
@@ -89,7 +91,7 @@ import {
   ApprovalRunStateLimitExceededError,
   isRetryableDatabaseTransportFailure,
   isSessionEventPersistenceError,
-  getEnrollment,
+  getLiveEnrollmentConnection,
   abandonRecordingForTurnAttempt,
   commitSessionAttemptQuiescence,
   getOrCreateCompanyProfileSnapshot,
@@ -4190,6 +4192,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       providerRecoveryCount = providerRecoveryCountFromMetadata(turn.metadata);
       let installedApiIntegrations: readonly ApiIntegrationRuntime[] = [];
       const credentialSubjectId = credentialSubjectIdForTurnInitiator(turn);
+      const fileAuthoritySubjectId = turn.initiatingHumanSubjectId ?? null;
       const mcpSettings = await settingsWithEnabledCapabilityMcpServers(
         db,
         input.workspaceId,
@@ -5507,9 +5510,23 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       modelCanReceiveRetainedSessionImages = supportsImageInput;
       const attachmentProjector = createModelHistoryAttachmentProjector(
         db,
-        input.workspaceId,
+        {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: fileAuthoritySubjectId,
+        },
         modelInputPolicy,
-        objectStorage ? (file) => objectStorage.getFileBytes(file) : undefined,
+        objectStorage
+          ? async (file) => {
+              await requireFileForSubject(db, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                subjectId: fileAuthoritySubjectId,
+                fileId: file.id,
+              });
+              return await objectStorage.getFileBytes(file);
+            }
+          : undefined,
       );
       const modelHistoryProjector = async (items: Array<Record<string, unknown>>) =>
         projectModelInputForCapabilities(await attachmentProjector(items), modelInputPolicy);
@@ -6335,6 +6352,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (activeSandboxBackend !== "selfhosted") {
         await assertGitHubResourcesRemainAuthorized(db, input.workspaceId, turnResources);
       }
+      await assertFileResourcesRemainAuthorized(
+        db,
+        input.accountId,
+        input.workspaceId,
+        fileAuthoritySubjectId,
+        turnResources,
+      );
       const authorizeGitHubTokenMint: GitHubTokenMintAuthorization = async (selection) => {
         await assertGitHubTokenMintSelectionAuthorized(
           db,
@@ -6829,11 +6853,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             // Whether the machine's latest Hello advertised the op-stream engine
             // (refreshed on every connect). Read only when the server flag is on —
             // one indexed lookup, and the flag off keeps this path byte-identical.
+            const machineEnrollment = await getLiveEnrollmentConnection(
+              db,
+              input.workspaceId,
+              activeSandboxRecord!.enrollmentId!,
+            );
             const machineOpStream =
-              settings.agentOpStreamEnabled === true
-                ? (await getEnrollment(db, input.workspaceId, activeSandboxRecord!.enrollmentId!))
-                    ?.opStream === true
-                : false;
+              settings.agentOpStreamEnabled === true && machineEnrollment?.opStream === true;
             const established = await establishSelfhostedTurnSession(
               {
                 db,
@@ -6846,6 +6872,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               {
                 workspaceId: input.workspaceId,
                 agentId: activeSandboxRecord!.enrollmentId!,
+                // An offline machine must not fail turn admission. Bind an
+                // intentionally unserved token so the model receives the normal
+                // typed agent_offline tool result; a later turn resolves a fresh
+                // claimed process instance.
+                connectionInstanceId: machineEnrollment?.connectionInstanceId ?? "unavailable",
                 opStream: machineOpStream,
                 epoch: activeSandboxPointer!.activeEpoch,
                 environment: sandboxEnvironment,
@@ -7047,7 +7078,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               runSettings,
               db,
               objectStorage,
+              input.accountId,
               input.workspaceId,
+              fileAuthoritySubjectId,
               turnResources,
               activeSandboxBackend ?? groupBoxBackend,
             ),
@@ -7422,7 +7455,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         await resolveImageGenerationReferences({
           db,
           objectStorage: objectStorage!,
+          accountId: input.accountId,
           workspaceId: input.workspaceId,
+          subjectId: fileAuthoritySubjectId,
           references,
           readSandboxFile: async (path, maxBytes) => {
             const imageReferenceSession = (setupBoxSession ??
@@ -8615,6 +8650,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         try {
           const prepared = await turnInput(db, runtime, agent, trigger, {
             turnId: activeTurnId,
+            fileAuthority: {
+              accountId: input.accountId,
+              subjectId: fileAuthoritySubjectId,
+            },
             recovering: turn.executionGeneration > 1,
             ...(unavailableSandboxFilesNote ? { unavailableSandboxFilesNote } : {}),
             ...(runCredentialsNote ? { runCredentialsNote } : {}),
@@ -11646,6 +11685,28 @@ async function assertGitHubResourcesRemainAuthorized(
   }
 }
 
+async function assertFileResourcesRemainAuthorized(
+  db: ActivityServices["db"],
+  accountId: string,
+  workspaceId: string,
+  subjectId: string | null,
+  resources: ResourceRef[],
+): Promise<void> {
+  const fileIds = resources.flatMap((resource) =>
+    resource.kind === "file" ? [resource.fileId] : [],
+  );
+  if (fileIds.length === 0) return;
+  const authorized = await getFilesForSubject(db, {
+    accountId,
+    workspaceId,
+    subjectId,
+    fileIds,
+  });
+  if (authorized.length !== new Set(fileIds).size) {
+    throw new Error("One or more file resources are unavailable or no longer authorized");
+  }
+}
+
 async function assertGitHubTokenMintSelectionAuthorized(
   db: Parameters<typeof areGitHubRepositoriesAllowedForWorkspace>[0],
   workspaceId: string,
@@ -12559,7 +12620,9 @@ async function sandboxFileDownloadsForRun(
   settings: Settings,
   db: ActivityServices["db"],
   objectStorage: ObjectStorage | null,
+  accountId: string,
   workspaceId: string,
+  subjectId: string | null,
   resources: ResourceRef[],
   activeSandboxBackend: Settings["sandboxBackend"] = settings.sandboxBackend,
 ): Promise<SandboxFileDownload[]> {
@@ -12580,7 +12643,12 @@ async function sandboxFileDownloadsForRun(
   const downloadStorage = objectStorageForSandboxDownloads(settings, objectStorage);
   const downloads: SandboxFileDownload[] = [];
   for (const resource of fileResources) {
-    const file = await requireFile(db, workspaceId, resource.fileId);
+    const file = await requireFileForSubject(db, {
+      accountId,
+      workspaceId,
+      subjectId,
+      fileId: resource.fileId,
+    });
     const url = await downloadStorage.createGetUrl({ key: file.objectKey });
     downloads.push({
       fileId: file.id,

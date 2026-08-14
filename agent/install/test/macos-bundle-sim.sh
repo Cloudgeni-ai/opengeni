@@ -88,9 +88,10 @@ printf 'fake mach-o\n' > "$FAKE_BIN"
 # $1=label (unique HOME + log), rest handled by env the caller already set.
 run_local_install() {
   _home="$WORK/home-$1"; rm -rf "$_home"; mkdir -p "$_home"
+  _runtime="${2:-}"
   MOCK_CODESIGN_LOG="$WORK/codesign-$1.log"; : > "$MOCK_CODESIGN_LOG"
   export MOCK_CODESIGN_LOG
-  HOME="$_home" install_macos_local_bundle "$FAKE_BIN" "$_home/bin" \
+  HOME="$_home" install_macos_local_bundle "$FAKE_BIN" "$_home/bin" "$_runtime" \
     >"$WORK/out-$1" 2>"$WORK/log-$1"
 }
 
@@ -207,7 +208,24 @@ else
 fi
 unset OPENGENI_ALLOW_DOWNGRADE
 
-echo "SIM 6: a macOS bundle version transition survives helper command substitution"
+echo "SIM 6: every interaction helper is installed and nested-signed"
+RUNTIME="$WORK/runtime"
+mkdir -p "$RUNTIME"
+for helper in opengeni-browserd agent-browser opengeni-computer-native; do
+  printf '%s\n' "$helper" > "$RUNTIME/$helper"
+  chmod 0755 "$RUNTIME/$helper"
+done
+MOCK_SECURITY_FILE="" run_local_install runtime "$RUNTIME"
+for helper in opengeni-browserd agent-browser opengeni-computer-native; do
+  installed="$WORK/home-runtime/Applications/OpenGeni Agent.app/Contents/Helpers/$helper"
+  if [ -x "$installed" ] && grep -q -- "--sign - .*Contents/Helpers/$helper" "$WORK/codesign-runtime.log"; then
+    ok "$helper installed executable and nested-signed"
+  else
+    bad "$helper was not installed and signed coherently"
+  fi
+done
+
+echo "SIM 7: a macOS bundle version transition survives helper command substitution"
 OPENGENI_AGENT_WAS_UPGRADED=0
 mark_upgrade_if_changed "9.0.0" "$NEWER_AGENT"
 if [ "$OPENGENI_AGENT_WAS_UPGRADED" = "1" ]; then
