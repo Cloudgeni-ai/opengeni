@@ -3,6 +3,7 @@ import {
   useId,
   useMemo,
   useState,
+  type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
@@ -38,7 +39,7 @@ export function donutTone(index: number): string {
   return DONUT_TONES[index % DONUT_TONES.length]!;
 }
 
-function smoothLine(points: Array<{ x: number; y: number }>): string {
+export function smoothLine(points: Array<{ x: number; y: number }>): string {
   if (points.length === 0) return "";
   if (points.length === 1) return `M${points[0]!.x},${points[0]!.y}`;
   let d = `M${points[0]!.x},${points[0]!.y}`;
@@ -48,9 +49,11 @@ function smoothLine(points: Array<{ x: number; y: number }>): string {
     const p2 = points[i + 1]!;
     const p3 = points[i + 2] ?? p2;
     const cp1x = p1.x + (p2.x - p0.x) / 6;
-    const cp1y = p1.y + (p2.y - p0.y) / 6;
+    const minSegmentY = Math.min(p1.y, p2.y);
+    const maxSegmentY = Math.max(p1.y, p2.y);
+    const cp1y = Math.max(minSegmentY, Math.min(maxSegmentY, p1.y + (p2.y - p0.y) / 6));
     const cp2x = p2.x - (p3.x - p1.x) / 6;
-    const cp2y = p2.y - (p3.y - p1.y) / 6;
+    const cp2y = Math.max(minSegmentY, Math.min(maxSegmentY, p2.y - (p3.y - p1.y) / 6));
     d += ` C${cp1x},${cp1y} ${cp2x},${cp2y} ${p2.x},${p2.y}`;
   }
   return d;
@@ -79,7 +82,9 @@ export function AreaChart(props: {
   const reduceMotion = useReducedMotion();
   const gradId = useId();
   const plotClipId = useId();
-  const [active, setActive] = useState<number | null>(null);
+  const [pointerActive, setPointerActive] = useState<number | null>(null);
+  const [keyboardActive, setKeyboardActive] = useState<number | null>(null);
+  const active = pointerActive ?? keyboardActive;
   const height = props.height ?? 220;
   const width = 720;
   const padL = 36;
@@ -117,17 +122,43 @@ export function AreaChart(props: {
     const localX = ((event.clientX - rect.left) / rect.width) * width;
     const ratio = (localX - padL) / innerW;
     const index = Math.round(ratio * (props.labels.length - 1));
-    setActive(Math.max(0, Math.min(props.labels.length - 1, index)));
+    setPointerActive(Math.max(0, Math.min(props.labels.length - 1, index)));
   };
 
-  const activeX =
-    active == null ? null : padL + (active / Math.max(props.labels.length - 1, 1)) * innerW;
+  const activeRatio =
+    active == null ? null : props.labels.length === 1 ? 0.5 : active / (props.labels.length - 1);
+  const activeX = activeRatio == null ? null : padL + activeRatio * innerW;
+  const tooltipPositionPercent = (activeRatio ?? 0) * 100;
+  const activeCell = (() => {
+    if (active == null || activeX == null) return null;
+    if (props.labels.length === 1) return { x: padL, width: innerW };
+    const pointSpacing = innerW / (props.labels.length - 1);
+    const left = active === 0 ? padL : activeX - pointSpacing / 2;
+    const right = active === props.labels.length - 1 ? padL + innerW : activeX + pointSpacing / 2;
+    return { x: left, width: right - left };
+  })();
 
   const ticks = [0, 0.5, 1];
   const formattedValue = (value: number) =>
     props.formatValue
       ? props.formatValue(value)
       : `${props.valuePrefix ?? ""}${formatChartNumber(value, props.valueDigits)}${props.valueSuffix ?? ""}`;
+  const pointDescription = (index: number) =>
+    `${props.labels[index]}. ${props.series
+      .map((series) => `${series.label}: ${formattedValue(series.values[index] ?? 0)}`)
+      .join(", ")}`;
+  const onChartKeyDown = (event: ReactKeyboardEvent<SVGSVGElement>) => {
+    const current = keyboardActive ?? pointerActive ?? 0;
+    let next: number | null = null;
+    if (event.key === "ArrowLeft" || event.key === "ArrowDown") next = current - 1;
+    if (event.key === "ArrowRight" || event.key === "ArrowUp") next = current + 1;
+    if (event.key === "Home") next = 0;
+    if (event.key === "End") next = props.labels.length - 1;
+    if (next == null) return;
+    event.preventDefault();
+    setPointerActive(null);
+    setKeyboardActive(Math.max(0, Math.min(props.labels.length - 1, next)));
+  };
   const labelStride = Math.max(1, Math.ceil(props.labels.length / 6));
   const visibleLabels = props.labels
     .map((label, index) => ({ label, index }))
@@ -149,7 +180,10 @@ export function AreaChart(props: {
   }
 
   return (
-    <div className={cn("relative w-full", props.className)} onPointerLeave={() => setActive(null)}>
+    <div
+      className={cn("relative w-full", props.className)}
+      onPointerLeave={() => setPointerActive(null)}
+    >
       <AnimatePresence>
         {active != null ? (
           <motion.div
@@ -159,8 +193,10 @@ export function AreaChart(props: {
             exit={{ opacity: 0, y: 2 }}
             transition={{ duration: 0.15 }}
             className="pointer-events-none absolute top-0 z-10 min-w-[7.5rem] rounded-lg border border-border bg-surface-3/95 px-2.5 py-2 shadow-sm backdrop-blur-md"
+            data-chart-tooltip="aligned"
+            data-chart-tooltip-position={tooltipPositionPercent}
             style={{
-              left: `clamp(0px, calc(${(active / Math.max(props.labels.length - 1, 1)) * 100}% - 40px), calc(100% - 130px))`,
+              left: `clamp(0px, calc(${tooltipPositionPercent}% - 40px), calc(100% - 130px))`,
             }}
           >
             <p className="text-2xs font-medium text-fg-subtle">{props.labels[active]}</p>
@@ -184,8 +220,20 @@ export function AreaChart(props: {
       <svg
         viewBox={`0 0 ${width} ${height}`}
         className="h-auto w-full cursor-crosshair overflow-hidden"
-        role="img"
+        role="slider"
         aria-label="Trend chart"
+        aria-orientation="horizontal"
+        aria-valuemin={0}
+        aria-valuemax={props.labels.length - 1}
+        aria-valuenow={keyboardActive ?? pointerActive ?? 0}
+        aria-valuetext={pointDescription(keyboardActive ?? pointerActive ?? 0)}
+        tabIndex={0}
+        onFocus={() => {
+          setKeyboardActive((current) => current ?? pointerActive ?? 0);
+          setPointerActive(null);
+        }}
+        onBlur={() => setKeyboardActive(null)}
+        onKeyDown={onChartKeyDown}
         onPointerMove={onMove}
       >
         <defs>
@@ -241,16 +289,14 @@ export function AreaChart(props: {
         })}
 
         <g clipPath={`url(#${plotClipId})`} data-chart-plot-highlight="clipped">
-          {activeX != null ? (
-            <motion.rect
-              x={activeX - innerW / props.labels.length / 2}
+          {activeCell != null ? (
+            <rect
+              x={activeCell.x}
               y={padTop}
-              width={Math.max(innerW / props.labels.length, 12)}
+              width={activeCell.width}
               height={innerH}
               className="fill-fg/[0.04]"
-              initial={false}
-              animate={{ x: activeX - innerW / props.labels.length / 2 }}
-              transition={{ type: "spring", stiffness: 380, damping: 36 }}
+              data-chart-hover-band="aligned"
             />
           ) : null}
         </g>
@@ -321,7 +367,15 @@ export function AreaChart(props: {
           <button
             key={`${label}-${index}`}
             type="button"
-            onMouseEnter={() => setActive(index)}
+            onMouseEnter={() => setPointerActive(index)}
+            onMouseLeave={() => setPointerActive(null)}
+            onFocus={() => {
+              setPointerActive(null);
+              setKeyboardActive(index);
+            }}
+            onClick={() => setKeyboardActive(index)}
+            onBlur={() => setKeyboardActive(null)}
+            aria-label={pointDescription(index)}
             className={cn(
               "min-w-0 truncate text-2xs transition-colors",
               active === index ? "font-medium text-fg" : "text-fg-subtle",
