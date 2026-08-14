@@ -1565,7 +1565,7 @@ async function prepareSlackInvocationEntry(
     exactMessage = exact.messages.find((message) => message.timestamp === entry.slackMessageTs);
   }
   const attachments = exactMessage
-    ? await prepareSlackMessageAttachments(deps, client, entry, exactMessage.files)
+    ? await prepareSlackMessageAttachments(deps, client, entry, exactMessage.files, authorizeRead)
     : {
         resources: [],
         attachments: [],
@@ -2081,6 +2081,7 @@ async function prepareSlackMessageAttachments(
   client: OpenGeniSlackBotClient,
   entry: SlackInteractionInboxEntry,
   exactFiles: readonly { id: string; name: string; title: string }[],
+  authorizeSharedRead?: () => Promise<void>,
 ): Promise<PreparedSlackReactionTask> {
   if (exactFiles.length === 0) {
     return { resources: [], attachments: [], omissionCodes: [], omittedCount: 0 };
@@ -2100,12 +2101,13 @@ async function prepareSlackMessageAttachments(
       name: file.name,
       title: file.title,
     })),
+    ...(authorizeSharedRead ? { authorizeSharedRead } : {}),
   });
   const downloaded: Awaited<ReturnType<OpenGeniSlackBotClient["downloadReactionImage"]>>[] = [];
   let aggregateBytes = 0;
   for (const image of prepared) {
     try {
-      const value = await client.downloadReactionImage(image);
+      const value = await client.downloadReactionImage(image, authorizeSharedRead);
       if (
         value.bytes.byteLength > SLACK_REACTION_IMAGE_MAX_BYTES ||
         aggregateBytes + value.bytes.byteLength > MAX_SLACK_REACTION_IMAGE_AGGREGATE_BYTES
