@@ -2985,6 +2985,41 @@ describe("lazy sandbox provisioner single-flight", () => {
     expect(terminal).toEqual(["failed:11111111-1111-4111-8111-111111111111"]);
   });
 
+  test("cancellation during pre-terminal completion emits no terminal outcome", async () => {
+    const controller = new AbortController();
+    let establishes = 0;
+    let completed = 0;
+    let failed = 0;
+    let disposed = 0;
+    const provisioner = createTurnSandboxProvisioner(
+      async () => {
+        establishes += 1;
+        return "ready";
+      },
+      {
+        signal: controller.signal,
+        beforeCompleted: () => {
+          controller.abort(new Error("STEER"));
+        },
+        onCompleted: () => {
+          completed += 1;
+        },
+        onFailed: () => {
+          failed += 1;
+        },
+        disposeResult: () => {
+          disposed += 1;
+        },
+      },
+    );
+
+    await expect(provisioner.get()).rejects.toBeInstanceOf(TurnOperationCancelledError);
+    expect(establishes).toBe(1);
+    expect(disposed).toBe(1);
+    expect(completed).toBe(0);
+    expect(failed).toBe(0);
+  });
+
   test("an exhausted expected transition settles one logical id before a later re-read", async () => {
     let sequence = 0;
     const failures: Array<{ provisionId: string; internalAttempts: number }> = [];

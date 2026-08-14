@@ -3028,6 +3028,7 @@ export function createTurnSandboxProvisioner<T>(
               provisionId,
               internalAttempts,
             });
+            throwIfTurnOperationCancelled(options.signal);
             await options.onCompleted?.(result, {
               provisionId,
               internalAttempts,
