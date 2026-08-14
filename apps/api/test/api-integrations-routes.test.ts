@@ -605,6 +605,15 @@ describe("API Integration routes", () => {
         ],
       },
     });
+    const legacyConfigured = structuredClone(configured);
+    delete legacyConfigured.binding.directlyOwned;
+    delete legacyConfigured.binding.owners;
+    await shared!.admin`
+      update capability_operations
+      set result = ${shared!.admin.json(legacyConfigured)}
+      where workspace_id = ${workspaceId}::uuid
+        and idempotency_key = ${configureKey}
+    `;
     const replay = await request(`${base}/inventory-source`, {
       method: "PUT",
       body: JSON.stringify({

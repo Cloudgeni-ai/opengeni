@@ -486,7 +486,9 @@ async function withFacetOperation<T extends Record<string, unknown>>(
               "Integration facet idempotency key was reused",
             );
           }
-          if (existing.status === "completed" && existing.result) return existing.result as T;
+          if (existing.status === "completed" && existing.result) {
+            return await hydrateFacetOperationResult(tx, input, existing.result as T);
+          }
           throw new IntegrationFacetOperationIdempotencyError(
             "Integration facet operation is already in progress",
           );
@@ -512,6 +514,64 @@ async function withFacetOperation<T extends Record<string, unknown>>(
       });
     },
   );
+}
+
+async function hydrateFacetOperationResult<T extends Record<string, unknown>>(
+  db: Database,
+  input: { capabilityId: string; instanceKey: string; facetKey: string },
+  result: T,
+): Promise<T> {
+  const binding = recordValue(result.binding);
+  if (!binding) return result;
+  if (typeof binding.directlyOwned === "boolean" && Array.isArray(binding.owners)) return result;
+
+  const expectedOwner = facetOwner(input.capabilityId, input.instanceKey, input.facetKey);
+  let owners =
+    typeof binding.id === "string" ? await listIntegrationFacetBindingOwners(db, binding.id) : [];
+  if (owners.length === 0) {
+    owners = capabilityComponentOwners(result.remainingOwners);
+  }
+  if (
+    owners.length === 0 &&
+    (result.status === "configured" || result.status === "paused" || result.status === "active")
+  ) {
+    owners = [expectedOwner];
+  }
+  return {
+    ...result,
+    binding: {
+      ...binding,
+      directlyOwned: owners.some(
+        (owner) => owner.kind === expectedOwner.kind && owner.id === expectedOwner.id,
+      ),
+      owners,
+    },
+  } as T;
+}
+
+function capabilityComponentOwners(value: unknown): IntegrationFacetBindingOwner[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    const owner = recordValue(entry);
+    if (
+      !owner ||
+      (owner.kind !== "direct" &&
+        owner.kind !== "plugin" &&
+        owner.kind !== "pack" &&
+        owner.kind !== "migration") ||
+      typeof owner.id !== "string" ||
+      typeof owner.removable !== "boolean"
+    ) {
+      return [];
+    }
+    return [{ kind: owner.kind, id: owner.id, removable: owner.removable }];
+  });
+}
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
 }
 
 async function requireMutationContext(
